@@ -135,6 +135,153 @@ async def _generate_task_name(
         return ""
 
 
+# Automated turns (mail_authority kinds) that run on the automation lane, and
+# those whose result is meant for the user and so is mirrored into the main
+# chat. Delegated results and flow consults stay where they are: they carry
+# on a conversation (or a flow step) that lives in the main chat.
+REROUTED_AUTOMATION_KINDS = frozenset({
+    "fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan", "peer", "botport", "mcp_task",
+})
+MIRRORED_AUTOMATION_KINDS = frozenset({"fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan"})
+
+
+def automation_lane_for(server: Any, automation: Any, lane: str, is_public: bool) -> str:
+    """The lane an automated turn on the main chat moves to ("" = it stays)."""
+    if automation is None or is_public or lane != server.LANE_MAIN:
+        return ""
+    if getattr(automation, "kind", "") not in REROUTED_AUTOMATION_KINDS:
+        return ""
+    import os
+
+    from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+
+    if _is_fd_spawned_worker() or str(os.environ.get("CLAW_BEING_WORKER", "")).strip().lower() in (
+            "1", "true", "yes"):
+        return ""
+    target = server.normalize_lane(get_config().session.automation_lane or "")
+    return "" if target == server.LANE_MAIN else target
+
+
+_AUTOMATION_WAIT_TICKS = 1200          # x 0.5 s: how long automation queues for its lane
+_MIRROR_WAIT_TICKS = 900               # x 1 s: how long a result waits for lane A to idle
+PENDING_RESULTS_KEY = "automation_results"
+_PENDING_RESULTS_KEPT = 20
+
+
+def _borrow_socket(server: Any, ws: Any, lane: str) -> None:
+    """Move *ws* from its own lane to *lane* until ``_return_socket``."""
+    if ws is None or getattr(ws, "_claw_borrowed_lane", None):
+        return
+    home = server.normalize_lane(getattr(ws, "_lane", ""))
+    server._lane_sockets.get(home, set()).discard(ws)
+    server._lane_sockets.setdefault(lane, set()).add(ws)
+    ws._claw_home_lane = home
+    ws._claw_borrowed_lane = lane
+    ws._lane = lane
+
+
+def _return_socket(server: Any, ws: Any, lane: str) -> None:
+    """Send a borrowed socket back to its own lane."""
+    if ws is None or getattr(ws, "_claw_borrowed_lane", None) != lane:
+        return
+    server._lane_sockets.get(lane, set()).discard(ws)
+    home = getattr(ws, "_claw_home_lane", server.LANE_MAIN)
+    ws._lane = home
+    ws._claw_borrowed_lane = None
+    if not getattr(ws, "closed", False):
+        server._lane_sockets.setdefault(home, set()).add(ws)
+
+
+# The main agent's state an automated turn needs: who it is in the fleet,
+# its instructions and peers, and where its chats are (WhatsApp, origin).
+_SHARED_AGENT_ATTRS = ("_fleet_identity", "_fleet_instructions", "_peer_agents", "_fd_url")
+_SHARED_SESSION_KEYS = ("whatsapp_waid", "origin", "peer_agents", "fleet_identity",
+                        "fleet_instructions", "fd_url", "model_selection")
+
+
+def _sync_automation_agent(server: Any, agent: Any) -> None:
+    """Bring the automation lane's agent up to the main agent's state before
+    a turn: fleet identity, instructions, peers, chat origin, memory, and the
+    model it runs on."""
+    import copy
+
+    main = getattr(server, "agent", None)
+    if main is None or agent is main:
+        return
+    for attr in _SHARED_AGENT_ATTRS:
+        if hasattr(main, attr):
+            setattr(agent, attr, getattr(main, attr))
+    src = getattr(getattr(main, "session", None), "metadata", None)
+    dst = getattr(getattr(agent, "session", None), "metadata", None)
+    if isinstance(src, dict) and isinstance(dst, dict):
+        for key in _SHARED_SESSION_KEYS:
+            if key in src:
+                dst[key] = src[key]
+    if getattr(agent, "memory", None) is None and getattr(main, "memory", None) is not None:
+        agent.memory = main.memory
+    base, mine = getattr(main, "provider", None), getattr(agent, "provider", None)
+    if base is not None and (getattr(base, "provider", None), getattr(base, "model", None)) != (
+            getattr(mine, "provider", None), getattr(mine, "model", None)):
+        try:
+            agent.provider = copy.copy(base)
+        except Exception:
+            agent.provider = base
+
+
+async def _mirror_automation_result(
+    server: Any, ws: Any, automation: Any, reply: str, lane: str,
+) -> None:
+    """Bring an automated turn's result into the main chat (and the channels
+    bound to it) once lane A is idle: shown live, and kept in the main
+    session so a follow-up there has it as context. While lane A is busy the
+    result waits in the session's metadata; the next lane-A turn takes it in
+    first if it is still waiting then."""
+    text = str(reply or "").strip()
+    main = getattr(server, "agent", None)
+    session = getattr(main, "session", None)
+    if not text or session is None:
+        return
+    label = mail_authority.KIND_LABELS.get(getattr(automation, "kind", ""), "automated turn")
+    label = label[:1].upper() + label[1:]
+    pending = session.metadata.setdefault(PENDING_RESULTS_KEY, [])
+    pending.append({"label": label, "lane": lane, "text": text,
+                    "at": datetime.now(UTC).isoformat()})
+    del pending[: max(0, len(pending) - _PENDING_RESULTS_KEPT)]
+    for _ in range(_MIRROR_WAIT_TICKS):
+        if not server._busy:
+            break
+        await asyncio.sleep(1)
+    await flush_automation_results(server, exclude=ws)
+
+
+async def flush_automation_results(server: Any, exclude: Any = None) -> int:
+    """Move results waiting in the main session's metadata into the session
+    (and show them live), if lane A is idle. Returns how many moved."""
+    main = getattr(server, "agent", None)
+    session = getattr(main, "session", None)
+    if session is None or server._busy or not isinstance(session.metadata, dict):
+        return 0
+    pending = session.metadata.pop(PENDING_RESULTS_KEY, None) or []
+    for item in pending:
+        text = str(item.get("text") or "")
+        server._broadcast({
+            "type": "chat_message", "role": "assistant", "content": text,
+            "timestamp": item.get("at") or datetime.now(UTC).isoformat(),
+            "automation_lane": item.get("lane") or "",
+        }, exclude=exclude)
+        session.add_message(
+            "assistant", f"[{item.get('label') or 'Automated turn'} — from the "
+                         f"{item.get('lane') or 'automation'} lane]\n{text}",
+            origin="system_note", origin_detail="automation_result",
+        )
+    if pending:
+        try:
+            await main.session_manager.save_session(session)
+        except Exception as exc:
+            log.debug("Could not save the mirrored automation results", error=str(exc))
+    return len(pending)
+
+
 async def handle_chat(
     server: WebServer,
     ws: web.WebSocketResponse,
@@ -147,6 +294,7 @@ async def handle_chat(
     rewind_to: str | None = None,
     whatsapp_waid: str | None = None,
     origin: dict | None = None,
+    surface: str | None = None,
     no_flow: bool = False,
     deny_tools: list[str] | None = None,
     no_tools: bool = False,
@@ -205,6 +353,13 @@ async def handle_chat(
     is_public = bool(public_session_id)
     # Lane A is the main agent, so `lane` only changes anything for B, C, …
     lane = server.normalize_lane(getattr(ws, "_lane", ""))
+    # An automated turn from Flight Deck runs on the automation lane's own
+    # session, not in the main chat (results meant for the user are mirrored
+    # back when it ends).
+    rerouted = automation_lane_for(server, automation, lane, is_public)
+    if rerouted:
+        lane = rerouted
+        no_next_steps = True
 
     if is_public:
         # Per-session agent for public users — no global busy check.
@@ -232,12 +387,25 @@ async def handle_chat(
         except Exception as e:
             await server._send(ws, {"type": "error", "message": f"Lane error: {e}"})
             return False
+        if rerouted:
+            # Automation waits its turn on the automation lane rather than
+            # bouncing: a "busy" reply would leave its caller listening to
+            # lane A.
+            for _ in range(_AUTOMATION_WAIT_TICKS):
+                if not getattr(agent, "_lane_busy", False):
+                    break
+                await asyncio.sleep(0.5)
         if getattr(agent, "_lane_busy", False):
             await server._send(ws, {
                 "type": "error",
                 "message": f"Lane {lane} is busy processing another request. Please wait.",
             })
             return False
+        # Claimed now, not when the turn task starts: a second frame arriving
+        # in between must see the lane taken.
+        agent._lane_busy = True  # type: ignore[attr-defined]
+        if rerouted:
+            _sync_automation_agent(server, agent)
     else:
         # Admin / normal mode — use the main shared agent (lane A).
         if server._busy:
@@ -247,6 +415,10 @@ async def handle_chat(
             })
             return False
         agent = server.agent
+        # Automation results still waiting go in ahead of this turn.
+        if isinstance(getattr(getattr(agent, "session", None), "metadata", None), dict) \
+                and agent.session.metadata.get(PENDING_RESULTS_KEY):
+            await flush_automation_results(server)
 
     # ── Remember the originating WhatsApp chat (if any) ──
     # Lets tools like whatsapp_send_file default to "the current chat".
@@ -358,6 +530,13 @@ async def handle_chat(
         )
         effective_content = prefix + (content or default_msg)
 
+    # A rerouted turn's caller (a lane-A socket) moves to the automation lane
+    # for this turn: it gets every frame that lane sends (Flight Deck's
+    # collectors read the reply, the tool activity and the final "ready"),
+    # and none of lane A's, which runs freely meanwhile.
+    if rerouted:
+        _borrow_socket(server, ws, lane)
+
     # ── Send to the right targets ────────────────────────────────
     # For public users we send directly to their WS; for admin we
     # broadcast to all admin connections.
@@ -393,10 +572,24 @@ async def handle_chat(
     naming_task = _start_task_naming(agent, content, server._recent_prompts)
     _remember_prompt(server._recent_prompts, content)
 
+    # The surface this turn arrived on, recorded on its opening message
+    # (a bridge's socket remembers it for frames routed here without one).
+    surface = surface or getattr(ws, "_claw_surface", None)
+    _origin_kind = str((origin or {}).get("kind", "") or "").strip().lower()
+    if surface:
+        turn_channel = surface
+    elif whatsapp_waid or _origin_kind == "whatsapp":
+        turn_channel = "whatsapp"
+    elif is_public:
+        turn_channel = "public"
+    else:
+        turn_channel = "web"
+
     # Launch the heavy work as a background task.
     task = asyncio.create_task(_run_agent(
         server, ws, agent, effective_content, naming_task,
         is_public=is_public,
+        turn_channel=turn_channel,
         lane=lane,
         public_session_id=public_session_id,
         video_attachments=video_attachments,
@@ -408,6 +601,7 @@ async def handle_chat(
         no_next_steps=no_next_steps,
         no_rephrase=no_rephrase,
         automation=automation,
+        rerouted=bool(rerouted),
         flow_text=content,
         flow_attach={
             "image_path": image_path or (image_paths[0] if image_paths else ""),
@@ -576,6 +770,7 @@ async def _handle_speaker_chat(
             speaker_key=speaker_key,
             speaker_turn=speaker_turn,
             speaker_grant=speaker_grant,
+            turn_channel="member",
         ))
         agent._public_task = task  # type: ignore[attr-defined]
         return True
@@ -813,11 +1008,13 @@ async def _run_agent(
     no_next_steps: bool = False,
     no_rephrase: bool = False,
     automation: mail_authority.Authority | None = None,
+    rerouted: bool = False,
     flow_text: str = "",
     flow_attach: dict | None = None,
     speaker_key: tuple[str, str] | None = None,
     speaker_turn: str = "",
     speaker_grant: str = "",
+    turn_channel: str | None = None,
 ) -> None:
     """Background coroutine that drives the agent and finalises the turn.
 
@@ -1018,6 +1215,9 @@ async def _run_agent(
                     **({"member_private": _private_level} if _private_level else {}),
                 })
         else:
+            from captain_claw import msg_origin as _msg_origin
+
+            _msg_origin.hint_turn_provenance(agent, channel=turn_channel)
             response = await agent.complete(content)
             # Read right away, before any other await: a concurrent turn on
             # this Agent object could reset it (contract part 0c NB7). The
@@ -1040,6 +1240,8 @@ async def _run_agent(
                 "model": model_label,
                 **({"member_private": _private_level} if _private_level else {}),
             })
+            if rerouted and automation is not None and automation.kind in MIRRORED_AUTOMATION_KINDS:
+                asyncio.create_task(_mirror_automation_result(server, ws, automation, response, lane))
 
             # Extract and broadcast suggested next steps — skip for FD-spawned
             # workers (Basna/Vatra/Council/Code): they're orchestrated, headless,
@@ -1219,6 +1421,7 @@ async def _run_agent(
             "type": "status", "status": "ready",
             **({"turn_end": speaker_turn} if speaker_key else {}),
         })
+        _return_socket(server, ws, lane)
         if _speaker_tok is not None:
             _speaker.reset(_speaker_tok)
         mail_authority.reset(_auth_tok)

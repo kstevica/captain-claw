@@ -735,7 +735,13 @@ export interface PlanState {
 // server-side chat row keeps working untouched, and only lanes B and C ever
 // see a composite key.
 export const LANE_MAIN = 'A'
-export const LANES = ['A', 'B', 'C'] as const
+// AUTO is the agent's automation lane: scheduler, autonomy, plan and peer
+// turns run there instead of in lane A (results meant for you are mirrored
+// into lane A as well).
+export const LANE_AUTO = 'AUTO'
+export const LANES = ['A', 'B', 'C', LANE_AUTO] as const
+/** The lanes you hand work to (the queue planner): not the automation lane. */
+export const WORK_LANES = LANES.filter((l) => l !== LANE_AUTO)
 
 export function laneKey(containerId: string, lane: string = LANE_MAIN): string {
   return !lane || lane === LANE_MAIN ? containerId : `${containerId}::${lane}`
@@ -842,6 +848,8 @@ interface ChatStore {
   /** `fromQueue` marks a turn the queue dispatched: no next-step suggestions. */
   sendMessage: (containerId: string, content: string, opts?: { fromQueue?: boolean }) => void
   sendBtw: (containerId: string, content: string) => void
+  /** Start a new session on this lane (the agent's /new). */
+  newSession: (containerId: string) => void
   /** Append a local system note to the chat (no agent turn) — e.g. "started flow X". */
   addLocalNote: (containerId: string, content: string) => void
   cancelTask: (containerId: string) => void
@@ -1142,7 +1150,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     ws.on('chat_message', (data) => {
       // Skip echoed user messages — we already add them locally in sendMessage
-      if (data.role === 'user' && !data.replay) return
+      // — except the rest of a "new topic" message: the transcript was just
+      // cleared for the new session, so it goes back in.
+      if (data.role === 'user' && !data.replay && !data.rotation_cue) return
       const rawContent = (data.content as string) || ''
       // Sanitize assistant content: strip thinking blocks, council protocol
       // headers (SUITABILITY/ACTION/TARGET), insight echoes, and other
@@ -1157,6 +1167,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         model: data.model as string || '',
       }
       addMessage(key, msg)
+      // A result the automation lane mirrored here is a note: it ends no turn
+      // of this lane and is no queued item's reply.
+      if (data.automation_lane) return
       if (data.role === 'assistant' && !data.replay) {
         const onScreen = useChatStore.getState().activeChatId === key
         updateSession(key, {
@@ -1360,8 +1373,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     ws.on('command_result', (data) => {
       const command = (data.command as string || '').trim().toLowerCase()
-      // If /clear was executed, wipe local messages first
-      if (command === '/clear') {
+      // /clear and /new (typed, the New-session button, or a "new topic"
+      // cue the agent acted on) leave an empty conversation: wipe local
+      // messages first.
+      const created = String(data.content || '').startsWith('New session created')
+      if (command === '/clear' || ((command === '/new' || command.startsWith('/new ')) && created)) {
         clearMessages(key)
       }
       const msg: ChatMessage = {
@@ -1880,6 +1896,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   sendBtw: (containerId, content) => {
     const session = get().sessions.get(containerId)
     if (session) session.ws.sendBtw(content)
+  },
+
+  newSession: (containerId) => {
+    const session = get().sessions.get(containerId)
+    if (!session || session.busy) return
+    session.ws.sendJSON({ type: 'command', command: '/new' })
   },
 
   addLocalNote: (containerId, content) => {

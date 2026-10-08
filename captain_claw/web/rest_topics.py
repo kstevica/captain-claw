@@ -24,7 +24,10 @@ log = get_logger(__name__)
 
 
 async def list_topics(server: "WebServer", request: web.Request) -> web.Response:
-    """GET /api/topics — topics (optionally ?q= to search, ?limit=, ?order=recent|alpha)."""
+    """GET /api/topics — topics (optionally ?q= to search, ?limit=, ?order=recent|alpha).
+
+    The panel lists every topic, hidden ones too (``hidden`` flags them);
+    ``?hidden=0`` leaves them out, as recall does."""
     mgr = get_topics_manager()
     q = (request.query.get("q") or "").strip()
     order = (request.query.get("order") or "recent").strip()
@@ -34,10 +37,13 @@ async def list_topics(server: "WebServer", request: web.Request) -> web.Response
         limit = int(request.query.get("limit") or 300)
     except (ValueError, TypeError):
         limit = 300
+    include_hidden = (request.query.get("hidden") or "1").strip().lower() not in ("0", "false", "no")
     if q:
-        topics = mgr.search_topics(q, limit=limit, order=order, group=group, tags=tags)
+        topics = mgr.search_topics(q, limit=limit, order=order, group=group, tags=tags,
+                                   include_hidden=include_hidden)
     else:
-        topics = mgr.list_topics(limit=limit, order=order, group=group, tags=tags)
+        topics = mgr.list_topics(limit=limit, order=order, group=group, tags=tags,
+                                 include_hidden=include_hidden)
     return web.json_response({"topics": topics, "total": len(topics)})
 
 
@@ -217,6 +223,19 @@ async def star(server: "WebServer", request: web.Request) -> web.Response:
     starred = bool((body or {}).get("starred", True))
     ok = get_topics_manager().set_star(topic_id, starred)
     return web.json_response({"ok": ok, "starred": starred})
+
+
+async def hide(server: "WebServer", request: web.Request) -> web.Response:
+    """POST /api/topics/{topic_id}/hide — keep a topic out of recall, or bring
+    it back. Body: {hidden: bool}. The panel keeps listing it."""
+    topic_id = request.match_info.get("topic_id", "")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    hidden = bool((body or {}).get("hidden", True))
+    ok = get_topics_manager().set_hidden(topic_id, hidden)
+    return web.json_response({"ok": ok, "hidden": hidden})
 
 
 async def reset(server: "WebServer", request: web.Request) -> web.Response:

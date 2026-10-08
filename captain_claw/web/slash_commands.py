@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import json
 import random
 import shlex as _shlex
@@ -35,11 +37,45 @@ def _is_view(server: Any) -> bool:
     return isinstance(server, _LaneServerView)
 
 
+def _held_elsewhere(server: Any, session_id: str) -> bool:
+    """Another live agent (main, a lane, a public or member instance) has
+    *session_id* open — two agents saving one session clobber each other."""
+    real = getattr(server, "_server", server)
+    me = server.agent
+    holders = [getattr(real, "agent", None)]
+    for pool in ("_lane_agents", "_public_agents", "_speaker_agents"):
+        holders.extend((getattr(real, pool, None) or {}).values())
+    return any(
+        agent is not None and agent is not me
+        and getattr(getattr(agent, "session", None), "id", None) == session_id
+        for agent in holders
+    )
+
+
 def _is_speaker_server(server: Any) -> bool:
     """Commands are running for a shared-agent member's own instance."""
     from captain_claw.speaker import is_speaker_agent
 
     return is_speaker_agent(getattr(server, "agent", None))
+
+
+def rotation_cue(text: str) -> str | None:
+    """When *text* opens with a new-session cue ("Nova tema: …", "new topic"
+    on its own), the rest of the message (possibly ""); else None. The cue
+    must stand alone: followed by the end, a line break or punctuation, so
+    "nova tema za blog" is just a message."""
+    from captain_claw.config import get_config
+
+    cues = [str(c).strip() for c in (get_config().session.rotation_cues or []) if str(c).strip()]
+    if not cues:
+        return None
+    body = str(text or "").lstrip()
+    pattern = r"^(?:%s)(?:\s*(?:$|\n)|\s*[:\-–—.,!]\s*)" % "|".join(
+        re.escape(c).replace(r"\ ", r"\s+") for c in sorted(cues, key=len, reverse=True))
+    match = re.match(pattern, body, re.IGNORECASE)
+    if not match:
+        return None
+    return body[match.end():].strip()
 
 
 async def _create_new_session(server: Any, name: str | None) -> Any:
@@ -75,7 +111,11 @@ async def _create_new_session(server: Any, name: str | None) -> Any:
         session = await server._create_speaker_session(p, name=name)
         await server._set_speaker_session(agent, session)
         return session
-    session = await agent.session_manager.create_session(name=name or "web-session")
+    # A lane's new session keeps the lane's name: lanes are found by name
+    # (newest first), so after a restart the lane opens on it, not the old one.
+    lane = getattr(server, "lane", "") if _is_view(server) else ""
+    session = await agent.session_manager.create_session(
+        name=name or (f"lane-{lane}" if lane else "web-session"))
     agent.session = session
     return session
 
@@ -99,6 +139,15 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
                 "type": "command_result", "command": raw, "content": NOT_ALLOWED_MESSAGE,
             })
             return
+
+    # A public visitor has no commands over the deck's agents (they would run
+    # on the owner's agent): only /help.
+    if getattr(ws, "_public_session_id", None) and cmd not in ("/help", "/h"):
+        await server._send(ws, {
+            "type": "command_result", "command": raw,
+            "content": "Commands aren't available in this session.",
+        })
+        return
 
     result = ""
 
@@ -744,9 +793,13 @@ async def handle_session_subcommand(server: WebServer, args: str) -> str:
             # A member's private conversation on this shared agent: nobody
             # (the owner included) takes it over by switching into it.
             return refusal
+        if session and _held_elsewhere(server, session.id):
+            return ("That session is open on another lane or chat right now — "
+                    "switch to it there, or start a new one here.")
         if session:
             server.agent.session = session
-            await server.agent.session_manager.set_last_active_session(session.id)
+            if not _is_view(server):
+                await server.agent.session_manager.set_last_active_session(session.id)
             server.agent._sync_runtime_flags_from_session()
             server._broadcast({"type": "session_info", **server._session_info()})
             server._broadcast({"type": "session_switched"})
@@ -829,6 +882,7 @@ async def handle_session_subcommand(server: WebServer, args: str) -> str:
                 session_name=server.agent.session.name,
                 messages=server.agent.session.messages,
                 saved_base_path=server.agent.tools.get_saved_base_path(create=True),
+                metadata=server.agent.session.metadata,
             )
         except Exception as e:
             return f"Export failed: {e}"

@@ -43,6 +43,10 @@ class Message:
     # the thinking mode must be passed back to the API"). Ignored
     # by providers that don't recognize it.
     reasoning_content: str | None = None
+    # Last message of the prior turns' history: an extra prompt-cache
+    # breakpoint for providers with explicit cache control (Anthropic), so a
+    # new turn reuses the cached history. Not sent on the wire.
+    cache_breakpoint: bool = False
 
 
 @dataclass
@@ -891,7 +895,30 @@ def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str | None:
 _CACHE_SPLIT_MARKER = "<!-- CACHE_SPLIT -->"
 
 
-def _inject_anthropic_cache_control(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _history_breakpoint_index(messages: list[Any]) -> int | None:
+    """Index, in the converted payload, of the message flagged as the end of
+    the prior turns' history (``Message.cache_breakpoint``)."""
+    kept = 0
+    found: int | None = None
+    for msg in messages:
+        if isinstance(msg, dict):
+            role = str(msg.get("role", ""))
+            flagged = bool(msg.get("cache_breakpoint"))
+        else:
+            role = str(getattr(msg, "role", ""))
+            flagged = bool(getattr(msg, "cache_breakpoint", False))
+        if role not in {"system", "user", "assistant", "tool"}:
+            continue   # dropped by the converter
+        if flagged:
+            found = kept
+        kept += 1
+    return found
+
+
+def _inject_anthropic_cache_control(
+    messages: list[dict[str, Any]],
+    history_breakpoint: int | None = None,
+) -> list[dict[str, Any]]:
     """Add ``cache_control`` to system and history messages for Anthropic prompt caching.
 
     Anthropic caches the prompt prefix up to each ``cache_control`` breakpoint.
@@ -909,6 +936,10 @@ def _inject_anthropic_cache_control(messages: list[dict[str, Any]]) -> list[dict
        tool-use loop the same conversation prefix is sent multiple times.
        Marking the last historical message lets Anthropic cache the entire
        prefix (system + history) across tool-loop iterations within a turn.
+
+    3. **End of the prior turns' history** (``history_breakpoint``) — the
+       message just before the current turn's opener, which a new turn sends
+       unchanged, so the next turn can read the cached history.
 
     LiteLLM passes ``cache_control`` through to Anthropic when the message
     content is a list of content blocks (not a plain string).
@@ -970,6 +1001,35 @@ def _inject_anthropic_cache_control(messages: list[dict[str, Any]]) -> list[dict
                     blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
                 result[i] = {**result[i], "content": blocks}
             break
+
+    # Breakpoint 3: the end of the prior turns' history — only while the
+    # request stays within Anthropic's limit of 4 cache_control blocks (a
+    # session can store extra system rows, each already marked above).
+    def _marked_blocks() -> int:
+        count = 0
+        for item in result:
+            content = item.get("content")
+            if isinstance(content, list):
+                count += sum(1 for b in content if isinstance(b, dict) and b.get("cache_control"))
+        return count
+
+    if (
+        history_breakpoint is not None
+        and 0 <= history_breakpoint < len(result)
+        and _marked_blocks() < 4
+    ):
+        target = result[history_breakpoint]
+        content = target.get("content", "")
+        if target.get("role") in ("user", "assistant"):
+            if isinstance(content, str) and content:
+                result[history_breakpoint] = {**target, "content": [
+                    {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}},
+                ]}
+            elif isinstance(content, list):
+                blocks = [dict(b) if isinstance(b, dict) else b for b in content]
+                if blocks and isinstance(blocks[-1], dict) and "cache_control" not in blocks[-1]:
+                    blocks[-1] = {**blocks[-1], "cache_control": {"type": "ephemeral"}}
+                result[history_breakpoint] = {**target, "content": blocks}
 
     return result
 
@@ -1681,12 +1741,16 @@ class ChatGPTResponsesProvider(LLMProvider):
         if usage["total_tokens"] <= 0:
             usage["total_tokens"] = usage["prompt_tokens"] + usage["completion_tokens"]
 
+        # An answer stopped by the output cap comes back "incomplete".
+        incomplete = str(response_data.get("status") or "") == "incomplete" and str(
+            (response_data.get("incomplete_details") or {}).get("reason") or ""
+        ) == "max_output_tokens"
         return LLMResponse(
             content="".join(content_parts),
             tool_calls=tool_calls,
             model=str(response_data.get("model", self.model) or self.model),
             usage=usage,
-            finish_reason="tool_calls" if tool_calls else "stop",
+            finish_reason="tool_calls" if tool_calls else ("length" if incomplete else "stop"),
         )
 
     # ── LLMProvider interface ──────────────────────────────────────────
@@ -1781,10 +1845,10 @@ class ChatGPTResponsesProvider(LLMProvider):
                 event_types=sorted({str(e.get("type", "")) for e in events})[:20],
             )
 
-            # Find the completed event.
+            # Find the completed event ("incomplete" when the output cap hit).
             completed: dict[str, Any] | None = None
             for evt in events:
-                if evt.get("type") == "response.completed":
+                if evt.get("type") in ("response.completed", "response.incomplete"):
                     completed = evt
                     break
 
@@ -3040,7 +3104,9 @@ class LiteLLMProvider(LLMProvider):
         # into static (cached) + dynamic (uncached) blocks, and add a cache
         # breakpoint on the last conversation message for tool-loop caching.
         if self.provider == "anthropic":
-            kwargs["messages"] = _inject_anthropic_cache_control(kwargs["messages"])
+            kwargs["messages"] = _inject_anthropic_cache_control(
+                kwargs["messages"], history_breakpoint=_history_breakpoint_index(messages),
+            )
         else:
             # Strip the cache-split marker for non-Anthropic providers.
             for msg in kwargs["messages"]:
@@ -3210,7 +3276,10 @@ class LiteLLMProvider(LLMProvider):
             if _is_healable_request_error(str(e).lower()):
                 raise
             # Otherwise preserve whatever we collected so far rather than losing
-            # the entire response.  Log so we can diagnose.
+            # the entire response, and say it was cut short: the turn loop
+            # continues a broken-off answer instead of shipping it as complete.
+            if not finish_reason:
+                finish_reason = "interrupted"
             log.warning(
                 "Stream collection interrupted, returning partial content",
                 error=str(e),

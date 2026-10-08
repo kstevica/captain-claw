@@ -122,7 +122,8 @@ def test_build_messages_prunes_history_to_context_budget():
         contents = [m.content for m in messages]
 
         assert messages[0].role == "system"
-        assert "latest question" in contents
+        # The question rides last, behind the turn's (pinned) clock block.
+        assert contents[-1].endswith("latest question")
         assert agent.last_context_window["dropped_messages"] > 0
         assert agent.last_context_window["included_messages"] == 1
         assert agent.last_context_window["over_budget"] in (0, 1)
@@ -678,6 +679,7 @@ async def test_compact_session_summarizes_old_messages_and_updates_metadata():
     cfg.context.max_tokens = 40
     cfg.context.compaction_threshold = 0.5
     cfg.context.compaction_ratio = 0.2
+    cfg.context.compaction_summary = "model"   # the model-written summary path
     set_config(cfg)
     try:
         agent = Agent(provider=TokenAwareProvider())

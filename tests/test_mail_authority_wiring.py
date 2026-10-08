@@ -410,11 +410,18 @@ def _ws_server(agent=None):
     async def _send(ws, msg):
         sent.append(msg)
 
-    return types.SimpleNamespace(
+    server = types.SimpleNamespace(
         agent=agent or _GuardAgent(), _send=_send, sent=sent,
         _broadcast=lambda msg: None, _telegram_agents={}, _telegram_user_locks={},
         _telegram_bridge=None,
     )
+
+    async def _resolve_agent(ws):
+        return server.agent
+
+    server.resolve_agent = _resolve_agent
+    server.lane_view = lambda ws, agent: server
+    return server
 
 
 @pytest.fixture
@@ -1222,4 +1229,7 @@ def test_turn_user_text_is_set_by_complete_and_stream():
 
     assert Agent._turn_user_text == ""
     for fn in (Agent.complete, Agent.stream):
-        assert 'self._turn_user_text = str(user_input or "")' in inspect.getsource(fn)
+        # Set from the turn's text (a chat surface's rules block taken out).
+        source = inspect.getsource(fn)
+        assert 'self._absorb_surface_block(str(user_input or ""))' in source
+        assert "self._turn_user_text = user_input" in source

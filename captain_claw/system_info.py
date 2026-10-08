@@ -311,6 +311,24 @@ def _get_uptime_compact() -> str:
     return f"{minutes}m"
 
 
+# Host facts are rendered every turn; cache them so a turn never waits on
+# subprocesses or the public-IP lookup (a blocking HTTP call of up to 2 s).
+# Keyed by the getter itself, so a patched getter gets its own entry.
+_HOST_FACT_CACHE: dict[object, tuple[float, object]] = {}
+_SLOW_FACT_TTL_S = 600.0   # IPs
+_FAST_FACT_TTL_S = 60.0    # memory, disk, load
+
+
+def _cached_fact(getter, ttl_seconds: float):
+    now = time.monotonic()
+    hit = _HOST_FACT_CACHE.get(getter)
+    if hit is not None and now - hit[0] < ttl_seconds:
+        return hit[1]
+    value = getter()
+    _HOST_FACT_CACHE[getter] = (now, value)
+    return value
+
+
 def build_system_info_block(detail_level: str = "normal", tz_name: str | None = None) -> str:
     """Build a system environment info block for the agent system prompt.
 
@@ -330,11 +348,11 @@ def build_system_info_block(detail_level: str = "normal", tz_name: str | None = 
 
     datetime_normal, datetime_micro = build_datetime_lines(tz_name)
     hostname = socket.gethostname()
-    disk_free = _get_disk_free()
-    local_ip = _get_local_ip()
-    public_ip = _get_public_ip()
-    load_avg = _get_system_load()
-    mem_normal, mem_compact = _get_memory_usage()
+    disk_free = _cached_fact(_get_disk_free, _FAST_FACT_TTL_S)
+    local_ip = _cached_fact(_get_local_ip, _SLOW_FACT_TTL_S)
+    public_ip = _cached_fact(_get_public_ip, _SLOW_FACT_TTL_S)
+    load_avg = _cached_fact(_get_system_load, _FAST_FACT_TTL_S)
+    mem_normal, mem_compact = _cached_fact(_get_memory_usage, _FAST_FACT_TTL_S)
 
     if detail_level == "micro":
         parts = [datetime_micro]

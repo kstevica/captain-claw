@@ -361,6 +361,7 @@ async def dispatch_local_command(
                 session_name=agent.session.name,
                 messages=agent.session.messages,
                 saved_base_path=agent.tools.get_saved_base_path(create=True),
+                metadata=agent.session.metadata,
             )
 
         written_paths = await enqueue_agent_task(

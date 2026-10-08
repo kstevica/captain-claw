@@ -41,7 +41,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { useShallow } from 'zustand/react/shallow'
-import { useChatStore, PLAN_LEVELS, LANE_MAIN, LANES, laneKey, type PlanLevel, type NextStepOption, type QueuedMessage } from '../../stores/chatStore'
+import { useChatStore, PLAN_LEVELS, LANE_MAIN, LANE_AUTO, LANES, laneKey, type PlanLevel, type NextStepOption, type QueuedMessage } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
@@ -1063,10 +1063,15 @@ function LaneStrip({ agentId, activeLane, agentName }: {
 }) {
   const sessions = useChatStore((s) => s.sessions)
   const setActiveLane = useChatStore((s) => s.setActiveLane)
+  const newSession = useChatStore((s) => s.newSession)
+  const activeSession = sessions.get(laneKey(agentId, activeLane))
+  // A shared agent's member has lanes A-C of their own, no automation lane.
+  const shared = agentId.startsWith('shared:') || !!activeSession?.shared
+  const lanes = shared ? LANES.filter((l) => l !== LANE_AUTO) : LANES
 
   return (
     <div className="flex items-center gap-1 border-b border-zinc-800 bg-zinc-900/40 px-2 py-1">
-      {LANES.map((lane) => {
+      {lanes.map((lane) => {
         const s = sessions.get(laneKey(agentId, lane))
         const isActive = lane === activeLane
         const pending = s ? s.queue.filter((q) => q.status === 'pending').length : 0
@@ -1076,7 +1081,8 @@ function LaneStrip({ agentId, activeLane, agentName }: {
             key={lane}
             onClick={() => setActiveLane(agentId, lane)}
             title={
-              !s ? `Lane ${lane} — not started`
+              lane === LANE_AUTO ? 'Automated turns (scheduler, autonomy, plans, peer tasks) — results for you also show in lane A'
+                : !s ? `Lane ${lane} — not started`
                 : awaiting ? `Lane ${lane} — waiting on an answer`
                 : s.busy ? `Lane ${lane} — running`
                 : `Lane ${lane} — idle`
@@ -1096,7 +1102,7 @@ function LaneStrip({ agentId, activeLane, agentName }: {
                   : 'bg-emerald-400'
               }`}
             />
-            <span>{lane} - {agentName}</span>
+            <span>{lane === LANE_AUTO ? 'Auto' : lane} - {agentName}</span>
             {pending > 0 && (
               <span className="rounded-full bg-zinc-800 px-1 text-[9px] text-zinc-400">{pending}</span>
             )}
@@ -1107,6 +1113,15 @@ function LaneStrip({ agentId, activeLane, agentName }: {
           </button>
         )
       })}
+      {/* A fresh conversation on the lane you're looking at (the agent's /new). */}
+      {!shared && <button
+        onClick={() => activeSession && newSession(activeSession.key)}
+        disabled={!activeSession || activeSession.busy}
+        title="Start a new session on this lane"
+        className="ml-auto rounded-md px-2 py-1 text-[11px] font-medium text-zinc-500 transition-colors hover:bg-zinc-800/60 hover:text-zinc-300 disabled:opacity-40 disabled:hover:bg-transparent"
+      >
+        + New session
+      </button>}
     </div>
   )
 }

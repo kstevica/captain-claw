@@ -151,6 +151,17 @@ def current() -> Authority:
     return a if a is not None else _process_default()
 
 
+def bound_authority() -> Authority | None:
+    """The authority bound for this turn, or None when only the process
+    default applies. Read-only; provenance labelling uses it."""
+    return _CURRENT.get()
+
+
+def process_default() -> Authority:
+    """The authority an unmarked turn gets in this process."""
+    return _process_default()
+
+
 def bind(a: Authority) -> contextvars.Token:
     return _CURRENT.set(a)
 

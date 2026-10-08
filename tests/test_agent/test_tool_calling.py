@@ -1023,7 +1023,8 @@ async def test_complete_records_full_llm_trace_when_enabled():
 @pytest.mark.asyncio
 async def test_emit_tool_output_records_compact_pipeline_trace_when_enabled():
     provider = DummyProvider()
-    agent = Agent(provider=provider)
+    outputs: list[str] = []
+    agent = Agent(provider=provider, tool_output_callback=lambda name, args, out: outputs.append(name))
     agent._initialized = True
     agent.session = Session(id="s1", name="default")
     agent.session_manager = DummySessionManager()
@@ -1036,20 +1037,44 @@ async def test_emit_tool_output_records_compact_pipeline_trace_when_enabled():
         "Planning event=created\nstate=active\nprogress=1/5 remaining=4",
     )
 
-    planning_entries = [
-        msg for msg in agent.session.messages if msg.get("role") == "tool" and msg.get("tool_name") == "planning"
-    ]
-    pipeline_entries = [
-        msg for msg in agent.session.messages if msg.get("role") == "tool" and msg.get("tool_name") == "pipeline_trace"
-    ]
-    assert planning_entries
-    assert "Planning event=created" in str(planning_entries[0].get("content", ""))
-    assert pipeline_entries
-    payload = pipeline_entries[0].get("tool_arguments")
-    assert isinstance(payload, dict)
+    # The live monitor gets the event; the session keeps only the compact
+    # trace entry (in metadata), not a planning row or a pipeline_trace row.
+    assert outputs == ["planning"]
+    assert not [msg for msg in agent.session.messages if msg.get("role") == "tool"]
+    trace = agent.session.metadata.get("pipeline_trace")
+    assert isinstance(trace, list) and len(trace) == 1
+    payload = trace[0]
     assert payload.get("source") == "planning"
     assert payload.get("event") == "created"
-    assert "Planning event=created" not in str(pipeline_entries[0].get("content", ""))
+    assert payload.get("timestamp")
+    assert "Planning event=created" not in json.dumps(payload)
+
+
+@pytest.mark.asyncio
+async def test_emit_tool_output_persists_only_rows_read_back():
+    outputs: list[str] = []
+    agent = Agent(provider=DummyProvider(), tool_output_callback=lambda name, args, out: outputs.append(name))
+    agent.session = Session(id="s1", name="default")
+    await agent.set_monitor_trace_pipeline(False, persist=False)
+
+    for name in ("memory_select", "memory_semantic_select", "task_contract", "completion_gate",
+                 "task_rephrase", "scale_micro_loop"):
+        agent._emit_tool_output(name, {"query": "q"}, f"{name} output")
+
+    assert outputs == ["memory_select", "memory_semantic_select", "task_contract", "completion_gate",
+                       "task_rephrase", "scale_micro_loop"]
+    stored = [msg.get("tool_name") for msg in agent.session.messages]
+    assert stored == ["task_rephrase", "scale_micro_loop"]
+
+
+def test_pipeline_export_reads_the_metadata_trace_log():
+    from captain_claw.session_export import collect_pipeline_trace_entries
+
+    entries = collect_pipeline_trace_entries(
+        "s1", "default", [],
+        metadata={"pipeline_trace": [{"source": "planning", "event": "created", "timestamp": "t1"}]},
+    )
+    assert [(e["source"], e["seq"], e["timestamp"]) for e in entries] == [("planning", 1, "t1")]
 
 
 def test_build_messages_keeps_tool_metadata():
@@ -1483,10 +1508,10 @@ def test_build_messages_includes_list_task_memory_note():
         },
     )
 
-    assert any(
-        msg.role == "assistant" and "List task memory is active" in msg.content
-        for msg in messages
-    )
+    # Live task state rides at the end on the user's side, never as an
+    # assistant turn after the question.
+    assert messages[-1].role == "user"
+    assert "List task memory is active" in messages[-1].content
 
 
 @pytest.mark.asyncio

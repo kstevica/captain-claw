@@ -416,7 +416,7 @@ async def run_interactive() -> None:
                         effective_input = ctx.last_next_steps[idx - 1].get("action", user_input)
                         ctx.last_next_steps = []
 
-                await run_prompt_in_active_session(ctx, effective_input)
+                await run_prompt_in_active_session(ctx, effective_input, channel="cli")
 
             except KeyboardInterrupt:
                 log.info("Interrupted by user")

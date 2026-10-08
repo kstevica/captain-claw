@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { X, Wand2, Loader2, AlertTriangle, Trash2, Pin, ListPlus, Paperclip, FileText } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
-import { useChatStore, LANES, LANE_MAIN, laneKey } from '../../stores/chatStore'
+import { useChatStore, WORK_LANES, LANE_MAIN, laneKey } from '../../stores/chatStore'
 import { uploadFileToAgent, formatSize } from '../../services/fileTransfer'
 
 /**
@@ -276,7 +276,7 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
 
   const send = () => {
     // Canonical A-B-C order regardless of the order lanes were ticked.
-    const dest = LANES.filter((l) => lanes.includes(l))
+    const dest = WORK_LANES.filter((l) => lanes.includes(l))
     if (dest.length === 0 || messages.length === 0) return
     // A lane that has never been opened has no queue to land in — open each
     // target once so every one of them can receive its share.
@@ -326,7 +326,7 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
   // Which lanes get the work, in canonical A-B-C order, and how the tasks split
   // across them. Counts are simulated with the SAME round-robin `send` uses, so
   // the breakdown on screen is exactly what will be queued.
-  const targets = LANES.filter((l) => lanes.includes(l))
+  const targets = WORK_LANES.filter((l) => lanes.includes(l))
   const perLane = targets.map((l) => ({ lane: l, count: 0 }))
   if (perLane.length) messages.forEach((_, i) => { perLane[i % perLane.length].count++ })
   const newCount = perLane.reduce((s, p) => s + Math.max(0, p.count - 1), 0)
@@ -482,7 +482,7 @@ export function QueuePlannerModal({ agentId, agentName, host, port, auth, onClos
 
             <Field label="Distribute to lanes">
               <div className="flex flex-wrap gap-1.5">
-                {LANES.map((l) => {
+                {WORK_LANES.map((l) => {
                   const on = lanes.includes(l)
                   const pend = pendingIn(l)
                   return (

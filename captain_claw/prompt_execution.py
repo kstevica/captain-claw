@@ -12,7 +12,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from captain_claw import mail_authority
+from captain_claw import mail_authority, msg_origin
 from captain_claw.config import get_config
 from captain_claw.execution_queue import (
     CommandLane,
@@ -209,8 +209,12 @@ async def run_prompt_in_active_session(
     queue: bool = True,
     on_assistant_text: Callable[[str], Awaitable[None]] | None = None,
     after_turn: Callable[[int, str, str], Awaitable[None]] | None = None,
+    channel: str | None = None,
 ) -> None:
-    """Execute one user prompt using the currently selected session."""
+    """Execute one user prompt using the currently selected session.
+
+    *channel* names the surface the prompt came from (cli, telegram, slack…),
+    recorded on the turn's opening message."""
     if not prompt_text.strip():
         return
 
@@ -273,6 +277,10 @@ async def run_prompt_in_active_session(
                 model_prompt = wrap_cron_prompt(cron_job_id, prompt_text)
             except Exception:
                 model_prompt = prompt_text
+        # Recorded on the turn's opening message.
+        _origin_kwargs: dict[str, Any] = {"channel": channel} if channel else {}
+        if cron_job_id:
+            _origin_kwargs["turn_origin"] = "cron"
 
         started = time.perf_counter()
         assistant_text = ""
@@ -287,6 +295,7 @@ async def run_prompt_in_active_session(
                 chunks: list[str] = []
 
                 async def _consume_stream() -> None:
+                    msg_origin.hint_turn_provenance(agent, **_origin_kwargs)
                     async for chunk in agent.stream(model_prompt):
                         chunks.append(chunk)
                         ui.print_streaming(chunk)
@@ -306,6 +315,7 @@ async def run_prompt_in_active_session(
                     return
                 assistant_text = "".join(chunks)
             else:
+                msg_origin.hint_turn_provenance(agent, **_origin_kwargs)
                 response, cancelled = await run_cancellable(ui, agent.complete(model_prompt))
                 if cancelled:
                     if cron_job_id:
@@ -357,6 +367,9 @@ async def run_prompt_in_active_session(
                     outbound_text = "Task completed. Check monitor output for details."
                 await on_assistant_text(outbound_text)
             if after_turn:
+                from captain_claw.platform_adapter import effective_turn_start_idx
+
+                turn_start_idx = effective_turn_start_idx(agent, turn_start_idx)
                 await after_turn(turn_start_idx, prompt_text, assistant_text)
 
             # Extract suggested next steps (skip for cron jobs, FD-spawned
@@ -374,6 +387,15 @@ async def run_prompt_in_active_session(
                         ui.print_next_steps(step_dicts)
                 except Exception as ns_err:
                     log.debug("Next steps extraction failed", error=str(ns_err))
+
+            # Topic classification from this channel's turn end too (background;
+            # not for cron runs or FD workers — same skips as the web chat).
+            if not cron_job_id and not _is_fd_spawned_worker():
+                try:
+                    from captain_claw.conversation_topics import maybe_classify_topics
+                    asyncio.create_task(maybe_classify_topics(agent))
+                except Exception:
+                    pass
 
             ctx.last_exec_seconds = time.perf_counter() - started
             ctx.last_completed_at = datetime.now()
@@ -394,7 +416,10 @@ async def run_prompt_in_active_session(
                     # Try to recover partial results from session messages.
                     _err_partial = ""
                     if agent.session:
-                        for _msg in reversed(agent.session.messages[turn_start_idx:]):
+                        from captain_claw.platform_adapter import effective_turn_start_idx
+
+                        _start = effective_turn_start_idx(agent, turn_start_idx)
+                        for _msg in reversed(agent.session.messages[_start:]):
                             if str(_msg.get("role", "")).strip().lower() == "assistant":
                                 _cand = str(_msg.get("content", "")).strip()
                                 if _cand and len(_cand) > 30:

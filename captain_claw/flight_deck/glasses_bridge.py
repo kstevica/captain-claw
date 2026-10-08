@@ -728,7 +728,9 @@ async def glasses_send(request: Request) -> JSONResponse:
             ch.context_sent = True
         else:
             agent_content = effective_text
-        payload_obj: dict = {"type": "chat", "content": agent_content}
+        # ``surface`` marks every frame, so the agent renders these rules on
+        # glasses turns only (the block above seeds them once per binding).
+        payload_obj: dict = {"type": "chat", "content": agent_content, "surface": "glasses"}
         if image_path:
             # Matches the contract in captain_claw/web/ws_handler.py: the
             # agent reads ``image_path`` and prefixes the prompt with

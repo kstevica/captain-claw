@@ -673,6 +673,7 @@ async def test_compaction_summarizes_only_learnable_messages(private_turn, monke
     await agent.complete("and another")
     monkeypatch.setattr(get_config().context, "max_tokens", 10)
     monkeypatch.setattr(get_config().context, "compaction_ratio", 0.05)
+    monkeypatch.setattr(get_config().context, "compaction_summary", "model")
     seen, archived = [], []
 
     async def _summ(messages):
@@ -703,9 +704,11 @@ async def test_compaction_summarizes_only_learnable_messages(private_turn, monke
     assert COMPACTION_PRIVATE_NOTE in compacted[0]["content"]
 
 
-def test_record_narration_skips_a_private_turn():
+def test_record_narration_skips_a_private_turn(monkeypatch):
     from captain_claw import conversation_topics as ct
+    from captain_claw.config import get_config
 
+    monkeypatch.setattr(get_config().conversation_topics, "include_narration", True)
     a = types.SimpleNamespace()
     member_privacy.begin_turn(a)
     ct.record_narration(a, "kept blurb")

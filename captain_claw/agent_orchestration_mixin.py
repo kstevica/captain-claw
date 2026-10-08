@@ -17,7 +17,7 @@ from captain_claw.agent_stuck import (
     MSG_RETRIES_EXHAUSTED,
     MSG_STUCK,
 )
-from captain_claw import mail_authority
+from captain_claw import mail_authority, msg_origin
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
 from captain_claw.llm import Message, is_reasoning_backfill_placeholder
@@ -271,6 +271,60 @@ _STALL_FIRST_LINE_RE = _re.compile(
 # convert most weak-model stalls into a useful turn without driving an
 # infinite re-roll loop when the model genuinely has nothing to add.
 MAX_STALL_RETRIES = 2
+
+# Finish reasons that mean a text answer stopped before it was done: the
+# output limit, or a stream that broke mid-generation (set by the LiteLLM
+# stream collector). Such an answer is continued, up to this many times.
+_CUT_OFF_FINISH_REASONS = frozenset({"length", "max_tokens", "interrupted"})
+MAX_ANSWER_CONTINUATIONS = 2
+_CONTINUE_CUT_OFF_INSTRUCTION = (
+    "Your previous reply was cut off before it was finished. Continue exactly where "
+    "it stopped — do not repeat anything already written, and add no preamble."
+)
+# A thinking model that spent the whole output limit on reasoning: the
+# provider hands back the reasoning's last paragraph as content, which is
+# not an answer to continue.
+_ANSWER_AFTER_THINKING_INSTRUCTION = (
+    "Your last reply ran out of room while you were still thinking, before any answer. "
+    "Write the answer now, and keep your thinking short."
+)
+# A continuation that opens a new markdown block starts on its own line.
+_BLOCK_START_RE = _re.compile(r"^(?:#{1,6}\s|[-*+]\s|\d+[.)]\s|\||```|>\s)")
+
+
+def _join_cut_off(parts: list[str]) -> str:
+    """Join the pieces of a continued answer. Providers strip a reply's
+    leading whitespace, so the seam gets a space between words, a newline
+    before a new markdown block, and loses any words the model repeated."""
+    out = ""
+    for part in parts:
+        part = str(part or "")
+        if not out or not part:
+            out = out or part
+            continue
+        for k in range(min(len(out), len(part), 400), 11, -1):
+            if out.endswith(part[:k]):
+                part = part[k:]
+                break
+        if not part:
+            continue
+        if out[-1].isspace() or part[0].isspace():
+            out += part
+        elif _BLOCK_START_RE.match(part):
+            out += "\n" + part
+        elif (out[-1].isalnum() or out[-1] in ".,;:!?)]") and (part[0].isalnum() or part[0] in "(["):
+            out += " " + part
+        else:
+            out += part
+    return out
+
+
+def _content_is_reasoning_tail(response: Any) -> bool:
+    """The reply's text is the provider's recovery from reasoning_content (a
+    model that never got to its answer), not an answer."""
+    reasoning = str(getattr(response, "reasoning_content", "") or "")
+    content = str(getattr(response, "content", "") or "").strip()
+    return bool(reasoning and content) and content in reasoning
 # Length budget for the stall check. Real stalls are terse single
 # sentences ("Let me look that up.", ~25 chars). Anything longer is
 # only treated as a stall if it has no substantive follow-through
@@ -731,6 +785,11 @@ class AgentOrchestrationMixin:
         """
         if not self._initialized:
             await self.initialize()
+        # Where this turn starts in session.messages once its user message is
+        # in (and any auto-compaction has run); callers that slice the turn's
+        # messages after complete() read it. Reset before the early returns
+        # below, so a slash-command turn never leaves the previous turn's.
+        self.last_turn_start_idx = None
 
         # `/basna` slash command. Channels that intercept slash commands (web,
         # Telegram) call run_basna_command directly; this branch covers the ones
@@ -739,7 +798,7 @@ class AgentOrchestrationMixin:
         if _st.lower() == "/basna" or _st.lower().startswith("/basna "):
             _reply = await self.run_basna_command(_st[len("/basna"):])
             self._add_session_message(role="user", content=user_input)
-            self._add_session_message(role="assistant", content=_reply)
+            self._add_session_message(role="assistant", content=_reply, origin="command")
             return _reply
 
         # `/code` slash command — works on every channel that funnels through
@@ -754,11 +813,11 @@ class AgentOrchestrationMixin:
             if _tools is None or not _tools.has_tool("code"):
                 _reply = "The code tool isn't available on this agent."
                 self._add_session_message(role="user", content=user_input)
-                self._add_session_message(role="assistant", content=_reply)
+                self._add_session_message(role="assistant", content=_reply, origin="command")
                 return _reply
             if not _args:
                 self._add_session_message(role="user", content=user_input)
-                self._add_session_message(role="assistant", content=CODE_COMMAND_HELP)
+                self._add_session_message(role="assistant", content=CODE_COMMAND_HELP, origin="command")
                 return CODE_COMMAND_HELP
             user_input = _CODE_COMMAND_DIRECTIVE.format(args=_args)
             # fall through to the normal model turn below
@@ -772,11 +831,11 @@ class AgentOrchestrationMixin:
             if _tools is None or not _tools.has_tool("hosting"):
                 _reply = "The hosting tool isn't available on this agent."
                 self._add_session_message(role="user", content=user_input)
-                self._add_session_message(role="assistant", content=_reply)
+                self._add_session_message(role="assistant", content=_reply, origin="command")
                 return _reply
             if not _args:
                 self._add_session_message(role="user", content=user_input)
-                self._add_session_message(role="assistant", content=PUBLISH_COMMAND_HELP)
+                self._add_session_message(role="assistant", content=PUBLISH_COMMAND_HELP, origin="command")
                 return PUBLISH_COMMAND_HELP
             user_input = _PUBLISH_COMMAND_DIRECTIVE.format(args=_args)
             # fall through to the normal model turn below
@@ -798,7 +857,7 @@ class AgentOrchestrationMixin:
                     _reply = (getattr(_res, "content", "") or "").strip() or "Basna run started."
                 except Exception as _e:  # noqa: BLE001 — surface a clean message
                     _reply = f"I couldn't start the Basna run: {_e}"
-                self._add_session_message(role="assistant", content=_reply)
+                self._add_session_message(role="assistant", content=_reply, origin="command")
                 return _reply
 
         self._last_memory_debug_signature = None
@@ -850,13 +909,18 @@ class AgentOrchestrationMixin:
         # New turn → re-render the system prompt once (it embeds the clock;
         # _build_messages freezes it for the rest of the turn so the
         # provider's prompt-prefix cache hits on every tool-loop call).
+        # The background context notes are frozen per turn the same way.
         self._turn_system_prompt = None
+        self._turn_context_notes = None
         # Reset per-turn coverage-gate valve counters (no-net-progress
         # streak, best missing seen, total blocks, turn key).
         self._coverage_gate_streak: int = 0
         self._coverage_gate_best_missing: int | None = None
         self._coverage_gate_blocks: int = 0
         self._coverage_gate_turn_idx: int | None = None
+        # Same for the scale-reply gate: its key is the turn start, which
+        # repeats from turn to turn once auto-compaction resets the list.
+        self._scale_reply_gate_turn_idx: int | None = None
         self._pw_enforcement_streak: int = 0
         # Reset per-turn success flag (updated by finish()).
         self._last_complete_success = True
@@ -950,6 +1014,12 @@ class AgentOrchestrationMixin:
         task_contract: dict[str, Any] | None = None
         completion_requirements: list[dict[str, Any]] = []
         completion_feedback: str = ""
+        # A text answer cut off by the output limit (or a broken stream) is
+        # continued, and the parts joined, instead of shipped half-done. The
+        # parts are joined only onto the reply that answers the continuation.
+        _answer_parts: list[str] = []
+        _answer_continuations = 0
+        _continue_answer_next = False
 
         def _restore_skill_env_once() -> None:
             nonlocal skill_env_restored
@@ -986,6 +1056,9 @@ class AgentOrchestrationMixin:
             """
             if not self.session:
                 return ""
+            # 0. An answer cut off mid-continuation: its joined parts.
+            if _answer_parts:
+                return _join_cut_off(_answer_parts)
             turn_msgs = self.session.messages[turn_start_idx:]
 
             # 1. Look for a substantial assistant response (likely a real answer).
@@ -1098,11 +1171,23 @@ class AgentOrchestrationMixin:
 
         # Add user message to session
         self._add_session_message("user", user_input)
+        turn_user_msg = (
+            self.session.messages[-1] if self.session and self.session.messages else None
+        )
         # Stamp the last REAL user-message time (skip cron/scheduler-driven
-        # turns — those record their own automated-run timestamp instead).
-        if not getattr(self, "_turn_is_automated", False):
+        # and other automated turns — those record their own timestamps).
+        _turn = getattr(self, "_turn_origin", None)
+        _human_turn = not (isinstance(_turn, tuple) and _turn and _turn[0] != "human")
+        if not getattr(self, "_turn_is_automated", False) and _human_turn:
             self._record_timing_event("last_user_msg_at")
         await self._auto_compact_if_needed()
+        # Compaction swaps session.messages for [summary, *recent tail], so
+        # the index captured above can point past this turn: every tool
+        # result of the turn would then read as historical and be filtered
+        # out of the prompt, and the stuck/salvage/completion checks would
+        # slice an empty list.
+        turn_start_idx = self._turn_start_after_compaction(turn_user_msg, turn_start_idx)
+        self.last_turn_start_idx = turn_start_idx
         # The owner's caches are never loaded for a shared-agent member.
         if getattr(self, "_speaker_scoped", False) is not True:
             await self._refresh_cron_context_cache()
@@ -1111,6 +1196,10 @@ class AgentOrchestrationMixin:
             await self._refresh_scripts_context_cache()
             await self._refresh_apis_context_cache()
             await self._refresh_datastore_context_cache()
+        # Insights (the shared commons) follow what this turn is about.
+        await self._refresh_insights_context_cache(
+            query=msg_origin.model_view_text({"content": user_input}),
+        )
         if clarification_context_applied:
             self._emit_tool_output(
                 "task_contract",
@@ -1557,6 +1646,7 @@ class AgentOrchestrationMixin:
         _plan_leak_nudged = False
 
         for iteration in range(hard_turn_iterations):
+            _continuing_answer, _continue_answer_next = _continue_answer_next, False
             # ── External cancellation check ───────────────────────
             cancel_ev: asyncio.Event | None = getattr(self, "cancel_event", None)
             if cancel_ev is not None and cancel_ev.is_set():
@@ -1716,7 +1806,9 @@ class AgentOrchestrationMixin:
                 planning_pipeline=planning_pipeline,
                 list_task_plan=list_task_plan,
             )
-            if completion_feedback:
+            # Gate feedback waits while a cut-off answer is being continued:
+            # as the last word it would turn "continue" into "rewrite".
+            if completion_feedback and not _continuing_answer:
                 messages.append(
                     Message(
                         role="user",
@@ -1849,6 +1941,7 @@ class AgentOrchestrationMixin:
                         deferred=len(_deferred),
                         intent_matched=list(_intent_tools & {td["name"] for td in tool_defs}),
                     )
+            self._note_tool_schema_tokens(tool_defs)
             log.debug(
                 "Tool definitions available",
                 count=len(
@@ -1929,13 +2022,17 @@ class AgentOrchestrationMixin:
                             await self.compact_session(force=True, trigger="orphan_fix")
                         except Exception:
                             pass
+                        turn_start_idx = self._turn_start_after_compaction(
+                            turn_user_msg, turn_start_idx,
+                        )
+                        self.last_turn_start_idx = turn_start_idx
                         messages = self._build_messages(
                             tool_messages_from_index=turn_start_idx,
                             query=effective_user_input,
                             planning_pipeline=planning_pipeline,
                             list_task_plan=list_task_plan,
                         )
-                        if completion_feedback:
+                        if completion_feedback and not _continuing_answer:
                             messages.append(Message(role="user", content=completion_feedback))
                         continue
 
@@ -1998,7 +2095,7 @@ class AgentOrchestrationMixin:
                 if _lt_corrective is not None:
                     _partial = str(response.content or "").strip()
                     if _partial:
-                        self._add_session_message(role="assistant", content=_partial)
+                        self._add_session_message(role="assistant", content=_partial, origin="rejected")
                     self._add_session_message(role="user", content=_lt_corrective)
                     log.warning("Length-truncated tool call — split corrective",
                                 attempt=self._malformed_retry_count)
@@ -2672,6 +2769,55 @@ class AgentOrchestrationMixin:
             # available so the model cannot stall the same way again.
             # The stall text is committed to the session so the model
             # can see (and avoid repeating) what it just emitted.
+            if not _continuing_answer:
+                # A fragment the model answered with something else (a tool
+                # call, a file write) is not glued onto a later reply.
+                _answer_parts = []
+            if (
+                not response.tool_calls
+                and str(response.finish_reason or "").strip().lower() in _CUT_OFF_FINISH_REASONS
+                and str(response.content or "").strip()
+                and _answer_continuations < MAX_ANSWER_CONTINUATIONS
+            ):
+                _answer_continuations += 1
+                _continue_answer_next = True
+                # The continuation is not new work: it gets its iteration back.
+                soft_turn_iterations += 1
+                hard_turn_iterations += 1
+                _thinking_only = _content_is_reasoning_tail(response)
+                log.warning(
+                    "Answer cut off — asking the model to continue",
+                    finish_reason=response.finish_reason,
+                    part_chars=len(str(response.content)),
+                    continuation=_answer_continuations,
+                    thinking_only=_thinking_only,
+                )
+                if _thinking_only:
+                    self._add_session_message(
+                        role="user",
+                        content=(
+                            _CONTINUE_CUT_OFF_INSTRUCTION + " Keep your thinking short."
+                            if _answer_parts else _ANSWER_AFTER_THINKING_INSTRUCTION
+                        ),
+                        origin="corrective", origin_detail="continue_cut_off",
+                    )
+                    continue
+                _answer_parts.append(str(response.content))
+                # The partial goes to history as a rejected draft (later turns
+                # drop it with its corrective); the joined answer is what gets
+                # persisted when the turn finishes.
+                self._add_session_message(
+                    role="assistant", content=str(response.content), origin="rejected",
+                    origin_detail="cut_off",
+                )
+                self._add_session_message(
+                    role="user", content=_CONTINUE_CUT_OFF_INSTRUCTION, origin="corrective",
+                    origin_detail="continue_cut_off",
+                )
+                continue
+            if _answer_parts and not response.tool_calls:
+                response.content = _join_cut_off(_answer_parts + [str(response.content or "")])
+                _answer_parts = []
             _stall_resp_text = str(response.content or "")
             # False-action-claim gate: the reply claims it delegated/sent to a
             # peer, but no flight_deck/consult_peer tool was called THIS TURN —
@@ -2797,7 +2943,7 @@ class AgentOrchestrationMixin:
                 # that answering with nothing is acceptable here, which
                 # makes the next re-roll *more* likely to stall, not less.
                 if _stall_resp_text.strip():
-                    self._add_session_message(role="assistant", content=_stall_resp_text)
+                    self._add_session_message(role="assistant", content=_stall_resp_text, origin="rejected")
                 self._add_session_message(role="user", content=_retry_instruction)
                 # Force tool use on the very next provider call so the
                 # retry can't repeat the same intent-only stall. The
@@ -2824,7 +2970,7 @@ class AgentOrchestrationMixin:
                 if _nudge_msg:
                     log.warning("Tool-avoidance detected, nudging LLM", tool="google_mail")
                     self._tool_avoidance_nudged = True
-                    self._add_session_message(role="assistant", content=_resp_text)
+                    self._add_session_message(role="assistant", content=_resp_text, origin="rejected")
                     self._add_session_message(role="user", content=_nudge_msg)
                     continue
 
@@ -2846,7 +2992,7 @@ class AgentOrchestrationMixin:
                     "Leaked plan/contract JSON detected as final response; nudging to answer",
                     preview=str(response.content or "")[:160],
                 )
-                self._add_session_message(role="assistant", content=str(response.content or ""))
+                self._add_session_message(role="assistant", content=str(response.content or ""), origin="rejected")
                 self._add_session_message(
                     role="user",
                     content=(
@@ -2883,7 +3029,7 @@ class AgentOrchestrationMixin:
                     "Reasoning-preamble detected as final response; nudging to answer",
                     preview=str(response.content or "")[:160],
                 )
-                self._add_session_message(role="assistant", content=str(response.content or ""))
+                self._add_session_message(role="assistant", content=str(response.content or ""), origin="rejected")
                 self._add_session_message(
                     role="user",
                     content=(
@@ -2954,15 +3100,22 @@ class AgentOrchestrationMixin:
         self._last_memory_debug_signature = None
         self._last_semantic_memory_debug_signature = None
         self.last_usage = self._empty_usage()
-        # New turn → re-render the (turn-frozen) system prompt once.
+        # New turn → re-render the (turn-frozen) system prompt and context
+        # notes once.
         self._turn_system_prompt = None
+        self._turn_context_notes = None
+        self.last_turn_start_idx = None
 
         # Tool-calling and streaming over a single pass is currently limited.
         # Preserve tool behavior and guard checks by using complete() and
         # yielding chunked output when tools/guards are enabled.
         if self.tools.list_tools() or self.guards_enabled():
             self._set_runtime_status("thinking")
-            content = await self.complete(user_input)
+            # Re-enters Agent.complete: carry this turn's origin over.
+            _origin_kwargs = (
+                self._turn_origin_kwargs() if hasattr(self, "_turn_origin_kwargs") else {}
+            )
+            content = await self.complete(user_input, **_origin_kwargs)
             chunk_size = 24
             self._set_runtime_status("streaming")
             for idx in range(0, len(content), chunk_size):
@@ -2971,8 +3124,13 @@ class AgentOrchestrationMixin:
             return
 
         # Add user message to session
+        turn_start_idx = len(self.session.messages) if self.session else 0
         self._add_session_message("user", user_input)
+        turn_user_msg = (
+            self.session.messages[-1] if self.session and self.session.messages else None
+        )
         await self._auto_compact_if_needed()
+        self.last_turn_start_idx = self._turn_start_after_compaction(turn_user_msg, turn_start_idx)
         planning_pipeline: dict[str, Any] | None = None
         if self.planning_enabled:
             planning_pipeline = self._build_task_pipeline(user_input)
@@ -2986,7 +3144,14 @@ class AgentOrchestrationMixin:
 
         # For streaming, we currently don't support tool calling
         # This is a limitation - full streaming with tools needs more work
-        messages = self._build_messages(query=user_input, planning_pipeline=planning_pipeline)
+        # The turn's start, as complete() passes it, so earlier turns get the
+        # same history rules (old tool output, correctives) here too.
+        messages = self._build_messages(
+            tool_messages_from_index=self.last_turn_start_idx,
+            query=user_input,
+            planning_pipeline=planning_pipeline,
+        )
+        self._note_tool_schema_tokens(tool_defs)
 
         # Stream the response
         full_content = ""

@@ -15,6 +15,8 @@ from urllib.parse import urlparse
 from captain_claw.config import get_config
 from captain_claw.llm import Message, ToolCall, get_provider, set_provider
 from captain_claw.logging import get_logger
+from captain_claw import msg_origin
+from captain_claw.msg_origin import is_model_hidden_tool
 from captain_claw.tools.registry import Tool
 
 
@@ -26,6 +28,25 @@ _NANO_FLEET_INSTRUCTIONS_MAX_CHARS = 1500
 # Rendered in place of the owner's filesystem paths in a shared-agent
 # member's system prompt.
 _SPEAKER_PATH_PLACEHOLDER = "(not available in shared chats)"
+
+# Lead lines of the background-notes block: in front of the turn's user
+# message, or on its own when the request has no user message to carry it.
+_BACKGROUND_NOTES_LEAD = (
+    "background for the user message below; reference only, "
+    "do not repeat or quote it in your reply"
+)
+_STANDALONE_NOTES_LEAD = "background context; reference only, do not repeat or quote it in your reply"
+# Chat surfaces whose formatting rules ride on their turns.
+_RULED_SURFACES = frozenset({"glasses", "whatsapp", "messenger"})
+# "[Flight Deck] Agent '<name>' has <event> the fleet …" (anywhere in a notice).
+_FLEET_NOTICE_RE = re.compile(
+    r"\[Flight Deck\] Agent '(?P<name>[^']*)' has (?P<event>\w+) the fleet"
+    r"(?:[^\n]*?Current fleet: (?P<roster>[^\n]*))?"
+)
+# Order of the live task-state notes inside their block.
+_LIVE_NOTE_ORDER = ("planning_context", "list_task_memory", "scale_progress")
+# Block markers quoted inside a note body (e.g. a snippet of an earlier prompt).
+_NESTED_BLOCK_MARKER_RE = re.compile(r"\[((?:END )?INTERNAL CONTEXT)", re.IGNORECASE)
 
 
 def _is_being_body() -> bool:
@@ -164,6 +185,29 @@ def _short_tool_desc(text: str, limit: int = 160) -> str:
 # Retired tool names already logged as skipped at registration (once per name
 # per process — _register_default_tools runs on every agent/session init).
 _RETIRED_TOOLS_LOGGED: set[str] = set()
+
+
+# context.notes_allocator = capped: each source's share of the notes budget.
+_NOTE_SHARES = {
+    "memory_context": 0.3,
+    "semantic_memory_context": 0.2,
+    "deep_memory_context": 0.2,
+    "cross_session_context": 0.2,
+    "insights_context": 0.15,
+    "workspace_manifest": 0.15,
+    "topic_recall": 0.15,
+    "pinned_topic": 0.2,
+}
+_NOTE_SHARE_DEFAULT = 0.1
+_NOTE_CAP_FLOOR = 200
+_NOTE_CUT_MARK = "[… cut to this note's share of the context]"
+
+
+def _being_body() -> bool:
+    """This process is an Iskra being's body (CLAW_BEING_WORKER)."""
+    import os
+
+    return str(os.environ.get("CLAW_BEING_WORKER", "")).strip().lower() in ("1", "true", "yes")
 
 
 class AgentContextMixin:
@@ -1188,8 +1232,10 @@ class AgentContextMixin:
             )
         )
 
-    async def _refresh_insights_context_cache(self) -> None:
-        """Pre-fetch insights for context injection."""
+    async def _refresh_insights_context_cache(self, query: str | None = None) -> None:
+        """Pre-fetch insights for context injection. With a turn's *query* in
+        ``relevant`` mode: the core most important insights plus those the
+        turn's words match; otherwise the top list by importance."""
         cfg = get_config()
         if not cfg.insights.enabled or not cfg.insights.inject_in_context:
             return
@@ -1199,6 +1245,13 @@ class AgentContextMixin:
                 mgr = get_session_insights_manager(str(self.session.id))
             else:
                 mgr = get_insights_manager()
+            if query is not None and str(cfg.insights.context_mode).strip().lower() == "relevant":
+                self._insights_context_cache = await mgr.relevant_for_context(
+                    query,
+                    limit=cfg.insights.max_items_in_prompt,
+                    core=cfg.insights.core_items_in_prompt,
+                )
+                return
             self._insights_context_cache = await mgr.get_for_context(
                 limit=cfg.insights.max_items_in_prompt,
             )
@@ -1582,7 +1635,7 @@ class AgentContextMixin:
             "SELF-REFLECTION: Every ~10 messages (or ~4 hours), you perform autonomous "
             "self-assessment. You review your recent conversations, memory, and completed "
             "tasks, then generate actionable improvement directives for yourself. These "
-            "directives are injected into your context as \"Self-reflection\" above. "
+            "directives are injected into your context as \"Self-reflection\". "
             "They represent your own conclusions about what you're doing well and what "
             "to improve — treat them as your own internal voice, not external instructions."
         )
@@ -2856,6 +2909,50 @@ class AgentContextMixin:
             return "\n\n" + self.instructions.render(section_file, **variables)
         return "\n\n" + self.instructions.load(section_file)
 
+    def _build_env_now_text(self) -> str:
+        """Clock, host facts and activity timing for the current turn.
+
+        Rendered into the per-turn context block (never dropped for budget)
+        instead of the system prompt's tail, where its per-minute changes
+        broke the provider's prompt cache for all history after it.
+        """
+        from captain_claw.system_info import build_system_info_block
+
+        if self.instructions.use_nano:
+            _detail = "nano"
+        elif self.instructions.use_micro:
+            _detail = "micro"
+        else:
+            _detail = "normal"
+        try:
+            _tz_name = get_config().context.timezone
+        except Exception:
+            _tz_name = ""
+        if getattr(self, "_speaker_scoped", False) is True:
+            # A shared-agent member gets the clock, never the owner's machine
+            # (hostname, local/public IP, memory, disk, load, uptime).
+            from captain_claw.system_info import build_datetime_lines
+
+            if _detail == "nano":
+                system_info_block = ""
+            else:
+                _dt_normal, _dt_micro = build_datetime_lines(_tz_name or None)
+                system_info_block = (
+                    f"Env: {_dt_micro}" if _detail == "micro"
+                    else "\n".join(["System environment:", *_dt_normal])
+                )
+        else:
+            system_info_block = build_system_info_block(detail_level=_detail, tz_name=_tz_name or None)
+        # Append activity-timing lines (last user message / reply / cron run /
+        # session start) so the model knows recency, not just the current clock.
+        _timing_block = self._build_timing_block(detail_level=_detail)
+        if _timing_block:
+            system_info_block = (
+                f"{system_info_block}\n{_timing_block}" if system_info_block
+                else _timing_block
+            )
+        return system_info_block
+
     def _build_system_prompt(self) -> str:
         """Build the system prompt."""
         session_id = self._current_session_slug()
@@ -3030,41 +3127,11 @@ class AgentContextMixin:
         except Exception:
             pass
 
-        from captain_claw.system_info import build_system_info_block
-
-        if self.instructions.use_nano:
-            _detail = "nano"
-        elif self.instructions.use_micro:
-            _detail = "micro"
-        else:
-            _detail = "normal"
-        try:
-            _tz_name = get_config().context.timezone
-        except Exception:
-            _tz_name = ""
-        if getattr(self, "_speaker_scoped", False) is True:
-            # A shared-agent member gets the clock, never the owner's machine
-            # (hostname, local/public IP, memory, disk, load, uptime).
-            from captain_claw.system_info import build_datetime_lines
-
-            if _detail == "nano":
-                system_info_block = ""
-            else:
-                _dt_normal, _dt_micro = build_datetime_lines(_tz_name or None)
-                system_info_block = (
-                    f"Env: {_dt_micro}" if _detail == "micro"
-                    else "\n".join(["System environment:", *_dt_normal])
-                )
-        else:
-            system_info_block = build_system_info_block(detail_level=_detail, tz_name=_tz_name or None)
-        # Append activity-timing lines (last user message / reply / cron run /
-        # session start) so the model knows recency, not just the current clock.
-        _timing_block = self._build_timing_block(detail_level=_detail)
-        if _timing_block:
-            system_info_block = (
-                f"{system_info_block}\n{_timing_block}" if system_info_block
-                else _timing_block
-            )
+        # The clock, host facts and activity timing change every turn; they
+        # ride in the per-turn context block (see _build_env_now_text), not
+        # here, so everything from this prompt onward stays one cacheable
+        # prefix from turn to turn.
+        system_info_block = ""
 
         # Build extra read dirs block + file tree listings for system prompt.
         extra_read_dirs_block = ""
@@ -3550,9 +3617,10 @@ class AgentContextMixin:
     ) -> list[dict[str, Any]]:
         """Ensure conversation ends with a user message for Anthropic.
 
-        Trailing assistant messages without tool_calls (injected context
-        notes like memory, todo, planning) are converted to user role.
-        LiteLLM merges consecutive same-role messages for Anthropic.
+        Trailing assistant messages without tool_calls (a history that ends
+        on an assistant reply) are converted to user role. Context notes no
+        longer trail the conversation — they ride on the turn's user
+        message. LiteLLM merges consecutive same-role messages for Anthropic.
         """
         if not selected_messages:
             return selected_messages
@@ -3680,6 +3748,526 @@ class AgentContextMixin:
 
         return normalized
 
+    @staticmethod
+    def _merge_assistant_messages(
+        base: dict[str, Any],
+        extra: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Fold ``extra`` into a copy of ``base`` (consecutive assistant turns).
+
+        Each part keeps its own ``system_hint`` (folded into the text, as the
+        message builder would), and the latest non-empty
+        ``reasoning_content`` is kept: thinking-mode servers want one on
+        every assistant message.
+        """
+
+        def _text(msg: dict[str, Any]) -> str:
+            content = str(msg.get("content", "") or "").strip()
+            hint = msg.get("system_hint")
+            return f"{content}\n{hint}".strip() if hint else content
+
+        merged = dict(base)
+        merged["content"] = "\n\n".join(part for part in (_text(base), _text(extra)) if part)
+        merged.pop("system_hint", None)
+        if extra.get("reasoning_content"):
+            merged["reasoning_content"] = extra["reasoning_content"]
+        for key in ("token_count", "_tc_counted", "_rc_counted", "reasoning_token_count"):
+            merged.pop(key, None)
+        return merged
+
+    @staticmethod
+    def _wrap_internal_context(notes: list[tuple[str, str]], lead: str) -> str:
+        """One delimited block of internal context notes.
+
+        The delimiters let a small model tell the notes from the
+        conversation, and let ``_strip_internal_context`` cut an echo out of
+        a reply. ``[Attached image: …]`` markers quoted from old messages are
+        defused: the block sits in a user message, and Ollama inlines the
+        image of the last user message that carries such a marker. Block
+        markers quoted inside a note (a snippet of an earlier prompt) are
+        defused too, so the block always ends where it says it does.
+        """
+        body = "\n\n".join(text.strip() for _, text in notes if text and text.strip())
+        body = body.replace("[Attached image:", "[Earlier image:")
+        body = _NESTED_BLOCK_MARKER_RE.sub(lambda m: "(" + m.group(1), body)
+        return f"[INTERNAL CONTEXT — {lead}]\n{body}\n[END INTERNAL CONTEXT]"
+
+    def _fit_context_notes(
+        self,
+        notes: list[tuple[str, str]],
+        budget: int,
+        lead: str,
+        pinned: list[tuple[str, str]] | None = None,
+    ) -> list[tuple[str, str]]:
+        """The background notes that fit ``budget`` once wrapped, in order.
+
+        ``pinned`` notes (the turn's clock and activity lines) share the block
+        and always stay; only ``notes`` are trimmed. When they don't all fit,
+        notes are taken last-collected first — the order the newest-first
+        trimmer kept them in when each note was its own message — and any note
+        that would overflow is skipped, so one large note can't take the small
+        ones out with it.
+        """
+        pinned = list(pinned or [])
+        if not notes:
+            return []
+        if self._count_tokens(self._wrap_internal_context(notes + pinned, lead)) <= budget:
+            return list(notes)
+        if str(get_config().context.notes_allocator or "").strip().lower() == "capped":
+            notes = self._cap_notes_per_source(notes, budget)
+            if self._count_tokens(self._wrap_internal_context(notes + pinned, lead)) <= budget:
+                return list(notes)
+        overhead = self._count_tokens(self._wrap_internal_context(pinned, lead))
+        sizes = [self._count_tokens(text) for _, text in notes]
+        kept: set[int] = set()
+        used = overhead
+        for idx in range(len(notes) - 1, -1, -1):
+            if used + sizes[idx] <= budget:
+                kept.add(idx)
+                used += sizes[idx]
+        fitted = [note for idx, note in enumerate(notes) if idx in kept]
+        # Per-note counts miss the separators the joined block adds; settle
+        # on the real text, shedding the lowest-priority note until it fits.
+        while fitted and self._count_tokens(self._wrap_internal_context(fitted + pinned, lead)) > budget:
+            fitted.pop(0)
+        return fitted
+
+    def _cap_notes_per_source(
+        self, notes: list[tuple[str, str]], budget: int,
+    ) -> list[tuple[str, str]]:
+        """Each note cut to its source's share of the notes budget
+        (``context.notes_allocator: capped``, when they don't all fit): whole
+        items kept (a line and the indented lines under it), and a single
+        item longer than the share cut inside it."""
+        capped: list[tuple[str, str]] = []
+        for kind, text in notes:
+            cap = max(_NOTE_CAP_FLOOR, int(budget * _NOTE_SHARES.get(kind, _NOTE_SHARE_DEFAULT)))
+            if self._count_tokens(text) <= cap:
+                capped.append((kind, text))
+                continue
+            items: list[list[str]] = []
+            for line in text.splitlines():
+                if items and line[:1].isspace():
+                    items[-1].append(line)      # Why / How to apply under its rule
+                else:
+                    items.append([line])
+            kept: list[str] = []
+            used = self._count_tokens(_NOTE_CUT_MARK)
+            for item in items:
+                block = "\n".join(item)
+                cost = self._count_tokens(block) + 1
+                if used + cost > cap:
+                    if not kept:                # one item over the share: cut inside it
+                        kept.append(self._cut_to_tokens(block, cap - used))
+                    break
+                kept.append(block)
+                used += cost
+            capped.append((kind, "\n".join(kept) + "\n" + _NOTE_CUT_MARK))
+        return capped
+
+    def _cut_to_tokens(self, text: str, tokens: int) -> str:
+        """The longest prefix of *text* within *tokens* (cut at a word)."""
+        lo, hi = 0, len(text)
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            if self._count_tokens(text[:mid]) <= max(1, tokens):
+                lo = mid
+            else:
+                hi = mid - 1
+        cut = text[:lo]
+        return cut.rsplit(" ", 1)[0] if " " in cut and lo < len(text) else cut
+
+    def _collect_background_context_notes(
+        self,
+        skipped_historical_tools: list[dict[str, Any]],
+        query: str | None,
+        skip_memory: bool,
+        owner_notes: bool,
+        history_budget: int = 0,
+    ) -> list[tuple[str, str]]:
+        """Background context notes for this turn, as ``(kind, text)`` pairs.
+
+        ``skip_memory`` honours an explicit "use fresh/web data, not memory"
+        request: no automatic memory or semantic-memory injection. A
+        shared-agent member's instance (``owner_notes`` False) never sees the
+        owner's caches (todo, contacts, scripts, apis, datastore, intentions,
+        briefing); insights, intuitions and workspace notes are the shared
+        commons.
+        """
+        notes: list[tuple[str, str]] = []
+        memory_note, memory_debug = (None, "") if skip_memory else self._build_tool_memory_note(
+            skipped_historical_tools,
+            query=query,
+        )
+        if memory_note:
+            notes.append(("memory_context", memory_note))
+            signature = f"{query or ''}|{memory_debug}"
+            if signature != self._last_memory_debug_signature:
+                self._emit_tool_output(
+                    "memory_select",
+                    {"query": query or ""},
+                    memory_debug,
+                )
+                self._last_memory_debug_signature = signature
+
+        semantic_note, semantic_debug = (None, "") if skip_memory else self._build_semantic_memory_note(query=query)
+        if semantic_note:
+            notes.append(("semantic_memory_context", semantic_note))
+            semantic_signature = f"{query or ''}|{semantic_debug}"
+            if semantic_signature != getattr(self, "_last_semantic_memory_debug_signature", None):
+                self._emit_tool_output(
+                    "memory_semantic_select",
+                    {"query": query or ""},
+                    semantic_debug,
+                )
+                self._last_semantic_memory_debug_signature = semantic_signature
+
+        deep_note, deep_debug = self._build_deep_memory_note(query=query)
+        if deep_note:
+            notes.append(("deep_memory_context", deep_note))
+            deep_signature = f"{query or ''}|{deep_debug}"
+            if deep_signature != getattr(self, "_last_deep_memory_debug_signature", None):
+                self._emit_tool_output(
+                    "memory_deep_select",
+                    {"query": query or ""},
+                    deep_debug,
+                )
+                self._last_deep_memory_debug_signature = deep_signature
+
+        # Cross-session context note — fetched async, cached for sync access.
+        _cs_cache = getattr(self, "_cross_session_context_cache", None)
+        if isinstance(_cs_cache, dict) and _cs_cache.get("note"):
+            _cs_note = str(_cs_cache["note"])
+            notes.append(("cross_session_context", _cs_note))
+            _cs_sig = f"cross_session|{hash(_cs_note)}"
+            if _cs_sig != getattr(self, "_last_cross_session_debug_signature", None):
+                self._emit_tool_output(
+                    "memory_cross_session",
+                    {"selectors": _cs_cache.get("selectors", [])},
+                    f"Cross-session context injected ({len(_cs_note)} chars)",
+                )
+                self._last_cross_session_debug_signature = _cs_sig
+
+        # Playbook context note — inject proven patterns for similar tasks.
+        if hasattr(self, "_build_playbook_context_note_sync") and query:
+            try:
+                _pb_note = self._build_playbook_context_note_sync(query)
+                if _pb_note:
+                    notes.append(("playbook_context", _pb_note))
+            except Exception:
+                pass  # best-effort — never block message assembly
+
+        todo_note = self._build_todo_context_note() if owner_notes else ""
+        if todo_note:
+            notes.append(("todo_context", todo_note))
+        contacts_note = (
+            self._build_contacts_context_note(query or "") if query and owner_notes else ""
+        )
+        if contacts_note:
+            notes.append(("contacts_context", contacts_note))
+        scripts_note = (
+            self._build_scripts_context_note(query or "") if query and owner_notes else ""
+        )
+        if scripts_note:
+            notes.append(("scripts_context", scripts_note))
+        apis_note = self._build_apis_context_note(query or "") if query and owner_notes else ""
+        if apis_note:
+            notes.append(("apis_context", apis_note))
+        datastore_note = self._build_datastore_context_note() if owner_notes else ""
+        if datastore_note:
+            notes.append(("datastore_context", datastore_note))
+        insights_note = self._build_insights_context_note()
+        if insights_note:
+            notes.append(("insights_context", insights_note))
+        intentions_note = self._build_intentions_context_note() if owner_notes else ""
+        if intentions_note:
+            notes.append(("intentions_context", intentions_note))
+        nervous_note = self._build_nervous_system_context_note()
+        if nervous_note:
+            notes.append(("nervous_system_context", nervous_note))
+        briefing_note = self._build_briefing_context_note() if owner_notes else ""
+        if briefing_note:
+            notes.append(("briefing_context", briefing_note))
+        # Workspace manifest — compact listing of files created/modified
+        # this session.  Gives the LLM a project map without needing
+        # full file contents in history (those are compacted on disk).
+        workspace_note = (
+            self._build_workspace_manifest_note()
+            if hasattr(self, "_build_workspace_manifest_note")
+            else ""
+        )
+        if workspace_note:
+            notes.append(("workspace_manifest", workspace_note))
+        # An earlier conversation thread matched to this message, and topics
+        # pinned with the topics tool — last, so they are trimmed last.
+        notes.extend(self._topic_context_notes(skip_memory=skip_memory, history_budget=history_budget))
+
+        return notes
+
+    def _topic_context_notes(self, *, skip_memory: bool = False,
+                             history_budget: int = 0) -> list[tuple[str, str]]:
+        """The recalled-topic card and pinned-topic cards for this turn.
+
+        Only on turns a person opened (cron and autonomy turns neither see
+        nor spend pins). Recall follows ``conversation_topics.recall``: off |
+        shadow | on — shadow records the decision in the context trace and
+        sends nothing; pins ride whatever the mode. A shared-agent member
+        sees only topics they spoke in, with their own excerpts; the owner
+        sees the owner's excerpts. Hidden topics never ride. Nothing for a
+        public visitor, a BotPort dispatch or an Iskra body (the store is the
+        owner's), and no recall on a turn that asked for no memory.
+        """
+        self._last_topic_recall = None
+        try:
+            from captain_claw import topic_recall
+            from captain_claw.conversation_topics import get_topics_manager, topic_embedder
+            from captain_claw.speaker import principal_for
+
+            cfg = get_config()
+            tc = cfg.conversation_topics
+            if not tc.enabled or not self.session:
+                return []
+            if (cfg.web.public_run and not tc.allow_public) or getattr(self, "_public_scoped", False) \
+                    or getattr(self, "_tenant_hidden", False) or _being_body():
+                return []
+            principal = principal_for(self)
+            if principal is not None and not principal.speaker_id:
+                return []                        # an unverified member
+            speaker = principal.speaker_id if principal is not None else None
+            turn = getattr(self, "_turn_origin", None)
+            if not (isinstance(turn, tuple) and turn[0] == "human"):
+                return []
+            mgr = get_topics_manager()
+            budget = int(history_budget or cfg.context.max_tokens)
+            notes: list[tuple[str, str]] = []
+            pinned = topic_recall.active_pins(self.session)[-topic_recall.pins_shown(budget):]
+            for topic_id in pinned:
+                topic = mgr.get_topic(topic_id, max_excerpts=6, speaker=speaker or "")
+                if topic and not topic.get("hidden"):
+                    notes.append(("pinned_topic", topic_recall.render_card(
+                        topic, pinned=True, budget_tokens=budget, own_excerpts=bool(speaker))))
+            mode = str(tc.recall or "off").strip().lower()
+            text = msg_origin.model_view_text({"content": getattr(self, "_turn_user_text", "") or ""})
+            if mode not in ("shadow", "on") or not text.strip():
+                return notes
+            if skip_memory or getattr(self, "_suppress_memory_context", False):
+                self._last_topic_recall = {"topic": None, "rule": "", "reason": "memory suppressed",
+                                           "terms": [], "candidates": [], "mode": mode}
+                return notes
+            live_ids = {str(m.get("message_id")) for m in self.session.messages if m.get("message_id")}
+            decision = topic_recall.decide(
+                mgr, text,
+                embedder=topic_embedder(self, local_only=True),
+                live_ids=live_ids,
+                speaker=speaker,
+                min_cosine=float(tc.recall_min_cosine),
+                agree_min_cosine=float(tc.recall_agree_min_cosine),
+                cosine_margin=float(tc.recall_cosine_margin),
+                bm25_margin=float(tc.recall_bm25_margin),
+            )
+            if decision["topic"] and decision["topic"] in pinned:
+                decision.update(topic=None, reason="pinned")
+            decision["mode"] = mode
+            self._last_topic_recall = decision
+            log.info("Topic recall", mode=mode, topic=decision["topic"], rule=decision["rule"],
+                     reason=decision["reason"],
+                     terms=decision["terms"] if speaker is None else len(decision["terms"]))
+            if decision["topic"] and mode == "on":
+                topic = mgr.get_topic(decision["topic"], max_excerpts=3, speaker=speaker or "")
+                if topic:
+                    notes.insert(0, ("topic_recall", topic_recall.render_card(
+                        topic, budget_tokens=budget, own_excerpts=bool(speaker))))
+            return notes
+        except Exception as exc:
+            log.debug("Topic recall failed", error=str(exc))
+            return []
+
+    @staticmethod
+    def _provenance_hidden_messages(
+        messages: list[dict[str, Any]],
+        turn_start: int | None,
+    ) -> tuple[set[int], list[tuple[str, str]]]:
+        """Indices the model's history leaves out, and the fleet changes since
+        the previous turn (name, event) for the fleet note."""
+        hidden: set[int] = set()
+        current_start = turn_start if turn_start is not None else len(messages)
+        previous_opener = -1
+        for idx in range(min(current_start, len(messages)) - 1, -1, -1):
+            if msg_origin.is_turn_opener(messages[idx]):
+                previous_opener = idx
+                break
+        events: dict[str, str] = {}
+        for idx, msg in enumerate(messages):
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role", "")).strip().lower()
+            if role not in ("user", "assistant"):
+                continue
+            origin = msg_origin.origin_of(msg)
+            if role == "user" and origin == "fleet_notice":
+                hidden.add(idx)
+                if idx > previous_opener:
+                    found = _FLEET_NOTICE_RE.search(str(msg.get("content", "") or ""))
+                    if found:
+                        events.pop(found.group("name"), None)
+                        events[found.group("name")] = found.group("event")
+                        roster = found.group("roster")
+                        if roster:
+                            events.pop("", None)
+                            events[""] = roster.strip()[:400]   # newest notice's full roster
+                continue
+            if turn_start is None or idx >= turn_start:
+                continue
+            if role == "user" and origin == "corrective":
+                if msg.get("turn_input") is True:
+                    continue     # a turn's own input is what a person sent
+                hidden.add(idx)
+                # The reply it rejected goes with it: tagged ``rejected`` on
+                # new messages (hidden below); on legacy ones it is the plain
+                # assistant message right before the corrective.
+                prev = messages[idx - 1] if idx > 0 else None
+                if (
+                    "origin" not in msg
+                    and isinstance(prev, dict)
+                    and "origin" not in prev
+                    and str(prev.get("role", "")).strip().lower() == "assistant"
+                    and not prev.get("tool_calls")
+                    and prev.get("turn_input") is not True
+                ):
+                    hidden.add(idx - 1)
+            elif role == "assistant" and origin == "rejected":
+                hidden.add(idx)
+        roster = events.pop("", "")
+        changes = list(events.items())[-12:]
+        return hidden, changes + ([("", roster)] if roster else [])
+
+    @staticmethod
+    def _metadata_fleet_events(
+        messages: list[dict[str, Any]], turn_start: int | None, stored: list[Any],
+    ) -> list[tuple[str, str]]:
+        """Fleet changes from the notices kept in session metadata since the
+        previous turn began, as (name, event) plus ("", roster)."""
+        current_start = turn_start if turn_start is not None else len(messages)
+        since = ""
+        for idx in range(min(current_start, len(messages)) - 1, -1, -1):
+            if msg_origin.is_turn_opener(messages[idx]):
+                since = str(messages[idx].get("timestamp") or "")
+                break
+        events: dict[str, str] = {}
+        for entry in stored:
+            if not isinstance(entry, dict) or str(entry.get("at") or "") <= since:
+                continue
+            found = _FLEET_NOTICE_RE.search(str(entry.get("text") or ""))
+            if not found:
+                continue
+            events.pop(found.group("name"), None)
+            events[found.group("name")] = found.group("event")
+            if found.group("roster"):
+                events.pop("", None)
+                events[""] = found.group("roster").strip()[:400]
+        roster = events.pop("", "")
+        return list(events.items()) + ([("", roster)] if roster else [])
+
+    @staticmethod
+    def _merge_fleet_events(
+        first: list[tuple[str, str]], later: list[tuple[str, str]],
+    ) -> list[tuple[str, str]]:
+        """Two (name, event) lists as one: the later event for a name wins,
+        and the later roster."""
+        events: dict[str, str] = {}
+        roster = ""
+        for name, event in [*first, *later]:
+            if name == "":
+                roster = event
+                continue
+            events.pop(name, None)
+            events[name] = event
+        changes = list(events.items())[-12:]
+        return changes + ([("", roster)] if roster else [])
+
+    @staticmethod
+    def _fleet_changes_note(events: list[tuple[str, str]]) -> str:
+        roster = next((value for name, value in events if name == ""), "")
+        changes = ", ".join(f"'{name}' {event}" for name, event in events if name)
+        if not changes:
+            return ""
+        note = f"Fleet changes since the previous turn: {changes}."
+        if roster:
+            note += f" Fleet at the latest change: {roster}."
+        return note
+
+    def _turn_channel(self) -> str:
+        turn = getattr(self, "_turn_origin", None)
+        if isinstance(turn, tuple) and len(turn) == 3 and turn[2]:
+            return str(turn[2])
+        return ""
+
+    def _surface_rules_for_turn(self) -> str:
+        """The chat surface's rules when this turn came from one (glasses,
+        WhatsApp, Messenger): stored when the surface's block first arrived,
+        or recovered from a legacy block still in the session."""
+        if self._turn_channel() not in _RULED_SURFACES or not self.session:
+            return ""
+        metadata = self.session.metadata if isinstance(self.session.metadata, dict) else {}
+        stored = metadata.get("surface_rules")
+        if isinstance(stored, dict) and str(stored.get("text", "") or "").strip():
+            return str(stored["text"]).strip()
+        for msg in reversed(self.session.messages or []):
+            if str(msg.get("role", "")).strip().lower() != "user":
+                continue
+            block, _rest = msg_origin.split_surface_block(str(msg.get("content", "") or ""))
+            if block:
+                rules = msg_origin.surface_rules_text(block)
+                if rules:
+                    metadata["surface_rules"] = {"text": rules, "seen_at": ""}
+                return rules
+        return ""
+
+    def _note_tool_schema_tokens(self, tool_defs: list[Any] | None) -> None:
+        """Add the tool schemas sent with this call to the context trace.
+
+        Counted once per distinct tool set (cached by signature): schemas ride
+        on every call and are often the largest fixed part of the request.
+        """
+        defs = list(tool_defs or [])
+        try:
+            wire = json.dumps(defs, sort_keys=True, separators=(",", ":"), default=str)
+        except Exception:
+            return
+        sig = hashlib.sha1(wire.encode("utf-8")).hexdigest()[:16]
+        cache = getattr(self, "_tool_schema_token_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            self._tool_schema_token_cache = cache
+        tokens = cache.get(sig)
+        if tokens is None:
+            tokens = self._count_tokens(wire) if defs else 0
+            if len(cache) >= 16:
+                cache.clear()
+            cache[sig] = tokens
+        window = getattr(self, "last_context_window", None)
+        if not isinstance(window, dict):
+            return
+        self._last_tool_schema_tokens = tokens
+        window["tool_schema_tokens"] = tokens
+        window["tool_count"] = len(defs)
+        window["tool_schema_sig"] = sig
+        window["prompt_tokens_with_tools"] = int(window.get("prompt_tokens", 0) or 0) + tokens
+        # The meter reads what is really sent: the budget reserves the schemas.
+        _budget = int(window.get("context_budget_tokens", 0) or 0)
+        if _budget:
+            window["utilization"] = window["prompt_tokens_with_tools"] / _budget
+            window["over_budget"] = 1 if window["prompt_tokens_with_tools"] > _budget else 0
+        # Everything sent: messages, tool schemas, and replayed reasoning —
+        # comparable with what the provider bills (provider_input_tokens).
+        window["estimated_input_tokens"] = window["prompt_tokens_with_tools"] + (
+            0 if window.get("reasoning_in_budget") else int(window.get("reasoning_tokens", 0) or 0)
+        )
+        if isinstance(window.get("sections"), dict):
+            window["sections"]["tool_schemas"] = tokens
+        if self.session and isinstance(self.session.metadata, dict):
+            self.session.metadata["context_window"] = dict(window)
+
     def _build_messages(
         self,
         tool_messages_from_index: int | None = None,
@@ -3722,6 +4310,10 @@ class AgentContextMixin:
             system_prompt = self._build_system_prompt()
             system_tokens = self._count_tokens(system_prompt)
             self._turn_system_prompt = (_sp_key, system_prompt, system_tokens, time.monotonic())
+            # The part after the cache split changes between turns; the trace
+            # reports it apart from the static instructions.
+            _dynamic = system_prompt.partition("<!-- CACHE_SPLIT -->")[2]
+            self._turn_system_prompt_dynamic_tokens = self._count_tokens(_dynamic) if _dynamic.strip() else 0
         messages = [Message(role="system", content=system_prompt)]
         context_budget = max(1, int(cfg.context.max_tokens))
         # Never budget more history than the provider will actually accept.
@@ -3734,7 +4326,17 @@ class AgentContextMixin:
         _provider_ctx = int(getattr(getattr(self, "provider", None), "num_ctx", 0) or 0)
         if 0 < _provider_ctx < context_budget:
             context_budget = _provider_ctx
-        history_budget = max(0, context_budget - system_tokens)
+        # The tool schemas ride on every call too (counted on the previous
+        # call; tool sets rarely change within a session). A fresh agent
+        # starts from the session's last measurement.
+        _tool_schema_tokens = getattr(self, "_last_tool_schema_tokens", None)
+        if _tool_schema_tokens is None:
+            _cw = self.session.metadata.get("context_window") if self.session and isinstance(
+                self.session.metadata, dict) else None
+            _tool_schema_tokens = int(_cw.get("tool_schema_tokens") or 0) if isinstance(_cw, dict) else 0
+        _tool_schema_tokens = int(_tool_schema_tokens or 0)
+        history_budget = max(0, context_budget - system_tokens - _tool_schema_tokens)
+        _replays_reasoning = self._replays_reasoning()
 
         candidate_messages: list[dict[str, Any]] = []
         skipped_historical_tools: list[dict[str, Any]] = []
@@ -3742,22 +4344,76 @@ class AgentContextMixin:
         # Collect tool_call_ids that were filtered so we can strip the
         # corresponding tool_calls from their parent assistant messages.
         _filtered_tool_call_ids: set[str] = set()
+        # Position (in candidate_messages) of the user message that opened
+        # this turn — the background context block rides on it. With
+        # tool_messages_from_index it is the turn's first user message;
+        # otherwise (or when that one is gone) the latest user message.
+        turn_anchor_pos: int | None = None
+        latest_user_pos: int | None = None
+        # Position of the previous candidate when it is a plain assistant
+        # message from an earlier turn, so the next one can fold into it.
+        mergeable_assistant_pos: int | None = None
+        # First candidate of the current turn (for a block with no anchor).
+        first_turn_pos: int | None = None
+        empty_assistant_skipped = 0
+        historical_assistant_merged = 0
+        model_hidden_skipped = 0
+        synthetic_suppressed = 0
+        # Provenance: which stored messages the model's history leaves out.
+        # Earlier turns' correctives (with the rejected reply they answered)
+        # are not replayed — the current turn keeps its own, since they refer
+        # to "your last response". Fleet notices are never replayed: each
+        # repeats the whole roster (already in the system prompt), so the
+        # ones since the previous turn become one line in the context block.
+        hidden_idx: set[int] = set()
+        fleet_events: list[tuple[str, str]] = []
         if self.session:
-            # First pass: identify which tool response messages will be filtered.
+            hidden_idx, fleet_events = self._provenance_hidden_messages(
+                self.session.messages, tool_messages_from_index,
+            )
+            # With an automation lane the notices themselves live there; the
+            # main session keeps their events in metadata.
+            _stored_fleet = (self.session.metadata or {}).get("fleet_events") if isinstance(
+                self.session.metadata, dict) else None
+            if _stored_fleet:
+                fleet_events = self._merge_fleet_events(fleet_events, self._metadata_fleet_events(
+                    self.session.messages, tool_messages_from_index, _stored_fleet))
+        if self.session:
+            # First pass: identify which tool response messages will be filtered
+            # (and which are sent: this turn's).
+            _sent_tool_call_ids: set[str] = set()
             if filter_historical_tools:
                 for idx, msg in enumerate(self.session.messages):
-                    if msg.get("role") == "tool" and idx < tool_messages_from_index:
+                    if msg.get("role") == "tool":
                         tcid = str(msg.get("tool_call_id", "")).strip()
-                        if tcid:
+                        if not tcid:
+                            continue
+                        if idx < tool_messages_from_index:
                             _filtered_tool_call_ids.add(tcid)
+                        else:
+                            _sent_tool_call_ids.add(tcid)
 
             for idx, msg in enumerate(self.session.messages):
-                tool_name = str(msg.get("tool_name", "")).strip().lower()
-                if (
-                    str(msg.get("role", "")).strip().lower() == "tool"
-                    and self._is_monitor_only_tool_name(tool_name)
-                ):
+                # Monitor/debug rows and the scale loop's progress cards never
+                # reach the model (the scale state rides in its own note).
+                if is_model_hidden_tool(msg):
+                    model_hidden_skipped += 1
                     continue
+                if idx in hidden_idx:
+                    synthetic_suppressed += 1
+                    continue
+                if (
+                    filter_historical_tools
+                    and idx < tool_messages_from_index
+                    and str(msg.get("role", "")).strip().lower() == "user"
+                ):
+                    # An earlier turn's opener without its one-off envelope
+                    # (a surface rules block, a stale scheduler clock).
+                    _view = msg_origin.model_view_text(msg)
+                    if _view != str(msg.get("content", "") or ""):
+                        msg = dict(msg)
+                        msg["content"] = _view
+                        msg.pop("token_count", None)
                 # Skip empty assistant messages (no content, no tool_calls).
                 # These are leftover poison from prior failed turns where the
                 # local LLM returned nothing — sending them back as history
@@ -3779,15 +4435,25 @@ class AgentContextMixin:
                     continue
                 # Strip tool_calls from assistant messages whose tool responses
                 # were filtered out, preventing orphaned tool_calls references.
+                # An earlier turn's step keeps only calls whose result is still
+                # sent: its results are all filtered, and a call that never got
+                # one (an interrupted turn) would otherwise be dropped by the
+                # provider normaliser after the empty-skip and merge below.
                 if (
-                    _filtered_tool_call_ids
+                    filter_historical_tools
                     and msg.get("role") == "assistant"
                     and msg.get("tool_calls")
                 ):
-                    remaining_calls = [
-                        tc for tc in msg["tool_calls"]
-                        if str(tc.get("id", "")).strip() not in _filtered_tool_call_ids
-                    ]
+                    if idx < tool_messages_from_index:
+                        remaining_calls = [
+                            tc for tc in msg["tool_calls"]
+                            if str(tc.get("id", "")).strip() in _sent_tool_call_ids
+                        ]
+                    else:
+                        remaining_calls = [
+                            tc for tc in msg["tool_calls"]
+                            if str(tc.get("id", "")).strip() not in _filtered_tool_call_ids
+                        ]
                     if len(remaining_calls) != len(msg["tool_calls"]):
                         msg = dict(msg)  # shallow copy to avoid mutating session
                         if remaining_calls:
@@ -3799,223 +4465,73 @@ class AgentContextMixin:
                         # tokens that are no longer present.
                         msg.pop("token_count", None)
                         msg.pop("_tc_counted", None)
+                        # A tool-call-only step whose results were all
+                        # filtered is now an empty assistant turn — the same
+                        # poison the empty-message skip above keeps out.
+                        if (
+                            not msg.get("tool_calls")
+                            and not str(msg.get("content", "") or "").strip()
+                        ):
+                            empty_assistant_skipped += 1
+                            continue
+                role = str(msg.get("role", "")).strip().lower()
+                # An earlier turn's tool steps, with their calls stripped,
+                # read as a run of assistant messages that each announce work
+                # and stop ("Let me check that:"). Weak models copy that
+                # pattern, so fold the run into one message.
+                is_mergeable_assistant = (
+                    filter_historical_tools
+                    and idx < tool_messages_from_index
+                    and role == "assistant"
+                    and not msg.get("tool_calls")
+                    and not str(msg.get("tool_name", "") or "").strip()
+                )
+                if is_mergeable_assistant and mergeable_assistant_pos is not None:
+                    candidate_messages[mergeable_assistant_pos] = self._merge_assistant_messages(
+                        candidate_messages[mergeable_assistant_pos], msg,
+                    )
+                    historical_assistant_merged += 1
+                    continue
+                if role == "user":
+                    latest_user_pos = len(candidate_messages)
+                    if (
+                        turn_anchor_pos is None
+                        and filter_historical_tools
+                        and idx >= tool_messages_from_index
+                    ):
+                        turn_anchor_pos = latest_user_pos
+                mergeable_assistant_pos = (
+                    len(candidate_messages) if is_mergeable_assistant else None
+                )
+                if (
+                    first_turn_pos is None
+                    and filter_historical_tools
+                    and idx >= tool_messages_from_index
+                ):
+                    first_turn_pos = len(candidate_messages)
                 candidate_messages.append(msg)
+        if turn_anchor_pos is None:
+            turn_anchor_pos = latest_user_pos
 
-        # Honour an explicit "use fresh/web data, not memory" request for this
-        # turn: skip the automatic memory + semantic-memory context injection.
+        # ── Context notes ────────────────────────────────────────────
+        # Background notes (memory, insights, todos, workspace map, …) go in
+        # ONE block in front of the user message that opened the turn, never
+        # after it: a request that ends on a stack of assistant-role notes
+        # reads to a weak model as "I already answered", so it replies
+        # briefly, echoes a note, or carries one on.
         _skip_memory = getattr(self, "_skip_memory_injection", False)
-
-        memory_note, memory_debug = (None, "") if _skip_memory else self._build_tool_memory_note(
-            skipped_historical_tools,
-            query=query,
-        )
-        if memory_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": memory_note,
-                "tool_name": "memory_context",
-                "token_count": self._count_tokens(memory_note),
-            })
-            signature = f"{query or ''}|{memory_debug}"
-            if signature != self._last_memory_debug_signature:
-                self._emit_tool_output(
-                    "memory_select",
-                    {"query": query or ""},
-                    memory_debug,
-                )
-                self._last_memory_debug_signature = signature
-
-        semantic_note, semantic_debug = (None, "") if _skip_memory else self._build_semantic_memory_note(query=query)
-        if semantic_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": semantic_note,
-                "tool_name": "semantic_memory_context",
-                "token_count": self._count_tokens(semantic_note),
-            })
-            semantic_signature = f"{query or ''}|{semantic_debug}"
-            if semantic_signature != getattr(self, "_last_semantic_memory_debug_signature", None):
-                self._emit_tool_output(
-                    "memory_semantic_select",
-                    {"query": query or ""},
-                    semantic_debug,
-                )
-                self._last_semantic_memory_debug_signature = semantic_signature
-
-        deep_note, deep_debug = self._build_deep_memory_note(query=query)
-        if deep_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": deep_note,
-                "tool_name": "deep_memory_context",
-                "token_count": self._count_tokens(deep_note),
-            })
-            deep_signature = f"{query or ''}|{deep_debug}"
-            if deep_signature != getattr(self, "_last_deep_memory_debug_signature", None):
-                self._emit_tool_output(
-                    "memory_deep_select",
-                    {"query": query or ""},
-                    deep_debug,
-                )
-                self._last_deep_memory_debug_signature = deep_signature
-
-        # Cross-session context note — fetched async, cached for sync access.
-        _cs_cache = getattr(self, "_cross_session_context_cache", None)
-        if isinstance(_cs_cache, dict) and _cs_cache.get("note"):
-            _cs_note = str(_cs_cache["note"])
-            candidate_messages.append({
-                "role": "assistant",
-                "content": _cs_note,
-                "tool_name": "cross_session_context",
-                "token_count": self._count_tokens(_cs_note),
-            })
-            _cs_sig = f"cross_session|{hash(_cs_note)}"
-            if _cs_sig != getattr(self, "_last_cross_session_debug_signature", None):
-                self._emit_tool_output(
-                    "memory_cross_session",
-                    {"selectors": _cs_cache.get("selectors", [])},
-                    f"Cross-session context injected ({len(_cs_note)} chars)",
-                )
-                self._last_cross_session_debug_signature = _cs_sig
-
-        # Playbook context note — inject proven patterns for similar tasks.
-        if hasattr(self, "_build_playbook_context_note_sync") and query:
-            try:
-                _pb_note = self._build_playbook_context_note_sync(query)
-                if _pb_note:
-                    candidate_messages.append({
-                        "role": "assistant",
-                        "content": _pb_note,
-                        "tool_name": "playbook_context",
-                        "token_count": self._count_tokens(_pb_note),
-                    })
-            except Exception:
-                pass  # best-effort — never block message assembly
-
-        planning_note = self._build_pipeline_note(planning_pipeline or {})
-        if planning_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": planning_note,
-                "tool_name": "planning_context",
-                "token_count": self._count_tokens(planning_note),
-            })
-        list_note = self._build_list_task_note(list_task_plan or {})
-        if list_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": list_note,
-                "tool_name": "list_task_memory",
-                "token_count": self._count_tokens(list_note),
-            })
-        scale_note = self._build_scale_progress_note()
-        if scale_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": scale_note,
-                "tool_name": "scale_progress",
-                "token_count": self._count_tokens(scale_note),
-            })
-        # A shared-agent member's instance never sees the owner's caches
-        # (todo, contacts, scripts, apis, datastore, intentions, briefing);
-        # insights, intuitions and workspace notes are the shared commons.
         _owner_notes = getattr(self, "_speaker_scoped", False) is not True
-        todo_note = self._build_todo_context_note() if _owner_notes else ""
-        if todo_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": todo_note,
-                "tool_name": "todo_context",
-                "token_count": self._count_tokens(todo_note),
-            })
-        contacts_note = (
-            self._build_contacts_context_note(query or "") if query and _owner_notes else ""
-        )
-        if contacts_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": contacts_note,
-                "tool_name": "contacts_context",
-                "token_count": self._count_tokens(contacts_note),
-            })
-        scripts_note = (
-            self._build_scripts_context_note(query or "") if query and _owner_notes else ""
-        )
-        if scripts_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": scripts_note,
-                "tool_name": "scripts_context",
-                "token_count": self._count_tokens(scripts_note),
-            })
-        apis_note = self._build_apis_context_note(query or "") if query and _owner_notes else ""
-        if apis_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": apis_note,
-                "tool_name": "apis_context",
-                "token_count": self._count_tokens(apis_note),
-            })
-        datastore_note = self._build_datastore_context_note() if _owner_notes else ""
-        if datastore_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": datastore_note,
-                "tool_name": "datastore_context",
-                "token_count": self._count_tokens(datastore_note),
-            })
-        insights_note = self._build_insights_context_note()
-        if insights_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": insights_note,
-                "tool_name": "insights_context",
-                "token_count": self._count_tokens(insights_note),
-            })
-        intentions_note = self._build_intentions_context_note() if _owner_notes else ""
-        if intentions_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": intentions_note,
-                "tool_name": "intentions_context",
-                "token_count": self._count_tokens(intentions_note),
-            })
-        nervous_note = self._build_nervous_system_context_note()
-        if nervous_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": nervous_note,
-                "tool_name": "nervous_system_context",
-                "token_count": self._count_tokens(nervous_note),
-            })
-        briefing_note = self._build_briefing_context_note() if _owner_notes else ""
-        if briefing_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": briefing_note,
-                "tool_name": "briefing_context",
-                "token_count": self._count_tokens(briefing_note),
-            })
-        # Workspace manifest — compact listing of files created/modified
-        # this session.  Gives the LLM a project map without needing
-        # full file contents in history (those are compacted on disk).
-        workspace_note = (
-            self._build_workspace_manifest_note()
-            if hasattr(self, "_build_workspace_manifest_note")
-            else ""
-        )
-        if workspace_note:
-            candidate_messages.append({
-                "role": "assistant",
-                "content": workspace_note,
-                "tool_name": "workspace_manifest",
-                "token_count": self._count_tokens(workspace_note),
-            })
 
+        # Live task state changes on every tool-loop call, so it stays at
+        # the end of the request (see below).
+        planning_note = self._build_pipeline_note(planning_pipeline or {})
+        list_note = self._build_list_task_note(list_task_plan or {})
+        scale_note = self._build_scale_progress_note()
         # "BTW" live instructions — injected by the user while a task is
         # running.  Each one becomes a user message so the model treats
         # them as direct instructions.
         _btw_list: list[str] = getattr(self, "_btw_instructions", None) or []
+        _btw_note = ""
         if _btw_list:
             _btw_block = "\n".join(
                 f"- {inst}" for inst in _btw_list
@@ -4025,53 +4541,209 @@ class AgentContextMixin:
                 "Take these into account for ALL remaining work.]\n\n"
                 + _btw_block
             )
+
+        # The block is rendered once per turn and reused by every tool-loop
+        # call, so it never shifts under the provider's prompt-prefix cache
+        # (a note that changed mid-turn — a new file in the workspace map —
+        # would re-bill the whole tool chain after it on every call). It is
+        # keyed on the turn's own text, not on `query`, which picks up
+        # advisories mid-turn, and on the system prompt's render, so both
+        # expire on the same call. When the notes don't all fit next to the
+        # must-include messages, the ones that fit are chosen here, once.
+        _bg_lead = (
+            _BACKGROUND_NOTES_LEAD if turn_anchor_pos is not None else _STANDALONE_NOTES_LEAD
+        )
+        _sp_cache = getattr(self, "_turn_system_prompt", None)
+        _bg_key = (
+            getattr(self, "_turn_user_text", None) or query or "",
+            tool_messages_from_index,
+            bool(_skip_memory),
+            bool(getattr(self, "_suppress_memory_context", False)),
+            _owner_notes,
+            getattr(self.session, "id", None),
+            _sp_cache[3] if isinstance(_sp_cache, tuple) and len(_sp_cache) == 4 else None,
+            self._turn_channel(),
+        )
+        _bg_cache = getattr(self, "_turn_context_notes", None)
+        if isinstance(_bg_cache, tuple) and len(_bg_cache) == 3 and _bg_cache[0] == _bg_key:
+            background_notes = _bg_cache[1]
+            env_note = _bg_cache[2]
+        else:
+            # The turn's clock and activity lines (once the system prompt's
+            # tail): pinned in the block, never trimmed for budget.
+            _env_text = self._build_env_now_text()
+            env_note = [("env_now", _env_text)] if _env_text else []
+            # This turn's chat surface rules (glasses / WhatsApp / Messenger),
+            # only on turns that arrived from such a surface.
+            _surface_text = self._surface_rules_for_turn()
+            if _surface_text:
+                env_note = [("surface_rules", _surface_text)] + env_note
+            self._turn_env_tokens = self._count_tokens(_env_text) if _env_text else 0
+            reserved_tokens = 0
+            if turn_anchor_pos is not None:
+                reserved_tokens += self._wire_token_count(candidate_messages[turn_anchor_pos])
+            if scale_note:
+                reserved_tokens += self._count_tokens(scale_note)
+            if _btw_note:
+                reserved_tokens += self._count_tokens(_btw_note)
+            _fleet_note = self._fleet_changes_note(fleet_events)
+            background_notes = self._fit_context_notes(
+                self._collect_background_context_notes(
+                    skipped_historical_tools,
+                    query=query,
+                    skip_memory=bool(_skip_memory),
+                    owner_notes=_owner_notes,
+                    history_budget=history_budget,
+                ) + ([("fleet_changes", _fleet_note)] if _fleet_note else []),
+                max(0, history_budget - reserved_tokens),
+                _bg_lead,
+                pinned=env_note,
+            )
+            self._turn_context_notes = (_bg_key, background_notes, env_note)
+
+        must_include: set[int] = set()
+        background_pos: int | None = None
+        if background_notes or env_note:
+            background_msg = {
+                "role": "user",
+                "content": self._wrap_internal_context(background_notes + env_note, _bg_lead),
+            }
+            if turn_anchor_pos is not None:
+                candidate_messages.insert(turn_anchor_pos, background_msg)
+                background_pos = turn_anchor_pos
+                turn_anchor_pos += 1
+            elif first_turn_pos is not None:
+                # No user message to ride on (the turn's own was folded into
+                # a compaction summary): open the turn with the block rather
+                # than trailing it after the tool chain.
+                candidate_messages.insert(first_turn_pos, background_msg)
+                background_pos = first_turn_pos
+            else:
+                background_pos = len(candidate_messages)
+                candidate_messages.append(background_msg)
+        if turn_anchor_pos is not None:
+            must_include.add(turn_anchor_pos)
+        # Planning goes after the (often long) list note, so the
+        # newest-first pass keeps the plan when only one of them fits.
+        for kind, text in (("list_task_memory", list_note), ("planning_context", planning_note)):
+            if text:
+                candidate_messages.append({
+                    "role": "user",
+                    "content": text,
+                    "_live_notes": [(kind, text)],
+                })
+        if scale_note:
+            # The scale progress note is critical during incremental
+            # processing — it prevents the LLM from re-globbing or
+            # losing track of the worklist.  Always include it.
+            must_include.add(len(candidate_messages))
+            candidate_messages.append({
+                "role": "user",
+                "content": scale_note,
+                "_live_notes": [("scale_progress", scale_note)],
+            })
+        btw_pos: int | None = None
+        if _btw_note:
+            btw_pos = len(candidate_messages)
+            must_include.add(btw_pos)
             candidate_messages.append({
                 "role": "user",
                 "content": _btw_note,
                 "token_count": self._count_tokens(_btw_note),
             })
 
-        selected_reversed: list[dict[str, Any]] = []
+        # Must-includes first, then the background block (fitted next to
+        # them above), then everything else newest-first — the notes keep
+        # the priority they had as the newest messages.
+        selected: set[int] = set()
         used_tokens = 0
+        for pos in sorted(must_include):
+            used_tokens += self._wire_token_count(candidate_messages[pos])
+            selected.add(pos)
         dropped_messages = 0
-        included_latest_user = False
-        for msg in reversed(candidate_messages):
-            msg_tokens = self._ensure_message_token_count(msg)
-            must_include_latest_user = (
-                (not included_latest_user) and str(msg.get("role", "")) == "user"
-            )
-            # The scale progress note is critical during incremental
-            # processing — it prevents the LLM from re-globbing or
-            # losing track of the worklist.  Always include it.
-            is_scale_note = str(msg.get("tool_name", "")) == "scale_progress"
-            must_include = must_include_latest_user or is_scale_note
-            if used_tokens + msg_tokens <= history_budget or must_include:
-                selected_reversed.append(msg)
+        if background_pos is not None:
+            block_tokens = self._wire_token_count(candidate_messages[background_pos])
+            if used_tokens + block_tokens > history_budget:
+                # The must-includes grew since the notes were fitted (a BTW
+                # arrived, a scale note appeared): refit once rather than
+                # lose every note. The changed block costs one cache miss —
+                # the same as dropping it.
+                background_notes = self._fit_context_notes(
+                    background_notes, max(0, history_budget - used_tokens), _bg_lead,
+                    pinned=env_note,
+                )
+                self._turn_context_notes = (_bg_key, background_notes, env_note)
+                if background_notes or env_note:
+                    candidate_messages[background_pos] = {
+                        "role": "user",
+                        "content": self._wrap_internal_context(
+                            background_notes + env_note, _bg_lead,
+                        ),
+                    }
+                    block_tokens = self._wire_token_count(candidate_messages[background_pos])
+            # The clock rides along even past the budget, like the turn's
+            # question itself.
+            if env_note or (background_notes and used_tokens + block_tokens <= history_budget):
+                selected.add(background_pos)
+                used_tokens += block_tokens
+            else:
+                dropped_messages += 1
+        for pos in range(len(candidate_messages) - 1, -1, -1):
+            if pos in selected or pos == background_pos:
+                continue
+            msg_tokens = self._wire_token_count(candidate_messages[pos])
+            if used_tokens + msg_tokens <= history_budget:
+                selected.add(pos)
                 used_tokens += msg_tokens
-                if must_include_latest_user:
-                    included_latest_user = True
             else:
                 dropped_messages += 1
 
-        selected_messages = list(reversed(selected_reversed))
+        selected_messages: list[dict[str, Any]] = []
+        live_parts: list[tuple[str, str]] = []
+        for pos in sorted(selected):
+            msg = candidate_messages[pos]
+            if pos == btw_pos:
+                continue
+            if "_live_notes" in msg:
+                live_parts.extend(msg["_live_notes"])
+                continue
+            if (
+                pos == turn_anchor_pos
+                and background_pos is not None
+                and selected_messages
+                and selected_messages[-1] is candidate_messages[background_pos]
+            ):
+                # One user message — the context block, then the question —
+                # rather than two user turns in a row.
+                block = selected_messages.pop()
+                msg = dict(msg)
+                msg["content"] = f"{block['content']}\n\n{msg.get('content', '')}"
+            if pos == turn_anchor_pos and selected_messages:
+                # The prior turns' history ends here and is sent unchanged by
+                # the next turn: a cache breakpoint for providers that take one.
+                selected_messages[-1] = {**selected_messages[-1], "_cache_breakpoint": True}
+            selected_messages.append(msg)
+        if live_parts:
+            live_parts.sort(key=lambda note: _LIVE_NOTE_ORDER.index(note[0]))
+            live_block = self._wrap_internal_context(
+                live_parts,
+                "current task state; reference only, do not repeat or quote it in your reply",
+            )
+            # Ride on the request's last message when it is a tool result or
+            # a user message. A separate user message after the tool chain
+            # would open a new user turn: thinking-mode templates (Qwen3,
+            # GLM) then treat the chain as an earlier turn and drop its
+            # reasoning, and a weak model can read the state as a new ask.
+            # As a suffix it also leaves the cached prefix intact.
+            if selected_messages and str(selected_messages[-1].get("role", "")) in {"tool", "user"}:
+                last = dict(selected_messages[-1])
+                last["content"] = f"{last.get('content', '')}\n\n{live_block}"
+                selected_messages[-1] = last
+            else:
+                selected_messages.append({"role": "user", "content": live_block})
+        if btw_pos is not None:
+            selected_messages.append(candidate_messages[btw_pos])
         selected_messages = self._normalize_selected_messages_for_provider(selected_messages)
-        # Tool names whose content is internal context — wrap with a clear
-        # delimiter and instruction so smaller/cheaper models don't echo
-        # the raw memory/playbook/planning text back as their reply.
-        _CONTEXT_INJECTION_TOOL_NAMES = {
-            "memory_context",
-            "semantic_memory_context",
-            "deep_memory_context",
-            "cross_session_context",
-            "playbook_context",
-            "planning_context",
-            "list_task_memory",
-            "scale_progress",
-            "todo_context",
-            "contacts_context",
-            "scripts_context",
-            "workspace_manifest",
-        }
         for msg in selected_messages:
             # Append system_hint to content for the LLM (not stored in
             # the visible content field, so users don't see it in chat).
@@ -4079,13 +4751,6 @@ class AgentContextMixin:
             _hint = msg.get("system_hint")
             if _hint:
                 _content = f"{_content}\n{_hint}"
-            _tn = str(msg.get("tool_name", "") or "")
-            if _tn in _CONTEXT_INJECTION_TOOL_NAMES and _content:
-                _content = (
-                    "[INTERNAL CONTEXT — reference only, do not repeat or quote in your reply]\n"
-                    f"{_content}\n"
-                    "[END INTERNAL CONTEXT]"
-                )
             messages.append(
                 Message(
                     role=msg["role"],
@@ -4099,9 +4764,45 @@ class AgentContextMixin:
                     # requires this round-trip; other providers
                     # ignore the field.
                     reasoning_content=msg.get("reasoning_content"),
+                    cache_breakpoint=bool(msg.get("_cache_breakpoint")),
                 )
             )
 
+        _sent_notes = background_notes if background_pos in selected else []
+        _note_kinds = {kind for kind, _ in _sent_notes}
+        _live_kinds = {kind for kind, _ in live_parts}
+        # Where the tokens went, per part of the request.
+        sections = {
+            "prior_history": 0, "current_chain": 0, "turn_message": 0,
+            "context_block": 0, "live_notes": 0, "btw": 0,
+        }
+        reasoning_prior = reasoning_current = 0
+        for pos in selected:
+            msg = candidate_messages[pos]
+            tokens = self._wire_token_count(msg)
+            if pos == background_pos:
+                sections["context_block"] += tokens
+            elif pos == turn_anchor_pos:
+                sections["turn_message"] += tokens
+            elif pos == btw_pos:
+                sections["btw"] += tokens
+            elif "_live_notes" in msg:
+                sections["live_notes"] += tokens
+            else:
+                current = turn_anchor_pos is not None and pos > turn_anchor_pos
+                sections["current_chain" if current else "prior_history"] += tokens
+                reasoning = self._ensure_reasoning_token_count(msg)
+                if reasoning > 0:
+                    if current:
+                        reasoning_current += reasoning
+                    else:
+                        reasoning_prior += reasoning
+        _dynamic_system = int(getattr(self, "_turn_system_prompt_dynamic_tokens", 0) or 0)
+        sections["system_static"] = max(0, system_tokens - _dynamic_system)
+        sections["system_dynamic"] = _dynamic_system
+        sections["env_note"] = int(getattr(self, "_turn_env_tokens", 0) or 0) if env_note else 0
+        sections["reasoning_prior"] = reasoning_prior
+        sections["reasoning_current"] = reasoning_current
         prompt_tokens = system_tokens + used_tokens
         self.last_context_window = {
             "context_budget_tokens": context_budget,
@@ -4113,11 +4814,29 @@ class AgentContextMixin:
             "included_messages": len(selected_messages),
             "dropped_messages": dropped_messages,
             "historical_tool_messages_filtered": len(skipped_historical_tools),
-            "memory_note_used": 1 if memory_note else 0,
-            "planning_note_used": 1 if planning_note else 0,
-            "scale_progress_note_used": 1 if scale_note else 0,
-            "todo_note_used": 1 if todo_note else 0,
-            "workspace_manifest_used": 1 if workspace_note else 0,
+            "historical_assistant_merged": historical_assistant_merged,
+            "empty_assistant_skipped": empty_assistant_skipped,
+            "context_notes_used": len(_sent_notes),
+            "env_note_used": 1 if env_note and background_pos in selected else 0,
+            "model_hidden_skipped": model_hidden_skipped,
+            "synthetic_suppressed": synthetic_suppressed,
+            "reasoning_tokens": reasoning_prior + reasoning_current,
+            # Replayed reasoning is inside history_tokens / prompt_tokens when
+            # the provider carries it (and then weighs on the budget).
+            "reasoning_in_budget": 1 if _replays_reasoning else 0,
+            "tool_schema_tokens_budgeted": _tool_schema_tokens,
+            # The recall decision, and whether its card made it into the block.
+            "topic_recall": (
+                {**self._last_topic_recall, "sent": "topic_recall" in _note_kinds}
+                if isinstance(getattr(self, "_last_topic_recall", None), dict) else None
+            ),
+            "pinned_topics_used": sum(1 for kind, _ in _sent_notes if kind == "pinned_topic"),
+            "sections": sections,
+            "memory_note_used": 1 if "memory_context" in _note_kinds else 0,
+            "planning_note_used": 1 if "planning_context" in _live_kinds else 0,
+            "scale_progress_note_used": 1 if "scale_progress" in _live_kinds else 0,
+            "todo_note_used": 1 if "todo_context" in _note_kinds else 0,
+            "workspace_manifest_used": 1 if "workspace_manifest" in _note_kinds else 0,
             "over_budget": 1 if prompt_tokens > context_budget else 0,
             "utilization": (prompt_tokens / context_budget) if context_budget else 0.0,
         }

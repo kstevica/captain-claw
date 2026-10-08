@@ -1285,11 +1285,14 @@ class AgentToolLoopMixin:
                     and _tool_lower in _CONTENT_TOOLS
                     and hasattr(self, "_chunked_reduce_tool_result")
                 ):
-                    # Get the user's original query from session messages
-                    _user_query = ""
-                    if self.session:
+                    # The turn's own request — not the latest user-role row,
+                    # which can be a corrective or a fleet notice.
+                    _user_query = str(getattr(self, "_turn_user_text", "") or "")
+                    if not _user_query and self.session:
+                        from captain_claw import msg_origin
+
                         for _m in reversed(self.session.messages):
-                            if str(_m.get("role", "")) == "user":
+                            if msg_origin.is_turn_opener(_m):
                                 _user_query = str(_m.get("content", ""))
                                 break
                     if _user_query:
@@ -1308,6 +1311,17 @@ class AgentToolLoopMixin:
                                 tool=tc.name,
                                 error=str(_chunk_err),
                             )
+
+                # Optional per-agent cap on one tool result (off by default),
+                # before the hints below are appended so they always survive.
+                _cap = int(getattr(get_config().context, "tool_result_max_chars", 0) or 0)
+                if _cap > 0 and len(_result_content) > _cap:
+                    _cut = len(_result_content) - _cap
+                    _result_content = (
+                        _result_content[:_cap]
+                        + f"\n\n[… {_cut} more characters cut by this agent's "
+                        "tool_result_max_chars limit. Narrow the request to see them.]"
+                    )
 
                 # Append a soft write-reminder when the LLM skipped writing
                 # the previous item's result before reading a new one.

@@ -916,6 +916,7 @@ async def handle_platform_message(
                     display_prompt=display_prompt,
                     on_assistant_text=lambda out: adapter.send(channel_id, out, reply_to=reply_to),
                     after_turn=_after_turn,
+                    channel=platform,
                 )
 
             platform_labels = {"telegram": "Telegram", "slack": "Slack", "discord": "Discord", "twitter": "Twitter/X"}
@@ -949,6 +950,7 @@ async def handle_platform_message(
                 display_prompt=f"[{label} {user_label}] {text}",
                 on_assistant_text=lambda out: adapter.send(channel_id, out, reply_to=reply_to),
                 after_turn=_after_turn,
+                channel=platform,
             ),
         )
     except Exception as e:

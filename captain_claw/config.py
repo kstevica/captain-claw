@@ -82,6 +82,18 @@ class ContextConfig(BaseModel):
     chunked_processing: ChunkedProcessingConfig = Field(
         default_factory=ChunkedProcessingConfig,
     )
+    # Cap (chars) on a single tool result kept in the session and sent to the
+    # model; 0 = no cap. Off by default: the tier's window decides.
+    tool_result_max_chars: int = 0
+    # What replaces folded messages on compaction: "digest" — exchanges a
+    # person started, grouped by conversation topic, with handles to the full
+    # text (no LLM call) — or "model", the agent's model summarising them.
+    compaction_summary: str = "digest"
+    # How the per-turn context notes share their budget: "trim" drops whole
+    # notes, lowest priority first, once they don't fit; "capped" first cuts
+    # each note to its source's share, so one large note can't crowd out the
+    # rest.
+    notes_allocator: str = "trim"
 
 
 class MemoryEmbeddingsConfig(BaseModel):
@@ -719,6 +731,16 @@ class SessionConfig(BaseModel):
     storage: str = "sqlite"
     path: str = str(DEFAULT_DB_PATH)
     auto_save: bool = True
+    # Automated turns from Flight Deck (scheduler, autonomy, plans, peer and
+    # MCP tasks) run on this lane's own session instead of the main chat; the
+    # results meant for the user are mirrored into the main chat. Empty = run
+    # them on the main chat, as before.
+    automation_lane: str = "AUTO"
+    # Typed at the start of a message ("Nova tema: …"), these start a new
+    # session first, like /new. Empty list = off.
+    rotation_cues: list[str] = Field(default_factory=lambda: [
+        "new topic", "new conversation", "nova tema", "novi razgovor",
+    ])
 
 
 class WorkspaceConfig(BaseModel):
@@ -866,6 +888,12 @@ class InsightsConfig(BaseModel):
     auto_extract: bool = True
     inject_in_context: bool = True
     max_items_in_prompt: int = 8
+    # relevant: the core_items_in_prompt most important insights, every rule
+    # (feedback, preference) of importance 8+, and those the turn's words
+    # match (refreshed every turn); importance: a fixed top list by
+    # importance (refreshed at session load).
+    context_mode: str = "relevant"
+    core_items_in_prompt: int = 3
     extraction_interval_messages: int = 20
     extraction_cooldown_seconds: int = 60
     max_insights: int = 500
@@ -894,21 +922,31 @@ class SisterSessionConfig(BaseModel):
 class ConversationTopicsConfig(BaseModel):
     """Automatic topic/tagging memory over comms-channel conversation.
 
-    A periodic pass clusters recent comms messages (user + agent + narration)
-    into persistent, cross-session topics the agent can recall via the `topics`
-    tool. Mirrors the dreaming/insight passes."""
+    A periodic pass clusters the conversation — what people typed and the
+    final reply of each turn they opened — into persistent, cross-session
+    topics the agent can recall via the `topics` tool. Mirrors the
+    dreaming/insight passes."""
 
     enabled: bool = True
-    interval_messages: int = 15          # classify every N new comms messages
+    interval_messages: int = 6           # classify once N conversation messages are pending
     cooldown_seconds: int = 120          # min gap between classification passes
     max_messages_per_pass: int = 15      # messages per classify call (small: reasoning
                                          # models burn budget on long batches → no JSON)
     classify_max_tokens: int = 8000      # output budget; must cover reasoning + the JSON
     max_topics: int = 300                # prune oldest beyond this
     excerpts_per_topic: int = 40         # message excerpts kept per topic
-    include_narration: bool = True
+    include_narration: bool = False      # also feed mid-turn progress narration
     allow_public: bool = False
     db_path: str = "~/.captain-claw/conversation_topics.db"
+    # Topic recall card in the per-turn context block: off | shadow (decide
+    # and record in the context trace, send nothing) | on. Pinned topics
+    # ride the block whatever the mode.
+    recall: str = "shadow"
+    recall_min_cosine: float = 0.5        # meaning alone: at least this close…
+    recall_cosine_margin: float = 0.15    # …and this far ahead of the next topic
+    recall_agree_min_cosine: float = 0.35 # word and meaning rankings agree
+    recall_bm25_margin: float = 1.3       # words alone: 2+ matched, this far ahead
+    pin_turns: int = 5                    # turns a pinned topic stays in view
 
 
 class NervousSystemConfig(BaseModel):

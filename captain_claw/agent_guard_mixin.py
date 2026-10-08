@@ -13,6 +13,13 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
+# A context-note block inside a prompt message (body in group 1). Notes in the
+# body are separated by blank lines; quoted block markers inside notes are
+# defused when the block is built, so the first END marker closes it.
+_GUARD_NOTES_BLOCK_RE = re.compile(
+    r"\[INTERNAL CONTEXT[^\]\n]*\]\n?(.*?)\n?\[END INTERNAL CONTEXT\]", re.DOTALL,
+)
+
 # Interaction labels of post-turn background jobs. Their LLM calls happen
 # while the agent is otherwise idle, so the runtime status must be reset
 # to "ready" when they finish (the UI treats "ready" as the idle state).
@@ -190,13 +197,31 @@ class AgentGuardMixin:
 
     def _serialize_messages_for_guard(self, messages: list[Message], max_chars: int = 12000) -> str:
         """Serialize outbound prompt messages for input guard checks."""
+        def _cut(text: str) -> str:
+            text = re.sub(r"\s+", " ", text).strip()
+            return text if len(text) <= 800 else text[:800].rstrip() + "... [truncated]"
+
         lines: list[str] = []
         for idx, msg in enumerate(messages, start=1):
             role = str(getattr(msg, "role", "")).strip().lower() or "unknown"
-            content = re.sub(r"\s+", " ", str(getattr(msg, "content", "")).strip())
-            if len(content) > 800:
-                content = content[:800].rstrip() + "... [truncated]"
-            lines.append(f"{idx}. {role}: {content}")
+            content = str(getattr(msg, "content", "")).strip()
+            # Context-note blocks ride inside messages (background notes in
+            # front of the turn's question, task state after a tool result).
+            # Cut each note and the text around the blocks on its own, so
+            # neither the notes nor the question crowd the other out of view.
+            parts: list[str] = []
+            pos = 0
+            for block in _GUARD_NOTES_BLOCK_RE.finditer(content):
+                parts.append(_cut(content[pos:block.start()]))
+                notes = [_cut(note) for note in block.group(1).split("\n\n")]
+                parts.append(
+                    "[INTERNAL CONTEXT] "
+                    + " | ".join(note for note in notes if note)
+                    + " [END INTERNAL CONTEXT]"
+                )
+                pos = block.end()
+            parts.append(_cut(content[pos:]))
+            lines.append(f"{idx}. {role}: {' '.join(part for part in parts if part)}")
         return self._truncate_guard_text("\n".join(lines), max_chars=max_chars)
 
     @staticmethod
@@ -567,6 +592,23 @@ class AgentGuardMixin:
                 if isinstance(c, str):
                     input_bytes += len(c.encode("utf-8", errors="replace"))
             output_bytes = len(content.encode("utf-8", errors="replace"))
+
+            # Calibrate the context trace: what the provider billed as input
+            # for this main-turn call, next to the estimate made before it.
+            if interaction_label.startswith("turn_"):
+                window = getattr(self, "last_context_window", None)
+                if isinstance(window, dict):
+                    _prompt = int(usage.get("prompt_tokens", 0) or 0)
+                    _cached = int(usage.get("cache_read_input_tokens", 0) or 0)
+                    _created = int(usage.get("cache_creation_input_tokens", 0) or 0)
+                    # LiteLLM's Anthropic usage already folds cache reads and
+                    # writes into prompt_tokens; elsewhere prompt_tokens is
+                    # the uncached part.
+                    if provider_name == "anthropic" and _prompt >= _cached + _created:
+                        window["provider_input_tokens"] = _prompt
+                    else:
+                        window["provider_input_tokens"] = _prompt + _cached + _created
+                    window["provider_cached_tokens"] = _cached
 
             loop = asyncio.get_event_loop()
             loop.create_task(self.session_manager.record_llm_usage(

@@ -235,11 +235,14 @@ class LayeredMemory:
     ) -> tuple[str, str]:
         if self.semantic is None:
             return "", ""
+        # The passive note rides next to the live session, so it skips that
+        # session's own transcript chunks.
         return self.semantic.build_context_note(
             query=query,
             max_items=max_items,
             max_snippet_chars=max_snippet_chars,
             layer=layer,
+            exclude_active_session=True,
         )
 
     def promote(self, chunk_ids: list[str], layer: str = "l3"):

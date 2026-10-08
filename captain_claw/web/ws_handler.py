@@ -62,6 +62,10 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     # session and busy flag. Absent or unrecognised → lane A, which IS the
     # shared main agent, so every existing client is unaffected.
     lane = server.normalize_lane(request.query.get("lane", ""))
+    # A public visitor has one session of their own; they never watch a lane
+    # (the automation lane carries the owner's scheduled and autonomous work).
+    if getattr(ws, "_public_session_id", None):
+        lane = server.LANE_MAIN
     ws._lane = lane  # type: ignore[attr-defined]
     server._lane_sockets.setdefault(lane, set()).add(ws)
 
@@ -169,6 +173,45 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
     return ws
 
 
+_FLEET_EVENTS_KEPT = 40
+
+
+async def _fleet_notice_to_automation_lane(server, text: str) -> bool:
+    """Keep a fleet notice out of the main chat when the automation lane is
+    on: the notice is stored in that lane's session (where the user can read
+    it) and the main session keeps only the event, for the one-line "fleet
+    changes" note. False when there is no automation lane."""
+    import os
+    from datetime import datetime, timezone
+
+    from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+    from captain_claw.config import get_config
+
+    lane = server.normalize_lane(get_config().session.automation_lane or "")
+    if lane == server.LANE_MAIN:
+        return False
+    # FD workers and beings keep notices where they were (no lane of their own).
+    if _is_fd_spawned_worker() or str(os.environ.get("CLAW_BEING_WORKER", "")).strip().lower() in (
+            "1", "true", "yes"):
+        return False
+    try:
+        auto = await server._get_lane_agent(lane)
+    except Exception as exc:
+        log.warning("Automation lane unavailable for a fleet notice", error=str(exc))
+        return False
+    if getattr(auto, "session", None) is None:
+        return False
+    auto.session.add_message("user", text, origin="fleet_notice")
+    events = server.agent.session.metadata.setdefault("fleet_events", [])
+    events.append({"text": text, "at": datetime.now(timezone.utc).isoformat()})
+    del events[: max(0, len(events) - _FLEET_EVENTS_KEPT)]
+    try:      # the main session saves with its next turn, as notices always did
+        await auto.session_manager.save_session(auto.session)
+    except Exception as exc:
+        log.debug("Could not save the automation lane after a fleet notice", error=str(exc))
+    return True
+
+
 def _build_replay_batch(session) -> list[dict]:
     """The ``replay_batch`` messages that rebuild *session*'s transcript in a
     freshly connected client (chat, rephrase panels, monitor cards)."""
@@ -180,6 +223,8 @@ def _build_replay_batch(session) -> list[dict]:
         timestamp = msg.get("timestamp", "")
         model = msg.get("model", "")
         if role in ("user", "assistant"):
+            if msg.get("origin_detail") in ("cut_off", "continue_cut_off"):
+                continue        # plumbing of a continued answer; the joined reply follows
             payload = {
                 "type": "chat_message",
                 "role": role,
@@ -190,6 +235,14 @@ def _build_replay_batch(session) -> list[dict]:
             }
             if msg.get("feedback"):
                 payload["feedback"] = msg["feedback"]
+            # Where the message came from (human, corrective, fleet notice…),
+            # so a client can label synthetic rows instead of showing them as
+            # something the user typed.
+            from captain_claw import msg_origin
+
+            payload["origin"] = msg_origin.origin_of(msg)
+            if msg.get("channel"):
+                payload["channel"] = msg["channel"]
             batch.append(payload)
         elif role == "tool" and tool_name == "task_rephrase":
             batch.append({
@@ -232,6 +285,11 @@ async def _handle_telegram_delegate_result(
             try:
                 # Another agent's result, not the Telegram user typing.
                 with mail_authority.bound(mail_authority.automated("peer_relay", "", "deny")):
+                    from captain_claw import msg_origin as _msg_origin
+
+                    _msg_origin.hint_turn_provenance(
+                        tg_agent, turn_origin="delegated_result", channel="telegram",
+                    )
                     response = await tg_agent.complete(content)
                 if response and chat_id:
                     await _tg_send(server, chat_id, response)
@@ -276,6 +334,26 @@ async def handle_ws_message(
         # can be routed back to this source later. Bridges may send it
         # explicitly; otherwise handle_chat synthesizes one from whatsapp_waid.
         origin = data.get("origin") if isinstance(data.get("origin"), dict) else None
+        # The chat surface this frame came from (glasses / whatsapp /
+        # messenger), sent by the bridges on every frame: the turn renders
+        # that surface's rules, and only on that surface's turns.
+        surface = str(data.get("surface", "") or "").strip().lower() or None
+        # A bridge talks over its own socket: remember its surface for the
+        # frames that don't carry one (slash-routed turns, older bridges,
+        # whose first message carries the surface rules block instead).
+        if not surface:
+            from captain_claw import msg_origin as _msg_origin
+
+            if _msg_origin.SURFACE_BLOCK_RE.search(content):
+                _wa = whatsapp_waid or str((origin or {}).get("kind", "")).lower() == "whatsapp"
+                surface = "whatsapp" if _wa else "glasses"
+            else:
+                surface = getattr(ws, "_claw_surface", None)
+        if surface:
+            try:
+                ws._claw_surface = surface
+            except Exception:
+                pass
 
         # Multi-file support: collect all image/file paths into lists.
         image_paths: list[str] = []
@@ -308,9 +386,45 @@ async def handle_ws_message(
 
         if not content and not image_paths and not file_paths:
             return
+        # "Nova tema: …" / "new topic" opening a typed message: a new session
+        # first (as /new), then the rest of the message is the turn. Never for
+        # a public visitor (their /new would reach the owner's session).
+        if (automation is None and not content.startswith("/")
+                and not getattr(ws, "_public_session_id", None)):
+            from captain_claw import msg_origin as _cue_origin
+            from captain_claw.web.slash_commands import handle_command, rotation_cue
+
+            # A bridge's first message carries the surface rules block ahead
+            # of what the person wrote: the cue is in the person's words.
+            _block, _said = _cue_origin.split_surface_block(content)
+            rest = rotation_cue(_said)
+            if rest is not None:
+                _cue_agent = await server.resolve_agent(ws)
+                _cue_busy = (getattr(_cue_agent, "_lane_busy", False)
+                             if _cue_agent is not server.agent else server._busy)
+                if _cue_busy:
+                    await server._send(ws, {
+                        "type": "error",
+                        "message": "Still answering the previous message — start the new "
+                                   "session once it is done (or stop it first).",
+                    })
+                    return
+                # On this socket's own agent: a lane's or lane A.
+                await handle_command(server.lane_view(ws, _cue_agent), ws, "/new")
+                content = (_block + rest) if (_block and rest) else rest
+                if rest:
+                    # The client cleared its transcript for the new session;
+                    # what the person asked goes back in.
+                    await server._send(ws, {"type": "chat_message", "role": "user", "content": rest,
+                                            "rotation_cue": True})
+                if not rest and not image_paths and not file_paths:
+                    return
         if automation is None and content.startswith("/"):
             from captain_claw.web.slash_commands import handle_command
-            await handle_command(server, ws, content)
+            # On this socket's own agent, as a "command" frame is: a lane's
+            # /new must not switch lane A's session.
+            _cmd_agent = await server.resolve_agent(ws)
+            await handle_command(server.lane_view(ws, _cmd_agent), ws, content)
         elif automation is None and getattr(server.agent, "plan_mode_auto", False):
             from captain_claw.web.plan_auto_route import handle_plan_auto_route
             with mail_authority.bound(mail_authority.interactive(content)):
@@ -326,6 +440,7 @@ async def handle_ws_message(
                 rewind_to=rewind_to,
                 whatsapp_waid=whatsapp_waid,
                 origin=origin,
+                surface=surface,
                 no_flow=bool(data.get("no_flow", False)),
                 deny_tools=[str(t) for t in (data.get("deny_tools") or [])],
                 no_tools=bool(data.get("no_tools", False)),
@@ -413,10 +528,9 @@ async def handle_ws_message(
                      content_len=len(notif_content))
             tg_agent = server._telegram_agents.get(origin_user_id)
             if tg_agent:
-                # Inject into the telegram user's session
-                if tg_agent.session:
-                    tg_agent.session.add_message("user", notif_content)
-                # Process with the telegram agent and send result to telegram
+                # Process with the telegram agent and send result to telegram;
+                # the turn records the result as its opening message (writing
+                # it here as well stored every relayed result twice).
                 await _handle_telegram_delegate_result(
                     server, tg_agent, origin_user_id, origin_chat_id, notif_content,
                 )
@@ -458,7 +572,17 @@ async def handle_ws_message(
         # No trigger requested — inject silently into session history.
         _target_agent = await server.resolve_agent(ws)
         if _target_agent and _target_agent.session:
-            _target_agent.session.add_message("user", notif_content)
+            from captain_claw import msg_origin
+
+            _found = msg_origin.detect_literal(notif_content)
+            _fleet = bool(_found and _found[0] == "fleet_notice")
+            if _fleet and _target_agent is server.agent and await _fleet_notice_to_automation_lane(
+                    server, notif_content):
+                return
+            _target_agent.session.add_message(
+                "user", notif_content,
+                origin="fleet_notice" if _fleet else "notification",
+            )
             log.info("Notification injected into session", content_len=len(notif_content),
                      agent_busy=server._busy, trigger=trigger)
 
@@ -658,6 +782,8 @@ async def handle_ws_message(
 
     elif msg_type == "cancel":
         _pub_sid = getattr(ws, "_public_session_id", None)
+        # (A socket whose automated turn moved to the automation lane is on
+        # that lane for the turn, so this cancels that turn.)
         _cancel_agent = await server.resolve_agent(ws)
         if _cancel_agent and hasattr(_cancel_agent, "cancel_event"):
             _cancel_agent.cancel_event.set()

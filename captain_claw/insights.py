@@ -158,6 +158,13 @@ class InsightsManager:
             except Exception:
                 pass  # column already exists
 
+        # Migration: index why / how_to_apply too — a rule's trigger ("when
+        # processing the inbox…") lives there, not in its content.
+        await self._index_rule_context()
+        # Per-term row counts (how rare a matched word is).
+        await self._db.execute(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS insights_fts_vocab USING fts5vocab(insights_fts, 'row')")
+
         # Pending-review queue for staged imports (see CONFLICT_STAGED_CATEGORIES).
         # Populated only by ``import_items(stage_conflicts=True)`` when an incoming
         # decision/preference/workflow insight would otherwise be silently deduped.
@@ -188,6 +195,36 @@ class InsightsManager:
         )
 
         await self._db.commit()
+
+    async def _index_rule_context(self) -> None:
+        """Rebuild insights_fts with the why / how_to_apply columns (once)."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'insights_fts'")
+        if rows and "how_to_apply" in str(rows[0][0] or ""):
+            return
+        cols = "content, category, tags, why, how_to_apply"
+        for trigger in ("insights_ai", "insights_ad", "insights_au"):
+            await self._db.execute(f"DROP TRIGGER IF EXISTS {trigger}")
+        await self._db.execute("DROP TABLE IF EXISTS insights_fts")
+        await self._db.execute(
+            f"CREATE VIRTUAL TABLE insights_fts USING fts5({cols}, content=insights, content_rowid=rowid)")
+        new = "new.content, new.category, new.tags, new.why, new.how_to_apply"
+        old = "old.content, old.category, old.tags, old.why, old.how_to_apply"
+        await self._db.execute(f"""
+            CREATE TRIGGER insights_ai AFTER INSERT ON insights BEGIN
+                INSERT INTO insights_fts(rowid, {cols}) VALUES (new.rowid, {new});
+            END""")
+        await self._db.execute(f"""
+            CREATE TRIGGER insights_ad AFTER DELETE ON insights BEGIN
+                INSERT INTO insights_fts(insights_fts, rowid, {cols}) VALUES ('delete', old.rowid, {old});
+            END""")
+        await self._db.execute(f"""
+            CREATE TRIGGER insights_au AFTER UPDATE ON insights BEGIN
+                INSERT INTO insights_fts(insights_fts, rowid, {cols}) VALUES ('delete', old.rowid, {old});
+                INSERT INTO insights_fts(rowid, {cols}) VALUES (new.rowid, {new});
+            END""")
+        await self._db.execute("INSERT INTO insights_fts(insights_fts) VALUES ('rebuild')")
 
     async def close(self) -> None:
         if self._db:
@@ -463,19 +500,119 @@ class InsightsManager:
         await self._ensure_db()
         assert self._db is not None
 
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        live = "(expires_at IS NULL OR expires_at = '' OR expires_at >= ?)"
         if project_id:
             rows = await self._db.execute_fetchall(
-                """SELECT * FROM insights
-                   WHERE project_id IN ('', ?)
+                f"""SELECT * FROM insights
+                   WHERE project_id IN ('', ?) AND {live}
                    ORDER BY importance DESC, created_at DESC LIMIT ?""",
-                (project_id, limit),
+                (project_id, now, limit),
             )
         else:
             rows = await self._db.execute_fetchall(
-                "SELECT * FROM insights ORDER BY importance DESC, created_at DESC LIMIT ?",
-                (limit,),
+                f"SELECT * FROM insights WHERE {live} ORDER BY importance DESC, created_at DESC LIMIT ?",
+                (now, limit),
             )
         return [self._row_to_dict(r) for r in rows]
+
+    async def relevant_for_context(
+        self,
+        query: str,
+        *,
+        limit: int = 8,
+        core: int = 3,
+        project_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """Insights for one turn. Always: the *core* most important ones and
+        every behaviour rule (feedback, preference) of importance 8+ — rules
+        apply whatever is asked. Then those the turn's words match (content,
+        tags, and a rule's why / how-to-apply), ranked by bm25 weighted by
+        importance: two matched words, the only word asked, or one rare word.
+        Expired insights never show. Nothing else — the prompt carries what is
+        relevant, not a fixed top list."""
+        from captain_claw import retrieval
+
+        await self._ensure_db()
+        assert self._db is not None
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        where = ["(expires_at IS NULL OR expires_at = '' OR expires_at >= ?)"]
+        params: list[Any] = [now]
+        if project_id:
+            where.append("project_id IN ('', ?)")
+            params.append(project_id)
+        live = " AND ".join(where)
+        top = await self._db.execute_fetchall(
+            f"SELECT * FROM insights WHERE {live} ORDER BY importance DESC, created_at DESC LIMIT ?",
+            (*params, max(0, min(core, limit))),
+        )
+        rules = await self._db.execute_fetchall(
+            f"SELECT * FROM insights WHERE {live} AND importance >= 8"
+            " AND category IN ('feedback', 'preference') ORDER BY importance DESC, created_at DESC LIMIT ?",
+            (*params, limit),
+        )
+        picked: list[dict[str, Any]] = []
+        for row in [*top, *rules]:
+            item = self._row_to_dict(row)
+            if item["id"] not in {p["id"] for p in picked} and len(picked) < limit:
+                picked.append(item)
+        terms = retrieval.query_terms(query, max_terms=12)
+        if not terms or len(picked) >= limit:
+            return picked
+        have = {p["id"] for p in picked}
+        match = "{content tags why how_to_apply} : (" + retrieval.fts_match(terms) + ")"
+        live_i = live.replace("expires_at", "i.expires_at").replace("project_id", "i.project_id")
+        try:
+            rows = await self._db.execute_fetchall(
+                f"""SELECT i.*, bm25(insights_fts) AS rank
+                    FROM insights_fts JOIN insights i ON i.rowid = insights_fts.rowid
+                    WHERE insights_fts MATCH ? AND {live_i}
+                    ORDER BY rank LIMIT 40""",
+                (match, *params),
+            )
+            total = (await self._db.execute_fetchall("SELECT COUNT(*) FROM insights"))[0][0]
+        except Exception as exc:
+            log.debug("Insight relevance query failed", error=str(exc))
+            return picked
+        rare_cap = max(1, int(total * 0.02))
+        scored: list[tuple[float, dict[str, Any]]] = []
+        for row in rows:
+            item = self._row_to_dict(row)
+            if item["id"] in have:
+                continue
+            hits = retrieval.matched_terms(
+                terms, item.get("content", ""), item.get("tags", ""),
+                item.get("why", ""), item.get("how_to_apply", ""),
+            )
+            if not (len(hits) >= 2 or (len(terms) == 1 and hits)
+                    or (len(hits) == 1 and await self._term_rows(hits[0]) <= rare_cap)):
+                continue
+            importance = int(item.get("importance") or 5)
+            relevance = retrieval.bm25_relevance(item.get("rank", 0.0))
+            scored.append((relevance * (0.5 + importance / 20.0), item))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        picked += [item for _score, item in scored[: max(0, limit - len(picked))]]
+        return picked
+
+    async def _term_rows(self, term: str) -> int:
+        """How many insights hold *term* (by the same prefix FTS matches on)."""
+        from captain_claw import retrieval
+
+        assert self._db is not None
+        word = retrieval.fold(term)
+        try:
+            if len(term) >= 4:
+                prefix = retrieval.stem(word)
+                rows = await self._db.execute_fetchall(
+                    "SELECT COALESCE(SUM(doc), 0) FROM insights_fts_vocab WHERE term >= ? AND term < ?",
+                    (prefix, prefix + "\uffff"),
+                )
+            else:
+                rows = await self._db.execute_fetchall(
+                    "SELECT COALESCE(SUM(doc), 0) FROM insights_fts_vocab WHERE term = ?", (word,))
+            return int(rows[0][0] or 0)
+        except Exception:
+            return 1 << 30
 
     async def search_in_project(
         self,
