@@ -1247,7 +1247,9 @@ Auth is handled per-call; the caller just needs the target slug + the path the s
 
 ### whatsapp_send_file
 
-Send a file the agent saved (its `saved/` workspace) to a WhatsApp chat as a document, via the Flight Deck WhatsApp bridge. Requires `WHATSAPP_ACCESS_TOKEN` + `WHATSAPP_PHONE_NUMBER_ID` (inherited from Flight Deck). WhatsApp only allows free-form documents within 24h of the recipient's last message.
+Send a file the agent saved (its `saved/` workspace) to a WhatsApp chat through the Cloud API: JPEG and 8-bit PNG up to 5 MB arrive as **photos**, H.264/AAC MP4 up to 16 MB as **videos**, MP3, AAC M4A, AMR or Opus audio up to 16 MB as **audio** — the file's bytes are checked, not just its extension. Everything else, anything larger, or a file WhatsApp wouldn't play (an HEVC clip, a Vorbis .ogg, ALAC) goes as a **document**, which always arrives; a photo/video/audio Meta refuses for its format is sent again as a document, and `send_as: "document"` sends the original file. By default it sends into the chat the turn answers (on an automated turn without one — a cron job, a muted scheduled job — it needs an explicit `to`). Requires `WHATSAPP_ACCESS_TOKEN` + `WHATSAPP_PHONE_NUMBER_ID` (Flight Deck passes them to process agents; Docker agents need them in their own `.env`). WhatsApp only allows free-form messages within 24h of the recipient's last message.
+
+**Delivered at the end of a WhatsApp turn.** When a turn arrived over WhatsApp — or is a Flight Deck scheduled job delivering to a WhatsApp number that may receive pushes now (on the allowlist, not muted with `/mute`) — the agent sends what it made for the user into that chat once the reply is out: pictures it generated (`image_gen`) or took with the phone (`termux`), audio it spoke (`pocket_tts`), and **any file this session wrote during the turn that the reply names by its whole file name** ("here's report.docx"; under `saved/<category>/<session>/`, including `tmp/` where bare writes land — not `scripts/`, `tools/`, `skills/` or `downloads/`, so a Drive file it only read isn't sent back). Nothing it already sent with this tool, at most `whatsapp.max_media_per_turn` (6) files; when something can't be sent or the cap cuts the list, the chat gets one short line saying so. The agent is told this on those turns (and told plainly when it has no WhatsApp credentials). Agent-local cron jobs don't deliver files (they can't see `/mute`); the agent can still send with this tool. Turn it off with `whatsapp.auto_send_media: false`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -1256,7 +1258,8 @@ Send a file the agent saved (its `saved/` workspace) to a WhatsApp chat as a doc
 | `filename` | string | no | Filename (fuzzy, case-insensitive; newest match) when `path` is not given |
 | `latest` | boolean | no | Send the most recently saved file |
 | `to` | string | no | Recipient number (digits only, no `+`). Omit to reply into the current WhatsApp chat |
-| `caption` | string | no | Caption shown under the document |
+| `caption` | string | no | Caption shown under the file or photo (not for audio) |
+| `send_as` | string | no | `auto` (default) or `document` — the original file, never re-compressed by WhatsApp |
 
 Office/PDF use Meta-accepted MIME types; text formats (`.md/.html/.py/.csv/…`) are sent as `text/plain`. Allow-list enforced (`WHATSAPP_ALLOWED_WAIDS`).
 

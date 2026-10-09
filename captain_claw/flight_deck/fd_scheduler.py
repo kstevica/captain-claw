@@ -564,12 +564,17 @@ async def run_prompt_and_capture(
     prompt: str,
     timeout: float = _REPLY_TIMEOUT_SECONDS,
     automation: dict[str, Any] | None = None,
+    whatsapp_media_to: str = "",
 ) -> str | None:
     """Inject ``prompt`` into a fresh ephemeral channel bound to the agent
     and return the first ``agent`` reply text, or None on timeout/failure.
 
     ``automation`` (the automated-turn marker) rides on the chat frame when
     given, so the agent knows this turn is a scheduled job, not the user.
+    ``whatsapp_media_to`` (a job delivering to a WhatsApp number that may
+    receive pushes right now) lets the agent send the files and pictures the
+    turn makes to that chat itself; the text still goes through the job's
+    delivery.
 
     The ephemeral channel is torn down in all cases.
     """
@@ -596,6 +601,8 @@ async def run_prompt_and_capture(
             frame: dict[str, Any] = {"type": "chat", "content": prompt}
             if automation:
                 frame["automation"] = automation
+            if whatsapp_media_to:
+                frame["whatsapp_media_to"] = whatsapp_media_to
             await ch.agent_ws.send(json.dumps(frame))
         try:
             return await asyncio.wait_for(fut, timeout)
@@ -606,6 +613,18 @@ async def run_prompt_and_capture(
         return None
     finally:
         await _remove_channel(run_channel)
+
+
+def _media_target(kind: str, target: str) -> str:
+    """The WhatsApp number a job's files and pictures may go to: only one
+    a proactive push may reach now (allowlisted, not muted) — the same gate
+    the job's text goes through."""
+    if kind != "whatsapp" or not target:
+        return ""
+    from captain_claw.flight_deck.whatsapp_bridge import _allowed_waids, is_push_muted
+
+    waid = target.lstrip("+").strip()
+    return waid if waid in _allowed_waids() and not is_push_muted(waid) else ""
 
 
 async def _deliver(kind: str, target: str, text: str) -> tuple[bool, str]:
@@ -742,12 +761,15 @@ async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str,
     # human-written prompt asks for it (judged on the raw prompt, no preamble).
     raw_prompt = str(job.get("prompt") or "")
     human_written = str(job.get("prompt_author") or "human") == "human"
+    _kind = str(job.get("delivery_kind") or "").strip().lower()
+    _target = str(job.get("delivery_target") or "").strip()
     reply = await run_prompt_and_capture(
         host=host, port=port, auth=auth,
         prompt=_fire_time_preamble() + raw_prompt,
         automation={"kind": "fd_scheduler",
                     "job_text": (raw_prompt if human_written else "")[:4000],
                     "mail_write": "intent"},
+        whatsapp_media_to=_media_target(_kind, _target),
     )
     if reply is None:
         return ("error:no-reply", "agent produced no reply within timeout")

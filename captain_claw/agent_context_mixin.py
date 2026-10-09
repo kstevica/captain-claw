@@ -145,7 +145,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "pptx_extract": "single .pptx → markdown (ONLY .pptx, never .pdf; for multiple files use summarize_files)",
     "pocket_tts": "text-to-speech MP3",
     "send_mail": "send emails via SMTP (only when asked)",
-    "whatsapp_send_file": "send a saved file to a WhatsApp chat (defaults to current chat)",
+    "whatsapp_send_file": "send a saved file or picture to a WhatsApp chat (defaults to current chat; photos as images)",
     "intentions": "record future actions: user notes-to-self + your own proactive intentions",
     "video_vision": "analyze/describe a video (samples frames + transcribes audio)",
     "clipboard": "read/write system clipboard",
@@ -4202,6 +4202,31 @@ class AgentContextMixin:
             return str(turn[2])
         return ""
 
+    def _whatsapp_delivery_note(self) -> str:
+        """On a turn that answers a WhatsApp chat (it came from one, or it
+        is a scheduled job delivering to one): how a file or picture gets
+        there — only what this agent can actually do."""
+        import os
+
+        from captain_claw.tools import whatsapp_send_file as _wa
+
+        answering = _wa.reply_to(self)
+        if self._turn_channel() != "whatsapp" and not answering:
+            return ""
+        if not (os.environ.get("WHATSAPP_ACCESS_TOKEN", "").strip()
+                and os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "").strip()):
+            return ("Your reply goes to a WhatsApp chat as text. This agent can't send files or "
+                    "pictures there (no WhatsApp credentials) — say where the file is instead.")
+        if get_config().whatsapp.auto_send_media and answering:
+            return (
+                "Your reply goes to a WhatsApp chat. Pictures you generate (image_gen), phone "
+                "photos and audio you speak (pocket_tts) are sent there automatically after your "
+                "reply. A file you write in this turn (a document, spreadsheet, chart…) is sent when "
+                "your reply names it by its file name, e.g. report.docx. For anything else — an "
+                "older file, a download, a screenshot — use whatsapp_send_file."
+            )
+        return "Your reply goes to a WhatsApp chat. To send a file or picture there, use whatsapp_send_file."
+
     def _surface_rules_for_turn(self) -> str:
         """The chat surface's rules when this turn came from one (glasses,
         WhatsApp, Messenger): stored when the surface's block first arrived,
@@ -4578,6 +4603,10 @@ class AgentContextMixin:
             _surface_text = self._surface_rules_for_turn()
             if _surface_text:
                 env_note = [("surface_rules", _surface_text)] + env_note
+            # How files and pictures reach a WhatsApp chat.
+            _delivery_text = self._whatsapp_delivery_note()
+            if _delivery_text:
+                env_note = [("whatsapp_delivery", _delivery_text)] + env_note
             self._turn_env_tokens = self._count_tokens(_env_text) if _env_text else 0
             reserved_tokens = 0
             if turn_anchor_pos is not None:
