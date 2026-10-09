@@ -29,13 +29,21 @@ and refuse to make another unless the call passes ``allow_repeat`` — see
 :func:`gmail_compose.find_repeats`. Flight Deck runs the same check on sends.
 A revision goes through update_draft, which edits the existing draft.
 
-There are still no label / trash / attachment / delete actions.
+Attachments: read_message / get_thread list each one with a number;
+get_attachment saves one (or all) under ``saved/downloads/<session>/mail-<id>/`` and
+says which tool reads it (pdf_extract, docx_extract, image_vision, read…).
+
+There are still no label / trash / delete actions.
 """
 
 from __future__ import annotations
 
 import base64
 import email.utils
+import mimetypes
+import re
+import unicodedata
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -88,6 +96,22 @@ _LOCAL_SEND_OFF = (
 
 # Max body length returned to the agent.
 _MAX_BODY_CHARS = 30_000
+# Gmail caps a message at 25 MB; one attachment never needs more than this.
+_MAX_ATTACHMENT_BYTES = 30 * 1024 * 1024
+# get_attachment with attachment="all" saves at most this many.
+_MAX_ATTACHMENTS_PER_CALL = 10
+# Unnamed file parts (a pasted picture, a scanner's PDF): named from their type.
+_EXT_BY_MIME = {
+    "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/gif": ".gif",
+    "image/webp": ".webp", "image/heic": ".heic", "application/pdf": ".pdf",
+    "text/plain": ".txt", "text/calendar": ".ics",
+}
+# Saved attachment names stay under this many UTF-8 bytes (NAME_MAX is 255).
+_MAX_NAME_BYTES = 180
+# Stripped from a sender's file name: control characters and Unicode line
+# breaks (they would forge lines in the listing) and bidi overrides (they
+# disguise an extension).
+_NAME_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f\x85\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]+")
 
 # Appended to list / search output so the LLM always sees the routing
 # reminder next to the IDs it should pass back in. Helps prevent the
@@ -161,6 +185,9 @@ class GoogleMailTool(Tool):
         "pass reply_to_message_id so they thread. If send says sending is off, create a draft "
         "instead and tell the user how to enable sending. To send a draft you created, use "
         "send_draft with its Draft ID (list_drafts finds draft IDs). "
+        "ATTACHMENTS: read_message lists them numbered; get_attachment (message_id + attachment "
+        "number/name, or 'all') saves them and tells you which tool reads each — open an "
+        "attachment before answering questions about its contents. "
         "ROUTING: any user request that refers to an email, message, inbox, thread, "
         "conversation, sender, subject line, or Gmail — including phrases like "
         "'read the one from X', 'open that email', 'show me the Fil Rouge email', "
@@ -222,6 +249,7 @@ class GoogleMailTool(Tool):
                     "list_drafts",
                     "send",
                     "send_draft",
+                    "get_attachment",
                 ],
                 "description": "The action to perform.",
             },
@@ -272,7 +300,14 @@ class GoogleMailTool(Tool):
             },
             "message_id": {
                 "type": "string",
-                "description": "Message ID (for read_message action).",
+                "description": "Message ID (for read_message and get_attachment).",
+            },
+            "attachment": {
+                "type": "string",
+                "description": (
+                    "For get_attachment: which attachment — its number from read_message "
+                    "('1', '2', …), its name, or 'all'. Optional when the message has one."
+                ),
             },
             "reply_to_message_id": {
                 "type": "string",
@@ -352,12 +387,15 @@ class GoogleMailTool(Tool):
 
     async def execute(self, action: str, **kwargs: Any) -> ToolResult:
         """Dispatch to the appropriate action handler."""
-        kwargs.pop("_runtime_base_path", None)
-        kwargs.pop("_saved_base_path", None)
-        kwargs.pop("_session_id", None)
+        # Where get_attachment saves (the same runtime context the file tools get).
+        runtime = {
+            key: kwargs.pop(key, None)
+            for key in ("_runtime_base_path", "_saved_base_path", "_session_id",
+                        "_file_registry", "_task_id")
+        }
         kwargs.pop("_abort_event", None)
-        kwargs.pop("_file_registry", None)
-        kwargs.pop("_task_id", None)
+        if action == "get_attachment":
+            kwargs["_runtime"] = runtime
 
         handlers = {
             "list_messages": self._action_list_messages,
@@ -370,6 +408,7 @@ class GoogleMailTool(Tool):
             "list_drafts": self._action_list_drafts,
             "send": self._action_send,
             "send_draft": self._action_send_draft,
+            "get_attachment": self._action_get_attachment,
         }
 
         # Mail writes in an automated turn need the job's own explicit words
@@ -843,6 +882,176 @@ class GoogleMailTool(Tool):
 
         msg = await self._fetch_full_message(token, message_id)
         return ToolResult(success=True, content=self._format_message_detail(msg))
+
+    # ------------------------------------------------------------------
+    # Action: get_attachment
+    # ------------------------------------------------------------------
+
+    async def _action_get_attachment(
+        self,
+        token: str,
+        message_id: str = "",
+        attachment: str = "",
+        _runtime: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> ToolResult:
+        """Save an email's attachment(s) to ``saved/downloads/<session>/mail-<id>/``
+        and say which tool reads each."""
+        if not message_id:
+            return ToolResult(success=False, error="message_id is required.")
+        resp = await self._client.get(
+            f"{_GMAIL_API}/users/me/messages/{message_id}",
+            params={"format": "full"},
+            headers=self._auth_headers(token),
+        )
+        resp.raise_for_status()
+        msg = self._parse_message(resp.json())
+        atts = msg.get("attachments") or []
+        if not atts:
+            return ToolResult(success=False, error=f"Message {message_id} has no attachments.")
+        listing = ", ".join(f"[{n}] {a['filename']}" for n, a in enumerate(atts, 1))
+        wanted = str(attachment or "").strip()
+        if not wanted and len(atts) > 1:
+            return ToolResult(
+                success=False,
+                error=f"The message has {len(atts)} attachments ({listing}) — pass attachment=<number, name or 'all'>.",
+            )
+        name = wanted.lower()
+        if not wanted or name == "all":
+            chosen = list(enumerate(atts))[:_MAX_ATTACHMENTS_PER_CALL]
+        elif wanted.isdigit() and 1 <= int(wanted) <= len(atts):
+            chosen = [(int(wanted) - 1, atts[int(wanted) - 1])]
+        else:
+            exact = [(i, a) for i, a in enumerate(atts) if a["filename"].lower() == name]
+            # A number past the end is a wrong number, never a piece of a name.
+            partial = [] if wanted.isdigit() else [
+                (i, a) for i, a in enumerate(atts) if name in a["filename"].lower()]
+            chosen = (exact or partial)[:1]
+        if not chosen:
+            return ToolResult(success=False, error=f"No attachment '{wanted}' — the message has {listing}.")
+
+        save_names = self._attachment_save_names(atts)
+        lines: list[str] = []
+        saved = 0
+        for index, att in chosen:
+            ok, line = await self._save_attachment(
+                token, message_id, att, save_names[index], _runtime or {})
+            lines.append(line)
+            saved += ok
+        if not saved:
+            return ToolResult(success=False, error="\n".join(lines))
+        if len(atts) > len(chosen) and name == "all":
+            lines.append(f"({len(atts) - len(chosen)} more not saved — ask for them by number.)")
+        return ToolResult(success=True, content="\n".join(lines))
+
+    @staticmethod
+    def _attachment_save_names(atts: list[dict[str, Any]]) -> list[str]:
+        """One safe, distinct file name per attachment of a message.
+
+        The extension its reader needs is kept through truncation and added
+        when missing (``Contract v2.1`` → ``.pdf``); a repeated name (two
+        pasted ``image.png``) gets `` (2)``."""
+        from captain_claw.tools.google_drive import _missing_suffix, _safe_filename
+
+        names: list[str] = []
+        taken: set[str] = set()
+        for n, att in enumerate(atts, 1):
+            raw = str(att.get("filename") or "")
+            suffix = Path(raw).suffix if len(Path(raw).suffix) <= 16 else ""
+            if len(raw.encode()) > _MAX_NAME_BYTES:
+                budget = _MAX_NAME_BYTES - len(suffix.encode())
+                stem = raw[: len(raw) - len(suffix)].encode()[:budget].decode("utf-8", "ignore")
+                raw = stem.rstrip() + suffix
+            safe = _safe_filename(raw, f"attachment-{n}")
+            safe += _missing_suffix(safe, str(att.get("mime_type") or ""))
+            # Distinct the way the disk sees names (APFS: case- and
+            # normalization-insensitive).
+            unique, copy = safe, 1
+            while unicodedata.normalize("NFC", unique).casefold() in taken:
+                copy += 1
+                stem, dot, ext = safe.rpartition(".")
+                unique = f"{stem} ({copy}).{ext}" if dot and stem else f"{safe} ({copy})"
+            taken.add(unicodedata.normalize("NFC", unique).casefold())
+            names.append(unique)
+        return names
+
+    async def _save_attachment(
+        self, token: str, message_id: str, att: dict[str, Any], save_name: str,
+        runtime: dict[str, Any],
+    ) -> tuple[bool, str]:
+        """Fetch one attachment and save it; (ok, the line to report)."""
+        import asyncio
+
+        from captain_claw import saved_attribution
+        from captain_claw import speaker as _speaker
+        from captain_claw.tools.google_drive import (
+            _READER_BY_SUFFIX,
+            GoogleDriveTool,
+            _DownloadPathError,
+        )
+
+        name = att["filename"]
+        try:
+            size = int(att.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > _MAX_ATTACHMENT_BYTES:
+            return False, f"'{name}' is too large ({size} bytes)."
+        data = att.get("data") or ""
+        if not data:
+            try:
+                resp = await self._client.get(
+                    f"{_GMAIL_API}/users/me/messages/{message_id}/attachments/{att['attachment_id']}",
+                    headers=self._auth_headers(token),
+                )
+                resp.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                return False, f"'{name}' could not be fetched from Gmail (HTTP {exc.response.status_code})."
+            except httpx.HTTPError as exc:
+                return False, f"'{name}' could not be fetched from Gmail ({type(exc).__name__})."
+            data = str((resp.json() or {}).get("data") or "")
+        try:
+            blob = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+        except Exception:
+            return False, f"'{name}' came back unreadable from Gmail."
+        if not blob:
+            return False, f"'{name}' is empty."
+        if len(blob) > _MAX_ATTACHMENT_BYTES:
+            return False, f"'{name}' is too large ({len(blob)} bytes)."
+        # One folder per email: two emails' invoice.pdf never overwrite each other.
+        folder = "mail-" + (re.sub(r"[^A-Za-z0-9_-]", "", message_id)[:64] or "message")
+        try:
+            dest = GoogleDriveTool._download_dest(None, f"{folder}/{save_name}", "", runtime)
+        except _DownloadPathError as exc:
+            return False, str(exc)
+        # A shared-agent member never overwrites a saved/ file someone else made.
+        prior = saved_attribution.prior_creator(dest)
+        member = _speaker.current()
+        if (member is not None and dest.exists()
+                and not saved_attribution.member_may_change(dest, member.speaker_id)):
+            return False, _speaker.PATH_REFUSED_PREFIX + _speaker.FILE_NOT_YOURS_WHY
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(dest.write_bytes, blob)
+        except OSError as exc:
+            return False, f"'{name}' could not be saved ({exc.strerror or type(exc).__name__})."
+        saved_attribution.note_write(dest, prior)
+        registry = runtime.get("_file_registry")
+        if registry is not None:
+            try:
+                registry.register(logical_path=dest.name, physical_path=str(dest),
+                                  task_id=str(runtime.get("_task_id") or ""))
+            except Exception:
+                pass
+        reader = _READER_BY_SUFFIX.get(dest.suffix.lower(), "read")
+        # "Saved to:", not "Path:" — channel bridges (Telegram) auto-send
+        # documents named on a "Path:" line, and an email's attachment is an
+        # input, not something to post back into the chat.
+        return True, (
+            f"Saved attachment '{name}' ({att.get('mime_type') or 'unknown'}, {len(blob)} bytes)\n"
+            f"  Saved to: {dest}\n"
+            f"Use {reader}(path=\"{dest}\") to view it."
+        )
 
     # ------------------------------------------------------------------
     # Action: get_thread
@@ -1639,27 +1848,63 @@ class GoogleMailTool(Tool):
     def _extract_parts(
         payload: dict[str, Any],
         body_parts: dict[str, list[str]],
-        attachments: list[dict[str, str]],
+        attachments: list[dict[str, Any]],
     ) -> None:
-        """Recursively extract text/html bodies and attachment info from MIME parts."""
+        """Recursively extract text/html bodies and attachment info from MIME
+        parts. An attachment keeps what get_attachment needs to fetch it: its
+        ``attachment_id`` or, for a small one Gmail inlines, its ``data``.
+
+        A named text part Gmail inlines stays the body unless the sender
+        marked it ``Content-Disposition: attachment`` (MMS gateways name the
+        message text ``text_0.txt``). Unnamed file parts — a pasted picture,
+        a scanner's PDF — are attachments too, named from their type."""
         mime_type = payload.get("mimeType", "")
         body = payload.get("body", {})
-        filename = payload.get("filename", "")
+        # The name is the sender's: control characters could forge lines in
+        # the listing the model reads.
+        filename = _NAME_CONTROL_RE.sub(
+            " ", unicodedata.normalize("NFC", payload.get("filename") or "")).strip()
+        att_id = body.get("attachmentId")
+        inline_data = body.get("data")
+        is_body_text = mime_type in ("text/plain", "text/html")
 
-        # Attachment
-        if filename and body.get("attachmentId"):
+        if filename:
+            disposition = next(
+                (str(h.get("value") or "") for h in payload.get("headers") or []
+                 if str(h.get("name") or "").lower() == "content-disposition"),
+                "",
+            ).strip().lower()
+            is_file = bool(att_id) or bool(
+                inline_data and (not is_body_text or disposition.startswith("attachment")))
+        else:
+            is_file = (
+                not payload.get("parts") and not is_body_text
+                and not mime_type.startswith("multipart/")
+                and bool(att_id or (inline_data and not mime_type.startswith("text/")))
+            )
+
+        if is_file:
+            inline_image = not filename and mime_type.startswith("image/")
+            if not filename:
+                ext = _EXT_BY_MIME.get(mime_type) or mimetypes.guess_extension(mime_type) or ""
+                stem = "inline" if inline_image else "attachment"
+                filename = f"{stem}-{len(attachments) + 1}{ext}"
             attachments.append({
                 "filename": filename,
                 "mime_type": mime_type,
                 "size": str(body.get("size", "?")),
+                "attachment_id": str(att_id or ""),
+                "data": "" if att_id else str(inline_data or ""),
+                "inline": inline_image,
             })
             return
 
-        # Leaf part with data
+        # Leaf part with data (base64url; padding not guaranteed)
         data = body.get("data", "")
         if data:
             try:
-                decoded = base64.urlsafe_b64decode(data).decode("utf-8", errors="replace")
+                decoded = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4)).decode(
+                    "utf-8", errors="replace")
             except Exception:
                 decoded = ""
             if "text/plain" in mime_type and decoded:
@@ -1817,8 +2062,13 @@ class GoogleMailTool(Tool):
 
         if msg.get("attachments"):
             lines.append(f"\nAttachments ({len(msg['attachments'])}):")
-            for att in msg["attachments"]:
-                lines.append(f"  📎 {att['filename']} ({att['mime_type']}, {att['size']} bytes)")
+            for n, att in enumerate(msg["attachments"], 1):
+                inline = " — inline image" if att.get("inline") else ""
+                lines.append(f"  📎 [{n}] {att['filename']} ({att['mime_type']}, {att['size']} bytes){inline}")
+            lines.append(
+                f"  To open one: get_attachment with message_id='{msg['id']}' and "
+                "attachment=<number or name> (or 'all')."
+            )
 
         if msg.get("body"):
             lines.append(f"\n{'─' * 60}")
