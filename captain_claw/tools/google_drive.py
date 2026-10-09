@@ -176,6 +176,7 @@ _READER_BY_SUFFIX = {
     ".pdf": "pdf_extract", ".docx": "docx_extract",
     ".xlsx": "xlsx_extract", ".pptx": "pptx_extract",
     ".png": "image_vision", ".jpg": "image_vision", ".jpeg": "image_vision",
+    ".gif": "image_vision", ".webp": "image_vision", ".bmp": "image_vision",
 }
 
 # Inline base64 images in a Docs markdown export (``![](data:image/png;base64,…)``)

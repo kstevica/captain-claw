@@ -188,6 +188,11 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
     # Email
     (_re.compile(r"\bemail\b|\bmail\b|\bgmail\b|\bdraft\b|\bsend\s+(?:a\s+)?message\b", _re.I),
      frozenset({"send_mail", "google_mail"})),
+    # Attachments (EN / HR): google_mail / google_drive name the reader for a
+    # saved file — the extract tools and image_vision must be in the schema.
+    (_re.compile(r"\battach\w*|\bprilo[gzž]\w*|\bprivi[tc]\w*", _re.I),
+     frozenset({"google_mail", "pdf_extract", "docx_extract", "xlsx_extract",
+                "pptx_extract", "image_vision"})),
     # Calendar
     (_re.compile(r"\bcalendar\b|\bschedule\b|\bmeeting\b|\bagenda\b|\bevent\b", _re.I),
      frozenset({"google_calendar"})),
