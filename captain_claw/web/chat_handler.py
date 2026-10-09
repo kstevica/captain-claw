@@ -145,6 +145,18 @@ REROUTED_AUTOMATION_KINDS = frozenset({
 MIRRORED_AUTOMATION_KINDS = frozenset({"fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan"})
 
 
+def _reply_waid(whatsapp_waid: str | None, origin: dict | None,
+                media_to: str | None = None) -> str:
+    """The WhatsApp chat a turn answers ("" when none): where it came from,
+    or — for a scheduled job delivering to WhatsApp — where Flight Deck
+    said its files may go."""
+    if whatsapp_waid:
+        return str(whatsapp_waid).lstrip("+").strip()
+    if isinstance(origin, dict) and str(origin.get("kind", "")).strip().lower() == "whatsapp":
+        return str(origin.get("address", "")).lstrip("+").strip()
+    return str(media_to or "").lstrip("+").strip()
+
+
 def automation_lane_for(server: Any, automation: Any, lane: str, is_public: bool) -> str:
     """The lane an automated turn on the main chat moves to ("" = it stays)."""
     if automation is None or is_public or lane != server.LANE_MAIN:
@@ -304,6 +316,7 @@ async def handle_chat(
     automation: mail_authority.Authority | None = None,
     speaker_turn: str | None = None,
     speaker_grant: str | None = None,
+    whatsapp_media_to: str | None = None,
 ) -> bool:
     """Process a chat message through the agent.
 
@@ -602,6 +615,7 @@ async def handle_chat(
         no_rephrase=no_rephrase,
         automation=automation,
         rerouted=bool(rerouted),
+        reply_waid=_reply_waid(whatsapp_waid, origin, whatsapp_media_to if automation is not None else None),
         flow_text=content,
         flow_attach={
             "image_path": image_path or (image_paths[0] if image_paths else ""),
@@ -1009,6 +1023,7 @@ async def _run_agent(
     no_rephrase: bool = False,
     automation: mail_authority.Authority | None = None,
     rerouted: bool = False,
+    reply_waid: str = "",
     flow_text: str = "",
     flow_attach: dict | None = None,
     speaker_key: tuple[str, str] | None = None,
@@ -1067,6 +1082,12 @@ async def _run_agent(
     # Who started this turn — read by the mail-write guard and soft checks.
     # A frame without a marker is a person typing — except in an FD-spawned
     # worker or a being, where the process default (deny) stays (J7).
+    # The WhatsApp chat this turn answers ("" when none) and nothing sent to
+    # it yet — set for every path of the turn (flows and /orchestrate too),
+    # so no earlier turn's chat lingers as the tool's default recipient.
+    from captain_claw.tools import whatsapp_send_file as _wa_files
+
+    _wa_files.reset_turn(agent, reply_waid, automated=automation is not None)
     _auth_tok = mail_authority.bind(
         automation if automation is not None else mail_authority.interactive(flow_text or content)
     )
@@ -1218,6 +1239,12 @@ async def _run_agent(
             from captain_claw import msg_origin as _msg_origin
 
             _msg_origin.hint_turn_provenance(agent, channel=turn_channel)
+            # A WhatsApp turn: what it produces for the user goes back into
+            # that chat once the reply is out.
+            _wa_turn_start = len(agent.session.messages) if getattr(agent, "session", None) else 0
+            import time as _wa_time
+
+            _wa_started_at = _wa_time.time()
             response = await agent.complete(content)
             # Read right away, before any other await: a concurrent turn on
             # this Agent object could reset it (contract part 0c NB7). The
@@ -1242,6 +1269,12 @@ async def _run_agent(
             })
             if rerouted and automation is not None and automation.kind in MIRRORED_AUTOMATION_KINDS:
                 asyncio.create_task(_mirror_automation_result(server, ws, automation, response, lane))
+            if reply_waid:
+                asyncio.create_task(_wa_files.deliver_turn_media(
+                    agent, reply_waid, _wa_turn_start, reply=str(response or ""),
+                    turn_started_at=_wa_started_at,
+                    already_sent=_wa_files.sent_this_turn(agent),
+                ))
 
             # Extract and broadcast suggested next steps — skip for FD-spawned
             # workers (Basna/Vatra/Council/Code): they're orchestrated, headless,
@@ -1421,6 +1454,9 @@ async def _run_agent(
             "type": "status", "status": "ready",
             **({"turn_end": speaker_turn} if speaker_key else {}),
         })
+        # The turn's WhatsApp chat ends with it (a later cron or channel turn
+        # on this session must not inherit it).
+        _wa_files.reset_turn(agent)
         _return_socket(server, ws, lane)
         if _speaker_tok is not None:
             _speaker.reset(_speaker_tok)

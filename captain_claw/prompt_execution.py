@@ -284,6 +284,11 @@ async def run_prompt_in_active_session(
 
         started = time.perf_counter()
         assistant_text = ""
+        # No WhatsApp chat for this turn (CLI, remote platforms, cron): the
+        # end-of-turn file delivery runs only on web/channel turns.
+        from captain_claw.tools.whatsapp_send_file import reset_turn as _reset_wa_turn
+
+        _reset_wa_turn(agent, automated=bool(cron_job_id))
         try:
             # Clear stale thinking text from previous prompt before starting.
             if hasattr(ui, "set_thinking"):

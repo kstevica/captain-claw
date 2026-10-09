@@ -789,6 +789,21 @@ class TelegramConfig(BaseModel):
     pairing_ttl_minutes: int = 30
 
 
+class WhatsAppConfig(BaseModel):
+    """Replies over WhatsApp. Flight Deck's bridge carries the text; the agent
+    sends media itself through the Cloud API (WHATSAPP_ACCESS_TOKEN /
+    WHATSAPP_PHONE_NUMBER_ID, passed down by Flight Deck)."""
+
+    # After a turn that answers a WhatsApp chat (it came from one, or it is a
+    # Flight Deck scheduled job delivering to an allowlisted, unmuted
+    # number), send what it made for the user there: pictures from image_gen
+    # or the phone camera, audio from pocket_tts, and files written during the
+    # turn under saved/<category>/<session>/ that the reply names (not
+    # scripts/tools/skills/downloads). Browser screenshots are not sent.
+    auto_send_media: bool = True
+    max_media_per_turn: int = 6
+
+
 class SlackConfig(BaseModel):
     """Slack bot UI configuration."""
 
@@ -1447,6 +1462,7 @@ class Config(BaseSettings):
     execution_queue: ExecutionQueueConfig = Field(default_factory=ExecutionQueueConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     telegram: TelegramConfig = Field(default_factory=TelegramConfig)
+    whatsapp: WhatsAppConfig = Field(default_factory=WhatsAppConfig)
     slack: SlackConfig = Field(default_factory=SlackConfig)
     discord: DiscordConfig = Field(default_factory=DiscordConfig)
     twitter: TwitterConfig = Field(default_factory=TwitterConfig)
