@@ -16,6 +16,12 @@ from typing import Any, TypeVar
 from captain_claw.config import get_config
 from captain_claw.cron import now_utc, to_utc_iso
 from captain_claw.logging import log
+from captain_claw.turn_deliverables import (
+    keep_deliverables,
+    named_new_files,
+    saved_root_of,
+    turn_started_at,
+)
 
 if True:  # TYPE_CHECKING style import to avoid circular at runtime
     from captain_claw.runtime_context import RuntimeContext
@@ -101,8 +107,11 @@ def effective_turn_start_idx(agent: Any, captured_idx: int) -> int:
     return captured_idx
 
 
-def collect_turn_generated_audio_paths(session: Any, turn_start_idx: int) -> list[Path]:
-    """Collect pocket_tts generated MP3 files from current turn tool outputs."""
+def collect_turn_generated_audio_paths(
+    session: Any, turn_start_idx: int, *, saved_root: Path | None = None, since: float = 0.0,
+) -> list[Path]:
+    """pocket_tts MP3s of the current turn — only deliverables (inside the
+    agent's ``saved_root``, made this turn; see :mod:`turn_deliverables`)."""
     if not session:
         return []
     paths: list[Path] = []
@@ -120,7 +129,7 @@ def collect_turn_generated_audio_paths(session: Any, turn_start_idx: int) -> lis
                 continue
             seen.add(key)
             paths.append(path)
-    return paths
+    return keep_deliverables(paths, saved_root, since=since)
 
 
 _IMAGE_EXTENSIONS: set[str] = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -156,8 +165,14 @@ def extract_image_paths_from_tool_output(content: str) -> list[Path]:
     return paths
 
 
-def collect_turn_generated_image_paths(session: Any, turn_start_idx: int) -> list[Path]:
-    """Collect image_gen generated image files from current turn tool outputs."""
+def collect_turn_generated_image_paths(
+    session: Any, turn_start_idx: int, *, saved_root: Path | None = None, since: float = 0.0,
+    agent: Any = None, reply: str = "",
+) -> list[Path]:
+    """Pictures the current turn made for the user: what image_gen, termux and
+    browser screenshots reported, plus pictures the session wrote this turn
+    that the reply names. Only deliverables — a ``Path:`` line in a web page
+    or its vision description can't send a local file (:mod:`turn_deliverables`)."""
     if not session:
         return []
     paths: list[Path] = []
@@ -175,13 +190,21 @@ def collect_turn_generated_image_paths(session: Any, turn_start_idx: int) -> lis
                 continue
             seen.add(key)
             paths.append(path)
-    return paths
+    found = keep_deliverables(paths, saved_root, since=since)
+    if agent is not None and reply:
+        keys = {str(p.resolve()) for p in found}
+        for path in named_new_files(agent, reply, since or turn_started_at(session, turn_start_idx),
+                                    _IMAGE_EXTENSIONS):
+            if str(path.resolve()) not in keys:
+                keys.add(str(path.resolve()))
+                found.append(path)
+    return found
 
 
 _DOCUMENT_EXTENSIONS: set[str] = {
-    ".pdf", ".docx", ".doc", ".pptx", ".ppt",
-    ".xlsx", ".xls", ".csv",
-    ".txt", ".md", ".vcf",
+    ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".odt", ".ods", ".odp", ".rtf",
+    ".xlsx", ".xls", ".csv", ".tsv",
+    ".txt", ".md", ".vcf", ".ics", ".json", ".html", ".zip",
 }
 
 
@@ -215,24 +238,20 @@ def extract_document_paths_from_tool_output(content: str) -> list[Path]:
     return paths
 
 
-def collect_turn_generated_document_paths(session: Any, turn_start_idx: int) -> list[Path]:
-    """Collect document files generated during current turn from tool outputs."""
-    if not session:
+def collect_turn_generated_document_paths(
+    session: Any, turn_start_idx: int, *, agent: Any = None, reply: str = "", since: float = 0.0,
+) -> list[Path]:
+    """Documents the current turn made for the user: files the session wrote
+    during the turn (in ``saved/<category>/<session>/``, not scripts, tools,
+    skills or downloads) that the reply names by file name.
+
+    Tool output is never scanned for paths: a Drive download, an email body
+    or a web page can carry a ``Path:`` line naming any file on the host
+    (:mod:`turn_deliverables`). Without the agent nothing is collected."""
+    if not session or agent is None:
         return []
-    paths: list[Path] = []
-    seen: set[str] = set()
-    for msg in session.messages[max(0, int(turn_start_idx)):]:
-        if str(msg.get("role", "")).strip().lower() != "tool":
-            continue
-        if str(msg.get("content", "")).strip().lower().startswith("error:"):
-            continue
-        for path in extract_document_paths_from_tool_output(str(msg.get("content", ""))):
-            key = str(path)
-            if key in seen:
-                continue
-            seen.add(key)
-            paths.append(path)
-    return paths
+    since = since or turn_started_at(session, turn_start_idx)
+    return named_new_files(agent, reply, since, _DOCUMENT_EXTENSIONS)
 
 
 def cleanup_expired_pairings(pending_map: dict[str, dict[str, object]]) -> None:
@@ -706,9 +725,12 @@ class PlatformAdapter:
         channel_id: Any,
         reply_to: Any,
         turn_start_idx: int,
+        reply: str = "",
     ) -> None:
+        agent = self.ctx.agent
         generated_paths = collect_turn_generated_image_paths(
-            self.ctx.agent.session, turn_start_idx,
+            agent.session, turn_start_idx, saved_root=saved_root_of(agent),
+            since=turn_started_at(agent.session, turn_start_idx), agent=agent, reply=reply,
         )
         for path in generated_paths:
             await self.send_image_file(
@@ -722,9 +744,10 @@ class PlatformAdapter:
         channel_id: Any,
         reply_to: Any,
         turn_start_idx: int,
+        reply: str = "",
     ) -> None:
         generated_paths = collect_turn_generated_document_paths(
-            self.ctx.agent.session, turn_start_idx,
+            self.ctx.agent.session, turn_start_idx, agent=self.ctx.agent, reply=reply,
         )
         for path in generated_paths:
             await self.send_document_file(
@@ -741,8 +764,10 @@ class PlatformAdapter:
         assistant_text: str,
         turn_start_idx: int,
     ) -> None:
+        agent = self.ctx.agent
         generated_paths = collect_turn_generated_audio_paths(
-            self.ctx.agent.session, turn_start_idx,
+            agent.session, turn_start_idx, saved_root=saved_root_of(agent),
+            since=turn_started_at(agent.session, turn_start_idx),
         )
         if generated_paths:
             for path in generated_paths:
@@ -797,7 +822,8 @@ class PlatformAdapter:
                 )
                 return
 
-            for path in extract_audio_paths_from_tool_output(tool_output):
+            for path in keep_deliverables(extract_audio_paths_from_tool_output(tool_output),
+                                          saved_root_of(self.ctx.agent)):
                 await self.send_audio_file(
                     channel_id, path, caption="Audio summary", reply_to=reply_to,
                 )

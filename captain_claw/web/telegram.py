@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -952,6 +953,7 @@ async def _tg_process_with_typing(
                     })
             else:
                 turn_start_idx = len(user_agent.session.messages) if user_agent.session else 0
+                turn_started_at = time.time()  # what this turn writes counts as a deliverable
                 log.info("Telegram agent.complete() start", user_id=user_id, text_len=len(text))
                 with mail_authority.bound(mail_authority.interactive(text)):
                     from captain_claw import msg_origin as _msg_origin
@@ -962,15 +964,22 @@ async def _tg_process_with_typing(
 
                 await _tg_send(server, chat_id, response, reply_to_message_id=reply_to_message_id)
 
-                # Send any generated images back to Telegram.
+                # Send what the turn made for the user back to Telegram — only
+                # deliverables: files in the agent's saved/ area written this
+                # turn (pictures a tool made, documents the reply names), never
+                # a path some tool output, email body or web page printed.
                 from captain_claw.platform_adapter import (
                     collect_turn_generated_document_paths,
                     collect_turn_generated_image_paths,
                     effective_turn_start_idx,
                 )
+                from captain_claw.turn_deliverables import saved_root_of
                 turn_start_idx = effective_turn_start_idx(user_agent, turn_start_idx)
                 if user_agent.session and server._telegram_bridge:
-                    for img_path in collect_turn_generated_image_paths(user_agent.session, turn_start_idx):
+                    for img_path in collect_turn_generated_image_paths(
+                        user_agent.session, turn_start_idx, saved_root=saved_root_of(user_agent),
+                        since=turn_started_at, agent=user_agent, reply=response or "",
+                    ):
                         try:
                             await server._telegram_bridge.send_photo(
                                 chat_id, img_path, reply_to_message_id=reply_to_message_id,
@@ -980,7 +989,10 @@ async def _tg_process_with_typing(
 
                 # Send any generated documents back to Telegram.
                 if user_agent.session and server._telegram_bridge:
-                    for doc_path in collect_turn_generated_document_paths(user_agent.session, turn_start_idx):
+                    for doc_path in collect_turn_generated_document_paths(
+                        user_agent.session, turn_start_idx, agent=user_agent,
+                        reply=response or "", since=turn_started_at,
+                    ):
                         try:
                             await server._telegram_bridge.send_document(
                                 chat_id, doc_path,
