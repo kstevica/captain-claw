@@ -584,7 +584,10 @@ async def run_prompt_and_capture(
     fut: asyncio.Future[str] = loop.create_future()
 
     async def _capture(payload: dict) -> None:
-        if payload.get("type") == "agent" and payload.get("text") and not fut.done():
+        # A result mirrored into the main chat (automation_lane) belongs to
+        # another automated turn that ended while this one waited for its lane.
+        if (payload.get("type") == "agent" and payload.get("text")
+                and not payload.get("automation_lane") and not fut.done()):
             fut.set_result(str(payload["text"]))
 
     ch.callback_subscribers.append(_capture)
@@ -766,9 +769,12 @@ async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str,
     reply = await run_prompt_and_capture(
         host=host, port=port, auth=auth,
         prompt=_fire_time_preamble() + raw_prompt,
+        # fd_delivers: this run's result goes out through _deliver below, so
+        # the agent's mirror of it into the main chat isn't relayed again by
+        # the chat bridges (a scheduled WhatsApp job arrived twice).
         automation={"kind": "fd_scheduler",
                     "job_text": (raw_prompt if human_written else "")[:4000],
-                    "mail_write": "intent"},
+                    "mail_write": "intent", "fd_delivers": True},
         whatsapp_media_to=_media_target(_kind, _target),
     )
     if reply is None:

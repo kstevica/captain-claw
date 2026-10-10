@@ -244,13 +244,14 @@ def _sync_automation_agent(server: Any, agent: Any) -> None:
 
 
 async def _mirror_automation_result(
-    server: Any, ws: Any, automation: Any, reply: str, lane: str,
+    server: Any, ws: Any, automation: Any, reply: str, lane: str, *, fd_delivers: bool = False,
 ) -> None:
     """Bring an automated turn's result into the main chat (and the channels
     bound to it) once lane A is idle: shown live, and kept in the main
     session so a follow-up there has it as context. While lane A is busy the
     result waits in the session's metadata; the next lane-A turn takes it in
-    first if it is still waiting then."""
+    first if it is still waiting then. ``fd_delivers``: Flight Deck sends the
+    result out itself, so the chat bridges show it but don't relay it."""
     text = str(reply or "").strip()
     main = getattr(server, "agent", None)
     session = getattr(main, "session", None)
@@ -260,7 +261,8 @@ async def _mirror_automation_result(
     label = label[:1].upper() + label[1:]
     pending = session.metadata.setdefault(PENDING_RESULTS_KEY, [])
     pending.append({"label": label, "lane": lane, "text": text,
-                    "at": datetime.now(UTC).isoformat()})
+                    "at": datetime.now(UTC).isoformat(),
+                    **({"fd_delivers": True} if fd_delivers else {})})
     del pending[: max(0, len(pending) - _PENDING_RESULTS_KEPT)]
     for _ in range(_MIRROR_WAIT_TICKS):
         if not server._busy:
@@ -283,6 +285,7 @@ async def flush_automation_results(server: Any, exclude: Any = None) -> int:
             "type": "chat_message", "role": "assistant", "content": text,
             "timestamp": item.get("at") or datetime.now(UTC).isoformat(),
             "automation_lane": item.get("lane") or "",
+            **({"fd_delivers": True} if item.get("fd_delivers") else {}),
         }, exclude=exclude)
         session.add_message(
             "assistant", f"[{item.get('label') or 'Automated turn'} — from the "
@@ -472,6 +475,14 @@ def busy_refusal_fields(client_msg_id: str = "") -> dict[str, Any]:
     return out
 
 
+def fd_still_delivers(fd_delivers: bool, automation: Any, ws: Any) -> bool:
+    """Does Flight Deck still deliver this automated turn's result itself? Only
+    while it is listening: once it gave up waiting (its socket closed — a job
+    capture or a nudge collector timed out) nothing else will send it, so the
+    chat bridges must."""
+    return bool(fd_delivers and automation is not None and not getattr(ws, "closed", False))
+
+
 def accepted_fields(client_msg_id: str = "") -> dict[str, Any]:
     """The turn-start ``thinking`` names the frame it accepted, so a bridge
     sending turns one at a time knows this one is taken."""
@@ -504,6 +515,7 @@ async def handle_chat(
     speaker_grant: str | None = None,
     whatsapp_media_to: str | None = None,
     client_msg_id: str = "",
+    fd_delivers: bool = False,
 ) -> bool:
     """Process a chat message through the agent.
 
@@ -756,6 +768,7 @@ async def handle_chat(
         no_next_steps=no_next_steps,
         no_rephrase=no_rephrase,
         automation=automation,
+        fd_delivers=fd_delivers,
         rerouted=bool(rerouted),
         reply_waid=_reply_waid(whatsapp_waid, origin, whatsapp_media_to if automation is not None else None),
         flow_text=user_words,
@@ -1165,6 +1178,7 @@ async def _run_agent(
     no_next_steps: bool = False,
     no_rephrase: bool = False,
     automation: mail_authority.Authority | None = None,
+    fd_delivers: bool = False,
     rerouted: bool = False,
     reply_waid: str = "",
     flow_text: str = "",
@@ -1406,6 +1420,7 @@ async def _run_agent(
                 public=is_public,
             )
 
+            _fd_delivers_now = fd_still_delivers(fd_delivers, automation, ws)
             send({
                 "type": "chat_message",
                 "role": "assistant",
@@ -1413,9 +1428,13 @@ async def _run_agent(
                 "timestamp": datetime.now(UTC).isoformat(),
                 "model": model_label,
                 **({"member_private": _private_level} if _private_level else {}),
+                # Flight Deck delivers this automated result itself: a chat
+                # bridge on this lane (automation lane off) must not relay it.
+                **({"fd_delivers": True} if _fd_delivers_now else {}),
             })
             if rerouted and automation is not None and automation.kind in MIRRORED_AUTOMATION_KINDS:
-                asyncio.create_task(_mirror_automation_result(server, ws, automation, response, lane))
+                asyncio.create_task(_mirror_automation_result(
+                    server, ws, automation, response, lane, fd_delivers=_fd_delivers_now))
             if reply_waid:
                 asyncio.create_task(_wa_files.deliver_turn_media(
                     agent, reply_waid, _wa_turn_start, reply=str(response or ""),

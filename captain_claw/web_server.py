@@ -1382,22 +1382,28 @@ class WebServer:
             agent's own Telegram bridge. Either way it's also surfaced in any
             connected web chat for this agent (the cron UI is otherwise silent,
             so a UI-created job would produce nothing visible)."""
-            # 0) Always show it in the connected web chat.
+            # 1) Durable origin routing via Flight Deck (owns channel creds).
+            delivered = False
+            try:
+                from captain_claw.delivery import deliver_to_origin
+                delivered = bool(await deliver_to_origin(server.agent, session_id, text))
+            except Exception:
+                log.debug("cron origin delivery failed; trying local fallback", exc_info=True)
+            # 0) Always show it in the connected web chat. A proactive message
+            # (chat bridges honour /mute); when Flight Deck delivered it, the
+            # bridges don't relay this copy too (fd_delivers) — it arrived twice.
             try:
                 server._broadcast({
                     "type": "chat_message",
                     "role": "assistant",
                     "content": text,
+                    "proactive": True,
+                    **({"fd_delivers": True} if delivered else {}),
                 })
             except Exception:
                 log.debug("cron web broadcast failed", exc_info=True)
-            # 1) Durable origin routing via Flight Deck (owns channel creds).
-            try:
-                from captain_claw.delivery import deliver_to_origin
-                if await deliver_to_origin(server.agent, session_id, text):
-                    return
-            except Exception:
-                log.debug("cron origin delivery failed; trying local fallback", exc_info=True)
+            if delivered:
+                return
             # 2) Standalone fallback: local Telegram bridge (legacy behavior).
             bridge = server._telegram_bridge
             if not bridge:

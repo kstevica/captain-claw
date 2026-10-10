@@ -5423,6 +5423,17 @@ captain-claw-fd
 
 ---
 
+### WhatsApp: automated messages arrive once
+
+An autonomy nudge, a Flight Deck scheduled job or an agent cron result used to reach WhatsApp twice. One copy was plain text: the result shown in the agent's main chat and relayed by the bridge. The other was formatted: Flight Deck's own delivery.
+
+Now the copy in the main chat is marked `fd_delivers` whenever Flight Deck delivers the result itself, and the WhatsApp bridge shows it there but doesn't relay it. Only Flight Deck's formatted copy arrives, however late the main-chat copy appears. The mark is set in these cases:
+- **every scheduled job;**
+- **a nudge** when Flight Deck will push it to WhatsApp (a bound, allowlisted number), or when `nudge_to_whatsapp` is off;
+- **an agent cron result** that Flight Deck routed back to where the session came from.
+
+If Flight Deck stops waiting for a slow turn, the result isn't marked, so it still arrives once through the bridge. A nudge with no number to push to is also left unmarked. Automated results the bridge still relays (plans, cron results Flight Deck didn't route, autonomous actions that aren't nudges) respect `/mute`, the same as pushes.
+
 ### WhatsApp: files you send
 
 Every file you send over WhatsApp reaches the agent: documents of any type (xlsx, docx, pdf, zip, json, …), photos, stickers, audio files and videos. Flight Deck downloads each file from WhatsApp and uploads it to the bound agent with `POST /api/file/upload?extract=0`, which keeps a zip as a zip. The agent gets a short note for each file: its name, type, size, caption and transcript. These notes are shown next to the attachments, never as your own words.

@@ -291,11 +291,21 @@ async def _forward_agent_msg(ch: "_ChannelState", data: dict) -> None:
     mtype = data.get("type")
     if mtype == "chat_message":
         if data.get("role", "") == "assistant":
-            await _broadcast(ch, {
+            event = {
                 "type": "agent",
                 "text": str(data.get("content", "")),
                 "ts": data.get("timestamp") or _now_iso(),
-            })
+            }
+            # An automated turn's result mirrored into the main chat: chat
+            # bridges treat it as a proactive message. fd_delivers (mirrored
+            # or not): Flight Deck sends it out itself, so they skip it.
+            if data.get("automation_lane"):
+                event["automation_lane"] = str(data["automation_lane"])
+            if data.get("fd_delivers"):
+                event["fd_delivers"] = True
+            if data.get("proactive"):
+                event["proactive"] = True  # e.g. an agent cron result
+            await _broadcast(ch, event)
         # We don't echo "user" chat_messages back — mobile already injected its
         # own "user" event for instant local display.
     elif mtype == "narration":

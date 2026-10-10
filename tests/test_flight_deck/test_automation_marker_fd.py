@@ -230,7 +230,10 @@ async def test_execute_job_marks_fd_scheduler(monkeypatch, author, expect):
     job = {**_JOB, "id": "j1", "prompt_author": author}
     await sched.execute_job(job, force=True)
     (kw,) = seen
-    assert kw["automation"] == {"kind": "fd_scheduler", "job_text": expect, "mail_write": "intent"}
+    # fd_delivers: Flight Deck delivers the result itself, so the agent's
+    # mirror of it into the main chat isn't relayed to WhatsApp again.
+    assert kw["automation"] == {"kind": "fd_scheduler", "job_text": expect, "mail_write": "intent",
+                                "fd_delivers": True}
     assert kw["prompt"].endswith(_JOB["prompt"]) and kw["prompt"] != _JOB["prompt"]  # preamble only in the prompt
 
 
