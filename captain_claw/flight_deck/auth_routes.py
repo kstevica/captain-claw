@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
-from datetime import datetime, timedelta, timezone
+import secrets
+import time
+import unicodedata
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Response, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, EmailStr
 
 from captain_claw.flight_deck.auth import (
@@ -20,8 +26,11 @@ from captain_claw.flight_deck.auth import (
     hash_token,
     verify_password,
 )
+from captain_claw.flight_deck.rate_limiter import _SlidingWindow
 
 router = APIRouter(prefix="/fd/auth", tags=["auth"])
+
+log = logging.getLogger("flight_deck.auth")
 
 
 # ── Request / response models ───────────────────────────────────────
@@ -158,6 +167,12 @@ async def login(body: LoginRequest, response: Response):
     if not user or not verify_password(body.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
+    return await _issue_session(db, user, response)
+
+
+async def _issue_session(db, user: dict, response: Response) -> TokenResponse:
+    """Sign *user* in on this response: a fresh access token, a new refresh
+    session row and the refresh cookie. Shared by login and device pairing."""
     access_token = create_access_token(user["id"], role=user["role"])
     refresh_token = create_refresh_token()
 
@@ -292,3 +307,245 @@ async def update_me(body: UpdateProfileRequest, user: dict = Depends(get_current
         "id": updated["id"], "email": updated["email"],
         "display_name": updated["display_name"], "role": updated["role"],
     }
+
+
+# ── Device pairing (RFC 8628-style device authorization) ─────────────
+# A device that can't comfortably type a password (smart glasses) signs in by
+# showing a short user code; the wearer approves it from a phone/desktop where
+# they are already signed in. The device then receives a normal session —
+# access token + the fd_refresh cookie, exactly as login() issues them — so
+# refresh, logout and /fd/agent-ws work unchanged. Nothing secret is typed or
+# spoken on the device.
+#
+#   POST /fd/auth/pair/start    public   {label?}             → device_code, user_code, …
+#   POST /fd/auth/pair/poll     public   {device_code}        → pending|denied|expired|approved(+tokens)
+#   GET  /fd/auth/pair/lookup   signed-in ?code=XXXX-XXXX     → which device is asking
+#   POST /fd/auth/pair/approve  signed-in {user_code, approve} → approved|denied
+#
+# The store is in-memory: Flight Deck runs as a single uvicorn process, and a
+# pairing lives for minutes, so a restart only forces the device to show a
+# new code. Only sha256(device_code) is kept. Codes are single-use: a poll that
+# reports approved/denied deletes the pairing. The poll lives under /fd/auth so
+# the refresh cookie (path=/fd/auth) set on its response is the one refresh reads.
+
+PAIR_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"  # 20 consonants: no vowels (no words), no 0/O/1/I
+PAIR_CODE_LEN = 8                       # 20^8 ≈ 2.6e10 codes
+PAIR_TTL_S = 600
+PAIR_INTERVAL_S = 3
+PAIR_MAX_PENDING = 500
+PAIR_VERIFICATION_PATH = "/hud/pair"
+PAIR_LABEL_MAX = 60
+PAIR_UA_MAX = 300
+
+# Rate limits: (count, window seconds).
+PAIR_START_LIMIT = (10, 600.0)     # per client IP
+PAIR_POLL_LIMIT = (120, 60.0)      # per client IP (a device polls every 3 s)
+PAIR_APPROVER_LIMIT = (30, 60.0)   # per signed-in user, for lookup and approve each
+
+
+@dataclass
+class _Pairing:
+    user_code: str          # normalized, 8 chars of PAIR_ALPHABET
+    device_hash: str        # sha256(device_code)
+    label: str
+    user_agent: str
+    ip: str
+    created_at: float       # epoch seconds (_now)
+    expires_at: float
+    status: str = "pending"  # pending | approved | denied
+    approved_by: str = ""    # user id of the approver
+
+
+_pairings: dict[str, _Pairing] = {}   # user_code → pairing
+_pairings_by_device: dict[str, str] = {}  # sha256(device_code) → user_code
+
+
+def _now() -> float:
+    """Wall clock for pairing expiry (monkeypatched by tests)."""
+    return time.time()
+
+
+_pair_start_limiter = _SlidingWindow()
+_pair_poll_limiter = _SlidingWindow()
+_pair_approver_limiter = _SlidingWindow()
+
+
+_LIMITER_GC_AT = 5000  # distinct keys before idle ones are dropped
+
+
+def _rate_limit(limiter: _SlidingWindow, key: str, limit: tuple[int, float]) -> None:
+    # The public endpoints are keyed by client IP: drop idle keys now and then
+    # so a spray of addresses can't grow the limiter without bound.
+    if len(limiter._requests) > _LIMITER_GC_AT:
+        cutoff = time.monotonic() - limit[1]
+        for k in [k for k, ts in limiter._requests.items() if not ts or ts[-1] <= cutoff]:
+            del limiter._requests[k]
+    if not limiter.check(key, limit[0], limit[1]):
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Too many requests — try again in a moment.")
+
+
+def _require_auth_enabled() -> None:
+    if not _fd_auth_enabled():
+        raise HTTPException(
+            status_code=400,
+            detail="Device pairing is unavailable: this Flight Deck runs without accounts (FD_AUTH_ENABLED=false).",
+        )
+
+
+def _client_ip(request: Request) -> str:
+    # uvicorn already resolves X-Forwarded-For for trusted local proxies
+    # (FORWARDED_ALLOW_IPS); never trust the raw header here.
+    return request.client.host if request.client else ""
+
+
+def _clean_text(value: str | None, cap: int) -> str:
+    """Drop control/format characters (incl. bidi overrides), collapse
+    whitespace, cap the length — the approver reads this to decide."""
+    raw = str(value or "")[: cap * 4]
+    kept = "".join(" " if ch.isspace() else ch for ch in raw
+                   if ch.isspace() or not unicodedata.category(ch).startswith("C"))
+    return " ".join(kept.split())[:cap]
+
+
+def normalize_user_code(code: str | None) -> str:
+    """Uppercase and keep only alphabet letters: 'bcdf-ghjk' → 'BCDFGHJK'."""
+    return "".join(ch for ch in str(code or "").upper()[:64] if ch in PAIR_ALPHABET)
+
+
+def format_user_code(code: str) -> str:
+    return f"{code[:4]}-{code[4:]}" if len(code) == PAIR_CODE_LEN else code
+
+
+def _hash_device_code(device_code: str) -> str:
+    return hashlib.sha256(device_code.encode("utf-8")).hexdigest()
+
+
+def _drop_pairing(p: _Pairing) -> None:
+    _pairings.pop(p.user_code, None)
+    _pairings_by_device.pop(p.device_hash, None)
+
+
+def _purge_expired(now: float) -> None:
+    for p in [p for p in _pairings.values() if p.expires_at <= now]:
+        _drop_pairing(p)
+
+
+def _pending(code: str | None, now: float) -> _Pairing | None:
+    p = _pairings.get(normalize_user_code(code))
+    if p is None or p.status != "pending" or p.expires_at <= now:
+        return None
+    return p
+
+
+class PairStartRequest(BaseModel):
+    label: str | None = None
+
+
+class PairPollRequest(BaseModel):
+    device_code: str
+
+
+class PairApproveRequest(BaseModel):
+    user_code: str
+    approve: bool
+
+
+@router.post("/pair/start")
+async def pair_start(request: Request, body: PairStartRequest | None = None):
+    _require_auth_enabled()
+    now = _now()
+    _purge_expired(now)
+    ip = _client_ip(request)
+    _rate_limit(_pair_start_limiter, f"ip:{ip}", PAIR_START_LIMIT)
+    if len(_pairings) >= PAIR_MAX_PENDING:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                            detail="Too many pairings in progress — try again in a few minutes.")
+    for _ in range(20):
+        user_code = "".join(secrets.choice(PAIR_ALPHABET) for _ in range(PAIR_CODE_LEN))
+        if user_code not in _pairings:
+            break
+    else:  # pragma: no cover — 500 live codes out of 2.6e10
+        raise HTTPException(status_code=503, detail="Could not allocate a pairing code")
+    device_code = secrets.token_urlsafe(32)
+    pairing = _Pairing(
+        user_code=user_code,
+        device_hash=_hash_device_code(device_code),
+        label=_clean_text(body.label if body else "", PAIR_LABEL_MAX),
+        user_agent=_clean_text(request.headers.get("user-agent", ""), PAIR_UA_MAX),
+        ip=ip,
+        created_at=now,
+        expires_at=now + PAIR_TTL_S,
+    )
+    _pairings[user_code] = pairing
+    _pairings_by_device[pairing.device_hash] = user_code
+    return {
+        "device_code": device_code,
+        "user_code": format_user_code(user_code),
+        "expires_in": PAIR_TTL_S,
+        "interval": PAIR_INTERVAL_S,
+        "verification_path": PAIR_VERIFICATION_PATH,
+    }
+
+
+@router.post("/pair/poll")
+async def pair_poll(body: PairPollRequest, request: Request, response: Response):
+    _require_auth_enabled()
+    now = _now()
+    _purge_expired(now)
+    _rate_limit(_pair_poll_limiter, f"ip:{_client_ip(request)}", PAIR_POLL_LIMIT)
+    code = _pairings_by_device.get(_hash_device_code(body.device_code[:256]))
+    p = _pairings.get(code) if code else None
+    if p is None:
+        return {"status": "expired"}
+    if p.status == "pending":
+        return {"status": "pending"}
+    # approved / denied: single use. Drop it before any await so two racing
+    # polls can't both claim the session.
+    _drop_pairing(p)
+    if p.status == "denied":
+        return {"status": "denied"}
+    db = get_db()
+    user = await db.get_user_by_id(p.approved_by)
+    if not user:
+        return {"status": "denied"}
+    issued = await _issue_session(db, user, response)
+    log.info("device pairing claimed: user=%s label=%r ip=%s", user["id"], p.label, p.ip)
+    return {"status": "approved", **issued.model_dump()}
+
+
+@router.get("/pair/lookup")
+async def pair_lookup(code: str = Query("", max_length=64), user: dict = Depends(get_current_user)):
+    _require_auth_enabled()
+    now = _now()
+    _purge_expired(now)
+    _rate_limit(_pair_approver_limiter, f"lookup:{user['id']}", PAIR_APPROVER_LIMIT)
+    p = _pending(code, now)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired code")
+    return {
+        "user_code": format_user_code(p.user_code),
+        "label": p.label,
+        "user_agent": p.user_agent,
+        "ip": p.ip,
+        "created_at": datetime.fromtimestamp(p.created_at, UTC).isoformat(),
+        "expires_in": max(0, int(p.expires_at - now)),
+    }
+
+
+@router.post("/pair/approve")
+async def pair_approve(body: PairApproveRequest, user: dict = Depends(get_current_user)):
+    _require_auth_enabled()
+    now = _now()
+    _purge_expired(now)
+    _rate_limit(_pair_approver_limiter, f"approve:{user['id']}", PAIR_APPROVER_LIMIT)
+    p = _pending(body.user_code, now)
+    if p is None:
+        raise HTTPException(status_code=404, detail="Unknown or expired code")
+    if body.approve:
+        p.status = "approved"
+        p.approved_by = str(user["id"])
+    else:
+        p.status = "denied"
+    log.info("device pairing %s by user=%s label=%r ip=%s", p.status, user["id"], p.label, p.ip)
+    return {"ok": True, "status": p.status}

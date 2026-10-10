@@ -48,7 +48,7 @@ export default defineConfig({
       // only small chunks (react, the auth store) — the HUD must never pull
       // the dashboard's three.js / web-llm / xyflow graph.
       input: {
-        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        index: fileURLToPath(new URL('./index.html', import.meta.url)),
         hud: fileURLToPath(new URL('./hud.html', import.meta.url)),
       },
     },

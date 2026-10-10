@@ -1,0 +1,235 @@
+/* HUD markdown (HudMarkdown) — file previews and chat bubbles.
+ *
+ * Nothing in here may widen the page: long words, URLs, code and table cells
+ * all break anywhere (Meta QA flags horizontal overflow). Margins stay tight
+ * because chat bubbles use the same component.
+ */
+
+.hud-md {
+  min-width: 0;
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+.hud-md > :first-child { margin-top: 0; }
+.hud-md > :last-child { margin-bottom: 0; }
+
+.hud-md p { margin: 0 0 0.6em; }
+
+.hud-md h1,
+.hud-md h2,
+.hud-md h3,
+.hud-md h4,
+.hud-md h5,
+.hud-md h6 {
+  margin: 0.8em 0 0.35em;
+  font-weight: 700;
+  line-height: 1.25;
+  color: var(--text);
+}
+.hud-md h1 { font-size: 26px; }
+.hud-md h2 { font-size: 23px; }
+.hud-md h3 { font-size: 21px; }
+.hud-md h4 { font-size: var(--fs-md); }
+.hud-md h5,
+.hud-md h6 { font-size: var(--fs-md); color: var(--text-3); }
+
+.hud-md strong { font-weight: 700; color: var(--text); }
+.hud-md del { color: var(--text-3); }
+.hud-md sup,
+.hud-md sub { font-size: 0.7em; line-height: 0; }
+
+.hud-md hr {
+  margin: 12px 0;
+  border: 0;
+  border-top: 1px solid var(--line);
+}
+
+/* Lists */
+.hud-md ul,
+.hud-md ol { margin: 0 0 0.6em; padding-left: 1.4em; }
+.hud-md li { margin: 0.2em 0; }
+.hud-md li > p { margin: 0 0 0.3em; }
+.hud-md li > :last-child { margin-bottom: 0; }
+.hud-md li ul,
+.hud-md li ol { margin: 0.2em 0 0; }
+.hud-md li::marker { color: var(--text-3); }
+/* Task items: the checkbox glyph takes the bullet's place. */
+.hud-md li.task-list-item { list-style: none; }
+.hud-md-check { color: var(--accent); }
+.hud-md li.task-list-item .hud-md-check { display: inline-block; width: 1.4em; margin-left: -1.4em; }
+
+/* Code */
+.hud-md code {
+  padding: 0.08em 0.35em;
+  border-radius: 6px;
+  background: var(--surface-2);
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  font-size: 0.85em;
+}
+.hud-md pre {
+  margin: 0 0 0.6em;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-2);
+  font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  overflow: hidden;
+  tab-size: 2;
+}
+.hud-md pre code {
+  padding: 0;
+  border-radius: 0;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+}
+
+/* Quotes */
+.hud-md blockquote {
+  margin: 0 0 0.6em;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--line);
+  color: var(--text-3);
+}
+.hud-md blockquote strong { color: var(--text-2); }
+
+/* Links are text (never followed), images are chips (never loaded). */
+.hud-md-link {
+  color: var(--user);
+  text-decoration: underline;
+  text-decoration-color: rgba(155, 208, 255, 0.45);
+  text-underline-offset: 2px;
+}
+.hud-md-img {
+  display: inline-block;
+  padding: 0 8px;
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--text-3);
+  font-size: 0.85em;
+}
+
+/* Narrow tables (≤ 3 short columns): a real table, full width. */
+.hud-md-table { margin: 0 0 0.6em; }
+.hud-md-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85em;
+  line-height: 1.3;
+}
+.hud-md-table th,
+.hud-md-table td {
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+  /* anywhere-breaking makes every column's minimum one character wide; keep
+   * short columns readable next to a long one. */
+  min-width: 5em;
+}
+.hud-md-table th {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.hud-md-table tbody tr:nth-child(even) { background: rgba(255, 255, 255, 0.04); }
+
+/* Wide tables: one card per row. */
+.hud-md-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 0.6em;
+}
+.hud-md-card-title {
+  margin-bottom: 6px;
+  font-weight: 700;
+  color: var(--text);
+}
+.hud-md-card-title:last-child { margin-bottom: 0; }
+.hud-md-card dl {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+}
+.hud-md-kv { min-width: 0; }
+.hud-md-kv dt {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.hud-md-kv dd {
+  margin: 0;
+  font-size: 18px;
+  color: var(--text-2);
+  overflow-wrap: anywhere;
+}
+
+/* Footnotes (GFM) */
+.hud-md section[data-footnotes] {
+  margin-top: 12px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+.hud-md section[data-footnotes] h2 { font-size: var(--fs-sm); color: var(--text-3); }
+
+/* ── blocks mode (file preview): every top-level block is a reading block ── */
+
+.hud-md--blocks .hud-block {
+  margin: 0 0 6px;
+  padding: 6px 10px 6px 14px;
+}
+.hud-md--blocks h1.hud-block,
+.hud-md--blocks h2.hud-block,
+.hud-md--blocks h3.hud-block { margin-top: 12px; }
+.hud-md--blocks > .hud-block:first-child { margin-top: 0; }
+.hud-md--blocks pre.hud-block { padding: 10px 12px 10px 14px; }
+.hud-md--blocks blockquote.hud-block { border-radius: 0 10px 10px 0; }
+.hud-md--blocks pre.hud-block:focus { background: var(--surface-2); }
+
+/* Top-level lists: items carry their own marker so the whole item (marker
+ * included) sits inside its focus highlight. */
+.hud-md .hud-md-list { list-style: none; padding-left: 0; }
+.hud-md .hud-md-list > li { position: relative; margin: 0 0 2px; padding-left: calc(14px + 1.3em); }
+.hud-md ol.hud-md-list > li { padding-left: calc(14px + 2em); }
+.hud-md-marker {
+  position: absolute;
+  top: 6px;
+  left: 8px;
+  width: 1.3em;
+  text-align: center;
+  color: var(--text-3);
+}
+ol.hud-md-list > li > .hud-md-marker {
+  width: 1.85em;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cards (after the generic block rule: they keep their own box). */
+.hud-md .hud-md-card {
+  min-width: 0;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.hud-md .hud-md-card.hud-block:focus { background: var(--surface-2); }

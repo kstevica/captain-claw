@@ -39,12 +39,14 @@ function screenRoot(): HTMLElement {
   return document.querySelector<HTMLElement>('.hud-screen') ?? document.body
 }
 
+// Called for every candidate on every D-pad step, on a CPU ~12× slower than a
+// laptop and with long documents holding hundreds of reading blocks — so no
+// getComputedStyle here: an empty client-rect list covers display:none, and
+// [hidden]/[inert]/aria-hidden cover the rest of what the HUD uses.
 function isVisible(el: HTMLElement): boolean {
-  if (el.closest('[inert], [aria-hidden="true"], [hidden]')) return false
   if (el.getAttribute('aria-disabled') === 'true') return false
-  const r = el.getBoundingClientRect()
-  if (r.width === 0 && r.height === 0) return false
-  return getComputedStyle(el).visibility !== 'hidden'
+  if (el.getClientRects().length === 0) return false
+  return !el.closest('[inert], [aria-hidden="true"], [hidden]')
 }
 
 export function focusables(root: ParentNode = screenRoot()): HTMLElement[] {
@@ -305,11 +307,22 @@ function onKeyDown(e: KeyboardEvent) {
   }
   // Desktop / simulator Back. Never on the Display itself: its shell already
   // turns the Back gesture into history.back(), so handling Escape too would
-  // go back twice.
+  // go back twice. Other hosts (Rokid Lumen) may send Escape AND go back
+  // themselves, so ours waits a beat and stands down if a popstate arrives.
   if (!IS_GLASSES && (e.key === 'Escape' || (e.key === 'Backspace' && !isTextField(document.activeElement)))) {
     e.preventDefault()
-    goBack()
+    if (Date.now() - lastPopAt < 400) return // the host already went back
+    if (pendingBack) clearTimeout(pendingBack)
+    pendingBack = setTimeout(() => { pendingBack = null; goBack() }, 250)
   }
+}
+
+let pendingBack: ReturnType<typeof setTimeout> | null = null
+let lastPopAt = 0
+
+function onPopState() {
+  lastPopAt = Date.now()
+  if (pendingBack) { clearTimeout(pendingBack); pendingBack = null }
 }
 
 let installedEngine = false
@@ -320,9 +333,11 @@ export function installFocusEngine(): () => void {
   installedEngine = true
   document.addEventListener('keydown', onKeyDown)
   document.addEventListener('focusin', onFocusIn)
+  window.addEventListener('popstate', onPopState)
   return () => {
     document.removeEventListener('keydown', onKeyDown)
     document.removeEventListener('focusin', onFocusIn)
+    window.removeEventListener('popstate', onPopState)
     installedEngine = false
   }
 }

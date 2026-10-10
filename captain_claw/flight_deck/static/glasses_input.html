@@ -3,6 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- Marks this page as a Meta Ray-Ban Display web app (routes D-pad /
+     Neural Band input to it). -->
+<meta name="mrbd-web-app-capable" content="yes">
+<meta name="description" content="Captain Claw input probe: tests which text input, dictation and pointer paths reach a web app on Meta Ray-Ban Display.">
+<!-- INJECT_META -->
 <title>Glasses · input probe</title>
 <style>
   /* Black HUD palette so this page reads on the Ray-Ban Display projector. */
@@ -174,6 +179,26 @@
     padding: 4px 8px; font-size: 11px; cursor: pointer;
   }
   .log-actions button:hover { border-color: var(--accent); color: var(--text); }
+
+  /* Composer / capability probes (v127+). Div buttons: some Display builds'
+     focus walk skipped native <button>s, so these are tabindexed divs. */
+  .pbtn {
+    display: inline-block; flex: 1 1 auto; text-align: center;
+    padding: 10px 14px;
+    background: transparent; color: var(--text);
+    border: 1px solid var(--line-hi); border-radius: 10px;
+    font: 600 14px -apple-system, sans-serif;
+    cursor: pointer; user-select: none;
+  }
+  .pbtn:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .caps {
+    margin-top: 8px; padding: 8px 10px;
+    background: #050709; border: 1px solid var(--line);
+    border-radius: 8px;
+    font: 11px ui-monospace, Menlo, monospace;
+    color: var(--text-dim);
+    white-space: pre-wrap; word-break: break-word;
+  }
 </style>
 </head>
 <body>
@@ -265,6 +290,33 @@
     <div class="status" id="s6">Tap any link and tell me if anything opened.</div>
   </div>
 
+  <!-- ── Test 7: system composer (firmware v127+) ───────────── -->
+  <div class="section" id="sec-7">
+    <h2>Test 7 · Composer (v127+)</h2>
+    <p class="hint">Focus the field, then pinch to open the composer; swipe down
+       in the composer for the keyboard (v129+). Committed text should arrive as
+       one input + change. Watch the log for the closing pinch landing as an
+       Enter/click on whatever is focused next.</p>
+    <textarea id="c1" rows="2" placeholder="Composer · textarea"></textarea>
+    <input id="c2" type="text" autocomplete="off" autocapitalize="off"
+           autocorrect="off" spellcheck="false" placeholder="Composer · input type=text"
+           style="margin-top:8px">
+    <div class="status" id="s7">Idle.</div>
+  </div>
+
+  <!-- ── Test 8: capability readout ──────────────────────────── -->
+  <div class="section" id="sec-8">
+    <h2>Test 8 · Capabilities</h2>
+    <p class="hint">Snapshot taken on load (voices refresh when they arrive).
+       Included in Save to FD.</p>
+    <div class="caps" id="caps">…</div>
+    <div class="row">
+      <div class="pbtn" id="gum-btn" role="button" tabindex="0">Try getUserMedia(audio)</div>
+      <div class="pbtn" id="caps-btn" role="button" tabindex="0">Refresh readout</div>
+    </div>
+    <div class="status" id="s8">Idle.</div>
+  </div>
+
   <!-- ── Debug log ──────────────────────────────────────────── -->
   <div class="section">
     <h2>Debug log</h2>
@@ -275,6 +327,9 @@
       <button id="log-copy" type="button">Copy</button>
       <button id="log-send" type="button">Send to channel</button>
       <button id="log-clear" type="button">Clear</button>
+    </div>
+    <div class="row">
+      <div class="pbtn" id="log-save" role="button" tabindex="0">Save to FD /tmp</div>
     </div>
   </div>
 
@@ -477,6 +532,177 @@
     const a = document.getElementById(id);
     if (!a) return;
     a.addEventListener('click', () => log('evt', 'scheme · clicked ' + a.id + ' → ' + a.href));
+  });
+
+  // ── Pinch-safe activation for the div buttons ────────────────────
+  // A pinch can arrive as Enter AND a click within ~500 ms: run once.
+  function onActivate(el, fn) {
+    let last = 0;
+    const run = (how) => {
+      const now = Date.now();
+      if (now - last < 500) { log('evt', el.id + ' · ' + how + ' (deduped)'); return; }
+      last = now;
+      log('evt', el.id + ' · activate via ' + how);
+      fn();
+    };
+    el.addEventListener('click', () => run('click'));
+    el.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); run('key ' + e.key); }
+    });
+  }
+
+  // ── Test 7 · composer instrumentation ────────────────────────────
+  const t0 = performance.now();
+  function ms() { return '+' + Math.round(performance.now() - t0) + 'ms'; }
+  function show(v) {
+    if (v === null || v === undefined) return String(v);
+    const s = JSON.stringify(String(v));
+    return s.length > 200 ? s.slice(0, 200) + '…"' : s;
+  }
+  ['c1', 'c2'].forEach(id => {
+    const el = document.getElementById(id);
+    const tag = 'composer ' + id;
+    el.addEventListener('focus', () => log('evt', tag + ' · focus ' + ms()));
+    el.addEventListener('blur',  () => log('evt', tag + ' · blur ' + ms() + ' value=' + show(el.value)));
+    el.addEventListener('click', () => log('evt', tag + ' · click ' + ms()));
+    el.addEventListener('keydown', (e) =>
+      log('evt', tag + ' · keydown key=' + JSON.stringify(e.key) + ' code=' + JSON.stringify(e.code) +
+                 ' isComposing=' + e.isComposing + ' ' + ms()));
+    el.addEventListener('beforeinput', (e) =>
+      log('evt', tag + ' · beforeinput type=' + e.inputType + ' data=' + show(e.data) + ' ' + ms()));
+    el.addEventListener('input', (e) => {
+      log('ok', tag + ' · input type=' + (e.inputType || '?') + ' value=' + show(el.value) + ' ' + ms());
+      setStatus('s7', id + ': ' + el.value.length + ' chars received', 'ok');
+    });
+    el.addEventListener('change', () =>
+      log('ok', tag + ' · change value=' + show(el.value) + ' ' + ms()));
+    el.addEventListener('compositionstart', (e) =>
+      log('evt', tag + ' · compositionstart data=' + show(e.data) + ' ' + ms()));
+    el.addEventListener('compositionend', (e) =>
+      log('evt', tag + ' · compositionend data=' + show(e.data) + ' ' + ms()));
+  });
+  // Where do stray pinches / focus resets land? (document-level, capture)
+  function describe(t) {
+    if (!t || !t.tagName) return String(t);
+    return t.tagName.toLowerCase() + (t.id ? '#' + t.id : '');
+  }
+  document.addEventListener('keydown', (e) =>
+    log('evt', 'doc · keydown key=' + JSON.stringify(e.key) + ' code=' + JSON.stringify(e.code) +
+               ' target=' + describe(e.target) + ' ' + ms()), true);
+  document.addEventListener('click', (e) =>
+    log('evt', 'doc · click target=' + describe(e.target) + ' ' + ms()), true);
+  document.addEventListener('focusin', (e) =>
+    log('evt', 'doc · focusin ' + describe(e.target) + ' ' + ms()), true);
+
+  // ── Test 8 · capability readout ──────────────────────────────────
+  const capsEl = document.getElementById('caps');
+  const caps = {};
+  function renderCaps() {
+    capsEl.textContent = Object.keys(caps).map(k => k + ': ' + caps[k]).join('\n');
+  }
+  function readVoices() {
+    try {
+      if (!('speechSynthesis' in window)) return 'speechSynthesis missing';
+      const v = window.speechSynthesis.getVoices() || [];
+      return v.length + ' voice(s)' + (v.length ? ' · ' +
+        v.map(x => x.name + ' (' + x.lang + (x.default ? ', default' : '') + ')').join('; ') : '');
+    } catch (e) { return 'error ' + (e && e.message ? e.message : e); }
+  }
+  async function readCaps() {
+    caps['document.modelContext'] = typeof document.modelContext;
+    caps['navigator.modelContext'] = typeof navigator.modelContext;
+    caps.speechSynthesis = readVoices();
+    caps.userAgent = navigator.userAgent || '(empty)';
+    const uad = navigator.userAgentData;
+    if (uad) {
+      caps['userAgentData.brands'] = (uad.brands || []).map(b => b.brand + ' ' + b.version).join(', ');
+      caps['userAgentData.mobile'] = String(uad.mobile);
+      caps['userAgentData.platform'] = String(uad.platform);
+      if (typeof uad.getHighEntropyValues === 'function') {
+        try {
+          const hev = await uad.getHighEntropyValues(['model', 'platformVersion']);
+          caps['userAgentData.model'] = JSON.stringify(hev.model);
+          caps['userAgentData.platformVersion'] = JSON.stringify(hev.platformVersion);
+        } catch (e) {
+          caps['userAgentData.highEntropy'] = 'error ' + (e && e.message ? e.message : e);
+        }
+      }
+    } else {
+      caps.userAgentData = 'missing';
+    }
+    caps.mediaDevices = 'mediaDevices' in navigator ? 'present' : 'missing';
+    caps.getUserMedia = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+    caps.speechRecognition = !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+    caps.serviceWorker = 'serviceWorker' in navigator;
+    caps.viewport = window.innerWidth + 'x' + window.innerHeight + ' @' + window.devicePixelRatio;
+    try {
+      const odd = Object.getOwnPropertyNames(window).filter(n => /meta|glass|sdk|fb|wearable/i.test(n));
+      caps['window globals ~ /meta|glass|sdk|fb|wearable/'] = odd.join(', ') || '(none)';
+    } catch (e) { /* ignore */ }
+    renderCaps();
+    log('evt', 'caps · ' + Object.keys(caps).map(k => k + '=' + caps[k]).join(' | '));
+  }
+  if ('speechSynthesis' in window) {
+    try {
+      window.speechSynthesis.addEventListener('voiceschanged', () => {
+        caps.speechSynthesis = readVoices();
+        renderCaps();
+        log('evt', 'caps · voiceschanged → ' + caps.speechSynthesis);
+      });
+    } catch (e) { /* older webviews */ }
+  }
+  readCaps();
+  onActivate(document.getElementById('caps-btn'), () => { readCaps(); });
+
+  onActivate(document.getElementById('gum-btn'), async () => {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('s8', 'getUserMedia not present.', 'err');
+      log('err', 'gum · navigator.mediaDevices.getUserMedia missing');
+      return;
+    }
+    setStatus('s8', 'Requesting microphone…');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const tracks = stream.getAudioTracks().map(t => t.label || '(unlabelled)');
+      stream.getTracks().forEach(t => t.stop());
+      setStatus('s8', 'getUserMedia OK · ' + tracks.join(', '), 'ok');
+      log('ok', 'gum · success, audio tracks=' + JSON.stringify(tracks));
+    } catch (e) {
+      const msg = (e && e.name ? e.name : 'Error') + ': ' + (e && e.message ? e.message : e);
+      setStatus('s8', 'getUserMedia failed · ' + msg, 'err');
+      log('err', 'gum · ' + msg);
+    }
+  });
+
+  // ── Save to FD (/glasses/input-log → /tmp on the FD box) ──────────
+  onActivate(document.getElementById('log-save'), async () => {
+    const lines = Array.from(logEl.children).map(n => n.textContent).join('\n');
+    const fields = ['t1', 't2', 'c1', 'c2'].map(id => {
+      const el = document.getElementById(id);
+      return id + ' = ' + show(el ? el.value : '');
+    }).join('\n');
+    const text = '== log ==\n' + lines +
+      '\n\n== capabilities ==\n' + capsEl.textContent +
+      '\n\n== field values ==\n' + fields + '\n';
+    const headers = { 'Content-Type': 'application/json' };
+    const bridgeToken = (params.get('t') || '').trim();
+    if (bridgeToken) headers['x-glasses-token'] = bridgeToken;
+    try {
+      const r = await fetch('/glasses/input-log', {
+        method: 'POST',
+        cache: 'no-store',
+        headers,
+        body: JSON.stringify({ text, label: channel ? 'ch_' + channel : '' }),
+      });
+      const body = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        log('err', 'save · failed ' + r.status + ' ' + JSON.stringify(body));
+        return;
+      }
+      log('ok', 'save · wrote ' + body.bytes + ' bytes to ' + body.path);
+    } catch (e) {
+      log('err', 'save · network error: ' + (e && e.message ? e.message : e));
+    }
   });
 
   // ── Focus the first input proactively. If focus IS allowed but only
