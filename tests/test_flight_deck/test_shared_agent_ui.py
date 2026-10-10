@@ -659,7 +659,7 @@ _SLICE_DECLS = [
     (_CHAT_STORE, [
         "_planLSKey", "savePlanSlice", "loadPlanSlice", "_queueLSKey", "saveQueueSlice",
         "loadQueueSlice", "_sliceId", "purgeSharedSlices", "clearSharedSlices",
-        "LANE_MAIN", "LANES", "laneKey",
+        "LANE_MAIN", "LANE_AUTO", "LANES", "laneKey",
     ]),
 ]
 

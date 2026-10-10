@@ -146,6 +146,8 @@ def register_channel_callback(
         # echoes (the user already typed it on their own screen) and
         # ``status`` heartbeats (noise on a chat thread).
         mtype = payload.get("type")
+        if payload.get("relay_skip"):
+            return  # a subscriber handled it (e.g. a busy refusal WhatsApp re-sends)
         if mtype == "narration":
             # Live progress blurbs during a long task. On by default; can be
             # chatty on a message thread, so allow opt-out via env.

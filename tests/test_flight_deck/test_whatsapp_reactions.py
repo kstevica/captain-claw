@@ -667,17 +667,25 @@ async def test_a_matched_text_flow_gets_no_reaction(inbound, monkeypatch):
     async def _no_command(payload):
         return False
 
-    async def _flow_ran(payload):
-        return True
+    ran = []
+
+    async def _matched(payload):
+        return {"name": "daily report"}
+
+    async def _run(flow, payload):
+        ran.append(flow["name"])
 
     monkeypatch.setattr(flow_router, "engine_ready", lambda: True)
     monkeypatch.setattr(flow_router, "maybe_handle_flow_command", _no_command)
     monkeypatch.setattr(flow_router, "deliver_pending_input", lambda **kw: False)
     monkeypatch.setattr(flow_router, "classify_payload", lambda **kw: dict(kw))
-    monkeypatch.setattr(flow_router, "try_match_and_run", _flow_ran)
+    monkeypatch.setattr(flow_router, "match_flow", _matched)
+    monkeypatch.setattr(flow_router, "run_flow", _run)
 
     await wb._handle_message(WAID, _text_msg("daily report please"))
     await _settle(inbound)
+    await asyncio.sleep(0)            # the flow runs detached (never holds the inbox)
+    assert ran == ["daily report"]
     assert inbound.tasks == []
     assert inbound.ch.agent_ws.sent == []
 

@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import os
 import re
+import unicodedata
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aiohttp import web
 
@@ -294,6 +297,188 @@ async def flush_automation_results(server: Any, exclude: Any = None) -> int:
     return len(pending)
 
 
+# ── Attachment prefix ────────────────────────────────────────────────
+# The lines ahead of the user's message that name what came with it. The
+# ``[Attached image: …]`` / ``[Attached file: …]`` format is matched
+# elsewhere (Ollama inlining, retrieval noise, eco intent) — keep it.
+
+_VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")
+_TEXT_EXTS = frozenset({
+    ".csv", ".tsv", ".txt", ".md", ".json", ".xml", ".html", ".htm",
+    ".ics", ".vcf", ".log", ".yaml", ".yml", ".rtf",
+})
+_AUDIO_EXTS = frozenset({
+    ".ogg", ".opus", ".mp3", ".m4a", ".aac", ".amr", ".wav", ".weba", ".flac",
+})
+# What a reader tool from google_drive._READER_BY_SUFFIX opens, for the hint.
+_READER_KINDS = {
+    "pdf_extract": "PDF document", "docx_extract": "Word document",
+    "xlsx_extract": "spreadsheet", "pptx_extract": "presentation",
+    "image_vision": "image",
+}
+_NO_READER = ("no built-in reader — convert it with shell if a converter such as "
+              "libreoffice is installed, otherwise tell the user plainly what you can't open")
+# Bidi embedding/override/isolate marks: they reorder how a note reads.
+_BIDI_CONTROLS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200e\u200f")
+_MAX_NOTE_CHARS = 4000
+
+
+class AttachmentPrefix(NamedTuple):
+    lines: list[str]        # every line, in prompt order
+    base_lines: list[str]   # only the [Attached …] lines and the image/video guidance
+    videos: list[str]       # attached videos (analyzed server-side before the turn)
+
+
+def sanitize_attachment_note(note: Any) -> str:
+    """One line of a bridge's note: control characters and line/paragraph
+    separators become spaces, bidi marks go, whitespace collapses. Square
+    brackets turn into parentheses so a note can't pass for an
+    ``[Attached image: …]`` marker (Ollama inlines those) or a context block."""
+    text = "".join(
+        " " if unicodedata.category(c) in ("Cc", "Zl", "Zp") else c
+        for c in str(note or "") if c not in _BIDI_CONTROLS
+    )
+    text = " ".join(text.replace("[", "(").replace("]", ")").split())
+    if len(text) > _MAX_NOTE_CHARS:
+        text = text[: _MAX_NOTE_CHARS - 12].rstrip() + " (truncated)"
+    return text
+
+
+def attachment_reader_hint(path: str) -> str | None:
+    """``(<name>: <kind> — open it with <tool>.)`` for an attached data file;
+    None for a video (analyzed automatically). A weak model otherwise gets a
+    bare ``[Attached file: ….xlsx]`` and no idea which tool opens it."""
+    raw = str(path or "").rstrip("/\\")
+    name = os.path.basename(raw) or raw
+    ext = os.path.splitext(name)[1].lower()
+    if ext in _VIDEO_EXTS:
+        return None
+    try:
+        is_dir = os.path.isdir(raw)
+    except (OSError, ValueError):
+        is_dir = False
+    from captain_claw.tools.google_drive import _READER_BY_SUFFIX
+
+    if is_dir:
+        desc = "folder — list it with glob"
+    elif ext == ".zip":
+        desc = "archive — list or extract it with shell (unzip -l / unzip)"
+    elif ext in _AUDIO_EXTS:
+        desc = ("audio recording — there is no transcription tool; use any transcript "
+                "in the notes, otherwise tell the user plainly")
+    elif ext in _READER_BY_SUFFIX:
+        reader = _READER_BY_SUFFIX[ext]
+        verb = "view" if reader == "image_vision" else "open"
+        desc = f"{_READER_KINDS.get(reader, 'file')} — {verb} it with {reader}"
+    elif ext in _TEXT_EXTS:
+        desc = "text file — open it with read"
+    else:
+        desc = _NO_READER
+    return f"({name}: {desc}.)"
+
+
+def build_attachment_prefix(
+    images: list[str],
+    files: list[str],
+    notes: list[str] | None = None,
+    *,
+    sees_inline: bool = False,
+) -> AttachmentPrefix:
+    """The attachment lines of a turn — pure, apart from telling an extracted
+    zip's folder from a file.
+
+    Order: the bridge's notes and one reader hint per data file first, then
+    the ``[Attached …]`` lines and the image/video guidance (``base_lines``).
+    Notes and hints are never the user's words, and a message with no text of
+    its own binds ``base_lines`` + its default line for flows and the mail
+    guard — which must be the END of the stored message (the mail guard finds
+    the turn by suffix), so notes and hints go before it.
+    """
+    images = [str(p) for p in images]
+    files = [str(p) for p in files]
+    attached = [f"[Attached image: {p}]" for p in images]
+    attached += [f"[Attached file: {p}]" for p in files]
+    note_lines = [f"[Attachment note: {n}]" for n in map(sanitize_attachment_note, notes or ()) if n]
+    videos = [p for p in files if p.lower().endswith(_VIDEO_EXTS)]
+
+    guidance: list[str] = []
+    # Image guidance is capability-aware. Ollama-backed agents receive the image
+    # INLINE (see _convert_messages_for_ollama) — i.e. they can SEE it directly,
+    # so telling them to call image_vision makes them flail on a tool they may
+    # not even have. Other providers get the description injected server-side.
+    # Both are about the image(s) only: a weak model applies "no tool" to the
+    # whole turn, and a file beside the image still needs its reader.
+    if images:
+        _this_msg_only = (
+            " Describe the image attached in THIS message only — do NOT reuse earlier "
+            "images or remembered/previous descriptions from the conversation."
+        )
+        if sees_inline:
+            guidance.append(
+                "(The image(s) above are attached and you can SEE them directly — "
+                "describe/analyze them from what you see. For the image(s), do NOT call "
+                "image_vision, do NOT delegate, and do NOT use read; just look and answer."
+                + _this_msg_only + ")"
+            )
+        else:
+            # Auto-analyze server-side (a vision model or a multimodal peer) and inject
+            # the description — the image mirror of the video path (_prefix_image_analysis
+            # in _run_agent). The model no longer has to pick the right tool: it kept
+            # grabbing the always-on `cv` tool and returning pixel stats instead of a
+            # description. Now the answer is already in the turn.
+            guidance.append(
+                "(An automatic visual description of the image(s) — including any visible "
+                "text — is included below. Answer the user from it; you usually need no tool "
+                "for the image(s). Only call image_ocr if the user needs exact/complete text "
+                "extraction from an image, or cv for a pixel task they explicitly asked for "
+                "(QR, blur, diff)." + _this_msg_only + ")"
+            )
+    # Video is analyzed deterministically server-side (see _run_agent) and the
+    # analysis is injected into this turn — so we do NOT ask the model to call
+    # video_vision or (worse) write its own extraction script.
+    if videos:
+        guidance.append(
+            "(The attached video(s) are being analyzed automatically — frames + audio "
+            "transcript — and the analysis is included in this message. Use it to answer; "
+            "do NOT call video_vision yourself and do NOT write any extraction script.)"
+        )
+    hints = [h for h in map(attachment_reader_hint, files) if h]
+    return AttachmentPrefix(
+        lines=note_lines + hints + attached + guidance,
+        base_lines=attached + guidance,
+        videos=videos,
+    )
+
+
+# The client_msg_id of the WebSocket frame being handled (set by ws_handler
+# for every frame), so a turn started by a route that doesn't pass it on —
+# /code, /publish, /orchestrate, plan-auto — still echoes it.
+_FRAME_CLIENT_MSG_ID: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "frame_client_msg_id", default="")
+
+
+def set_frame_client_msg_id(client_msg_id: str) -> None:
+    _FRAME_CLIENT_MSG_ID.set(client_msg_id)
+
+
+def busy_refusal_fields(client_msg_id: str = "") -> dict[str, Any]:
+    """Fields a busy refusal carries: ``retryable`` and the refused frame's
+    ``client_msg_id`` when it had one — a bridge (WhatsApp) re-sends exactly
+    that turn instead of guessing which of its frames was refused."""
+    out: dict[str, Any] = {"retryable": True}
+    client_msg_id = client_msg_id or _FRAME_CLIENT_MSG_ID.get()
+    if client_msg_id:
+        out["client_msg_id"] = client_msg_id
+    return out
+
+
+def accepted_fields(client_msg_id: str = "") -> dict[str, Any]:
+    """The turn-start ``thinking`` names the frame it accepted, so a bridge
+    sending turns one at a time knows this one is taken."""
+    client_msg_id = client_msg_id or _FRAME_CLIENT_MSG_ID.get()
+    return {"client_msg_id": client_msg_id} if client_msg_id else {}
+
+
 async def handle_chat(
     server: WebServer,
     ws: web.WebSocketResponse,
@@ -303,6 +488,7 @@ async def handle_chat(
     file_path: str | None = None,
     image_paths: list[str] | None = None,
     file_paths: list[str] | None = None,
+    attachment_notes: list[str] | None = None,
     rewind_to: str | None = None,
     whatsapp_waid: str | None = None,
     origin: dict | None = None,
@@ -317,6 +503,7 @@ async def handle_chat(
     speaker_turn: str | None = None,
     speaker_grant: str | None = None,
     whatsapp_media_to: str | None = None,
+    client_msg_id: str = "",
 ) -> bool:
     """Process a chat message through the agent.
 
@@ -338,6 +525,11 @@ async def handle_chat(
     *automation* (an automated turn's :class:`mail_authority.Authority`, from
     the frame's ``automation`` marker) is bound for the turn; ``None`` is a
     human turn. A member's turn ignores it.
+
+    *attachment_notes* are lines a bridge wrote about the attachments (a
+    voice note's length, a file it couldn't fetch, …). Each is sanitised to
+    one line and shown after the ``[Attached …]`` lines; they never count as
+    the user's words (task naming, flows and the mail guard don't see them).
     """
     from captain_claw.speaker import speaker_error, speaker_key_of
 
@@ -388,6 +580,7 @@ async def handle_chat(
             await server._send(ws, {
                 "type": "error",
                 "message": "Your session is busy processing. Please wait.",
+                **busy_refusal_fields(client_msg_id),
             })
             return False
         # Register the WS for this session so callbacks can reach it.
@@ -412,6 +605,7 @@ async def handle_chat(
             await server._send(ws, {
                 "type": "error",
                 "message": f"Lane {lane} is busy processing another request. Please wait.",
+                **busy_refusal_fields(client_msg_id),
             })
             return False
         # Claimed now, not when the turn task starts: a second frame arriving
@@ -425,6 +619,7 @@ async def handle_chat(
             await server._send(ws, {
                 "type": "error",
                 "message": "Agent is busy processing another request. Please wait.",
+                **busy_refusal_fields(client_msg_id),
             })
             return False
         agent = server.agent
@@ -463,85 +658,32 @@ async def handle_chat(
 
     # Build attachment prefix — supports single or multiple files.
     effective_content = content
-    attachment_lines: list[str] = []
-    _has_image = False
-    _has_video = False
-    _VIDEO_EXTS = (".mp4", ".mov", ".webm", ".mkv", ".avi", ".m4v")
-    video_attachments: list[str] = []  # auto-analyzed server-side before the turn
-    image_attachments: list[str] = []  # non-inline images auto-analyzed server-side
-    _all_images: list[str] = []
+    _all_images = [str(p) for p in ([image_path] if image_path else []) + list(image_paths or [])]
+    _all_files = [str(p) for p in ([file_path] if file_path else []) + list(file_paths or [])]
+    _sees_inline = str(getattr(getattr(agent, "provider", None), "provider", "")).lower() == "ollama"
+    _prefix = build_attachment_prefix(_all_images, _all_files, attachment_notes,
+                                      sees_inline=_sees_inline)
+    video_attachments: list[str] = list(_prefix.videos)  # auto-analyzed server-side before the turn
+    # Non-inline images are auto-analyzed server-side (see _prefix_image_analysis).
+    image_attachments: list[str] = [] if _sees_inline else list(_all_images)
+    # What the person said — the text flows match and the mail guard reads. A
+    # message with no text of its own falls back to the attachment lines as
+    # before, never to the bridge's notes or the reader hints.
+    user_words = content
 
-    # Single image (backward compat)
-    if image_path:
-        attachment_lines.append(f"[Attached image: {image_path}]")
-        _has_image = True
-        _all_images.append(str(image_path))
-    # Multiple images
-    if image_paths:
-        for p in image_paths:
-            attachment_lines.append(f"[Attached image: {p}]")
-            _has_image = True
-            _all_images.append(str(p))
-    # Single data file (backward compat)
-    if file_path:
-        attachment_lines.append(f"[Attached file: {file_path}]")
-        if str(file_path).lower().endswith(_VIDEO_EXTS):
-            _has_video = True
-            video_attachments.append(str(file_path))
-    # Multiple data files
-    if file_paths:
-        for p in file_paths:
-            attachment_lines.append(f"[Attached file: {p}]")
-            if str(p).lower().endswith(_VIDEO_EXTS):
-                _has_video = True
-                video_attachments.append(str(p))
-    # Image guidance is capability-aware. Ollama-backed agents receive the image
-    # INLINE (see _convert_messages_for_ollama) — i.e. they can SEE it directly,
-    # so telling them to call image_vision makes them flail on a tool they may
-    # not even have. Other providers must use image_vision or delegate.
-    if _has_image:
-        _sees_inline = str(getattr(getattr(agent, "provider", None), "provider", "")).lower() == "ollama"
-        _this_msg_only = (
-            " Describe the image attached in THIS message only — do NOT reuse earlier "
-            "images or remembered/previous descriptions from the conversation."
-        )
-        if _sees_inline:
-            attachment_lines.append(
-                "(The image(s) above are attached and you can SEE them directly — "
-                "describe/analyze from what you see. Do NOT call image_vision, do NOT "
-                "delegate, and do NOT use read; just look and answer." + _this_msg_only + ")"
-            )
-        else:
-            # Auto-analyze server-side (a vision model or a multimodal peer) and inject
-            # the description — the image mirror of the video path (_prefix_image_analysis
-            # in _run_agent). The model no longer has to pick the right tool: it kept
-            # grabbing the always-on `cv` tool and returning pixel stats instead of a
-            # description. Now the answer is already in the turn.
-            image_attachments = list(_all_images)
-            attachment_lines.append(
-                "(An automatic visual description of the image(s) — including any visible "
-                "text — is included below. Answer the user from it; you usually need no tool. "
-                "Only call image_ocr if the user needs exact/complete text extraction, or cv "
-                "for a pixel task they explicitly asked for (QR, blur, diff)." + _this_msg_only + ")"
-            )
-    # Video is analyzed deterministically server-side (see _run_agent) and the
-    # analysis is injected into this turn — so we do NOT ask the model to call
-    # video_vision or (worse) write its own extraction script.
-    if _has_video:
-        attachment_lines.append(
-            "(The attached video(s) are being analyzed automatically — frames + audio "
-            "transcript — and the analysis is included in this message. Use it to answer; "
-            "do NOT call video_vision yourself and do NOT write any extraction script.)"
-        )
-
-    if attachment_lines:
-        prefix = "\n".join(attachment_lines) + "\n"
-        default_msg = (
-            "Please analyze these files."
-            if len(attachment_lines) > 1
-            else ("Please analyze this image." if (image_path or image_paths) else "I've attached a file.")
-        )
-        effective_content = prefix + (content or default_msg)
+    if _prefix.lines:
+        _n_attached = len(_all_images) + len(_all_files)
+        if _n_attached > 1:
+            default_msg = "Please analyze these files."
+        elif _all_images:
+            default_msg = "Please analyze this image."
+        elif _all_files:
+            default_msg = "I've attached a file."
+        else:  # only a note (e.g. something the bridge couldn't fetch)
+            default_msg = "I've sent an attachment — see the note above."
+        effective_content = "\n".join(_prefix.lines) + "\n" + (content or default_msg)
+        if not content:
+            user_words = "\n".join(_prefix.base_lines + [default_msg])
 
     # A rerouted turn's caller (a lane-A socket) moves to the automation lane
     # for this turn: it gets every frame that lane sends (Flight Deck's
@@ -562,7 +704,7 @@ async def handle_chat(
                 fire_and_forget_send(ws, _json_mod.dumps(msg, default=str))
         else:
             _send_msg = server._lane_send(lane)
-        _send_msg({"type": "status", "status": "thinking"})
+        _send_msg({"type": "status", "status": "thinking", **accepted_fields(client_msg_id)})
         _send_msg({
             "type": "chat_message", "role": "user",
             "content": effective_content,
@@ -570,7 +712,7 @@ async def handle_chat(
         })
     else:
         server._busy = True
-        server._broadcast({"type": "status", "status": "thinking"})
+        server._broadcast({"type": "status", "status": "thinking", **accepted_fields(client_msg_id)})
         server._thinking_callback("Thinking\u2026", phase="reasoning")
         server._broadcast({
             "type": "chat_message", "role": "user",
@@ -616,12 +758,13 @@ async def handle_chat(
         automation=automation,
         rerouted=bool(rerouted),
         reply_waid=_reply_waid(whatsapp_waid, origin, whatsapp_media_to if automation is not None else None),
-        flow_text=content,
+        flow_text=user_words,
         flow_attach={
             "image_path": image_path or (image_paths[0] if image_paths else ""),
             "video_path": video_attachments[0] if video_attachments else "",
             "file_path": file_path or (file_paths[0] if file_paths else ""),
         },
+        non_image_attached=bool(_all_files),
     ))
 
     if is_public or lane != server.LANE_MAIN:
@@ -1030,6 +1173,7 @@ async def _run_agent(
     speaker_turn: str = "",
     speaker_grant: str = "",
     turn_channel: str | None = None,
+    non_image_attached: bool = False,
 ) -> None:
     """Background coroutine that drives the agent and finalises the turn.
 
@@ -1178,7 +1322,10 @@ async def _run_agent(
         # Image-describe turn: suppress memory/insights injection so the model
         # describes the freshly-attached image instead of regurgitating a
         # remembered description of an earlier one (rich-session contamination).
-        _img_turn = isinstance(content, str) and "[Attached image:" in content
+        # Only when images are all that came: a spreadsheet (or any other file)
+        # beside the photo makes it a working turn that needs its context.
+        _img_turn = (isinstance(content, str) and "[Attached image:" in content
+                     and not non_image_attached)
         if _img_turn:
             try:
                 agent._suppress_memory_context = True  # type: ignore[attr-defined]

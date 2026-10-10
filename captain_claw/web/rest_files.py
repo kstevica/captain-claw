@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
 
+from captain_claw.web.active_content import ACTIVE_VIEW_CSP, active_view_type
+
 if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
 
@@ -32,6 +34,19 @@ _TEXT_FILENAMES: set[str] = {
 
 # Maximum size (bytes) for inline text preview.
 _MAX_TEXT_PREVIEW_BYTES = 2 * 1024 * 1024  # 2 MB
+
+
+def _safe_serve_headers(p: Path, content_type: str | None = None) -> dict[str, str]:
+    """Headers every file route sends: no MIME sniffing, and a sandbox CSP on a
+    type the browser would run as a document (HTML/SVG/XML) — files reach
+    saved/ from uploads and the web, so one served inline on the agent's
+    origin must not run script there."""
+    headers = {"X-Content-Type-Options": "nosniff"}
+    ctype = content_type or mimetypes.guess_type(str(p))[0] or ""
+    if active_view_type(ctype):
+        headers["Content-Security-Policy"] = ACTIVE_VIEW_CSP
+    return headers
+
 
 # Directories the workspace scan never descends into (large / noise).
 _SCAN_SKIP_DIRS: set[str] = {
@@ -587,6 +602,7 @@ async def download_file(server: WebServer, request: web.Request) -> web.Response
         p,
         headers={
             "Content-Disposition": f'attachment; filename="{p.name}"',
+            **_safe_serve_headers(p),
         },
     )
 
@@ -697,7 +713,7 @@ async def view_file(server: WebServer, request: web.Request) -> web.Response:
     if not p.is_file():
         return web.json_response({"error": "File not found on disk"}, status=404)
 
-    return web.FileResponse(p)
+    return web.FileResponse(p, headers=_safe_serve_headers(p))
 
 
 # Allowed media extensions for the /api/media endpoint.
@@ -769,6 +785,7 @@ async def serve_media(server: WebServer, request: web.Request) -> web.Response:
         headers={
             "Content-Type": mime,
             "Cache-Control": "private, max-age=3600",
+            **_safe_serve_headers(p, mime),
         },
     )
 

@@ -175,6 +175,25 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
 
 _FLEET_EVENTS_KEPT = 40
 
+# A chat frame's ``attachment_notes``: at most this many, each cut to this length.
+_MAX_ATTACHMENT_NOTES = 20
+_MAX_ATTACHMENT_NOTE_CHARS = 8000  # chat_handler trims to 4000, marked
+
+
+def _attachment_notes(raw: object) -> list[str]:
+    """The frame's ``attachment_notes`` as a capped list of strings
+    (non-strings and blank entries are dropped; chat_handler sanitises)."""
+    if not isinstance(raw, list):
+        return []
+    notes: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        notes.append(item[:_MAX_ATTACHMENT_NOTE_CHARS])
+        if len(notes) >= _MAX_ATTACHMENT_NOTES:
+            break
+    return notes
+
 
 async def _fleet_notice_to_automation_lane(server, text: str) -> bool:
     """Keep a fleet notice out of the main chat when the automation lane is
@@ -323,6 +342,10 @@ async def handle_ws_message(
         if not await speaker_gate(server, ws, data):
             return
     msg_type = data.get("type", "")
+    # Every frame resets it: a turn this frame starts (even via /code or the
+    # plan-auto route) echoes the frame's own id, never a previous frame's.
+    from captain_claw.web.chat_handler import set_frame_client_msg_id
+    set_frame_client_msg_id(str(data.get("client_msg_id") or "").strip()[:64])
 
     if msg_type == "chat":
         content = str(data.get("content", "")).strip()
@@ -374,6 +397,15 @@ async def handle_ws_message(
             v = str(p).strip()
             if v and v not in file_paths:
                 file_paths.append(v)
+        # Lines a bridge wrote about what it attached (a voice note's length,
+        # a file it couldn't fetch, …). They reach the model beside the
+        # attachments — never as the user's words.
+        attachment_notes = _attachment_notes(data.get("attachment_notes"))
+        # A bridge's id for this frame, echoed in a busy refusal (retry exactly it).
+        client_msg_id = str(data.get("client_msg_id") or "").strip()[:64]
+        # A frame carrying attachments is always a chat turn: a caption that
+        # starts with "/" is not a command, and neither route takes files.
+        has_attachments = bool(image_paths or file_paths or attachment_notes)
 
         # Automated-turn marker (Flight Deck: autonomy, scheduler, flows,
         # peers …). Absent = a human turn. An automated frame never runs a
@@ -384,7 +416,7 @@ async def handle_ws_message(
             if "automation" in data else None
         )
 
-        if not content and not image_paths and not file_paths:
+        if not content and not has_attachments:
             return
         # "Nova tema: …" / "new topic" opening a typed message: a new session
         # first (as /new), then the rest of the message is the turn. Never for
@@ -403,10 +435,12 @@ async def handle_ws_message(
                 _cue_busy = (getattr(_cue_agent, "_lane_busy", False)
                              if _cue_agent is not server.agent else server._busy)
                 if _cue_busy:
+                    from captain_claw.web.chat_handler import busy_refusal_fields
                     await server._send(ws, {
                         "type": "error",
                         "message": "Still answering the previous message — start the new "
                                    "session once it is done (or stop it first).",
+                        **busy_refusal_fields(client_msg_id),
                     })
                     return
                 # On this socket's own agent: a lane's or lane A.
@@ -417,15 +451,16 @@ async def handle_ws_message(
                     # what the person asked goes back in.
                     await server._send(ws, {"type": "chat_message", "role": "user", "content": rest,
                                             "rotation_cue": True})
-                if not rest and not image_paths and not file_paths:
+                if not rest and not has_attachments:
                     return
-        if automation is None and content.startswith("/"):
+        if automation is None and not has_attachments and content.startswith("/"):
             from captain_claw.web.slash_commands import handle_command
             # On this socket's own agent, as a "command" frame is: a lane's
             # /new must not switch lane A's session.
             _cmd_agent = await server.resolve_agent(ws)
             await handle_command(server.lane_view(ws, _cmd_agent), ws, content)
-        elif automation is None and getattr(server.agent, "plan_mode_auto", False):
+        elif (automation is None and not has_attachments
+              and getattr(server.agent, "plan_mode_auto", False)):
             from captain_claw.web.plan_auto_route import handle_plan_auto_route
             with mail_authority.bound(mail_authority.interactive(content)):
                 await handle_plan_auto_route(server, ws, content)
@@ -437,6 +472,8 @@ async def handle_ws_message(
                 file_path=file_paths[0] if len(file_paths) == 1 else None,
                 image_paths=image_paths if len(image_paths) > 1 else None,
                 file_paths=file_paths if len(file_paths) > 1 else None,
+                attachment_notes=attachment_notes or None,
+                client_msg_id=client_msg_id,
                 rewind_to=rewind_to,
                 whatsapp_waid=whatsapp_waid,
                 origin=origin,

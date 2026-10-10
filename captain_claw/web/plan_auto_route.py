@@ -38,7 +38,8 @@ async def handle_plan_auto_route(
         "content": content,
         "timestamp": datetime.now(UTC).isoformat(),
     })
-    server._broadcast({"type": "status", "status": "thinking"})
+    from captain_claw.web.chat_handler import accepted_fields
+    server._broadcast({"type": "status", "status": "thinking", **accepted_fields()})
 
     try:
         plan_result = await handle_plan_command(server, content)

@@ -6577,18 +6577,12 @@ async def agent_file_download(host: str, port: int, path: str, token: str = "", 
         raise HTTPException(502, "Cannot connect to agent")
 
 
-_ACTIVE_VIEW_TYPES = frozenset({"text/html", "application/xhtml+xml", "image/svg+xml",
-                                "text/xml", "application/xml", "text/xsl"})
+# Shared with the agent's own file routes (captain_claw/web/rest_files.py).
+from captain_claw.web import active_content as _active_content  # noqa: E402
 
-
-def _active_view_type(content_type: str) -> bool:
-    """A response type a browser renders as a document that can run script:
-    HTML, SVG and every XML type (browsers render any ``*+xml`` type — e.g.
-    ``.rss``/``.atom``/``.xslt`` as the agent labels them — as XML, where
-    XHTML-namespaced script runs)."""
-    base = content_type.split(";", 1)[0].strip().lower()
-    return base in _ACTIVE_VIEW_TYPES or base.endswith("+xml")
-_ACTIVE_VIEW_CSP = "sandbox allow-scripts allow-popups allow-forms allow-modals allow-downloads"
+_ACTIVE_VIEW_TYPES = _active_content.ACTIVE_VIEW_TYPES
+_active_view_type = _active_content.active_view_type
+_ACTIVE_VIEW_CSP = _active_content.ACTIVE_VIEW_CSP
 
 
 @app.get("/fd/agent-file-view/{host}/{port}")
