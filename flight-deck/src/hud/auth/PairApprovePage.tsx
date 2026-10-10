@@ -4,11 +4,15 @@
 // here): real <form>, <input> and <button> elements, one centered column,
 // 48 px touch targets. Flow:
 //   auth status → (auth off: nothing to pair) → refresh the session →
-//   sign in if needed → type the code shown in the glasses (prefilled from
-//   ?code=) → see WHICH device is asking (label, browser, IP, age) →
+//   sign in if needed → type the code shown in the glasses → see WHICH
+//   device is asking (IP, age, and what it says about itself) →
 //   Approve / Deny → done.
-// Device-code phishing is the main risk of this flow, hence the device card
-// and the explicit "only approve a code showing in YOUR glasses" warning.
+// Device-code phishing is the main risk of this flow ("open this link /
+// enter this code"), hence: the code is never taken from the URL (nothing
+// links here with one — the glasses show the bare address — so a prefilled
+// link could only come from someone else), the card separates the one fact
+// the deck observed (the IP) from the label and browser any caller can make
+// up, and the explicit "only approve a code showing in YOUR glasses" warning.
 
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
@@ -197,7 +201,8 @@ type Step =
   | { k: 'done'; approved: boolean }
 
 function ApproveFlow(props: { email: string }) {
-  const [code, setCode] = useState(() => formatCode(new URLSearchParams(window.location.search).get('code') || ''))
+  // Typed by the wearer from the glasses — never prefilled (see the top).
+  const [code, setCode] = useState('')
   const [step, setStep] = useState<Step>({ k: 'enter' })
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -242,8 +247,6 @@ function ApproveFlow(props: { email: string }) {
     setStep({ k: 'enter' })
     setCode('')
     setError(null)
-    // Drop a ?code= we were opened with — it has been used.
-    if (window.location.search) window.history.replaceState(null, '', window.location.pathname)
   }
 
   const signOut = () => {
@@ -282,7 +285,10 @@ function ApproveFlow(props: { email: string }) {
         {step.approved ? (
           <>
             <p className="hud-pp-ok">Glasses signed in — they continue automatically.</p>
-            <p className="hud-pp-muted">You can sign this device out later from the glasses' agent list.</p>
+            <p className="hud-pp-muted">
+              They stay signed in as long as they are used at least once every 7 days. Only Sign out on the
+              glasses (in their agent list) ends it sooner — this page can't sign them out.
+            </p>
           </>
         ) : (
           <>
@@ -331,10 +337,6 @@ function ReviewCard(props: {
       <h2 className="hud-pp-h2">Sign in this device?</h2>
       <div className="hud-pp-code-show">{props.code}</div>
       <dl className="hud-pp-facts">
-        <dt>Device</dt>
-        <dd>{truncate(props.info.label || 'Unknown device', 80)}</dd>
-        <dt>Browser</dt>
-        <dd title={props.info.user_agent}>{shortUA(props.info.user_agent || '')}</dd>
         <dt>IP address</dt>
         <dd>{props.info.ip || 'unknown'}</dd>
         <dt>Requested</dt>
@@ -342,9 +344,19 @@ function ReviewCard(props: {
         <dt>Expires</dt>
         <dd className={expired ? 'hud-pp-expired' : undefined}>{expired ? 'expired' : `in ${mmss(left)}`}</dd>
       </dl>
+      {/* Sent by whoever started the pairing — anyone can claim to be glasses. */}
+      <div className="hud-pp-claimed">
+        <div className="hud-pp-claimed-h">Reported by the device (not verified)</div>
+        <dl className="hud-pp-facts">
+          <dt>Name</dt>
+          <dd>{truncate(props.info.label || 'none given', 80)}</dd>
+          <dt>Browser</dt>
+          <dd title={props.info.user_agent}>{shortUA(props.info.user_agent || '')}</dd>
+        </dl>
+      </div>
       <p className="hud-pp-warn">
         Only approve a code that is showing in <strong>YOUR</strong> glasses right now. Approving signs that
-        device in as <strong>{props.email || 'you'}</strong>.
+        device in as <strong>{props.email || 'you'}</strong> until it signs out or goes 7 days unused.
       </p>
       {expired ? (
         <p className="hud-pp-error" role="alert">This code has expired — check the glasses for a fresh code.</p>

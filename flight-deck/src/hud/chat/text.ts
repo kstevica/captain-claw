@@ -7,6 +7,8 @@
 
 import { sanitizeAgentContent } from '../../utils/sanitizeAgentContent'
 import type { HudFile } from '../api'
+import { truncate } from '../format'
+import { splitMarkdown } from '../markdown/chunks'
 
 // ── Display cleaning ──
 
@@ -39,6 +41,54 @@ export function cleanAssistantText(raw: unknown): string {
   const text = typeof raw === 'string' ? raw : ''
   if (!text) return ''
   return stripSuggestions(sanitizeAgentContent(text)).trim()
+}
+
+/**
+ * Longest reply kept for display. Markdown parse + layout costs ~7 µs per
+ * character on a laptop and the glasses' CPU is ~12× slower — paid when the
+ * reply arrives and again whenever the Chat tab mounts — so a desktop-length
+ * answer would freeze the D-pad for seconds.
+ */
+export const MAX_REPLY_CHARS = 6_000
+
+/** `md` cut at a block boundary near `max` characters, with a note saying how
+ *  much is left for the dashboard. Short replies come back unchanged. */
+export function capReply(md: string, max = MAX_REPLY_CHARS): string {
+  // splitMarkdown keeps anything up to 1.5 × target whole.
+  if (md.length <= max * 1.5) return md
+  let head = splitMarkdown(md, max)[0]
+  if (head.length > max * 1.5) {
+    // No safe block boundary (one huge table, list or code block): cut at a
+    // line, closing a code fence left open so the note stays prose.
+    const cut = head.lastIndexOf('\n', max)
+    head = head.slice(0, cut > max * 0.5 ? cut : max)
+    const fences = head.match(/^ {0,3}(?:`{3,}|~{3,})/gm)
+    if (fences && fences.length % 2 === 1) head += `\n${fences[fences.length - 1].trim()}`
+  }
+  const more = Math.max(1, Math.round((md.length - head.length) / 1024))
+  return `${head.trimEnd()}\n\n*… ${more} KB more — open this chat on Flight Deck.*`
+}
+
+/** Short labels for user rows the agent's machinery wrote (msg_origin.py). */
+const SYNTHETIC_LABELS: Record<string, string> = {
+  cron: 'Scheduled job',
+  autonomy: 'Autonomous work',
+  flow: 'Flow',
+  peer: 'Task from another agent',
+  delegated_result: 'Result from another agent',
+  mcp_task: 'MCP task',
+  life_tick: 'Life tick',
+  worker_task: 'Worker task',
+  automated: 'Automated turn',
+  fleet_notice: 'Fleet update',
+  notification: 'Notification',
+}
+
+/** A user row the wearer did not write, as one short system line. */
+export function syntheticRowText(origin: string, text: string): string {
+  const label = SYNTHETIC_LABELS[origin] ?? 'Automated turn'
+  const body = text.replace(/^\[Automated turn[^\]\n]*\]\s*/i, '').replace(/\s+/g, ' ').trim()
+  return body ? `${label}: ${truncate(body, 120)}` : label
 }
 
 const IDLE_RE = /^(ready|idle|done|completed)$/i

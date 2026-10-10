@@ -8,8 +8,12 @@
 //     per-key keydowns;
 //   - the pinch that closes the composer can arrive late as Enter / click on
 //     whatever is focused next, and the host may reset focus to the first
-//     control. So on `change` we mute activations briefly and walk focus to
-//     Send (pinned), making "pinch field → speak → pinch Send" the whole flow;
+//     control. So on `change` we walk focus to Send (pinned) and mute every
+//     activation for 800 ms from that move (Glasscast's on-device guard,
+//     added after this pinch pressed its Send by itself), making
+//     "pinch field → speak → pinch Send" the whole flow;
+//   - a message Meta AI drafted by voice (WebMCP) lands here unsent, with
+//     focus on Send: the wearer reads it and pinches.
 //   - Enter sends only for physical typing (desktop / phone keyboard): on the
 //     glasses Enter on the field is the pinch that opens the composer.
 // The app stays usable without the composer (next-step chips, WebMCP).
@@ -24,6 +28,8 @@ import './chat.css'
 
 const MAX_FIELD_PX = 104 // three lines of 20 px text, then the field scrolls
 const TYPING_WINDOW_MS = 10_000
+/** Late composer pinch guard (device-tested length), from the focus move. */
+const COMPOSER_GUARD_MS = 800
 const NAV_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab'])
 
 export function Composer(props: {
@@ -34,6 +40,7 @@ export function Composer(props: {
   const connected = useHudChat((s) => s.connected)
   const busy = useHudChat((s) => s.busy)
   const closed = useHudChat((s) => s.closed)
+  const staged = useHudChat((s) => s.draftStaged)
   const fieldRef = useRef<HTMLTextAreaElement>(null)
   const wrapRef = useRef<HTMLDivElement>(null)
   /** Last printable keydown in the field (physical keyboard present). */
@@ -69,14 +76,17 @@ export function Composer(props: {
       // A desktop blur-change after typing, or the wearer already moved on.
       if (navSinceFocus.current || Date.now() - typedAt.current < TYPING_WINDOW_MS) return
       // The pinch that closed the composer must not press what gets focus.
-      quietActivations(450)
+      quietActivations(COMPOSER_GUARD_MS)
       // After React re-rendered with the new text (Send enabled).
       requestAnimationFrame(() => {
         if (!field.isConnected) return
         const sendEl = wrapRef.current?.querySelector<HTMLElement>('.hud-composer-send')
         const target = sendEl && sendEl.getAttribute('aria-disabled') !== 'true' && field.value.trim() ? sendEl : field
         focusEl(target)
-        pinFocus(target, 800)
+        // The guard counts from the move (the render can take a while on the
+        // glasses' CPU), and the pin covers the same window.
+        quietActivations(COMPOSER_GUARD_MS)
+        pinFocus(target, COMPOSER_GUARD_MS)
       })
     }
     field.addEventListener('focus', onFocus)
@@ -88,6 +98,21 @@ export function Composer(props: {
       document.removeEventListener('keydown', onNavKey, true)
     }
   }, [])
+
+  // A voice draft arrived: put focus on Send so one pinch sends what the
+  // wearer is reading (after the screen's own initial focus has run).
+  useEffect(() => {
+    if (!staged) return
+    let raf2 = 0
+    const raf1 = requestAnimationFrame(() => {
+      raf2 = requestAnimationFrame(() => {
+        const sendEl = wrapRef.current?.querySelector<HTMLElement>('.hud-composer-send')
+        const target = sendEl && sendEl.getAttribute('aria-disabled') !== 'true' ? sendEl : fieldRef.current
+        if (target) focusEl(target)
+      })
+    })
+    return () => { cancelAnimationFrame(raf1); cancelAnimationFrame(raf2) }
+  }, [staged])
 
   const onFieldKeyDown = (e: ReactKeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key.length === 1) typedAt.current = Date.now()
@@ -110,7 +135,10 @@ export function Composer(props: {
     if (props.onArrowUp()) e.preventDefault()
   }
 
-  const hint = !connected ? (closed ? 'Disconnected' : 'Connecting…') : busy ? 'Waiting for reply…' : ''
+  const hint = !connected ? (closed ? 'Disconnected' : 'Connecting…')
+    : busy ? 'Waiting for reply…'
+      : staged ? 'Written by Meta AI — not sent. Pinch Send to send it.'
+        : ''
 
   return (
     <div className="hud-composer-wrap" ref={wrapRef} onKeyDown={onWrapKeyDown}>

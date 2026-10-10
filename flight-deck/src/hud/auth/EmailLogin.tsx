@@ -9,6 +9,10 @@
 // composer arrives late as Enter / click on whatever is focused next) and
 // walk focus to the next empty field, else to Sign in — pinned, because the
 // glasses may reset focus to the first control when the composer closes.
+// A `change` from a field that already lost focus to a tap / click (paste,
+// autofill or a soft keyboard leave no printable keydown) is an ordinary
+// blur commit: it fires between that press and its click, so muting there
+// would swallow the tap on Sign in.
 
 import { useEffect, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent } from 'react'
@@ -21,6 +25,8 @@ import './auth.css'
 
 /** A physical keystroke this recent means "someone is typing" (not the composer). */
 const TYPING_WINDOW_MS = 10_000
+/** A `change` this soon after a pointer press came from the blur it caused. */
+const POINTER_BLUR_MS = 300
 const NAV_KEYS = new Set(['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Tab'])
 /** Symbols the glasses keyboard has no key for. */
 const UNTYPABLE = `' " _ \\ < > [ ] { } | ~ ^ \``
@@ -55,6 +61,8 @@ export function EmailLogin(props: {
   const typedAt = useRef(0)
   /** The wearer moved focus themselves since a field got focus. */
   const navSinceFocus = useRef(false)
+  /** Last pointer press anywhere (a tap / click that may blur a field). */
+  const pointerAt = useRef(0)
 
   useAutoFocus(true)
 
@@ -65,11 +73,19 @@ export function EmailLogin(props: {
     if (!emailEl || !passwordEl) return
     const onFocus = () => { navSinceFocus.current = false }
     const onNavKey = (e: KeyboardEvent) => { if (NAV_KEYS.has(e.key)) navSinceFocus.current = true }
-    const onCommit = () => {
+    // Touch: the focus change (and the blur-change) comes with the compat
+    // mousedown after the finger lifts, so note every phase of the press.
+    const onPointer = () => { pointerAt.current = Date.now() }
+    const onCommit = (e: Event) => {
       // A desktop blur-change after typing, or the wearer already moved on.
       if (navSinceFocus.current || Date.now() - typedAt.current < TYPING_WINDOW_MS) return
+      // The field lost focus to a tap / click (or, off the glasses, to
+      // anything: there is no composer there) — let that press through.
+      const field = e.target as HTMLElement
+      if (field !== document.activeElement
+        && (!IS_GLASSES || Date.now() - pointerAt.current < POINTER_BLUR_MS)) return
       // The pinch that closed the composer must not press what gets focus.
-      quietActivations(450)
+      quietActivations(800)
       // After React re-rendered with the new value.
       requestAnimationFrame(() => {
         const target = nextStop(emailEl, passwordEl)
@@ -83,12 +99,15 @@ export function EmailLogin(props: {
       el.addEventListener('change', onCommit)
     }
     document.addEventListener('keydown', onNavKey, true)
+    const pointerEvents = ['pointerdown', 'pointerup', 'mousedown'] as const
+    for (const t of pointerEvents) document.addEventListener(t, onPointer, true)
     return () => {
       for (const el of [emailEl, passwordEl]) {
         el.removeEventListener('focus', onFocus)
         el.removeEventListener('change', onCommit)
       }
       document.removeEventListener('keydown', onNavKey, true)
+      for (const t of pointerEvents) document.removeEventListener(t, onPointer, true)
     }
   }, [])
 

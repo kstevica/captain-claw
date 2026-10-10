@@ -15,7 +15,7 @@ import type { FocusEvent } from 'react'
 import type { HudAgent } from '../api'
 import { focusEl } from '../focus'
 import { truncate } from '../format'
-import { useAutoFocus } from '../hooks'
+import { useAutoFocus, useNow } from '../hooks'
 import { HudMarkdown } from '../markdown/HudMarkdown'
 import { getRoute, navigate } from '../router'
 import { Btn, ScreenFrame } from '../ui'
@@ -28,6 +28,10 @@ const NO_MSGS: HudMsg[] = []
 /** File chips are offered for this many of the latest replies. */
 const FILE_REPLIES = 3
 const MAX_STEPS = 4
+/** Messages rendered until the wearer asks for older ones: each is a
+ *  markdown parse + layout on a CPU ~12× slower than a laptop, paid again
+ *  whenever the Chat tab mounts (tab switch, Back from a file). */
+const RECENT_MSGS = 10
 
 function focusComposer(): void {
   const field = document.querySelector<HTMLElement>('.hud-screen .hud-composer-field')
@@ -92,14 +96,17 @@ function categoryLabel(category: string): string {
 }
 
 function ApprovalCard({ approval }: { approval: Approval }) {
+  const now = useNow(1_000)
   const answer = (ok: boolean) => {
     chat.respondApproval(ok)
     focusComposer()
   }
   const cat = categoryLabel(approval.category)
+  const left = Math.max(0, Math.ceil((approval.expiresAt - now) / 1000))
   return (
     <section className="hud-chat-approval" aria-label="Approval needed">
       <div className="hud-chat-approval-title">Approval needed{cat ? ` · ${cat}` : ''}</div>
+      <div className="hud-chat-approval-timer">Goes ahead on its own in {left} s</div>
       <div className="hud-block hud-chat-approval-msg" tabIndex={0} data-fk={`approval-${approval.id}`}>
         {approval.message}
       </div>
@@ -134,6 +141,19 @@ export function ChatScreen({ agent }: { agent: HudAgent }) {
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [confirmNew, setConfirmNew] = useState(false)
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const [showAll, setShowAll] = useState(false)
+  /** Message to focus once the earlier ones are rendered. */
+  const expandFocus = useRef<string | null>(null)
+  const earlier = showAll ? 0 : Math.max(0, shown.length - RECENT_MSGS)
+  const visible = earlier ? shown.slice(earlier) : shown
+  // New chat is offered only while idle (as on the dashboard): a turn
+  // started meanwhile cancels a pending confirm.
+  const canNewChat = agent.kind !== 'shared' && !(mine && busy)
+  const [hadNewChat, setHadNewChat] = useState(canNewChat)
+  if (hadNewChat !== canNewChat) {
+    setHadNewChat(canNewChat)
+    if (!canNewChat) setConfirmNew(false)
+  }
 
   useEffect(() => { chat.markRead() }, [])
   useEffect(() => () => {
@@ -212,6 +232,15 @@ export function ChatScreen({ agent }: { agent: HudAgent }) {
     }
   }, [tallLastReply])
 
+  // Before follow(): reading backwards from the newest earlier message.
+  useLayoutEffect(() => {
+    const fk = expandFocus.current
+    if (!fk || !showAll) return
+    expandFocus.current = null
+    const el = logRef.current?.querySelector<HTMLElement>(`[data-fk="${fk}"]`)
+    if (el) focusEl(el, 'up')
+  }, [showAll])
+
   useLayoutEffect(() => { follow() }, [follow, shown, busy, status, narration, approval, error, nextSteps, notice, mine])
 
   // Late layout (fonts, markdown that renders in a second pass) moves things.
@@ -240,6 +269,11 @@ export function ChatScreen({ agent }: { agent: HudAgent }) {
   const sendStep = (action: string) => {
     if (chat.send(action)) focusComposer()
     else flash(useHudChat.getState().connected ? 'Wait for the reply to finish' : 'Not connected')
+  }
+
+  const showEarlier = () => {
+    expandFocus.current = `msg-${shown[earlier - 1].id}`
+    setShowAll(true)
   }
 
   const onNewChat = () => {
@@ -274,7 +308,14 @@ export function ChatScreen({ agent }: { agent: HudAgent }) {
         {shown.length === 0 ? (
           <p className="hud-chat-empty">Ask {agent.name} anything. Pinch the field below to write or speak.</p>
         ) : null}
-        {shown.map((m) => {
+        {earlier ? (
+          <div className="hud-actions hud-chat-earlier">
+            <Btn variant="chip" fk="chat-earlier" onActivate={showEarlier}>
+              Earlier messages ({earlier})
+            </Btn>
+          </div>
+        ) : null}
+        {visible.map((m) => {
           const refs = fileRefs.get(m.id)
           return (
             <div className="hud-chat-turn" key={m.id} data-chat-turn="">
@@ -307,9 +348,11 @@ export function ChatScreen({ agent }: { agent: HudAgent }) {
         {mine && busy ? (
           <Btn variant="chip" className="hud-chat-stop" fk="chat-stop" onActivate={onStop}>Stop</Btn>
         ) : null}
-        <Btn variant="chip" className={confirmNew ? 'hud-chat-confirm' : undefined} fk="chat-new" onActivate={onNewChat}>
-          {confirmNew ? 'Start a new chat?' : 'New chat'}
-        </Btn>
+        {canNewChat ? (
+          <Btn variant="chip" className={confirmNew ? 'hud-chat-confirm' : undefined} fk="chat-new" onActivate={onNewChat}>
+            {confirmNew ? 'Start a new chat?' : 'New chat'}
+          </Btn>
+        ) : null}
         <Btn variant="chip" fk="chat-tts" onActivate={() => chat.setTts(!tts)}>
           Read aloud: {tts ? 'On' : 'Off'}
         </Btn>

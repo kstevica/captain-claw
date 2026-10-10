@@ -208,7 +208,7 @@
  * included) sits inside its focus highlight. */
 .hud-md .hud-md-list { list-style: none; padding-left: 0; }
 .hud-md .hud-md-list > li { position: relative; margin: 0 0 2px; padding-left: calc(14px + 1.3em); }
-.hud-md ol.hud-md-list > li { padding-left: calc(14px + 2em); }
+.hud-md ol.hud-md-list > li { padding-left: calc(14px + var(--hud-mk, 1.85em) + 0.15em); }
 .hud-md-marker {
   position: absolute;
   top: 6px;
@@ -216,12 +216,24 @@
   width: 1.3em;
   text-align: center;
   color: var(--text-3);
+  /* A number never wraps ("100." over two lines would overlap the next item). */
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 ol.hud-md-list > li > .hud-md-marker {
-  width: 1.85em;
+  width: var(--hud-mk, 1.85em);
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+/* Numbers of 3+ digits (rehypeHud sets the class from the last number): the
+ * gutter grows with them. */
+.hud-md ol.hud-md-ol-w3 { --hud-mk: 4ch; }
+.hud-md ol.hud-md-ol-w4 { --hud-mk: 5ch; }
+.hud-md ol.hud-md-ol-w5 { --hud-mk: 6ch; }
+.hud-md ol.hud-md-ol-w6 { --hud-mk: 7ch; }
+.hud-md ol.hud-md-ol-w7 { --hud-mk: 8ch; }
+.hud-md ol.hud-md-ol-w8 { --hud-mk: 9ch; }
+.hud-md ol.hud-md-ol-w9 { --hud-mk: 10ch; }
 
 /* Cards (after the generic block rule: they keep their own box). */
 .hud-md .hud-md-card {

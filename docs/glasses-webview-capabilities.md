@@ -68,7 +68,7 @@ page's origin (inferred).
 | 2026-09-23/24 | Connect 2026: web-app text can come from "dictation, handwriting, or an on-screen keyboard that all feed one text composer". Rollout from 2026-09-30. | official (extract): [Connect recap](https://developers.meta.com/blog/meta-connect-recap-ai-glasses/) |
 | 2026-09-24 | The UI Toolkit (`@wearables-ui-toolkit/mrbd` 129.0.0) goes public, with `InputTextView`, a focus engine and Back handling. | official: [toolkit repo](https://github.com/facebook/meta-ray-ban-display-ui-toolkit-web) |
 | 2026-10-01 | WebMCP skill: Meta AI can call tools the page registers on `document.modelContext`. It is "off by default and enabled per device". Commit `e617d92`. | official |
-| v129 | The on-screen keyboard inside the composer "needs firmware v129+". We found no dated Display v129 release note, and v129 was still rolling out gradually in early October. | official (extract): Build page; community: [Android Authority](https://www.androidauthority.com/meta-glasses-navigation-audio-update-3719444/) |
+| v129 | The on-screen keyboard inside the composer "needs firmware v129+". We found no dated Display v129 release note. A press report says v129 was still rolling out gradually in early October, but it covers the Ray-Ban Meta (non-Display) line; whether Display firmware uses the same numbers and dates is unconfirmed. Meta's toolkit 129.0.0 (2026-09-24) suggests v129 is near on the Display. | official (extract): Build page; community, non-Display line: [Android Authority](https://www.androidauthority.com/meta-glasses-navigation-audio-update-3719444/); inferred: the Display timing |
 
 ### Status table (October 2026)
 
@@ -212,7 +212,7 @@ Meta's own toolkit and game templates still rely on those keydowns.
 | CPU | About 12× slower than a modern laptop core | official |
 | First load | First paint under 1 s; usable under 5 s; **under 300 KB** transferred; **fewer than 15** initial requests | official (`ai-glasses-webapp-build`) |
 | Warm launch | Under 2 s with 0 bytes transferred (Service Worker) | official |
-| Heap | Under 128 MB. A page over the budget gets its renderer killed. | official |
+| Heap | Target: JS heap under 128 MB. This is a budget, not a documented kill threshold: Android's Low Memory Killer acts on the whole process. Meta's game docs record a WebView renderer killed while holding about 70 MB of decoded audio (AudioBuffers, not JS heap), so stay well under the budget and drop large caches when the page is hidden. | official (budget: toolkit `AGENTS.md`; the 70 MB kill: game `docs/audio-banks.md`) |
 | Hosting | Public HTTPS URL; HTTP is not supported ("The glasses runtime requires HTTPS for every Web App URL it loads") | official (extract) |
 | Debugging | No console and no tethering; log remotely | official |
 
@@ -264,7 +264,8 @@ composer events and Test 8 is a capability readout.
 9. **Test 6.** Do scheme links still do nothing?
 10. **Back.** Does the Back gesture produce `popstate` with no key event? (`Escape` should not appear.)
 11. **Save the log.** Tap **Save to FD /tmp** to write `/tmp/glasses-input-<UTC-ts>-ch_<channel>.log`. Diff it against the May files and update this document.
-12. **Checks on `/hud/`.** The probe page can't cover two things:
+12. **Declared mode.** Open `/glasses/input?c=<channel>&perms=1` (plus `&t=<token>` if needed), which injects May's nine candidate permission meta tags. Repeat steps 3–11 and diff the new log against the one from step 11.
+13. **Checks on `/hud/`.** The probe page can't cover two things:
     - After pairing, close the app and relaunch it. Does the httpOnly `fd_refresh` cookie survive?
     - Does the 5-entry history cap behave as described?
 
@@ -533,15 +534,20 @@ when Meta ships firmware updates.
    doesn't need a port.
 2. On the glasses, open `/glasses/view?c=<channel>`. Tap the `✎` icon
    in the HUD header — that navigates to `/glasses/input?c=<channel>`.
-3. Run the six numbered sections top to bottom. Each has a status line
+3. Run the eight numbered sections top to bottom. Each has a status line
    that confirms what happened.
-4. Tap **Scan globals** in Test 7 — fills the globals-log block with the
-   live `window` / `navigator` / `document` Meta-property dump.
-5. Tap **Save to FD /tmp** in the debug-log toolbar. The full page log +
-   the globals dump is POSTed to `/glasses/input-log` and written to
-   `/tmp/glasses-input-<UTC-ts>-ch_<channel>.log` on the FD box.
-6. Tap **Reload with perm tags** and repeat steps 3–5 to produce a
-   declared-mode comparison file.
+4. In **Test 8 · Capabilities**, tap **Refresh readout**. The readout lists
+   the Meta-looking `window` globals (names matching
+   `/meta|glass|sdk|fb|wearable/i`) next to the UA, viewport, voices and
+   WebMCP state. `navigator` and `document` are not scanned.
+5. Tap **Save to FD /tmp** under the debug log. The full page log plus the
+   capability readout is POSTed to `/glasses/input-log` and written to
+   `/tmp/glasses-input-<UTC-ts>-ch_<channel>.log` on the FD box. (If
+   `FD_GLASSES_BRIDGE_TOKEN` is set, the page URL needs `&t=<token>`.)
+6. Open the page again as `/glasses/input?c=<channel>&perms=1` (plus
+   `&t=<token>` if needed): the server injects the nine candidate permission
+   meta tags. Repeat steps 3–5 to produce a declared-mode comparison file.
+   There is no button for this; it is the URL only.
 7. On the dev box, `diff` the two files. Anything different between
    baseline and declared is news.
 
@@ -550,8 +556,8 @@ when Meta ships firmware updates.
 - **Any change in the `MetaGlassSDK dictation not available` error
   message.** Wording change, error-code change, or appearance of an
   `onresult` event would be the first signal.
-- **New globals appearing in the Test-7 scan.** Particularly anything
-  matching `/meta|glass|ray|sdk|fb/i`. If a `MetaGlassSDK` namespace
+- **New globals appearing in the Test 8 readout** (its `window` scan
+  matches `/meta|glass|sdk|fb|wearable/i`). If a `MetaGlassSDK` namespace
   appears alongside the existing `__fbAndroidBridgeAuthToken`, the gate
   has opened.
 - **Neural-Band handwriting glyphs arriving as `KeyA`/`KeyB`-style

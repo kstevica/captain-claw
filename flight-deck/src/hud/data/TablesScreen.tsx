@@ -3,7 +3,7 @@
 //
 // The list comes from dataCache (shown at once when cached; refetched when
 // older than TABLES_TTL_MS) so Back from a table is instant and focus returns
-// to the row the wearer opened.
+// to the row the wearer opened. Opening a table starts at its newest rows.
 
 import { useEffect, useState } from 'react'
 import type { HudAgent, HudTable } from '../api'
@@ -11,7 +11,7 @@ import { relTime } from '../format'
 import { useAutoFocus, useNow } from '../hooks'
 import { navigate } from '../router'
 import { Btn, Row, ScreenFrame, StateView } from '../ui'
-import { getCachedTables, isFresh, loadTables, plural, TABLES_TTL_MS } from './dataCache'
+import { getCachedTables, isFresh, loadTables, plural, resetTablePosition, TABLES_TTL_MS } from './dataCache'
 import './data.css'
 
 interface ListState {
@@ -97,7 +97,10 @@ export function TablesScreen({ agent }: { agent: HudAgent }) {
               fk={`table-${t.name}`}
               title={t.name}
               meta={tableMeta(t, now)}
-              onActivate={() => navigate({ v: 'rows', a: agent.id, tb: t.name })}
+              onActivate={() => {
+                resetTablePosition(agent.id, t.name)
+                navigate({ v: 'rows', a: agent.id, tb: t.name })
+              }}
             />
           ))}
         </div>

@@ -1,7 +1,8 @@
 // Markdown for the HUD: file previews (`blocks`) and chat replies.
 //
 // react-markdown + remark-gfm only. Everything renders as React text: no raw
-// HTML (skipHtml, never rehype-raw), no KaTeX, no syntax highlighting. Links
+// HTML (skipHtml, never rehype-raw; rehypeHud keeps `<br>` breaks and the
+// visible text of HTML blocks as text), no KaTeX, no syntax highlighting. Links
 // are text — following one would leave the app inside the glasses webview —
 // and images become an alt-text chip: never load remote images (bandwidth,
 // and a tracking pixel in someone else's file). Tables and reading blocks are

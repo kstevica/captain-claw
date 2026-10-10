@@ -3,8 +3,11 @@
 // Runs on the hast tree react-markdown builds (remark-gfm → remark-rehype),
 // before it is turned into React elements:
 //
-//   1. drops embedded raw HTML (react-markdown's skipHtml would drop it after
-//      us anyway — doing it first keeps "is this cell empty?" honest);
+//   1. embedded raw HTML never renders as HTML: `<br>` becomes a line break,
+//      an HTML block becomes its visible text as plain paragraphs (inert text
+//      nodes), every other tag is dropped (react-markdown's skipHtml would
+//      drop what is left after us anyway — doing it first keeps "is this cell
+//      empty?" honest);
 //   2. tables: narrow ones (≤ 3 columns, short headers) stay real tables in a
 //      `.hud-md-table` wrapper; wider ones become one card per row — a
 //      horizontal scroller is unusable with a D-pad and Meta QA flags any
@@ -94,14 +97,62 @@ function filled(children: ElementContent[] | undefined): ElementContent[] {
 
 // ── 1. raw HTML ──
 
+const BR = /^<br\b[^>]*>$/i
+/** Tags that separate lines of text. */
+const BLOCK_TAG = /<\/?(?:address|article|aside|blockquote|br|center|dd|details|dialog|div|dl|dt|figcaption|figure|footer|h[1-6]|header|hr|li|main|nav|ol|p|pre|section|summary|table|tbody|tfoot|thead|tr|ul)\b[^>]*>/gi
+const ENTITIES: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' }
+/** Parents whose children are blocks (a tight list item holds inline content
+ *  directly: an HTML block there still becomes paragraphs, a `<br>` in it
+ *  stays a line break). */
+const BLOCK_PARENTS = new Set(['blockquote', 'section'])
+
+function decodeEntity(m: string, e: string): string {
+  if (e[0] === '#') {
+    const code = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10)
+    return code > 0 && code <= 0x10ffff ? String.fromCodePoint(code) : m
+  }
+  return ENTITIES[e.toLowerCase()] ?? m
+}
+
+/** The visible text of raw HTML, one string per line of text (comments,
+ *  scripts and styles dropped). Only ever used as text nodes. */
+export function htmlText(html: string): string[] {
+  return html
+    .replace(/<!--[\s\S]*?(?:-->|$)|<!\[CDATA\[[\s\S]*?(?:\]\]>|$)|<\?[\s\S]*?(?:\?>|$)|<![a-zA-Z][^>]*>/g, ' ')
+    .replace(/<(script|style|textarea|template)\b[\s\S]*?(?:<\/\1\s*>|$)/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(BLOCK_TAG, '\n')
+    .replace(/<\/?t[dh]\b[^>]*>/gi, ' ')
+    .replace(/<\/?[a-zA-Z][^>]*>/g, '')
+    .replace(/&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z]{2,8});/gi, decodeEntity)
+    .split('\n')
+    .map((t) => t.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+}
+
 function stripRaw(parent: Parent): void {
   // `raw` nodes come from remark-rehype's allowDangerousHtml (react-markdown
-  // always sets it); they are not part of the core hast types.
+  // always sets it); they are not part of the core hast types. Inline HTML is
+  // one node per tag; a node with text in it is an HTML block.
   const kids = parent.children as HNode[]
+  const blockParent = parent.type === 'root' || BLOCK_PARENTS.has(parent.tagName)
+  const flow = blockParent || parent.tagName === 'li'
   for (let i = kids.length - 1; i >= 0; i--) {
     const c = kids[i]
-    if ((c as { type: string }).type === 'raw') kids.splice(i, 1)
-    else if (c.type === 'element') stripRaw(c)
+    if (c.type === 'element') { stripRaw(c); continue }
+    if ((c as { type: string }).type !== 'raw') continue
+    const value = String((c as { value?: unknown }).value ?? '').trim()
+    // `<br>` (e.g. a line break inside a table cell): keep the break — not as
+    // a block of its own.
+    if (BR.test(value)) {
+      if (blockParent) kids.splice(i, 1)
+      else kids[i] = el('br', null, [])
+      continue
+    }
+    const lines = htmlText(value)
+    if (!lines.length) kids.splice(i, 1)
+    else if (flow) kids.splice(i, 1, ...lines.map((t) => el('p', null, [text(t)])))
+    else kids[i] = text(lines.join(' '))
   }
 }
 
@@ -204,14 +255,20 @@ function blockifyList(list: Element): void {
   let n = Number.isFinite(start) ? start : 1
   for (const li of list.children) {
     if (!isEl(li, 'li')) continue
+    // Checked before the marker goes in: an empty item shows its bullet but
+    // is no focus stop.
+    const content = li.children.some(hasContent)
     if (!hasClass(li, 'task-list-item')) {
       const marker = el('span', 'hud-md-marker', [text(ordered ? `${n}.` : '•')])
       marker.properties.ariaHidden = 'true'
       li.children.unshift(marker)
     }
     n++
-    if (li.children.some(hasContent)) makeBlock(li)
+    if (content) makeBlock(li)
   }
+  // "100." / "1999.": a gutter wide enough for the longest number (markdown.css).
+  const digits = String(n - 1).length
+  if (ordered && digits > 2) addClass(list, `hud-md-ol-w${Math.min(digits, 9)}`)
 }
 
 function blockify(parent: Parent): void {

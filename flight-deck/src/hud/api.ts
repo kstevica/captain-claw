@@ -75,7 +75,54 @@ export class HudApiError extends Error {
 
 // ── Fetch with auth + one refresh ──
 
-const TIMEOUT_MS = 20_000
+/** Response headers must arrive within this… */
+const HEADERS_TIMEOUT_MS = 20_000
+/** …then a (small JSON) body gets this long. */
+const BODY_TIMEOUT_MS = 20_000
+/** A file's body: READ_LIMIT_CHARS takes ~4 s at the glasses' ~500 Kbps; this
+ *  leaves room for a much slower link instead of cutting a download that is
+ *  still coming in. */
+const FILE_BODY_TIMEOUT_MS = 90_000
+/** Public pairing calls (before sign-in): a stalled one must become a retry,
+ *  not a "Getting a sign-in code…" that never ends. */
+const PAIR_TIMEOUT_MS = 15_000
+/** "Is Flight Deck there at all?" — asked after a refresh failed. */
+const PROBE_TIMEOUT_MS = 5_000
+
+/**
+ * fetch() whose response HEADERS must arrive within `headersMs`; the body then
+ * has its own `bodyMs`, so a slow but progressing download isn't cut at the
+ * headers' limit. Either limit aborts the request: fetch() or the body read
+ * rejects with an AbortError (see transportError). The body timer is left to
+ * run out — aborting a response that was read to the end does nothing.
+ */
+function timedFetch(path: string, init: RequestInit, headersMs: number, bodyMs: number): Promise<Response> {
+  const ctl = new AbortController()
+  const outer = init.signal
+  if (outer?.aborted) ctl.abort()
+  else outer?.addEventListener('abort', () => ctl.abort(), { once: true })
+  const timer = setTimeout(() => ctl.abort(), headersMs)
+  return fetch(path, { ...init, signal: ctl.signal }).then(
+    (res) => {
+      clearTimeout(timer)
+      setTimeout(() => ctl.abort(), bodyMs)
+      return res
+    },
+    (e: unknown) => {
+      clearTimeout(timer)
+      throw e
+    },
+  )
+}
+
+/** A failed fetch() / body read as the HudApiError the screens understand
+ *  (never a raw "The user aborted a request."). */
+function transportError(e: unknown): HudApiError {
+  if (e instanceof HudApiError) return e
+  const name = (e as { name?: string } | null)?.name
+  if (name === 'TimeoutError' || name === 'AbortError') return new HudApiError('Timed out', 0)
+  return new HudApiError('Network error', 0)
+}
 
 function authHeader(): Record<string, string> {
   const { token, authEnabled } = useAuthStore.getState()
@@ -102,52 +149,149 @@ export function errorMessage(body: unknown, status: number): string {
   return pick(body) ?? `Request failed (${status})`
 }
 
-/**
- * fetch() against Flight Deck with the access token. A 401 triggers ONE
- * single-flight refresh (refreshAccessToken — never call /fd/auth/refresh
- * directly: two concurrent rotations log the device out) and a retry; a failed
- * refresh ends the session (the app shows the pairing screen).
- */
-export async function hudFetch(path: string, init: RequestInit = {}): Promise<Response> {
-  const st = useAuthStore.getState()
-  if (st.authEnabled === true && !st.token) {
-    if (!(await refreshAccessToken())) {
-      useAuthStore.getState().clearAuth()
-      throw new HudApiError('Not signed in', 401)
-    }
+/** Flight Deck's own auth failures: auth.py (get_current_user,
+ *  decode_access_token) and server.py's agent-proxy ownership guard. */
+const FD_AUTH_DETAILS = new Set(['Not authenticated', 'Token expired', 'Invalid token', 'Invalid token type', 'User not found'])
+
+function isFdAuthDetail(body: unknown): boolean {
+  const d = (body as { detail?: unknown } | null)?.detail
+  return typeof d === 'string' && FD_AUTH_DETAILS.has(d)
+}
+
+/** The access token is past its `exp` (false when it can't be read). */
+function tokenExpired(token: string): boolean {
+  try {
+    const p = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/'))) as { exp?: unknown }
+    return typeof p.exp === 'number' && p.exp * 1000 <= Date.now()
+  } catch {
+    return false
   }
-  const run = () => fetch(path, {
+}
+
+/**
+ * Is this 401 Flight Deck turning down the session (→ refresh), or the agent
+ * behind an FD proxy turning down FD? The agent proxies relay the agent's own
+ * 401 with its body as `detail` ('{"error": "unauthorized"}', 'Agent returned
+ * 401'); refreshing for that only rotates the refresh cookie. FD sends no
+ * WWW-Authenticate, so its detail text is the tell — and a token past its
+ * `exp` is FD's business either way.
+ */
+async function isFdAuthFailure(res: Response, sentToken: string): Promise<boolean> {
+  if (tokenExpired(sentToken)) return true
+  return isFdAuthDetail(await res.clone().json().catch(() => null))
+}
+
+/** The HudApiError for a non-OK response (reads its body). */
+async function responseError(res: Response): Promise<HudApiError> {
+  const body = await res.json().catch(() => null)
+  // hudFetch already renewed the session for FD's own 401s: any other 401 is
+  // the agent refusing FD's stored token — not the wearer's sign-in.
+  if (res.status === 401 && !isFdAuthDetail(body)) return new HudApiError("The agent refused Flight Deck's access.", 502)
+  return new HudApiError(errorMessage(body, res.status), res.status)
+}
+
+/** refreshAccessToken(), or null when it hasn't answered in time: a stalled
+ *  refresh must not hang every request queued behind it. */
+function refreshWithin(): Promise<boolean | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  return Promise.race([
+    refreshAccessToken(),
+    new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), HEADERS_TIMEOUT_MS) }),
+  ]).finally(() => clearTimeout(timer))
+}
+
+/** Flight Deck gives a real answer to the public status call. */
+async function deckReachable(): Promise<boolean> {
+  try {
+    const res = await fetch('/fd/auth/status', { cache: 'no-store', signal: AbortSignal.timeout(PROBE_TIMEOUT_MS) })
+    if (!res.ok) return false
+    const data = (await res.json()) as { auth_enabled?: unknown } | null
+    return typeof data?.auth_enabled === 'boolean'
+  } catch {
+    return false
+  }
+}
+
+type Renewal = 'ok' | 'offline' | 'ended'
+let renewal: Promise<Renewal> | null = null
+
+/**
+ * Renew the access token (single-flight), telling a session that is really
+ * over from a link that is down. refreshAccessToken() — never call
+ * /fd/auth/refresh directly: two concurrent rotations log the device out —
+ * answers false both for a rejected cookie and for a refresh that got no real
+ * answer (network error, a proxy's 5xx). So on false: Flight Deck unreachable
+ * → keep the session and fail this request as a network error the screen can
+ * retry; reachable → one more refresh, and only if that fails too is the
+ * session over (clearAuth: the app shows the pairing screen).
+ */
+async function renewSession(endMessage: string): Promise<void> {
+  renewal ??= (async (): Promise<Renewal> => {
+    let ok = await refreshWithin()
+    if (ok === false) {
+      if (!(await deckReachable())) return 'offline'
+      ok = await refreshWithin()
+    }
+    if (ok === null) return 'offline'
+    if (ok) return 'ok'
+    useAuthStore.getState().clearAuth()
+    return 'ended'
+  })().finally(() => { renewal = null })
+  const r = await renewal
+  if (r === 'offline') throw new HudApiError('Network error', 0)
+  if (r === 'ended') throw new HudApiError(endMessage, 401)
+}
+
+/**
+ * Boot: restore the session from the refresh cookie. 'offline' — Flight Deck
+ * gave no real answer (retry; never drop the wearer to pairing over a blip);
+ * 'ended' — there is no session (show pairing).
+ */
+export async function restoreSession(): Promise<Renewal> {
+  // One refresh, not renewSession's two: at boot there is nothing to keep, and
+  // a first launch (no cookie) would otherwise pay two refreshes + a probe.
+  const ok = await refreshWithin()
+  if (ok) return 'ok'
+  if (ok === null || !(await deckReachable())) return 'offline'
+  return 'ended'
+}
+
+/**
+ * fetch() against Flight Deck with the access token. Flight Deck's own 401
+ * renews the session ONCE (renewSession) and retries; a 401 an agent proxy
+ * relays from the agent comes back as is (see isFdAuthFailure). `bodyMs`: how
+ * long the body may take once the headers are in.
+ */
+export async function hudFetch(path: string, init: RequestInit = {}, bodyMs = BODY_TIMEOUT_MS): Promise<Response> {
+  const st = useAuthStore.getState()
+  if (st.authEnabled === true && !st.token) await renewSession('Not signed in')
+  const run = () => timedFetch(path, {
     ...init,
     credentials: 'include',
-    signal: init.signal ?? AbortSignal.timeout(TIMEOUT_MS),
     headers: { ...authHeader(), ...(init.headers as Record<string, string> | undefined) },
-  })
-  let res: Response
+  }, HEADERS_TIMEOUT_MS, bodyMs)
   try {
-    res = await run()
-    if (res.status === 401 && useAuthStore.getState().authEnabled) {
-      if (!(await refreshAccessToken())) {
-        useAuthStore.getState().clearAuth()
-        throw new HudApiError('Session expired', 401)
-      }
+    const sent = useAuthStore.getState().token
+    let res = await run()
+    if (res.status === 401 && useAuthStore.getState().authEnabled && await isFdAuthFailure(res, sent)) {
+      // Another request may have renewed the token meanwhile: just use that.
+      if (useAuthStore.getState().token === sent) await renewSession('Session expired')
       res = await run()
     }
+    return res
   } catch (e) {
-    if (e instanceof HudApiError) throw e
-    const name = (e as { name?: string })?.name
-    if (name === 'TimeoutError' || name === 'AbortError') throw new HudApiError('Timed out', 0)
-    throw new HudApiError('Network error', 0)
+    throw transportError(e)
   }
-  return res
 }
 
 export async function hudJSON<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await hudFetch(path, init)
-  if (!res.ok) {
-    const body = await res.json().catch(() => null)
-    throw new HudApiError(errorMessage(body, res.status), res.status)
+  if (!res.ok) throw await responseError(res)
+  try {
+    return (await res.json()) as T
+  } catch (e) {
+    throw transportError(e)
   }
-  return res.json() as Promise<T>
 }
 
 function postJSON(body: unknown): RequestInit {
@@ -176,7 +320,15 @@ export async function listAgents(): Promise<HudAgent[]> {
   for (const r of [procs, conts]) {
     if (r.status === 'rejected' && r.reason instanceof HudApiError && r.reason.status === 401) throw r.reason
   }
-  if (procs.status === 'rejected' && conts.status === 'rejected') throw procs.reason
+  // Nor may a failed process list (a tunnel 502, a timeout on the slow link):
+  // that is where most agents live. Only a deck without the route (404) goes
+  // on with containers alone. Containers / shared stay optional (FD answers
+  // [] without Docker; sharing can be off).
+  if (procs.status === 'rejected') {
+    const noRoute = procs.reason instanceof HudApiError && procs.reason.status === 404
+    if (!noRoute) throw procs.reason
+    if (conts.status === 'rejected') throw conts.reason
+  }
   const out: HudAgent[] = []
   if (procs.status === 'fulfilled' && Array.isArray(procs.value)) {
     for (const p of procs.value) {
@@ -221,6 +373,10 @@ function ownBase(agent: HudAgent, prefix: string): string {
 const MD_EXT = new Set(['.md', '.markdown'])
 /** Refuse to pull bigger files over the glasses' ~500 Kbps link. */
 export const MAX_FILE_BYTES = 1024 * 1024
+/** readFileText stops the download once it has more text than this: the HUD
+ *  renders only the first 200 000 chars (FileScreen RENDER_LIMIT, which must
+ *  stay below this so a cut file still reads as clipped). */
+export const READ_LIMIT_CHARS = 250_000
 
 function toMs(t: unknown): number {
   const n = Number(t)
@@ -261,7 +417,8 @@ export async function listMarkdownFiles(agent: HudAgent): Promise<HudFile[]> {
       // Workspace-root files outside saved/ output/ workflows/ can't be opened (agent sandbox).
       if (f.logical.startsWith('workspace/') && !/^workspace\/(saved|output|workflows)\//.test(f.logical)) continue
       seen.add(f.physical)
-      // Fail closed: anything not created by the owner (or unattributed) is a member file.
+      // Unattributed files are the agent's own; any attribution other than the
+      // owner (including an unknown kind) fails closed as a member file.
       const trusted = !f.created_by || f.created_by.kind === 'owner'
       files.push({
         key: f.physical, name: f.filename, logical: f.logical, size: f.size || 0, modified: toMs(f.modified),
@@ -273,20 +430,48 @@ export async function listMarkdownFiles(agent: HudAgent): Promise<HudFile[]> {
   return files
 }
 
-/** Raw text of a file. `size` (if known) is checked against MAX_FILE_BYTES first. */
+/** Raw text of a file — at most a little over READ_LIMIT_CHARS of it.
+ *  `size` (if known) is checked against MAX_FILE_BYTES first. */
 export async function readFileText(agent: HudAgent, key: string, size?: number): Promise<string> {
   if (size && size > MAX_FILE_BYTES) throw new HudApiError('File too large for the glasses', 413)
   const path = agent.kind === 'shared'
     ? `/fd/shared-agents/files/view?ref=${encodeURIComponent(agent.ref || '')}&id=${encodeURIComponent(key)}`
     : `${ownBase(agent, 'agent-file-view')}?path=${encodeURIComponent(key)}`
-  const res = await hudFetch(path)
-  if (!res.ok) {
-    const body = await res.json().catch(() => null)
-    throw new HudApiError(errorMessage(body, res.status), res.status)
-  }
+  const res = await hudFetch(path, {}, FILE_BODY_TIMEOUT_MS)
+  if (!res.ok) throw await responseError(res)
   const len = Number(res.headers.get('content-length') || 0)
-  if (len > MAX_FILE_BYTES) throw new HudApiError('File too large for the glasses', 413)
-  return res.text()
+  if (len > MAX_FILE_BYTES) {
+    res.body?.cancel().catch(() => {})
+    throw new HudApiError('File too large for the glasses', 413)
+  }
+  try {
+    return await readTextUpTo(res, READ_LIMIT_CHARS)
+  } catch (e) {
+    throw transportError(e)
+  }
+}
+
+/** The body as text, cancelling the rest of the download once more than
+ *  `maxChars` have arrived. */
+async function readTextUpTo(res: Response, maxChars: number): Promise<string> {
+  if (!res.body) return res.text()
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  const parts: string[] = []
+  let chars = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    const s = decoder.decode(value, { stream: true })
+    parts.push(s)
+    chars += s.length
+    if (chars > maxChars) {
+      reader.cancel().catch(() => {})
+      return parts.join('')
+    }
+  }
+  parts.push(decoder.decode())
+  return parts.join('')
 }
 
 // ── Datastore (read-only) ──
@@ -388,19 +573,27 @@ export interface PairInfo {
   expires_in: number
 }
 
+/** A public (pre-sign-in) POST, bounded like hudFetch: a stalled request
+ *  turns into HudApiError(…, 0), which the pairing screen retries. */
+async function publicPost<T>(path: string, body: unknown): Promise<T> {
+  try {
+    const res = await timedFetch(path, { ...postJSON(body), credentials: 'include' }, PAIR_TIMEOUT_MS, BODY_TIMEOUT_MS)
+    if (!res.ok) throw new HudApiError(errorMessage(await res.json().catch(() => null), res.status), res.status)
+    return (await res.json()) as T
+  } catch (e) {
+    throw transportError(e)
+  }
+}
+
 /** Public: start a pairing for this device. */
-export async function pairStart(label: string): Promise<PairStart> {
-  const res = await fetch('/fd/auth/pair/start', { ...postJSON({ label }), credentials: 'include' })
-  if (!res.ok) throw new HudApiError(errorMessage(await res.json().catch(() => null), res.status), res.status)
-  return res.json()
+export function pairStart(label: string): Promise<PairStart> {
+  return publicPost<PairStart>('/fd/auth/pair/start', { label })
 }
 
 /** Public: the glasses ask whether the code was approved. On approval the
  *  response also sets the refresh cookie, like a normal login. */
-export async function pairPoll(deviceCode: string): Promise<PairPoll> {
-  const res = await fetch('/fd/auth/pair/poll', { ...postJSON({ device_code: deviceCode }), credentials: 'include' })
-  if (!res.ok) throw new HudApiError(errorMessage(await res.json().catch(() => null), res.status), res.status)
-  return res.json()
+export function pairPoll(deviceCode: string): Promise<PairPoll> {
+  return publicPost<PairPoll>('/fd/auth/pair/poll', { device_code: deviceCode })
 }
 
 /** Signed in (phone/desktop): which device is asking for this code? */

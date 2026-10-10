@@ -10,17 +10,21 @@ Routes (this router is included before ``spa_catch_all`` in ``server.py``):
 * ``GET /hud/manifest.webmanifest`` — the launcher manifest (PNG icons only:
   Meta's launcher rejects SVG).
 * ``GET /hud/sw.js`` — a small service worker: cache-first for hashed
-  ``/assets/*``, network-first for ``/hud*`` navigations (offline fallback to
-  the last good shell). It never touches ``/fd/*``.
+  ``/assets/*``, network-first for ``/hud*`` navigations (falls back to the
+  last good shell when Flight Deck doesn't answer: a network error, a slow
+  link, or a tunnel's 5xx page). It never touches ``/fd/*``.
 * ``GET /hud``, ``/hud/``, ``/hud/{rest}`` — the built page, never cached by
-  the browser (the SW is the only cache). ``/hud/pair`` (the phone/desktop
-  approval page for device pairing) is one of these client-side routes.
+  the browser (the SW is the only cache) and never framed. ``/hud/pair`` (the
+  phone/desktop approval page for device pairing) is one of these client-side
+  routes.
 * ``GET /fd/hud/config`` — signed-in: the rendering rules the HUD prepends to
   the first chat message of a connection.
 
 Plus ``root_override`` — called by ``spa_catch_all`` for ``GET /`` only — which
 sends the Display's WebView to ``/hud/`` unless the wearer opted out with
-``/?ui=full``.
+``/?ui=full``; and ``HudDeliveryMiddleware`` (registered in ``server.py``),
+which gzips the HUD page and the built ``/assets/*`` and lets browsers keep
+the content-hashed assets for good.
 
 The HUD's data comes from the owner-checked ``/fd/*`` API and
 ``/fd/agent-ws``; nothing here uses the unauthenticated ``/glasses/*`` bridge.
@@ -29,10 +33,14 @@ The HUD's data comes from the owner-checked ``/fd/*`` API and
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import FileResponse, RedirectResponse, Response
+from starlette.datastructures import Headers, MutableHeaders
+from starlette.middleware.gzip import GZipMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.auth_routes import _cookie_secure
@@ -82,14 +90,25 @@ async def hud_manifest() -> Response:
 # network-first, so a redeploy is picked up on the next online launch (Meta:
 # "cache-first can serve a stale build after redeploy"). Only GET + same-origin
 # requests are considered; /fd/* (API, auth) is never intercepted.
+#
+# The deck normally sits behind a tunnel or reverse proxy (Meta needs public
+# HTTPS), so "Flight Deck is down" usually arrives as the proxy's 502/530 page,
+# not as a network error. Any such answer — or none within SHELL_TIMEOUT_MS —
+# boots the last good shell instead, whose own loop retries Flight Deck. Only
+# the real page (marked X-HUD-Shell by _hud_page) is ever stored as the shell.
 
-HUD_CACHE = "hud-v1"
+HUD_CACHE = "hud-v2"
+HUD_SHELL_HEADER = "X-HUD-Shell"
 
 _HUD_SW = """// Captain Claw HUD service worker (served by hud_routes.py).
 'use strict';
 const CACHE = '__HUD_CACHE__';
 const SHELL = '/hud/';
 const MAX_ASSETS = 60;
+// How long a launch waits for the page before booting the cached shell.
+const SHELL_TIMEOUT_MS = 4000;
+// Files under /hud/ that are not the page: never handled as the shell.
+const NOT_PAGES = ['/hud/sw.js', '/hud/manifest.webmanifest'];
 
 self.addEventListener('install', () => { self.skipWaiting(); });
 
@@ -120,17 +139,50 @@ async function assetFirst(request) {
   return res;
 }
 
-async function shellNetworkFirst(request) {
-  const cache = await caches.open(CACHE);
-  try {
-    const res = await fetch(request);
-    if (res.ok) await cache.put(SHELL, res.clone());
+// The HUD page itself (Flight Deck marks it) — never a proxy's error page, a
+// tunnel's interstitial, or the manifest opened in a tab.
+function isShell(res) {
+  return res.status === 200 && res.headers.get('__HUD_SHELL_HEADER__') === '1'
+    && (res.headers.get('Content-Type') || '').startsWith('text/html');
+}
+
+// Answers the wearer must see as they are: any 2xx (a tunnel's interstitial),
+// redirects (an access gate's sign-in: navigations fetch with redirect
+// 'manual') and auth challenges. Any other error (502/503/504, a tunnel's
+// 530, ngrok's offline 404) means Flight Deck isn't answering.
+function passThrough(res) {
+  return res.ok || res.type === 'opaqueredirect' || res.status === 401 || res.status === 407;
+}
+
+function shellNetworkFirst(event) {
+  const network = fetch(event.request).then(async (res) => {
+    if (isShell(res)) {
+      const cache = await caches.open(CACHE);
+      await cache.put(SHELL, res.clone()).catch(() => {});
+    }
     return res;
-  } catch (err) {
-    const hit = await cache.match(SHELL);
-    if (hit) return hit;
-    throw err;
-  }
+  });
+  // An answer that comes after the timeout still refreshes the cached shell.
+  event.waitUntil(network.catch(() => {}));
+  const lastShell = async () => (await caches.open(CACHE)).match(SHELL);
+  return (async () => {
+    let timer;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error('timeout')), SHELL_TIMEOUT_MS);
+    });
+    let res;
+    try {
+      res = await Promise.race([network, timeout]);
+    } catch (err) {
+      // Network error or no answer in time: the last good shell; nothing
+      // cached yet (first launch): keep waiting for the network.
+      return (await lastShell()) || network;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (passThrough(res)) return res;
+    return (await lastShell()) || res;
+  })();
 }
 
 self.addEventListener('fetch', (event) => {
@@ -142,12 +194,13 @@ self.addEventListener('fetch', (event) => {
     event.respondWith(assetFirst(request));
     return;
   }
-  if (request.mode === 'navigate' && url.pathname.startsWith('/hud')) {
-    event.respondWith(shellNetworkFirst(request));
+  if (request.mode === 'navigate' && (url.pathname === '/hud' || url.pathname.startsWith('/hud/'))
+      && !NOT_PAGES.includes(url.pathname)) {
+    event.respondWith(shellNetworkFirst(event));
   }
   // Everything else (notably /fd/*) goes straight to the network.
 });
-""".replace("__HUD_CACHE__", HUD_CACHE)
+""".replace("__HUD_CACHE__", HUD_CACHE).replace("__HUD_SHELL_HEADER__", HUD_SHELL_HEADER)
 
 
 @router.get("/hud/sw.js")
@@ -164,6 +217,12 @@ async def hud_service_worker() -> Response:
 
 _NOT_BUILT = "HUD not built — run npm run build in flight-deck"
 
+# Never framed: /hud/pair is a one-click "sign this device in" page, and a
+# framing page on the same site (another port, a sibling subdomain) would get
+# the approver's cookie and could clickjack it. Same as the OAuth consent pages.
+_HUD_PAGE_HEADERS = {**_NO_CACHE, "X-Frame-Options": "DENY",
+                     "Content-Security-Policy": "frame-ancestors 'none'"}
+
 
 def _hud_page() -> Response:
     page = STATIC_DIR / HUD_PAGE
@@ -171,8 +230,10 @@ def _hud_page() -> Response:
         body = page.read_bytes()
     except OSError:
         return Response(_NOT_BUILT, status_code=503, media_type="text/plain; charset=utf-8",
-                        headers=_NO_CACHE)
-    return Response(body, media_type="text/html; charset=utf-8", headers=_NO_CACHE)
+                        headers=_HUD_PAGE_HEADERS)
+    # The marker is how the service worker tells the page from anything else.
+    return Response(body, media_type="text/html; charset=utf-8",
+                    headers={**_HUD_PAGE_HEADERS, HUD_SHELL_HEADER: "1"})
 
 
 @router.get("/hud")
@@ -216,8 +277,15 @@ def is_display_webview(user_agent: str) -> bool:
     return "Greatwhite" in user_agent and "; wv)" in user_agent
 
 
+# What GET / returns depends on the User-Agent and the fd_ui cookie, so no
+# cached copy may answer for the server: a WebView that once got the dashboard
+# at / would otherwise keep it and never see the redirect (or /?ui=hud).
+ROOT_HEADERS = {"Cache-Control": "no-cache", "Vary": "User-Agent, Cookie"}
+
+
 def _to_hud() -> RedirectResponse:
-    return RedirectResponse("/hud/", status_code=302, headers={"Cache-Control": "no-store"})
+    return RedirectResponse("/hud/", status_code=302,
+                            headers={**ROOT_HEADERS, "Cache-Control": "no-store"})
 
 
 def root_override(request: Request, index_file: Path) -> Response | None:
@@ -228,11 +296,12 @@ def root_override(request: Request, index_file: Path) -> Response | None:
     * ``/?ui=hud`` — forget that choice and go to ``/hud/``;
     * the Display's WebView without the opt-out cookie — ``302 /hud/``.
 
-    Any other request: None (the caller serves ``index.html`` as before).
+    Any other request: None (the caller serves ``index.html`` with
+    ``ROOT_HEADERS``).
     """
     ui = request.query_params.get("ui", "")
     if ui == "full":
-        resp = FileResponse(index_file)
+        resp = FileResponse(index_file, headers=ROOT_HEADERS)
         resp.set_cookie(UI_COOKIE, "full", max_age=UI_COOKIE_MAX_AGE, path="/",
                         samesite="lax", httponly=True,
                         # Same rule as the refresh cookie (FD_COOKIE_SECURE / FD_LOCKDOWN).
@@ -246,3 +315,51 @@ def root_override(request: Request, index_file: Path) -> Response | None:
             and request.cookies.get(UI_COOKIE) != "full"):
         return _to_hud()
     return None
+
+
+# ── Compression and caching for the HUD's first load ─────────────────
+# Meta's budget for a first load is under 300 KB at ~500 Kbps. The HUD's page,
+# JS and CSS are ~490 KB raw but ~150 KB gzipped, and many tunnels (ngrok, an
+# ssh tunnel, stock nginx) don't compress. So Flight Deck gzips them itself,
+# scoped by path: only /hud* and the built text files in /assets/, never /fd/*
+# (a compressor must not buffer SSE, ndjson or chat streams). Content-hashed
+# assets are also cacheable for good: a new build has new names.
+
+_ASSET_PREFIX = "/assets/"
+_COMPRESSIBLE_ASSET = re.compile(r"\.(?:js|mjs|css|json|map|svg|html|txt)$")
+_HASHED_ASSET = re.compile(r"-[A-Za-z0-9_-]{8}\.[A-Za-z0-9]+$")  # Vite's [name]-[hash].[ext]
+_IMMUTABLE = "public, max-age=31536000, immutable"
+_GZIP_MIN_BYTES = 1024
+
+
+def _with_immutable_cache(send: Send) -> Send:
+    async def send_cached(message: Message) -> None:
+        if message["type"] == "http.response.start" and message["status"] in (200, 304):
+            MutableHeaders(scope=message)["Cache-Control"] = _IMMUTABLE
+        await send(message)
+    return send_cached
+
+
+class HudDeliveryMiddleware:
+    """gzip for ``/hud*`` and the text files in ``/assets/`` (no Range
+    requests), plus ``Cache-Control: immutable`` for content-hashed
+    ``/assets/*``. Every other path goes straight through, untouched."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+        self.gzip = GZipMiddleware(app, minimum_size=_GZIP_MIN_BYTES, compresslevel=6)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        path: str = scope["path"]
+        asset = path.startswith(_ASSET_PREFIX)
+        if asset and _HASHED_ASSET.search(path):
+            send = _with_immutable_cache(send)
+        hud = path == "/hud" or path.startswith("/hud/")
+        if ((hud or (asset and _COMPRESSIBLE_ASSET.search(path)))
+                and "range" not in Headers(scope=scope)):
+            await self.gzip(scope, receive, send)
+        else:
+            await self.app(scope, receive, send)

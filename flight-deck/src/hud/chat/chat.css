@@ -61,6 +61,9 @@
 /* Focused reading block: hud.css draws the left bar; keep the user border. */
 .hud-msg--user:focus { border-color: rgba(95, 227, 255, 0.35); }
 
+/* "Earlier messages": older rows are rendered on request (slow CPU). */
+.hud-actions.hud-chat-earlier { justify-content: center; margin: 0 0 10px; }
+
 /* ── File chips (after the reply that mentions them) ── */
 
 .hud-chat-files {
@@ -135,6 +138,12 @@
   font-size: var(--fs-sm);
   font-weight: 700;
   color: var(--warn);
+}
+
+.hud-chat-approval-timer {
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
 }
 
 .hud-chat-approval-msg {

@@ -292,3 +292,16 @@
 .hud-pp-facts dt { font-size: 15px; color: var(--text-3); }
 .hud-pp-facts dd { margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
 .hud-pp-facts .hud-pp-expired { color: var(--err); }
+
+/* Label and browser come from the requester, not the deck: set apart. */
+.hud-pp-claimed {
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+.hud-pp-claimed-h {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-3);
+}

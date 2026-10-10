@@ -2,6 +2,8 @@
 // agents shared with them). Running agents are focus stops that open the
 // agent's chat; stopped ones are shown dimmed in one reading block (Flight
 // Deck starts agents, not the glasses). Ends with Refresh and Sign out.
+// A failed load is never shown as "no agents": with nothing (or an empty list)
+// to show it is an error with Retry; over an older list, a note with Retry.
 
 import { useEffect, useRef, useState } from 'react'
 import { logoutUser, useAuthStore } from '../../stores/authStore'
@@ -93,8 +95,11 @@ export function AgentsScreen() {
 
   const subtitle = authEnabled === false ? 'Sign-in off' : userName || undefined
 
+  // Keyed: when Refresh drops out of the actions (a failed load), React must
+  // not turn the focused Refresh element into Sign out.
   const signOutBtn = authEnabled ? (
     <Btn
+      key="signout"
       variant="chip"
       className={confirming ? 'hud-agents-confirm' : undefined}
       fk="agents-signout"
@@ -118,18 +123,26 @@ export function AgentsScreen() {
     </>
   )
 
+  // Nothing loaded yet, or a failed re-list of an empty list (it may not be
+  // empty any more): the error, with Retry — never "No agents yet".
+  if (error && (!agents || agents.length === 0)) {
+    return (
+      <ScreenFrame title="Agents" subtitle={subtitle}>
+        {/* Refresh's focus key: when a refresh fails, focus moves on to Retry
+            (not to its neighbour, Sign out). */}
+        <div className="hud-agents-retry" data-fk="agents-refresh">
+          <StateView kind="error" message={`Couldn't load agents — ${error}`} onRetry={refresh} />
+        </div>
+        {signOutBtn ? <div className="hud-actions hud-agents-actions">{signOutBtn}</div> : null}
+        {footerNotes}
+      </ScreenFrame>
+    )
+  }
+
   if (!agents) {
     return (
       <ScreenFrame title="Agents" subtitle={subtitle}>
-        {error ? (
-          <>
-            <StateView kind="error" message={error} onRetry={refresh} />
-            {signOutBtn ? <div className="hud-actions hud-agents-actions">{signOutBtn}</div> : null}
-            {footerNotes}
-          </>
-        ) : (
-          <StateView kind="loading" message="Loading agents…" />
-        )}
+        <StateView kind="loading" message="Loading agents…" />
       </ScreenFrame>
     )
   }
@@ -139,7 +152,7 @@ export function AgentsScreen() {
 
   const actions = (
     <div className="hud-actions hud-agents-actions">
-      <Btn variant="chip" fk="agents-refresh" onActivate={refresh}>{loading ? 'Refreshing…' : 'Refresh'}</Btn>
+      <Btn key="refresh" variant="chip" fk="agents-refresh" onActivate={refresh}>{loading ? 'Refreshing…' : 'Refresh'}</Btn>
       {signOutBtn}
     </div>
   )
@@ -147,7 +160,9 @@ export function AgentsScreen() {
   if (agents.length === 0) {
     return (
       <ScreenFrame title="Agents" subtitle={subtitle}>
-        <StateView kind="empty" message="No agents yet — create one in Flight Deck." />
+        {loading
+          ? <StateView kind="loading" message="Loading agents…" />
+          : <StateView kind="empty" message="No agents yet — create one in Flight Deck." />}
         {actions}
         {footerNotes}
       </ScreenFrame>
@@ -156,7 +171,12 @@ export function AgentsScreen() {
 
   return (
     <ScreenFrame title="Agents" subtitle={subtitle}>
-      {error ? <p className="hud-note hud-agents-error">Couldn't refresh — {error}</p> : null}
+      {error ? (
+        <div className="hud-agents-errorbar" role="alert">
+          <p className="hud-note hud-agents-error">Couldn't refresh — {error}</p>
+          <Btn variant="chip" fk="agents-retry" onActivate={refresh}>Retry</Btn>
+        </div>
+      ) : null}
       {running.map((a) => <AgentRow key={a.id} agent={a} last={a.id === lastId} />)}
       {running.length === 0 ? (
         <p className="hud-note">No agent is running — start one in Flight Deck.</p>

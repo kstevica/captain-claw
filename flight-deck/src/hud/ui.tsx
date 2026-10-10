@@ -86,7 +86,7 @@ export function StateView(props: {
 
 const TAB_LABEL: Record<Tab, string> = { chat: 'Chat', files: 'Files', data: 'Data' }
 
-function TabBtn(props: { agent: HudAgent; tab: Tab; active: boolean; badge?: number }) {
+function TabBtn(props: { agent: HudAgent; tab: Tab; active: boolean; badge?: number | string }) {
   const act = useActivate(props.active ? () => {} : () => navigate({ v: 'agent', a: props.agent.id, t: props.tab }, { replace: true }))
   return (
     <div className={`hud-tab${props.active ? ' hud-tab--on' : ''}`} data-fk={`tab-${props.tab}`} aria-selected={props.active} {...act}>
@@ -119,6 +119,8 @@ export function ScreenFrame({ scrollRef, ...props }: {
 }) {
   const now = useNow(15_000)
   const unread = useHudChat((s) => s.unread)
+  // A pending approval blocks the agent's turn: flag it louder than unread.
+  const approvalPending = useHudChat((s) => s.approval !== null)
   const tabs: Tab[] = props.agent
     ? (['chat', 'files', 'data'] as Tab[]).filter((t) => t === 'chat' || (t === 'files' ? props.agent!.caps.files : props.agent!.caps.data))
     : []
@@ -132,7 +134,7 @@ export function ScreenFrame({ scrollRef, ...props }: {
         {props.agent && props.tab ? (
           <nav className="hud-tabs" aria-label="Sections">
             {tabs.map((t) => (
-              <TabBtn key={t} agent={props.agent!} tab={t} active={t === props.tab} badge={t === 'chat' && props.tab !== 'chat' ? unread : 0} />
+              <TabBtn key={t} agent={props.agent!} tab={t} active={t === props.tab} badge={t === 'chat' && props.tab !== 'chat' ? (approvalPending ? '!' : unread) : 0} />
             ))}
           </nav>
         ) : null}

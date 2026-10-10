@@ -3,14 +3,17 @@
 //  - The markdown file list per agent: the file screen looks up size + trust
 //    without another request, and Back to the list renders instantly (so the
 //    focus-restore lands on the row the wearer left).
-//  - The last few file texts: re-opening a file costs nothing over the
+//  - The last few file texts: re-opening a file shows it at once over the
 //    glasses' ~500 Kbps link. A text is reused only while the listed
-//    `modified` time still matches.
+//    `modified` time still matches (the file screen re-checks the list in the
+//    background before trusting an older one). Reads are single-flight, so
+//    re-opening a file while it downloads joins that download.
 //
-// Everything is dropped when the signed-in user changes or signs out.
+// Everything is dropped when the signed-in user changes or signs out, and a
+// request started before that never writes back.
 
 import { useAuthStore } from '../../stores/authStore'
-import { listMarkdownFiles, type HudAgent, type HudFile } from '../api'
+import { listMarkdownFiles, readFileText, type HudAgent, type HudFile } from '../api'
 
 /** A list younger than this is shown without refetching. */
 export const LIST_TTL_MS = 60_000
@@ -63,6 +66,7 @@ const TEXT_MAX_CHARS = 2_000_000
 interface TextEntry { id: string; modified: number; text: string }
 
 let texts: TextEntry[] = []
+const textReads = new Map<string, Promise<string>>()
 
 function textId(agentId: string, key: string): string {
   return `${agentId}\u0000${key}`
@@ -76,7 +80,7 @@ export function cachedText(agentId: string, key: string, modified: number): stri
   return hit && hit.modified === modified ? hit.text : null
 }
 
-export function rememberText(agentId: string, key: string, modified: number, text: string): void {
+function rememberText(agentId: string, key: string, modified: number, text: string): void {
   if (!modified || text.length > TEXT_MAX_CHARS) return
   const id = textId(agentId, key)
   texts = texts.filter((t) => t.id !== id)
@@ -89,11 +93,33 @@ export function rememberText(agentId: string, key: string, modified: number, tex
   }
 }
 
+/**
+ * Read a file's text and cache it under `meta.modified` (`meta`: its list
+ * entry, when known — size check + cache key). Single flight per file version.
+ */
+export function loadText(agent: HudAgent, key: string, meta: HudFile | null): Promise<string> {
+  const id = `${textId(agent.id, key)}\u0000${meta?.modified ?? 0}`
+  const running = textReads.get(id)
+  if (running) return running
+  const gen = generation
+  const p = readFileText(agent, key, meta?.size || undefined)
+    .then((text) => {
+      if (meta && gen === generation) rememberText(agent.id, key, meta.modified, text)
+      return text
+    })
+    .finally(() => {
+      if (textReads.get(id) === p) textReads.delete(id)
+    })
+  textReads.set(id, p)
+  return p
+}
+
 export function clearFilesCache(): void {
   generation++
   lists.clear()
   inflight.clear()
   texts = []
+  textReads.clear()
 }
 
 useAuthStore.subscribe((s, prev) => {

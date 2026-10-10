@@ -21,21 +21,21 @@ export function useActivate(fn: (() => void) | null | undefined, opts?: { disabl
   const ref = useRef(fn)
   useEffect(() => { ref.current = fn })
   const disabled = !!opts?.disabled || !fn
-  const run = useCallback((el: Element) => {
+  const run = useCallback(() => {
     if (disabled || !ref.current) return
-    if (!claimActivation(el)) return
+    if (!claimActivation()) return
     ref.current()
   }, [disabled])
   return {
     role: 'button',
     tabIndex: disabled ? -1 : 0,
     ...(disabled ? { 'aria-disabled': true as const } : {}),
-    onClick: (e) => { e.preventDefault(); run(e.currentTarget) },
+    onClick: (e) => { e.preventDefault(); run() },
     onKeyDown: (e) => {
       if (e.key === 'Enter' || e.key === ' ') {
         e.preventDefault()
         e.stopPropagation()
-        run(e.currentTarget)
+        run()
       }
     },
   }
@@ -43,7 +43,9 @@ export function useActivate(fn: (() => void) | null | undefined, opts?: { disabl
 
 /**
  * Focus the screen's first stop (or the one Back should restore) once its
- * content is ready. Never steals focus that is already on this screen.
+ * content is ready. Never steals focus that is already on this screen —
+ * except right after Back, where the host's reset to the first control must
+ * not beat the restore (see focusInitial).
  */
 export function useAutoFocus(ready: boolean): void {
   useEffect(() => {

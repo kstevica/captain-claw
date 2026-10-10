@@ -29,3 +29,16 @@
 
 .hud-agents-warn { color: var(--text-2); }
 .hud-agents-warn .hud-pill { margin-right: 6px; vertical-align: 1px; }
+
+/* A failed re-list over the old list: the reason, then Retry (its own stop). */
+.hud-agents-errorbar {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.hud-agents-errorbar .hud-note { margin: 0; }
+/* Only carries a focus key: no box of its own (the state view sizes itself
+   against the scroll area). */
+.hud-agents-retry { display: contents; }

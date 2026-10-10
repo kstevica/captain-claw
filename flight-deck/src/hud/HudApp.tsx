@@ -7,9 +7,11 @@
 // but none of its side effects: no hydrateAllStores, no polling stores, no
 // dashboard bundle.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { ComponentProps } from 'react'
 import { awaitAuthStatus, refreshAccessToken, useAuthStore } from '../stores/authStore'
 import { AgentsScreen } from './agents/AgentsScreen'
+import { restoreSession } from './api'
 import { lastAgentId, rememberAgent, useAgents } from './agentsStore'
 import { PairApprovePage } from './auth/PairApprovePage'
 import { PairScreen } from './auth/PairScreen'
@@ -21,7 +23,8 @@ import { TablesScreen } from './data/TablesScreen'
 import { FileScreen } from './files/FileScreen'
 import { FilesScreen } from './files/FilesScreen'
 import { installFocusEngine } from './focus'
-import { getRoute, initRouter, navigate, routeKey, useRoute, type Route } from './router'
+import { useAutoFocus } from './hooks'
+import { collapseHistory, getRoute, initRouter, navigate, navigateUp, routeKey, useRoute, type Route } from './router'
 import { ScreenFrame, StateView } from './ui'
 import { registerWebMcpTools } from './webmcp'
 
@@ -33,8 +36,10 @@ export function HudApp() {
 function GlassesApp() {
   const authEnabled = useAuthStore((s) => s.authEnabled)
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated)
+  const signingOut = useAuthStore((s) => s.signingOut)
   const [booted, setBooted] = useState(false)
   const [unreachable, setUnreachable] = useState(false)
+  const wasSignedIn = useRef(false)
 
   useEffect(() => installFocusEngine(), [])
 
@@ -45,38 +50,86 @@ function GlassesApp() {
       const enabled = await awaitAuthStatus(() => setUnreachable(true), () => cancelled)
       if (enabled === null || cancelled) return
       setUnreachable(false)
-      if (enabled) await refreshAccessToken()
+      // A refresh that got no real answer (the link blinked, a stalled
+      // proxy) retries instead of sending the wearer to re-pair.
+      for (let attempt = 0; enabled; attempt++) {
+        const r = await restoreSession()
+        if (cancelled) return
+        if (r !== 'offline') break
+        setUnreachable(true)
+        await new Promise((resolve) => setTimeout(resolve, Math.min(1000 * 2 ** attempt, 10_000)))
+        if (cancelled) return
+      }
+      setUnreachable(false)
       if (!cancelled) setBooted(true)
     })()
     return () => { cancelled = true }
   }, [])
 
-  if (!booted) {
-    return (
-      <main className="hud-screen hud-boot-screen">
-        <div className="hud-state hud-state--loading">
-          <div className="hud-state-text">{unreachable ? "Can't reach Flight Deck — retrying…" : 'Captain Claw…'}</div>
-        </div>
-      </main>
-    )
-  }
-  if (authEnabled && !isAuthenticated) return <PairScreen />
+  // The session ended mid-use (a refresh failed): the app's screens are
+  // gone, so take their history entries with them — otherwise each Back on
+  // the sign-in screen pops one with nothing visible happening. A sign-out
+  // reloads instead (signingOut), from the agent list.
+  useEffect(() => {
+    if (!booted || !authEnabled || signingOut) return
+    if (isAuthenticated) wasSignedIn.current = true
+    else if (wasSignedIn.current) { wasSignedIn.current = false; collapseHistory() }
+  }, [booted, authEnabled, isAuthenticated, signingOut])
+
+  if (!booted) return <BootScreen text={unreachable ? "Can't reach Flight Deck — retrying…" : 'Captain Claw…'} />
+  // Signing out reloads the page in a moment; the sign-in screen mounted
+  // meanwhile would request a pairing code only to drop it.
+  if (authEnabled && !isAuthenticated) return signingOut ? <BootScreen text="Signing out…" /> : <PairScreen />
   return <Shell />
 }
 
-/** Keep the 15-minute access token fresh: the glasses idle a lot (display
- *  sleeps after ~25 s) and an own-agent chat socket never refreshes it. */
+function BootScreen({ text }: { text: string }) {
+  return (
+    <main className="hud-screen hud-boot-screen">
+      <div className="hud-state hud-state--loading">
+        <div className="hud-state-text">{text}</div>
+      </div>
+    </main>
+  )
+}
+
+/** Refresh when the access token has less than this left. */
+const REFRESH_WITHIN_MS = 3 * 60_000
+
+/** Whether the access token's `exp` is within `ms` (or unreadable). No
+ *  verification — it only decides whether to refresh. */
+function tokenExpiresWithin(ms: number): boolean {
+  const token = useAuthStore.getState().token
+  if (!token) return true
+  try {
+    const part = token.split('.')[1] || ''
+    const b64 = part.replace(/-/g, '+').replace(/_/g, '/')
+    const json = JSON.parse(atob(b64 + '='.repeat((4 - (b64.length % 4)) % 4))) as { exp?: unknown }
+    const exp = Number(json.exp)
+    return !Number.isFinite(exp) || exp * 1000 - Date.now() < ms
+  } catch {
+    return true
+  }
+}
+
+/** Keep the 15-minute access token from lapsing while the HUD is in use (an
+ *  own-agent chat socket never refreshes it): check once a minute and when
+ *  the display wakes, and refresh only when it is about to expire. Every
+ *  refresh rotates the refresh cookie, and one whose reply is lost — the
+ *  link is often still reconnecting at wake — ends the session, so no
+ *  rotation that isn't needed. */
 function useTokenKeepAlive() {
   useEffect(() => {
     if (!useAuthStore.getState().authEnabled) return
-    let lastRefresh = Date.now()
-    const unsub = useAuthStore.subscribe((s, prev) => { if (s.token && s.token !== prev.token) lastRefresh = Date.now() })
-    const id = setInterval(() => { void refreshAccessToken() }, 10 * 60_000)
-    const onVis = () => {
-      if (document.visibilityState === 'visible' && Date.now() - lastRefresh > 5 * 60_000) void refreshAccessToken()
+    const check = () => {
+      if (document.visibilityState !== 'visible') return
+      const s = useAuthStore.getState()
+      if (!s.isAuthenticated || s.signingOut) return
+      if (tokenExpiresWithin(REFRESH_WITHIN_MS)) void refreshAccessToken()
     }
-    document.addEventListener('visibilitychange', onVis)
-    return () => { unsub(); clearInterval(id); document.removeEventListener('visibilitychange', onVis) }
+    const id = setInterval(check, 60_000)
+    document.addEventListener('visibilitychange', check)
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', check) }
   }, [])
 }
 
@@ -122,32 +175,35 @@ function Shell() {
   return <div className="hud-app" key={routeKey(route)}>{renderRoute(route, agents, agentsError)}</div>
 }
 
+/** Loading / error / agent-gone screen of a route: its Retry or All agents
+ *  gets focus, so a pinch works without a swipe first. */
+function RouteState({ title, subtitle, ...view }: { title: string; subtitle?: string } & ComponentProps<typeof StateView>) {
+  useAutoFocus(view.kind !== 'loading')
+  return (
+    <ScreenFrame title={title} subtitle={subtitle}>
+      <StateView {...view} />
+    </ScreenFrame>
+  )
+}
+
 function renderRoute(route: Route, agents: ReturnType<typeof useAgents.getState>['agents'], error: string | null) {
   if (route.v === 'agents') return <AgentsScreen />
   if (!agents) {
-    return (
-      <ScreenFrame title="Captain Claw">
-        {error
-          ? <StateView kind="error" message={error} onRetry={() => { void useAgents.getState().refresh() }} />
-          : <StateView kind="loading" />}
-      </ScreenFrame>
-    )
+    return error
+      ? <RouteState title="Captain Claw" kind="error" message={error} onRetry={() => { void useAgents.getState().refresh() }} />
+      : <RouteState title="Captain Claw" kind="loading" />
   }
   const agent = agents.find((a) => a.id === route.a)
   if (!agent) {
     return (
-      <ScreenFrame title="Agent not found">
-        <StateView kind="empty" message="This agent is gone or no longer shared with you."
-          action={{ label: 'All agents', onActivate: () => navigate({ v: 'agents' }, { replace: true }) }} />
-      </ScreenFrame>
+      <RouteState title="Agent not found" kind="empty" message="This agent is gone or no longer shared with you."
+        action={{ label: 'All agents', onActivate: () => navigateUp({ v: 'agents' }) }} />
     )
   }
   if (!agent.running) {
     return (
-      <ScreenFrame title={agent.name} subtitle="stopped">
-        <StateView kind="empty" message={`${agent.name} is not running. Start it from Flight Deck.`}
-          action={{ label: 'All agents', onActivate: () => navigate({ v: 'agents' }, { replace: true }) }} />
-      </ScreenFrame>
+      <RouteState title={agent.name} subtitle="stopped" kind="empty" message={`${agent.name} is not running. Start it from Flight Deck.`}
+        action={{ label: 'All agents', onActivate: () => navigateUp({ v: 'agents' }) }} />
     )
   }
   switch (route.v) {

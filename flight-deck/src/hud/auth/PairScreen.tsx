@@ -10,15 +10,21 @@
 //      setAuth() is all it takes — HudApp then switches to the app.
 //
 // Nothing secret is typed on the glasses. Email + password stays available
-// as a fallback (EmailLogin, local state — not a route, so Back still exits).
+// as a fallback (EmailLogin, local state — not a route, so Back still exits),
+// on every view — a stalled request never leaves a screen without controls.
 // Polling pauses while the page is hidden (display asleep) and resumes the
 // moment it is visible again; network trouble backs off quietly.
+// The pending code is kept in sessionStorage until it is used up, so a reload
+// (universal menu → Restart, a sign-out hand-over) shows the SAME code the
+// wearer may be typing on the phone instead of orphaning it, and does not
+// spend another start (10 per 10 minutes per network).
 
 import { useCallback, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { useAuthStore } from '../../stores/authStore'
 import { HudApiError, pairPoll, pairStart } from '../api'
 import { deviceLabel } from '../device'
+import { clock } from '../format'
 import { focusEl } from '../focus'
 import { useAutoFocus, useNow } from '../hooks'
 import { Btn, ScreenFrame, StateView } from '../ui'
@@ -43,9 +49,56 @@ interface PairState {
   error?: string
   /** view 'error': the deck no longer requires sign-in (pair/start → 400). */
   authOff?: boolean
+  /** view 'limited': epoch ms of the refusal; message: the deck's own reason. */
+  limitedAt?: number
+  message?: string
 }
 
 const MAX_BACKOFF_MS = 30_000
+/** pair/start allows this many codes per window per client IP (auth_routes PAIR_START_LIMIT). */
+const START_LIMIT = 10
+const START_WINDOW_MIN = 10
+
+// ── The pending pairing, across reloads ──
+
+const STORE_KEY = 'hud.pair.v1'
+/** Resume a stored code only if it still has this long to live. */
+const MIN_RESUME_MS = 10_000
+
+interface StoredPairing {
+  v: 1
+  /** Secret poll credential — same tab only (sessionStorage), dropped once used. */
+  deviceCode: string
+  userCode: string
+  /** Epoch ms when the code stops working. */
+  expiresAt: number
+  ttl: number
+  intervalMs: number
+  path: string
+}
+
+function loadPairing(): StoredPairing | null {
+  try {
+    const raw = sessionStorage.getItem(STORE_KEY)
+    if (!raw) return null
+    const p = JSON.parse(raw) as Partial<StoredPairing> | null
+    if (
+      p && p.v === 1 && typeof p.deviceCode === 'string' && p.deviceCode && typeof p.userCode === 'string' && p.userCode
+      && typeof p.path === 'string' && Number.isFinite(p.expiresAt) && Number.isFinite(p.ttl) && Number.isFinite(p.intervalMs)
+      && p.expiresAt! - Date.now() >= MIN_RESUME_MS && p.expiresAt! - Date.now() <= p.ttl! * 1_000
+    ) return p as StoredPairing
+    sessionStorage.removeItem(STORE_KEY)
+  } catch { /* storage blocked / bad JSON: start a new code */ }
+  return null
+}
+
+function savePairing(p: StoredPairing): void {
+  try { sessionStorage.setItem(STORE_KEY, JSON.stringify(p)) } catch { /* storage blocked */ }
+}
+
+function clearPairing(): void {
+  try { sessionStorage.removeItem(STORE_KEY) } catch { /* storage blocked */ }
+}
 
 function statusOf(e: unknown): number {
   return e instanceof HudApiError ? e.status : 0
@@ -69,7 +122,8 @@ function mmss(totalSeconds: number): string {
 /**
  * The pairing state machine. `restart()` starts over with a fresh code.
  * One setTimeout chain drives both "get a code" retries and polling; a
- * second timer ends the code when it expires.
+ * second timer ends the code when it expires. A stored, still-valid code is
+ * resumed instead of starting a new one.
  */
 function usePairing(): { state: PairState; restart: () => void } {
   const [state, setState] = useState<PairState>({ view: 'starting' })
@@ -87,6 +141,8 @@ function usePairing(): { state: PairState; restart: () => void } {
     let deviceCode = ''
     let expiresAt = 0
     let intervalMs = 3_000
+    /** Polling a code restored from storage that no poll has confirmed yet. */
+    let resumed = false
 
     const schedule = (step: () => Promise<void>, ms: number) => {
       clearTimeout(timer)
@@ -99,11 +155,23 @@ function usePairing(): { state: PairState; restart: () => void } {
       }, ms)
     }
     const stop = () => { clearTimeout(timer); clearTimeout(expiryTimer); next = null; parked = false }
-    const end = (view: View) => {
+    /** Every end state uses the code up: a reload must not bring it back. */
+    const end = (view: View, extra?: Partial<PairState>) => {
       stop()
-      setState((s) => ({ ...s, view, reconnecting: false }))
+      clearPairing()
+      setState((s) => ({ ...s, ...extra, view, reconnecting: false }))
     }
     const backoff = () => Math.min(1_000 * 2 ** failures, MAX_BACKOFF_MS)
+
+    /** Show a code and poll it until it is used up or expires. */
+    const activate = (p: StoredPairing) => {
+      deviceCode = p.deviceCode
+      intervalMs = p.intervalMs
+      expiresAt = p.expiresAt
+      setState({ view: 'active', code: p.userCode, expiresAt, ttl: p.ttl, path: p.path })
+      clearTimeout(expiryTimer)
+      expiryTimer = setTimeout(() => { if (!cancelled) end('expired') }, Math.max(0, expiresAt - Date.now()))
+    }
 
     const start = async () => {
       try {
@@ -111,18 +179,26 @@ function usePairing(): { state: PairState; restart: () => void } {
         if (cancelled) return
         if (!res?.device_code || !res.user_code) throw new HudApiError('Unexpected answer from Flight Deck.', 422)
         failures = 0
-        deviceCode = res.device_code
-        intervalMs = clamp(res.interval, 1, 30, 3) * 1_000
         const ttl = clamp(res.expires_in, 1, 3_600, 600)
-        expiresAt = Date.now() + ttl * 1_000
-        setState({ view: 'active', code: res.user_code, expiresAt, ttl, path: res.verification_path || '/hud/pair' })
-        clearTimeout(expiryTimer)
-        expiryTimer = setTimeout(() => { if (!cancelled) end('expired') }, ttl * 1_000)
+        const p: StoredPairing = {
+          v: 1,
+          deviceCode: res.device_code,
+          userCode: res.user_code,
+          expiresAt: Date.now() + ttl * 1_000,
+          ttl,
+          intervalMs: clamp(res.interval, 1, 30, 3) * 1_000,
+          path: res.verification_path || '/hud/pair',
+        }
+        savePairing(p)
+        activate(p)
         schedule(poll, intervalMs)
       } catch (e) {
         if (cancelled) return
         const status = statusOf(e)
-        if (status === 429) { end('limited'); return }
+        if (status === 429) {
+          end('limited', { limitedAt: Date.now(), message: e instanceof Error ? e.message : '' })
+          return
+        }
         if (isTransient(status)) {
           failures++
           setState({ view: 'starting', reconnecting: true })
@@ -140,6 +216,17 @@ function usePairing(): { state: PairState; restart: () => void } {
       }
     }
 
+    /** The deck does not know the code. A restored one: the deck restarted
+     *  (or the code was used up elsewhere) — quietly get a new one. */
+    const expire = () => {
+      if (!resumed) { end('expired'); return }
+      resumed = false
+      stop()
+      clearPairing()
+      setState({ view: 'starting' })
+      schedule(start, 0)
+    }
+
     const poll = async () => {
       if (Date.now() >= expiresAt) { end('expired'); return }
       try {
@@ -149,6 +236,7 @@ function usePairing(): { state: PairState; restart: () => void } {
           // Even if the code timed out meanwhile: the server already handed
           // us the session (and set the refresh cookie) — take it.
           stop()
+          clearPairing()
           if (res.access_token && res.user) {
             // HudApp sees isAuthenticated and swaps this screen for the app.
             useAuthStore.getState().setAuth(res.user, res.access_token)
@@ -160,7 +248,8 @@ function usePairing(): { state: PairState; restart: () => void } {
         if (!next) return // ended while the request was in flight
         if (failures) { failures = 0; setState((s) => ({ ...s, reconnecting: false })) }
         if (res.status === 'denied') { end('denied'); return }
-        if (res.status === 'expired') { end('expired'); return }
+        if (res.status === 'expired') { expire(); return }
+        resumed = false
         schedule(poll, intervalMs)
       } catch (e) {
         if (cancelled || !next) return
@@ -178,7 +267,7 @@ function usePairing(): { state: PairState; restart: () => void } {
           return
         }
         // Unknown / already used device code (e.g. the deck restarted).
-        end('expired')
+        expire()
       }
     }
 
@@ -188,20 +277,43 @@ function usePairing(): { state: PairState; restart: () => void } {
       schedule(next, 0)
     }
     document.addEventListener('visibilitychange', onVisibility)
-    schedule(start, 0)
+    const saved = loadPairing()
+    if (saved) {
+      // The code from before the reload: keep showing it, ask about it now.
+      resumed = true
+      activate(saved)
+      schedule(poll, 0)
+    } else {
+      schedule(start, 0)
+    }
     return () => {
       cancelled = true
       stop()
       document.removeEventListener('visibilitychange', onVisibility)
+      // Signed in another way (email): this code is no longer needed.
+      if (useAuthStore.getState().isAuthenticated) clearPairing()
     }
   }, [gen])
 
   const restart = useCallback(() => {
+    clearPairing()
     setState({ view: 'starting' })
     setGen((g) => g + 1)
   }, [])
 
   return { state, restart }
+}
+
+/**
+ * pair/start answered 429. Usually the per-network limit: a sliding window, so
+ * a new code can take up to the whole window — say so, with the latest time.
+ * Otherwise the deck's own reason (too many pairings in progress overall).
+ */
+function limitedText(p: PairState): string {
+  if (p.message && /in progress/i.test(p.message)) return p.message
+  const by = clock((p.limitedAt ?? Date.now()) + START_WINDOW_MIN * 60_000)
+  return `Too many new codes from this network (${START_LIMIT} per ${START_WINDOW_MIN} minutes). `
+    + `Try again in a few minutes — by ${by} at the latest.`
 }
 
 /** "Expires in 9:41" — ticks on its own so the rest of the screen stays still. */
@@ -220,13 +332,14 @@ export function PairScreen() {
   const toEmail = useCallback(() => setMode('email'), [])
   const toPairing = useCallback(() => setMode('pair'), [])
 
-  // First paint of real content: focus its landing spot.
-  useAutoFocus(mode === 'pair' && view !== 'starting')
+  // First paint: focus its landing spot (while a code is on its way, that is
+  // "Sign in with email instead" — never a screen without a focus stop).
+  useAutoFocus(mode === 'pair')
 
   // Later view changes unmount the focused element: land on the new spot
   // ("New code" after an expiry, the code after a restart).
   useEffect(() => {
-    if (mode !== 'pair' || view === 'starting') return
+    if (mode !== 'pair') return
     let raf2 = 0
     const raf1 = requestAnimationFrame(() => {
       raf2 = requestAnimationFrame(() => {
@@ -248,12 +361,19 @@ export function PairScreen() {
   let body: ReactNode
   switch (view) {
     case 'starting':
-      body = <StateView kind="loading" message="Getting a sign-in code…" />
-      break
-    case 'retrying':
       body = (
         <>
-          <StateView kind="loading" message="Reconnecting…" />
+          <StateView kind="loading" message="Getting a sign-in code…" />
+          {emailBtn}
+        </>
+      )
+      break
+    case 'retrying':
+      // No answer (or a timeout): retrying with backoff; "Try now" skips the wait.
+      body = (
+        <>
+          <StateView kind="loading" message="Can't reach Flight Deck — trying again…"
+            action={{ label: 'Try now', onActivate: restart }} />
           {emailBtn}
         </>
       )
@@ -285,11 +405,11 @@ export function PairScreen() {
     case 'limited': {
       const text = view === 'denied'
         ? 'Sign-in was denied.'
-        : view === 'expired' ? 'Code expired.' : 'Too many attempts — wait a minute.'
+        : view === 'expired' ? 'Code expired.' : limitedText(pairing)
       body = (
         <>
           <StateView kind={view === 'expired' ? 'empty' : 'error'} message={text}
-            action={{ label: 'New code', onActivate: restart }} />
+            action={{ label: view === 'limited' ? 'Try again' : 'New code', onActivate: restart }} />
           {emailBtn}
         </>
       )

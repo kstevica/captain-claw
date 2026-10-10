@@ -9,7 +9,9 @@
 //   - the shell caps a session at 5 entries — our deepest chain is 4
 //     (agents → agent → rows → record);
 //   - the glasses reset focus after Back, so each entry remembers which
-//     element (data-fk) had focus when we left it.
+//     element (data-fk) had focus when we left it;
+//   - "up" actions (All agents, Back to list) go BACK to the ancestor entry
+//     when it is in the history below (navigateUp), never stack a copy of it.
 // The route also lives in the URL so a reload (universal menu → Restart)
 // lands on the same screen.
 
@@ -26,15 +28,32 @@ export type Route =
   /** i = absolute row index in the rows screen's ordering (newest first) */
   | { v: 'record'; a: string; tb: string; i: number }
 
-interface HistState { hud: 1; route: Route; fk?: string }
+interface HistState {
+  hud: 1
+  route: Route
+  fk?: string
+  /** How many of our entries lie below this one (0 = the bottom). */
+  d?: number
+  /** URLs of the entries below, nearest last (capped at UP_MAX). */
+  up?: string[]
+}
 
 export const TABS: Tab[] = ['chat', 'files', 'data']
 export const TABLE_NAME_RE = /^[a-z0-9_]{1,128}$/
 
 const BASE = '/hud/'
+const UP_MAX = 8
 
 let current: Route = { v: 'agents' }
 let restoreKey: string | null = null
+/** A Back landed and the new screen hasn't put focus anywhere yet. */
+let backPending = false
+/** A history.go() of ours on its way (navigateUp / collapseHistory): what
+ *  to make of the entry it lands on, and what to do if it never lands. */
+let traversal: { land: ((st: HistState | null) => void) | null; timer: ReturnType<typeof setTimeout> } | null = null
+/** Depth of the lowest entry this document created: entries below it belong
+ *  to an earlier load (before a Restart), and traversing to them reloads. */
+let ownFrom = 0
 const listeners = new Set<() => void>()
 
 function notify() { listeners.forEach((fn) => fn()) }
@@ -126,15 +145,28 @@ function focusKeyOfActive(): string | undefined {
   return holder?.dataset.fk || undefined
 }
 
+function ours(st: unknown): HistState | null {
+  const h = st as HistState | null
+  return h && h.hud === 1 && h.route ? h : null
+}
+
 function onPopState(e: PopStateEvent) {
-  const st = e.state as HistState | null
-  if (st && st.hud === 1 && st.route) {
+  const st = ours(e.state)
+  const land = traversal?.land
+  if (traversal) { clearTimeout(traversal.timer); traversal = null }
+  if (land) {
+    land(st)
+    notify()
+    return
+  }
+  if (st) {
     current = st.route
     restoreKey = st.fk ?? null
   } else {
     current = parseRoute(window.location.search) ?? { v: 'agents' }
     restoreKey = null
   }
+  backPending = true
   notify()
 }
 
@@ -155,12 +187,18 @@ export function initRouter(fallback: Route): boolean {
   }
   if (window.history.length <= 1) {
     const chain = chainTo(current)
-    window.history.replaceState({ hud: 1, route: chain[0] } satisfies HistState, '', routeUrl(chain[0]))
-    for (const r of chain.slice(1)) {
-      window.history.pushState({ hud: 1, route: r } satisfies HistState, '', routeUrl(r))
-    }
+    const urls = chain.map(routeUrl)
+    chain.forEach((r, i) => {
+      const st: HistState = { hud: 1, route: r, d: i, up: urls.slice(0, i).slice(-UP_MAX) }
+      if (i === 0) window.history.replaceState(st, '', urls[0])
+      else window.history.pushState(st, '', urls[i])
+    })
+    ownFrom = 0
   } else {
-    window.history.replaceState({ hud: 1, route: current } satisfies HistState, '', routeUrl(current))
+    // A reload (Restart) or a link: keep this entry's place in the stack.
+    const st = ours(window.history.state)
+    window.history.replaceState({ hud: 1, route: current, d: st?.d ?? 0, up: st?.up ?? [] } satisfies HistState, '', routeUrl(current))
+    ownFrom = st?.d ?? 0
   }
   notify()
   return fromUrl !== null
@@ -168,17 +206,82 @@ export function initRouter(fallback: Route): boolean {
 
 /** Go to a screen. Push by default; `replace` for tab/pager switches. */
 export function navigate(r: Route, opts?: { replace?: boolean }): void {
+  const st = ours(window.history.state)
+  const d = st?.d ?? 0
+  const up = st?.up ?? []
   if (opts?.replace) {
-    window.history.replaceState({ hud: 1, route: r } satisfies HistState, '', routeUrl(r))
+    window.history.replaceState({ hud: 1, route: r, d, up } satisfies HistState, '', routeUrl(r))
   } else {
     // Remember what had focus here so Back can put it back.
-    const st = (window.history.state as HistState | null) ?? { hud: 1 as const, route: current }
-    window.history.replaceState({ ...st, hud: 1, route: current, fk: focusKeyOfActive() } satisfies HistState, '', window.location.href)
-    window.history.pushState({ hud: 1, route: r } satisfies HistState, '', routeUrl(r))
+    window.history.replaceState({ ...st, hud: 1, route: current, fk: focusKeyOfActive(), d, up } satisfies HistState, '', window.location.href)
+    const below = [...up, routeUrl(current)].slice(-UP_MAX)
+    window.history.pushState({ hud: 1, route: r, d: d + 1, up: below } satisfies HistState, '', routeUrl(r))
   }
   current = r
   restoreKey = null
+  backPending = false
   notify()
+}
+
+/** history.go(-n), then `land` instead of the plain popstate handling. If no
+ *  popstate comes (the host dropped entries we counted), `fallback` runs. */
+function traverseBack(n: number, land: ((st: HistState | null) => void) | null, fallback: () => void): void {
+  const timer = setTimeout(() => {
+    if (traversal?.timer !== timer) return
+    traversal = null
+    fallback()
+  }, 1500)
+  traversal = { land, timer }
+  window.history.go(-n)
+}
+
+/**
+ * Go "up" to `target` (All agents, Back to list, WebMCP's agent list). When
+ * it is an entry below this one, go BACK to it — no duplicate entry, so Back
+ * from there keeps meaning "leave", and its focused row comes back. When only
+ * its parent is below (another tab of the agent, another agent), go back to
+ * the entry right above the parent and turn it into `target`. Otherwise
+ * replace this entry.
+ */
+export function navigateUp(target: Route): void {
+  if (traversal) return // the same gesture twice; we're already on the way
+  const up = ours(window.history.state)?.up ?? []
+  const fallback = () => navigate(target, { replace: true })
+  const i = up.lastIndexOf(routeUrl(target))
+  if (i >= 0) { traverseBack(up.length - i, null, fallback); return }
+  const parent = parentRoute(target)
+  const p = parent ? up.lastIndexOf(routeUrl(parent)) : -1
+  if (p >= 0 && p < up.length - 1) {
+    traverseBack(up.length - 1 - p, (st) => {
+      window.history.replaceState({ hud: 1, route: target, d: st?.d ?? 0, up: st?.up ?? [] } satisfies HistState, '', routeUrl(target))
+      current = target
+      restoreKey = null
+      backPending = true
+    }, fallback)
+    return
+  }
+  fallback()
+}
+
+/**
+ * The session ended mid-use and the sign-in screen is up: go back to the
+ * lowest entry this document owns and make it a plain /hud/ launch. Back on
+ * the sign-in screen then leaves the app instead of walking screens that are
+ * no longer shown, and signing back in resumes like a fresh start. (Entries
+ * from before a Restart are left alone — reaching them reloads the page.)
+ */
+export function collapseHistory(): void {
+  const seed = (st: HistState | null) => {
+    window.history.replaceState({ hud: 1, route: { v: 'agents' }, d: st?.d ?? 0, up: st?.up ?? [] } satisfies HistState, '', BASE)
+    current = { v: 'agents' }
+    restoreKey = null
+    backPending = false
+  }
+  const here = () => { seed(ours(window.history.state)); notify() }
+  if (traversal) return
+  const n = (ours(window.history.state)?.d ?? 0) - ownFrom
+  if (n > 0) traverseBack(n, seed, here)
+  else here()
 }
 
 let lastBackAt = 0
@@ -201,6 +304,15 @@ export function takeRestoreFocusKey(): string | null {
   const k = restoreKey
   restoreKey = null
   return k
+}
+
+/** A Back landed and the screen hasn't placed its focus yet (focusInitial). */
+export function isBackPending(): boolean {
+  return backPending
+}
+
+export function clearBackPending(): void {
+  backPending = false
 }
 
 function subscribe(fn: () => void) {

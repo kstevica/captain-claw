@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import logging
 import os
 import secrets
 import time
 import unicodedata
+from collections import OrderedDict
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 
@@ -327,19 +330,30 @@ async def update_me(body: UpdateProfileRequest, user: dict = Depends(get_current
 # new code. Only sha256(device_code) is kept. Codes are single-use: a poll that
 # reports approved/denied deletes the pairing. The poll lives under /fd/auth so
 # the refresh cookie (path=/fd/auth) set on its response is the one refresh reads.
+#
+# Approving mints a lasting session for another device, so lookup/approve want
+# more than an access token (which also travels in ?fd_token= URLs and logs):
+# the Authorization header plus the approver's own refresh cookie — which the
+# browser sends to /fd/auth/pair/* — for a live session of the same user.
+#
+# Fairness: the public calls are limited per client network (an IPv4 address,
+# an IPv6 /64 — one host can own a whole /64), and one network holds at most
+# PAIR_MAX_PER_NETWORK pending codes (a new code replaces its oldest), so
+# nobody can fill the table and lock every wearer out of pairing.
 
 PAIR_ALPHABET = "BCDFGHJKLMNPQRSTVWXZ"  # 20 consonants: no vowels (no words), no 0/O/1/I
 PAIR_CODE_LEN = 8                       # 20^8 ≈ 2.6e10 codes
 PAIR_TTL_S = 600
 PAIR_INTERVAL_S = 3
-PAIR_MAX_PENDING = 500
+PAIR_MAX_PENDING = 10_000              # memory backstop; the per-network cap binds first
+PAIR_MAX_PER_NETWORK = 3                # pending codes one client network can hold
 PAIR_VERIFICATION_PATH = "/hud/pair"
 PAIR_LABEL_MAX = 60
 PAIR_UA_MAX = 300
 
 # Rate limits: (count, window seconds).
-PAIR_START_LIMIT = (10, 600.0)     # per client IP
-PAIR_POLL_LIMIT = (120, 60.0)      # per client IP (a device polls every 3 s)
+PAIR_START_LIMIT = (10, 600.0)     # per client network
+PAIR_POLL_LIMIT = (120, 60.0)      # per client network (a device polls every 3 s)
 PAIR_APPROVER_LIMIT = (30, 60.0)   # per signed-in user, for lookup and approve each
 
 
@@ -350,14 +364,17 @@ class _Pairing:
     label: str
     user_agent: str
     ip: str
+    network: str            # _client_network(ip): the fairness key
     created_at: float       # epoch seconds (_now)
     expires_at: float
     status: str = "pending"  # pending | approved | denied
     approved_by: str = ""    # user id of the approver
 
 
-_pairings: dict[str, _Pairing] = {}   # user_code → pairing
+# user_code → pairing. Oldest first: one TTL for all, so this is expiry order.
+_pairings: OrderedDict[str, _Pairing] = OrderedDict()
 _pairings_by_device: dict[str, str] = {}  # sha256(device_code) → user_code
+_pairings_by_network: dict[str, list[str]] = {}  # client network → its user codes, oldest first
 
 
 def _now() -> float:
@@ -365,21 +382,40 @@ def _now() -> float:
     return time.time()
 
 
-_pair_start_limiter = _SlidingWindow()
-_pair_poll_limiter = _SlidingWindow()
-_pair_approver_limiter = _SlidingWindow()
+_LIMITER_GC_AT = 5000          # distinct keys before idle ones are swept…
+_LIMITER_SWEEP_EVERY_S = 30.0  # …at most this often
 
 
-_LIMITER_GC_AT = 5000  # distinct keys before idle ones are dropped
+class _PairLimiter(_SlidingWindow):
+    """A _SlidingWindow keyed by what clients send (networks, user ids). Idle
+    keys are swept so a spray of sources can't grow it without bound, but the
+    sweep is amortised — only above _LIMITER_GC_AT keys and at most once per
+    _LIMITER_SWEEP_EVERY_S — so a flood of live keys never turns every
+    request into a scan of all of them."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.swept_at = float("-inf")
+
+    def maybe_sweep(self, window: float) -> None:
+        now = time.monotonic()
+        if len(self._requests) <= _LIMITER_GC_AT or now - self.swept_at < _LIMITER_SWEEP_EVERY_S:
+            return
+        self.swept_at = now
+        self.sweep(now - window)
+
+    def sweep(self, cutoff: float) -> None:
+        for k in [k for k, ts in self._requests.items() if not ts or ts[-1] <= cutoff]:
+            del self._requests[k]
 
 
-def _rate_limit(limiter: _SlidingWindow, key: str, limit: tuple[int, float]) -> None:
-    # The public endpoints are keyed by client IP: drop idle keys now and then
-    # so a spray of addresses can't grow the limiter without bound.
-    if len(limiter._requests) > _LIMITER_GC_AT:
-        cutoff = time.monotonic() - limit[1]
-        for k in [k for k, ts in limiter._requests.items() if not ts or ts[-1] <= cutoff]:
-            del limiter._requests[k]
+_pair_start_limiter = _PairLimiter()
+_pair_poll_limiter = _PairLimiter()
+_pair_approver_limiter = _PairLimiter()
+
+
+def _rate_limit(limiter: _PairLimiter, key: str, limit: tuple[int, float]) -> None:
+    limiter.maybe_sweep(limit[1])
     if not limiter.check(key, limit[0], limit[1]):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                             detail="Too many requests — try again in a moment.")
@@ -397,6 +433,21 @@ def _client_ip(request: Request) -> str:
     # uvicorn already resolves X-Forwarded-For for trusted local proxies
     # (FORWARDED_ALLOW_IPS); never trust the raw header here.
     return request.client.host if request.client else ""
+
+
+def _client_network(ip: str) -> str:
+    """The fairness key for a client address: an IPv4 address as is (also when
+    IPv4-mapped), an IPv6 address's /64 — keying on the full address would give
+    a host that owns a /64 2^64 budgets."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    if isinstance(addr, ipaddress.IPv6Address):
+        if addr.ipv4_mapped is not None:
+            return str(addr.ipv4_mapped)
+        return str(ipaddress.IPv6Network((int(addr) >> 64 << 64, 64)))
+    return str(addr)
 
 
 def _clean_text(value: str | None, cap: int) -> str:
@@ -424,11 +475,30 @@ def _hash_device_code(device_code: str) -> str:
 def _drop_pairing(p: _Pairing) -> None:
     _pairings.pop(p.user_code, None)
     _pairings_by_device.pop(p.device_hash, None)
+    codes = _pairings_by_network.get(p.network)
+    if codes is not None:
+        with suppress(ValueError):
+            codes.remove(p.user_code)
+        if not codes:
+            del _pairings_by_network[p.network]
 
 
 def _purge_expired(now: float) -> None:
-    for p in [p for p in _pairings.values() if p.expires_at <= now]:
+    # Oldest first, so stop at the first live one: no scan of every pairing.
+    while _pairings:
+        p = next(iter(_pairings.values()))
+        if p.expires_at > now:
+            break
         _drop_pairing(p)
+
+
+def _to_replace(network: str) -> list[_Pairing]:
+    """The pending codes *network* gives up for a new one: its oldest, so it
+    keeps at most PAIR_MAX_PER_NETWORK (approved/denied ones are claimed
+    within seconds and don't count)."""
+    codes = _pairings_by_network.get(network, ())
+    pending = [_pairings[c] for c in codes if _pairings[c].status == "pending"]
+    return pending[: max(0, len(pending) - PAIR_MAX_PER_NETWORK + 1)]
 
 
 def _pending(code: str | None, now: float) -> _Pairing | None:
@@ -436,6 +506,29 @@ def _pending(code: str | None, now: float) -> _Pairing | None:
     if p is None or p.status != "pending" or p.expires_at <= now:
         return None
     return p
+
+
+_FULL_SIGN_IN_NEEDED = ("Approving a device needs a full sign-in in this browser — "
+                        "sign out, sign in again and retry.")
+
+
+async def _require_browser_session(request: Request, user: dict) -> None:
+    """403 unless the request carries the Authorization header (not the
+    ?fd_token= fallback) and this browser's refresh cookie for a live session
+    of the same *user* — proof of a full sign-in, not just an access token."""
+    refresh_token = request.cookies.get(REFRESH_COOKIE)
+    if not refresh_token or not request.headers.get("authorization", "").lower().startswith("bearer "):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_FULL_SIGN_IN_NEEDED)
+    db = get_db()
+    assert db._db is not None
+    async with db._db.execute(
+        "SELECT user_id, expires_at FROM user_sessions WHERE refresh_token_hash = ?",
+        (hash_token(refresh_token),),
+    ) as cur:
+        session = await cur.fetchone()
+    if (session is None or str(session["user_id"]) != str(user["id"])
+            or datetime.fromisoformat(session["expires_at"]) <= datetime.now(UTC)):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=_FULL_SIGN_IN_NEEDED)
 
 
 class PairStartRequest(BaseModel):
@@ -457,15 +550,20 @@ async def pair_start(request: Request, body: PairStartRequest | None = None):
     now = _now()
     _purge_expired(now)
     ip = _client_ip(request)
-    _rate_limit(_pair_start_limiter, f"ip:{ip}", PAIR_START_LIMIT)
-    if len(_pairings) >= PAIR_MAX_PENDING:
+    network = _client_network(ip)
+    _rate_limit(_pair_start_limiter, f"net:{network}", PAIR_START_LIMIT)
+    replaced = _to_replace(network)
+    if len(_pairings) - len(replaced) >= PAIR_MAX_PENDING:
+        # (A refused start keeps the codes it would have replaced.)
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                             detail="Too many pairings in progress — try again in a few minutes.")
+    for p in replaced:
+        _drop_pairing(p)
     for _ in range(20):
         user_code = "".join(secrets.choice(PAIR_ALPHABET) for _ in range(PAIR_CODE_LEN))
         if user_code not in _pairings:
             break
-    else:  # pragma: no cover — 500 live codes out of 2.6e10
+    else:  # pragma: no cover — 10k live codes out of 2.6e10
         raise HTTPException(status_code=503, detail="Could not allocate a pairing code")
     device_code = secrets.token_urlsafe(32)
     pairing = _Pairing(
@@ -474,11 +572,13 @@ async def pair_start(request: Request, body: PairStartRequest | None = None):
         label=_clean_text(body.label if body else "", PAIR_LABEL_MAX),
         user_agent=_clean_text(request.headers.get("user-agent", ""), PAIR_UA_MAX),
         ip=ip,
+        network=network,
         created_at=now,
         expires_at=now + PAIR_TTL_S,
     )
     _pairings[user_code] = pairing
     _pairings_by_device[pairing.device_hash] = user_code
+    _pairings_by_network.setdefault(network, []).append(user_code)
     return {
         "device_code": device_code,
         "user_code": format_user_code(user_code),
@@ -493,10 +593,10 @@ async def pair_poll(body: PairPollRequest, request: Request, response: Response)
     _require_auth_enabled()
     now = _now()
     _purge_expired(now)
-    _rate_limit(_pair_poll_limiter, f"ip:{_client_ip(request)}", PAIR_POLL_LIMIT)
+    _rate_limit(_pair_poll_limiter, f"net:{_client_network(_client_ip(request))}", PAIR_POLL_LIMIT)
     code = _pairings_by_device.get(_hash_device_code(body.device_code[:256]))
     p = _pairings.get(code) if code else None
-    if p is None:
+    if p is None or p.expires_at <= now:  # (the purge stops early if the clock stepped back)
         return {"status": "expired"}
     if p.status == "pending":
         return {"status": "pending"}
@@ -515,11 +615,13 @@ async def pair_poll(body: PairPollRequest, request: Request, response: Response)
 
 
 @router.get("/pair/lookup")
-async def pair_lookup(code: str = Query("", max_length=64), user: dict = Depends(get_current_user)):
+async def pair_lookup(request: Request, code: str = Query("", max_length=64),
+                      user: dict = Depends(get_current_user)):
     _require_auth_enabled()
     now = _now()
     _purge_expired(now)
     _rate_limit(_pair_approver_limiter, f"lookup:{user['id']}", PAIR_APPROVER_LIMIT)
+    await _require_browser_session(request, user)
     p = _pending(code, now)
     if p is None:
         raise HTTPException(status_code=404, detail="Unknown or expired code")
@@ -534,11 +636,13 @@ async def pair_lookup(code: str = Query("", max_length=64), user: dict = Depends
 
 
 @router.post("/pair/approve")
-async def pair_approve(body: PairApproveRequest, user: dict = Depends(get_current_user)):
+async def pair_approve(body: PairApproveRequest, request: Request,
+                       user: dict = Depends(get_current_user)):
     _require_auth_enabled()
     now = _now()
     _purge_expired(now)
     _rate_limit(_pair_approver_limiter, f"approve:{user['id']}", PAIR_APPROVER_LIMIT)
+    await _require_browser_session(request, user)
     p = _pending(body.user_code, now)
     if p is None:
         raise HTTPException(status_code=404, detail="Unknown or expired code")
