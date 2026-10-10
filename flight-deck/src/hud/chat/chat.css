@@ -1,0 +1,211 @@
+/* HUD chat: transcript bubbles, busy line, approval card, chips, composer.
+ * 600×600 additive display: dark surfaces only, bright text, no bright fills
+ * except the primary button; tokens from hud.css. */
+
+/* ── Transcript ── */
+
+.hud-chat-log { display: flex; flex-direction: column; }
+
+.hud-chat-empty {
+  margin: 32px 12px;
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  color: var(--text-3);
+  text-align: center;
+}
+
+.hud-chat-turn { display: flex; flex-direction: column; }
+
+.hud-msg {
+  margin: 0 0 10px;
+  padding: 10px 14px;
+  border-radius: var(--radius);
+  font-size: var(--fs-md);
+  line-height: 1.4;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.hud-msg--assistant {
+  background: var(--surface);
+  color: var(--text-2);
+}
+
+/* The wearer's own words: darker, indented, blue-ish. */
+.hud-msg--user {
+  margin-left: 32px;
+  background: #0b0e14;
+  border: 1px solid rgba(155, 208, 255, 0.2);
+  color: var(--user);
+}
+
+.hud-msg--system {
+  background: transparent;
+  border: 1px dashed var(--line);
+  color: var(--text-3);
+  font-size: var(--fs-sm);
+}
+
+.hud-msg-label {
+  margin-bottom: 2px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--user);
+  opacity: 0.85;
+}
+
+.hud-msg-text { white-space: pre-wrap; }
+
+/* Focused reading block: hud.css draws the left bar; keep the user border. */
+.hud-msg--user:focus { border-color: rgba(95, 227, 255, 0.35); }
+
+/* "Earlier messages": older rows are rendered on request (slow CPU). */
+.hud-actions.hud-chat-earlier { justify-content: center; margin: 0 0 10px; }
+
+/* ── File chips (after the reply that mentions them) ── */
+
+.hud-chat-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -2px 0 12px;
+}
+
+.hud-chat-file { max-width: 100%; min-width: 0; }
+
+.hud-chat-file-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Busy line ── */
+
+.hud-chat-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 6px 6px 8px;
+  color: var(--warn);
+}
+
+.hud-chat-status-dot {
+  flex: none;
+  width: 10px;
+  height: 10px;
+  margin-top: 7px;
+  border-radius: 50%;
+  background: var(--warn);
+  box-shadow: 0 0 8px var(--warn);
+  animation: hud-pulse 1.4s ease-in-out infinite;
+}
+
+.hud-chat-status-body { min-width: 0; }
+
+.hud-chat-status-text {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  animation: hud-pulse 1.4s ease-in-out infinite;
+}
+
+.hud-chat-narration {
+  margin-top: 2px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ── Approval card ── */
+
+.hud-chat-approval {
+  margin: 8px 0;
+  padding: 12px;
+  border-radius: var(--radius);
+  border: 1px solid rgba(255, 216, 119, 0.45);
+  background: #15130b;
+}
+
+.hud-chat-approval-title {
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  color: var(--warn);
+}
+
+.hud-chat-approval-timer {
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.hud-chat-approval-msg {
+  margin: 6px 0 4px;
+  padding: 6px 8px;
+  font-size: var(--fs-md);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Lines and chips ── */
+
+.hud-chat-error,
+.hud-chat-notice {
+  padding: 6px;
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.hud-chat-error { color: var(--err); }
+.hud-chat-notice { color: var(--warn); }
+
+.hud-chat-steps .hud-btn { max-width: 100%; }
+
+.hud-chat-tools { margin-top: 12px; }
+
+.hud-chat-stop { color: var(--err); }
+.hud-chat-confirm { color: var(--warn); background: #241e0c; }
+
+/* ── Composer (screen footer) ── */
+
+.hud-composer { display: flex; align-items: flex-end; gap: 8px; }
+
+.hud-composer-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: block;
+  height: 52px;
+  min-height: 52px;
+  max-height: 104px;
+  margin: 0;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-md);
+  line-height: 1.3;
+  resize: none;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: none;
+  caret-color: var(--accent);
+}
+.hud-composer-field::-webkit-scrollbar { display: none; }
+.hud-composer-field::placeholder { color: var(--text-3); opacity: 1; }
+
+.hud-composer-send { flex: none; }
+
+.hud-composer-hint {
+  margin: 4px 4px 0;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}

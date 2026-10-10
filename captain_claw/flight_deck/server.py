@@ -1133,6 +1133,13 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Flight Deck", lifespan=lifespan)
 
+# gzip for the smart-glasses HUD page and the built /assets/* (plus long-lived
+# caching for the content-hashed assets); every other path, /fd/* streams
+# included, is untouched. Added first so it sits innermost, next to the routes.
+from captain_claw.flight_deck.hud_routes import HudDeliveryMiddleware  # noqa: E402
+
+app.add_middleware(HudDeliveryMiddleware)
+
 # CORS: this deck's own origins only (FD_PUBLIC_URL, FD_ALLOWED_HOSTS names,
 # the Vite dev server) plus FD_CORS_ORIGINS — a comma-separated allowlist for
 # a frontend served from another origin (e.g. "https://app.example.com").
@@ -1374,6 +1381,11 @@ from captain_claw.flight_deck.llm_routes import router as llm_router
 from captain_claw.flight_deck.being_routes import router as being_router
 from captain_claw.flight_deck.being_public_routes import router as being_public_router
 from captain_claw.flight_deck.being_public_routes import village_router as being_village_router
+from captain_claw.flight_deck.hud_routes import router as hud_router
+from captain_claw.flight_deck.hud_routes import (
+    ROOT_HEADERS as HUD_ROOT_HEADERS,
+    root_override as hud_root_override,
+)
 from captain_claw.terminal.relay import router as pty_router
 
 app.include_router(auth_router)
@@ -1411,6 +1423,8 @@ if os.environ.get("FD_LEGACY_MANIFEST_APPS", "false").lower() in ("true", "1", "
     app.include_router(app_builtin_router)
 app.include_router(app_code_router)
 app.include_router(glasses_router)
+# Smart-glasses HUD (/hud/*, /fd/hud/config). Must precede spa_catch_all.
+app.include_router(hud_router)
 app.include_router(face_router)
 app.include_router(messenger_router)
 app.include_router(whatsapp_router)
@@ -8653,11 +8667,18 @@ if STATIC_DIR.is_dir():
     _API_PREFIXES = ("fd/", "api/", "ws/", ".well-known/", "authorize")
 
     @app.get("/{path:path}")
-    async def spa_catch_all(path: str):
+    async def spa_catch_all(path: str, request: Request):
         """Serve the SPA — any non-API path returns index.html."""
         # Don't shadow unknown API routes with HTML.
         if path.startswith(_API_PREFIXES):
             raise HTTPException(status_code=404, detail=f"No route for /{path}")
+        if path == "":
+            # Meta Ray-Ban Display's WebView → /hud/ (opt out: /?ui=full).
+            override = hud_root_override(request, STATIC_DIR / "index.html")
+            if override is not None:
+                return override
+            # Depends on the User-Agent and fd_ui: a cached copy is always revalidated.
+            return FileResponse(STATIC_DIR / "index.html", headers=HUD_ROOT_HEADERS)
         file = STATIC_DIR / path
         if file.is_file():
             return FileResponse(file)

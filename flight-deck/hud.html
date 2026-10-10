@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- Smart-glasses HUD (Meta Ray-Ban Display and other glasses web hosts).
+         Served by Flight Deck at /hud/ — see captain_claw/flight_deck/hud_routes.py.
+         Kept separate from index.html so the glasses never download the full
+         dashboard bundle (Meta's budget: < 300 KB first load). -->
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <!-- Required by Meta Ray-Ban Display: marks the page as a Display web app
+         so the device routes D-pad / Neural Band input to it. -->
+    <meta name="mrbd-web-app-capable" content="yes" />
+    <meta name="description" content="Captain Claw on smart glasses: chat with your agents, read their markdown files and browse their datastore tables." />
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#000000" />
+    <title>Captain Claw</title>
+    <link rel="manifest" href="/hud/manifest.webmanifest" />
+    <!-- PNG only: the Meta launcher rejects SVG icons. -->
+    <link rel="icon" type="image/png" sizes="96x96" href="/icon-96.png" />
+    <link rel="icon" type="image/png" sizes="192x192" href="/icon-192.png" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <style>
+      /* First paint before the bundle arrives. #000 is transparent on the
+         additive display, so the page itself stays invisible. */
+      html, body, #root { height: 100%; margin: 0; background: #000; color: #e4e6eb; }
+      .hud-boot { display: flex; height: 100%; align-items: center; justify-content: center;
+        font: 600 22px/1.3 system-ui, -apple-system, Roboto, "Segoe UI", sans-serif; color: #5fff9f; }
+    </style>
+  </head>
+  <body>
+    <div id="root"><div class="hud-boot">Captain Claw…</div></div>
+    <script type="module" src="/src/hud/main.tsx"></script>
+  </body>
+</html>

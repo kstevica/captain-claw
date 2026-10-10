@@ -1,0 +1,307 @@
+/* Sign-in: the glasses pairing code (PairScreen), email sign-in on the glasses
+ * (EmailLogin) and the phone / desktop approval page (PairApprovePage at
+ * /hud/pair, scoped under .hud-pair-page). Tokens come from hud.css. */
+
+/* ── Glasses: pairing code ── */
+
+.hud-pair-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  margin: 4px 0 4px;
+  padding: 14px 16px 16px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  text-align: center;
+}
+.hud-pair-card.hud-block:focus { background: var(--surface-2); }
+
+.hud-pair-lead {
+  font-size: var(--fs-md);
+  color: var(--text-2);
+}
+
+.hud-pair-url {
+  margin: 2px 0 4px;
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.hud-pair-code {
+  margin: 10px 0 8px;
+  /* letter-spacing trails the last glyph too: pad the left to stay centered */
+  padding-left: 0.1em;
+  font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  font-size: 48px;
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+  color: var(--accent);
+}
+
+.hud-pair-expiry {
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-pair-reconnect { color: var(--warn); }
+
+.hud-pair-screen .hud-note { text-align: center; }
+.hud-pair-screen .hud-actions { justify-content: center; }
+
+/* ── Glasses: email sign-in ── */
+
+.hud-field { display: block; margin: 0 0 12px; }
+
+.hud-field-label {
+  display: block;
+  margin: 0 4px 4px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.hud-input {
+  display: block;
+  width: 100%;
+  min-height: 52px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: var(--fs-md);
+  caret-color: var(--accent);
+  -webkit-appearance: none;
+  appearance: none;
+}
+.hud-input:focus { border-color: var(--focus); }
+.hud-input::placeholder { color: var(--text-3); opacity: 1; }
+.hud-input[readonly] { opacity: 0.6; }
+
+/* Glasses password: type=password never opens the composer, so it is a text
+   field drawn as dots. */
+.hud-secret { -webkit-text-security: disc; }
+
+.hud-login-error {
+  margin: 0 4px 8px;
+  font-size: var(--fs-sm);
+  color: var(--err);
+}
+
+.hud-login-symbols {
+  font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  color: var(--text-2);
+  word-spacing: 0.15em;
+}
+
+/* ── Phone / desktop: /hud/pair ── */
+
+.hud-pair-page {
+  font-size: 17px;
+  line-height: 1.45;
+  color: var(--text-2);
+}
+
+.hud-pp-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 460px;
+  margin: 0 auto;
+}
+
+.hud-pp-head { padding: 4px 4px 0; }
+
+.hud-pp-brand {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.hud-pp-title {
+  margin: 4px 0 0;
+  font-size: 28px;
+  line-height: 1.2;
+  color: var(--text);
+}
+
+.hud-pp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 20px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--surface);
+}
+
+.hud-pp-h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.3;
+  color: var(--text);
+}
+
+.hud-pp-text { margin: 0; }
+.hud-pp-muted { margin: 0; font-size: 15px; color: var(--text-3); }
+.hud-pp-url { color: var(--text); overflow-wrap: anywhere; }
+
+.hud-pp-field { display: flex; flex-direction: column; gap: 6px; }
+
+.hud-pp-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+
+.hud-pp-input {
+  width: 100%;
+  min-height: 48px;
+  margin: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 18px; /* ≥ 16 px: iOS does not zoom on focus */
+  -webkit-appearance: none;
+  appearance: none;
+}
+.hud-pp-input:focus { border-color: var(--focus); }
+.hud-pp-input::placeholder { color: var(--text-3); opacity: 0.7; }
+.hud-pp-input[readonly] { opacity: 0.6; }
+
+.hud-pp-code-input {
+  padding-left: calc(14px + 0.12em);
+  font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  font-size: 28px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.hud-pp-btn {
+  width: 100%;
+  min-height: 48px;
+  padding: 12px 18px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--surface-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 18px;
+  font-weight: 600;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.hud-pp-btn--primary { background: var(--accent); color: var(--accent-ink); }
+.hud-pp-btn--danger { background: #3a1416; color: var(--err); }
+.hud-pp-btn:disabled { opacity: 0.5; cursor: default; }
+
+.hud-pp-link {
+  align-self: center;
+  min-height: 44px;
+  padding: 8px 12px;
+  border: 0;
+  border-radius: 10px;
+  background: none;
+  color: var(--focus);
+  font: inherit;
+  font-size: 16px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.hud-pp-link:disabled { opacity: 0.5; cursor: default; }
+
+.hud-pp-btn:focus-visible,
+.hud-pp-link:focus-visible {
+  box-shadow: 0 0 0 3px var(--focus), 0 0 14px var(--focus-glow);
+}
+
+.hud-pp-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.hud-pp-user {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 4px;
+  font-size: 15px;
+  color: var(--text-3);
+}
+.hud-pp-user-name { min-width: 0; overflow-wrap: anywhere; }
+.hud-pp-user strong { color: var(--text); }
+.hud-pp-user .hud-pp-link { flex: none; }
+
+.hud-pp-error { margin: 0; color: var(--err); }
+
+.hud-pp-ok {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--accent);
+}
+.hud-pp-ok--denied { color: var(--text); }
+
+.hud-pp-warn {
+  margin: 0;
+  padding: 12px 14px;
+  border-left: 4px solid var(--warn);
+  border-radius: 8px;
+  background: rgba(255, 216, 119, 0.08);
+  color: var(--text);
+}
+
+.hud-pp-code-show {
+  padding-left: 0.1em;
+  font-family: ui-monospace, "SF Mono", "Roboto Mono", Menlo, Consolas, monospace;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-align: center;
+  color: var(--accent);
+}
+
+.hud-pp-facts {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 14px;
+  margin: 0;
+}
+.hud-pp-facts dt { font-size: 15px; color: var(--text-3); }
+.hud-pp-facts dd { margin: 0; min-width: 0; color: var(--text); overflow-wrap: anywhere; }
+.hud-pp-facts .hud-pp-expired { color: var(--err); }
+
+/* Label and browser come from the requester, not the deck: set apart. */
+.hud-pp-claimed {
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+}
+.hud-pp-claimed-h {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-3);
+}

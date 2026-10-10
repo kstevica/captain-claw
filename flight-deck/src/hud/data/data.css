@@ -1,0 +1,122 @@
+/* Data tab: tables list, paged rows, one record per screen (TablesScreen,
+ * RowsScreen, RecordScreen). Tuned for 600×600; nothing may overflow sideways. */
+
+.hud-data-note { margin: 2px 4px 10px; }
+.hud-data-stale { color: var(--warn); }
+
+/* ── Lists (tables, rows) ── */
+
+.hud-data-list .hud-row {
+  min-height: 58px;
+  padding: 8px 14px;
+  margin-bottom: 6px;
+}
+
+.hud-data-list .hud-row-badge {
+  max-width: 30%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The previous page stays on screen (dimmed) while the next one loads. */
+.hud-data-list--pending { opacity: 0.5; }
+
+.hud-data-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 0 8px;
+}
+
+.hud-data-pager .hud-btn { flex: none; }
+
+.hud-data-range {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ── Record ── */
+
+.hud-data-record { min-width: 0; }
+
+.hud-data-head,
+.hud-data-field {
+  min-width: 0;
+  margin: 0 0 6px;
+  padding: 8px 12px 10px 14px;
+  border-radius: 12px;
+  background: var(--surface);
+}
+.hud-data-head.hud-block:focus,
+.hud-data-field.hud-block:focus { background: var(--surface-2); }
+
+.hud-data-head { margin-bottom: 10px; }
+
+.hud-data-id {
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.hud-data-pos {
+  font-size: var(--fs-sm);
+  color: var(--text-2);
+  font-variant-numeric: tabular-nums;
+}
+
+.hud-data-creator {
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+
+.hud-data-hint {
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+}
+
+.hud-data-head .hud-data-stale {
+  margin-top: 4px;
+  font-size: var(--fs-xs);
+}
+
+.hud-data-key {
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  overflow-wrap: anywhere;
+}
+
+.hud-data-val {
+  margin-top: 2px;
+  font-size: var(--fs-md);
+  line-height: 1.35;
+  color: var(--text-2);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.hud-data-val--empty { color: var(--text-3); }
+
+/* JSON / structured cells: denser monospace, still wrapped (no sideways scroll). */
+.hud-data-val--code {
+  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, "Roboto Mono", monospace;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}

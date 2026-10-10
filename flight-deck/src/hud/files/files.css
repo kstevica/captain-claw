@@ -1,0 +1,43 @@
+/* Files tab + file preview (FilesScreen, FileScreen). */
+
+.hud-files-count { margin: 2px 4px 10px; }
+.hud-files-stale { color: var(--warn); }
+
+/* The first reading block of a file: what it is, how old, who wrote it. */
+.hud-file-info {
+  margin: 0 0 10px;
+  padding: 10px 12px 10px 14px;
+  border-radius: 12px;
+  background: var(--surface);
+}
+.hud-file-info.hud-block:focus { background: var(--surface-2); }
+
+.hud-file-path {
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.hud-file-facts {
+  margin-top: 2px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.hud-file-creator {
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--warn);
+  overflow-wrap: anywhere;
+}
+
+.hud-file-note {
+  margin-top: 4px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+}
+
+.hud-file-piece + .hud-file-piece { margin-top: 6px; }
+.hud-file-more { text-align: center; }

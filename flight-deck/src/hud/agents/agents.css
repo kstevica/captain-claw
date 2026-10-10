@@ -1,0 +1,44 @@
+/* Agents list (AgentsScreen). Tokens come from hud.css. */
+
+.hud-agents-badges {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Stopped agents: one reading block (a single focus stop) of dim rows. */
+.hud-agents-stopped {
+  margin: 0 0 8px;
+  padding: 6px 4px 0 10px;
+}
+.hud-agents-stopped .hud-row { cursor: default; }
+.hud-agents-stopped .hud-row:last-child { margin-bottom: 6px; }
+
+/* One column: the D-pad walks Refresh → Sign out in order (side by side,
+   Down from a wide row would land on whichever chip is nearer its middle). */
+.hud-agents-actions {
+  flex-direction: column;
+  align-items: flex-start;
+  margin-top: 12px;
+}
+
+/* Sign out, armed: a second pinch confirms. */
+.hud-btn.hud-agents-confirm { background: #3a1416; color: var(--err); }
+
+.hud-agents-error { color: var(--err); }
+
+.hud-agents-warn { color: var(--text-2); }
+.hud-agents-warn .hud-pill { margin-right: 6px; vertical-align: 1px; }
+
+/* A failed re-list over the old list: the reason, then Retry (its own stop). */
+.hud-agents-errorbar {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin: 0 0 10px;
+}
+.hud-agents-errorbar .hud-note { margin: 0; }
+/* Only carries a focus key: no box of its own (the state view sizes itself
+   against the scroll area). */
+.hud-agents-retry { display: contents; }

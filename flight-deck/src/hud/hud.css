@@ -1,0 +1,288 @@
+/* Smart-glasses HUD — base styles.
+ *
+ * Display facts (Meta Ray-Ban Display web apps): 600×600 CSS px at DPR 1,
+ * additive waveguide — #000 is fully transparent, bright fills glare, so the
+ * page is black and UI sits on dark surfaces (#0a0a0f–#1c1e21) with bright,
+ * high-contrast text. Body text ≥ 16 px, nothing interactive under 14 px, a
+ * strong focus ring (exactly one visible focus owner), ≥ 8 px safe margin.
+ * Layout is fluid — 600×600 is the validation target, not a hard size.
+ * Module styles live next to their components (chat.css, markdown.css, …).
+ */
+
+:root {
+  --bg: #000;
+  --surface: #121418;
+  --surface-2: #1c1e21;
+  --line: #2c3036;
+  --text: #ffffff;
+  --text-2: #e4e6eb;
+  --text-3: #b0b3b8;
+  --accent: #5fff9f;          /* HUD green, carried over from the legacy view */
+  --accent-ink: #03140a;
+  --accent-soft: rgba(95, 255, 159, 0.14);
+  --focus: #5fe3ff;
+  --focus-glow: rgba(95, 227, 255, 0.45);
+  --user: #9bd0ff;
+  --warn: #ffd877;
+  --err: #ff8a8a;
+  --radius: 14px;
+  --safe: 12px;
+  --fs-xs: 14px;
+  --fs-sm: 16px;
+  --fs-md: 20px;
+  --fs-lg: 24px;
+  --fs-xl: 28px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  background: var(--bg);
+  color: var(--text-2);
+  overflow: hidden;
+}
+
+body {
+  font-family: system-ui, -apple-system, Roboto, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  font-size: var(--fs-md);
+  line-height: 1.35;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior: none;
+}
+
+.hud-app { height: 100%; }
+
+/* ── Focus: one strong ring; reading blocks get a quieter left bar ── */
+
+:focus { outline: none; }
+
+[tabindex="0"]:focus,
+textarea:focus,
+input:focus {
+  box-shadow: 0 0 0 3px var(--focus), 0 0 18px var(--focus-glow);
+}
+
+.hud-block { border-radius: 10px; }
+.hud-block:focus {
+  box-shadow: inset 4px 0 0 var(--focus);
+  background: rgba(95, 227, 255, 0.07);
+}
+
+/* ── Screen frame ── */
+
+.hud-screen {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding: var(--safe) var(--safe) 0;
+  gap: 8px;
+}
+
+.hud-header {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+}
+
+.hud-title { flex: 1 1 auto; min-width: 0; }
+
+.hud-title-main {
+  font-size: var(--fs-md);
+  font-weight: 700;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-title-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-tabs { flex: none; display: flex; gap: 6px; }
+
+.hud-tab {
+  position: relative;
+  padding: 8px 12px;
+  border-radius: 999px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  color: var(--text-3);
+  background: var(--surface);
+  cursor: pointer;
+  user-select: none;
+}
+
+.hud-tab--on { color: var(--accent-ink); background: var(--accent); }
+
+.hud-tab-badge {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 5px;
+  border-radius: 10px;
+  background: var(--warn);
+  color: #1a1400;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  line-height: 20px;
+  text-align: center;
+}
+
+.hud-header-end { flex: none; display: flex; align-items: center; gap: 8px; }
+
+.hud-clock { font-size: var(--fs-sm); color: var(--text-3); font-variant-numeric: tabular-nums; }
+
+.hud-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--text-3); }
+.hud-dot--on { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.hud-dot--busy { background: var(--warn); box-shadow: 0 0 8px var(--warn); animation: hud-pulse 1.4s ease-in-out infinite; }
+.hud-dot--off { background: #6b7076; }
+
+@keyframes hud-pulse { 50% { opacity: 0.35; } }
+
+/* The one vertical scroll owner of a screen. Edge fades act as scrims. */
+.hud-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 4px 4px 12px;
+  scrollbar-width: none;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 10px, #000 calc(100% - 14px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 10px, #000 calc(100% - 14px), transparent 100%);
+}
+.hud-scroll::-webkit-scrollbar { display: none; }
+
+.hud-footer {
+  flex: none;
+  padding: 6px 0 var(--safe);
+}
+
+/* ── Rows (lists) ── */
+
+.hud-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 64px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  border-radius: var(--radius);
+  background: var(--surface);
+  opacity: 0.88;
+  cursor: pointer;
+  user-select: none;
+}
+.hud-row:focus { opacity: 1; background: var(--surface-2); }
+.hud-row--dim { opacity: 0.55; }
+
+.hud-row-main { flex: 1 1 auto; min-width: 0; }
+
+.hud-row-title {
+  font-size: var(--fs-md);
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-row-meta {
+  margin-top: 2px;
+  font-size: var(--fs-sm);
+  color: var(--text-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.hud-row-badge { flex: none; font-size: var(--fs-sm); color: var(--text-3); }
+
+/* ── Buttons ── */
+
+.hud-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 52px;
+  padding: 10px 20px;
+  border-radius: var(--radius);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+  color: var(--text);
+  background: var(--surface-2);
+}
+.hud-btn--primary { background: var(--accent); color: var(--accent-ink); }
+.hud-btn--danger { background: #3a1416; color: var(--err); }
+.hud-btn--chip { min-height: 44px; padding: 8px 14px; font-size: var(--fs-sm); border-radius: 999px; background: var(--surface); color: var(--text-2); }
+.hud-btn[aria-disabled="true"] { opacity: 0.4; cursor: default; }
+
+.hud-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+
+/* ── Pills, states, sections ── */
+
+.hud-pill {
+  display: inline-block;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  background: var(--surface-2);
+  color: var(--text-3);
+}
+.hud-pill--ok { color: var(--accent); }
+.hud-pill--warn { color: var(--warn); }
+.hud-pill--err { color: var(--err); }
+
+.hud-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  min-height: 60%;
+  padding: 24px;
+  text-align: center;
+}
+.hud-state-text { font-size: var(--fs-md); color: var(--text-3); }
+.hud-state--error .hud-state-text { color: var(--err); }
+.hud-boot-screen .hud-state { min-height: 100%; }
+.hud-boot-screen .hud-state-text { color: var(--accent); font-weight: 600; }
+
+.hud-section-label {
+  margin: 12px 4px 8px;
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+
+.hud-note { font-size: var(--fs-sm); color: var(--text-3); margin: 8px 4px; }
+
+/* Phone / desktop pages (e.g. /hud/pair) — normal scrolling page. */
+.hud-page {
+  height: 100%;
+  overflow-y: auto;
+  padding: 24px 16px 48px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
