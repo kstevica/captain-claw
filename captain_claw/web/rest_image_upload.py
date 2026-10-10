@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
-import os
-import tempfile
-from datetime import UTC, datetime
-from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from aiohttp import web
 
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
+from captain_claw.web.rest_file_upload import (
+    first_file_field,
+    sanitize_upload_name,
+    save_upload_field,
+    upload_session_id,
+)
 
 if TYPE_CHECKING:
     from captain_claw.web_server import WebServer
@@ -25,26 +27,23 @@ async def upload_image(server: WebServer, request: web.Request) -> web.Response:
     """POST /api/image/upload — upload an image and save to workspace saved/media/.
 
     Returns JSON with the absolute path so the frontend can attach it to chat.
+    Every upload gets its own name (``{stem}-{stamp}-{token}{ext}``, created
+    exclusively), so two same-name photos never overwrite each other.
     """
     try:
-        reader = await request.multipart()
-        if reader is None:
-            return web.json_response({"error": "Multipart body required"}, status=400)
+        # Determine save location: workspace/saved/media/<session-id>/
+        # For public users, scope uploads to their session.
+        _is_public, session_id = upload_session_id(server, request)
+        if session_id is None:
+            return web.json_response({"error": "No session — reload the page and try again."},
+                                     status=403)
 
-        file_field = None
-        while True:
-            field = await reader.next()
-            if field is None:
-                break
-            if field.name == "file":
-                file_field = field
-                break
-
+        file_field = await first_file_field(request)
         if file_field is None:
             return web.json_response({"error": "No file field in upload"}, status=400)
 
         original_name = file_field.filename or "image.png"
-        ext = Path(original_name).suffix.lower()
+        safe_stem, ext = sanitize_upload_name(original_name)
 
         if ext not in _IMAGE_EXTENSIONS:
             return web.json_response(
@@ -52,56 +51,25 @@ async def upload_image(server: WebServer, request: web.Request) -> web.Response:
                 status=400,
             )
 
-        # Read file data.
-        chunks: list[bytes] = []
-        while True:
-            chunk = await file_field.read_chunk(8192)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        file_bytes = b"".join(chunks)
-
-        if not file_bytes:
-            return web.json_response({"error": "Empty file"}, status=400)
-
-        # Determine save location: workspace/saved/media/<session-id>/
         cfg = get_config()
         workspace = cfg.resolved_workspace_path()
-
-        # For public users, scope uploads to their session.
-        from captain_claw.web.public_auth import get_request_session_id
-        is_public, pub_session_id = get_request_session_id(request)
-        if is_public and pub_session_id:
-            session_id = pub_session_id
-        else:
-            session_id = ""
-            if server.agent and server.agent.session:
-                session_id = server.agent.session.id or ""
-        if not session_id:
-            session_id = "uploads"
-
-        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        stem = Path(original_name).stem
-        safe_stem = "".join(c if c.isalnum() or c in "-_." else "_" for c in stem)[:60]
-        filename = f"{safe_stem}-{stamp}{ext}"
-
         dest_dir = workspace / "saved" / "media" / session_id
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest_path = dest_dir / filename
 
-        dest_path.write_bytes(file_bytes)
+        dest_path, size = await save_upload_field(file_field, dest_dir, safe_stem, ext)
+        if size == 0:
+            return web.json_response({"error": "Empty file"}, status=400)
 
         log.info(
             "Image uploaded",
             filename=original_name,
             path=str(dest_path),
-            size=len(file_bytes),
+            size=size,
         )
 
         return web.json_response({
             "path": str(dest_path),
             "filename": original_name,
-            "size": len(file_bytes),
+            "size": size,
         })
 
     except web.HTTPException:

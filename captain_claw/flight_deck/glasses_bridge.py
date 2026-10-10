@@ -307,17 +307,27 @@ async def _forward_agent_msg(ch: "_ChannelState", data: dict) -> None:
             "ts": data.get("timestamp") or _now_iso(),
         })
     elif mtype == "status":
-        await _broadcast(ch, {
+        event = {
             "type": "status",
             "status": str(data.get("status", "")),
             "ts": _now_iso(),
-        })
+        }
+        # A turn-start "thinking" names the frame the agent accepted.
+        if data.get("client_msg_id"):
+            event["client_msg_id"] = str(data["client_msg_id"])
+        await _broadcast(ch, event)
     elif mtype == "error":
-        await _broadcast(ch, {
+        event = {
             "type": "error",
             "text": str(data.get("message", "")),
             "ts": _now_iso(),
-        })
+        }
+        # A busy refusal names the refused frame (the WhatsApp bridge re-sends it).
+        if data.get("client_msg_id"):
+            event["client_msg_id"] = str(data["client_msg_id"])
+        if data.get("retryable"):
+            event["retryable"] = True
+        await _broadcast(ch, event)
 
 
 async def _ensure_agent_binding(

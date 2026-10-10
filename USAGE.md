@@ -5421,6 +5421,24 @@ captain-claw-fd
 
 ---
 
+### WhatsApp: files you send
+
+Every file you send over WhatsApp reaches the agent: documents of any type (xlsx, docx, pdf, zip, json, …), photos, stickers, audio files and videos. Flight Deck downloads each file from WhatsApp and uploads it to the bound agent with `POST /api/file/upload?extract=0`, which keeps a zip as a zip. The agent gets a short note for each file: its name, type, size, caption and transcript. These notes are shown next to the attachments, never as your own words.
+
+- **A file without a word** isn't a turn of its own. The bridge answers "📎 Got Report.xlsx — what should I do with it?" and your next message carries the file. Several files at once (an album) get one answer. A sticker on its own gets no answer; it goes with your next message as a plain file if that message comes within 10 minutes. Files wait for that message for up to `WHATSAPP_PENDING_FILES_MINUTES` (default 360); a slash command like `/new` doesn't take them.
+- **A caption** is the message, and the file goes with it. An album with a caption on one photo stays one turn: the bridge waits for `WHATSAPP_MEDIA_BURST_SECONDS` (default 2) of quiet first.
+- **A file right after a text** ("check this invoice", then invoice.pdf a moment later) is sent as belonging to that text, if it arrives within a minute and that text had no file.
+- **Replying to a file's bubble** ("and the price in this one?") carries that file again.
+- **Photos** get the agent's automatic vision description (a photo that waited more than 10 minutes goes as a plain file instead). HEIC and TIFF pictures sent as files are converted to JPEG when the deck can (HEIC needs `pillow-heif`), and stickers become a still PNG. A video, including one sent as a file, is analysed in a turn of its own, as before.
+- **Voice notes** are transcribed and the transcript is your message; the recording is saved and named in a note. When transcription fails you're asked to type it or send it again, and the recording goes with your next message. An audio file, or a voice note you forward, arrives as a file with its transcript and is never treated as your own words.
+- **Faces.** "who is this?" or "remember this is Ana" right after a photo runs face recognition on it; any other message sends the photo to the agent. A face caption ("who is this?") runs face recognition too, and the photo goes to the agent instead when it has no face or the deck has no face support.
+- **A busy agent.** A message the agent refuses because it is still answering is no longer lost. You get "⏳ The agent is busy with another task — I'll pass this on as soon as it's free." and the bridge sends it again as soon as the agent is ready, or on a backoff of up to a minute, for about half an hour. If the agent restarts meanwhile, even on a new port, the message waits for it. The agent gets your messages one at a time, in the order you sent them.
+  - **How it knows which message:** each frame carries a `client_msg_id`. The agent echoes it on the `thinking` status that starts the turn and on a busy refusal (`retryable: true`).
+  - **Commands:** an agent slash command such as `/stop` is never held back. `/code`, `/publish` and `/orchestrate` run as messages and keep their place in line.
+  - **A dropped link:** if the link to the agent drops before it confirms a message, you're told ("⚠️ … couldn't confirm it got …") and asked to send it again if no answer comes. The bridge doesn't re-send it, because re-sending could run it twice.
+  - **Older agents:** an agent that doesn't echo ids yet makes a queued message wait up to 10 s for the one before it, and its busy text still reaches you.
+- **Failures are reported.** A file over `WHATSAPP_MAX_INBOUND_MB` (default 100), a failed download or a refused upload gets a reply, and the agent is told you tried to send it. View-once media and polls can't reach the bridge, and it says so. A message Meta delivers twice is handled once.
+
 ## OpenAI-Compatible API Proxy
 
 When the web server is running with `api_enabled: true`, Captain Claw exposes an OpenAI-compatible API.
