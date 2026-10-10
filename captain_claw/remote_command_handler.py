@@ -905,7 +905,7 @@ async def handle_platform_message(
         reply_to = adapter._message_reply_id(message)
 
         async def _after_turn(ti: int, up: str, at: str) -> None:
-            await adapter.maybe_send_images_for_turn(channel_id, reply_to, ti)
+            await adapter.maybe_send_images_for_turn(channel_id, reply_to, ti, reply=at)
             await adapter.maybe_send_audio_for_turn(channel_id, reply_to, up, at, ti)
 
         # Slash command

@@ -38,6 +38,7 @@ from typing import Any
 
 import httpx
 
+from captain_claw import turn_deliverables as _deliverables
 from captain_claw.tools.registry import Tool, ToolResult
 
 # WhatsApp Cloud API caps documents at 100 MB; stay just under.
@@ -320,7 +321,7 @@ _DELIVERED_IMAGE_TOOLS = ("image_gen", "termux")
 _DELIVERED_AUDIO_TOOLS = ("pocket_tts",)
 # saved/ folders that never hold deliverables: working code, and inputs the
 # agent fetched (a Drive file it summarises isn't sent back unasked).
-_WORKING_DIRS = ("scripts", "tools", "skills", "downloads")
+_WORKING_DIRS = _deliverables.WORKING_DIRS
 # Extensions a reply can name to have the file delivered (all of them go
 # through Meta: as media, or as a document Meta accepts).
 _NAMEABLE = {
@@ -328,43 +329,14 @@ _NAMEABLE = {
     ".html", ".json", ".vcf", ".ics", ".svg", ".rtf", ".png", ".jpg", ".jpeg", ".webp",
     ".mp3", ".m4a", ".aac", ".amr", ".ogg", ".opus", ".mp4",
 }
-_NAMED_EXT_RE = re.compile(
-    r"\.(?:" + "|".join(sorted(e.lstrip(".") for e in _NAMEABLE)) + r")\b", re.IGNORECASE)
 
 
 def _named_new_files(agent: Any, reply: str, since: float) -> list[Path]:
     """Files this session wrote during the turn (under
     ``saved/<category>/<session>/``, modified at or after *since*) that the
     reply names by their whole file name — "here's report.docx". Not
-    scripts, tools, skills or downloads."""
-    text = str(reply or "").lower()
-    if not text or since <= 0 or not _NAMED_EXT_RE.search(text):
-        return []
-    try:
-        base = Path(agent.tools.get_saved_base_path(create=False))
-        slug = agent._current_session_slug()
-    except Exception:
-        return []
-    if not base.is_dir() or not slug:
-        return []
-    found: list[tuple[float, Path]] = []
-    for category in base.iterdir():
-        folder = category / slug
-        if category.name in _WORKING_DIRS or not folder.is_dir():
-            continue
-        for path in folder.rglob("*"):
-            try:
-                if path.suffix.lower() not in _NAMEABLE or not path.is_file():
-                    continue
-                mtime = path.stat().st_mtime
-            except OSError:
-                continue
-            if mtime < since:
-                continue
-            if re.search(r"(?<![\w.-])" + re.escape(path.name.lower()) + r"(?![\w-])", text):
-                found.append((mtime, path))
-    found.sort()
-    return [p for _m, p in found]
+    scripts, tools, skills or downloads (:func:`turn_deliverables.named_new_files`)."""
+    return _deliverables.named_new_files(agent, reply, since, _NAMEABLE)
 
 
 async def deliver_turn_media(
@@ -412,6 +384,9 @@ async def deliver_turn_media(
                 found.extend(extract_image_paths_from_tool_output(content))
             elif tool in _DELIVERED_AUDIO_TOOLS:
                 found.extend(extract_audio_paths_from_tool_output(content))
+        # Only deliverables: inside this agent's saved/ area, made this turn.
+        found = _deliverables.keep_deliverables(
+            found, _deliverables.saved_root_of(agent), since=turn_started_at)
         found.extend(await asyncio.to_thread(_named_new_files, agent, reply, turn_started_at))
         queue: list[Path] = []
         seen = set(already)

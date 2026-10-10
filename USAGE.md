@@ -5317,7 +5317,9 @@ Each Telegram user automatically gets a dedicated session and agent instance:
 - **Disabled commands** — `/new` and session switching (`/session list`, `/session switch`, `/session load`, `/session new`) are not available on Telegram
 - **Available session commands** — `/clear`, `/history`, `/compact`, `/session info`, `/session rename` operate on the user's own session
 - **Photo attachments** — images sent to the bot are processed through the `image_vision` tool
-- **Generated images** — images created by `image_gen` are automatically sent back to the user
+- **Generated images**: images that `image_gen`, `termux` or a browser screenshot made this turn are sent back to the user automatically.
+- **Files the reply names**: a document or picture the agent wrote this turn is sent back when the reply names it by file name ("here's report.docx"). Only files in the user's session folders under `saved/` count, never `scripts/`, `tools/`, `skills/` or `downloads/`. A file the agent only read (a Drive download, an email attachment) is never sent.
+- **Only deliverables**: a file is sent only if the turn made it, inside the agent's own `saved/` area. A `Path:` line in tool output, an email body or a web page can't send a file. The CLI chat bridges (Telegram, Slack, Discord) and WhatsApp follow the same rule.
 
 ### Supported Remote Commands
 
