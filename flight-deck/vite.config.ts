@@ -1,9 +1,29 @@
-import { defineConfig } from 'vite'
+import { fileURLToPath } from 'node:url'
+import { defineConfig, type Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
+// The smart-glasses HUD is its own page (hud.html → src/hud/main.tsx), served
+// by Flight Deck at /hud/. In dev, rewrite /hud and /hud/<screen> to that page;
+// the manifest and service worker come from the FD server (proxied below).
+function hudDevRewrite(): Plugin {
+  return {
+    name: 'hud-dev-rewrite',
+    configureServer(server) {
+      server.middlewares.use((req, _res, next) => {
+        const url = req.url || ''
+        const m = /^\/hud(\/[^?]*)?(\?.*)?$/.exec(url)
+        if (m && !/^\/hud\/(manifest\.webmanifest|sw\.js)$/.test(url.split('?')[0])) {
+          req.url = '/hud.html' + (m[2] || '')
+        }
+        next()
+      })
+    },
+  }
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), hudDevRewrite()],
   build: {
     outDir: '../captain_claw/flight_deck/static',
     // CRITICAL: do NOT empty this directory on build.
@@ -23,6 +43,15 @@ export default defineConfig({
     //   npm run build
     // when the disk usage ever becomes annoying.
     emptyOutDir: false,
+    rollupOptions: {
+      // Two pages: the dashboard and the lean smart-glasses HUD. They share
+      // only small chunks (react, the auth store) — the HUD must never pull
+      // the dashboard's three.js / web-llm / xyflow graph.
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        hud: fileURLToPath(new URL('./hud.html', import.meta.url)),
+      },
+    },
   },
   server: {
     port: 5173,
@@ -44,6 +73,8 @@ export default defineConfig({
       '/scheduler': { target: 'http://localhost:25080', changeOrigin: true },
       '/glasses': { target: 'http://localhost:25080', changeOrigin: true },
       '/deck': { target: 'http://localhost:25080', changeOrigin: true },
+      '/hud/manifest.webmanifest': { target: 'http://localhost:25080', changeOrigin: true },
+      '/hud/sw.js': { target: 'http://localhost:25080', changeOrigin: true },
     },
   },
 })
