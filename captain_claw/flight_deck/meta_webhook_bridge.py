@@ -99,7 +99,8 @@ def register_channel_callback(
     channel_id: str,
     wired_set: set[str],
     recipients_for_channel: Callable[[str], Iterable[str]],
-    send_one: Callable[[str, str], Awaitable[None]],
+    send_one: Callable[..., Awaitable[None]],
+    with_payload: bool = False,
 ) -> None:
     """Attach a callback subscriber that fans agent replies on ``channel_id``
     out to every platform recipient currently bound to that channel.
@@ -129,6 +130,10 @@ def register_channel_callback(
         Async function the bridge provides to push one text message to
         one recipient. Failure to send to one recipient must not block
         the others.
+    with_payload
+        Call ``send_one(recipient, text, payload)`` so the bridge can see
+        the bus event (e.g. ``automation_lane`` / ``fd_delivers`` on a
+        mirrored automated result).
     """
     if channel_id in wired_set:
         return
@@ -165,7 +170,10 @@ def register_channel_callback(
         plain = strip_markdown(text)
         for rid in ids:
             try:
-                await send_one(rid, plain)
+                if with_payload:
+                    await send_one(rid, plain, payload)
+                else:
+                    await send_one(rid, plain)
             except Exception as exc:
                 # Log but don't propagate — one dead recipient must not
                 # block the others. Without this log, send failures

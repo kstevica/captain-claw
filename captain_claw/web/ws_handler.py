@@ -415,6 +415,11 @@ async def handle_ws_message(
             mail_authority.from_wire(data.get("automation"), default_kind="unknown")
             if "automation" in data else None
         )
+        # Flight Deck delivers this automated turn's result itself (a nudge's
+        # push, a scheduled job's delivery): its mirror into the main chat is
+        # shown there but not relayed again by the chat bridges.
+        fd_delivers = bool(isinstance(data.get("automation"), dict)
+                           and data["automation"].get("fd_delivers") is True)
 
         if not content and not has_attachments:
             return
@@ -486,6 +491,7 @@ async def handle_ws_message(
                 no_next_steps=bool(data.get("no_next_steps", False)),
                 no_rephrase=bool(data.get("no_rephrase", False)),
                 automation=automation,
+                fd_delivers=fd_delivers,
                 # A scheduled job delivering to WhatsApp: where its files go.
                 whatsapp_media_to=str(data.get("whatsapp_media_to", "") or "").strip() or None,
             )

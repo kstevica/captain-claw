@@ -366,7 +366,7 @@ async def _execute_and_judge(
         res = await _dispatch_one(
             int(agent.get("port") or 0), str(agent.get("auth", "")),
             _instruction_for(action, approved_by_human=approved_by_human), 180.0,
-            automation=dict(_AUTONOMY_AUTOMATION),
+            automation=dict(_AUTONOMY_AUTOMATION, **_nudge_delivery_mark(user_id, action)),
         )
         output = str(res.get("output") or "").strip()
         cfg = resolve_config(user_id)
@@ -428,6 +428,23 @@ async def _execute_and_judge(
         _log.warning("dispatch execute/judge failed for %s: %s", aid, exc)
         store.log(user_id, "error: dispatch crashed", f"{action.get('title')}: {exc}", "error")
         store.update_status(aid, "done", outcome="fail", outcome_note=f"dispatch error: {exc}"[:500])
+
+
+def _nudge_delivery_mark(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
+    """``{"fd_delivers": True}`` when Flight Deck decides this nudge's WhatsApp
+    delivery itself: it will push it (a bound, allowlisted number), or the
+    owner turned nudges to WhatsApp off. The agent's mirror of the result is
+    then not relayed again by the chat bridges (that was the second, plain
+    copy). With no number to push to, the mirror stays the one copy."""
+    if str(action.get("kind") or "") != "nudge":
+        return {}
+    try:
+        cfg = resolve_config(user_id)
+        if not cfg.get("nudge_to_whatsapp", True) or _nudge_waids(cfg)[0]:
+            return {"fd_delivers": True}
+    except Exception as exc:
+        _log.debug("nudge delivery mark skipped: %s", exc)
+    return {}
 
 
 def _nudge_waids(cfg: dict[str, Any]) -> tuple[list[str], str]:

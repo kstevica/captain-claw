@@ -2458,8 +2458,27 @@ def _ensure_whatsapp_forwarding(channel_id: str) -> None:
         channel_id=channel_id,
         wired_set=_WIRED_CHANNELS,
         recipients_for_channel=lambda ch: _CHANNEL_WAIDS.get(ch, ()),
-        send_one=_send_whatsapp_reply,
+        send_one=_relay_to_waid,
+        with_payload=True,
     )
+
+
+async def _relay_to_waid(waid: str, text: str, payload: dict | None = None) -> None:
+    """Relay one channel-bus reply to a WhatsApp number.
+
+    An automated turn's result that Flight Deck delivers itself
+    (``fd_delivers``: an autonomy nudge, a scheduled job) is skipped — its
+    own push is the formatted copy, and this would be a second, plain one;
+    it comes as the main chat's mirror, or as the reply itself when the turn
+    ran on the main lane. Any other automated result (a mirror with
+    ``automation_lane``, an agent cron result marked ``proactive``) is a
+    proactive message, so it honours ``/mute``."""
+    if isinstance(payload, dict):
+        if payload.get("fd_delivers"):
+            return
+        if (payload.get("automation_lane") or payload.get("proactive")) and is_push_muted(waid):
+            return
+    await _send_whatsapp_reply(waid, text)
 
 
 # ── Cloud API: send text ──────────────────────────────────────────────
