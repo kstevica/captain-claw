@@ -751,7 +751,8 @@ async def test_a_new_topic_said_alone_gets_a_short_line():
     frame = _relay(conn, "t-new-topic-alone")
     await conn.send_to_agent("New topic.", None)
     await frame(_NEW_SESSION)
-    assert conn.ws.sent[1:] == [{"type": "reply", "text": db.NEW_TOPIC_REPLY, "proactive": False},
+    assert conn.ws.sent[1:] == [{"type": "reply", "text": db.NEW_TOPIC_REPLY, "proactive": False,
+                                 "spoken": len(db.speakable(db.NEW_TOPIC_REPLY))},
                                 {"type": "state", "state": "ready"}]
     assert conn._audio_q.get_nowait() == ("tts", db.NEW_TOPIC_REPLY)
     assert conn.pending is False
@@ -814,7 +815,7 @@ async def test_an_answer_landing_while_the_link_is_down_comes_on_the_reconnect(d
     new = await deck.connect()
     assert new.pending is False  # that turn is over
     await new.resume()
-    assert _after_bound(new) == [{"type": "reply", "text": "Tri sata.", "proactive": False},
+    assert _after_bound(new) == [{"type": "reply", "text": "Tri sata.", "proactive": False, "spoken": 9},
                                  {"type": "state", "state": "ready"}]
     assert new._audio_q.get_nowait() == ("tts", "Tri sata.")
 

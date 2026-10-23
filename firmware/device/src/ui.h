@@ -111,6 +111,15 @@ bool nextPage();                    // false when it wrapped back to page 1
 bool prevPage();                    // false on page 1 (stays there)
 bool onLastPage();                  // the current page is the answer's last
 bool onFirstPage();
+// The voice's place in the answer, as a character index into its text (-1:
+// not speaking): the sentence there is lit and the rest dimmed, the
+// character's subtitle shows it, and the page turns to follow it unless the
+// user paged by hand. True when the screen needs drawing again (the
+// sentence or the page changed).
+bool setSpoken(int at);
+// A small replay button under an answer that has sound; tap = hear it again.
+void setReplayable(bool on);
+bool replayHit(int x, int y);
 // How the next screen drawn comes in (the round screen; the others cut):
 // sliding on from the right (forward) or back from the left, or fading
 // through black. One-shot: the next push uses it.

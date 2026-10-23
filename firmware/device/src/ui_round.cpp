@@ -68,7 +68,13 @@ static Health hWifi = Down, hAgent = Down;
 
 static String replyText;
 static std::vector<std::vector<String>> replyPages;
+static std::vector<std::vector<std::pair<int, int>>> lineSpans;  // each line's [from, to) in replyText
+static std::vector<int> pageEnds;                                  // where each page's text ends
 static int replyPage = 0;
+static int spokenAt = -1, litFrom = -1, litTo = -1;  // the voice's place, and the sentence round it
+static bool autoFollow = true;                       // the page turns with the voice (off once paged by hand)
+static bool replayable = false;                      // the small replay button under the answer
+static int rpX = 0, rpY = 0, rpR = 0;                // where it is (rpR 0: none)
 static bool replyCentred = false;  // one short page: the block sits mid-screen
 static uint8_t* imgBuf = nullptr;
 static size_t imgLen = 0;
@@ -132,6 +138,7 @@ static void beginFrame(bool plain = false) {
   if (hasBackdrop && !plain) backdropDim.pushSprite(&canvas, 0, 0);
   else canvas.fillScreen(kBlack);
   tapR = 0;
+  rpR = 0;
   askShown = false;
 }
 
@@ -1029,6 +1036,91 @@ static void layoutReply() {
     }
   }
   if (replyPage >= (int)replyPages.size()) replyPage = 0;  // re-wrapped into fewer pages
+  // Where each line sits in the text (lines are its pieces, in order), so a
+  // sentence can be lit and the voice's place tells which page it's on.
+  lineSpans.clear();
+  pageEnds.clear();
+  const char* all = replyText.c_str();
+  int cursor = 0;
+  for (const auto& page : replyPages) {
+    lineSpans.emplace_back();
+    for (const String& l : page) {
+      const char* p = l.length() ? strstr(all + cursor, l.c_str()) : nullptr;
+      const int from = p ? (int)(p - all) : cursor;
+      cursor = from + (int)l.length();
+      lineSpans.back().push_back({from, cursor});
+    }
+    pageEnds.push_back(cursor);
+  }
+}
+
+// The sentence round character *at*: [from, to). A sentence ends at a full
+// stop, ! or ? (or …) followed by a space or the end, or at a line break.
+static void sentenceAt(int at, int* from, int* to) {
+  const char* s = replyText.c_str();
+  const int n = replyText.length();
+  int start = 0;
+  for (int i = 0; i < n; ++i) {
+    const unsigned char c = s[i];
+    bool end = c == '\n';
+    if (!end && (c == '.' || c == '!' || c == '?')) {
+      const char nx = i + 1 < n ? s[i + 1] : ' ';
+      end = nx == ' ' || nx == '\n' || nx == '"' || nx == ')';
+    } else if (!end && c == 0xE2 && i + 2 < n && (unsigned char)s[i + 1] == 0x80 && (unsigned char)s[i + 2] == 0xA6) {
+      i += 2;  // …
+      end = i + 1 >= n || s[i + 1] == ' ' || s[i + 1] == '\n';
+    }
+    if (!end) continue;
+    int stop = i + 1;
+    if (at < stop) {
+      *from = start;
+      *to = stop;
+      return;
+    }
+    while (stop < n && (s[stop] == ' ' || s[stop] == '\n')) ++stop;
+    start = stop;
+    i = stop - 1;
+  }
+  *from = start;
+  *to = n;
+}
+
+bool setSpoken(int at) {
+  if (at < 0) {
+    const bool was = litTo >= 0;
+    spokenAt = litFrom = litTo = -1;
+    return was;
+  }
+  spokenAt = min(at, (int)replyText.length());
+  int from = 0, to = 0;
+  sentenceAt(spokenAt, &from, &to);
+  bool changed = from != litFrom || to != litTo;
+  litFrom = from;
+  litTo = to;
+  if (autoFollow && replyPage + 1 < (int)replyPages.size() && replyPage < (int)pageEnds.size() &&
+      spokenAt >= pageEnds[replyPage]) {
+    ++replyPage;  // the voice has gone on to the next page
+    nextFx = Fx::SlideOn;
+    changed = true;
+  }
+  return changed;
+}
+
+void setReplayable(bool on) { replayable = on; }
+
+// A small circle arrow in a ring, like the tap button's.
+static void drawReplay(int cx, int cy, int r) {
+  canvas.fillSmoothCircle(cx, cy, r, mix(kBlack, kText, 0.85f));
+  canvas.fillSmoothCircle(cx, cy, r - 3, kBlack);
+  canvas.fillArc(cx, cy, r - 11, r - 8, 270, 360, kText);
+  canvas.fillArc(cx, cy, r - 11, r - 8, 0, 200, kText);
+  canvas.fillTriangle(cx - 5, cy - (r - 10), cx + 2, cy - (r - 10) - 5, cx + 2, cy - (r - 10) + 5, kText);
+  rpX = cx, rpY = cy, rpR = r;
+}
+
+bool replayHit(int x, int y) {
+  const int dx = x - rpX, dy = y - rpY, reach = rpR + 24;
+  return rpR && dx * dx + dy * dy <= reach * reach;
 }
 
 void setQuestion(const String&) {}
@@ -1040,6 +1132,8 @@ bool restoreAnswer() { return false; }
 void setReply(const String& t) {
   replyText = t;
   replyPage = 0;
+  spokenAt = litFrom = litTo = -1;
+  autoFollow = true;
   layoutReply();
 }
 
@@ -1058,14 +1152,25 @@ void showReply() {
     const auto& lines = replyPages[replyPage];
     int line = ts().line;
     int top = replyCentred ? kTop + ((replyBottom() - kTop) - (int)lines.size() * line) / 2 : kTop;
-    drawLines(lines, top, line, kText);
+    // While it's spoken, the sentence the voice is in is lit, the rest dimmed.
+    const auto* spans = replyPage < (int)lineSpans.size() ? &lineSpans[replyPage] : nullptr;
+    for (int i = 0; i < (int)lines.size(); ++i) {
+      uint16_t col = kText;
+      if (litTo >= 0 && spans && i < (int)spans->size()) {
+        const auto& sp = (*spans)[i];
+        col = sp.second > litFrom && sp.first < litTo ? kText : kDim;
+      }
+      text(lines[i], CX, top + i * line + line / 2, col);
+    }
     drawPageDots(replyPages.size(), replyPage, replyBottom() + 22);
   }
   if (answerButton()) drawTapButton(kTapLowY, kTapLowR);
+  if (replayable) drawReplay(answerButton() ? CX - 74 : CX, kTapLowY, 20);
   push();
 }
 
 bool nextPage() {
+  autoFollow = false;  // paged by hand: the voice no longer turns the pages
   if (replyPages.empty()) return false;
   replyPage = (replyPage + 1) % replyPages.size();
   showReply();
@@ -1073,6 +1178,7 @@ bool nextPage() {
 }
 
 bool prevPage() {
+  autoFollow = false;
   if (replyPage == 0) return false;
   --replyPage;
   showReply();
@@ -1099,15 +1205,34 @@ void showFace(uint8_t kind, face::Pose pose, int level) {
   else if (pose == face::Pose::Thinking) ringWorking(0);
 
   drawChrome();
-  font(vlw::Title);
-  String name = barAgent.length() ? barAgent : String("Captain Claw");
-  text(fit(name, lineRoom(342, 378)), CX, 360, kText);
+  // The sentence being spoken, as a subtitle in place of the name: the two
+  // lines round where the voice is in it; else the name.
+  const bool subtitle = pose == face::Pose::Speaking && litTo > litFrom;
+  if (subtitle) {
+    font(vlw::BodyS);
+    const int room = lineRoom(330, 390);
+    auto ls = wrap(replyText.substring(litFrom, litTo), [&](int) { return room; });
+    const int want = max(0, spokenAt - litFrom);
+    int at = 0, seen = 0;
+    for (int i = 0; i < (int)ls.size(); ++i) {
+      at = i;
+      seen += ls[i].length() + 1;
+      if (want < seen) break;
+    }
+    const int first = min(at, max(0, (int)ls.size() - 2));
+    const int n = min(2, (int)ls.size() - first);
+    for (int i = 0; i < n; ++i) text(ls[first + i], CX, 344 + i * 30, kText);
+  } else {
+    font(vlw::Title);
+    String name = barAgent.length() ? barAgent : String("Captain Claw");
+    text(fit(name, lineRoom(342, 378)), CX, 360, kText);
+  }
   // The tap button takes the state line's place: to talk, or to stop.
   const bool listening = pose == face::Pose::Listening;
   if ((answerButton() && !listening && pose != face::Pose::Thinking) ||
       (tapMode == TapButton::Stop && listening)) {
     drawTapButton(kTapLowY, kTapLowR);
-  } else {
+  } else if (!subtitle) {
     font(vlw::Small);
     text(fit(barState, lineRoom(382, 410)), CX, 396, pose == face::Pose::Idle ? kDim : barColor);
   }

@@ -647,15 +647,16 @@ class _DeviceConn:
         if self.closed:
             return  # the reconnect brings it
         self.last_reply_at = time.monotonic()
+        spoken = speakable(text) if self.speak else ""
         # Round screens (the StopWatch) and e-paper use Inter, which has Đ.
+        # "spoken": how much of it is read aloud, so the watch can follow the
+        # voice through the text (0: nothing is).
         await self.send_json({"type": "reply", "text": screen_text(text, has_dj=self.round_screen or self.paper),
-                              "proactive": proactive})
+                              "proactive": proactive, "spoken": len(spoken)})
         sounds = _answers[self.channel_id] = []  # a new answer
-        if self.speak:
-            spoken = speakable(text)
-            if spoken:
-                sounds.append(("tts", spoken))
-                await self._audio_q.put(("tts", spoken))
+        if spoken:
+            sounds.append(("tts", spoken))
+            await self._audio_q.put(("tts", spoken))
 
     # ── a turn across reconnects ──
     def _end_turn(self) -> None:

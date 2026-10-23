@@ -177,6 +177,19 @@ int main(int argc, char** argv) {
   save("06_reply_long_p1");
   ui::nextPage();
   save("07_reply_long_p2");
+  ui::prevPage();
+  ui::setSpoken(120);  // the voice in the second sentence: lit, the rest dimmed
+  bar("speaking", kCyan);
+  ui::showReply();
+  save("07b_reply_lit");
+  ui::showFace(1, face::Pose::Speaking, 70);  // the character: that sentence as a subtitle
+  save("07c_icon_subtitle");
+  ui::setSpoken(-1);
+  bar("ready", kGreen);
+  ui::setReplayable(true);  // after the speech: hear it again
+  ui::showReply();
+  save("07d_reply_replay");
+  ui::setReplayable(false);
 
   auto items = menu();
   bar("menu", kText);

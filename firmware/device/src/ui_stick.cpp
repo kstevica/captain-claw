@@ -376,6 +376,9 @@ bool nextPage() {
 bool onFirstPage() { return page == 0; }
 void slide(bool) {}  // the round screen's
 void fade() {}
+bool setSpoken(int) { return false; }
+void setReplayable(bool) {}
+bool replayHit(int, int) { return false; }
 
 bool prevPage() {
   if (page == 0) return false;

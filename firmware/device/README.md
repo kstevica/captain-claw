@@ -161,6 +161,17 @@ home, the menu, a notice, the picture alone, the status — fades through black
 cuts in, so nothing delays it. While the agent works, the ring's track
 breathes under the moving head.
 
+The text follows the voice (0.14.2). While an answer is spoken, the sentence
+being said is lit and the rest dimmed, the page turns by itself when the
+voice reaches the next one (until you page by hand), and in character mode
+the sentence shows as a subtitle under the face. No word timings are
+needed: the watch knows how far into the speech the speaker is (the mouth
+uses the same estimate); once the speech has all arrived, that fraction of
+the text is the place, and before that the pace learned from the last answer
+carries it (the deck says how many characters it speaks: `"spoken"` in the
+reply). After the speech, a small replay button sits under the text — tap it
+to hear the answer again.
+
 *Tap to talk* (Menu, or the settings page; off by default) puts a record
 button on the screen: under the name at home, under an answer or the
 character. Tap it and talk; the button turns into a stop square, and a second

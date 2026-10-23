@@ -30,6 +30,8 @@ static size_t soundStartPos = 0;          // …and from which sample
 static int carry = -1;                    // odd byte waiting for its pair
 static bool replaying = false;            // the clip is playing again (replay())
 static bool onHold = false;               // pause(): the stream stays open, nothing is fed
+static size_t firstEnd = 0;               // where the clip's first stream (the speech) ended…
+static bool firstEnded = false;           // …once it has
 static bool finished = false;             // it played to its end by itself (takeFinished())
 
 // ── a line spoken aside: its own small buffer and speaker channel ──
@@ -194,6 +196,8 @@ bool playBegin(uint32_t rate, uint32_t holdMs) {
     writePos = 0;
     cut = false;
     freshClip = false;
+    firstEnded = false;
+    firstEnd = 0;
   }
   playRate = rate;
   playPos = writePos;
@@ -226,7 +230,24 @@ void playFeed(const uint8_t* data, size_t len) {
 }
 
 void playEnd() {
-  if (streamOpen) streamEnded = true;
+  if (!streamOpen) return;
+  streamEnded = true;
+  if (!firstEnded) {
+    firstEnded = true;
+    firstEnd = writePos;
+  }
+}
+
+size_t speechTotal() { return firstEnded ? firstEnd : writePos; }
+bool speechEnded() { return firstEnded; }
+uint32_t playRateHz() { return playRate; }
+
+size_t speechAt() {
+  const size_t total = speechTotal();
+  if (!streamOpen) return total;
+  if (onHold || !started) return min(playPos, total);
+  const size_t at = soundStartPos + (size_t)((millis() - soundStartMs) * (uint64_t)playRate / 1000);
+  return min(min(at, playPos), total);
 }
 
 void playStop() {

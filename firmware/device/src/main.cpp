@@ -47,7 +47,7 @@
 #include <M5PM1.h>
 #endif
 
-#define FW_VERSION "0.14.1"
+#define FW_VERSION "0.14.2"
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
 // round and paper screens draw each glyph through a stack buffer — a timer
@@ -167,6 +167,12 @@ static uint8_t buzzMore = 0;
 static uint16_t buzzOnMs = 0, buzzGapMs = 0;
 static uint32_t buzzAgainMs = 0;
 static uint32_t pendingTapMs = 0;    // a single tap on a picture acts once it can't become a double tap
+// Following the voice through the answer's text: how much of it the deck
+// speaks, how long the text is, and the speaking pace learned from the last
+// answer whose speech had all arrived (characters a second).
+static int spokenChars = 0, replyChars = 0;
+static float charsPerSec = 14.0f;
+static bool paceLearned = false;
 static constexpr uint16_t kHintTurns = 5;  // the home screen's "hold … to talk" goes after this many
 static uint32_t turnBusyMs = 0;      // last moment a turn was under way (Wi-Fi stays fully awake)
 static bool wifiAwake = false;
@@ -758,6 +764,7 @@ static String phoneUrl;  // "settings on phone" address while it's open
 static void redraw() {
   setBarState();
   syncTapButton();
+  ui::setReplayable((mode == Mode::Reply || mode == Mode::Idle) && canReplay() && !audio::playing());
   switch (mode) {
     case Mode::Listening:
       if (settings.iconMode) ui::showFace(settings.character, face::Pose::Listening, 0);
@@ -1604,6 +1611,9 @@ static void onText(const char* payload, size_t len) {
     Serial.printf("[claw] reply; loop stack never below %u bytes free\n", (unsigned)uxTaskGetStackHighWaterMark(nullptr));
     lastReplyMs = millis();
     String said = doc["text"] | "";
+    spokenChars = doc["spoken"] | 0;
+    replyChars = said.length();
+    paceLearned = false;
     ui::setReply(said);
     face::setText(said);
     audio::newClip();  // this answer's sound replaces the last one's
@@ -2625,6 +2635,11 @@ static void pollTouch(bool dark) {
     answerAsk(hit == 1);
     return;
   }
+  if ((mode == Mode::Reply || mode == Mode::Idle) && ui::replayHit(x, y)) {
+    hapticConfirm();
+    replayAnswer();
+    return;
+  }
   const ui::TapButton button = tapButtonKind();
   if (button == ui::TapButton::Off || !ui::tapButtonHit(x, y)) {
     static uint32_t lastTapMs = 0;  // taps on the button act at once, so only these count
@@ -2659,6 +2674,24 @@ static void pollTouch(bool dark) {
     return;
   }
   if (wasSpeaking) sendType("stop");
+}
+
+// Where the voice is in the answer's text, as a character index (-1: not
+// speaking). Once the speech has all arrived its length is known and the
+// place is the played fraction of it; before that, the pace of the last
+// answer (learned here) carries the estimate.
+static int spokenCharAt() {
+  if (!audio::playing()) return -1;
+  const size_t total = audio::speechTotal(), at = audio::speechAt();
+  const int chars = spokenChars > 0 ? min(spokenChars, replyChars) : replyChars;
+  if (audio::speechEnded() && total) {
+    if (!paceLearned) {
+      paceLearned = true;
+      charsPerSec = constrain(chars * (float)audio::playRateHz() / total, 6.0f, 30.0f);
+    }
+    return (int)((uint64_t)chars * at / total);
+  }
+  return (int)(at * charsPerSec / audio::playRateHz());
 }
 
 // A turn the link dropped in the middle of (see turnDropMs): over when the
@@ -2915,7 +2948,10 @@ void loop() {
     closeAtMs = 0;
     if (!audio::playing() && !audio::micActive() && !prerollOn) audio::cueEnd();
   }
-  if (wasPlaying != audio::playing() && (mode == Mode::Reply || mode == Mode::Idle) && !flashing) redraw();
+  if (wasPlaying != audio::playing() && (mode == Mode::Reply || mode == Mode::Idle) && !flashing) {
+    if (!audio::playing()) ui::setSpoken(-1);  // done: the whole text lit again
+    redraw();
+  }
 
   if (!flashing && !screenOff) {
     uint32_t since = millis() - lastDrawMs;
@@ -2935,10 +2971,12 @@ void loop() {
                since > frameGap(min<uint32_t>(60, face::frameMs(settings.character)))) {
       lastDrawMs = millis();
       setBarState();
+      ui::setSpoken(spokenCharAt());  // the subtitle
       ui::showFace(settings.character, face::Pose::Speaking, audio::outputLevel());
     } else if (!settings.iconMode && ui::animated() && mode == Mode::Reply && audio::sounding() && since > 80) {
-      lastDrawMs = millis();  // the speaking line follows the voice (its strip only)
-      ui::showSpeaking(audio::sounding() ? audio::outputLevel() : 0);
+      lastDrawMs = millis();
+      if (ui::setSpoken(spokenCharAt())) redraw();  // the sentence or the page changed: the whole screen
+      else ui::showSpeaking(audio::outputLevel());  // else the speaking line follows the voice (its strip only)
     } else if (settings.iconMode && mode == Mode::Idle && !ui::hasReply() && since > frameGap(face::frameMs(settings.character))) {
       lastDrawMs = millis();  // blinking, rain, bouncing…
       redraw();
