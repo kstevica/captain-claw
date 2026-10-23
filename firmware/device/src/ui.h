@@ -110,6 +110,12 @@ void showReply();                   // redraw the current page
 bool nextPage();                    // false when it wrapped back to page 1
 bool prevPage();                    // false on page 1 (stays there)
 bool onLastPage();                  // the current page is the answer's last
+bool onFirstPage();
+// How the next screen drawn comes in (the round screen; the others cut):
+// sliding on from the right (forward) or back from the left, or fading
+// through black. One-shot: the next push uses it.
+void slide(bool forward);
+void fade();
 bool hasReply();
 
 // While an answer plays (text mode), every frame or so: a light indicator

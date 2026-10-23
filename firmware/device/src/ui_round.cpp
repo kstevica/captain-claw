@@ -44,6 +44,11 @@ static constexpr uint16_t kCyan = rgb(60, 210, 245), kBlue = rgb(90, 150, 255);
 
 static M5Canvas canvas(&M5.Display);
 static M5Canvas faceSprite;  // characters draw at the stick's size, then scale up
+static M5Canvas prevFrame;   // the screen before a slide (PSRAM)
+enum class Fx : uint8_t { None, SlideOn, SlideBack, Fade };
+static Fx nextFx = Fx::None;        // how the next push() brings its screen in
+static uint8_t curBright = 0;       // what brightness() last set (dark or dim: no fades)
+static constexpr int kSlideFrames = 4;
 
 static lgfx::VLWfont fontSet[vlw::Count];
 static lgfx::PointerWrapper fontData[vlw::Count];
@@ -106,19 +111,31 @@ uint32_t g_perfDrawUs = 0, g_perfDrawMax = 0, g_perfPushUs = 0, g_perfPushMax = 
 static uint32_t frameT0 = 0;
 #endif
 
+// The screen as it is, kept for a slide.
+static bool keepFrame() {
+  if (!prevFrame.width()) {
+    prevFrame.setPsram(true);
+    prevFrame.setColorDepth(16);
+    if (!prevFrame.createSprite(W, H)) return false;
+  }
+  memcpy(prevFrame.getBuffer(), canvas.getBuffer(), (size_t)W * H * 2);
+  return true;
+}
+
 // Every screen starts here: the background picture, else black (*plain*:
 // black all the same — a picture of the agent's own is shown on it).
 static void beginFrame(bool plain = false) {
 #ifdef CLAW_PERF
   frameT0 = micros();
 #endif
+  if ((nextFx == Fx::SlideOn || nextFx == Fx::SlideBack) && !keepFrame()) nextFx = Fx::None;
   if (hasBackdrop && !plain) backdropDim.pushSprite(&canvas, 0, 0);
   else canvas.fillScreen(kBlack);
   tapR = 0;
   askShown = false;
 }
 
-static void push() {
+static void pushNow() {
 #ifdef CLAW_PERF
   uint32_t t = micros();
   uint32_t draw = t - frameT0;
@@ -133,6 +150,47 @@ static void push() {
   canvas.pushSprite(0, 0);
 #endif
 }
+
+// The old screen leaves and the new one follows it in, eased, in a few
+// frames — each a screen's worth of pixels (~50 ms on the AMOLED).
+static void slideIn(bool forward) {
+  const int dir = forward ? -1 : 1;
+  for (int k = 1; k < kSlideFrames; ++k) {
+    float t = k / (float)kSlideFrames;
+    t = t * t * (3 - 2 * t);
+    const int off = ((int)(W * t)) & ~1;  // even: the panel's rule
+    prevFrame.pushSprite(&M5.Display, dir * off, 0);
+    canvas.pushSprite(dir * (off - W), 0);
+  }
+  pushNow();
+}
+
+// Through black: the panel's brightness steps down, the new screen goes up
+// unlit and the brightness comes back — read as a fade, at no drawing cost.
+static void fadeIn() {
+  const uint8_t b = curBright;
+  for (int k = 2; k >= 1; --k) {
+    M5.Display.setBrightness(b * k / 3);
+    delay(28);
+  }
+  M5.Display.setBrightness(0);
+  pushNow();
+  for (int k = 1; k <= 3; ++k) {
+    delay(28);
+    M5.Display.setBrightness(b * k / 3);
+  }
+}
+
+static void push() {
+  const Fx fx = nextFx;
+  nextFx = Fx::None;
+  if (fx == Fx::SlideOn || fx == Fx::SlideBack) slideIn(fx == Fx::SlideOn);
+  else if (fx == Fx::Fade && curBright > 24) fadeIn();  // (not from a dark or dimmed screen)
+  else pushNow();
+}
+
+void slide(bool forward) { nextFx = forward ? Fx::SlideOn : Fx::SlideBack; }
+void fade() { nextFx = Fx::Fade; }
 
 static int tw(const String& s) { return canvas.textWidth(s.c_str()); }
 
@@ -383,7 +441,9 @@ static void ringListening(uint32_t elapsedMs, int level) {
 
 // Working: an amber comet circling; tool steps as ticks inside the ring.
 static void ringWorking(int steps) {
-  ringTrack(kAmber);
+  // The track breathes while the agent works: one breath in 2.4 s.
+  const float breath = 0.5f + 0.5f * sinf(millis() * (6.2832f / 2400));
+  ringArc(0, 360, mix(kBlack, kAmber, 0.12f + 0.22f * breath));
   float head = fmodf(millis() * 0.225f, 360.0f);  // one turn in 1.6 s
   const int segs = 9;
   for (int i = 0; i < segs; ++i) {
@@ -674,7 +734,10 @@ void begin() {
   badgeSprite(TBlue);  // the common one, ready before the first screen
 }
 
-void brightness(uint8_t level) { M5.Display.setBrightness(level); }
+void brightness(uint8_t level) {
+  curBright = level;
+  M5.Display.setBrightness(level);
+}
 
 bool animated() { return true; }
 
@@ -1017,6 +1080,7 @@ bool prevPage() {
 }
 
 bool onLastPage() { return replyPage + 1 >= (int)replyPages.size(); }
+bool onFirstPage() { return replyPage == 0; }
 
 // Characters are drawn for the stick's 240×135 screen (under its 16 px bar),
 // then scaled up smoothly into the middle of the round one.

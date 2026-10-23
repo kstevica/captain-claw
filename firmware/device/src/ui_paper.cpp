@@ -1271,6 +1271,9 @@ bool prevPage() {
 }
 
 bool onLastPage() { return replyPage + 1 >= (int)replyPages.size(); }
+bool onFirstPage() { return replyPage == 0; }
+void slide(bool) {}  // the round screen's
+void fade() {}
 
 bool canPin() { return replyText.length() > 0 || pinCard.valid(); }
 

@@ -154,6 +154,13 @@ step or a page, a double tick at the end, a longer one for a choice, three
 for something that went wrong. The home screen's "Hold the yellow button to
 talk" goes away after the first five recordings.
 
+Screens move (0.14.1): a page, a picker row or a status page slides in from
+the side it came from (four eased frames, ~200 ms); going somewhere else —
+home, the menu, a notice, the picture alone, the status — fades through black
+(the panel's brightness, so it costs no drawing). An answer arriving still
+cuts in, so nothing delays it. While the agent works, the ring's track
+breathes under the moving head.
+
 *Tap to talk* (Menu, or the settings page; off by default) puts a record
 button on the screen: under the name at home, under an answer or the
 character. Tap it and talk; the button turns into a stop square, and a second

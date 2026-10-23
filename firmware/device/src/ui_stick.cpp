@@ -373,6 +373,10 @@ bool nextPage() {
   return page != 0;
 }
 
+bool onFirstPage() { return page == 0; }
+void slide(bool) {}  // the round screen's
+void fade() {}
+
 bool prevPage() {
   if (page == 0) return false;
   --page;

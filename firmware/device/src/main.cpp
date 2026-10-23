@@ -47,7 +47,7 @@
 #include <M5PM1.h>
 #endif
 
-#define FW_VERSION "0.14.0"
+#define FW_VERSION "0.14.1"
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
 // round and paper screens draw each glyph through a stack buffer — a timer
@@ -831,6 +831,7 @@ static void redraw() {
 }
 
 static void notice(const char* title, const String& body, uint16_t color) {
+  ui::fade();
   mode = Mode::Notice;
   setBarState();
   ui::showMessage(title, body, color);
@@ -843,6 +844,7 @@ static void backToMain() {
 
 // From the picture alone back to the home screen (even with an answer kept).
 static void leaveBackdrop() {
+  ui::fade();
   mode = ui::hasReply() ? Mode::Home : Mode::Idle;
   redraw();
 }
@@ -852,6 +854,7 @@ static void openMenu() {
   menuSel = board::kEpaper ? MPhone : canReplay() ? MReplay : MStatus;
   menuOpenedMs = millis();
   mode = Mode::Menu;
+  ui::fade();
   redraw();
   sayRow();
 }
@@ -889,12 +892,14 @@ static void chooseMenuRow() {
   menuOpenedMs = millis();
   switch (menuSel) {
     case MReplay:
+      ui::fade();
       backToMain();
       replayAnswer();
       return;
     case MMore:
     case MBack:
       menuMore = menuSel == MMore;
+      ui::slide(menuMore);  // into Settings, or back out
       menuSel = menuMore ? 0 : MMore;
       while (!rowShown(menuSel)) ++menuSel;  // the level's first row
       redraw();
@@ -904,6 +909,7 @@ static void chooseMenuRow() {
       statusPage = 0;
       mode = Mode::Status;
       ui::drawNow();  // asked to see it
+      ui::fade();
       redraw();
       return;
     case MAgent:
@@ -967,6 +973,7 @@ static void chooseMenuRow() {
     case MCharacter:
       charSel = settings.character;
       mode = Mode::CharPick;
+      ui::slide(true);
       redraw();
       sayRow();
       return;
@@ -1327,6 +1334,7 @@ static void askNotes() {
   askedMs = millis();
   touch();
   buzz(60);
+  ui::fade();
   mode = Mode::Ask;
   ui::drawNow();  // the e-paper too: a question waits for nobody
   redraw();
@@ -2075,6 +2083,14 @@ static void noteSideClick(bool wokeOnly) {
 // One side click: next row / page, or back to the main screen.
 static void sideClick() {
   ui::drawNow();  // a page, the status: asked to see it (the e-paper draws it now)
+  if (mode == Mode::Menu || mode == Mode::CharPick || (mode == Mode::Agents && !agentsLoading) ||
+      (mode == Mode::Status && statusPage + 1 < statusPages) ||
+      (mode == Mode::Reply && !(audio::playing() && settings.iconMode))) {
+    ui::slide(true);  // a step on
+  } else if (mode == Mode::Ask || mode == Mode::Status || mode == Mode::Image || mode == Mode::Notice ||
+             mode == Mode::Link || mode == Mode::Idle || mode == Mode::Home || mode == Mode::Backdrop) {
+    ui::fade();  // another place
+  }
   if (mode == Mode::Ask) {
     answerAsk(false);
   } else if (mode == Mode::Menu) {
@@ -2123,6 +2139,13 @@ static void sideClick() {
 // out to the main screen; from the home screen, to the answer.
 static void backClick() {
   ui::drawNow();  // back, the answer, the home screen: asked to see it
+  if (mode == Mode::Menu || mode == Mode::CharPick || (mode == Mode::Agents && !agentsLoading) ||
+      (mode == Mode::Status && statusPage > 0)) {
+    ui::slide(false);  // a step back
+  } else if (mode == Mode::Ask || mode == Mode::Status || mode == Mode::Reply || mode == Mode::Image ||
+             mode == Mode::Notice || mode == Mode::Link || (mode == Mode::Home && ui::hasReply())) {
+    ui::fade();
+  }
   if (mode == Mode::Ask) {
     answerAsk(false);
   } else if (mode == Mode::Menu) {
@@ -2476,7 +2499,10 @@ static void stopOnSilence() {
 // picture, if it came with one, then the text's pages. No wrapping round.
 static void swipeAnswer(bool forward) {
   if (mode == Mode::Image) {
-    if (forward) backToMain();  // on to the text
+    if (forward) {  // on to the text
+      ui::slide(true);
+      backToMain();
+    }
     return;
   }
   if (settings.iconMode && audio::playing()) {  // the character speaking: the text, as a side click does
@@ -2484,14 +2510,19 @@ static void swipeAnswer(bool forward) {
     return;
   }
   if (forward) {
-    if (ui::onLastPage()) hapticBump();  // nothing after this
-    else {
+    if (ui::onLastPage()) {
+      hapticBump();  // nothing after this
+    } else {
+      ui::slide(true);
       ui::nextPage();
       hapticTick();
     }
-  } else if (ui::prevPage()) {
+  } else if (!ui::onFirstPage()) {
+    ui::slide(false);
+    ui::prevPage();
     hapticTick();
   } else if (ui::hasImage()) {  // before the first page: the picture
+    ui::slide(false);
     mode = Mode::Image;
     redraw();
     hapticTick();
@@ -2509,9 +2540,11 @@ static void goHome() {
     leaveBackdrop();
   } else if (mode == Mode::Home || (mode == Mode::Idle && !ui::hasReply())) {
     if (!ui::hasBackground()) return;  // home already, and nothing behind it to show
+    ui::fade();
     mode = Mode::Backdrop;
     redraw();
   } else {
+    ui::fade();
     mode = Mode::Home;
     redraw();
   }
@@ -2524,6 +2557,7 @@ static void pickCharacter() {
   settings.save();
   mode = Mode::Menu;
   menuOpenedMs = millis();
+  ui::slide(false);
   redraw();
 }
 static void chooseHere() {
@@ -2747,6 +2781,7 @@ void loop() {
       menuOpenedMs = millis();
       redraw();
     } else if (inMenu || (board::kEpaper && mode == Mode::Link)) {
+      ui::fade();
       backToMain();
     } else if (mode != Mode::Listening) {
       if (board::kEpaper) openOptions();  // the paper's whole menu
@@ -2850,6 +2885,7 @@ void loop() {
     if (mode == Mode::Image) {  // a single tap on a picture: all of it, or the middle again
       ui::toggleImageFit();
       hapticTick();
+      ui::fade();
       redraw();
     }
   }
