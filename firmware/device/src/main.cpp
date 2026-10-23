@@ -47,7 +47,7 @@
 #include <M5PM1.h>
 #endif
 
-#define FW_VERSION "0.14.2"
+#define FW_VERSION "0.15.0"
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
 // round and paper screens draw each glyph through a stack buffer — a timer
@@ -173,6 +173,8 @@ static uint32_t pendingTapMs = 0;    // a single tap on a picture acts once it c
 static int spokenChars = 0, replyChars = 0;
 static float charsPerSec = 14.0f;
 static bool paceLearned = false;
+static bool streamedReply = false;  // this answer is coming in parts (reply_part)
+static bool speechMore = false;     // the deck has more of the answer's voice to send: no closing chime yet
 static constexpr uint16_t kHintTurns = 5;  // the home screen's "hold … to talk" goes after this many
 static uint32_t turnBusyMs = 0;      // last moment a turn was under way (Wi-Fi stays fully awake)
 static bool wifiAwake = false;
@@ -398,6 +400,7 @@ static String notesCount() {
 // its sound plays, else Tap to talk's record / stop button.
 static ui::TapButton tapButtonKind() {
   if (!board::kHasTouch) return ui::TapButton::Off;
+  if (mode == Mode::Waiting) return ui::TapButton::Stop;  // stop the agent
   if ((mode == Mode::Reply || mode == Mode::Idle) && audio::playing() && !tapRec) {
     return audio::paused() ? ui::TapButton::Play : ui::TapButton::Pause;
   }
@@ -1060,6 +1063,7 @@ static void startTalking() {
   d["type"] = "rec_start";
   d["rate"] = audio::kMicRate;
   sendJson(d);
+  speechMore = false;
   recStartMs = millis();
   mode = Mode::Listening;
   buzz(35);
@@ -1098,8 +1102,8 @@ static void stopTalking(bool send) {
 
 // ── speech cue: beep + flash, then the speech ────────────────────────
 
-static void startSpeech(uint32_t rate) {
-  bool quiet = quietSpeech;  // a replay the user asked for needs no cue
+static void startSpeech(uint32_t rate, bool cont = false) {
+  bool quiet = quietSpeech || cont;  // a replay the user asked for, or the answer's next sound: no cue
   bool cue = !quiet && (settings.cueBeep || settings.cueFlash);
   bool buzzCue = !quiet && board::kHasMotor && settings.cueBuzz;
   bool goesOn = audio::playBegin(rate, (cue || buzzCue) ? settings.cueLeadS * 1000UL : 0);
@@ -1614,12 +1618,54 @@ static void onText(const char* payload, size_t len) {
     spokenChars = doc["spoken"] | 0;
     replyChars = said.length();
     paceLearned = false;
-    ui::setReply(said);
+    if (streamedReply) {
+      ui::growReply(said);  // the rest of it, in place
+      streamedReply = false;
+    } else {
+      ui::setReply(said);
+      audio::newClip();  // this answer's sound replaces the last one's
+    }
     face::setText(said);
-    audio::newClip();  // this answer's sound replaces the last one's
     deckReplay = quietSpeech = false;
     mode = Mode::Reply;
     if (!flashing) redraw();
+  } else if (type == "reply_part") {
+    // The answer as the model writes it, a sentence at a time: shown now.
+    touch();
+    String said = doc["text"] | "";
+    replyChars = said.length();
+    if (!streamedReply) {
+      streamedReply = true;
+      lastReplyMs = millis();
+      spokenChars = 0;
+      paceLearned = false;
+      ui::setReply(said);
+      audio::newClip();
+      deckReplay = quietSpeech = false;
+      mode = Mode::Reply;
+    } else {
+      ui::growReply(said);
+    }
+    face::setText(said);
+    if (!flashing) redraw();
+  } else if (type == "speech_reset") {
+    // What the model wrote before a tool call wasn't the answer: back to the
+    // working screen; the answer's sound starts afresh.
+    audio::newClip();
+    streamedReply = false;
+    if (mode == Mode::Reply) {
+      ui::setReply("");
+      mode = Mode::Waiting;
+      workDirty = true;
+      redraw();
+    }
+  } else if (type == "speech_end") {
+    speechMore = false;
+    audio::markSpeechEnd();
+    if (!audio::playing() && settings.cueBeep && !quietSpeech) {  // it finished before this came
+      closeAtMs = millis() + 350;
+      if (!closeAtMs) closeAtMs = 1;
+    }
   } else if (type == "audio_start" && (doc["aside"] | false)) {
     asideOpen = true;  // a menu row read aloud: apart from the answer
     audio::asideBegin(doc["rate"] | 24000);
@@ -1632,7 +1678,8 @@ static void onText(const char* payload, size_t len) {
       deckReplay = false;
       audio::newClip();
     }
-    startSpeech(doc["rate"] | 24000);
+    speechMore = true;  // until speech_end
+    startSpeech(doc["rate"] | 24000, doc["cont"] | false);
     setBarState();
   } else if (type == "audio_end") {
     audio::playEnd();
@@ -2561,6 +2608,15 @@ static void goHome() {
   hapticTick();
 }
 
+// The stop button while the agent works: it stops after its current step
+// (its "ready" ends the turn).
+static void stopAgent() {
+  sendType("stop_agent");
+  hapticConfirm();
+  statusLine = "Stopping…";
+  workDirty = true;
+}
+
 // The talk button in a picker: this row, agent or character.
 static void pickCharacter() {
   settings.character = charSel;
@@ -2652,6 +2708,10 @@ static void pollTouch(bool dark) {
       if (!lastTapMs) lastTapMs = 1;
       if (mode == Mode::Image) pendingTapMs = lastTapMs;  // a single tap, unless a second follows
     }
+    return;
+  }
+  if (button == ui::TapButton::Stop && mode == Mode::Waiting) {
+    stopAgent();
     return;
   }
   if (button == ui::TapButton::Pause || button == ui::TapButton::Play) {
@@ -2940,7 +3000,7 @@ void loop() {
   audio::playPoll();
   // The answer's sound played to its end: the cue again, the other way round
   // — a moment later, so an agent-made sound that follows comes first.
-  if (audio::takeFinished() && settings.cueBeep && !quietSpeech) {
+  if (audio::takeFinished() && settings.cueBeep && !quietSpeech && !speechMore) {
     closeAtMs = millis() + 350;
     if (!closeAtMs) closeAtMs = 1;
   }

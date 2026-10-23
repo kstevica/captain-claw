@@ -30,7 +30,7 @@ static size_t soundStartPos = 0;          // …and from which sample
 static int carry = -1;                    // odd byte waiting for its pair
 static bool replaying = false;            // the clip is playing again (replay())
 static bool onHold = false;               // pause(): the stream stays open, nothing is fed
-static size_t firstEnd = 0;               // where the clip's first stream (the speech) ended…
+static size_t firstEnd = 0;               // where the clip's speech ended (markSpeechEnd)…
 static bool firstEnded = false;           // …once it has
 static bool finished = false;             // it played to its end by itself (takeFinished())
 
@@ -230,12 +230,13 @@ void playFeed(const uint8_t* data, size_t len) {
 }
 
 void playEnd() {
-  if (!streamOpen) return;
-  streamEnded = true;
-  if (!firstEnded) {
-    firstEnded = true;
-    firstEnd = writePos;
-  }
+  if (streamOpen) streamEnded = true;
+}
+
+void markSpeechEnd() {
+  if (firstEnded) return;
+  firstEnded = true;
+  firstEnd = writePos;
 }
 
 size_t speechTotal() { return firstEnded ? firstEnd : writePos; }

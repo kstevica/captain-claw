@@ -117,6 +117,9 @@ bool onFirstPage();
 // user paged by hand. True when the screen needs drawing again (the
 // sentence or the page changed).
 bool setSpoken(int at);
+// More of the answer (it streams in): the text so far, keeping the page and
+// the voice's place.
+void growReply(const String& t);
 // A small replay button under an answer that has sound; tap = hear it again.
 void setReplayable(bool on);
 bool replayHit(int x, int y);

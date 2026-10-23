@@ -172,6 +172,17 @@ carries it (the deck says how many characters it speaks: `"spoken"` in the
 reply). After the speech, a small replay button sits under the text — tap it
 to hear the answer again.
 
+The answer comes as it's written (0.15.0). Flight Deck follows the model's
+text as it streams and, each time a sentence completes, shows the answer so
+far (`reply_part`) and reads that sentence aloud, so the first words are heard
+while the rest is still being written; the complete answer (`reply`) replaces
+the text in place and only what wasn't read yet is spoken. The sounds of one
+answer follow each other without a cue (`"cont"` on `audio_start`), and the
+closing chime waits for `speech_end`. Text the model writes before a tool call
+isn't the answer: `speech_reset` takes the watch back to the working screen.
+While the agent works, the button under the timer is a **stop**: the agent
+stops after its current step.
+
 *Tap to talk* (Menu, or the settings page; off by default) puts a record
 button on the screen: under the name at home, under an answer or the
 character. Tap it and talk; the button turns into a stop square, and a second

@@ -275,7 +275,9 @@ async def test_turn_media_trailing_the_reply_is_delivered(monkeypatch):
 def _queued(conn):
     items = []
     while not conn._audio_q.empty():
-        items.append(conn._audio_q.get_nowait())
+        item = conn._audio_q.get_nowait()
+        if item[0] != "end":  # the speech_end marker that follows an answer's sounds
+            items.append(item)
     return items
 
 
@@ -740,7 +742,8 @@ async def test_a_new_topic_goes_straight_to_the_answer():
     await frame({"type": "chat_message", "role": "assistant", "content": "23 °C."})
     await conn.on_bus({"type": "status", "status": "ready"})
     assert [m["text"] for m in conn.ws.sent if m["type"] == "reply"] == ["23 °C."]
-    assert conn._audio_q.get_nowait() == ("tts", "23 °C.") and conn._audio_q.empty()
+    assert conn._audio_q.get_nowait() == ("tts", "23 °C.")
+    assert conn._audio_q.get_nowait() == ("end", None) and conn._audio_q.empty()
     assert conn.pending is False
 
 
@@ -910,3 +913,78 @@ async def test_a_device_leaving_is_logged_with_how_it_ended(monkeypatch, caplog)
         await db.device_ws(_Socket())
     line = next(r.getMessage() for r in caplog.records if "left after" in r.getMessage())
     assert line.startswith("device watch-1 (stopwatch 0.12.10) left after 0s: code 1006, last heard 0s before")
+
+
+# ── the answer as it streams ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_sentences_are_spoken_as_the_answer_streams():
+    conn = _conn(speak=True)
+    conn.pending = True
+    await conn.on_bus({"type": "agent_delta", "text": "Sunny today, 24 °C. Tomorrow "})
+    await conn.on_bus({"type": "agent_delta", "text": "rain.\nTake a coat."})
+    parts = [m["text"] for m in conn.ws.sent if m["type"] == "reply_part"]
+    assert parts == ["Sunny today, 24 °C.", "Sunny today, 24 °C. Tomorrow rain."]
+    assert conn._audio_q.get_nowait() == ("tts", "Sunny today, 24 °C.")
+    assert conn._audio_q.get_nowait() == ("tts", "Tomorrow rain.")
+    await conn.on_bus({"type": "agent", "text": "Sunny today, 24 °C. Tomorrow rain.\nTake a coat."})
+    reply = [m for m in conn.ws.sent if m["type"] == "reply"][0]
+    assert reply["text"] == "Sunny today, 24 °C. Tomorrow rain.\nTake a coat."
+    assert reply["spoken"] == len("Sunny today, 24 °C.") + len("Tomorrow rain.") + len("Take a coat.")
+    assert conn._audio_q.get_nowait() == ("tts", "Take a coat.")  # only what wasn't read yet
+    assert conn._audio_q.get_nowait() == ("end", None) and conn._audio_q.empty()
+    assert db._answers[conn.channel_id] == [("tts", "Sunny today, 24 °C."), ("tts", "Tomorrow rain."),
+                                            ("tts", "Take a coat.")]
+
+
+@pytest.mark.asyncio
+async def test_text_before_a_tool_call_is_not_the_answer():
+    conn = _conn(speak=True)
+    conn.pending = True
+    await conn.on_bus({"type": "agent_delta", "text": "Let me check the calendar. "})
+    assert conn._audio_q.get_nowait() == ("tts", "Let me check the calendar.")
+    await conn.on_bus({"type": "activity", "text": "Reading the calendar", "tool": "google_calendar", "phase": "tool"})
+    assert {"type": "speech_reset"} in conn.ws.sent
+    await conn.on_bus({"type": "agent_delta", "text": "Three meetings tomorrow. "})
+    assert conn._audio_q.get_nowait() == ("tts", "Three meetings tomorrow.")
+    await conn.on_bus({"type": "agent", "text": "Three meetings tomorrow."})
+    reply = [m for m in conn.ws.sent if m["type"] == "reply"][0]
+    assert reply["spoken"] == len("Three meetings tomorrow.")
+    assert conn._audio_q.get_nowait() == ("end", None) and conn._audio_q.empty()
+
+
+@pytest.mark.asyncio
+async def test_the_cue_comes_once_per_answer():
+    conn = _conn(speak=True)
+
+    async def pcm():
+        yield b"\x00\x00" * 10
+
+    await conn._stream_pcm(pcm())
+    await conn._stream_pcm(pcm())
+    starts = [m for m in conn.ws.sent if isinstance(m, dict) and m["type"] == "audio_start"]
+    assert "cont" not in starts[0] and starts[1]["cont"] is True
+
+
+@pytest.mark.asyncio
+async def test_the_stop_button_cancels_the_agent():
+    conn = _conn()
+    agent = _bound(conn)
+    await conn.send_to_agent("write me a long poem", None)
+    await conn.stop_agent()
+    assert agent.frames[-1] == {"type": "cancel"}
+    assert conn.ws.sent[-1] == {"type": "status", "text": "Stopping…"}
+
+
+@pytest.mark.asyncio
+async def test_speech_end_follows_the_last_sound():
+    conn = _conn(speak=True)
+    conn.start_audio_worker()
+    await conn._audio_q.put(("end", None))
+    for _ in range(50):
+        await asyncio.sleep(0.01)
+        if conn.ws.sent:
+            break
+    conn._audio_worker.cancel()
+    assert conn.ws.sent == [{"type": "speech_end"}]

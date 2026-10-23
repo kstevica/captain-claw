@@ -186,7 +186,7 @@ def _now_iso() -> str:
 # old file (and ``control`` would re-step it), causing the deck to reload back
 # and forth between recently-opened decks before settling. These are live, fire-
 # once signals — only durable chat-like messages belong in the replay buffer.
-_NO_BACKFILL_TYPES = {"deck_open", "control", "deck_state", "narration", "media", "activity"}
+_NO_BACKFILL_TYPES = {"deck_open", "control", "deck_state", "narration", "media", "activity", "agent_delta"}
 
 
 async def _broadcast(ch: _ChannelState, payload: dict) -> None:
@@ -351,6 +351,12 @@ async def _forward_agent_msg(ch: "_ChannelState", data: dict) -> None:
         items = [i for i in (data.get("items") or []) if isinstance(i, dict) and i.get("path")]
         if items:
             await _broadcast(ch, {"type": "media", "items": items, "ts": data.get("timestamp") or _now_iso()})
+    elif mtype == "response_stream":
+        # The answer's text as the model writes it (the web app's stream
+        # panel): the device bridge speaks it sentence by sentence. Live only.
+        text = str(data.get("text", "") or "")
+        if text:
+            await _broadcast(ch, {"type": "agent_delta", "text": text})
     elif mtype == "thinking":
         # What the agent is doing right now — the web app's activity
         # indicator ("Searching: …", "Reading: …"). Only the device bridge

@@ -53,12 +53,14 @@ void playStop();                           // stop now (the clip is kept)
 void playPoll();                           // keep the speaker fed; call from loop()
 bool playing();                            // a stream is buffered or sounding (or held by pause())
 bool sounding();                           // the speaker is actually outputting it
-// The speech is the answer's first stream: the sample in it the speaker is
-// at now (the gapless estimate the mouth uses), how many it has (so far,
-// or in all once it has ended), whether it has all arrived, its rate.
+// The answer's speech (its sounds up to markSpeechEnd(), which the deck's
+// speech_end asks for): the sample in it the speaker is at now (the gapless
+// estimate the mouth uses), how many it has (so far, or in all once it has
+// ended), whether it has all arrived, its rate.
 size_t speechAt();
 size_t speechTotal();
 bool speechEnded();
+void markSpeechEnd();
 uint32_t playRateHz();
 void pause();                              // hold the sound where it is (the stream keeps arriving)
 void resume();                             // carry on from there

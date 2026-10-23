@@ -131,6 +131,10 @@ MAX_CHUNKED_JPEG_BYTES = 120_000  # a picture sent in parts (img=chunks)
 MAX_SAY_CHARS = 120              # a spoken menu row, not a reply
 MAX_NOTES_PER_BATCH = 20         # offline voice notes taken in one upload
 MAX_NOTE_SECONDS = 120
+# A sentence of the answer as it streams: a full stop, ! ? or … followed by
+# whitespace (so "3.5" and "e.g." hold), or a line break. The last one comes
+# with the complete answer.
+_SENTENCE_END = re.compile(r"[.!?…](?=\s)|\n")
 # "New topic" said with nothing after it: no answer follows the new session.
 NEW_TOPIC_REPLY = "New topic — go ahead."
 TURN_KEEP_S = 600.0              # a turn (its answer) waits this long for its device to come back
@@ -226,6 +230,14 @@ def activity_text(text: str, limit: int = 120) -> str:
     out = _NO_GLYPH.sub("", str(text or "")).replace("\n", " ")
     out = re.sub(r"\.\.\.$", "…", re.sub(r"\s{2,}", " ", out).strip())
     return out[:limit]
+
+
+def _common_prefix(a: str, b: str) -> int:
+    n = min(len(a), len(b))
+    i = 0
+    while i < n and a[i] == b[i]:
+        i += 1
+    return i
 
 
 def cue_alone(text: str) -> bool:
@@ -489,6 +501,14 @@ class _DeviceConn:
         self.closed = False  # the link is gone; a turn still open keeps listening
         self.opened_at = self.last_heard_at = time.monotonic()
         self.bg_id: str | None = None  # the background it has ("" none); None: it can't show one
+        # The answer as the model writes it (agent_delta): shown as it grows
+        # and spoken sentence by sentence as they complete.
+        self.partial = ""
+        self.spoken_upto = 0     # chars of partial handed to the voice
+        self.spoken_total = 0    # chars spoken of this answer so far
+        self.streamed = False    # some of this answer went out as it came
+        self.last_part = ""      # the text last shown as a part
+        self.speech_parts = 0    # sounds sent for this answer: the first gets the cue, the rest carry on
         self._send_lock = asyncio.Lock()
         self.recording = False
         self.rec_rate = 16000
@@ -595,9 +615,15 @@ class _DeviceConn:
         elif etype == "narration":
             if self.pending and ev.get("text"):
                 await self.send_json({"type": "status", "text": str(ev["text"])[:200]})
+        elif etype == "agent_delta":
+            if self.pending and not self.cue_alone and not self.closed:
+                await self._on_delta(str(ev.get("text", "") or ""))
         elif etype == "activity":
             if self.pending and ev.get("phase") != "done":
-                await self._send_activity(str(ev.get("text", "")), str(ev.get("tool", "")))
+                tool = str(ev.get("tool", "") or "")
+                if tool and tool != "progress":
+                    await self._reset_stream()  # what the model wrote before a tool call isn't the answer
+                await self._send_activity(str(ev.get("text", "")), tool)
         elif etype == "status":
             status = str(ev.get("status", ""))
             # "Using <tool>..." duplicates the tool's activity line (which says more).
@@ -639,24 +665,101 @@ class _DeviceConn:
         await self.send_json({"type": "activity", "text": line, "tool": tool})
 
     async def _show_reply(self, text: str, proactive: bool, turn: dict | None = None) -> None:
-        """An answer on the screen and spoken; a turn's answer is also kept
-        until the device is heard from after it (a dropped link loses it)."""
+        """An answer on the screen and spoken (what of it wasn't already, as it
+        streamed); a turn's answer is also kept until the device is heard from
+        after it (a dropped link loses it)."""
         if turn is not None:
             turn.update(answer={"text": text, "proactive": proactive}, via=self.serial,
                         sent_at=time.monotonic(), heard=False)
         if self.closed:
+            self._forget_stream()
             return  # the reconnect brings it
         self.last_reply_at = time.monotonic()
-        spoken = speakable(text) if self.speak else ""
+        if self.streamed:
+            # Spoken as it came: only what follows the last sentence read is left.
+            read = self.partial[:self.spoken_upto]
+            tail = text[len(read):] if text.startswith(read) else text[_common_prefix(text, read):]
+            spoken = speakable(tail) if self.speak else ""
+            total = self.spoken_total + len(spoken)
+        else:
+            spoken = speakable(text) if self.speak else ""
+            total = len(spoken)
+            _answers[self.channel_id] = []  # a new answer
+            self.speech_parts = 0
         # Round screens (the StopWatch) and e-paper use Inter, which has Đ.
         # "spoken": how much of it is read aloud, so the watch can follow the
         # voice through the text (0: nothing is).
         await self.send_json({"type": "reply", "text": screen_text(text, has_dj=self.round_screen or self.paper),
-                              "proactive": proactive, "spoken": len(spoken)})
-        sounds = _answers[self.channel_id] = []  # a new answer
+                              "proactive": proactive, "spoken": total})
         if spoken:
-            sounds.append(("tts", spoken))
+            _answers.setdefault(self.channel_id, []).append(("tts", spoken))
             await self._audio_q.put(("tts", spoken))
+        if total:
+            await self._audio_q.put(("end", None))  # speech_end, once the voice has all gone out
+        self._forget_stream()
+
+    # ── the answer as it streams ──
+    async def _on_delta(self, text: str) -> None:
+        self.partial += text
+        while True:
+            m = _SENTENCE_END.search(self.partial, self.spoken_upto)
+            if not m:
+                return
+            sentence = self.partial[self.spoken_upto:m.end()]
+            self.spoken_upto = m.end()
+            await self._speak_part(sentence)
+
+    async def _speak_part(self, sentence: str) -> None:
+        """A sentence that just completed: on the screen (the answer so far)
+        and read aloud, straight after the one before."""
+        if not self.streamed:
+            self.streamed = True
+            self.speech_parts = 0
+            self.last_part = ""
+            _answers[self.channel_id] = []  # a new answer
+            self.last_reply_at = time.monotonic()
+        shown = screen_text(self.partial[:self.spoken_upto], has_dj=self.round_screen or self.paper)
+        if shown and shown != self.last_part:
+            self.last_part = shown
+            await self.send_json({"type": "reply_part", "text": shown})
+        spoken = speakable(sentence) if self.speak else ""
+        if spoken:
+            _answers.setdefault(self.channel_id, []).append(("tts", spoken))
+            self.spoken_total += len(spoken)
+            await self._audio_q.put(("tts", spoken))
+
+    async def _reset_stream(self) -> None:
+        """Text that came before a tool call wasn't the answer: forgotten, and
+        the device starts the answer's sound afresh (what of it was already
+        sent plays out)."""
+        if self.streamed:
+            while not self._audio_q.empty():  # not yet sent: dropped
+                self._audio_q.get_nowait()
+            await self.send_json({"type": "speech_reset"})
+        self._forget_stream()
+        self.speech_parts = 0
+
+    def _forget_stream(self) -> None:
+        self.partial = ""
+        self.spoken_upto = self.spoken_total = 0
+        self.streamed = False
+        self.last_part = ""
+
+    async def stop_agent(self) -> None:
+        """The device's stop button while the agent works: the agent stops
+        after its current step (its "ready" ends the turn); what was queued
+        to be spoken is dropped."""
+        ch = self.ch
+        if not (self.pending and ch is not None and ch.agent_ws is not None):
+            return
+        await self.stop_audio()
+        self._forget_stream()
+        try:
+            await ch.agent_ws.send(json.dumps({"type": "cancel"}))
+        except Exception as exc:
+            await self.send_json({"type": "error", "text": f"Couldn't stop: {exc}"[:200]})
+            return
+        await self.send_json({"type": "status", "text": "Stopping…"})
 
     # ── a turn across reconnects ──
     def _end_turn(self) -> None:
@@ -755,6 +858,8 @@ class _DeviceConn:
                 await self.send_json({"type": "error", "text": f"Send failed: {exc}"})
                 return False
         self.pending = True
+        self._forget_stream()  # a new answer
+        self.speech_parts = 0
         self.cue_alone = cue_alone(text)
         _turns[self.channel_id] = {"at": time.monotonic(), "open": True, "answer": None,
                                    "via": 0, "sent_at": 0.0, "heard": False}
@@ -929,11 +1034,16 @@ class _DeviceConn:
     async def _audio_loop(self) -> None:
         while True:
             kind, arg = await self._audio_q.get()
+            if kind == "end":  # the answer's voice has all gone out
+                await self.send_json({"type": "speech_end"})
+                continue
             await self._stop_say()  # an answer's sound never shares the wire with an aside
             job = self._play_tts(arg) if kind == "tts" else self._play_file(arg)
             self._audio_task = asyncio.create_task(job)
             try:
                 await self._audio_task
+                if kind == "file":  # a sound the agent made: the answer's closing chime may follow it
+                    await self.send_json({"type": "speech_end"})
             except asyncio.CancelledError:
                 me = asyncio.current_task()
                 if me is not None and me.cancelling():
@@ -951,8 +1061,10 @@ class _DeviceConn:
             await self.send_json({"type": "replay_none"})
             return False
         await self.stop_audio()
+        self.speech_parts = 0
         for sound in sounds:
             await self._audio_q.put(sound)
+        await self._audio_q.put(("end", None))
         return True
 
     async def say(self, text: str) -> bool:
@@ -994,6 +1106,10 @@ class _DeviceConn:
         start: dict = {"type": "audio_start", "rate": TTS_RATE}
         if aside:
             start["aside"] = True
+        else:
+            if self.speech_parts:
+                start["cont"] = True  # the answer's next sound: no cue before it
+            self.speech_parts += 1
         await self.send_json(start)
         try:
             pending = b""
@@ -1169,6 +1285,8 @@ async def device_ws(ws: WebSocket) -> None:
                     conn._spawn(conn.send_to_agent(text, obj.get("ctx")))
             elif mtype == "stop":
                 await conn.stop_audio()
+            elif mtype == "stop_agent":
+                await conn.stop_agent()
             elif mtype == "replay":
                 await conn.replay()
             elif mtype == "say":

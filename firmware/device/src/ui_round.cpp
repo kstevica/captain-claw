@@ -1005,8 +1005,9 @@ void showWorking(const String& heard, const std::vector<String>& activity, const
   }
   if (status.length()) {
     font(vlw::Small);
-    text(fit(status, lineRoom(392, 418)), CX, 404, kDim);
+    text(fit(status, lineRoom(374, 398)), CX, 386, kDim);
   }
+  if (tapMode == TapButton::Stop) drawTapButton(424, 18);  // stop the agent (above the step ticks)
   push();
 }
 
@@ -1137,6 +1138,11 @@ void setReply(const String& t) {
   layoutReply();
 }
 
+void growReply(const String& t) {
+  replyText = t;
+  layoutReply();  // the page stays (within the pages there are now)
+}
+
 void setTextSize(uint8_t size) {
   sizeIdx = size < sizeof(kSizes) / sizeof(kSizes[0]) ? size : 0;
   if (replyText.length()) layoutReply();
@@ -1230,7 +1236,7 @@ void showFace(uint8_t kind, face::Pose pose, int level) {
   // The tap button takes the state line's place: to talk, or to stop.
   const bool listening = pose == face::Pose::Listening;
   if ((answerButton() && !listening && pose != face::Pose::Thinking) ||
-      (tapMode == TapButton::Stop && listening)) {
+      (tapMode == TapButton::Stop && (listening || pose == face::Pose::Thinking))) {
     drawTapButton(kTapLowY, kTapLowR);
   } else if (!subtitle) {
     font(vlw::Small);

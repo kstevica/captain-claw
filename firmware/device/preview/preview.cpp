@@ -157,6 +157,12 @@ int main(int argc, char** argv) {
                   {"Reading the calendar", "google_calendar · list events", "Looking for a free slot on Friday"},
                   "Checking Friday afternoon", 12400, 3);
   save("04_working");
+  ui::setTapButton(ui::TapButton::Stop);  // the stop button while the agent works
+  ui::showWorking("What's on my calendar tomorrow, and can you move the dentist to Friday afternoon?",
+                  {"Reading the calendar", "google_calendar · list events", "Looking for a free slot on Friday"},
+                  "Checking Friday afternoon", 12400, 3);
+  save("04b_working_stop");
+  ui::setTapButton(ui::TapButton::Off);
 
   bar("speaking", kCyan);
   gPlaying = true;

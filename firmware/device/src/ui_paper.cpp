@@ -1275,6 +1275,7 @@ bool onFirstPage() { return replyPage == 0; }
 void slide(bool) {}  // the round screen's
 void fade() {}
 bool setSpoken(int) { return false; }
+void growReply(const String& t) { setReply(t); }
 void setReplayable(bool) {}
 bool replayHit(int, int) { return false; }
 
