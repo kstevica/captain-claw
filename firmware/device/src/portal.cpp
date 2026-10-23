@@ -209,8 +209,9 @@ static void handleRoot() {
       h += "<option value=" + String(s) + (settings.screenOffS == s ? " selected>" : ">") + String(s) + " s</option>";
     }
     h += F("</select><label>Power off when idle</label><select name=pwroff>");
-    for (int s : {15, 30, 60}) {
-      h += "<option value=" + String(s) + (settings.powerOffS == s ? " selected>" : ">") + String(s) + " s</option>";
+    for (int s : {15, 30, 60, 180}) {
+      h += "<option value=" + String(s) + (settings.powerOffS == s ? " selected>" : ">") +
+           (s == 180 ? String("3 min") : String(s) + " s") + "</option>";
     }
     h += F("</select>");
   }
@@ -267,7 +268,7 @@ static void handleSave() {
   } else {
     int so = server.arg("scroff").toInt(), po = server.arg("pwroff").toInt();
     settings.screenOffS = (so == 5 || so == 10) ? so : 15;
-    settings.powerOffS = (po == 15 || po == 30) ? po : 60;
+    settings.powerOffS = (po == 15 || po == 30 || po == 180) ? po : 60;
   }
   settings.autoUpdate = server.arg("autoupd") == "1";
   settings.femaleVoice = server.arg("voice") == "female";

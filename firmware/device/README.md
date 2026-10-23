@@ -183,6 +183,16 @@ isn't the answer: `speech_reset` takes the watch back to the working screen.
 While the agent works, the button under the timer is a **stop**: the agent
 stops after its current step.
 
+A watch first (0.15.1): idle, the screen is a clock face — the date, the time
+large, the agent's badge small with its name, the hint while it's new, the
+battery as an arc at the bottom of the ring. **Raise to wake**: a wrist raise
+lights a dark or dimmed screen, lowering the wrist on an idle screen puts it
+out (the watch still sleeps on its *Power off* timer — set it to 3 min to stay
+wakeable longer; a raise can't wake it from sleep, only the buttons can). The
+background behind text screens is **frosted** — a light blur, then darkened —
+so a busy photo doesn't fight the words; the picture-only screen keeps it
+sharp.
+
 *Tap to talk* (Menu, or the settings page; off by default) puts a record
 button on the screen: under the name at home, under an answer or the
 character. Tap it and talk; the button turns into a stop square, and a second

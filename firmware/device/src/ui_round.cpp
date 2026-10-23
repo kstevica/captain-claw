@@ -347,6 +347,17 @@ static bool clockText(char* out, size_t n) {
   return true;
 }
 
+// "Fri 23 Oct"
+static String dateText() {
+  time_t now = time(nullptr);
+  struct tm tm;
+  localtime_r(&now, &tm);
+  char wday[8], mon[8];
+  strftime(wday, sizeof(wday), "%a", &tm);
+  strftime(mon, sizeof(mon), "%b", &tm);
+  return String(wday) + " " + String(tm.tm_mday) + " " + mon;
+}
+
 static void drawBatteryAt(int y, bool force) {
   bool chg = false;
   int pct = batteryPct(&chg);
@@ -369,11 +380,11 @@ static void drawBatteryAt(int y, bool force) {
 
 // Clock with the Wi-Fi dot left of it and the agent dot right of it; a low
 // battery shows its percentage underneath on every screen.
-static void drawChrome(bool lowBattery = true) {
+static void drawChrome(bool lowBattery = true, bool withClock = true) {
   char clock[8];
   font(vlw::Small);
   int half = 10;
-  if (clockText(clock, sizeof(clock))) {
+  if (withClock && clockText(clock, sizeof(clock))) {
     text(clock, CX, kChromeY, kText);
     half = tw(clock) / 2 + 14;
   }
@@ -917,21 +928,54 @@ int showPanel(const char* title, uint16_t titleColor, const std::vector<Row>& ro
   return pages;
 }
 
+// The agent's badge, small: the glow and all, scaled down, its initials in it.
+static void drawSmallBadge(Tone tone, const String& name, int cy) {
+  M5Canvas* s = badgeSprite(tone);
+  const float z = 0.42f;
+  if (s) s->pushRotateZoomWithAA(&canvas, CX, cy, 0, z, z, kBlack);
+  else canvas.fillSmoothCircle(CX, cy, kBadgeR * z, rgb(kTones[tone].a[0], kTones[tone].a[1], kTones[tone].a[2]));
+  font(vlw::Small);
+  text(initials(name), CX, cy + 1, kWhite);
+}
+
+// Idle: a watch first — the date, the time large, the agent's badge small
+// with its name, then the hint (or what's wrong), the battery as an arc at
+// the bottom of the ring and in words. Before the clock is known, the badge
+// takes the middle as it used to.
 void showHome(const Home& home) {
   beginFrame();
   Tone tone = home.ready ? TBlue : barState == "offline" ? TGrey : TAmber;
   String name = barAgent.length() ? barAgent : String("Captain Claw");
-  drawBadge(tone, name, Glyph::Initials);
-  drawChrome(false);
-  font(vlw::Title);
-  text(fit(name, lineRoom(kTitleY - 20, kTitleY + 20)), CX, kTitleY, kText);
-  if (tapMode == TapButton::Talk) {
-    drawTapButton(kTapY, kTapR);  // in place of "hold the yellow button…"
+  char clock[8];
+  const bool face = clockText(clock, sizeof(clock));
+  drawChrome(false, !face);
+  if (face) {
+    font(vlw::Small);
+    text(dateText(), CX, 104, kDim);
+    font(vlw::Digits);
+    text(clock, CX, 180, kText);
+    drawSmallBadge(tone, name, 282);
+    font(vlw::Title);
+    text(fit(name, lineRoom(324, 358)), CX, 342, kText);
   } else {
+    drawBadge(tone, name, Glyph::Initials);
+    font(vlw::Title);
+    text(fit(name, lineRoom(kTitleY - 20, kTitleY + 20)), CX, kTitleY, kText);
+  }
+  if (tapMode == TapButton::Talk) {
+    drawTapButton(face ? 398 : kTapY, face ? kTapLowR : kTapR);  // in place of "hold the yellow button…"
+  } else if (home.hint.length()) {
     font(vlw::Small);
     int first = 0;
-    auto lines = wrapCentred(home.hint, kNoteY - 16, kNoteY + 46, 28, 2, &first);
+    const int top = face ? 364 : kNoteY - 16;
+    auto lines = wrapCentred(home.hint, top, top + 62, 28, 2, &first);
     drawLines(lines, first, 28, home.ready ? kDim : home.color);
+  }
+  bool chg = false;
+  const int pct = batteryPct(&chg);
+  if (face && pct >= 0) {  // the level as an arc at the bottom of the ring
+    ringArc(150, 60, mix(kBlack, kText, 0.12f), 6, R - 2);
+    ringArc(150, max(2, 60 * pct / 100), batteryColor(pct), 6, R - 2);
   }
   drawBatteryAt(kBatteryY, true);
   push();
@@ -1300,6 +1344,61 @@ void showStoredImage() {
   push();
 }
 
+static constexpr int kFrost = 4;  // the blur's radius: a light frost, the picture still shows through
+
+static void* bigAlloc(size_t n) {
+#if defined(ESP_PLATFORM)
+  return ps_malloc(n);
+#else
+  return malloc(n);
+#endif
+}
+
+// A box blur along one line of *n* values *stride* apart, edges held.
+static void blurLine(const uint8_t* in, uint8_t* out, int n, int stride, int r) {
+  int sum = 0;
+  for (int j = -r; j <= r; ++j) sum += in[constrain(j, 0, n - 1) * stride];
+  for (int i = 0; i < n; ++i) {
+    out[i * stride] = sum / (2 * r + 1);
+    sum += in[min(i + r + 1, n - 1) * stride] - in[max(i - r, 0) * stride];
+  }
+}
+
+// *dst* = *src* (W×H RGB565, byte-swapped) blurred a little (two box passes
+// each way ≈ a soft Gaussian) and darkened by kBackdropDim/256. False when
+// the planes can't be had.
+static bool frost(const uint16_t* src, uint16_t* dst) {
+  const int N = W * H;
+  auto* plane = (uint8_t*)bigAlloc((size_t)N * 3);
+  auto* tmp = (uint8_t*)bigAlloc((size_t)N);
+  if (!plane || !tmp) {
+    free(plane);
+    free(tmp);
+    return false;
+  }
+  for (int i = 0; i < N; ++i) {
+    const uint16_t c = __builtin_bswap16(src[i]);
+    plane[i] = (c >> 11) << 3;
+    plane[N + i] = ((c >> 5) & 63) << 2;
+    plane[2 * N + i] = (c & 31) << 3;
+  }
+  for (int ch = 0; ch < 3; ++ch) {
+    uint8_t* p = plane + ch * N;
+    for (int pass = 0; pass < 2; ++pass) {
+      for (int y = 0; y < H; ++y) blurLine(p + y * W, tmp + y * W, W, 1, kFrost);
+      for (int x = 0; x < W; ++x) blurLine(tmp + x, p + x, H, W, kFrost);
+    }
+  }
+  for (int i = 0; i < N; ++i) {
+    const int r = (plane[i] * kBackdropDim) >> 11, g = (plane[N + i] * kBackdropDim) >> 10,
+              b = (plane[2 * N + i] * kBackdropDim) >> 11;
+    dst[i] = __builtin_bswap16((uint16_t)(r << 11 | g << 5 | b));
+  }
+  free(plane);
+  free(tmp);
+  return true;
+}
+
 void setBackground(const uint8_t* jpg, size_t len) {
   hasBackdrop = false;
   if (!jpg || !len) {
@@ -1315,14 +1414,17 @@ void setBackground(const uint8_t* jpg, size_t len) {
   }
   backdrop.fillScreen(kBlack);
   if (!backdrop.drawJpg(jpg, len, 0, 0, W, H, 0, 0, 1.0f, 1.0f, lgfx::datum_t::middle_center)) return;
-  // Darkened once, pixel by pixel (the sprites keep RGB565 byte-swapped).
+  // The copy the screens draw on: frosted (a light blur) and darkened, once.
   const auto* src = (const uint16_t*)backdrop.getBuffer();
   auto* dst = (uint16_t*)backdropDim.getBuffer();
-  for (int i = 0; i < W * H; ++i) {
-    const uint16_t c = __builtin_bswap16(src[i]);
-    const uint16_t r = ((c >> 11) * kBackdropDim) >> 8, g = (((c >> 5) & 63) * kBackdropDim) >> 8,
-                   b = ((c & 31) * kBackdropDim) >> 8;
-    dst[i] = __builtin_bswap16((uint16_t)(r << 11 | g << 5 | b));
+  if (!frost(src, dst)) {
+    // No room for the blur's planes: darkened only (the sprites keep RGB565 byte-swapped).
+    for (int i = 0; i < W * H; ++i) {
+      const uint16_t c = __builtin_bswap16(src[i]);
+      const uint16_t r = ((c >> 11) * kBackdropDim) >> 8, g = (((c >> 5) & 63) * kBackdropDim) >> 8,
+                     b = ((c & 31) * kBackdropDim) >> 8;
+      dst[i] = __builtin_bswap16((uint16_t)(r << 11 | g << 5 | b));
+    }
   }
   hasBackdrop = true;
 }

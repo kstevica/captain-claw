@@ -32,4 +32,10 @@ bool onUsbPower();
 // The local time is known (NTP, or an RTC set by it earlier).
 bool clockSet();
 
+// Raise to wake: true once when the screen has just turned from hanging or
+// upright to facing up, with movement (a wrist raise); lowered(): the
+// reverse. Devices without an IMU never report either.
+bool raised();
+bool lowered();
+
 }  // namespace telemetry

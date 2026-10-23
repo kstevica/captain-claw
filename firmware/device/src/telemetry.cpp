@@ -48,6 +48,35 @@ static const char* movement() {
   return shake < 0.015f ? "still" : shake < 0.08f ? "moving gently" : shake < 0.3f ? "moving" : "shaking";
 }
 
+// The screen facing up (looked at) or away (hanging, upright), with a band
+// between so a slight tilt doesn't flip it; a change with movement is a
+// raise or a lowering.
+static int8_t facing = 0;  // 1 up, -1 away, 0 not known yet
+static bool raisedFlag = false, loweredFlag = false;
+
+static void trackFacing() {
+  const float mag = sqrtf(gx * gx + gy * gy + gz * gz);
+  if (mag < 0.5f || samples < 5) return;
+  const float flat = fabsf(gz) / mag;
+  const int8_t now = flat > 0.75f ? 1 : flat < 0.55f ? -1 : facing;
+  if (now == facing) return;
+  if (facing == -1 && now == 1 && shake > 0.02f) raisedFlag = true;
+  if (facing == 1 && now == -1) loweredFlag = true;
+  facing = now;
+}
+
+bool raised() {
+  const bool r = raisedFlag;
+  raisedFlag = false;
+  return r;
+}
+
+bool lowered() {
+  const bool l = loweredFlag;
+  loweredFlag = false;
+  return l;
+}
+
 // ── room climate (PaperColor: SHT40) ─────────────────────────────────
 
 static constexpr uint8_t kSht40 = 0x44;
@@ -136,6 +165,7 @@ void begin() {
 
 void poll() {
   if (haveImu && millis() - lastSampleMs >= 100) {
+    trackFacing();
     lastSampleMs = millis();
     sampleImu();
   }

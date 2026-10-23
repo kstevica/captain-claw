@@ -27,7 +27,7 @@ void Settings::load() {
   screenOffS = p.getUChar("scroff", 15);
   powerOffS = p.getUChar("pwroff", 60);
   if (screenOffS != 5 && screenOffS != 10 && screenOffS != 15) screenOffS = 15;
-  if (powerOffS != 15 && powerOffS != 30 && powerOffS != 60) powerOffS = 60;
+  if (powerOffS != 15 && powerOffS != 30 && powerOffS != 60 && powerOffS != 180) powerOffS = 60;
   femaleVoice = p.getBool("female", false);
   iconMode = p.getBool("icons", false);
   character = p.getUChar("char", 0);

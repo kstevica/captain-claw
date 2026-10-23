@@ -47,7 +47,7 @@
 #include <M5PM1.h>
 #endif
 
-#define FW_VERSION "0.15.0"
+#define FW_VERSION "0.15.1"
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
 // round and paper screens draw each glyph through a stack buffer — a timer
@@ -540,7 +540,9 @@ static String asleepLabel() {
 }
 
 static String powerOffLabel() {
-  return board::kEpaper ? String(settings.powerOffMin) + " min" : String(settings.powerOffS) + " s";
+  if (board::kEpaper) return String(settings.powerOffMin) + " min";
+  return settings.powerOffS >= 60 && settings.powerOffS % 60 == 0 ? String(settings.powerOffS / 60) + " min"
+                                                                  : String(settings.powerOffS) + " s";
 }
 
 static constexpr uint8_t kVolumeSteps[] = {64, 128, 191, 255};  // 25 / 50 / 75 / 100 %
@@ -998,7 +1000,7 @@ static void chooseMenuRow() {
     case MScreenOff: settings.screenOffS = settings.screenOffS == 5 ? 10 : settings.screenOffS == 10 ? 15 : 5; break;
     case MPowerOff:
       if (board::kEpaper) settings.powerOffMin = settings.powerOffMin == 1 ? 3 : settings.powerOffMin == 3 ? 10 : 1;
-      else settings.powerOffS = settings.powerOffS == 15 ? 30 : settings.powerOffS == 30 ? 60 : 15;
+      else settings.powerOffS = settings.powerOffS == 15 ? 30 : settings.powerOffS == 30 ? 60 : settings.powerOffS == 60 ? 180 : 15;
       break;
     case MUpdate:
       updateSoftware();
@@ -2787,6 +2789,15 @@ void loop() {
   }
   if (wsUp != wasUp) linkChangeMs = millis();
   holdTurn();
+  // Raise to wake: a wrist raise lights a dark or dimmed screen; lowering
+  // the wrist on an idle screen puts it out (the watch sleeps on its timer
+  // as before — set Power off to 3 min to keep it wakeable longer).
+  if (telemetry::raised() && (screenOff || dimmed)) touch();
+  if (telemetry::lowered() && !screenOff && !board::kEpaper &&
+      (mode == Mode::Idle || mode == Mode::Home || mode == Mode::Backdrop) && !audio::playing() && !flashing) {
+    ui::brightness(0);
+    screenOff = dimmed = true;
+  }
   keepWifi();
   PERF_T(pfTelMax, telemetry::poll());
   pumpPreroll();
