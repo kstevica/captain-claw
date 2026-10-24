@@ -169,9 +169,7 @@ int main(int argc, char** argv) {
   ui::showHome(home);  // asked for (B held): the dashboard now
   save("09_dashboard_links_down");
 
-  ui::setBar("Captain Claw", "asleep", kGreen);
-  g_previewMillis += 31 * 60 * 1000;  // half an hour on: due again, going to sleep
-  ui::showSleeping("", 0);
-  save("10_dashboard_asleep");
+  // (Asleep: the dashboard goes by the clock's five-minute marks — the Mac's
+  // real clock here, so a jump of the stand-in millis() doesn't make it due.)
   return 0;
 }

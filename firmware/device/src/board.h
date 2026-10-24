@@ -60,14 +60,29 @@ constexpr const char* kModel = "PaperColor";
 constexpr const char* kHw = "papercolor";
 constexpr const char* kNoun = "PaperColor";
 constexpr const char* kIdPrefix = "paper";
-constexpr const char* kTalkButton = "top button";
-constexpr const char* kSideButton = "A button";
-constexpr const char* kTalkHint = "Top button to talk";  // fits the home screen's chip
 constexpr bool kTalkToggles = true;  // press to start, press again to send: no holding on
 constexpr bool kTalkFromSleep = true;  // a press that wakes it starts a recording
 // M5Unified: BtnA = KEY3 (G10, top left), BtnB = KEY2 (G9, under it),
 // BtnC = KEY1 (G1, on top). All three are RTC GPIOs, so any of them wakes
-// the device from deep sleep. The top one (C) talks; A goes next, B back.
+// the device from deep sleep.
+#if defined(PAPER_B)
+// The B paper: A talks (and goes back from the options), C opens the
+// options (hold: Wi-Fi & settings), B shows the answer.
+constexpr const char* kTalkButton = "A button";
+constexpr const char* kSideButton = "top button";
+constexpr const char* kTalkHint = "Press A to talk";
+constexpr char kTalkM5 = 'A', kSideM5 = 'C', kBackM5 = 'B';
+constexpr const char* kTalkKey = "A";
+constexpr const char* kSideKey = "C";
+constexpr const char* kBackKey = "B";
+constexpr gpio_num_t kTalkPin = GPIO_NUM_10;  // A: talk / back from the options
+constexpr gpio_num_t kSidePin = GPIO_NUM_1;   // C (top): options
+constexpr gpio_num_t kBackPin = GPIO_NUM_9;   // B: the answer
+#else
+// The top one (C) talks; A goes next, B back.
+constexpr const char* kTalkButton = "top button";
+constexpr const char* kSideButton = "A button";
+constexpr const char* kTalkHint = "Top button to talk";  // fits the home screen's chip
 constexpr char kTalkM5 = 'C', kSideM5 = 'A', kBackM5 = 'B';
 constexpr const char* kTalkKey = "C";
 constexpr const char* kSideKey = "A";
@@ -75,6 +90,7 @@ constexpr const char* kBackKey = "B";
 constexpr gpio_num_t kTalkPin = GPIO_NUM_1;   // C (top): talk / choose
 constexpr gpio_num_t kSidePin = GPIO_NUM_10;  // A: next / status / Options
 constexpr gpio_num_t kBackPin = GPIO_NUM_9;   // B: previous / back / home
+#endif
 constexpr int kScreenW = 400, kScreenH = 600;  // portrait; the menu can turn it
 constexpr bool kRound = false;
 constexpr bool kEpaper = true;

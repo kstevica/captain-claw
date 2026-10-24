@@ -1,18 +1,18 @@
 // PaperColor, the "B" way: a device with two lights and a voice, and a
-// screen only because it's there. Nothing on the screen changes while the
-// paper is in use — the lights carry listening, working, speaking and
-// trouble (leds.cpp), the deck's voice carries the answers. The screen is a
-// dashboard: the room, the battery, the voice notes kept offline, redrawn
-// every half hour (awake, or on the timer wake from sleep) and when asked
-// for. B shows the last answer at the largest size that fits it on one
-// screen, paging only when it must; A shows the options code. A Spectra 6
-// redraw takes 15–30 s and can't be interrupted, so every one is deliberate
-// and the main loop never waits for it (a background task runs it).
+// screen only because it's there. The lights carry listening, working,
+// speaking and trouble (leds.cpp), the deck's voice carries the answers. The
+// screen is a dashboard — the clock, the room, the battery, the voice notes
+// kept offline, the links — redrawn on every five-minute mark (awake, or on
+// the timer wake from sleep) and when asked for. An answer goes on the paper
+// as its voice starts, at the largest size that fits it on one screen
+// (paging only when it must), and again once it's whole; B pages it. A
+// talks, C shows the options code. A redraw can't be interrupted, so the main
+// loop never waits for one (a background task runs it); each starts from a
+// reset panel controller, which also makes it several times faster.
 //
-// What the paper shows is remembered across deep sleep, as is when the
-// dashboard was last drawn, so a wake doesn't redraw and the half hour is
-// counted by the clock. The last answer lives in flash (LittleFS), so B
-// shows it after a sleep too.
+// What the paper shows is remembered across deep sleep and restarts, as is
+// when the dashboard was last drawn, so a wake doesn't redraw. The last
+// answer lives in flash (LittleFS), so B shows it after a sleep too.
 #include <M5Unified.h>
 #include <math.h>
 #include <time.h>
@@ -395,26 +395,13 @@ static void waitPanel(uint32_t ms) {
   while (M5.Display.displayBusy() && millis() - t0 < ms) delay(20);
 }
 
-// ── the clock's window: a partial refresh ──────────────────────────────
-//
-// The ED2208's undocumented partial-window command (0x83, the sequence from
-// esphome/esphome#20944; tried on this panel before, and it works): only the
-// rectangle given is driven, in the six inks. It takes about as long as a
-// full refresh, but only that window changes. The rest of the page may fade
-// a little over many of them, so after kClockPartialsMax in a row the next
-// tick redraws the whole dashboard instead. The bus is let go while the
-// panel works (the microSD card shares it).
-
-static int partialsInARow = 0;
-static volatile bool partialNext = false;  // the refresh asked for is the clock's window only
-static Rect partialRect;
+// ── the panel controller ───────────────────────────────────────────────
 
 #ifndef PREVIEW
-// The panel's framebuffer, bus and pins (M5GFX keeps them protected).
+// The panel's bus and pins (M5GFX keeps them protected).
 struct PaperPanel : lgfx::Panel_ED2208 {
   int width() const { return _cfg.panel_width; }
   int height() const { return _cfg.panel_height; }
-  const uint8_t* row(int y) const { return _lines_buffer[y]; }
 
   void cmd(uint8_t c) { _bus->writeCommand(c, 8); }
   void data(uint8_t d) { _bus->writeData(d, 8); }
@@ -424,82 +411,12 @@ struct PaperPanel : lgfx::Panel_ED2208 {
     uint32_t t0 = millis();
     while (!idle() && millis() - t0 < ms) delay(10);
   }
-  void begin() {
-    _bus->beginTransaction();
-    cs_control(false);
-  }
-  void end() {
-    _bus->wait();
-    cs_control(true);
-    _bus->endTransaction();
-  }
 
-  void window(int x0, int y0, int x1, int y1) {
-    cmd(0x83);  // partial window
-    for (int v : {x0, x1, y0, y1}) {
-      data(v >> 8);
-      data(v & 0xFF);
-    }
-    data(0x01);
-  }
-
-  // A framebuffer pixel as the panel's 4-bit ink code — the nearest of the
-  // six, as M5GFX's full refresh picks them (the frame is in the inks already).
-  static uint8_t code(const lgfx::bgr888_t& p) {
-    static constexpr uint8_t kCodes[6] = {0x0, 0x1, 0x2, 0x3, 0x5, 0x6};  // black white yellow red blue green
-    uint32_t best = UINT32_MAX;
-    uint8_t out = 0x1;
-    for (int i = 0; i < 6; ++i) {
-      const int dr = p.r - kInkDefs[i].r, dg = p.g - kInkDefs[i].g, db = p.b - kInkDefs[i].b;
-      const uint32_t d = dr * dr + dg * dg + db * db;
-      if (d < best) best = d, out = kCodes[i];
-    }
-    return out;
-  }
-
-  // Drives [x0..x1] × [y0..y1] (native pixels, inclusive; x widened to
-  // fours, the controller's step) from the framebuffer.
-  void partial(int x0, int y0, int x1, int y1) {
-    x0 &= ~3;
-    x1 = min(width() - 1, x1 | 3);
-    const int w = x1 - x0 + 1;
-    static uint8_t line[400];
-    begin();
-    window(x0, y0, x1, y1);
-    cmd(0x10);  // its pixels, two a byte
-    for (int y = y0; y <= y1; ++y) {
-      const lgfx::bgr888_t* px = reinterpret_cast<const lgfx::bgr888_t*>(row(y)) + x0;
-      for (int x = 0; x < w; x += 2) line[x >> 1] = code(px[x]) << 4 | code(px[x + 1]);
-      _bus->writeBytes(line, w / 2, true, false);
-    }
-    _bus->wait();
-    cmd(0x04);  // power on
-    waitBusy(5000);
-    delay(200);
-    cmd(0x06);  // booster, as M5GFX's full refresh
-    for (uint8_t d : {0x6F, 0x1F, 0x17, 0x27}) data(d);
-    delay(200);
-    window(x0, y0, x1, y1);  // again before the refresh, as esphome#20944 does
-    cmd(0x50);  // border floats for a window
-    data(0xFF);
-    cmd(0x12);  // refresh
-    data(0x00);
-    end();  // the bus is free while the panel works
-    for (uint32_t t0 = millis(); !idle() && millis() - t0 < 45000;) delay(20);
-    begin();
-    cmd(0x02);  // power off
-    data(0x00);
-    waitBusy(5000);
-    delay(200);
-    cmd(0x50);  // back to the full refresh's border setting
-    data(0x3F);
-    end();
-  }
-
-  // A reset pulse, then the set-up: the controller keeps a partial window
-  // through the set-up alone (and through the ESP32's deep sleep), and a
-  // "full" refresh then redrew only that window. The PaperColor's EPD reset
-  // is G12 (M5GFX pulses it at start; the panel's own reset pin is not it).
+  // A reset pulse, then the set-up. With the paper keeping its picture
+  // through restarts, M5GFX starts it without one (init_without_reset), so
+  // the controller ran on whatever state it had since power came; from a
+  // reset every refresh is whole, and several times faster. The PaperColor's
+  // EPD reset is G12 (M5GFX pulses it at start; the panel's reset pin is not it).
   void reset() {
     lgfx::gpio_hi(kResetPin);
     lgfx::pinMode(kResetPin, lgfx::pin_mode_t::output);
@@ -520,7 +437,8 @@ struct PaperPanel : lgfx::Panel_ED2208 {
         0x05, 4, 0x40, 0x1F, 0x1F, 0x2C, 0x08, 4, 0x6F, 0x1F, 0x1F, 0x22, 0x06, 4, 0x6F, 0x1F, 0x17, 0x17,
         0x03, 4, 0x03, 0x54, 0x00, 0x44, 0x60, 2, 0x02, 0x00, 0x30, 1, 0x08, 0x50, 1, 0x3F,
         0xE3, 1, 0x2F, 0x84, 1, 0x01, 0xFF};
-    begin();
+    _bus->beginTransaction();
+    cs_control(false);
     for (size_t i = 0; kInit[i] != 0xFF; i += 2 + kInit[i + 1]) {
       waitBusy(5000);
       cmd(kInit[i]);
@@ -532,7 +450,9 @@ struct PaperPanel : lgfx::Panel_ED2208 {
       data(v >> 8);
       data(v & 0xFF);
     }
-    end();
+    _bus->wait();
+    cs_control(true);
+    _bus->endTransaction();
   }
 };
 
@@ -541,12 +461,6 @@ static PaperPanel* paperPanel() {
   return static_cast<PaperPanel*>(static_cast<lgfx::Panel_ED2208*>(M5.Display.getPanel()));
 }
 
-// The canvas is the panel's own pixels (portrait, unrotated): a window on
-// one is the same window on the other.
-static bool canPartial() {
-  PaperPanel* p = paperPanel();
-  return p && p->width() == W && p->height() == H && M5.Display.getRotation() == 0;
-}
 #endif
 
 static void pushToPanel() {
@@ -555,18 +469,7 @@ static void pushToPanel() {
   canvas.pushSprite(&M5.Display, 0, 0);
   M5.Display.endWrite();
 #ifndef PREVIEW
-  if (partialNext) {
-    if (PaperPanel* p = paperPanel()) {
-      const Rect& r = partialRect;
-      p->partial(r.x, r.y, r.x + r.w - 1, r.y + r.h - 1);
-      ++partialsInARow;
-      return;
-    }
-  }
-  // Every full refresh starts from a reset controller: no partial window
-  // left from before (this boot's clock, or one before a deep sleep).
-  if (PaperPanel* p = paperPanel()) p->reset();
-  partialsInARow = 0;
+  if (PaperPanel* p = paperPanel()) p->reset();  // every refresh from a reset controller
 #endif
   M5.Display.display();
   waitPanel(45000);
@@ -580,7 +483,6 @@ static void paperLoop(void*) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
     toInks();
     pushToPanel();
-    partialNext = false;
     refreshing = false;
   }
 }
@@ -591,7 +493,6 @@ static void startRefresh() {
   else {  // no task (out of memory): do it here
     toInks();
     pushToPanel();
-    partialNext = false;
     refreshing = false;
   }
 }
@@ -599,7 +500,6 @@ static void startRefresh() {
 static void startRefresh() {
   toInks();
   pushToPanel();
-  partialNext = false;
 }
 #endif
 
@@ -617,11 +517,10 @@ enum class Kind : uint8_t { None, Dash, Reply, Link, Setup };
 RTC_DATA_ATTR static bool rtcShown = false;
 RTC_DATA_ATTR static uint8_t rtcKind = 0;
 RTC_DATA_ATTR static uint32_t rtcDashAt = 0;
-RTC_DATA_ATTR static int16_t rtcTopEnd = 0;  // the dashboard's top (header, date, room, battery) ends here, as last drawn
 static Kind shownKind = Kind::None;
 static bool everShown = false;
 static uint32_t lastDashMs = 0;  // the dashboard, this boot (0: not yet)
-static constexpr uint32_t kDashEverySec = 30 * 60;
+static constexpr uint32_t kDashEverySec = 5 * 60;  // on the clock's five-minute marks
 
 #ifndef PREVIEW
 static void keepShown() {
@@ -629,7 +528,6 @@ static void keepShown() {
   if (!p.begin("paperb", false)) return;
   p.putUChar("kind", rtcKind);
   p.putULong("dash", rtcDashAt);
-  p.putShort("top", rtcTopEnd);
   p.end();
 }
 
@@ -638,7 +536,6 @@ static void loadShown() {
   if (!p.begin("paperb", true)) return;  // (read-only: missing on the first boot)
   rtcKind = p.getUChar("kind", 0);
   rtcDashAt = p.getULong("dash", 0);
-  rtcTopEnd = p.getShort("top", 0);
   p.end();
   rtcShown = rtcKind != 0;
 }
@@ -656,7 +553,9 @@ static Want want;
 static bool forceNext = false;  // drawNow(): the dashboard, now, whatever the clock says
 static uint32_t forceAtMs = 0;  // (only right after: a stray drawNow() never redraws later)
 static String linkShown;        // the options code on the paper (title + address)
-static bool viewing = false;    // B showed the answer; the next B pages, the last B goes back to the dashboard
+static bool viewing = false;    // the answer is on the paper; B pages it, the last B goes back to the dashboard
+static bool answerDue = false;  // a new answer waits for its voice to go on the paper (not the dashboard first)
+static bool sounding = false;   // its voice is playing: the page stays as it went on until the voice ends
 static uint32_t replyGen = 0, shownGen = 0;  // the answer laid out / the one on the paper
 static int shownPage = -1;
 
@@ -665,7 +564,7 @@ void idleSince(uint32_t ms) { lastUseMs = ms; }
 void drawNow() {
   forceNext = true;
   forceAtMs = millis();
-  viewing = false;
+  viewing = answerDue = false;
 }
 bool waiting() { return false; }
 
@@ -693,19 +592,15 @@ static void commit() {
   startRefresh();
 }
 
-static void clockTick();
+static void dashTick();
 
 void tick() {
   if (refreshing) return;
   if (want.active) commit();
-#ifndef PREVIEW
-  else clockTick();
-#endif
+  else dashTick();
 }
 
-// A redraw the lights should show (the clock's window is quiet, and lets the
-// bus go while the panel works).
-bool busy() { return refreshing && !partialNext; }
+bool busy() { return refreshing; }
 
 void flush() {
 #ifndef PREVIEW
@@ -717,25 +612,21 @@ void flush() {
 #endif
 }
 
-// Seconds until the dashboard is next due (0: now). This boot's clock once
-// it has been drawn here, else the clock (it runs through deep sleep; after
-// a reset the RTC chip sets it) against when it was last drawn; a clock that
-// jumped back means now, no clock at all counts from this boot. An answer
-// left on the paper gives way at the next half hour, not before.
+// Seconds until the dashboard is next due (0: now): on the clock's
+// five-minute marks (:00, :05 … :55) — due once the mark it was last drawn
+// in has passed (the clock runs through deep sleep; after a reset the RTC
+// chip sets it). No clock yet (power came back): five minutes from this
+// boot's drawing, or from the boot. An answer on the paper stays until B
+// pages past it, or the paper goes to sleep.
 uint32_t dashboardDueInSec() {
-  if (lastDashMs) {
-    const uint32_t age = (millis() - lastDashMs) / 1000;
-    return age >= kDashEverySec ? 0 : kDashEverySec - age;
-  }
   if (!everShown) return 0;
   const uint32_t now = (uint32_t)time(nullptr);
-  if (now < 1700000000) {  // no clock yet (power came back): from this boot
-    const uint32_t up = millis() / 1000;
-    return up >= kDashEverySec ? 0 : kDashEverySec - up;
+  if (now >= 1700000000) {
+    if (rtcDashAt < 1700000000 || now / kDashEverySec != rtcDashAt / kDashEverySec) return 0;
+    return kDashEverySec - now % kDashEverySec;
   }
-  if (now < rtcDashAt) return 0;
-  const uint32_t age = now - rtcDashAt;
-  return age + 15 >= kDashEverySec ? 0 : kDashEverySec - age;  // a timer wake lands a little early
+  const uint32_t since = (millis() - lastDashMs) / 1000;
+  return since >= kDashEverySec ? 0 : kDashEverySec - since;
 }
 
 // Due by the clock — or at once when the paper shows a code that's no longer
@@ -789,28 +680,29 @@ static bool clockText(char* out, size_t n, const char* fmt, time_t t) {
   return true;
 }
 
-// The top bar: a title (the agent's name when none), health dots (not
-// asleep: nothing is connected then), the battery; a rule under it.
+// The top bar: a title (the clock when none, else the agent's name), the
+// Wi-Fi and agent dots in the middle (not asleep: nothing is connected then),
+// the battery; a rule under it.
 static void drawHeader(const String& title = "", bool dots = true) {
   font(vlw::Small);
   int y = kHeadH / 2;
-  String name = title.length() ? title : (barAgent.length() ? barAgent : String("Captain Claw"));
+  char clock[16];
+  String name = title.length() ? title
+                : clockText(clock, sizeof(clock), "%H:%M", time(nullptr)) ? String(clock)
+                : barAgent.length() ? barAgent : String("Captain Claw");
   bool chg = false;
   int pct = batteryPct(&chg);
-  int right = W - PAD;
-  drawBattery(right, y, pct, chg);
-  right -= 92;
+  drawBattery(W - PAD, y, pct, chg);
+  int right = W - PAD - 92;  // the battery's left edge
   if (dots) {
-    canvas.fillCircle(right, y, 6, healthInk(hAgent));
-    canvas.fillCircle(right - 18, y, 6, healthInk(hWifi));
-    right -= 34;
+    canvas.fillCircle(W / 2 - 9, y, 6, healthInk(hWifi));
+    canvas.fillCircle(W / 2 + 9, y, 6, healthInk(hAgent));
+    right = W / 2 - 24;
   }
   font(vlw::Title);
   text(fit(name, right - PAD), PAD, y + 2, kInk, middle_left);
   canvas.fillRect(0, kHeadH - 3, W, 3, kInk);
 }
-
-static time_t clockShownAt = 0;  // when the time the paper's clock says was drawn
 
 // A keycap: the button's letter in a small black rounded square.
 static int drawKey(const char* key, int x, int y) {
@@ -989,12 +881,9 @@ static bool haveHome = false;
 
 // The dashboard's top: the header (the clock as of this drawing, the links'
 // dots, the battery), the date, the room, the battery's block. Returns where
-// it ends — the window the clock's tick redraws.
+// it ends.
 static int drawDashTop(bool asleep) {
-  char clock[16] = "";
-  clockText(clock, sizeof(clock), "%H:%M", time(nullptr));
-  drawHeader(clock, !asleep);
-  clockShownAt = time(nullptr);
+  drawHeader("", !asleep);
   const int x = PAD, w = W - 2 * PAD;
   int y = kHeadH + 14;
   y += drawDate(x, y, w);
@@ -1008,12 +897,11 @@ static int drawDashTop(bool asleep) {
 }
 
 // The dashboard: the clock as of this drawing, the date, the room, the
-// battery, the notes kept offline, the links; drawn every half hour and on
+// battery, the notes kept offline, the links; drawn every five minutes and on
 // request. Asleep: the same, the links replaced by how to wake it.
 static void drawDashboard(bool asleep) {
   const int x = PAD, w = W - 2 * PAD;
   int y = drawDashTop(asleep);
-  rtcTopEnd = y;
   const int n = notes::count();
   const int roomMin = (int)(notes::room(kNoteRate) / kNoteRate / 60);
   String kept = n == 0 ? String("none waiting") : String(n) + (n == 1 ? " note waiting" : " notes waiting");
@@ -1033,7 +921,7 @@ static void drawDashboard(bool asleep) {
   if (asleep) {
     font(vlw::BodyS);
     text(fit(String("Press ") + board::kTalkKey + " to wake it and talk.", w), x, y, kInk);
-    text("Redrawn every half hour.", x, y + 32, kInk);
+    text("Redrawn every five minutes.", x, y + 32, kInk);
   } else {
     font(vlw::Small);
     int labelW = 0;
@@ -1055,42 +943,13 @@ static void drawDashboard(bool asleep) {
 
 static void askDashboard(bool asleep) { draw(Kind::Dash, [=] { drawDashboard(asleep); }); }
 
-#ifndef PREVIEW
-// On the five-minute marks (:00, :05 … :55) — or as soon after one as the
-// paper has been left alone — while the dashboard is on the paper: its top —
-// the clock, the date, the room's temperature and humidity, the battery —
-// redrawn as one partial window (one window takes as long as the clock alone
-// would; the canvas may hold nothing else after a wake — only the window is
-// driven). Where the top ends is kept from the last full drawing; not known,
-// the whole page is drawn instead. The whole page every half hour comes on a
-// mark too: when it's due before the next one, it's drawn now.
-static constexpr uint32_t kClockIdleMs = 20000;
-static constexpr uint32_t kClockEverySec = 5 * 60;
-static constexpr int kClockPartialsMax = 15;
-
-static void clockTick() {
-  if (shownKind != Kind::Dash || viewing || millis() - lastUseMs < kClockIdleMs || !canPartial()) return;
-  const time_t t = time(nullptr);
-  char now[16];
-  if (!clockText(now, sizeof(now), "%H:%M", t) || t / kClockEverySec == clockShownAt / kClockEverySec) return;
-  if (partialsInARow >= kClockPartialsMax || dashboardDueInSec() < kClockEverySec || rtcTopEnd <= 0) {
-    askDashboard(false);  // the whole page instead, readings and all
-    return;
-  }
-  clockShownAt = t;
-  pictures.clear();
-  canvas.fillRect(0, 0, W, rtcTopEnd, kPaper);
-  if (drawDashTop(false) != rtcTopEnd) {  // laid out otherwise now (a text size, a line): the whole page
-    askDashboard(false);
-    return;
-  }
-  partialRect = {0, 0, W, rtcTopEnd};
-  partialNext = true;
-  startRefresh();
+// On each five-minute mark, while the dashboard is on the paper: the whole
+// page again (a reset controller makes a full refresh quick).
+static void dashTick() {
+  if (shownKind == Kind::Dash && !viewing && !answerDue && dashDue()) askDashboard(false);
 }
-#endif
 
-// The dashboard when its half hour is up, or when it was asked for (drawNow).
+// The dashboard on its five-minute mark, or when it was asked for (drawNow).
 static void dashboardIfDue() {
   const bool now = forceNext && millis() - forceAtMs < 3000;
   forceNext = false;
@@ -1104,18 +963,18 @@ void showHome(const Home& home) {
 }
 
 // Going to sleep, and the timer wake while asleep: the dashboard when its
-// half hour is up (the sleep timer is set to land on it), else nothing.
+// mark has come (the sleep timer is set to land on the next), else nothing.
 void showSleeping(const String&, uint8_t) {
   forceNext = false;
   if (dashDue()) askDashboard(true);
   flush();
 }
 
-// ── the answer: shown on B, at the largest size that fits ──────────────
+// ── the answer: at the largest size that fits ──────────────────────────
 
 static std::vector<std::vector<String>> replyPages;
 static int replyPage = 0;
-static bool needLayout = false;  // laid out when B asks, not as the words stream in
+static bool needLayout = false;  // laid out when it's drawn, not as each word streams in
 static vlw::Id replyFont = vlw::BodyS;
 static int replyLine = 35;
 static int pictureH = 0;  // the picture on page 1 (0: none)
@@ -1137,6 +996,7 @@ static int questionHeight() { return question.length() ? 27 + 10 : 0; }
 static void layoutReply() {
   needLayout = false;
   ++replyGen;
+  const int keep = viewing ? replyPage : 0;  // the page being read, as more arrives
   replyPages.clear();
   replyPage = 0;
   pictureH = 0;
@@ -1160,6 +1020,7 @@ static void layoutReply() {
       for (size_t i = replyPages[0].size(); i < lines.size(); i += per) {
         replyPages.emplace_back(lines.begin() + i, lines.begin() + min(lines.size(), i + per));
       }
+      replyPage = min(keep, (int)replyPages.size() - 1);
       return;
     }
   }
@@ -1190,27 +1051,41 @@ static void drawReplyPage() {
   drawFooter({{board::kTalkKey, "talk"}, {board::kBackKey, page + 1 < pages ? "next" : "done"}}, when);
 }
 
-void setQuestion(const String& text) { pendingQuestion = text; }
+static bool newTurn = true;  // a turn began (setQuestion): what comes next is a new answer
 
-// A new answer is heard, not shown: it changes nothing on the paper until
-// B asks for it. (The same text again — a reconnect — changes nothing.)
+void setQuestion(const String& text) {
+  pendingQuestion = text;
+  newTurn = true;
+}
+
+// A new answer: it goes on the paper as its voice starts (answerStarted).
+// (The same text again — a reconnect — changes nothing.)
 void setReply(const String& t) {
   if (t == replyText && replyWhen) return;
-  const bool fresh = t != replyText;
   replyText = t;
   needLayout = true;
-  if (!fresh) return;
+  newTurn = false;
   question = pendingQuestion;
   pendingQuestion = "";
   replyWhen = time(nullptr);
   if (imgBuf) free(imgBuf);  // the last answer's picture goes with it
   imgBuf = nullptr;
   imgLen = 0;
-  viewing = false;
+  viewing = sounding = false;
+  answerDue = t.length() && !restoring;
   if (t.length() && !restoring) saveLast();
 }
 
-void growReply(const String& t) { setReply(t); }
+// More of the same answer as it's written (kept once it's whole: answerEnded).
+void growReply(const String& t) {
+  if (newTurn || replyText.isEmpty()) {
+    setReply(t);
+    return;
+  }
+  if (t == replyText) return;
+  replyText = t;
+  needLayout = true;
+}
 void setTextSize(uint8_t) {}  // the answer picks its own size
 bool hasReply() { return !replyText.isEmpty(); }
 
@@ -1226,15 +1101,42 @@ static void askReplyPage() {
   });
 }
 
-// Only while B is showing it, and only when the page on the paper isn't
-// this one already; otherwise the dashboard, when its half hour is up.
+// Only while it's on the paper, and only when the page there isn't this one
+// already — not while its voice plays (drawn again when that ends); else the
+// dashboard on its mark (not before a new answer about to be spoken).
 void showReply() {
   ensureLayout();
   if (!viewing || replyPages.empty()) {
-    dashboardIfDue();
+    if (!answerDue) dashboardIfDue();
     return;
   }
+  if (sounding) return;
   if (shownKind == Kind::Reply && shownGen == replyGen && shownPage == replyPage) return;
+  askReplyPage();
+}
+
+// The answer's voice has started (or it came with speaking off): it's on
+// the paper now, its first page, without waiting for B.
+void answerStarted() {
+  ensureLayout();
+  answerDue = false;
+  if (replyPages.empty()) return;
+  viewing = sounding = true;
+  replyPage = 0;
+  forceNext = false;
+  askReplyPage();
+}
+
+// The answer is whole and its voice is over: kept in flash, and its page
+// redrawn when more of it came since it went on the paper.
+void answerEnded() {
+  sounding = false;
+  if (replyText.isEmpty()) return;
+  if (!restoring) saveLast();
+  ensureLayout();
+  if (!viewing || replyPages.empty()) return;
+  if (want.active && want.kind == Kind::Reply) return;  // a page is on its way: drawn as it is now
+  if (shownKind == Kind::Reply && shownGen == replyGen) return;
   askReplyPage();
 }
 
@@ -1243,6 +1145,7 @@ void showReply() {
 bool nextPage() {
   ensureLayout();
   if (replyPages.empty()) return false;
+  answerDue = false;
   if (!viewing) {
     viewing = true;
     replyPage = 0;
@@ -1335,7 +1238,7 @@ void showSetup(const char* reason, const char* apName, const char* ip) {
                      {"2. Then open:", vlw::Small, kInk},
                      {String("http://") + addr, vlw::BodyS, kBlue}});
     font(vlw::Small);
-    text("Saving restarts it. Hold A to leave.", W / 2, H - 38, kInk, top_center);
+    text(String("Saving restarts it. Press ") + board::kTalkKey + " to leave.", W / 2, H - 38, kInk, top_center);
   });
   flush();  // the portal loop doesn't tick
 }
@@ -1354,7 +1257,7 @@ void showLink(const char* title, const String& url, const String& note) {
     font(vlw::Title);
     text(fit(t, W - 2 * PAD), W / 2, kHeadH + 18, kInk, top_center);
     drawQrWithLines(url, 4, kHeadH + 70, H - kFootH - 12, {{url, vlw::Small, kBlue}, {note, vlw::BodyS, kInk}});
-    drawFooter({{board::kTalkKey, "update"}, {board::kSideKey, "done"}});
+    drawFooter({{board::kTalkKey, "back"}, {board::kSideKey, "update"}});
   });
 }
 

@@ -131,57 +131,52 @@ The same paper built as if it had no screen: `src/ui_paper_b.cpp` replaces
 `ui_paper.cpp` (the "A" way above stays, env `papercolor`; both are the
 `papercolor` kind for updates, and the deck offers whichever version is
 newest, so B is published as 1.x). The lights carry listening, working,
-speaking and trouble exactly as above; the voice carries the answers; the
-paper changes only when it must:
+speaking and trouble exactly as above; the voice carries the answers:
 
-- **A dashboard, every half hour:** the clock as of the drawing, the date,
-  the room (temperature, humidity), the battery (percent, and how long it
-  has or until it's full), the voice notes waiting offline (how many, how
-  long, how much room is left), and the links (Wi-Fi, deck, agent). Awake
-  it redraws on the half hour; asleep the timer wake lands on the half hour
-  and draws it (no Wi-Fi), then sleeps again. Nothing else — an answer
-  arriving, the agent working, a picture — touches the paper.
-- **B: the last answer,** at the largest of the four sizes that fits it on
-  one screen (the question in one line above it, a picture on the first
-  page); longer answers page at the smallest size, B pages on, and after the
-  last page B brings the dashboard back (with fresh readings). The answer
-  lives in flash: B after a sleep shows it. Hold B for the dashboard now.
-- **A: the options code** (the phone settings page), A again closes it;
-  with no Wi-Fi it opens the setup hotspot instead. Hold A for the hotspot
-  (*Wi-Fi & settings*) at any time; hold A again there to leave.
-- **C talks** (press, talk, press again — or 2.5 s of quiet sends it); a
-  double press plays the last answer again; on the options code it installs
-  the update on offer.
+- **A dashboard, every five minutes** (1.0.11): the clock as of the drawing,
+  the Wi-Fi and agent dots in the middle of the top bar, the battery; the
+  date, the room (temperature, humidity), the battery (percent, and how long
+  it has or until it's full), the voice notes waiting offline (how many, how
+  long, how much room is left — minutes in flash, GB on a card), and the
+  links (Wi-Fi, deck, agent). Redrawn in full on every five-minute mark
+  (:00, :05 … :55), awake or asleep (the timer wake lands just after the
+  mark, draws it without Wi-Fi and sleeps again), and after an offline voice
+  note is kept.
+- **Fast, whole refreshes** (1.0.10): every refresh starts with a reset pulse
+  to the panel's controller (EPD reset is G12). With the paper keeping its
+  picture through restarts, M5GFX starts it without one, and refreshes were
+  several times slower; the 1.0.5–1.0.9 partial clock refresh (gone in
+  1.0.11) also left the controller in its window without it.
+- **The answer** (1.0.11): goes on the paper as its voice starts, at the
+  largest of four sizes that fits it on one screen (the question in one line
+  above it, a picture on the first page), and again once it's whole and the
+  voice is over (it's spoken sentence by sentence as it's written). With
+  speaking off, when it arrives. Longer answers page at the smallest size; B
+  pages on, and after the last page B brings the dashboard back. It lives in
+  flash: B after a sleep shows it. Hold B for the dashboard now.
+- **A talks** (1.0.11; C before): press, talk, press again — or 2.5 s of
+  quiet sends it; a double press plays the last answer again.
+- **C: the options code** (1.0.11; A before) — the phone settings page; with
+  no Wi-Fi it opens the setup hotspot instead. On it, A goes back and C
+  installs the update on offer. Hold C for the hotspot (*Wi-Fi & settings*)
+  at any time; a short press of A there leaves it.
 - **No asking:** voice notes kept offline go to the agent by themselves on
   the next link, and *Auto update* defaults to on (an update installs itself
   when idle on USB) — both can be changed on the phone page. Notices have
-  nowhere to go: the lights say what matters.
+  nowhere to go: the lights say what matters, and go back to their idle
+  blink once a recording is over (1.0.11: after an offline note they stayed
+  on the recording lights).
 - **Moving it does nothing** (1.0.1): motion is never read as use, and what
   the paper shows, with when the dashboard was drawn, is kept in flash as
   well as across deep sleep — a restart, a brownout or the battery jolted
-  loose doesn't redraw it. The options code is drawn once while it's open
-  (1.0.0 redrew it every 30 s) and gives way to the dashboard once it closes.
-  Each connect tells the deck why the device booted (`boot=power|restart|
-  crash|watchdog|brownout|button|timer` in its log).
+  loose doesn't redraw it. Each connect tells the deck why the device booted
+  (`boot=power|restart|crash|watchdog|brownout|button|timer` in its log).
 - **Downloading an update** (1.0.2): the lights blink purple left, then
   right, one a second, until it restarts into the new version (or gives up).
-- **Key beeps** (1.0.4): A and B answer every press with a short beep, A
-  higher, B lower (the 14 ms click before was too short to survive the
-  speaker waking). "Beep off" or *Key beeps: off* on the phone page silences them.
-- **The clock ticks** (1.0.6; 1.0.9 the room and battery too): on the
-  five-minute marks (:00, :05 … :55) — or as soon after one as the paper has
-  been left alone for 20 s — while the dashboard is up, its top half is
-  redrawn: the clock, the date, the temperature and humidity, the battery
-  (header and block). It's the panel's partial-window refresh, in colour:
-  one window, ~as long as a full refresh; the notes and links below don't
-  change. Where that top ends is kept in flash from the last full redraw; if
-  it isn't known (the first mark after this update), that mark redraws the
-  whole dashboard instead. Every full redraw starts with a reset pulse to the
-  panel's controller (1.0.10): it keeps a partial window otherwise, and 1.0.8
-  and 1.0.9 then redrew only that window — the options code, an answer or the
-  dashboard didn't appear. The whole dashboard every half hour
-  lands on a mark too (drawn early when it's due before the next one).
-  Asleep the clock stops; it catches up on the next wake.
+- **Key beeps** (1.0.4): every press of C and B, and of A on the options
+  code, gives a short beep (the options button higher, B lower); in the
+  setup hotspot every press beeps. "Beep off" or *Key beeps: off* on the
+  phone page silences them.
 - **microSD card** (1.0.5): with a card in the slot, voice notes recorded
   offline are kept on it (hours of room; the dashboard says how much is
   free) and notes already in flash move onto it at start-up; with none,
@@ -193,13 +188,12 @@ paper changes only when it must:
   green for the first 20 s, yellow for the next 20 s, red after that.
 - **Power off** (1.0.3): after 1, 3, 10 or 30 idle minutes, 1 or 2 hours, or
   never (phone page). Awake it stays on Wi-Fi, so it answers at once but the
-  battery lasts hours rather than days; the dashboard is redrawn every half
-  hour either way.
+  battery lasts hours rather than days.
 
-| | C (top) | A | B |
+| | A | C (top) | B |
 |---|---|---|---|
-| click | talk, click again to send · while it speaks: stop · on Options: update | Options (QR code) · Options: done · no Wi-Fi: the setup hotspot | the last answer · next page · after the last: the dashboard |
-| hold | | Wi-Fi & settings (the setup hotspot; hold A again to leave) | the dashboard now |
+| click | talk, click again to send · while it speaks: stop · on Options: back · in the hotspot: leave | Options (QR code) · on Options: update · no Wi-Fi: the setup hotspot | the last answer · next page · after the last: the dashboard |
+| hold | | Wi-Fi & settings (the setup hotspot) | the dashboard now |
 | double-click | hear the last answer again | | |
 
 ```bash

@@ -49,7 +49,7 @@
 #endif
 
 #if defined(PAPER_B)
-#define FW_VERSION "1.0.10"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
+#define FW_VERSION "1.0.11"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
 #define FW_VERSION "0.17.1"
 #endif
@@ -897,7 +897,10 @@ static void redraw() {
 
 static void notice(const char* title, const String& body, uint16_t color) {
   if (board::kPaperB) {  // nothing to show it on: the lights and the voice carry what matters
-    if (mode == Mode::Waiting) mode = ui::hasReply() ? Mode::Reply : Mode::Idle;  // (a turn it ends)
+    // (A turn or a recording it ends: the lights back to their idle blink.)
+    if (mode == Mode::Waiting || (mode == Mode::Listening && !prerollOn && !audio::micActive())) {
+      mode = ui::hasReply() ? Mode::Reply : Mode::Idle;
+    }
     return;
   }
   ui::fade();
@@ -1297,6 +1300,10 @@ static void keepOffline(uint32_t stopAt) {
   } else {
     notice("Not sent", "Couldn't reach Flight Deck in time — try again.", kRed);
   }
+  if (board::kPaperB && kept) {  // the dashboard now: one more note waiting, less room
+    ui::drawNow();
+    redraw();
+  }
 }
 
 // The samples the mic has surely written by `atMs` (it runs in real time).
@@ -1614,6 +1621,63 @@ static void replayAnswer() {
 
 // ── server → device ──────────────────────────────────────────────────
 
+// The B paper puts an answer on the paper as its voice starts (not waiting
+// for B), and again once it's whole and the voice is over (the text grew
+// meanwhile, sentence by sentence). With speaking off, when it arrives;
+// a voice that doesn't come within a few seconds isn't waited for.
+#if defined(PAPER_B)
+enum class PaperAnswer : uint8_t { None, Waiting, Sounding };
+static PaperAnswer paperAnswer = PaperAnswer::None;
+static uint32_t paperShowByMs = 0;  // the whole answer came, no voice yet: shown by then all the same
+static uint32_t paperSoundMs = 0;   // its voice was last heard
+
+static void paperAnswerWaits() {
+  paperAnswer = PaperAnswer::Waiting;
+  paperShowByMs = 0;
+}
+
+static void paperAnswerVoiced() {
+  if (paperAnswer != PaperAnswer::Waiting) return;
+  paperAnswer = PaperAnswer::Sounding;
+  paperSoundMs = millis();
+  ui::answerStarted();
+}
+
+static void paperAnswerWhole() {
+  if (paperAnswer != PaperAnswer::Waiting) return;
+  if (settings.speak) {
+    paperShowByMs = millis() + 6000;
+    if (!paperShowByMs) paperShowByMs = 1;
+    return;
+  }
+  paperAnswer = PaperAnswer::None;
+  ui::answerStarted();
+  ui::answerEnded();
+}
+
+static void paperAnswerPoll() {
+  if (paperAnswer == PaperAnswer::Waiting && paperShowByMs && (int32_t)(millis() - paperShowByMs) >= 0) {
+    paperAnswer = PaperAnswer::Sounding;
+    paperSoundMs = millis();
+    ui::answerStarted();
+  }
+  if (paperAnswer != PaperAnswer::Sounding) return;
+  if (audio::playing()) {
+    paperSoundMs = millis();
+    return;
+  }
+  if (!speechMore || millis() - paperSoundMs > 10000) {
+    paperAnswer = PaperAnswer::None;
+    ui::answerEnded();
+  }
+}
+#else
+static void paperAnswerWaits() {}
+static void paperAnswerVoiced() {}
+static void paperAnswerWhole() {}
+static void paperAnswerPoll() {}
+#endif
+
 // A spoken sound command the deck recognised ("volume up", "beep off"):
 // changed, kept, and said back — at the new volume, so it's heard — or,
 // with speaking off, a beep at it. Volume moves a quarter at a time (25 %
@@ -1743,10 +1807,12 @@ static void onText(const char* payload, size_t len) {
     } else {
       ui::setReply(said);
       audio::newClip();  // this answer's sound replaces the last one's
+      paperAnswerWaits();
     }
     face::setText(said);
     deckReplay = quietSpeech = false;
     mode = Mode::Reply;
+    paperAnswerWhole();
     if (!flashing) redraw();
   } else if (type == "reply_part") {
     // The answer as the model writes it, a sentence at a time: shown now.
@@ -1762,6 +1828,7 @@ static void onText(const char* payload, size_t len) {
       audio::newClip();
       deckReplay = quietSpeech = false;
       mode = Mode::Reply;
+      paperAnswerWaits();
     } else {
       ui::growReply(said);
     }
@@ -1796,6 +1863,8 @@ static void onText(const char* payload, size_t len) {
     if (deckReplay) {  // the deck's copy of the answer replaces what arrived
       deckReplay = false;
       audio::newClip();
+    } else {
+      paperAnswerVoiced();
     }
     speechMore = true;  // until speech_end
     startSpeech(doc["rate"] | 24000, doc["cont"] | false);
@@ -2185,8 +2254,8 @@ static void paperLights(bool on) {
     esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
     esp_sleep_enable_ext1_wakeup(kButtonPins, ESP_EXT1_WAKEUP_ANY_LOW);
 #if defined(PAPER_B)
-    // The dashboard's half hour, from when it was last drawn (a minute at least).
-    esp_sleep_enable_timer_wakeup(max<uint64_t>(60, ui::dashboardDueInSec() + 10) * 1000000ULL);
+    // Just after the dashboard's next five-minute mark.
+    esp_sleep_enable_timer_wakeup(max<uint64_t>(5, ui::dashboardDueInSec() + 8) * 1000000ULL);
 #else
     if (settings.asleepRefreshMin) esp_sleep_enable_timer_wakeup(settings.asleepRefreshMin * 60ULL * 1000000ULL);
 #endif
@@ -2291,10 +2360,9 @@ static void noteSideClick(bool wokeOnly) {
 
 // One side click: next row / page, or back to the main screen.
 static void sideClick() {
-  if (board::kPaperB) {  // A: the options code — and, pressed again, the dashboard
+  if (board::kPaperB) {  // C: the options code; on it, the software update (A goes back)
     if (mode == Mode::Link) {
-      ui::drawNow();
-      backToMain();
+      updateSoftware();
     } else if (mode != Mode::Listening && mode != Mode::Waiting && !prerollOn) {  // (working: the lights say so)
       openOptions();
     }
@@ -2988,6 +3056,7 @@ void loop() {
   }
   if (wsUp != wasUp) linkChangeMs = millis();
   holdTurn();
+  paperAnswerPoll();
   // Raise to wake: a wrist raise lights a dark or dimmed screen; lowering
   // the wrist on an idle screen puts it out (the watch sleeps on its timer
   // as before — set Power off to 3 min to keep it wakeable longer).
@@ -3036,8 +3105,14 @@ void loop() {
     } else if (mode == Mode::Status) {
       openMenu();
     } else if (mode == Mode::Link) {
-      if (board::kEpaper) updateSoftware();  // the Options screen: the talk button updates
-      else backToMain();
+      if (board::kPaperB) {  // the options screen: A goes back
+        ui::drawNow();
+        backToMain();
+      } else if (board::kEpaper) {
+        updateSoftware();  // the Options screen: the talk button updates
+      } else {
+        backToMain();
+      }
     } else if (mode == Mode::Ask) {
       answerAsk(true);
     } else if (tapRec && board::kTalkToggles && millis() - recStartMs < kDoubleMs + 100) {
@@ -3106,7 +3181,7 @@ void loop() {
     if (sideClickMs && mode == sideClickMode) {  // the second click: hear the answer again
       sideClickMs = 0;
       replayAnswer();
-    } else if (onAnswer() && !board::kPaperB) {  // (B's A does one thing: no wait for a second click)
+    } else if (onAnswer() && !board::kPaperB) {  // (the B paper's options button does one thing: no wait)
       noteSideClick(false);  // it may be the first of two
     } else {
       sideClick();

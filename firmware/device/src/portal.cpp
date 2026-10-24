@@ -5,6 +5,7 @@
 #include <WebServer.h>
 #include <WiFi.h>
 
+#include "audio.h"
 #include "board.h"
 #include "face.h"
 #include "settings.h"
@@ -346,11 +347,14 @@ void runSetupPortal(const char* reason) {
     dns.processNextRequest();
     server.handleClient();
     M5.update();
-    // Held B (the PaperColor's B, the other devices' side button; the B
-    // paper's A, the button that opened it): leave without saving — a
-    // restart, back to how it was.
-    if (M5.BtnB.wasHold() || (board::kPaperB && M5.BtnA.wasHold())) {
-      Serial.println("[claw] setup portal left (held): restarting");
+    // The B paper: every press beeps, and a short press of A (the button
+    // that goes back from the options) leaves without saving — a restart,
+    // back to how it was. Elsewhere B held does (the PaperColor's B, the
+    // other devices' side button).
+    if (board::kPaperB && (M5.BtnA.wasPressed() || M5.BtnB.wasPressed() || M5.BtnC.wasPressed())) audio::click();
+    if (M5.BtnB.wasHold() || (board::kPaperB && M5.BtnA.wasClicked())) {
+      Serial.println("[claw] setup portal left: restarting");
+      delay(150);  // (the beep)
       ESP.restart();
     }
     delay(2);

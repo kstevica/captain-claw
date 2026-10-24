@@ -174,6 +174,11 @@ void showHome(const Home& home);
 // The B paper (ui_paper_b.cpp): seconds until its dashboard is next due
 // (0: now) — the sleep timer is set to land on it.
 uint32_t dashboardDueInSec();
+// The answer's voice has started (or it came with speaking off): on the
+// paper now. Then it's whole and the voice is over: kept, and redrawn if it
+// grew since.
+void answerStarted();
+void answerEnded();
 #endif
 
 // Conversation views (text mode).
