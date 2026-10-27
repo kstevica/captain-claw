@@ -897,6 +897,8 @@ class ToolRegistry:
         if not speaker_call and _deck_confine.active():
             if _deck_confine.exec_blocked(name):
                 raise ToolBlockedError(name, _deck_confine.EXEC_REFUSED)
+            if _deck_confine.hosting_app_blocked(name, arguments):
+                raise ToolBlockedError(name, _deck_confine.HOSTING_APP_REFUSED)
             confine_error = tool_context.run(
                 _deck_confine.check_tool_paths, name, arguments, effective_base_path)
             if confine_error:
