@@ -22,7 +22,10 @@ several or every user gets N more, but nobody holds more than the deck's cap
 (``POST /fd/quota/reset``) to start the day's allowances over.
 
 Admins, the standalone app and decks without sign-in are never held to these
-limits (their usage is still counted, so an admin can see it).
+limits (their usage is still counted, so an admin can see it). Neither is a
+user running on their own API keys (``byok.py``) — on a shared agent, it is
+the agent's owner's keys that count, since they pay for the turn. Tokens spent
+on someone's own keys are kept apart (``byok_tokens``) and never count.
 """
 
 from __future__ import annotations
@@ -128,10 +131,15 @@ async def _user(db, user_or_id: dict | str) -> dict | None:
         return None
 
 
-async def status(db, user_or_id: dict | str) -> dict:
+async def status(db, user_or_id: dict | str, *, agent_owner: str = "") -> dict:
     """The person's allowances today: plan, used / limit for messages and
     tokens, when they reset, and whether they are spent (``blocked``:
-    ``"messages"`` / ``"tokens"`` / None) or running out (``warning``)."""
+    ``"messages"`` / ``"tokens"`` / None) or running out (``warning``).
+
+    ``agent_owner`` — the turn is on another user's agent (a shared agent's
+    member): whether the turn runs on own keys is that owner's, not theirs."""
+    from captain_claw.flight_deck import byok
+
     user = await _user(db, user_or_id)
     uid = str(user["id"]) if user else str(user_or_id)
     plan = get_user_plan(user) if user else "free"
@@ -141,7 +149,9 @@ async def status(db, user_or_id: dict | str) -> dict:
     resets_left = await db.get_usage_resets(uid)
     msg_limit = max(0, int(limits.get("messages_per_day") or 0))
     tok_limit = max(0, int(limits.get("tokens_per_day") or 0))
-    free = exempt(user)
+    may_bring_keys = await byok.allowed(db)
+    own_keys = may_bring_keys and await byok.active(db, agent_owner or uid)
+    free = exempt(user) or own_keys
     blocked = None
     warning = None
     if not free:
@@ -159,6 +169,9 @@ async def status(db, user_or_id: dict | str) -> dict:
         "day": day,
         "resets_at": resets_at().isoformat(),
         "exempt": free,
+        "byok": own_keys,  # on their own API keys: no limits
+        "byok_allowed": may_bring_keys,  # they could switch to their own keys
+        "byok_tokens": int(used.get("byok_tokens") or 0),
         "messages": _allowance(used["messages"], msg_limit),
         "tokens": _allowance(used["tokens"], tok_limit),
         "blocked": blocked,
@@ -223,14 +236,15 @@ def short_limit_text(st: dict) -> str:
             + (f" {_resets(left).capitalize()} in the web chat." if left else ""))
 
 
-async def admit_message(user_or_id: dict | str, content: Any = "") -> tuple[bool, dict | None]:
+async def admit_message(user_or_id: dict | str, content: Any = "", *,
+                        agent_owner: str = "") -> tuple[bool, dict | None]:
     """May this human message go to an agent? Counts it when it may.
 
     ``(True, status)`` after counting (status None for an uncounted free
     command); ``(False, status)`` when today's allowance is spent — the caller
-    refuses the turn with :func:`limit_text`. Never raises: if the counters
-    can't be read the message goes through (an outage of this bookkeeping must
-    not take chat down)."""
+    refuses the turn with :func:`limit_text`. ``agent_owner``: see
+    :func:`status`. Never raises: if the counters can't be read the message
+    goes through (an outage of this bookkeeping must not take chat down)."""
     if is_free_command(content):
         return True, None
     try:
@@ -238,11 +252,11 @@ async def admit_message(user_or_id: dict | str, content: Any = "") -> tuple[bool
         user = await _user(db, user_or_id)
         if user is None:
             return True, None
-        st = await status(db, user)
+        st = await status(db, user, agent_owner=agent_owner)
         if st["blocked"]:
             return False, st
         await db.add_daily_usage(str(user["id"]), st["day"], messages=1)
-        return True, await status(db, user)
+        return True, await status(db, user, agent_owner=agent_owner)
     except Exception as exc:
         log.warning("Daily allowance check failed; letting the message through",
                     error=type(exc).__name__)
@@ -305,11 +319,16 @@ async def automation_blocked(owner_id: str) -> dict | None:
     return st if st["blocked"] == "tokens" else None
 
 
-async def record_tokens(db, user_id: str, tokens: int) -> None:
+async def record_tokens(db, user_id: str, tokens: int, *, byok: bool = False) -> None:
+    """Count *tokens* for *user_id* today — apart, when they were spent on the
+    user's own key (``byok``): those never count against the plan."""
     tokens = max(0, min(int(tokens or 0), _MAX_TOKENS_PER_REPORT))
     if not user_id or not tokens:
         return
-    await db.add_daily_usage(str(user_id), today(), tokens=tokens)
+    if byok:
+        await db.add_daily_usage(str(user_id), today(), byok_tokens=tokens)
+    else:
+        await db.add_daily_usage(str(user_id), today(), tokens=tokens)
 
 
 # ── Routes ───────────────────────────────────────────────────────────
@@ -363,11 +382,28 @@ async def _reporting_user(request: Request) -> str:
     return _agent_owner(request)
 
 
+def _reporting_agent_on_own_keys(request: Request) -> bool:
+    """Does the reporting agent run on its owner's own keys? By FD's records
+    of the agent (its ``web_auth``), never by its claim."""
+    token = request.headers.get("X-Agent-Auth", "")
+    if not token:
+        return False
+    try:
+        from captain_claw.flight_deck.server import _find_agent_by_auth, _load_process_registry
+
+        matched, _owner, slug = _find_agent_by_auth(token)
+        if not (matched and slug):
+            return False
+        return (_load_process_registry().get(slug) or {}).get("key_source") == "byok"
+    except Exception:
+        return False
+
+
 @router.post("/quota/agent/usage")
 async def agent_usage(body: AgentUsage, request: Request) -> dict:
     """An agent reports LLM tokens it just spent."""
     uid = await _reporting_user(request)
-    await record_tokens(get_db(), uid, body.tokens)
+    await record_tokens(get_db(), uid, body.tokens, byok=_reporting_agent_on_own_keys(request))
     return {"ok": True}
 
 

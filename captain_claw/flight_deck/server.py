@@ -21,7 +21,7 @@ import yaml
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 # Load a project-local ``.env`` into ``os.environ`` early — before any
 # captain_claw submodule imports — so env-driven bridges (Messenger,
@@ -941,6 +941,12 @@ async def _start_botport_link(db: Any) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Own API keys move agents through THIS module's process table (it runs
+    # as __main__; an import of `server` elsewhere is a second copy).
+    from captain_claw.flight_deck import byok as _byok
+
+    _byok.agent_switcher = byok_switch_agents
+    _byok.owner_agents = byok_owner_agents
     # Initialize game registry with FD data dir
     from captain_claw.games.registry import set_games_dir
     games_dir = DATA_DIR / "games"
@@ -1664,6 +1670,7 @@ from captain_claw.flight_deck.mcp_server_routes import router as mcp_inbound_rou
 from captain_claw.flight_deck.mcp_oauth_routes import router as mcp_oauth_router
 from captain_claw.flight_deck.costs_routes import router as costs_router
 from captain_claw.flight_deck.usage_quota import router as usage_quota_router
+from captain_claw.flight_deck.byok import router as byok_router
 from captain_claw.flight_deck.llm_routes import router as llm_router
 from captain_claw.flight_deck.being_routes import router as being_router
 from captain_claw.flight_deck.being_public_routes import router as being_public_router
@@ -1784,6 +1791,7 @@ app.include_router(mcp_inbound_router)
 app.include_router(mcp_oauth_router)
 app.include_router(costs_router)
 app.include_router(usage_quota_router)
+app.include_router(byok_router)
 app.include_router(llm_router)
 app.include_router(being_router)
 app.include_router(being_public_router)
@@ -1818,6 +1826,10 @@ def _require_auth():
 
 class AgentConfig(BaseModel):
     """Agent spawn configuration — matches the frontend form."""
+    # Set by the archetype resolve, never by the caller: the tier the model
+    # came from, and whether it is on the owner's own API key (byok.py).
+    _model_tier: str = PrivateAttr(default="")
+    _byok: bool = PrivateAttr(default=False)
     # Identity
     name: str = ""
     description: str = ""
@@ -2126,6 +2138,8 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
             if "vision" not in config.model_fields_set and _vision_switch(tcfg.get("vision")) is not None:
                 config.vision = "on" if _vision_switch(tcfg.get("vision")) else "off"
             config.tier = ""  # pinned now — don't let _resolve_tier re-map it
+            config._model_tier = eff_tier
+            config._byok = bool(tcfg.get("byok"))
         elif not config.tier and _registry_tier_fits_the_caller(config, eff_tier):
             config.tier = eff_tier  # last resort: central registry tier table
     # The tier set's own keys (BRAVE_API_KEY, TAVILY_API_KEY, …) — what the
@@ -2578,6 +2592,180 @@ async def heal_keyless_agents(*, restart: bool = True) -> list[str]:
     if running:
         asyncio.get_running_loop().run_in_executor(None, _restart_processes, running)
     return healed
+
+
+# ── Own API keys (byok.py): moving a user's agents onto them and back ──
+
+
+def _drop_dotenv_values(env_path: Path, names: set[str], values: set[str] | None = None) -> bool:
+    """Remove the ``NAME=value`` lines of a .env whose name is in *names* and
+    (given *values*) whose value is one of them. True when the file changed."""
+    try:
+        lines = env_path.read_text().splitlines() if env_path.is_file() else []
+    except OSError:
+        return False
+    keep = []
+    for ln in lines:
+        name, sep, value = ln.strip().partition("=")
+        if sep and name in names and (values is None or value.strip().strip("'\"") in values):
+            continue
+        keep.append(ln)
+    if len(keep) == len(lines):
+        return False
+    try:
+        env_path.write_text("\n".join(keep) + "\n" if keep else "")
+    except OSError:
+        return False
+    return True
+
+
+def _set_agent_config_model(agent_dir: Path, provider: str, model: str, base_url: str,
+                            max_tokens: int = 0) -> dict:
+    """Point every copy of an agent's config at *provider*/*model* with no key
+    in the config (the .env's wins). Returns what the first copy had."""
+    before: dict = {}
+    for cfg_path in _agent_config_paths(agent_dir):
+        if not cfg_path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        m = data.get("model") if isinstance(data.get("model"), dict) else {}
+        if not before:
+            before = dict(m)
+        m.update(provider=provider, model=model, api_key="",
+                 base_url=base_url or _default_base_url(provider))
+        if max_tokens > 0:
+            m["max_tokens"] = max_tokens
+        data["model"] = m
+        cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+    return before
+
+
+def _byok_agent_tier(entry: dict, tiers: dict) -> str:
+    """The tier an agent's model came from: recorded at spawn, else its
+    archetype's, else the tier whose model it runs, else "balanced"."""
+    recorded = str(entry.get("model_tier") or entry.get("tier") or "")
+    if recorded:
+        return recorded
+    aid = str(entry.get("archetype") or "")
+    if aid:
+        from captain_claw.flight_deck.basna_routes import _load_registry
+
+        try:
+            for arch in _load_registry().get("archetypes") or []:
+                if isinstance(arch, dict) and arch.get("id") == aid and arch.get("tier"):
+                    return str(arch["tier"])
+        except Exception:
+            pass
+    for name, t in (tiers or {}).items():
+        if isinstance(t, dict) and (t.get("provider"), t.get("model")) == (entry.get("provider"), entry.get("model")):
+            return name
+    return "balanced"
+
+
+def byok_owner_agents(owner_id: str) -> list[dict]:
+    """*owner_id*'s process agents: whether each runs, and on own keys."""
+    return [{"slug": slug, "running": _process_is_alive(slug), "byok": entry.get("key_source") == "byok"}
+            for slug, entry in _load_process_registry().items() if entry.get("owner") == owner_id]
+
+
+async def byok_switch_agents(owner_id: str, tiers: dict | None, keys: dict) -> dict:
+    """Move *owner_id*'s process agents onto their own API keys — *tiers* is
+    their tier set with the keys over it (``byok.overlay_tiers``) — or, with
+    None, back to the models they ran before. An agent on a local model stays
+    there. Running ones are restarted. ``{"switched", "restarted"}``."""
+    from captain_claw.flight_deck import byok
+    from captain_claw.flight_deck.auth import get_db
+    from captain_claw.flight_deck.basna_routes import _owner_base_tier_set
+
+    base: dict = {}
+    if tiers is None:
+        try:
+            base = (await _owner_base_tier_set(get_db(), owner_id)).get("tiers") or {}
+        except Exception:
+            base = {}
+    key_values = {str(k) for k in (keys or {}).values() if k}
+    key_names = {n for p in byok.PROVIDERS for n in _provider_key_env_names(p)}
+    registry = _load_process_registry()
+    changed: list[str] = []
+    for slug, entry in registry.items():
+        if entry.get("owner") != owner_id:
+            continue
+        agent_dir = DATA_DIR / slug
+        if not agent_dir.is_dir():
+            continue
+        env_path = agent_dir / ".env"
+        on_own = entry.get("key_source") == "byok"
+        if tiers is not None:
+            if not on_own and str(entry.get("provider") or "") in byok.LOCAL_PROVIDERS:
+                continue
+            name = _byok_agent_tier(entry, tiers)
+            tier = tiers.get(name) if isinstance(tiers.get(name), dict) else None
+            if not (tier and tier.get("byok")):
+                tier = tiers.get("balanced") if isinstance(tiers.get("balanced"), dict) else None
+            if not (tier and tier.get("byok")):
+                continue
+            provider, model = str(tier["provider"]), str(tier["model"])
+            key = str(keys.get(provider) or tier.get("api_key") or "")
+            env_name = _PROVIDER_KEY_ENV.get(provider, "")
+            if not (key and env_name):
+                continue
+            try:
+                from captain_claw.config import Config
+
+                held = str(Config._read_dotenv_file(env_path).get(env_name) or "")
+            except Exception:
+                held = ""
+            if on_own and (entry.get("provider"), entry.get("model"), held) == (provider, model, key):
+                continue
+            if on_own and entry.get("provider") != provider:
+                # Off the provider it ran on with an own key: that key (put
+                # there by this switch, maybe one since removed) goes too.
+                _drop_dotenv_values(env_path, set(_provider_key_env_names(str(entry.get("provider") or ""))))
+            before = _set_agent_config_model(agent_dir, provider, model, "",
+                                             int(tier.get("output_ctx") or 0))
+            if not on_own:
+                entry["byok_prev"] = {
+                    "provider": str(entry.get("provider") or before.get("provider") or ""),
+                    "model": str(entry.get("model") or before.get("model") or ""),
+                    "base_url": str(before.get("base_url") or ""),
+                    "max_tokens": int(before.get("max_tokens") or 0),
+                }
+            _upsert_dotenv_var(env_path, env_name, key)
+            entry.update(provider=provider, model=model, key_source="byok", model_tier=name)
+        else:
+            if not on_own:
+                continue
+            prev = entry.get("byok_prev") if isinstance(entry.get("byok_prev"), dict) else {}
+            if not prev.get("model"):
+                # Made on own keys: back to its tier on the deck's set.
+                name = _byok_agent_tier(entry, base)
+                team = base.get(name) if isinstance(base.get(name), dict) else {}
+                prev = {"provider": team.get("provider"), "model": team.get("model"),
+                        "base_url": team.get("base_url") or "", "max_tokens": int(team.get("output_ctx") or 0)}
+            if prev.get("model"):
+                _set_agent_config_model(agent_dir, str(prev.get("provider") or ""), str(prev["model"]),
+                                        str(prev.get("base_url") or ""), int(prev.get("max_tokens") or 0))
+                entry.update(provider=str(prev.get("provider") or ""), model=str(prev["model"]))
+            _drop_dotenv_values(env_path, key_names, key_values)
+            entry.pop("key_source", None)
+            entry.pop("byok_prev", None)
+        changed.append(slug)
+    if changed:
+        _save_process_registry(registry)
+    if tiers is None:
+        for slug in changed:
+            await _heal_agent_model_key(slug)  # the deck's key, where it has one
+    running = [slug for slug in changed if _process_is_alive(slug)]
+    if running:
+        asyncio.get_running_loop().run_in_executor(None, _restart_processes, running)
+    log.info("Agents moved %s own API keys", "onto" if tiers is not None else "off",
+             owner=owner_id, switched=len(changed), restarted=len(running))
+    return {"switched": len(changed), "restarted": len(running)}
 
 
 async def _startup_team_keys_then_reattach() -> None:
@@ -4169,6 +4357,26 @@ async def update_agent_model(
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
     provider, model_name = body.provider.strip(), body.model.strip()
 
+    # An owner on their own API keys (byok.py) has no daily limits, so their
+    # agents stay on those keys: a provider they brought one for, or a local
+    # model — never one that would run on the deck's key.
+    own_keys: dict = {}
+    if changes_model and kind == "process":
+        from captain_claw.flight_deck import byok
+        from captain_claw.flight_deck.auth import get_db
+
+        owner = str((_load_process_registry().get(identifier) or {}).get("owner") or "")
+        if owner and await byok.active(get_db(), owner):
+            own_keys = await byok.read_keys(get_db(), owner)
+            if provider not in own_keys and provider not in byok.LOCAL_PROVIDERS:
+                raise HTTPException(409, (
+                    "You're running on your own API keys, so this agent can use "
+                    f"{', '.join(byok.PROVIDERS[p] for p in own_keys) or 'them'} or a local model. "
+                    "Add a key for this provider in Settings → Your own AI keys, or turn them off."))
+            if byok.chatgpt_only(provider, model_name):
+                raise HTTPException(409, f"{model_name} signs in through ChatGPT, not your API key — "
+                                         "pick another OpenAI model")
+
     updated_count = 0
     for cfg_path in _agent_config_paths(agent_dir):
         if not cfg_path.is_file():
@@ -4212,6 +4420,14 @@ async def update_agent_model(
         if identifier in registry:
             registry[identifier]["provider"] = provider
             registry[identifier]["model"] = model_name
+            if own_keys:
+                if provider in own_keys:
+                    _upsert_dotenv_var(agent_dir / ".env", _PROVIDER_KEY_ENV[provider], own_keys[provider])
+                    registry[identifier].setdefault("byok_prev", {})
+                    registry[identifier]["key_source"] = "byok"
+                else:  # a local model: nothing to pay for, nothing to switch back
+                    registry[identifier].pop("key_source", None)
+                    registry[identifier].pop("byok_prev", None)
             _save_process_registry(registry)
 
     return {"ok": True, "updated": updated_count, "message": "Restart the agent for changes to take effect."}
@@ -8813,6 +9029,10 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         # The archetype it was made from (id, no `@tier`): the kiosk's skill
         # cards start from what the agent is for.
         "archetype": config.archetype.strip().partition("@")[0],
+        # The tier its model came from, and — on its owner's own API key — that
+        # it is (byok.py): its tokens never count against the plan.
+        **({"model_tier": config._model_tier} if config._model_tier else {}),
+        **({"key_source": "byok"} if config._byok else {}),
         # Deep-memory grid config (empty for non-grid agents) — the FD deep-memory
         # proxy reads these to stamp write-tags and narrow reads without the agent
         # asserting anything (mirrors how `owner` is server-resolved).

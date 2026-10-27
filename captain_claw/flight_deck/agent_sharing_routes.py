@@ -519,8 +519,9 @@ async def _client_to_agent(conn: _MemberConn, db, rec: sharing.AgentRecord,
                 await conn.send({"type": "status", "status": "ready",
                                  "turn_end": secrets.token_hex(8)})
                 continue
-            # The member's own plan allowance for today, not the owner's.
-            allowed, quota = await usage_quota.admit_message(sub, content)
+            # The member's own plan allowance for today, not the owner's —
+            # unless the agent runs on the owner's own API keys (they pay).
+            allowed, quota = await usage_quota.admit_message(sub, content, agent_owner=rec.owner)
             if not allowed:
                 await conn.send(usage_quota.refusal_frame(quota))
                 await conn.send({"type": "status", "status": "ready",

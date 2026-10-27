@@ -1010,8 +1010,17 @@ async def _load_owner_tiers(db, owner_id: str) -> tuple[dict, list]:
 async def owner_tier_set(db, owner_id: str) -> dict:
     """Which tier set *owner_id*'s agents run on, as `_load_owner_tiers`
     resolves it: ``source`` ("own" — their active Library set, "team" — the
-    admin's team default, "none"), the set's ``name``, its ``tiers`` and
+    admin's team default, "none", "byok" — either of those on the owner's own
+    API keys, see ``byok.py``), the set's ``name``, its ``tiers`` and
     ``env_vars``. The tiers are raw (keys included): never send them on."""
+    from captain_claw.flight_deck import byok
+
+    return await byok.overlay(db, owner_id, await _owner_base_tier_set(db, owner_id))
+
+
+async def _owner_base_tier_set(db, owner_id: str) -> dict:
+    """`owner_tier_set` before the owner's own keys: their Library set or the
+    team default."""
     try:
         settings = await db.get_all_settings(owner_id)
     except Exception:

@@ -35,6 +35,7 @@ import {
   ShieldCheck,
   Smartphone,
   Activity,
+  KeyRound,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -71,6 +72,9 @@ import { SharedFilesPanel } from '../agents/SharedFilesPanel'
 import { SharedDatastorePanel } from '../agents/SharedDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
 import { ArchetypeSpawnDialog } from './ArchetypeSpawnDialog'
+import { KioskByokDialog } from './KioskByokDialog'
+import { useByokStore } from '../../stores/byokStore'
+import { useQuotaStore } from '../../stores/quotaStore'
 import ConnectionsPage, { type TabId as ConnectionsTab } from '../../pages/ConnectionsPage'
 import { ProfilePage } from '../../pages/ProfilePage'
 import { NotificationBell } from '../common/NotificationCenter'
@@ -246,6 +250,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [profileOpen, setProfileOpen] = useState(false)
   // Kiosk Settings dialog — theme, connections, profile, refresh, sign-out.
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // "Your own AI keys": from Settings, or the plan bar when the day runs out.
+  const byokOpen = useByokStore((s) => s.open)
+  const openByok = useByokStore((s) => s.openDialog)
+  const closeByok = useByokStore((s) => s.close)
+  const setByokHost = useByokStore((s) => s.setHost)
+  useEffect(() => {
+    setByokHost(locked)
+    return () => setByokHost(false)
+  }, [locked, setByokHost])
   // Kiosk Info dialog — models, agents, archetypes, profile, plan, connections.
   const [infoOpen, setInfoOpen] = useState(false)
   // Kiosk agent dialogs from an agent's "⋯": its Info (intentions, topics),
@@ -774,8 +787,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onData={() => { setSettingsOpen(false); openData() }}
           onFolders={() => { setSettingsOpen(false); openFolders() }}
           onActivity={() => { setSettingsOpen(false); openActivity() }}
+          onByok={() => { setSettingsOpen(false); openByok() }}
         />
       )}
+      {locked && byokOpen && <KioskByokDialog onClose={closeByok} />}
       {locked && infoOpen && (
         <KioskInfoDialog
           agents={infoAgents}
@@ -976,7 +991,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
 // the Getting started guide, and sign-out (how a shared kiosk hands the
 // screen to the next person).
 
-function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onScheduled, onLibrary, onData, onFolders, onActivity }: {
+function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onScheduled, onLibrary, onData, onFolders, onActivity, onByok }: {
   /** The desktop app's admin in the users' kiosk: back to the Admin console. */
   onAdmin?: () => void
   onClose: () => void
@@ -989,8 +1004,11 @@ function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onPro
   onData: () => void
   onFolders: () => void
   onActivity: () => void
+  onByok: () => void
 }) {
   const { theme, toggle: toggleTheme } = useThemeStore()
+  // Offered where the deck allows own keys (the plan status says so).
+  const quota = useQuotaStore((s) => s.status)
   const authEnabled = useAuthStore((s) => s.authEnabled)
   const authUser = useAuthStore((s) => s.user)
   const signingOut = useAuthStore((s) => s.signingOut)
@@ -1006,6 +1024,11 @@ function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onPro
     ...(onAdmin ? [{ icon: ShieldCheck, title: 'Switch to admin view', detail: 'Models, archetypes, connections and settings', onClick: onAdmin }] : []),
     { icon: dark ? Sun : Moon, title: dark ? 'Light theme' : 'Dark theme', detail: `Switch to the ${dark ? 'light' : 'dark'} look`, onClick: toggleTheme },
     { icon: Plug, title: 'Connections', detail: 'Google, Microsoft, MCP and Jev', onClick: onConnections },
+    ...(quota?.byok_allowed || quota?.byok ? [{
+      icon: KeyRound, title: 'Your own AI keys',
+      detail: quota.byok ? 'On — your agents run on your keys, no daily limits' : 'Run your agents on your own API keys, with no daily limits',
+      onClick: onByok,
+    }] : []),
     { icon: AlarmClock, title: 'Scheduled tasks', detail: 'Your agents on a timer — results by chat or email', onClick: onScheduled },
     { icon: LibraryBig, title: 'File library', detail: 'Every file your agents made, summarised and searchable', onClick: onLibrary },
     { icon: Database, title: 'Data library', detail: 'Every table your agents keep, summarised and easy to read', onClick: onData },
