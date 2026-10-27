@@ -952,12 +952,12 @@ def tier_api_key(tier: dict) -> str | None:
 
 async def _request_api_key(provider: str, api_key: str | None, base_url: str | None) -> str | None:
     """`tier_api_key` for creds that arrive in a request body (the UI sends a
-    team tier's "@system" as it holds it) — with the org keys read fresh."""
-    if (api_key or "").strip() == "@system":
-        try:
-            await _refresh_system_provider_keys(get_db())
-        except Exception:
-            pass
+    team tier's "@system" as it holds it) — with the org keys, and the team's
+    routes Flight Deck's own keys follow, read fresh."""
+    try:
+        await _refresh_system_provider_keys(get_db())
+    except Exception:
+        pass
     return tier_api_key({"provider": provider, "api_key": api_key, "base_url": base_url})
 
 
