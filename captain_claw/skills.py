@@ -959,6 +959,18 @@ def install_skill_dependencies(
     timeout_seconds: int = _DEFAULT_INSTALL_TIMEOUT_SECONDS,
 ) -> SkillDependencyInstallResult:
     """Install runtime dependencies declared in a skill metadata.install block."""
+    from captain_claw import deck_confine
+
+    if deck_confine.tier() == "user":
+        # brew / uv / go install build and run a package on the host.
+        return SkillDependencyInstallResult(
+            ok=False,
+            skill_name=str(skill_name or "").strip(),
+            install_id=str(install_id or "").strip(),
+            kind="",
+            command="",
+            message=deck_confine.EXEC_REFUSED,
+        )
     entries = load_workspace_skill_entries(workspace_dir, cfg)
     entry = _resolve_skill_entry(entries, skill_name)
     if not entry:

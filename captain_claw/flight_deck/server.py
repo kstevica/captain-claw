@@ -606,6 +606,88 @@ def _share_fd_secrets(environment: dict[str, str]) -> None:
                 environment[key] = value
 
 
+# Tenant confinement (captain_claw/deck_confine.py is the agent side). Every
+# process agent runs as this deck's OS user, so on a sign-in deck FD pins, after
+# the agent's .env and env_vars, which files its tools may name and whether it
+# may run code at all. FD_AGENT_CONFINE=off turns it off for a deck whose users
+# all trust each other.
+_CONFINE_ENV_KEYS = ("CLAW_CONFINE", "CLAW_CONFINE_HOME", "CLAW_CONFINE_WORKSPACE")
+# What a non-admin's .env / env_vars may not change from FD's own: each makes
+# the agent's Python, git, node or shell load code from a path (and the agent
+# writes its own workspace), moves the roots its tools are held to, routes its
+# calls to Flight Deck through another host, or turns its audit off.
+# (CLAW_VFS_SCOPE stays: it only ever narrows the agent's VFS — Iskra's wall.)
+_PINNED_ENV_PREFIXES = (
+    "PYTHON", "LD_", "DYLD_", "GIT_", "NODE_", "NPM_CONFIG_", "PERL", "RUBY",
+    "CLAW_PTY_", "CLAW_TOOL_AUDIT",
+)
+_PINNED_ENV_KEYS = frozenset({
+    "PATH", "BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELL", "PLAYWRIGHT_BROWSERS_PATH",
+    "CLAW_VFS_ROOT", "FD_DATA_DIR", "CAPTAIN_CLAW_FD_HOME", "FD_DATA_KEY_FILE",
+    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+})
+
+
+def _confine_agents() -> bool:
+    """Whether this deck confines its process agents: sign-in on (it has users
+    to keep apart) and not turned off with FD_AGENT_CONFINE=off."""
+    flag = os.environ.get("FD_AGENT_CONFINE", "").strip().lower()
+    return AUTH_ENABLED and flag not in ("off", "0", "false", "no")
+
+
+def _owner_is_admin(owner_id: str) -> bool:
+    """The owner's role, read now (a role change applies at the agent's next
+    start). Sync so the restart path can use it; False when unknown."""
+    if not owner_id:
+        return False
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(f"file:{DATA_DIR / 'flight-deck.db'}?mode=ro", uri=True, timeout=5)
+        try:
+            row = con.execute("SELECT role FROM users WHERE id = ?", (owner_id,)).fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        log.warning("Could not read an agent owner's role", error=type(exc).__name__)
+        return False
+    return bool(row) and row[0] == "admin"
+
+
+def _pin_confinement(environment: dict[str, str], base: dict[str, str], *,
+                     agent_dir: Path, owner_id: str, workspace: str = "") -> None:
+    """Pin the agent's confinement (deck_confine) LAST, over whatever its .env
+    and env_vars said. A non-admin owner's env also gets FD's own values back
+    for :data:`_PINNED_ENV_KEYS`, and a workspace FD didn't place in the
+    agent's folder or the owner's VFS root is not one of its roots."""
+    for key in _CONFINE_ENV_KEYS:
+        environment.pop(key, None)
+    if not _confine_agents():
+        return
+    tier = "admin" if _owner_is_admin(owner_id) else "user"
+    home = agent_dir.resolve()
+    default_ws = home / "data" / "workspace"
+    ws = Path(workspace).expanduser().resolve() if workspace else default_ws
+    if tier == "user":
+        for key in list(environment):
+            upper = key.upper()
+            if upper in _PINNED_ENV_KEYS or upper.startswith(_PINNED_ENV_PREFIXES):
+                if key in base:
+                    environment[key] = base[key]
+                else:
+                    environment.pop(key, None)
+        from captain_claw.vfs import path_within
+
+        owner_vfs = (DATA_DIR / "vfs" / owner_id).resolve() if owner_id else None
+        if not (path_within(ws, home) or (owner_vfs is not None and path_within(ws, owner_vfs))):
+            log.warning("Agent workspace outside its own roots — not one of them",
+                        agent=home.name)
+            ws = default_ws
+    environment["CLAW_CONFINE"] = tier
+    environment["CLAW_CONFINE_HOME"] = str(home)
+    environment["CLAW_CONFINE_WORKSPACE"] = str(ws)
+
+
 def _start_registered_process(slug: str, entry: dict) -> bool:
     """Start a single process agent from its registry entry. Returns True on success."""
     agent_dir = DATA_DIR / slug
@@ -615,7 +697,8 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
     web_port = entry.get("web_port", 24080)
 
     # Rebuild environment from .env file (on FD's env minus its own secrets)
-    environment = _agent_base_env()
+    base_env = _agent_base_env()
+    environment = dict(base_env)
     env_file = agent_dir / ".env"
     if env_file.is_file():
         content = env_file.read_text().strip()
@@ -643,6 +726,8 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
     if _owner:
         environment["FD_OWNER_ID"] = _owner
         environment["CLAW_VFS_USER"] = _owner
+    _pin_confinement(environment, base_env, agent_dir=agent_dir, owner_id=_owner,
+                     workspace=str(entry.get("workspace") or ""))
 
     log_file = agent_dir / "process.log"
     try:
@@ -8638,7 +8723,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     (agent_dir / ".env").write_text(env_content)
 
     # Build environment variables (FD's env minus its own secrets)
-    environment = _agent_base_env()
+    base_env = _agent_base_env()
+    environment = dict(base_env)
     if env_content:
         for line in env_content.strip().split("\n"):
             if "=" in line:
@@ -8666,6 +8752,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     # Slug for port-fallback callbacks: lets the agent tell FD which actual
     # port it bound to if the requested one was already in use.
     environment["FD_AGENT_SLUG"] = slug
+    _pin_confinement(environment, base_env, agent_dir=agent_dir, owner_id=owner_id or "",
+                     workspace=config.workspace_path or "")
 
     # Set HOME to the agent's home-config directory so captain-claw
     # picks up ~/.captain-claw/config.yaml from there
@@ -8730,6 +8818,9 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         # asserting anything (mirrors how `owner` is server-resolved).
         "grid_tags": list(config.grid_memory_tags or []),
         "grid_recall": config.grid_recall_mode or "",
+        # A workspace FD placed outside the agent's folder (Code mode's repo):
+        # a restart pins the same confinement root (_pin_confinement).
+        **({"workspace": config.workspace_path} if config.workspace_path else {}),
     }
     _save_process_registry(registry)
     # A re-spawn keeps its ref, so its context packs: rewrite their files.

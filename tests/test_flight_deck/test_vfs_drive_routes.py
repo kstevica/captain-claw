@@ -254,7 +254,8 @@ class TestDriveMountRoutes:
         # An ordinary (non-Drive) link should not be refreshable as a mount.
         ext = tmp / "external"
         ext.mkdir(parents=True)
-        await vr.add_link(vr.LinkBody(name="plain", path=str(ext), mode="ro"), USER)
+        # Linking a server folder is an admin's (vfs_routes._require_link_admin).
+        await vr.add_link(vr.LinkBody(name="plain", path=str(ext), mode="ro"), {**USER, "role": "admin"})
         with pytest.raises(HTTPException) as exc:
             await vr.refresh_drive("plain", USER)
         assert exc.value.status_code == 404

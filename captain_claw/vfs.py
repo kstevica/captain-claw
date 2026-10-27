@@ -261,6 +261,24 @@ def safe_link_target_at(root: Path, name: str, data_dir: Path | None = None) -> 
     return tgt
 
 
+def _usable_link(root: Path, name: str) -> Path | None:
+    """The link this process may follow: :func:`safe_link_target_at`, and on a
+    multi-user deck a non-admin's agent only one inside the owner's own root
+    (a Drive / OneDrive mount) — never an external host folder
+    (deck_confine)."""
+    tgt = safe_link_target_at(root, name)
+    if tgt is None:
+        return None
+    from captain_claw import deck_confine
+
+    if deck_confine.external_links_allowed():
+        return tgt
+    try:
+        return tgt if path_within(tgt.resolve(), Path(root).resolve()) else None
+    except (OSError, RuntimeError):
+        return None
+
+
 # Google Drive mounts live under this dotdir at the user root, each a
 # ``<name>/`` directory carrying a manifest (see vfs_drive.MOUNTS_DIRNAME /
 # MANIFEST_NAME). Mirrored here to avoid an import cycle — vfs_drive imports vfs.
@@ -455,7 +473,7 @@ def project_root(project: str = "", *, create: bool = False) -> Path:
         raise PermissionError(
             f"project {proj!r} is outside this process's CLAW_VFS_SCOPE")
     root = user_root()
-    tgt = link_target_at(root, proj)
+    tgt = _usable_link(root, proj)
     if tgt is not None:
         return tgt
     base = (root / proj).resolve()
@@ -472,7 +490,7 @@ def project_root(project: str = "", *, create: bool = False) -> Path:
     # scope still applies.
     canon = resolve_project_name(raw)
     if canon and canon != proj and _scope_allows(_sanitize(canon, fallback="")):
-        canon_tgt = link_target_at(root, canon)
+        canon_tgt = _usable_link(root, canon)
         if canon_tgt is not None:
             return canon_tgt
         canon_dm = _drive_mount_root(root, canon)

@@ -3296,7 +3296,10 @@ class AgentContextMixin:
         extra_read_dirs_block = ""
         try:
             cfg = get_config()
-            extra_dirs = cfg.tools.read.extra_dirs
+            from captain_claw import deck_confine
+
+            # A non-admin's agent on a multi-user deck has no read folders.
+            extra_dirs = deck_confine.read_folders(cfg.tools.read.extra_dirs)
             gdrive_folders = cfg.tools.read.gdrive_folders
             if getattr(self, "_speaker_scoped", False) is True:
                 # A shared-agent member never sees the owner's local or
