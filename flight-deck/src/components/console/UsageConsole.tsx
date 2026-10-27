@@ -9,6 +9,7 @@ import {
 } from './consoleApi'
 import { Page, PageHeader, Card, StatTile, Segmented, Button, Notice, Pill } from './parts'
 import { fmtNumber, timeAgo } from './format'
+import { ByokSetting } from '../admin/ByokSetting'
 
 // Usage & limits: what people used today against their plan, what the deck
 // spent, the plans' limits, and the latest activity. The Admin page's Usage
@@ -154,6 +155,8 @@ export function UsageConsole() {
       </Card>
 
       <PlansCard plans={plans} onSaved={() => fetchPlans().then(setPlans).catch(() => {})} />
+
+      <ByokSetting />
 
       <Card icon={Activity} title="Recent activity" hint="Sign-ins, new agents, resets and other events, newest first." bodyClassName="divide-y divide-zinc-800/70">
         {logs.length === 0 && <p className="px-5 py-6 text-center text-sm text-zinc-500">No activity yet.</p>}
