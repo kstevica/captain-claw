@@ -570,9 +570,10 @@ Look at the picture and reply with ONLY a JSON object, no prose, no code fence:
 Write in the language of the text in the picture; with no text, in English."""
 
 
-async def _resolve_tier(user_id: str) -> dict | None:
+async def _resolve_tier(user_id: str, prefer: tuple[str, ...] = ("fast", "balanced")) -> dict | None:
     """The owner's fast tier (else balanced, else any): the model that
-    writes their library. None when they have no tier set at all."""
+    writes their library — or the first of ``prefer`` they have. None when
+    they have no tier set at all."""
     from captain_claw.flight_deck.basna_routes import _load_owner_tiers
     tiers: dict = {}
     try:
@@ -586,7 +587,7 @@ async def _resolve_tier(user_id: str) -> dict | None:
             tiers = _load_registry().get("tiers") or {}
         except Exception:
             tiers = {}
-    cfg = tiers.get("fast") or tiers.get("balanced") or next(iter(tiers.values()), None)
+    cfg = next((tiers[t] for t in prefer if tiers.get(t)), None) or next(iter(tiers.values()), None)
     return cfg if isinstance(cfg, dict) and cfg.get("model") else None
 
 
@@ -662,7 +663,7 @@ async def call_model(tier: dict, system: str, user: str, owner_id: str,
         try:
             from captain_claw.flight_deck import usage_quota
             from captain_claw.flight_deck.auth import get_db
-            await usage_quota.record_tokens(get_db(), owner_id, tokens)
+            await usage_quota.record_tokens(get_db(), owner_id, tokens, byok=bool(tier.get("byok")))
         except Exception:
             log.debug("library: token report failed", exc_info=True)
     if images and getattr(provider, "sees_images", None) is False:

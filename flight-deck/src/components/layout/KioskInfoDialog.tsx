@@ -44,6 +44,7 @@ const SOURCE_TEXT: Record<MyInfo['tiers']['source'], (name: string) => string> =
   own: (name) => `Your own model set${name ? ` “${name}”` : ''}.`,
   team: (name) => `The team's default set${name ? ` “${name}”` : ''}, set up by your admin.`,
   none: () => "No model set yet: new agents use the deck's built-in models.",
+  byok: () => 'Your own API keys (Settings → Your own AI keys) — no daily limits.',
 }
 
 const LIMIT_LABELS: [keyof MyInfo['account']['limits'], string][] = [

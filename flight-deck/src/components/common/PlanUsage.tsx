@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react'
-import { Gauge, Hourglass, RotateCcw } from 'lucide-react'
+import { Gauge, Hourglass, KeyRound, RotateCcw } from 'lucide-react'
 import type { QuotaAllowance, QuotaStatus } from '../../services/profile'
 import { canSpendReset, quotaLimited, useQuotaStore } from '../../stores/quotaStore'
+import { useByokStore } from '../../stores/byokStore'
 
 // ── Daily plan allowances, as the person sees them ──
 //
@@ -12,6 +13,8 @@ import { canSpendReset, quotaLimited, useQuotaStore } from '../../stores/quotaSt
 // detailed view. "Tokens" are "AI usage" here — a kiosk user needn't know
 // what a token is. Someone an admin gave free resets can spend one from the
 // bar (once spent or running low) or the Info dialog to start the day over.
+// Where the deck allows it, the bar also offers "Use my own keys" (byok.py):
+// on their own API keys a person has no daily limits.
 
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`
@@ -109,6 +112,23 @@ function FreeReset({ s, tone, compact = false }: { s: QuotaStatus; tone: string;
   )
 }
 
+/** "Use my own keys" — where the deck allows them and a layout can open the dialog. */
+function OwnKeysButton({ s, tone, compact = false }: { s: QuotaStatus; tone: string; compact?: boolean }) {
+  const host = useByokStore((st) => st.host)
+  const openDialog = useByokStore((st) => st.openDialog)
+  if (!s.byok_allowed || !host) return null
+  return (
+    <button
+      onClick={openDialog}
+      title="Run your agents on your own API keys — no daily limits"
+      className={`inline-flex shrink-0 items-center gap-1 rounded-md border font-medium ${compact ? 'px-1.5 py-0.5 text-[11px]' : 'px-2.5 py-1 text-xs'} ${tone}`}
+    >
+      <KeyRound className="h-3 w-3" />
+      {compact ? 'Own keys' : 'Use my own keys'}
+    </button>
+  )
+}
+
 /** Keeps the allowances fresh while they matter: on mount, and every minute
  *  (and on focus) while one is spent — an admin may give it back. */
 function useQuotaRefresh(): QuotaStatus | null {
@@ -128,6 +148,16 @@ function useQuotaRefresh(): QuotaStatus | null {
 
 export function PlanUsageBar({ simple }: { simple: boolean }) {
   const status = useQuotaRefresh()
+  if (status?.byok && simple) {
+    return (
+      <div className="flex items-center gap-2 border-b border-zinc-800/60 px-3 py-1.5 text-xs text-zinc-500"
+        title="Your agents run on your own API keys: no daily limits, and your provider bills you directly.">
+        <KeyRound className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
+        <span className="min-w-0 flex-1 truncate">On your own keys · no daily limits</span>
+        <span className="shrink-0">{fmtTokens(status.byok_tokens ?? 0)} AI tokens today</span>
+      </div>
+    )
+  }
   if (!quotaLimited(status)) return null
   const s = status
 
@@ -145,9 +175,10 @@ export function PlanUsageBar({ simple }: { simple: boolean }) {
                 ? ' Or start over now with your free reset.'
                 : ` Or start over now with one of your ${s.resets_left} free resets.`}
           </div>
-          {canSpendReset(s) && (
-            <div className="mt-2">
+          {(canSpendReset(s) || s.byok_allowed) && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
               <FreeReset s={s} tone="border-red-500/40 hover:bg-red-500/10" />
+              <OwnKeysButton s={s} tone="border-red-500/40 hover:bg-red-500/10" />
             </div>
           )}
         </div>
@@ -173,6 +204,7 @@ export function PlanUsageBar({ simple }: { simple: boolean }) {
       <Gauge className="h-3.5 w-3.5 shrink-0" />
       <span className="min-w-0 flex-1 truncate">{parts.join(' · ')}</span>
       {low && <FreeReset s={s} compact tone="border-amber-500/40 hover:bg-amber-500/10" />}
+      {low && <OwnKeysButton s={s} compact tone="border-amber-500/40 hover:bg-amber-500/10" />}
       <span className="shrink-0">Resets {resetClock(s.resets_at)}</span>
     </div>
   )
@@ -203,6 +235,22 @@ export function PlanUsageMeters({ initial }: { initial?: QuotaStatus }) {
   const live = useQuotaRefresh()
   const s = live ?? initial ?? null
   if (!s) return null
+  if (s.byok) {
+    return (
+      <div className="mt-3">
+        <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">Today</div>
+        <div className="rounded-lg bg-zinc-900 px-3 py-2">
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="flex items-center gap-1.5 text-[11px] text-zinc-500"><KeyRound className="h-3 w-3 text-emerald-500" /> On your own keys</span>
+            <span className="text-sm font-medium text-zinc-200">{fmtTokens(s.byok_tokens ?? 0)} AI tokens · no limits</span>
+          </div>
+        </div>
+        <p className="mt-1.5 text-[11px] text-zinc-500">
+          Your agents run on your own API keys, so the {s.plan_label} plan's daily limits don't apply. Your provider bills you for what they use.
+        </p>
+      </div>
+    )
+  }
   return (
     <div className="mt-3">
       <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">Today</div>
