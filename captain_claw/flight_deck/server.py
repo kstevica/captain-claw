@@ -4244,6 +4244,135 @@ class AgentConfigUpdate(BaseModel):
     env: str | None = None
 
 
+# An agent on a team tier holds the deck's own model key in its .env
+# (`_build_env`, `heal_keyless_agents`), and org keys never reach a browser: a
+# non-admin owner reads its secrets as dots and, for a long one, the last four
+# characters — as Settings hints the team keys. A save that still carries such
+# a placeholder keeps the value behind it.
+_SECRET_MASK = "····"
+_SECRET_ENV_NAME = re.compile(r"(?:^|_)(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD)$", re.IGNORECASE)
+_ENV_ASSIGNMENT = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.]*)(\s*=\s*)(.*?)(\s*)$")
+# A team key shorter than this (a local server's placeholder "x") is masked
+# where it is a whole value, never wherever it happens to occur.
+_TEAM_KEY_MIN_MATCH = 12
+
+
+def _mask_secret(value: str) -> str:
+    return _SECRET_MASK + value[-4:] if len(value) >= 12 else _SECRET_MASK
+
+
+def _sees_agent_secrets(request: Request, user: dict | None) -> bool:
+    """Whether the caller reads an agent's .env as it is: an admin — also one
+    acting for the owner (X-FD-Act-As) — or anyone on a deck without accounts
+    (one trusted operator). Any other owner reads its secrets masked."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    if not _fd_auth_enabled() or getattr(request.state, "acting_admin", None):
+        return True
+    return bool(user) and user.get("role") == "admin"
+
+
+async def _deck_secrets() -> set[str]:
+    """Every model key the deck holds for its team: the org provider and
+    endpoint keys behind "@system", and the provider keys in Flight Deck's own
+    environment. Best-effort — without them the name rule still masks."""
+    from captain_claw.flight_deck.basna_routes import ENDPOINT_KEYS_SETTING
+
+    keys = {os.environ.get(n) or "" for p in _PROVIDER_KEY_ENV for n in _provider_key_env_names(p)}
+    try:
+        for setting in ("fd:provider-keys", ENDPOINT_KEYS_SETTING):
+            keys.update(v for v in (await _system_json(setting)).values() if isinstance(v, str))
+    except Exception as exc:
+        log.warning("Could not read the team keys to mask", error=str(exc))
+    return {k.strip() for k in keys if k.strip() and k.strip() != "@system"}
+
+
+def _holds_team_key(value: str, team_keys: set[str]) -> bool:
+    return any(value == k or (len(k) >= _TEAM_KEY_MIN_MATCH and k in value) for k in team_keys)
+
+
+def _mask_team_keys(text: str, team_keys: set[str]) -> str:
+    """``text`` with every (long enough) team key in it masked where it stands."""
+    for k in team_keys:
+        if len(k) >= _TEAM_KEY_MIN_MATCH and k in text:
+            text = text.replace(k, _mask_secret(k))
+    return text
+
+
+def _unmask_team_keys(text: str, current: str, team_keys: set[str]) -> str:
+    """`_mask_team_keys` undone for the team keys ``current`` (the file on disk) holds."""
+    for k in team_keys:
+        if len(k) >= _TEAM_KEY_MIN_MATCH and k in current:
+            text = text.replace(_mask_secret(k), k)
+    return text
+
+
+def _env_value(raw: str) -> tuple[str, str]:
+    """(quote, value) of a .env value as written: ``"x"`` → ('"', 'x')."""
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[0], raw[1:-1]
+    return "", raw
+
+
+def _mask_env_line(line: str, team_keys: set[str]) -> str:
+    """One .env line (no line ending) as a non-admin reads it: the value of an
+    assignment named like a secret (``*_API_KEY``, ``*_TOKEN``, ``*_SECRET`` …)
+    or holding a team key is masked; a team key anywhere else — a comment — is
+    masked where it stands."""
+    m = _ENV_ASSIGNMENT.match(line)
+    if not m:
+        return _mask_team_keys(line, team_keys)
+    lead, name, eq, raw, trail = m.groups()
+    quote, value = _env_value(raw)
+    if value and (_SECRET_ENV_NAME.search(name) or _holds_team_key(value, team_keys)):
+        return f"{lead}{name}{eq}{quote}{_mask_secret(value)}{quote}{trail}"
+    return line
+
+
+def _mask_agent_env(text: str, team_keys: set[str]) -> str:
+    out = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        out.append(_mask_env_line(body, team_keys) + line[len(body):])
+    return "".join(out)
+
+
+def _unmask_agent_env(text: str, current: str, team_keys: set[str]) -> str:
+    """``text`` (a .env being saved) with every placeholder `_mask_agent_env`
+    wrote swapped back for the value it stands for in ``current`` (the file on
+    disk), so a save from a masked read never writes the mask over the key. A
+    placeholder with nothing behind it — a name that holds no such value — is
+    a ValueError naming it, rather than a mask written as the value."""
+    restore: dict[str, str] = {}
+    held: dict[str, list[str]] = {}
+    for line in current.splitlines():
+        masked = _mask_env_line(line, team_keys)
+        if masked != line:
+            restore.setdefault(masked, line)
+        m = _ENV_ASSIGNMENT.match(line)
+        if m:
+            held.setdefault(m.group(2), []).append(_env_value(m.group(4))[1])
+    out = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        end = line[len(body):]
+        m = _ENV_ASSIGNMENT.match(body)
+        if _SECRET_MASK not in body:
+            out.append(line)
+        elif body in restore:
+            out.append(restore[body] + end)
+        elif m and _env_value(m.group(4))[1].startswith(_SECRET_MASK):
+            lead, name, eq, raw, trail = m.groups()
+            quote, value = _env_value(raw)
+            real = next((v for v in held.get(name, []) if _mask_secret(v) == value), None)
+            if real is None:
+                raise ValueError(name)
+            out.append(f"{lead}{name}{eq}{quote}{real}{quote}{trail}{end}")
+        else:
+            out.append(line)  # a comment that shows a mask — nothing behind it to lose
+    return "".join(out)
+
+
 def _resolve_agent_dir(identifier: str, kind: str, user_id: str) -> Path:
     """Resolve the on-disk data directory for a container or process agent."""
     if kind == "docker":
@@ -4263,7 +4392,8 @@ async def get_agent_config(
     kind: str, identifier: str, request: Request,
     user: dict | None = _agent_manager_dep,
 ):
-    """Read an agent's config.yaml and .env files."""
+    """Read an agent's config.yaml and .env files — secrets masked unless the
+    caller is an admin (`_sees_agent_secrets`)."""
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
     user_id = getattr(request.state, "user_id", "")
@@ -4277,6 +4407,10 @@ async def get_agent_config(
         config_yaml = config_file.read_text()
     if env_file.is_file():
         env = env_file.read_text()
+    if not _sees_agent_secrets(request, user):
+        team_keys = await _deck_secrets()
+        config_yaml = _mask_team_keys(config_yaml, team_keys)
+        env = _mask_agent_env(env, team_keys)
     return {"config_yaml": config_yaml, "env": env}
 
 
@@ -4285,28 +4419,45 @@ async def update_agent_config(
     kind: str, identifier: str, body: AgentConfigUpdate, request: Request,
     user: dict | None = _agent_manager_dep,
 ):
-    """Update an agent's config.yaml and/or .env files. Agent must be restarted for changes to take effect."""
+    """Update an agent's config.yaml and/or .env files. Agent must be restarted for changes to take effect.
+
+    A value the read masked (`get_agent_config`) and that comes back as its
+    placeholder keeps what is on disk."""
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
     user_id = getattr(request.state, "user_id", "")
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
 
+    config_file = agent_dir / "config.yaml"
+    env_file = agent_dir / ".env"
+    config_yaml, env = body.config_yaml, body.env
+    if _SECRET_MASK in (config_yaml or "") + (env or ""):
+        team_keys = await _deck_secrets()
+        if config_yaml is not None:
+            config_yaml = _unmask_team_keys(
+                config_yaml, config_file.read_text() if config_file.is_file() else "", team_keys)
+        if env is not None:
+            try:
+                env = _unmask_agent_env(env, env_file.read_text() if env_file.is_file() else "", team_keys)
+            except ValueError as exc:
+                raise HTTPException(400, (
+                    f"{exc} in .env shows a hidden value (····) that it doesn't hold — type the "
+                    "value, or remove the line. Nothing was saved."))
+
     updated = []
-    if body.config_yaml is not None:
-        config_file = agent_dir / "config.yaml"
-        config_file.write_text(body.config_yaml)
+    if config_yaml is not None:
+        config_file.write_text(config_yaml)
         # Also update home-config copy so it takes precedence on restart
         home_config = agent_dir / "data" / "home-config" / "config.yaml"
         if home_config.parent.is_dir():
-            home_config.write_text(body.config_yaml)
+            home_config.write_text(config_yaml)
         # Also update home-config-parent/.captain-claw copy
         parent_config = agent_dir / "data" / "home-config-parent" / ".captain-claw" / "config.yaml"
         if parent_config.parent.is_dir():
-            parent_config.write_text(body.config_yaml)
+            parent_config.write_text(config_yaml)
         updated.append("config.yaml")
-    if body.env is not None:
-        env_file = agent_dir / ".env"
-        env_file.write_text(body.env)
+    if env is not None:
+        env_file.write_text(env)
         updated.append(".env")
 
     return {"ok": True, "updated": updated, "message": "Restart the agent for changes to take effect."}
