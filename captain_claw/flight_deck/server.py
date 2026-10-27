@@ -613,19 +613,32 @@ def _share_fd_secrets(environment: dict[str, str]) -> None:
 # all trust each other.
 _CONFINE_ENV_KEYS = ("CLAW_CONFINE", "CLAW_CONFINE_HOME", "CLAW_CONFINE_WORKSPACE")
 # What a non-admin's .env / env_vars may not change from FD's own: each makes
-# the agent's Python, git, node or shell load code from a path (and the agent
-# writes its own workspace), moves the roots its tools are held to, routes its
-# calls to Flight Deck through another host, or turns its audit off.
+# the agent's Python, git, node, Java, OpenSSL, Playwright or shell load code
+# or config from a path (and the agent writes its own workspace) or run a
+# command it names, moves the roots its tools are held to, routes its calls
+# through another host (a proxy, a resolver alias) or has it trust another
+# certificate authority, or turns its audit off.
 # (CLAW_VFS_SCOPE stays: it only ever narrows the agent's VFS — Iskra's wall.)
 _PINNED_ENV_PREFIXES = (
     "PYTHON", "LD_", "DYLD_", "GIT_", "NODE_", "NPM_CONFIG_", "PERL", "RUBY",
-    "CLAW_PTY_", "CLAW_TOOL_AUDIT",
+    "JAVA_", "_JAVA_", "JDK_JAVA_", "OPENSSL_", "PLAYWRIGHT_", "XDG_", "PIP_", "UV_",
+    "SSL_CERT_", "CLAW_PTY_", "CLAW_TOOL_AUDIT",
 )
 _PINNED_ENV_KEYS = frozenset({
-    "PATH", "BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELL", "PLAYWRIGHT_BROWSERS_PATH",
+    "PATH", "BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELL", "ZDOTDIR",
+    "BROWSER", "EDITOR", "VISUAL", "PAGER", "LESSOPEN", "SSH_ASKPASS",
+    "CURL_HOME", "WGETRC", "NETRC", "GCONV_PATH", "LOCPATH",
     "CLAW_VFS_ROOT", "FD_DATA_DIR", "CAPTAIN_CLAW_FD_HOME", "FD_DATA_KEY_FILE",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "HOSTALIASES", "RES_OPTIONS", "LOCALDOMAIN",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSLKEYLOGFILE",
 })
+
+
+def _pinned_env_name(name: str) -> bool:
+    """Whether ``name`` is one a non-admin's agent takes from Flight Deck only."""
+    upper = name.upper()
+    return upper in _PINNED_ENV_KEYS or upper.startswith(_PINNED_ENV_PREFIXES)
 
 
 def _confine_agents() -> bool:
@@ -670,8 +683,7 @@ def _pin_confinement(environment: dict[str, str], base: dict[str, str], *,
     ws = Path(workspace).expanduser().resolve() if workspace else default_ws
     if tier == "user":
         for key in list(environment):
-            upper = key.upper()
-            if upper in _PINNED_ENV_KEYS or upper.startswith(_PINNED_ENV_PREFIXES):
+            if _pinned_env_name(key):
                 if key in base:
                     environment[key] = base[key]
                 else:
@@ -4581,6 +4593,17 @@ async def update_agent_config(
         blockers = await _team_key_blockers(model, kept if env is None else _dotenv_values(env), kept=kept)
         if blockers:
             raise _team_key_refusal(blockers)
+    if env is not None and _confine_agents() and not _owner_is_admin(user_id):
+        # A non-admin's agent takes these from Flight Deck at every start
+        # (`_pin_confinement`): one set here would never apply — say so.
+        from captain_claw.config import Config
+
+        was = Config._read_dotenv_file(env_file)
+        pinned = sorted(n for n, v in _dotenv_values(env).items() if _pinned_env_name(n) and v != was.get(n))
+        if pinned:
+            raise HTTPException(400, (
+                f"Not saved: Flight Deck sets {', '.join(pinned)} for this agent — it can load code "
+                "or reroute the agent's calls, so it isn't taken from .env. Remove the line."))
 
     updated = []
     if config_yaml is not None:
