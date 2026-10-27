@@ -107,6 +107,22 @@ def _tools(slug: str) -> list[str]:
     return [str(t) for t in enabled][:40] if isinstance(enabled, list) else []
 
 
+def _own_skills(slug: str) -> list[dict]:
+    """The skills in the agent's own folder (an Advanced setup writes one per
+    request it handles): name and when it applies, from each SKILL.md."""
+    from captain_claw.skills import _parse_frontmatter
+    root = _data_dir() / slug / "data" / "home-config-parent" / ".captain-claw" / "skills"
+    out: list[dict] = []
+    for md in sorted(root.glob("*/SKILL.md"))[:20] if root.is_dir() else []:
+        try:
+            meta = _parse_frontmatter(md.read_text(encoding="utf-8")[:4000])
+        except Exception:
+            continue
+        name = str(meta.get("name") or md.parent.name)
+        out.append({"name": name, "when": _clip(meta.get("description"), 200)})
+    return out
+
+
 async def _archetype(entry: dict, owner_id: str) -> dict | None:
     """The archetype the agent was made from: the id spawn recorded, else
     the one whose role became its description (an archetype spawn without a
@@ -162,6 +178,7 @@ async def _make_up(slug: str, entry: dict, owner_id: str) -> dict:
     """What the agent is — the part of its sources that, when it changes,
     makes the cards out of date at once."""
     arch = await _archetype(entry, owner_id)
+    skills = _own_skills(slug)
     return {
         "accounts": await _accounts(owner_id),
         "name": str(entry.get("name") or slug),
@@ -173,6 +190,8 @@ async def _make_up(slug: str, entry: dict, owner_id: str) -> dict:
         } if arch else None,
         "instructions": await _instructions(owner_id, slug),
         "tools": _tools(slug),
+        # Only when there are some: a new key would rewrite every agent's cards.
+        **({"skills": skills} if skills else {}),
         "scheduled": _scheduled(slug, owner_id),
     }
 
@@ -358,6 +377,9 @@ def _prompt(make_up: dict, done: dict) -> str:
                  f"Microsoft 365 (Outlook, Calendar, OneDrive): {'yes' if accounts.get('microsoft') else 'no'}")
     if make_up.get("instructions"):
         parts.append(f"Standing instructions:\n{make_up['instructions'][:3000]}")
+    if make_up.get("skills"):
+        parts.append("Requests it has a procedure for (its skills):\n" + "\n".join(
+            f"- {s['name']}: {s['when']}" for s in make_up["skills"]))
     if make_up.get("scheduled"):
         parts.append("Scheduled tasks:\n" + "\n".join(
             f"- {t['name']} ({t['schedule']}): {_clip(t['prompt'], 300)}" for t in make_up["scheduled"]))

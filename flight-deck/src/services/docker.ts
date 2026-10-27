@@ -1,6 +1,7 @@
 // REST client for the Flight Deck backend (Docker management)
 
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+import type { ReviewedPreset } from './agentPreset'
 
 const FD_BASE = '/fd'
 
@@ -257,6 +258,8 @@ export interface ProcessActionResult {
   ok: boolean
   slug: string
   message: string
+  /** A spawn's standing instructions as Flight Deck stored them for the owner. */
+  fleet_instructions?: string
 }
 
 // ── Old Man quick-spawn ──
@@ -297,6 +300,7 @@ export const spawnProcess = (config: SpawnConfig) =>
 // config or API key passes through the browser. The kiosk's "New agent" picker.
 export const spawnArchetypeProcess = (
   archetypeId: string, name: string, description: string, asUser?: string,
+  preset?: ReviewedPreset,
 ) =>
   fdFetch<ProcessActionResult>('/spawn-process', {
     method: 'POST',
@@ -307,6 +311,7 @@ export const spawnArchetypeProcess = (
       botport_enabled: false,
       web_enabled: true,
       web_port: 0,
+      ...(preset ? { preset } : {}),
     }),
   }, asUser)
 
