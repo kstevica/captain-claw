@@ -1,17 +1,19 @@
-"""Agent presets — the "Advanced" setup of the kiosk's New agent dialog.
+"""Agent presets — "your way of working", set up right after a kiosk agent is created.
 
-While creating an agent from an archetype, the person can add instructions and
-documents (their way of working, policies, FAQs, procedures, price lists,
-templates). ``POST /fd/agent-preset/prepare`` reads the documents and has the
-owner's model pull out what the new agent must know and do — rules, the
-requests it handles (intents, each with its steps), facts, when to ask first,
-output templates, a glossary and a summary per document — every item with the
-document and section it came from. Nothing reaches an agent yet: the dialog
-shows the preset for review, and the spawn takes the items the person kept
-(``AgentConfig.preset``) and seeds the new agent before it starts:
+The New agent dialog has a "set up its way of working next" box; with it
+ticked, the agent is created as usual and the setup dialog opens on it. The
+person adds instructions and documents (policies, FAQs, procedures, price
+lists, templates) — uploaded, or picked from their File library — and may say
+what each document is and how the agent should use it.
+``POST /fd/agent-preset/prepare`` reads them and has the owner's model pull out
+what the agent must know and do — rules, the requests it handles (intents, each
+with its steps), facts, when to ask first, output templates, a glossary and a
+summary per document — every item with the document and section it came from.
+Nothing reaches the agent yet: the dialog shows the preset for review, and
+``POST /fd/agent-preset/apply`` gives the agent the items the person kept:
 
 - rules, when-to-ask and templates → a short "Your owner's rules" block after
-  the archetype's instructions (the full lists in ``knowledge/owner-rules.md``);
+  its instructions (the full lists in ``knowledge/owner-rules.md``);
 - intents → one skill each, in the agent's own skills folder
   (``~/.captain-claw/skills/<name>/SKILL.md`` under its HOME);
 - documents → Markdown in its workspace's ``knowledge/`` folder with an
@@ -19,9 +21,11 @@ shows the preset for review, and the spawn takes the items the person kept
   agent only (not the owner-wide deep memory);
 - facts → insights, through the agent's REST once it is up.
 
-The documents' text waits server-side under the preset's id for a day, so
-Create doesn't upload them again. The owner's model reads them (balanced
-tier first) and the tokens count toward the owner's daily allowance.
+A running agent needs no restart for any of it: it re-reads its skills folder,
+indexes its workspace on its next message, and the chat sends it the new
+instructions. The documents' text waits server-side under the preset's id for
+a day, so Apply doesn't upload them again. The owner's model reads them
+(balanced tier first) and the tokens count toward the owner's daily allowance.
 """
 
 from __future__ import annotations
@@ -38,7 +42,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from pydantic import BaseModel, Field
 
+from captain_claw.flight_deck import file_library
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.flight_deck.file_library import (
     _auth_enabled,
@@ -77,6 +83,22 @@ _BLOCK_CAP = 5000                      # the rules block in the agent's instruct
 _MAX_INSTRUCTIONS_TOTAL = 64000        # AgentConfig.fleet_instructions' own cap
 _FACTS_READY_S = 90.0
 _TAG = "owner-setup"
+_MAX_DESCRIPTION = 500
+
+# How the person wants a document used: what the model is told, and what the
+# agent's knowledge index says. "auto" leaves it to the model.
+USAGES = {
+    "auto": ("", ""),
+    "rules": ("Rules to follow",
+              "rules and policies the agent must follow — extract its rules and when to ask first"),
+    "procedures": ("Procedures",
+                   "procedures — turn what it describes into intents, each with its steps"),
+    "reference": ("Reference",
+                  "reference material to look things up in — pull out the key facts and summarise it "
+                  "well, but do not turn it into rules"),
+    "templates": ("Templates",
+                  "templates and examples of answers — extract them as templates"),
+}
 
 
 # ── Cleaning what the model (or the dialog) sent ──────────────────────
@@ -245,34 +267,87 @@ def _read_one(raw: bytes, suffix: str) -> tuple[str | None, str | None]:
                 pass
 
 
-async def read_documents(files: list[UploadFile]) -> tuple[list[dict], list[str]]:
-    """Each uploaded document's text (``name``, ``text``, ``chars``,
-    ``truncated``) and what the person should know about the ones that
-    didn't come through — said without the model."""
+def note(raw: Any) -> dict:
+    """The person's note on a document: what it is, and how to use it."""
+    d = raw if isinstance(raw, dict) else {}
+    usage = str(d.get("usage") or "auto")
+    return {"description": _line(d.get("description"), _MAX_DESCRIPTION),
+            "usage": usage if usage in USAGES else "auto"}
+
+
+def _no_text(name: str, err: Any) -> str:
+    log.info("agent preset: no text in a document", file=name, error=err)
+    return f"{name}: no text could be read from it (a scanned PDF or a picture?), so it was left out."
+
+
+async def _upload_text(uf: UploadFile, name: str) -> tuple[str, str]:
+    """An uploaded document's text, or "" and what to tell the person."""
+    try:
+        raw = await uf.read()
+    except Exception:
+        raw = b""
+    if not raw:
+        return "", f"{name}: the file is empty."
+    if len(raw) > _MAX_FILE_BYTES:
+        return "", f"{name}: larger than 25 MB, left out."
+    text, err = await asyncio.to_thread(_read_one, raw, Path(uf.filename or "").suffix)
+    return (text, "") if (text or "").strip() else ("", _no_text(name, err))
+
+
+def _library_text(path: Path, name: str) -> tuple[str, str]:
+    """A document in one of the person's agents' folders: its text, or ""
+    and what to tell the person."""
+    try:
+        if path.stat().st_size > _MAX_FILE_BYTES:
+            return "", f"{name}: larger than 25 MB, left out."
+        text, err = file_library.read_text(path, path.suffix.lower())
+    except Exception as exc:
+        text, err = "", str(exc)
+    return (text, "") if (text or "").strip() else ("", _no_text(name, err))
+
+
+async def read_documents(files: list[UploadFile], notes: list | None = None,
+                         library: list | None = None, user: dict | None = None,
+                         ) -> tuple[list[dict], list[str]]:
+    """Each document's text (``name``, ``text``, ``chars``, ``truncated``,
+    the person's ``description`` and ``usage``, and where it came from) and
+    what the person should know about the ones that didn't come through —
+    said without the model. ``notes`` go with ``files`` in order;
+    ``library`` is ``[{id, description, usage}]`` of File library files,
+    read only from ``user``'s own agents' folders."""
+    uploads = [f for f in files or [] if f and f.filename]
+    notes = notes if isinstance(notes, list) else []
+    picks = [p for p in library or [] if isinstance(p, dict) and p.get("id")]
+    sources: list[tuple[str, Any, dict]] = [
+        ("upload", uf, note(notes[i] if i < len(notes) else None)) for i, uf in enumerate(uploads)]
+    sources += [("library", p, note(p)) for p in picks]
+
     docs: list[dict] = []
     warnings: list[str] = []
     taken: set[str] = set()
     total = 0
-    for uf in [f for f in files or [] if f and f.filename][:_MAX_FILES + 1]:
-        name = _display_name(uf.filename, taken)
+    for origin, src, meta in sources[:_MAX_FILES + 1]:
         if len(docs) >= _MAX_FILES:
             warnings.append(f"Only the first {_MAX_FILES} documents were read.")
             break
-        try:
-            raw = await uf.read()
-        except Exception:
-            raw = b""
-        if not raw:
-            warnings.append(f"{name}: the file is empty.")
-            continue
-        if len(raw) > _MAX_FILE_BYTES:
-            warnings.append(f"{name}: larger than 25 MB, left out.")
-            continue
-        text, err = await asyncio.to_thread(_read_one, raw, Path(uf.filename).suffix)
-        if not (text or "").strip():
-            log.info("agent preset: no text in a document", file=name, error=err)
-            warnings.append(f"{name}: no text could be read from it (a scanned PDF or a picture?), "
-                            "so it was left out.")
+        extra: dict = {}
+        if origin == "upload":
+            name = _display_name(src.filename, taken)
+            text, said = await _upload_text(src, name)
+        else:
+            try:
+                row, agents = file_library._owned_row(str(src["id"]), user or {})
+                path = file_library._resolve_path(row)
+            except HTTPException:
+                row, path = None, None
+            if row is None or path is None:
+                warnings.append("A file picked from your library is no longer there, so it was left out.")
+                continue
+            name = _display_name(row["filename"], taken)
+            extra = {"agent": agents.get(row["agent_slug"], {}).get("name") or row["agent_slug"]}
+            text, said = await asyncio.to_thread(_library_text, path, name)
+        if said:
+            warnings.append(said)
             continue
         remaining = _MAX_TOTAL - total
         if remaining <= 0:
@@ -284,7 +359,8 @@ async def read_documents(files: list[UploadFile]) -> tuple[list[dict], list[str]
             warnings.append(f"{name}: only the first {cut:,} characters were read.")
         text = text[:cut]
         total += len(text)
-        docs.append({"name": name, "text": text, "chars": len(text), "truncated": truncated})
+        docs.append({"name": name, "text": text, "chars": len(text), "truncated": truncated,
+                     "origin": origin, **meta, **extra})
     return docs, warnings
 
 
@@ -321,14 +397,16 @@ def save_docs(owner_id: str, docs: list[dict], archetype: str) -> str:
     for n, d in enumerate(docs):
         file = f"{n}.txt"
         (folder / "docs" / file).write_text(d["text"], encoding="utf-8")
-        meta["docs"].append({"name": d["name"], "file": file, "chars": d["chars"]})
+        meta["docs"].append({"name": d["name"], "file": file, "chars": d["chars"],
+                             **note(d)})
     (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     return preset_id
 
 
 def load_docs(owner_id: str, preset_id: str) -> list[dict]:
-    """A waiting preset's documents (``name``, ``text``); empty when it is
-    gone, expired, or another person's."""
+    """A waiting preset's documents (``name``, ``text``, the person's
+    ``description`` and ``usage``); empty when it is gone, expired, or
+    another person's."""
     folder = _preset_dir(owner_id, preset_id)
     if folder is None or not (folder / "meta.json").is_file():
         return []
@@ -336,7 +414,8 @@ def load_docs(owner_id: str, preset_id: str) -> list[dict]:
         meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
         if time.time() - float(meta.get("created") or 0) > _TTL:
             return []
-        return [{"name": d["name"], "text": (folder / "docs" / d["file"]).read_text(encoding="utf-8")}
+        return [{"name": d["name"], "text": (folder / "docs" / d["file"]).read_text(encoding="utf-8"),
+                 **note(d)}
                 for d in meta.get("docs") or []
                 if re.fullmatch(r"\d+\.txt", str(d.get("file") or ""))
                 and (folder / "docs" / d["file"]).is_file()]
@@ -399,9 +478,18 @@ def _user_prompt(arch: dict | None, instructions: str, docs: list[dict]) -> str:
     if instructions:
         parts.append(f"## The owner's instructions\n{instructions}")
     if docs:
-        parts.append("## The owner's documents\n" + "\n\n".join(
-            f"### {d['name']}\n{d['text']}" for d in docs))
+        parts.append("## The owner's documents\n" + "\n\n".join(_doc_part(d) for d in docs))
     return "\n\n".join(parts)
+
+
+def _doc_part(d: dict) -> str:
+    head = [f"### {d['name']}"]
+    if d.get("description"):
+        head.append(f"The owner says: {d['description']}")
+    hint = USAGES.get(d.get("usage") or "auto", ("", ""))[1]
+    if hint:
+        head.append(f"Use it as: {hint}")
+    return "\n".join(head) + "\n" + d["text"]
 
 
 async def _extract(tier: dict, user_prompt: str, owner_id: str) -> dict:
@@ -418,19 +506,43 @@ async def _extract(tier: dict, user_prompt: str, owner_id: str) -> dict:
         return parse_preset(content)
 
 
+def _json_list(raw: str) -> list:
+    try:
+        got = json.loads(raw or "[]")
+    except ValueError:
+        raise HTTPException(400, "The document notes couldn't be read.")
+    return got if isinstance(got, list) else []
+
+
+def _own_process(slug: str, owner_id: str) -> dict:
+    """The caller's own process agent's registry entry — 404 for anyone else's."""
+    from captain_claw.flight_deck.server import _verify_process_owner
+    return _verify_process_owner(str(slug or ""), owner_id)
+
+
 @router.post("/prepare")
 async def prepare(
     archetype: str = Form(""),
+    agent: str = Form(""),
     instructions: str = Form(""),
+    notes: str = Form(""),
+    library: str = Form(""),
     files: list[UploadFile] = File(default=[]),
     user: dict = Depends(get_managed_user),
 ) -> dict:
     """Read the person's instructions and documents into a preset for review.
-    Persists only the documents' text (under the returned id), never an agent."""
+    ``agent``: the agent being set up (its archetype frames the read);
+    ``notes``: JSON ``[{description, usage}]``, one per uploaded file in
+    order; ``library``: JSON ``[{id, description, usage}]`` of File library
+    files. Persists only the documents' text (under the returned id), never
+    anything in an agent."""
     owner_id = str(user.get("id") or "") if _auth_enabled() else ""
     instructions = (instructions or "").strip()[:_MAX_INSTRUCTIONS]
-    if not instructions and not [f for f in files or [] if f and f.filename]:
+    file_notes, picks = _json_list(notes), _json_list(library)
+    if not instructions and not picks and not [f for f in files or [] if f and f.filename]:
         raise HTTPException(400, "Add some instructions or at least one document first.")
+    if agent:
+        archetype = archetype or str(_own_process(agent, owner_id).get("archetype") or "")
     if await _quota_spent(owner_id):
         raise HTTPException(429, "Today's allowance is used up, so the documents can't be read now. "
                                  "Create the agent without them, or try again tomorrow.")
@@ -439,7 +551,7 @@ async def prepare(
     except Exception:
         log.debug("agent preset: prune failed", exc_info=True)
 
-    docs, warnings = await read_documents(files)
+    docs, warnings = await read_documents(files, file_notes, picks, user)
     if not instructions and not docs:
         raise HTTPException(400, " ".join(warnings) or "None of the documents had text that could be read.")
     tier = await _resolve_tier(owner_id, prefer=_TIERS)
@@ -454,18 +566,22 @@ async def prepare(
         log.warning("agent preset: model call failed", model=tier.get("model"), error=str(exc))
         raise HTTPException(502, f"Couldn't read the documents with {tier.get('model') or 'the model'}: {exc}")
 
-    # Every document the person gave gets a knowledge entry, summary or not;
-    # one the model invented a name for doesn't.
-    names = [d["name"] for d in docs]
-    known = {k["doc"]: k for k in preset["knowledge"] if k["doc"] in names}
-    preset["knowledge"] = [known.get(n) or {"doc": n, "title": Path(n).stem[:120], "summary": ""}
-                           for n in names]
+    # Every document the person gave gets a knowledge entry — summarised by
+    # the model, else by the person's own words; one the model invented a
+    # name for doesn't.
+    known = {k["doc"]: k for k in preset["knowledge"]}
+    preset["knowledge"] = [dict(known.get(d["name"]) or {"doc": d["name"], "title": Path(d["name"]).stem[:120],
+                                                         "summary": ""}) for d in docs]
+    for k, d in zip(preset["knowledge"], docs):
+        k["summary"] = k["summary"] or d["description"]
     preset["warnings"] = (warnings + preset["warnings"])[:20]
     preset_id = await asyncio.to_thread(save_docs, owner_id, docs, archetype)
     return {
         "id": preset_id,
         "preset": preset,
-        "docs": [{"name": d["name"], "chars": d["chars"], "truncated": d["truncated"]} for d in docs],
+        "docs": [{"name": d["name"], "chars": d["chars"], "truncated": d["truncated"],
+                  "origin": d["origin"], "description": d["description"], "usage": d["usage"],
+                  **({"agent": d["agent"]} if d.get("agent") else {})} for d in docs],
         "model": str(tier.get("model") or ""),
     }
 
@@ -501,7 +617,7 @@ def _skill_md(intent: dict) -> str:
         lines += ["## Steps", *[f"{n}. {s}" for n, s in enumerate(intent["steps"], 1)], ""]
     cite = _cite(intent["source"])
     if cite:
-        lines += [f"Source: {cite} (from your owner, when you were created)", ""]
+        lines += [f"Source: {cite} (from your owner, when they set you up)", ""]
     return "\n".join(lines)
 
 
@@ -520,7 +636,7 @@ def _owner_rules_md(preset: dict) -> str:
     """Every rule, when-to-ask and template in full: the prompt block may
     have to leave some out."""
     lines = ["# Your owner's rules", "",
-             "Set up by your owner when you were created, from their instructions and documents.", ""]
+             "Set up by your owner from their instructions and documents.", ""]
     if preset["rules"]:
         lines += ["## Rules", *[f"- {r['text']}" for r in preset["rules"]], ""]
     if preset["escalation"]:
@@ -534,26 +650,31 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict]) -> list[dict]:
     """The kept documents as Markdown, with an index, the glossary and the
     full rules; the documents written (``file``, ``title``)."""
     folder.mkdir(parents=True, exist_ok=True)
-    text_of = {d["name"]: d["text"] for d in docs}
+    doc_of = {d["name"]: d for d in docs}
     taken: set[str] = set()
     written: list[dict] = []
     for k in preset["knowledge"]:
-        text = text_of.get(k["doc"])
-        if text is None:
+        doc = doc_of.get(k["doc"])
+        if doc is None:
             continue
         file = f"{_file_stem(k['doc'], taken)}.md"
         title = k["title"] or Path(k["doc"]).stem
-        head = [f"# {title}", "", f"Source: {k['doc']} — given by your owner when you were created.", ""]
-        if k["summary"]:
+        use = USAGES.get(doc.get("usage") or "auto", ("", ""))[0]
+        head = [f"# {title}", "", f"Source: {k['doc']} — given to you by your owner.", ""]
+        if doc.get("description"):
+            head += [f"Your owner says: {doc['description']}", ""]
+        if use:
+            head += [f"Use it as: {use.lower()}.", ""]
+        if k["summary"] and k["summary"] != doc.get("description"):
             head += [k["summary"], ""]
-        (folder / file).write_text("\n".join(head) + "\n---\n\n" + text.strip() + "\n", encoding="utf-8")
-        written.append({"file": file, "title": title, "summary": k["summary"]})
+        (folder / file).write_text("\n".join(head) + "\n---\n\n" + doc["text"].strip() + "\n", encoding="utf-8")
+        written.append({"file": file, "title": title, "summary": k["summary"], "use": use})
     if written:
         (folder / "INDEX.md").write_text("\n".join([
             "# Knowledge", "",
-            "Documents your owner gave you when you were created. Read the one that fits "
-            "before you answer from memory.", "",
+            "Documents your owner gave you. Read the one that fits before you answer from memory.", "",
             *[f"- [{w['title']}]({w['file']})" + (f" — {w['summary']}" if w["summary"] else "")
+              + (f" ({w['use'].lower()})" if w["use"] else "")
               for w in written], ""]), encoding="utf-8")
     if preset["glossary"]:
         (folder / "glossary.md").write_text("\n".join([
@@ -569,8 +690,8 @@ def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int
     ``cap`` characters. When-to-ask goes in before the other rules; what
     doesn't fit is pointed at in knowledge/owner-rules.md."""
     head = ["## Your owner's rules", "",
-            "Set up by your owner when you were created. Where they differ from the general "
-            "procedure above, follow these."]
+            "Set up by your owner. Where they differ from the general procedure above, "
+            "follow these."]
     tail: list[str] = []
     if preset["templates"]:
         tail += ["", "### Templates",
@@ -622,10 +743,12 @@ def with_block(instructions: str, block: str) -> str:
     return f"{base}\n\n{block}" if base else block
 
 
-def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any) -> tuple[str, list[dict]]:
-    """Write the reviewed preset into a new agent's folder, before it starts.
-    Returns the block its instructions end with, and the facts to give it as
-    insights once it is up. The waiting documents are dropped afterwards."""
+def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any) -> dict:
+    """Write the reviewed preset into an agent's folder. Returns the
+    ``block`` its instructions end with, the ``facts`` to give it as
+    insights, and what was written: ``skills`` (names) and ``knowledge``
+    (documents) — plus how many of each other group it got, in ``counts``.
+    The waiting documents are dropped afterwards."""
     data = body if isinstance(body, dict) else {}
     preset = normalise(data)
     preset_id = str(data.get("id") or "")
@@ -637,7 +760,15 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any) -> tuple[st
     knowledge = write_knowledge(workspace / "knowledge", preset, docs)
     if preset_id:
         discard(owner_id, preset_id)
-    return rules_block(preset, knowledge, skills), preset["facts"]
+    return {
+        "block": rules_block(preset, knowledge, skills),
+        "facts": preset["facts"],
+        "skills": skills,
+        "knowledge": knowledge,
+        "counts": {"rules": len(preset["rules"]), "escalation": len(preset["escalation"]),
+                   "templates": len(preset["templates"]), "glossary": len(preset["glossary"]),
+                   "intents": len(skills), "facts": len(preset["facts"]), "knowledge": len(knowledge)},
+    }
 
 
 async def _post_facts(port: int, token: str, facts: list[dict]) -> int:
@@ -715,3 +846,51 @@ def schedule_facts(slug: str, port_of: Callable[[], int], token: str, facts: lis
         return
     _PENDING.add(task)
     task.add_done_callback(_PENDING.discard)
+
+
+# ── Apply (to the agent the dialog was opened on) ─────────────────────
+
+
+class ApplyBody(BaseModel):
+    agent: str = Field(min_length=1, max_length=128)
+    # The prepared id and the items the person kept, as they edited them.
+    preset: dict
+
+
+@router.post("/apply")
+async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict:
+    """Give one of the caller's process agents the reviewed preset: skills and
+    knowledge into its folder, the owner's block after its instructions
+    (stored for the owner, and returned for the chat to send), facts as
+    insights once it answers. Works on a running agent — no restart."""
+    from captain_claw.flight_deck import server as srv
+    owner_id = str(user.get("id") or "") if _auth_enabled() else ""
+    slug = body.agent
+    entry = _own_process(slug, owner_id)
+    agent_dir = srv.DATA_DIR / slug
+    workspace = Path(entry["workspace"]) if entry.get("workspace") else agent_dir / "data" / "workspace"
+    try:
+        done = await asyncio.to_thread(seed, agent_dir, workspace, owner_id, body.preset)
+    except Exception:
+        log.warning("agent preset: could not write the setup", agent=slug, exc_info=True)
+        raise HTTPException(500, "The setup couldn't be written into the agent's folder.")
+
+    # Without accounts the browser keeps the instructions: it appends the block.
+    instructions = ""
+    if owner_id and done["block"]:
+        current = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "")
+        instructions = with_block(current, done["block"])
+        await srv._set_owner_agent_instructions(owner_id, "process", slug, instructions, strict=True)
+    if done["facts"]:
+        schedule_facts(slug, lambda: (srv._load_process_registry().get(slug) or {}).get("web_port") or 0,
+                       str(entry.get("web_auth") or ""), done["facts"])
+    log.info("agent preset: applied", agent=slug, **done["counts"])
+    return {
+        "ok": True,
+        "instructions": instructions,
+        "block": done["block"],
+        "counts": done["counts"],
+        "skills": done["skills"],
+        "knowledge": [k["title"] for k in done["knowledge"]],
+        "running": srv._process_is_alive(slug),
+    }

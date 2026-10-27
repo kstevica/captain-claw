@@ -35,6 +35,15 @@ only what is specific to this owner and their material.
 - **warnings** — anything the person should know before creating the agent: material that
   looks incomplete, out of date, or not what this archetype is for.
 
+## The owner's notes on a document
+
+A document may start with the owner's own words about it: "The owner says:" (what it is) and
+"Use it as:" (what they want the agent to take from it). Trust those over your own guess:
+a document to use as rules yields rules and when-to-ask; procedures yield intents; reference
+material yields facts and a good knowledge summary but no rules; templates yield templates.
+Still extract anything else in it that clearly matters. The knowledge `summary` of a document
+should agree with what the owner says it is.
+
 Every item except `conflicts` and `warnings` carries a `source`: `{"doc": "<file name or
 "instructions">", "section": "<heading, page or short locator>"}`.
 

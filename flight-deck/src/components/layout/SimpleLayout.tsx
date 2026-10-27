@@ -71,7 +71,8 @@ import { AgentDatastorePanel } from '../agents/AgentDatastorePanel'
 import { SharedFilesPanel } from '../agents/SharedFilesPanel'
 import { SharedDatastorePanel } from '../agents/SharedDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
-import { ArchetypeSpawnDialog } from './ArchetypeSpawnDialog'
+import { AgentSetupDialog } from './AgentSetupDialog'
+import { ArchetypeSpawnDialog, type SetupRequest } from './ArchetypeSpawnDialog'
 import { KioskByokDialog } from './KioskByokDialog'
 import { useByokStore } from '../../stores/byokStore'
 import { useQuotaStore } from '../../stores/quotaStore'
@@ -231,6 +232,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [optionsAgent, setOptionsAgent] = useState<SimpleAgent | null>(null)
   // Kiosk "New agent" picker.
   const [archetypeOpen, setArchetypeOpen] = useState(false)
+  // A new agent whose "way of working" setup opens right after it is created.
+  const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   // Agents just spawned or powered on: Flight Deck lists one as running the
   // moment it launches, seconds before its web server binds — a chat opened
   // then fails. They stay "starting" until they answer.
@@ -766,13 +769,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         <ArchetypeSpawnDialog
           takenSlugs={new Set(processes.map((p) => p.slug))}
           onClose={() => setArchetypeOpen(false)}
-          onSpawned={(slug) => {
+          onSpawned={(slug, setup) => {
             setArchetypeOpen(false)
             startBoot(`proc-${slug}`, true)
-            useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
+            if (setup) setSetupFor(setup)
+            else useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
           }}
         />
       )}
+      {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
 
       {locked && settingsOpen && (
         <KioskSettingsDialog

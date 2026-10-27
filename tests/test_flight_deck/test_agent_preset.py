@@ -1,4 +1,4 @@
-"""The New agent dialog's Advanced setup (``/fd/agent-preset`` + spawn seeding).
+"""An agent's "way of working" setup (``/fd/agent-preset``), opened right after it is created.
 
 * a model's reply is cleaned per group (clipped, deduplicated, unknown
   categories fall back, intent names become skill ids), and the whole items of
@@ -8,11 +8,15 @@
 * prepare reads with the owner's model, keeps the documents' text under the
   preset's id for that owner only, and gives every document a knowledge entry;
   no input is a 400, no model a 409, a spent allowance a 429;
-* the spawn seeds the reviewed preset before the agent starts: one SKILL.md per
-  intent (in the skills folder the agent reads), the documents as Markdown in
+* the person's note on a document (what it is, how to use it) reaches the
+  model and the agent's knowledge; File library picks are read from the
+  person's own agents' folders only; the agent being set up frames the read
+  with its archetype, and only its owner can name it;
+* apply gives an existing agent the reviewed preset: one SKILL.md per intent
+  (in the skills folder the agent reads), the documents as Markdown in
   knowledge/ with an index, glossary and the full rules, and a capped rules
-  block after the archetype's instructions — which the spawn returns, and
-  stores for the owner; another person's preset id brings no documents;
+  block after its instructions — stored for the owner and returned; another
+  person's preset id brings no documents, another person's agent is a 404;
 * facts go to the agent as insights once it answers; a failure never raises.
 """
 
@@ -157,11 +161,21 @@ def _model(monkeypatch, *replies: str) -> list[dict]:
     return calls
 
 
-async def _prepare(uid: str, files: list[tuple[str, bytes]], instructions: str = "Be brief.") -> httpx.Response:
+async def _prepare(uid: str, files: list[tuple[str, bytes]], instructions: str = "Be brief.",
+                   **extra: str) -> httpx.Response:
     async with _client() as c:
         return await c.post("/fd/agent-preset/prepare", headers=_auth(uid),
-                            data={"archetype": "support", "instructions": instructions},
+                            data={"archetype": "support", "instructions": instructions, **extra},
                             files=[("files", (n, b, "text/plain")) for n, b in files])
+
+
+async def _spawn(uid: str, name: str, port: int) -> str:
+    async with _client() as c:
+        r = await c.post("/fd/spawn-process", headers=_auth(uid), json={
+            "name": name, "archetype": "support", "botport_enabled": False,
+            "web_enabled": True, "web_port": port})
+    assert r.status_code == 200, r.text
+    return r.json()["slug"]
 
 
 # ── Cleaning ──────────────────────────────────────────────────────────
@@ -296,6 +310,58 @@ async def test_prepare_needs_a_session(deck):
     assert r.status_code == 401
 
 
+async def test_the_persons_notes_reach_the_model_and_fill_a_missing_summary(deck, monkeypatch):
+    calls = _model(monkeypatch, json.dumps(_REPLY))
+    notes = [{"description": "Our EU refund policy, 2026", "usage": "rules"},
+             {"description": "Price list for the Basic plan", "usage": "bogus"}]
+    r = await _prepare(BOB, [("policy.txt", b"Refunds within 14 days."), ("prices.txt", b"Basic 10 EUR.")],
+                       notes=json.dumps(notes))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    prompt = calls[0]["user"]
+    assert "### policy.txt\nThe owner says: Our EU refund policy, 2026\nUse it as: rules and policies" in prompt
+    assert "### prices.txt\nThe owner says: Price list for the Basic plan\nBasic 10 EUR." in prompt
+    assert [(d["description"], d["usage"], d["origin"]) for d in body["docs"]] == [
+        ("Our EU refund policy, 2026", "rules", "upload"), ("Price list for the Basic plan", "auto", "upload")]
+    # The model summarised the policy; the price list has the person's words.
+    assert [k["summary"] for k in body["preset"]["knowledge"]] == ["How refunds work.", "Price list for the Basic plan"]
+    assert ap.load_docs(BOB, body["id"])[0]["usage"] == "rules"
+
+
+async def test_library_picks_are_read_from_the_persons_own_agents_only(deck, monkeypatch):
+    from captain_claw.flight_deck import file_library as fl
+    monkeypatch.setattr(fl, "_STORE", fl.LibraryStore(server.DATA_DIR / "file_library.db"))
+    server._save_process_registry({"bob-agent": {"slug": "bob-agent", "name": "Bob's agent", "owner": BOB}})
+    faq = server.DATA_DIR / "bob-agent" / "data" / "workspace" / "faq.md"
+    faq.parent.mkdir(parents=True)
+    faq.write_text("# FAQ\n\nWe ship within 3 days.\n")
+    fl.get_store().sync_agent("bob-agent", fl.walk_workspace("bob-agent"))
+    pick = json.dumps([{"id": fl.LibraryStore.file_id("bob-agent", "faq.md"),
+                        "description": "Shipping FAQ", "usage": "reference"}])
+
+    calls = _model(monkeypatch, json.dumps(_REPLY))
+    r = await _prepare(BOB, [], library=pick)
+    assert r.status_code == 200, r.text
+    assert "We ship within 3 days." in calls[0]["user"] and "Use it as: reference material" in calls[0]["user"]
+    assert r.json()["docs"] == [{"name": "faq.md", "chars": len("# FAQ\n\nWe ship within 3 days."),
+                                 "truncated": False, "origin": "library", "description": "Shipping FAQ",
+                                 "usage": "reference", "agent": "Bob's agent"}]
+
+    # Carol can't read Bob's file by its id: nothing is read, and she is told.
+    r = await _prepare(CAROL, [], instructions="", library=pick)
+    assert r.status_code == 400 and "no longer there" in r.json()["detail"]
+    assert len(calls) == 1
+
+
+async def test_the_agent_being_set_up_frames_the_read_and_must_be_ones_own(deck, monkeypatch):
+    calls = _model(monkeypatch, json.dumps(_REPLY))
+    slug = await _spawn(BOB, "Helpdesk", 24302)
+    r = await _prepare(BOB, [("p.txt", b"Refunds.")], archetype="", agent=slug)
+    assert r.status_code == 200, r.text
+    assert "Customer Support" in calls[0]["user"]
+    assert (await _prepare(CAROL, [("p.txt", b"x")], archetype="", agent=slug)).status_code == 404
+
+
 def test_old_presets_are_pruned(deck):
     old = ap.save_docs(BOB, [{"name": "a.txt", "text": "a", "chars": 1}], "support")
     new = ap.save_docs(BOB, [{"name": "b.txt", "text": "b", "chars": 1}], "support")
@@ -336,13 +402,18 @@ def test_with_block_keeps_the_instructions_within_their_cap():
 
 
 def test_seed_writes_skills_knowledge_and_the_full_rules(deck, tmp_path):
-    preset_id = ap.save_docs(BOB, [{"name": "policy.txt", "text": "Refunds within 14 days.", "chars": 23},
+    preset_id = ap.save_docs(BOB, [{"name": "policy.txt", "text": "Refunds within 14 days.", "chars": 23,
+                                    "description": "EU refund policy", "usage": "rules"},
                                    {"name": "dropped.txt", "text": "Not kept.", "chars": 9}], "support")
     reviewed = {**ap.normalise(_REPLY), "id": preset_id}
     reviewed["knowledge"] = [{"doc": "policy.txt", "title": "Refund policy", "summary": "How refunds work."}]
     agent_dir = tmp_path / "agent"
     workspace = agent_dir / "data" / "workspace"
-    block, facts = ap.seed(agent_dir, workspace, BOB, reviewed)
+    done = ap.seed(agent_dir, workspace, BOB, reviewed)
+    block, facts = done["block"], done["facts"]
+    assert done["skills"] == ["refund-request", "refund-request-2"]
+    assert done["counts"] == {"rules": 1, "escalation": 1, "templates": 1, "glossary": 1,
+                              "intents": 2, "facts": 2, "knowledge": 1}
 
     skill = agent_dir / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund-request" / "SKILL.md"
     meta = _parse_frontmatter(skill.read_text())
@@ -352,7 +423,9 @@ def test_seed_writes_skills_knowledge_and_the_full_rules(deck, tmp_path):
     kn = workspace / "knowledge"
     assert sorted(p.name for p in kn.iterdir()) == ["INDEX.md", "glossary.md", "owner-rules.md", "policy.md"]
     assert "Refunds within 14 days." in (kn / "policy.md").read_text()
-    assert "[Refund policy](policy.md)" in (kn / "INDEX.md").read_text()
+    assert "Your owner says: EU refund policy" in (kn / "policy.md").read_text()
+    assert "Use it as: rules to follow." in (kn / "policy.md").read_text()
+    assert "[Refund policy](policy.md) — How refunds work. (rules to follow)" in (kn / "INDEX.md").read_text()
     assert "## Template: Refund reply" in (kn / "owner-rules.md").read_text()
     assert "Always answer in Croatian." in block and "Ask before refunding" in block
     assert [f["content"] for f in facts] == ["Refund window is 14 days.", "Support email is help@acme.test"]
@@ -368,35 +441,44 @@ def test_another_persons_preset_brings_no_documents(deck, tmp_path):
     assert ap.load_docs(BOB, preset_id)            # Bob's is untouched
 
 
-async def test_spawn_seeds_the_preset_and_returns_the_stored_instructions(deck, monkeypatch):
-    _model(monkeypatch, json.dumps(_REPLY))
-    prepared = (await _prepare(BOB, [("policy.txt", b"Refunds within 14 days.")])).json()
-    given: list = []
-    monkeypatch.setattr(ap, "schedule_facts", lambda slug, port_of, token, facts: given.append((slug, facts)))
-    preset = {**prepared["preset"], "id": prepared["id"]}
+async def _apply(uid: str, slug: str, preset: dict) -> httpx.Response:
     async with _client() as c:
-        r = await c.post("/fd/spawn-process", headers=_auth(BOB), json={
-            "name": "Helpdesk", "archetype": "support", "botport_enabled": False,
-            "web_enabled": True, "web_port": 24300, "preset": preset})
+        return await c.post("/fd/agent-preset/apply", headers=_auth(uid), json={"agent": slug, "preset": preset})
+
+
+async def test_apply_sets_up_an_existing_agent_and_stores_its_instructions(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24300)
+    assert json.loads(await deck.get_setting(BOB, INSTR))[slug] == "You answer customers kindly."
+    assert not (server.DATA_DIR / slug / "data" / "workspace" / "knowledge").exists()
+
+    _model(monkeypatch, json.dumps(_REPLY))
+    prepared = (await _prepare(BOB, [("policy.txt", b"Refunds within 14 days.")], agent=slug)).json()
+    given: list = []
+    monkeypatch.setattr(ap, "schedule_facts",
+                        lambda slug, port_of, token, facts: given.append((slug, port_of(), token, facts)))
+    r = await _apply(BOB, slug, {**prepared["preset"], "id": prepared["id"]})
     assert r.status_code == 200, r.text
-    stored = r.json()["fleet_instructions"]
+    body = r.json()
+    stored = body["instructions"]
     assert stored.startswith("You answer customers kindly.") and "## Your owner's rules" in stored
-    assert json.loads(await deck.get_setting(BOB, INSTR))["helpdesk"] == stored
-    agent = server.DATA_DIR / "helpdesk"
+    assert stored.endswith(body["block"])
+    assert json.loads(await deck.get_setting(BOB, INSTR))[slug] == stored
+    assert body["counts"]["intents"] == 2 and body["knowledge"] == ["Refund policy"]
+    agent = server.DATA_DIR / slug
     assert (agent / "data" / "workspace" / "knowledge" / "policy.md").is_file()
     assert (agent / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund-request" / "SKILL.md").is_file()
-    assert given and given[0][0] == "helpdesk" and len(given[0][1]) == 2
-    assert _FakePopen.calls == ["helpdesk"]
+    entry = server._load_process_registry()[slug]
+    assert given == [(slug, 24300, entry["web_auth"], given[0][3])] and len(given[0][3]) == 2
+    assert ap.load_docs(BOB, prepared["id"]) == []      # the waiting documents are used up
+    assert _FakePopen.calls == [slug]                    # no restart
 
 
-async def test_spawn_without_a_preset_is_unchanged(deck):
-    async with _client() as c:
-        r = await c.post("/fd/spawn-process", headers=_auth(BOB), json={
-            "name": "Plain", "archetype": "support", "botport_enabled": False,
-            "web_enabled": True, "web_port": 24301})
-    assert r.status_code == 200, r.text
-    assert r.json()["fleet_instructions"] == "You answer customers kindly."
-    assert not (server.DATA_DIR / "plain" / "data" / "workspace" / "knowledge").exists()
+async def test_apply_refuses_another_persons_agent(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24301)
+    r = await _apply(CAROL, slug, {**ap.normalise(_REPLY), "id": ""})
+    assert r.status_code == 404
+    assert not (server.DATA_DIR / slug / "data" / "workspace" / "knowledge").exists()
+    assert json.loads(await deck.get_setting(BOB, INSTR))[slug] == "You answer customers kindly."
 
 
 # ── Facts ─────────────────────────────────────────────────────────────

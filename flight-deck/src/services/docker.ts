@@ -1,7 +1,6 @@
 // REST client for the Flight Deck backend (Docker management)
 
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
-import type { ReviewedPreset } from './agentPreset'
 
 const FD_BASE = '/fd'
 
@@ -298,10 +297,7 @@ export const spawnProcess = (config: SpawnConfig) =>
 // fills tools / cognitive mode / runtime from the archetype and the model from
 // the caller's tier set (else the admin-published team default), so no model
 // config or API key passes through the browser. The kiosk's "New agent" picker.
-export const spawnArchetypeProcess = (
-  archetypeId: string, name: string, description: string, asUser?: string,
-  preset?: ReviewedPreset,
-) =>
+export const spawnArchetypeProcess = (archetypeId: string, name: string, description: string, asUser?: string) =>
   fdFetch<ProcessActionResult>('/spawn-process', {
     method: 'POST',
     body: JSON.stringify({
@@ -311,7 +307,6 @@ export const spawnArchetypeProcess = (
       botport_enabled: false,
       web_enabled: true,
       web_port: 0,
-      ...(preset ? { preset } : {}),
     }),
   }, asUser)
 
