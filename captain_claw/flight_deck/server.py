@@ -1650,6 +1650,7 @@ from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.file_library import router as file_library_router
 from captain_claw.flight_deck.data_library import router as data_library_router
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
+from captain_claw.flight_deck import agent_preset
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck import public_file_shares
@@ -1746,6 +1747,7 @@ app.include_router(agents_fs_router)
 app.include_router(file_library_router)
 app.include_router(data_library_router)
 app.include_router(agent_skills_router)
+app.include_router(agent_preset.router)
 app.include_router(system_router)
 app.include_router(share_router)
 # Public file links: owner API (port-addressed → the ownership guard above
@@ -1855,6 +1857,11 @@ class AgentConfig(BaseModel):
     # settings, so they must be there whoever created the agent (the owner's
     # own browser, or an admin acting for them).
     fleet_instructions: str = Field(default="", max_length=64_000)
+    # The kiosk dialog's "Advanced" setup, as the person reviewed it: the id
+    # of a prepared preset (its documents wait server-side) and the items they
+    # kept — rules, intents, facts… (see agent_preset). Process agents only:
+    # seeded into the new agent's folder before it starts.
+    preset: dict | None = None
     # Deep-memory grid config, populated when `archetype` resolves to a composed
     # function×domain leaf (see archetype_compose). `grid_memory_tags` are stamped
     # onto the agent's deep-memory writes; `grid_recall_mode` (pool | domain | self)
@@ -8603,6 +8610,9 @@ class ProcessActionResult(BaseModel):
     message: str = ""
     # See ContainerActionResult.web_auth.
     web_auth: str = ""
+    # A spawn's standing instructions as stored for the owner (the archetype's,
+    # plus an Advanced setup's rules): what the browser mirrors, not its own copy.
+    fleet_instructions: str = ""
 
 
 @app.get("/fd/processes", response_model=list[ProcessInfo])
@@ -8779,6 +8789,19 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     # Never another agent's shared context (packs); a re-spawn of the same
     # agent gets its own back once the registry entry is saved (below).
     await context_packs.remove_files_locked(agent_dir, "process")
+    # The New agent dialog's Advanced setup: skills, knowledge and the owner's
+    # rules go in before the agent starts (its facts once it is up, below). A
+    # failure here costs the setup, never the agent.
+    preset_facts: list[dict] = []
+    if config.preset:
+        try:
+            block, preset_facts = await asyncio.to_thread(
+                agent_preset.seed, agent_dir,
+                Path(config.workspace_path) if config.workspace_path else agent_dir / "data" / "workspace",
+                owner_id or "", config.preset)
+            config.fleet_instructions = agent_preset.with_block(config.fleet_instructions, block)
+        except Exception:
+            log.warning("spawn-process: the Advanced setup could not be written", slug=slug, exc_info=True)
 
     # Open log file
     log_file = agent_dir / "process.log"
@@ -8932,12 +8955,16 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
 
     if config.fleet_instructions:
         await _set_owner_agent_instructions(owner_id, "process", slug, config.fleet_instructions)
+    if preset_facts and config.web_enabled:
+        agent_preset.schedule_facts(
+            slug, lambda: (_load_process_registry().get(slug) or {}).get("web_port") or config.web_port,
+            config.web_auth_token, preset_facts)
 
     message = f"Process agent '{slug}' spawned (PID {proc.pid}, port {config.web_port})"
     if web_auth_replaced:
         return ProcessActionResult(ok=True, slug=slug, message=message + _WEB_AUTH_REPLACED_NOTE,
-                                   web_auth=config.web_auth_token)
-    return ProcessActionResult(ok=True, slug=slug, message=message)
+                                   web_auth=config.web_auth_token, fleet_instructions=config.fleet_instructions)
+    return ProcessActionResult(ok=True, slug=slug, message=message, fleet_instructions=config.fleet_instructions)
 
 
 def _verify_process_owner(slug: str, user_id: str) -> dict:
