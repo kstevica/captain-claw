@@ -358,10 +358,23 @@ async def list_links(user: dict = Depends(get_current_user)):
     return {"links": out}
 
 
+def _require_link_admin(user: dict) -> None:
+    """Linking a folder of the server (and browsing its folders to pick one) is
+    an admin's: on a deck with users, a linked ~/.ssh or another deck's data
+    would be any user's to read and write. A sign-in-off deck hands
+    get_current_user a synthetic admin, so it passes unchanged. Drive and
+    OneDrive mounts live in the user's own root and stay everyone's."""
+    if (user or {}).get("role") != "admin":
+        raise HTTPException(
+            403, "Only an admin can link a folder of the server on this deck — "
+                 "use a Google Drive or OneDrive folder instead.")
+
+
 @router.post("/links")
 async def add_link(body: LinkBody, user: dict = Depends(get_current_user)):
     """Link an external absolute directory as a VFS project (no fs symlink)."""
     from captain_claw.flight_deck.server import DATA_DIR
+    _require_link_admin(user)
     name = safe_name(body.name, fallback="")
     if not name:
         raise HTTPException(400, "invalid link name")
@@ -394,6 +407,7 @@ async def browse_fs(path: str = "", user: dict = Depends(get_current_user)):
     FD runs on the user's machine, so this browses the same filesystem the user
     would link. Directories only; never returns file contents. Starts at $HOME.
     """
+    _require_link_admin(user)
     base = Path(path).expanduser() if path.strip() else Path.home()
     try:
         base = base.resolve()

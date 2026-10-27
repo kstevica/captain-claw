@@ -53,6 +53,7 @@ from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.google_oauth import GoogleOAuthTokens
 from test_flight_deck import test_agent_sharing as base
 from test_flight_deck.test_agent_sharing import (
+    ADMIN,
     HELPER_TOK,
     HTTP_FD,
     MEMBER,
@@ -1112,8 +1113,9 @@ class TestVfsLinkGuard:
                     assert r.status_code == 404, (project, path, r.text[:200])
                     for secret in _SECRETS:
                         assert secret.encode() not in r.content
+                # Linking a server folder is an admin's; the data dir is refused even so.
                 r = await c.post("/fd/vfs/links", json={"name": f"new{i}", "path": str(alias),
-                                                        "mode": "rw"}, headers=h)
+                                                        "mode": "rw"}, headers=_hdr(ADMIN))
                 assert r.status_code == 400, r.text
 
     async def test_public_hosting_never_serves_deck_internals(self, vfs_links, monkeypatch):

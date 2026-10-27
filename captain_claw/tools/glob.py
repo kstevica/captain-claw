@@ -9,7 +9,7 @@ from typing import Any
 
 import glob
 
-from captain_claw import pack_access, speaker
+from captain_claw import deck_confine, pack_access, speaker
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, project_root, split_scheme, to_display
@@ -30,10 +30,11 @@ def _member_filter(paths: list[str]) -> list[str]:
     """Every caller: a path in a shared folder of this call (vfs:@alias) only
     when its realpath stays in that folder on visible names. A member's
     results also only where the realpath stays in their roots (directory
-    symlinks are followed by ``**``). Owner calls without packs: unchanged."""
+    symlinks are followed by ``**``); an owner's on a multi-user deck only in
+    this agent's own (deck_confine). Other owner calls without packs: unchanged."""
     paths = [p for p in paths if pack_access.result_ok(p)]
     if not speaker.member_bound():
-        return paths
+        return deck_confine.filter_results(paths)
     return [p for p in paths if speaker.path_allowed(p)]
 
 
@@ -297,7 +298,7 @@ class GlobTool(Tool):
             if search_extra_dirs:
                 try:
                     from captain_claw.config import get_config
-                    extra_dirs = get_config().tools.read.extra_dirs
+                    extra_dirs = deck_confine.read_folders(get_config().tools.read.extra_dirs)
                 except Exception:
                     extra_dirs = []
 

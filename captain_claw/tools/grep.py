@@ -11,7 +11,7 @@ import stat
 from pathlib import Path
 from typing import Any
 
-from captain_claw import pack_access, saved_attribution, speaker
+from captain_claw import deck_confine, pack_access, saved_attribution, speaker
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 from captain_claw.vfs import is_vfs_path, project_root, resolve_vfs_path, split_scheme
@@ -202,6 +202,9 @@ class GrepTool(Tool):
             # them) — keep only files whose realpath stays in their roots.
             if speaker.member_bound():
                 files = [f for f in files if speaker.path_allowed(f)]
+            else:
+                # An owner on a multi-user deck: this agent's own files only.
+                files = deck_confine.filter_results(files)
 
             # Google Drive mounts: a placeholder has only a marker on disk, so
             # searching it would silently miss content that is really there.

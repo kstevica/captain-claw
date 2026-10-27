@@ -472,6 +472,12 @@ class ToolRegistry:
                 "principal",
                 ToolPolicy(allow=sorted(_speaker.allowed_tools(_speaker.current()))),
             ))
+        # A non-admin's agent on a multi-user deck never sees the tools that
+        # run code on the host (deck_confine); last, so nothing re-allows them.
+        from captain_claw import deck_confine as _deck_confine
+
+        if _deck_confine.tier() == "user":
+            steps.append(("deck", ToolPolicy(deny=sorted(_deck_confine.EXEC_TOOLS))))
         return ToolPolicyChain(steps=steps)
 
     def _resolve_tools(
@@ -808,6 +814,7 @@ class ToolRegistry:
         """
         import contextvars
 
+        from captain_claw import deck_confine as _deck_confine
         from captain_claw import pack_access as _pack_access
         from captain_claw import speaker as _speaker
 
@@ -883,6 +890,17 @@ class ToolRegistry:
                 name, arguments or {}, (arguments or {}).get("_agent"))
             if privacy_error:
                 raise ToolBlockedError(name, privacy_error)
+
+        # A multi-user deck (deck_confine): an owner call's paths stay in this
+        # agent's own roots, and a non-admin's agent runs no code on the host.
+        # Inside the tool context, after prepare_call, so shared folders resolve.
+        if not speaker_call and _deck_confine.active():
+            if _deck_confine.exec_blocked(name):
+                raise ToolBlockedError(name, _deck_confine.EXEC_REFUSED)
+            confine_error = tool_context.run(
+                _deck_confine.check_tool_paths, name, arguments, effective_base_path)
+            if confine_error:
+                raise ToolBlockedError(name, confine_error)
 
         if speaker_call:
             roots = tool_context.run(
