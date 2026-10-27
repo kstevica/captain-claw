@@ -207,7 +207,7 @@ export interface InfoTier {
 }
 
 export interface MyInfo {
-  tiers: { source: 'own' | 'team' | 'none'; set_name: string; tiers: InfoTier[] }
+  tiers: { source: 'own' | 'team' | 'none' | 'byok'; set_name: string; tiers: InfoTier[] }
   archetypes: { total: number; base: number; own: number; shared: number }
   profile: {
     own: ProfileFields
@@ -262,6 +262,9 @@ export interface QuotaStatus {
   blocked: 'messages' | 'tokens' | null
   warning: 'messages' | 'tokens' | null
   resets_left: number       // free resets an admin gave them
+  byok?: boolean            // on their own API keys: no daily limits
+  byok_allowed?: boolean    // the deck lets them switch to their own keys
+  byok_tokens?: number      // AI tokens spent on their own keys today
 }
 
 export const getMyQuota = () => fdFetch<QuotaStatus>('/quota')

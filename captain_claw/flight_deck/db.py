@@ -1062,6 +1062,7 @@ class FlightDeckDB:
             ("agent_links", "direction", "TEXT NOT NULL DEFAULT 'inbound'"),
             ("agent_links", "remote_url", "TEXT NOT NULL DEFAULT ''"),
             ("agent_links", "remote_key", "TEXT NOT NULL DEFAULT ''"),
+            ("daily_usage", "byok_tokens", "INTEGER NOT NULL DEFAULT 0"),
         ]:
             try:
                 await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
@@ -1814,6 +1815,14 @@ class FlightDeckDB:
         await self._db.commit()
         return int(cur.rowcount or 0)
 
+    async def users_with_setting(self, key: str) -> dict[str, str]:
+        """Every user holding setting *key*: ``{user_id: value}``."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT user_id, value FROM user_settings WHERE key = ?", (key,),
+        ) as cur:
+            return {r["user_id"]: r["value"] for r in await cur.fetchall()}
+
     # ── Chat sessions ────────────────────────────────────────────────
 
     async def list_chat_sessions(self, user_id: str) -> list[dict]:
@@ -2082,18 +2091,22 @@ class FlightDeckDB:
 
     async def add_daily_usage(
         self, user_id: str, day: str, *, messages: int = 0, tokens: int = 0,
+        byok_tokens: int = 0,
     ) -> dict:
-        """Add to *user_id*'s counters for *day*; returns the new totals."""
+        """Add to *user_id*'s counters for *day*; returns the new totals.
+        ``byok_tokens`` were spent on the user's own keys (not the plan's)."""
         assert self._db is not None
         now = _utcnow()
         await self._db.execute(
-            "INSERT INTO daily_usage (user_id, day, messages, tokens, updated_at)"
-            " VALUES (?, ?, ?, ?, ?)"
+            "INSERT INTO daily_usage (user_id, day, messages, tokens, byok_tokens, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(user_id, day) DO UPDATE SET"
             " messages = messages + excluded.messages,"
             " tokens = tokens + excluded.tokens,"
+            " byok_tokens = byok_tokens + excluded.byok_tokens,"
             " updated_at = excluded.updated_at",
-            (user_id, day, max(0, int(messages)), max(0, int(tokens)), now),
+            (user_id, day, max(0, int(messages)), max(0, int(tokens)),
+             max(0, int(byok_tokens)), now),
         )
         await self._db.commit()
         return await self.get_daily_usage(user_id, day)
@@ -2102,12 +2115,13 @@ class FlightDeckDB:
         """*user_id*'s counters for *day* (zeros when nothing was spent)."""
         assert self._db is not None
         async with self._db.execute(
-            "SELECT messages, tokens FROM daily_usage WHERE user_id = ? AND day = ?",
+            "SELECT messages, tokens, byok_tokens FROM daily_usage WHERE user_id = ? AND day = ?",
             (user_id, day),
         ) as cur:
             row = await cur.fetchone()
-        return {"messages": int(row["messages"]), "tokens": int(row["tokens"])} if row \
-            else {"messages": 0, "tokens": 0}
+        return {"messages": int(row["messages"]), "tokens": int(row["tokens"]),
+                "byok_tokens": int(row["byok_tokens"])} if row \
+            else {"messages": 0, "tokens": 0, "byok_tokens": 0}
 
     async def reset_daily_usage(self, user_id: str, day: str) -> None:
         """Zero *user_id*'s counters for *day*."""
@@ -2120,9 +2134,10 @@ class FlightDeckDB:
         """Every user's counters for *day*, by user id."""
         assert self._db is not None
         async with self._db.execute(
-            "SELECT user_id, messages, tokens FROM daily_usage WHERE day = ?", (day,),
+            "SELECT user_id, messages, tokens, byok_tokens FROM daily_usage WHERE day = ?", (day,),
         ) as cur:
-            return {r["user_id"]: {"messages": int(r["messages"]), "tokens": int(r["tokens"])}
+            return {r["user_id"]: {"messages": int(r["messages"]), "tokens": int(r["tokens"]),
+                                   "byok_tokens": int(r["byok_tokens"])}
                     for r in await cur.fetchall()}
 
     async def get_usage_resets(self, user_id: str) -> int:

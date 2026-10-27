@@ -3073,8 +3073,13 @@ def _resolve_agent_caller(web_auth: str, source_port: int, owner_hint: str,
         if hint and hint != uid:
             raise HTTPException(403, "owner_id does not match the authenticated user")
         return uid
-    # --- existing fallback (unchanged): spawned agents (web_auth / port) and
-    # auth-disabled local mode, where get_optional_user returns None ---
+    # --- spawned agents (loopback, no bearer): identity from FD's own records.
+    # The unique web_auth token first. The source port and the owner_id hint are
+    # caller-asserted, so they stand in as identity ONLY in single-user local
+    # mode (auth off); on a sign-in deck a spawned agent always carries its
+    # web_auth, and trusting a stated port/owner would let one agent act as
+    # another. (A verified bearer is handled above.) ---
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
     from captain_claw.flight_deck.server import (
         _resolve_agent_owner,
         _resolve_agent_owner_by_auth,
@@ -3082,9 +3087,10 @@ def _resolve_agent_caller(web_auth: str, source_port: int, owner_hint: str,
     owner = ""
     if web_auth:
         owner = _resolve_agent_owner_by_auth(web_auth) or ""
-    if not owner and source_port:
-        owner = _resolve_agent_owner(int(source_port)) or ""
-    owner = owner or (owner_hint or "").strip()
+    if not owner and not _fd_auth_enabled():
+        if source_port:
+            owner = _resolve_agent_owner(int(source_port)) or ""
+        owner = owner or (owner_hint or "").strip()
     if not owner:
         raise HTTPException(403, "could not resolve calling agent's owner")
     return owner

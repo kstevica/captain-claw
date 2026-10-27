@@ -212,8 +212,22 @@ async def test_hosting_agent_bearer_cannot_impersonate_other_owner(fd_db, monkey
     assert "does not match" in r.json()["detail"]
 
 
-async def test_code_agent_loopback_unchanged(fd_db, monkeypatch):
-    """Locally spawned agents (loopback, owner_id hint, no bearer) still work."""
+async def test_code_agent_owner_id_only_refused_on_auth_deck(fd_db, monkeypatch):
+    """On a sign-in deck a loopback caller that names only an owner_id (no
+    web_auth, no bearer) can no longer be bound to that owner — the spoofable
+    path is closed. A real locally-spawned agent carries its own web_auth."""
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    async with _client(fd_server.app, LOOPBACK) as c:
+        r = await c.post("/fd/code/agent/list", json={"owner_id": "u-loop"})
+    assert r.status_code == 403
+    assert "resolve" in r.json()["detail"]
+
+
+async def test_code_agent_owner_id_honored_with_sign_in_off(fd_db, monkeypatch):
+    """Single-user local mode (auth off): the owner_id hint still identifies the
+    caller, so a locally-spawned agent keeps working there."""
+    monkeypatch.setenv("FD_AUTH_ENABLED", "false")
     monkeypatch.delenv("FD_LOCKDOWN", raising=False)
     async with _client(fd_server.app, LOOPBACK) as c:
         r = await c.post("/fd/code/agent/list", json={"owner_id": "u-loop"})
@@ -221,26 +235,44 @@ async def test_code_agent_loopback_unchanged(fd_db, monkeypatch):
     assert "projects" in r.json()
 
 
-async def test_code_agent_secret_authorizes_remote(fd_db, monkeypatch):
-    """A remote secret-holder (e.g. an agent behind a same-host proxy) is
-    admitted; a wrong secret is blocked at the guard."""
+async def test_code_agent_secret_passes_guard_but_not_identity(fd_db, monkeypatch):
+    """The shared secret proves the caller is *an* agent (passes the transport
+    guard) but cannot say WHICH owner, so an owner_id hint alone is refused at
+    the resolver on an auth deck; a wrong secret is stopped earlier at the
+    guard."""
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    async with _client(fd_server.app, REMOTE) as c:
+        secret_ok = await c.post("/fd/hosting/agent/list", json={"owner_id": "u-r"},
+                                 headers={"X-Agent-Secret": "shh"})
+        bad = await c.post("/fd/hosting/agent/list", json={"owner_id": "u-r"},
+                           headers={"X-Agent-Secret": "nope"})
+    assert secret_ok.status_code == 403
+    assert "resolve" in secret_ok.json()["detail"]
+    assert bad.status_code == 403
+    assert "bearer token" in bad.json()["detail"]
+
+
+async def test_code_agent_secret_holder_works_with_sign_in_off(fd_db, monkeypatch):
+    """With sign-in off, a remote secret-holder behind a same-host proxy is
+    admitted and its owner_id hint identifies it (single trust domain)."""
+    monkeypatch.setenv("FD_AUTH_ENABLED", "false")
     monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
     monkeypatch.delenv("FD_LOCKDOWN", raising=False)
     async with _client(fd_server.app, REMOTE) as c:
         ok = await c.post("/fd/hosting/agent/list", json={"owner_id": "u-r"},
                           headers={"X-Agent-Secret": "shh"})
-        bad = await c.post("/fd/hosting/agent/list", json={"owner_id": "u-r"},
-                           headers={"X-Agent-Secret": "nope"})
     assert ok.status_code == 200
-    assert bad.status_code == 403
-    assert "bearer token" in bad.json()["detail"]
 
 
 async def test_code_agent_lockdown_requires_secret_even_from_loopback(fd_db, monkeypatch):
     """Under FD_LOCKDOWN, bare loopback is not enough — a bearer or the secret
-    is required, matching the basna/vatra lockdown semantics."""
+    is required, matching the basna/vatra lockdown semantics. (Auth off here so
+    the transport guard is isolated from the identity resolver.)"""
     monkeypatch.setenv("FD_LOCKDOWN", "1")
     monkeypatch.setenv("FD_AGENT_SHARED_SECRET", "shh")
+    monkeypatch.setenv("FD_AUTH_ENABLED", "false")
     async with _client(fd_server.app, LOOPBACK) as c:
         denied = await c.post("/fd/code/agent/list", json={"owner_id": "x"})
         allowed = await c.post("/fd/code/agent/list", json={"owner_id": "x"},
@@ -248,6 +280,58 @@ async def test_code_agent_lockdown_requires_secret_even_from_loopback(fd_db, mon
     assert denied.status_code == 403
     assert "bearer token" in denied.json()["detail"]
     assert allowed.status_code == 200
+
+
+# ── 0c: hosted apps (kind='app') are admin-only on a sign-in deck ────
+#
+# Publishing/starting an app runs its start command as a process on the shared
+# host, so a non-admin owner's agent (or a non-admin signed-in user) may publish
+# only static sites. Static hosting stays open to everyone.
+
+
+async def test_hosting_agent_app_is_admin_only_for_a_non_admin(fd_db, monkeypatch):
+    """A non-admin owner's agent (identified by its bearer) can't publish or
+    start a runnable app on a sign-in deck."""
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    u = await fd_db.create_user("hosty@user.local", "x")   # role defaults to user
+    tok = create_access_token(u["id"])
+    async with _client(fd_server.app, REMOTE) as c:
+        pub = await c.post("/fd/hosting/agent/publish",
+                           json={"name": "srv", "kind": "app", "project": "p",
+                                 "start_cmd": "node server.js"},
+                           headers={"Authorization": f"Bearer {tok}"})
+    assert pub.status_code == 403
+    assert "admin" in pub.json()["detail"].lower()
+
+
+async def test_hosting_agent_static_still_works_for_a_non_admin(fd_db, monkeypatch):
+    """A static publish is not gated by the admin check — it fails later (here,
+    on the missing VFS folder), never with the admin refusal."""
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    u = await fd_db.create_user("hosty2@user.local", "x")
+    tok = create_access_token(u["id"])
+    async with _client(fd_server.app, REMOTE) as c:
+        pub = await c.post("/fd/hosting/agent/publish",
+                           json={"name": "site", "kind": "static", "project": "p"},
+                           headers={"Authorization": f"Bearer {tok}"})
+    assert not (pub.status_code == 403 and "admin" in pub.json().get("detail", "").lower())
+
+
+async def test_hosting_agent_app_allowed_for_an_admin(fd_db, monkeypatch):
+    """An admin owner's agent clears the admin gate (the publish then fails on
+    the missing VFS folder, not on the admin check)."""
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.delenv("FD_LOCKDOWN", raising=False)
+    a = await fd_db.create_user("hosty@admin.local", "x", role="admin")
+    tok = create_access_token(a["id"], role="admin")
+    async with _client(fd_server.app, REMOTE) as c:
+        pub = await c.post("/fd/hosting/agent/publish",
+                           json={"name": "srv2", "kind": "app", "project": "p",
+                                 "start_cmd": "node server.js"},
+                           headers={"Authorization": f"Bearer {tok}"})
+    assert not (pub.status_code == 403 and "admin" in pub.json().get("detail", "").lower())
 
 
 async def test_code_agent_cancel_remote_denied_without_bearer(fd_db, monkeypatch):

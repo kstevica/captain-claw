@@ -31,6 +31,29 @@ router = APIRouter(tags=["hosting"])
 
 _PROXY_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]
 
+# A hosted app (kind='app') runs its start command as a process on the shared
+# host, so on a sign-in deck it is reserved for admins; with sign-in off there
+# is a single trust domain and it stays open to everyone. Static sites are
+# always open.
+_APP_ADMIN_ONLY = ("Hosting a runnable app is reserved for admins on this deck. "
+                   "You can still publish a static site (kind='static').")
+
+
+def _app_hosting_restricted() -> bool:
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+    return _fd_auth_enabled()
+
+
+async def _owner_is_admin(owner_id: str) -> bool:
+    if not owner_id:
+        return False
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        u = await get_db().get_user_by_id(owner_id)
+    except Exception:  # noqa: BLE001
+        return False
+    return bool(u) and u.get("role") == "admin"
+
 # Hop-by-hop headers never forwarded in either direction (RFC 7230 §6.1) + Host.
 _HOP = {
     "host", "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -105,6 +128,8 @@ async def publish(body: PublishBody, user: dict = Depends(get_current_user)):
         raise HTTPException(400, "project is required")
     if body.kind == "app" and not body.start_cmd.strip():
         raise HTTPException(400, "a start command is required for apps")
+    if body.kind == "app" and _app_hosting_restricted() and user.get("role") != "admin":
+        raise HTTPException(403, _APP_ADMIN_ONLY)
 
     reg = vh.load_registry()
     if name in reg:
@@ -141,6 +166,8 @@ async def edit(name: str, body: EditBody, user: dict = Depends(get_current_user)
         raise HTTPException(400, "project is required")
     if body.kind == "app" and not body.start_cmd.strip():
         raise HTTPException(400, "a start command is required for apps")
+    if body.kind == "app" and _app_hosting_restricted() and user.get("role") != "admin":
+        raise HTTPException(403, _APP_ADMIN_ONLY)
 
     updated = {
         **ent,
@@ -188,6 +215,8 @@ async def unpublish(name: str, user: dict = Depends(get_current_user)):
 @router.post("/fd/hosting/{name}/start")
 async def start(name: str, user: dict = Depends(get_current_user)):
     _owned_entry(name, user)
+    if _app_hosting_restricted() and user.get("role") != "admin":
+        raise HTTPException(403, _APP_ADMIN_ONLY)
     ok, msg = vh.start_app(name)
     if not ok:
         raise HTTPException(400, msg)
@@ -281,6 +310,8 @@ async def agent_publish(body: AgentPublishReq, request: Request,
         raise HTTPException(400, "project is required")
     if body.kind == "app" and not body.start_cmd.strip():
         raise HTTPException(400, "a start command is required for apps")
+    if body.kind == "app" and _app_hosting_restricted() and not await _owner_is_admin(owner):
+        raise HTTPException(403, _APP_ADMIN_ONLY)
 
     reg = vh.load_registry()
     existing = reg.get(name)
@@ -334,6 +365,8 @@ async def agent_start(body: AgentNameReq, request: Request,
     ent = _agent_owned(body.name, owner)
     if ent.get("kind") != "app":
         raise HTTPException(400, f"'{body.name}' is a static site — nothing to start.")
+    if _app_hosting_restricted() and not await _owner_is_admin(owner):
+        raise HTTPException(403, _APP_ADMIN_ONLY)
     ok, msg = vh.start_app(body.name)
     view = _view(body.name, vh.load_registry().get(body.name, ent))
     view.update({"started": ok, "message": msg, "url_abs": _abs_url(request, view["url"])})

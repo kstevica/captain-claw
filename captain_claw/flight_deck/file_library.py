@@ -663,7 +663,7 @@ async def call_model(tier: dict, system: str, user: str, owner_id: str,
         try:
             from captain_claw.flight_deck import usage_quota
             from captain_claw.flight_deck.auth import get_db
-            await usage_quota.record_tokens(get_db(), owner_id, tokens)
+            await usage_quota.record_tokens(get_db(), owner_id, tokens, byok=bool(tier.get("byok")))
         except Exception:
             log.debug("library: token report failed", exc_info=True)
     if images and getattr(provider, "sees_images", None) is False:
