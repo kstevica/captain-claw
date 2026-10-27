@@ -700,6 +700,62 @@ def _pin_confinement(environment: dict[str, str], base: dict[str, str], *,
     environment["CLAW_CONFINE_WORKSPACE"] = str(ws)
 
 
+def _deck_key_may_go(provider: str, base_url: str) -> bool:
+    """Where Flight Deck's own model keys — its environment's, and its
+    config's provider_keys — may be sent: where an org key may (#260), the
+    provider's own endpoint or one the published team sets route it through
+    (`basna_routes._SYSTEM_ROUTED`, kept fresh by `_prime_deck_routes`)."""
+    from captain_claw.flight_deck import basna_routes
+    from captain_claw.flight_deck.endpoints import endpoint_of
+
+    return (not endpoint_of(provider, base_url)[1]
+            or basna_routes.endpoint_key_id(provider, base_url) in basna_routes._SYSTEM_ROUTED)
+
+
+async def _prime_deck_routes() -> None:
+    """Re-read the team's routes `_deck_key_may_go` checks (TTL'd, best-effort)."""
+    from captain_claw.flight_deck import auth as fd_auth
+    from captain_claw.flight_deck.basna_routes import _refresh_system_provider_keys
+
+    if fd_auth._db is not None:
+        await _refresh_system_provider_keys(fd_auth._db)
+
+
+async def _guard_deck_keys() -> None:
+    """On a deck with accounts, Flight Deck's own model calls (Basna, Vatra,
+    Code, request bodies …) never send its keys to an endpoint a caller named:
+    with no key of their own there, they send none (`llm.set_env_key_guard`).
+    Without accounts the keys are the one operator's to send anywhere."""
+    from captain_claw import llm
+
+    llm.set_env_key_guard(_deck_key_may_go if AUTH_ENABLED else None)
+    await _prime_deck_routes()
+
+
+def _withhold_deck_keys(environment: dict[str, str], base: dict[str, str], *,
+                        agent_dir: Path, owner_id: str) -> None:
+    """Take Flight Deck's own provider keys, inherited through ``base``, back
+    out of a non-admin's process agent wherever it would send them on to an
+    endpoint they don't go to (`_deck_key_may_go`): its model, an allowed
+    model, or an endpoint its environment names. A key the agent's own .env
+    sets is its own (and #260's checks hold it). An admin's agent, and every
+    agent on a deck without accounts, keeps what it inherits."""
+    if not AUTH_ENABLED or _owner_is_admin(owner_id):
+        return
+    from captain_claw.config import Config
+
+    own = Config._read_dotenv_file(agent_dir / ".env")
+    model = (_agent_config_model(agent_dir.name) or ({}, {}))[0]
+    for provider, endpoint in _agent_key_routes(model, {**environment, **own}):
+        if _deck_key_may_go(provider, endpoint):
+            continue
+        for name in _provider_key_env_names(provider):
+            if base.get(name) and name not in own:
+                environment[name] = ""
+                log.info("Flight Deck's key withheld from an agent on another endpoint",
+                         agent=agent_dir.name, key=name, endpoint=_endpoint_label(provider, endpoint))
+
+
 def _start_registered_process(slug: str, entry: dict) -> bool:
     """Start a single process agent from its registry entry. Returns True on success."""
     agent_dir = DATA_DIR / slug
@@ -740,6 +796,7 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
         environment["CLAW_VFS_USER"] = _owner
     _pin_confinement(environment, base_env, agent_dir=agent_dir, owner_id=_owner,
                      workspace=str(entry.get("workspace") or ""))
+    _withhold_deck_keys(environment, base_env, agent_dir=agent_dir, owner_id=_owner)
 
     log_file = agent_dir / "process.log"
     try:
@@ -987,6 +1044,7 @@ async def lifespan(app: FastAPI):
     print(f"Flight Deck: {origin_guard.describe_policy()}")
     # Initialize database for auth & settings — always, see _init_fd_db.
     _fd_db = await _init_fd_db()
+    await _guard_deck_keys()
     # MCP servers saved before they had owners: settle that before serving,
     # so an OAuth sign-in never answers another user's agent in between.
     from captain_claw.flight_deck.mcp_routes import migrate_legacy_ownership
@@ -2723,6 +2781,7 @@ async def heal_keyless_agents(*, restart: bool = True) -> list[str]:
     .env changed; with ``restart`` the running ones among them are restarted in
     the background so the key takes effect."""
     healed = [slug for slug in list(_load_process_registry()) if await _heal_agent_model_key(slug)]
+    await _prime_deck_routes()  # the restarts below withhold by it
     running = [slug for slug in healed if _process_is_alive(slug)] if restart else []
     if running:
         asyncio.get_running_loop().run_in_executor(None, _restart_processes, running)
@@ -2897,6 +2956,7 @@ async def byok_switch_agents(owner_id: str, tiers: dict | None, keys: dict) -> d
             await _heal_agent_model_key(slug)  # the deck's key, where it has one
     running = [slug for slug in changed if _process_is_alive(slug)]
     if running:
+        await _prime_deck_routes()  # the restarts withhold by it
         asyncio.get_running_loop().run_in_executor(None, _restart_processes, running)
     log.info("Agents moved %s own API keys", "onto" if tiers is not None else "off",
              owner=owner_id, switched=len(changed), restarted=len(running))
@@ -9235,6 +9295,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     await _resolve_archetype(config, request, user)
     _resolve_tier(config)
     await _resolve_spawn_provider_key(config)
+    await _prime_deck_routes()  # for _withhold_deck_keys
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
         # An admin acting for this user spends their own request / spawn budget;
@@ -9324,6 +9385,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     environment["FD_AGENT_SLUG"] = slug
     _pin_confinement(environment, base_env, agent_dir=agent_dir, owner_id=owner_id or "",
                      workspace=config.workspace_path or "")
+    _withhold_deck_keys(environment, base_env, agent_dir=agent_dir, owner_id=owner_id or "")
 
     # Set HOME to the agent's home-config directory so captain-claw
     # picks up ~/.captain-claw/config.yaml from there
@@ -9698,6 +9760,7 @@ async def start_process(slug: str, request: Request, user: dict | None = _agent_
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     import asyncio
     await _heal_agent_model_key(slug)
+    await _prime_deck_routes()  # for _withhold_deck_keys
     return await asyncio.get_event_loop().run_in_executor(None, _do_start_process, slug)
 
 
@@ -9706,6 +9769,7 @@ async def restart_process(slug: str, request: Request, user: dict | None = _agen
     """Restart a process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     await _heal_agent_model_key(slug)
+    await _prime_deck_routes()  # for _withhold_deck_keys
     _do_stop_process(slug)
     import time
     time.sleep(1)
