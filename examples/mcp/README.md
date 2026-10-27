@@ -2,6 +2,8 @@
 
 - [Local repository lookup with Sem](sem-code.md): symbol lookup over stdio,
   including a smoke test through Flight Deck's MCP manager without an LLM.
+- [Publishing pages with deed.page](deed-page.md): HTTP publish and delete
+  smoke test through Flight Deck's MCP manager without an LLM.
 - Parallel Search over HTTP: setup and smoke test below.
 
 ## Parallel Search MCP
