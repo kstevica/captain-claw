@@ -5,20 +5,28 @@ ticked, the agent is created as usual and the setup dialog opens on it. The
 person adds instructions and documents (policies, FAQs, procedures, price
 lists, templates) — uploaded, or picked from their File library — and may say
 what each document is and how the agent should use it.
-``POST /fd/agent-preset/prepare`` reads them and has the owner's model pull out
-what the agent must know and do — rules, the requests it handles (intents, each
-with its steps), facts, when to ask first, output templates, a glossary and a
-summary per document — every item with the document and section it came from.
-Nothing reaches the agent yet: the dialog shows the preset for review, and
-``POST /fd/agent-preset/apply`` gives the agent the items the person kept:
+
+``POST /fd/agent-preset/documents`` reads each document in full as it is added
+(agent_preset_docs), so the dialog shows its pages and what reading it costs
+before anything is spent. ``POST /fd/agent-preset/prepare`` then reads the
+material in the background: in steps sized to the model's context window
+(``step_tokens``), each pulling out what the agent must know and do — rules,
+the requests it handles (intents, each with its steps), facts, when to ask
+first, output templates, a glossary and a summary per document, every item
+with the document and section (page) it came from — and the parts merged.
+A document marked "knowledge only" (the default for reference material) isn't
+read at all. Nothing reaches the agent yet: the dialog shows the preset for
+review, and ``POST /fd/agent-preset/apply`` gives the agent the items the
+person kept:
 
 - rules, when-to-ask and templates → a short "Your owner's rules" block after
   its instructions (the full lists in ``knowledge/owner-rules.md``);
 - intents → one skill each, in the agent's own skills folder
   (``~/.captain-claw/skills/<name>/SKILL.md`` under its HOME);
-- documents → Markdown in its workspace's ``knowledge/`` folder with an
-  ``INDEX.md`` and the glossary — semantic memory indexes them, for this
-  agent only (not the owner-wide deep memory);
+- documents → their whole text as Markdown in its workspace's ``knowledge/``
+  folder — a long one split into parts small enough for semantic memory to
+  index — with an ``INDEX.md`` and the glossary, for this agent only (not
+  the owner-wide deep memory);
 - facts → insights, through the agent's REST once it is up.
 
 A running agent needs no restart for any of it: it re-reads its skills folder,
@@ -31,19 +39,20 @@ a day, so Apply doesn't upload them again. The owner's model reads them
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
-import os
 import re
 import secrets
 import shutil
-import tempfile
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from captain_claw.flight_deck import agent_preset_docs as pdocs
 from captain_claw.flight_deck import file_library
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.flight_deck.file_library import (
@@ -60,6 +69,7 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/fd/agent-preset", tags=["agent-preset"])
 
 _PROMPT_FILE = Path(__file__).parent.parent / "instructions" / "agent_preset_system_prompt.md"
+_MERGE_PROMPT_FILE = Path(__file__).parent.parent / "instructions" / "agent_preset_merge_prompt.md"
 
 GROUPS = ("rules", "intents", "facts", "escalation", "templates", "glossary", "knowledge")
 FACT_CATEGORIES = ("contact", "decision", "preference", "fact", "deadline", "project",
@@ -69,10 +79,12 @@ LIMITS = {"rules": 30, "intents": 12, "facts": 40, "escalation": 15, "templates"
           "glossary": 60, "knowledge": 12}
 
 _MAX_FILES = 12
-_MAX_FILE_BYTES = 25 * 1024 * 1024    # the dialog's own guard, again here
-_MAX_PER_FILE = 40000                  # characters, as the archetype forge reads
-_MAX_TOTAL = 160000
 _MAX_INSTRUCTIONS = 20000
+_MAX_READ_CHARS = 4_000_000            # the most one setup reads (~1M tokens); all of it is kept anyway
+_STEP_MIN, _STEP_MAX = 4000, 100_000   # tokens of material in one step (step_tokens)
+_PROMPT_TOKENS = 3000                  # the prompt around a step's material
+_PART_BYTES = 200_000                  # a knowledge file: semantic memory skips files over 256 KB
+_JOB_KEEP = 3600                       # a finished read's result waits this long
 _TIERS = ("balanced", "reason", "fast")  # a careful read beats a quick one here
 _MAX_TOKENS = 8000
 _RETRY_TOKENS = 16000
@@ -249,24 +261,6 @@ def _display_name(name: str, taken: set[str]) -> str:
     return out
 
 
-def _read_one(raw: bytes, suffix: str) -> tuple[str | None, str | None]:
-    from captain_claw.tools.summarize_files import SummarizeFilesTool
-    tmp_path = None
-    try:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix or ".txt") as tmp:
-            tmp.write(raw)
-            tmp_path = Path(tmp.name)
-        return SummarizeFilesTool._read_file_content(tmp_path)
-    except Exception as exc:
-        return None, str(exc)
-    finally:
-        if tmp_path is not None:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-
-
 def note(raw: Any) -> dict:
     """The person's note on a document: what it is, and how to use it."""
     d = raw if isinstance(raw, dict) else {}
@@ -280,91 +274,48 @@ def _no_text(name: str, err: Any) -> str:
     return f"{name}: no text could be read from it (a scanned PDF or a picture?), so it was left out."
 
 
-async def _upload_text(uf: UploadFile, name: str) -> tuple[str, str]:
-    """An uploaded document's text, or "" and what to tell the person."""
+async def stage_upload(root: Path, uf: UploadFile) -> tuple[dict | None, str]:
+    """An upload read in full and staged, or None and what to tell the person."""
+    name = Path(uf.filename or "document").name[:120] or "document"
     try:
         raw = await uf.read()
     except Exception:
         raw = b""
     if not raw:
-        return "", f"{name}: the file is empty."
-    if len(raw) > _MAX_FILE_BYTES:
-        return "", f"{name}: larger than 25 MB, left out."
-    text, err = await asyncio.to_thread(_read_one, raw, Path(uf.filename or "").suffix)
-    return (text, "") if (text or "").strip() else ("", _no_text(name, err))
+        return None, f"{name}: the file is empty."
+    if len(raw) > pdocs.MAX_FILE_BYTES:
+        return None, f"{name}: larger than 25 MB, left out."
+    text, err = await asyncio.to_thread(pdocs.extract_bytes, raw, Path(name).suffix)
+    if not text.strip():
+        return None, _no_text(name, err)
+    return await asyncio.to_thread(pdocs.stage, root, name, text, "upload"), ""
 
 
-def _library_text(path: Path, name: str) -> tuple[str, str]:
-    """A document in one of the person's agents' folders: its text, or ""
-    and what to tell the person."""
+async def stage_library(root: Path, file_id: str, user: dict) -> tuple[dict | None, str]:
+    """A File library file — only ever one of *user*'s own agents' — read in
+    full and staged, or None and what to tell the person."""
     try:
-        if path.stat().st_size > _MAX_FILE_BYTES:
-            return "", f"{name}: larger than 25 MB, left out."
-        text, err = file_library.read_text(path, path.suffix.lower())
-    except Exception as exc:
-        text, err = "", str(exc)
-    return (text, "") if (text or "").strip() else ("", _no_text(name, err))
+        row, agents = file_library._owned_row(str(file_id or ""), user)
+        path = file_library._resolve_path(row)
+    except HTTPException:
+        row, path = None, None
+    if row is None or path is None:
+        return None, "A file picked from your library is no longer there, so it was left out."
+    name = row["filename"]
+    try:
+        too_big = path.stat().st_size > pdocs.MAX_FILE_BYTES
+    except OSError:
+        too_big = False
+    if too_big:
+        return None, f"{name}: larger than 25 MB, left out."
+    text, err = await asyncio.to_thread(pdocs.extract, path)
+    if not text.strip():
+        return None, _no_text(name, err)
+    agent = agents.get(row["agent_slug"], {}).get("name") or row["agent_slug"]
+    return await asyncio.to_thread(pdocs.stage, root, name, text, "library", agent), ""
 
 
-async def read_documents(files: list[UploadFile], notes: list | None = None,
-                         library: list | None = None, user: dict | None = None,
-                         ) -> tuple[list[dict], list[str]]:
-    """Each document's text (``name``, ``text``, ``chars``, ``truncated``,
-    the person's ``description`` and ``usage``, and where it came from) and
-    what the person should know about the ones that didn't come through —
-    said without the model. ``notes`` go with ``files`` in order;
-    ``library`` is ``[{id, description, usage}]`` of File library files,
-    read only from ``user``'s own agents' folders."""
-    uploads = [f for f in files or [] if f and f.filename]
-    notes = notes if isinstance(notes, list) else []
-    picks = [p for p in library or [] if isinstance(p, dict) and p.get("id")]
-    sources: list[tuple[str, Any, dict]] = [
-        ("upload", uf, note(notes[i] if i < len(notes) else None)) for i, uf in enumerate(uploads)]
-    sources += [("library", p, note(p)) for p in picks]
-
-    docs: list[dict] = []
-    warnings: list[str] = []
-    taken: set[str] = set()
-    total = 0
-    for origin, src, meta in sources[:_MAX_FILES + 1]:
-        if len(docs) >= _MAX_FILES:
-            warnings.append(f"Only the first {_MAX_FILES} documents were read.")
-            break
-        extra: dict = {}
-        if origin == "upload":
-            name = _display_name(src.filename, taken)
-            text, said = await _upload_text(src, name)
-        else:
-            try:
-                row, agents = file_library._owned_row(str(src["id"]), user or {})
-                path = file_library._resolve_path(row)
-            except HTTPException:
-                row, path = None, None
-            if row is None or path is None:
-                warnings.append("A file picked from your library is no longer there, so it was left out.")
-                continue
-            name = _display_name(row["filename"], taken)
-            extra = {"agent": agents.get(row["agent_slug"], {}).get("name") or row["agent_slug"]}
-            text, said = await asyncio.to_thread(_library_text, path, name)
-        if said:
-            warnings.append(said)
-            continue
-        remaining = _MAX_TOTAL - total
-        if remaining <= 0:
-            warnings.append(f"{name}: left out — the documents together are too long to read at once.")
-            continue
-        cut = min(_MAX_PER_FILE, remaining)
-        truncated = len(text) > cut
-        if truncated:
-            warnings.append(f"{name}: only the first {cut:,} characters were read.")
-        text = text[:cut]
-        total += len(text)
-        docs.append({"name": name, "text": text, "chars": len(text), "truncated": truncated,
-                     "origin": origin, **meta, **extra})
-    return docs, warnings
-
-
-# ── Waiting presets (the documents between Prepare and Create) ────────
+# ── Waiting presets (the documents between Prepare and Apply) ─────────
 
 
 def _data_dir() -> Path:
@@ -382,13 +333,19 @@ def owner_key(owner_id: str) -> str:
     return key if key and _auth_enabled() else "_deck"
 
 
+def owner_root(owner_id: str) -> Path:
+    """A person's folder: their presets, and their staged documents under ``staged/``."""
+    return _root() / owner_key(owner_id)
+
+
 def _preset_dir(owner_id: str, preset_id: str) -> Path | None:
     if not re.fullmatch(r"[0-9a-f]{24}", str(preset_id or "")):
         return None
-    return _root() / owner_key(owner_id) / preset_id
+    return owner_root(owner_id) / preset_id
 
 
 def save_docs(owner_id: str, docs: list[dict], archetype: str) -> str:
+    """Keep a preset's documents — their whole text — until it is applied."""
     preset_id = secrets.token_hex(12)
     folder = _preset_dir(owner_id, preset_id)
     assert folder is not None
@@ -397,16 +354,16 @@ def save_docs(owner_id: str, docs: list[dict], archetype: str) -> str:
     for n, d in enumerate(docs):
         file = f"{n}.txt"
         (folder / "docs" / file).write_text(d["text"], encoding="utf-8")
-        meta["docs"].append({"name": d["name"], "file": file, "chars": d["chars"],
-                             **note(d)})
+        meta["docs"].append({"name": d["name"], "file": file, "chars": len(d["text"]),
+                             "pages": d.get("pages") or 0, "read": bool(d.get("read", True)), **note(d)})
     (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     return preset_id
 
 
 def load_docs(owner_id: str, preset_id: str) -> list[dict]:
-    """A waiting preset's documents (``name``, ``text``, the person's
-    ``description`` and ``usage``); empty when it is gone, expired, or
-    another person's."""
+    """A waiting preset's documents (``name``, ``text``, ``pages``, ``read``,
+    the person's ``description`` and ``usage``); empty when it is gone,
+    expired, or another person's."""
     folder = _preset_dir(owner_id, preset_id)
     if folder is None or not (folder / "meta.json").is_file():
         return []
@@ -415,7 +372,7 @@ def load_docs(owner_id: str, preset_id: str) -> list[dict]:
         if time.time() - float(meta.get("created") or 0) > _TTL:
             return []
         return [{"name": d["name"], "text": (folder / "docs" / d["file"]).read_text(encoding="utf-8"),
-                 **note(d)}
+                 "pages": int(d.get("pages") or 0), "read": bool(d.get("read", True)), **note(d)}
                 for d in meta.get("docs") or []
                 if re.fullmatch(r"\d+\.txt", str(d.get("file") or ""))
                 and (folder / "docs" / d["file"]).is_file()]
@@ -431,7 +388,7 @@ def discard(owner_id: str, preset_id: str) -> None:
 
 
 def prune(now: float | None = None) -> int:
-    """Drop presets nobody created an agent from within a day."""
+    """Drop presets nobody applied, and documents nobody read, within a day."""
     now = time.time() if now is None else now
     gone = 0
     root = _root()
@@ -440,7 +397,10 @@ def prune(now: float | None = None) -> int:
     for owner in root.iterdir():
         if not owner.is_dir():
             continue
+        gone += pdocs.prune_staged(owner, now)
         for folder in owner.iterdir():
+            if folder.name == "staged":
+                continue
             try:
                 created = json.loads((folder / "meta.json").read_text(encoding="utf-8")).get("created")
             except Exception:
@@ -451,7 +411,66 @@ def prune(now: float | None = None) -> int:
     return gone
 
 
-# ── Prepare ───────────────────────────────────────────────────────────
+# ── Reading: the material in steps, then the parts merged ─────────────
+
+
+def step_tokens(tier: dict) -> int:
+    """How much material one step gives the model: half its context window,
+    less the prompt around it, within 4k–100k tokens. A tier that doesn't
+    say its window is taken at 32k (Ollama) or 128k."""
+    ctx = int(tier.get("input_ctx") or 0) or (32768 if tier.get("provider") == "ollama" else 128000)
+    return max(_STEP_MIN, min(_STEP_MAX, ctx // 2 - _PROMPT_TOKENS))
+
+
+def _retry_tokens(tier: dict) -> int:
+    ctx = int(tier.get("input_ctx") or 0) or (32768 if tier.get("provider") == "ollama" else 128000)
+    return min(_RETRY_TOKENS, max(_MAX_TOKENS, ctx - step_tokens(tier) - _PROMPT_TOKENS))
+
+
+def plan_steps(instructions: str, docs: list[dict], step_tok: int) -> tuple[list[dict], list[str]]:
+    """The steps the model reads the material in — each at most *step_tok*
+    tokens, small documents sharing one, a long one across many, the
+    instructions in the first — and what the person should know about what
+    wasn't read. Only documents marked ``read`` are; all of them reach the
+    agent's knowledge either way."""
+    limit = step_tok * pdocs.CHARS_PER_TOKEN
+    budget = _MAX_READ_CHARS
+    notes: list[str] = []
+    pieces: list[dict] = []
+    for d in docs:
+        if not d.get("read", True):
+            continue
+        text = d["text"]
+        if budget <= 0:
+            notes.append(f"{d['name']}: not read — the documents together are more than one setup reads "
+                         "(about a million tokens). It is still kept for the agent to look things up in.")
+            continue
+        if len(text) > budget:
+            notes.append(f"{d['name']}: only the first {budget:,} characters were read (about a million "
+                         "tokens in all). The whole document is still kept for the agent.")
+            text = text[:budget]
+        budget -= len(text)
+        parts = pdocs.split_text(text, limit)
+        for n, p in enumerate(parts, 1):
+            pieces.append({"doc": d, "text": p["text"], "label": p["label"], "part": n, "parts": len(parts)})
+
+    steps: list[dict] = []
+    cur: list[dict] = []
+    size = len(instructions.encode("utf-8"))
+    for piece in pieces:
+        piece_size = len(piece["text"].encode("utf-8"))
+        if cur and size + piece_size > limit:
+            steps.append({"pieces": cur})
+            cur, size = [], 0
+        cur.append(piece)
+        size += piece_size
+    if cur or (instructions and not steps):
+        steps.append({"pieces": cur})
+    for st in steps:
+        names = [p["doc"]["name"] + (f", {p['label']}" if p["parts"] > 1 and p["label"] else "")
+                 for p in st["pieces"]]
+        st["label"] = "; ".join(names) or "your instructions"
+    return steps, notes
 
 
 async def _archetype(owner_id: str, archetype_id: str) -> dict | None:
@@ -467,7 +486,21 @@ async def _archetype(owner_id: str, archetype_id: str) -> dict | None:
     return next((a for a in archetypes if a.get("id") == aid), None)
 
 
-def _user_prompt(arch: dict | None, instructions: str, docs: list[dict]) -> str:
+def _doc_part(piece: dict) -> str:
+    d = piece["doc"]
+    title = f"### {d['name']}"
+    if piece["parts"] > 1:
+        title += f" — {piece['label'] or 'part'} (part {piece['part']} of {piece['parts']} of this document)"
+    head = [title]
+    if d.get("description"):
+        head.append(f"The owner says: {d['description']}")
+    hint = USAGES.get(d.get("usage") or "auto", ("", ""))[1]
+    if hint:
+        head.append(f"Use it as: {hint}")
+    return "\n".join(head) + "\n" + piece["text"]
+
+
+def step_prompt(arch: dict | None, instructions: str, step: dict, n: int, total: int) -> str:
     parts: list[str] = []
     if arch:
         parts.append(
@@ -475,42 +508,243 @@ def _user_prompt(arch: dict | None, instructions: str, docs: list[dict]) -> str:
             f"Description: {arch.get('description') or ''}\n\n"
             "Its general procedure (for reference — extract only what the owner's material adds):\n"
             f"{str(arch.get('fleet_instructions') or '')[:3000]}")
-    if instructions:
+    if total > 1:
+        parts.append(
+            f"## Reading in parts\nThis is part {n} of {total} of the owner's material. Extract only what "
+            "is in this part — the parts are merged afterwards. For `knowledge`, give one entry per document "
+            "in this part (`doc` is its file name exactly as given, without the part): its `title` is the whole "
+            "document's (its own heading, or a name for all of it — not this part's), and its `summary` says "
+            "what this part contains, as content (\"Refund rules for EU orders; the returns form\") — never "
+            "about parts, sections still to come, or merging.")
+    if n == 1 and instructions:
         parts.append(f"## The owner's instructions\n{instructions}")
-    if docs:
-        parts.append("## The owner's documents\n" + "\n\n".join(_doc_part(d) for d in docs))
+    if step["pieces"]:
+        parts.append("## The owner's documents\n" + "\n\n".join(_doc_part(p) for p in step["pieces"]))
     return "\n\n".join(parts)
 
 
-def _doc_part(d: dict) -> str:
-    head = [f"### {d['name']}"]
-    if d.get("description"):
-        head.append(f"The owner says: {d['description']}")
-    hint = USAGES.get(d.get("usage") or "auto", ("", ""))[1]
-    if hint:
-        head.append(f"Use it as: {hint}")
-    return "\n".join(head) + "\n" + d["text"]
-
-
-async def _extract(tier: dict, user_prompt: str, owner_id: str) -> dict:
-    system = _PROMPT_FILE.read_text(encoding="utf-8")
-    content, _tokens = await call_model(tier, system, user_prompt, owner_id,
-                                        max_tokens=_MAX_TOKENS, request_timeout=_CALL_TIMEOUT)
+def _parse_part(content: str) -> dict | None:
+    """A step's reply, cleaned; None when it isn't JSON. A reply with nothing
+    in it is a part with nothing to set up, not a failure."""
     try:
-        return parse_preset(content)
-    except (ValueError, json.JSONDecodeError):
-        # A reasoning model that thought past the budget, or prose around the
-        # JSON: once more, with room and a nudge.
-        content, _tokens = await call_model(tier, system, f"{user_prompt}\n\n{_RETRY_NUDGE}", owner_id,
-                                            max_tokens=_RETRY_TOKENS, request_timeout=_CALL_TIMEOUT)
-        return parse_preset(content)
+        raw = reply_json(content)
+    except ValueError:
+        raw = _salvage(content)
+        if not raw:
+            return None
+    return normalise(raw)
+
+
+def combine(parts: list[dict]) -> dict:
+    """The parts merged without the model: each group interleaved, so its
+    cap keeps some of every part; one knowledge entry per document."""
+    out: dict[str, list] = {}
+    for g in (*GROUPS, "conflicts", "warnings"):
+        lists = [p.get(g) or [] for p in parts]
+        out[g] = [x for row in itertools.zip_longest(*lists) for x in row if x is not None]
+    by_doc: dict[str, dict] = {}
+    for p in parts:
+        for k in p.get("knowledge") or []:
+            e = by_doc.setdefault(k["doc"], {"doc": k["doc"], "title": "", "summary": []})
+            e["title"] = e["title"] or k.get("title") or ""
+            if k.get("summary"):
+                e["summary"].append(k["summary"])
+    out["knowledge"] = [{**e, "summary": " ".join(e["summary"])} for e in by_doc.values()]
+    return normalise(out)
+
+
+@dataclass
+class ReadJob:
+    """One read of a person's material, running in the background."""
+    id: str
+    owner: str
+    state: str = "running"          # running | done | error | cancelled
+    phase: str = "reading"          # reading | merging
+    step: int = 0
+    steps: int = 0
+    current: str = ""
+    tokens: int = 0
+    started: float = field(default_factory=time.time)
+    finished: float | None = None
+    error: str = ""
+    result: dict | None = None
+    task: asyncio.Task | None = None
+
+    def view(self) -> dict:
+        out = {"id": self.id, "state": self.state, "phase": self.phase, "step": self.step,
+               "steps": self.steps, "current": self.current, "tokens": self.tokens,
+               "started": self.started, "finished": self.finished, "error": self.error}
+        if self.result is not None:
+            out["result"] = self.result
+        return out
+
+
+_JOBS: dict[str, ReadJob] = {}
+
+
+def _forget_old_jobs(now: float) -> None:
+    for jid in [j.id for j in _JOBS.values() if j.finished and now - j.finished > _JOB_KEEP]:
+        _JOBS.pop(jid, None)
+
+
+class _UnreadableError(Exception):
+    pass
+
+
+async def _ask(tier: dict, system: str, prompt: str, owner_id: str, job: ReadJob) -> dict | None:
+    """One step's model call — again, with room and a nudge, when the reply
+    isn't JSON (a reasoning model that thought past the budget, prose around
+    it). None when it never is."""
+    for attempt in range(2):
+        content, tokens = await call_model(
+            tier, system, prompt if attempt == 0 else f"{prompt}\n\n{_RETRY_NUDGE}", owner_id,
+            max_tokens=_MAX_TOKENS if attempt == 0 else _retry_tokens(tier), request_timeout=_CALL_TIMEOUT)
+        job.tokens += int(tokens or 0)
+        got = _parse_part(content)
+        if got is not None:
+            return got
+    return None
+
+
+async def merge_parts(tier: dict, parts: list[dict], owner_id: str, job: ReadJob, depth: int = 0) -> dict:
+    """What every step found, as one preset: the model merges the parts
+    (a halving tree when they are too many for one call); without it — or
+    when its answer can't be read — they are combined as they are."""
+    if len(parts) == 1:
+        return parts[0]
+    payload = json.dumps(parts, ensure_ascii=False)
+    if len(payload) > step_tokens(tier) * pdocs.CHARS_PER_TOKEN:
+        if len(parts) > 2 and depth < 6:
+            mid = len(parts) // 2
+            left = await merge_parts(tier, parts[:mid], owner_id, job, depth + 1)
+            right = await merge_parts(tier, parts[mid:], owner_id, job, depth + 1)
+            return await merge_parts(tier, [left, right], owner_id, job, depth + 1)
+        return combine(parts)
+    system = _MERGE_PROMPT_FILE.read_text(encoding="utf-8")
+    try:
+        got = await _ask(tier, system, f"## The parts\n{payload}", owner_id, job)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("agent preset: merging failed, combined as they are", error=str(exc))
+        got = None
+    return whole_summaries(got, parts) if got is not None else combine(parts)
+
+
+def whole_summaries(merged: dict, parts: list[dict]) -> dict:
+    """A merge that kept one part's summary of a document read in several
+    parts — a small model copies rather than rewrites — gets every part's
+    summary instead, so the agent's index describes all of it."""
+    per_doc: dict[str, list[str]] = {}
+    for p in parts:
+        for k in p.get("knowledge") or []:
+            per_doc.setdefault(k["doc"], []).append(k.get("summary") or "")
+    joined = {k["doc"]: k["summary"] for k in combine(parts)["knowledge"]}
+    for k in merged.get("knowledge") or []:
+        summaries = per_doc.get(k["doc"], [])
+        if len(summaries) > 1 and k.get("summary") in summaries:
+            k["summary"] = joined.get(k["doc"], k["summary"])
+    return merged
+
+
+def _finish(preset: dict, docs: list[dict], warnings: list[str], model: str, steps: int, tokens: int,
+            preset_id: str) -> dict:
+    """The read's result: every document with a knowledge entry — summarised
+    by the model, else by the person's own words; one the model invented a
+    name for doesn't get in."""
+    names = [d["name"] for d in docs]
+    known: dict[str, dict] = {}
+    for k in preset["knowledge"]:
+        name = k["doc"] if k["doc"] in names else next((n for n in names if k["doc"].startswith(n)), "")
+        if name and name not in known:
+            known[name] = {**k, "doc": name}
+    preset["knowledge"] = [dict(known.get(n) or {"doc": n, "title": Path(n).stem[:120], "summary": ""})
+                           for n in names]
+    for k, d in zip(preset["knowledge"], docs):
+        k["summary"] = k["summary"] or d["description"]
+    preset["warnings"] = (warnings + preset["warnings"])[:20]
+    return {
+        "id": preset_id,
+        "preset": preset,
+        "docs": [{"name": d["name"], "chars": len(d["text"]), "pages": d.get("pages") or 0,
+                  "pages_exact": bool(d.get("pages_exact")), "truncated": bool(d.get("truncated")),
+                  "origin": d.get("origin") or "upload", "description": d["description"], "usage": d["usage"],
+                  "read": bool(d.get("read", True)), **({"agent": d["agent"]} if d.get("agent") else {})}
+                 for d in docs],
+        "model": model,
+        "steps": steps,
+        "tokens": tokens,
+    }
+
+
+async def run_read(job: ReadJob, tier: dict | None, arch: dict | None, instructions: str,
+                   docs: list[dict], warnings: list[str], owner_id: str) -> None:
+    """Read the material step by step, merge what each step found, and leave
+    the result on *job* for the dialog to fetch. A step whose answer can't
+    be read is reported and skipped; the person's allowance running out
+    stops the reading but keeps what was found."""
+    try:
+        steps, notes = plan_steps(instructions, docs, step_tokens(tier) if tier else _STEP_MAX)
+        warnings = warnings + notes
+        job.steps = len(steps)
+        parts: list[dict] = []
+        failed: str = ""
+        ran_out = False
+        system = _PROMPT_FILE.read_text(encoding="utf-8")
+        for n, step in enumerate(steps, 1):
+            if n > 1 and await _quota_spent(owner_id):
+                warnings.append(f"Today's allowance ran out after part {n - 1} of {len(steps)}, so the "
+                                "rest wasn't read. The documents are still kept whole for the agent.")
+                ran_out = True
+                break
+            job.step, job.current = n, step["label"]
+            try:
+                got = await _ask(tier, system, step_prompt(arch, instructions, step, n, len(steps)),
+                                 owner_id, job)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("agent preset: a step failed", step=n, model=(tier or {}).get("model"), error=str(exc))
+                failed = failed or str(exc)
+                got = None
+            if got is None:
+                warnings.append(f"Part {n} of {len(steps)} ({step['label']}) couldn't be read by the model, "
+                                "so nothing was taken from it.")
+                continue
+            parts.append(got)
+        if steps and not parts and not ran_out:
+            model = (tier or {}).get("model") or "the model"
+            raise _UnreadableError(f"Couldn't read the material with {model}: {failed}" if failed
+                              else "The model's answers couldn't be read. Try again, or with less material.")
+        if len(parts) > 1:
+            job.phase, job.current = "merging", "Putting the parts together"
+            preset = combine(parts) if ran_out else await merge_parts(tier, parts, owner_id, job)
+        else:
+            preset = parts[0] if parts else normalise({})
+        job.result = _finish(preset, docs, warnings, str((tier or {}).get("model") or ""), len(steps),
+                             job.tokens, job.id)
+        job.state = "done"
+    except asyncio.CancelledError:
+        job.state = "cancelled"
+        discard(owner_id, job.id)
+        raise
+    except Exception as exc:
+        if not isinstance(exc, _UnreadableError):
+            log.warning("agent preset: reading failed", exc_info=True)
+        job.state, job.error = "error", str(exc) or "Reading failed."
+        discard(owner_id, job.id)
+    finally:
+        job.finished = time.time()
+
+
+# ── Routes: documents, reading ────────────────────────────────────────
 
 
 def _json_list(raw: str) -> list:
     try:
         got = json.loads(raw or "[]")
     except ValueError:
-        raise HTTPException(400, "The document notes couldn't be read.")
+        raise HTTPException(400, "The list of library files couldn't be read.")
     return got if isinstance(got, list) else []
 
 
@@ -520,73 +754,155 @@ def _own_process(slug: str, owner_id: str) -> dict:
     return _verify_process_owner(str(slug or ""), owner_id)
 
 
-@router.post("/prepare")
-async def prepare(
-    archetype: str = Form(""),
-    agent: str = Form(""),
-    instructions: str = Form(""),
-    notes: str = Form(""),
-    library: str = Form(""),
+def _owner(user: dict) -> str:
+    return str(user.get("id") or "") if _auth_enabled() else ""
+
+
+@router.get("/reader")
+async def reader(user: dict = Depends(get_managed_user)) -> dict:
+    """The model that would read the material, and how much of it one step
+    takes — what the dialog estimates steps and tokens from."""
+    tier = await _resolve_tier(_owner(user), prefer=_TIERS)
+    if not tier:
+        return {"model": "", "step_tokens": 0}
+    return {"model": str(tier.get("model") or ""), "step_tokens": step_tokens(tier)}
+
+
+@router.post("/documents")
+async def add_documents(
     files: list[UploadFile] = File(default=[]),
+    library: str = Form(""),
     user: dict = Depends(get_managed_user),
 ) -> dict:
-    """Read the person's instructions and documents into a preset for review.
-    ``agent``: the agent being set up (its archetype frames the read);
-    ``notes``: JSON ``[{description, usage}]``, one per uploaded file in
-    order; ``library``: JSON ``[{id, description, usage}]`` of File library
-    files. Persists only the documents' text (under the returned id), never
-    anything in an agent."""
-    owner_id = str(user.get("id") or "") if _auth_enabled() else ""
-    instructions = (instructions or "").strip()[:_MAX_INSTRUCTIONS]
-    file_notes, picks = _json_list(notes), _json_list(library)
-    if not instructions and not picks and not [f for f in files or [] if f and f.filename]:
+    """Read documents in full — uploads, and ``library`` (JSON list of File
+    library ids) — and keep them for the setup a day. Spends no tokens: says
+    each one's pages, characters and the tokens reading it would take."""
+    root = owner_root(_owner(user))
+    try:
+        await asyncio.to_thread(prune)
+    except Exception:
+        log.debug("agent preset: prune failed", exc_info=True)
+    out: list[dict] = []
+    warnings: list[str] = []
+    for uf in [f for f in files or [] if f and f.filename]:
+        got, said = await stage_upload(root, uf)
+        out += [got] if got else []
+        warnings += [said] if said else []
+    for pick in _json_list(library):
+        file_id = pick.get("id") if isinstance(pick, dict) else pick
+        got, said = await stage_library(root, str(file_id or ""), user)
+        out += [got] if got else []
+        warnings += [said] if said else []
+    return {"docs": out, "warnings": warnings}
+
+
+class DocChoice(BaseModel):
+    id: str = Field(max_length=32)
+    description: str = Field(default="", max_length=2000)
+    usage: str = Field(default="auto", max_length=20)
+    # Read it for rules, skills and facts; otherwise it is only kept, whole,
+    # for the agent to look things up in (no tokens).
+    read: bool = True
+
+
+class PrepareBody(BaseModel):
+    agent: str = Field(default="", max_length=128)
+    archetype: str = Field(default="", max_length=200)
+    instructions: str = Field(default="", max_length=_MAX_INSTRUCTIONS * 2)
+    docs: list[DocChoice] = Field(default_factory=list, max_length=_MAX_FILES)
+
+
+@router.post("/prepare")
+async def prepare(body: PrepareBody, user: dict = Depends(get_managed_user)) -> dict:
+    """Start reading the person's instructions and staged documents into a
+    preset for review — in the background; ``GET /prepare/{id}`` follows it.
+    ``agent``: the agent being set up (its archetype frames the read). The
+    documents are kept, whole, under the returned id; nothing reaches an
+    agent until Apply."""
+    owner_id = _owner(user)
+    instructions = body.instructions.strip()[:_MAX_INSTRUCTIONS]
+    if not instructions and not body.docs:
         raise HTTPException(400, "Add some instructions or at least one document first.")
-    if agent:
-        archetype = archetype or str(_own_process(agent, owner_id).get("archetype") or "")
-    if await _quota_spent(owner_id):
-        raise HTTPException(429, "Today's allowance is used up, so the documents can't be read now. "
-                                 "Create the agent without them, or try again tomorrow.")
+    archetype = body.archetype
+    if body.agent:
+        archetype = archetype or str(_own_process(body.agent, owner_id).get("archetype") or "")
     try:
         await asyncio.to_thread(prune)
     except Exception:
         log.debug("agent preset: prune failed", exc_info=True)
 
-    docs, warnings = await read_documents(files, file_notes, picks, user)
+    root = owner_root(owner_id)
+    docs: list[dict] = []
+    warnings: list[str] = []
+    taken: set[str] = set()
+    for choice in body.docs:
+        staged = await asyncio.to_thread(pdocs.load_staged, root, choice.id)
+        if staged is None:
+            warnings.append("A document added more than a day ago is gone — add it again.")
+            continue
+        name = _display_name(staged["name"], taken)
+        if staged.get("truncated"):
+            warnings.append(f"{name}: only its first {pdocs.MAX_CHARS:,} characters are kept.")
+        docs.append({**{k: staged.get(k) for k in ("text", "pages", "pages_exact", "truncated", "origin", "agent")},
+                     "name": name, "read": choice.read, **note(choice.model_dump())})
     if not instructions and not docs:
-        raise HTTPException(400, " ".join(warnings) or "None of the documents had text that could be read.")
-    tier = await _resolve_tier(owner_id, prefer=_TIERS)
-    if not tier:
-        raise HTTPException(409, "No model is set up to read the documents with. Ask your admin.")
-    arch = await _archetype(owner_id, archetype)
-    try:
-        preset = await _extract(tier, _user_prompt(arch, instructions, docs), owner_id)
-    except (ValueError, json.JSONDecodeError):
-        raise HTTPException(502, "The model's answer couldn't be read. Try again, or with fewer documents.")
-    except Exception as exc:
-        log.warning("agent preset: model call failed", model=tier.get("model"), error=str(exc))
-        raise HTTPException(502, f"Couldn't read the documents with {tier.get('model') or 'the model'}: {exc}")
+        raise HTTPException(400, " ".join(warnings) or "None of the documents are there any more.")
 
-    # Every document the person gave gets a knowledge entry — summarised by
-    # the model, else by the person's own words; one the model invented a
-    # name for doesn't.
-    known = {k["doc"]: k for k in preset["knowledge"]}
-    preset["knowledge"] = [dict(known.get(d["name"]) or {"doc": d["name"], "title": Path(d["name"]).stem[:120],
-                                                         "summary": ""}) for d in docs]
-    for k, d in zip(preset["knowledge"], docs):
-        k["summary"] = k["summary"] or d["description"]
-    preset["warnings"] = (warnings + preset["warnings"])[:20]
+    tier = None
+    if instructions or any(d["read"] for d in docs):
+        if await _quota_spent(owner_id):
+            raise HTTPException(429, "Today's allowance is used up, so the documents can't be read now. "
+                                     "Keep them as knowledge only, or try again tomorrow.")
+        tier = await _resolve_tier(owner_id, prefer=_TIERS)
+        if not tier:
+            raise HTTPException(409, "No model is set up to read the documents with. Ask your admin.")
     preset_id = await asyncio.to_thread(save_docs, owner_id, docs, archetype)
-    return {
-        "id": preset_id,
-        "preset": preset,
-        "docs": [{"name": d["name"], "chars": d["chars"], "truncated": d["truncated"],
-                  "origin": d["origin"], "description": d["description"], "usage": d["usage"],
-                  **({"agent": d["agent"]} if d.get("agent") else {})} for d in docs],
-        "model": str(tier.get("model") or ""),
-    }
+    arch = await _archetype(owner_id, archetype)
+
+    now = time.time()
+    _forget_old_jobs(now)
+    key = owner_key(owner_id)
+    # One read at a time per person: a new one replaces one still running.
+    for other in [j for j in _JOBS.values() if j.owner == key and j.state == "running"]:
+        if other.task is not None:
+            other.task.cancel()
+    job = ReadJob(id=preset_id, owner=key)
+    _JOBS[preset_id] = job
+    job.task = asyncio.get_running_loop().create_task(
+        run_read(job, tier, arch, instructions, docs, warnings, owner_id))
+    return job.view()
 
 
-# ── Seeding a new agent (from the spawn, before the agent starts) ─────
+def _job(preset_id: str, user: dict) -> ReadJob:
+    job = _JOBS.get(str(preset_id or ""))
+    if job is None or job.owner != owner_key(_owner(user)):
+        raise HTTPException(404, "That reading isn't here any more — Flight Deck may have restarted. "
+                                 "Read the material again.")
+    return job
+
+
+@router.get("/prepare/{preset_id}")
+async def read_status(preset_id: str, user: dict = Depends(get_managed_user)) -> dict:
+    """Where a read stands: its step, the tokens spent, and — once done — the
+    preset for review."""
+    _forget_old_jobs(time.time())
+    return _job(preset_id, user).view()
+
+
+@router.delete("/prepare/{preset_id}")
+async def cancel_read(preset_id: str, user: dict = Depends(get_managed_user)) -> dict:
+    """Stop a read. The step under way is abandoned; its documents are dropped."""
+    job = _job(preset_id, user)
+    if job.state == "running" and job.task is not None:
+        job.task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(job.task), timeout=5)
+        except BaseException:
+            pass
+    return job.view()
+
+
+# ── Writing the setup into an agent ───────────────────────────────────
 
 
 def _file_stem(name: str, taken: set[str]) -> str:
@@ -647,8 +963,11 @@ def _owner_rules_md(preset: dict) -> str:
 
 
 def write_knowledge(folder: Path, preset: dict, docs: list[dict]) -> list[dict]:
-    """The kept documents as Markdown, with an index, the glossary and the
-    full rules; the documents written (``file``, ``title``)."""
+    """The kept documents — their whole text — as Markdown, with an index,
+    the glossary and the full rules; the documents written (``file``,
+    ``title``, ``parts``). A document too long for one file the agent's
+    semantic memory indexes is an overview plus parts (``<name>-part-01.md``
+    …), each cut at a page or heading."""
     folder.mkdir(parents=True, exist_ok=True)
     doc_of = {d["name"]: d for d in docs}
     taken: set[str] = set()
@@ -657,24 +976,42 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict]) -> list[dict]:
         doc = doc_of.get(k["doc"])
         if doc is None:
             continue
-        file = f"{_file_stem(k['doc'], taken)}.md"
+        stem = _file_stem(k["doc"], taken)
         title = k["title"] or Path(k["doc"]).stem
         use = USAGES.get(doc.get("usage") or "auto", ("", ""))[0]
-        head = [f"# {title}", "", f"Source: {k['doc']} — given to you by your owner.", ""]
+        source = f"Source: {k['doc']} — given to you by your owner."
+        head = [f"# {title}", "", source, ""]
         if doc.get("description"):
             head += [f"Your owner says: {doc['description']}", ""]
         if use:
             head += [f"Use it as: {use.lower()}.", ""]
         if k["summary"] and k["summary"] != doc.get("description"):
             head += [k["summary"], ""]
-        (folder / file).write_text("\n".join(head) + "\n---\n\n" + doc["text"].strip() + "\n", encoding="utf-8")
-        written.append({"file": file, "title": title, "summary": k["summary"], "use": use})
+        text = doc["text"].strip()
+        parts = pdocs.split_text(text, _PART_BYTES)
+        if len(parts) <= 1:
+            (folder / f"{stem}.md").write_text("\n".join(head) + "\n---\n\n" + text + "\n", encoding="utf-8")
+        else:
+            listing: list[str] = []
+            for n, part in enumerate(parts, 1):
+                name = f"{stem}-part-{n:02d}"
+                taken.add(name)
+                where = f" ({part['label']})" if part["label"] else ""
+                (folder / f"{name}.md").write_text("\n".join([
+                    f"# {title} — part {n} of {len(parts)}{where}", "", source,
+                    f"The whole document: {stem}.md.", "", "---", "", part["text"].strip(), ""]), encoding="utf-8")
+                listing.append(f"- [Part {n}{where}]({name}.md)")
+            (folder / f"{stem}.md").write_text("\n".join([
+                *head, f"It is long, so it is kept in {len(parts)} parts:", "", *listing, ""]), encoding="utf-8")
+        written.append({"file": f"{stem}.md", "title": title, "summary": k["summary"], "use": use,
+                        "parts": len(parts)})
     if written:
         (folder / "INDEX.md").write_text("\n".join([
             "# Knowledge", "",
             "Documents your owner gave you. Read the one that fits before you answer from memory.", "",
             *[f"- [{w['title']}]({w['file']})" + (f" — {w['summary']}" if w["summary"] else "")
               + (f" ({w['use'].lower()})" if w["use"] else "")
+              + (f" — {w['parts']} parts" if w["parts"] > 1 else "")
               for w in written], ""]), encoding="utf-8")
     if preset["glossary"]:
         (folder / "glossary.md").write_text("\n".join([
@@ -892,5 +1229,6 @@ async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict
         "counts": done["counts"],
         "skills": done["skills"],
         "knowledge": [k["title"] for k in done["knowledge"]],
+        "parts": sum(k["parts"] for k in done["knowledge"] if k["parts"] > 1),
         "running": srv._process_is_alive(slug),
     }

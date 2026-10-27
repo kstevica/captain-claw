@@ -21,6 +21,7 @@ export function PresetReview({ review, disabled, onChange }: {
   onChange: (r: Review) => void
 }) {
   const { preset, off, prepared } = review
+  const readDocs = prepared.docs.filter((d) => d.read).length
   const notices = [...preset.conflicts.map((t) => ({ t, conflict: true })), ...preset.warnings.map((t) => ({ t, conflict: false }))]
   const groups = GROUP_ORDER.filter((g) => preset[g].length > 0)
   // Conflicts first: they are what the person most needs to see.
@@ -62,8 +63,13 @@ export function PresetReview({ review, disabled, onChange }: {
       {/* Groups: a sidebar on a wide screen, a row of chips on a phone. */}
       <nav className="shrink-0 border-b border-zinc-800 wide:w-60 wide:border-b-0 wide:border-r wide:bg-zinc-950/40" aria-label="What it starts with">
         <p className="hidden px-4 pt-4 pb-2 text-[11px] leading-snug text-zinc-500 wide:block">
-          Read by <span className="text-zinc-400">{prepared.model || 'your model'}</span>
-          {prepared.docs.length > 0 && ` from ${prepared.docs.length} document${prepared.docs.length === 1 ? '' : 's'}`}.
+          {prepared.steps > 0 ? (
+            <>
+              Read by <span className="text-zinc-400">{prepared.model || 'your model'}</span>
+              {prepared.steps > 1 && ` in ${prepared.steps} steps`}
+              {readDocs > 0 && ` from ${readDocs} document${readDocs === 1 ? '' : 's'}`}.
+            </>
+          ) : 'Nothing was read — the documents are kept as knowledge only.'}
         </p>
         <ul className="flex gap-1.5 overflow-x-auto px-3 py-2.5 wide:flex-col wide:gap-0.5 wide:overflow-visible wide:px-2 wide:py-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
           {nav.map(({ id, icon: Icon, title, badge, warn }) => {
@@ -179,7 +185,8 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
                     {doc.usage !== 'auto' && (
                       <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">{USAGE_LOOKS[doc.usage].label}</span>
                     )}
-                    {doc.truncated && <span className="text-amber-600 dark:text-amber-400">only the start was read</span>}
+                    {doc.pages > 0 && <span>{doc.pages_exact ? '' : 'about '}{doc.pages.toLocaleString()} page{doc.pages === 1 ? '' : 's'}</span>}
+                    {!doc.read && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">Knowledge only</span>}
                   </p>
                 )}
               </div>
