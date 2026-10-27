@@ -700,10 +700,18 @@ async def give_facts(slug: str, port_of: Callable[[], int], token: str, facts: l
         return 0
 
 
+# Facts still on their way to a new agent: a task nobody holds can be
+# garbage-collected before it runs.
+_PENDING: set[asyncio.Task] = set()
+
+
 def schedule_facts(slug: str, port_of: Callable[[], int], token: str, facts: list[dict]) -> None:
     if not facts:
         return
     try:
-        asyncio.get_event_loop().create_task(give_facts(slug, port_of, token, facts))
+        task = asyncio.get_running_loop().create_task(give_facts(slug, port_of, token, facts))
     except RuntimeError:
         log.warning("agent preset: no loop to give facts on", agent=slug)
+        return
+    _PENDING.add(task)
+    task.add_done_callback(_PENDING.discard)
