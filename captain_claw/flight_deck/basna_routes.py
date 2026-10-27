@@ -690,7 +690,10 @@ def _resolve_owner(body: _AgentReq) -> str:
     owner = ""
     if body.web_auth:
         owner = _resolve_agent_owner_by_auth(body.web_auth) or ""
-    if not owner and body.source_port:
+    # The source port is caller-asserted, so it stands in as identity only in
+    # single-user local mode; on a sign-in deck a spawned agent carries its
+    # web_auth, and a stated port must not let one agent act as another.
+    if not owner and body.source_port and not _fd_auth_enabled():
         owner = _resolve_agent_owner(int(body.source_port)) or ""
     if owner:
         if hint and hint != owner:

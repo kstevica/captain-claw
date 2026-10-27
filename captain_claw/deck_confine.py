@@ -55,6 +55,15 @@ EXEC_REFUSED = (
     "Not available on this deck: running commands and driving the computer are "
     "reserved for admins' agents. Use read/write/glob and the other tools instead."
 )
+HOSTING_APP_REFUSED = (
+    "Not available on this deck: hosting a runnable app (kind='app') starts a "
+    "process on the server and is reserved for admins' agents. You can still "
+    "publish a static site with kind='static'."
+)
+PRIVATE_URL_REFUSED = (
+    "Not allowed on this deck: that address is on the server itself or a "
+    "private network. Use a public http(s) address."
+)
 PATH_REFUSED = "Not allowed on this deck: "
 _OUTSIDE = (" is outside this agent's own files (its workspace, its folder and "
             "your VFS folders)")
@@ -132,6 +141,20 @@ NON_PATH_PARAMS: dict[str, frozenset[str]] = {
     "direct_api": frozenset({"url"}), "apis": frozenset({"base_url"}),
 }
 
+# Tool arguments that carry an OUTBOUND address (not a file path). For a
+# `user`-tier agent these must not point back at the server or a private
+# network — otherwise the agent reaches Flight Deck's own loopback routes or a
+# neighbouring service instead of the public web. (admin agents, and decks
+# with sign-in off, keep the normal behaviour.)
+URL_PARAMS: dict[str, tuple[str, ...]] = {
+    "browser": ("url",),
+    "direct_api": ("url",),
+    "apis": ("base_url",),
+    "web_fetch": ("url",),
+    "web_get": ("url",),
+    "web_fetch_batch": ("urls",),
+}
+
 
 def tier() -> str:
     value = (os.environ.get(CONFINE_ENV) or "").strip().lower()
@@ -144,6 +167,21 @@ def active() -> bool:
 
 def exec_blocked(name: str) -> bool:
     return tier() == "user" and name in EXEC_TOOLS
+
+
+def hosting_app_blocked(name: str, arguments: dict | None) -> bool:
+    """A `user`-tier agent may publish a static site but not a runnable app: an
+    app runs its start command as a process on the shared host. Static hosting,
+    and every other hosting action (list/stop/status/unpublish), stay open."""
+    if tier() != "user" or name != "hosting":
+        return False
+    args = arguments or {}
+    action = str(args.get("action") or "").strip().lower()
+    if action == "start":
+        return True
+    if action == "publish":
+        return str(args.get("kind") or "static").strip().lower() == "app"
+    return False
 
 
 def external_links_allowed() -> bool:
@@ -268,6 +306,65 @@ def url_ok(value: str) -> bool:
     return bool(_HOST_PORT_RE.match(text))      # "example.com:8080/x"
 
 
+def _url_host(value: str) -> str | None:
+    """The host of a URL or a bare ``host[:port][/path]``, or None when there
+    is nothing to resolve (e.g. a path-only value)."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    from urllib.parse import urlsplit
+
+    # A scheme-less "example.com:8080/x" needs a leading "//" for urlsplit to
+    # read it as an authority rather than a scheme.
+    ref = text if _SCHEME_RE.match(text) else "//" + text
+    try:
+        return urlsplit(ref, scheme="http").hostname or None
+    except ValueError:
+        return None
+
+
+def _ip_is_local(ip: str) -> bool:
+    import ipaddress
+
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    mapped = getattr(addr, "ipv4_mapped", None)
+    if mapped is not None:
+        addr = mapped
+    return bool(addr.is_private or addr.is_loopback or addr.is_link_local
+                or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
+
+
+def url_public(value: str) -> bool:
+    """Whether a URL's host is a public address — the gate for a ``user``-tier
+    agent's outbound web tools. A literal private / loopback / link-local IP
+    fails; so does ``localhost``, and any hostname that resolves to such an
+    address. A name that can't be resolved right now is allowed (DNS may be
+    down; the tool's own request then fails on its own)."""
+    host = _url_host(value)
+    if host is None:
+        return True
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(host)
+        return not _ip_is_local(host)           # a literal IP in the host
+    except ValueError:
+        pass
+    low = host.lower().rstrip(".")
+    if low == "localhost" or low.endswith(".localhost"):
+        return False
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return True
+    return not any(_ip_is_local(ai[4][0]) for ai in infos)
+
+
 def _resolve(value: str, base: Path) -> Path | None:
     from captain_claw import vfs
 
@@ -355,10 +452,21 @@ def check_tool_paths(name: str, arguments: dict | None, runtime_base: Any) -> st
     context, after pack_access.prepare_call, so shared folders resolve."""
     if not active():
         return None
+    args = arguments or {}
+    # Outbound-address tools: a `user`-tier agent may not aim them at the server
+    # or a private network. Checked before the path rules, since most of these
+    # tools carry no file path (they aren't in PATH_RULES).
+    if tier() == "user":
+        for field in URL_PARAMS.get(name, ()):
+            value = args.get(field)
+            if value is None or value == "":
+                continue
+            for item in (value if isinstance(value, (list, tuple)) else [value]):
+                if isinstance(item, str) and item and not url_public(item):
+                    return PRIVATE_URL_REFUSED
     rules = PATH_RULES.get(name)
     if not rules:
         return None
-    args = arguments or {}
     try:
         base = Path(runtime_base).resolve()
     except (OSError, RuntimeError, ValueError, TypeError):

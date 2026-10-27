@@ -96,7 +96,9 @@ def deck(tmp_path, monkeypatch):
     reg = ToolRegistry(base_path=ws)
     for tool in (ReadTool(), WriteTool(), GlobTool(), GrepTool(), VfsTool()):
         reg.register(tool)
-    probes = {"shell": _Probe("shell", ("command",)), "browser": _Probe("browser")}
+    probes = {"shell": _Probe("shell", ("command",)), "browser": _Probe("browser"),
+              "hosting": _Probe("hosting", ("action", "kind", "name", "project", "start_cmd")),
+              "direct_api": _Probe("direct_api", ("action", "url"))}
     for p in probes.values():
         reg.register(p)
 
@@ -265,6 +267,56 @@ def test_user_agent_installs_no_skill_dependencies(deck):
 
     res = install_skill_dependencies("anything", deck.ws, get_config())
     assert not res.ok and res.message == deck_confine.EXEC_REFUSED
+
+
+# ── hosting: a non-admin's agent publishes static sites, not apps ────
+
+
+async def test_user_agent_publishes_static_not_apps(deck):
+    assert (await call(deck, "hosting", {"action": "publish", "kind": "static",
+                                         "name": "site", "project": "saved"})).success
+    for args in ({"action": "publish", "kind": "app", "name": "srv",
+                  "project": "saved", "start_cmd": "node server.js"},
+                 {"action": "start", "name": "srv"}):
+        with pytest.raises(ToolBlockedError) as info:
+            await call(deck, "hosting", args)
+        assert info.value.reason == deck_confine.HOSTING_APP_REFUSED
+    assert not deck.probes["hosting"].calls or all(
+        c.get("kind") != "app" for c in deck.probes["hosting"].calls)
+
+
+async def test_admin_agent_hosts_apps(deck):
+    deck.confine("admin")
+    assert (await call(deck, "hosting", {"action": "publish", "kind": "app", "name": "srv",
+                                         "project": "saved", "start_cmd": "node server.js"})).success
+
+
+# ── web tools: a non-admin's agent can't aim them at the server ──────
+
+
+async def test_user_agent_web_tools_refuse_private_addresses(deck):
+    for url in ("http://127.0.0.1:8765/fd/code/agent/list", "http://localhost/x",
+                "http://169.254.169.254/latest/meta-data", "http://10.0.0.5:2019/config",
+                "http://[::1]/"):
+        reason = await refused(deck, "direct_api", {"action": "call", "url": url})
+        assert reason == deck_confine.PRIVATE_URL_REFUSED
+    assert (await call(deck, "direct_api",
+                       {"action": "call", "url": "https://api.example.com/v1"})).success
+
+
+async def test_admin_agent_web_tools_reach_anywhere(deck):
+    deck.confine("admin")
+    assert (await call(deck, "direct_api",
+                       {"action": "call", "url": "http://127.0.0.1:8765/x"})).success
+
+
+def test_url_public_classifies_addresses():
+    pub = deck_confine.url_public
+    assert pub("https://example.com") and pub("https://8.8.8.8")
+    assert pub("") and pub("not a url")                       # nothing to resolve → allowed
+    for bad in ("http://127.0.0.1/x", "http://localhost", "http://10.1.2.3:9",
+                "http://169.254.169.254/", "http://[::1]/", "http://192.168.1.1/"):
+        assert not pub(bad), bad
 
 
 def test_read_or_write_follows_the_action():
