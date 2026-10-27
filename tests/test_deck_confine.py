@@ -422,6 +422,26 @@ def test_non_admin_gets_user_and_loses_code_loading_env(fd_server, deck):
     assert env["CLAW_VFS_SCOPE"] == "home,commons"     # only ever narrows
 
 
+def test_non_admin_loses_the_other_loaders_and_routes_too(fd_server, deck):
+    """Config/code a tool loads from a path (git via XDG, OpenSSL engines,
+    Playwright's driver, Java agents, pip/uv indexes), a command a library
+    runs (BROWSER, EDITOR, SSH_ASKPASS …), a resolver alias or a certificate
+    authority of the owner's own."""
+    named = {
+        "XDG_CONFIG_HOME": str(deck.ws), "OPENSSL_CONF": "x.cnf", "PLAYWRIGHT_DRIVER_PATH": "x",
+        "PLAYWRIGHT_BROWSERS_PATH": "x", "JAVA_TOOL_OPTIONS": "-javaagent:x", "_JAVA_OPTIONS": "x",
+        "PIP_INDEX_URL": "http://evil", "UV_INDEX_URL": "http://evil", "BROWSER": "sh x",
+        "EDITOR": "sh x", "SSH_ASKPASS": "x", "ZDOTDIR": "x", "LESSOPEN": "|x", "CURL_HOME": "x",
+        "GCONV_PATH": "x", "HOSTALIASES": "x", "SSL_CERT_FILE": "ca.pem", "ssl_cert_dir": "x",
+        "REQUESTS_CA_BUNDLE": "ca.pem", "CURL_CA_BUNDLE": "ca.pem", "SSLKEYLOGFILE": "k",
+    }
+    env = _spawn_env(fd_server, deck, "owner", {**named, "BRAVE_API_KEY": "keep", "MY_URL": "keep"})
+    for gone in named:
+        assert gone not in env, gone
+    assert env["BRAVE_API_KEY"] == env["MY_URL"] == "keep"
+    assert _spawn_env(fd_server, deck, "boss", named)["OPENSSL_CONF"] == "x.cnf"   # an admin's own
+
+
 def test_admin_keeps_its_env(fd_server, deck):
     env = _spawn_env(fd_server, deck, "boss", {"PYTHONPATH": "/opt/lib"})
     assert env["CLAW_CONFINE"] == "admin" and env["PYTHONPATH"] == "/opt/lib"
