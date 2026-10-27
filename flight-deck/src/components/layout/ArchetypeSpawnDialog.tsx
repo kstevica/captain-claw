@@ -2,20 +2,18 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  ArrowLeft, BarChart3, Bot, Brain, Briefcase, Calendar, Check, ChevronRight, ClipboardList, Clock, Code2, Contact,
+  ArrowLeft, BarChart3, Bot, Brain, Briefcase, Calendar, Check, ClipboardList, Clock, Code2, Contact,
   Database, Eye, FileSpreadsheet, FileText, Gauge, Globe, Image as ImageIcon, Library, Lightbulb, ListTodo,
-  Loader2, Mail, Map as MapIcon, Mic, Monitor, PenLine, Presentation, Search, ScanText, SlidersHorizontal, Sparkles,
-  Star, Telescope, TerminalSquare, Wand2, X, Zap,
+  Loader2, Mail, Map as MapIcon, Mic, Monitor, PenLine, Presentation, Search, ScanText, Sparkles, Star,
+  Telescope, TerminalSquare, Wand2, X, Zap,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { prepareAgentPreset } from '../../services/agentPreset'
 import { listArchetypes } from '../../services/archetypes'
 import { MODES } from '../../services/cognitiveModes'
 import { spawnArchetypeProcess } from '../../services/docker'
 import type { Archetype, ArchetypeRegistry } from '../../services/tierConfig'
 import { useProcessStore } from '../../stores/processStore'
 import { useIsMobile } from '../../hooks/useMediaQuery'
-import { AdvancedEditor, PresetReview, keptCount, reviewedPreset, startReview, type Review } from './ArchetypeAdvancedSetup'
 
 // ── Kiosk "New agent" picker ─────────────────────────────────────────
 //
@@ -31,11 +29,10 @@ import { AdvancedEditor, PresetReview, keptCount, reviewedPreset, startReview, t
 // and Create button under it. On a phone the two are steps: the gallery, then
 // the detail with a Back arrow.
 //
-// Advanced (optional, under the name): extra instructions and documents. Your
-// model reads them into a preset — rules, the requests it handles, facts,
-// when to ask you, templates, a glossary, the documents themselves — which
-// takes the whole dialog for review before Create; the spawn seeds what was
-// kept (see ArchetypeAdvancedSetup, backend agent_preset).
+// "Set up its way of working next" (optional, under the name): the agent is
+// created as usual, then the caller opens AgentSetupDialog on it — the
+// person's instructions and documents, read by their model into rules,
+// skills, facts and knowledge they review before it reaches the agent.
 
 /** Mirrors the backend `_slug`: a process agent's name is its directory. */
 function agentSlug(name: string): string {
@@ -140,11 +137,15 @@ function firstSentence(text: string): string {
 
 // ── Component ────────────────────────────────────────────────────────
 
+/** What a caller needs to open AgentSetupDialog on the new agent. */
+export interface SetupRequest { slug: string; name: string; role: string }
+
 export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, ownerLabel }: {
   /** Slugs of the agents this user can see — the default name avoids them. */
   takenSlugs: Set<string>
   onClose: () => void
-  onSpawned: (slug: string) => void
+  /** `setup`: the person ticked "set up its way of working next". */
+  onSpawned: (slug: string, setup?: SetupRequest) => void
   /** Admin creating the agent FOR that user: their gallery, their ownership,
    *  their tier set and plan. */
   asUser?: string
@@ -158,14 +159,7 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
-  // Advanced: what the person adds, the review once their model has read it,
-  // and whether the review is on screen (Back keeps it, an edit drops it).
-  const [advancedOpen, setAdvancedOpen] = useState(false)
-  const [advInstructions, setAdvInstructions] = useState('')
-  const [advFiles, setAdvFiles] = useState<File[]>([])
-  const [review, setReview] = useState<Review | null>(null)
-  const [reviewing, setReviewing] = useState(false)
-  const [preparing, setPreparing] = useState(false)
+  const [setupNext, setSetupNext] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
   const { isMobile } = useIsMobile()
   const archetypes = registry?.archetypes ?? null
@@ -178,15 +172,14 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape' || busy || preparing) return
-      if (reviewing) { setReviewing(false); return }
+      if (e.key !== 'Escape' || busy) return
       // On a phone the detail is a step of its own: Escape walks back first.
       if (isMobile && picked) { setPicked(null); return }
       onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [busy, preparing, reviewing, onClose, isMobile, picked])
+  }, [busy, onClose, isMobile, picked])
 
   const families = useMemo(() => {
     const counts = new Map<string, number>()
@@ -222,30 +215,6 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
     setPicked(a)
     setName(uniqueName(a.role || a.id, takenSlugs))
     setErr('')
-    // The person's material stays; what was read for another archetype doesn't.
-    if (picked?.id !== a.id) setReview(null)
-  }
-
-  const hasAdvanced = !!advInstructions.trim() || advFiles.length > 0
-  const editAdvanced = (instructions: string, files: File[]) => {
-    setAdvInstructions(instructions)
-    setAdvFiles(files)
-    setReview(null)
-  }
-
-  const prepare = async () => {
-    if (!picked || preparing || busy) return
-    setPreparing(true)
-    setErr('')
-    try {
-      const res = await prepareAgentPreset({ archetype: picked.id, instructions: advInstructions, files: advFiles, asUser })
-      setReview(startReview(res))
-      setReviewing(true)
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
-    } finally {
-      setPreparing(false)
-    }
   }
 
   // Focus the name once the pick has re-rendered it, so Enter creates. Not on
@@ -253,35 +222,33 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
   useEffect(() => { if (picked && !isMobile) nameRef.current?.select() }, [picked, isMobile])
 
   const create = async () => {
-    if (!picked || !name.trim() || busy || preparing) return
+    if (!picked || !name.trim() || busy) return
     setBusy(true)
     setErr('')
     let finalName = name.trim()
-    const preset = review && hasAdvanced ? reviewedPreset(review) : undefined
     try {
       let res
       try {
-        res = await spawnArchetypeProcess(picked.id, finalName, picked.description, asUser, preset)
+        res = await spawnArchetypeProcess(picked.id, finalName, picked.description, asUser)
       } catch (e) {
         // Taken by an agent this user can't see (another account's): try once
         // more with a short suffix rather than make a kiosk user guess.
         const msg = e instanceof Error ? e.message : String(e)
         if (!/already (exists|running)/i.test(msg)) throw e
         finalName = `${finalName} ${Math.random().toString(36).slice(2, 6)}`
-        res = await spawnArchetypeProcess(picked.id, finalName, picked.description, asUser, preset)
+        res = await spawnArchetypeProcess(picked.id, finalName, picked.description, asUser)
       }
       if (!res.ok) throw new Error(res.message)
       const slug = res.slug || agentSlug(finalName)
-      // FD records the instructions for the owner (the archetype's, plus the
-      // Advanced setup's rules); mirror what it stored — never the archetype's
-      // own text over it — and only when the agent is the viewer's own.
+      // FD records the instructions for the owner; mirror what it stored —
+      // and only when the agent is the viewer's own.
       if (!asUser) {
         const procs = useProcessStore.getState()
         const stored = res.fleet_instructions || picked.fleet_instructions
         if (stored) procs.setFleetInstructions(slug, stored)
         procs.fetchProcesses()
       }
-      onSpawned(slug)
+      onSpawned(slug, setupNext ? { slug, name: finalName, role: picked.role || picked.id } : undefined)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
       setBusy(false)
@@ -289,15 +256,9 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
   }
 
   const phoneDetail = isMobile && !!picked
-  const showReview = reviewing && !!review && !!picked
-  const working = busy || preparing
-  const subtitle = showReview
-    ? 'Check what it starts with, then create it.'
-    : phoneDetail ? 'Give it a name and create it.'
-      : 'Pick an archetype — its role, tools and model come with it. You only give it a name.'
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 wide:items-center wide:p-4" onClick={() => { if (!working) onClose() }}>
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 wide:items-center wide:p-4" onClick={() => { if (!busy) onClose() }}>
       <div
         role="dialog"
         aria-label="New agent from an archetype"
@@ -306,13 +267,8 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
       >
         {/* Header */}
         <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 px-4 py-3 wide:px-5">
-          {showReview || phoneDetail ? (
-            <button
-              onClick={() => (showReview ? setReviewing(false) : setPicked(null))}
-              disabled={working}
-              aria-label={showReview ? 'Back to the setup' : 'Back to all archetypes'}
-              className="-ml-2 rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
-            >
+          {phoneDetail ? (
+            <button onClick={() => setPicked(null)} disabled={busy} aria-label="Back to all archetypes" className="-ml-2 rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50">
               <ArrowLeft className="h-5 w-5" />
             </button>
           ) : (
@@ -321,45 +277,16 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
             </span>
           )}
           <div className="min-w-0">
-            <h3 className="truncate text-base font-semibold text-zinc-100">
-              {showReview ? `What ${name.trim() || picked?.role || 'it'} starts with` : `New agent${asUser && ownerLabel ? ` for ${ownerLabel}` : ''}`}
-            </h3>
-            <p className="truncate text-xs text-zinc-500">{subtitle}</p>
+            <h3 className="truncate text-base font-semibold text-zinc-100">New agent{asUser && ownerLabel ? ` for ${ownerLabel}` : ''}</h3>
+            <p className="truncate text-xs text-zinc-500">
+              {phoneDetail ? 'Give it a name and create it.' : 'Pick an archetype — its role, tools and model come with it. You only give it a name.'}
+            </p>
           </div>
-          <button onClick={onClose} disabled={working} aria-label="Close" className="ml-auto rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50" title="Close">
+          <button onClick={onClose} disabled={busy} aria-label="Close" className="ml-auto rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50" title="Close">
             <X className="h-5 w-5" />
           </button>
         </div>
 
-        {showReview && review ? (
-          <div className="flex min-h-0 flex-1 flex-col">
-            <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 wide:px-6">
-              <div className="mx-auto max-w-3xl">
-                <PresetReview review={review} disabled={busy} onChange={setReview} />
-              </div>
-            </div>
-            <div className="shrink-0 border-t border-zinc-800 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] wide:px-6">
-              <div className="mx-auto flex max-w-3xl flex-col gap-2 wide:flex-row wide:items-center">
-                {err && <p className="text-xs text-red-600 dark:text-red-400 wide:mr-auto">{err}</p>}
-                <button
-                  onClick={() => setReviewing(false)}
-                  disabled={busy}
-                  className="rounded-xl border border-zinc-700 px-4 py-2.5 text-sm font-medium text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50 wide:ml-auto"
-                >
-                  Back to the setup
-                </button>
-                <button
-                  onClick={create}
-                  disabled={!name.trim() || busy}
-                  className="flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
-                >
-                  {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                  {busy ? 'Creating…' : `Create ${picked?.role || 'agent'} with ${keptCount(review)} item${keptCount(review) === 1 ? '' : 's'}`}
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : (
         <div className="flex min-h-0 flex-1 flex-col wide:flex-row">
           {/* ── Gallery ── */}
           {!phoneDetail && (
@@ -448,16 +375,6 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
                     It brings its own role, tools and model. You'll see what it does and what it can reach here, then give it a name.
                   </p>
                 </div>
-              ) : advancedOpen ? (
-                <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4 wide:px-5">
-                  <AdvancedEditor
-                    instructions={advInstructions}
-                    files={advFiles}
-                    disabled={working}
-                    onInstructions={(v) => editAdvanced(v, advFiles)}
-                    onFiles={(f) => editAdvanced(advInstructions, f)}
-                  />
-                </div>
               ) : (
                 <ArchetypeDetail a={picked} registry={registry} />
               )}
@@ -465,61 +382,51 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
               {picked && (
                 <div className="shrink-0 border-t border-zinc-800 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] wide:px-5">
                   {err && <p className="mb-2 text-xs text-red-600 dark:text-red-400">{err}</p>}
-                  <form className="space-y-2" onSubmit={(e) => {
-                    e.preventDefault()
-                    if (hasAdvanced && !review) prepare()
-                    else if (hasAdvanced && review) setReviewing(true)
-                    else create()
-                  }}>
+                  <form className="space-y-2" onSubmit={(e) => { e.preventDefault(); create() }}>
                     <label className="block">
                       <span className="mb-1 block text-[11px] font-medium uppercase tracking-wider text-zinc-500">Agent name</span>
                       <input
                         ref={nameRef}
                         value={name}
                         onChange={(e) => setName(e.target.value)}
-                        disabled={working}
+                        disabled={busy}
                         placeholder="Agent name"
                         aria-label="Agent name"
                         className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-base text-zinc-100 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none disabled:opacity-60 wide:py-2 wide:text-sm"
                       />
                     </label>
-                    <button
-                      type="button"
-                      onClick={() => setAdvancedOpen((o) => !o)}
-                      disabled={working}
-                      aria-expanded={advancedOpen}
-                      className={`flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left text-sm transition-colors disabled:opacity-60 ${
-                        advancedOpen || hasAdvanced
-                          ? 'border-violet-500/40 bg-violet-500/10 text-violet-700 dark:text-violet-200'
-                          : 'border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
-                      }`}
-                    >
-                      <SlidersHorizontal className="h-4 w-4 shrink-0" />
-                      <span className="min-w-0 flex-1 truncate">
-                        {advancedOpen ? 'Back to the archetype' : 'Advanced — your way of working'}
-                      </span>
-                      {!advancedOpen && hasAdvanced && (
-                        <span className="shrink-0 text-[11px] opacity-80">
-                          {advFiles.length > 0 ? `${advFiles.length} doc${advFiles.length === 1 ? '' : 's'}` : 'instructions'}
+                    <label className={`flex cursor-pointer items-start gap-2.5 rounded-xl border px-3 py-2.5 transition-colors ${
+                      setupNext
+                        ? 'border-violet-500/40 bg-violet-500/10'
+                        : 'border-zinc-800 hover:border-zinc-700'
+                    } ${busy ? 'pointer-events-none opacity-60' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={setupNext}
+                        onChange={(e) => setSetupNext(e.target.checked)}
+                        disabled={busy}
+                        className="mt-0.5 h-4 w-4 shrink-0 accent-violet-600"
+                      />
+                      <span className="min-w-0">
+                        <span className={`flex items-center gap-1.5 text-sm ${setupNext ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-300'}`}>
+                          <Wand2 className="h-3.5 w-3.5 shrink-0" /> Set up its way of working next
                         </span>
-                      )}
-                      <ChevronRight className={`h-4 w-4 shrink-0 transition-transform ${advancedOpen ? 'rotate-180' : ''}`} />
-                    </button>
+                        <span className="mt-0.5 block text-[11px] leading-snug text-zinc-500">
+                          Right after it's created: your instructions and documents become its rules, skills and knowledge.
+                        </span>
+                      </span>
+                    </label>
                     <button
                       type="submit"
-                      disabled={!name.trim() || working}
+                      disabled={!name.trim() || busy}
                       className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
                     >
-                      {working ? <Loader2 className="h-4 w-4 animate-spin" /> : hasAdvanced ? <Sparkles className="h-4 w-4" /> : <Check className="h-4 w-4" />}
-                      {preparing ? 'Reading your material…'
-                        : busy ? 'Creating…'
-                          : hasAdvanced ? (review ? 'Review the setup' : 'Read it and review')
-                            : `Create ${picked.role || 'agent'}`}
+                      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : setupNext ? <Sparkles className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+                      {busy ? 'Creating…' : setupNext ? `Create and set up ${picked.role || 'agent'}` : `Create ${picked.role || 'agent'}`}
                     </button>
                     <p className="text-center text-[11px] text-zinc-600">
-                      {preparing ? 'Your model is reading it — this can take a minute or two.'
-                        : hasAdvanced ? 'You\'ll see what it learned before the agent is created.'
-                          : 'Starts in a few seconds and opens its chat by itself.'}
+                      {setupNext ? 'It starts right away; its setup opens as soon as it is created.'
+                        : 'Starts in a few seconds and opens its chat by itself.'}
                     </p>
                   </form>
                 </div>
@@ -527,7 +434,6 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
             </div>
           )}
         </div>
-        )}
       </div>
     </div>,
     document.body,

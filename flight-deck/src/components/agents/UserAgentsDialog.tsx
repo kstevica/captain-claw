@@ -9,7 +9,8 @@ import {
 } from '../../services/docker'
 import { useAuthStore } from '../../stores/authStore'
 import { AgentConfigEditor } from './AgentConfigEditor'
-import { ArchetypeSpawnDialog } from '../layout/ArchetypeSpawnDialog'
+import { AgentSetupDialog } from '../layout/AgentSetupDialog'
+import { ArchetypeSpawnDialog, type SetupRequest } from '../layout/ArchetypeSpawnDialog'
 
 // ── Admin: another user's agents ─────────────────────────────────────
 //
@@ -60,6 +61,7 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
   const [actionError, setActionError] = useState('')
   const [busy, setBusy] = useState<Set<string>>(() => new Set())   // agents with an action running
   const [creating, setCreating] = useState(false)
+  const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   const [editing, setEditing] = useState<ManagedAgent | null>(null)
 
   const load = useCallback(async () => {
@@ -86,11 +88,11 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
 
   // Escape closes this dialog only when no child dialog is open on top of it.
   useEffect(() => {
-    if (creating || editing) return
+    if (creating || editing || setupFor) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [creating, editing, onClose])
+  }, [creating, editing, setupFor, onClose])
 
   const run = async (a: ManagedAgent, action: 'start' | 'stop' | 'restart' | 'remove') => {
     if (action === 'remove' && !confirm(
@@ -210,8 +212,11 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
             asUser={actAs}
             ownerLabel={userLabel}
             onClose={() => setCreating(false)}
-            onSpawned={() => { setCreating(false); load() }}
+            onSpawned={(_slug, setup) => { setCreating(false); if (setup) setSetupFor(setup); load() }}
           />
+        )}
+        {setupFor && (
+          <AgentSetupDialog agent={setupFor} asUser={actAs} ownerLabel={userLabel} onClose={() => setSetupFor(null)} />
         )}
         {editing && (
           <AgentConfigEditor
