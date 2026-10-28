@@ -65,6 +65,7 @@ from pydantic import BaseModel, Field
 from captain_claw.exceptions import is_busy, retry_after
 from captain_claw.flight_deck import agent_idle, file_library
 from captain_claw.flight_deck import agent_preset_docs as pdocs
+from captain_claw.flight_deck import agent_preset_outline as poutline
 from captain_claw.flight_deck import agent_preset_tables as ptables
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.flight_deck.file_library import (
@@ -96,6 +97,7 @@ _MAX_READ_CHARS = 4_000_000            # the most one setup reads (~1M tokens); 
 _STEP_MIN, _STEP_MAX = 4000, 16_000    # tokens of material in one step: with its prompt, a call stays under ~20k
 _PROMPT_TOKENS = 3000                  # the prompt around a step's material
 _PART_BYTES = 200_000                  # a knowledge file: semantic memory skips files over 256 KB
+_MAP_MIN_CHARS = 20_000                # a document this long, with a few headings, gets a section map
 _JOB_KEEP = 3600                       # a finished read's result waits this long
 _TIERS = ("balanced", "reason", "fast")  # when the agent can't read: a careful read beats a quick one
 _MAX_TOKENS = 8000
@@ -1343,24 +1345,40 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dic
             head += [_own_tables_line(own), ""]
         text = doc["text"].strip()
         parts = pdocs.split_text(text, _PART_BYTES)
+        # A long document gets a map of its sections: which file and lines hold each (agent_preset_outline).
+        sections = poutline.outline(text) if len(text) >= _MAP_MIN_CHARS else []
+        map_name = f"{stem}.map.md" if len(sections) >= 3 else ""
+        pointer = [f"Its section map, {map_name}, says which lines hold each section.", ""] if map_name else []
+        files: list[dict] = []  # each file's text and where it starts, for the map's line numbers
         if len(parts) <= 1:
-            (folder / f"{stem}.md").write_text("\n".join(head) + "\n---\n\n" + text + "\n", encoding="utf-8")
+            prefix = "\n".join(head + pointer) + "\n---\n\n"
+            (folder / f"{stem}.md").write_text(prefix + text + "\n", encoding="utf-8")
+            files.append({"name": f"{stem}.md", "label": "", "start": 0, "raw": text, "body": text, "prefix": prefix})
         else:
             listing: list[str] = []
+            at = 0
             for n, part in enumerate(parts, 1):
                 name = f"{stem}-part-{n:02d}"
                 taken.add(name)
                 where = f" ({part['label']})" if part["label"] else ""
-                (folder / f"{name}.md").write_text("\n".join([
-                    f"# {title} — part {n} of {len(parts)}{where}", "", source,
-                    f"The whole document: {stem}.md.", "", "---", "", part["text"].strip(), ""]), encoding="utf-8")
+                prefix = "\n".join([f"# {title} — part {n} of {len(parts)}{where}", "", source,
+                                    f"The whole document: {stem}.md.", "", "---", ""]) + "\n"
+                body = part["text"].strip()
+                (folder / f"{name}.md").write_text(prefix + body + "\n", encoding="utf-8")
+                files.append({"name": f"{name}.md", "label": part["label"], "start": at, "raw": part["text"],
+                              "body": body, "prefix": prefix})
+                at += len(part["text"])
                 listing.append(f"- [Part {n}{where}]({name}.md)")
             (folder / f"{stem}.md").write_text("\n".join([
-                *head, f"It is long, so it is kept in {len(parts)} parts:", "", *listing, ""]), encoding="utf-8")
+                *head, *pointer, f"It is long, so it is kept in {len(parts)} parts:", "", *listing, ""]), encoding="utf-8")
+        if map_name:
+            taken.add(f"{stem}.map")
+            (folder / map_name).write_text(
+                poutline.map_md(title, k["doc"], files, poutline.add_gists(text, sections)), encoding="utf-8")
         written.append({"doc": k["doc"], "file": f"{stem}.md", "title": title, "summary": k["summary"], "use": use,
-                        "parts": len(parts),
+                        "parts": len(parts), "sections": len(sections) if map_name else 0, "map": map_name,
                         "files": [f"{stem}.md", *(f"{stem}-part-{n:02d}.md" for n in range(1, len(parts) + 1)
-                                                  if len(parts) > 1)]})
+                                                  if len(parts) > 1), *([map_name] if map_name else [])]})
     listed = kept + written
     _write_or_drop(folder / "INDEX.md", (listed or tables) and "\n".join([
         "# Knowledge", "",
@@ -1368,6 +1386,7 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dic
         *[f"- [{w['title']}]({w['file']})" + (f" — {w['summary']}" if w.get("summary") else "")
           + (f" ({w['use'].lower()})" if w.get("use") else "")
           + (f" — {w['parts']} parts" if (w.get("parts") or 1) > 1 else "")
+          + (f" — section map: {w['map']}" if w.get("map") else "")
           for w in listed],
         *(["", "## Tables", "", _TABLES_NOTE, "", *map(_table_line, tables)] if tables else []), ""]))
     _write_or_drop(folder / "glossary.md", preset["glossary"] and "\n".join([
@@ -1410,7 +1429,11 @@ def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int
                      + "; ".join(k["title"] for k in knowledge)[:600] + "; index: knowledge/INDEX.md)")
         if preset["glossary"]:
             line += ", and their terms in knowledge/glossary.md"
-        tail += ["", "### Your knowledge", line + ". Look there before you answer from memory."]
+        line += ". Look there before you answer from memory"
+        if any(k.get("map") for k in knowledge):
+            line += (". A long document has a section map (<name>.map.md) saying which lines hold each section: "
+                     "read just those lines, or search your memory for a phrase — a hit says its file and lines")
+        tail += ["", "### Your knowledge", line + "."]
     if tables:
         tail += ["", "### Your tables",
                  "Your owner's spreadsheets are also tables in your datastore — query them (the datastore tool) "
@@ -1506,10 +1529,13 @@ def _record_from_files(skills_dir: Path, folder: Path) -> dict:
                 continue
             stem = m["file"][:-3]
             parts = sorted(p.name for p in folder.glob(f"{stem}-part-*.md"))
-            summary = re.sub(r"( — \d+ parts)?$", "", m["rest"] or "")
+            maps = [f"{stem}.map.md"] if (folder / f"{stem}.map.md").is_file() else []
+            summary = re.sub(r" — section map: [a-z0-9._-]+\.map\.md$", "", m["rest"] or "")
+            summary = re.sub(r"( — \d+ parts)?$", "", summary)
             summary = re.sub(r" \((?:rules to follow|procedures|reference|templates)\)$", "", summary)
             knowledge.append({"doc": m["file"], "file": m["file"], "title": m["title"], "summary": summary,
-                              "use": "", "parts": max(1, len(parts)), "files": [m["file"], *parts]})
+                              "use": "", "parts": max(1, len(parts)), "map": maps[0] if maps else "",
+                              "files": [m["file"], *parts, *maps]})
         rules = (folder / "owner-rules.md").read_text(encoding="utf-8") if (folder / "owner-rules.md").is_file() else ""
         glossary = (folder / "glossary.md").read_text(encoding="utf-8") if (folder / "glossary.md").is_file() else ""
         templates = [{"name": m.group(1).strip(), "body": m.group(2).strip()}
@@ -1774,6 +1800,34 @@ def schedule_facts(slug: str, port_of: Callable[[], int], token: str, facts: lis
     task.add_done_callback(_PENDING.discard)
 
 
+async def ask_to_index(slug: str, port_of: Callable[[], int], token: str, timeout: float = _FACTS_READY_S) -> bool:
+    """Ask a running agent to index its knowledge/ now — its semantic memory
+    otherwise starts when it first searches, and that search finds the index
+    as it was. Never raises; whether it was asked."""
+    import httpx
+    try:
+        port = await _wait_ready(port_of, token, timeout)
+        if not port:
+            return False
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.post(f"http://127.0.0.1:{port}/api/semantic-memory/sync",
+                                     params={"token": token} if token else {})
+        log.info("agent preset: asked the agent to index its knowledge", agent=slug, status=resp.status_code)
+        return resp.status_code < 300
+    except Exception:
+        log.warning("agent preset: asking the agent to index failed", agent=slug, exc_info=True)
+        return False
+
+
+def schedule_index(slug: str, port_of: Callable[[], int], token: str) -> None:
+    try:
+        task = asyncio.get_running_loop().create_task(ask_to_index(slug, port_of, token))
+    except RuntimeError:
+        return
+    _PENDING.add(task)
+    task.add_done_callback(_PENDING.discard)
+
+
 async def give_tables(slug: str, port_of: Callable[[], int], token: str, drop: list[str], tables: list[dict],
                       agent_dir: Path, timeout: float = _FACTS_READY_S) -> int:
     """Give a running agent its owner's spreadsheets as tables once it
@@ -1904,6 +1958,10 @@ async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict
                             str(entry.get("web_auth") or ""), done["drop"], done["tables"], agent_dir)
         else:
             await asyncio.to_thread(ptables.leave_tables, agent_dir, done["drop"], done["tables"])
+    # Its documents indexed now, not at its first search; one that is off indexes them when it starts.
+    if done["knowledge"] and running:
+        schedule_index(slug, lambda: (srv._load_process_registry().get(slug) or {}).get("web_port") or 0,
+                       str(entry.get("web_auth") or ""))
     log.info("agent preset: applied", agent=slug, mode=body.mode, **done["counts"])
     return {
         "ok": True,
@@ -1916,6 +1974,7 @@ async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict
         "skills": done["skills"],
         "knowledge": [k["title"] for k in done["knowledge"]],
         "parts": sum(k["parts"] for k in done["knowledge"] if k["parts"] > 1),
+        "sections": sum(int(k.get("sections") or 0) for k in done["knowledge"]),
         "tables": [t["name"] for t in done["tables"]],
         "warnings": done["warnings"],
         "running": running,

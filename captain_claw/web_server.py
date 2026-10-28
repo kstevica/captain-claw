@@ -2285,6 +2285,10 @@ class WebServer:
         from captain_claw.web.rest_semantic_memory import search
         return await search(self, request)
 
+    async def _sm_sync(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_semantic_memory import sync
+        return await sync(self, request)
+
     async def _sm_promote(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_semantic_memory import promote
         return await promote(self, request)
@@ -3416,6 +3420,7 @@ class WebServer:
         app.router.add_get("/api/semantic-memory/documents", self._sm_documents)
         app.router.add_get("/api/semantic-memory/documents/{doc_id}", self._sm_document_detail)
         app.router.add_get("/api/semantic-memory/search", self._sm_search)
+        app.router.add_post("/api/semantic-memory/sync", self._sm_sync)
         app.router.add_get("/api/semantic-memory/promote", self._sm_promote)
         if self.config.web.api_enabled and self._api_pool:
             app.router.add_post("/v1/chat/completions", self._api_chat_completions)
@@ -3747,6 +3752,14 @@ async def _run_server(config: Config) -> None:
         asyncio.create_task(import_pending_tables())
     except Exception as exc:
         log.warning("pending_tables_failed", error=str(exc))
+    # …and the documents in its knowledge/ folder, indexed before anyone asks
+    # (a no-op when nothing changed; a setup may have written them while it was off).
+    try:
+        semantic = getattr(getattr(server.agent, "memory", None), "semantic", None)
+        if semantic is not None:
+            semantic.schedule_sync("startup")
+    except Exception as exc:
+        log.warning("semantic_startup_sync_failed", error=str(exc))
 
     await stop_event.wait()
 

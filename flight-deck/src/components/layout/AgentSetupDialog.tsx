@@ -49,6 +49,12 @@ import {
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024
 const MAX_FILES = 12
+// A document this big (some 800 pages) is searchable knowledge by default:
+// reading it in full is many steps, which is the person's call.
+const BIG_DOC_TOKENS = 200_000
+// The backend's agent_preset._MAP_MIN_CHARS: this long, with a few headings, a document gets a section map.
+const MAP_MIN_CHARS = 20_000
+const mapped = (st: StagedDoc) => (st.sections ?? 0) >= 3 && st.chars >= MAP_MIN_CHARS
 // The backend's: the most one setup reads, and a step's prompt and answer
 // around its material — what the estimate counts.
 const MAX_READ_TOKENS = 1_000_000
@@ -187,7 +193,8 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   const stage = (doc: Doc) => {
     stageDocument(doc.file ? { file: doc.file } : { libraryId: doc.pick!.id }, asUser)
       .then(({ docs: got, warnings }) => patchDoc(doc.key, got[0]
-        ? { status: 'ready', staged: got[0] }
+        // A big document is searchable knowledge by default; reading it in full is the person's choice.
+        ? { status: 'ready', staged: got[0], ...(got[0].tokens > BIG_DOC_TOKENS ? { read: false } : {}) }
         : { status: 'error', error: warnings.join(' ') || 'It could not be read.' }))
       .catch((e) => patchDoc(doc.key, { status: 'error', error: message(e) }))
   }
@@ -246,6 +253,8 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
   const ready = docs.filter((d) => d.status === 'ready')
   const staging = docs.some((d) => d.status === 'staging')
+  // Every document is kept whole and indexed, read or not.
+  const searchable = { docs: ready.length, bytes: ready.reduce((n, d) => n + (d.size || 0), 0) }
   const hasMaterial = ready.length > 0 || !!instructions.trim()
   const stepTokens = reader?.step_tokens || 0
   const estimate = useMemo(() => estimateRead(docs, instructions, stepTokens), [docs, instructions, stepTokens])
@@ -460,7 +469,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
               {/* On a phone, after the documents: they come first there. */}
               <div className="order-3 shrink-0 space-y-5 border-t border-zinc-800 px-4 py-4 wide:hidden">
                 <HowItWorks name={name} />
-                <UsageNote estimate={estimate} reader={reader} name={name} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} />
+                <UsageNote estimate={estimate} reader={reader} name={name} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} searchable={searchable} />
               </div>
 
               {/* Instructions, how it works, usage */}
@@ -489,7 +498,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
                 <div className="hidden space-y-5 wide:block">
                   <HowItWorks name={name} />
-                  <UsageNote estimate={estimate} reader={reader} name={name} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} />
+                  <UsageNote estimate={estimate} reader={reader} name={name} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} searchable={searchable} />
                 </div>
               </aside>
             </div>
@@ -623,6 +632,15 @@ function DocCard({ doc, agentName, stepTokens, onChange, onRemove }: {
               {st.truncated && <span className="text-amber-600 dark:text-amber-400"> · only its first {kTokens(st.chars)} characters are kept</span>}
             </p>
           )}
+          {st && (
+            <p className="mt-0.5 flex items-center gap-1 text-[11px] text-sky-700 dark:text-sky-400">
+              <Search className="h-3 w-3 shrink-0" />
+              {mapped(st)
+                ? `All of it searchable, with a map of its ${st.sections!.toLocaleString()} sections`
+                : 'All of it searchable'}
+              <span className="text-zinc-500">· no tokens</span>
+            </p>
+          )}
           {!!st?.tables && (
             <p className="mt-0.5 flex items-center gap-1 text-[11px] text-emerald-700 dark:text-emerald-400">
               <Table2 className="h-3 w-3 shrink-0" />
@@ -690,7 +708,9 @@ function DocCard({ doc, agentName, stepTokens, onChange, onRemove }: {
               <span className="block text-[11px] leading-snug text-zinc-500">
                 {doc.read
                   ? `${agentName} also keeps the whole document to look things up in.`
-                  : `Nothing is read now: ${agentName} keeps the whole document and looks things up in it when it needs to.`}
+                  : st && st.tokens > BIG_DOC_TOKENS
+                    ? `It's big, so it's kept as searchable knowledge: ${agentName} finds any part of it by search${mapped(st) ? ' and its section map' : ''}. Switch on to read it for rules and skills too.`
+                    : `Nothing is read now: ${agentName} keeps the whole document and looks things up in it when it needs to.`}
               </span>
             </span>
           </button>
@@ -777,7 +797,7 @@ function HowItWorks({ name }: { name: string }) {
 }
 
 /** What reading the material costs, against what is left today. */
-function UsageNote({ estimate, reader, name, quota, knowledgeOnly }: {
+function UsageNote({ estimate, reader, name, quota, knowledgeOnly, searchable }: {
   estimate: { steps: number; tokens: number }
   reader: Reader | null
   /** The agent being set up. */
@@ -785,6 +805,8 @@ function UsageNote({ estimate, reader, name, quota, knowledgeOnly }: {
   quota: QuotaStatus | null
   /** Some documents are kept as knowledge only. */
   knowledgeOnly: boolean
+  /** The documents, all of which become searchable knowledge. */
+  searchable: { docs: number; bytes: number }
 }) {
   const { steps, tokens } = estimate
   const whose = reader?.via === 'agent' ? `, ${name}'s own model` : ''
@@ -832,6 +854,13 @@ function UsageNote({ estimate, reader, name, quota, knowledgeOnly }: {
     <div>
       <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-zinc-500">Usage</p>
       {body}
+      {searchable.docs > 0 && (
+        <p className="mt-1 text-[11px] text-zinc-500">
+          {searchable.docs === 1 ? 'The document' : `All ${searchable.docs} documents`}
+          {searchable.bytes > 0 ? ` (${fmtBytes(searchable.bytes)})` : ''} {searchable.docs === 1 ? 'becomes' : 'become'} searchable
+          knowledge for {name}, read or not — no tokens.
+        </p>
+      )}
       {reader?.note && reader.model && <p className="mt-1 text-[11px] text-zinc-500">{reader.note}</p>}
     </div>
   )
@@ -954,7 +983,8 @@ function Done({ name, applied, hadSetup }: { name: string; applied: AppliedPrese
       {c.knowledge > 0 && (
         <p className="mt-1 text-xs text-zinc-500">
           The documents are in its workspace, in the knowledge folder
-          {applied.parts > 0 ? ` — the long ones in ${applied.parts} parts, so it can search all of them` : ''}.
+          {applied.parts > 0 ? ` — the long ones in ${applied.parts} parts, so it can search all of them` : ''}
+          {applied.sections ? `${applied.parts > 0 ? ',' : ' —'} with a map of their ${applied.sections.toLocaleString()} sections` : ''}.
         </p>
       )}
       {!!applied.tables?.length && (

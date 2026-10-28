@@ -170,6 +170,9 @@ class MemoryConfig(BaseModel):
     cross_session_retrieval: bool = False
     auto_sync_on_search: bool = True
     max_workspace_files: int = 400
+    # The workspace's knowledge/ folder (the documents an owner's setup gives the
+    # agent) is indexed first, under its own cap, so other files never crowd it out.
+    max_knowledge_files: int = 3000
     max_file_bytes: int = 262144
     chunk_chars: int = 1400
     chunk_overlap_chars: int = 200

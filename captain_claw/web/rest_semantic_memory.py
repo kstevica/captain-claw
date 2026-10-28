@@ -23,6 +23,21 @@ def _get_semantic(server: Any):
 
 
 # ---------------------------------------------------------------------------
+# POST /api/semantic-memory/sync
+# ---------------------------------------------------------------------------
+
+async def sync(server: Any, request: web.Request) -> web.Response:
+    """Index the workspace now, in the background — what Flight Deck asks for
+    after a setup writes documents into knowledge/, so the agent's first
+    search finds them instead of starting the indexing then."""
+    semantic = _get_semantic(server)
+    if semantic is None:
+        return web.json_response({"ok": False, "error": "Semantic memory is off"}, status=503)
+    semantic.schedule_sync("requested")
+    return web.json_response({"ok": True})
+
+
+# ---------------------------------------------------------------------------
 # GET /api/semantic-memory/status
 # ---------------------------------------------------------------------------
 
