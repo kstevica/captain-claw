@@ -3713,6 +3713,14 @@ async def _run_server(config: Config) -> None:
     except Exception as exc:
         log.warning("inbound_queue_consumer_failed_to_start", error=str(exc))
 
+    # Facts its owner's setup left while it was off (Flight Deck's agent_preset).
+    try:
+        from captain_claw.insights import import_pending
+
+        asyncio.create_task(import_pending())
+    except Exception as exc:
+        log.warning("pending_insights_failed", error=str(exc))
+
     await stop_event.wait()
 
     print("\nShutting down...")

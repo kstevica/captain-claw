@@ -76,6 +76,9 @@ def agent_dir(tmp_path, monkeypatch) -> Path:
         path.write_text(yaml.dump({"model": {"provider": "openai", "model": "m", "api_key": ""},
                                    "context": {"max_tokens": 32768}}))
     monkeypatch.setattr(server, "_resolve_agent_dir", lambda identifier, kind, user_id: tmp_path)
+    # The route is called with no user: a deck without accounts (with them, a
+    # non-admin's model change is checked against the team's keys).
+    monkeypatch.setenv("FD_AUTH_ENABLED", "false")
     return tmp_path
 
 

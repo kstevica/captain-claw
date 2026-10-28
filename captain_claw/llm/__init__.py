@@ -1247,6 +1247,21 @@ def _normalize_temperature_for_model(provider: str, model: str, temperature: flo
     return temperature
 
 
+# A process that holds model keys for others (Flight Deck) says where the keys
+# in its environment and config may be sent: ``guard(provider, base_url)``. A
+# client given no key on an endpoint the guard refuses sends `WITHHELD_KEY`
+# instead — not this process's key, and not LiteLLM's own fallback to the
+# environment either. None (an agent, the CLI): its keys go anywhere.
+_ENV_KEY_GUARD: Callable[[str, str], bool] | None = None
+# A local server takes any key; a keyed endpoint refuses this one.
+WITHHELD_KEY = "no-key"
+
+
+def set_env_key_guard(guard: Callable[[str, str], bool] | None) -> None:
+    global _ENV_KEY_GUARD
+    _ENV_KEY_GUARD = guard
+
+
 def _resolve_api_key(provider: str, explicit_api_key: str | None) -> str | None:
     """Resolve provider API key from explicit value, environment, or provider_keys."""
     if explicit_api_key:
@@ -3562,6 +3577,9 @@ class LiteLLMProvider(LLMProvider):
         self.model = _provider_model_name(self.provider, _stripped or model)
         self.api_key = _resolve_api_key(self.provider, api_key)
         self.base_url = (base_url or "").strip() or None
+        if (not api_key and self.base_url and _ENV_KEY_GUARD is not None
+                and not _ENV_KEY_GUARD(self.provider, self.base_url)):
+            self.api_key = WITHHELD_KEY  # never this process's key, nor LiteLLM's env fallback
         self.temperature = _normalize_temperature_for_model(
             self.provider,
             self.model,

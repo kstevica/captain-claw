@@ -35,6 +35,8 @@ import {
   ShieldCheck,
   Smartphone,
   Activity,
+  KeyRound,
+  Wand2,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -70,7 +72,11 @@ import { AgentDatastorePanel } from '../agents/AgentDatastorePanel'
 import { SharedFilesPanel } from '../agents/SharedFilesPanel'
 import { SharedDatastorePanel } from '../agents/SharedDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
-import { ArchetypeSpawnDialog } from './ArchetypeSpawnDialog'
+import { AgentSetupDialog } from './AgentSetupDialog'
+import { ArchetypeSpawnDialog, type SetupRequest } from './ArchetypeSpawnDialog'
+import { KioskByokDialog } from './KioskByokDialog'
+import { useByokStore } from '../../stores/byokStore'
+import { useQuotaStore } from '../../stores/quotaStore'
 import ConnectionsPage, { type TabId as ConnectionsTab } from '../../pages/ConnectionsPage'
 import { ProfilePage } from '../../pages/ProfilePage'
 import { NotificationBell } from '../common/NotificationCenter'
@@ -227,6 +233,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [optionsAgent, setOptionsAgent] = useState<SimpleAgent | null>(null)
   // Kiosk "New agent" picker.
   const [archetypeOpen, setArchetypeOpen] = useState(false)
+  // A new agent whose "way of working" setup opens right after it is created.
+  const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   // Agents just spawned or powered on: Flight Deck lists one as running the
   // moment it launches, seconds before its web server binds — a chat opened
   // then fails. They stay "starting" until they answer.
@@ -246,6 +254,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [profileOpen, setProfileOpen] = useState(false)
   // Kiosk Settings dialog — theme, connections, profile, refresh, sign-out.
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // "Your own AI keys": from Settings, or the plan bar when the day runs out.
+  const byokOpen = useByokStore((s) => s.open)
+  const openByok = useByokStore((s) => s.openDialog)
+  const closeByok = useByokStore((s) => s.close)
+  const setByokHost = useByokStore((s) => s.setHost)
+  useEffect(() => {
+    setByokHost(locked)
+    return () => setByokHost(false)
+  }, [locked, setByokHost])
   // Kiosk Info dialog — models, agents, archetypes, profile, plan, connections.
   const [infoOpen, setInfoOpen] = useState(false)
   // Kiosk agent dialogs from an agent's "⋯": its Info (intentions, topics),
@@ -606,6 +623,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
         { icon: BookOpen, label: 'Instructions', hint: 'What it should always keep in mind', onSelect: () => setAgentInstructionsId(a.id) },
+      )
+      // Your documents and way of working → its rules, skills and knowledge (process agents: FD writes its folder).
+      if (a.kind === 'process') {
+        items.push({ icon: Wand2, label: 'Way of working', hint: 'Your instructions and documents, as its rules, skills and knowledge',
+          onSelect: () => setSetupFor({ slug: a.startKey, name: a.name, role: '' }) })
+      }
+      items.push(
         { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', onSelect: () => setAgentSettingsId(a.id) },
       )
       const net = networkShareAction(netAgents[shareKeyOf(a)], {
@@ -753,13 +777,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         <ArchetypeSpawnDialog
           takenSlugs={new Set(processes.map((p) => p.slug))}
           onClose={() => setArchetypeOpen(false)}
-          onSpawned={(slug) => {
+          onSpawned={(slug, setup) => {
             setArchetypeOpen(false)
             startBoot(`proc-${slug}`, true)
-            useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
+            if (setup) setSetupFor(setup)
+            else useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
           }}
         />
       )}
+      {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
 
       {locked && settingsOpen && (
         <KioskSettingsDialog
@@ -774,8 +800,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onData={() => { setSettingsOpen(false); openData() }}
           onFolders={() => { setSettingsOpen(false); openFolders() }}
           onActivity={() => { setSettingsOpen(false); openActivity() }}
+          onByok={() => { setSettingsOpen(false); openByok() }}
         />
       )}
+      {locked && byokOpen && <KioskByokDialog onClose={closeByok} />}
       {locked && infoOpen && (
         <KioskInfoDialog
           agents={infoAgents}
@@ -976,7 +1004,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
 // the Getting started guide, and sign-out (how a shared kiosk hands the
 // screen to the next person).
 
-function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onScheduled, onLibrary, onData, onFolders, onActivity }: {
+function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onScheduled, onLibrary, onData, onFolders, onActivity, onByok }: {
   /** The desktop app's admin in the users' kiosk: back to the Admin console. */
   onAdmin?: () => void
   onClose: () => void
@@ -989,8 +1017,11 @@ function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onPro
   onData: () => void
   onFolders: () => void
   onActivity: () => void
+  onByok: () => void
 }) {
   const { theme, toggle: toggleTheme } = useThemeStore()
+  // Offered where the deck allows own keys (the plan status says so).
+  const quota = useQuotaStore((s) => s.status)
   const authEnabled = useAuthStore((s) => s.authEnabled)
   const authUser = useAuthStore((s) => s.user)
   const signingOut = useAuthStore((s) => s.signingOut)
@@ -1006,6 +1037,11 @@ function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onPro
     ...(onAdmin ? [{ icon: ShieldCheck, title: 'Switch to admin view', detail: 'Models, archetypes, connections and settings', onClick: onAdmin }] : []),
     { icon: dark ? Sun : Moon, title: dark ? 'Light theme' : 'Dark theme', detail: `Switch to the ${dark ? 'light' : 'dark'} look`, onClick: toggleTheme },
     { icon: Plug, title: 'Connections', detail: 'Google, Microsoft, MCP and Jev', onClick: onConnections },
+    ...(quota?.byok_allowed || quota?.byok ? [{
+      icon: KeyRound, title: 'Your own AI keys',
+      detail: quota.byok ? 'On — your agents run on your keys, no daily limits' : 'Run your agents on your own API keys, with no daily limits',
+      onClick: onByok,
+    }] : []),
     { icon: AlarmClock, title: 'Scheduled tasks', detail: 'Your agents on a timer — results by chat or email', onClick: onScheduled },
     { icon: LibraryBig, title: 'File library', detail: 'Every file your agents made, summarised and searchable', onClick: onLibrary },
     { icon: Database, title: 'Data library', detail: 'Every table your agents keep, summarised and easy to read', onClick: onData },

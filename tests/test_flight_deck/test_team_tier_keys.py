@@ -965,8 +965,8 @@ class TestPublishedSetsGetTheirKeysWithoutRepublishing:
         with pytest.raises(HTTPException) as exc:                 # no key — and it says so
             await _spawn_config()
         assert exc.value.status_code == 409 and "old-gw.example" in exc.value.detail
-        assert await server._team_key("openai", old_gw, asked=True) == ""
-        assert await server._team_key("openai", old_gw, asked=False) == ""
+        assert await server._team_key("openai", old_gw) == ""
+        assert await server._team_key("openai", old_gw) == ""
         await basna_mod._refresh_system_provider_keys(db)          # Basna / Vatra / direct calls too
         assert basna_mod._effective_key("openai", "@system", old_gw) is None
         assert basna_mod._effective_key("openai", "@system") == "sk-openai-direct"
@@ -974,9 +974,9 @@ class TestPublishedSetsGetTheirKeysWithoutRepublishing:
         assert await server.heal_keyless_agents(restart=False) == []
         # Publishing a key for that gateway settles it; publishing without one keeps the mark.
         await _publish(_set({"fast": _tier(api_key="@system")}))
-        assert await server._team_key("openai", old_gw, asked=True) == ""
+        assert await server._team_key("openai", old_gw) == ""
         await _publish(_set({"balanced": _tier(api_key="old-gw-key", base_url=old_gw)}))
-        assert await server._team_key("openai", old_gw, asked=True) == "old-gw-key"
+        assert await server._team_key("openai", old_gw) == "old-gw-key"
         assert json.loads(await db.get_system_setting("fd:shared-tier-sets"))["no_provider_fallback"] == []
 
     async def test_a_provider_key_in_the_sets_extra_keys_does_not_hide_a_gateways_own(self, db):
@@ -1007,7 +1007,7 @@ class TestPublishedSetsGetTheirKeysWithoutRepublishing:
         provider's org key to that host."""
         await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "sk-org"}))
         await _already_published(db, _set({"balanced": _tier(api_key="", base_url=GW)}))
-        assert await server._team_key("openai", GW, asked=False) == ""
+        assert await server._team_key("openai", GW) == ""
 
     async def test_a_gateway_key_that_is_the_org_key_is_not_stored_twice(self, db):
         await db.set_system_setting("fd:provider-keys", json.dumps({"openai": "gw-key"}))

@@ -30,10 +30,12 @@ PROVIDER_KEYS_SETTING = "fd:provider-keys"
 # /fd/microsoft/logout). ``jev:*`` is the user's Jev (TypeSafe AI) API key and
 # what Flight Deck knows about it — written only through PUT / DELETE
 # /fd/jev/key (which verify the key and never return it); readable here, any
-# script running as the user would get the raw key.
+# script running as the user would get the raw key. ``byok:*`` is the user's
+# own provider keys (sealed) and the switch that runs their agents on them —
+# written only through /fd/byok, which moves their agents with it.
 _SERVER_OWNED_PREFIXES = (
     "google_oauth:", "microsoft_oauth:", "fd:tenant-profile", "fd:shared-agent-",
-    "jev:", "soniox:",
+    "jev:", "soniox:", "byok:",
 )
 
 

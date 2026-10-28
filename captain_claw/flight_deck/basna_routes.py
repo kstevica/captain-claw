@@ -862,6 +862,9 @@ _SYSTEM_NO_FALLBACK: frozenset[str] = frozenset()
 # to belong to the provider's own endpoint (it was recovered from a tier on
 # it). Such a tier gets no key rather than that one.
 NO_PROVIDER_FALLBACK = "no_provider_fallback"
+# Custom endpoints the published sets send a provider's "@system" tiers to
+# (see routed_endpoint_ids) — the only ones its org key may follow.
+_SYSTEM_ROUTED: frozenset[str] = frozenset()
 _SYSTEM_KEYS_TS: float = 0.0
 _SYSTEM_KEYS_TTL = 15.0  # seconds
 
@@ -872,6 +875,24 @@ def endpoint_key_id(provider: str | None, base_url: str | None) -> str:
     return f"{(provider or '').strip().lower()}|{url}" if url else ""
 
 
+def routed_endpoint_ids(blob: Any) -> frozenset[str]:
+    """Endpoint ids of the "@system" tiers in the published team sets (the
+    ``fd:shared-tier-sets`` blob): the custom endpoints the team itself sends a
+    provider's models to — a deck that routes a provider through one gateway.
+
+    A provider's org key belongs to the provider's own endpoint and to these;
+    an endpoint a caller names (a tier set of their own, a request body, an
+    agent's config) gets its own key or none, whether its key is blank or the
+    "@system" sentinel."""
+    sets = blob.get("sets") if isinstance(blob, dict) else None
+    return frozenset(
+        endpoint_key_id(str(t.get("provider") or ""), str(t.get("base_url") or ""))
+        for st in (sets if isinstance(sets, list) else []) if isinstance(st, dict)
+        for t in (st.get("tiers").values() if isinstance(st.get("tiers"), dict) else ())
+        if isinstance(t, dict) and str(t.get("api_key") or "").strip() == "@system"
+    ) - {""}
+
+
 async def _refresh_system_provider_keys(db) -> None:
     """Refresh the cached org provider keys from system_settings (cheap, TTL'd).
 
@@ -879,7 +900,7 @@ async def _refresh_system_provider_keys(db) -> None:
     _effective_key below always sees fresh keys without threading async DB
     access through the credential resolvers.
     """
-    global _SYSTEM_PROVIDER_KEYS, _SYSTEM_ENDPOINT_KEYS, _SYSTEM_NO_FALLBACK, _SYSTEM_KEYS_TS
+    global _SYSTEM_PROVIDER_KEYS, _SYSTEM_ENDPOINT_KEYS, _SYSTEM_NO_FALLBACK, _SYSTEM_ROUTED, _SYSTEM_KEYS_TS
     now = time.monotonic()
     if (_SYSTEM_PROVIDER_KEYS or _SYSTEM_ENDPOINT_KEYS) and (now - _SYSTEM_KEYS_TS) < _SYSTEM_KEYS_TTL:
         return
@@ -896,6 +917,7 @@ async def _refresh_system_provider_keys(db) -> None:
         blob = json.loads(raw) if raw else {}
         marked = blob.get(NO_PROVIDER_FALLBACK) if isinstance(blob, dict) else None
         _SYSTEM_NO_FALLBACK = frozenset(str(e) for e in marked) if isinstance(marked, list) else frozenset()
+        _SYSTEM_ROUTED = routed_endpoint_ids(blob)
         _SYSTEM_KEYS_TS = now
     except Exception:
         pass
@@ -904,14 +926,15 @@ async def _refresh_system_provider_keys(db) -> None:
 def _effective_key(provider: str, api_key: str | None, base_url: str | None = None) -> str | None:
     """Swap an empty or "@system" tier key for the org key of its endpoint:
     the custom endpoint's own key when the tier has a ``base_url`` and one is
-    stored for it, else the provider's."""
+    stored for it, else the provider's — on a custom endpoint only where the
+    published sets route the provider (`routed_endpoint_ids`)."""
     k = (api_key or "").strip()
     if k and k != "@system":
         return api_key
     eid = endpoint_key_id(provider, base_url)
     if eid and _SYSTEM_ENDPOINT_KEYS.get(eid):
         return _SYSTEM_ENDPOINT_KEYS[eid]
-    if eid in _SYSTEM_NO_FALLBACK:
+    if eid and (eid in _SYSTEM_NO_FALLBACK or eid not in _SYSTEM_ROUTED):
         return None
     return _SYSTEM_PROVIDER_KEYS.get(provider or "", "") or None
 
@@ -929,12 +952,12 @@ def tier_api_key(tier: dict) -> str | None:
 
 async def _request_api_key(provider: str, api_key: str | None, base_url: str | None) -> str | None:
     """`tier_api_key` for creds that arrive in a request body (the UI sends a
-    team tier's "@system" as it holds it) — with the org keys read fresh."""
-    if (api_key or "").strip() == "@system":
-        try:
-            await _refresh_system_provider_keys(get_db())
-        except Exception:
-            pass
+    team tier's "@system" as it holds it) — with the org keys, and the team's
+    routes Flight Deck's own keys follow, read fresh."""
+    try:
+        await _refresh_system_provider_keys(get_db())
+    except Exception:
+        pass
     return tier_api_key({"provider": provider, "api_key": api_key, "base_url": base_url})
 
 
@@ -1013,8 +1036,17 @@ async def _load_owner_tiers(db, owner_id: str) -> tuple[dict, list]:
 async def owner_tier_set(db, owner_id: str) -> dict:
     """Which tier set *owner_id*'s agents run on, as `_load_owner_tiers`
     resolves it: ``source`` ("own" — their active Library set, "team" — the
-    admin's team default, "none"), the set's ``name``, its ``tiers`` and
+    admin's team default, "none", "byok" — either of those on the owner's own
+    API keys, see ``byok.py``), the set's ``name``, its ``tiers`` and
     ``env_vars``. The tiers are raw (keys included): never send them on."""
+    from captain_claw.flight_deck import byok
+
+    return await byok.overlay(db, owner_id, await _owner_base_tier_set(db, owner_id))
+
+
+async def _owner_base_tier_set(db, owner_id: str) -> dict:
+    """`owner_tier_set` before the owner's own keys: their Library set or the
+    team default."""
     try:
         settings = await db.get_all_settings(owner_id)
     except Exception:

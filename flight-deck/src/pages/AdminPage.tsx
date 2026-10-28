@@ -20,6 +20,7 @@ import { SharedCredentialsAdmin } from '../components/admin/SharedCredentialsAdm
 import { BrandingAdmin } from '../components/admin/BrandingAdmin'
 import { Switch } from '../components/admin/Switch'
 import { IdleAgentsSetting, IDLE_AGENTS_HINT, IDLE_AGENTS_TITLE } from '../components/admin/IdleAgentsSetting'
+import { ByokSetting } from '../components/admin/ByokSetting'
 import {
   adminHeaders, CONFIG_DEFAULTS, fetchConfig, fetchPlans, openUsersTab, saveConfig, waitlistName,
   type KioskMode, type PlanLimits, type SystemConfig,
@@ -724,6 +725,7 @@ export function AdminPage() {
         )}
 
         {/* Plans tab */}
+        {!loading && tab === 'plans' && <div className="mb-4"><ByokSetting /></div>}
         {!loading && tab === 'plans' && (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             {Object.entries(plans).map(([name, limits]) => (

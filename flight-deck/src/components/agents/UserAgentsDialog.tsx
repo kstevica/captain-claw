@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Bot, Box, Cpu, Loader2, Play, Plus, RefreshCw, RotateCw, Settings, Square, Trash2, X } from 'lucide-react'
+import { Bot, Box, Cpu, Loader2, Play, Plus, RefreshCw, RotateCw, Settings, Square, Trash2, Wand2, X } from 'lucide-react'
 import {
   listContainers, listProcesses,
   startContainer, stopContainer, restartContainer, removeContainer,
@@ -9,7 +9,8 @@ import {
 } from '../../services/docker'
 import { useAuthStore } from '../../stores/authStore'
 import { AgentConfigEditor } from './AgentConfigEditor'
-import { ArchetypeSpawnDialog } from '../layout/ArchetypeSpawnDialog'
+import { AgentSetupDialog } from '../layout/AgentSetupDialog'
+import { ArchetypeSpawnDialog, type SetupRequest } from '../layout/ArchetypeSpawnDialog'
 
 // ── Admin: another user's agents ─────────────────────────────────────
 //
@@ -60,6 +61,7 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
   const [actionError, setActionError] = useState('')
   const [busy, setBusy] = useState<Set<string>>(() => new Set())   // agents with an action running
   const [creating, setCreating] = useState(false)
+  const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   const [editing, setEditing] = useState<ManagedAgent | null>(null)
 
   const load = useCallback(async () => {
@@ -86,11 +88,11 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
 
   // Escape closes this dialog only when no child dialog is open on top of it.
   useEffect(() => {
-    if (creating || editing) return
+    if (creating || editing || setupFor) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [creating, editing, onClose])
+  }, [creating, editing, setupFor, onClose])
 
   const run = async (a: ManagedAgent, action: 'start' | 'stop' | 'restart' | 'remove') => {
     if (action === 'remove' && !confirm(
@@ -190,6 +192,12 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
                     ) : (
                       <button onClick={() => run(a, 'start')} disabled={working} className={btn}><Play className="h-3 w-3" /> Start</button>
                     )}
+                    {a.kind === 'process' && (
+                      <button onClick={() => setSetupFor({ slug: a.id, name: a.name, role: '' })} disabled={working} className={btn}
+                        title="Their instructions and documents, as its rules, skills and knowledge">
+                        <Wand2 className="h-3 w-3" /> Way of working
+                      </button>
+                    )}
                     <button onClick={() => setEditing(a)} disabled={working} className={btn}><Settings className="h-3 w-3" /> Config</button>
                     <button onClick={() => run(a, 'remove')} disabled={working} className={`${btn} hover:border-red-500/40 hover:text-red-600 dark:hover:text-red-400`}>
                       <Trash2 className="h-3 w-3" /> Remove
@@ -210,8 +218,11 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
             asUser={actAs}
             ownerLabel={userLabel}
             onClose={() => setCreating(false)}
-            onSpawned={() => { setCreating(false); load() }}
+            onSpawned={(_slug, setup) => { setCreating(false); if (setup) setSetupFor(setup); load() }}
           />
+        )}
+        {setupFor && (
+          <AgentSetupDialog agent={setupFor} asUser={actAs} ownerLabel={userLabel} onClose={() => setSetupFor(null)} />
         )}
         {editing && (
           <AgentConfigEditor

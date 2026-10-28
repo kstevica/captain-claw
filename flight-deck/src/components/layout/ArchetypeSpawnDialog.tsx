@@ -28,6 +28,11 @@ import { useIsMobile } from '../../hooks/useMediaQuery'
 // it thinks, which model class it runs on, what it can reach — with the name
 // and Create button under it. On a phone the two are steps: the gallery, then
 // the detail with a Back arrow.
+//
+// "Set up its way of working next" (optional, under the name): the agent is
+// created as usual, then the caller opens AgentSetupDialog on it — the
+// person's instructions and documents, read by their model into rules,
+// skills, facts and knowledge they review before it reaches the agent.
 
 /** Mirrors the backend `_slug`: a process agent's name is its directory. */
 function agentSlug(name: string): string {
@@ -132,11 +137,15 @@ function firstSentence(text: string): string {
 
 // ── Component ────────────────────────────────────────────────────────
 
+/** What a caller needs to open AgentSetupDialog on the new agent. */
+export interface SetupRequest { slug: string; name: string; role: string }
+
 export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, ownerLabel }: {
   /** Slugs of the agents this user can see — the default name avoids them. */
   takenSlugs: Set<string>
   onClose: () => void
-  onSpawned: (slug: string) => void
+  /** `setup`: the person ticked "set up its way of working next". */
+  onSpawned: (slug: string, setup?: SetupRequest) => void
   /** Admin creating the agent FOR that user: their gallery, their ownership,
    *  their tier set and plan. */
   asUser?: string
@@ -150,6 +159,7 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
   const [name, setName] = useState('')
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
+  const [setupNext, setSetupNext] = useState(false)
   const nameRef = useRef<HTMLInputElement>(null)
   const { isMobile } = useIsMobile()
   const archetypes = registry?.archetypes ?? null
@@ -230,14 +240,15 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
       }
       if (!res.ok) throw new Error(res.message)
       const slug = res.slug || agentSlug(finalName)
-      // FD records the archetype's instructions for the owner; mirror them
-      // into this browser's store only when the agent is the viewer's own.
+      // FD records the instructions for the owner; mirror what it stored —
+      // and only when the agent is the viewer's own.
       if (!asUser) {
         const procs = useProcessStore.getState()
-        if (picked.fleet_instructions) procs.setFleetInstructions(slug, picked.fleet_instructions)
+        const stored = res.fleet_instructions || picked.fleet_instructions
+        if (stored) procs.setFleetInstructions(slug, stored)
         procs.fetchProcesses()
       }
-      onSpawned(slug)
+      onSpawned(slug, setupNext ? { slug, name: finalName, role: picked.role || picked.id } : undefined)
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e))
       setBusy(false)
@@ -384,15 +395,39 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
                         className="w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2.5 text-base text-zinc-100 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none disabled:opacity-60 wide:py-2 wide:text-sm"
                       />
                     </label>
+                    <label className={`flex cursor-pointer items-start gap-2.5 rounded-xl border px-3 py-2.5 transition-colors ${
+                      setupNext
+                        ? 'border-violet-500/40 bg-violet-500/10'
+                        : 'border-zinc-800 hover:border-zinc-700'
+                    } ${busy ? 'pointer-events-none opacity-60' : ''}`}>
+                      <input
+                        type="checkbox"
+                        checked={setupNext}
+                        onChange={(e) => setSetupNext(e.target.checked)}
+                        disabled={busy}
+                        className="mt-0.5 h-4 w-4 shrink-0 accent-violet-600"
+                      />
+                      <span className="min-w-0">
+                        <span className={`flex items-center gap-1.5 text-sm ${setupNext ? 'text-violet-700 dark:text-violet-200' : 'text-zinc-300'}`}>
+                          <Wand2 className="h-3.5 w-3.5 shrink-0" /> Set up its way of working next
+                        </span>
+                        <span className="mt-0.5 block text-[11px] leading-snug text-zinc-500">
+                          Right after it's created: your instructions and documents become its rules, skills and knowledge.
+                        </span>
+                      </span>
+                    </label>
                     <button
                       type="submit"
                       disabled={!name.trim() || busy}
                       className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
                     >
-                      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                      {busy ? 'Creating…' : `Create ${picked.role || 'agent'}`}
+                      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : setupNext ? <Sparkles className="h-4 w-4" /> : <Check className="h-4 w-4" />}
+                      {busy ? 'Creating…' : setupNext ? `Create and set up ${picked.role || 'agent'}` : `Create ${picked.role || 'agent'}`}
                     </button>
-                    <p className="text-center text-[11px] text-zinc-600">Starts in a few seconds and opens its chat by itself.</p>
+                    <p className="text-center text-[11px] text-zinc-600">
+                      {setupNext ? 'It starts right away; its setup opens as soon as it is created.'
+                        : 'Starts in a few seconds and opens its chat by itself.'}
+                    </p>
                   </form>
                 </div>
               )}

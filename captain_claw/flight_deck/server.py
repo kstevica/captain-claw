@@ -21,7 +21,7 @@ import yaml
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 # Load a project-local ``.env`` into ``os.environ`` early — before any
 # captain_claw submodule imports — so env-driven bridges (Messenger,
@@ -613,19 +613,32 @@ def _share_fd_secrets(environment: dict[str, str]) -> None:
 # all trust each other.
 _CONFINE_ENV_KEYS = ("CLAW_CONFINE", "CLAW_CONFINE_HOME", "CLAW_CONFINE_WORKSPACE")
 # What a non-admin's .env / env_vars may not change from FD's own: each makes
-# the agent's Python, git, node or shell load code from a path (and the agent
-# writes its own workspace), moves the roots its tools are held to, routes its
-# calls to Flight Deck through another host, or turns its audit off.
+# the agent's Python, git, node, Java, OpenSSL, Playwright or shell load code
+# or config from a path (and the agent writes its own workspace) or run a
+# command it names, moves the roots its tools are held to, routes its calls
+# through another host (a proxy, a resolver alias) or has it trust another
+# certificate authority, or turns its audit off.
 # (CLAW_VFS_SCOPE stays: it only ever narrows the agent's VFS — Iskra's wall.)
 _PINNED_ENV_PREFIXES = (
     "PYTHON", "LD_", "DYLD_", "GIT_", "NODE_", "NPM_CONFIG_", "PERL", "RUBY",
-    "CLAW_PTY_", "CLAW_TOOL_AUDIT",
+    "JAVA_", "_JAVA_", "JDK_JAVA_", "OPENSSL_", "PLAYWRIGHT_", "XDG_", "PIP_", "UV_",
+    "SSL_CERT_", "CLAW_PTY_", "CLAW_TOOL_AUDIT",
 )
 _PINNED_ENV_KEYS = frozenset({
-    "PATH", "BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELL", "PLAYWRIGHT_BROWSERS_PATH",
+    "PATH", "BASH_ENV", "ENV", "PROMPT_COMMAND", "SHELL", "ZDOTDIR",
+    "BROWSER", "EDITOR", "VISUAL", "PAGER", "LESSOPEN", "SSH_ASKPASS",
+    "CURL_HOME", "WGETRC", "NETRC", "GCONV_PATH", "LOCPATH",
     "CLAW_VFS_ROOT", "FD_DATA_DIR", "CAPTAIN_CLAW_FD_HOME", "FD_DATA_KEY_FILE",
     "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+    "HOSTALIASES", "RES_OPTIONS", "LOCALDOMAIN",
+    "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE", "SSLKEYLOGFILE",
 })
+
+
+def _pinned_env_name(name: str) -> bool:
+    """Whether ``name`` is one a non-admin's agent takes from Flight Deck only."""
+    upper = name.upper()
+    return upper in _PINNED_ENV_KEYS or upper.startswith(_PINNED_ENV_PREFIXES)
 
 
 def _confine_agents() -> bool:
@@ -670,8 +683,7 @@ def _pin_confinement(environment: dict[str, str], base: dict[str, str], *,
     ws = Path(workspace).expanduser().resolve() if workspace else default_ws
     if tier == "user":
         for key in list(environment):
-            upper = key.upper()
-            if upper in _PINNED_ENV_KEYS or upper.startswith(_PINNED_ENV_PREFIXES):
+            if _pinned_env_name(key):
                 if key in base:
                     environment[key] = base[key]
                 else:
@@ -686,6 +698,62 @@ def _pin_confinement(environment: dict[str, str], base: dict[str, str], *,
     environment["CLAW_CONFINE"] = tier
     environment["CLAW_CONFINE_HOME"] = str(home)
     environment["CLAW_CONFINE_WORKSPACE"] = str(ws)
+
+
+def _deck_key_may_go(provider: str, base_url: str) -> bool:
+    """Where Flight Deck's own model keys — its environment's, and its
+    config's provider_keys — may be sent: where an org key may (#260), the
+    provider's own endpoint or one the published team sets route it through
+    (`basna_routes._SYSTEM_ROUTED`, kept fresh by `_prime_deck_routes`)."""
+    from captain_claw.flight_deck import basna_routes
+    from captain_claw.flight_deck.endpoints import endpoint_of
+
+    return (not endpoint_of(provider, base_url)[1]
+            or basna_routes.endpoint_key_id(provider, base_url) in basna_routes._SYSTEM_ROUTED)
+
+
+async def _prime_deck_routes() -> None:
+    """Re-read the team's routes `_deck_key_may_go` checks (TTL'd, best-effort)."""
+    from captain_claw.flight_deck import auth as fd_auth
+    from captain_claw.flight_deck.basna_routes import _refresh_system_provider_keys
+
+    if fd_auth._db is not None:
+        await _refresh_system_provider_keys(fd_auth._db)
+
+
+async def _guard_deck_keys() -> None:
+    """On a deck with accounts, Flight Deck's own model calls (Basna, Vatra,
+    Code, request bodies …) never send its keys to an endpoint a caller named:
+    with no key of their own there, they send none (`llm.set_env_key_guard`).
+    Without accounts the keys are the one operator's to send anywhere."""
+    from captain_claw import llm
+
+    llm.set_env_key_guard(_deck_key_may_go if AUTH_ENABLED else None)
+    await _prime_deck_routes()
+
+
+def _withhold_deck_keys(environment: dict[str, str], base: dict[str, str], *,
+                        agent_dir: Path, owner_id: str) -> None:
+    """Take Flight Deck's own provider keys, inherited through ``base``, back
+    out of a non-admin's process agent wherever it would send them on to an
+    endpoint they don't go to (`_deck_key_may_go`): its model, an allowed
+    model, or an endpoint its environment names. A key the agent's own .env
+    sets is its own (and #260's checks hold it). An admin's agent, and every
+    agent on a deck without accounts, keeps what it inherits."""
+    if not AUTH_ENABLED or _owner_is_admin(owner_id):
+        return
+    from captain_claw.config import Config
+
+    own = Config._read_dotenv_file(agent_dir / ".env")
+    model = (_agent_config_model(agent_dir.name) or ({}, {}))[0]
+    for provider, endpoint in _agent_key_routes(model, {**environment, **own}):
+        if _deck_key_may_go(provider, endpoint):
+            continue
+        for name in _provider_key_env_names(provider):
+            if base.get(name) and name not in own:
+                environment[name] = ""
+                log.info("Flight Deck's key withheld from an agent on another endpoint",
+                         agent=agent_dir.name, key=name, endpoint=_endpoint_label(provider, endpoint))
 
 
 def _start_registered_process(slug: str, entry: dict) -> bool:
@@ -728,6 +796,7 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
         environment["CLAW_VFS_USER"] = _owner
     _pin_confinement(environment, base_env, agent_dir=agent_dir, owner_id=_owner,
                      workspace=str(entry.get("workspace") or ""))
+    _withhold_deck_keys(environment, base_env, agent_dir=agent_dir, owner_id=_owner)
 
     log_file = agent_dir / "process.log"
     try:
@@ -941,6 +1010,12 @@ async def _start_botport_link(db: Any) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    # Own API keys move agents through THIS module's process table (it runs
+    # as __main__; an import of `server` elsewhere is a second copy).
+    from captain_claw.flight_deck import byok as _byok
+
+    _byok.agent_switcher = byok_switch_agents
+    _byok.owner_agents = byok_owner_agents
     # Initialize game registry with FD data dir
     from captain_claw.games.registry import set_games_dir
     games_dir = DATA_DIR / "games"
@@ -969,6 +1044,7 @@ async def lifespan(app: FastAPI):
     print(f"Flight Deck: {origin_guard.describe_policy()}")
     # Initialize database for auth & settings — always, see _init_fd_db.
     _fd_db = await _init_fd_db()
+    await _guard_deck_keys()
     # MCP servers saved before they had owners: settle that before serving,
     # so an OAuth sign-in never answers another user's agent in between.
     from captain_claw.flight_deck.mcp_routes import migrate_legacy_ownership
@@ -1650,6 +1726,7 @@ from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.file_library import router as file_library_router
 from captain_claw.flight_deck.data_library import router as data_library_router
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
+from captain_claw.flight_deck import agent_preset
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck import public_file_shares
@@ -1664,6 +1741,7 @@ from captain_claw.flight_deck.mcp_server_routes import router as mcp_inbound_rou
 from captain_claw.flight_deck.mcp_oauth_routes import router as mcp_oauth_router
 from captain_claw.flight_deck.costs_routes import router as costs_router
 from captain_claw.flight_deck.usage_quota import router as usage_quota_router
+from captain_claw.flight_deck.byok import router as byok_router
 from captain_claw.flight_deck.llm_routes import router as llm_router
 from captain_claw.flight_deck.being_routes import router as being_router
 from captain_claw.flight_deck.being_public_routes import router as being_public_router
@@ -1746,6 +1824,7 @@ app.include_router(agents_fs_router)
 app.include_router(file_library_router)
 app.include_router(data_library_router)
 app.include_router(agent_skills_router)
+app.include_router(agent_preset.router)
 app.include_router(system_router)
 app.include_router(share_router)
 # Public file links: owner API (port-addressed → the ownership guard above
@@ -1784,6 +1863,7 @@ app.include_router(mcp_inbound_router)
 app.include_router(mcp_oauth_router)
 app.include_router(costs_router)
 app.include_router(usage_quota_router)
+app.include_router(byok_router)
 app.include_router(llm_router)
 app.include_router(being_router)
 app.include_router(being_public_router)
@@ -1818,6 +1898,10 @@ def _require_auth():
 
 class AgentConfig(BaseModel):
     """Agent spawn configuration — matches the frontend form."""
+    # Set by the archetype resolve, never by the caller: the tier the model
+    # came from, and whether it is on the owner's own API key (byok.py).
+    _model_tier: str = PrivateAttr(default="")
+    _byok: bool = PrivateAttr(default=False)
     # Identity
     name: str = ""
     description: str = ""
@@ -2126,6 +2210,8 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
             if "vision" not in config.model_fields_set and _vision_switch(tcfg.get("vision")) is not None:
                 config.vision = "on" if _vision_switch(tcfg.get("vision")) else "off"
             config.tier = ""  # pinned now — don't let _resolve_tier re-map it
+            config._model_tier = eff_tier
+            config._byok = bool(tcfg.get("byok"))
         elif not config.tier and _registry_tier_fits_the_caller(config, eff_tier):
             config.tier = eff_tier  # last resort: central registry tier table
     # The tier set's own keys (BRAVE_API_KEY, TAVILY_API_KEY, …) — what the
@@ -2371,20 +2457,20 @@ async def _system_json(setting: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-async def _team_key(provider: str, base_url: str, *, asked: bool) -> str:
+async def _team_key(provider: str, base_url: str) -> str:
     """The team's API key for a model endpoint ("" when there is none).
 
     A custom endpoint (``base_url``) has its own key (``fd:endpoint-keys``);
     the provider's own endpoint runs on the provider's (``fd:provider-keys``).
-
-    ``asked`` — the caller holds the ``@system`` sentinel, i.e. a team tier: an
-    endpoint with no key of its own then runs on the provider's (a deck that
-    routes a provider through one gateway). A caller with a BLANK key is never
-    handed the provider's key for some endpoint of its own choosing — only for
-    one the published team sets themselves send it to.
+    A custom endpoint with no key of its own runs on the provider's only where
+    the published team sets send the provider's "@system" tiers (a deck that
+    routes a provider through one gateway — `routed_endpoint_ids`). One the
+    caller names is never handed the provider's key, whether the caller's key
+    is blank or the "@system" sentinel: the endpoint is theirs, the key the
+    team's.
     """
     from captain_claw.flight_deck.basna_routes import (
-        ENDPOINT_KEYS_SETTING, NO_PROVIDER_FALLBACK, endpoint_key_id,
+        ENDPOINT_KEYS_SETTING, NO_PROVIDER_FALLBACK, endpoint_key_id, routed_endpoint_ids,
     )
 
     eid = endpoint_key_id(provider, base_url)
@@ -2392,17 +2478,10 @@ async def _team_key(provider: str, base_url: str, *, asked: bool) -> str:
         key = str((await _system_json(ENDPOINT_KEYS_SETTING)).get(eid) or "")
         if key:
             return key
-        if not asked:
-            published = (await _system_json("fd:shared-tier-sets")).get("sets")
-            if not any(
-                isinstance(t, dict) and str(t.get("api_key") or "").strip() == "@system"
-                and endpoint_key_id(str(t.get("provider") or ""), str(t.get("base_url") or "")) == eid
-                for st in (published if isinstance(published, list) else []) if isinstance(st, dict)
-                for t in (st.get("tiers") or {}).values()
-            ):
-                return ""
-        if eid in ((await _system_json("fd:shared-tier-sets")).get(NO_PROVIDER_FALLBACK) or []):
-            return ""  # the provider's key is known not to be this endpoint's
+        shared = await _system_json("fd:shared-tier-sets")
+        no_fallback = shared.get(NO_PROVIDER_FALLBACK)
+        if eid not in routed_endpoint_ids(shared) or eid in (no_fallback if isinstance(no_fallback, list) else []):
+            return ""  # not the team's endpoint, or the provider's key is known not to be its
     return str((await _system_json("fd:provider-keys")).get(provider) or "")
 
 
@@ -2412,7 +2491,122 @@ def _endpoint_label(provider: str, base_url: str) -> str:
     return f"{provider} at {_endpoint_host(base_url)}" if (base_url or "").strip() else provider
 
 
+# Where an agent's environment sends its model calls when its config names no
+# endpoint: the variables LiteLLM reads a provider's endpoint from then.
+_PROVIDER_BASE_ENV = {
+    "anthropic": ("ANTHROPIC_API_BASE", "ANTHROPIC_BASE_URL"),
+    "openai": ("OPENAI_BASE_URL", "OPENAI_API_BASE"),
+    "gemini": ("GEMINI_API_BASE",),
+    "xai": ("XAI_API_BASE",),
+    "openrouter": ("OPENROUTER_API_BASE",),
+}
+# …and the ones that carry every request through another host, or have the
+# agent trust another certificate authority — a proxy that can read the key.
+_TRAFFIC_ENV = re.compile(
+    r"^(?:HTTPS?_PROXY|ALL_PROXY|SSL_CERT_(?:FILE|DIR)|REQUESTS_CA_BUNDLE|CURL_CA_BUNDLE)$", re.IGNORECASE)
+
+
+async def _org_keys() -> set[str]:
+    """The team's model keys as Flight Deck holds them (provider and endpoint)."""
+    from captain_claw.flight_deck import auth as fd_auth
+    from captain_claw.flight_deck.basna_routes import ENDPOINT_KEYS_SETTING
+
+    if fd_auth._db is None:
+        return set()  # no accounts database, so no team keys in it either
+    keys: set[str] = set()
+    for setting in ("fd:provider-keys", ENDPOINT_KEYS_SETTING):
+        keys.update(v.strip() for v in (await _system_json(setting)).values() if isinstance(v, str))
+    return keys - {"", "@system"}
+
+
+def _agent_key_routes(model: dict, env: dict[str, str]) -> list[tuple[str, str]]:
+    """(provider, endpoint) of every model call an agent makes with a key from
+    its environment, as it picks them: its model unless the config gives it a
+    key, and each ``model.allowed`` entry — on the model's provider with the
+    model's key and (naming none) its endpoint, on another with that
+    provider's key. A blank endpoint is the one the environment names for the
+    provider (`_PROVIDER_BASE_ENV`), else the provider's own ("")."""
+    main = str(model.get("provider") or "").strip().lower()
+    main_key = str(model.get("api_key") or "").strip()
+    main_base = str(model.get("base_url") or "").strip()
+    allowed = model.get("allowed")
+    entries = [(main, main_base)] + [
+        (str(e.get("provider") or "").strip().lower(), str(e.get("base_url") or "").strip())
+        for e in (allowed if isinstance(allowed, list) else []) if isinstance(e, dict)]
+    routes: list[tuple[str, str]] = []
+    for provider, base in entries:
+        if provider == main:
+            if main_key:
+                continue
+            base = base or main_base
+        named = [str(env.get(n) or "").strip() for n in _PROVIDER_BASE_ENV.get(provider, ())]
+        for endpoint in ([base] if base else [u for u in named if u] or [""]):
+            if (provider, endpoint) not in routes:
+                routes.append((provider, endpoint))
+    return routes
+
+
+async def _misrouted_team_keys(model: dict, env: dict[str, str]) -> list[tuple[str, str, str]]:
+    """(env var, provider, endpoint) for each team key in ``env`` that the
+    agent would send to an endpoint it isn't the team's key for (`_team_key`)."""
+    org = await _org_keys()
+    if not any(str(v).strip() in org for v in env.values()):
+        return []
+    out = []
+    for provider, endpoint in _agent_key_routes(model, env):
+        for name in _provider_key_env_names(provider):
+            key = str(env.get(name) or "").strip()
+            if key in org and await _team_key(provider, endpoint) != key:
+                out.append((name, provider, endpoint))
+    return out
+
+
+async def _team_key_blockers(model: dict, env: dict[str, str], *, kept: dict[str, str] | None = None) -> list[str]:
+    """Why a team key in an agent's ``env`` would leave the team's hands, as
+    sentences ([] when it wouldn't, or ``env`` holds none): each endpoint it
+    would go to that isn't the team's for it, and each proxy / certificate
+    variable that would carry it — unless Flight Deck's own environment, a
+    published team set, or ``kept`` (the .env as it was) sets it so already."""
+    org = await _org_keys()
+    if not any(str(v).strip() in org for v in env.values()):
+        return []
+    out = [f"the team's key in {name} would go to {_endpoint_label(provider, endpoint)}"
+           for name, provider, endpoint in await _misrouted_team_keys(model, env)]
+    sets = (await _system_json("fd:shared-tier-sets")).get("sets")
+    team_env = {(str(ev.get("key") or ""), str(ev.get("value") or ""))
+                for st in (sets if isinstance(sets, list) else []) if isinstance(st, dict)
+                for ev in (st.get("envVars") if isinstance(st.get("envVars"), list) else [])
+                if isinstance(ev, dict)}
+    for name, value in env.items():
+        value = str(value or "").strip()
+        if (_TRAFFIC_ENV.match(name) and value and value != (kept or {}).get(name, "").strip()
+                and value != os.environ.get(name, "").strip() and (name, value) not in team_env):
+            out.append(f"{name} would carry the team's key through a host of its own")
+    return out
+
+
+def _team_key_refusal(blockers: list[str]) -> HTTPException:
+    return HTTPException(400, (
+        "Not saved: " + "; ".join(blockers) + ". The team's keys only go to the endpoints the "
+        "team set up — give a key of your own for that endpoint, or ask an admin."))
+
+
 async def _resolve_spawn_provider_key(config: AgentConfig, *, inherits_fd_env: bool = True) -> None:
+    """`_resolve_spawn_key`, then: a team key the agent would hold — resolved
+    there, or one its env vars carry (a flow spawn copies its origin agent's
+    .env) — never goes on to an endpoint the spawn names, nor through a proxy
+    of its own (`_team_key_blockers`): the spawn is refused (400)."""
+    await _resolve_spawn_key(config, inherits_fd_env=inherits_fd_env)
+    blockers = await _team_key_blockers(
+        {"provider": config.provider, "base_url": config.base_url, "allowed": config.allowed_models},
+        _dotenv_values(_build_env(config)))
+    if blockers:
+        raise HTTPException(400, (
+            "This agent can't run on the team's key: " + "; ".join(blockers) + ". The team's "
+            "keys only go to the endpoints the team set up — give a key of your own."))
+
+
+async def _resolve_spawn_key(config: AgentConfig, *, inherits_fd_env: bool) -> None:
     """Give a spawn that brings no model key of its own the team's (`_team_key`).
 
     The browser never receives raw org keys (GET /fd/settings/provider-keys is
@@ -2455,13 +2649,13 @@ async def _resolve_spawn_provider_key(config: AgentConfig, *, inherits_fd_env: b
         return
     config.provider_api_key = ""
     try:
-        key = await _team_key(config.provider, config.base_url, asked=asked)
+        key = await _team_key(config.provider, config.base_url)
         if not key and not supplied:
             from captain_claw.flight_deck.admin_routes import recover_team_keys
             from captain_claw.flight_deck.auth import get_db
 
             if await recover_team_keys(get_db()):
-                key = await _team_key(config.provider, config.base_url, asked=asked)
+                key = await _team_key(config.provider, config.base_url)
     except Exception as exc:
         log.warning("team key resolve failed", provider=config.provider, error=str(exc))
         return
@@ -2543,10 +2737,18 @@ async def _heal_agent_model_key(slug: str) -> bool:
         if not gap:
             return False
         provider, base_url, env_name = gap
-        key = await _team_key(provider, base_url, asked=False)
+        key = await _team_key(provider, base_url)
         if not key:
             log.warning("Agent has no model key and the team has none for it",
                         slug=slug, provider=provider, endpoint=_endpoint_label(provider, base_url))
+            return False
+        from captain_claw.config import Config
+
+        dotenv = Config._read_dotenv_file(DATA_DIR / slug / ".env")
+        blockers = await _team_key_blockers(
+            (_agent_config_model(slug) or ({}, {}))[0], {**dotenv, env_name: key})
+        if blockers:
+            log.warning("Agent not given the team's key: " + "; ".join(blockers), slug=slug)
             return False
         if not _upsert_dotenv_var(DATA_DIR / slug / ".env", env_name, key):
             return False
@@ -2574,10 +2776,186 @@ async def heal_keyless_agents(*, restart: bool = True) -> list[str]:
     .env changed; with ``restart`` the running ones among them are restarted in
     the background so the key takes effect."""
     healed = [slug for slug in list(_load_process_registry()) if await _heal_agent_model_key(slug)]
+    await _prime_deck_routes()  # the restarts below withhold by it
     running = [slug for slug in healed if _process_is_alive(slug)] if restart else []
     if running:
         asyncio.get_running_loop().run_in_executor(None, _restart_processes, running)
     return healed
+
+
+# ── Own API keys (byok.py): moving a user's agents onto them and back ──
+
+
+def _drop_dotenv_values(env_path: Path, names: set[str], values: set[str] | None = None) -> bool:
+    """Remove the ``NAME=value`` lines of a .env whose name is in *names* and
+    (given *values*) whose value is one of them. True when the file changed."""
+    try:
+        lines = env_path.read_text().splitlines() if env_path.is_file() else []
+    except OSError:
+        return False
+    keep = []
+    for ln in lines:
+        name, sep, value = ln.strip().partition("=")
+        if sep and name in names and (values is None or value.strip().strip("'\"") in values):
+            continue
+        keep.append(ln)
+    if len(keep) == len(lines):
+        return False
+    try:
+        env_path.write_text("\n".join(keep) + "\n" if keep else "")
+    except OSError:
+        return False
+    return True
+
+
+def _set_agent_config_model(agent_dir: Path, provider: str, model: str, base_url: str,
+                            max_tokens: int = 0) -> dict:
+    """Point every copy of an agent's config at *provider*/*model* with no key
+    in the config (the .env's wins). Returns what the first copy had."""
+    before: dict = {}
+    for cfg_path in _agent_config_paths(agent_dir):
+        if not cfg_path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        m = data.get("model") if isinstance(data.get("model"), dict) else {}
+        if not before:
+            before = dict(m)
+        m.update(provider=provider, model=model, api_key="",
+                 base_url=base_url or _default_base_url(provider))
+        if max_tokens > 0:
+            m["max_tokens"] = max_tokens
+        data["model"] = m
+        cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+    return before
+
+
+def _byok_agent_tier(entry: dict, tiers: dict) -> str:
+    """The tier an agent's model came from: recorded at spawn, else its
+    archetype's, else the tier whose model it runs, else "balanced"."""
+    recorded = str(entry.get("model_tier") or entry.get("tier") or "")
+    if recorded:
+        return recorded
+    aid = str(entry.get("archetype") or "")
+    if aid:
+        from captain_claw.flight_deck.basna_routes import _load_registry
+
+        try:
+            for arch in _load_registry().get("archetypes") or []:
+                if isinstance(arch, dict) and arch.get("id") == aid and arch.get("tier"):
+                    return str(arch["tier"])
+        except Exception:
+            pass
+    for name, t in (tiers or {}).items():
+        if isinstance(t, dict) and (t.get("provider"), t.get("model")) == (entry.get("provider"), entry.get("model")):
+            return name
+    return "balanced"
+
+
+def byok_owner_agents(owner_id: str) -> list[dict]:
+    """*owner_id*'s process agents: whether each runs, and on own keys."""
+    return [{"slug": slug, "running": _process_is_alive(slug), "byok": entry.get("key_source") == "byok"}
+            for slug, entry in _load_process_registry().items() if entry.get("owner") == owner_id]
+
+
+async def byok_switch_agents(owner_id: str, tiers: dict | None, keys: dict) -> dict:
+    """Move *owner_id*'s process agents onto their own API keys — *tiers* is
+    their tier set with the keys over it (``byok.overlay_tiers``) — or, with
+    None, back to the models they ran before. An agent on a local model stays
+    there. Running ones are restarted. ``{"switched", "restarted"}``."""
+    from captain_claw.flight_deck import byok
+    from captain_claw.flight_deck.auth import get_db
+    from captain_claw.flight_deck.basna_routes import _owner_base_tier_set
+
+    base: dict = {}
+    if tiers is None:
+        try:
+            base = (await _owner_base_tier_set(get_db(), owner_id)).get("tiers") or {}
+        except Exception:
+            base = {}
+    key_values = {str(k) for k in (keys or {}).values() if k}
+    key_names = {n for p in byok.PROVIDERS for n in _provider_key_env_names(p)}
+    registry = _load_process_registry()
+    changed: list[str] = []
+    for slug, entry in registry.items():
+        if entry.get("owner") != owner_id:
+            continue
+        agent_dir = DATA_DIR / slug
+        if not agent_dir.is_dir():
+            continue
+        env_path = agent_dir / ".env"
+        on_own = entry.get("key_source") == "byok"
+        if tiers is not None:
+            if not on_own and str(entry.get("provider") or "") in byok.LOCAL_PROVIDERS:
+                continue
+            name = _byok_agent_tier(entry, tiers)
+            tier = tiers.get(name) if isinstance(tiers.get(name), dict) else None
+            if not (tier and tier.get("byok")):
+                tier = tiers.get("balanced") if isinstance(tiers.get("balanced"), dict) else None
+            if not (tier and tier.get("byok")):
+                continue
+            provider, model = str(tier["provider"]), str(tier["model"])
+            key = str(keys.get(provider) or tier.get("api_key") or "")
+            env_name = _PROVIDER_KEY_ENV.get(provider, "")
+            if not (key and env_name):
+                continue
+            try:
+                from captain_claw.config import Config
+
+                held = str(Config._read_dotenv_file(env_path).get(env_name) or "")
+            except Exception:
+                held = ""
+            if on_own and (entry.get("provider"), entry.get("model"), held) == (provider, model, key):
+                continue
+            if on_own and entry.get("provider") != provider:
+                # Off the provider it ran on with an own key: that key (put
+                # there by this switch, maybe one since removed) goes too.
+                _drop_dotenv_values(env_path, set(_provider_key_env_names(str(entry.get("provider") or ""))))
+            before = _set_agent_config_model(agent_dir, provider, model, "",
+                                             int(tier.get("output_ctx") or 0))
+            if not on_own:
+                entry["byok_prev"] = {
+                    "provider": str(entry.get("provider") or before.get("provider") or ""),
+                    "model": str(entry.get("model") or before.get("model") or ""),
+                    "base_url": str(before.get("base_url") or ""),
+                    "max_tokens": int(before.get("max_tokens") or 0),
+                }
+            _upsert_dotenv_var(env_path, env_name, key)
+            entry.update(provider=provider, model=model, key_source="byok", model_tier=name)
+        else:
+            if not on_own:
+                continue
+            prev = entry.get("byok_prev") if isinstance(entry.get("byok_prev"), dict) else {}
+            if not prev.get("model"):
+                # Made on own keys: back to its tier on the deck's set.
+                name = _byok_agent_tier(entry, base)
+                team = base.get(name) if isinstance(base.get(name), dict) else {}
+                prev = {"provider": team.get("provider"), "model": team.get("model"),
+                        "base_url": team.get("base_url") or "", "max_tokens": int(team.get("output_ctx") or 0)}
+            if prev.get("model"):
+                _set_agent_config_model(agent_dir, str(prev.get("provider") or ""), str(prev["model"]),
+                                        str(prev.get("base_url") or ""), int(prev.get("max_tokens") or 0))
+                entry.update(provider=str(prev.get("provider") or ""), model=str(prev["model"]))
+            _drop_dotenv_values(env_path, key_names, key_values)
+            entry.pop("key_source", None)
+            entry.pop("byok_prev", None)
+        changed.append(slug)
+    if changed:
+        _save_process_registry(registry)
+    if tiers is None:
+        for slug in changed:
+            await _heal_agent_model_key(slug)  # the deck's key, where it has one
+    running = [slug for slug in changed if _process_is_alive(slug)]
+    if running:
+        await _prime_deck_routes()  # the restarts withhold by it
+        asyncio.get_running_loop().run_in_executor(None, _restart_processes, running)
+    log.info("Agents moved %s own API keys", "onto" if tiers is not None else "off",
+             owner=owner_id, switched=len(changed), restarted=len(running))
+    return {"switched": len(changed), "restarted": len(running)}
 
 
 async def _startup_team_keys_then_reattach() -> None:
@@ -4049,6 +4427,142 @@ class AgentConfigUpdate(BaseModel):
     env: str | None = None
 
 
+# An agent on a team tier holds the deck's own model key in its .env
+# (`_build_env`, `heal_keyless_agents`), and org keys never reach a browser: a
+# non-admin owner reads its secrets as dots and, for a long one, the last four
+# characters — as Settings hints the team keys. A save that still carries such
+# a placeholder keeps the value behind it.
+_SECRET_MASK = "····"
+_SECRET_ENV_NAME = re.compile(r"(?:^|_)(?:API_?KEY|KEY|TOKEN|SECRET|PASSWORD|PASSWD)$", re.IGNORECASE)
+_ENV_ASSIGNMENT = re.compile(r"^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.]*)(\s*=\s*)(.*?)(\s*)$")
+# A team key shorter than this (a local server's placeholder "x") is masked
+# where it is a whole value, never wherever it happens to occur.
+_TEAM_KEY_MIN_MATCH = 12
+
+
+def _mask_secret(value: str) -> str:
+    return _SECRET_MASK + value[-4:] if len(value) >= 12 else _SECRET_MASK
+
+
+def _sees_agent_secrets(request: Request, user: dict | None) -> bool:
+    """Whether the caller reads an agent's .env as it is: an admin — also one
+    acting for the owner (X-FD-Act-As) — or anyone on a deck without accounts
+    (one trusted operator). Any other owner reads its secrets masked."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    if not _fd_auth_enabled() or getattr(request.state, "acting_admin", None):
+        return True
+    return bool(user) and user.get("role") == "admin"
+
+
+async def _deck_secrets() -> set[str]:
+    """Every model key the deck holds for its team: the org provider and
+    endpoint keys behind "@system", and the provider keys in Flight Deck's own
+    environment. Best-effort — without them the name rule still masks."""
+    keys = {os.environ.get(n) or "" for p in _PROVIDER_KEY_ENV for n in _provider_key_env_names(p)}
+    try:
+        keys |= await _org_keys()
+    except Exception as exc:
+        log.warning("Could not read the team keys to mask", error=str(exc))
+    return {k.strip() for k in keys if k.strip() and k.strip() != "@system"}
+
+
+def _holds_team_key(value: str, team_keys: set[str]) -> bool:
+    return any(value == k or (len(k) >= _TEAM_KEY_MIN_MATCH and k in value) for k in team_keys)
+
+
+def _mask_team_keys(text: str, team_keys: set[str]) -> str:
+    """``text`` with every (long enough) team key in it masked where it stands."""
+    for k in team_keys:
+        if len(k) >= _TEAM_KEY_MIN_MATCH and k in text:
+            text = text.replace(k, _mask_secret(k))
+    return text
+
+
+def _unmask_team_keys(text: str, current: str, team_keys: set[str]) -> str:
+    """`_mask_team_keys` undone for the team keys ``current`` (the file on disk) holds."""
+    for k in team_keys:
+        if len(k) >= _TEAM_KEY_MIN_MATCH and k in current:
+            text = text.replace(_mask_secret(k), k)
+    return text
+
+
+def _env_value(raw: str) -> tuple[str, str]:
+    """(quote, value) of a .env value as written: ``"x"`` → ('"', 'x')."""
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+        return raw[0], raw[1:-1]
+    return "", raw
+
+
+def _mask_env_line(line: str, team_keys: set[str]) -> str:
+    """One .env line (no line ending) as a non-admin reads it: the value of an
+    assignment named like a secret (``*_API_KEY``, ``*_TOKEN``, ``*_SECRET`` …)
+    or holding a team key is masked; a team key anywhere else — a comment — is
+    masked where it stands."""
+    m = _ENV_ASSIGNMENT.match(line)
+    if not m:
+        return _mask_team_keys(line, team_keys)
+    lead, name, eq, raw, trail = m.groups()
+    quote, value = _env_value(raw)
+    if value and (_SECRET_ENV_NAME.search(name) or _holds_team_key(value, team_keys)):
+        return f"{lead}{name}{eq}{quote}{_mask_secret(value)}{quote}{trail}"
+    return line
+
+
+def _dotenv_values(text: str) -> dict[str, str]:
+    """``{name: value}`` of a .env text, read as the agent reads its file."""
+    values = {}
+    for line in text.splitlines():
+        m = _ENV_ASSIGNMENT.match(line)
+        if m:
+            values[m.group(2)] = _env_value(m.group(4))[1]
+    return values
+
+
+def _mask_agent_env(text: str, team_keys: set[str]) -> str:
+    out = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        out.append(_mask_env_line(body, team_keys) + line[len(body):])
+    return "".join(out)
+
+
+def _unmask_agent_env(text: str, current: str, team_keys: set[str]) -> str:
+    """``text`` (a .env being saved) with every placeholder `_mask_agent_env`
+    wrote swapped back for the value it stands for in ``current`` (the file on
+    disk), so a save from a masked read never writes the mask over the key. A
+    placeholder with nothing behind it — a name that holds no such value — is
+    a ValueError naming it, rather than a mask written as the value."""
+    restore: dict[str, str] = {}
+    held: dict[str, list[str]] = {}
+    for line in current.splitlines():
+        masked = _mask_env_line(line, team_keys)
+        if masked != line:
+            restore.setdefault(masked, line)
+        m = _ENV_ASSIGNMENT.match(line)
+        if m:
+            held.setdefault(m.group(2), []).append(_env_value(m.group(4))[1])
+    out = []
+    for line in text.splitlines(keepends=True):
+        body = line.rstrip("\r\n")
+        end = line[len(body):]
+        m = _ENV_ASSIGNMENT.match(body)
+        if _SECRET_MASK not in body:
+            out.append(line)
+        elif body in restore:
+            out.append(restore[body] + end)
+        elif m and _env_value(m.group(4))[1].startswith(_SECRET_MASK):
+            lead, name, eq, raw, trail = m.groups()
+            quote, value = _env_value(raw)
+            real = next((v for v in held.get(name, []) if _mask_secret(v) == value), None)
+            if real is None:
+                raise ValueError(name)
+            out.append(f"{lead}{name}{eq}{quote}{real}{quote}{trail}{end}")
+        else:
+            out.append(line)  # a comment that shows a mask — nothing behind it to lose
+    return "".join(out)
+
+
 def _resolve_agent_dir(identifier: str, kind: str, user_id: str) -> Path:
     """Resolve the on-disk data directory for a container or process agent."""
     if kind == "docker":
@@ -4068,7 +4582,8 @@ async def get_agent_config(
     kind: str, identifier: str, request: Request,
     user: dict | None = _agent_manager_dep,
 ):
-    """Read an agent's config.yaml and .env files."""
+    """Read an agent's config.yaml and .env files — secrets masked unless the
+    caller is an admin (`_sees_agent_secrets`)."""
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
     user_id = getattr(request.state, "user_id", "")
@@ -4082,6 +4597,10 @@ async def get_agent_config(
         config_yaml = config_file.read_text()
     if env_file.is_file():
         env = env_file.read_text()
+    if not _sees_agent_secrets(request, user):
+        team_keys = await _deck_secrets()
+        config_yaml = _mask_team_keys(config_yaml, team_keys)
+        env = _mask_agent_env(env, team_keys)
     return {"config_yaml": config_yaml, "env": env}
 
 
@@ -4090,28 +4609,71 @@ async def update_agent_config(
     kind: str, identifier: str, body: AgentConfigUpdate, request: Request,
     user: dict | None = _agent_manager_dep,
 ):
-    """Update an agent's config.yaml and/or .env files. Agent must be restarted for changes to take effect."""
+    """Update an agent's config.yaml and/or .env files. Agent must be restarted for changes to take effect.
+
+    A value the read masked (`get_agent_config`) and that comes back as its
+    placeholder keeps what is on disk."""
     if kind not in ("docker", "process"):
         raise HTTPException(400, "kind must be 'docker' or 'process'")
     user_id = getattr(request.state, "user_id", "")
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
 
+    config_file = agent_dir / "config.yaml"
+    env_file = agent_dir / ".env"
+    config_yaml, env = body.config_yaml, body.env
+    if _SECRET_MASK in (config_yaml or "") + (env or ""):
+        team_keys = await _deck_secrets()
+        if config_yaml is not None:
+            config_yaml = _unmask_team_keys(
+                config_yaml, config_file.read_text() if config_file.is_file() else "", team_keys)
+        if env is not None:
+            try:
+                env = _unmask_agent_env(env, env_file.read_text() if env_file.is_file() else "", team_keys)
+            except ValueError as exc:
+                raise HTTPException(400, (
+                    f"{exc} in .env shows a hidden value (····) that it doesn't hold — type the "
+                    "value, or remove the line. Nothing was saved."))
+    if not _sees_agent_secrets(request, user) and (config_yaml is not None or env is not None):
+        # The endpoint is the owner's to choose; the team's key goes only to the team's.
+        from captain_claw.config import Config
+
+        kept = Config._read_dotenv_file(env_file)
+        model = (_agent_config_model(agent_dir.name) or ({}, {}))[0]
+        if config_yaml is not None:
+            try:
+                data = yaml.safe_load(config_yaml)
+            except yaml.YAMLError:
+                data = None
+            model = data.get("model") if isinstance(data, dict) and isinstance(data.get("model"), dict) else {}
+        blockers = await _team_key_blockers(model, kept if env is None else _dotenv_values(env), kept=kept)
+        if blockers:
+            raise _team_key_refusal(blockers)
+    if env is not None and _confine_agents() and not _owner_is_admin(user_id):
+        # A non-admin's agent takes these from Flight Deck at every start
+        # (`_pin_confinement`): one set here would never apply — say so.
+        from captain_claw.config import Config
+
+        was = Config._read_dotenv_file(env_file)
+        pinned = sorted(n for n, v in _dotenv_values(env).items() if _pinned_env_name(n) and v != was.get(n))
+        if pinned:
+            raise HTTPException(400, (
+                f"Not saved: Flight Deck sets {', '.join(pinned)} for this agent — it can load code "
+                "or reroute the agent's calls, so it isn't taken from .env. Remove the line."))
+
     updated = []
-    if body.config_yaml is not None:
-        config_file = agent_dir / "config.yaml"
-        config_file.write_text(body.config_yaml)
+    if config_yaml is not None:
+        config_file.write_text(config_yaml)
         # Also update home-config copy so it takes precedence on restart
         home_config = agent_dir / "data" / "home-config" / "config.yaml"
         if home_config.parent.is_dir():
-            home_config.write_text(body.config_yaml)
+            home_config.write_text(config_yaml)
         # Also update home-config-parent/.captain-claw copy
         parent_config = agent_dir / "data" / "home-config-parent" / ".captain-claw" / "config.yaml"
         if parent_config.parent.is_dir():
-            parent_config.write_text(body.config_yaml)
+            parent_config.write_text(config_yaml)
         updated.append("config.yaml")
-    if body.env is not None:
-        env_file = agent_dir / ".env"
-        env_file.write_text(body.env)
+    if env is not None:
+        env_file.write_text(env)
         updated.append(".env")
 
     return {"ok": True, "updated": updated, "message": "Restart the agent for changes to take effect."}
@@ -4169,6 +4731,67 @@ async def update_agent_model(
     agent_dir = _resolve_agent_dir(identifier, kind, user_id)
     provider, model_name = body.provider.strip(), body.model.strip()
 
+    def change(section: dict) -> None:
+        switched = str(section.get("provider") or "") != provider
+        section["provider"] = provider
+        section["model"] = model_name
+        if provider in {"antigravity-cli", "antigravity", "google-subscription"}:
+            section.pop("api_key", None)
+            section.pop("base_url", None)
+            return
+        if body.api_key is not None:
+            section["api_key"] = body.api_key.strip()
+        elif switched:
+            section["api_key"] = ""  # never the old provider's key
+        if body.base_url is not None:
+            section["base_url"] = body.base_url.strip()
+        elif switched:
+            section["base_url"] = _default_base_url(provider)
+
+    # An owner on their own API keys (byok.py) has no daily limits, so their
+    # agents stay on those keys: a provider they brought one for, or a local
+    # model — never one that would run on the deck's key.
+    own_keys: dict = {}
+    if changes_model and kind == "process":
+        from captain_claw.flight_deck import byok
+        from captain_claw.flight_deck.auth import get_db
+
+        owner = str((_load_process_registry().get(identifier) or {}).get("owner") or "")
+        if owner and await byok.active(get_db(), owner):
+            own_keys = await byok.read_keys(get_db(), owner)
+            if provider not in own_keys and provider not in byok.LOCAL_PROVIDERS:
+                raise HTTPException(409, (
+                    "You're running on your own API keys, so this agent can use "
+                    f"{', '.join(byok.PROVIDERS[p] for p in own_keys) or 'them'} or a local model. "
+                    "Add a key for this provider in Settings → Your own AI keys, or turn them off."))
+            if byok.chatgpt_only(provider, model_name):
+                raise HTTPException(409, f"{model_name} signs in through ChatGPT, not your API key — "
+                                         "pick another OpenAI model")
+
+    # A non-admin picks the endpoint, not where the team's key goes: a team
+    # key in the agent's .env that the change would send elsewhere becomes the
+    # new endpoint's own team key — or, with none, the change is refused.
+    rekey: dict[str, str] = {}
+    owner_only = changes_model and not _sees_agent_secrets(request, user)
+    if owner_only:
+        from captain_claw.config import Config
+
+        dotenv = Config._read_dotenv_file(agent_dir / ".env")
+        if provider in own_keys:  # …which the owner's own key replaces below
+            dotenv[_PROVIDER_KEY_ENV[provider]] = own_keys[provider]
+        after = dict((_agent_config_model(agent_dir.name) or ({}, {}))[0])
+        change(after)
+        where: dict[str, str] = {}
+        for name, p, e in await _misrouted_team_keys(after, dotenv):
+            where.setdefault(name, _endpoint_label(p, e))
+        routes = _agent_key_routes(after, dotenv)
+        for name in where:
+            fits = {await _team_key(p, e) for p, e in routes if name in _provider_key_env_names(p)}
+            rekey[name] = fits.pop() if len(fits) == 1 else ""
+        blockers = [f"the team's key in {n} would go to {where[n]}" for n, k in rekey.items() if not k]
+        if blockers:
+            raise _team_key_refusal(blockers)
+
     updated_count = 0
     for cfg_path in _agent_config_paths(agent_dir):
         if not cfg_path.is_file():
@@ -4182,21 +4805,7 @@ async def update_agent_model(
         if "model" not in data or not isinstance(data.get("model"), dict):
             data["model"] = {}
         if changes_model:
-            switched = str(data["model"].get("provider") or "") != provider
-            data["model"]["provider"] = provider
-            data["model"]["model"] = model_name
-            if provider in {"antigravity-cli", "antigravity", "google-subscription"}:
-                data["model"].pop("api_key", None)
-                data["model"].pop("base_url", None)
-            else:
-                if body.api_key is not None:
-                    data["model"]["api_key"] = body.api_key.strip()
-                elif switched:
-                    data["model"]["api_key"] = ""  # never the old provider's key
-                if body.base_url is not None:
-                    data["model"]["base_url"] = body.base_url.strip()
-                elif switched:
-                    data["model"]["base_url"] = _default_base_url(provider)
+            change(data["model"])
         if body.vision is not None:
             switch = _vision_switch(body.vision)
             if switch is None:
@@ -4212,7 +4821,20 @@ async def update_agent_model(
         if identifier in registry:
             registry[identifier]["provider"] = provider
             registry[identifier]["model"] = model_name
+            if own_keys:
+                if provider in own_keys:
+                    _upsert_dotenv_var(agent_dir / ".env", _PROVIDER_KEY_ENV[provider], own_keys[provider])
+                    registry[identifier].setdefault("byok_prev", {})
+                    registry[identifier]["key_source"] = "byok"
+                else:  # a local model: nothing to pay for, nothing to switch back
+                    registry[identifier].pop("key_source", None)
+                    registry[identifier].pop("byok_prev", None)
             _save_process_registry(registry)
+    for name, key in rekey.items():
+        _upsert_dotenv_var(agent_dir / ".env", name, key)
+    if owner_only and kind == "process" and not own_keys:
+        # A model left with no key gets the team's for its endpoint, if it has one.
+        await _heal_agent_model_key(identifier)
 
     return {"ok": True, "updated": updated_count, "message": "Restart the agent for changes to take effect."}
 
@@ -8603,6 +9225,9 @@ class ProcessActionResult(BaseModel):
     message: str = ""
     # See ContainerActionResult.web_auth.
     web_auth: str = ""
+    # A spawn's standing instructions as stored for the owner (the archetype's):
+    # what the browser mirrors, not its own copy.
+    fleet_instructions: str = ""
 
 
 @app.get("/fd/processes", response_model=list[ProcessInfo])
@@ -8665,6 +9290,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     await _resolve_archetype(config, request, user)
     _resolve_tier(config)
     await _resolve_spawn_provider_key(config)
+    await _prime_deck_routes()  # for _withhold_deck_keys
     # Rate limiting & agent count check
     if AUTH_ENABLED and user:
         # An admin acting for this user spends their own request / spawn budget;
@@ -8754,6 +9380,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     environment["FD_AGENT_SLUG"] = slug
     _pin_confinement(environment, base_env, agent_dir=agent_dir, owner_id=owner_id or "",
                      workspace=config.workspace_path or "")
+    _withhold_deck_keys(environment, base_env, agent_dir=agent_dir, owner_id=owner_id or "")
 
     # Set HOME to the agent's home-config directory so captain-claw
     # picks up ~/.captain-claw/config.yaml from there
@@ -8813,6 +9440,10 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         # The archetype it was made from (id, no `@tier`): the kiosk's skill
         # cards start from what the agent is for.
         "archetype": config.archetype.strip().partition("@")[0],
+        # The tier its model came from, and — on its owner's own API key — that
+        # it is (byok.py): its tokens never count against the plan.
+        **({"model_tier": config._model_tier} if config._model_tier else {}),
+        **({"key_source": "byok"} if config._byok else {}),
         # Deep-memory grid config (empty for non-grid agents) — the FD deep-memory
         # proxy reads these to stamp write-tags and narrow reads without the agent
         # asserting anything (mirrors how `owner` is server-resolved).
@@ -8936,8 +9567,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     message = f"Process agent '{slug}' spawned (PID {proc.pid}, port {config.web_port})"
     if web_auth_replaced:
         return ProcessActionResult(ok=True, slug=slug, message=message + _WEB_AUTH_REPLACED_NOTE,
-                                   web_auth=config.web_auth_token)
-    return ProcessActionResult(ok=True, slug=slug, message=message)
+                                   web_auth=config.web_auth_token, fleet_instructions=config.fleet_instructions)
+    return ProcessActionResult(ok=True, slug=slug, message=message, fleet_instructions=config.fleet_instructions)
 
 
 def _verify_process_owner(slug: str, user_id: str) -> dict:
@@ -9107,6 +9738,7 @@ async def start_process(slug: str, request: Request, user: dict | None = _agent_
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     import asyncio
     await _heal_agent_model_key(slug)
+    await _prime_deck_routes()  # for _withhold_deck_keys
     return await asyncio.get_event_loop().run_in_executor(None, _do_start_process, slug)
 
 
@@ -9115,6 +9747,7 @@ async def restart_process(slug: str, request: Request, user: dict | None = _agen
     """Restart a process agent."""
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     await _heal_agent_model_key(slug)
+    await _prime_deck_routes()  # for _withhold_deck_keys
     _do_stop_process(slug)
     import time
     time.sleep(1)

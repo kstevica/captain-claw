@@ -211,7 +211,7 @@ async def test_admin_sees_and_resets_today(fd_db):
     await usage_quota.admit_message(u["id"], "hi")
     async with _client(_app(admin)) as c:
         r = await c.get("/fd/admin/usage/today")
-        assert r.json()["usage"][u["id"]] == {"messages": 1, "tokens": 0}
+        assert r.json()["usage"][u["id"]] == {"messages": 1, "tokens": 0, "byok_tokens": 0}
         r = await c.delete(f"/fd/admin/users/{u['id']}/usage/today")
         assert r.status_code == 200
         assert (await c.delete("/fd/admin/users/nobody/usage/today")).status_code == 404

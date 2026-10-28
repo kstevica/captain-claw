@@ -257,6 +257,8 @@ export interface ProcessActionResult {
   ok: boolean
   slug: string
   message: string
+  /** A spawn's standing instructions as Flight Deck stored them for the owner. */
+  fleet_instructions?: string
 }
 
 // ── Old Man quick-spawn ──
@@ -295,9 +297,7 @@ export const spawnProcess = (config: SpawnConfig) =>
 // fills tools / cognitive mode / runtime from the archetype and the model from
 // the caller's tier set (else the admin-published team default), so no model
 // config or API key passes through the browser. The kiosk's "New agent" picker.
-export const spawnArchetypeProcess = (
-  archetypeId: string, name: string, description: string, asUser?: string,
-) =>
+export const spawnArchetypeProcess = (archetypeId: string, name: string, description: string, asUser?: string) =>
   fdFetch<ProcessActionResult>('/spawn-process', {
     method: 'POST',
     body: JSON.stringify({
