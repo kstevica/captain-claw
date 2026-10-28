@@ -301,6 +301,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Settings, the phone header) — or one agent's (its "⋯", its phone chat).
   const libraryOpen = useFileLibraryStore((s) => s.open)
   const libraryAgent = useFileLibraryStore((s) => s.agentFilter)
+  const libraryFocus = useFileLibraryStore((s) => s.focus)
   const openLibrary = useFileLibraryStore((s) => s.openLibrary)
   const closeLibrary = useFileLibraryStore((s) => s.close)
   // Data library: every datastore table the agents keep, summarised.
@@ -834,6 +835,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           <FileLibrary
             phone={isMobile}
             initialAgent={libraryAgent}
+            initialFile={libraryFocus}
             onClose={closeLibrary}
             onOpenAgent={openLibraryAgent}
             onOpenLive={locked ? openLibraryLive : undefined}

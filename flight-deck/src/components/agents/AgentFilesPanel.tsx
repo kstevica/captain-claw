@@ -69,7 +69,7 @@ export function useAgentBack(containerId: string): number {
   return back
 }
 
-function FileIcon({ file }: { file: AgentFile }) {
+export function FileIcon({ file }: { file: AgentFile }) {
   const group = getFileTypeGroup(file)
   const Icon = TYPE_ICONS[group] || FileText
   return <Icon className={`h-3.5 w-3.5 shrink-0 ${TYPE_COLORS[group] || 'text-zinc-500'}`} />

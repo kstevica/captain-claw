@@ -44,6 +44,8 @@ import {
 import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
 import { EffortMenu } from './EffortMenu'
+import { ChatFilesMenu } from './ChatFilesMenu'
+import { isManagedAgent } from '../../utils/managedAgents'
 import { AttachmentChip } from './AttachmentChip'
 import { appendAttachmentRefs, useFileAttachments } from '../../hooks/useFileAttachments'
 import { useAgentSkills } from '../../hooks/useAgentSkills'
@@ -648,6 +650,7 @@ export function ChatPanel({ variant = 'default' }: { variant?: 'default' | 'simp
               session={session}
               sessionKey={session.key}
               shared={!!shared}
+              sharedRef={shared?.agentRef}
               simple={simple}
               minWidth={simple && !isMobile ? 300 : undefined}
               onSend={(content) => sendMessage(session.key, content)}
@@ -719,6 +722,7 @@ function ChatContent({
   session,
   sessionKey,
   shared = false,
+  sharedRef,
   simple = false,
   minWidth,
   onSend,
@@ -731,6 +735,8 @@ function ChatContent({
   sessionKey: string
   /** An agent shared with you: chat only — no attachments, no plan card. */
   shared?: boolean
+  /** That shared agent's ref: the Files menu lists its files by it. */
+  sharedRef?: string
   /** The simple (kiosk) layout: larger text, a greeting with the agent's
    *  skill cards on a fresh chat, and the roomier composer. */
   simple?: boolean
@@ -870,6 +876,13 @@ function ChatContent({
   // first asks for what it needs (text, a file, a picture) in a dialog.
   const skills = useAgentSkills(session.containerId, simple && !shared)
   const [skillsOpen, setSkillsOpen] = useState(false)
+  // The File library holds the files of your own process agents (not a
+  // run's workers): the Files menu shows a file there.
+  const librarySlug = useProcessStore((s) => {
+    if (!simple || shared) return undefined
+    const p = s.processes.find((x) => `proc-${x.slug}` === session.containerId)
+    return p && !isManagedAgent(p.slug, p.description) ? p.slug : undefined
+  })
   const [skillsDialog, setSkillsDialog] = useState(false)
   const [skillAsking, setSkillAsking] = useState<AgentSkill | null>(null)
   const canPick = session.connected && !closed && !quotaSpent && !session.busy
@@ -1132,6 +1145,14 @@ function ChatContent({
                   compact={isMobile}
                 />
               )}
+              <ChatFilesMenu
+                messages={session.messages}
+                conn={conn}
+                sharedRef={sharedRef}
+                librarySlug={librarySlug}
+                busy={session.busy}
+                compact={isMobile}
+              />
               {/* The keys hint takes what room the row has left, and says
                   as much of itself as fits. */}
               <div className="@container min-w-0 flex-1">
