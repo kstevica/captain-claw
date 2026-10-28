@@ -1865,3 +1865,69 @@ async def test_reading_the_rest_while_replacing_writes_it_again(deck, monkeypatc
     (entry,) = _record(slug)["knowledge"]
     assert entry["doc"] == "handbook.md" and entry["read"]["all"]
     assert (server.DATA_DIR / slug / "data" / "workspace" / "knowledge" / entry["file"]).is_file()
+
+
+# ── The knowledge browser (/fd/agent-knowledge) ───────────────────────
+
+
+async def _kb(uid: str, path: str, **params) -> httpx.Response:
+    async with _client() as c:
+        return await c.get(f"/fd/agent-knowledge/{path}", headers=_auth(uid), params=params)
+
+
+async def test_the_knowledge_browser_lists_reads_and_finds(deck, monkeypatch):
+    from captain_claw.flight_deck import agent_knowledge as ak
+
+    monkeypatch.setattr(ap.psel, "BUDGETS", {**ap.psel.BUDGETS, "quick": 500})
+    slug = await _spawn(BOB, "Helpdesk", 24378)
+    _model(monkeypatch, json.dumps({"rules": [{"text": "Check every item first."}],
+                                    "knowledge": [{"doc": "handbook.md", "title": "Handbook", "summary": "Refunds."}]}))
+    job = await _prepare(BOB, [("handbook.md", _chaptered().encode()), ("notes.md", b"# Notes\n\nJust notes.\n")],
+                         notes=[{}, {"usage": "reference", "read": False}], agent=slug, budget="quick")
+    assert (await _apply(BOB, slug, {**job["result"]["preset"], "id": job["id"]})).status_code == 200
+
+    over = (await _kb(BOB, slug)).json()
+    assert over["agent"] == "Helpdesk" and [d["title"] for d in over["documents"]] == ["Handbook", "notes"]
+    hb, notes = over["documents"]
+    assert hb["id"] == "handbook.md" and hb["summary"] == "Refunds." and hb["read"]["state"] == "partial"
+    assert notes["read"]["state"] == "none" and notes["use"] == "Reference"
+    assert {"id": "owner-rules.md", "title": "Your rules"} in over["extras"]
+    assert over["totals"]["documents"] == 2 and over["totals"]["read"] == hb["read"]["sections"]
+
+    doc = (await _kb(BOB, f"{slug}/doc", id="handbook.md")).json()
+    by_title = {s["title"]: s for s in doc["sections"]}
+    assert by_title["Chapter 1 procedure"]["read"] is True and by_title["Chapter 8 story"]["read"] is False
+    assert by_title["Handbook"]["read"] is None and by_title["Chapter 2 procedure"]["path"] == ["Handbook"]
+    assert by_title["Chapter 2 procedure"]["level"] == 2
+
+    i = by_title["Chapter 2 procedure"]["i"]
+    sec = (await _kb(BOB, f"{slug}/section", id="handbook.md", i=i)).json()
+    assert sec["section"] == "Chapter 2 procedure" and "check item 2.1 " in sec["text"] and sec["pages"] == 1
+    assert sec["prev"]["title"] == "Chapter 2 story" and sec["next"]["title"] == "Chapter 3 story"
+    held = (server.DATA_DIR / slug / "data" / "workspace" / "knowledge" / sec["file"]).read_text().splitlines()
+    assert held[sec["line"] - 1] == "## Chapter 2 procedure"                      # where it is, exactly
+    top = (await _kb(BOB, f"{slug}/section", id="handbook.md", i=by_title["Handbook"]["i"])).json()
+    assert [c["title"] for c in top["children"]][:2] == ["Chapter 1 story", "Chapter 1 procedure"]
+    monkeypatch.setattr(ak, "PAGE_CHARS", 200)
+    paged = (await _kb(BOB, f"{slug}/section", id="handbook.md", i=i, page=2)).json()
+    assert paged["pages"] > 1 and paged["page"] == 2
+
+    rules = (await _kb(BOB, f"{slug}/extra", id="owner-rules.md")).json()
+    assert "Check every item first." in rules["text"]
+    hits = (await _kb(BOB, f"{slug}/search", q="check item 5.3")).json()["results"]
+    assert hits[0]["id"] == "handbook.md" and hits[0]["section"] == "Chapter 5 procedure"
+    assert hits[0]["i"] == by_title["Chapter 5 procedure"]["i"] and hits[0]["path"] == ["Handbook"]
+    only = (await _kb(BOB, f"{slug}/search", q="notes", id="notes.md")).json()["results"]
+    assert only and all(h.get("id") == "notes.md" for h in only)
+    assert (await _kb(BOB, f"{slug}/search", q="x")).json() == {"results": []}
+
+    for path, params in ((slug, {}), (f"{slug}/doc", {"id": "handbook.md"}), (f"{slug}/search", {"q": "refund"})):
+        assert (await _kb(CAROL, path, **params)).status_code == 404                # not hers
+    assert (await _kb(BOB, f"{slug}/doc", id="../../etc/passwd")).status_code == 404
+    assert (await _kb(BOB, f"{slug}/extra", id="INDEX.md")).status_code == 404
+
+
+async def test_an_agent_without_knowledge_has_nothing_to_browse(deck):
+    slug = await _spawn(BOB, "Fresh", 24379)
+    over = (await _kb(BOB, slug)).json()
+    assert over["documents"] == [] and over["extras"] == [] and over["totals"]["documents"] == 0

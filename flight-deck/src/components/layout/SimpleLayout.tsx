@@ -32,6 +32,7 @@ import {
   SlidersHorizontal,
   Trash2,
   BookOpen,
+  BookMarked,
   ShieldCheck,
   Smartphone,
   Activity,
@@ -73,6 +74,7 @@ import { SharedFilesPanel } from '../agents/SharedFilesPanel'
 import { SharedDatastorePanel } from '../agents/SharedDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
 import { AgentSetupDialog } from './AgentSetupDialog'
+import { KnowledgeBrowser } from '../library/KnowledgeBrowser'
 import { ArchetypeSpawnDialog, type SetupRequest } from './ArchetypeSpawnDialog'
 import { KioskByokDialog } from './KioskByokDialog'
 import { useByokStore } from '../../stores/byokStore'
@@ -235,6 +237,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [archetypeOpen, setArchetypeOpen] = useState(false)
   // A new agent whose "way of working" setup opens right after it is created.
   const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
+  // An agent's knowledge, to browse (its ⋯ menu → Knowledge).
+  const [knowledgeFor, setKnowledgeFor] = useState<{ slug: string; name: string } | null>(null)
   // Agents just spawned or powered on: Flight Deck lists one as running the
   // moment it launches, seconds before its web server binds — a chat opened
   // then fails. They stay "starting" until they answer.
@@ -627,6 +631,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       )
       // Your documents and way of working → its rules, skills and knowledge (process agents: FD writes its folder).
       if (a.kind === 'process') {
+        items.push({ icon: BookMarked, label: 'Knowledge', hint: 'Its documents — browse their sections, search them, see what was read',
+          onSelect: () => setKnowledgeFor({ slug: a.startKey, name: a.name }) })
         items.push({ icon: Wand2, label: 'Way of working', hint: 'Your instructions and documents, as its rules, skills and knowledge',
           onSelect: () => setSetupFor({ slug: a.startKey, name: a.name, role: '' }) })
       }
@@ -787,6 +793,17 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         />
       )}
       {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
+      {knowledgeFor && (
+        <KioskWideDialog label={`${knowledgeFor.name}'s knowledge`} phone={isMobile} onClose={() => setKnowledgeFor(null)} widest>
+          <KnowledgeBrowser
+            key={knowledgeFor.slug}
+            agent={knowledgeFor}
+            phone={isMobile}
+            onClose={() => setKnowledgeFor(null)}
+            onSetup={() => { setSetupFor({ slug: knowledgeFor.slug, name: knowledgeFor.name, role: '' }); setKnowledgeFor(null) }}
+          />
+        </KioskWideDialog>
+      )}
 
       {locked && settingsOpen && (
         <KioskSettingsDialog

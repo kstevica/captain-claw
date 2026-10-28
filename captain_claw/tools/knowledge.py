@@ -138,6 +138,18 @@ class KnowledgeTool(Tool):
         except OSError:
             return False
 
+    def documents(self, folder: Path) -> list[_Doc]:
+        """The documents in *folder* (``_documents``), for the knowledge browser."""
+        return self._documents(folder)
+
+    def load(self, folder: Path, doc: _Doc) -> _Doc:
+        """A document's text and sections (``_load``), for the knowledge browser."""
+        return self._load(folder, doc)
+
+    def where(self, doc: _Doc, offset: int) -> tuple[str, int]:
+        """The file and line of *offset* in *doc*'s text."""
+        return self._where(doc, offset)
+
     def _documents(self, folder: Path) -> list[_Doc]:
         """The documents: INDEX.md's, in its order, then any other file put there."""
         listed: list[_Doc] = []
@@ -339,10 +351,14 @@ class KnowledgeTool(Tool):
 
     # ── Search ────────────────────────────────────────────────────────
 
-    async def _search(self, folder: Path, docs: list[_Doc], query: str, doc_name: str, limit: int) -> str:
-        only = self._find_doc(docs, doc_name) if doc_name else None
-        if doc_name and only is None:
-            return f"No document matches {doc_name!r}. " + self._list(docs)
+    async def find(self, folder: Path, docs: list[_Doc], query: str, only: _Doc | None = None,
+                   limit: int = 5) -> list[dict]:
+        """The best passages for *query* in the knowledge (or one document):
+        by the index when the agent has one, else by reading the files —
+        each ``doc``, ``file``, ``first``/``last`` lines, ``text``, ``where``
+        (document › section path), ``section`` and ``offset`` (in its
+        document's text, None outside one). Flight Deck's knowledge browser
+        finds with it too."""
         scope = only.files if only else None
         semantic = getattr(getattr(getattr(self, "_agent", None), "memory", None), "semantic", None)
         hits: list[tuple[str, int, int, float]] = []   # (file, first line, last line, score)
@@ -360,11 +376,17 @@ class KnowledgeTool(Tool):
             files = scope or [f for d in docs for f in d.files] + [f for f in _EXTRAS if (folder / f).is_file()]
             hits = await asyncio.to_thread(self._scan, folder, files, query, limit * 4)
         passages = await asyncio.to_thread(self._passages, folder, docs, hits, query)
+        return passages[:limit]
+
+    async def _search(self, folder: Path, docs: list[_Doc], query: str, doc_name: str, limit: int) -> str:
+        only = self._find_doc(docs, doc_name) if doc_name else None
+        if doc_name and only is None:
+            return f"No document matches {doc_name!r}. " + self._list(docs)
+        passages = await self.find(folder, docs, query, only, limit)
         if not passages:
             where = f" in {only.title}" if only else ""
             return (f"Nothing in your knowledge{where} matches {query!r}. Try other words, or look at a "
                     "document's outline (action=outline).")
-        passages = passages[:limit]
         lines = [f"{len(passages)} passage{'s' if len(passages) != 1 else ''} for {query!r} in your knowledge"
                  + (f" ({only.title})" if only else "") + ":"]
         for n, p in enumerate(passages, 1):
@@ -448,7 +470,7 @@ class KnowledgeTool(Tool):
                 score += 0.2 * sum(1 for m in marks if m in folded) / len(marks)
             taken.setdefault(file, []).append((a, b))
             doc = doc_of.get(file)
-            where, section = (doc.title if doc else Path(file).stem), ""
+            where, section, at = (doc.title if doc else Path(file).stem), "", None
             if doc is not None:
                 self._load(folder, doc)
                 at = self._offset(doc, file, focus)
@@ -457,7 +479,8 @@ class KnowledgeTool(Tool):
                     section = s["title"]
                     where = " › ".join([doc.title, *s["path"], s["title"]])
             out.append({"file": file, "first": a, "last": b, "score": score, "text": text, "where": where,
-                        "doc": doc.title if doc else "", "section": section})
+                        "doc": doc.title if doc else "", "doc_file": doc.file if doc else "",
+                        "section": section, "offset": at, "focus": focus})
         out.sort(key=lambda p: -p["score"])
         return out
 
