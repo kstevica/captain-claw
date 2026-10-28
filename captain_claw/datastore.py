@@ -23,6 +23,7 @@ import csv
 import io
 import json
 import os
+import posixpath
 import re
 import sqlite3
 import time
@@ -2752,7 +2753,8 @@ class DatastoreManager:
                     if s.get("name", "").lower() == sheet_name.lower():
                         target_sheet = s
                         break
-                if not target_sheet:
+                # An element without children is falsy: test for None.
+                if target_sheet is None:
                     raise ValueError(f"Sheet not found: {sheet_name}")
             else:
                 target_sheet = sheets_el[0]
@@ -2763,10 +2765,13 @@ class DatastoreManager:
             sheet_path = None
             for rel in rel_tree.findall("{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"):
                 if rel.get("Id") == rid:
-                    sheet_path = "xl/" + rel.get("Target", "")
+                    sheet_path = _xlsx_part(rel.get("Target", ""))
                     break
 
             if not sheet_path or sheet_path not in zf.namelist():
+                # A sheet asked for by name is that sheet or none at all.
+                if sheet_name:
+                    raise ValueError(f"Sheet not readable: {sheet_name}")
                 # Fallback: try first worksheet
                 candidates = [n for n in zf.namelist() if n.startswith("xl/worksheets/sheet")]
                 if not candidates:
@@ -2778,14 +2783,19 @@ class DatastoreManager:
 
             for row_el in sheet_tree.findall(f"{{{ns}}}sheetData/{{{ns}}}row"):
                 row_vals: dict[int, Any] = {}
+                col_idx = -1
                 for cell in row_el.findall(f"{{{ns}}}c"):
                     ref = cell.get("r", "")
-                    col_idx = _col_ref_to_index(ref)
+                    # A cell without a reference is the one after the last.
+                    col_idx = _col_ref_to_index(ref) if ref else col_idx + 1
                     cell_type = cell.get("t", "")
                     val_el = cell.find(f"{{{ns}}}v")
                     val_text = val_el.text if val_el is not None and val_el.text else ""
 
-                    if cell_type == "s" and val_text:
+                    if cell_type == "inlineStr":
+                        # Plain (<is><t>) or rich text (<is><r><t>…</t></r>…), as openpyxl writes strings.
+                        value = "".join(t.text or "" for t in cell.findall(f"{{{ns}}}is//{{{ns}}}t"))
+                    elif cell_type == "s" and val_text:
                         idx = int(val_text)
                         value = shared[idx] if idx < len(shared) else ""
                     elif cell_type == "b":
@@ -2908,6 +2918,17 @@ class DatastoreManager:
 
 
 # ── module-level helpers ─────────────────────────────────────────────
+
+def _xlsx_part(target: str) -> str:
+    """A workbook relationship's target as a member of the package: relative
+    to ``xl/`` (Excel), or absolute from the package root (openpyxl writes
+    ``/xl/worksheets/sheet1.xml``)."""
+    if target.startswith("/"):
+        return posixpath.normpath(target.lstrip("/"))
+    if target.startswith("xl/"):
+        return posixpath.normpath(target)
+    return posixpath.normpath(posixpath.join("xl", target))
+
 
 def _col_ref_to_index(ref: str) -> int:
     """Convert Excel column reference (e.g. 'AB3') to 0-based index."""

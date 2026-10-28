@@ -2,6 +2,7 @@
 
 import asyncio
 from pathlib import Path
+import posixpath
 import re
 import xml.etree.ElementTree as ET
 import zipfile
@@ -276,6 +277,17 @@ def _xlsx_index_to_col(idx: int) -> str:
     return "".join(reversed(letters)) or "A"
 
 
+def _xlsx_part(target: str) -> str:
+    """A workbook relationship's target as a member of the package: relative
+    to ``xl/`` (Excel), or absolute from the package root (openpyxl writes
+    ``/xl/worksheets/sheet1.xml``)."""
+    if target.startswith("/"):
+        return posixpath.normpath(target.lstrip("/"))
+    if target.startswith("xl/"):
+        return posixpath.normpath(target)
+    return posixpath.normpath(posixpath.join("xl", target))
+
+
 def _extract_xlsx_markdown(path: Path, max_rows: int) -> str:
     """Extract XLSX sheets as markdown tables."""
     ns_main = {"x": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
@@ -310,7 +322,7 @@ def _extract_xlsx_markdown(path: Path, max_rows: int) -> str:
             target = rel_map.get(rel_id, "")
             if not target:
                 continue
-            sheet_path = f"xl/{target}" if not target.startswith("xl/") else target
+            sheet_path = _xlsx_part(target)
             if sheet_path not in archive.namelist():
                 continue
 
@@ -321,15 +333,17 @@ def _extract_xlsx_markdown(path: Path, max_rows: int) -> str:
                 if len(rows) >= max_rows:
                     break
                 row_values: dict[int, str] = {}
+                col_idx = -1
                 for cell in row_el.findall("./x:c", ns_main):
                     cell_ref = str(cell.get("r", "")).strip()
-                    col_idx = _xlsx_col_to_index(cell_ref) if cell_ref else 0
+                    # A cell without a reference is the one after the last.
+                    col_idx = _xlsx_col_to_index(cell_ref) if cell_ref else col_idx + 1
                     max_col = max(max_col, col_idx)
                     cell_type = str(cell.get("t", "")).strip()
                     value = ""
                     if cell_type == "inlineStr":
-                        node = cell.find("./x:is/x:t", ns_main)
-                        value = node.text if node is not None and node.text else ""
+                        # Plain (<is><t>) or rich text (<is><r><t>…</t></r>…).
+                        value = "".join(node.text or "" for node in cell.findall("./x:is//x:t", ns_main))
                     else:
                         node = cell.find("./x:v", ns_main)
                         raw = node.text.strip() if node is not None and node.text else ""
