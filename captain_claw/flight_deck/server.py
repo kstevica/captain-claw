@@ -1040,6 +1040,8 @@ async def lifespan(app: FastAPI):
     async def _deferred_reattach():
         await asyncio.sleep(1.0)
         await _startup_team_keys_then_reattach()
+        # An agent setup's reads that were under way go on where they were — with their agents back.
+        await agent_preset.resume_reads(delay=0)
     asyncio.create_task(_deferred_reattach())
     print(f"Flight Deck: {origin_guard.describe_policy()}")
     # Initialize database for auth & settings — always, see _init_fd_db.

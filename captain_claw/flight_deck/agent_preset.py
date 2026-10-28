@@ -13,11 +13,17 @@ material in the background: in steps sized to the model's context window
 (``step_tokens``), each pulling out what the agent must know and do — rules,
 the requests it handles (intents, each with its steps), facts, when to ask
 first, output templates, a glossary and a summary per document, every item
-with the document and section (page) it came from — and the parts merged.
-A document marked "knowledge only" (the default for reference material) isn't
-read at all. Nothing reaches the agent yet: the dialog shows the preset for
-review, and ``POST /fd/agent-preset/apply`` gives the agent the items the
-person kept:
+with the document and section (page) it came from — then folded without the
+model (repeats once) and merged in one call. Material over the person's
+budget (quick, standard, deep) isn't read front to back: its most
+instructive sections are, closest to what they asked to focus on
+(agent_preset_select). A document marked "knowledge only" (the default for
+reference material) isn't read at all. The read is kept on disk beside its
+documents, so it goes on with the dialog closed and after Flight Deck
+restarts (``resume_reads``); the bell says when it is ready, and the dialog
+opens on it (``GET /fd/agent-preset/prepare?agent=``). Nothing reaches the
+agent yet: the dialog shows the preset for review, and ``POST
+/fd/agent-preset/apply`` gives the agent the items the person kept:
 
 - rules, when-to-ask and templates → a short "Your owner's rules" block after
   its instructions (the full lists in ``knowledge/owner-rules.md``);
@@ -66,6 +72,7 @@ from captain_claw.exceptions import is_busy, retry_after
 from captain_claw.flight_deck import agent_idle, file_library
 from captain_claw.flight_deck import agent_preset_docs as pdocs
 from captain_claw.flight_deck import agent_preset_outline as poutline
+from captain_claw.flight_deck import agent_preset_select as psel
 from captain_claw.flight_deck import agent_preset_tables as ptables
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.flight_deck.file_library import (
@@ -93,12 +100,13 @@ LIMITS = {"rules": 30, "intents": 12, "facts": 40, "escalation": 15, "templates"
 
 _MAX_FILES = 12
 _MAX_INSTRUCTIONS = 20000
-_MAX_READ_CHARS = 4_000_000            # the most one setup reads (~1M tokens); all of it is kept anyway
+_CHAPTERS_CHARS = 1500                 # a selectively read document's chapters, as the model is told them
 _STEP_MIN, _STEP_MAX = 4000, 16_000    # tokens of material in one step: with its prompt, a call stays under ~20k
 _PROMPT_TOKENS = 3000                  # the prompt around a step's material
 _PART_BYTES = 200_000                  # a knowledge file: semantic memory skips files over 256 KB
 _MAP_MIN_CHARS = 20_000                # a document this long, with a few headings, gets a section map
-_JOB_KEEP = 3600                       # a finished read's result waits this long
+_JOB_KEEP = 3600                       # a finished read stays in memory this long (on disk, a day)
+_WATCHED_S = 10.0                      # the dialog asked after a read this recently: no bell when it ends
 _TIERS = ("balanced", "reason", "fast")  # when the agent can't read: a careful read beats a quick one
 _MAX_TOKENS = 8000
 _RETRY_TOKENS = 16000
@@ -156,6 +164,8 @@ def skill_name(value: Any) -> str:
 def _strings(raw: Any, limit: int, count: int) -> list[str]:
     out: list[str] = []
     for v in raw if isinstance(raw, list) else []:
+        if isinstance(v, dict):  # {"text": …} where a plain string belongs
+            v = next((v[k] for k in ("text", "content", "warning", "conflict") if isinstance(v.get(k), str)), "")
         v = _line(v, limit)
         if v and v not in out:
             out.append(v)
@@ -463,36 +473,73 @@ def _retry_tokens(tier: dict) -> int:
     return min(_RETRY_TOKENS, max(_MAX_TOKENS, ctx - step_tokens(tier) - _PROMPT_TOKENS))
 
 
-def plan_steps(instructions: str, docs: list[dict], step_tok: int) -> tuple[list[dict], list[str]]:
+def _chapters(text: str) -> str:
+    """A document's chapters as one line for the model: its first heading
+    level with more than one section (a title above them all isn't one)."""
+    sections = poutline.outline(text)
+    levels = sorted({s["level"] for s in sections})
+    level = next((lv for lv in levels if sum(1 for s in sections if s["level"] == lv) > 1), 1)
+    titles = [s["title"] for s in sections if s["level"] == level]
+    line = ""
+    for n, t in enumerate(titles):
+        if len(line) + len(t) > _CHAPTERS_CHARS:
+            return f"{line}; and {len(titles) - n} more"
+        line = f"{line}; {t}" if line else t
+    return line
+
+
+def plan_steps(instructions: str, docs: list[dict], step_tok: int, budget: str = psel.DEFAULT_BUDGET,
+               focus: str = "") -> tuple[list[dict], list[str]]:
     """The steps the model reads the material in — each at most *step_tok*
     tokens, small documents sharing one, a long one across many, the
     instructions in the first — and what the person should know about what
     wasn't read. Only documents marked ``read`` are; all of them reach the
-    agent's knowledge either way."""
+    agent's knowledge either way. Material over the person's *budget* isn't
+    read front to back: its most instructive sections are (closest to
+    *focus*, when one is given — agent_preset_select), in document order,
+    the first of each document with its chapters, so the model knows what
+    the whole of it covers."""
     limit = step_tok * pdocs.CHARS_PER_TOKEN
-    budget = _MAX_READ_CHARS
+    budget_chars = psel.BUDGETS.get(budget, psel.BUDGETS[psel.DEFAULT_BUDGET]) * pdocs.CHARS_PER_TOKEN
+    reading = [d for d in docs if d.get("read", True)]
     notes: list[str] = []
     pieces: list[dict] = []
-    for d in docs:
-        if not d.get("read", True):
-            continue
-        text = d["text"]
-        if budget <= 0:
-            notes.append(f"{d['name']}: not read — the documents together are more than one setup reads "
-                         "(about a million tokens). It is still kept for the agent to look things up in.")
-            continue
-        if len(text) > budget:
-            notes.append(f"{d['name']}: only the first {budget:,} characters were read (about a million "
-                         "tokens in all). The whole document is still kept for the agent.")
-            text = text[:budget]
-        budget -= len(text)
-        parts = pdocs.split_text(text, limit)
-        for n, p in enumerate(parts, 1):
-            pieces.append({"doc": d, "text": p["text"], "label": p["label"], "part": n, "parts": len(parts)})
+    if sum(len(d["text"]) for d in reading) <= budget_chars:
+        for d in reading:
+            parts = pdocs.split_text(d["text"], limit)
+            for n, p in enumerate(parts, 1):
+                pieces.append({"doc": d, "text": p["text"], "label": p["label"], "part": n, "parts": len(parts)})
+    else:
+        # Sections in pieces that fit a step, and the budget several times over.
+        picked, summary = psel.select(reading, budget_chars, focus,
+                                      max_chars=min(psel.UNIT_MAX_CHARS, limit // 2, budget_chars // 4))
+        introduced: set[int] = set()
+        for u in picked:
+            d = reading[u["doc"]]
+            pieces.append({"doc": d, "text": d["text"][u["start"]:u["end"]], "label": u["title"],
+                           "path": u["path"], "selected": True,
+                           **({"chapters": _chapters(d["text"])} if u["doc"] not in introduced else {})})
+            introduced.add(u["doc"])
+        why = (f"closest to “{focus.strip()[:80]}” and with the most rules, steps and definitions" if focus.strip()
+               else "the ones with the most rules, steps and definitions")
+        for d, s in zip(reading, summary):
+            if not s["sections"]:
+                notes.append(f"{d['name']}: none of it fitted in the budget, so it wasn't read. It is still "
+                             "kept whole for the agent to search.")
+            elif s["sections"] < s["of"]:
+                notes.append(f"{d['name']}: read {s['sections']} of its {s['of']} sections, about "
+                             f"{max(1, s['chars'] // pdocs.CHARS_PER_TOKEN // 1000)}k tokens — {why}. The rest "
+                             "wasn't read, but stays whole and searchable for the agent.")
 
+    return _pack(pieces, limit, len(instructions.encode("utf-8")), bool(instructions)), notes
+
+
+def _pack(pieces: list[dict], limit: int, lead: int = 0, instructions: bool = False) -> list[dict]:
+    """*pieces* in steps of at most *limit* bytes — the first with *lead*
+    bytes of instructions in it — each labelled with what it reads."""
     steps: list[dict] = []
     cur: list[dict] = []
-    size = len(instructions.encode("utf-8"))
+    size = lead
     for piece in pieces:
         piece_size = len(piece["text"].encode("utf-8"))
         if cur and size + piece_size > limit:
@@ -503,10 +550,38 @@ def plan_steps(instructions: str, docs: list[dict], step_tok: int) -> tuple[list
     if cur or (instructions and not steps):
         steps.append({"pieces": cur})
     for st in steps:
-        names = [p["doc"]["name"] + (f", {p['label']}" if p["parts"] > 1 and p["label"] else "")
-                 for p in st["pieces"]]
+        names: list[str] = []
+        for _, run in itertools.groupby(st["pieces"], key=lambda p: id(p["doc"])):
+            run = list(run)
+            first = run[0]
+            if first.get("selected"):
+                more = len(run) - 1
+                names.append(f"{first['doc']['name']}, {first['label']}"
+                             + (f" and {more} more section{'s' if more > 1 else ''}" if more else ""))
+            else:
+                names += [p["doc"]["name"] + (f", {p['label']}" if p["parts"] > 1 and p["label"] else "")
+                          for p in run]
         st["label"] = "; ".join(names) or "your instructions"
-    return steps, notes
+    return steps
+
+
+def refit(steps: list[dict], first: int, step_tok: int) -> list[dict]:
+    """The steps from *first* (1-based) on, cut again for a reader that
+    takes less in one step — a read that went on after a restart with
+    another model: a piece too big for it in parts, all of them packed anew.
+    The steps before *first* stay as they are."""
+    limit = step_tok * pdocs.CHARS_PER_TOKEN
+    pieces: list[dict] = []
+    for st in steps[first - 1:]:
+        for p in st["pieces"]:
+            if len(p["text"].encode("utf-8")) <= limit:
+                pieces.append(p)
+                continue
+            cut = pdocs.split_text(p["text"], limit)
+            for n, q in enumerate(cut, 1):
+                label = f"{p['label']} ({n}/{len(cut)})" if p.get("selected") else (q["label"] or p["label"])
+                pieces.append({**p, "text": q["text"], "label": label, **({"chapters": ""} if n > 1 else {})})
+    return steps[:first - 1] + _pack(pieces, limit)
 
 
 async def _archetype(owner_id: str, archetype_id: str) -> dict | None:
@@ -522,18 +597,41 @@ async def _archetype(owner_id: str, archetype_id: str) -> dict | None:
     return next((a for a in archetypes if a.get("id") == aid), None)
 
 
-def _doc_part(piece: dict) -> str:
-    d = piece["doc"]
-    title = f"### {d['name']}"
-    if piece["parts"] > 1:
-        title += f" — {piece['label'] or 'part'} (part {piece['part']} of {piece['parts']} of this document)"
+def _doc_head(d: dict, title: str) -> list[str]:
     head = [title]
     if d.get("description"):
         head.append(f"The owner says: {d['description']}")
     hint = USAGES.get(d.get("usage") or "auto", ("", ""))[1]
     if hint:
         head.append(f"Use it as: {hint}")
-    return "\n".join(head) + "\n" + piece["text"]
+    return head
+
+
+def _doc_part(piece: dict) -> str:
+    d = piece["doc"]
+    title = f"### {d['name']}"
+    if piece["parts"] > 1:
+        title += f" — {piece['label'] or 'part'} (part {piece['part']} of {piece['parts']} of this document)"
+    return "\n".join(_doc_head(d, title)) + "\n" + piece["text"]
+
+
+def _selected_part(run: list[dict]) -> str:
+    """A document's selected sections in one step, under one heading: its
+    chapters the first time it comes up, each section with where it sits."""
+    d = run[0]["doc"]
+    head = _doc_head(d, f"### {d['name']} — selected sections")
+    if run[0].get("chapters"):
+        head.append(f"Its chapters (the whole document): {run[0]['chapters']}")
+    body = [(f"(In: {' › '.join(p['path'])})\n" if p.get("path") else "") + p["text"].strip() for p in run]
+    return "\n".join(head) + "\n\n" + "\n\n".join(body)
+
+
+def _step_material(pieces: list[dict]) -> str:
+    out: list[str] = []
+    for _, run in itertools.groupby(pieces, key=lambda p: (id(p["doc"]), bool(p.get("selected")))):
+        run = list(run)
+        out += [_selected_part(run)] if run[0].get("selected") else [_doc_part(p) for p in run]
+    return "\n\n".join(out)
 
 
 def step_prompt(arch: dict | None, instructions: str, step: dict, n: int, total: int) -> str:
@@ -552,10 +650,16 @@ def step_prompt(arch: dict | None, instructions: str, step: dict, n: int, total:
             "document's (its own heading, or a name for all of it — not this part's), and its `summary` says "
             "what this part contains, as content (\"Refund rules for EU orders; the returns form\") — never "
             "about parts, sections still to come, or merging.")
+    if any(p.get("selected") for p in step["pieces"]):
+        parts.append(
+            "## Selected sections\nSome documents are too long to read whole, so you are given only their "
+            "most instructive sections — the agent keeps all of each document to search. Extract only from "
+            "what is given. For such a document's `knowledge`, say what the whole of it covers (its chapters "
+            "are listed), not only these sections.")
     if n == 1 and instructions:
         parts.append(f"## The owner's instructions\n{instructions}")
     if step["pieces"]:
-        parts.append("## The owner's documents\n" + "\n\n".join(_doc_part(p) for p in step["pieces"]))
+        parts.append("## The owner's documents\n" + _step_material(step["pieces"]))
     return "\n\n".join(parts)
 
 
@@ -591,9 +695,17 @@ def combine(parts: list[dict]) -> dict:
 
 @dataclass
 class ReadJob:
-    """One read of a person's material, running in the background."""
+    """One read of a person's material, running in the background — and on
+    disk beside its documents (``job.json``, the plan, each step's part,
+    the result), so it outlives the dialog and a restart of Flight Deck."""
     id: str
-    owner: str
+    owner: str                      # owner_key: the folder it is kept in
+    owner_id: str = ""
+    agent: str = ""                 # the agent being set up
+    agent_name: str = ""
+    budget: str = psel.DEFAULT_BUDGET
+    focus: str = ""
+    docs: list[dict] = field(default_factory=list)  # each document's name and whether it is read
     state: str = "running"          # running | done | error | cancelled
     phase: str = "reading"          # reading | merging
     step: int = 0
@@ -608,25 +720,154 @@ class ReadJob:
     via: str = ""                   # agent | tiers
     waiting: dict | None = None     # {"why": waking | busy | pacing, ...} while it waits
     notes: list[str] = field(default_factory=list)  # found while reading, for the review
-    next_call: float = 0.0          # when the next model call may start (_pace)
+    spec: dict = field(default_factory=dict)        # what it needs to go on: instructions, archetype, warnings
+    watched: float = 0.0            # when the dialog last asked after it
+    stopping: bool = False          # the person stopped it (a shutdown cancels it too, and keeps it)
     task: asyncio.Task | None = None
 
     def view(self) -> dict:
         out = {"id": self.id, "state": self.state, "phase": self.phase, "step": self.step,
                "steps": self.steps, "current": self.current, "tokens": self.tokens,
                "started": self.started, "finished": self.finished, "error": self.error,
-               "model": self.model, "via": self.via, "waiting": self.waiting}
+               "model": self.model, "via": self.via, "waiting": self.waiting, "agent": self.agent,
+               "agent_name": self.agent_name, "budget": self.budget, "focus": self.focus, "docs": self.docs}
         if self.result is not None:
             out["result"] = self.result
         return out
 
 
 _JOBS: dict[str, ReadJob] = {}
+_JOB_FILE, _PLAN_FILE, _RESULT_FILE = "job.json", "plan.json", "result.json"
+_KEPT_FIELDS = ("id", "owner", "owner_id", "agent", "agent_name", "budget", "focus", "docs", "state", "phase",
+                "step", "steps", "current", "tokens", "started", "finished", "error", "model", "via", "notes", "spec")
 
 
 def _forget_old_jobs(now: float) -> None:
+    """Finished reads leave memory after an hour; one waiting for its review
+    is still on disk (``_find``) until its documents expire."""
     for jid in [j.id for j in _JOBS.values() if j.finished and now - j.finished > _JOB_KEEP]:
         _JOBS.pop(jid, None)
+
+
+def _folder(job: ReadJob) -> Path:
+    return _root() / job.owner / job.id
+
+
+def _read_json(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+
+def _write_json(path: Path, data: Any) -> None:
+    """Whole or not at all: a restart mid-write leaves the last copy."""
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def save_job(job: ReadJob) -> None:
+    """Where the read stands, beside its documents (gone with them)."""
+    folder = _folder(job)
+    if folder.is_dir():
+        try:
+            _write_json(folder / _JOB_FILE, {k: getattr(job, k) for k in _KEPT_FIELDS})
+        except OSError:
+            log.warning("agent preset: could not keep the read's state", preset=job.id, exc_info=True)
+
+
+def _job_from(data: dict) -> ReadJob:
+    return ReadJob(**{k: data[k] for k in _KEPT_FIELDS if k in data})
+
+
+def _find(key: str, preset_id: str) -> ReadJob | None:
+    """A person's read: in memory, else the finished one on disk (its result
+    with it) — None when it is gone, expired, or not theirs."""
+    job = _JOBS.get(str(preset_id or ""))
+    if job is not None:
+        return job if job.owner == key else None
+    if not re.fullmatch(r"[0-9a-f]{24}", str(preset_id or "")):
+        return None
+    folder = _root() / key / preset_id
+    data = _read_json(folder / _JOB_FILE)
+    meta = _read_json(folder / "meta.json")
+    if not isinstance(data, dict) or not isinstance(meta, dict) or data.get("owner") != key:
+        return None
+    if time.time() - float(meta.get("created") or 0) > _TTL or data.get("state") != "done":
+        return None
+    job = _job_from(data)
+    job.result = _read_json(folder / _RESULT_FILE)
+    if not isinstance(job.result, dict):
+        return None
+    _JOBS[job.id] = job
+    return job
+
+
+def _save_plan(job: ReadJob, steps: list[dict], notes: list[str], docs: list[dict], step_tok: int) -> None:
+    """The steps as planned — their text, each piece's document by its place
+    in the preset, the step size they were cut to — so a read that goes on
+    after a restart reads the same."""
+    index = {id(d): n for n, d in enumerate(docs)}
+    plan = {"notes": notes, "step_tokens": step_tok, "steps": [
+        {"label": st["label"], "pieces": [{**{k: v for k, v in p.items() if k != "doc"}, "doc": index[id(p["doc"])]}
+                                          for p in st["pieces"]]} for st in steps]}
+    folder = _folder(job)
+    if folder.is_dir():
+        (folder / "parts").mkdir(exist_ok=True)
+        _write_json(folder / _PLAN_FILE, plan)
+
+
+def _load_plan(job: ReadJob, docs: list[dict]) -> tuple[list[dict], list[str], int] | None:
+    plan = _read_json(_folder(job) / _PLAN_FILE)
+    if not isinstance(plan, dict):
+        return None
+    try:
+        steps = [{"label": st["label"], "pieces": [{**p, "doc": docs[int(p["doc"])]} for p in st["pieces"]]}
+                 for st in plan["steps"]]
+        step_tok = int(plan.get("step_tokens") or 0)
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
+    return steps, [str(n) for n in plan.get("notes") or []], step_tok
+
+
+def _save_part(job: ReadJob, n: int, part: dict | None) -> None:
+    """A step's part (None: the model's answer couldn't be read)."""
+    folder = _folder(job) / "parts"
+    if folder.is_dir():
+        _write_json(folder / f"{n}.json", {"part": part})
+
+
+def _done_parts(job: ReadJob) -> dict[int, dict | None]:
+    out: dict[int, dict | None] = {}
+    folder = _folder(job) / "parts"
+    for path in folder.glob("*.json") if folder.is_dir() else []:
+        got = _read_json(path)
+        if path.stem.isdigit() and isinstance(got, dict):
+            out[int(path.stem)] = normalise(got["part"]) if isinstance(got.get("part"), dict) else None
+    return out
+
+
+async def _tell(job: ReadJob) -> None:
+    """The bell, when a read ends with nobody watching it (the dialog
+    closed): ready to review, or why it stopped. Never raises."""
+    if job.state not in ("done", "error") or time.time() - job.watched < _WATCHED_S:
+        return
+    name = job.agent_name or "your agent"
+    if job.state == "done":
+        kind, title = "agent_setup", f"{name}'s way of working is ready to review"
+        body = (f"Your material is read ({job.steps} part{'s' if job.steps != 1 else ''}, "
+                f"{job.tokens:,} tokens). Open it to keep what's right and apply it — it waits a day.")
+    else:
+        kind, title, body = "agent_setup_error", f"Reading your material for {name} stopped", job.error
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        from captain_claw.flight_deck.autonomy import _norm_user
+
+        await get_db().add_notification(_norm_user(job.owner_id), kind, title[:200], body[:2000],
+                                        ref_type="agent_setup" if job.agent else "", ref_id=job.agent)
+    except Exception:
+        log.debug("agent preset: bell notification failed", exc_info=True)
 
 
 class _UnreadableError(Exception):
@@ -701,20 +942,25 @@ def pace_tpm(reader: dict) -> int:
     return 0 if local else max(0, tpm)
 
 
+_NEXT_CALL: dict[str, float] = {}   # a person's model: when its next call may start (_pace)
+
+
 async def _pace(reader: dict, job: ReadJob, tokens: int) -> None:
     """Wait for this call's turn: calls start no faster than the read's
-    tokens a minute allow (``pace_tpm``), and never closer than 3 s."""
+    tokens a minute allow (``pace_tpm``), and never closer than 3 s — the
+    person's reads together, when two agents are set up at once with one
+    model."""
     tpm = pace_tpm(reader)
     if not tpm:
         return
-    pause = job.next_call - time.time()
-    if pause > 0:
-        job.waiting = {"why": "pacing", "until": job.next_call}
+    slot = f"{job.owner}|{reader.get('provider') or ''}|{reader.get('model') or ''}"
+    while (pause := _NEXT_CALL.get(slot, 0.0) - time.time()) > 0:
+        job.waiting = {"why": "pacing", "until": _NEXT_CALL[slot]}
         try:
             await asyncio.sleep(pause)
         finally:
             job.waiting = None
-    job.next_call = time.time() + max(_PACE_GAP, tokens * 60.0 / tpm)
+    _NEXT_CALL[slot] = time.time() + max(_PACE_GAP, tokens * 60.0 / tpm)
 
 
 async def choose_reader(owner_id: str, slug: str) -> tuple[dict | None, str]:
@@ -875,29 +1121,136 @@ async def _ask(reader: dict, system: str, prompt: str, owner_id: str, job: ReadJ
     return None
 
 
-async def merge_parts(reader: dict, parts: list[dict], owner_id: str, job: ReadJob, depth: int = 0) -> dict:
-    """What every step found, as one preset: the model merges the parts
-    (a halving tree when they are too many for one call); without it — or
-    when its answer can't be read — they are combined as they are."""
+# What identifies an item when steps found it twice; rules, when-to-ask and
+# facts also match in other words (retrieval.same_fact).
+_ITEM_KEY = {"rules": "text", "escalation": "text", "facts": "content",
+             "intents": "name", "templates": "name", "glossary": "term"}
+_REWORDED = ("rules", "escalation", "facts")
+_MERGE_SUMMARY_CHARS = 3000   # a document's part summaries, as the merge sees them
+
+
+def _richer(group: str, kept: dict, other: dict) -> dict:
+    """Of two items saying the same, the more specific — more numbers, then
+    more words; a skill with more steps, both one's examples."""
+    if group == "intents":
+        best = kept if len(kept.get("steps") or []) >= len(other.get("steps") or []) else other
+        return {**best, "examples": list(dict.fromkeys([*kept.get("examples", []), *other.get("examples", [])]))[:3]}
+    field_ = {"templates": "body", "glossary": "meaning"}.get(group, _ITEM_KEY[group])
+
+    def weight(x: dict) -> tuple[int, int]:
+        s = str(x.get(field_) or "")
+        return len(re.findall(r"\d", s)), len(s)
+
+    return other if weight(other) > weight(kept) else kept
+
+
+def fold(parts: list[dict]) -> dict:
+    """What every step found, as one preset, without the model: an item
+    several steps found — a rule or fact in other words too
+    (``retrieval.same_fact``: "14 days" and "30 days" stay two), a skill, a
+    template or a term by its name — is kept once, in its most specific
+    wording, and ranks by how many steps found it; ties keep the steps'
+    order, interleaved, so a group's cap keeps some of every step. Nothing
+    is capped here; ``normalise`` caps."""
+    from captain_claw import retrieval
+
+    def stems(text: str) -> list[str]:
+        return list(dict.fromkeys(retrieval.stem(retrieval.fold(t))
+                                  for t in retrieval.query_terms(retrieval.uncontract(text), max_terms=32)))
+
+    out: dict[str, Any] = {}
+    for group, key in _ITEM_KEY.items():
+        clusters: list[dict] = []
+        exact: dict[str, int] = {}
+        by_stem: dict[str, list[int]] = {}
+        for row in itertools.zip_longest(*[p.get(group) or [] for p in parts]):
+            for item in (x for x in row if x is not None):
+                text = str(item.get(key) or "")
+                norm = " ".join(text.casefold().split())
+                hit = exact.get(norm)
+                mine = stems(text) if group in _REWORDED else []
+                if hit is None and mine:
+                    shared: dict[int, int] = {}
+                    for s in mine:
+                        for c in by_stem.get(s, ()):
+                            shared[c] = shared.get(c, 0) + 1
+                    hit = next((c for c, n in sorted(shared.items(), key=lambda kv: -kv[1])
+                                if n >= len(mine) / 2 and retrieval.same_fact(text, clusters[c]["text"])), None)
+                if hit is None:
+                    hit = len(clusters)
+                    clusters.append({"item": item, "text": text, "count": 0})
+                    for s in mine:
+                        by_stem.setdefault(s, []).append(hit)
+                else:
+                    clusters[hit]["item"] = _richer(group, clusters[hit]["item"], item)
+                clusters[hit]["count"] += 1
+                exact[norm] = hit
+        out[group] = [c["item"] for c in sorted(clusters, key=lambda c: -c["count"])]  # stable: ties keep order
+    for group in ("conflicts", "warnings"):
+        rows = itertools.zip_longest(*[p.get(group) or [] for p in parts])
+        out[group] = list(dict.fromkeys(x for row in rows for x in row if x))
+    by_doc: dict[str, dict] = {}
+    for p in parts:
+        for k in p.get("knowledge") or []:
+            e = by_doc.setdefault(k["doc"], {"doc": k["doc"], "title": "", "summaries": []})
+            e["title"] = e["title"] or k.get("title") or ""
+            if k.get("summary") and k["summary"] not in e["summaries"]:
+                e["summaries"].append(k["summary"])
+    out["knowledge"] = [{**e, "summary": " ".join(e["summaries"])} for e in by_doc.values()]
+    return out
+
+
+def _sampled(summaries: list[str], limit: int) -> str:
+    """A document's part summaries within *limit* characters: evenly from
+    all of them, not just the first parts'."""
+    joined = " ".join(summaries)
+    if len(joined) <= limit:
+        return joined
+    every = max(1, round(len(joined) / limit + 0.5))
+    return " ".join(summaries[::every])[:limit]
+
+
+def _merge_payload(folded: dict, room: int) -> str | None:
+    """The folded preset as the merge call sees it — each group up to twice
+    its cap, else its cap; templates left out (the fold already has them
+    once each) — or None when even that is more than *room* characters."""
+    for times in (2, 1):
+        view = {g: folded[g][:LIMITS[g] * times] for g in ("rules", "intents", "facts", "escalation", "glossary")}
+        view["knowledge"] = [{"doc": k["doc"], "title": k["title"],
+                              "summary": _sampled(k["summaries"], _MERGE_SUMMARY_CHARS)} for k in folded["knowledge"]]
+        view["conflicts"], view["warnings"] = folded["conflicts"], folded["warnings"]
+        payload = json.dumps(view, ensure_ascii=False)
+        if len(payload) <= room:
+            return payload
+    return None
+
+
+async def merge_parts(reader: dict, parts: list[dict], owner_id: str, job: ReadJob) -> dict:
+    """What every step found, as one preset: folded without the model
+    (``fold``), then — however many steps there were — one call that settles
+    what the fold can't (the same thing said very differently, conflicts
+    between steps), keeps each group's best within its cap and writes each
+    document's summary anew. Without that call — too big for one, or an
+    answer that can't be read — the fold stands, capped."""
     if len(parts) == 1:
         return parts[0]
-    payload = json.dumps(parts, ensure_ascii=False)
-    if len(payload) > step_tokens(reader) * pdocs.CHARS_PER_TOKEN:
-        if len(parts) > 2 and depth < 6:
-            mid = len(parts) // 2
-            left = await merge_parts(reader, parts[:mid], owner_id, job, depth + 1)
-            right = await merge_parts(reader, parts[mid:], owner_id, job, depth + 1)
-            return await merge_parts(reader, [left, right], owner_id, job, depth + 1)
-        return combine(parts)
+    folded = fold(parts)
+    payload = _merge_payload(folded, step_tokens(reader) * pdocs.CHARS_PER_TOKEN)
+    if payload is None:
+        log.info("agent preset: too much for one merge call, the fold stands", parts=len(parts))
+        return normalise(folded)
     system = _MERGE_PROMPT_FILE.read_text(encoding="utf-8")
     try:
-        got = await _ask(reader, system, f"## The parts\n{payload}", owner_id, job)
+        got = await _ask(reader, system, f"## What the parts found\n{payload}", owner_id, job)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        log.warning("agent preset: merging failed, combined as they are", error=str(exc))
+        log.warning("agent preset: merging failed, the fold stands", error=str(exc))
         got = None
-    return whole_summaries(got, parts) if got is not None else combine(parts)
+    if got is None:
+        return normalise(folded)
+    got["templates"] = normalise({"templates": folded["templates"]})["templates"]
+    return whole_summaries(got, parts)
 
 
 def whole_summaries(merged: dict, parts: list[dict]) -> dict:
@@ -952,29 +1305,54 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
     """Read the material step by step — with the agent's own model, woken
     first if it is asleep, or the owner's when it doesn't answer — merge
     what each step found, and leave the result on *job* for the dialog to
-    fetch. A step whose answer can't be read is reported and skipped; the
-    person's allowance running out, or the model's server staying busy,
-    stops the reading but keeps what was found."""
+    fetch, and on disk for the review later; with the dialog closed, the
+    bell says it's ready. A step whose answer can't be read is reported and
+    skipped; the person's allowance running out, or the model's server
+    staying busy, stops the reading but keeps what was found. A read that
+    Flight Deck stopped mid-way (``resume_reads``) plans nothing again and
+    reads no step twice."""
     try:
         if reader and reader.get("agent") and not await _agent_up(reader, job):
             if not _fall_back(reader, job, "{name} didn't answer, so {model} read your material "
                                            "instead of its own model."):
                 raise _UnreadableError(f"{reader['name']} isn't answering, and no other model is set up "
                                        "to read with. Switch it on and try again.")
-        steps, notes = plan_steps(instructions, docs, step_tokens(reader) if reader else _STEP_MAX)
+        step_tok = step_tokens(reader) if reader else _STEP_MAX
+        done = await asyncio.to_thread(_done_parts, job)
+        planned = await asyncio.to_thread(_load_plan, job, docs)
+        if planned is not None and planned[2] > step_tok:
+            # Going on with a model that takes less at once: nothing read yet, plan again; else cut the rest smaller.
+            planned = None if not done else (
+                refit(planned[0], max(done) + 1, step_tok), planned[1], step_tok)
+            if planned is not None:
+                await asyncio.to_thread(_save_plan, job, planned[0], planned[1], docs, step_tok)
+        if planned is None:
+            steps, notes = await asyncio.to_thread(plan_steps, instructions, docs, step_tok, job.budget, job.focus)
+            await asyncio.to_thread(_save_plan, job, steps, notes, docs, step_tok)
+        else:
+            steps, notes, _ = planned
         warnings = warnings + notes
         job.steps = len(steps)
+        save_job(job)
         parts: list[dict] = []
         failed: str = ""
         stopped = False
         system = _PROMPT_FILE.read_text(encoding="utf-8")
         for n, step in enumerate(steps, 1):
+            if n in done:
+                if done[n] is None:
+                    warnings.append(f"Part {n} of {len(steps)} ({step['label']}) couldn't be read by the model, "
+                                    "so nothing was taken from it.")
+                else:
+                    parts.append(done[n])
+                continue
             if n > 1 and await _quota_spent(owner_id):
                 warnings.append(f"Today's allowance ran out after part {n - 1} of {len(steps)}, so the "
                                 "rest wasn't read. The documents are still kept whole for the agent.")
                 stopped = True
                 break
             job.step, job.current = n, step["label"]
+            save_job(job)
             try:
                 got = await _ask(reader, system, step_prompt(arch, instructions, step, n, len(steps)),
                                  owner_id, job)
@@ -995,6 +1373,7 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
                 log.warning("agent preset: a step failed", step=n, model=(reader or {}).get("model"), error=str(exc))
                 failed = failed or str(exc)
                 got = None
+            _save_part(job, n, got)
             if got is None:
                 warnings.append(f"Part {n} of {len(steps)} ({step['label']}) couldn't be read by the model, "
                                 "so nothing was taken from it.")
@@ -1006,23 +1385,77 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
                               else "The model's answers couldn't be read. Try again, or with less material.")
         if len(parts) > 1:
             job.phase, job.current = "merging", "Putting the parts together"
-            preset = combine(parts) if stopped else await merge_parts(reader, parts, owner_id, job)
+            save_job(job)
+            preset = normalise(fold(parts)) if stopped else await merge_parts(reader, parts, owner_id, job)
         else:
             preset = parts[0] if parts else normalise({})
         job.result = _finish(preset, docs, job.notes + warnings, str((reader or {}).get("model") or ""),
                              len(steps), job.tokens, job.id)
-        job.state = "done"
+        job.state, job.finished = "done", time.time()
+        if _folder(job).is_dir():
+            _write_json(_folder(job) / _RESULT_FILE, job.result)
+        save_job(job)
+        await _tell(job)
     except asyncio.CancelledError:
-        job.state = "cancelled"
-        discard(owner_id, job.id)
+        if job.stopping:
+            job.state = "cancelled"
+            discard(owner_id, job.id)
+        # Otherwise Flight Deck is stopping: the read stays on disk as it is, and goes on at its next start.
         raise
     except Exception as exc:
         if not isinstance(exc, _UnreadableError):
             log.warning("agent preset: reading failed", exc_info=True)
         job.state, job.error = "error", str(exc) or "Reading failed."
         discard(owner_id, job.id)
-    finally:
         job.finished = time.time()
+        await _tell(job)
+    finally:
+        job.finished = job.finished or (time.time() if job.state != "running" else None)
+
+
+async def resume_reads(delay: float = 0.0) -> int:
+    """At Flight Deck's start, once its agents are back: reads it stopped
+    mid-way go on from the step after the last one they finished — with the
+    agent's own model again (the owner's, when the agent is off, the rest cut
+    to fit it) — and a finished one waiting for its review is there for the
+    dialog. How many went on."""
+    await asyncio.sleep(delay)
+    root = _root()
+    resumed = 0
+    for owner in sorted(root.iterdir()) if root.is_dir() else []:
+        for folder in sorted(owner.iterdir()) if owner.is_dir() else []:
+            data = _read_json(folder / _JOB_FILE)
+            meta = _read_json(folder / "meta.json")
+            if (not isinstance(data, dict) or not isinstance(meta, dict) or data.get("state") != "running"
+                    or folder.name in _JOBS or time.time() - float(meta.get("created") or 0) > _TTL):
+                continue
+            try:
+                job = _job_from(data)
+                docs = await asyncio.to_thread(load_docs, job.owner_id, job.id)
+                spec = job.spec or {}
+                who, why = await choose_reader(job.owner_id, job.agent)
+                _JOBS[job.id] = job
+                if not who:
+                    job.state, job.error = "error", why or "No model is set up to read with any more."
+                    discard(job.owner_id, job.id)
+                    job.finished = time.time()
+                    await _tell(job)
+                    continue
+                job.model, job.via, job.waiting = str(who.get("model") or ""), "agent" if who.get("agent") else "tiers", None
+                job.notes.append("Flight Deck restarted during the read, so it went on from where it was.")
+                if why:
+                    job.notes.append(why)
+                arch = await _archetype(job.owner_id, str(spec.get("archetype") or ""))
+                job.task = asyncio.get_running_loop().create_task(run_read(
+                    job, who, arch, str(spec.get("instructions") or ""), docs,
+                    [str(w) for w in spec.get("warnings") or []], job.owner_id))
+                resumed += 1
+                log.info("agent preset: a read goes on after the restart", preset=job.id, agent=job.agent,
+                         step=job.step, steps=job.steps)
+            except Exception:
+                log.warning("agent preset: a read couldn't go on after the restart", preset=folder.name,
+                            exc_info=True)
+    return resumed
 
 
 # ── Routes: documents, reading ────────────────────────────────────────
@@ -1101,6 +1534,10 @@ class PrepareBody(BaseModel):
     archetype: str = Field(default="", max_length=200)
     instructions: str = Field(default="", max_length=_MAX_INSTRUCTIONS * 2)
     docs: list[DocChoice] = Field(default_factory=list, max_length=_MAX_FILES)
+    # How much of material bigger than this is read: its most instructive
+    # sections, closest to ``focus`` when one is given (agent_preset_select).
+    budget: Literal["quick", "standard", "deep"] = psel.DEFAULT_BUDGET
+    focus: str = Field(default="", max_length=300)
 
 
 @router.post("/prepare")
@@ -1156,24 +1593,72 @@ async def prepare(body: PrepareBody, user: dict = Depends(get_managed_user)) -> 
     now = time.time()
     _forget_old_jobs(now)
     key = owner_key(owner_id)
-    # One read at a time per person: a new one replaces one still running.
-    for other in [j for j in _JOBS.values() if j.owner == key and j.state == "running"]:
-        if other.task is not None:
-            other.task.cancel()
-    job = ReadJob(id=preset_id, owner=key, model=str((who or {}).get("model") or ""),
-                  via=("agent" if who.get("agent") else "tiers") if who else "")
+    # One read per agent: a new one replaces one still running, and an earlier one waiting for review.
+    for other in [j for j in _JOBS.values() if j.owner == key and j.agent == body.agent]:
+        _stop(other)
+    for other in await asyncio.to_thread(_on_disk, key, body.agent):
+        if other != preset_id and other not in _JOBS:
+            discard(owner_id, other)
+    entry = _own_process(body.agent, owner_id) if body.agent else {}
+    job = ReadJob(id=preset_id, owner=key, owner_id=owner_id, agent=body.agent,
+                  agent_name=str(entry.get("name") or body.agent), budget=body.budget, focus=body.focus.strip(),
+                  docs=[{"name": d["name"], "read": bool(d["read"])} for d in docs],
+                  model=str((who or {}).get("model") or ""),
+                  via=("agent" if who.get("agent") else "tiers") if who else "",
+                  spec={"instructions": instructions, "archetype": archetype, "warnings": warnings},
+                  watched=now)
     _JOBS[preset_id] = job
+    save_job(job)
     job.task = asyncio.get_running_loop().create_task(
         run_read(job, who, arch, instructions, docs, warnings, owner_id))
     return job.view()
 
 
+def _stop(job: ReadJob) -> None:
+    """The person's own stop (a shutdown's cancel keeps the read): a running
+    read is cancelled and its documents dropped; a finished one is put
+    away unreviewed."""
+    job.stopping = True
+    if job.state == "running" and job.task is not None and not job.task.done():
+        job.task.cancel()
+    elif job.state == "done":
+        job.state = "cancelled"
+        discard(job.owner_id, job.id)
+        _JOBS.pop(job.id, None)
+
+
+def _on_disk(key: str, agent: str) -> list[str]:
+    """The reads kept for *agent* in a person's folder — under way, or
+    waiting for review — newest first."""
+    found: list[tuple[float, str]] = []
+    folder = _root() / key
+    for sub in folder.iterdir() if folder.is_dir() else []:
+        data = _read_json(sub / _JOB_FILE)
+        if isinstance(data, dict) and data.get("agent") == agent and data.get("state") in ("running", "done"):
+            found.append((float(data.get("started") or 0), sub.name))
+    return [name for _, name in sorted(found, reverse=True)]
+
+
 def _job(preset_id: str, user: dict) -> ReadJob:
-    job = _JOBS.get(str(preset_id or ""))
-    if job is None or job.owner != owner_key(_owner(user)):
-        raise HTTPException(404, "That reading isn't here any more — Flight Deck may have restarted. "
-                                 "Read the material again.")
+    job = _find(owner_key(_owner(user)), preset_id)
+    if job is None:
+        raise HTTPException(404, "That reading isn't here any more. Read the material again.")
     return job
+
+
+@router.get("/prepare")
+async def latest_read(agent: str = "", user: dict = Depends(get_managed_user)) -> dict:
+    """The read the setup dialog opens on for *agent*: the newest one still
+    under way, or done and waiting for its review — ``job`` None when there
+    is none, and the dialog starts from the material."""
+    key = owner_key(_owner(user))
+    _forget_old_jobs(time.time())
+    for preset_id in await asyncio.to_thread(_on_disk, key, str(agent or "")):
+        job = _find(key, preset_id)
+        if job is not None and job.state in ("running", "done"):
+            job.watched = time.time()
+            return {"job": job.view()}
+    return {"job": None}
 
 
 @router.get("/prepare/{preset_id}")
@@ -1181,17 +1666,21 @@ async def read_status(preset_id: str, user: dict = Depends(get_managed_user)) ->
     """Where a read stands: its step, the tokens spent, and — once done — the
     preset for review."""
     _forget_old_jobs(time.time())
-    return _job(preset_id, user).view()
+    job = _job(preset_id, user)
+    job.watched = time.time()
+    return job.view()
 
 
 @router.delete("/prepare/{preset_id}")
 async def cancel_read(preset_id: str, user: dict = Depends(get_managed_user)) -> dict:
-    """Stop a read. The step under way is abandoned; its documents are dropped."""
+    """Stop a read — the step under way is abandoned — or put away one
+    waiting for its review. Either way its documents are dropped."""
     job = _job(preset_id, user)
-    if job.state == "running" and job.task is not None:
-        job.task.cancel()
+    task = job.task
+    _stop(job)
+    if task is not None and not task.done():
         try:
-            await asyncio.wait_for(asyncio.shield(job.task), timeout=5)
+            await asyncio.wait_for(asyncio.shield(task), timeout=5)
         except BaseException:
             pass
     return job.view()
@@ -1674,6 +2163,7 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
         ensure_ascii=False), encoding="utf-8")
     if preset_id:
         discard(owner_id, preset_id)
+        _JOBS.pop(preset_id, None)
     return {
         "block": rules_block(merged, knowledge, skills, tables=all_tables),
         "facts": preset["facts"],

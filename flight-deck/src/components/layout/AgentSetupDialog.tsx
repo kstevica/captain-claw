@@ -3,13 +3,13 @@ import type { DragEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ArrowLeft, BookA, BookOpen, Check, CheckCircle2, FolderOpen, Hand, LayoutTemplate, Library, Lightbulb,
-  ListChecks, Loader2, Plus, ScrollText, Search, Sparkles, Table2, Trash2, Upload, Wand2, X,
+  ListChecks, Loader2, Plus, ScrollText, Search, Sparkles, Table2, Target, Trash2, Upload, Wand2, X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
-  applyAgentPreset, cancelRead, getCurrentSetup, getRead, getReader, stageDocument, startRead,
-  type AppliedPreset, type ApplyMode, type CurrentSetup, type DocUsage, type ReadJob, type Reader, type SetupCounts,
-  type StagedDoc,
+  READ_BUDGETS, applyAgentPreset, cancelRead, getCurrentSetup, getLatestRead, getRead, getReader, stageDocument, startRead,
+  type AppliedPreset, type ApplyMode, type CurrentSetup, type DocUsage, type ReadBudget, type ReadJob, type Reader,
+  type SetupCounts, type StagedDoc,
 } from '../../services/agentPreset'
 import { fileLibraryApi, type LibraryItem } from '../../services/fileLibraryApi'
 import type { QuotaStatus } from '../../services/profile'
@@ -34,7 +34,11 @@ import {
 //              whether the model reads it or it is kept as knowledge only;
 //   reading  — the owner's model reads it in the background, in steps sized
 //              to its context window, then merges the parts (POST
-//              /fd/agent-preset/prepare, followed by GET …/prepare/{id});
+//              /fd/agent-preset/prepare, followed by GET …/prepare/{id}) —
+//              material over the chosen budget by its most instructive
+//              sections. It reads on with the dialog closed: the bell says
+//              when it's done, and the dialog opens on it (GET
+//              …/prepare?agent=) — still reading, or for its review;
 //   review   — every rule, skill, fact… kept or left out, editable
 //              (AgentSetupReview);
 //   done     — what the agent now has (POST /fd/agent-preset/apply). Every
@@ -49,15 +53,12 @@ import {
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024
 const MAX_FILES = 12
-// A document this big (some 800 pages) is searchable knowledge by default:
-// reading it in full is many steps, which is the person's call.
-const BIG_DOC_TOKENS = 200_000
+const BUDGET_ORDER: ReadBudget[] = ['quick', 'standard', 'deep']
+const BUDGET_LABELS: Record<ReadBudget, string> = { quick: 'Quick', standard: 'Standard', deep: 'Deep' }
 // The backend's agent_preset._MAP_MIN_CHARS: this long, with a few headings, a document gets a section map.
 const MAP_MIN_CHARS = 20_000
 const mapped = (st: StagedDoc) => (st.sections ?? 0) >= 3 && st.chars >= MAP_MIN_CHARS
-// The backend's: the most one setup reads, and a step's prompt and answer
-// around its material — what the estimate counts.
-const MAX_READ_TOKENS = 1_000_000
+// The backend's: a step's prompt and answer around its material — what the estimate counts.
 const STEP_OVERHEAD = 3000 + 4000
 const POLL_MS = 1500
 
@@ -83,15 +84,17 @@ type Step = 'material' | 'reading' | 'review' | 'done'
 let seq = 0
 const nextKey = () => `doc-${++seq}`
 
+/** The tokens of the documents to be read, in full. */
+const readTokensOf = (docs: Doc[]) => docs.reduce((n, d) => n + (d.read && d.staged ? d.staged.tokens : 0), 0)
+
 /** What reading the material takes, roughly: its steps (each at most the
- *  reader's step size), and the tokens — the material, each step's prompt
- *  and answer, and merging the parts. */
-function estimateRead(docs: Doc[], instructions: string, stepTokens: number): { steps: number; tokens: number } {
-  const material = Math.min(MAX_READ_TOKENS, docs.reduce((n, d) => n + (d.read && d.staged ? d.staged.tokens : 0), 0))
-    + Math.ceil(instructions.trim().length / 4)
+ *  reader's step size), and the tokens — the material up to the budget,
+ *  each step's prompt and answer, and the one call merging the parts. */
+function estimateRead(docs: Doc[], instructions: string, stepTokens: number, budgetTokens: number): { steps: number; tokens: number } {
+  const material = Math.min(budgetTokens, readTokensOf(docs)) + Math.ceil(instructions.trim().length / 4)
   if (!material || !stepTokens) return { steps: 0, tokens: 0 }
   const steps = Math.max(1, Math.ceil(material / stepTokens))
-  const merging = steps > 1 ? steps * 3000 + 8000 * Math.max(1, Math.ceil((steps * 3000) / stepTokens)) : 0
+  const merging = steps > 1 ? Math.min(stepTokens, steps * 1500) + 8000 : 0
   return { steps, tokens: material + steps * STEP_OVERHEAD + merging }
 }
 
@@ -137,6 +140,11 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   const [dragging, setDragging] = useState(false)
   const [startedAt, setStartedAt] = useState(0)
   const [now, setNow] = useState(() => Date.now())
+  // How much of big material is read (null: chosen from what's left today), and what first.
+  const [budgetPick, setBudgetPick] = useState<ReadBudget | null>(null)
+  const [focus, setFocus] = useState('')
+  // Looking for a read of this agent's still going, or waiting for its review.
+  const [opening, setOpening] = useState(true)
   const dragDepth = useRef(0)
   const fileRef = useRef<HTMLInputElement>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
@@ -149,6 +157,25 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   }, [agent.slug, asUser])
   useEffect(() => {
     getCurrentSetup(agent.slug, asUser).then(setCurrent).catch(() => setCurrent(null))
+  }, [agent.slug, asUser])
+  // A read started earlier goes on in the background: open on it — still reading, or ready to review.
+  useEffect(() => {
+    let live = true
+    getLatestRead(agent.slug, asUser).then((found) => {
+      if (!live || !found) return
+      setOpening(false)
+      if (found.state === 'running') {
+        setJob(found)
+        setStartedAt(found.started * 1000)
+        setNow(Date.now())
+        setStep('reading')
+      } else if (found.state === 'done' && found.result) {
+        setJob(found)
+        setReview(startReview(found.result))
+        setStep('review')
+      }
+    }).catch(() => undefined).finally(() => { if (live) setOpening(false) })
+    return () => { live = false }
   }, [agent.slug, asUser])
 
   useEffect(() => {
@@ -187,14 +214,15 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   // Anything changed in the material: what was read from it no longer holds.
   const updateDocs = (fn: (prev: Doc[]) => Doc[]) => { setDocs(fn); setReview(null) }
   const editInstructions = (v: string) => { setInstructions(v); setReview(null) }
+  const pickBudget = (b: ReadBudget) => { setBudgetPick(b); setReview(null) }
+  const editFocus = (v: string) => { setFocus(v); setReview(null) }
   const patchDoc = (key: string, patch: Partial<Doc>) => updateDocs((prev) => prev.map((d) => (d.key === key ? { ...d, ...patch } : d)))
 
   /** Read a document in full on the server: its pages and what reading it costs. */
   const stage = (doc: Doc) => {
     stageDocument(doc.file ? { file: doc.file } : { libraryId: doc.pick!.id }, asUser)
       .then(({ docs: got, warnings }) => patchDoc(doc.key, got[0]
-        // A big document is searchable knowledge by default; reading it in full is the person's choice.
-        ? { status: 'ready', staged: got[0], ...(got[0].tokens > BIG_DOC_TOKENS ? { read: false } : {}) }
+        ? { status: 'ready', staged: got[0] }
         : { status: 'error', error: warnings.join(' ') || 'It could not be read.' }))
       .catch((e) => patchDoc(doc.key, { status: 'error', error: message(e) }))
   }
@@ -257,7 +285,16 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   const searchable = { docs: ready.length, bytes: ready.reduce((n, d) => n + (d.size || 0), 0) }
   const hasMaterial = ready.length > 0 || !!instructions.trim()
   const stepTokens = reader?.step_tokens || 0
-  const estimate = useMemo(() => estimateRead(docs, instructions, stepTokens), [docs, instructions, stepTokens])
+  const readTokens = readTokensOf(docs)
+  // By default the most that fits what's left today, up to Standard; on own keys or without a cap, Standard.
+  const autoBudget: ReadBudget = useMemo(() => {
+    if (asUser || !quotaLimited(quota) || !(quota.tokens.limit > 0)) return 'standard'
+    const left = quota.tokens.remaining ?? Math.max(0, quota.tokens.limit - quota.tokens.used)
+    return estimateRead(docs, instructions, stepTokens, READ_BUDGETS.standard).tokens <= left ? 'standard' : 'quick'
+  }, [asUser, quota, docs, instructions, stepTokens])
+  const budget = budgetPick ?? autoBudget
+  const budgeted = readTokens > READ_BUDGETS[budget]
+  const estimate = useMemo(() => estimateRead(docs, instructions, stepTokens, READ_BUDGETS[budget]), [docs, instructions, stepTokens, budget])
   const needsModel = !!instructions.trim() || ready.some((d) => d.read)
   const noModel = needsModel && reader !== null && !reader.model
   const canRead = hasMaterial && !staging && !noModel && (reader !== null || !needsModel)
@@ -275,6 +312,8 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
         agent: agent.slug,
         instructions,
         docs: ready.map((d) => ({ id: d.staged!.id, description: d.description, usage: d.usage, read: d.read })),
+        budget,
+        focus: budgeted ? focus.trim() : '',
         asUser,
       }))
     } catch (e) {
@@ -319,9 +358,10 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
   const close = () => {
     if (applying) return
-    const unsaved = step === 'reading' || step === 'review' || (step === 'material' && (hasMaterial || docs.length > 0))
-    if (unsaved && !confirm(`Close without setting up ${name}? It works as it is, but what you added here is lost.`)) return
-    if (step === 'reading' && job) void cancelRead(job.id, asUser)
+    // A read goes on without the dialog, and the bell says when it's ready; a review waits a day.
+    if (step === 'review' && !confirm(`Close the review? It waits here for a day — open ${name}'s Way of working to come back to it. Changes you made in it aren't kept.`)) return
+    if (step === 'material' && (hasMaterial || docs.length > 0)
+      && !confirm(`Close without setting up ${name}? It works as it is, but what you added here is lost.`)) return
     onClose()
   }
 
@@ -407,7 +447,13 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
           </button>
         </div>
 
-        {step === 'material' && (
+        {opening && (
+          <div className="flex min-h-0 flex-1 items-center justify-center" role="status" aria-label="Opening">
+            <Loader2 className="h-5 w-5 animate-spin text-zinc-500" />
+          </div>
+        )}
+
+        {step === 'material' && !opening && (
           <>
             {current?.has && <EarlierSetup name={name} current={current} mode={mode} onMode={(m) => { setMode(m); setReview(null) }} />}
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto wide:flex-row wide:overflow-hidden">
@@ -450,7 +496,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
                   <>
                     <ul className="space-y-2.5">
                       {docs.map((d) => (
-                        <DocCard key={d.key} doc={d} agentName={name} stepTokens={stepTokens}
+                        <DocCard key={d.key} doc={d} agentName={name} stepTokens={stepTokens} budgeted={budgeted}
                           onChange={(patch) => patchDoc(d.key, patch)}
                           onRemove={() => updateDocs((prev) => prev.filter((x) => x.key !== d.key))} />
                       ))}
@@ -468,6 +514,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
               {/* On a phone, after the documents: they come first there. */}
               <div className="order-3 shrink-0 space-y-5 border-t border-zinc-800 px-4 py-4 wide:hidden">
+                {readTokens > READ_BUDGETS.quick && <BudgetPicker material={readTokens} budget={budget} onBudget={pickBudget} focus={focus} onFocus={editFocus} />}
                 <HowItWorks name={name} />
                 <UsageNote estimate={estimate} reader={reader} name={name} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} searchable={searchable} />
               </div>
@@ -497,6 +544,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
                 </div>
 
                 <div className="hidden space-y-5 wide:block">
+                  {readTokens > READ_BUDGETS.quick && <BudgetPicker material={readTokens} budget={budget} onBudget={pickBudget} focus={focus} onFocus={editFocus} />}
                   <HowItWorks name={name} />
                   <UsageNote estimate={estimate} reader={reader} name={name} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} searchable={searchable} />
                 </div>
@@ -523,7 +571,10 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
         )}
 
         {step === 'reading' && (
-          <ReadingView job={job} docs={docs} name={name} now={now} elapsed={now - startedAt} onStop={stopReading} />
+          <ReadingView job={job} name={name} now={now} elapsed={now - startedAt} onStop={stopReading}
+            docs={docs.length
+              ? docs.filter((d) => d.status === 'ready').map((d) => ({ key: d.key, name: d.name, read: d.read }))
+              : (job?.docs ?? []).map((d, i) => ({ key: `${i}`, ...d }))} />
         )}
 
         {step === 'review' && review && (
@@ -592,11 +643,13 @@ function clock(ms: number): string {
 
 // ── Pieces ───────────────────────────────────────────────────────────
 
-function DocCard({ doc, agentName, stepTokens, onChange, onRemove }: {
+function DocCard({ doc, agentName, stepTokens, budgeted, onChange, onRemove }: {
   doc: Doc
   agentName: string
   /** How much one reading step takes (0 until known). */
   stepTokens: number
+  /** The documents to read are more than the budget: their best sections are read. */
+  budgeted: boolean
   onChange: (patch: Partial<Doc>) => void
   onRemove: () => void
 }) {
@@ -702,15 +755,15 @@ function DocCard({ doc, agentName, stepTokens, onChange, onRemove }: {
               <span className="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-200">
                 {doc.read ? 'Read it for rules, skills and facts' : 'Knowledge only'}
                 <span className="text-[11px] text-zinc-500">
-                  {doc.read ? (st ? `~${kTokens(st.tokens)} tokens${steps > 1 ? ` · ${steps} steps` : ''}` : '') : 'no tokens'}
+                  {!doc.read ? 'no tokens'
+                    : budgeted ? 'its key sections, within your budget'
+                      : st ? `~${kTokens(st.tokens)} tokens${steps > 1 ? ` · ${steps} steps` : ''}` : ''}
                 </span>
               </span>
               <span className="block text-[11px] leading-snug text-zinc-500">
                 {doc.read
                   ? `${agentName} also keeps the whole document to look things up in.`
-                  : st && st.tokens > BIG_DOC_TOKENS
-                    ? `It's big, so it's kept as searchable knowledge: ${agentName} finds any part of it by search${mapped(st) ? ' and its section map' : ''}. Switch on to read it for rules and skills too.`
-                    : `Nothing is read now: ${agentName} keeps the whole document and looks things up in it when it needs to.`}
+                  : `Nothing is read now: ${agentName} keeps the whole document and finds any part of it by search${st && mapped(st) ? ' and its section map' : ''}.`}
               </span>
             </span>
           </button>
@@ -770,10 +823,69 @@ function EarlierSetup({ name, current, mode, onMode }: {
   )
 }
 
+/** How much of material bigger than the smallest budget is read — its most
+ *  instructive sections up to the budget — and, then, what to read first. */
+function BudgetPicker({ material, budget, onBudget, focus, onFocus }: {
+  /** The documents to read, in tokens. */
+  material: number
+  budget: ReadBudget
+  onBudget: (b: ReadBudget) => void
+  focus: string
+  onFocus: (v: string) => void
+}) {
+  // Each budget until the first that takes all of it, which says so.
+  const options = BUDGET_ORDER.filter((_, i) => i === 0 || READ_BUDGETS[BUDGET_ORDER[i - 1]] < material)
+  const partial = material > READ_BUDGETS[budget]
+  return (
+    <div>
+      <p className="mb-2 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+        How much to read
+      </p>
+      <div role="radiogroup" aria-label="How much to read"
+        className={`grid gap-0.5 rounded-lg border border-zinc-800 p-0.5 ${options.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
+        {options.map((b) => {
+          const on = budget === b
+          return (
+            <button key={b} role="radio" aria-checked={on} onClick={() => onBudget(b)}
+              className={`rounded-md px-2 py-1.5 text-center transition-colors ${
+                on ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200'
+              }`}>
+              <span className="block text-xs font-medium">{READ_BUDGETS[b] >= material ? 'All of it' : BUDGET_LABELS[b]}</span>
+              <span className={`block text-[10px] tabular-nums ${on ? 'text-violet-100' : 'text-zinc-500'}`}>
+                ~{kTokens(Math.min(material, READ_BUDGETS[b]))}
+              </span>
+            </button>
+          )
+        })}
+      </div>
+      <p className="mt-1.5 text-[11px] leading-snug text-zinc-500">
+        {partial
+          ? 'The sections with the most rules, steps and definitions are read, up to this. All of it stays searchable.'
+          : 'All of it is read.'}
+      </p>
+      {partial && (
+        <label className="mt-2.5 block">
+          <span className="mb-1 flex items-center gap-1 text-[11px] font-medium text-zinc-500">
+            <Target className="h-3 w-3" /> Focus on <span className="font-normal text-zinc-600">· optional</span>
+          </span>
+          <input
+            value={focus}
+            maxLength={300}
+            onChange={(e) => onFocus(e.target.value)}
+            placeholder="e.g. discount rates, valuing banks"
+            className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-base text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none wide:text-sm"
+          />
+          <span className="mt-1 block text-[11px] text-zinc-500">Sections closest to this are read first.</span>
+        </label>
+      )}
+    </div>
+  )
+}
+
 function HowItWorks({ name }: { name: string }) {
   const steps: { icon: LucideIcon; title: string; text: string }[] = [
     { icon: Upload, title: 'You add', text: 'Your instructions and documents — and, for each document, what it is and how to use it.' },
-    { icon: Sparkles, title: 'Your model reads it', text: 'In steps it can take in, it turns it into rules, skills, facts, templates and a glossary. This uses your daily allowance; knowledge-only documents don’t.' },
+    { icon: Sparkles, title: 'Your model reads it', text: 'In steps it can take in — long material by its most instructive sections, within your budget — it turns it into rules, skills, facts, templates and a glossary. This uses your daily allowance; knowledge-only documents don’t.' },
     { icon: CheckCircle2, title: 'You review', text: `Keep what's right, fix what isn't. Nothing reaches ${name} until you apply.` },
   ]
   return (
@@ -842,7 +954,7 @@ function UsageNote({ estimate, reader, name, quota, knowledgeOnly, searchable }:
         {tokens > left && (
           <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
             That is more than you have left. Reading stops when the allowance runs out and keeps what it read —
-            or keep the long documents as knowledge only, which costs nothing.
+            or read less (Quick), or keep the long documents as knowledge only, which costs nothing.
           </p>
         )}
       </>
@@ -869,7 +981,8 @@ function UsageNote({ estimate, reader, name, quota, knowledgeOnly, searchable }:
 /** The read under way: which part, how far, what it has spent. */
 function ReadingView({ job, docs, name, now, elapsed, onStop }: {
   job: ReadJob | null
-  docs: Doc[]
+  /** The documents, read or kept as knowledge only. */
+  docs: { key: string; name: string; read: boolean }[]
   /** The agent being set up. */
   name: string
   now: number
@@ -886,8 +999,8 @@ function ReadingView({ job, docs, name, now, elapsed, onStop }: {
   const merging = job?.phase === 'merging'
   const steps = job?.steps || 0
   const pct = steps ? Math.round(((merging ? steps : Math.max(0, (job?.step || 1) - 1)) / steps) * 100) : 0
-  const reading = docs.filter((d) => d.status === 'ready' && d.read)
-  const kept = docs.filter((d) => d.status === 'ready' && !d.read)
+  const reading = docs.filter((d) => d.read)
+  const kept = docs.filter((d) => !d.read)
   return (
     <div className="flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-6 py-10 text-center">
       <div className="relative mb-5 flex h-16 w-16 items-center justify-center">
@@ -917,7 +1030,11 @@ function ReadingView({ job, docs, name, now, elapsed, onStop }: {
         <p className={`mt-2 max-w-sm text-[11px] ${wait?.why === 'busy' ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500'}`}
           role="status">{waitLine}</p>
       )}
-      {steps > 3 && <p className="mt-1 text-[11px] text-zinc-600">Long documents take a while — keep this open until it is done.</p>}
+      {job && (
+        <p className="mt-3 max-w-sm text-[11px] text-zinc-500">
+          You can close this: it keeps reading, and the bell tells you when it’s ready to review.
+        </p>
+      )}
       {(reading.length > 0 || kept.length > 0) && (
         <ul className="mt-5 w-full max-w-sm space-y-1.5 text-left">
           {[...reading, ...kept].map((d) => {

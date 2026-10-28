@@ -8,8 +8,10 @@ import { fetchWaitingProposalIds, resolveProposal } from '../../services/notific
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
 import { useAuthStore, selectKioskLocked } from '../../stores/authStore'
 import { useChatStore } from '../../stores/chatStore'
+import { useProcessStore } from '../../stores/processStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { useUIStore } from '../../stores/uiStore'
+import { AgentSetupDialog } from '../layout/AgentSetupDialog'
 import {
   SHARED_SECTION_ID, sharedNotificationAction, type SharedNotificationAction,
 } from '../../utils/sharedAgent'
@@ -57,6 +59,14 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
   const [open, setOpen] = useState(false)
   // The same list, big: a dialog that reads long nudges and proposals whole.
   const [big, setBig] = useState(false)
+  // An agent whose way-of-working read is done (or stopped): its setup dialog, opened from here.
+  const [setupFor, setSetupFor] = useState<{ slug: string; name: string } | null>(null)
+  const openSetup = (slug: string) => {
+    setOpen(false)
+    setBig(false)
+    const proc = useProcessStore.getState().processes.find((p) => p.slug === slug)
+    setSetupFor({ slug, name: proc?.name || slug })
+  }
 
   return (
     <div className="relative">
@@ -79,17 +89,18 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div className={`fixed left-2 right-2 top-14 z-50 sm:absolute sm:top-full sm:mt-1 sm:w-[360px] rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl ${align === 'left' ? 'sm:right-auto sm:left-0' : 'sm:left-auto sm:right-0'}`}>
-            <NotificationDropdown onClose={() => setOpen(false)} onEnlarge={() => { setOpen(false); setBig(true) }} />
+            <NotificationDropdown onClose={() => setOpen(false)} onEnlarge={() => { setOpen(false); setBig(true) }} onOpenSetup={openSetup} />
           </div>
         </>
       )}
-      {big && <NotificationDialog onClose={() => setBig(false)} />}
+      {big && <NotificationDialog onClose={() => setBig(false)} onOpenSetup={openSetup} />}
+      {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
     </div>
   )
 }
 
 // The bell's list in a dialog: wide, tall, every text whole.
-function NotificationDialog({ onClose }: { onClose: () => void }) {
+function NotificationDialog({ onClose, onOpenSetup }: { onClose: () => void; onOpenSetup: (slug: string) => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -103,7 +114,7 @@ function NotificationDialog({ onClose }: { onClose: () => void }) {
         className="flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 shadow-2xl sm:h-[85vh] sm:max-w-3xl sm:rounded-xl sm:border sm:border-zinc-800"
         onClick={(e) => e.stopPropagation()}
       >
-        <NotificationDropdown large onClose={onClose} />
+        <NotificationDropdown large onClose={onClose} onOpenSetup={onOpenSetup} />
       </div>
     </div>,
     document.body,
@@ -118,9 +129,11 @@ function revealSharedSection(tries = 20): void {
   if (tries > 0) setTimeout(() => revealSharedSection(tries - 1), 50)
 }
 
-function NotificationDropdown({ onClose, onEnlarge, large = false }: {
+function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }: {
   onClose: () => void
   onEnlarge?: () => void
+  /** A notice that an agent's way-of-working read ended opens its setup. */
+  onOpenSetup?: (slug: string) => void
   /** In the big dialog: larger text, every text whole, a close button. */
   large?: boolean
 }) {
@@ -207,20 +220,24 @@ function NotificationDropdown({ onClose, onEnlarge, large = false }: {
         {filtered.length === 0 ? (
           <div className="px-3 py-6 text-center text-xs text-zinc-600">No notifications</div>
         ) : (
-          filtered.map((n) => (
+          filtered.map((n) => {
+            const setup = n.refType === 'agent_setup' && n.refId && onOpenSetup ? n.refId : ''
+            return (
             <NotificationItem
               key={n.id}
               notification={n}
               large={large}
-              action={sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
+              action={setup ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
+              hint={setup ? (n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
                 ? (waiting.has(n.refId) ? 'waiting' : 'answered') : undefined}
               onAnswered={() => { markRead(n.id); loadWaiting() }}
               onRead={() => markRead(n.id)}
-              onActivate={activate}
+              onActivate={setup ? () => onOpenSetup?.(setup) : activate}
               onRemove={() => remove(n.id)}
             />
-          ))
+            )
+          })
         )}
       </div>
     </div>
@@ -261,10 +278,12 @@ function ProposalButtons({ id, large, onAnswered }: { id: string; large: boolean
   )
 }
 
-function NotificationItem({ notification: n, large, action, proposal, onAnswered, onRead, onActivate, onRemove }: {
+function NotificationItem({ notification: n, large, action, hint, proposal, onAnswered, onRead, onActivate, onRemove }: {
   notification: Notification
   large: boolean
   action: SharedNotificationAction
+  /** What a click does, when it isn't the shared-agent action's. */
+  hint?: string
   proposal?: 'waiting' | 'answered'
   onAnswered: () => void
   onRead: () => void
@@ -305,8 +324,8 @@ function NotificationItem({ notification: n, large, action, proposal, onAnswered
         )}
         {proposal === 'waiting' && n.refId && <ProposalButtons id={n.refId} large={large} onAnswered={onAnswered} />}
         {proposal === 'answered' && <p className={`mt-0.5 ${large ? 'text-xs' : 'text-[10px]'} text-zinc-600`}>No longer waiting.</p>}
-        {action.kind !== 'none' && (
-          <p className="mt-0.5 text-[10px] text-sky-700 dark:text-sky-400">{action.hint}</p>
+        {(hint || action.kind !== 'none') && (
+          <p className="mt-0.5 text-[10px] text-sky-700 dark:text-sky-400">{hint || (action.kind !== 'none' ? action.hint : '')}</p>
         )}
         <div className={`flex items-center gap-1.5 mt-0.5 ${large ? 'text-xs' : 'text-[10px]'} text-zinc-600`}>
           {n.agentName && <span>{n.agentName}</span>}
