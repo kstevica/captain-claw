@@ -8,6 +8,7 @@ calls and can be searched/managed via the ``insights`` tool.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from datetime import UTC, datetime
@@ -46,12 +47,36 @@ CONFLICT_STAGED_CATEGORIES = frozenset({
 # Null for non-feedback categories.
 VALID_POLARITIES = frozenset({"positive", "negative"})
 
-# BM25 rank threshold for dedup (FTS5 returns negative ranks; closer to 0 = better).
-_DEDUP_RANK_THRESHOLD = -8.0
+# Dedup: two contents state the same fact when each holds this share of the
+# other's search words (by stem) and their numbers and negations match.
+_DEDUP_MIN_OVERLAP = 0.8
+# Words that flip a fact and that search terms drop as stopwords (EN + HR).
+_NEGATIONS = frozenset(
+    "no not never none nothing nobody cannot without ne nije nisu nema nikad nikada bez".split())
 
 # Extraction trigger defaults (overridden by config).
 _DEFAULT_INTERVAL_MESSAGES = 20
 _DEFAULT_COOLDOWN_SECONDS = 60
+
+
+def _norm_content(v: Any) -> str | None:
+    """Content as compared for an exact repeat: case-folded, whitespace collapsed."""
+    return None if v is None else " ".join(str(v).split()).casefold()
+
+
+def _uncontract(text: str) -> str:
+    """"doesn't" → "does not", so a contraction compares like its long form."""
+    return re.sub(r"n['’]t\b", " not", text, flags=re.IGNORECASE)
+
+
+def _fact_marks(text: str) -> tuple[tuple[str, ...], frozenset[str]]:
+    """What must be equal for two texts to be one fact, however alike their
+    words: the numbers in order ("14 days" is not "30 days") and the negations."""
+    from captain_claw import retrieval
+
+    folded = retrieval.fold(text)
+    negations = frozenset(re.findall(r"\w+", folded)) & _NEGATIONS
+    return tuple(re.findall(r"\d+", folded)), negations
 
 
 def _source_text(value: Any, limit: int) -> str | None:
@@ -100,6 +125,7 @@ class InsightsManager:
         if self._db is not None:
             return
         self._db = await aiosqlite.connect(str(self.db_path))
+        await self._db.create_function("cc_norm", 1, _norm_content, deterministic=True)
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA temp_store=MEMORY")
@@ -317,10 +343,20 @@ class InsightsManager:
                 log.debug("Insight superseded via entity_key", entity_key=entity_key,
                           old_id=supersedes_id)
 
+        # Dedup: exact repeat (case and whitespace aside) → keep the stored one.
+        # Also covers content the FTS check has no search words for.
+        if not supersedes_id:
+            twin = await self.find_exact(content)
+            if twin:
+                await self._fill_source(twin, source_file, source_section)
+                log.debug("Insight deduped as exact repeat", id=twin["id"])
+                return None
+
         # Dedup: FTS similarity check.
         if not supersedes_id:
             similar = await self.find_similar(content, limit=1)
             if similar:
+                await self._fill_source(similar[0], source_file, source_section)
                 log.debug("Insight deduped via FTS similarity", score=similar[0].get("rank"))
                 return None
 
@@ -480,31 +516,70 @@ class InsightsManager:
         *,
         limit: int = 1,
     ) -> list[dict[str, Any]]:
-        """FTS5 similarity search for dedup."""
+        """Insights that state the same fact as *text*, best match first.
+
+        FTS finds candidates by *text*'s search words; one counts when each
+        side holds ``_DEDUP_MIN_OVERLAP`` of the other's words (by stem) and
+        their numbers and negations are equal — a bm25 cutoff would depend on
+        how big the DB is, and "within 14 days" vs "30 days" must stay two."""
+        from captain_claw import retrieval
+
         await self._ensure_db()
         assert self._db is not None
 
-        # Sanitize FTS query — remove special chars that break FTS5.
-        safe = " ".join(w for w in text.split() if len(w) > 2)[:200]
-        if not safe:
+        text = _uncontract(text)
+        terms = retrieval.query_terms(text, max_terms=32)
+        if not terms:
             return []
-
         try:
             rows = await self._db.execute_fetchall(
-                """SELECT i.*, rank FROM insights_fts fts
-                   JOIN insights i ON i.rowid = fts.rowid
+                """SELECT i.*, bm25(insights_fts) AS rank
+                   FROM insights_fts JOIN insights i ON i.rowid = insights_fts.rowid
                    WHERE insights_fts MATCH ?
-                   ORDER BY rank LIMIT ?""",
-                (safe, limit),
+                   ORDER BY rank LIMIT 20""",
+                ("{content} : (" + retrieval.fts_match(terms) + ")",),
             )
-        except Exception:
+        except Exception as exc:
+            log.debug("Insight similarity query failed", error=str(exc))
             return []
 
-        # rank is negative; closer to 0 = better match.
-        return [
-            self._row_to_dict(r) for r in rows
-            if (r[-1] or 0) > _DEDUP_RANK_THRESHOLD  # stronger match than threshold
-        ]
+        marks = _fact_marks(text)
+        found: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._row_to_dict(row)
+            content = _uncontract(item.get("content") or "")
+            theirs = retrieval.query_terms(content, max_terms=32)
+            if (theirs and _fact_marks(content) == marks
+                    and len(retrieval.matched_terms(terms, content)) >= _DEDUP_MIN_OVERLAP * len(terms)
+                    and len(retrieval.matched_terms(theirs, text)) >= _DEDUP_MIN_OVERLAP * len(theirs)):
+                found.append(item)
+                if len(found) >= limit:
+                    break
+        return found
+
+    async def find_exact(self, text: str) -> dict[str, Any] | None:
+        """An insight with the same content, ignoring case and whitespace."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        norm = _norm_content(text)
+        if not norm:
+            return None
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM insights WHERE cc_norm(content) = ? LIMIT 1", (norm,),
+        )
+        return self._row_to_dict(rows[0]) if rows else None
+
+    async def _fill_source(
+        self, stored: dict[str, Any], source_file: str | None, source_section: str | None,
+    ) -> None:
+        """A deduped repeat that knows the file *stored* lacks gives it that
+        file and section; a file the stored insight already has stays."""
+        source_file = _source_text(source_file, 500)
+        if source_file and not stored.get("source_file"):
+            await self.update(stored["id"], source_file=source_file,
+                              source_section=_source_text(source_section, 200))
+            log.debug("Insight source filled from a repeat", id=stored["id"])
 
     async def find_by_entity_key(self, entity_key: str) -> dict[str, Any] | None:
         """Exact match on entity_key."""
