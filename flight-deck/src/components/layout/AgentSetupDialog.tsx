@@ -3,7 +3,7 @@ import type { DragEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ArrowLeft, BookA, BookOpen, Check, CheckCircle2, FolderOpen, Hand, LayoutTemplate, Library, Lightbulb,
-  ListChecks, Loader2, Plus, ScrollText, Search, Sparkles, Trash2, Upload, Wand2, X,
+  ListChecks, Loader2, Plus, ScrollText, Search, Sparkles, Table2, Trash2, Upload, Wand2, X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -38,7 +38,8 @@ import {
 //   review   — every rule, skill, fact… kept or left out, editable
 //              (AgentSetupReview);
 //   done     — what the agent now has (POST /fd/agent-preset/apply). Every
-//              document reaches it whole, read or not.
+//              document reaches it whole, read or not; a spreadsheet's
+//              sheets become datastore tables too, with no model involved.
 //
 // The agent already exists, so closing at any step costs nothing but the
 // setup: it works as its archetype made it. The agent's ⋯ menu opens it on
@@ -622,6 +623,15 @@ function DocCard({ doc, agentName, stepTokens, onChange, onRemove }: {
               {st.truncated && <span className="text-amber-600 dark:text-amber-400"> · only its first {kTokens(st.chars)} characters are kept</span>}
             </p>
           )}
+          {!!st?.tables && (
+            <p className="mt-0.5 flex items-center gap-1 text-[11px] text-emerald-700 dark:text-emerald-400">
+              <Table2 className="h-3 w-3 shrink-0" />
+              {st.tables === 1
+                ? `Also a table ${agentName} can query`
+                : `Also ${st.tables} tables ${agentName} can query, one per sheet`}
+              <span className="text-zinc-500">· exact values, no tokens</span>
+            </p>
+          )}
         </div>
         <button onClick={onRemove} aria-label={`Remove ${doc.name}`} title="Remove"
           className="rounded-lg p-1.5 text-zinc-600 hover:bg-zinc-800 hover:text-red-600 dark:hover:text-red-400">
@@ -691,10 +701,10 @@ function DocCard({ doc, agentName, stepTokens, onChange, onRemove }: {
 }
 
 /** "6 rules, 1 skill, 3 documents" — the groups a setup gave, those it has. */
-function setupSummary(c: Pick<SetupCounts, 'rules' | 'escalation' | 'templates' | 'glossary' | 'intents' | 'facts' | 'knowledge'>): string {
+function setupSummary(c: Pick<SetupCounts, 'rules' | 'escalation' | 'templates' | 'glossary' | 'intents' | 'facts' | 'knowledge' | 'tables'>): string {
   const parts = [
     c.rules && plural(c.rules, 'rule'), c.intents && plural(c.intents, 'skill'), c.knowledge && plural(c.knowledge, 'document'),
-    c.facts && plural(c.facts, 'fact'), c.escalation && `${c.escalation} ask-you-first`, c.templates && plural(c.templates, 'template'),
+    c.tables && plural(c.tables, 'table'), c.facts && plural(c.facts, 'fact'), c.escalation && `${c.escalation} ask-you-first`, c.templates && plural(c.templates, 'template'),
     c.glossary && plural(c.glossary, 'term'),
   ].filter(Boolean)
   return parts.length ? parts.join(', ') : 'nothing yet'
@@ -707,7 +717,9 @@ function EarlierSetup({ name, current, mode, onMode }: {
   mode: ApplyMode
   onMode: (m: ApplyMode) => void
 }) {
-  const summary = setupSummary({ ...current, intents: current.skills.length, knowledge: current.knowledge.length })
+  const summary = setupSummary({
+    ...current, intents: current.skills.length, knowledge: current.knowledge.length, tables: current.tables?.length ?? 0,
+  })
   const options: { id: ApplyMode; label: string }[] = [{ id: 'add', label: 'Add to it' }, { id: 'replace', label: 'Replace it' }]
   return (
     <div className="shrink-0 border-b border-zinc-800 bg-violet-500/5 px-4 py-3 wide:px-6">
@@ -731,8 +743,8 @@ function EarlierSetup({ name, current, mode, onMode }: {
       </div>
       <p className="mt-1 text-[11px] text-zinc-500">
         {mode === 'add'
-          ? 'What you add now joins it. A document you give again replaces its earlier copy; newer rules come first.'
-          : 'Its earlier rules, skills and documents are taken out and this setup goes in their place. Facts it already learned stay.'}
+          ? 'What you add now joins it. A document you give again replaces its earlier copy (a spreadsheet, its tables too); newer rules come first.'
+          : 'Its earlier rules, skills, documents and tables are taken out and this setup goes in their place. Facts it already learned stay.'}
       </p>
     </div>
   )
@@ -909,6 +921,7 @@ function Done({ name, applied, hadSetup }: { name: string; applied: AppliedPrese
     { icon: Lightbulb, n: c.facts, label: c.facts === 1 ? 'fact' : 'facts' },
     { icon: Hand, n: c.escalation, label: 'ask you first' },
     { icon: BookOpen, n: c.knowledge, label: c.knowledge === 1 ? 'document' : 'documents' },
+    { icon: Table2, n: c.tables ?? 0, label: c.tables === 1 ? 'table' : 'tables' },
     { icon: LayoutTemplate, n: c.templates, label: c.templates === 1 ? 'template' : 'templates' },
     { icon: BookA, n: c.glossary, label: c.glossary === 1 ? 'term' : 'terms' },
   ].filter((t) => t.n > 0)
@@ -943,6 +956,17 @@ function Done({ name, applied, hadSetup }: { name: string; applied: AppliedPrese
           The documents are in its workspace, in the knowledge folder
           {applied.parts > 0 ? ` — the long ones in ${applied.parts} parts, so it can search all of them` : ''}.
         </p>
+      )}
+      {!!applied.tables?.length && (
+        <p className="mt-1 text-xs text-zinc-500">
+          {applied.running ? 'The spreadsheets are going into its datastore now' : `The spreadsheets go into its datastore as soon as ${name} is up`}
+          {' '}as {plural(applied.tables.length, 'table')} it can query: {applied.tables.join(', ')}.
+        </p>
+      )}
+      {!!applied.warnings?.length && (
+        <ul className="mt-3 max-w-lg space-y-0.5 text-left text-xs text-amber-700 dark:text-amber-400">
+          {applied.warnings.map((w) => <li key={w}>{w}</li>)}
+        </ul>
       )}
     </div>
   )

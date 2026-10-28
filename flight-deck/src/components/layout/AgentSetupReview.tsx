@@ -187,6 +187,11 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
                     )}
                     {doc.pages > 0 && <span>{doc.pages_exact ? '' : 'about '}{doc.pages.toLocaleString()} page{doc.pages === 1 ? '' : 's'}</span>}
                     {!doc.read && <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-zinc-400">Knowledge only</span>}
+                    {!!doc.tables && (
+                      <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-emerald-700 dark:text-emerald-400">
+                        {doc.tables === 1 ? 'Also a table' : `Also ${doc.tables} tables`}
+                      </span>
+                    )}
                   </p>
                 )}
               </div>

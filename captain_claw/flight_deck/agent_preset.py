@@ -27,6 +27,10 @@ person kept:
   folder — a long one split into parts small enough for semantic memory to
   index — with an ``INDEX.md`` and the glossary, for this agent only (not
   the owner-wide deep memory);
+- spreadsheets (.xlsx, .csv) → also one datastore table per sheet, no model
+  involved (agent_preset_tables), so prices, plans and codes are exact
+  lookups — through the agent's REST, or at its next start when it is off;
+  a spreadsheet given again replaces its tables;
 - facts → insights, through the agent's REST once it is up.
 
 A running agent needs no restart for any of it: it re-reads its skills folder,
@@ -61,6 +65,7 @@ from pydantic import BaseModel, Field
 from captain_claw.exceptions import is_busy, retry_after
 from captain_claw.flight_deck import agent_idle, file_library
 from captain_claw.flight_deck import agent_preset_docs as pdocs
+from captain_claw.flight_deck import agent_preset_tables as ptables
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.flight_deck.file_library import (
     _auth_enabled,
@@ -300,7 +305,7 @@ async def stage_upload(root: Path, uf: UploadFile) -> tuple[dict | None, str]:
     text, err = await asyncio.to_thread(pdocs.extract_bytes, raw, Path(name).suffix)
     if not text.strip():
         return None, _no_text(name, err)
-    return await asyncio.to_thread(pdocs.stage, root, name, text, "upload"), ""
+    return await asyncio.to_thread(pdocs.stage, root, name, text, "upload", "", raw), ""
 
 
 async def stage_library(root: Path, file_id: str, user: dict) -> tuple[dict | None, str]:
@@ -324,7 +329,11 @@ async def stage_library(root: Path, file_id: str, user: dict) -> tuple[dict | No
     if not text.strip():
         return None, _no_text(name, err)
     agent = agents.get(row["agent_slug"], {}).get("name") or row["agent_slug"]
-    return await asyncio.to_thread(pdocs.stage, root, name, text, "library", agent), ""
+    try:
+        raw = await asyncio.to_thread(path.read_bytes) if ptables.is_spreadsheet(name) else None
+    except OSError:
+        raw = None
+    return await asyncio.to_thread(pdocs.stage, root, name, text, "library", agent, raw), ""
 
 
 # ── Waiting presets (the documents between Prepare and Apply) ─────────
@@ -357,7 +366,8 @@ def _preset_dir(owner_id: str, preset_id: str) -> Path | None:
 
 
 def save_docs(owner_id: str, docs: list[dict], archetype: str) -> str:
-    """Keep a preset's documents — their whole text — until it is applied."""
+    """Keep a preset's documents — their whole text, and a spreadsheet's own
+    file (``source``) — until it is applied."""
     preset_id = secrets.token_hex(12)
     folder = _preset_dir(owner_id, preset_id)
     assert folder is not None
@@ -366,16 +376,22 @@ def save_docs(owner_id: str, docs: list[dict], archetype: str) -> str:
     for n, d in enumerate(docs):
         file = f"{n}.txt"
         (folder / "docs" / file).write_text(d["text"], encoding="utf-8")
+        source = Path(d["source"]) if d.get("source") else None
+        kept = ""
+        if source is not None and source.suffix.lower() in ptables.TABLE_EXTS and source.is_file():
+            kept = f"{n}{source.suffix.lower()}"
+            shutil.copyfile(source, folder / "docs" / kept)
         meta["docs"].append({"name": d["name"], "file": file, "chars": len(d["text"]),
-                             "pages": d.get("pages") or 0, "read": bool(d.get("read", True)), **note(d)})
+                             "pages": d.get("pages") or 0, "read": bool(d.get("read", True)),
+                             **({"source": kept} if kept else {}), **note(d)})
     (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     return preset_id
 
 
 def load_docs(owner_id: str, preset_id: str) -> list[dict]:
     """A waiting preset's documents (``name``, ``text``, ``pages``, ``read``,
-    the person's ``description`` and ``usage``); empty when it is gone,
-    expired, or another person's."""
+    the person's ``description`` and ``usage``, a spreadsheet's ``source``
+    file); empty when it is gone, expired, or another person's."""
     folder = _preset_dir(owner_id, preset_id)
     if folder is None or not (folder / "meta.json").is_file():
         return []
@@ -383,8 +399,13 @@ def load_docs(owner_id: str, preset_id: str) -> list[dict]:
         meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
         if time.time() - float(meta.get("created") or 0) > _TTL:
             return []
+        def source(d: dict) -> dict:
+            name = str(d.get("source") or "")
+            ok = re.fullmatch(r"\d+\.(xlsx|csv)", name) and (folder / "docs" / name).is_file()
+            return {"source": folder / "docs" / name} if ok else {}
+
         return [{"name": d["name"], "text": (folder / "docs" / d["file"]).read_text(encoding="utf-8"),
-                 "pages": int(d.get("pages") or 0), "read": bool(d.get("read", True)), **note(d)}
+                 "pages": int(d.get("pages") or 0), "read": bool(d.get("read", True)), **source(d), **note(d)}
                 for d in meta.get("docs") or []
                 if re.fullmatch(r"\d+\.txt", str(d.get("file") or ""))
                 and (folder / "docs" / d["file"]).is_file()]
@@ -915,7 +936,8 @@ def _finish(preset: dict, docs: list[dict], warnings: list[str], model: str, ste
         "docs": [{"name": d["name"], "chars": len(d["text"]), "pages": d.get("pages") or 0,
                   "pages_exact": bool(d.get("pages_exact")), "truncated": bool(d.get("truncated")),
                   "origin": d.get("origin") or "upload", "description": d["description"], "usage": d["usage"],
-                  "read": bool(d.get("read", True)), **({"agent": d["agent"]} if d.get("agent") else {})}
+                  "read": bool(d.get("read", True)), **({"agent": d["agent"]} if d.get("agent") else {}),
+                  **({"tables": int(d["tables"])} if d.get("tables") else {})}
                  for d in docs],
         "model": model,
         "steps": steps,
@@ -1110,7 +1132,8 @@ async def prepare(body: PrepareBody, user: dict = Depends(get_managed_user)) -> 
         name = _display_name(staged["name"], taken)
         if staged.get("truncated"):
             warnings.append(f"{name}: only its first {pdocs.MAX_CHARS:,} characters are kept.")
-        docs.append({**{k: staged.get(k) for k in ("text", "pages", "pages_exact", "truncated", "origin", "agent")},
+        docs.append({**{k: staged.get(k) for k in ("text", "pages", "pages_exact", "truncated", "origin", "agent",
+                                                   "source", "tables")},
                      "name": name, "read": choice.read, **note(choice.model_dump())})
     if not instructions and not docs:
         raise HTTPException(400, " ".join(warnings) or "None of the documents are there any more.")
@@ -1260,16 +1283,43 @@ def _owner_rules_md(preset: dict) -> str:
     return "\n".join(lines)
 
 
-def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dict] | None = None) -> list[dict]:
+_TABLES_NOTE = ("Your owner's spreadsheets, also as tables in your datastore — query them (the datastore tool) "
+                "for exact values such as prices, plans and codes rather than searching the text.")
+
+
+def _table_line(t: dict) -> str:
+    cols = [c for c in t.get("columns") or [] if isinstance(c, str)]
+    sheet = f", sheet “{t['sheet']}”" if t.get("sheet") else ""
+    line = f"- `{t['name']}` — {t.get('doc') or 'a spreadsheet'}{sheet}: {int(t.get('rows') or 0):,} rows"
+    if cols:
+        line += "; columns " + ", ".join(cols[:12]) + (", …" if len(cols) > 12 else "")
+    return line + (f" (only its first {ptables.MAX_ROWS:,} rows)" if t.get("cut") else "")
+
+
+def _own_tables_line(own: list[dict]) -> str:
+    """What a spreadsheet's knowledge file says about its tables."""
+    if len(own) == 1:
+        return f"It is also a table in your datastore: `{own[0]['name']}` — query it for exact values."
+    return ("It is also in your datastore, a table per sheet: "
+            + ", ".join(f"`{t['name']}` ({t.get('sheet') or 'sheet'})" for t in own)
+            + " — query them for exact values.")
+
+
+def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dict] | None = None,
+                    tables: list[dict] | None = None) -> list[dict]:
     """The kept documents — their whole text — as Markdown, with an index,
     the glossary and the full rules; the documents written (``doc``,
     ``file``, ``title``, ``parts``, ``files``). A document too long for one
     file the agent's semantic memory indexes is an overview plus parts
     (``<name>-part-01.md`` …), each cut at a page or heading. ``kept``: the
-    documents an earlier setup left, which stay in the index."""
+    documents an earlier setup left, which stay in the index. ``tables``:
+    the tables the agent has from setups (``name``, ``doc``, ``sheet``,
+    ``rows``, ``columns``), listed in the index and named in their
+    spreadsheet's own file."""
     folder.mkdir(parents=True, exist_ok=True)
     doc_of = {d["name"]: d for d in docs}
     kept = kept or []
+    tables = tables or []
     # The documents an earlier setup left keep their files and their place in the index.
     taken: set[str] = {Path(f).stem for e in kept for f in e.get("files") or []}
     written: list[dict] = []
@@ -1288,6 +1338,9 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dic
             head += [f"Use it as: {use.lower()}.", ""]
         if k["summary"] and k["summary"] != doc.get("description"):
             head += [k["summary"], ""]
+        own = [t for t in tables if t.get("doc") == k["doc"]]
+        if own:
+            head += [_own_tables_line(own), ""]
         text = doc["text"].strip()
         parts = pdocs.split_text(text, _PART_BYTES)
         if len(parts) <= 1:
@@ -1309,13 +1362,14 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dic
                         "files": [f"{stem}.md", *(f"{stem}-part-{n:02d}.md" for n in range(1, len(parts) + 1)
                                                   if len(parts) > 1)]})
     listed = kept + written
-    _write_or_drop(folder / "INDEX.md", listed and "\n".join([
+    _write_or_drop(folder / "INDEX.md", (listed or tables) and "\n".join([
         "# Knowledge", "",
         "Documents your owner gave you. Read the one that fits before you answer from memory.", "",
         *[f"- [{w['title']}]({w['file']})" + (f" — {w['summary']}" if w.get("summary") else "")
           + (f" ({w['use'].lower()})" if w.get("use") else "")
           + (f" — {w['parts']} parts" if (w.get("parts") or 1) > 1 else "")
-          for w in listed], ""]))
+          for w in listed],
+        *(["", "## Tables", "", _TABLES_NOTE, "", *map(_table_line, tables)] if tables else []), ""]))
     _write_or_drop(folder / "glossary.md", preset["glossary"] and "\n".join([
         "# Glossary", "", *[f"- **{g['term']}** — {g['meaning']}{_from(g.get('source') or {})}" for g in preset["glossary"]],
         ""]))
@@ -1332,7 +1386,8 @@ def _write_or_drop(path: Path, text: Any) -> None:
         path.unlink(missing_ok=True)
 
 
-def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int = _BLOCK_CAP) -> str:
+def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int = _BLOCK_CAP,
+                tables: list[dict] | None = None) -> str:
     """The short block the new agent's instructions end with — at most
     ``cap`` characters. When-to-ask goes in before the other rules; what
     doesn't fit is pointed at in knowledge/owner-rules.md."""
@@ -1356,6 +1411,11 @@ def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int
         if preset["glossary"]:
             line += ", and their terms in knowledge/glossary.md"
         tail += ["", "### Your knowledge", line + ". Look there before you answer from memory."]
+    if tables:
+        tail += ["", "### Your tables",
+                 "Your owner's spreadsheets are also tables in your datastore — query them (the datastore tool) "
+                 "for exact values such as prices, plans and codes, rather than searching the text: "
+                 + ", ".join(t["name"] for t in tables)[:600] + " (what is in each: knowledge/INDEX.md)."]
 
     budget = cap - len("\n".join(head + tail)) - 200  # room for headings and the pointer
     kept: dict[str, list[str]] = {"escalation": [], "rules": []}
@@ -1490,15 +1550,60 @@ def _undo(record: dict, skills_dir: Path, knowledge: Path) -> None:
     _unlink(knowledge, ["INDEX.md", "glossary.md", "owner-rules.md"])
 
 
+def _table_summary(t: dict) -> dict:
+    """What the record, the index and the dialog keep of a table."""
+    return {"name": t["name"], "doc": t["doc"], "sheet": t.get("sheet"), "rows": len(t["rows"]),
+            "columns": [c["name"] for c in t["columns"]], "cut": bool(t.get("cut"))}
+
+
+def new_tables(agent_dir: Path, preset: dict, docs: list[dict], drop: list[str],
+               kept: list[dict]) -> tuple[list[dict], list[str]]:
+    """The tables the kept spreadsheets give — one per sheet (``name``,
+    ``doc``, ``sheet``, ``columns``, ``rows``, ``cut``), each named so it
+    takes no table the agent keeps for itself, nor one an earlier setup gave
+    that stays — within the room its datastore has; and what was left out,
+    said for the person."""
+    doc_of = {d["name"]: d for d in docs}
+    sources = [(k["doc"], doc_of[k["doc"]]["source"]) for k in preset["knowledge"]
+               if k["doc"] in doc_of and doc_of[k["doc"]].get("source")]
+    if not sources:
+        return [], []
+    taken = (ptables.existing_tables(agent_dir) - set(drop)) | {t["name"] for t in kept}
+    most = ptables.max_tables(agent_dir)
+    room = most - len(taken)
+    out: list[dict] = []
+    warnings: list[str] = []
+    for doc, source in sources:
+        got, notes = ptables.read_tables(Path(source))
+        warnings += [f"{doc}: {n}." for n in notes]
+        left_out = 0
+        for t in got:
+            if room <= 0:
+                left_out += 1
+                continue
+            room -= 1
+            name = ptables.unique(ptables.table_name(doc, t["sheet"] if len(got) > 1 else None), taken)
+            if t["cut"]:
+                where = f", sheet “{t['sheet']}”" if t["sheet"] and len(got) > 1 else ""
+                warnings.append(f"{doc}{where}: only its first {ptables.MAX_ROWS:,} rows are in the table.")
+            out.append({**t, "name": name, "doc": doc})
+        if left_out:
+            warnings.append(f"{doc}: {left_out} sheet{'s' if left_out != 1 else ''} didn't become "
+                            f"table{'s' if left_out != 1 else ''} — the agent's datastore holds at most {most}.")
+    return out, warnings
+
+
 def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str = "add") -> dict:
     """Write the reviewed preset into an agent's folder — added to what an
     earlier setup gave it (the new items first; a document given again
-    replaces its earlier copy), or in its place (``mode="replace"``: the
-    earlier skills, documents and rules go first; facts it learned stay).
-    Returns the ``block`` its instructions end with, the new ``facts`` to
-    give it as insights, what this setup wrote (``skills``, ``knowledge``,
-    ``counts``) and what the agent now has from setups (``totals``). The
-    waiting documents are dropped afterwards."""
+    replaces its earlier copy, its tables too), or in its place
+    (``mode="replace"``: the earlier skills, documents, tables and rules go
+    first; facts it learned stay). Returns the ``block`` its instructions
+    end with, the new ``facts`` to give it as insights, the ``tables`` to
+    make in its datastore and those to ``drop`` first, what this setup wrote
+    (``skills``, ``knowledge``, ``counts``), what the agent now has from
+    setups (``totals``) and ``warnings`` for the person. The waiting
+    documents are dropped afterwards."""
     data = body if isinstance(body, dict) else {}
     preset = normalise(data)
     preset_id = str(data.get("id") or "")
@@ -1508,6 +1613,7 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     skills_dir = agent_dir / "data" / "home-config-parent" / ".captain-claw" / "skills"
     folder = workspace / "knowledge"
     earlier = earlier_setup(agent_dir, workspace)
+    earlier_tables = [t for t in earlier.get("tables") or [] if isinstance(t, dict) and isinstance(t.get("name"), str)]
     if mode == "replace":
         _undo(earlier, skills_dir, folder)
         earlier = {}
@@ -1526,25 +1632,36 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
             _unlink(folder, entry.get("files") or [])
         elif (folder / entry["file"]).is_file():
             kept.append(entry)
-    written = write_knowledge(folder, {**merged, "knowledge": preset["knowledge"]}, docs, kept)
+    # Replacing drops every table an earlier setup made; adding, those of the documents given again.
+    gone = earlier_tables if mode == "replace" else [t for t in earlier_tables if t.get("doc") in given]
+    drop = list(dict.fromkeys(t["name"] for t in gone))
+    kept_tables = [t for t in earlier_tables if t["name"] not in drop]
+    tables, warnings = new_tables(agent_dir, preset, docs, drop, kept_tables)
+    all_tables = kept_tables + [_table_summary(t) for t in tables]
+    written = write_knowledge(folder, {**merged, "knowledge": preset["knowledge"]}, docs, kept, all_tables)
     knowledge = kept + written
     facts = int(earlier.get("facts") or 0) + len(preset["facts"])
     agent_dir.mkdir(parents=True, exist_ok=True)
     (agent_dir / _RECORD).write_text(json.dumps({
         "updated": time.time(), **{g: merged[g] for g in _KEPT_GROUPS},
-        "skills": skills, "knowledge": knowledge, "facts": facts}, ensure_ascii=False), encoding="utf-8")
+        "skills": skills, "knowledge": knowledge, "tables": all_tables, "facts": facts},
+        ensure_ascii=False), encoding="utf-8")
     if preset_id:
         discard(owner_id, preset_id)
     return {
-        "block": rules_block(merged, knowledge, skills),
+        "block": rules_block(merged, knowledge, skills, tables=all_tables),
         "facts": preset["facts"],
+        "tables": tables,
+        "drop": drop,
         "skills": new_skills,
         "knowledge": written,
+        "warnings": warnings,
         "counts": {"rules": len(preset["rules"]), "escalation": len(preset["escalation"]),
                    "templates": len(preset["templates"]), "glossary": len(preset["glossary"]),
-                   "intents": len(new_skills), "facts": len(preset["facts"]), "knowledge": len(written)},
+                   "intents": len(new_skills), "facts": len(preset["facts"]), "knowledge": len(written),
+                   "tables": len(tables)},
         "totals": {**{g: len(merged[g]) for g in _KEPT_GROUPS}, "intents": len(skills), "facts": facts,
-                   "knowledge": len(knowledge)},
+                   "knowledge": len(knowledge), "tables": len(all_tables)},
     }
 
 
@@ -1657,6 +1774,61 @@ def schedule_facts(slug: str, port_of: Callable[[], int], token: str, facts: lis
     task.add_done_callback(_PENDING.discard)
 
 
+async def give_tables(slug: str, port_of: Callable[[], int], token: str, drop: list[str], tables: list[dict],
+                      agent_dir: Path, timeout: float = _FACTS_READY_S) -> int:
+    """Give a running agent its owner's spreadsheets as tables once it
+    answers, the tables they replace dropped first; how many were made.
+    Never raises: what it couldn't be given waits in its folder for its
+    next start."""
+    dropped: set[str] = set()
+    made: set[str] = set()
+    try:
+        port = await _wait_ready(port_of, token, timeout)
+        if port:
+            dropped, made = await ptables.post_tables(port, token, drop, tables)
+            log.info("agent preset: tables given", agent=slug, made=len(made), of=len(tables), dropped=len(dropped))
+        else:
+            log.warning("agent preset: the agent never came up, tables left for its next start", agent=slug)
+    except Exception:
+        log.warning("agent preset: giving tables failed", agent=slug, exc_info=True)
+    try:
+        await asyncio.to_thread(ptables.forget_pending, agent_dir, dropped | made)
+        await asyncio.to_thread(ptables.leave_tables, agent_dir, [n for n in drop if n not in dropped],
+                                [t for t in tables if t["name"] not in made])
+    except Exception:
+        log.warning("agent preset: could not leave the tables for later", agent=slug, exc_info=True)
+    return len(made)
+
+
+# The tables still on their way to each agent: a setup applied again waits
+# for the one before, so their drops and rows never cross.
+_TABLES_BUSY: dict[str, asyncio.Task] = {}
+
+
+def schedule_tables(slug: str, port_of: Callable[[], int], token: str, drop: list[str], tables: list[dict],
+                    agent_dir: Path) -> None:
+    if not drop and not tables:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        log.warning("agent preset: no loop to give tables on, left for its next start", agent=slug)
+        ptables.leave_tables(agent_dir, drop, tables)
+        return
+    before = _TABLES_BUSY.get(slug)
+
+    async def after_the_last() -> int:
+        if before is not None and not before.done() and before.get_loop() is loop:
+            await asyncio.wait([before])
+        return await give_tables(slug, port_of, token, drop, tables, agent_dir)
+
+    task = loop.create_task(after_the_last())
+    _TABLES_BUSY[slug] = task
+    _PENDING.add(task)
+    task.add_done_callback(_PENDING.discard)
+    task.add_done_callback(lambda t: _TABLES_BUSY.pop(slug, None) if _TABLES_BUSY.get(slug) is t else None)
+
+
 # ── Apply (to the agent the dialog was opened on) ─────────────────────
 
 
@@ -1685,6 +1857,9 @@ async def current_setup(slug: str, user: dict = Depends(get_managed_user)) -> di
         "facts": int(record.get("facts") or 0),
         "knowledge": [{"title": e.get("title") or e.get("doc") or "", "parts": int(e.get("parts") or 1)}
                       for e in record.get("knowledge") or [] if isinstance(e, dict)],
+        "tables": [{"name": t["name"], "doc": t.get("doc") or "", "sheet": t.get("sheet"),
+                    "rows": int(t.get("rows") or 0)}
+                   for t in record.get("tables") or [] if isinstance(t, dict) and isinstance(t.get("name"), str)],
     }
 
 
@@ -1693,9 +1868,9 @@ async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict
     """Give one of the caller's process agents the reviewed preset — added to
     what an earlier setup gave it, or in its place: skills and knowledge
     into its folder, the owner's block in its instructions (stored for the
-    owner, and returned for the chat to send), facts as insights once it
-    answers — or, when it is off, at its next start. Works on a running
-    agent: no restart."""
+    owner, and returned for the chat to send), facts as insights and the
+    spreadsheets as datastore tables once it answers — or, when it is off,
+    at its next start. Works on a running agent: no restart."""
     from captain_claw.flight_deck import server as srv
     owner_id = _owner(user)
     slug = body.agent
@@ -1723,6 +1898,12 @@ async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict
                            str(entry.get("web_auth") or ""), done["facts"], agent_dir=agent_dir)
         else:
             await asyncio.to_thread(leave_facts, agent_dir, done["facts"])
+    if done["tables"] or done["drop"]:
+        if running:
+            schedule_tables(slug, lambda: (srv._load_process_registry().get(slug) or {}).get("web_port") or 0,
+                            str(entry.get("web_auth") or ""), done["drop"], done["tables"], agent_dir)
+        else:
+            await asyncio.to_thread(ptables.leave_tables, agent_dir, done["drop"], done["tables"])
     log.info("agent preset: applied", agent=slug, mode=body.mode, **done["counts"])
     return {
         "ok": True,
@@ -1735,5 +1916,7 @@ async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict
         "skills": done["skills"],
         "knowledge": [k["title"] for k in done["knowledge"]],
         "parts": sum(k["parts"] for k in done["knowledge"] if k["parts"] > 1),
+        "tables": [t["name"] for t in done["tables"]],
+        "warnings": done["warnings"],
         "running": running,
     }
