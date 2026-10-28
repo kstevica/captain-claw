@@ -261,6 +261,14 @@ def _build_replay_batch(session) -> list[dict]:
                 head, sep, rest = content.partition("\n")
                 if sep and head.startswith("[") and head.endswith("]"):
                     payload["content"] = rest
+            if msg.get("origin_detail") == "automation_result":
+                # An automated turn's result mirrored here (as the live frame's
+                # automation_label): older rows only have it in the note line.
+                label = str(msg.get("automation_label") or "")
+                head = content.partition("\n")[0]
+                if not label and head.startswith("[") and head.endswith("]"):
+                    label = head[1:-1].partition(" — ")[0].strip()
+                payload["automation_label"] = label or "Automated turn"
             if msg.get("feedback"):
                 payload["feedback"] = msg["feedback"]
             # Where the message came from (human, corrective, fleet notice…),

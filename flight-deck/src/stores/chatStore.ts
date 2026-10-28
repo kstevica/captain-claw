@@ -93,6 +93,7 @@ function logRowToMessage(r: LogRow): ChatMessage {
     ...(meta.via ? { via: String(meta.via) } : {}),
     ...(meta.source_label ? { sourceLabel: String(meta.source_label) } : {}),
     ...(taskMark(meta.task) ? { task: taskMark(meta.task) } : {}),
+    ...(meta.automation ? { automation: String(meta.automation) } : {}),
   }
 }
 
@@ -387,6 +388,7 @@ async function _flushMessages() {
               ...(m.via ? { via: m.via } : {}),
               ...(m.sourceLabel ? { source_label: m.sourceLabel } : {}),
               ...(m.task ? { task: m.task } : {}),
+              ...(m.automation ? { automation: m.automation } : {}),
             }),
           })),
         }),
@@ -2028,7 +2030,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const cleanContent = data.role === 'assistant' ? sanitizeAgentContent(rawContent) : rawContent
       const msg: ChatMessage = {
         id: nextId(),
-        role: data.role as 'user' | 'assistant',
+        role: data.role as 'user' | 'assistant' | 'rephrase',
         content: cleanContent,
         timestamp: data.timestamp as string || new Date().toISOString(),
         replay: data.replay as boolean || false,
@@ -2036,6 +2038,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ...(via ? { via } : {}),
         ...(sourceLabel ? { sourceLabel } : {}),
         ...(taskMark(data.task) ? { task: taskMark(data.task) } : {}),
+        ...(data.automation_lane ? { automation: String(data.automation_label || '') || 'Automated turn' } : {}),
       }
       addMessage(key, msg)
       // A result the automation lane mirrored here is a note: it ends no turn
@@ -3552,14 +3555,25 @@ function replayToMessage(d: Record<string, unknown>): ChatMessage {
       tool_output: (d.output as string) || '',
     }
   }
+  // A mirrored automation result: the note line ahead of it ("[Autonomous
+  // Work — from the AUTO lane]") is for the model; the chat shows the result
+  // as the live frame did, so it also matches its row in the log.
+  const automation = String(d.automation_label || '')
+  let content = rawContent
+  if (automation) {
+    const nl = content.indexOf('\n')
+    const head = nl < 0 ? '' : content.slice(0, nl)
+    if (head.startsWith(`[${automation} — `) && head.endsWith(']')) content = content.slice(nl + 1)
+  }
   return {
     id: nextId(),
     role: role as ChatMessage['role'],
-    content: role === 'assistant' ? sanitizeAgentContent(rawContent) : rawContent,
+    content: role === 'assistant' ? sanitizeAgentContent(content) : content,
     timestamp: (d.timestamp as string) || new Date().toISOString(),
     replay: true,
     model: (d.model as string) || '',
     ...(taskMark(d.task) ? { task: taskMark(d.task) } : {}),
+    ...(automation ? { automation } : {}),
   }
 }
 

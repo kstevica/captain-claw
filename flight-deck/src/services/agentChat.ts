@@ -16,7 +16,9 @@ export interface TokenUsage {
 
 export interface ChatMessage {
   id: string
-  role: 'user' | 'assistant' | 'system' | 'tool'
+  /** `rephrase`: the agent's restatement of your request (task_rephrase),
+   *  shown as a small preview like an automated result. */
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'rephrase'
   content: string
   timestamp: string
   replay?: boolean
@@ -50,6 +52,10 @@ export interface ChatMessage {
   /** The result of a scheduled task (Flight Deck's Scheduled tasks), posted
    *  into this chat: labelled, and links back to the task. */
   task?: TaskMark
+  /** An automated turn's result the automation lane mirrored into this chat
+   *  (Autonomous Work, a plan, a scheduled job): what ran it, as a person
+   *  reads it. Shown as a small preview that opens in a dialog. */
+  automation?: string
 }
 
 export interface TaskMark {
