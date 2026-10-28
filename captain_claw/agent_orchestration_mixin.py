@@ -244,6 +244,11 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
     # Images
     (_re.compile(r"\bimage\b|\bphoto\b|\bpicture\b|\bscreenshot\b|\bdraw\b|\bgenerate\s+(?:an?\s+)?image", _re.I),
      frozenset({"image_gen", "image_ocr", "image_vision", "screen_capture"})),
+    # Charts and other visuals (EN / HR): HTML rendered to a page + PNG.
+    (_re.compile(r"\bchart|\bgraph|\bplot\b|\bdiagram|\bvisuali[sz]|\bdashboard|\binfographic"
+                 r"|\bhistogram|\bheatmap|\bgantt|\bflowchart|\bmind\s?map"
+                 r"|\bgraf\w*|\bdijagram\w*|\bvizualiz\w*|\bkart[aeiu]\b", _re.I),
+     frozenset({"visualize"})),
     # Email
     (_re.compile(r"\bemail\b|\bmail\b|\bgmail\b|\boutlook\b|\bdraft\b|\bsend\s+(?:a\s+)?message\b", _re.I),
      frozenset({"send_mail", "google_mail", "microsoft_mail"})),

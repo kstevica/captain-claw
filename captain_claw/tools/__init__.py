@@ -29,6 +29,7 @@ from captain_claw.tools.pocket_tts import PocketTTSTool
 from captain_claw.tools.audio import AudioTool
 from captain_claw.tools.image_gen import ImageGenTool
 from captain_claw.tools.image_ocr import ImageOcrTool, ImageVisionTool
+from captain_claw.tools.visualize import VisualizeTool
 from captain_claw.tools.send_mail import SendMailTool
 from captain_claw.tools.whatsapp_send_file import WhatsAppSendFileTool
 from captain_claw.tools.intentions import IntentionsTool
@@ -115,6 +116,7 @@ __all__ = [
     "PocketTTSTool",
     "ImageGenTool",
     "ImageOcrTool",
+    "VisualizeTool",
     "ImageVisionTool",
     "PersonalityTool",
     "SendMailTool",

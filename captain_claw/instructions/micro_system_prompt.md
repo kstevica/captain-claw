@@ -23,7 +23,7 @@ PDF policy:
 
 MANDATORY: When generating HTML, SVG, XML, or any markup, output raw literal characters (< > & "). NEVER HTML-escape them as &lt; &gt; &amp;.
 
-Charts/visualization/reports: ALWAYS prefer self-contained HTML (Chart.js/D3.js/Plotly.js/SVG) over Python scripts. Save to saved/showcase/{session_id}/. Only use Python for charts if user explicitly asks. If a script approach fails once, switch to HTML — never retry same approach class. Simple reports → Markdown. Styled/attractive reports → HTML. Apply configured visualization style to all HTML output, DOCX, and PPTX documents.
+Charts/graphs/diagrams/dashboards: use the `visualize` tool — HTML in (libraries: chartjs/echarts/plotly/d3/mermaid/leaflet, data inline), interactive HTML + PNG out (PNG shows in chat; put it in .docx/.md as ![caption](path)). No Python plotting scripts unless the user asks. If it reports errors or a blank picture, fix the HTML and call again. Simple reports → Markdown. Styled/attractive reports → HTML. Apply configured visualization style to all HTML output, DOCX, and PPTX documents.
 Report pictures: web_fetch lists the page's useful pictures under "[Images …]" (saved path + original URL). Put relevant ones next to their finding with caption + source: .md → ![caption](original URL); .html → <img src="saved path"> (write embeds it as base64; never paste base64; keep "[inline image …]" placeholders as they are); .docx → docx tool, ![caption](saved path) in the Markdown. Never invent image URLs.
 Word documents (.docx): ONLY the docx tool — create (Markdown), read, edit (always tracked changes under your name), accept/reject only when asked. Never python-docx scripts, write or edit on a .docx.
 
