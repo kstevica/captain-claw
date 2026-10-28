@@ -72,6 +72,12 @@ vector = [
 vision = [
     "Pillow>=10.0.0",
 ]
+pdf = [
+    # PDFs read with their headings and tables (the agent setup, and files an
+    # agent adds to its knowledge). PyMuPDF is AGPL-3.0, so it stays optional:
+    # without it PDFs are read page by page.
+    "pymupdf4llm>=0.3",
+]
 cv = [
     # Deterministic local computer-vision ops (the `vision` tool). CPU-only,
     # headless (no GUI deps). OpenCV 5 has the rewritten DNN engine for Phase 2.

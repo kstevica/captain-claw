@@ -168,3 +168,86 @@ def test_the_setup_tells_the_agent_about_the_tool():
     preset = ap.normalise({"knowledge": [{"doc": "m.md", "title": "Manual", "summary": ""}]})
     block = ap.rules_block(preset, [{"title": "Manual", "map": "m.map.md"}], [])
     assert "the knowledge tool searches all of it" in block and "section map (<name>.map.md)" in block
+
+
+# ── add: keeping a file the user gave ─────────────────────────────────
+
+
+def _deck(monkeypatch, reply) -> list:
+    """Run as Flight Deck's agent; Flight Deck answers with *reply(request)*. The requests sent."""
+    import httpx
+
+    monkeypatch.setenv("FD_URL", "http://fd.test")
+    sent: list = []
+    real = httpx.AsyncClient
+
+    def handler(request):
+        sent.append(request)
+        return reply(request)
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    return sent
+
+
+async def test_add_sends_a_document_and_says_what_was_kept(tmp_path, monkeypatch):
+    import httpx
+
+    sent = _deck(monkeypatch, lambda r: httpx.Response(200, json={
+        "doc": "prices.xlsx", "title": "Prices", "chars": 1234, "parts": 1, "sections": 0,
+        "tables": ["prices_basic"], "replaced": False, "warnings": []}))
+    doc = tmp_path / "prices-20261028-215500-a1b2c3.xlsx"            # as a chat upload is saved
+    doc.write_bytes(b"PK fake workbook")
+    tool = _tool(tmp_path)
+    got = await tool.execute(action="add", path=str(doc), note="Our price list", use="reference")
+    assert got.success, got.error
+    assert "Kept “Prices” (prices.xlsx) in your knowledge" in got.content and "prices_basic" in got.content
+    assert "isn't read for rules" in got.content
+    (req,) = sent
+    assert req.url.path == "/fd/agent-knowledge/agent/add"
+    body = req.content
+    assert b'name="file"; filename="prices.xlsx"' in body and b"PK fake workbook" in body
+    sent.clear()
+    await tool.execute(action="add", path=str(doc), name="price-list-2026.md")   # a name the agent chose
+    assert b'filename="prices.xlsx"' in sent[0].content and b"price-list-2026.md" in sent[0].content
+    assert b"Our price list" in body and b"reference" in body
+
+    sent.clear()
+    got = await tool.execute(action="add", text="Total 42 EUR", name="receipt.md")
+    from urllib.parse import parse_qs
+
+    form = parse_qs(sent[0].content.decode())
+    assert got.success and form["text"] == ["Total 42 EUR"] and form["name"] == ["receipt.md"]
+
+
+async def test_add_asks_for_a_pictures_text_and_turns_a_scan_into_pages(tmp_path, monkeypatch):
+    import httpx
+    import pypdf
+
+    sent = _deck(monkeypatch, lambda r: httpx.Response(422, json={"detail": {"reason": "scan", "detail": "no text"}}))
+    tool = _tool(tmp_path)
+    shot = tmp_path / "screenshot.png"
+    shot.write_bytes(b"\x89PNG")
+    got = await tool.execute(action="add", path=str(shot))
+    assert not got.success and "image_ocr" in got.error and 'name="screenshot.md"' in got.error and sent == []
+
+    writer = pypdf.PdfWriter()
+    for _ in range(3):
+        writer.add_blank_page(width=200, height=200)
+    scan = tmp_path / "Old contract.pdf"
+    with scan.open("wb") as fh:
+        writer.write(fh)
+    got = await tool.execute(action="add", path=str(scan), _runtime_base_path=str(tmp_path))
+    assert not got.success and "is a scan" in got.error and 'name="Old-contract.md"' in got.error
+    assert "scans/Old-contract/page-03.png" in got.error and (tmp_path / "scans/Old-contract/page-01.png").is_file()
+
+
+async def test_add_needs_flight_deck_and_the_tool_shows_there(tmp_path, monkeypatch):
+    monkeypatch.delenv("FD_URL", raising=False)
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    tool = _tool(empty)
+    assert not tool.has_knowledge()                                     # nothing to search, no Flight Deck
+    got = await tool.execute(action="add", text="x", name="x.md")
+    assert not got.success and "Flight Deck" in got.error
+    monkeypatch.setenv("FD_URL", "http://fd.test")
+    assert tool.has_knowledge()                                         # under it: always — it takes files in

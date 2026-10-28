@@ -2697,6 +2697,79 @@ async def current_setup(slug: str, user: dict = Depends(get_managed_user)) -> di
     }
 
 
+async def deliver(slug: str, entry: dict, owner_id: str, agent_dir: Path, done: dict) -> tuple[bool, str, bool]:
+    """What a written setup (``seed``) still needs: the owner's block in the
+    agent's stored instructions, facts as insights, spreadsheets as datastore
+    tables — through its REST while it runs, else at its next start — and
+    its documents indexed. Returns (instructions stored, the instructions,
+    running)."""
+    from captain_claw.flight_deck import server as srv
+    # Without accounts the browser keeps the instructions: it puts the block in itself.
+    instructions = ""
+    stored = bool(owner_id) and _auth_enabled()
+    if stored:
+        current = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "")
+        instructions = with_block(current, done["block"])
+        if instructions != current:
+            await srv._set_owner_agent_instructions(owner_id, "process", slug, instructions, strict=True)
+    running = srv._process_is_alive(slug)
+
+    def port_of() -> int:
+        return (srv._load_process_registry().get(slug) or {}).get("web_port") or 0
+
+    if done["facts"]:
+        if running:
+            schedule_facts(slug, port_of, str(entry.get("web_auth") or ""), done["facts"], agent_dir=agent_dir)
+        else:
+            await asyncio.to_thread(leave_facts, agent_dir, done["facts"])
+    if done["tables"] or done["drop"]:
+        if running:
+            schedule_tables(slug, port_of, str(entry.get("web_auth") or ""), done["drop"], done["tables"], agent_dir)
+        else:
+            await asyncio.to_thread(ptables.leave_tables, agent_dir, done["drop"], done["tables"])
+    # Its documents indexed now, not at its first search; one that is off indexes them when it starts.
+    if done["knowledge"] and running:
+        schedule_index(slug, port_of, str(entry.get("web_auth") or ""))
+    return stored, instructions, running
+
+
+async def add_document(slug: str, owner_id: str, name: str, text: str, raw: bytes = b"", title: str = "",
+                       note: str = "", usage: str = "auto") -> dict:
+    """One document into an agent's knowledge, as a setup gives one: whole,
+    in parts with a section map when it is long, a spreadsheet's sheets as
+    datastore tables too, indexed — and not read (its owner reads it for
+    rules and skills in Way of working, when they want). The same name again
+    takes the earlier copy's place. How it went, for the agent to tell."""
+    from captain_claw.flight_deck import server as srv
+    entry = srv._load_process_registry().get(slug) or {}
+    agent_dir = srv.DATA_DIR / slug
+    workspace = Path(entry["workspace"]) if entry.get("workspace") else agent_dir / "data" / "workspace"
+    root = owner_root(owner_id)
+    staged = await asyncio.to_thread(pdocs.stage, root, name, text, "chat", slug,
+                                     raw if ptables.is_spreadsheet(name) else None)
+    try:
+        full = await asyncio.to_thread(pdocs.load_staged, root, staged["id"]) or {}
+        had = {e.get("doc") for e in (await asyncio.to_thread(earlier_setup, agent_dir, workspace)).get("knowledge") or []
+               if isinstance(e, dict)}
+        docs = [{**{k: full.get(k) for k in ("text", "pages", "pages_exact", "truncated", "origin", "agent", "source",
+                                             "tables")},
+                 "name": name, "read": False, "description": note[:_MAX_DESCRIPTION],
+                 "usage": usage if usage in USAGES else "auto"}]
+        preset_id = await asyncio.to_thread(save_docs, owner_id, docs, "")
+        body = {"id": preset_id, "knowledge": [{"doc": name, "title": title.strip() or Path(name).stem, "summary": note}]}
+        done = await asyncio.to_thread(seed, agent_dir, workspace, owner_id, body, "add")
+    finally:
+        shutil.rmtree(root / "staged" / staged["id"], ignore_errors=True)
+    await deliver(slug, entry, owner_id, agent_dir, done)
+    written = next(iter(done["knowledge"]), {})
+    log.info("agent preset: a document added from a chat", agent=slug, doc=name, chars=len(text),
+             parts=written.get("parts"), tables=len(done["tables"]))
+    return {"doc": name, "title": written.get("title") or name, "file": written.get("file") or "",
+            "parts": int(written.get("parts") or 1), "sections": int(written.get("sections") or 0),
+            "map": written.get("map") or "", "chars": len(text), "truncated": bool(full.get("truncated")),
+            "tables": [t["name"] for t in done["tables"]], "replaced": name in had, "warnings": done["warnings"]}
+
+
 @router.post("/apply")
 async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict:
     """Give one of the caller's process agents the reviewed preset — added to
@@ -2717,31 +2790,7 @@ async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict
         log.warning("agent preset: could not write the setup", agent=slug, exc_info=True)
         raise HTTPException(500, "The setup couldn't be written into the agent's folder.")
 
-    # Without accounts the browser keeps the instructions: it puts the block in itself.
-    instructions = ""
-    stored = bool(owner_id) and _auth_enabled()
-    if stored:
-        current = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "")
-        instructions = with_block(current, done["block"])
-        if instructions != current:
-            await srv._set_owner_agent_instructions(owner_id, "process", slug, instructions, strict=True)
-    running = srv._process_is_alive(slug)
-    if done["facts"]:
-        if running:
-            schedule_facts(slug, lambda: (srv._load_process_registry().get(slug) or {}).get("web_port") or 0,
-                           str(entry.get("web_auth") or ""), done["facts"], agent_dir=agent_dir)
-        else:
-            await asyncio.to_thread(leave_facts, agent_dir, done["facts"])
-    if done["tables"] or done["drop"]:
-        if running:
-            schedule_tables(slug, lambda: (srv._load_process_registry().get(slug) or {}).get("web_port") or 0,
-                            str(entry.get("web_auth") or ""), done["drop"], done["tables"], agent_dir)
-        else:
-            await asyncio.to_thread(ptables.leave_tables, agent_dir, done["drop"], done["tables"])
-    # Its documents indexed now, not at its first search; one that is off indexes them when it starts.
-    if done["knowledge"] and running:
-        schedule_index(slug, lambda: (srv._load_process_registry().get(slug) or {}).get("web_port") or 0,
-                       str(entry.get("web_auth") or ""))
+    stored, instructions, running = await deliver(slug, entry, owner_id, agent_dir, done)
     log.info("agent preset: applied", agent=slug, mode=body.mode, **done["counts"])
     return {
         "ok": True,

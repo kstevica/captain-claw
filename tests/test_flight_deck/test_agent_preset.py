@@ -1931,3 +1931,101 @@ async def test_an_agent_without_knowledge_has_nothing_to_browse(deck):
     slug = await _spawn(BOB, "Fresh", 24379)
     over = (await _kb(BOB, slug)).json()
     assert over["documents"] == [] and over["extras"] == [] and over["totals"]["documents"] == 0
+
+
+# ── An agent keeping a file its user gave it (/fd/agent-knowledge/agent/add) ──
+
+
+async def _agent_add(slug: str, *, file: tuple[str, bytes] | None = None, headers: dict | None = None,
+                     **form) -> httpx.Response:
+    """POST as the agent itself: from loopback, with its own X-Agent-Auth."""
+    token = server._load_process_registry()[slug]["web_auth"] if slug else ""
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=server.app, client=("127.0.0.1", 40002)),
+                                 base_url="http://fd.test") as c:
+        return await c.post("/fd/agent-knowledge/agent/add", data=form,
+                            files={"file": file} if file else None,
+                            headers={"X-Agent-Auth": token, **(headers or {})})
+
+
+async def test_an_agent_keeps_a_file_its_user_gave_it(deck, tmp_path):
+    slug = await _spawn(BOB, "Helpdesk", 24380)
+    r = await _agent_add(slug, file=("refunds.md", _chaptered(3).encode()), title="Refund handbook",
+                         note="How we refund, from the shop wiki", use="reference")
+    assert r.status_code == 200, r.text
+    got = r.json()
+    assert (got["doc"], got["title"], got["replaced"]) == ("refunds.md", "Refund handbook", False)
+    folder = server.DATA_DIR / slug / "data" / "workspace" / "knowledge"
+    assert "[Refund handbook](refunds.md)" in (folder / "INDEX.md").read_text()
+    (entry,) = _record(slug)["knowledge"]
+    assert entry["read"]["keys"] == [] and not entry["read"]["all"] and entry["use"] == "Reference"
+    assert entry["summary"] == "How we refund, from the shop wiki"
+    current = await _current(BOB, slug)
+    assert current["knowledge"][0]["read"]["state"] == "none"                     # for Way of working to read
+    assert "Refund handbook" in json.loads(await deck.get_setting(BOB, INSTR))[slug]  # the agent is told
+
+    # Given again: in place of the earlier copy. A spreadsheet's sheets become tables too.
+    r = await _agent_add(slug, file=("refunds.md", b"# Refunds\n\nNow within 30 days.\n"))
+    assert r.json()["replaced"] is True and len(_record(slug)["knowledge"]) == 1
+    r = await _agent_add(slug, file=("Price list.xlsx", _xlsx(tmp_path / "p.xlsx").read_bytes()))
+    assert r.status_code == 200, r.text
+    assert r.json()["tables"] and {t["doc"] for t in _record(slug)["tables"]} == {"Price list.xlsx"}
+
+    # A picture's text, read by the agent; a web page.
+    r = await _agent_add(slug, text="# Receipt\n\nTotal 42 EUR, paid by card.", name="receipt")
+    assert r.status_code == 200 and r.json()["doc"] == "receipt.md"
+    page = b"<html><head><title>Shipping</title></head><body><nav>Menu</nav><h2>Rates</h2><p>EU: 5 EUR.</p></body></html>"
+    r = await _agent_add(slug, file=("shipping.html", page), name="shipping-notes.md")   # a name the agent chose
+    assert r.status_code == 200, r.text
+    assert r.json()["doc"] == "shipping-notes.html"                                # its kind is the file's
+    kept = (folder / _record_file(slug, "shipping-notes.html")).read_text()
+    assert "## Rates" in kept and "EU: 5 EUR." in kept and "Menu" not in kept
+    assert {e["doc"] for e in _record(slug)["knowledge"]} == {"refunds.md", "Price list.xlsx", "receipt.md",
+                                                              "shipping-notes.html"}
+
+
+def _record_file(slug: str, doc: str) -> str:
+    return next(e["file"] for e in _record(slug)["knowledge"] if e["doc"] == doc)
+
+
+async def test_what_an_agent_cant_keep_and_who_cant_ask(deck, tmp_path):
+    import pypdf
+
+    slug = await _spawn(BOB, "Helpdesk", 24381)
+    assert (await _agent_add(slug, file=("photo.png", b"\x89PNG..."))).status_code == 415
+    assert (await _agent_add(slug, name="x")).status_code == 400
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    scan = tmp_path / "scan.pdf"
+    with scan.open("wb") as fh:
+        writer.write(fh)
+    r = await _agent_add(slug, file=("scan.pdf", scan.read_bytes()))
+    assert r.status_code == 422 and r.json()["detail"]["reason"] == "scan"
+    r = await _agent_add(slug, file=("a.md", b"# A\n\nx\n"), headers={"Origin": "http://evil.test"})
+    assert r.status_code == 403                                                     # never a browser
+    r = await _agent_add(slug, file=("a.md", b"# A\n\nx\n"), headers={"X-Agent-Auth": "not-a-token"})
+    assert r.status_code == 403                                                     # nor an unknown agent
+    assert not (server.DATA_DIR / slug / ap._RECORD).exists()
+
+
+def test_a_pdf_is_read_by_pymupdf4llm_when_it_is_installed(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    import pypdf
+
+    writer = pypdf.PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    pdf = tmp_path / "book.pdf"
+    with pdf.open("wb") as fh:
+        writer.write(fh)
+    calls: list = []
+    book = "# Chapter 1: Cash flows\n\n" + "The discount rate reflects risk. " * 20
+    monkeypatch.setitem(sys.modules, "pymupdf4llm", types.SimpleNamespace(
+        to_markdown=lambda path, **kw: calls.append(kw) or book))
+    text, err = pdocs.extract(pdf)
+    assert (text, err) == (book, "") and calls == [{"show_progress": False, "ignore_images": True}]
+    # Hardly any text from it — a scan: the page-by-page reading says so.
+    monkeypatch.setitem(sys.modules, "pymupdf4llm", types.SimpleNamespace(to_markdown=lambda path, **kw: "  "))
+    assert pdocs.extract(pdf) == ("", pdocs.NO_TEXT_SCAN)
+    monkeypatch.setitem(sys.modules, "pymupdf4llm", None)                 # not installed: page by page
+    assert pdocs.extract(pdf) == ("", pdocs.NO_TEXT_SCAN)

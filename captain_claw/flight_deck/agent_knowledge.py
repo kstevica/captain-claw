@@ -17,7 +17,11 @@ while the agent is off or asleep:
 - ``…/{slug}/search?q=`` — the passages a search finds, each with the
   section to open.
 
-Read-only, and the owner's alone (or an admin's acting for them).
+Those are read-only, and the owner's alone (or an admin's acting for them).
+And for the agent itself — its knowledge tool's ``add``, when its user hands
+it a file in a chat and says to keep it: ``POST …/agent/add`` takes a
+document (or the text of a picture the agent read) into the calling agent's
+own knowledge, as a setup would, not read (agent_preset.add_document).
 """
 
 from __future__ import annotations
@@ -28,10 +32,12 @@ from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
 
 from captain_claw.flight_deck import agent_preset as ap
+from captain_claw.flight_deck import agent_preset_docs as pdocs
 from captain_claw.flight_deck import agent_preset_select as psel
+from captain_claw.flight_deck.agent_identity import require_agent_caller
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.logging import get_logger
 from captain_claw.tools.knowledge import KnowledgeTool, _Doc
@@ -247,3 +253,57 @@ async def search(slug: str, q: str = Query(..., max_length=300), id: str = Query
             hit.update(extra=p["file"], title=_EXTRAS[p["file"]])
         results.append(hit)
     return {"results": results}
+
+
+# ── An agent adding to its own knowledge ──────────────────────────────
+
+_ADDING: dict[str, asyncio.Lock] = {}   # one add at a time per agent: each writes its setup record
+
+
+@router.post("/agent/add")
+async def add_from_agent(
+    request: Request,
+    name: str = Form("", max_length=200),
+    file: UploadFile | None = File(None),
+    text: str = Form(""),
+    title: str = Form("", max_length=200),
+    note: str = Form("", max_length=2000),
+    use: str = Form("auto", max_length=20),
+) -> dict:
+    """The calling agent keeps a file in its own knowledge — what its user
+    handed it in a chat: a document (``file``: PDF, Word, Excel, PowerPoint,
+    CSV, Markdown, text, HTML), or the ``text`` it read off a picture or a
+    scan. Whole and searchable, not read by a model (agent_preset.add_document).
+    Only this deck's agents, each into its own knowledge."""
+    caller = require_agent_caller(request, what="adding to an agent's knowledge")
+    if not caller.slug:
+        raise HTTPException(403, "Flight Deck can't tell which agent is calling.")
+    # Its name: as the agent gives it, else the file's own.
+    given = str(name or (file.filename if file is not None else "") or "")
+    name = Path(given.replace("\\", "/")).name.strip()[:120] or "document"
+    raw = await file.read() if file is not None else b""
+    if raw:
+        # What it is comes from the file itself; the name the agent chose keeps its kind ("notes.md" for a
+        # web page would be read as Markdown, and a spreadsheet renamed so would lose its tables).
+        suffix = Path(file.filename or "").suffix.lower() or Path(name).suffix.lower()
+        if len(raw) > pdocs.MAX_FILE_BYTES:
+            raise HTTPException(413, f"{name} is larger than 25 MB.")
+        if suffix not in pdocs.SUPPORTED:
+            raise HTTPException(415, f"{name}: not a kind of document knowledge takes ({', '.join(pdocs.SUPPORTED)}). "
+                                     "A picture or a scan: read its text, and add that as text.")
+        name = (Path(name).stem if Path(name).suffix.lower() in pdocs.SUPPORTED else name) + suffix
+        body, why = await asyncio.to_thread(pdocs.extract_bytes, raw, suffix)
+        if not body.strip():
+            scan = why == pdocs.NO_TEXT_SCAN
+            raise HTTPException(422, {"reason": "scan" if scan else "unreadable",
+                                      "detail": f"{name}: " + (why or "no text could be read from it.")})
+    elif text.strip():
+        body = text
+        if not Path(name).suffix:
+            name += ".md"
+    else:
+        raise HTTPException(400, "Send the file, or the text to keep.")
+    from captain_claw.flight_deck.file_library import _auth_enabled
+    owner = caller.owner if _auth_enabled() else ""
+    async with _ADDING.setdefault(caller.slug, asyncio.Lock()):
+        return await ap.add_document(caller.slug, owner, name, body[:pdocs.MAX_CHARS], raw, title, note, use)

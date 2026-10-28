@@ -21,7 +21,7 @@ export const USAGE_LOOKS: Record<DocUsage, { icon: LucideIcon; label: string; bl
 }
 
 /** The documents the setup reads (the backend reads the same). */
-export const SETUP_ACCEPT = '.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv'
+export const SETUP_ACCEPT = '.pdf,.docx,.xlsx,.pptx,.txt,.md,.csv,.html,.htm'
 export const SETUP_EXTS = new Set(SETUP_ACCEPT.split(','))
 
 export function extOf(name: string): string {
