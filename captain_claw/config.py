@@ -626,6 +626,7 @@ class ToolsConfig(BaseModel):
         "pptx_extract",
         "pocket_tts",
         "image_gen",
+        "visualize",
         "image_ocr",
         "image_vision",
         "video_vision",
@@ -721,6 +722,9 @@ class ToolsConfig(BaseModel):
         # Every agent can read its own tool calls back from Flight Deck's
         # register: what it did, whether it really happened, what keeps failing.
         "activity",
+        # Charts, diagrams and dashboards come from HTML rendered to a page
+        # and a PNG, not from plotting scripts that often leave nothing.
+        "visualize",
         # Deep memory is reached through Flight Deck, which owns the Typesense
         # connection and the credentials — so from an agent's side the archive
         # is simply always there. A per-agent opt-in would mean an agent could

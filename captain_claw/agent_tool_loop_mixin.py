@@ -169,6 +169,9 @@ class AgentToolLoopMixin:
         if name == "image_gen":
             prompt = str(arguments.get("prompt", "")).strip()
             return f"Generating image: {prompt[:50]}" if prompt else "Generating image"
+        if name == "visualize":
+            title = str(arguments.get("title", "")).strip()
+            return f"Drawing {title[:50]}" if title else "Drawing a visual"
         if name == "image_ocr":
             path = str(arguments.get("path", "")).strip()
             fname = path.rsplit("/", 1)[-1] if "/" in path else path

@@ -2390,6 +2390,7 @@ class AgentContextMixin:
         "pocket_tts": ["pocket_tts"],
         "audio": ["audio"],
         "image_gen": ["image_gen"],
+        "visualize": ["visualize"],
         "image_ocr": ["image_ocr"],
         "image_vision": ["image_vision"],
         "send_mail": ["send_mail"],
@@ -2548,6 +2549,9 @@ class AgentContextMixin:
                 self.tools.register(PocketTTSTool())
             elif tool_name == "image_gen":
                 self.tools.register(ImageGenTool())
+            elif tool_name == "visualize":
+                from captain_claw.tools.visualize import VisualizeTool
+                self.tools.register(VisualizeTool())
             elif tool_name == "image_ocr":
                 self.tools.register(ImageOcrTool())
             elif tool_name == "image_vision":

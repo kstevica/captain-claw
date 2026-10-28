@@ -170,8 +170,8 @@ def collect_turn_generated_image_paths(
     session: Any, turn_start_idx: int, *, saved_root: Path | None = None, since: float = 0.0,
     agent: Any = None, reply: str = "",
 ) -> list[Path]:
-    """Pictures the current turn made for the user: what image_gen, termux and
-    browser screenshots reported, plus pictures the session wrote this turn
+    """Pictures the current turn made for the user: what image_gen, visualize,
+    termux and browser screenshots reported, plus pictures the session wrote this turn
     that the reply names. Only deliverables — a ``Path:`` line in a web page
     or its vision description can't send a local file (:mod:`turn_deliverables`)."""
     if not session:
@@ -181,7 +181,7 @@ def collect_turn_generated_image_paths(
     for msg in session.messages[max(0, int(turn_start_idx)):]:
         if str(msg.get("role", "")).strip().lower() != "tool":
             continue
-        if str(msg.get("tool_name", "")).strip().lower() not in ("image_gen", "termux", "browser", "payments"):
+        if str(msg.get("tool_name", "")).strip().lower() not in ("image_gen", "visualize", "termux", "browser", "payments"):
             continue
         if str(msg.get("content", "")).strip().lower().startswith("error:"):
             continue
