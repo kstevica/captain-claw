@@ -48,6 +48,7 @@ class NervousSystemManager:
             self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db: aiosqlite.Connection | None = None
+        self._columns: list[str] = []
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -150,6 +151,11 @@ class NervousSystemManager:
             pass  # Column already exists.
 
         await self._db.commit()
+
+        # Column names in this DB's order: the source_trigger migration sits
+        # above the older maturation one, so DBs made before it hold those
+        # columns in another order than new ones — rows are read by name.
+        self._columns = [r[1] for r in await self._db.execute_fetchall("PRAGMA table_info(intuitions)")]
 
     async def close(self) -> None:
         if self._db:
@@ -788,32 +794,18 @@ class NervousSystemManager:
 
     # ── internal ─────────────────────────────────────────────────────
 
-    @staticmethod
-    def _row_to_dict(row: Any) -> dict[str, Any]:
-        """Convert an aiosqlite Row to a plain dict."""
-        cols = [
-            "id", "content", "thread_type", "source_layers", "source_ids",
-            "source_session", "confidence", "importance", "access_count",
-            "last_accessed", "validated", "created_at", "updated_at",
-            "decayed_at", "tags",
-            # Musical cognition columns (schema migrations).
-            "resolution_state", "resolved_from_id",
-            "maturation_state", "matured_at", "dream_cycles_seen",
-            "source_trigger",
-            # Process of Thoughts provenance.
-            "source_message_id",
-        ]
+    def _row_to_dict(self, row: Any) -> dict[str, Any]:
+        """Convert a ``SELECT *`` row to a plain dict, by this DB's column names."""
+        cols = self._columns
         d: dict[str, Any] = {}
-        for i, col in enumerate(cols):
-            if i < len(row):
-                val = row[i]
-                # Parse JSON lists.
-                if col in ("source_layers", "source_ids") and isinstance(val, str):
-                    try:
-                        val = json.loads(val)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                d[col] = val
+        for col, val in zip(cols, row):
+            # Parse JSON lists.
+            if col in ("source_layers", "source_ids") and isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            d[col] = val
         # rank column may be appended by FTS joins.
         if len(row) > len(cols):
             d["rank"] = row[len(cols)]
