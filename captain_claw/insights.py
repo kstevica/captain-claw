@@ -348,6 +348,7 @@ class InsightsManager:
         if not supersedes_id:
             twin = await self.find_exact(content)
             if twin:
+                await self._fill_source(twin, source_file, source_section)
                 log.debug("Insight deduped as exact repeat", id=twin["id"])
                 return None
 
@@ -355,6 +356,7 @@ class InsightsManager:
         if not supersedes_id:
             similar = await self.find_similar(content, limit=1)
             if similar:
+                await self._fill_source(similar[0], source_file, source_section)
                 log.debug("Insight deduped via FTS similarity", score=similar[0].get("rank"))
                 return None
 
@@ -567,6 +569,17 @@ class InsightsManager:
             "SELECT * FROM insights WHERE cc_norm(content) = ? LIMIT 1", (norm,),
         )
         return self._row_to_dict(rows[0]) if rows else None
+
+    async def _fill_source(
+        self, stored: dict[str, Any], source_file: str | None, source_section: str | None,
+    ) -> None:
+        """A deduped repeat that knows the file *stored* lacks gives it that
+        file and section; a file the stored insight already has stays."""
+        source_file = _source_text(source_file, 500)
+        if source_file and not stored.get("source_file"):
+            await self.update(stored["id"], source_file=source_file,
+                              source_section=_source_text(source_section, 200))
+            log.debug("Insight source filled from a repeat", id=stored["id"])
 
     async def find_by_entity_key(self, entity_key: str) -> dict[str, Any] | None:
         """Exact match on entity_key."""

@@ -10,6 +10,8 @@ Every test uses a tmp DB (nothing here may reach ~/.captain-claw).
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 WAREHOUSE = "The warehouse closes at 15:00 on Fridays."
@@ -138,3 +140,47 @@ async def test_import_stages_a_reworded_decision_for_review(insights):
     assert stats["staged"] == 1 and stats["stored"] == 0
     [pending] = await insights.list_pending()
     assert pending["conflict_reason"] == "fts similarity"
+
+
+# ── a repeat that knows where the fact came from ─────────────────────
+
+@pytest.mark.asyncio
+async def test_a_repeat_fills_in_the_source_the_stored_fact_lacks(insights):
+    first = await insights.add(content=WAREHOUSE, category="fact")
+    assert await insights.add(content=WAREHOUSE, category="fact",
+                              source_file="opening-hours.pdf", source_section="page 2") is None
+    stored = await insights.get(first)
+    assert (stored["source_file"], stored["source_section"]) == ("opening-hours.pdf", "page 2")
+
+
+@pytest.mark.asyncio
+async def test_a_reworded_repeat_fills_in_the_source_too(insights):
+    first = await insights.add(content="Warehouse closes at 15:00 on Fridays!", category="fact")
+    assert await insights.add(content=WAREHOUSE, category="fact", source_file="opening-hours.pdf") is None
+    stored = await insights.get(first)
+    assert (stored["source_file"], stored["source_section"]) == ("opening-hours.pdf", None)
+
+
+@pytest.mark.asyncio
+async def test_a_source_the_stored_fact_has_is_kept(insights):
+    first = await insights.add(content=WAREHOUSE, category="fact",
+                               source_file="opening-hours.pdf", source_section="page 2")
+    assert await insights.add(content=WAREHOUSE, category="fact",
+                              source_file="old-notes.docx", source_section="intro") is None
+    stored = await insights.get(first)
+    assert (stored["source_file"], stored["source_section"]) == ("opening-hours.pdf", "page 2")
+
+
+@pytest.mark.asyncio
+async def test_setup_facts_left_while_off_fill_in_a_live_copy(insights, tmp_path):
+    from captain_claw.insights import import_pending
+
+    first = await insights.add(content=WAREHOUSE, category="fact")     # arrived live
+    waiting = tmp_path / "pending-insights.json"
+    waiting.write_text(json.dumps([
+        {"content": WAREHOUSE, "category": "fact", "source_file": "handbook.docx", "source_section": "Hours"},
+    ]))
+    assert await import_pending(insights, waiting) == 0
+    assert (await insights.get(first))["source_file"] == "handbook.docx"
+    assert await insights.count() == 9
+
