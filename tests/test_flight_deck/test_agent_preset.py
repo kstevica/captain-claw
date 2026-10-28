@@ -113,6 +113,7 @@ async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("FD_SPAWN_SETTLE_S", "0")
     monkeypatch.delenv("FD_LOCKDOWN", raising=False)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "fd-env-key")
+    monkeypatch.setenv("FD_SETUP_TOKENS_PER_MIN", "0")       # unpaced; the pacing tests set their own
 
     def _no_docker():
         raise RuntimeError("docker unavailable in tests")
@@ -388,8 +389,55 @@ def test_instructions_alone_are_one_step_and_too_much_is_not_read(monkeypatch):
 def test_a_step_is_sized_from_the_models_window():
     assert ap.step_tokens({"provider": "ollama", "input_ctx": 32768}) == 32768 // 2 - ap._PROMPT_TOKENS
     assert ap.step_tokens({"provider": "ollama"}) == 32768 // 2 - ap._PROMPT_TOKENS
-    assert ap.step_tokens({"provider": "anthropic", "input_ctx": 1_000_000}) == 100_000
     assert ap.step_tokens({"provider": "ollama", "input_ctx": 4096}) == 4000
+    # However big the window, a call stays small: 16k of material, under ~20k with its prompt.
+    assert ap.step_tokens({"provider": "anthropic", "input_ctx": 1_000_000}) == 16_000
+    assert ap.step_tokens({"provider": "anthropic"}) == 16_000
+
+
+def test_every_call_of_a_long_read_stays_under_20k_tokens():
+    big = _doc("manual.md", _pdf_text(120))                 # ~240k characters: many steps
+    step_tok = ap.step_tokens({"provider": "anthropic", "input_ctx": 1_000_000})
+    steps, _ = ap.plan_steps("Be brief. " * 200, [big], step_tok)
+    assert len(steps) > 3
+    prompts = [ap.step_prompt(dict(_ARCH), "Be brief. " * 200, s, n, len(steps)) for n, s in enumerate(steps, 1)]
+    system = ap._PROMPT_FILE.read_text(encoding="utf-8")
+    assert max(len(system) + len(p) for p in prompts) // pdocs.CHARS_PER_TOKEN <= 20_000
+
+
+def test_a_read_is_paced_unless_its_model_runs_here(monkeypatch):
+    monkeypatch.delenv("FD_SETUP_TOKENS_PER_MIN", raising=False)
+    assert ap.pace_tpm({"provider": "anthropic", "model": "claude-haiku-4-5"}) == ap._PACE_TPM
+    assert ap.pace_tpm({"provider": "ollama", "model": "gemma4:31b-cloud"}) == ap._PACE_TPM
+    assert ap.pace_tpm({"provider": "ollama", "model": "glm-5:cloud"}) == ap._PACE_TPM
+    # … through the local daemon, as Ollama's cloud models are called:
+    assert ap.pace_tpm({"provider": "ollama", "model": "gemma4:31b-cloud",
+                        "base_url": "http://localhost:11434"}) == ap._PACE_TPM
+    assert ap.pace_tpm({"provider": "ollama", "model": "qwen3:8b"}) == 0              # local Ollama
+    assert ap.pace_tpm({"provider": "openai", "model": "m", "base_url": "http://localhost:1234/v1"}) == 0
+    monkeypatch.setenv("FD_SETUP_TOKENS_PER_MIN", "10000")
+    assert ap.pace_tpm({"provider": "anthropic", "model": "m"}) == 10_000
+    monkeypatch.setenv("FD_SETUP_TOKENS_PER_MIN", "0")
+    assert ap.pace_tpm({"provider": "anthropic", "model": "m"}) == 0
+
+
+async def test_calls_are_spaced_by_the_pace_and_the_wait_shows(monkeypatch):
+    monkeypatch.setenv("FD_SETUP_TOKENS_PER_MIN", "60000")      # 1,000 tokens a second
+    monkeypatch.setattr(ap, "_PACE_GAP", 0.05)
+    job = ap.ReadJob(id="j", owner="o")
+    cloud = {"provider": "anthropic", "model": "m"}
+    start = time.monotonic()
+    await ap._pace(cloud, job, 300)                              # the first goes at once …
+    assert time.monotonic() - start < 0.1 and job.waiting is None
+    second = asyncio.create_task(ap._pace(cloud, job, 300))     # … the next 0.3 s after it
+    await asyncio.sleep(0.05)
+    assert job.waiting and job.waiting["why"] == "pacing" and job.waiting["until"] > time.time()
+    await second
+    assert time.monotonic() - start >= 0.25 and job.waiting is None
+    local = {"provider": "ollama", "model": "qwen3:8b"}
+    start = time.monotonic()
+    await ap._pace(local, job, 10**6)                            # a local model never waits
+    assert time.monotonic() - start < 0.05
 
 
 # ── Reading ───────────────────────────────────────────────────────────
@@ -571,7 +619,8 @@ async def test_the_agent_being_set_up_frames_the_read_and_must_be_ones_own(deck,
 async def test_the_reader_says_its_model_and_step(deck):
     async with _client() as c:
         r = await c.get("/fd/agent-preset/reader", headers=_auth(BOB))
-    assert r.json() == {"model": "test-model", "step_tokens": ap.step_tokens(_TIER), "via": "tiers", "note": ""}
+    assert r.json() == {"model": "test-model", "step_tokens": ap.step_tokens(_TIER), "pace_tpm": 0,
+                        "via": "tiers", "note": ""}
 
 
 # ── The agent's own model reads ───────────────────────────────────────
@@ -623,7 +672,7 @@ async def test_the_agent_reads_with_its_own_model(deck, monkeypatch):
     calls = _agent_model(monkeypatch, json.dumps(_REPLY))
     async with _client() as c:
         r = await c.get("/fd/agent-preset/reader", params={"agent": slug}, headers=_auth(BOB))
-    assert r.json() == {"model": "claude-haiku-4-5", "via": "agent", "note": "",
+    assert r.json() == {"model": "claude-haiku-4-5", "via": "agent", "note": "", "pace_tpm": 0,
                         "step_tokens": ap.step_tokens({"provider": "anthropic", "input_ctx": 200000})}
 
     job = await _prepare(BOB, [("p.txt", b"Refunds within 14 days.")], archetype="", agent=slug)
@@ -642,7 +691,7 @@ def test_an_agents_reader_follows_its_config(deck, tmp_path, monkeypatch):
     cfg.parent.mkdir(parents=True)
     cfg.write_text("model:\n  provider: ollama\n  model: qwen3:8b\ncontext:\n  max_tokens: 160000\n")
     local = ap.agent_reader("a", {"name": "A", "key_source": "byok"})
-    assert local == {"agent": "a", "name": "A", "provider": "ollama", "model": "qwen3:8b",
+    assert local == {"agent": "a", "name": "A", "provider": "ollama", "model": "qwen3:8b", "base_url": "",
                      "input_ctx": 32768, "byok": True}   # a local Ollama window is clamped
     cfg.write_text("model:\n  provider: ollama\n  model: glm-5:cloud\n")
     assert ap.agent_reader("a", {})["input_ctx"] == 0      # unknown: step_tokens' default
@@ -1102,9 +1151,11 @@ def test_a_setup_from_before_records_is_read_back_from_its_files(deck, tmp_path)
     (skills / "my-own").mkdir()
     (skills / "my-own" / "SKILL.md").write_text("---\nname: my-own\n---\nNot from a setup.")
     back = ap.earlier_setup(agent, ws)
-    assert [r["text"] for r in back["rules"]] == ["Old rule."] and back["escalation"] == [{"text": "Ask first."}]
+    assert [r["text"] for r in back["rules"]] == ["Old rule."] and back["escalation"] == [
+        {"text": "Ask first.", "source": {"doc": "instructions", "section": ""}}]
     assert back["templates"] == [{"name": "Offer", "body": "Dear [name],\n\nOffer."}]
-    assert back["glossary"] == [{"term": "RMA", "meaning": "a return"}] and back["skills"] == ["refund"]
+    assert back["glossary"] == [{"term": "RMA", "meaning": "a return",
+                                 "source": {"doc": "instructions", "section": ""}}] and back["skills"] == ["refund"]
     manual = next(e for e in back["knowledge"] if e["file"] == "manual.md")
     assert manual["parts"] == 2 and manual["files"] == ["manual.md", "manual-part-01.md", "manual-part-02.md"]
 
@@ -1207,3 +1258,72 @@ async def test_facts_wait_for_the_agent_and_never_raise(monkeypatch):
 
     monkeypatch.setattr(ap, "_wait_ready", boom)
     assert await ap.give_facts("a", lambda: 24500, "tok", facts) == 0
+
+
+# ── Where things came from ────────────────────────────────────────────
+
+
+def test_rules_and_terms_say_which_document_they_came_from(tmp_path):
+    preset = ap.normalise({
+        "rules": [{"text": "Refunds within 14 days.", "source": {"doc": "policy.pdf", "section": "Refunds"}},
+                  {"text": "Be brief.", "source": {"doc": "instructions"}}],
+        "escalation": [{"text": "Ask before discounts over 10%.", "source": {"doc": "prices.xlsx"}}],
+        "glossary": [{"term": "RMA", "meaning": "a return", "source": {"doc": "policy.pdf", "section": "p. 3"}}],
+    })
+    folder, skills = tmp_path / "knowledge", tmp_path / "skills"
+    ap.write_knowledge(folder, preset, [])
+    rules = (folder / "owner-rules.md").read_text()
+    assert "- Refunds within 14 days. (from policy.pdf — Refunds)" in rules
+    assert "- Be brief.\n" in rules                               # the owner's own instructions: no "from"
+    assert "- Ask before discounts over 10%. (from prices.xlsx)" in rules
+    assert "- **RMA** — a return (from policy.pdf — p. 3)" in (folder / "glossary.md").read_text()
+
+    # An agent set up before setups were recorded is read back from these files, sources and all.
+    back = ap._record_from_files(skills, folder)
+    assert back["rules"] == [{"text": "Refunds within 14 days.", "source": {"doc": "policy.pdf", "section": "Refunds"}},
+                             {"text": "Be brief.", "source": {"doc": "instructions", "section": ""}}]
+    assert back["escalation"][0]["source"] == {"doc": "prices.xlsx", "section": ""}
+    assert back["glossary"] == [{"term": "RMA", "meaning": "a return",
+                                 "source": {"doc": "policy.pdf", "section": "p. 3"}}]
+
+
+def test_a_fact_keeps_its_document_as_the_agents_insight_does():
+    assert ap.fact_source({"source": {"doc": "price-list.pdf", "section": "page 4"}}) == {
+        "source_file": "price-list.pdf", "source_section": "page 4"}
+    assert ap.fact_source({"source": {"doc": "price-list.pdf", "section": ""}}) == {"source_file": "price-list.pdf"}
+    assert ap.fact_source({"source": {"doc": "instructions", "section": "x"}}) == {}
+    assert ap.fact_source({}) == {}
+
+
+async def test_facts_reach_the_agent_with_their_document(monkeypatch):
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(201, json={"id": "x"})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    facts = [{"content": "Shipping is free over 50 EUR.", "category": "fact", "importance": 7,
+              "source": {"doc": "price-list.pdf", "section": "page 4"}},
+             {"content": "The owner is Ana.", "category": "fact", "importance": 5, "source": {"doc": "instructions"}}]
+    assert await ap._post_facts(24500, "tok", facts) == 2
+    assert seen[0]["source_file"] == "price-list.pdf" and seen[0]["source_section"] == "page 4"
+    assert "source_file" not in seen[1]
+
+
+async def test_facts_left_for_an_agent_thats_off_keep_their_document(tmp_path):
+    from captain_claw import insights
+    facts = [{"content": "Shipping is free over 50 EUR.", "category": "fact", "importance": 7,
+              "source": {"doc": "price-list.pdf", "section": "page 4"}}]
+    ap.leave_facts(tmp_path, facts)
+    waiting = json.loads(ap.pending_path(tmp_path).read_text())
+    assert waiting[0]["source_file"] == "price-list.pdf"
+    mgr = insights.InsightsManager(tmp_path / "insights.db")
+    try:
+        assert await insights.import_pending(mgr, ap.pending_path(tmp_path)) == 1
+        got = (await mgr.list_recent(limit=1))[0]
+        assert got["source_file"] == "price-list.pdf" and got["source_section"] == "page 4"
+        assert got["source_tool"] == "owner_setup"
+    finally:
+        await mgr.close()

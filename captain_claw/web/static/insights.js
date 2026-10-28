@@ -91,6 +91,7 @@
             var created = it.created_at ? formatDate(it.created_at) : '';
             var meta = [];
             if (source) meta.push(source);
+            if (it.source_file) meta.push('from ' + escHtml(it.source_file + (it.source_section ? ' \u2014 ' + it.source_section : '')));
             if (created) meta.push(created);
             if (it.entity_key) meta.push(escHtml(it.entity_key));
 
@@ -132,7 +133,8 @@
                 detailImportance.value = item.importance || 5;
                 detailEntityKey.value = item.entity_key || '';
                 detailTags.value = item.tags || '';
-                detailSource.textContent = (item.source_tool || 'auto') + (item.source_session ? ' / session ' + item.source_session.substring(0, 8) : '');
+                detailSource.textContent = (item.source_tool || 'auto') + (item.source_session ? ' / session ' + item.source_session.substring(0, 8) : '')
+                    + (item.source_file ? ' \u00b7 from ' + item.source_file + (item.source_section ? ' \u2014 ' + item.source_section : '') : '');
                 detailCreated.textContent = item.created_at || '';
                 overlay.classList.add('visible');
             });
