@@ -85,6 +85,9 @@ async def create_insight(server: WebServer, request: web.Request) -> web.Respons
         source_tool="web_ui",
         tags=body.get("tags") or None,
         expires_at=body.get("expires_at") or None,
+        # Where it came from: Flight Deck's setup gives each fact its document.
+        source_file=body.get("source_file") or None,
+        source_section=body.get("source_section") or None,
     )
     if insight_id:
         item = await mgr.get(insight_id)

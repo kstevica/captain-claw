@@ -776,7 +776,10 @@ function UsageNote({ estimate, reader, name, quota, knowledgeOnly }: {
 }) {
   const { steps, tokens } = estimate
   const whose = reader?.via === 'agent' ? `, ${name}'s own model` : ''
-  const how = reader?.model ? ` in ${plural(steps, 'step')} by ${reader.model}${whose}` : ''
+  // A paced read takes at least its tokens over the pace — say so when that's minutes.
+  const minutes = reader?.pace_tpm ? Math.ceil(tokens / reader.pace_tpm) : 0
+  const slow = minutes >= 2 ? `, about ${minutes} minutes or more — paced to stay under the provider's limits` : ''
+  const how = reader?.model ? ` in ${plural(steps, 'step')} by ${reader.model}${whose}${slow}` : ''
   let body: ReactNode
   if (!tokens) {
     body = (
@@ -833,9 +836,11 @@ function ReadingView({ job, docs, name, now, elapsed, onStop }: {
   onStop: () => void
 }) {
   const wait = job?.waiting
-  const waitLine = !wait ? ''
+  const left = wait && 'until' in wait ? Math.max(0, Math.ceil(wait.until - now / 1000)) : 0
+  const waitLine = !wait || (wait.why === 'pacing' && left < 3) ? ''
     : wait.why === 'waking' ? `Waking ${wait.name}…`
-      : `${wait.model} is busy (a rate limit, or overloaded) — trying again in ${Math.max(0, Math.ceil(wait.until - now / 1000))} s`
+      : wait.why === 'pacing' ? `Taking it slowly so the provider's limits aren't hit — next part in ${left} s`
+        : `${wait.model} is busy (a rate limit, or overloaded) — trying again in ${left} s`
   const by = job?.model ? `By ${job.model}${job.via === 'agent' ? `, ${name}'s own model` : ''}` : ''
   const merging = job?.phase === 'merging'
   const steps = job?.steps || 0
@@ -868,7 +873,8 @@ function ReadingView({ job, docs, name, now, elapsed, onStop }: {
       </p>
       {by && <p className="mt-1 text-[11px] text-zinc-500">{by}</p>}
       {waitLine && (
-        <p className="mt-2 max-w-sm text-[11px] text-amber-600 dark:text-amber-400" role="status">{waitLine}</p>
+        <p className={`mt-2 max-w-sm text-[11px] ${wait?.why === 'busy' ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-500'}`}
+          role="status">{waitLine}</p>
       )}
       {steps > 3 && <p className="mt-1 text-[11px] text-zinc-600">Long documents take a while — keep this open until it is done.</p>}
       {(reading.length > 0 || kept.length > 0) && (

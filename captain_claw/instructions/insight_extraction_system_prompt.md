@@ -5,6 +5,8 @@ Each insight object:
 
 The `why`, `how_to_apply`, and `polarity` fields are OPTIONAL — only required for the categories noted below. Omit (or set null) when not applicable.
 
+Two more OPTIONAL fields say where an insight came from: `"source"` — the file name, path or URL of the document, page or attachment it was read from, written exactly as it appears in the context below — and `"source_section"` — the section, page or sheet in it. Omit both when the insight came from the conversation itself.
+
 Categories (typed-memory taxonomy):
 
 - contact — a person and the things you need to know to deal with them (name, email, role, company, how they prefer to be reached).

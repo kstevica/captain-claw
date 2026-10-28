@@ -1315,6 +1315,7 @@ class AgentContextMixin:
         items = getattr(self, "_insights_context_cache", None)
         if not items:
             return ""
+        from captain_claw.insights import source_note
         lines = ["Persistent insights from memory:"]
         for i in items:
             imp = i.get("importance", 5)
@@ -1326,7 +1327,7 @@ class AgentContextMixin:
             polarity_tag = ""
             if cat == "feedback" and polarity in ("positive", "negative"):
                 polarity_tag = f"/{polarity[:3]}"  # "/pos" or "/neg"
-            lines.append(f"- [{cat}{polarity_tag}] (imp:{imp}) {content}")
+            lines.append(f"- [{cat}{polarity_tag}] (imp:{imp}) {content}{source_note(i)}")
             # Render Why / How to apply on their own lines so the agent
             # can judge edge cases rather than blindly applying the rule.
             why = (i.get("why") or "").strip()
@@ -1411,6 +1412,7 @@ class AgentContextMixin:
             "- Memory captures what was true when it was written; some entries go stale. Before recommending something a memory names — a person, a deadline, a file or document, an external system, a decision — sanity-check that it still applies.\n"
             "- Quick checks: for a contact, has the user mentioned them more recently? For a deadline, is the date still in the future? For a `reference` to an external system, does that system still exist or have you been told it moved? For a stored fact, does anything in this conversation contradict it?\n"
             "- If a memory conflicts with what you're seeing now, trust what you're seeing and update or remove the stale memory rather than acting on it.\n"
+            "- An insight marked \"(from <file>)\" was read from that file: say so when you use it, and re-read the file when the exact figure, wording or date matters.\n"
             "- Distinguish historical questions (\"what did we decide about X?\") from current-state questions (\"what's the status of X today?\"). Memory is fine for the first; for the second, prefer fresh information."
         )
 

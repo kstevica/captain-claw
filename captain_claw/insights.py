@@ -79,6 +79,32 @@ def _fact_marks(text: str) -> tuple[tuple[str, ...], frozenset[str]]:
     return tuple(re.findall(r"\d+", folded)), negations
 
 
+def _source_text(value: Any, limit: int) -> str | None:
+    """A source field as stored: one line, capped; None when empty."""
+    text = " ".join(str(value or "").split())[:limit]
+    return text or None
+
+
+def seen_source(source: Any, *texts: str) -> str | None:
+    """The file, path or URL an extracted insight names as its source — only
+    one the conversation it was read from shows: a model mustn't invent
+    where a fact came from."""
+    text = _source_text(source, 500)
+    if not text or text.lower() in ("null", "none", "n/a"):
+        return None
+    shown = "\n".join(t for t in texts if t).lower()
+    return text if text.lower() in shown else None
+
+
+def source_note(item: dict[str, Any]) -> str:
+    """" (from price-list.pdf — page 4)" for an insight that knows where it
+    came from, else ""."""
+    file, section = item.get("source_file") or "", item.get("source_section") or ""
+    if not file:
+        return ""
+    return f" (from {file} — {section})" if section else f" (from {file})"
+
+
 # ── InsightsManager ──────────────────────────────────────────────────
 
 class InsightsManager:
@@ -184,6 +210,17 @@ class InsightsManager:
             except Exception:
                 pass  # column already exists
 
+        # Migration: where an insight came from — the file (a document's
+        # name, a path, a URL) and the section or page in it — so the agent
+        # can cite it and go back to it when the details matter.
+        for col in ("source_file", "source_section"):
+            try:
+                await self._db.execute(
+                    f"ALTER TABLE insights ADD COLUMN {col} TEXT DEFAULT NULL"
+                )
+            except Exception:
+                pass  # column already exists
+
         # Migration: index why / how_to_apply too — a rule's trigger ("when
         # processing the inbox…") lives there, not in its content.
         await self._index_rule_context()
@@ -276,8 +313,12 @@ class InsightsManager:
         why: str | None = None,
         how_to_apply: str | None = None,
         polarity: str | None = None,
+        source_file: str | None = None,
+        source_section: str | None = None,
     ) -> str | None:
-        """Insert a new insight.  Returns the insight ID, or None if deduped."""
+        """Insert a new insight.  Returns the insight ID, or None if deduped.
+        ``source_file`` / ``source_section``: the file it came from (a
+        document's name, a path, a URL) and where in it."""
         await self._ensure_db()
         assert self._db is not None
 
@@ -325,12 +366,13 @@ class InsightsManager:
                (id, content, category, entity_key, importance, source_tool,
                 source_session, created_at, updated_at, expires_at, tags,
                 source_message_id, supersedes_id, project_id,
-                why, how_to_apply, polarity)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                why, how_to_apply, polarity, source_file, source_section)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (insight_id, content, category, entity_key, importance,
              source_tool, source_session, now, now, expires_at, tags,
              source_message_id, supersedes_id, project_id or "",
-             why, how_to_apply, polarity),
+             why, how_to_apply, polarity,
+             _source_text(source_file, 500), _source_text(source_section, 200)),
         )
         await self._db.commit()
         log.debug("Insight stored", id=insight_id, category=category,
@@ -428,7 +470,7 @@ class InsightsManager:
 
         allowed = {
             "content", "category", "importance", "tags", "entity_key", "expires_at",
-            "why", "how_to_apply", "polarity",
+            "why", "how_to_apply", "polarity", "source_file", "source_section",
         }
         updates = {k: v for k, v in fields.items() if k in allowed and v is not None}
         if not updates:
@@ -869,6 +911,8 @@ class InsightsManager:
                 source_session=new_session,
                 tags=tags,
                 expires_at=expires_at,
+                source_file=item.get("source_file") or None,
+                source_section=item.get("source_section") or None,
             )
             if insight_id:
                 stats["stored"] += 1
@@ -1092,6 +1136,7 @@ class InsightsManager:
             "source_tool", "source_session", "created_at", "updated_at",
             "expires_at", "tags", "source_message_id", "supersedes_id",
             "project_id", "why", "how_to_apply", "polarity",
+            "source_file", "source_section",
         ]
         d: dict[str, Any] = {}
         for i, col in enumerate(cols):
@@ -1138,7 +1183,9 @@ async def import_pending(manager: InsightsManager | None = None, path: Path | No
         try:
             if await mgr.add(content=content, category=str(item.get("category") or "fact"),
                              importance=int(item.get("importance") or 5), source_tool="owner_setup",
-                             tags=str(item.get("tags") or "") or None):
+                             tags=str(item.get("tags") or "") or None,
+                             source_file=item.get("source_file") or None,
+                             source_section=item.get("source_section") or None):
                 added += 1
         except Exception as exc:
             log.warning("Pending insight not added", error=str(exc))
@@ -1277,6 +1324,7 @@ async def extract_insights(
     for item in new_insights[:5]:  # Cap at 5.
         if not isinstance(item, dict) or not item.get("content"):
             continue
+        source_file = seen_source(item.get("source"), recent_text, tool_context or "")
         insight_id = await mgr.add(
             content=str(item["content"]).strip(),
             category=str(item.get("category", "fact")).strip(),
@@ -1290,6 +1338,8 @@ async def extract_insights(
             why=(item.get("why") or None),
             how_to_apply=(item.get("how_to_apply") or None),
             polarity=(item.get("polarity") or None),
+            source_file=source_file,
+            source_section=_source_text(item.get("source_section"), 200) if source_file else None,
         )
         if insight_id:
             stored.append(item)

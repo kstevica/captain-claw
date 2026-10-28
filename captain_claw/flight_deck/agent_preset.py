@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import os
 import re
 import secrets
 import shutil
@@ -87,7 +88,7 @@ LIMITS = {"rules": 30, "intents": 12, "facts": 40, "escalation": 15, "templates"
 _MAX_FILES = 12
 _MAX_INSTRUCTIONS = 20000
 _MAX_READ_CHARS = 4_000_000            # the most one setup reads (~1M tokens); all of it is kept anyway
-_STEP_MIN, _STEP_MAX = 4000, 100_000   # tokens of material in one step (step_tokens)
+_STEP_MIN, _STEP_MAX = 4000, 16_000    # tokens of material in one step: with its prompt, a call stays under ~20k
 _PROMPT_TOKENS = 3000                  # the prompt around a step's material
 _PART_BYTES = 200_000                  # a knowledge file: semantic memory skips files over 256 KB
 _JOB_KEEP = 3600                       # a finished read's result waits this long
@@ -98,6 +99,8 @@ _CALL_TIMEOUT = 300.0
 _WAITS = (15, 30, 60, 60, 60, 60)      # seconds between tries while the model's server says "not now" (~5 min)
 _WAIT_CAP = 120.0                      # the longest one retry-after is honoured for
 _AGENT_READY_S = 90.0                  # an agent just created, or being woken, starting up
+_PACE_TPM = 40_000                     # a read's tokens a minute, at most (FD_SETUP_TOKENS_PER_MIN; 0: unpaced)
+_PACE_GAP = 3.0                        # seconds between two calls' starts, at least
 _RETRY_NUDGE = "Reply now with the JSON object only: no thinking aloud, no prose."
 _TTL = 24 * 3600                       # a prepared preset nobody created waits this long
 _BLOCK_CAP = 5000                      # the rules block in the agent's instructions
@@ -425,7 +428,8 @@ def prune(now: float | None = None) -> int:
 
 def step_tokens(tier: dict) -> int:
     """How much material one step gives the model: half its context window,
-    less the prompt around it, within 4k–100k tokens. A tier that doesn't
+    less the prompt around it, within 4k–16k tokens — small calls, which a
+    provider's per-minute caps take in their stride. A tier that doesn't
     say its window is taken at 32k (Ollama) or 128k."""
     ctx = int(tier.get("input_ctx") or 0) or (32768 if tier.get("provider") == "ollama" else 128000)
     return max(_STEP_MIN, min(_STEP_MAX, ctx // 2 - _PROMPT_TOKENS))
@@ -579,8 +583,9 @@ class ReadJob:
     result: dict | None = None
     model: str = ""                 # who reads: the agent's own model, or the owner's
     via: str = ""                   # agent | tiers
-    waiting: dict | None = None     # {"why": waking | busy, ...} while it waits
+    waiting: dict | None = None     # {"why": waking | busy | pacing, ...} while it waits
     notes: list[str] = field(default_factory=list)  # found while reading, for the review
+    next_call: float = 0.0          # when the next model call may start (_pace)
     task: asyncio.Task | None = None
 
     def view(self) -> dict:
@@ -653,7 +658,40 @@ def agent_reader(slug: str, entry: dict) -> dict | None:
     if provider == "ollama" and not model.endswith(":cloud"):
         ctx = min(ctx or 32768, 32768)  # where the agent's local Ollama window is clamped
     return {"agent": slug, "name": str(entry.get("name") or slug), "provider": provider, "model": model,
-            "input_ctx": ctx, "byok": entry.get("key_source") == "byok"}
+            "base_url": str(model_cfg.get("base_url") or ""), "input_ctx": ctx,
+            "byok": entry.get("key_source") == "byok"}
+
+
+def pace_tpm(reader: dict) -> int:
+    """The tokens a minute a read with *reader* keeps to — so a provider's
+    per-minute and hourly caps stay far off — or 0: unpaced (a model on
+    this machine has no provider cap to keep off)."""
+    try:
+        tpm = int(os.getenv("FD_SETUP_TOKENS_PER_MIN") or _PACE_TPM)
+    except ValueError:
+        tpm = _PACE_TPM
+    model, base = str(reader.get("model") or ""), str(reader.get("base_url") or "")
+    # Ollama's cloud models go through the local daemon, to its hosted (and capped) servers.
+    hosted = model.endswith((":cloud", "-cloud"))
+    local = not hosted and (reader.get("provider") == "ollama" or bool(
+        re.match(r"https?://(localhost|127\.0\.0\.1|\[::1\])[:/]", base)))
+    return 0 if local else max(0, tpm)
+
+
+async def _pace(reader: dict, job: ReadJob, tokens: int) -> None:
+    """Wait for this call's turn: calls start no faster than the read's
+    tokens a minute allow (``pace_tpm``), and never closer than 3 s."""
+    tpm = pace_tpm(reader)
+    if not tpm:
+        return
+    pause = job.next_call - time.time()
+    if pause > 0:
+        job.waiting = {"why": "pacing", "until": job.next_call}
+        try:
+            await asyncio.sleep(pause)
+        finally:
+            job.waiting = None
+    job.next_call = time.time() + max(_PACE_GAP, tokens * 60.0 / tpm)
 
 
 async def choose_reader(owner_id: str, slug: str) -> tuple[dict | None, str]:
@@ -765,7 +803,9 @@ async def _call(reader: dict, system: str, prompt: str, owner_id: str, job: Read
     it asks, else 15 s, 30 s, then a minute at a time, some 5 minutes in
     all; an agent that stops answering hands over to the owner's model."""
     waits = iter(_WAITS)
+    tokens_in = (len(system) + len(prompt)) // pdocs.CHARS_PER_TOKEN
     while True:
+        await _pace(reader, job, tokens_in + min(max_tokens, 2000))  # the reply, as one usually runs
         try:
             if reader.get("agent"):
                 content, tokens = await _agent_complete(reader, system, prompt, owner_id, max_tokens)
@@ -986,11 +1026,12 @@ def _owner(user: dict) -> str:
 async def reader(agent: str = "", user: dict = Depends(get_managed_user)) -> dict:
     """The model that would read the material — the agent's own, else the
     owner's — and how much of it one step takes: what the dialog estimates
-    steps and tokens from. ``note``: why it isn't the agent's model."""
+    steps and tokens from (and, with ``pace_tpm``, how long it takes).
+    ``note``: why it isn't the agent's model."""
     who, note = await choose_reader(_owner(user), agent)
     if not who:
-        return {"model": "", "step_tokens": 0, "via": "", "note": note}
-    return {"model": str(who.get("model") or ""), "step_tokens": step_tokens(who),
+        return {"model": "", "step_tokens": 0, "pace_tpm": 0, "via": "", "note": note}
+    return {"model": str(who.get("model") or ""), "step_tokens": step_tokens(who), "pace_tpm": pace_tpm(who),
             "via": "agent" if who.get("agent") else "tiers", "note": note}
 
 
@@ -1149,6 +1190,34 @@ def _cite(source: dict) -> str:
     return f"{doc} — {section}" if doc and section else doc or section
 
 
+_FROM = re.compile(r"^(?P<text>.+?) \(from (?P<doc>[^()]+?)(?: — (?P<section>[^()]+))?\)$")
+
+
+def _from(source: dict) -> str:
+    """" (from policy.pdf — Refunds)" after an item the owner's document gave;
+    nothing for one from their own instructions."""
+    doc = source.get("doc") or ""
+    return f" (from {_cite(source)})" if doc and doc != "instructions" else ""
+
+
+def _unfrom(line: str) -> tuple[str, dict]:
+    """An item as ``_from`` wrote it: its text, and where it came from."""
+    m = _FROM.match(line)
+    if not m:
+        return line, {"doc": "instructions", "section": ""}
+    return m["text"], {"doc": m["doc"], "section": m["section"] or ""}
+
+
+def fact_source(fact: dict) -> dict:
+    """Where a fact came from, as the agent's insights keep it: the
+    document's file name — none for the owner's own instructions — and the
+    section or page in it."""
+    source = fact.get("source") or {}
+    doc = "" if source.get("doc") in (None, "", "instructions") else str(source["doc"])
+    return {k: v for k, v in (("source_file", doc), ("source_section", doc and str(source.get("section") or "")))
+            if v}
+
+
 def _skill_md(intent: dict) -> str:
     title = intent["name"].replace("-", " ").capitalize()
     lines = ["---", f"name: {intent['name']}",
@@ -1183,9 +1252,9 @@ def _owner_rules_md(preset: dict) -> str:
     lines = ["# Your owner's rules", "",
              "Set up by your owner from their instructions and documents.", ""]
     if preset["rules"]:
-        lines += ["## Rules", *[f"- {r['text']}" for r in preset["rules"]], ""]
+        lines += ["## Rules", *[f"- {r['text']}{_from(r.get('source') or {})}" for r in preset["rules"]], ""]
     if preset["escalation"]:
-        lines += ["## Ask your owner first", *[f"- {r['text']}" for r in preset["escalation"]], ""]
+        lines += ["## Ask your owner first", *[f"- {r['text']}{_from(r.get('source') or {})}" for r in preset["escalation"]], ""]
     for t in preset["templates"]:
         lines += [f"## Template: {t['name']}", "", t["body"], ""]
     return "\n".join(lines)
@@ -1248,7 +1317,8 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dic
           + (f" — {w['parts']} parts" if (w.get("parts") or 1) > 1 else "")
           for w in listed], ""]))
     _write_or_drop(folder / "glossary.md", preset["glossary"] and "\n".join([
-        "# Glossary", "", *[f"- **{g['term']}** — {g['meaning']}" for g in preset["glossary"]], ""]))
+        "# Glossary", "", *[f"- **{g['term']}** — {g['meaning']}{_from(g.get('source') or {})}" for g in preset["glossary"]],
+        ""]))
     _write_or_drop(folder / "owner-rules.md", (preset["rules"] or preset["escalation"] or preset["templates"])
                    and _owner_rules_md(preset))
     return written
@@ -1363,7 +1433,8 @@ def _record_from_files(skills_dir: Path, folder: Path) -> dict:
     the owner — {} when there are none."""
     def bullets(text: str, heading: str) -> list[dict]:
         m = re.search(rf"(?ms)^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", text)
-        return [{"text": ln[2:].strip()} for ln in (m.group(1) if m else "").splitlines() if ln.startswith("- ")]
+        return [dict(zip(("text", "source"), _unfrom(ln[2:].strip())))
+                for ln in (m.group(1) if m else "").splitlines() if ln.startswith("- ")]
 
     record: dict[str, Any] = {}
     try:
@@ -1383,7 +1454,7 @@ def _record_from_files(skills_dir: Path, folder: Path) -> dict:
         glossary = (folder / "glossary.md").read_text(encoding="utf-8") if (folder / "glossary.md").is_file() else ""
         templates = [{"name": m.group(1).strip(), "body": m.group(2).strip()}
                      for m in re.finditer(r"(?ms)^## Template: (.+?)\n\n(.*?)(?=^## |\Z)", rules)]
-        terms = [{"term": m.group(1), "meaning": m.group(2).strip()}
+        terms = [{"term": m.group(1), **dict(zip(("meaning", "source"), _unfrom(m.group(2).strip())))}
                  for m in re.finditer(r"(?m)^- \*\*(.+?)\*\* — (.+)$", glossary)]
         skills = [d.name for d in sorted(skills_dir.iterdir()) if (d / "SKILL.md").is_file()
                   and _SETUP_SKILL.search((d / "SKILL.md").read_text(encoding="utf-8"))] if skills_dir.is_dir() else []
@@ -1487,7 +1558,7 @@ async def _post_facts(port: int, token: str, facts: list[dict]) -> int:
             try:
                 resp = await client.post(f"{base}/api/insights", params=params, json={
                     "content": f["content"], "category": f["category"],
-                    "importance": f["importance"], "tags": _TAG})
+                    "importance": f["importance"], "tags": _TAG, **fact_source(f)})
                 if resp.status_code < 300:
                     given += 1
             except Exception:
@@ -1537,7 +1608,8 @@ def leave_facts(agent_dir: Path, facts: list[dict]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps([*(waiting if isinstance(waiting, list) else []),
                                 *({"content": f["content"], "category": f["category"],
-                                   "importance": f["importance"], "tags": _TAG} for f in facts)],
+                                   "importance": f["importance"], "tags": _TAG, **fact_source(f)}
+                                  for f in facts)],
                                ensure_ascii=False), encoding="utf-8")
 
 

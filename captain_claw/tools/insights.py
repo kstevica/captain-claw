@@ -3,7 +3,7 @@
 from typing import Any
 
 from captain_claw.config import get_config
-from captain_claw.insights import get_insights_manager, get_session_insights_manager
+from captain_claw.insights import get_insights_manager, get_session_insights_manager, source_note
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
@@ -66,6 +66,14 @@ class InsightsTool(Tool):
                 "type": "string",
                 "description": "Comma-separated tags (for 'add'/'update').",
             },
+            "source": {
+                "type": "string",
+                "description": "For 'add': the file name, path or URL the insight was read from, if any.",
+            },
+            "source_section": {
+                "type": "string",
+                "description": "For 'add': the section, page or sheet of that source.",
+            },
             "limit": {
                 "type": "integer",
                 "description": "Max results (for 'search'/'list'). Default 10.",
@@ -85,6 +93,8 @@ class InsightsTool(Tool):
         entity_key: str | None = None,
         tags: str | None = None,
         limit: int | None = None,
+        source: str | None = None,
+        source_section: str | None = None,
         **kwargs: Any,
     ) -> ToolResult:
         session_id = str(kwargs.get("_session_id", "") or "").strip() or None
@@ -98,6 +108,7 @@ class InsightsTool(Tool):
             if action == "add":
                 return await self._add(
                     mgr, content, category, importance, entity_key, tags, session_id,
+                    source, source_section,
                 )
             if action == "update":
                 return await self._update(mgr, insight_id, content, category, importance, tags)
@@ -137,6 +148,8 @@ class InsightsTool(Tool):
         entity_key: str | None,
         tags: str | None,
         session_id: str | None,
+        source: str | None = None,
+        source_section: str | None = None,
     ) -> ToolResult:
         if not content or not content.strip():
             return ToolResult(success=False, error="'content' is required for add.")
@@ -148,6 +161,8 @@ class InsightsTool(Tool):
             source_tool="manual",
             source_session=session_id,
             tags=tags,
+            source_file=source or None,
+            source_section=(source_section or None) if source else None,
         )
         if insight_id:
             return ToolResult(success=True, content=f"Stored insight {insight_id}.")
@@ -198,5 +213,5 @@ def _format_insights(items: list[dict[str, Any]]) -> str:
         imp = i.get("importance", 5)
         cat = i.get("category", "fact")
         tags = f" [{i['tags']}]" if i.get("tags") else ""
-        lines.append(f"• [{cat}] (imp:{imp}) {i['content']}{tags}  id={i['id']}")
+        lines.append(f"• [{cat}] (imp:{imp}) {i['content']}{source_note(i)}{tags}  id={i['id']}")
     return "\n".join(lines)
