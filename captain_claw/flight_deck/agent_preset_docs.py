@@ -23,6 +23,7 @@ import time
 from pathlib import Path
 
 from captain_claw.flight_deck import agent_preset_tables as ptables
+from captain_claw.flight_deck.agent_preset_outline import outline
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -194,6 +195,7 @@ def _staged_dir(root: Path, doc_id: str) -> Path | None:
 def public(meta: dict) -> dict:
     """What the dialog sees of a staged document."""
     out = {k: meta[k] for k in ("id", "name", "origin", "pages", "pages_exact", "chars", "tokens", "truncated")}
+    out["sections"] = int(meta.get("sections") or 0)
     if meta.get("agent"):
         out["agent"] = meta["agent"]
     if meta.get("source"):
@@ -215,6 +217,7 @@ def stage(root: Path, name: str, text: str, origin: str, agent: str = "", raw: b
     (folder / "text.txt").write_text(text, encoding="utf-8")
     meta = {"id": doc_id, "name": name, "origin": origin, "created": time.time(),
             "pages": pages, "pages_exact": exact, "chars": len(text), "tokens": tokens_of(len(text)),
+            "sections": len(outline(text.strip())),
             "truncated": truncated, **({"agent": agent} if agent else {})}
     if raw and ptables.is_spreadsheet(name):
         source = folder / f"source{Path(name).suffix.lower()}"

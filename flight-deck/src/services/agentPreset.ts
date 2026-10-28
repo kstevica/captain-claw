@@ -48,6 +48,8 @@ export interface StagedDoc {
   agent?: string
   /** A spreadsheet: the datastore tables it also gives the agent (one per sheet with data). */
   tables?: number
+  /** Its sections, by its headings (a PDF's pages grouped): a long one gets a section map. */
+  sections?: number
 }
 
 export interface PreparedDoc {
@@ -139,6 +141,8 @@ export interface AppliedPreset {
   knowledge: string[]
   /** Files the long documents were split into, so the agent can search all of them. */
   parts: number
+  /** Sections in the long documents' section maps. */
+  sections?: number
   /** The datastore tables the spreadsheets became (made now, or when the agent is next up). */
   tables?: string[]
   /** What was left out of them (sheets past the datastore's room, rows past its cap). */

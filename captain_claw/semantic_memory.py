@@ -372,6 +372,7 @@ class SemanticMemoryIndex:
         index_sessions: bool = True,
         cross_session_retrieval: bool = False,
         max_workspace_files: int = 400,
+        max_knowledge_files: int = 3000,
         max_file_bytes: int = 262_144,
         include_extensions: list[str] | None = None,
         exclude_dirs: list[str] | None = None,
@@ -401,6 +402,7 @@ class SemanticMemoryIndex:
         self._active_project_id: str | None = None
         self._project_session_ids: list[str] | None = None  # cached session IDs for active project
         self.max_workspace_files = max(1, int(max_workspace_files))
+        self.max_knowledge_files = max(0, int(max_knowledge_files))
         self.max_file_bytes = max(1024, int(max_file_bytes))
         self.include_extensions = {
             ext.lower() if ext.startswith(".") else f".{ext.lower()}"
@@ -1331,7 +1333,8 @@ class SemanticMemoryIndex:
         return self._conn
 
     def _sync_once(self) -> None:
-        workspace_docs = self._collect_workspace_documents() if self.index_workspace else []
+        workspace_docs = (self._collect_workspace_documents(self._known_signatures("workspace"))
+                          if self.index_workspace else [])
         session_docs = self._collect_session_documents() if self.index_sessions else []
         history_docs = self._collect_history_documents() if self.index_sessions else []
         with self._db_lock:
@@ -1421,16 +1424,44 @@ class SemanticMemoryIndex:
             log.info("Re-embedded stale memory chunks", count=total, provider=active_key)
         return total
 
-    def _collect_workspace_documents(self) -> list[_Document]:
+    def _known_signatures(self, source: str) -> dict[str, str]:
+        """What is indexed from *source* now: reference → signature."""
+        try:
+            with self._db_lock:
+                rows = self._conn_or_raise().execute(
+                    "SELECT reference, signature FROM memory_documents WHERE source = ?", (source,),
+                ).fetchall()
+        except Exception:
+            return {}
+        return {str(r[0]): str(r[1]) for r in rows}
+
+    def _collect_workspace_documents(self, known: dict[str, str] | None = None) -> list[_Document]:
+        """The workspace's files to index: its ``knowledge/`` folder first, under
+        ``max_knowledge_files`` (an owner's setup can leave thousands of parts
+        there, and nothing else may crowd them out), then the rest under
+        ``max_workspace_files``. A file whose signature is *known* — indexed
+        and unchanged — is not read again: the sync skips it anyway, and a
+        big knowledge folder would otherwise be re-read on every sync."""
         if not self.workspace_path.exists() or not self.workspace_path.is_dir():
             return []
+        known = known or {}
+        knowledge = self.workspace_path / "knowledge"
         documents: list[_Document] = []
-        for root, dirs, files in os.walk(self.workspace_path):
-            dirs[:] = [d for d in dirs if d.strip().lower() not in self.exclude_dirs]
-            for filename in files:
-                if len(documents) >= self.max_workspace_files:
-                    return documents
-                file_path = Path(root) / filename
+        if knowledge.is_dir() and self.max_knowledge_files:
+            self._walk_documents(knowledge, self.max_knowledge_files, known, documents)
+        rest: list[_Document] = []
+        self._walk_documents(self.workspace_path, self.max_workspace_files, known, rest, skip=knowledge)
+        return documents + rest
+
+    def _walk_documents(self, root: Path, cap: int, known: dict[str, str], documents: list[_Document],
+                        skip: Path | None = None) -> None:
+        for walk_root, dirs, files in os.walk(root):
+            dirs[:] = sorted(d for d in dirs if d.strip().lower() not in self.exclude_dirs
+                             and (skip is None or Path(walk_root) / d != skip))
+            for filename in sorted(files):
+                if len(documents) >= cap:
+                    return
+                file_path = Path(walk_root) / filename
                 try:
                     stat = file_path.stat()
                 except Exception:
@@ -1442,15 +1473,18 @@ class SemanticMemoryIndex:
                 suffix = file_path.suffix.lower()
                 if self.include_extensions and suffix not in self.include_extensions:
                     continue
-                try:
-                    raw = file_path.read_text(encoding="utf-8", errors="ignore")
-                except Exception:
-                    continue
-                if not raw.strip():
-                    continue
                 rel_path = file_path.resolve().relative_to(self.workspace_path).as_posix()
                 updated_at = datetime.fromtimestamp(stat.st_mtime, tz=UTC).isoformat()
                 signature = f"{stat.st_size}:{int(stat.st_mtime_ns)}"
+                if known.get(rel_path) == signature:
+                    raw = ""  # indexed and unchanged: the sync skips it
+                else:
+                    try:
+                        raw = file_path.read_text(encoding="utf-8", errors="ignore")
+                    except Exception:
+                        continue
+                    if not raw.strip():
+                        continue
                 documents.append(
                     _Document(
                         source="workspace",
@@ -1461,7 +1495,6 @@ class SemanticMemoryIndex:
                         updated_at=updated_at,
                     )
                 )
-        return documents
 
     def _collect_session_documents(self) -> list[_Document]:
         if not self.session_db_path.exists():
@@ -2318,6 +2351,7 @@ def create_semantic_memory_index(
         index_sessions=bool(getattr(memory_cfg, "index_sessions", True)),
         cross_session_retrieval=bool(getattr(memory_cfg, "cross_session_retrieval", False)),
         max_workspace_files=int(getattr(memory_cfg, "max_workspace_files", 400)),
+        max_knowledge_files=int(getattr(memory_cfg, "max_knowledge_files", 3000)),
         max_file_bytes=int(getattr(memory_cfg, "max_file_bytes", 262_144)),
         include_extensions=include_extensions,
         exclude_dirs=exclude_dirs,

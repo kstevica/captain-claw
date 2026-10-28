@@ -97,6 +97,9 @@ class _FakePopen:
         return None
 
 
+deck_indexed: list[tuple] = []
+
+
 @pytest.fixture
 async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Auth-enabled deck with Bob and Carol; spawns never start a process."""
@@ -152,6 +155,9 @@ async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(ap, "_quota_spent", not_spent)
     # The owner's tier reads, unless a test gives the agent a model of its own (_own_model).
     monkeypatch.setattr(ap, "agent_reader", lambda slug, entry: None)
+    # Apply asks a running agent to index its knowledge: recorded here, never sent (test_agent_preset_outline).
+    deck_indexed.clear()
+    monkeypatch.setattr(ap, "schedule_index", lambda slug, port_of, token: deck_indexed.append((slug, port_of(), token)))
     server._save_process_registry({})
     try:
         yield db
@@ -1058,6 +1064,7 @@ async def test_apply_sets_up_an_existing_agent_and_stores_its_instructions(deck,
     assert (agent / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund-request" / "SKILL.md").is_file()
     entry = server._load_process_registry()[slug]
     assert given == [(slug, 24300, entry["web_auth"], given[0][3])] and len(given[0][3]) == 2
+    assert deck_indexed == [(slug, 24300, entry["web_auth"])]   # its new documents, indexed now
     assert ap.load_docs(BOB, prepared["id"]) == []      # the waiting documents are used up
     assert _FakePopen.calls == [slug]                    # no restart
 
