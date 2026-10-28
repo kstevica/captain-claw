@@ -868,6 +868,8 @@ def test_an_agents_reader_follows_its_config(deck, tmp_path, monkeypatch):
                      "input_ctx": 32768, "byok": True}   # a local Ollama window is clamped
     cfg.write_text("model:\n  provider: ollama\n  model: glm-5:cloud\n")
     assert ap.agent_reader("a", {})["input_ctx"] == 0      # unknown: step_tokens' default
+    cfg.write_text("model:\n  provider: ollama\n  model: gemma4:31b-cloud\ncontext:\n  max_tokens: 160000\n")
+    assert ap.agent_reader("a", {})["input_ctx"] == 160000   # a -cloud tag runs on Ollama's servers
     cfg.unlink()
     assert ap.agent_reader("a", {"provider": "anthropic", "model": "m"})["model"] == "m"   # the registry, else
     assert ap.agent_reader("a", {}) is None
