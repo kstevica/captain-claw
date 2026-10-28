@@ -1603,6 +1603,32 @@ def _encode_ollama_image(path: str) -> str | None:
         return None
 
 
+def _ollama_tool_calls(msg: Any) -> list[dict[str, Any]]:
+    """An assistant message's tool calls in Ollama's shape.
+
+    Without them the model sees an empty assistant turn and then a tool
+    result it never asked for: Gemma 4 calls the same tool again, turn after
+    turn, until the duplicate guard or the iteration budget stops it. Ollama
+    wants each call's arguments as an object, not the JSON text OpenAI uses.
+    """
+    raw_calls = msg.get("tool_calls") if isinstance(msg, dict) else getattr(msg, "tool_calls", None)
+    calls: list[dict[str, Any]] = []
+    for raw in raw_calls or []:
+        function_obj = _obj_get(raw, "function", None)
+        source = function_obj if isinstance(function_obj, dict) else raw
+        name = str(_obj_get(source, "name", "") or "")
+        if not name:
+            continue
+        args = _obj_get(source, "arguments", {})
+        if isinstance(args, str):
+            try:
+                args = json.loads(args) if args.strip() else {}
+            except ValueError:
+                args = {}
+        calls.append({"function": {"name": name, "arguments": args if isinstance(args, dict) else {}}})
+    return calls
+
+
 def _convert_messages_for_ollama(
     messages: list[Message], *, legacy_markers: bool = True,
 ) -> list[dict[str, Any]]:
@@ -1652,6 +1678,8 @@ def _convert_messages_for_ollama(
 
         if role in {"system", "user", "assistant"}:
             entry = {"role": role, "content": content}
+            if role == "assistant" and (calls := _ollama_tool_calls(msg)):
+                entry["tool_calls"] = calls
             if i == last_img_idx:
                 # Cap to the last few markers so a reflection/insight prompt that
                 # concatenates the whole history (many [Attached image:] markers)
@@ -1696,6 +1724,8 @@ def _convert_messages_for_ollama_picked(messages: list[Message]) -> list[dict[st
             continue
         _flush_tool_images()
         entry = {"role": role, "content": content}
+        if role == "assistant" and (calls := _ollama_tool_calls(msg)):
+            entry["tool_calls"] = calls
         if images and role == "user":
             entry["images"] = [img.data for img in images]
         result.append(entry)
@@ -2666,16 +2696,22 @@ def _resolve_ollama_think(raw: bool | str | None, model: str) -> bool | str:
 # budget in place. Clamping here catches every such agent regardless of
 # how its config was produced.
 #
-# `:cloud` models are exempt: those run on Ollama's hosted hardware, where
+# Cloud models are exempt: those run on Ollama's hosted hardware, where
 # a large context is both legitimate and free of local memory pressure.
 # Raise the ceiling with CLAW_OLLAMA_MAX_NUM_CTX if you have the memory.
 _OLLAMA_DEFAULT_MAX_NUM_CTX = 32768
 
 
+def is_ollama_cloud_model(model: str) -> bool:
+    """An Ollama model that runs on Ollama's servers: named ``name:cloud``
+    or with a ``-cloud`` tag (``gemma4:31b-cloud``)."""
+    return str(model or "").strip().lower().endswith((":cloud", "-cloud"))
+
+
 def _clamp_ollama_num_ctx(num_ctx: int, model: str) -> int:
     """Clamp a requested context window to what a local Ollama box can hold."""
     requested = max(1, int(num_ctx))
-    if str(model or "").strip().endswith(":cloud"):
+    if is_ollama_cloud_model(model):
         return requested
     try:
         ceiling = int(

@@ -2,7 +2,8 @@ import type { ChatMessage } from '../services/agentChat'
 
 // The files an agent made in a chat, recognised from the chat itself — what
 // the composer's Files menu lists. A file counts when the agent's reply names
-// it, or a file-making tool reports making it (write, docx, image_gen, speech).
+// it, or a file-making tool reports making it (write, docx, image_gen,
+// visualize, speech).
 // What the user attached never counts, nor anything in a working or input
 // folder of saved/ — the line the chat bridges draw for deliverables
 // (captain_claw/turn_deliverables.py), plus tmp/ scratch. A mention is only a
@@ -13,11 +14,13 @@ const WORKING_DIRS = new Set(['scripts', 'tools', 'skills', 'downloads', 'tmp'])
 
 /** Tools whose `Path:` line is a file made for the user. A browser screenshot
  *  or a screen capture is the agent looking, not making. */
-const PATH_TOOLS = new Set(['image_gen', 'pocket_tts', 'audio', 'termux'])
+const PATH_TOOLS = new Set(['image_gen', 'visualize', 'pocket_tts', 'audio', 'termux'])
 
 const WRITTEN_RE = /^Written \d+ chars \(\d+ lines?\) to (.+?)(?: \(requested: .*\))?$/
 const DOCX_SAVED_RE = /^Saved(?: in place)?: (.+?)(?: \(the original .* is unchanged\))?$/
 const PATH_LINE_RE = /^Path: (.+?)(?: \(requested: .*\))?$/
+/** visualize's interactive page, beside the PNG on its `Path:` line. */
+const HTML_LINE_RE = /^HTML: (.+\.html?)$/
 const ATTACHED_RE = /^\[Attached (?:image: (.+?)|file: .*? → (.+?))\]$/
 // A path or file name in a reply: no spaces, quotes, brackets or markdown
 // marks, ending in an extension. Names with spaces are found by the file list.
@@ -80,6 +83,9 @@ function toolPaths(m: ChatMessage): string[] {
   const tool = (m.tool_name || '').slice((m.tool_name || '').lastIndexOf(':') + 1)
   if (tool === 'write') return lineMatch(m.tool_output, WRITTEN_RE).slice(0, 1)
   if (tool === 'docx') return lineMatch(m.tool_output, DOCX_SAVED_RE)
+  if (tool === 'visualize') {
+    return [...lineMatch(m.tool_output, PATH_LINE_RE), ...lineMatch(m.tool_output, HTML_LINE_RE)]
+  }
   if (PATH_TOOLS.has(tool)) return lineMatch(m.tool_output, PATH_LINE_RE)
   return []
 }

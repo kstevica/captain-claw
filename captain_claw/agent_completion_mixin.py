@@ -189,6 +189,7 @@ class AgentCompletionMixin:
             has_media_output = (
                 self._turn_has_successful_tool(turn_start_idx, "browser")
                 or self._turn_has_successful_tool(turn_start_idx, "image_gen")
+                or self._turn_has_successful_tool(turn_start_idx, "visualize")
             )
             # Typesense index is a valid output sink — no file needed.
             has_index_output = self._turn_has_successful_tool(turn_start_idx, "typesense")

@@ -89,8 +89,12 @@ def test_num_ctx_under_the_ceiling_is_untouched():
 
 
 def test_cloud_models_are_exempt():
-    """`:cloud` runs on Ollama's hardware — no local memory pressure."""
+    """Cloud models run on Ollama's hardware — no local memory pressure.
+    They are named `name:cloud` or carry a `-cloud` tag."""
     assert _clamp_ollama_num_ctx(200_000, "minimax-m2.7:cloud") == 200_000
+    assert _clamp_ollama_num_ctx(200_000, "gemma4:31b-cloud") == 200_000
+    assert _clamp_ollama_num_ctx(200_000, "qwen3-vl:235b-Cloud") == 200_000
+    assert _clamp_ollama_num_ctx(200_000, "cloudy:9b") == _OLLAMA_DEFAULT_MAX_NUM_CTX
 
 
 def test_ceiling_is_overridable(monkeypatch):

@@ -980,7 +980,7 @@ def agent_reader(slug: str, entry: dict) -> dict | None:
         ctx = int(ctx_cfg.get("max_tokens") or 0)
     except (TypeError, ValueError):
         ctx = 0
-    if provider == "ollama" and not model.endswith(":cloud"):
+    if provider == "ollama" and not model.lower().endswith((":cloud", "-cloud")):
         ctx = min(ctx or 32768, 32768)  # where the agent's local Ollama window is clamped
     return {"agent": slug, "name": str(entry.get("name") or slug), "provider": provider, "model": model,
             "base_url": str(model_cfg.get("base_url") or ""), "input_ctx": ctx,

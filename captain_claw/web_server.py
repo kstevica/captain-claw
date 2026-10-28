@@ -965,10 +965,15 @@ class WebServer:
                     "role": "rephrase",
                     "content": str(output or ""),
                 })
-            if normalized in ("image_gen", "termux", "browser") and output and not str(output).strip().lower().startswith("error"):
+            if normalized in ("image_gen", "visualize", "termux", "browser") and output and not str(output).strip().lower().startswith("error"):
                 from captain_claw.platform_adapter import extract_image_paths_from_tool_output
                 for img_path in extract_image_paths_from_tool_output(str(output)):
                     send({"type": "chat_message", "role": "image", "content": str(img_path)})
+            if normalized == "visualize" and output and not str(output).strip().lower().startswith("error"):
+                import re as _re
+                page_match = _re.search(r"^HTML:\s*(\S+\.html?)\s*$", str(output), _re.M)
+                if page_match:
+                    send({"type": "chat_message", "role": "html_file", "content": page_match.group(1)})
             if normalized == "write" and output and not str(output).strip().lower().startswith("error"):
                 import re as _re
                 html_match = _re.search(r"to\s+(\S+\.(?:html|htm|svg))", str(output))
@@ -1118,13 +1123,23 @@ class WebServer:
                 "role": "rephrase",
                 "content": str(output or ""),
             })
-        if normalized in ("image_gen", "termux", "browser") and output and not str(output).strip().lower().startswith("error"):
+        if normalized in ("image_gen", "visualize", "termux", "browser") and output and not str(output).strip().lower().startswith("error"):
             from captain_claw.platform_adapter import extract_image_paths_from_tool_output
             for img_path in extract_image_paths_from_tool_output(str(output)):
                 self._broadcast({
                     "type": "chat_message",
                     "role": "image",
                     "content": str(img_path),
+                })
+        # visualize also made the interactive page: offer it like a written one.
+        if normalized == "visualize" and output and not str(output).strip().lower().startswith("error"):
+            import re
+            page_match = re.search(r"^HTML:\s*(\S+\.html?)\s*$", str(output), re.M)
+            if page_match:
+                self._broadcast({
+                    "type": "chat_message",
+                    "role": "html_file",
+                    "content": page_match.group(1),
                 })
         # Auto-broadcast audio player when pocket_tts / audio speak (or similar) produces a file.
         if normalized in ("pocket_tts", "tts", "audio") and output and not str(output).strip().lower().startswith("error"):
