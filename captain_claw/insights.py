@@ -54,6 +54,11 @@ _DEFAULT_INTERVAL_MESSAGES = 20
 _DEFAULT_COOLDOWN_SECONDS = 60
 
 
+def _norm_content(v: Any) -> str | None:
+    """Content as compared for an exact repeat: case-folded, whitespace collapsed."""
+    return None if v is None else " ".join(str(v).split()).casefold()
+
+
 # ── InsightsManager ──────────────────────────────────────────────────
 
 class InsightsManager:
@@ -74,6 +79,7 @@ class InsightsManager:
         if self._db is not None:
             return
         self._db = await aiosqlite.connect(str(self.db_path))
+        await self._db.create_function("cc_norm", 1, _norm_content, deterministic=True)
         await self._db.execute("PRAGMA journal_mode=WAL")
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.execute("PRAGMA temp_store=MEMORY")
@@ -276,6 +282,15 @@ class InsightsManager:
                 log.debug("Insight superseded via entity_key", entity_key=entity_key,
                           old_id=supersedes_id)
 
+        # Dedup: exact repeat (case and whitespace aside) → keep the stored one.
+        # The FTS check below can't be relied on for these: its MATCH query
+        # fails on punctuation (a trailing ".", "15:00") and then finds nothing.
+        if not supersedes_id:
+            twin = await self.find_exact(content)
+            if twin:
+                log.debug("Insight deduped as exact repeat", id=twin["id"])
+                return None
+
         # Dedup: FTS similarity check.
         if not supersedes_id:
             similar = await self.find_similar(content, limit=1)
@@ -463,6 +478,19 @@ class InsightsManager:
             self._row_to_dict(r) for r in rows
             if (r[-1] or 0) > _DEDUP_RANK_THRESHOLD  # stronger match than threshold
         ]
+
+    async def find_exact(self, text: str) -> dict[str, Any] | None:
+        """An insight with the same content, ignoring case and whitespace."""
+        await self._ensure_db()
+        assert self._db is not None
+
+        norm = _norm_content(text)
+        if not norm:
+            return None
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM insights WHERE cc_norm(content) = ? LIMIT 1", (norm,),
+        )
+        return self._row_to_dict(rows[0]) if rows else None
 
     async def find_by_entity_key(self, entity_key: str) -> dict[str, Any] | None:
         """Exact match on entity_key."""
