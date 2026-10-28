@@ -8035,7 +8035,8 @@ async def _proxy_agent_intentions(
     method: str, host: str, port: int, token: str, path: str,
     *, query: dict | None = None, body: dict | None = None, timeout: float = 15.0,
 ):
-    """Forward an intentions request to an agent, preserving its status code."""
+    """Forward a request to an agent's REST (its intentions, its insights),
+    preserving its status code."""
     import httpx
     from fastapi.responses import JSONResponse
 
@@ -8876,6 +8877,79 @@ async def proxy_delete_semantic_import(
             raise HTTPException(resp.status_code, resp.text)
     except httpx.ConnectError:
         raise HTTPException(502, "Cannot connect to agent")
+
+
+# ── An agent's insights: what it remembers between conversations ──
+#
+# The kiosk's "Instructions & insights" dialog reads, edits and adds to them.
+# Port-addressed like every agent proxy: the hardening middleware lets a
+# user reach only agents they own.
+
+_INSIGHT_ID = re.compile(r"[0-9a-f]{6,32}")
+# insights.VALID_CATEGORIES — an agent's update takes any category as given.
+_INSIGHT_CATEGORIES = frozenset({"contact", "decision", "preference", "fact", "deadline", "project",
+                                 "workflow", "feedback", "reference"})
+
+
+def _insight_body(body: Any) -> dict:
+    """The fields of an insight the owner may set — nothing else is passed on."""
+    body = body if isinstance(body, dict) else {}
+    out: dict = {}
+    if isinstance(body.get("content"), str) and body["content"].strip():
+        out["content"] = body["content"].strip()[:2000]
+    if isinstance(body.get("category"), str) and body["category"].strip().lower() in _INSIGHT_CATEGORIES:
+        out["category"] = body["category"].strip().lower()
+    if isinstance(body.get("importance"), (int, float)):
+        out["importance"] = max(1, min(10, int(body["importance"])))
+    if isinstance(body.get("tags"), str):
+        out["tags"] = body["tags"].strip()[:300]
+    return out
+
+
+def _insight_id(insight_id: str) -> str:
+    if not _INSIGHT_ID.fullmatch(insight_id or ""):
+        raise HTTPException(400, "Not an insight id")
+    return insight_id
+
+
+@app.get("/fd/agent-insights/{host}/{port}")
+async def agent_insights(
+    host: str, port: int, token: str = "", q: str = "", category: str = "", limit: int = 200,
+    user: dict | None = _required_user_dep,
+):
+    """The agent's insights, newest first — or those matching *q*."""
+    query: dict = {"limit": max(1, min(int(limit), 200))}
+    if q.strip():
+        query["q"] = q.strip()[:200]
+    if category.strip():
+        query["category"] = category.strip()[:32]
+    return await _proxy_agent_intentions("GET", host, port, token, "/api/insights", query=query)
+
+
+@app.post("/fd/agent-insights/{host}/{port}")
+async def agent_insight_add(host: str, port: int, request: Request, token: str = "",
+                            user: dict | None = _required_user_dep):
+    """Teach the agent something: a new insight, added by its owner."""
+    body = _insight_body(await request.json())
+    if "content" not in body:
+        raise HTTPException(400, "Say what it should remember")
+    return await _proxy_agent_intentions("POST", host, port, token, "/api/insights", body=body)
+
+
+@app.patch("/fd/agent-insights/{host}/{port}/{insight_id}")
+async def agent_insight_edit(host: str, port: int, insight_id: str, request: Request, token: str = "",
+                             user: dict | None = _required_user_dep):
+    body = _insight_body(await request.json())
+    if not body:
+        raise HTTPException(400, "Nothing to change")
+    return await _proxy_agent_intentions("PATCH", host, port, token, f"/api/insights/{_insight_id(insight_id)}",
+                                         body=body)
+
+
+@app.delete("/fd/agent-insights/{host}/{port}/{insight_id}")
+async def agent_insight_forget(host: str, port: int, insight_id: str, token: str = "",
+                               user: dict | None = _required_user_dep):
+    return await _proxy_agent_intentions("DELETE", host, port, token, f"/api/insights/{_insight_id(insight_id)}")
 
 
 # ── Pending-review insights (stage_conflicts queue) ──
