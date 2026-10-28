@@ -18,10 +18,12 @@ import {
   Tags,
   Target,
   Trash2,
+  Wand2,
   X,
 } from 'lucide-react'
 import { IntentionsPanel } from '../agents/IntentionsPanel'
 import { KioskInsightsPanel } from './KioskAgentInsights'
+import { KioskSkillsPanel } from './KioskAgentSkills'
 import { TopicsPanel } from '../agents/TopicsPanel'
 import { getAgentConfig, getAgentMode, setAgentMode, setAgentModel, setAgentVision } from '../../services/docker'
 import { LLM_PROVIDERS } from '../../services/tierConfig'
@@ -38,9 +40,10 @@ import { useProcessStore } from '../../stores/processStore'
 // The "⋯" on a kiosk agent row opens what a kiosk user may do with one agent
 // of theirs besides chatting and the power switch: look at what it means to
 // do and what they talked about (Info: its intentions and topics), open its
-// files and data, give it standing instructions and see what it remembers
-// (Instructions & insights), change its model, how it thinks and whether it
-// sees images itself (Settings), or remove it for good, folder and all (Remove).
+// files and data, give it standing instructions and see what it remembers and
+// knows how to do (Instructions, insights & skills), change its model, how it
+// thinks and whether it sees images itself (Settings), or remove it for good,
+// folder and all (Remove).
 
 /** What these dialogs need of an agent row. */
 export interface KioskAgent {
@@ -675,18 +678,19 @@ function SectionTitle({ icon: Icon, title, saving, saved = false }: { icon: type
   )
 }
 
-// ── Instructions & insights ──
+// ── Instructions, insights & skills ──
 //
-// Two tabs. Instructions: the owner's standing instructions, added to the
+// Three tabs. Instructions: the owner's standing instructions, added to the
 // agent's system prompt in every conversation — saved where the agent cards
 // keep them; open chats are told at once, so they apply from its next reply.
-// Insights: what the agent remembers between conversations, read from the
-// agent itself (KioskInsightsPanel). Both stay mounted, so switching keeps
-// unsaved text and a search.
+// Insights: what the agent remembers between conversations; Skills: the
+// procedures it follows — both read from the agent itself
+// (KioskInsightsPanel, KioskSkillsPanel). All stay mounted, so switching
+// keeps unsaved text and a search.
 
 const MAX_INSTRUCTIONS = 64_000  // the server's limit
 
-type MindTab = 'instructions' | 'insights'
+type MindTab = 'instructions' | 'insights' | 'skills'
 
 export function KioskAgentInstructionsDialog({ agent, initialTab = 'instructions', onClose }: {
   agent: KioskAgent & { kind: 'docker' | 'process' }
@@ -701,12 +705,14 @@ export function KioskAgentInstructionsDialog({ agent, initialTab = 'instructions
   const [error, setError] = useState('')
   const [tab, setTab] = useState<MindTab>(initialTab)
   const [total, setTotal] = useState<number | null>(null)
+  const [skillCount, setSkillCount] = useState<number | null>(null)
   const dirty = text.trim() !== saved.trim()
   // Insights live in the agent: a stopped one has none to show.
   const up = agent.reachable && agent.port > 0
   const address = useMemo(() => (up ? { host: agent.host, port: agent.port, auth: agent.auth } : null),
     [up, agent.host, agent.port, agent.auth])
   const onTotal = useCallback((n: number) => setTotal(n), [])
+  const onSkills = useCallback((n: number) => setSkillCount(n), [])
 
   const save = async () => {
     setSaving(true); setError('')
@@ -728,16 +734,17 @@ export function KioskAgentInstructionsDialog({ agent, initialTab = 'instructions
   }
 
   return (
-    <AgentDialog title="Instructions & insights" icon={BookOpen} agentName={agent.name} size="lg" onClose={close}>
+    <AgentDialog title="Instructions, insights & skills" icon={BookOpen} agentName={agent.name} size="lg" onClose={close}>
       <div className="shrink-0 border-b border-zinc-800 p-2">
-        <div className="grid grid-cols-2 rounded-xl bg-zinc-900 p-1 wide:max-w-sm" role="tablist">
+        <div className="grid grid-cols-3 rounded-xl bg-zinc-900 p-1 wide:max-w-md" role="tablist">
           <MindTabButton on={tab === 'instructions'} onClick={() => setTab('instructions')} icon={BookOpen} iconClass="text-violet-400" label="Instructions">
             {dirty && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" title="Not saved yet" />}
           </MindTabButton>
           <MindTabButton on={tab === 'insights'} onClick={() => setTab('insights')} icon={Brain} iconClass="text-amber-400" label="Insights">
-            {total !== null && (
-              <span className="rounded-full bg-zinc-700/70 px-1.5 text-[10px] font-semibold tabular-nums text-zinc-300">{total}</span>
-            )}
+            {total !== null && <TabCount n={total} />}
+          </MindTabButton>
+          <MindTabButton on={tab === 'skills'} onClick={() => setTab('skills')} icon={Wand2} iconClass="text-sky-400" label="Skills">
+            {skillCount !== null && <TabCount n={skillCount} />}
           </MindTabButton>
         </div>
       </div>
@@ -792,8 +799,15 @@ export function KioskAgentInstructionsDialog({ agent, initialTab = 'instructions
       <div role="tabpanel" className={tab === 'insights' ? 'min-h-0 flex-1' : 'hidden'}>
         <KioskInsightsPanel address={address} agentName={agent.name} onTotal={onTotal} />
       </div>
+      <div role="tabpanel" className={tab === 'skills' ? 'min-h-0 flex-1' : 'hidden'}>
+        <KioskSkillsPanel address={address} agentName={agent.name} onTotal={onSkills} />
+      </div>
     </AgentDialog>
   )
+}
+
+function TabCount({ n }: { n: number }) {
+  return <span className="rounded-full bg-zinc-700/70 px-1.5 text-[10px] font-semibold tabular-nums text-zinc-300">{n}</span>
 }
 
 function MindTabButton({ on, onClick, icon: Icon, iconClass, label, children }: {
