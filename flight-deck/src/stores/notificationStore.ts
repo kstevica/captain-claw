@@ -22,6 +22,9 @@ function mapServerType(t: string): NotificationType {
   // Autonomous Work: a proposal waits for the owner (Approve / Reject in the
   // bell); a nudge the agent sent them.
   if (t === 'autonomy_proposal') return 'warning'
+  // An agent's way-of-working read ended with the dialog closed: ready to review, or stopped.
+  if (t === 'agent_setup') return 'success'
+  if (t === 'agent_setup_error') return 'error'
   if (t === 'autonomy_nudge') return 'info'
   if (t === 'share' || t === 'info') return 'info'
   if (t === 'success' || t === 'warning' || t === 'error') return t

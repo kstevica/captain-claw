@@ -3,7 +3,9 @@
 // full as it is added — uploaded or picked from the File library — and says
 // its pages and what reading it costs; POST /fd/agent-preset/prepare reads the
 // material with the person's own model in the background (in steps sized to
-// its context, then merged) into a preset they review; POST
+// its context, then merged) into a preset they review — within a budget, its
+// most instructive sections when the material is bigger — and keeps going
+// with the dialog closed (GET …/prepare?agent= finds it again); POST
 // /fd/agent-preset/apply gives the agent what they kept.
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
 import { ACT_AS_HEADER } from './docker'
@@ -78,9 +80,21 @@ export interface PreparedPreset {
   tokens: number
 }
 
+/** How much of the material is read, in tokens (the backend's agent_preset_select.BUDGETS):
+ *  bigger material is read by its most instructive sections, up to this. */
+export type ReadBudget = 'quick' | 'standard' | 'deep'
+export const READ_BUDGETS: Record<ReadBudget, number> = { quick: 60_000, standard: 250_000, deep: 1_000_000 }
+
 /** A read running in the background (GET /prepare/{id}). */
 export interface ReadJob {
   id: string
+  /** The agent being set up, and its name. */
+  agent: string
+  agent_name: string
+  budget: ReadBudget
+  focus: string
+  /** Its documents, and whether each is read or kept as knowledge only. */
+  docs: { name: string; read: boolean }[]
   state: 'running' | 'done' | 'error' | 'cancelled'
   phase: 'reading' | 'merging'
   step: number
@@ -209,18 +223,29 @@ export async function startRead(opts: {
   agent: string
   instructions: string
   docs: DocChoice[]
+  budget: ReadBudget
+  /** What to read first of material over the budget ("" — the most instructive). */
+  focus: string
   asUser?: string
 }): Promise<ReadJob> {
   const res = await send('/fd/agent-preset/prepare', {
-    method: 'POST', body: JSON.stringify({ agent: opts.agent, instructions: opts.instructions, docs: opts.docs }),
+    method: 'POST',
+    body: JSON.stringify({ agent: opts.agent, instructions: opts.instructions, docs: opts.docs, budget: opts.budget, focus: opts.focus }),
   }, opts.asUser)
   return res.json()
+}
+
+/** The agent's read still under way, or done and waiting for its review — null when there is none. */
+export async function getLatestRead(agent: string, asUser?: string): Promise<ReadJob | null> {
+  const res = await send(`/fd/agent-preset/prepare?agent=${encodeURIComponent(agent)}`, { method: 'GET' }, asUser)
+  return (await res.json()).job ?? null
 }
 
 export async function getRead(id: string, asUser?: string): Promise<ReadJob> {
   return (await send(`/fd/agent-preset/prepare/${encodeURIComponent(id)}`, { method: 'GET' }, asUser)).json()
 }
 
+/** Stop a read, or put away one waiting for its review: its documents go. */
 export async function cancelRead(id: string, asUser?: string): Promise<void> {
   await send(`/fd/agent-preset/prepare/${encodeURIComponent(id)}`, { method: 'DELETE' }, asUser).catch(() => undefined)
 }

@@ -13,6 +13,11 @@
   merged by the model; a step whose answer can't be read is skipped, none
   readable fails the read, a spent allowance stops it but keeps what was read;
   a read can be stopped, and only its owner follows it;
+* a read runs on with the dialog closed and rings the bell when it ends,
+  then waits on disk for its review, which the dialog opens on; one that
+  Flight Deck stopped mid-way goes on at its next start without reading a
+  step twice; Stop, or a new read for the same agent, drops it; one person's
+  reads share their pace;
 * the person's note on a document (what it is, how to use it) reaches the
   model and the agent's knowledge; the agent being set up frames the read
   with its archetype, and only its owner can name it;
@@ -250,6 +255,12 @@ def test_normalise_cleans_every_group():
     assert set(p) == {*ap.GROUPS, "conflicts", "warnings"}
 
 
+def test_a_note_given_as_an_object_is_its_text():
+    p = ap.normalise({"warnings": [{"text": "Only part of it was read."}, {"other": 1}, "Plain."],
+                      "conflicts": [{"conflict": "14 days here, 30 there."}]})
+    assert p["warnings"] == ["Only part of it was read.", "Plain."] and p["conflicts"] == ["14 days here, 30 there."]
+
+
 def test_normalise_caps_each_group():
     p = ap.normalise({"rules": [{"text": f"Rule {n}"} for n in range(100)]})
     assert len(p["rules"]) == ap.LIMITS["rules"]
@@ -390,16 +401,16 @@ def test_steps_share_small_documents_and_split_long_ones():
     assert not any(p["doc"]["name"] == "ref.csv" for s in steps for p in s["pieces"])
 
 
-def test_instructions_alone_are_one_step_and_too_much_is_not_read(monkeypatch):
+def test_instructions_alone_are_one_step_and_knowledge_only_none(monkeypatch):
     steps, _ = ap.plan_steps("Be brief.", [], step_tok=10_000)
     assert len(steps) == 1 and steps[0]["label"] == "your instructions"
     assert ap.plan_steps("", [_doc("r.csv", "x", read=False)], step_tok=10_000)[0] == []
-    monkeypatch.setattr(ap, "_MAX_READ_CHARS", 1000)
-    steps, notes = ap.plan_steps("", [_doc("a.txt", "A" * 800), _doc("b.txt", "B" * 800), _doc("c.txt", "C" * 10)],
-                                 step_tok=10_000)
-    assert sum(len(p["text"]) for s in steps for p in s["pieces"]) == 1000
-    assert any(n.startswith("b.txt: only the first 200") for n in notes)
-    assert any(n.startswith("c.txt: not read") for n in notes)
+    # More than the budget: its best sections, not its start (test_agent_preset_select).
+    monkeypatch.setattr(ap.psel, "BUDGETS", {**ap.psel.BUDGETS, "quick": 250})
+    steps, notes = ap.plan_steps("", [_doc("a.md", "# A\n\n" + "Words, words and words. " * 200)],
+                                 step_tok=10_000, budget="quick")
+    assert sum(len(p["text"]) for s in steps for p in s["pieces"]) <= 1000
+    assert notes and notes[0].startswith("a.md: read ")
 
 
 def test_a_step_is_sized_from_the_models_window():
@@ -593,6 +604,152 @@ async def test_a_read_can_be_stopped_and_only_its_owner_follows_it(deck, monkeyp
         r = await c.delete(f"/fd/agent-preset/prepare/{job_id}", headers=_auth(BOB))
     assert r.json()["state"] == "cancelled"
     assert ap.load_docs(BOB, job_id) == []
+
+
+# ── In the background ─────────────────────────────────────────────────
+
+
+def _gated(monkeypatch, reply: dict) -> asyncio.Event:
+    """The model answers *reply* once the returned gate is open."""
+    gate = asyncio.Event()
+
+    async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+        await gate.wait()
+        return json.dumps(reply), 100
+
+    monkeypatch.setattr(ap, "call_model", fake_call)
+    return gate
+
+
+async def _latest(uid: str, slug: str) -> dict | None:
+    async with _client() as c:
+        r = await c.get(f"/fd/agent-preset/prepare?agent={slug}", headers=_auth(uid))
+    assert r.status_code == 200, r.text
+    return r.json()["job"]
+
+
+async def test_a_read_outlives_the_dialog_rings_the_bell_and_waits_for_its_review(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24371)
+    gate = _gated(monkeypatch, _REPLY)
+    staged = (await _stage(BOB, [("policy.txt", b"Refunds within 14 days.")]))["docs"]
+    r = await _start(BOB, [{"id": staged[0]["id"]}], agent=slug, budget="quick", focus="refunds")
+    job = ap._JOBS[r.json()["id"]]
+    assert (job.agent, job.agent_name, job.budget, job.focus) == (slug, "Helpdesk", "quick", "refunds")
+    running = await _latest(BOB, slug)
+    assert running["id"] == job.id and running["state"] == "running" and running["docs"] == [
+        {"name": "policy.txt", "read": True}]
+    job.watched = 0                         # the dialog was closed
+    gate.set()
+    await job.task
+    assert job.state == "done"
+    folder = ap._folder(job)
+    assert json.loads((folder / "job.json").read_text())["state"] == "done" and (folder / "result.json").is_file()
+    (bell,) = await deck.list_notifications(BOB)
+    assert (bell["type"], bell["ref_type"], bell["ref_id"]) == ("agent_setup", "agent_setup", slug)
+    assert bell["title"] == "Helpdesk's way of working is ready to review"
+    assert await deck.list_notifications(CAROL) == []
+    # Opening the dialog again — after Flight Deck forgot it, from disk — goes straight to the review.
+    ap._JOBS.clear()
+    done = await _latest(BOB, slug)
+    assert done["id"] == job.id and done["state"] == "done" and done["result"]["preset"]["rules"]
+    assert await _latest(CAROL, slug) is None
+    # Applied, it is gone.
+    r = await _apply(BOB, slug, {**done["result"]["preset"], "id": job.id})
+    assert r.status_code == 200, r.text
+    assert await _latest(BOB, slug) is None and job.id not in ap._JOBS
+
+
+async def test_a_read_someone_follows_rings_no_bell(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24372)
+    _model(monkeypatch, json.dumps(_REPLY))
+    job = await _prepare(BOB, [("policy.txt", b"Refunds.")], agent=slug)
+    assert job["state"] == "done" and await deck.list_notifications(BOB) == []
+
+
+async def test_a_read_that_stopped_with_flight_deck_goes_on_from_where_it_was(deck, monkeypatch):
+    async def small_tier(_uid, prefer=()):
+        return {**_TIER, "input_ctx": 8000 * 2 + 2 * ap._PROMPT_TOKENS}   # 8k-token steps: 3 of them
+
+    monkeypatch.setattr(ap, "_resolve_tier", small_tier)
+    slug = await _spawn(BOB, "Helpdesk", 24373)
+    calls: list[dict] = []
+    second = asyncio.Event()
+
+    async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+        calls.append({"system": system, "user": user})
+        if len(calls) == 2 and not second.is_set():
+            second.set()
+            await asyncio.sleep(30)          # Flight Deck stops during part 2
+        return json.dumps({"rules": [{"text": f"Rule from call {len(calls)}."}]}), 100
+
+    monkeypatch.setattr(ap, "call_model", fake_call)
+    staged = (await _stage(BOB, [("big.md", _pdf_text(40).encode())]))["docs"]
+    r = await _start(BOB, [{"id": staged[0]["id"]}], agent=slug)
+    job = ap._JOBS[r.json()["id"]]
+    await asyncio.wait_for(second.wait(), 5)
+    job.task.cancel()                        # a shutdown: nobody pressed Stop
+    with pytest.raises(asyncio.CancelledError):
+        await job.task
+    folder = ap._folder(job)
+    on_disk = json.loads((folder / "job.json").read_text())
+    assert on_disk["state"] == "running" and on_disk["step"] == 2 and on_disk["steps"] == 3
+    assert (folder / "parts" / "1.json").is_file() and not (folder / "parts" / "2.json").exists()
+    assert [d["name"] for d in ap.load_docs(BOB, job.id)] == ["big.md"]
+
+    # It goes on with a model that takes half as much at once: the rest is cut again to fit it.
+    async def smaller_tier(_uid, prefer=()):
+        return {**_TIER, "input_ctx": 4000 * 2 + 2 * ap._PROMPT_TOKENS}
+
+    monkeypatch.setattr(ap, "_resolve_tier", smaller_tier)
+    ap._JOBS.clear()
+    calls.clear()
+    assert await ap.resume_reads(delay=0) == 1
+    again = ap._JOBS[job.id]
+    await again.task
+    assert again.state == "done", again.error
+    reads = [c for c in calls if "Merging an agent setup" not in c["system"]]
+    merges = [c for c in calls if "Merging an agent setup" in c["system"]]
+    assert again.steps > 3 and len(reads) == again.steps - 1                   # part 1 isn't read twice
+    assert f"This is part 2 of {again.steps}" in reads[0]["user"]
+    assert all(len(r["user"].split("## The owner's documents\n", 1)[1]) <= 4000 * 4 + 200 for r in reads)
+    assert len(merges) == 1 and "Rule from call 1." in merges[0]["user"]       # but what it found is kept
+    assert any("Flight Deck restarted" in w for w in again.result["preset"]["warnings"])
+    assert await ap.resume_reads(delay=0) == 0                                 # nothing left to go on with
+
+
+async def test_stop_drops_a_read_and_a_new_one_replaces_the_agents_earlier(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24374)
+    other = await _spawn(BOB, "Sales", 24375)
+    gate = _gated(monkeypatch, _REPLY)
+    staged = (await _stage(BOB, [("a.txt", b"A."), ("b.txt", b"B."), ("c.txt", b"C.")]))["docs"]
+    first = ap._JOBS[(await _start(BOB, [{"id": staged[0]["id"]}], agent=slug)).json()["id"]]
+    sales = ap._JOBS[(await _start(BOB, [{"id": staged[1]["id"]}], agent=other)).json()["id"]]
+    second = ap._JOBS[(await _start(BOB, [{"id": staged[2]["id"]}], agent=slug)).json()["id"]]
+    with pytest.raises(asyncio.CancelledError):
+        await first.task
+    assert first.state == "cancelled" and ap.load_docs(BOB, first.id) == []     # replaced, for the same agent
+    assert sales.state == "running"                                             # another agent's goes on
+    gate.set()
+    await asyncio.gather(sales.task, second.task)
+    # Put away unreviewed, it is gone; so is the one Stop stopped.
+    async with _client() as c:
+        r = await c.delete(f"/fd/agent-preset/prepare/{second.id}", headers=_auth(BOB))
+    assert r.json()["state"] == "cancelled" and ap.load_docs(BOB, second.id) == []
+    assert await _latest(BOB, slug) is None and (await _latest(BOB, other))["id"] == sales.id
+
+
+async def test_one_persons_reads_share_their_pace(monkeypatch):
+    monkeypatch.setenv("FD_SETUP_TOKENS_PER_MIN", "60000")      # 1,000 tokens a second
+    monkeypatch.setattr(ap, "_PACE_GAP", 0.05)
+    monkeypatch.setattr(ap, "_NEXT_CALL", {})
+    cloud = {"provider": "anthropic", "model": "m"}
+    a, b, c = ap.ReadJob(id="a", owner="o"), ap.ReadJob(id="b", owner="o"), ap.ReadJob(id="c", owner="p")
+    await ap._pace(cloud, a, 300)
+    start = time.monotonic()
+    await ap._pace(cloud, c, 300)                                # someone else's: at once
+    assert time.monotonic() - start < 0.1
+    await ap._pace(cloud, b, 300)                                # the same person's other read waits its turn
+    assert time.monotonic() - start >= 0.25
 
 
 async def test_prepare_needs_something_to_read(deck, monkeypatch):
