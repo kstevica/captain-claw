@@ -457,10 +457,14 @@ async def flush_automation_results(server: Any, exclude: Any = None) -> int:
     for item in pending:
         text = str(item.get("text") or "")
         task = item.get("task") if isinstance(item.get("task"), dict) else None
+        label = item.get("label") or "Automated turn"
         server._broadcast({
             "type": "chat_message", "role": "assistant", "content": text,
             "timestamp": item.get("at") or datetime.now(UTC).isoformat(),
             "automation_lane": item.get("lane") or "",
+            # What ran it, as a person reads it: the chat shows the result as
+            # an automatic one ("Autonomous Work") rather than a reply.
+            "automation_label": label,
             **({"fd_delivers": True} if item.get("fd_delivers") else {}),
             # A scheduled task's result: the chat labels it and links the task.
             **({"task": task} if task else {}),
@@ -468,11 +472,12 @@ async def flush_automation_results(server: Any, exclude: Any = None) -> int:
         where = (f"ran in its own session \"{task_session_name(task)}\"" if task
                  else f"from the {item.get('lane') or 'automation'} lane")
         session.add_message(
-            "assistant", f"[{item.get('label') or 'Automated turn'} — {where}]\n{text}",
+            "assistant", f"[{label} — {where}]\n{text}",
             origin="system_note", origin_detail="automation_result",
         )
+        # A replay shows it as the live frame did: the result, labelled.
+        session.messages[-1]["automation_label"] = label
         if task:
-            # A replay shows it as the live frame did: the result, labelled.
             session.messages[-1]["task"] = task
     if pending:
         try:

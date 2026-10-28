@@ -228,6 +228,26 @@ async def test_the_mirror_waits_for_a_busy_main_chat(monkeypatch):
     assert main.session.messages[-1]["origin"] == "system_note"
 
 
+async def test_a_mirrored_result_says_what_ran_it_live_and_in_the_replay():
+    from captain_claw.web import chat_handler
+    from captain_claw.web.ws_handler import _build_replay_batch
+
+    main = types.SimpleNamespace(session=Session(id="main", name="default"),
+                                 session_manager=_SessionManager())
+    s = _server(main)
+    viewer = FakeWS()
+    s.clients = {viewer}
+    await chat_handler._mirror_automation_result(s, None, _auth("autonomy"), "Verified live: €7,799.", "AUTO")
+    live = [f for f in viewer.frames() if f.get("automation_lane") == "AUTO"]
+    assert live and live[0]["automation_label"] == "Autonomous Work"
+    # A row kept before the label was: read from its note line.
+    main.session.add_message("assistant", "[A scheduled job — from the AUTO lane]\nDone.",
+                             origin="system_note", origin_detail="automation_result")
+    main.session.add_message("assistant", "A reply.")
+    replay = [m for m in _build_replay_batch(main.session) if m.get("role") == "assistant"]
+    assert [m.get("automation_label") for m in replay] == ["Autonomous Work", "A scheduled job", None]
+
+
 # ── The new-session cue ────────────────────────────────────────────────
 
 

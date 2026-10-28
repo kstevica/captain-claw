@@ -38,6 +38,8 @@ import {
   Plus,
   ArrowUp,
   Moon,
+  Bot,
+  Wand2,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
@@ -1928,7 +1930,8 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
 
   const handlePin = useCallback(() => {
     if (!agentId || pinned) return
-    pin({ agentId, agentName: sourceName || 'Agent', content: message.content, role: message.role, model: message.model })
+    pin({ agentId, agentName: sourceName || 'Agent', content: message.content,
+      role: message.role === 'rephrase' ? 'assistant' : message.role, model: message.model })
   }, [agentId, pinned, pin, sourceName, message])
 
   const handleClip = useCallback(() => {
@@ -2125,19 +2128,22 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
   // Assistant — strip trailing suggestions/rating prompts
   const cleanContent = stripSuggestions(message.content)
 
+  // An automated turn's result (Autonomous Work, a plan, a scheduled task) and
+  // the agent's restatement of your request are no reply to you: a small
+  // preview, the whole of it in a dialog on request.
+  if (message.automation || message.task || message.role === 'rephrase') {
+    return (
+      <CompactMessage
+        message={message}
+        content={processImagePaths(cleanContent, agentConn?.host, agentConn?.port, agentConn?.auth)}
+        actions={actionButtons('left')}
+      />
+    )
+  }
+
   return (
     <div id={`fd-msg-${message.id}`} className="group mb-3 flex flex-col items-start gap-0.5">
-      <div className={`max-w-[85%] rounded-bl-sm bg-zinc-800/60 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'} ${message.replay ? 'opacity-60' : ''} ${message.task ? 'border-l-2 border-amber-500/60' : ''}`}>
-        {message.task && (
-          <button
-            onClick={() => useScheduledStore.getState().openTasks(message.task!.id)}
-            className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-amber-700 hover:underline dark:text-amber-400"
-            title="Open this scheduled task and its history"
-          >
-            <AlarmClock className="h-3.5 w-3.5" />
-            Scheduled · {message.task.name}
-          </button>
-        )}
+      <div className={`max-w-[85%] rounded-bl-sm bg-zinc-800/60 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'} ${message.replay ? 'opacity-60' : ''}`}>
         <div className={`fd-markdown ${bodyText} text-zinc-300`}>
           <MarkdownMessage content={processImagePaths(cleanContent, agentConn?.host, agentConn?.port, agentConn?.auth)} />
         </div>
@@ -2151,6 +2157,127 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     </div>
   )
 })
+
+/** A message that is no reply to you — an automated turn's result, or the
+ *  agent's restatement of your request — kept small and marked as what it
+ *  is: its first lines as a preview, the whole of it in a dialog on request. */
+const CompactMessage = memo(function CompactMessage({ message, content, actions }: {
+  message: ChatMessage
+  /** The message as the dialog renders it (images proxied). */
+  content: string
+  actions: React.ReactNode
+}) {
+  const [open, setOpen] = useState(false)
+  const preview = useMemo(() => previewText(message.content), [message.content])
+  const task = message.task
+  const rephrase = message.role === 'rephrase'
+  const Icon = rephrase ? Wand2 : Bot
+  return (
+    <div id={`fd-msg-${message.id}`} data-compact={rephrase ? 'rephrase' : 'automated'} className="group mb-3 flex flex-col items-start gap-0.5">
+      <div className={`w-full max-w-[85%] rounded-lg border border-dashed border-zinc-700 bg-zinc-900/40 px-3 py-2 ${message.replay ? 'opacity-60' : ''}`}>
+        <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-zinc-500">
+          <Icon className="h-3 w-3 shrink-0" />
+          <span className="shrink-0 font-semibold uppercase tracking-wider">{rephrase ? 'Rephrased task' : 'Automatic'}</span>
+          {!rephrase && <span className="shrink-0 text-zinc-600">·</span>}
+          {rephrase ? null : task ? (
+            <button
+              onClick={() => useScheduledStore.getState().openTasks(task.id)}
+              className="flex min-w-0 items-center gap-1 font-medium text-amber-700 hover:underline dark:text-amber-400"
+              title="Open this scheduled task and its history"
+            >
+              <AlarmClock className="h-3 w-3 shrink-0" />
+              <span className="truncate">{task.name}</span>
+            </button>
+          ) : (
+            <span className="truncate" title={message.automation}>{message.automation}</span>
+          )}
+          <span className="shrink-0 text-zinc-600">{formatTime(message.timestamp)}</span>
+          <button
+            onClick={() => setOpen(true)}
+            className="ml-auto flex shrink-0 items-center gap-1 rounded-md border border-zinc-700 px-1.5 py-0.5 text-[11px] font-medium text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+            title={rephrase ? 'Show the whole rephrased task' : 'Show the whole result'}
+          >
+            <Maximize2 className="h-3 w-3" />
+            Open
+          </button>
+        </div>
+        {preview && (
+          <button onClick={() => setOpen(true)} className="mt-1 block w-full text-left" title={rephrase ? 'Show the whole rephrased task' : 'Show the whole result'}>
+            <span className="line-clamp-2 text-xs leading-snug text-zinc-500 hover:text-zinc-400">{preview}</span>
+          </button>
+        )}
+      </div>
+      {actions}
+      {open && <CompactMessageDialog message={message} content={content} onClose={() => setOpen(false)} />}
+    </div>
+  )
+})
+
+function CompactMessageDialog({ message, content, onClose }: {
+  message: ChatMessage
+  content: string
+  onClose: () => void
+}) {
+  const { isMobile } = useIsMobile()
+  const [copied, setCopied] = useState(false)
+  const rephrase = message.role === 'rephrase'
+  const Icon = rephrase ? Wand2 : Bot
+  const title = rephrase ? 'Rephrased task'
+    : message.task ? `Scheduled · ${message.task.name}` : message.automation || 'Automated turn'
+  const kind = rephrase ? 'How the agent restated your request' : 'Automatic result'
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose])
+
+  const copy = () => {
+    navigator.clipboard.writeText(message.content || '')
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
+  return createPortal(
+    <div
+      className={`fixed inset-0 z-[70] flex bg-black/50 ${isMobile ? 'items-end' : 'items-center justify-center p-6'}`}
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={rephrase ? title : `${kind}: ${title}`}
+        className={`flex w-full flex-col overflow-hidden border border-zinc-700 bg-zinc-900 shadow-2xl ${
+          isMobile ? 'max-h-[85dvh] rounded-t-2xl pb-[env(safe-area-inset-bottom)]' : 'max-h-[85vh] max-w-3xl rounded-xl'
+        }`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center gap-2.5 border-b border-zinc-800 px-4 py-2.5">
+          <Icon className="h-4 w-4 shrink-0 text-zinc-500" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-sm font-semibold text-zinc-100">{title}</div>
+            <div className="flex items-center gap-2 text-[11px] text-zinc-500">
+              <span>{kind} · {formatTime(message.timestamp)}</span>
+              {message.model && <span className="truncate font-mono">{message.model}</span>}
+            </div>
+          </div>
+          <button onClick={copy} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="Copy" aria-label="Copy">
+            {copied ? <Check className="h-4 w-4 text-emerald-400" /> : <Copy className="h-4 w-4" />}
+          </button>
+          <button onClick={onClose} className="rounded p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="Close" aria-label="Close">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+          <div className="fd-markdown text-sm text-zinc-300">
+            <MarkdownMessage content={content} />
+          </div>
+        </div>
+      </div>
+    </div>,
+    document.body,
+  )
+}
 
 // ── Intermediary "activity" stream (tool calls + between-step narration) ──
 //
@@ -2277,6 +2404,22 @@ function stripSuggestions(text: string): string {
   // Remove "SUGGESTED NEXT STEPS" block
   cleaned = cleaned.replace(/\nSUGGESTED NEXT STEPS[\s\S]*$/i, '')
   return cleaned.trimEnd()
+}
+
+/** A markdown result's opening words as one plain line, for a preview. */
+function previewText(md: string): string {
+  return stripSuggestions(md)
+    .slice(0, 2000)
+    .replace(/```[\s\S]*?(```|$)/g, ' ')                  // code blocks
+    .replace(/!\[[^\]]*\]\([^)]*\)/g, ' ')                // images
+    .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')              // links → their text
+    .replace(/^\s*\|?(\s*:?-{3,}:?\s*\|?)+\s*$/gm, ' ')    // table rules
+    .replace(/^\s{0,3}(#{1,6}\s+|>\s?|[-*+]\s+|\d+\.\s+)/gm, '')
+    .replace(/\*+|__|~~|`/g, '')
+    .replace(/\|/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 400)
 }
 
 function formatTime(ts: string): string {
