@@ -640,6 +640,52 @@ class SemanticMemoryIndex:
         self._cache[key] = (time.time() + self.cache_ttl_seconds, merged)
         return list(merged)
 
+    def search_files(
+        self,
+        query: str,
+        *,
+        prefix: str,
+        paths: list[str] | None = None,
+        exclude_suffix: str = "",
+        max_results: int = 8,
+    ) -> list[SemanticMemoryResult]:
+        """Hybrid search over the workspace files under *prefix* alone (just
+        *paths*, when given; never those ending in *exclude_suffix*) — the
+        agent's knowledge, for the knowledge tool: no conversations mixed
+        in, no ageing, best first. Thread-safe."""
+        cleaned = str(query or "").strip()
+        if not cleaned or self._closed:
+            return []
+        escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        where = "c.source = 'workspace' AND c.path LIKE ? ESCAPE '\\'"
+        params: tuple[Any, ...] = (f"{escaped}%",)
+        if paths:
+            where += f" AND c.path IN ({','.join('?' for _ in paths)})"
+            params = (*params, *paths)
+        if exclude_suffix:
+            where += " AND c.path NOT LIKE ?"
+            params = (*params, f"%{exclude_suffix}")
+        kwargs: dict[str, Any] = {"active_session_reference": None, "include_all_sessions": False,
+                                  "scope": (where, params)}
+        with self._db_lock:
+            keyword = self._keyword_search(cleaned, self.candidate_limit, **kwargs)
+            vector = self._vector_search(cleaned, self.candidate_limit, **kwargs)
+        by_id: dict[str, dict[str, Any]] = {h["chunk_id"]: {**h, "vector_score": 0.0} for h in keyword}
+        for h in vector:
+            by_id.setdefault(h["chunk_id"], {**h, "text_score": 0.0})["vector_score"] = h["vector_score"]
+        out: list[SemanticMemoryResult] = []
+        for h in by_id.values():
+            score = self.vector_weight * float(h["vector_score"]) + self.text_weight * float(h.get("text_score", 0.0))
+            if score < self.min_score:
+                continue
+            out.append(SemanticMemoryResult(
+                chunk_id=h["chunk_id"], source=h["source"], reference=h["reference"], path=h["path"],
+                start_line=int(h["start_line"]), end_line=int(h["end_line"]), snippet=h["snippet"], score=score,
+                text_score=float(h.get("text_score", 0.0)), vector_score=float(h["vector_score"]),
+                updated_at=h["updated_at"], relevance=score))
+        out.sort(key=lambda r: r.score, reverse=True)
+        return out[:max(1, int(max_results))]
+
     def search_in_session(
         self,
         query: str,
@@ -1961,7 +2007,10 @@ class SemanticMemoryIndex:
         include_all_sessions: bool,
         project_session_ids: list[str] | None = None,
         exclude_session_reference: str | None = None,
+        scope: tuple[str, tuple[Any, ...]] | None = None,
     ) -> list[dict[str, Any]]:
+        """*scope*: a WHERE condition on ``c`` (and its parameters) in place
+        of the session scoping — ``search_files``."""
         conn = self._conn_or_raise()
         fts_query = _build_fts_query(query)
         if not fts_query:
@@ -1990,6 +2039,8 @@ class SemanticMemoryIndex:
         if exclude_session_reference:
             where_clause += " AND NOT (c.source = 'session' AND c.reference = ?)"
             params = (*params[:-1], exclude_session_reference, params[-1])
+        if scope is not None:
+            where_clause, params = f"AND {scope[0]}", (fts_query, *scope[1], limit)
         try:
             rows = conn.execute(
                 f"""
@@ -2037,6 +2088,8 @@ class SemanticMemoryIndex:
             if exclude_session_reference:
                 like_where += " AND NOT (source = 'session' AND reference = ?)"
                 like_params = (*like_params[:-1], exclude_session_reference, like_params[-1])
+            if scope is not None:
+                like_where, like_params = f"AND {scope[0].replace('c.', '')}", (like, *scope[1], limit)
             rows = conn.execute(
                 f"""
                 SELECT
@@ -2084,6 +2137,7 @@ class SemanticMemoryIndex:
         include_all_sessions: bool,
         project_session_ids: list[str] | None = None,
         exclude_session_reference: str | None = None,
+        scope: tuple[str, tuple[Any, ...]] | None = None,
     ) -> list[dict[str, Any]]:
         if not self.embedding_chain.enabled:
             return []
@@ -2120,6 +2174,8 @@ class SemanticMemoryIndex:
         if exclude_session_reference:
             extra_where += " AND NOT (c.source = 'session' AND c.reference = ?)"
             params = (*params, exclude_session_reference)
+        if scope is not None:
+            extra_where, params = f"AND {scope[0]}", (provider_key, dims, *scope[1])
         rows = conn.execute(
             f"""
             SELECT
@@ -2146,7 +2202,7 @@ class SemanticMemoryIndex:
             # chunks under the active provider on the next sync pass. (Not when
             # the live session was filtered out: on a fresh agent that leaves
             # nothing, which is no sign of a stale index.)
-            if not exclude_session_reference:
+            if not exclude_session_reference and scope is None:
                 self._reembed_checked = False
                 self.schedule_sync("vector_provider_mismatch")
             return []

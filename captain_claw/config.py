@@ -703,6 +703,9 @@ class ToolsConfig(BaseModel):
         "jev", "audio", "telegram_inbox", "whatsapp_web",
         "whatsapp_send_file", "intentions", "image_vision", "video_vision", "cv", "topics",
         "sessions", "history", "vfs",
+        # The documents an owner's setup gave the agent (knowledge/): shown
+        # only when there are some.
+        "knowledge",
         # The everyday working set. Archetype and spawn lists used to decide
         # these, and most left some out: 24 of 31 archetypes had no insights
         # (so "remember that…" had nowhere to go), and Gmail/OneDrive

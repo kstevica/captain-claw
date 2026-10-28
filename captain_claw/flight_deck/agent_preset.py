@@ -1919,9 +1919,11 @@ def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int
         if preset["glossary"]:
             line += ", and their terms in knowledge/glossary.md"
         line += ". Look there before you answer from memory"
+        if knowledge:
+            line += (": the knowledge tool searches all of it (search — each hit says its document, section and "
+                     "lines), reads a whole section by its title (section) and outlines a document (outline)")
         if any(k.get("map") for k in knowledge):
-            line += (". A long document has a section map (<name>.map.md) saying which lines hold each section: "
-                     "read just those lines, or search your memory for a phrase — a hit says its file and lines")
+            line += ". A long document also has a section map (<name>.map.md) saying which lines hold each section"
         tail += ["", "### Your knowledge", line + "."]
     if tables:
         tail += ["", "### Your tables",

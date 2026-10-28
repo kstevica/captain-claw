@@ -2474,6 +2474,7 @@ class AgentContextMixin:
             TopicsTool,
             SessionsTool,
             SessionHistoryTool,
+            KnowledgeTool,
             VfsTool,
             CvTool,
         )
@@ -2592,6 +2593,10 @@ class AgentContextMixin:
                 ht = SessionHistoryTool()
                 ht._agent = self
                 self.tools.register(ht)
+            elif tool_name == "knowledge":
+                kt = KnowledgeTool()
+                kt._agent = self
+                self.tools.register(kt, metadata={"requires_knowledge": True})
             elif tool_name == "video_vision":
                 self.tools.register(VideoVisionTool())
             elif tool_name == "cv":
