@@ -67,6 +67,8 @@
 
 /* ── File viewer markdown ── */
 .fd-file-markdown { color: #d4d4d8; line-height: 1.75; font-size: 0.9rem; }
+/* The passage a knowledge search opened, marked a moment (KnowledgeBrowser). */
+.fd-kb-flash { background: rgba(250, 204, 21, 0.16); box-shadow: 0 0 0 4px rgba(250, 204, 21, 0.16); border-radius: 4px; transition: background 0.8s, box-shadow 0.8s; }
 .fd-file-markdown h1 { font-size: 1.75em; font-weight: 700; color: #f4f4f5; margin: 1.5em 0 0.6em; padding-bottom: 0.3em; border-bottom: 2px solid #3f3f46; }
 .fd-file-markdown h2 { font-size: 1.4em; font-weight: 700; color: #f4f4f5; margin: 1.4em 0 0.5em; padding-bottom: 0.25em; border-bottom: 1px solid #27272a; }
 .fd-file-markdown h3 { font-size: 1.15em; font-weight: 600; color: #e4e4e7; margin: 1.2em 0 0.4em; }
