@@ -139,6 +139,8 @@ async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         return False
 
     monkeypatch.setattr(ap, "_quota_spent", not_spent)
+    # The owner's tier reads, unless a test gives the agent a model of its own (_own_model).
+    monkeypatch.setattr(ap, "agent_reader", lambda slug, entry: None)
     server._save_process_registry({})
     try:
         yield db
@@ -569,7 +571,324 @@ async def test_the_agent_being_set_up_frames_the_read_and_must_be_ones_own(deck,
 async def test_the_reader_says_its_model_and_step(deck):
     async with _client() as c:
         r = await c.get("/fd/agent-preset/reader", headers=_auth(BOB))
-    assert r.json() == {"model": "test-model", "step_tokens": ap.step_tokens(_TIER)}
+    assert r.json() == {"model": "test-model", "step_tokens": ap.step_tokens(_TIER), "via": "tiers", "note": ""}
+
+
+# ── The agent's own model reads ───────────────────────────────────────
+
+_HAIKU = {"provider": "anthropic", "model": "claude-haiku-4-5"}
+
+
+def _own_model(monkeypatch, slug: str, *, ctx: int = 200000, available: bool = True, **entry) -> None:
+    """Give *slug* its own model in its config.yaml (the real agent_reader
+    reads it) and say whether it is running or asleep."""
+    cfg = server.DATA_DIR / slug / "data" / "home-config-parent" / ".captain-claw" / "config.yaml"
+    cfg.parent.mkdir(parents=True, exist_ok=True)
+    cfg.write_text(json.dumps({"model": _HAIKU, "context": {"max_tokens": ctx}}), encoding="utf-8")
+    if entry:
+        reg = server._load_process_registry()
+        reg[slug].update(entry)
+        server._save_process_registry(reg)
+    monkeypatch.setattr(ap, "agent_reader", _REAL_AGENT_READER)
+    monkeypatch.setattr(ap.agent_idle, "is_available", lambda s: available)
+
+
+_REAL_AGENT_READER = ap.agent_reader
+
+
+def _agent_model(monkeypatch, *replies, up: bool = True) -> list[dict]:
+    """The agent answers (its /api/llm/complete) with *replies* in turn —
+    an exception is raised instead of answered; the calls it got."""
+    calls: list[dict] = []
+
+    async def fake_up(reader, job):
+        return up
+
+    async def fake_complete(reader, system, prompt, owner_id, max_tokens):
+        calls.append({"agent": reader["agent"], "model": reader["model"], "user": prompt, "max_tokens": max_tokens})
+        reply = replies[min(len(calls), len(replies)) - 1]
+        if isinstance(reply, Exception):
+            raise reply
+        return reply, 50
+
+    monkeypatch.setattr(ap, "_agent_up", fake_up)
+    monkeypatch.setattr(ap, "_agent_complete", fake_complete)
+    return calls
+
+
+async def test_the_agent_reads_with_its_own_model(deck, monkeypatch):
+    tier_calls = _model(monkeypatch, json.dumps(_REPLY))
+    slug = await _spawn(BOB, "Helpdesk", 24303)
+    _own_model(monkeypatch, slug)
+    calls = _agent_model(monkeypatch, json.dumps(_REPLY))
+    async with _client() as c:
+        r = await c.get("/fd/agent-preset/reader", params={"agent": slug}, headers=_auth(BOB))
+    assert r.json() == {"model": "claude-haiku-4-5", "via": "agent", "note": "",
+                        "step_tokens": ap.step_tokens({"provider": "anthropic", "input_ctx": 200000})}
+
+    job = await _prepare(BOB, [("p.txt", b"Refunds within 14 days.")], archetype="", agent=slug)
+    assert job["state"] == "done" and job["model"] == "claude-haiku-4-5" and job["via"] == "agent"
+    assert job["result"]["model"] == "claude-haiku-4-5" and job["tokens"] == 50
+    assert calls and calls[0]["agent"] == slug and "Refunds within 14 days." in calls[0]["user"]
+    assert tier_calls == []                     # the owner's model never ran
+    async with _client() as c:                  # nor can another person ask about it
+        r = await c.get("/fd/agent-preset/reader", params={"agent": slug}, headers=_auth(CAROL))
+    assert r.status_code == 404
+
+
+def test_an_agents_reader_follows_its_config(deck, tmp_path, monkeypatch):
+    monkeypatch.setattr(ap, "agent_reader", _REAL_AGENT_READER)
+    cfg = server.DATA_DIR / "a" / "data" / "home-config-parent" / ".captain-claw" / "config.yaml"
+    cfg.parent.mkdir(parents=True)
+    cfg.write_text("model:\n  provider: ollama\n  model: qwen3:8b\ncontext:\n  max_tokens: 160000\n")
+    local = ap.agent_reader("a", {"name": "A", "key_source": "byok"})
+    assert local == {"agent": "a", "name": "A", "provider": "ollama", "model": "qwen3:8b",
+                     "input_ctx": 32768, "byok": True}   # a local Ollama window is clamped
+    cfg.write_text("model:\n  provider: ollama\n  model: glm-5:cloud\n")
+    assert ap.agent_reader("a", {})["input_ctx"] == 0      # unknown: step_tokens' default
+    cfg.unlink()
+    assert ap.agent_reader("a", {"provider": "anthropic", "model": "m"})["model"] == "m"   # the registry, else
+    assert ap.agent_reader("a", {}) is None
+
+
+async def test_an_agent_thats_off_leaves_the_read_to_the_owners_model(deck, monkeypatch):
+    tier_calls = _model(monkeypatch, json.dumps(_REPLY))
+    slug = await _spawn(BOB, "Helpdesk", 24304)
+    _own_model(monkeypatch, slug, available=False)
+    async with _client() as c:
+        r = await c.get("/fd/agent-preset/reader", params={"agent": slug}, headers=_auth(BOB))
+    assert r.json()["model"] == "test-model" and r.json()["via"] == "tiers"
+    assert "Helpdesk is switched off" in r.json()["note"]
+
+    job = await _prepare(BOB, [("p.txt", b"Refunds.")], archetype="", agent=slug)
+    assert job["state"] == "done" and job["via"] == "tiers" and len(tier_calls) == 1
+    assert any("Helpdesk is switched off" in w for w in job["result"]["preset"]["warnings"])
+
+    async def no_tier(_uid, prefer=()):
+        return None
+
+    monkeypatch.setattr(ap, "_resolve_tier", no_tier)
+    r = await _start(BOB, [], "Be brief.", archetype="", agent=slug)
+    assert r.status_code == 409 and "Switch it on" in r.json()["detail"]
+
+
+async def test_an_agent_that_doesnt_answer_hands_over_to_the_owners_model(deck, monkeypatch):
+    tier_calls = _model(monkeypatch, json.dumps(_REPLY))
+    slug = await _spawn(BOB, "Helpdesk", 24305)
+    _own_model(monkeypatch, slug)
+    _agent_model(monkeypatch, json.dumps(_REPLY), up=False)
+    job = await _prepare(BOB, [("p.txt", b"Refunds.")], archetype="", agent=slug)
+    assert job["state"] == "done" and job["model"] == "test-model" and job["via"] == "tiers"
+    assert len(tier_calls) == 1
+    assert job["result"]["preset"]["warnings"][0].startswith("Helpdesk didn't answer, so test-model read")
+
+
+async def test_an_agent_that_stops_answering_mid_read_hands_over(deck, monkeypatch):
+    async def small_tier(_uid, prefer=()):
+        return {**_TIER, "input_ctx": 8000 * 2 + 2 * ap._PROMPT_TOKENS}
+
+    monkeypatch.setattr(ap, "_resolve_tier", small_tier)
+    tier_calls = _model(monkeypatch, json.dumps(_REPLY))
+    slug = await _spawn(BOB, "Helpdesk", 24306)
+    _own_model(monkeypatch, slug, ctx=8000 * 2 + 2 * ap._PROMPT_TOKENS)
+    calls = _agent_model(monkeypatch, json.dumps(_REPLY), ap._AgentGoneError("not answering"))
+    job = await _prepare(BOB, [("big.md", _pdf_text(40).encode())], archetype="", agent=slug)
+    assert job["state"] == "done" and job["steps"] == 3
+    assert len(calls) == 2 and len(tier_calls) >= 2     # part 1 by the agent; the rest by the owner's
+    assert any("Helpdesk stopped answering, so test-model read the rest." == w
+               for w in job["result"]["preset"]["warnings"])
+
+
+async def test_an_agents_rest_call_carries_its_model_and_counts_its_tokens(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24307)
+    reg = server._load_process_registry()
+    reg[slug].update(web_port=24307, web_auth="tok-1", key_source="byok")
+    server._save_process_registry(reg)
+    monkeypatch.setattr(server, "_process_is_alive", lambda s: True)
+    counted: list[tuple] = []
+
+    async def count(owner, tokens, byok):
+        counted.append((owner, tokens, byok))
+
+    monkeypatch.setattr(ap, "_count", count)
+    seen: list[httpx.Request] = []
+    answers = [httpx.Response(200, json={"ok": True, "content": "{}", "usage": {"prompt_tokens": 70,
+                                                                                 "completion_tokens": 5}}),
+               httpx.Response(500, json={"ok": False, "error": "litellm.RateLimitError: rate_limit_error",
+                                         "retry_after": 7}),
+               httpx.Response(503, json={"ok": False, "error": "no LLM provider"})]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return answers[len(seen) - 1]
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient",
+                        lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
+    reader = ap.agent_reader(slug, reg[slug]) or {"agent": slug, "name": "Helpdesk", "model": "m"}
+    reader = {**reader, "byok": True}
+
+    assert await ap._agent_complete(reader, "sys", "material", BOB, 8000) == ("{}", 75)
+    body = json.loads(seen[0].content)
+    assert seen[0].url.path == "/api/llm/complete" and seen[0].url.params["token"] == "tok-1"
+    assert seen[0].url.port == 24307
+    assert body["messages"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "material"}]
+    assert body["max_tokens"] == 8000 and body["timeout"] == ap._CALL_TIMEOUT
+    assert counted == [(BOB, 75, True)]
+
+    with pytest.raises(ap._ModelError) as busy:
+        await ap._agent_complete(reader, "sys", "material", BOB, 8000)
+    assert busy.value.wait == 7 and ap.is_busy(busy.value)
+    with pytest.raises(ap._AgentGoneError):
+        await ap._agent_complete(reader, "sys", "material", BOB, 8000)
+
+
+# ── A busy model's server is waited out ───────────────────────────────
+
+
+def _rate_limited(seconds: str) -> Exception:
+    """A 429 carrying its response, as LiteLLM's RateLimitError does (``.response``
+    with the server's headers) — without importing litellm, which reconfigures
+    logging for every test after it."""
+    return httpx.HTTPStatusError("Error", request=httpx.Request("POST", "https://api.example"),
+                                 response=httpx.Response(429, headers={"retry-after": seconds}))
+
+
+def test_busy_and_retry_after_are_read_from_the_error():
+    from captain_claw.exceptions import LLMAPIError, is_busy, retry_after
+
+    limited = _rate_limited("12")
+    wrapped = LLMAPIError("anthropic API call failed: Error", status_code=429)
+    wrapped.__context__ = limited            # what LiteLLMProvider's raise inside `except` leaves
+    assert is_busy(wrapped) and retry_after(wrapped) == 12.0
+    assert is_busy(LLMAPIError("Overloaded", status_code=529))
+    assert is_busy("AnthropicException - {\"type\":\"rate_limit_error\"}")
+    assert not is_busy(LLMAPIError("invalid x-api-key", status_code=401))
+    assert retry_after(ValueError("no response")) is None
+
+
+def _busy_then(monkeypatch, *replies) -> list[int]:
+    """The owner's model: a busy server for every Exception in *replies*,
+    else the reply; waits take no time. The calls."""
+    calls: list[int] = []
+
+    async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+        calls.append(1)
+        reply = replies[min(len(calls), len(replies)) - 1]
+        if isinstance(reply, Exception):
+            raise reply
+        return reply, 100
+
+    monkeypatch.setattr(ap, "call_model", fake_call)
+    monkeypatch.setattr(ap, "_WAITS", (0, 0, 0))
+    return calls
+
+
+async def test_a_busy_model_is_waited_out(deck, monkeypatch):
+    from captain_claw.exceptions import LLMAPIError
+    limited = LLMAPIError("anthropic API call failed: litellm.RateLimitError", status_code=429)
+    calls = _busy_then(monkeypatch, limited, limited, json.dumps(_REPLY))
+    job = await _prepare(BOB, [("p.txt", b"Refunds.")])
+    assert job["state"] == "done" and len(calls) == 3 and job["waiting"] is None
+    assert job["result"]["preset"]["rules"]
+
+
+async def test_a_wait_shows_on_the_job_until_it_ends(deck, monkeypatch):
+    from captain_claw.exceptions import LLMAPIError
+    calls = _busy_then(monkeypatch, LLMAPIError("rate limit", status_code=429), json.dumps(_REPLY))
+    monkeypatch.setattr(ap, "_WAITS", (0.3,))
+    staged = (await _stage(BOB, [("p.txt", b"Refunds.")]))["docs"]
+    r = await _start(BOB, [{"id": staged[0]["id"]}])
+    seen = None
+    async with _client() as c:
+        for _ in range(100):
+            view = (await c.get(f"/fd/agent-preset/prepare/{r.json()['id']}", headers=_auth(BOB))).json()
+            if view["waiting"]:
+                seen = view["waiting"]
+                break
+            await asyncio.sleep(0.01)
+    assert seen and seen["why"] == "busy" and seen["model"] == "test-model" and seen["until"] > time.time() - 1
+    assert (await _wait(BOB, r.json()["id"]))["state"] == "done" and len(calls) == 2
+
+
+async def test_a_model_still_busy_stops_the_read_and_keeps_what_was_read(deck, monkeypatch):
+    from captain_claw.exceptions import LLMAPIError
+
+    async def small_tier(_uid, prefer=()):
+        return {**_TIER, "input_ctx": 8000 * 2 + 2 * ap._PROMPT_TOKENS}
+
+    monkeypatch.setattr(ap, "_resolve_tier", small_tier)
+    limited = LLMAPIError("rate_limit_error", status_code=429)
+    calls = _busy_then(monkeypatch, json.dumps(_REPLY), limited)
+    job = await _prepare(BOB, [("big.md", _pdf_text(40).encode())])
+    assert job["state"] == "done" and job["steps"] == 3
+    assert len(calls) == 1 + 1 + len(ap._WAITS)          # part 1, then part 2 tried and waited for
+    assert any("test-model was still rate-limited or overloaded after waiting, so parts 2–3 weren't read." in w
+               for w in job["result"]["preset"]["warnings"])
+    assert job["result"]["preset"]["rules"]               # part 1's findings are kept
+
+    _busy_then(monkeypatch, limited)
+    job = await _prepare(BOB, [("p.txt", b"Refunds.")])
+    assert job["state"] == "error" and "still rate-limited or overloaded" in job["error"]
+
+
+async def test_a_refused_call_is_not_waited_for(deck, monkeypatch):
+    from captain_claw.exceptions import LLMAPIError
+    calls = _busy_then(monkeypatch, LLMAPIError("invalid x-api-key", status_code=401))
+    job = await _prepare(BOB, [("p.txt", b"Refunds.")])
+    assert job["state"] == "error" and len(calls) == 1 and "invalid x-api-key" in job["error"]
+
+
+# ── Agent side: /api/llm/complete takes the setup's timeout ───────────
+
+
+class _TimedProvider:
+    request_timeout = None
+
+    def __init__(self, fail: Exception | None = None):
+        self.fail = fail
+        self.seen: list = []                 # shared by shallow copies
+
+    async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
+        from captain_claw.llm import LLMResponse
+        self.seen.append(self.request_timeout)
+        if self.fail:
+            raise self.fail
+        return LLMResponse(content="{}", model="m", usage={"total_tokens": 3}, finish_reason="stop")
+
+
+class _JsonRequest:
+    def __init__(self, body):
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+async def test_llm_complete_takes_a_timeout_for_this_call_only():
+    import types
+
+    from captain_claw.web_server import WebServer
+    shared = _TimedProvider()
+    web = WebServer.__new__(WebServer)
+    web.agent = types.SimpleNamespace(provider=shared)
+    resp = await web._llm_complete(_JsonRequest({"messages": [{"role": "user", "content": "x"}], "timeout": 300}))
+    assert resp.status == 200 and shared.seen == [300.0] and shared.request_timeout is None
+
+
+async def test_llm_complete_says_how_long_a_busy_server_asked_to_wait():
+    import types
+
+    from captain_claw.exceptions import LLMAPIError
+    from captain_claw.web_server import WebServer
+    wrapped = LLMAPIError("anthropic API call failed: litellm.RateLimitError: Error", status_code=429)
+    wrapped.__context__ = _rate_limited("9")
+    web = WebServer.__new__(WebServer)
+    web.agent = types.SimpleNamespace(provider=_TimedProvider(fail=wrapped))
+    resp = await web._llm_complete(_JsonRequest({"messages": [{"role": "user", "content": "x"}]}))
+    data = json.loads(resp.text)
+    assert resp.status == 500 and data["ok"] is False and data["retry_after"] == 9.0
+    assert "RateLimitError" in data["error"]
 
 
 # ── Seeding ───────────────────────────────────────────────────────────

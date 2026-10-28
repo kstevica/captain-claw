@@ -138,8 +138,8 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
   useEffect(() => { if (!asUser) void useQuotaStore.getState().refresh() }, [asUser])
   useEffect(() => {
-    getReader(asUser).then(setReader).catch(() => setReader({ model: '', step_tokens: 0 }))
-  }, [asUser])
+    getReader(agent.slug, asUser).then(setReader).catch(() => setReader({ model: '', step_tokens: 0 }))
+  }, [agent.slug, asUser])
   useEffect(() => {
     getCurrentSetup(agent.slug, asUser).then(setCurrent).catch(() => setCurrent(null))
   }, [agent.slug, asUser])
@@ -342,7 +342,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
           : 'Read it'
   const footHint = review ? 'Nothing changed since it was read.'
     : staging ? 'Reading the documents’ pages — no tokens yet.'
-      : noModel ? 'No model is set up to read with. Keep the documents as knowledge only, or ask your admin.'
+      : noModel ? (reader?.note || 'No model is set up to read with. Keep the documents as knowledge only, or ask your admin.')
         : hasMaterial ? 'You review everything before it reaches the agent.'
           : 'Add instructions or a document to start.'
 
@@ -459,7 +459,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
               {/* On a phone, after the documents: they come first there. */}
               <div className="order-3 shrink-0 space-y-5 border-t border-zinc-800 px-4 py-4 wide:hidden">
                 <HowItWorks name={name} />
-                <UsageNote estimate={estimate} reader={reader} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} />
+                <UsageNote estimate={estimate} reader={reader} name={name} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} />
               </div>
 
               {/* Instructions, how it works, usage */}
@@ -488,7 +488,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
                 <div className="hidden space-y-5 wide:block">
                   <HowItWorks name={name} />
-                  <UsageNote estimate={estimate} reader={reader} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} />
+                  <UsageNote estimate={estimate} reader={reader} name={name} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} />
                 </div>
               </aside>
             </div>
@@ -513,7 +513,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
         )}
 
         {step === 'reading' && (
-          <ReadingView job={job} docs={docs} elapsed={now - startedAt} onStop={stopReading} />
+          <ReadingView job={job} docs={docs} name={name} now={now} elapsed={now - startedAt} onStop={stopReading} />
         )}
 
         {step === 'review' && review && (
@@ -765,15 +765,18 @@ function HowItWorks({ name }: { name: string }) {
 }
 
 /** What reading the material costs, against what is left today. */
-function UsageNote({ estimate, reader, quota, knowledgeOnly }: {
+function UsageNote({ estimate, reader, name, quota, knowledgeOnly }: {
   estimate: { steps: number; tokens: number }
   reader: Reader | null
+  /** The agent being set up. */
+  name: string
   quota: QuotaStatus | null
   /** Some documents are kept as knowledge only. */
   knowledgeOnly: boolean
 }) {
   const { steps, tokens } = estimate
-  const how = reader?.model ? ` in ${plural(steps, 'step')} by ${reader.model}` : ''
+  const whose = reader?.via === 'agent' ? `, ${name}'s own model` : ''
+  const how = reader?.model ? ` in ${plural(steps, 'step')} by ${reader.model}${whose}` : ''
   let body: ReactNode
   if (!tokens) {
     body = (
@@ -814,17 +817,26 @@ function UsageNote({ estimate, reader, quota, knowledgeOnly }: {
     <div>
       <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-zinc-500">Usage</p>
       {body}
+      {reader?.note && reader.model && <p className="mt-1 text-[11px] text-zinc-500">{reader.note}</p>}
     </div>
   )
 }
 
 /** The read under way: which part, how far, what it has spent. */
-function ReadingView({ job, docs, elapsed, onStop }: {
+function ReadingView({ job, docs, name, now, elapsed, onStop }: {
   job: ReadJob | null
   docs: Doc[]
+  /** The agent being set up. */
+  name: string
+  now: number
   elapsed: number
   onStop: () => void
 }) {
+  const wait = job?.waiting
+  const waitLine = !wait ? ''
+    : wait.why === 'waking' ? `Waking ${wait.name}…`
+      : `${wait.model} is busy (a rate limit, or overloaded) — trying again in ${Math.max(0, Math.ceil(wait.until - now / 1000))} s`
+  const by = job?.model ? `By ${job.model}${job.via === 'agent' ? `, ${name}'s own model` : ''}` : ''
   const merging = job?.phase === 'merging'
   const steps = job?.steps || 0
   const pct = steps ? Math.round(((merging ? steps : Math.max(0, (job?.step || 1) - 1)) / steps) * 100) : 0
@@ -854,6 +866,10 @@ function ReadingView({ job, docs, elapsed, onStop }: {
       <p className="mt-2 font-mono text-xs tabular-nums text-zinc-500">
         {clock(elapsed)}{job && job.tokens > 0 ? ` · ${kTokens(job.tokens)} tokens so far` : ''}
       </p>
+      {by && <p className="mt-1 text-[11px] text-zinc-500">{by}</p>}
+      {waitLine && (
+        <p className="mt-2 max-w-sm text-[11px] text-amber-600 dark:text-amber-400" role="status">{waitLine}</p>
+      )}
       {steps > 3 && <p className="mt-1 text-[11px] text-zinc-600">Long documents take a while — keep this open until it is done.</p>}
       {(reading.length > 0 || kept.length > 0) && (
         <ul className="mt-5 w-full max-w-sm space-y-1.5 text-left">

@@ -32,8 +32,12 @@ person kept:
 A running agent needs no restart for any of it: it re-reads its skills folder,
 indexes its workspace on its next message, and the chat sends it the new
 instructions. The documents' text waits server-side under the preset's id for
-a day, so Apply doesn't upload them again. The owner's model reads them
-(balanced tier first) and the tokens count toward the owner's daily allowance.
+a day, so Apply doesn't upload them again. The agent being set up reads them
+with its own model (its ``/api/llm/complete``: its provider, key and context
+window), woken first if it is asleep; only when it is off or stops answering
+does the owner's model read them (balanced tier first). A model server that
+says "not now" (a rate limit, overloaded) is waited out. The tokens count
+toward the owner's daily allowance.
 """
 
 from __future__ import annotations
@@ -49,11 +53,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+import yaml
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
+from captain_claw.exceptions import is_busy, retry_after
+from captain_claw.flight_deck import agent_idle, file_library
 from captain_claw.flight_deck import agent_preset_docs as pdocs
-from captain_claw.flight_deck import file_library
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.flight_deck.file_library import (
     _auth_enabled,
@@ -85,10 +91,13 @@ _STEP_MIN, _STEP_MAX = 4000, 100_000   # tokens of material in one step (step_to
 _PROMPT_TOKENS = 3000                  # the prompt around a step's material
 _PART_BYTES = 200_000                  # a knowledge file: semantic memory skips files over 256 KB
 _JOB_KEEP = 3600                       # a finished read's result waits this long
-_TIERS = ("balanced", "reason", "fast")  # a careful read beats a quick one here
+_TIERS = ("balanced", "reason", "fast")  # when the agent can't read: a careful read beats a quick one
 _MAX_TOKENS = 8000
 _RETRY_TOKENS = 16000
 _CALL_TIMEOUT = 300.0
+_WAITS = (15, 30, 60, 60, 60, 60)      # seconds between tries while the model's server says "not now" (~5 min)
+_WAIT_CAP = 120.0                      # the longest one retry-after is honoured for
+_AGENT_READY_S = 90.0                  # an agent just created, or being woken, starting up
 _RETRY_NUDGE = "Reply now with the JSON object only: no thinking aloud, no prose."
 _TTL = 24 * 3600                       # a prepared preset nobody created waits this long
 _BLOCK_CAP = 5000                      # the rules block in the agent's instructions
@@ -568,12 +577,17 @@ class ReadJob:
     finished: float | None = None
     error: str = ""
     result: dict | None = None
+    model: str = ""                 # who reads: the agent's own model, or the owner's
+    via: str = ""                   # agent | tiers
+    waiting: dict | None = None     # {"why": waking | busy, ...} while it waits
+    notes: list[str] = field(default_factory=list)  # found while reading, for the review
     task: asyncio.Task | None = None
 
     def view(self) -> dict:
         out = {"id": self.id, "state": self.state, "phase": self.phase, "step": self.step,
                "steps": self.steps, "current": self.current, "tokens": self.tokens,
-               "started": self.started, "finished": self.finished, "error": self.error}
+               "started": self.started, "finished": self.finished, "error": self.error,
+               "model": self.model, "via": self.via, "waiting": self.waiting}
         if self.result is not None:
             out["result"] = self.result
         return out
@@ -591,38 +605,230 @@ class _UnreadableError(Exception):
     pass
 
 
-async def _ask(tier: dict, system: str, prompt: str, owner_id: str, job: ReadJob) -> dict | None:
+class _AgentGoneError(Exception):
+    """The agent being set up doesn't answer at all — not its model's error."""
+
+
+class _ModelError(Exception):
+    """The agent's model failed a call, as the agent reports it."""
+
+    def __init__(self, message: str, wait: Any = None):
+        super().__init__(message)
+        self.wait = wait
+
+
+class _BusyError(Exception):
+    """The model's server still said "not now" after every wait."""
+
+
+# ── Who reads: the agent's own model, else the owner's ────────────────
+
+
+def _agent_config(slug: str) -> dict:
+    """The agent's config.yaml — the model it runs on — or {}."""
+    from captain_claw.flight_deck import server as srv
+    path = srv.DATA_DIR / slug / "data" / "home-config-parent" / ".captain-claw" / "config.yaml"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def agent_reader(slug: str, entry: dict) -> dict | None:
+    """The agent's own model as the reader: what it runs on (its config,
+    else its registry entry), its context window, and whether that is on
+    its owner's own keys. None when its model isn't known."""
+    cfg = _agent_config(slug)
+    model_cfg = cfg.get("model") if isinstance(cfg.get("model"), dict) else {}
+    ctx_cfg = cfg.get("context") if isinstance(cfg.get("context"), dict) else {}
+    provider = str(model_cfg.get("provider") or entry.get("provider") or "")
+    model = str(model_cfg.get("model") or entry.get("model") or "")
+    if not model:
+        return None
+    try:
+        ctx = int(ctx_cfg.get("max_tokens") or 0)
+    except (TypeError, ValueError):
+        ctx = 0
+    if provider == "ollama" and not model.endswith(":cloud"):
+        ctx = min(ctx or 32768, 32768)  # where the agent's local Ollama window is clamped
+    return {"agent": slug, "name": str(entry.get("name") or slug), "provider": provider, "model": model,
+            "input_ctx": ctx, "byok": entry.get("key_source") == "byok"}
+
+
+async def choose_reader(owner_id: str, slug: str) -> tuple[dict | None, str]:
+    """Who reads the material, and what the person should know about it:
+    the agent being set up, with its own model, when it is running or
+    asleep (woken when the read starts); else the owner's tier."""
+    tier = await _resolve_tier(owner_id, prefer=_TIERS)
+    if not slug:
+        return tier, ""
+    entry = _own_process(slug, owner_id)
+    own = agent_reader(slug, entry)
+    if own is None:
+        return tier, ""
+    if agent_idle.is_available(slug):
+        return {**own, "fallback": tier}, ""
+    if tier:
+        return tier, f"{own['name']} is switched off, so {tier.get('model')} reads your material instead of its own model."
+    return None, f"{own['name']} is switched off, and no other model is set up to read with. Switch it on and try again."
+
+
+async def _agent_up(reader: dict, job: ReadJob) -> bool:
+    """Wake the agent if it is asleep, and wait for it to answer (one just
+    created is still starting): True when it does."""
+    from captain_claw.flight_deck import server as srv
+    slug = reader["agent"]
+    if agent_idle.is_asleep(slug):
+        job.waiting = {"why": "waking", "name": reader["name"]}
+        try:
+            await agent_idle.wake(slug)
+        finally:
+            job.waiting = None
+    if not srv._process_is_alive(slug):
+        return False
+    token = str((srv._load_process_registry().get(slug) or {}).get("web_auth") or "")
+    port = await _wait_ready(lambda: (srv._load_process_registry().get(slug) or {}).get("web_port") or 0,
+                             token, _AGENT_READY_S)
+    return bool(port)
+
+
+def _fall_back(reader: dict, job: ReadJob, note: str) -> bool:
+    """Read on with the owner's model (*note* says why, in the review) —
+    False when there is none."""
+    tier = reader.get("fallback")
+    if not reader.get("agent") or not tier:
+        return False
+    log.warning("agent preset: reading with the owner's model instead", agent=reader["agent"], why=note)
+    job.notes.append(note.format(name=reader["name"], model=tier.get("model") or "your model"))
+    reader.clear()
+    reader.update(tier)
+    job.model, job.via = str(tier.get("model") or ""), "tiers"
+    return True
+
+
+async def _count(owner_id: str, tokens: int, byok: bool) -> None:
+    """Tokens the agent's model spent for the setup, toward the owner's day
+    (the agent doesn't count calls to its /api/llm/complete)."""
+    if not (owner_id and _auth_enabled() and tokens):
+        return
+    try:
+        from captain_claw.flight_deck import usage_quota
+        from captain_claw.flight_deck.auth import get_db
+        await usage_quota.record_tokens(get_db(), owner_id, tokens, byok=byok)
+    except Exception:
+        log.debug("agent preset: token report failed", exc_info=True)
+
+
+async def _agent_complete(reader: dict, system: str, prompt: str, owner_id: str,
+                          max_tokens: int) -> tuple[str, int]:
+    """One call to the agent's own model, through its REST: (reply, tokens)."""
+    import httpx
+
+    from captain_claw.flight_deck import server as srv
+    slug = reader["agent"]
+    entry = srv._load_process_registry().get(slug) or {}
+    port, token = int(entry.get("web_port") or 0), str(entry.get("web_auth") or "")
+    if not port or not srv._process_is_alive(slug):
+        raise _AgentGoneError("not running")
+    agent_idle.touch(slug)
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(2 * _CALL_TIMEOUT + 30, connect=5.0),
+                                     trust_env=False) as client:
+            resp = await client.post(
+                f"http://127.0.0.1:{port}/api/llm/complete", params={"token": token} if token else {},
+                json={"messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
+                      "temperature": 0.2, "max_tokens": max_tokens, "timeout": _CALL_TIMEOUT})
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        raise _AgentGoneError("not answering") from exc
+    finally:
+        agent_idle.touch(slug)
+    try:
+        data = resp.json()
+    except ValueError:
+        data = None
+    # 503: no model at all; 401/403/404: not this agent, or one without the route.
+    if resp.status_code in (401, 403, 404, 503) or not isinstance(data, dict):
+        raise _AgentGoneError(f"HTTP {resp.status_code}")
+    if not data.get("ok"):
+        raise _ModelError(str(data.get("error") or f"HTTP {resp.status_code}"), data.get("retry_after"))
+    usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+    tokens = int(usage.get("total_tokens") or 0) or (
+        int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0))
+    await _count(owner_id, tokens, bool(reader.get("byok")))
+    return str(data.get("content") or ""), tokens
+
+
+async def _call(reader: dict, system: str, prompt: str, owner_id: str, job: ReadJob, max_tokens: int) -> str:
+    """One model call: the agent's model, or the owner's tier. A server that
+    says "not now" (a rate limit, overloaded) is waited out — for as long as
+    it asks, else 15 s, 30 s, then a minute at a time, some 5 minutes in
+    all; an agent that stops answering hands over to the owner's model."""
+    waits = iter(_WAITS)
+    while True:
+        try:
+            if reader.get("agent"):
+                content, tokens = await _agent_complete(reader, system, prompt, owner_id, max_tokens)
+            else:
+                content, tokens = await call_model(reader, system, prompt, owner_id, max_tokens=max_tokens,
+                                                   request_timeout=_CALL_TIMEOUT)
+            job.tokens += int(tokens or 0)
+            return content
+        except asyncio.CancelledError:
+            raise
+        except _AgentGoneError as exc:
+            if not _fall_back(reader, job, "{name} stopped answering, so {model} read the rest."):
+                raise _UnreadableError(f"{reader.get('name') or 'The agent'} stopped answering ({exc}).") from exc
+        except Exception as exc:
+            if not is_busy(exc):
+                raise
+            pause = next(waits, None)
+            if pause is None:
+                raise _BusyError(str(exc)) from exc
+            try:
+                asked = float(getattr(exc, "wait", None) or retry_after(exc) or 0)
+            except (TypeError, ValueError):
+                asked = 0.0
+            if asked > 0:
+                pause = min(_WAIT_CAP, max(1.0, asked))
+            log.info("agent preset: the model is busy, waiting", model=reader.get("model"), seconds=pause)
+            job.waiting = {"why": "busy", "model": str(reader.get("model") or ""), "until": time.time() + pause}
+            try:
+                await asyncio.sleep(pause)
+            finally:
+                job.waiting = None
+
+
+async def _ask(reader: dict, system: str, prompt: str, owner_id: str, job: ReadJob) -> dict | None:
     """One step's model call — again, with room and a nudge, when the reply
     isn't JSON (a reasoning model that thought past the budget, prose around
     it). None when it never is."""
     for attempt in range(2):
-        content, tokens = await call_model(
-            tier, system, prompt if attempt == 0 else f"{prompt}\n\n{_RETRY_NUDGE}", owner_id,
-            max_tokens=_MAX_TOKENS if attempt == 0 else _retry_tokens(tier), request_timeout=_CALL_TIMEOUT)
-        job.tokens += int(tokens or 0)
+        content = await _call(reader, system, prompt if attempt == 0 else f"{prompt}\n\n{_RETRY_NUDGE}",
+                              owner_id, job, _MAX_TOKENS if attempt == 0 else _retry_tokens(reader))
         got = _parse_part(content)
         if got is not None:
             return got
     return None
 
 
-async def merge_parts(tier: dict, parts: list[dict], owner_id: str, job: ReadJob, depth: int = 0) -> dict:
+async def merge_parts(reader: dict, parts: list[dict], owner_id: str, job: ReadJob, depth: int = 0) -> dict:
     """What every step found, as one preset: the model merges the parts
     (a halving tree when they are too many for one call); without it — or
     when its answer can't be read — they are combined as they are."""
     if len(parts) == 1:
         return parts[0]
     payload = json.dumps(parts, ensure_ascii=False)
-    if len(payload) > step_tokens(tier) * pdocs.CHARS_PER_TOKEN:
+    if len(payload) > step_tokens(reader) * pdocs.CHARS_PER_TOKEN:
         if len(parts) > 2 and depth < 6:
             mid = len(parts) // 2
-            left = await merge_parts(tier, parts[:mid], owner_id, job, depth + 1)
-            right = await merge_parts(tier, parts[mid:], owner_id, job, depth + 1)
-            return await merge_parts(tier, [left, right], owner_id, job, depth + 1)
+            left = await merge_parts(reader, parts[:mid], owner_id, job, depth + 1)
+            right = await merge_parts(reader, parts[mid:], owner_id, job, depth + 1)
+            return await merge_parts(reader, [left, right], owner_id, job, depth + 1)
         return combine(parts)
     system = _MERGE_PROMPT_FILE.read_text(encoding="utf-8")
     try:
-        got = await _ask(tier, system, f"## The parts\n{payload}", owner_id, job)
+        got = await _ask(reader, system, f"## The parts\n{payload}", owner_id, job)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -677,34 +883,52 @@ def _finish(preset: dict, docs: list[dict], warnings: list[str], model: str, ste
     }
 
 
-async def run_read(job: ReadJob, tier: dict | None, arch: dict | None, instructions: str,
+async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instructions: str,
                    docs: list[dict], warnings: list[str], owner_id: str) -> None:
-    """Read the material step by step, merge what each step found, and leave
-    the result on *job* for the dialog to fetch. A step whose answer can't
-    be read is reported and skipped; the person's allowance running out
+    """Read the material step by step — with the agent's own model, woken
+    first if it is asleep, or the owner's when it doesn't answer — merge
+    what each step found, and leave the result on *job* for the dialog to
+    fetch. A step whose answer can't be read is reported and skipped; the
+    person's allowance running out, or the model's server staying busy,
     stops the reading but keeps what was found."""
     try:
-        steps, notes = plan_steps(instructions, docs, step_tokens(tier) if tier else _STEP_MAX)
+        if reader and reader.get("agent") and not await _agent_up(reader, job):
+            if not _fall_back(reader, job, "{name} didn't answer, so {model} read your material "
+                                           "instead of its own model."):
+                raise _UnreadableError(f"{reader['name']} isn't answering, and no other model is set up "
+                                       "to read with. Switch it on and try again.")
+        steps, notes = plan_steps(instructions, docs, step_tokens(reader) if reader else _STEP_MAX)
         warnings = warnings + notes
         job.steps = len(steps)
         parts: list[dict] = []
         failed: str = ""
-        ran_out = False
+        stopped = False
         system = _PROMPT_FILE.read_text(encoding="utf-8")
         for n, step in enumerate(steps, 1):
             if n > 1 and await _quota_spent(owner_id):
                 warnings.append(f"Today's allowance ran out after part {n - 1} of {len(steps)}, so the "
                                 "rest wasn't read. The documents are still kept whole for the agent.")
-                ran_out = True
+                stopped = True
                 break
             job.step, job.current = n, step["label"]
             try:
-                got = await _ask(tier, system, step_prompt(arch, instructions, step, n, len(steps)),
+                got = await _ask(reader, system, step_prompt(arch, instructions, step, n, len(steps)),
                                  owner_id, job)
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, _UnreadableError):
                 raise
+            except _BusyError:
+                model = (reader or {}).get("model") or "The model"
+                if not parts:
+                    raise _UnreadableError(
+                        f"{model} is still rate-limited or overloaded after waiting about 5 minutes. Try again "
+                        "later, or keep the long documents as knowledge only, which needs no model.") from None
+                rest = f"part {n} wasn't" if n == len(steps) else f"parts {n}–{len(steps)} weren't"
+                warnings.append(f"{model} was still rate-limited or overloaded after waiting, so {rest} read. "
+                                "The documents are still kept whole for the agent.")
+                stopped = True
+                break
             except Exception as exc:
-                log.warning("agent preset: a step failed", step=n, model=(tier or {}).get("model"), error=str(exc))
+                log.warning("agent preset: a step failed", step=n, model=(reader or {}).get("model"), error=str(exc))
                 failed = failed or str(exc)
                 got = None
             if got is None:
@@ -712,17 +936,17 @@ async def run_read(job: ReadJob, tier: dict | None, arch: dict | None, instructi
                                 "so nothing was taken from it.")
                 continue
             parts.append(got)
-        if steps and not parts and not ran_out:
-            model = (tier or {}).get("model") or "the model"
+        if steps and not parts and not stopped:
+            model = (reader or {}).get("model") or "the model"
             raise _UnreadableError(f"Couldn't read the material with {model}: {failed}" if failed
                               else "The model's answers couldn't be read. Try again, or with less material.")
         if len(parts) > 1:
             job.phase, job.current = "merging", "Putting the parts together"
-            preset = combine(parts) if ran_out else await merge_parts(tier, parts, owner_id, job)
+            preset = combine(parts) if stopped else await merge_parts(reader, parts, owner_id, job)
         else:
             preset = parts[0] if parts else normalise({})
-        job.result = _finish(preset, docs, warnings, str((tier or {}).get("model") or ""), len(steps),
-                             job.tokens, job.id)
+        job.result = _finish(preset, docs, job.notes + warnings, str((reader or {}).get("model") or ""),
+                             len(steps), job.tokens, job.id)
         job.state = "done"
     except asyncio.CancelledError:
         job.state = "cancelled"
@@ -759,13 +983,15 @@ def _owner(user: dict) -> str:
 
 
 @router.get("/reader")
-async def reader(user: dict = Depends(get_managed_user)) -> dict:
-    """The model that would read the material, and how much of it one step
-    takes — what the dialog estimates steps and tokens from."""
-    tier = await _resolve_tier(_owner(user), prefer=_TIERS)
-    if not tier:
-        return {"model": "", "step_tokens": 0}
-    return {"model": str(tier.get("model") or ""), "step_tokens": step_tokens(tier)}
+async def reader(agent: str = "", user: dict = Depends(get_managed_user)) -> dict:
+    """The model that would read the material — the agent's own, else the
+    owner's — and how much of it one step takes: what the dialog estimates
+    steps and tokens from. ``note``: why it isn't the agent's model."""
+    who, note = await choose_reader(_owner(user), agent)
+    if not who:
+        return {"model": "", "step_tokens": 0, "via": "", "note": note}
+    return {"model": str(who.get("model") or ""), "step_tokens": step_tokens(who),
+            "via": "agent" if who.get("agent") else "tiers", "note": note}
 
 
 @router.post("/documents")
@@ -848,14 +1074,16 @@ async def prepare(body: PrepareBody, user: dict = Depends(get_managed_user)) -> 
     if not instructions and not docs:
         raise HTTPException(400, " ".join(warnings) or "None of the documents are there any more.")
 
-    tier = None
+    who = None
     if instructions or any(d["read"] for d in docs):
         if await _quota_spent(owner_id):
             raise HTTPException(429, "Today's allowance is used up, so the documents can't be read now. "
                                      "Keep them as knowledge only, or try again tomorrow.")
-        tier = await _resolve_tier(owner_id, prefer=_TIERS)
-        if not tier:
-            raise HTTPException(409, "No model is set up to read the documents with. Ask your admin.")
+        who, why = await choose_reader(owner_id, body.agent)
+        if not who:
+            raise HTTPException(409, why or "No model is set up to read the documents with. Ask your admin.")
+        if why:
+            warnings.append(why)
     preset_id = await asyncio.to_thread(save_docs, owner_id, docs, archetype)
     arch = await _archetype(owner_id, archetype)
 
@@ -866,10 +1094,11 @@ async def prepare(body: PrepareBody, user: dict = Depends(get_managed_user)) -> 
     for other in [j for j in _JOBS.values() if j.owner == key and j.state == "running"]:
         if other.task is not None:
             other.task.cancel()
-    job = ReadJob(id=preset_id, owner=key)
+    job = ReadJob(id=preset_id, owner=key, model=str((who or {}).get("model") or ""),
+                  via=("agent" if who.get("agent") else "tiers") if who else "")
     _JOBS[preset_id] = job
     job.task = asyncio.get_running_loop().create_task(
-        run_read(job, tier, arch, instructions, docs, warnings, owner_id))
+        run_read(job, who, arch, instructions, docs, warnings, owner_id))
     return job.view()
 
 
