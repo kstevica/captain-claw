@@ -511,6 +511,7 @@ class ToolRegistry:
                     and not self._tool_metadata.get(t.name, {}).get("requires_payments")
                     and not self._tool_metadata.get(t.name, {}).get("requires_telegram_inbox")
                     and not self._tool_metadata.get(t.name, {}).get("requires_whatsapp_web")
+                    and not self._tool_metadata.get(t.name, {}).get("requires_knowledge")
                 ]
         except Exception:
             pass
@@ -613,6 +614,14 @@ class ToolRegistry:
                              if not self._tool_metadata.get(t.name, {}).get("requires_whatsapp_web")]
         except Exception:
             tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_whatsapp_web")]
+
+        # Knowledge: shown only when the workspace's knowledge/ folder has
+        # documents in it (an owner's setup gave some) — the tool looks.
+        try:
+            tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_knowledge")
+                     or t.has_knowledge()]
+        except Exception:
+            tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_knowledge")]
 
         # Same idea for deep memory. Under Flight Deck the tool always shows:
         # FD owns the Typesense connection and can gain one at any moment, and

@@ -162,6 +162,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     # the schema the agent told the user it had no memory tool, or claimed
     # it had saved a fact it never stored.
     "insights",
+    # The owner's documents: "what does the policy say…" comes in any
+    # language too, and the tool only shows when there are documents.
+    "knowledge",
     # Scheduling: cron self-describes as a frozen/always-available tool, and
     # scheduling requests arrive in any language ("za 5 minuta", "in 5 min").
     # The English-only intent patterns can't catch those, so keep cron in core
