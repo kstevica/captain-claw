@@ -58,7 +58,7 @@ def test_units_cover_the_document_and_say_where_each_sits():
     assert len(pieces) > 5 and all(u["end"] - u["start"] <= 2000 for u in pieces)
     assert pieces[0]["title"].startswith("Long (1/") and "".join(long[u["start"]:u["end"]] for u in pieces) == long
     plain = sel.units("no headings at all. " * 300, max_chars=1500)
-    assert len(plain) > 3 and plain[0]["title"] == f"Part 1 of {len(plain)}"
+    assert len(plain) > 3 and plain[0]["title"] == f"Part 1 (1/{len(plain)})" and plain[0]["key"] == "Part 1"
 
 
 def test_a_procedure_scores_above_definitions_and_prose():

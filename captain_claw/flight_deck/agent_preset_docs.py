@@ -203,10 +203,12 @@ def public(meta: dict) -> dict:
     return out
 
 
-def stage(root: Path, name: str, text: str, origin: str, agent: str = "", raw: bytes | None = None) -> dict:
+def stage(root: Path, name: str, text: str, origin: str, agent: str = "", raw: bytes | None = None,
+          extra: dict | None = None) -> dict:
     """Keep a document's text under *root* (the owner's folder) until the
     setup reads it — a spreadsheet's own bytes (*raw*) too, for its tables —
-    and its public description (a spreadsheet's: how many tables it gives)."""
+    and its public description (a spreadsheet's: how many tables it gives).
+    *extra*: more to keep with it (and in place of what was worked out)."""
     truncated = len(text) > MAX_CHARS
     text = text[:MAX_CHARS]
     pages, exact = pages_of(text)
@@ -223,6 +225,7 @@ def stage(root: Path, name: str, text: str, origin: str, agent: str = "", raw: b
         source = folder / f"source{Path(name).suffix.lower()}"
         source.write_bytes(raw)
         meta.update(source=source.name, tables=ptables.count_tables(source))
+    meta.update(extra or {})
     (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     return public(meta)
 
