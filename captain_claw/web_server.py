@@ -3096,6 +3096,13 @@ class WebServer:
         messages = [Message(role=m["role"], content=m["content"]) for m in raw_messages]
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
+        try:
+            # A long single call (Flight Deck's setup reads ~100k tokens at once)
+            # outlasts the provider's own timeout; the copy keeps it to this call.
+            if provider is not base and float(body.get("timeout") or 0) > 0:
+                provider.request_timeout = float(body["timeout"])
+        except (TypeError, ValueError):
+            pass
 
         try:
             resp: LLMResponse = await provider.complete(
@@ -3115,7 +3122,10 @@ class WebServer:
                 "reasoning": "" if is_reasoning_backfill_placeholder(reasoning) else reasoning,
             })
         except Exception as exc:
-            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+            from captain_claw.exceptions import retry_after
+            wait = retry_after(exc)
+            return web.json_response({"ok": False, "error": str(exc), **({"retry_after": wait} if wait else {})},
+                                     status=500)
         finally:
             # Learned even when the retry then failed. Same model only: the
             # agent may have switched models while this call was in flight.
