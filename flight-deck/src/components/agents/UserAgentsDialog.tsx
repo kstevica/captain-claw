@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Bot, Box, Cpu, Loader2, Play, Plus, RefreshCw, RotateCw, Settings, Square, Trash2, X } from 'lucide-react'
+import { Bot, Box, Cpu, Loader2, Play, Plus, RefreshCw, RotateCw, Settings, Square, Trash2, Wand2, X } from 'lucide-react'
 import {
   listContainers, listProcesses,
   startContainer, stopContainer, restartContainer, removeContainer,
@@ -191,6 +191,12 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
                       </>
                     ) : (
                       <button onClick={() => run(a, 'start')} disabled={working} className={btn}><Play className="h-3 w-3" /> Start</button>
+                    )}
+                    {a.kind === 'process' && (
+                      <button onClick={() => setSetupFor({ slug: a.id, name: a.name, role: '' })} disabled={working} className={btn}
+                        title="Their instructions and documents, as its rules, skills and knowledge">
+                        <Wand2 className="h-3 w-3" /> Way of working
+                      </button>
                     )}
                     <button onClick={() => setEditing(a)} disabled={working} className={btn}><Settings className="h-3 w-3" /> Config</button>
                     <button onClick={() => run(a, 'remove')} disabled={working} className={`${btn} hover:border-red-500/40 hover:text-red-600 dark:hover:text-red-400`}>

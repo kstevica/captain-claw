@@ -1055,6 +1055,36 @@ def get_insights_manager() -> InsightsManager:
     return _manager
 
 
+async def import_pending(manager: InsightsManager | None = None, path: Path | None = None) -> int:
+    """Add the facts Flight Deck left for this agent while it was off (its
+    owner's setup — flight_deck.agent_preset.leave_facts), deduplicated as
+    any other insight, and drop the file. How many were new."""
+    path = path or Path("~/.captain-claw/pending-insights.json").expanduser()
+    if not path.is_file():
+        return 0
+    try:
+        items = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.warning("Pending insights unreadable, dropped", path=str(path))
+        items = []
+    mgr = manager or get_insights_manager()
+    added = 0
+    for item in items if isinstance(items, list) else []:
+        content = str((item or {}).get("content") or "").strip() if isinstance(item, dict) else ""
+        if not content:
+            continue
+        try:
+            if await mgr.add(content=content, category=str(item.get("category") or "fact"),
+                             importance=int(item.get("importance") or 5), source_tool="owner_setup",
+                             tags=str(item.get("tags") or "") or None):
+                added += 1
+        except Exception as exc:
+            log.warning("Pending insight not added", error=str(exc))
+    path.unlink(missing_ok=True)
+    log.info("Pending insights added", added=added, of=len(items) if isinstance(items, list) else 0)
+    return added
+
+
 def get_session_insights_manager(session_id: str) -> InsightsManager:
     """Return a per-session insights manager (for public computer mode)."""
     if session_id not in _session_managers:

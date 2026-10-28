@@ -6,7 +6,11 @@ import {
   ListChecks, Loader2, Plus, ScrollText, Search, Sparkles, Trash2, Upload, Wand2, X,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { applyAgentPreset, prepareAgentPreset, type AppliedPreset, type DocUsage } from '../../services/agentPreset'
+import {
+  applyAgentPreset, cancelRead, getCurrentSetup, getRead, getReader, stageDocument, startRead,
+  type AppliedPreset, type ApplyMode, type CurrentSetup, type DocUsage, type ReadJob, type Reader, type SetupCounts,
+  type StagedDoc,
+} from '../../services/agentPreset'
 import { fileLibraryApi, type LibraryItem } from '../../services/fileLibraryApi'
 import type { QuotaStatus } from '../../services/profile'
 import { useChatStore } from '../../stores/chatStore'
@@ -15,7 +19,7 @@ import { quotaLimited, useQuotaStore } from '../../stores/quotaStore'
 import { PresetReview } from './AgentSetupReview'
 import {
   SETUP_ACCEPT, SETUP_EXTS, USAGE_LOOKS, USAGE_ORDER, extOf, fileLook, fmtBytes, keptCount, reviewedPreset, startReview,
-  type Review,
+  stripOwnerBlock, type Review,
 } from './agentSetup'
 
 // ── "Your way of working" — set up right after the agent is created ───
@@ -24,22 +28,31 @@ import {
 // the agent it just created. Four steps:
 //
 //   material — instructions, and documents (uploaded, or picked from the File
-//              library), each with what it is and how the agent should use it;
-//   reading  — the owner's model reads it all (POST /fd/agent-preset/prepare);
+//              library), each read in full as it is added (POST
+//              /fd/agent-preset/documents: its pages, and what reading it
+//              costs), with what it is, how the agent should use it, and
+//              whether the model reads it or it is kept as knowledge only;
+//   reading  — the owner's model reads it in the background, in steps sized
+//              to its context window, then merges the parts (POST
+//              /fd/agent-preset/prepare, followed by GET …/prepare/{id});
 //   review   — every rule, skill, fact… kept or left out, editable
 //              (AgentSetupReview);
-//   done     — what the agent now has (POST /fd/agent-preset/apply).
+//   done     — what the agent now has (POST /fd/agent-preset/apply). Every
+//              document reaches it whole, read or not.
 //
 // The agent already exists, so closing at any step costs nothing but the
-// setup: it works as its archetype made it.
+// setup: it works as its archetype made it. The agent's ⋯ menu opens it on
+// an agent later, too: one an earlier setup gave rules, skills and documents
+// gets the new ones added to them — or in their place (GET …/current/{slug}
+// says what it has).
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024
 const MAX_FILES = 12
-// Prepare reads at most this much text (the backend's caps) — what the token
-// estimate is bounded by.
-const MAX_CHARS_PER_FILE = 40000
-const MAX_CHARS = 160000
-const TEXT_TYPES = /\.(txt|md|csv)$/i
+// The backend's: the most one setup reads, and a step's prompt and answer
+// around its material — what the estimate counts.
+const MAX_READ_TOKENS = 1_000_000
+const STEP_OVERHEAD = 3000 + 4000
+const POLL_MS = 1500
 
 interface Doc {
   key: string
@@ -47,6 +60,11 @@ interface Doc {
   size: number
   description: string
   usage: DocUsage
+  /** Read it for rules, skills and facts — or keep it as knowledge only. */
+  read: boolean
+  status: 'staging' | 'ready' | 'error'
+  staged?: StagedDoc
+  error?: string
   /** An upload… */
   file?: File
   /** …or a File library file. */
@@ -58,18 +76,21 @@ type Step = 'material' | 'reading' | 'review' | 'done'
 let seq = 0
 const nextKey = () => `doc-${++seq}`
 
-/** A rough upper bound of the tokens Prepare spends: the text it can read
- *  (a text file's size; about a third of a PDF's or an Office file's), the
- *  instructions, the prompt and the answer. */
-function estimateTokens(docs: Doc[], instructions: string): number {
-  if (!docs.length && !instructions.trim()) return 0
-  let chars = 0
-  for (const d of docs) chars += Math.min(MAX_CHARS_PER_FILE, TEXT_TYPES.test(d.name) ? d.size : d.size / 3) + d.description.length
-  chars = Math.min(MAX_CHARS, chars) + instructions.length
-  return Math.round(chars / 4 + 2500 + 8000)
+/** What reading the material takes, roughly: its steps (each at most the
+ *  reader's step size), and the tokens — the material, each step's prompt
+ *  and answer, and merging the parts. */
+function estimateRead(docs: Doc[], instructions: string, stepTokens: number): { steps: number; tokens: number } {
+  const material = Math.min(MAX_READ_TOKENS, docs.reduce((n, d) => n + (d.read && d.staged ? d.staged.tokens : 0), 0))
+    + Math.ceil(instructions.trim().length / 4)
+  if (!material || !stepTokens) return { steps: 0, tokens: 0 }
+  const steps = Math.max(1, Math.ceil(material / stepTokens))
+  const merging = steps > 1 ? steps * 3000 + 8000 * Math.max(1, Math.ceil((steps * 3000) / stepTokens)) : 0
+  return { steps, tokens: material + steps * STEP_OVERHEAD + merging }
 }
 
-const kTokens = (n: number) => `${Math.max(1, Math.round(n / 1000))}k`
+const kTokens = (n: number) => (n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : `${Math.max(1, Math.round(n / 1000))}k`)
+const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`
+const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
 /** Starting points for the instructions: the bracketed part is selected for typing over. */
 const STARTERS = [
@@ -98,6 +119,10 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   const [docs, setDocs] = useState<Doc[]>([])
   const [notice, setNotice] = useState('')
   const [picking, setPicking] = useState(false)
+  const [reader, setReader] = useState<Reader | null>(null)
+  const [current, setCurrent] = useState<CurrentSetup | null>(null)
+  const [mode, setMode] = useState<ApplyMode>('add')
+  const [job, setJob] = useState<ReadJob | null>(null)
   const [review, setReview] = useState<Review | null>(null)
   const [applied, setApplied] = useState<AppliedPreset | null>(null)
   const [applying, setApplying] = useState(false)
@@ -105,7 +130,6 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   const [dragging, setDragging] = useState(false)
   const [startedAt, setStartedAt] = useState(0)
   const [now, setNow] = useState(() => Date.now())
-  const abortRef = useRef<AbortController | null>(null)
   const dragDepth = useRef(0)
   const fileRef = useRef<HTMLInputElement>(null)
   const textRef = useRef<HTMLTextAreaElement>(null)
@@ -113,6 +137,12 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   const name = agent.name
 
   useEffect(() => { if (!asUser) void useQuotaStore.getState().refresh() }, [asUser])
+  useEffect(() => {
+    getReader(asUser).then(setReader).catch(() => setReader({ model: '', step_tokens: 0 }))
+  }, [asUser])
+  useEffect(() => {
+    getCurrentSetup(agent.slug, asUser).then(setCurrent).catch(() => setCurrent(null))
+  }, [agent.slug, asUser])
 
   useEffect(() => {
     if (step !== 'reading') return
@@ -120,10 +150,46 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
     return () => clearInterval(t)
   }, [step])
 
+  // Follow the read until it ends.
+  useEffect(() => {
+    if (step !== 'reading' || !job || job.state !== 'running') return
+    let live = true
+    const t = setTimeout(() => {
+      getRead(job.id, asUser).then((next) => {
+        if (!live) return
+        setJob(next)
+        if (next.state === 'done' && next.result) {
+          setReview(startReview(next.result))
+          setStep('review')
+        } else if (next.state === 'error') {
+          setErr(next.error || 'Reading failed.')
+          setStep('material')
+        } else if (next.state === 'cancelled') {
+          setStep('material')
+        }
+        if (next.state !== 'running' && !asUser) useQuotaStore.getState().refreshSoon()
+      }).catch((e) => {
+        if (!live) return
+        setErr(message(e))
+        setStep('material')
+      })
+    }, POLL_MS)
+    return () => { live = false; clearTimeout(t) }
+  }, [step, job, asUser])
+
   // Anything changed in the material: what was read from it no longer holds.
-  const editDocs = (next: Doc[]) => { setDocs(next); setReview(null) }
+  const updateDocs = (fn: (prev: Doc[]) => Doc[]) => { setDocs(fn); setReview(null) }
   const editInstructions = (v: string) => { setInstructions(v); setReview(null) }
-  const patchDoc = (key: string, patch: Partial<Doc>) => editDocs(docs.map((d) => (d.key === key ? { ...d, ...patch } : d)))
+  const patchDoc = (key: string, patch: Partial<Doc>) => updateDocs((prev) => prev.map((d) => (d.key === key ? { ...d, ...patch } : d)))
+
+  /** Read a document in full on the server: its pages and what reading it costs. */
+  const stage = (doc: Doc) => {
+    stageDocument(doc.file ? { file: doc.file } : { libraryId: doc.pick!.id }, asUser)
+      .then(({ docs: got, warnings }) => patchDoc(doc.key, got[0]
+        ? { status: 'ready', staged: got[0] }
+        : { status: 'error', error: warnings.join(' ') || 'It could not be read.' }))
+      .catch((e) => patchDoc(doc.key, { status: 'error', error: message(e) }))
+  }
 
   const addFiles = (list: FileList | File[] | null) => {
     if (!list) return
@@ -139,9 +205,11 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
       fresh.length > room ? `Up to ${MAX_FILES} documents.` : '',
     ].filter(Boolean).join(' '))
     if (fresh.length && room > 0) {
-      editDocs([...docs, ...fresh.slice(0, room).map((file) => ({
-        key: nextKey(), name: file.name, size: file.size, description: '', usage: 'auto' as DocUsage, file,
-      }))])
+      const added: Doc[] = fresh.slice(0, room).map((file) => ({
+        key: nextKey(), name: file.name, size: file.size, description: '', usage: 'auto', read: true, status: 'staging', file,
+      }))
+      updateDocs((prev) => [...prev, ...added])
+      added.forEach(stage)
     }
   }
 
@@ -150,11 +218,13 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
     const fresh = items.filter((i) => !have.has(i.id)).slice(0, MAX_FILES - docs.length)
     setNotice('')
     if (fresh.length) {
-      editDocs([...docs, ...fresh.map((pick) => ({
-        key: nextKey(), name: pick.filename, size: pick.size, usage: 'auto' as DocUsage, pick,
+      const added: Doc[] = fresh.map((pick) => ({
+        key: nextKey(), name: pick.filename, size: pick.size, usage: 'auto', read: true, status: 'staging', pick,
         // The library's own title is a good first answer to "what is it?".
         description: pick.status === 'done' && pick.title ? pick.title : '',
-      }))])
+      }))
+      updateDocs((prev) => [...prev, ...added])
+      added.forEach(stage)
     }
     setPicking(false)
   }
@@ -173,36 +243,40 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
     })
   }
 
-  const hasMaterial = docs.length > 0 || !!instructions.trim()
-  const estimate = useMemo(() => estimateTokens(docs, instructions), [docs, instructions])
+  const ready = docs.filter((d) => d.status === 'ready')
+  const staging = docs.some((d) => d.status === 'staging')
+  const hasMaterial = ready.length > 0 || !!instructions.trim()
+  const stepTokens = reader?.step_tokens || 0
+  const estimate = useMemo(() => estimateRead(docs, instructions, stepTokens), [docs, instructions, stepTokens])
+  const needsModel = !!instructions.trim() || ready.some((d) => d.read)
+  const noModel = needsModel && reader !== null && !reader.model
+  const canRead = hasMaterial && !staging && !noModel && (reader !== null || !needsModel)
 
   const read = async () => {
-    if (!hasMaterial || step === 'reading') return
+    if (!canRead || step === 'reading') return
     if (review) { setStep('review'); return }
-    const ctl = new AbortController()
-    abortRef.current = ctl
     setErr('')
+    setJob(null)
     setStartedAt(Date.now())
     setNow(Date.now())
     setStep('reading')
     try {
-      const res = await prepareAgentPreset({
+      setJob(await startRead({
         agent: agent.slug,
         instructions,
-        uploads: docs.filter((d) => d.file).map((d) => ({ file: d.file!, description: d.description, usage: d.usage })),
-        picks: docs.filter((d) => d.pick).map((d) => ({ id: d.pick!.id, description: d.description, usage: d.usage })),
+        docs: ready.map((d) => ({ id: d.staged!.id, description: d.description, usage: d.usage, read: d.read })),
         asUser,
-        signal: ctl.signal,
-      })
-      setReview(startReview(res))
-      setStep('review')
+      }))
     } catch (e) {
-      if (!ctl.signal.aborted) setErr(e instanceof Error ? e.message : String(e))
+      setErr(message(e))
       setStep('material')
-    } finally {
-      abortRef.current = null
-      if (!asUser) useQuotaStore.getState().refreshSoon()
     }
+  }
+
+  const stopReading = () => {
+    if (job) void cancelRead(job.id, asUser)
+    setJob(null)
+    setStep('material')
   }
 
   const apply = async () => {
@@ -210,15 +284,16 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
     setApplying(true)
     setErr('')
     try {
-      const res = await applyAgentPreset(agent.slug, reviewedPreset(review), asUser)
+      const res = await applyAgentPreset(agent.slug, reviewedPreset(review), current?.has ? mode : 'add', asUser)
       // The agent's chat sends its instructions: mirror what FD stored (or,
-      // without accounts, add the block to this browser's copy) and re-send.
-      // Not for an agent an admin set up for someone else.
+      // without accounts, put the block in this browser's copy, in place of
+      // an earlier one) and re-send. Not for an agent an admin set up for
+      // someone else.
       if (!asUser) {
         const procs = useProcessStore.getState()
-        const current = procs.getFleetInstructions(agent.slug).trimEnd()
-        const next = res.instructions || (res.block ? (current ? `${current}\n\n${res.block}` : res.block) : '')
-        if (next) {
+        const had = procs.getFleetInstructions(agent.slug)
+        const next = res.stored ? res.instructions : [stripOwnerBlock(had), res.block].filter(Boolean).join('\n\n')
+        if (next !== had) {
           void procs.setFleetInstructions(agent.slug, next)
             .then(() => useChatStore.getState().resendFleetIdentity(`proc-${agent.slug}`))
         }
@@ -226,7 +301,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
       setApplied(res)
       setStep('done')
     } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e))
+      setErr(message(e))
     } finally {
       setApplying(false)
     }
@@ -234,9 +309,9 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
   const close = () => {
     if (applying) return
-    const unsaved = step === 'reading' || step === 'review' || (step === 'material' && hasMaterial)
+    const unsaved = step === 'reading' || step === 'review' || (step === 'material' && (hasMaterial || docs.length > 0))
     if (unsaved && !confirm(`Close without setting up ${name}? It works as it is, but what you added here is lost.`)) return
-    abortRef.current?.abort()
+    if (step === 'reading' && job) void cancelRead(job.id, asUser)
     onClose()
   }
 
@@ -259,6 +334,17 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   } : {}
 
   const stepIndex = step === 'reading' ? 0 : STEPS.findIndex((s) => s.id === step)
+  const readCount = ready.filter((d) => d.read).length
+  const readLabel = staging ? 'Reading pages…'
+    : review ? 'Back to the review'
+      : estimate.steps === 0 && ready.length ? 'Continue — knowledge only'
+        : readCount ? `Read ${plural(readCount, 'document')}${estimate.steps > 1 ? ` in ${estimate.steps} steps` : ''}`
+          : 'Read it'
+  const footHint = review ? 'Nothing changed since it was read.'
+    : staging ? 'Reading the documents’ pages — no tokens yet.'
+      : noModel ? 'No model is set up to read with. Keep the documents as knowledge only, or ask your admin.'
+        : hasMaterial ? 'You review everything before it reaches the agent.'
+          : 'Add instructions or a document to start.'
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 wide:items-center wide:p-4" onClick={close}>
@@ -313,6 +399,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
         {step === 'material' && (
           <>
+            {current?.has && <EarlierSetup name={name} current={current} mode={mode} onMode={(m) => { setMode(m); setReview(null) }} />}
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto wide:flex-row wide:overflow-hidden">
               {/* Documents */}
               <section className="order-2 shrink-0 px-4 py-4 wide:order-1 wide:min-h-0 wide:flex-1 wide:shrink wide:overflow-y-auto wide:px-6">
@@ -353,9 +440,9 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
                   <>
                     <ul className="space-y-2.5">
                       {docs.map((d) => (
-                        <DocCard key={d.key} doc={d} agentName={name}
+                        <DocCard key={d.key} doc={d} agentName={name} stepTokens={stepTokens}
                           onChange={(patch) => patchDoc(d.key, patch)}
-                          onRemove={() => editDocs(docs.filter((x) => x.key !== d.key))} />
+                          onRemove={() => updateDocs((prev) => prev.filter((x) => x.key !== d.key))} />
                       ))}
                     </ul>
                     {docs.length < MAX_FILES && (
@@ -372,7 +459,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
               {/* On a phone, after the documents: they come first there. */}
               <div className="order-3 shrink-0 space-y-5 border-t border-zinc-800 px-4 py-4 wide:hidden">
                 <HowItWorks name={name} />
-                <UsageNote estimate={estimate} quota={asUser ? null : quota} />
+                <UsageNote estimate={estimate} reader={reader} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} />
               </div>
 
               {/* Instructions, how it works, usage */}
@@ -401,7 +488,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
                 <div className="hidden space-y-5 wide:block">
                   <HowItWorks name={name} />
-                  <UsageNote estimate={estimate} quota={asUser ? null : quota} />
+                  <UsageNote estimate={estimate} reader={reader} quota={asUser ? null : quota} knowledgeOnly={ready.some((d) => !d.read)} />
                 </div>
               </aside>
             </div>
@@ -412,13 +499,13 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
                 <button onClick={close} className="rounded-xl px-3 py-2 text-sm text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
                   Skip for now
                 </button>
-                <span className="text-[11px] text-zinc-600 wide:ml-auto">
-                  {review ? 'Nothing changed since it was read.' : hasMaterial ? 'You review everything before it reaches the agent.' : 'Add instructions or a document to start.'}
+                <span className={`text-[11px] wide:ml-auto ${noModel ? 'text-amber-600 dark:text-amber-400' : 'text-zinc-600'}`}>
+                  {footHint}
                 </span>
-                <button onClick={read} disabled={!hasMaterial}
+                <button onClick={read} disabled={!canRead && !review}
                   className="flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50">
-                  <Sparkles className="h-4 w-4" />
-                  {review ? 'Back to the review' : docs.length ? `Read ${docs.length} document${docs.length === 1 ? '' : 's'}` : 'Read it'}
+                  {staging ? <Loader2 className="h-4 w-4 animate-spin" /> : <Sparkles className="h-4 w-4" />}
+                  {readLabel}
                 </button>
               </div>
             </div>
@@ -426,41 +513,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
         )}
 
         {step === 'reading' && (
-          <div className="flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-6 py-10 text-center">
-            <div className="relative mb-5 flex h-16 w-16 items-center justify-center">
-              <span className="absolute inset-0 animate-ping rounded-2xl bg-violet-500/15" />
-              <span className="relative flex h-16 w-16 items-center justify-center rounded-2xl bg-violet-500/15 text-violet-600 dark:text-violet-300">
-                <Sparkles className="h-7 w-7" />
-              </span>
-            </div>
-            <h4 className="text-base font-semibold text-zinc-100">Reading your material</h4>
-            <p className="mt-1 max-w-md text-sm leading-relaxed text-zinc-500">
-              Your model is going through {docs.length ? `${docs.length} document${docs.length === 1 ? '' : 's'}` : 'your instructions'}
-              {docs.length > 0 && instructions.trim() ? ' and your instructions' : ''}, pulling out rules, procedures,
-              facts and terms. This usually takes a minute or two.
-            </p>
-            <p className="mt-3 font-mono text-xs tabular-nums text-zinc-500">{clock(now - startedAt)}</p>
-            {docs.length > 0 && (
-              <ul className="mt-5 w-full max-w-sm space-y-1.5 text-left">
-                {docs.map((d) => {
-                  const look = fileLook(d.name)
-                  const Icon = look.icon
-                  return (
-                    <li key={d.key} className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5">
-                      <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded ${look.tone}`}><Icon className="h-3 w-3" /></span>
-                      <span className="min-w-0 flex-1 truncate text-xs text-zinc-300">{d.name}</span>
-                      {d.usage !== 'auto' && <span className="shrink-0 text-[10px] text-zinc-500">{USAGE_LOOKS[d.usage].label}</span>}
-                      <Loader2 className="h-3 w-3 shrink-0 animate-spin text-zinc-500" />
-                    </li>
-                  )
-                })}
-              </ul>
-            )}
-            <button onClick={() => abortRef.current?.abort()}
-              className="mt-6 rounded-xl border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800">
-              Cancel
-            </button>
-          </div>
+          <ReadingView job={job} docs={docs} elapsed={now - startedAt} onStop={stopReading} />
         )}
 
         {step === 'review' && review && (
@@ -479,7 +532,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
                 <button onClick={apply} disabled={applying || keptCount(review) === 0}
                   className="flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50">
                   {applying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                  {applying ? 'Applying…' : `Apply to ${name}`}
+                  {applying ? 'Applying…' : current?.has && mode === 'replace' ? `Replace ${name}'s setup` : `Apply to ${name}`}
                 </button>
               </div>
             </div>
@@ -488,7 +541,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
         {step === 'done' && applied && (
           <>
-            <Done name={name} applied={applied} />
+            <Done name={name} applied={applied} hadSetup={!!current?.has} />
             <div className="shrink-0 border-t border-zinc-800 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] wide:px-5">
               <div className="flex justify-end">
                 <button onClick={onClose} className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-violet-500 wide:w-auto">
@@ -529,16 +582,20 @@ function clock(ms: number): string {
 
 // ── Pieces ───────────────────────────────────────────────────────────
 
-function DocCard({ doc, agentName, onChange, onRemove }: {
+function DocCard({ doc, agentName, stepTokens, onChange, onRemove }: {
   doc: Doc
   agentName: string
+  /** How much one reading step takes (0 until known). */
+  stepTokens: number
   onChange: (patch: Partial<Doc>) => void
   onRemove: () => void
 }) {
   const look = fileLook(doc.name)
   const Icon = look.icon
+  const st = doc.staged
+  const steps = st && stepTokens ? Math.max(1, Math.ceil(st.tokens / stepTokens)) : 0
   return (
-    <li className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
+    <li className={`rounded-xl border bg-zinc-900/60 p-3 ${doc.status === 'error' ? 'border-red-500/40' : 'border-zinc-800'}`}>
       <div className="flex items-start gap-3">
         <span className={`flex h-10 w-10 shrink-0 flex-col items-center justify-center rounded-lg ${look.tone}`}>
           <Icon className="h-4 w-4" />
@@ -552,52 +609,139 @@ function DocCard({ doc, agentName, onChange, onRemove }: {
               : <><Upload className="h-3 w-3 shrink-0" /><span>Uploaded</span></>}
             <span className="shrink-0">· {fmtBytes(doc.size)}</span>
           </p>
+          {doc.status === 'staging' && (
+            <p className="mt-0.5 flex items-center gap-1 text-[11px] text-zinc-500">
+              <Loader2 className="h-3 w-3 animate-spin" /> Reading its pages…
+            </p>
+          )}
+          {doc.status === 'error' && <p className="mt-0.5 text-[11px] text-red-600 dark:text-red-400">{doc.error}</p>}
+          {st && (
+            <p className="mt-0.5 text-[11px] text-zinc-400">
+              {st.pages_exact ? plural(st.pages, 'page') : `about ${plural(st.pages, 'page')}`}
+              {' · '}{kTokens(st.tokens)} tokens to read in full
+              {st.truncated && <span className="text-amber-600 dark:text-amber-400"> · only its first {kTokens(st.chars)} characters are kept</span>}
+            </p>
+          )}
         </div>
         <button onClick={onRemove} aria-label={`Remove ${doc.name}`} title="Remove"
           className="rounded-lg p-1.5 text-zinc-600 hover:bg-zinc-800 hover:text-red-600 dark:hover:text-red-400">
           <Trash2 className="h-3.5 w-3.5" />
         </button>
       </div>
-      <div className="mt-3 space-y-2.5 wide:pl-[3.25rem]">
-        <label className="block">
-          <span className="mb-1 block text-[11px] font-medium text-zinc-500">What is it?</span>
-          <input
-            value={doc.description}
-            maxLength={500}
-            onChange={(e) => onChange({ description: e.target.value })}
-            placeholder="e.g. Our refund policy for EU customers, updated March 2026"
-            className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-base text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none wide:text-sm"
-          />
-        </label>
-        <div>
-          <span className="mb-1 block text-[11px] font-medium text-zinc-500">How should {agentName} use it?</span>
-          <div role="radiogroup" aria-label={`How ${agentName} should use ${doc.name}`} className="flex flex-wrap gap-1.5">
-            {USAGE_ORDER.map((u) => {
-              const { icon: UIcon, label } = USAGE_LOOKS[u]
-              const on = doc.usage === u
-              return (
-                <button key={u} role="radio" aria-checked={on} onClick={() => onChange({ usage: u })}
-                  className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                    on
-                      ? 'border-violet-500/50 bg-violet-500/15 text-violet-700 dark:text-violet-200'
-                      : 'border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
-                  }`}>
-                  <UIcon className="h-3 w-3" /> {label}
-                </button>
-              )
-            })}
+      {doc.status !== 'error' && (
+        <div className="mt-3 space-y-2.5 wide:pl-[3.25rem]">
+          <label className="block">
+            <span className="mb-1 block text-[11px] font-medium text-zinc-500">What is it?</span>
+            <input
+              value={doc.description}
+              maxLength={500}
+              onChange={(e) => onChange({ description: e.target.value })}
+              placeholder="e.g. Our refund policy for EU customers, updated March 2026"
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py-1.5 text-base text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none wide:text-sm"
+            />
+          </label>
+          <div>
+            <span className="mb-1 block text-[11px] font-medium text-zinc-500">How should {agentName} use it?</span>
+            <div role="radiogroup" aria-label={`How ${agentName} should use ${doc.name}`} className="flex flex-wrap gap-1.5">
+              {USAGE_ORDER.map((u) => {
+                const { icon: UIcon, label } = USAGE_LOOKS[u]
+                const on = doc.usage === u
+                return (
+                  // Reference material is looked up, not read for rules: knowledge only by default.
+                  <button key={u} role="radio" aria-checked={on} onClick={() => onChange({ usage: u, read: u !== 'reference' })}
+                    className={`flex items-center gap-1 rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                      on
+                        ? 'border-violet-500/50 bg-violet-500/15 text-violet-700 dark:text-violet-200'
+                        : 'border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-200'
+                    }`}>
+                    <UIcon className="h-3 w-3" /> {label}
+                  </button>
+                )
+              })}
+            </div>
+            <p className="mt-1 text-[11px] text-zinc-500">{USAGE_LOOKS[doc.usage].blurb}</p>
           </div>
-          <p className="mt-1 text-[11px] text-zinc-500">{USAGE_LOOKS[doc.usage].blurb}</p>
+          <button
+            role="switch"
+            aria-checked={doc.read}
+            onClick={() => onChange({ read: !doc.read })}
+            className="flex w-full items-start gap-2.5 rounded-lg border border-zinc-800 px-2.5 py-2 text-left hover:border-zinc-700"
+          >
+            <span className={`mt-0.5 flex h-4 w-7 shrink-0 items-center rounded-full p-0.5 transition-colors ${doc.read ? 'bg-violet-600' : 'bg-zinc-700'}`}>
+              <span className={`h-3 w-3 rounded-full bg-white transition-transform ${doc.read ? 'translate-x-3' : ''}`} />
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-200">
+                {doc.read ? 'Read it for rules, skills and facts' : 'Knowledge only'}
+                <span className="text-[11px] text-zinc-500">
+                  {doc.read ? (st ? `~${kTokens(st.tokens)} tokens${steps > 1 ? ` · ${steps} steps` : ''}` : '') : 'no tokens'}
+                </span>
+              </span>
+              <span className="block text-[11px] leading-snug text-zinc-500">
+                {doc.read
+                  ? `${agentName} also keeps the whole document to look things up in.`
+                  : `Nothing is read now: ${agentName} keeps the whole document and looks things up in it when it needs to.`}
+              </span>
+            </span>
+          </button>
+        </div>
+      )}
+    </li>
+  )
+}
+
+/** "6 rules, 1 skill, 3 documents" — the groups a setup gave, those it has. */
+function setupSummary(c: Pick<SetupCounts, 'rules' | 'escalation' | 'templates' | 'glossary' | 'intents' | 'facts' | 'knowledge'>): string {
+  const parts = [
+    c.rules && plural(c.rules, 'rule'), c.intents && plural(c.intents, 'skill'), c.knowledge && plural(c.knowledge, 'document'),
+    c.facts && plural(c.facts, 'fact'), c.escalation && `${c.escalation} ask-you-first`, c.templates && plural(c.templates, 'template'),
+    c.glossary && plural(c.glossary, 'term'),
+  ].filter(Boolean)
+  return parts.length ? parts.join(', ') : 'nothing yet'
+}
+
+/** The setup an agent already has, and whether the new one adds to it or replaces it. */
+function EarlierSetup({ name, current, mode, onMode }: {
+  name: string
+  current: CurrentSetup
+  mode: ApplyMode
+  onMode: (m: ApplyMode) => void
+}) {
+  const summary = setupSummary({ ...current, intents: current.skills.length, knowledge: current.knowledge.length })
+  const options: { id: ApplyMode; label: string }[] = [{ id: 'add', label: 'Add to it' }, { id: 'replace', label: 'Replace it' }]
+  return (
+    <div className="shrink-0 border-b border-zinc-800 bg-violet-500/5 px-4 py-3 wide:px-6">
+      <div className="flex flex-col gap-2 wide:flex-row wide:items-center">
+        <p className="min-w-0 flex-1 text-xs text-zinc-400">
+          <span className="font-medium text-zinc-200">{name} already has a setup:</span> {summary}.
+          {current.knowledge.length > 0 && (
+            <span className="text-zinc-500"> Documents: {current.knowledge.map((k) => k.title).join(', ')}.</span>
+          )}
+        </p>
+        <div role="radiogroup" aria-label="Add to its setup or replace it" className="flex shrink-0 rounded-lg border border-zinc-800 p-0.5">
+          {options.map((o) => (
+            <button key={o.id} role="radio" aria-checked={mode === o.id} onClick={() => onMode(o.id)}
+              className={`rounded-md px-3 py-1 text-xs transition-colors ${
+                mode === o.id ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}>
+              {o.label}
+            </button>
+          ))}
         </div>
       </div>
-    </li>
+      <p className="mt-1 text-[11px] text-zinc-500">
+        {mode === 'add'
+          ? 'What you add now joins it. A document you give again replaces its earlier copy; newer rules come first.'
+          : 'Its earlier rules, skills and documents are taken out and this setup goes in their place. Facts it already learned stay.'}
+      </p>
+    </div>
   )
 }
 
 function HowItWorks({ name }: { name: string }) {
   const steps: { icon: LucideIcon; title: string; text: string }[] = [
     { icon: Upload, title: 'You add', text: 'Your instructions and documents — and, for each document, what it is and how to use it.' },
-    { icon: Sparkles, title: 'Your model reads it', text: 'It turns it into rules, skills, facts, templates and a glossary. This uses your daily allowance.' },
+    { icon: Sparkles, title: 'Your model reads it', text: 'In steps it can take in, it turns it into rules, skills, facts, templates and a glossary. This uses your daily allowance; knowledge-only documents don’t.' },
     { icon: CheckCircle2, title: 'You review', text: `Keep what's right, fix what isn't. Nothing reaches ${name} until you apply.` },
   ]
   return (
@@ -621,33 +765,50 @@ function HowItWorks({ name }: { name: string }) {
 }
 
 /** What reading the material costs, against what is left today. */
-function UsageNote({ estimate, quota }: { estimate: number; quota: QuotaStatus | null }) {
+function UsageNote({ estimate, reader, quota, knowledgeOnly }: {
+  estimate: { steps: number; tokens: number }
+  reader: Reader | null
+  quota: QuotaStatus | null
+  /** Some documents are kept as knowledge only. */
+  knowledgeOnly: boolean
+}) {
+  const { steps, tokens } = estimate
+  const how = reader?.model ? ` in ${plural(steps, 'step')} by ${reader.model}` : ''
   let body: ReactNode
-  if (!estimate) {
-    body = <p className="text-[11px] text-zinc-500">Reading your material takes tokens from your daily allowance — how many depends on what you add.</p>
+  if (!tokens) {
+    body = (
+      <p className="text-[11px] text-zinc-500">
+        {knowledgeOnly
+          ? 'Documents kept as knowledge only cost no tokens.'
+          : 'Reading your material takes tokens from your daily allowance — how many depends on what you add.'}
+      </p>
+    )
   } else if (quota?.byok) {
-    body = <p className="text-[11px] text-zinc-500">About {kTokens(estimate)} tokens, on your own AI keys.</p>
+    body = <p className="text-[11px] text-zinc-500">About {kTokens(tokens)} tokens{how}, on your own AI keys.</p>
   } else if (quotaLimited(quota) && quota.tokens.limit > 0) {
     const { used, limit, remaining } = quota.tokens
     const left = remaining ?? Math.max(0, limit - used)
     const usedPct = Math.min(100, (used / limit) * 100)
-    const estPct = Math.min(100 - usedPct, (estimate / limit) * 100)
+    const estPct = Math.min(100 - usedPct, (tokens / limit) * 100)
     body = (
       <>
         <div className="flex h-1.5 overflow-hidden rounded-full bg-zinc-800" aria-hidden>
           <span className="bg-zinc-600" style={{ width: `${usedPct}%` }} />
-          <span className={estimate > left ? 'bg-amber-500' : 'bg-violet-500'} style={{ width: `${estPct}%` }} />
+          <span className={tokens > left ? 'bg-amber-500' : 'bg-violet-500'} style={{ width: `${estPct}%` }} />
         </div>
         <p className="mt-1.5 text-[11px] text-zinc-500">
-          Up to about <span className="text-zinc-300">{kTokens(estimate)}</span> tokens of the {kTokens(left)} you have left today.
+          About <span className="text-zinc-300">{kTokens(tokens)}</span> tokens{how}, of the {kTokens(left)} you have left today.
         </p>
-        {estimate > left && (
-          <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">That may be more than you have left — fewer or shorter documents help.</p>
+        {tokens > left && (
+          <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">
+            That is more than you have left. Reading stops when the allowance runs out and keeps what it read —
+            or keep the long documents as knowledge only, which costs nothing.
+          </p>
         )}
       </>
     )
   } else {
-    body = <p className="text-[11px] text-zinc-500">Reading it takes up to about {kTokens(estimate)} tokens.</p>
+    body = <p className="text-[11px] text-zinc-500">About {kTokens(tokens)} tokens{how}.</p>
   }
   return (
     <div>
@@ -657,7 +818,68 @@ function UsageNote({ estimate, quota }: { estimate: number; quota: QuotaStatus |
   )
 }
 
-function Done({ name, applied }: { name: string; applied: AppliedPreset }) {
+/** The read under way: which part, how far, what it has spent. */
+function ReadingView({ job, docs, elapsed, onStop }: {
+  job: ReadJob | null
+  docs: Doc[]
+  elapsed: number
+  onStop: () => void
+}) {
+  const merging = job?.phase === 'merging'
+  const steps = job?.steps || 0
+  const pct = steps ? Math.round(((merging ? steps : Math.max(0, (job?.step || 1) - 1)) / steps) * 100) : 0
+  const reading = docs.filter((d) => d.status === 'ready' && d.read)
+  const kept = docs.filter((d) => d.status === 'ready' && !d.read)
+  return (
+    <div className="flex min-h-0 flex-1 flex-col items-center justify-center overflow-y-auto px-6 py-10 text-center">
+      <div className="relative mb-5 flex h-16 w-16 items-center justify-center">
+        <span className="absolute inset-0 animate-ping rounded-2xl bg-violet-500/15" />
+        <span className="relative flex h-16 w-16 items-center justify-center rounded-2xl bg-violet-500/15 text-violet-600 dark:text-violet-300">
+          <Sparkles className="h-7 w-7" />
+        </span>
+      </div>
+      <h4 className="text-base font-semibold text-zinc-100">{merging ? 'Putting the parts together' : 'Reading your material'}</h4>
+      <p className="mt-1 max-w-md text-sm leading-relaxed text-zinc-500">
+        {!job ? 'Starting…'
+          : merging ? 'Merging what each part found into one setup — duplicates out, conflicts flagged.'
+            : steps > 1 ? <>Part <span className="text-zinc-300">{job.step}</span> of {steps}: {job.current}</>
+              : 'Pulling out rules, procedures, facts and terms.'}
+      </p>
+      <div className="mt-4 h-1.5 w-full max-w-sm overflow-hidden rounded-full bg-zinc-800" role="progressbar"
+        aria-valuemin={0} aria-valuemax={100} aria-valuenow={steps > 1 && !merging ? pct : undefined}>
+        {steps > 1 && !merging
+          ? <span className="block h-full rounded-full bg-violet-500 transition-all" style={{ width: `${Math.max(4, pct)}%` }} />
+          : <span className="block h-full w-1/3 animate-pulse rounded-full bg-violet-500/70" />}
+      </div>
+      <p className="mt-2 font-mono text-xs tabular-nums text-zinc-500">
+        {clock(elapsed)}{job && job.tokens > 0 ? ` · ${kTokens(job.tokens)} tokens so far` : ''}
+      </p>
+      {steps > 3 && <p className="mt-1 text-[11px] text-zinc-600">Long documents take a while — keep this open until it is done.</p>}
+      {(reading.length > 0 || kept.length > 0) && (
+        <ul className="mt-5 w-full max-w-sm space-y-1.5 text-left">
+          {[...reading, ...kept].map((d) => {
+            const look = fileLook(d.name)
+            const Icon = look.icon
+            return (
+              <li key={d.key} className="flex items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/60 px-2.5 py-1.5">
+                <span className={`flex h-6 w-6 shrink-0 items-center justify-center rounded ${look.tone}`}><Icon className="h-3 w-3" /></span>
+                <span className="min-w-0 flex-1 truncate text-xs text-zinc-300">{d.name}</span>
+                {d.read
+                  ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-zinc-500" />
+                  : <span className="shrink-0 text-[10px] text-zinc-500">knowledge only</span>}
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      <button onClick={onStop} className="mt-6 rounded-xl border border-zinc-700 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800">
+        Stop reading
+      </button>
+    </div>
+  )
+}
+
+function Done({ name, applied, hadSetup }: { name: string; applied: AppliedPreset; hadSetup: boolean }) {
   const c = applied.counts
   const tiles: { icon: LucideIcon; n: number; label: string }[] = [
     { icon: ScrollText, n: c.rules, label: c.rules === 1 ? 'rule' : 'rules' },
@@ -686,13 +908,19 @@ function Done({ name, applied }: { name: string; applied: AppliedPreset }) {
           ))}
         </ul>
       )}
+      {hadSetup && applied.mode === 'add' && (
+        <p className="mt-4 text-xs text-zinc-400">Added to its earlier setup — in all it now has {setupSummary(applied.totals)}.</p>
+      )}
       {c.facts > 0 && (
         <p className="mt-4 text-xs text-zinc-500">
           {applied.running ? 'Its facts are being added now.' : `Its facts are added as soon as ${name} is up.`}
         </p>
       )}
       {c.knowledge > 0 && (
-        <p className="mt-1 text-xs text-zinc-500">The documents are in its workspace, in the knowledge folder.</p>
+        <p className="mt-1 text-xs text-zinc-500">
+          The documents are in its workspace, in the knowledge folder
+          {applied.parts > 0 ? ` — the long ones in ${applied.parts} parts, so it can search all of them` : ''}.
+        </p>
       )}
     </div>
   )

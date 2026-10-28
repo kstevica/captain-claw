@@ -2,26 +2,32 @@
 
 * a model's reply is cleaned per group (clipped, deduplicated, unknown
   categories fall back, intent names become skill ids), and the whole items of
-  a cut-off reply are kept;
-* a document with no text is reported without the model; long ones are cut
-  at the archetype forge's caps;
-* prepare reads with the owner's model, keeps the documents' text under the
-  preset's id for that owner only, and gives every document a knowledge entry;
-  no input is a 400, no model a 409, a spent allowance a 429;
+  a cut-off reply are kept; a part with nothing in it is not a failure;
+* a document is read in full when it is added (a Library pick too — not the
+  Library's own 10 pages) and staged with its pages and tokens, for its owner
+  only, without the model; text is split at pages and headings within a byte
+  limit, losing nothing;
+* the material is read in steps sized to the model's window — small
+  documents share one, a long one spans many, knowledge-only documents are not
+  read, more than a setup reads is left out with a note — and the parts are
+  merged by the model; a step whose answer can't be read is skipped, none
+  readable fails the read, a spent allowance stops it but keeps what was read;
+  a read can be stopped, and only its owner follows it;
 * the person's note on a document (what it is, how to use it) reaches the
-  model and the agent's knowledge; File library picks are read from the
-  person's own agents' folders only; the agent being set up frames the read
+  model and the agent's knowledge; the agent being set up frames the read
   with its archetype, and only its owner can name it;
 * apply gives an existing agent the reviewed preset: one SKILL.md per intent
-  (in the skills folder the agent reads), the documents as Markdown in
-  knowledge/ with an index, glossary and the full rules, and a capped rules
-  block after its instructions — stored for the owner and returned; another
-  person's preset id brings no documents, another person's agent is a 404;
+  (in the skills folder the agent reads), every document whole in knowledge/ —
+  a long one as an overview plus parts under semantic memory's 256 KB limit —
+  with an index, glossary and the full rules, and a capped rules block after
+  its instructions — stored for the owner and returned; another person's
+  preset id brings no documents, another person's agent is a 404;
 * facts go to the agent as insights once it answers; a failure never raises.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
@@ -30,6 +36,7 @@ import httpx
 import pytest
 
 from captain_claw.flight_deck import agent_preset as ap
+from captain_claw.flight_deck import agent_preset_docs as pdocs
 from captain_claw.flight_deck import archetypes as arch_mod
 from captain_claw.flight_deck import auth as fd_auth
 from captain_claw.flight_deck import rate_limiter, server
@@ -150,23 +157,52 @@ def _auth(uid: str) -> dict:
 
 
 def _model(monkeypatch, *replies: str) -> list[dict]:
-    """The model answers with ``replies`` in turn; the calls it got."""
+    """The model answers with ``replies`` in turn (the last one again after
+    that); the calls it got."""
     calls: list[dict] = []
 
     async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
-        calls.append({"user": user, "owner": owner_id, "max_tokens": max_tokens})
+        calls.append({"system": system, "user": user, "owner": owner_id, "max_tokens": max_tokens})
         return replies[min(len(calls), len(replies)) - 1], 100
 
     monkeypatch.setattr(ap, "call_model", fake_call)
     return calls
 
 
-async def _prepare(uid: str, files: list[tuple[str, bytes]], instructions: str = "Be brief.",
-                   **extra: str) -> httpx.Response:
+async def _stage(uid: str, files: list[tuple[str, bytes]] = (), library: list | None = None) -> dict:
     async with _client() as c:
-        return await c.post("/fd/agent-preset/prepare", headers=_auth(uid),
-                            data={"archetype": "support", "instructions": instructions, **extra},
-                            files=[("files", (n, b, "text/plain")) for n, b in files])
+        r = await c.post("/fd/agent-preset/documents", headers=_auth(uid),
+                         data={"library": json.dumps(library or [])},
+                         files=[("files", (n, b, "text/plain")) for n, b in files] or None)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def _start(uid: str, docs: list[dict], instructions: str = "Be brief.", **extra) -> httpx.Response:
+    async with _client() as c:
+        return await c.post("/fd/agent-preset/prepare", headers=_auth(uid), json={
+            "archetype": "support", "instructions": instructions, "docs": docs, **extra})
+
+
+async def _wait(uid: str, job_id: str) -> dict:
+    async with _client() as c:
+        for _ in range(500):
+            r = await c.get(f"/fd/agent-preset/prepare/{job_id}", headers=_auth(uid))
+            assert r.status_code == 200, r.text
+            if r.json()["state"] != "running":
+                return r.json()
+            await asyncio.sleep(0.01)
+    raise AssertionError("the read never finished")
+
+
+async def _prepare(uid: str, files: list[tuple[str, bytes]], instructions: str = "Be brief.",
+                   notes: list[dict] | None = None, **extra) -> dict:
+    """Stage *files*, read them (with *notes* per file), and wait: the job."""
+    staged = (await _stage(uid, files))["docs"]
+    docs = [{"id": d["id"], **((notes or [])[i] if i < len(notes or []) else {})} for i, d in enumerate(staged)]
+    r = await _start(uid, docs, instructions, **extra)
+    assert r.status_code == 200, r.text
+    return await _wait(uid, r.json()["id"])
 
 
 async def _spawn(uid: str, name: str, port: int) -> str:
@@ -221,71 +257,283 @@ def test_parse_refuses_a_reply_with_nothing():
         ap.parse_preset("I could not find anything.")
 
 
-# ── The documents ─────────────────────────────────────────────────────
+def test_a_part_with_nothing_in_it_is_not_a_failure():
+    assert ap._parse_part('{"rules": []}')["rules"] == []
+    assert ap._parse_part("I could not find anything.") is None
 
 
-class _Upload:
-    def __init__(self, filename: str, data: bytes):
-        self.filename, self._data = filename, data
-
-    async def read(self) -> bytes:
-        return self._data
+# ── The documents: read in full, split, staged ────────────────────────
 
 
-async def test_a_document_without_text_is_reported_without_the_model():
-    docs, warnings = await ap.read_documents([_Upload("scan.txt", b"   \n  "), _Upload("ok.txt", b"Hello")])
-    assert [d["name"] for d in docs] == ["ok.txt"]
-    assert any("scan.txt" in w and "no text" in w for w in warnings)
+def _pdf_text(pages: int, chars_per_page: int = 2000) -> str:
+    """What the PDF extractor makes of a document of *pages* pages."""
+    return "\n".join(["# big.pdf", ""] + [f"## Page {n}\n\n" + ("x" * (chars_per_page - 1)) + "\n" for n in range(1, pages + 1)])
 
 
-async def test_long_documents_are_cut_at_the_caps(monkeypatch):
-    monkeypatch.setattr(ap, "_MAX_PER_FILE", 10)
-    monkeypatch.setattr(ap, "_MAX_TOTAL", 15)
-    docs, warnings = await ap.read_documents([
-        _Upload("a.txt", b"a" * 50), _Upload("a.txt", b"b" * 50), _Upload("c.txt", b"c" * 50)])
-    assert [(d["name"], d["chars"], d["truncated"]) for d in docs] == [("a.txt", 10, True), ("a.txt (2)", 5, True)]
-    assert any(w.startswith("c.txt: left out") for w in warnings)
+def test_split_cuts_at_pages_and_says_which():
+    text = _pdf_text(100)
+    parts = pdocs.split_text(text, 50_000)
+    assert len(parts) > 1 and "".join(p["text"] for p in parts) == text
+    assert all(len(p["text"].encode()) <= 50_000 for p in parts)
+    assert parts[0]["label"].startswith("pages 1–") and parts[-1]["label"].endswith("–100")
+    assert all(p["text"].lstrip().startswith(("#", "## Page")) for p in parts)
 
 
-# ── Prepare ───────────────────────────────────────────────────────────
+def test_split_cuts_a_block_too_big_on_its_own():
+    text = "# Title\n\n" + ("word " * 60_000) + "\n\nend"
+    parts = pdocs.split_text(text, 20_000)
+    assert "".join(p["text"] for p in parts) == text
+    assert all(len(p["text"].encode()) <= 20_000 for p in parts)
+    multibyte = "č" * 30_000
+    assert all(len(p["text"].encode()) <= 10_000 for p in pdocs.split_text(multibyte, 10_000))
+
+
+def test_pages_are_counted_or_estimated():
+    assert pdocs.pages_of(_pdf_text(7)) == (7, True)
+    assert pdocs.pages_of("## Slide 1\nA\n## Slide 2\nB") == (2, True)
+    assert pdocs.pages_of("y" * 9001) == (4, False)
+
+
+def test_a_library_file_is_read_in_full(monkeypatch, tmp_path):
+    from captain_claw.tools import document_extract as dx
+    asked: list = []
+
+    def fake_pdf(path, max_pages):
+        asked.append(max_pages)
+        return _pdf_text(3), None
+
+    monkeypatch.setattr(dx, "_extract_pdf_markdown", fake_pdf)
+    (tmp_path / "a.pdf").write_bytes(b"%PDF")
+    text, why = pdocs.extract(tmp_path / "a.pdf")
+    assert why == "" and "## Page 3" in text and asked == [3000]   # not the Library's 10 pages
+    assert pdocs.extract(tmp_path / "x.exe") == ("", "not a kind of document the setup reads")
+
+
+async def test_documents_are_staged_with_their_size_and_no_model(deck, monkeypatch):
+    calls = _model(monkeypatch, json.dumps(_REPLY))
+    big = _pdf_text(40).encode()
+    out = await _stage(BOB, [("policy.md", big), ("empty.txt", b""), ("scan.txt", b"   \n  ")])
+    [doc] = out["docs"]
+    assert doc["name"] == "policy.md" and doc["pages"] == 40 and doc["pages_exact"] is True
+    assert doc["chars"] == len(big.decode()) and doc["tokens"] == -(-doc["chars"] // 4)
+    assert any("empty.txt" in w for w in out["warnings"]) and any("scan.txt" in w for w in out["warnings"])
+    assert pdocs.load_staged(ap.owner_root(BOB), doc["id"])["text"] == big.decode()
+    assert pdocs.load_staged(ap.owner_root(CAROL), doc["id"]) is None
+    assert calls == []
+
+
+async def test_library_picks_are_staged_from_the_persons_own_agents_only(deck, monkeypatch):
+    from captain_claw.flight_deck import file_library as fl
+    monkeypatch.setattr(fl, "_STORE", fl.LibraryStore(server.DATA_DIR / "file_library.db"))
+    server._save_process_registry({"bob-agent": {"slug": "bob-agent", "name": "Bob's agent", "owner": BOB}})
+    faq = server.DATA_DIR / "bob-agent" / "data" / "workspace" / "faq.md"
+    faq.parent.mkdir(parents=True)
+    faq.write_text("# FAQ\n\nWe ship within 3 days.\n")
+    fl.get_store().sync_agent("bob-agent", fl.walk_workspace("bob-agent"))
+    file_id = fl.LibraryStore.file_id("bob-agent", "faq.md")
+
+    out = await _stage(BOB, library=[file_id])
+    assert [(d["name"], d["origin"], d["agent"]) for d in out["docs"]] == [("faq.md", "library", "Bob's agent")]
+    out = await _stage(CAROL, library=[{"id": file_id}])
+    assert out["docs"] == [] and "no longer there" in out["warnings"][0]
+
+
+def test_old_presets_and_staged_documents_are_pruned(deck):
+    old = ap.save_docs(BOB, [{"name": "a.txt", "text": "a"}], "support")
+    new = ap.save_docs(BOB, [{"name": "b.txt", "text": "b"}], "support")
+    meta = ap._preset_dir(BOB, old) / "meta.json"
+    meta.write_text(json.dumps({**json.loads(meta.read_text()), "created": time.time() - ap._TTL - 5}))
+    staged = pdocs.stage(ap.owner_root(BOB), "c.txt", "c", "upload")
+    smeta = ap.owner_root(BOB) / "staged" / staged["id"] / "meta.json"
+    smeta.write_text(json.dumps({**json.loads(smeta.read_text()), "created": time.time() - pdocs.TTL - 5}))
+    assert ap.load_docs(BOB, old) == [] and pdocs.load_staged(ap.owner_root(BOB), staged["id"]) is None
+    assert ap.prune() == 2
+    assert not ap._preset_dir(BOB, old).exists() and ap._preset_dir(BOB, new).exists()
+    assert ap.load_docs(BOB, "../../etc") == [] and ap._preset_dir(BOB, "../x") is None
+
+
+# ── Planning the steps ────────────────────────────────────────────────
+
+
+def _doc(name: str, text: str, read: bool = True) -> dict:
+    return {"name": name, "text": text, "read": read, "description": "", "usage": "auto"}
+
+
+def test_steps_share_small_documents_and_split_long_ones():
+    long = _pdf_text(100)            # ~200k characters
+    steps, notes = ap.plan_steps("Be brief.", [_doc("a.txt", "A" * 100), _doc("b.txt", "B" * 100),
+                                               _doc("big.pdf", long), _doc("ref.csv", "R" * 100, read=False)],
+                                 step_tok=10_000)      # 40k characters a step
+    assert notes == []
+    assert [p["doc"]["name"] for p in steps[0]["pieces"]][:2] == ["a.txt", "b.txt"]
+    assert all(sum(len(p["text"]) for p in s["pieces"]) <= 40_000 for s in steps)
+    assert len(steps) >= 5 and "big.pdf, pages" in steps[-1]["label"]
+    assert not any(p["doc"]["name"] == "ref.csv" for s in steps for p in s["pieces"])
+
+
+def test_instructions_alone_are_one_step_and_too_much_is_not_read(monkeypatch):
+    steps, _ = ap.plan_steps("Be brief.", [], step_tok=10_000)
+    assert len(steps) == 1 and steps[0]["label"] == "your instructions"
+    assert ap.plan_steps("", [_doc("r.csv", "x", read=False)], step_tok=10_000)[0] == []
+    monkeypatch.setattr(ap, "_MAX_READ_CHARS", 1000)
+    steps, notes = ap.plan_steps("", [_doc("a.txt", "A" * 800), _doc("b.txt", "B" * 800), _doc("c.txt", "C" * 10)],
+                                 step_tok=10_000)
+    assert sum(len(p["text"]) for s in steps for p in s["pieces"]) == 1000
+    assert any(n.startswith("b.txt: only the first 200") for n in notes)
+    assert any(n.startswith("c.txt: not read") for n in notes)
+
+
+def test_a_step_is_sized_from_the_models_window():
+    assert ap.step_tokens({"provider": "ollama", "input_ctx": 32768}) == 32768 // 2 - ap._PROMPT_TOKENS
+    assert ap.step_tokens({"provider": "ollama"}) == 32768 // 2 - ap._PROMPT_TOKENS
+    assert ap.step_tokens({"provider": "anthropic", "input_ctx": 1_000_000}) == 100_000
+    assert ap.step_tokens({"provider": "ollama", "input_ctx": 4096}) == 4000
+
+
+# ── Reading ───────────────────────────────────────────────────────────
 
 
 async def test_prepare_reads_with_the_owners_model_and_keeps_the_documents(deck, monkeypatch):
     calls = _model(monkeypatch, json.dumps(_REPLY))
-    r = await _prepare(BOB, [("policy.txt", b"Refunds within 14 days."), ("empty.txt", b"  "),
-                             ("prices.txt", b"Basic plan 10 EUR.")])
-    assert r.status_code == 200, r.text
-    body = r.json()
-    assert calls[0]["owner"] == BOB and "Customer Support" in calls[0]["user"]
+    job = await _prepare(BOB, [("policy.txt", b"Refunds within 14 days."), ("prices.txt", b"Basic plan 10 EUR.")])
+    assert job["state"] == "done", job
+    body = job["result"]
+    assert len(calls) == 1 and calls[0]["owner"] == BOB and "Customer Support" in calls[0]["user"]
     assert "Refunds within 14 days." in calls[0]["user"] and "Be brief." in calls[0]["user"]
-    # Every uploaded document has a knowledge entry; the invented one is gone.
+    assert "Reading in parts" not in calls[0]["user"]
+    # Every document has a knowledge entry; the invented one is gone.
     assert [k["doc"] for k in body["preset"]["knowledge"]] == ["policy.txt", "prices.txt"]
     assert body["preset"]["knowledge"][1] == {"doc": "prices.txt", "title": "prices", "summary": ""}
-    assert any("empty.txt" in w for w in body["preset"]["warnings"])
-    assert [d["name"] for d in body["docs"]] == ["policy.txt", "prices.txt"]
+    assert [d["name"] for d in body["docs"]] == ["policy.txt", "prices.txt"] and body["steps"] == 1
+    assert body["tokens"] == 100 and job["tokens"] == 100
     assert [d["name"] for d in ap.load_docs(BOB, body["id"])] == ["policy.txt", "prices.txt"]
     assert ap.load_docs(CAROL, body["id"]) == []
 
 
-async def test_prepare_asks_again_when_the_reply_is_no_good(deck, monkeypatch):
-    calls = _model(monkeypatch, "thinking… no JSON yet", json.dumps(_REPLY))
-    r = await _prepare(BOB, [("policy.txt", b"Refunds.")])
-    assert r.status_code == 200, r.text
-    assert len(calls) == 2 and calls[1]["max_tokens"] > calls[0]["max_tokens"]
-    assert ap._RETRY_NUDGE in calls[1]["user"]
+async def test_the_persons_notes_reach_the_model_and_fill_a_missing_summary(deck, monkeypatch):
+    calls = _model(monkeypatch, json.dumps(_REPLY))
+    notes = [{"description": "Our EU refund policy, 2026", "usage": "rules"},
+             {"description": "Price list for the Basic plan", "usage": "bogus"}]
+    job = await _prepare(BOB, [("policy.txt", b"Refunds within 14 days."), ("prices.txt", b"Basic 10 EUR.")],
+                         notes=notes)
+    body = job["result"]
+    prompt = calls[0]["user"]
+    assert "### policy.txt\nThe owner says: Our EU refund policy, 2026\nUse it as: rules and policies" in prompt
+    assert "### prices.txt\nThe owner says: Price list for the Basic plan\nBasic 10 EUR." in prompt
+    assert [(d["description"], d["usage"], d["origin"]) for d in body["docs"]] == [
+        ("Our EU refund policy, 2026", "rules", "upload"), ("Price list for the Basic plan", "auto", "upload")]
+    assert [k["summary"] for k in body["preset"]["knowledge"]] == ["How refunds work.", "Price list for the Basic plan"]
+    assert ap.load_docs(BOB, body["id"])[0]["usage"] == "rules"
 
 
-async def test_prepare_502_when_the_model_never_answers_usefully(deck, monkeypatch):
-    _model(monkeypatch, "no", "still no")
-    r = await _prepare(BOB, [("policy.txt", b"Refunds.")])
-    assert r.status_code == 502
+async def test_a_long_document_is_read_in_steps_and_the_parts_merged(deck, monkeypatch):
+    async def small_tier(_uid, prefer=()):
+        return {**_TIER, "input_ctx": 8000 * 2 + 2 * ap._PROMPT_TOKENS}   # 8k-token steps
+
+    monkeypatch.setattr(ap, "_resolve_tier", small_tier)
+    merged = {**_REPLY, "rules": [{"text": "Merged rule."}],
+              "knowledge": [{"doc": "big.md", "title": "The big one", "summary": "All of it."}]}
+    part = {"rules": [{"text": "A rule from a part."}], "knowledge": [{"doc": "big.md", "title": "Big", "summary": "Some."}]}
+    replies = [json.dumps(part)] * 3 + [json.dumps(merged)]
+    calls = _model(monkeypatch, *replies)
+    job = await _prepare(BOB, [("big.md", _pdf_text(40).encode())])       # ~80k characters: 3 steps
+    assert job["state"] == "done", job
+    reads = [c for c in calls if "Merging an agent setup" not in c["system"]]
+    merges = [c for c in calls if "Merging an agent setup" in c["system"]]
+    assert len(reads) == 3 and len(merges) == 1 and job["steps"] == 3
+    assert "This is part 2 of 3" in reads[1]["user"] and "Be brief." not in reads[1]["user"]
+    assert "### big.md — pages" in reads[0]["user"] and "(part 1 of 3 of this document)" in reads[0]["user"]
+    assert job["result"]["preset"]["rules"] == [{"text": "Merged rule.", "source": {"doc": "instructions", "section": ""}}]
+    assert job["result"]["preset"]["knowledge"][0]["title"] == "The big one"
+    assert job["result"]["tokens"] == 400
+
+
+def test_a_merge_that_copied_one_parts_summary_gets_all_of_them():
+    parts = [ap.normalise({"knowledge": [{"doc": "h.md", "title": "Handbook", "summary": "Quotes and approvals."}]}),
+             ap.normalise({"knowledge": [{"doc": "h.md", "title": "Handbook", "summary": "Monthly close."}]})]
+    copied = ap.normalise({"knowledge": [{"doc": "h.md", "title": "Handbook", "summary": "Quotes and approvals."}]})
+    assert ap.whole_summaries(copied, parts)["knowledge"][0]["summary"] == "Quotes and approvals. Monthly close."
+    rewritten = ap.normalise({"knowledge": [{"doc": "h.md", "title": "Handbook", "summary": "The whole handbook."}]})
+    assert ap.whole_summaries(rewritten, parts)["knowledge"][0]["summary"] == "The whole handbook."
+
+
+async def test_a_step_that_cant_be_read_is_skipped_and_none_readable_fails(deck, monkeypatch):
+    async def small_tier(_uid, prefer=()):
+        return {**_TIER, "input_ctx": 8000 * 2 + 2 * ap._PROMPT_TOKENS}
+
+    monkeypatch.setattr(ap, "_resolve_tier", small_tier)
+    good = json.dumps({"rules": [{"text": "Kept."}]})
+    _model(monkeypatch, "no", "still no", good, good, good)   # part 1 fails twice; then the rest
+    job = await _prepare(BOB, [("big.md", _pdf_text(40).encode())])
+    assert job["state"] == "done"
+    assert any(w.startswith("Part 1 of 3") for w in job["result"]["preset"]["warnings"])
+    assert [r["text"] for r in job["result"]["preset"]["rules"]] == ["Kept."]
+
+    _model(monkeypatch, "no")
+    job = await _prepare(BOB, [("p.txt", b"Refunds.")])
+    assert job["state"] == "error" and "couldn't be read" in job["error"]
+    assert ap.load_docs(BOB, job["id"]) == []
+
+
+async def test_running_out_of_allowance_keeps_what_was_read(deck, monkeypatch):
+    async def small_tier(_uid, prefer=()):
+        return {**_TIER, "input_ctx": 8000 * 2 + 2 * ap._PROMPT_TOKENS}
+
+    monkeypatch.setattr(ap, "_resolve_tier", small_tier)
+    calls = _model(monkeypatch, json.dumps({"rules": [{"text": "From part one."}]}))
+    checks = {"n": 0}
+
+    async def spent_after_first(_uid):
+        checks["n"] += 1
+        return checks["n"] > 1        # the check before reading is fine, the one before part 2 isn't
+
+    monkeypatch.setattr(ap, "_quota_spent", spent_after_first)
+    job = await _prepare(BOB, [("big.md", _pdf_text(40).encode())])
+    assert job["state"] == "done" and len(calls) == 1
+    assert any("allowance ran out after part 1 of 3" in w for w in job["result"]["preset"]["warnings"])
+    assert job["result"]["preset"]["rules"][0]["text"] == "From part one."
+
+
+async def test_knowledge_only_documents_cost_nothing(deck, monkeypatch):
+    calls = _model(monkeypatch, json.dumps(_REPLY))
+
+    async def no_tier(_uid, prefer=()):
+        return None
+
+    monkeypatch.setattr(ap, "_resolve_tier", no_tier)       # not needed: nothing is read
+    staged = (await _stage(BOB, [("prices.csv", b"plan,price\nBasic,10\n")]))["docs"]
+    r = await _start(BOB, [{"id": staged[0]["id"], "usage": "reference", "read": False,
+                            "description": "Price list"}], instructions="")
+    job = await _wait(BOB, r.json()["id"])
+    assert job["state"] == "done" and calls == [] and job["result"]["steps"] == 0
+    assert job["result"]["preset"]["knowledge"] == [{"doc": "prices.csv", "title": "prices", "summary": "Price list"}]
+    assert job["result"]["docs"][0]["read"] is False
+
+
+async def test_a_read_can_be_stopped_and_only_its_owner_follows_it(deck, monkeypatch):
+    started = asyncio.Event()
+
+    async def slow_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+        started.set()
+        await asyncio.sleep(30)
+        return json.dumps(_REPLY), 100
+
+    monkeypatch.setattr(ap, "call_model", slow_call)
+    staged = (await _stage(BOB, [("p.txt", b"Refunds.")]))["docs"]
+    job_id = (await _start(BOB, [{"id": staged[0]["id"]}])).json()["id"]
+    await asyncio.wait_for(started.wait(), 5)
+    async with _client() as c:
+        assert (await c.get(f"/fd/agent-preset/prepare/{job_id}", headers=_auth(CAROL))).status_code == 404
+        r = await c.delete(f"/fd/agent-preset/prepare/{job_id}", headers=_auth(BOB))
+    assert r.json()["state"] == "cancelled"
+    assert ap.load_docs(BOB, job_id) == []
 
 
 async def test_prepare_needs_something_to_read(deck, monkeypatch):
     _model(monkeypatch, json.dumps(_REPLY))
-    assert (await _prepare(BOB, [], instructions="  ")).status_code == 400
-    r = await _prepare(BOB, [("scan.txt", b" ")], instructions="")
-    assert r.status_code == 400 and "scan.txt" in r.json()["detail"]
+    assert (await _start(BOB, [], instructions="  ")).status_code == 400
+    r = await _start(BOB, [{"id": "0" * 24}], instructions="")
+    assert r.status_code == 400 and "gone" in r.json()["detail"]
 
 
 async def test_prepare_without_a_model_or_allowance(deck, monkeypatch):
@@ -295,82 +543,33 @@ async def test_prepare_without_a_model_or_allowance(deck, monkeypatch):
         return None
 
     monkeypatch.setattr(ap, "_resolve_tier", no_tier)
-    assert (await _prepare(BOB, [("p.txt", b"x")])).status_code == 409
+    assert (await _start(BOB, [])).status_code == 409
 
     async def spent(_uid):
         return True
 
     monkeypatch.setattr(ap, "_quota_spent", spent)
-    assert (await _prepare(BOB, [("p.txt", b"x")])).status_code == 429
+    assert (await _start(BOB, [])).status_code == 429
 
 
 async def test_prepare_needs_a_session(deck):
     async with _client() as c:
-        r = await c.post("/fd/agent-preset/prepare", data={"instructions": "x"})
+        r = await c.post("/fd/agent-preset/prepare", json={"instructions": "x"})
     assert r.status_code == 401
-
-
-async def test_the_persons_notes_reach_the_model_and_fill_a_missing_summary(deck, monkeypatch):
-    calls = _model(monkeypatch, json.dumps(_REPLY))
-    notes = [{"description": "Our EU refund policy, 2026", "usage": "rules"},
-             {"description": "Price list for the Basic plan", "usage": "bogus"}]
-    r = await _prepare(BOB, [("policy.txt", b"Refunds within 14 days."), ("prices.txt", b"Basic 10 EUR.")],
-                       notes=json.dumps(notes))
-    assert r.status_code == 200, r.text
-    body = r.json()
-    prompt = calls[0]["user"]
-    assert "### policy.txt\nThe owner says: Our EU refund policy, 2026\nUse it as: rules and policies" in prompt
-    assert "### prices.txt\nThe owner says: Price list for the Basic plan\nBasic 10 EUR." in prompt
-    assert [(d["description"], d["usage"], d["origin"]) for d in body["docs"]] == [
-        ("Our EU refund policy, 2026", "rules", "upload"), ("Price list for the Basic plan", "auto", "upload")]
-    # The model summarised the policy; the price list has the person's words.
-    assert [k["summary"] for k in body["preset"]["knowledge"]] == ["How refunds work.", "Price list for the Basic plan"]
-    assert ap.load_docs(BOB, body["id"])[0]["usage"] == "rules"
-
-
-async def test_library_picks_are_read_from_the_persons_own_agents_only(deck, monkeypatch):
-    from captain_claw.flight_deck import file_library as fl
-    monkeypatch.setattr(fl, "_STORE", fl.LibraryStore(server.DATA_DIR / "file_library.db"))
-    server._save_process_registry({"bob-agent": {"slug": "bob-agent", "name": "Bob's agent", "owner": BOB}})
-    faq = server.DATA_DIR / "bob-agent" / "data" / "workspace" / "faq.md"
-    faq.parent.mkdir(parents=True)
-    faq.write_text("# FAQ\n\nWe ship within 3 days.\n")
-    fl.get_store().sync_agent("bob-agent", fl.walk_workspace("bob-agent"))
-    pick = json.dumps([{"id": fl.LibraryStore.file_id("bob-agent", "faq.md"),
-                        "description": "Shipping FAQ", "usage": "reference"}])
-
-    calls = _model(monkeypatch, json.dumps(_REPLY))
-    r = await _prepare(BOB, [], library=pick)
-    assert r.status_code == 200, r.text
-    assert "We ship within 3 days." in calls[0]["user"] and "Use it as: reference material" in calls[0]["user"]
-    assert r.json()["docs"] == [{"name": "faq.md", "chars": len("# FAQ\n\nWe ship within 3 days."),
-                                 "truncated": False, "origin": "library", "description": "Shipping FAQ",
-                                 "usage": "reference", "agent": "Bob's agent"}]
-
-    # Carol can't read Bob's file by its id: nothing is read, and she is told.
-    r = await _prepare(CAROL, [], instructions="", library=pick)
-    assert r.status_code == 400 and "no longer there" in r.json()["detail"]
-    assert len(calls) == 1
 
 
 async def test_the_agent_being_set_up_frames_the_read_and_must_be_ones_own(deck, monkeypatch):
     calls = _model(monkeypatch, json.dumps(_REPLY))
     slug = await _spawn(BOB, "Helpdesk", 24302)
-    r = await _prepare(BOB, [("p.txt", b"Refunds.")], archetype="", agent=slug)
-    assert r.status_code == 200, r.text
-    assert "Customer Support" in calls[0]["user"]
-    assert (await _prepare(CAROL, [("p.txt", b"x")], archetype="", agent=slug)).status_code == 404
+    job = await _prepare(BOB, [("p.txt", b"Refunds.")], archetype="", agent=slug)
+    assert job["state"] == "done" and "Customer Support" in calls[0]["user"]
+    assert (await _start(CAROL, [], archetype="", agent=slug)).status_code == 404
 
 
-def test_old_presets_are_pruned(deck):
-    old = ap.save_docs(BOB, [{"name": "a.txt", "text": "a", "chars": 1}], "support")
-    new = ap.save_docs(BOB, [{"name": "b.txt", "text": "b", "chars": 1}], "support")
-    meta = ap._preset_dir(BOB, old) / "meta.json"
-    meta.write_text(json.dumps({**json.loads(meta.read_text()), "created": time.time() - ap._TTL - 5}))
-    assert ap.load_docs(BOB, old) == []
-    assert ap.prune() == 1
-    assert not ap._preset_dir(BOB, old).exists() and ap._preset_dir(BOB, new).exists()
-    assert ap.load_docs(BOB, "../../etc") == [] and ap._preset_dir(BOB, "../x") is None
+async def test_the_reader_says_its_model_and_step(deck):
+    async with _client() as c:
+        r = await c.get("/fd/agent-preset/reader", headers=_auth(BOB))
+    assert r.json() == {"model": "test-model", "step_tokens": ap.step_tokens(_TIER)}
 
 
 # ── Seeding ───────────────────────────────────────────────────────────
@@ -398,7 +597,18 @@ def test_an_empty_preset_adds_no_block():
 
 def test_with_block_keeps_the_instructions_within_their_cap():
     out = ap.with_block("b" * 64000, "## Your owner's rules\n- x")
-    assert len(out) <= 64000 and out.endswith("- x")
+    assert len(out) <= 64000 and out.endswith("- x\n" + ap._BLOCK_CLOSE)
+
+
+def test_a_new_block_replaces_the_one_an_earlier_setup_left():
+    once = ap.with_block("You answer customers kindly.", "## Your owner's rules\n\n- Old rule.")
+    twice = ap.with_block(once + "\n\nMy own note.", "## Your owner's rules\n\n- New rule.")
+    assert twice.count(ap._BLOCK_OPEN) == 1 and "Old rule" not in twice and "New rule" in twice
+    assert twice.startswith("You answer customers kindly.\n\nMy own note.")
+    assert ap.with_block(once, "") == "You answer customers kindly."
+    bare = ("Base.\n\n## Your owner's rules\n\nSet up by your owner. Follow these.\n\n### Rules\n- Old.\n\n"
+            "## Later section\nKeep me.")
+    assert ap.strip_block(bare) == "Base.\n\n## Later section\nKeep me."
 
 
 def test_seed_writes_skills_knowledge_and_the_full_rules(deck, tmp_path):
@@ -441,9 +651,10 @@ def test_another_persons_preset_brings_no_documents(deck, tmp_path):
     assert ap.load_docs(BOB, preset_id)            # Bob's is untouched
 
 
-async def _apply(uid: str, slug: str, preset: dict) -> httpx.Response:
+async def _apply(uid: str, slug: str, preset: dict, mode: str = "add") -> httpx.Response:
     async with _client() as c:
-        return await c.post("/fd/agent-preset/apply", headers=_auth(uid), json={"agent": slug, "preset": preset})
+        return await c.post("/fd/agent-preset/apply", headers=_auth(uid),
+                            json={"agent": slug, "preset": preset, "mode": mode})
 
 
 async def test_apply_sets_up_an_existing_agent_and_stores_its_instructions(deck, monkeypatch):
@@ -452,10 +663,10 @@ async def test_apply_sets_up_an_existing_agent_and_stores_its_instructions(deck,
     assert not (server.DATA_DIR / slug / "data" / "workspace" / "knowledge").exists()
 
     _model(monkeypatch, json.dumps(_REPLY))
-    prepared = (await _prepare(BOB, [("policy.txt", b"Refunds within 14 days.")], agent=slug)).json()
+    prepared = (await _prepare(BOB, [("policy.txt", b"Refunds within 14 days.")], agent=slug))["result"]
     given: list = []
     monkeypatch.setattr(ap, "schedule_facts",
-                        lambda slug, port_of, token, facts: given.append((slug, port_of(), token, facts)))
+                        lambda slug, port_of, token, facts, **kw: given.append((slug, port_of(), token, facts)))
     r = await _apply(BOB, slug, {**prepared["preset"], "id": prepared["id"]})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -473,12 +684,178 @@ async def test_apply_sets_up_an_existing_agent_and_stores_its_instructions(deck,
     assert _FakePopen.calls == [slug]                    # no restart
 
 
+def test_a_long_document_reaches_the_agent_whole_in_parts_it_can_index(deck, tmp_path):
+    text = _pdf_text(400)                                   # ~800 KB
+    preset_id = ap.save_docs(BOB, [{"name": "manual.pdf", "text": text, "pages": 400,
+                                    "description": "The product manual", "usage": "reference", "read": False}],
+                             "support")
+    reviewed = {**ap.normalise({}), "id": preset_id,
+                "knowledge": [{"doc": "manual.pdf", "title": "Product manual", "summary": ""}]}
+    done = ap.seed(tmp_path / "agent", tmp_path / "ws", BOB, reviewed)
+    kn = tmp_path / "ws" / "knowledge"
+    parts = sorted(kn.glob("manual-part-*.md"))
+    assert len(parts) >= 4 and done["knowledge"][0]["parts"] == len(parts)
+    assert all(p.stat().st_size <= 262_144 for p in kn.iterdir())     # semantic memory's own limit
+    body = "".join(p.read_text().split("---\n\n", 1)[1] for p in parts)
+    assert all(f"## Page {n}\n" in body for n in (1, 200, 400))       # every page is there
+    overview = (kn / "manual.md").read_text()
+    assert f"kept in {len(parts)} parts" in overview and "(manual-part-01.md)" in overview
+    assert "Your owner says: The product manual" in overview and "Use it as: reference." in overview
+    assert f"— {len(parts)} parts" in (kn / "INDEX.md").read_text()
+    assert parts[0].read_text().startswith(f"# Product manual — part 1 of {len(parts)} (pages 1–")
+
+
 async def test_apply_refuses_another_persons_agent(deck, monkeypatch):
     slug = await _spawn(BOB, "Helpdesk", 24301)
     r = await _apply(CAROL, slug, {**ap.normalise(_REPLY), "id": ""})
     assert r.status_code == 404
     assert not (server.DATA_DIR / slug / "data" / "workspace" / "knowledge").exists()
     assert json.loads(await deck.get_setting(BOB, INSTR))[slug] == "You answer customers kindly."
+
+
+# ── An agent that already has a setup ─────────────────────────────────
+
+
+def _setup(owner, docs, **groups) -> dict:
+    """A reviewed preset with *docs* waiting under its id."""
+    preset_id = ap.save_docs(owner, docs, "support")
+    return {**ap.normalise(groups), "id": preset_id,
+            "knowledge": [{"doc": d["name"], "title": d["name"].split(".")[0].title(), "summary": ""} for d in docs]}
+
+
+def test_a_second_setup_adds_to_the_first(deck, tmp_path):
+    agent, ws = tmp_path / "agent", tmp_path / "agent" / "ws"
+    agent.mkdir()
+    ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "policy.md", "text": "Old policy."},
+                                         {"name": "prices.md", "text": "Prices."}],
+                                   rules=[{"text": "Old rule."}], glossary=[{"term": "RMA", "meaning": "a return"}],
+                                   intents=[{"name": "refund", "when": "Refunds.", "steps": ["a"]}]))
+    done = ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "policy.md", "text": "New policy."},
+                                                {"name": "faq.md", "text": "FAQ."}],
+                                          rules=[{"text": "New rule."}, {"text": "old rule."}],
+                                          intents=[{"name": "quote", "when": "Quotes.", "steps": ["b"]}]))
+    kn = ws / "knowledge"
+    assert (kn / "policy.md").read_text().endswith("New policy.\n")            # given again: replaced
+    assert (kn / "prices.md").is_file() and (kn / "faq.md").is_file()
+    index = (kn / "INDEX.md").read_text()
+    assert all(f"({n}.md)" in index for n in ("policy", "prices", "faq")) and index.count("(policy.md)") == 1
+    assert "RMA" in (kn / "glossary.md").read_text()                           # earlier groups stay
+    rules = (kn / "owner-rules.md").read_text()
+    assert rules.index("New rule.") < rules.index("old rule.") and "Old rule." not in rules   # the newer wording
+    skills = agent / "data" / "home-config-parent" / ".captain-claw" / "skills"
+    assert (skills / "refund" / "SKILL.md").is_file() and (skills / "quote" / "SKILL.md").is_file()
+    assert done["counts"]["rules"] == 2 and done["totals"]["rules"] == 2 and done["totals"]["intents"] == 2
+    assert done["totals"]["knowledge"] == 3 and "refund" in done["block"] and "quote" in done["block"]
+    record = ap.read_record(agent)
+    assert sorted(e["doc"] for e in record["knowledge"]) == ["faq.md", "policy.md", "prices.md"]
+
+
+def test_a_setup_can_replace_the_one_before(deck, tmp_path):
+    agent, ws = tmp_path / "agent", tmp_path / "agent" / "ws"
+    agent.mkdir()
+    (ws / "knowledge").mkdir(parents=True)
+    (ws / "knowledge" / "my-notes.md").write_text("The agent's own file.")
+    ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "manual.md", "text": "## Page 1\n" + "x" * 300_000}],
+                                   rules=[{"text": "Old rule."}],
+                                   intents=[{"name": "refund", "when": "Refunds.", "steps": ["a"]}]))
+    assert len(list((ws / "knowledge").glob("manual-part-*.md"))) == 2
+    done = ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "faq.md", "text": "FAQ."}], rules=[{"text": "New rule."}]),
+                   mode="replace")
+    kn = ws / "knowledge"
+    assert sorted(p.name for p in kn.iterdir()) == ["INDEX.md", "faq.md", "my-notes.md", "owner-rules.md"]
+    assert not (agent / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund").exists()
+    assert "Old rule." not in (kn / "owner-rules.md").read_text()
+    assert done["totals"] == {"rules": 1, "escalation": 0, "templates": 0, "glossary": 0, "intents": 0,
+                              "facts": 0, "knowledge": 1}
+
+
+def test_a_setup_from_before_records_is_read_back_from_its_files(deck, tmp_path):
+    agent, ws = tmp_path / "agent", tmp_path / "agent" / "ws"
+    agent.mkdir()
+    ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "manual.md", "text": "## Page 1\n" + "x" * 300_000},
+                                         {"name": "faq.md", "text": "FAQ."}],
+                                   rules=[{"text": "Old rule."}], escalation=[{"text": "Ask first."}],
+                                   templates=[{"name": "Offer", "body": "Dear [name],\n\nOffer."}],
+                                   glossary=[{"term": "RMA", "meaning": "a return"}],
+                                   intents=[{"name": "refund", "when": "Refunds.", "steps": ["a"]}]))
+    (agent / ".owner-setup.json").unlink()                     # as #263 left it: no record
+    skills = agent / "data" / "home-config-parent" / ".captain-claw" / "skills"
+    (skills / "my-own").mkdir()
+    (skills / "my-own" / "SKILL.md").write_text("---\nname: my-own\n---\nNot from a setup.")
+    back = ap.earlier_setup(agent, ws)
+    assert [r["text"] for r in back["rules"]] == ["Old rule."] and back["escalation"] == [{"text": "Ask first."}]
+    assert back["templates"] == [{"name": "Offer", "body": "Dear [name],\n\nOffer."}]
+    assert back["glossary"] == [{"term": "RMA", "meaning": "a return"}] and back["skills"] == ["refund"]
+    manual = next(e for e in back["knowledge"] if e["file"] == "manual.md")
+    assert manual["parts"] == 2 and manual["files"] == ["manual.md", "manual-part-01.md", "manual-part-02.md"]
+
+    done = ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "new.md", "text": "New."}], rules=[{"text": "New rule."}]))
+    assert done["totals"]["knowledge"] == 3 and done["totals"]["rules"] == 2 and done["totals"]["intents"] == 1
+    assert "(manual.md)" in (ws / "knowledge" / "INDEX.md").read_text()
+    ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "only.md", "text": "Only."}]), mode="replace")
+    assert not (ws / "knowledge" / "manual-part-01.md").exists() and not (skills / "refund").exists()
+    assert (skills / "my-own" / "SKILL.md").is_file()           # not the setup's: left alone
+
+
+async def test_applying_twice_keeps_one_block_and_says_what_it_has(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24303)
+    monkeypatch.setattr(ap, "schedule_facts", lambda *a, **k: None)
+    first = _setup(BOB, [{"name": "a.md", "text": "A."}], rules=[{"text": "Rule one."}])
+    assert (await _apply(BOB, slug, first)).status_code == 200
+    second = _setup(BOB, [{"name": "b.md", "text": "B."}], rules=[{"text": "Rule two."}])
+    r = await _apply(BOB, slug, second)
+    body = r.json()
+    stored = json.loads(await deck.get_setting(BOB, INSTR))[slug]
+    assert stored == body["instructions"] and stored.count(ap._BLOCK_OPEN) == 1
+    assert "Rule one." in stored and "Rule two." in stored and stored.startswith("You answer customers kindly.")
+    assert body["totals"]["knowledge"] == 2 and body["counts"]["knowledge"] == 1 and body["stored"] is True
+    async with _client() as c:
+        cur = (await c.get(f"/fd/agent-preset/current/{slug}", headers=_auth(BOB))).json()
+        assert (await c.get(f"/fd/agent-preset/current/{slug}", headers=_auth(CAROL))).status_code == 404
+    assert cur["has"] is True and cur["rules"] == 2 and [k["title"] for k in cur["knowledge"]] == ["A", "B"]
+
+    r = await _apply(BOB, slug, {**_setup(BOB, []), "rules": []} | {"id": ""}, mode="replace")
+    assert r.json()["instructions"] == "You answer customers kindly."
+
+
+async def test_an_agent_that_is_off_gets_its_facts_when_it_next_starts(deck, monkeypatch, tmp_path):
+    slug = await _spawn(BOB, "Helpdesk", 24304)
+    monkeypatch.setattr(server, "_process_is_alive", lambda s: False)
+    scheduled: list = []
+    monkeypatch.setattr(ap, "schedule_facts", lambda *a, **k: scheduled.append(a))
+    preset = _setup(BOB, [], facts=[{"content": "Refund window is 14 days.", "category": "fact"}])
+    assert (await _apply(BOB, slug, preset)).json()["running"] is False
+    pending = ap.pending_path(server.DATA_DIR / slug)
+    assert scheduled == [] and json.loads(pending.read_text())[0]["content"] == "Refund window is 14 days."
+
+    from captain_claw import insights
+
+    class _Mgr:
+        def __init__(self):
+            self.added: list = []
+
+        async def add(self, content, category, **kw):
+            if content in [a[0] for a in self.added]:
+                return None                                    # deduplicated, as the real one does
+            self.added.append((content, category, kw.get("tags")))
+            return "id"
+
+    ap.leave_facts(server.DATA_DIR / slug, [{"content": "Refund window is 14 days.", "category": "fact",
+                                             "importance": 5}])
+    mgr = _Mgr()
+    assert await insights.import_pending(mgr, pending) == 1
+    assert mgr.added == [("Refund window is 14 days.", "fact", "owner-setup")] and not pending.exists()
+    assert await insights.import_pending(mgr, pending) == 0
+
+
+async def test_facts_an_agent_never_took_wait_for_its_next_start(monkeypatch, tmp_path):
+    async def never(port_of, token, timeout):
+        return 0
+
+    monkeypatch.setattr(ap, "_wait_ready", never)
+    facts = ap.normalise(_REPLY)["facts"]
+    assert await ap.give_facts("a", lambda: 0, "", facts, agent_dir=tmp_path) == 0
+    assert len(json.loads(ap.pending_path(tmp_path).read_text())) == 2
 
 
 # ── Facts ─────────────────────────────────────────────────────────────
