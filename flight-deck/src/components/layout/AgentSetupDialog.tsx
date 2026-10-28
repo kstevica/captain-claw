@@ -519,7 +519,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
                       <FolderOpen className="h-6 w-6" />
                     </span>
                     <span className="text-sm font-medium text-zinc-200">Drop your documents here, or choose them</span>
-                    <span className="text-xs text-zinc-500">PDF, Word, Excel, PowerPoint, text, Markdown, CSV · up to 25 MB each · up to {MAX_FILES}</span>
+                    <span className="text-xs text-zinc-500">PDF, Word, Excel, PowerPoint, text, Markdown, CSV, HTML · up to 25 MB each · up to {MAX_FILES}</span>
                     <span className="mt-1 text-[11px] text-zinc-600">Then say what each one is and how {name} should use it.</span>
                   </button>
                 ) : (

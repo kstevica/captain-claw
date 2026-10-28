@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 from captain_claw.flight_deck import agent_preset_tables as ptables
 from captain_claw.flight_deck.agent_preset_outline import outline
@@ -28,7 +29,7 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
-SUPPORTED = (".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv")
+SUPPORTED = (".pdf", ".docx", ".xlsx", ".pptx", ".txt", ".md", ".csv", ".html", ".htm")
 MAX_FILE_BYTES = 25 * 1024 * 1024
 MAX_CHARS = 6_000_000          # a document's text, at most (some 2,000 pages)
 CHARS_PER_PAGE = 3000          # a page of a document without pages, roughly
@@ -38,9 +39,36 @@ _MAX_PAGES = 3000
 _MAX_ROWS = 20000
 _MAX_SLIDES = 1000
 _PLAIN = (".txt", ".md", ".csv")
+_HTML = (".html", ".htm")
+_HTML_DROP = ("script", "style", "noscript", "template", "svg", "nav", "footer", "form", "iframe", "button")
+_HTML_BLOCKS = ("h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "pre", "blockquote", "table", "dt", "dd")
 
 
 # ── Reading a document in full ────────────────────────────────────────
+
+
+NO_TEXT_SCAN = "no text in it (a scan or an image-only file)"
+
+
+def _pdf_by_pymupdf(path: Path) -> str:
+    """A PDF as Markdown by pymupdf4llm — its headings and tables found by
+    their type, so a book's section map follows its chapters — when it is
+    installed (the optional ``pdf`` extra: PyMuPDF is AGPL-3.0, so never a
+    requirement); "" without it, when it fails, or when it finds hardly any
+    text (a scan: the page-by-page reading says so)."""
+    try:
+        import pymupdf4llm  # type: ignore[import-not-found]
+    except ImportError:
+        return ""
+    try:
+        md = pymupdf4llm.to_markdown(str(path), show_progress=False, ignore_images=True)
+    except TypeError:   # an older pymupdf4llm without those options
+        md = pymupdf4llm.to_markdown(str(path))
+    except Exception:
+        log.warning("agent preset: pymupdf4llm couldn't read a PDF, reading it page by page", exc_info=True)
+        return ""
+    md = str(md or "")
+    return md if len(md.strip()) >= 200 else ""
 
 
 def extract(path: Path) -> tuple[str, str]:
@@ -53,13 +81,18 @@ def extract(path: Path) -> tuple[str, str]:
         if ext in _PLAIN:
             with path.open("rb") as fh:
                 return fh.read(MAX_CHARS * 2).decode("utf-8", errors="replace"), ""
+        if ext in _HTML:
+            with path.open("rb") as fh:
+                return html_markdown(fh.read(MAX_CHARS * 4).decode("utf-8", errors="replace")), ""
         from captain_claw.tools import document_extract as dx
         if ext == ".pdf":
-            text, err = dx._extract_pdf_markdown(path, max_pages=_MAX_PAGES)
-            if err:
-                return "", err
-            if "_(No extractable text found in selected pages.)_" in (text or ""):
-                return "", "no text in it (a scan or an image-only file)"
+            text = _pdf_by_pymupdf(path)
+            if not text:
+                text, err = dx._extract_pdf_markdown(path, max_pages=_MAX_PAGES)
+                if err:
+                    return "", err
+                if "_(No extractable text found in selected pages.)_" in (text or ""):
+                    return "", NO_TEXT_SCAN
         elif ext == ".docx":
             text = dx._extract_docx_markdown(path)
         elif ext == ".xlsx":
@@ -69,6 +102,62 @@ def extract(path: Path) -> tuple[str, str]:
         return text or "", ""
     except Exception as exc:
         return "", str(exc)
+
+
+def html_markdown(html: str) -> str:
+    """A web page's text as Markdown — its title, headings, paragraphs,
+    lists, tables and code — without scripts, styles, menus or forms."""
+    from bs4 import BeautifulSoup
+
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(list(_HTML_DROP)):
+        tag.decompose()
+
+    def tidy(s: str) -> str:   # inline tags leave a space before punctuation: "14 days ."
+        return re.sub(r"\s+([.,;:!?)])", r"\1", " ".join(s.split()))
+
+    def words(el: Any) -> str:
+        return tidy(el.get_text(" ", strip=True))
+
+    out: list[str] = []
+    for el in (soup.body or soup).find_all(list(_HTML_BLOCKS)):
+        if el.find_parent(["table", "pre", "blockquote"]) or (el.name == "p" and el.find_parent("li")):
+            continue
+        if el.name == "table":
+            rows = [[words(c) for c in tr.find_all(["th", "td"])] for tr in el.find_all("tr")]
+            rows = [r for r in rows if any(r)]
+            if rows:
+                width = max(len(r) for r in rows)
+                rows = [r + [""] * (width - len(r)) for r in rows]
+                out.append("\n".join(["| " + " | ".join(rows[0]) + " |", "|" + " --- |" * width,
+                                       *("| " + " | ".join(r) + " |" for r in rows[1:])]))
+            continue
+        if el.name == "pre":
+            out.append("```\n" + el.get_text().strip("\n") + "\n```")
+            continue
+        if el.name == "li":   # its own words, not its sub-list's
+            own = " ".join(" ".join((c.get_text(" ", strip=True) if hasattr(c, "get_text") else str(c)).split())
+                           for c in el.children if getattr(c, "name", None) not in ("ul", "ol"))
+            text = tidy(own)
+        else:
+            text = words(el)
+        if not text:
+            continue
+        if el.name[0] == "h" and el.name[1:].isdigit():
+            out.append("#" * int(el.name[1:]) + " " + text)
+        elif el.name == "li":
+            out.append("- " + text)
+        elif el.name == "blockquote":
+            out.append("> " + text)
+        else:
+            out.append(text)
+    md = "\n\n".join(out)
+    if not md.strip():
+        md = words(soup.body or soup)
+    title = " ".join(soup.title.get_text(" ", strip=True).split()) if soup.title else ""
+    if title and not md.lstrip().startswith("# "):
+        md = f"# {title}\n\n{md}"
+    return md
 
 
 def extract_bytes(raw: bytes, suffix: str) -> tuple[str, str]:
