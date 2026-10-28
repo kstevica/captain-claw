@@ -30,9 +30,6 @@ VALID_THREAD_TYPES = frozenset({
     "connection", "pattern", "hypothesis", "association", "unresolved",
 })
 
-# BM25 rank threshold for dedup (FTS5 returns negative ranks; closer to 0 = better).
-_DEDUP_RANK_THRESHOLD = -8.0
-
 # Dreaming trigger defaults (overridden by config).
 _DEFAULT_INTERVAL_MESSAGES = 12
 _DEFAULT_COOLDOWN_SECONDS = 300
@@ -51,6 +48,7 @@ class NervousSystemManager:
             self.db_path = Path(db_path).expanduser()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._db: aiosqlite.Connection | None = None
+        self._columns: list[str] = []
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -153,6 +151,11 @@ class NervousSystemManager:
             pass  # Column already exists.
 
         await self._db.commit()
+
+        # Column names in this DB's order: the source_trigger migration sits
+        # above the older maturation one, so DBs made before it hold those
+        # columns in another order than new ones — rows are read by name.
+        self._columns = [r[1] for r in await self._db.execute_fetchall("PRAGMA table_info(intuitions)")]
 
     async def close(self) -> None:
         if self._db:
@@ -385,29 +388,32 @@ class NervousSystemManager:
         *,
         limit: int = 1,
     ) -> list[dict[str, Any]]:
-        """FTS5 similarity search for dedup."""
+        """Intuitions that state the same thing as *text*, best match first:
+        FTS finds candidates by *text*'s search words, ``retrieval.same_fact``
+        decides (a different number or a negation keeps them two)."""
+        from captain_claw import retrieval
+
         await self._ensure_db()
         assert self._db is not None
 
-        safe = " ".join(w for w in text.split() if len(w) > 2)[:200]
-        if not safe:
+        terms = retrieval.query_terms(retrieval.uncontract(text), max_terms=32)
+        if not terms:
             return []
-
         try:
             rows = await self._db.execute_fetchall(
-                """SELECT i.*, rank FROM intuitions_fts fts
-                   JOIN intuitions i ON i.rowid = fts.rowid
+                """SELECT i.*, bm25(intuitions_fts) AS rank
+                   FROM intuitions_fts JOIN intuitions i ON i.rowid = intuitions_fts.rowid
                    WHERE intuitions_fts MATCH ?
-                   ORDER BY rank LIMIT ?""",
-                (safe, limit),
+                   ORDER BY rank LIMIT 20""",
+                ("{content} : (" + retrieval.fts_match(terms) + ")",),
             )
-        except Exception:
+        except Exception as exc:
+            log.debug("Intuition similarity query failed", error=str(exc))
             return []
 
-        return [
-            self._row_to_dict(r) for r in rows
-            if (r[-1] or 0) > _DEDUP_RANK_THRESHOLD
-        ]
+        found = [item for item in map(self._row_to_dict, rows)
+                 if retrieval.same_fact(text, item.get("content") or "")]
+        return found[:limit]
 
     # ── context / lifecycle ──────────────────────────────────────────
 
@@ -788,32 +794,18 @@ class NervousSystemManager:
 
     # ── internal ─────────────────────────────────────────────────────
 
-    @staticmethod
-    def _row_to_dict(row: Any) -> dict[str, Any]:
-        """Convert an aiosqlite Row to a plain dict."""
-        cols = [
-            "id", "content", "thread_type", "source_layers", "source_ids",
-            "source_session", "confidence", "importance", "access_count",
-            "last_accessed", "validated", "created_at", "updated_at",
-            "decayed_at", "tags",
-            # Musical cognition columns (schema migrations).
-            "resolution_state", "resolved_from_id",
-            "maturation_state", "matured_at", "dream_cycles_seen",
-            "source_trigger",
-            # Process of Thoughts provenance.
-            "source_message_id",
-        ]
+    def _row_to_dict(self, row: Any) -> dict[str, Any]:
+        """Convert a ``SELECT *`` row to a plain dict, by this DB's column names."""
+        cols = self._columns
         d: dict[str, Any] = {}
-        for i, col in enumerate(cols):
-            if i < len(row):
-                val = row[i]
-                # Parse JSON lists.
-                if col in ("source_layers", "source_ids") and isinstance(val, str):
-                    try:
-                        val = json.loads(val)
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-                d[col] = val
+        for col, val in zip(cols, row):
+            # Parse JSON lists.
+            if col in ("source_layers", "source_ids") and isinstance(val, str):
+                try:
+                    val = json.loads(val)
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            d[col] = val
         # rank column may be appended by FTS joins.
         if len(row) > len(cols):
             d["rank"] = row[len(cols)]

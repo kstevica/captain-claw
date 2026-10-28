@@ -114,6 +114,36 @@ def matched_terms(terms: Iterable[str], *texts: str) -> list[str]:
     return hits
 
 
+# Words that flip a statement and that search terms drop as stopwords (EN + HR).
+NEGATIONS = frozenset(
+    "no not never none nothing nobody cannot without ne nije nisu nema nikad nikada bez".split())
+# Share of each side's search words the other must hold for one fact.
+SAME_FACT_OVERLAP = 0.8
+
+
+def uncontract(text: str) -> str:
+    """"doesn't" → "does not", so a contraction compares like its long form."""
+    return re.sub(r"n['’]t\b", " not", str(text or ""), flags=re.IGNORECASE)
+
+
+def fact_marks(text: str) -> tuple[tuple[str, ...], frozenset[str]]:
+    """What must be equal for two texts to be one fact, however alike their
+    words: the numbers in order ("14 days" is not "30 days") and the negations."""
+    folded = fold(uncontract(text))
+    return tuple(re.findall(r"\d+", folded)), frozenset(re.findall(r"\w+", folded)) & NEGATIONS
+
+
+def same_fact(text: str, other: str, overlap: float = SAME_FACT_OVERLAP) -> bool:
+    """Whether *text* and *other* state one fact (a store's dedup): each holds
+    *overlap* of the other's search words (by stem), and their numbers and
+    negations are equal — a bm25 cutoff would depend on how big the store is."""
+    text, other = uncontract(text), uncontract(other)
+    mine, theirs = query_terms(text, max_terms=32), query_terms(other, max_terms=32)
+    return bool(mine and theirs and fact_marks(text) == fact_marks(other)
+                and len(matched_terms(mine, other)) >= overlap * len(mine)
+                and len(matched_terms(theirs, text)) >= overlap * len(theirs))
+
+
 def bm25_relevance(rank: float, scale: float = 4.0) -> float:
     """FTS5 bm25 (negative, lower is better) as a 0..1 relevance: a hit
     scoring ``scale`` lands at 0.5."""
