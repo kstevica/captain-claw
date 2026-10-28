@@ -8035,7 +8035,7 @@ async def _proxy_agent_intentions(
     method: str, host: str, port: int, token: str, path: str,
     *, query: dict | None = None, body: dict | None = None, timeout: float = 15.0,
 ):
-    """Forward a request to an agent's REST (its intentions, its insights),
+    """Forward a request to an agent's REST (its intentions, insights, skills),
     preserving its status code."""
     import httpx
     from fastapi.responses import JSONResponse
@@ -9216,6 +9216,26 @@ async def proxy_toggle_skill(
             raise HTTPException(resp.status_code, resp.text)
     except httpx.ConnectError:
         raise HTTPException(502, "Cannot connect to agent")
+
+
+@app.get("/fd/agent-skills/{host}/{port}/content")
+async def proxy_skill_content(host: str, port: int, name: str, token: str = "",
+                              user: dict | None = _required_user_dep):
+    """A skill's SKILL.md, read by the agent itself (the kiosk's Skills tab)."""
+    return await _proxy_agent_intentions("GET", host, port, token, "/api/skills/content",
+                                         query={"name": name[:200]})
+
+
+@app.put("/fd/agent-skills/{host}/{port}/content")
+async def proxy_save_skill_content(host: str, port: int, request: Request, token: str = "",
+                                   user: dict | None = _required_user_dep):
+    """Rewrite one of the agent's own skills — it refuses built-in ones."""
+    body = await request.json()
+    body = body if isinstance(body, dict) else {}
+    if not isinstance(body.get("name"), str) or not isinstance(body.get("content"), str):
+        raise HTTPException(400, "Say which skill, and what it should say")
+    return await _proxy_agent_intentions("PUT", host, port, token, "/api/skills/content",
+                                         body={"name": body["name"][:200], "content": body["content"]})
 
 
 # ── Captain Claw Game proxy endpoints ──

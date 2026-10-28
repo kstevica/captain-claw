@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import platform
 import posixpath
+import re
 import shutil
 import tempfile
 import zipfile
@@ -133,9 +135,95 @@ async def list_skills(server: WebServer, request: web.Request) -> web.Response:
                 "config": requires.config if requires else [],
             },
             "has_install": bool(meta and meta.install),
+            "editable": entry.source in _EDITABLE_SOURCES,
+            "from_owner": _from_owner_setup(entry),
         })
 
     return web.json_response({"skills": result})
+
+
+# ── One skill's SKILL.md: read it, and rewrite an editable one ─────────
+#
+# The kiosk's "Instructions, insights & skills" dialog shows what a skill
+# says and lets the owner correct the ones the agent keeps itself (from
+# their setup, or its own); built-in and plugin skills are read-only. The
+# file is always the one the agent loaded under that name — never a path
+# from the caller.
+
+_EDITABLE_SOURCES = frozenset({
+    "captain-managed", "captain-workspace", "agents-skills-personal", "agents-skills-project",
+})
+# What Flight Deck's setup writes at the end of a skill it made (agent_preset._skill_md).
+_OWNER_SETUP = re.compile(r"\(from your owner, when (?:they set you up|you were created)\)")
+_MAX_SKILL_BYTES = 100_000
+
+
+def _from_owner_setup(entry: Any) -> bool:
+    if entry.source != "captain-managed":
+        return False
+    try:
+        return bool(_OWNER_SETUP.search(Path(entry.file_path).read_text(encoding="utf-8")))
+    except OSError:
+        return False
+
+
+def _find_skill(server: WebServer, name: str) -> Any:
+    from captain_claw.config import get_config
+    from captain_claw.skills import load_workspace_skill_entries
+
+    workspace = str(server.agent.workspace_base_path) if server.agent else "."
+    return next((e for e in load_workspace_skill_entries(workspace, get_config()) if e.name == name), None)
+
+
+async def skill_content(server: WebServer, request: web.Request) -> web.Response:
+    """GET /api/skills/content?name= — a skill's SKILL.md, and whether it may be edited."""
+    entry = _find_skill(server, request.query.get("name", "").strip())
+    if entry is None:
+        return web.json_response({"ok": False, "error": "No such skill"}, status=404)
+    try:
+        content = Path(entry.file_path).read_text(encoding="utf-8")
+    except OSError as exc:
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+    return web.json_response({"ok": True, "name": entry.name, "source": entry.source,
+                              "editable": entry.source in _EDITABLE_SOURCES,
+                              "from_owner": _from_owner_setup(entry), "content": content})
+
+
+async def save_skill_content(server: WebServer, request: web.Request) -> web.Response:
+    """PUT /api/skills/content — rewrite an editable skill's SKILL.md. It keeps
+    its name (the frontmatter's, else its folder's), so it stays the same
+    skill — on or off as it was."""
+    from captain_claw.skills import _parse_frontmatter
+
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "Invalid JSON"}, status=400)
+    entry = _find_skill(server, str(body.get("name", "")).strip())
+    if entry is None:
+        return web.json_response({"ok": False, "error": "No such skill"}, status=404)
+    if entry.source not in _EDITABLE_SOURCES:
+        return web.json_response({"ok": False, "error": "A built-in skill can't be changed"}, status=403)
+    content = body.get("content")
+    if not isinstance(content, str) or not content.strip():
+        return web.json_response({"ok": False, "error": "The skill can't be empty"}, status=400)
+    if len(content.encode("utf-8")) > _MAX_SKILL_BYTES:
+        return web.json_response({"ok": False, "error": "The skill is too long"}, status=400)
+    path = Path(entry.file_path)
+    name = str(_parse_frontmatter(content).get("name", "")).strip() or path.parent.name.strip()
+    if name != entry.name:
+        return web.json_response(
+            {"ok": False, "error": f'Keep "name: {entry.name}" at the top, so it stays the same skill'},
+            status=400)
+    tmp = path.with_name(f".{path.name}.tmp")
+    try:
+        tmp.write_text(content.rstrip() + "\n", encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        tmp.unlink(missing_ok=True)
+        return web.json_response({"ok": False, "error": str(exc)}, status=500)
+    log.info("Skill rewritten", name=entry.name, source=entry.source)
+    return web.json_response({"ok": True, "name": entry.name})
 
 
 async def install_skill(server: WebServer, request: web.Request) -> web.Response:

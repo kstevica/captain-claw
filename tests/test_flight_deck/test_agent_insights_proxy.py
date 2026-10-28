@@ -2,7 +2,9 @@
 remembers — listed and searched, added to, edited and forgotten through the
 agent's own /api/insights. Only the owner's fields pass, only an insight id
 reaches the agent's path, and like every port-addressed proxy only the
-agent's owner (or an admin) gets through."""
+agent's owner (or an admin) gets through. The same goes for
+/fd/agent-skills/{host}/{port}/content: a skill's SKILL.md, read and
+rewritten by the agent itself."""
 
 from __future__ import annotations
 
@@ -134,4 +136,27 @@ async def test_editing_and_forgetting_reach_only_an_insight(deck, agent):
         r = await c.patch(f"/fd/agent-insights/localhost/{PORT}/abc123def456", headers=_bearer(deck.alice),
                           json={"source_tool": "x"})
         assert r.status_code == 400
+    assert len(agent) == n
+
+
+async def test_a_skill_is_read_and_rewritten_through_the_agent(deck, agent):
+    async with _client() as c:
+        r = await c.get(f"/fd/agent-skills/localhost/{PORT}/content", headers=_bearer(deck.alice),
+                        params={"name": "weekly-sales-report"})
+        assert r.status_code == 200
+        assert agent[-1]["url"].path == "/api/skills/content"
+        assert dict(agent[-1]["url"].params) == {"name": "weekly-sales-report", "token": "tok-a"}
+        r = await c.put(f"/fd/agent-skills/localhost/{PORT}/content", headers=_bearer(deck.alice),
+                        json={"name": "weekly-sales-report", "content": "---\nname: weekly-sales-report\n---\nSteps.",
+                              "path": "/etc/passwd"})
+        assert r.status_code == 200 and agent[-1]["method"] == "PUT"
+        assert agent[-1]["json"] == {"name": "weekly-sales-report",
+                                     "content": "---\nname: weekly-sales-report\n---\nSteps."}
+        n = len(agent)
+        r = await c.put(f"/fd/agent-skills/localhost/{PORT}/content", headers=_bearer(deck.alice), json={"name": "x"})
+        assert r.status_code == 400
+        for method in ("GET", "PUT"):
+            r = await c.request(method, f"/fd/agent-skills/localhost/{PORT}/content", headers=_bearer(deck.bob),
+                                params={"name": "x"}, json={"name": "x", "content": "y"} if method == "PUT" else None)
+            assert r.status_code == 403
     assert len(agent) == n

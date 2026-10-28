@@ -623,7 +623,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     }
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
-        { icon: BookOpen, label: 'Instructions & insights', hint: 'What it keeps in mind, and what it has learned', onSelect: () => setAgentInstructionsId(a.id) },
+        { icon: BookOpen, label: 'Instructions, insights & skills', hint: 'What it keeps in mind, has learned, and knows how to do', onSelect: () => setAgentInstructionsId(a.id) },
       )
       // Your documents and way of working → its rules, skills and knowledge (process agents: FD writes its folder).
       if (a.kind === 'process') {

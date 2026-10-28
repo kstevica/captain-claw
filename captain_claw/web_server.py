@@ -3026,6 +3026,14 @@ class WebServer:
         from captain_claw.web.rest_skills import toggle_skill
         return await toggle_skill(self, request)
 
+    async def _skill_content(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import skill_content
+        return await skill_content(self, request)
+
+    async def _save_skill_content(self, request: web.Request) -> web.Response:
+        from captain_claw.web.rest_skills import save_skill_content
+        return await save_skill_content(self, request)
+
     async def _browse_directory(self, request: web.Request) -> web.Response:
         from captain_claw.web.rest_skills import browse_directory
         return await browse_directory(self, request)
@@ -3168,6 +3176,8 @@ class WebServer:
         app.router.add_post("/api/skills/install", self._install_skill)
         app.router.add_post("/api/skills/install-upload", self._install_skill_upload)
         app.router.add_post("/api/skills/toggle", self._toggle_skill)
+        app.router.add_get("/api/skills/content", self._skill_content)
+        app.router.add_put("/api/skills/content", self._save_skill_content)
         app.router.add_get("/api/read-folders", self._list_read_folders)
         app.router.add_post("/api/read-folders", self._add_read_folder)
         app.router.add_delete("/api/read-folders", self._remove_read_folder)
