@@ -1,5 +1,7 @@
 """Custom exceptions for Captain Claw."""
 
+import re
+
 
 class CaptainClawError(Exception):
     """Base exception for Captain Claw."""
@@ -25,6 +27,42 @@ class LLMAPIError(LLMError):
     def __init__(self, message: str, status_code: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+
+
+_BUSY = re.compile(r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b", re.I)
+
+
+def _chain(exc: BaseException):
+    """*exc* and what it was raised from (a provider re-raises LiteLLM's error)."""
+    seen: set[int] = set()
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        yield exc
+        exc = exc.__cause__ or exc.__context__
+
+
+def is_busy(err: BaseException | str) -> bool:
+    """The model's server saying "not now" — a rate limit, or overloaded —
+    which waiting cures, unlike a refusal of the request itself."""
+    if isinstance(err, str):
+        return bool(_BUSY.search(err))
+    return any(getattr(e, "status_code", None) in (429, 529) or bool(_BUSY.search(str(e)))
+               for e in _chain(err))
+
+
+def retry_after(err: BaseException) -> float | None:
+    """The seconds the server asked to wait (its ``retry-after`` header), if
+    the error carries its response."""
+    for e in _chain(err):
+        headers = getattr(getattr(e, "response", None), "headers", None) or getattr(
+            e, "litellm_response_headers", None)
+        try:
+            value = float((headers or {}).get("retry-after") or 0)
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if value > 0:
+            return value
+    return None
 
 
 class ToolError(CaptainClawError):

@@ -85,11 +85,23 @@ export interface ReadJob {
   started: number
   finished: number | null
   error: string
+  /** Who reads: the agent's own model ('agent'), or the person's ('tiers'). */
+  model: string
+  via: ReaderVia
+  /** While it waits: the agent being woken, or a busy model's server waited out. */
+  waiting: ReadWait | null
   result?: PreparedPreset
 }
 
-/** The model that reads, and how much material one step gives it. */
-export interface Reader { model: string; step_tokens: number }
+export type ReaderVia = 'agent' | 'tiers' | ''
+
+export type ReadWait =
+  | { why: 'waking'; name: string }
+  | { why: 'busy'; model: string; /** Unix seconds. */ until: number }
+
+/** The model that reads — the agent's own, else the person's — how much
+ *  material one step gives it, and why it isn't the agent's (`note`). */
+export interface Reader { model: string; step_tokens: number; via?: ReaderVia; note?: string }
 
 /** What Apply takes: the prepared id and the items the person kept. */
 export type ReviewedPreset = Omit<AgentPreset, 'conflicts' | 'warnings'> & { id: string }
@@ -167,13 +179,13 @@ export async function stageDocument(
   return res.json()
 }
 
-export async function getReader(asUser?: string): Promise<Reader> {
-  return (await send('/fd/agent-preset/reader', { method: 'GET' }, asUser)).json()
+export async function getReader(agent: string, asUser?: string): Promise<Reader> {
+  return (await send(`/fd/agent-preset/reader?agent=${encodeURIComponent(agent)}`, { method: 'GET' }, asUser)).json()
 }
 
 /** Start reading the material (in the background); follow it with getRead. */
 export async function startRead(opts: {
-  /** The agent being set up: its archetype frames the read. */
+  /** The agent being set up: its own model reads, and its archetype frames the read. */
   agent: string
   instructions: string
   docs: DocChoice[]
