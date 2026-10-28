@@ -1,8 +1,9 @@
-import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertTriangle,
   BookOpen,
+  Brain,
   BrainCog,
   Check,
   Cpu,
@@ -20,6 +21,7 @@ import {
   X,
 } from 'lucide-react'
 import { IntentionsPanel } from '../agents/IntentionsPanel'
+import { KioskInsightsPanel } from './KioskAgentInsights'
 import { TopicsPanel } from '../agents/TopicsPanel'
 import { getAgentConfig, getAgentMode, setAgentMode, setAgentModel, setAgentVision } from '../../services/docker'
 import { LLM_PROVIDERS } from '../../services/tierConfig'
@@ -36,9 +38,9 @@ import { useProcessStore } from '../../stores/processStore'
 // The "⋯" on a kiosk agent row opens what a kiosk user may do with one agent
 // of theirs besides chatting and the power switch: look at what it means to
 // do and what they talked about (Info: its intentions and topics), open its
-// files and data, give it standing instructions (Instructions), change its
-// model, how it thinks and whether it sees images itself (Settings), or remove
-// it for good, folder and all (Remove).
+// files and data, give it standing instructions and see what it remembers
+// (Instructions & insights), change its model, how it thinks and whether it
+// sees images itself (Settings), or remove it for good, folder and all (Remove).
 
 /** What these dialogs need of an agent row. */
 export interface KioskAgent {
@@ -673,16 +675,22 @@ function SectionTitle({ icon: Icon, title, saving, saved = false }: { icon: type
   )
 }
 
-// ── Instructions ──
+// ── Instructions & insights ──
 //
-// The owner's standing instructions: added to the agent's system prompt in
-// every conversation. Saved where the agent cards keep them; open chats are
-// told at once, so they apply from its next reply.
+// Two tabs. Instructions: the owner's standing instructions, added to the
+// agent's system prompt in every conversation — saved where the agent cards
+// keep them; open chats are told at once, so they apply from its next reply.
+// Insights: what the agent remembers between conversations, read from the
+// agent itself (KioskInsightsPanel). Both stay mounted, so switching keeps
+// unsaved text and a search.
 
 const MAX_INSTRUCTIONS = 64_000  // the server's limit
 
-export function KioskAgentInstructionsDialog({ agent, onClose }: {
+type MindTab = 'instructions' | 'insights'
+
+export function KioskAgentInstructionsDialog({ agent, initialTab = 'instructions', onClose }: {
   agent: KioskAgent & { kind: 'docker' | 'process' }
+  initialTab?: MindTab
   onClose: () => void
 }) {
   const { kind, startKey: key } = agent
@@ -691,7 +699,14 @@ export function KioskAgentInstructionsDialog({ agent, onClose }: {
   const [text, setText] = useState(saved)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+  const [tab, setTab] = useState<MindTab>(initialTab)
+  const [total, setTotal] = useState<number | null>(null)
   const dirty = text.trim() !== saved.trim()
+  // Insights live in the agent: a stopped one has none to show.
+  const up = agent.reachable && agent.port > 0
+  const address = useMemo(() => (up ? { host: agent.host, port: agent.port, auth: agent.auth } : null),
+    [up, agent.host, agent.port, agent.auth])
+  const onTotal = useCallback((n: number) => setTotal(n), [])
 
   const save = async () => {
     setSaving(true); setError('')
@@ -713,49 +728,95 @@ export function KioskAgentInstructionsDialog({ agent, onClose }: {
   }
 
   return (
-    <AgentDialog title="Instructions" icon={BookOpen} agentName={agent.name} size="md" onClose={close}>
-      <div className="flex min-h-0 flex-1 flex-col gap-3 p-5">
-        <p className="shrink-0 text-xs leading-relaxed text-zinc-500">
-          What {agent.name} should always keep in mind — tone, format, house rules, or things about
-          you and your work. They go with every conversation and apply from its next reply.
-        </p>
-        <textarea
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          maxLength={MAX_INSTRUCTIONS}
-          autoFocus
-          placeholder={'For example:\n- Answer in British English\n- Keep answers short, with bullet points\n- Cite your sources\n- I run a small bakery in Zagreb'}
-          className="min-h-[12rem] w-full flex-1 resize-none rounded-lg border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
-        />
-        {text.length > MAX_INSTRUCTIONS * 0.9 && (
-          <p className="shrink-0 text-right text-[11px] text-amber-700 dark:text-amber-400">
-            {text.length.toLocaleString()} / {MAX_INSTRUCTIONS.toLocaleString()} characters
-          </p>
-        )}
-        {error && (
-          <div className="flex shrink-0 items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> Couldn't save them: {error}
-          </div>
-        )}
+    <AgentDialog title="Instructions & insights" icon={BookOpen} agentName={agent.name} size="lg" onClose={close}>
+      <div className="shrink-0 border-b border-zinc-800 p-2">
+        <div className="grid grid-cols-2 rounded-xl bg-zinc-900 p-1 wide:max-w-sm" role="tablist">
+          <MindTabButton on={tab === 'instructions'} onClick={() => setTab('instructions')} icon={BookOpen} iconClass="text-violet-400" label="Instructions">
+            {dirty && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" title="Not saved yet" />}
+          </MindTabButton>
+          <MindTabButton on={tab === 'insights'} onClick={() => setTab('insights')} icon={Brain} iconClass="text-amber-400" label="Insights">
+            {total !== null && (
+              <span className="rounded-full bg-zinc-700/70 px-1.5 text-[10px] font-semibold tabular-nums text-zinc-300">{total}</span>
+            )}
+          </MindTabButton>
+        </div>
       </div>
-      <div className="flex shrink-0 items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3.5">
-        <button
-          onClick={close}
-          disabled={saving}
-          className="rounded-lg px-3.5 py-2 text-sm font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
-        >
-          Cancel
-        </button>
-        <button
-          onClick={save}
-          disabled={saving || !dirty}
-          className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
-        >
-          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-          Save
-        </button>
+
+      <div role="tabpanel" className={tab === 'instructions' ? 'flex min-h-0 flex-1 flex-col' : 'hidden'}>
+        <div className="flex min-h-0 flex-1 flex-col gap-3 px-5 pb-4 pt-4">
+          <p className="shrink-0 text-xs leading-relaxed text-zinc-500">
+            What {agent.name} should always keep in mind — tone, format, house rules, or things about
+            you and your work. They go with every conversation and apply from its next reply.
+          </p>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            maxLength={MAX_INSTRUCTIONS}
+            autoFocus={initialTab === 'instructions'}
+            placeholder={'For example:\n- Answer in British English\n- Keep answers short, with bullet points\n- Cite your sources\n- I run a small bakery in Zagreb'}
+            className="min-h-[12rem] w-full flex-1 resize-none rounded-xl border border-zinc-700 bg-zinc-950 px-4 py-3 text-sm leading-relaxed text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none wide:font-mono wide:text-[13px]"
+          />
+          {text.length > MAX_INSTRUCTIONS * 0.9 && (
+            <p className="shrink-0 text-right text-[11px] text-amber-700 dark:text-amber-400">
+              {text.length.toLocaleString()} / {MAX_INSTRUCTIONS.toLocaleString()} characters
+            </p>
+          )}
+          {error && (
+            <div className="flex shrink-0 items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+              <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" /> Couldn't save them: {error}
+            </div>
+          )}
+        </div>
+        <div className="flex shrink-0 items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3.5">
+          <span className="mr-auto hidden text-[11px] text-zinc-500 wide:inline">
+            {dirty ? 'Not saved yet' : `${text.trim().length.toLocaleString()} characters`}
+          </span>
+          <button
+            onClick={close}
+            disabled={saving}
+            className="rounded-lg px-3.5 py-2 text-sm font-medium text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            disabled={saving || !dirty}
+            className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
+            Save
+          </button>
+        </div>
+      </div>
+
+      <div role="tabpanel" className={tab === 'insights' ? 'min-h-0 flex-1' : 'hidden'}>
+        <KioskInsightsPanel address={address} agentName={agent.name} onTotal={onTotal} />
       </div>
     </AgentDialog>
+  )
+}
+
+function MindTabButton({ on, onClick, icon: Icon, iconClass, label, children }: {
+  on: boolean
+  onClick: () => void
+  icon: typeof Info
+  iconClass: string
+  label: string
+  children?: ReactNode
+}) {
+  return (
+    <button
+      role="tab"
+      aria-selected={on}
+      onClick={onClick}
+      className={`flex h-9 items-center justify-center gap-1.5 rounded-lg text-sm font-medium transition-colors ${
+        on ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
+      }`}
+    >
+      <Icon className={`h-4 w-4 ${iconClass}`} />
+      {label}
+      {children}
+    </button>
   )
 }
 
