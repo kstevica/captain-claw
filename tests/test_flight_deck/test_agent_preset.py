@@ -597,7 +597,18 @@ def test_an_empty_preset_adds_no_block():
 
 def test_with_block_keeps_the_instructions_within_their_cap():
     out = ap.with_block("b" * 64000, "## Your owner's rules\n- x")
-    assert len(out) <= 64000 and out.endswith("- x")
+    assert len(out) <= 64000 and out.endswith("- x\n" + ap._BLOCK_CLOSE)
+
+
+def test_a_new_block_replaces_the_one_an_earlier_setup_left():
+    once = ap.with_block("You answer customers kindly.", "## Your owner's rules\n\n- Old rule.")
+    twice = ap.with_block(once + "\n\nMy own note.", "## Your owner's rules\n\n- New rule.")
+    assert twice.count(ap._BLOCK_OPEN) == 1 and "Old rule" not in twice and "New rule" in twice
+    assert twice.startswith("You answer customers kindly.\n\nMy own note.")
+    assert ap.with_block(once, "") == "You answer customers kindly."
+    bare = ("Base.\n\n## Your owner's rules\n\nSet up by your owner. Follow these.\n\n### Rules\n- Old.\n\n"
+            "## Later section\nKeep me.")
+    assert ap.strip_block(bare) == "Base.\n\n## Later section\nKeep me."
 
 
 def test_seed_writes_skills_knowledge_and_the_full_rules(deck, tmp_path):
@@ -640,9 +651,10 @@ def test_another_persons_preset_brings_no_documents(deck, tmp_path):
     assert ap.load_docs(BOB, preset_id)            # Bob's is untouched
 
 
-async def _apply(uid: str, slug: str, preset: dict) -> httpx.Response:
+async def _apply(uid: str, slug: str, preset: dict, mode: str = "add") -> httpx.Response:
     async with _client() as c:
-        return await c.post("/fd/agent-preset/apply", headers=_auth(uid), json={"agent": slug, "preset": preset})
+        return await c.post("/fd/agent-preset/apply", headers=_auth(uid),
+                            json={"agent": slug, "preset": preset, "mode": mode})
 
 
 async def test_apply_sets_up_an_existing_agent_and_stores_its_instructions(deck, monkeypatch):
@@ -654,7 +666,7 @@ async def test_apply_sets_up_an_existing_agent_and_stores_its_instructions(deck,
     prepared = (await _prepare(BOB, [("policy.txt", b"Refunds within 14 days.")], agent=slug))["result"]
     given: list = []
     monkeypatch.setattr(ap, "schedule_facts",
-                        lambda slug, port_of, token, facts: given.append((slug, port_of(), token, facts)))
+                        lambda slug, port_of, token, facts, **kw: given.append((slug, port_of(), token, facts)))
     r = await _apply(BOB, slug, {**prepared["preset"], "id": prepared["id"]})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -699,6 +711,151 @@ async def test_apply_refuses_another_persons_agent(deck, monkeypatch):
     assert r.status_code == 404
     assert not (server.DATA_DIR / slug / "data" / "workspace" / "knowledge").exists()
     assert json.loads(await deck.get_setting(BOB, INSTR))[slug] == "You answer customers kindly."
+
+
+# ── An agent that already has a setup ─────────────────────────────────
+
+
+def _setup(owner, docs, **groups) -> dict:
+    """A reviewed preset with *docs* waiting under its id."""
+    preset_id = ap.save_docs(owner, docs, "support")
+    return {**ap.normalise(groups), "id": preset_id,
+            "knowledge": [{"doc": d["name"], "title": d["name"].split(".")[0].title(), "summary": ""} for d in docs]}
+
+
+def test_a_second_setup_adds_to_the_first(deck, tmp_path):
+    agent, ws = tmp_path / "agent", tmp_path / "agent" / "ws"
+    agent.mkdir()
+    ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "policy.md", "text": "Old policy."},
+                                         {"name": "prices.md", "text": "Prices."}],
+                                   rules=[{"text": "Old rule."}], glossary=[{"term": "RMA", "meaning": "a return"}],
+                                   intents=[{"name": "refund", "when": "Refunds.", "steps": ["a"]}]))
+    done = ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "policy.md", "text": "New policy."},
+                                                {"name": "faq.md", "text": "FAQ."}],
+                                          rules=[{"text": "New rule."}, {"text": "old rule."}],
+                                          intents=[{"name": "quote", "when": "Quotes.", "steps": ["b"]}]))
+    kn = ws / "knowledge"
+    assert (kn / "policy.md").read_text().endswith("New policy.\n")            # given again: replaced
+    assert (kn / "prices.md").is_file() and (kn / "faq.md").is_file()
+    index = (kn / "INDEX.md").read_text()
+    assert all(f"({n}.md)" in index for n in ("policy", "prices", "faq")) and index.count("(policy.md)") == 1
+    assert "RMA" in (kn / "glossary.md").read_text()                           # earlier groups stay
+    rules = (kn / "owner-rules.md").read_text()
+    assert rules.index("New rule.") < rules.index("old rule.") and "Old rule." not in rules   # the newer wording
+    skills = agent / "data" / "home-config-parent" / ".captain-claw" / "skills"
+    assert (skills / "refund" / "SKILL.md").is_file() and (skills / "quote" / "SKILL.md").is_file()
+    assert done["counts"]["rules"] == 2 and done["totals"]["rules"] == 2 and done["totals"]["intents"] == 2
+    assert done["totals"]["knowledge"] == 3 and "refund" in done["block"] and "quote" in done["block"]
+    record = ap.read_record(agent)
+    assert sorted(e["doc"] for e in record["knowledge"]) == ["faq.md", "policy.md", "prices.md"]
+
+
+def test_a_setup_can_replace_the_one_before(deck, tmp_path):
+    agent, ws = tmp_path / "agent", tmp_path / "agent" / "ws"
+    agent.mkdir()
+    (ws / "knowledge").mkdir(parents=True)
+    (ws / "knowledge" / "my-notes.md").write_text("The agent's own file.")
+    ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "manual.md", "text": "## Page 1\n" + "x" * 300_000}],
+                                   rules=[{"text": "Old rule."}],
+                                   intents=[{"name": "refund", "when": "Refunds.", "steps": ["a"]}]))
+    assert len(list((ws / "knowledge").glob("manual-part-*.md"))) == 2
+    done = ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "faq.md", "text": "FAQ."}], rules=[{"text": "New rule."}]),
+                   mode="replace")
+    kn = ws / "knowledge"
+    assert sorted(p.name for p in kn.iterdir()) == ["INDEX.md", "faq.md", "my-notes.md", "owner-rules.md"]
+    assert not (agent / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund").exists()
+    assert "Old rule." not in (kn / "owner-rules.md").read_text()
+    assert done["totals"] == {"rules": 1, "escalation": 0, "templates": 0, "glossary": 0, "intents": 0,
+                              "facts": 0, "knowledge": 1}
+
+
+def test_a_setup_from_before_records_is_read_back_from_its_files(deck, tmp_path):
+    agent, ws = tmp_path / "agent", tmp_path / "agent" / "ws"
+    agent.mkdir()
+    ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "manual.md", "text": "## Page 1\n" + "x" * 300_000},
+                                         {"name": "faq.md", "text": "FAQ."}],
+                                   rules=[{"text": "Old rule."}], escalation=[{"text": "Ask first."}],
+                                   templates=[{"name": "Offer", "body": "Dear [name],\n\nOffer."}],
+                                   glossary=[{"term": "RMA", "meaning": "a return"}],
+                                   intents=[{"name": "refund", "when": "Refunds.", "steps": ["a"]}]))
+    (agent / ".owner-setup.json").unlink()                     # as #263 left it: no record
+    skills = agent / "data" / "home-config-parent" / ".captain-claw" / "skills"
+    (skills / "my-own").mkdir()
+    (skills / "my-own" / "SKILL.md").write_text("---\nname: my-own\n---\nNot from a setup.")
+    back = ap.earlier_setup(agent, ws)
+    assert [r["text"] for r in back["rules"]] == ["Old rule."] and back["escalation"] == [{"text": "Ask first."}]
+    assert back["templates"] == [{"name": "Offer", "body": "Dear [name],\n\nOffer."}]
+    assert back["glossary"] == [{"term": "RMA", "meaning": "a return"}] and back["skills"] == ["refund"]
+    manual = next(e for e in back["knowledge"] if e["file"] == "manual.md")
+    assert manual["parts"] == 2 and manual["files"] == ["manual.md", "manual-part-01.md", "manual-part-02.md"]
+
+    done = ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "new.md", "text": "New."}], rules=[{"text": "New rule."}]))
+    assert done["totals"]["knowledge"] == 3 and done["totals"]["rules"] == 2 and done["totals"]["intents"] == 1
+    assert "(manual.md)" in (ws / "knowledge" / "INDEX.md").read_text()
+    ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "only.md", "text": "Only."}]), mode="replace")
+    assert not (ws / "knowledge" / "manual-part-01.md").exists() and not (skills / "refund").exists()
+    assert (skills / "my-own" / "SKILL.md").is_file()           # not the setup's: left alone
+
+
+async def test_applying_twice_keeps_one_block_and_says_what_it_has(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24303)
+    monkeypatch.setattr(ap, "schedule_facts", lambda *a, **k: None)
+    first = _setup(BOB, [{"name": "a.md", "text": "A."}], rules=[{"text": "Rule one."}])
+    assert (await _apply(BOB, slug, first)).status_code == 200
+    second = _setup(BOB, [{"name": "b.md", "text": "B."}], rules=[{"text": "Rule two."}])
+    r = await _apply(BOB, slug, second)
+    body = r.json()
+    stored = json.loads(await deck.get_setting(BOB, INSTR))[slug]
+    assert stored == body["instructions"] and stored.count(ap._BLOCK_OPEN) == 1
+    assert "Rule one." in stored and "Rule two." in stored and stored.startswith("You answer customers kindly.")
+    assert body["totals"]["knowledge"] == 2 and body["counts"]["knowledge"] == 1 and body["stored"] is True
+    async with _client() as c:
+        cur = (await c.get(f"/fd/agent-preset/current/{slug}", headers=_auth(BOB))).json()
+        assert (await c.get(f"/fd/agent-preset/current/{slug}", headers=_auth(CAROL))).status_code == 404
+    assert cur["has"] is True and cur["rules"] == 2 and [k["title"] for k in cur["knowledge"]] == ["A", "B"]
+
+    r = await _apply(BOB, slug, {**_setup(BOB, []), "rules": []} | {"id": ""}, mode="replace")
+    assert r.json()["instructions"] == "You answer customers kindly."
+
+
+async def test_an_agent_that_is_off_gets_its_facts_when_it_next_starts(deck, monkeypatch, tmp_path):
+    slug = await _spawn(BOB, "Helpdesk", 24304)
+    monkeypatch.setattr(server, "_process_is_alive", lambda s: False)
+    scheduled: list = []
+    monkeypatch.setattr(ap, "schedule_facts", lambda *a, **k: scheduled.append(a))
+    preset = _setup(BOB, [], facts=[{"content": "Refund window is 14 days.", "category": "fact"}])
+    assert (await _apply(BOB, slug, preset)).json()["running"] is False
+    pending = ap.pending_path(server.DATA_DIR / slug)
+    assert scheduled == [] and json.loads(pending.read_text())[0]["content"] == "Refund window is 14 days."
+
+    from captain_claw import insights
+
+    class _Mgr:
+        def __init__(self):
+            self.added: list = []
+
+        async def add(self, content, category, **kw):
+            if content in [a[0] for a in self.added]:
+                return None                                    # deduplicated, as the real one does
+            self.added.append((content, category, kw.get("tags")))
+            return "id"
+
+    ap.leave_facts(server.DATA_DIR / slug, [{"content": "Refund window is 14 days.", "category": "fact",
+                                             "importance": 5}])
+    mgr = _Mgr()
+    assert await insights.import_pending(mgr, pending) == 1
+    assert mgr.added == [("Refund window is 14 days.", "fact", "owner-setup")] and not pending.exists()
+    assert await insights.import_pending(mgr, pending) == 0
+
+
+async def test_facts_an_agent_never_took_wait_for_its_next_start(monkeypatch, tmp_path):
+    async def never(port_of, token, timeout):
+        return 0
+
+    monkeypatch.setattr(ap, "_wait_ready", never)
+    facts = ap.normalise(_REPLY)["facts"]
+    assert await ap.give_facts("a", lambda: 0, "", facts, agent_dir=tmp_path) == 0
+    assert len(json.loads(ap.pending_path(tmp_path).read_text())) == 2
 
 
 # ── Facts ─────────────────────────────────────────────────────────────

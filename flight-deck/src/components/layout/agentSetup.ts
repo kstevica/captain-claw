@@ -91,3 +91,17 @@ export function keptIn(r: Review, g: Group): number {
 export function keptCount(r: Review): number {
   return GROUP_ORDER.reduce((n, g) => n + keptIn(r, g), 0)
 }
+
+// ── The block a setup puts in the agent's instructions ────────────────
+
+const MARKED_BLOCK = /\s*<!-- owner-setup -->[\s\S]*?<!-- \/owner-setup -->/g
+// One written before it was marked: its heading to the next "## " or the end.
+const BARE_BLOCK = /\s*^## Your owner's rules\n\nSet up by your owner[\s\S]*?(?=^## |(?![\s\S]))/gm
+
+/** The instructions without the block an earlier setup put in them — what
+ *  a deck without accounts (the browser keeps them) replaces itself; the
+ *  backend's agent_preset.strip_block. */
+export function stripOwnerBlock(text: string): string {
+  const unmarked = text.replace(MARKED_BLOCK, '')
+  return unmarked.replace(BARE_BLOCK, (m, offset: number) => (offset + m.length >= unmarked.length ? '' : '\n\n')).trimEnd()
+}

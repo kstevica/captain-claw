@@ -7,8 +7,9 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
-  applyAgentPreset, cancelRead, getRead, getReader, stageDocument, startRead,
-  type AppliedPreset, type DocUsage, type ReadJob, type Reader, type StagedDoc,
+  applyAgentPreset, cancelRead, getCurrentSetup, getRead, getReader, stageDocument, startRead,
+  type AppliedPreset, type ApplyMode, type CurrentSetup, type DocUsage, type ReadJob, type Reader, type SetupCounts,
+  type StagedDoc,
 } from '../../services/agentPreset'
 import { fileLibraryApi, type LibraryItem } from '../../services/fileLibraryApi'
 import type { QuotaStatus } from '../../services/profile'
@@ -18,7 +19,7 @@ import { quotaLimited, useQuotaStore } from '../../stores/quotaStore'
 import { PresetReview } from './AgentSetupReview'
 import {
   SETUP_ACCEPT, SETUP_EXTS, USAGE_LOOKS, USAGE_ORDER, extOf, fileLook, fmtBytes, keptCount, reviewedPreset, startReview,
-  type Review,
+  stripOwnerBlock, type Review,
 } from './agentSetup'
 
 // ── "Your way of working" — set up right after the agent is created ───
@@ -40,7 +41,10 @@ import {
 //              document reaches it whole, read or not.
 //
 // The agent already exists, so closing at any step costs nothing but the
-// setup: it works as its archetype made it.
+// setup: it works as its archetype made it. The agent's ⋯ menu opens it on
+// an agent later, too: one an earlier setup gave rules, skills and documents
+// gets the new ones added to them — or in their place (GET …/current/{slug}
+// says what it has).
 
 const MAX_FILE_BYTES = 25 * 1024 * 1024
 const MAX_FILES = 12
@@ -116,6 +120,8 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   const [notice, setNotice] = useState('')
   const [picking, setPicking] = useState(false)
   const [reader, setReader] = useState<Reader | null>(null)
+  const [current, setCurrent] = useState<CurrentSetup | null>(null)
+  const [mode, setMode] = useState<ApplyMode>('add')
   const [job, setJob] = useState<ReadJob | null>(null)
   const [review, setReview] = useState<Review | null>(null)
   const [applied, setApplied] = useState<AppliedPreset | null>(null)
@@ -134,6 +140,9 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   useEffect(() => {
     getReader(asUser).then(setReader).catch(() => setReader({ model: '', step_tokens: 0 }))
   }, [asUser])
+  useEffect(() => {
+    getCurrentSetup(agent.slug, asUser).then(setCurrent).catch(() => setCurrent(null))
+  }, [agent.slug, asUser])
 
   useEffect(() => {
     if (step !== 'reading') return
@@ -275,15 +284,16 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
     setApplying(true)
     setErr('')
     try {
-      const res = await applyAgentPreset(agent.slug, reviewedPreset(review), asUser)
+      const res = await applyAgentPreset(agent.slug, reviewedPreset(review), current?.has ? mode : 'add', asUser)
       // The agent's chat sends its instructions: mirror what FD stored (or,
-      // without accounts, add the block to this browser's copy) and re-send.
-      // Not for an agent an admin set up for someone else.
+      // without accounts, put the block in this browser's copy, in place of
+      // an earlier one) and re-send. Not for an agent an admin set up for
+      // someone else.
       if (!asUser) {
         const procs = useProcessStore.getState()
-        const current = procs.getFleetInstructions(agent.slug).trimEnd()
-        const next = res.instructions || (res.block ? (current ? `${current}\n\n${res.block}` : res.block) : '')
-        if (next) {
+        const had = procs.getFleetInstructions(agent.slug)
+        const next = res.stored ? res.instructions : [stripOwnerBlock(had), res.block].filter(Boolean).join('\n\n')
+        if (next !== had) {
           void procs.setFleetInstructions(agent.slug, next)
             .then(() => useChatStore.getState().resendFleetIdentity(`proc-${agent.slug}`))
         }
@@ -389,6 +399,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
         {step === 'material' && (
           <>
+            {current?.has && <EarlierSetup name={name} current={current} mode={mode} onMode={(m) => { setMode(m); setReview(null) }} />}
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto wide:flex-row wide:overflow-hidden">
               {/* Documents */}
               <section className="order-2 shrink-0 px-4 py-4 wide:order-1 wide:min-h-0 wide:flex-1 wide:shrink wide:overflow-y-auto wide:px-6">
@@ -521,7 +532,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
                 <button onClick={apply} disabled={applying || keptCount(review) === 0}
                   className="flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50">
                   {applying ? <Loader2 className="h-4 w-4 animate-spin" /> : <Check className="h-4 w-4" />}
-                  {applying ? 'Applying…' : `Apply to ${name}`}
+                  {applying ? 'Applying…' : current?.has && mode === 'replace' ? `Replace ${name}'s setup` : `Apply to ${name}`}
                 </button>
               </div>
             </div>
@@ -530,7 +541,7 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
         {step === 'done' && applied && (
           <>
-            <Done name={name} applied={applied} />
+            <Done name={name} applied={applied} hadSetup={!!current?.has} />
             <div className="shrink-0 border-t border-zinc-800 px-4 pt-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] wide:px-5">
               <div className="flex justify-end">
                 <button onClick={onClose} className="flex w-full items-center justify-center gap-2 rounded-xl bg-violet-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-violet-500 wide:w-auto">
@@ -679,6 +690,54 @@ function DocCard({ doc, agentName, stepTokens, onChange, onRemove }: {
   )
 }
 
+/** "6 rules, 1 skill, 3 documents" — the groups a setup gave, those it has. */
+function setupSummary(c: Pick<SetupCounts, 'rules' | 'escalation' | 'templates' | 'glossary' | 'intents' | 'facts' | 'knowledge'>): string {
+  const parts = [
+    c.rules && plural(c.rules, 'rule'), c.intents && plural(c.intents, 'skill'), c.knowledge && plural(c.knowledge, 'document'),
+    c.facts && plural(c.facts, 'fact'), c.escalation && `${c.escalation} ask-you-first`, c.templates && plural(c.templates, 'template'),
+    c.glossary && plural(c.glossary, 'term'),
+  ].filter(Boolean)
+  return parts.length ? parts.join(', ') : 'nothing yet'
+}
+
+/** The setup an agent already has, and whether the new one adds to it or replaces it. */
+function EarlierSetup({ name, current, mode, onMode }: {
+  name: string
+  current: CurrentSetup
+  mode: ApplyMode
+  onMode: (m: ApplyMode) => void
+}) {
+  const summary = setupSummary({ ...current, intents: current.skills.length, knowledge: current.knowledge.length })
+  const options: { id: ApplyMode; label: string }[] = [{ id: 'add', label: 'Add to it' }, { id: 'replace', label: 'Replace it' }]
+  return (
+    <div className="shrink-0 border-b border-zinc-800 bg-violet-500/5 px-4 py-3 wide:px-6">
+      <div className="flex flex-col gap-2 wide:flex-row wide:items-center">
+        <p className="min-w-0 flex-1 text-xs text-zinc-400">
+          <span className="font-medium text-zinc-200">{name} already has a setup:</span> {summary}.
+          {current.knowledge.length > 0 && (
+            <span className="text-zinc-500"> Documents: {current.knowledge.map((k) => k.title).join(', ')}.</span>
+          )}
+        </p>
+        <div role="radiogroup" aria-label="Add to its setup or replace it" className="flex shrink-0 rounded-lg border border-zinc-800 p-0.5">
+          {options.map((o) => (
+            <button key={o.id} role="radio" aria-checked={mode === o.id} onClick={() => onMode(o.id)}
+              className={`rounded-md px-3 py-1 text-xs transition-colors ${
+                mode === o.id ? 'bg-violet-600 text-white' : 'text-zinc-400 hover:text-zinc-200'
+              }`}>
+              {o.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <p className="mt-1 text-[11px] text-zinc-500">
+        {mode === 'add'
+          ? 'What you add now joins it. A document you give again replaces its earlier copy; newer rules come first.'
+          : 'Its earlier rules, skills and documents are taken out and this setup goes in their place. Facts it already learned stay.'}
+      </p>
+    </div>
+  )
+}
+
 function HowItWorks({ name }: { name: string }) {
   const steps: { icon: LucideIcon; title: string; text: string }[] = [
     { icon: Upload, title: 'You add', text: 'Your instructions and documents — and, for each document, what it is and how to use it.' },
@@ -820,7 +879,7 @@ function ReadingView({ job, docs, elapsed, onStop }: {
   )
 }
 
-function Done({ name, applied }: { name: string; applied: AppliedPreset }) {
+function Done({ name, applied, hadSetup }: { name: string; applied: AppliedPreset; hadSetup: boolean }) {
   const c = applied.counts
   const tiles: { icon: LucideIcon; n: number; label: string }[] = [
     { icon: ScrollText, n: c.rules, label: c.rules === 1 ? 'rule' : 'rules' },
@@ -848,6 +907,9 @@ function Done({ name, applied }: { name: string; applied: AppliedPreset }) {
             </li>
           ))}
         </ul>
+      )}
+      {hadSetup && applied.mode === 'add' && (
+        <p className="mt-4 text-xs text-zinc-400">Added to its earlier setup — in all it now has {setupSummary(applied.totals)}.</p>
       )}
       {c.facts > 0 && (
         <p className="mt-4 text-xs text-zinc-500">

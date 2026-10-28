@@ -94,13 +94,24 @@ export interface Reader { model: string; step_tokens: number }
 /** What Apply takes: the prepared id and the items the person kept. */
 export type ReviewedPreset = Omit<AgentPreset, 'conflicts' | 'warnings'> & { id: string }
 
+/** Added to what an earlier setup gave the agent, or in its place. */
+export type ApplyMode = 'add' | 'replace'
+
+export interface SetupCounts { rules: number; escalation: number; templates: number; glossary: number; intents: number; facts: number; knowledge: number }
+
 export interface AppliedPreset {
   ok: boolean
-  /** The agent's instructions as now stored for its owner ("" without accounts). */
+  mode: ApplyMode
+  /** Flight Deck stored the instructions for the owner (a deck with accounts). */
+  stored: boolean
+  /** The agent's instructions as now stored for its owner. */
   instructions: string
-  /** The block they end with — what a deck without accounts appends itself. */
+  /** The marked block they end with — what a deck without accounts puts in itself. */
   block: string
-  counts: { rules: number; escalation: number; templates: number; glossary: number; intents: number; facts: number; knowledge: number }
+  /** What this setup gave it… */
+  counts: SetupCounts
+  /** …and what it has from every setup so far. */
+  totals: SetupCounts
   skills: string[]
   knowledge: string[]
   /** Files the long documents were split into, so the agent can search all of them. */
@@ -109,6 +120,19 @@ export interface AppliedPreset {
 }
 
 export interface DocChoice { id: string; description: string; usage: DocUsage; read: boolean }
+
+/** What earlier setups gave an agent (GET /fd/agent-preset/current/{slug}). */
+export interface CurrentSetup {
+  has: boolean
+  updated: number | null
+  rules: number
+  escalation: number
+  templates: number
+  glossary: number
+  skills: string[]
+  facts: number
+  knowledge: { title: string; parts: number }[]
+}
 
 async function send(path: string, init: RequestInit, asUser?: string): Promise<Response> {
   const headers = (): Record<string, string> => {
@@ -169,9 +193,15 @@ export async function cancelRead(id: string, asUser?: string): Promise<void> {
   await send(`/fd/agent-preset/prepare/${encodeURIComponent(id)}`, { method: 'DELETE' }, asUser).catch(() => undefined)
 }
 
-export async function applyAgentPreset(agent: string, preset: ReviewedPreset, asUser?: string): Promise<AppliedPreset> {
+export async function getCurrentSetup(agent: string, asUser?: string): Promise<CurrentSetup> {
+  return (await send(`/fd/agent-preset/current/${encodeURIComponent(agent)}`, { method: 'GET' }, asUser)).json()
+}
+
+export async function applyAgentPreset(
+  agent: string, preset: ReviewedPreset, mode: ApplyMode = 'add', asUser?: string,
+): Promise<AppliedPreset> {
   const res = await send('/fd/agent-preset/apply', {
-    method: 'POST', body: JSON.stringify({ agent, preset }),
+    method: 'POST', body: JSON.stringify({ agent, preset, mode }),
   }, asUser)
   return res.json()
 }

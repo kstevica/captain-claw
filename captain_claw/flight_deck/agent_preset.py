@@ -47,7 +47,7 @@ import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
@@ -962,15 +962,18 @@ def _owner_rules_md(preset: dict) -> str:
     return "\n".join(lines)
 
 
-def write_knowledge(folder: Path, preset: dict, docs: list[dict]) -> list[dict]:
+def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dict] | None = None) -> list[dict]:
     """The kept documents — their whole text — as Markdown, with an index,
-    the glossary and the full rules; the documents written (``file``,
-    ``title``, ``parts``). A document too long for one file the agent's
-    semantic memory indexes is an overview plus parts (``<name>-part-01.md``
-    …), each cut at a page or heading."""
+    the glossary and the full rules; the documents written (``doc``,
+    ``file``, ``title``, ``parts``, ``files``). A document too long for one
+    file the agent's semantic memory indexes is an overview plus parts
+    (``<name>-part-01.md`` …), each cut at a page or heading. ``kept``: the
+    documents an earlier setup left, which stay in the index."""
     folder.mkdir(parents=True, exist_ok=True)
     doc_of = {d["name"]: d for d in docs}
-    taken: set[str] = set()
+    kept = kept or []
+    # The documents an earlier setup left keep their files and their place in the index.
+    taken: set[str] = {Path(f).stem for e in kept for f in e.get("files") or []}
     written: list[dict] = []
     for k in preset["knowledge"]:
         doc = doc_of.get(k["doc"])
@@ -1003,23 +1006,31 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict]) -> list[dict]:
                 listing.append(f"- [Part {n}{where}]({name}.md)")
             (folder / f"{stem}.md").write_text("\n".join([
                 *head, f"It is long, so it is kept in {len(parts)} parts:", "", *listing, ""]), encoding="utf-8")
-        written.append({"file": f"{stem}.md", "title": title, "summary": k["summary"], "use": use,
-                        "parts": len(parts)})
-    if written:
-        (folder / "INDEX.md").write_text("\n".join([
-            "# Knowledge", "",
-            "Documents your owner gave you. Read the one that fits before you answer from memory.", "",
-            *[f"- [{w['title']}]({w['file']})" + (f" — {w['summary']}" if w["summary"] else "")
-              + (f" ({w['use'].lower()})" if w["use"] else "")
-              + (f" — {w['parts']} parts" if w["parts"] > 1 else "")
-              for w in written], ""]), encoding="utf-8")
-    if preset["glossary"]:
-        (folder / "glossary.md").write_text("\n".join([
-            "# Glossary", "", *[f"- **{g['term']}** — {g['meaning']}" for g in preset["glossary"]], ""]),
-            encoding="utf-8")
-    if preset["rules"] or preset["escalation"] or preset["templates"]:
-        (folder / "owner-rules.md").write_text(_owner_rules_md(preset), encoding="utf-8")
+        written.append({"doc": k["doc"], "file": f"{stem}.md", "title": title, "summary": k["summary"], "use": use,
+                        "parts": len(parts),
+                        "files": [f"{stem}.md", *(f"{stem}-part-{n:02d}.md" for n in range(1, len(parts) + 1)
+                                                  if len(parts) > 1)]})
+    listed = kept + written
+    _write_or_drop(folder / "INDEX.md", listed and "\n".join([
+        "# Knowledge", "",
+        "Documents your owner gave you. Read the one that fits before you answer from memory.", "",
+        *[f"- [{w['title']}]({w['file']})" + (f" — {w['summary']}" if w.get("summary") else "")
+          + (f" ({w['use'].lower()})" if w.get("use") else "")
+          + (f" — {w['parts']} parts" if (w.get("parts") or 1) > 1 else "")
+          for w in listed], ""]))
+    _write_or_drop(folder / "glossary.md", preset["glossary"] and "\n".join([
+        "# Glossary", "", *[f"- **{g['term']}** — {g['meaning']}" for g in preset["glossary"]], ""]))
+    _write_or_drop(folder / "owner-rules.md", (preset["rules"] or preset["escalation"] or preset["templates"])
+                   and _owner_rules_md(preset))
     return written
+
+
+def _write_or_drop(path: Path, text: Any) -> None:
+    """Write *text* to *path*; nothing to say takes away what it said before."""
+    if text:
+        path.write_text(text, encoding="utf-8")
+    else:
+        path.unlink(missing_ok=True)
 
 
 def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int = _BLOCK_CAP) -> str:
@@ -1070,41 +1081,170 @@ def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int
     return "\n".join(head + body + tail)[:cap]
 
 
+_BLOCK_OPEN, _BLOCK_CLOSE = "<!-- owner-setup -->", "<!-- /owner-setup -->"
+_MARKED_BLOCK = re.compile(r"\s*<!-- owner-setup -->.*?<!-- /owner-setup -->", re.S)
+# A block written before it was marked: its heading to the next ``## `` or the end.
+_BARE_BLOCK = re.compile(r"(?ms)\s*^## Your owner's rules\n\nSet up by your owner.*?(?=^## |\Z)")
+
+
+def strip_block(instructions: str) -> str:
+    """The instructions without the block an earlier setup put in them."""
+    text = _MARKED_BLOCK.sub("", instructions or "")
+    # What followed an unmarked block keeps its blank line.
+    return _BARE_BLOCK.sub(lambda m: "" if m.end() == len(m.string) else "\n\n", text).rstrip()
+
+
 def with_block(instructions: str, block: str) -> str:
-    """The archetype's instructions followed by the owner's block, within the
-    instructions' own cap (the block wins: the general part is clipped)."""
+    """The agent's instructions ending with the owner's block — in place of
+    one an earlier setup left — within the instructions' own cap (the block
+    wins: the rest is clipped). The block is marked, so the next setup finds
+    it again."""
+    base = strip_block(instructions)
     if not block:
-        return instructions
-    room = _MAX_INSTRUCTIONS_TOTAL - len(block) - 2
-    base = (instructions or "").rstrip()[:max(0, room)]
-    return f"{base}\n\n{block}" if base else block
+        return base
+    marked = f"{_BLOCK_OPEN}\n{block}\n{_BLOCK_CLOSE}"
+    base = base[:max(0, _MAX_INSTRUCTIONS_TOTAL - len(marked) - 2)]
+    return f"{base}\n\n{marked}" if base else marked
 
 
-def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any) -> dict:
-    """Write the reviewed preset into an agent's folder. Returns the
-    ``block`` its instructions end with, the ``facts`` to give it as
-    insights, and what was written: ``skills`` (names) and ``knowledge``
-    (documents) — plus how many of each other group it got, in ``counts``.
-    The waiting documents are dropped afterwards."""
+# ── What a setup gave an agent (its record, outside its workspace) ────
+
+_RECORD = ".owner-setup.json"
+_KEPT_GROUPS = ("rules", "escalation", "templates", "glossary")
+
+
+def read_record(agent_dir: Path) -> dict:
+    """What earlier setups gave the agent: the groups it goes by, its skills
+    and documents (with their files) and how many facts — {} for none."""
+    try:
+        got = json.loads((agent_dir / _RECORD).read_text(encoding="utf-8"))
+        return got if isinstance(got, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+_INDEX_LINE = re.compile(r"^- \[(?P<title>.+?)\]\((?P<file>[a-z0-9._-]+\.md)\)(?: — (?P<rest>.*))?$")
+_SETUP_SKILL = re.compile(r"\(from your owner, when (?:they set you up|you were created)\)")
+
+
+def _record_from_files(skills_dir: Path, folder: Path) -> dict:
+    """The record of a setup written before setups kept one, read back from
+    the files it wrote: the documents in INDEX.md, the rules in
+    owner-rules.md, the glossary, and the skills that say they came from
+    the owner — {} when there are none."""
+    def bullets(text: str, heading: str) -> list[dict]:
+        m = re.search(rf"(?ms)^## {re.escape(heading)}\n(.*?)(?=^## |\Z)", text)
+        return [{"text": ln[2:].strip()} for ln in (m.group(1) if m else "").splitlines() if ln.startswith("- ")]
+
+    record: dict[str, Any] = {}
+    try:
+        index = (folder / "INDEX.md").read_text(encoding="utf-8") if (folder / "INDEX.md").is_file() else ""
+        knowledge = []
+        for line in index.splitlines():
+            m = _INDEX_LINE.match(line.strip())
+            if not m or not (folder / m["file"]).is_file():
+                continue
+            stem = m["file"][:-3]
+            parts = sorted(p.name for p in folder.glob(f"{stem}-part-*.md"))
+            summary = re.sub(r"( — \d+ parts)?$", "", m["rest"] or "")
+            summary = re.sub(r" \((?:rules to follow|procedures|reference|templates)\)$", "", summary)
+            knowledge.append({"doc": m["file"], "file": m["file"], "title": m["title"], "summary": summary,
+                              "use": "", "parts": max(1, len(parts)), "files": [m["file"], *parts]})
+        rules = (folder / "owner-rules.md").read_text(encoding="utf-8") if (folder / "owner-rules.md").is_file() else ""
+        glossary = (folder / "glossary.md").read_text(encoding="utf-8") if (folder / "glossary.md").is_file() else ""
+        templates = [{"name": m.group(1).strip(), "body": m.group(2).strip()}
+                     for m in re.finditer(r"(?ms)^## Template: (.+?)\n\n(.*?)(?=^## |\Z)", rules)]
+        terms = [{"term": m.group(1), "meaning": m.group(2).strip()}
+                 for m in re.finditer(r"(?m)^- \*\*(.+?)\*\* — (.+)$", glossary)]
+        skills = [d.name for d in sorted(skills_dir.iterdir()) if (d / "SKILL.md").is_file()
+                  and _SETUP_SKILL.search((d / "SKILL.md").read_text(encoding="utf-8"))] if skills_dir.is_dir() else []
+        record = {"rules": bullets(rules, "Rules"), "escalation": bullets(rules, "Ask your owner first"),
+                  "templates": templates, "glossary": terms, "skills": skills, "knowledge": knowledge, "facts": 0}
+    except OSError:
+        log.warning("agent preset: could not read back an earlier setup", folder=str(folder), exc_info=True)
+        return {}
+    return record if any(record[k] for k in ("rules", "escalation", "templates", "glossary", "skills", "knowledge")) else {}
+
+
+def earlier_setup(agent_dir: Path, workspace: Path) -> dict:
+    """What earlier setups gave the agent: its record, else what the files
+    of a setup from before records say."""
+    return read_record(agent_dir) or _record_from_files(
+        agent_dir / "data" / "home-config-parent" / ".captain-claw" / "skills", workspace / "knowledge")
+
+
+def _unlink(folder: Path, names: list) -> None:
+    for name in names or []:
+        if isinstance(name, str) and re.fullmatch(r"[a-z0-9._-]+\.md", name):
+            (folder / name).unlink(missing_ok=True)
+
+
+def _undo(record: dict, skills_dir: Path, knowledge: Path) -> None:
+    """Take out what a setup wrote — its skills, its documents and the files
+    made from its rules — leaving whatever else the agent has."""
+    for name in record.get("skills") or []:
+        if isinstance(name, str) and skill_name(name) == name and name:
+            shutil.rmtree(skills_dir / name, ignore_errors=True)
+    for entry in record.get("knowledge") or []:
+        _unlink(knowledge, entry.get("files") or [])
+    _unlink(knowledge, ["INDEX.md", "glossary.md", "owner-rules.md"])
+
+
+def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str = "add") -> dict:
+    """Write the reviewed preset into an agent's folder — added to what an
+    earlier setup gave it (the new items first; a document given again
+    replaces its earlier copy), or in its place (``mode="replace"``: the
+    earlier skills, documents and rules go first; facts it learned stay).
+    Returns the ``block`` its instructions end with, the new ``facts`` to
+    give it as insights, what this setup wrote (``skills``, ``knowledge``,
+    ``counts``) and what the agent now has from setups (``totals``). The
+    waiting documents are dropped afterwards."""
     data = body if isinstance(body, dict) else {}
     preset = normalise(data)
     preset_id = str(data.get("id") or "")
     docs = load_docs(owner_id, preset_id) if preset_id else []
     if preset["knowledge"] and not docs and preset_id:
         log.warning("agent preset: its documents are gone (expired?)", preset=preset_id)
-    skills = write_skills(agent_dir / "data" / "home-config-parent" / ".captain-claw" / "skills",
-                          preset["intents"])
-    knowledge = write_knowledge(workspace / "knowledge", preset, docs)
+    skills_dir = agent_dir / "data" / "home-config-parent" / ".captain-claw" / "skills"
+    folder = workspace / "knowledge"
+    earlier = earlier_setup(agent_dir, workspace)
+    if mode == "replace":
+        _undo(earlier, skills_dir, folder)
+        earlier = {}
+
+    merged = normalise({g: preset[g] + [i for i in earlier.get(g) or [] if isinstance(i, dict)]
+                        for g in _KEPT_GROUPS})
+    new_skills = write_skills(skills_dir, preset["intents"])
+    skills = new_skills + [n for n in earlier.get("skills") or []
+                           if isinstance(n, str) and n not in new_skills and (skills_dir / n / "SKILL.md").is_file()]
+    given = {k["doc"] for k in preset["knowledge"]} & {d["name"] for d in docs}
+    kept: list[dict] = []
+    for entry in earlier.get("knowledge") or []:
+        if not isinstance(entry, dict) or not entry.get("file"):
+            continue
+        if entry.get("doc") in given:
+            _unlink(folder, entry.get("files") or [])
+        elif (folder / entry["file"]).is_file():
+            kept.append(entry)
+    written = write_knowledge(folder, {**merged, "knowledge": preset["knowledge"]}, docs, kept)
+    knowledge = kept + written
+    facts = int(earlier.get("facts") or 0) + len(preset["facts"])
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / _RECORD).write_text(json.dumps({
+        "updated": time.time(), **{g: merged[g] for g in _KEPT_GROUPS},
+        "skills": skills, "knowledge": knowledge, "facts": facts}, ensure_ascii=False), encoding="utf-8")
     if preset_id:
         discard(owner_id, preset_id)
     return {
-        "block": rules_block(preset, knowledge, skills),
+        "block": rules_block(merged, knowledge, skills),
         "facts": preset["facts"],
-        "skills": skills,
-        "knowledge": knowledge,
+        "skills": new_skills,
+        "knowledge": written,
         "counts": {"rules": len(preset["rules"]), "escalation": len(preset["escalation"]),
                    "templates": len(preset["templates"]), "glossary": len(preset["glossary"]),
-                   "intents": len(skills), "facts": len(preset["facts"]), "knowledge": len(knowledge)},
+                   "intents": len(new_skills), "facts": len(preset["facts"]), "knowledge": len(written)},
+        "totals": {**{g: len(merged[g]) for g in _KEPT_GROUPS}, "intents": len(skills), "facts": facts,
+                   "knowledge": len(knowledge)},
     }
 
 
@@ -1149,23 +1289,52 @@ async def _wait_ready(port_of: Callable[[], int], token: str, timeout: float) ->
     return 0
 
 
+def pending_path(agent_dir: Path) -> Path:
+    """Where facts wait for an agent that is off: ``~/.captain-claw`` under
+    its HOME, which it reads when it starts (``insights.import_pending``)."""
+    return agent_dir / "data" / "home-config-parent" / ".captain-claw" / "pending-insights.json"
+
+
+def leave_facts(agent_dir: Path, facts: list[dict]) -> None:
+    """Leave facts for the agent to add itself when it next starts — with
+    any already waiting (it deduplicates them as any other insight)."""
+    if not facts:
+        return
+    path = pending_path(agent_dir)
+    try:
+        waiting = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
+    except (OSError, ValueError):
+        waiting = []
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps([*(waiting if isinstance(waiting, list) else []),
+                                *({"content": f["content"], "category": f["category"],
+                                   "importance": f["importance"], "tags": _TAG} for f in facts)],
+                               ensure_ascii=False), encoding="utf-8")
+
+
 async def give_facts(slug: str, port_of: Callable[[], int], token: str, facts: list[dict],
-                     timeout: float = _FACTS_READY_S) -> int:
-    """Give a freshly spawned agent its owner's facts as insights. Never
-    raises: a failure is logged and the agent simply starts without them."""
+                     timeout: float = _FACTS_READY_S, agent_dir: Path | None = None) -> int:
+    """Give an agent its owner's facts as insights once it answers. Never
+    raises: what it couldn't be given waits in its folder for its next start
+    (``agent_dir``), else it simply goes without."""
     if not facts:
         return 0
+    given = 0
     try:
         port = await _wait_ready(port_of, token, timeout)
-        if not port:
-            log.warning("agent preset: the agent never came up, facts not given", agent=slug)
-            return 0
-        given = await _post_facts(port, token, facts)
-        log.info("agent preset: facts given", agent=slug, given=given, of=len(facts))
-        return given
+        if port:
+            given = await _post_facts(port, token, facts)
+            log.info("agent preset: facts given", agent=slug, given=given, of=len(facts))
+        else:
+            log.warning("agent preset: the agent never came up, facts left for its next start", agent=slug)
     except Exception:
         log.warning("agent preset: giving facts failed", agent=slug, exc_info=True)
-        return 0
+    if given < len(facts) and agent_dir is not None:
+        try:
+            leave_facts(agent_dir, facts)
+        except Exception:
+            log.warning("agent preset: could not leave the facts for later", agent=slug, exc_info=True)
+    return given
 
 
 # Facts still on their way to a new agent: a task nobody holds can be
@@ -1173,11 +1342,13 @@ async def give_facts(slug: str, port_of: Callable[[], int], token: str, facts: l
 _PENDING: set[asyncio.Task] = set()
 
 
-def schedule_facts(slug: str, port_of: Callable[[], int], token: str, facts: list[dict]) -> None:
+def schedule_facts(slug: str, port_of: Callable[[], int], token: str, facts: list[dict],
+                   agent_dir: Path | None = None) -> None:
     if not facts:
         return
     try:
-        task = asyncio.get_running_loop().create_task(give_facts(slug, port_of, token, facts))
+        task = asyncio.get_running_loop().create_task(
+            give_facts(slug, port_of, token, facts, agent_dir=agent_dir))
     except RuntimeError:
         log.warning("agent preset: no loop to give facts on", agent=slug)
         return
@@ -1192,43 +1363,76 @@ class ApplyBody(BaseModel):
     agent: str = Field(min_length=1, max_length=128)
     # The prepared id and the items the person kept, as they edited them.
     preset: dict
+    # Added to what an earlier setup gave the agent, or in its place.
+    mode: Literal["add", "replace"] = "add"
+
+
+@router.get("/current/{slug}")
+async def current_setup(slug: str, user: dict = Depends(get_managed_user)) -> dict:
+    """What earlier setups gave one of the caller's agents — for the dialog
+    opened on an agent that already has one."""
+    from captain_claw.flight_deck import server as srv
+    entry = _own_process(slug, _owner(user))
+    agent_dir = srv.DATA_DIR / slug
+    workspace = Path(entry["workspace"]) if entry.get("workspace") else agent_dir / "data" / "workspace"
+    record = await asyncio.to_thread(earlier_setup, agent_dir, workspace)
+    return {
+        "has": bool(record),
+        "updated": record.get("updated"),
+        **{g: len(record.get(g) or []) for g in _KEPT_GROUPS},
+        "skills": [n for n in record.get("skills") or [] if isinstance(n, str)],
+        "facts": int(record.get("facts") or 0),
+        "knowledge": [{"title": e.get("title") or e.get("doc") or "", "parts": int(e.get("parts") or 1)}
+                      for e in record.get("knowledge") or [] if isinstance(e, dict)],
+    }
 
 
 @router.post("/apply")
 async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict:
-    """Give one of the caller's process agents the reviewed preset: skills and
-    knowledge into its folder, the owner's block after its instructions
-    (stored for the owner, and returned for the chat to send), facts as
-    insights once it answers. Works on a running agent — no restart."""
+    """Give one of the caller's process agents the reviewed preset — added to
+    what an earlier setup gave it, or in its place: skills and knowledge
+    into its folder, the owner's block in its instructions (stored for the
+    owner, and returned for the chat to send), facts as insights once it
+    answers — or, when it is off, at its next start. Works on a running
+    agent: no restart."""
     from captain_claw.flight_deck import server as srv
-    owner_id = str(user.get("id") or "") if _auth_enabled() else ""
+    owner_id = _owner(user)
     slug = body.agent
     entry = _own_process(slug, owner_id)
     agent_dir = srv.DATA_DIR / slug
     workspace = Path(entry["workspace"]) if entry.get("workspace") else agent_dir / "data" / "workspace"
     try:
-        done = await asyncio.to_thread(seed, agent_dir, workspace, owner_id, body.preset)
+        done = await asyncio.to_thread(seed, agent_dir, workspace, owner_id, body.preset, body.mode)
     except Exception:
         log.warning("agent preset: could not write the setup", agent=slug, exc_info=True)
         raise HTTPException(500, "The setup couldn't be written into the agent's folder.")
 
-    # Without accounts the browser keeps the instructions: it appends the block.
+    # Without accounts the browser keeps the instructions: it puts the block in itself.
     instructions = ""
-    if owner_id and done["block"]:
+    stored = bool(owner_id) and _auth_enabled()
+    if stored:
         current = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "")
         instructions = with_block(current, done["block"])
-        await srv._set_owner_agent_instructions(owner_id, "process", slug, instructions, strict=True)
+        if instructions != current:
+            await srv._set_owner_agent_instructions(owner_id, "process", slug, instructions, strict=True)
+    running = srv._process_is_alive(slug)
     if done["facts"]:
-        schedule_facts(slug, lambda: (srv._load_process_registry().get(slug) or {}).get("web_port") or 0,
-                       str(entry.get("web_auth") or ""), done["facts"])
-    log.info("agent preset: applied", agent=slug, **done["counts"])
+        if running:
+            schedule_facts(slug, lambda: (srv._load_process_registry().get(slug) or {}).get("web_port") or 0,
+                           str(entry.get("web_auth") or ""), done["facts"], agent_dir=agent_dir)
+        else:
+            await asyncio.to_thread(leave_facts, agent_dir, done["facts"])
+    log.info("agent preset: applied", agent=slug, mode=body.mode, **done["counts"])
     return {
         "ok": True,
+        "mode": body.mode,
+        "stored": stored,
         "instructions": instructions,
-        "block": done["block"],
+        "block": done["block"] and f"{_BLOCK_OPEN}\n{done['block']}\n{_BLOCK_CLOSE}",
         "counts": done["counts"],
+        "totals": done["totals"],
         "skills": done["skills"],
         "knowledge": [k["title"] for k in done["knowledge"]],
         "parts": sum(k["parts"] for k in done["knowledge"] if k["parts"] > 1),
-        "running": srv._process_is_alive(slug),
+        "running": running,
     }

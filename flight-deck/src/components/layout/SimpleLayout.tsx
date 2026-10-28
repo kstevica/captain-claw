@@ -36,6 +36,7 @@ import {
   Smartphone,
   Activity,
   KeyRound,
+  Wand2,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -622,6 +623,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
         { icon: BookOpen, label: 'Instructions', hint: 'What it should always keep in mind', onSelect: () => setAgentInstructionsId(a.id) },
+      )
+      // Your documents and way of working → its rules, skills and knowledge (process agents: FD writes its folder).
+      if (a.kind === 'process') {
+        items.push({ icon: Wand2, label: 'Way of working', hint: 'Your instructions and documents, as its rules, skills and knowledge',
+          onSelect: () => setSetupFor({ slug: a.startKey, name: a.name, role: '' }) })
+      }
+      items.push(
         { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', onSelect: () => setAgentSettingsId(a.id) },
       )
       const net = networkShareAction(netAgents[shareKeyOf(a)], {
