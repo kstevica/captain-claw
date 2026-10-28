@@ -14,7 +14,8 @@ material in the background: in steps sized to the model's context window
 the requests it handles (intents, each with its steps), facts, when to ask
 first, output templates, a glossary and a summary per document, every item
 with the document and section (page) it came from — then folded without the
-model (repeats once) and merged in one call. Material over the person's
+model (repeats once) and merged in one call; a longer read keeps more of each
+(``limits_for``). Material over the person's
 budget (quick, standard, deep) isn't read front to back: its most
 instructive sections are, closest to what they asked to focus on
 (agent_preset_select). A document marked "knowledge only" (the default for
@@ -55,6 +56,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
+import math
 import os
 import re
 import secrets
@@ -94,9 +96,16 @@ _MERGE_PROMPT_FILE = Path(__file__).parent.parent / "instructions" / "agent_pres
 GROUPS = ("rules", "intents", "facts", "escalation", "templates", "glossary", "knowledge")
 FACT_CATEGORIES = ("contact", "decision", "preference", "fact", "deadline", "project",
                    "workflow", "feedback", "reference")
-# The most of each group a preset keeps.
+# The most of each group a preset keeps from a step's worth of material (and
+# what one step, or the merge call, gives); a longer read keeps more
+# (``limits_for``), up to CEILINGS. TOTALS: what an agent keeps from all its
+# setups together — a book read in passes, several books.
 LIMITS = {"rules": 30, "intents": 12, "facts": 40, "escalation": 15, "templates": 8,
           "glossary": 60, "knowledge": 12}
+CEILINGS = {"rules": 150, "intents": 30, "facts": 300, "escalation": 30, "templates": 20,
+            "glossary": 400, "knowledge": 12}
+TOTALS = {g: n * 3 for g, n in CEILINGS.items()}
+_BLOCK_NAMES = 30                      # skills or templates the block names; the rest are in their folders
 
 _MAX_FILES = 12
 _MAX_INSTRUCTIONS = 20000
@@ -172,10 +181,21 @@ def _strings(raw: Any, limit: int, count: int) -> list[str]:
     return out[:count]
 
 
-def normalise(raw: Any) -> dict:
+def limits_for(tokens: int) -> dict[str, int]:
+    """What a read of *tokens* tokens of material keeps of each group:
+    LIMITS for a step's worth, more as the square root of what was read —
+    a long read finds more, though it repeats itself more too — up to
+    CEILINGS."""
+    grow = max(1.0, math.sqrt(max(0, tokens) / _STEP_MAX))
+    return {g: min(CEILINGS[g], round(n * grow)) for g, n in LIMITS.items()}
+
+
+def normalise(raw: Any, limits: dict[str, int] | None = None) -> dict:
     """A preset with every group present, each item cleaned, clipped and
-    deduplicated — the model's reply and the dialog's edits alike."""
+    deduplicated — the model's reply and the dialog's edits alike — with
+    at most *limits* (LIMITS) of each group."""
     data = raw if isinstance(raw, dict) else {}
+    caps = limits or LIMITS
 
     def items(group: str) -> list[dict]:
         got = data.get(group)
@@ -190,7 +210,7 @@ def normalise(raw: Any) -> dict:
                 continue
             seen.add(k)
             out.append(r)
-        return out[:LIMITS[group]]
+        return out[:caps[group]]
 
     intents: list[dict] = []
     names: set[str] = set()
@@ -222,7 +242,7 @@ def normalise(raw: Any) -> dict:
     return {
         "rules": unique([{"text": _line(r.get("text"), 400), "source": _source(r.get("source"))}
                          for r in items("rules")], "text", "rules"),
-        "intents": intents[:LIMITS["intents"]],
+        "intents": intents[:caps["intents"]],
         "facts": unique(facts, "content", "facts"),
         "escalation": unique([{"text": _line(r.get("text"), 400), "source": _source(r.get("source"))}
                               for r in items("escalation")], "text", "escalation"),
@@ -1205,47 +1225,83 @@ def _richer(group: str, kept: dict, other: dict) -> dict:
     return other if weight(other) > weight(kept) else kept
 
 
+class _Alike:
+    """The items of one group so far, by their key's text, for telling
+    whether another is one of them: the same text, or — rules, when-to-ask
+    and facts — the same thing in other words (``retrieval.same_fact``:
+    "14 days" and "30 days" stay two)."""
+
+    def __init__(self, group: str) -> None:
+        self.reworded = group in _REWORDED
+        self.texts: list[str] = []
+        self.exact: dict[str, int] = {}
+        self.by_stem: dict[str, list[int]] = {}
+        self._last: tuple[str, list[str]] = ("", [])   # the stems find() worked out, for add()
+
+    @staticmethod
+    def _norm(text: str) -> str:
+        return " ".join(text.casefold().split())
+
+    def _stems(self, text: str) -> list[str]:
+        from captain_claw import retrieval
+        if not self.reworded:
+            return []
+        if self._last[0] == text:
+            return self._last[1]
+        mine = list(dict.fromkeys(retrieval.stem(retrieval.fold(t))
+                                  for t in retrieval.query_terms(retrieval.uncontract(text), max_terms=32)))
+        self._last = (text, mine)
+        return mine
+
+    def find(self, text: str) -> int | None:
+        """Which item *text* is (its place), or None for a new one; once
+        found, the same text finds it again."""
+        from captain_claw import retrieval
+        norm = self._norm(text)
+        hit = self.exact.get(norm)
+        mine = self._stems(text) if hit is None else []
+        if mine:
+            shared: dict[int, int] = {}
+            for s in mine:
+                for c in self.by_stem.get(s, ()):
+                    shared[c] = shared.get(c, 0) + 1
+            hit = next((c for c, n in sorted(shared.items(), key=lambda kv: -kv[1])
+                        if n >= len(mine) / 2 and retrieval.same_fact(text, self.texts[c])), None)
+        if hit is not None:
+            self.exact[norm] = hit
+        return hit
+
+    def add(self, text: str) -> int:
+        """*text* as a new item; its place."""
+        at = len(self.texts)
+        self.texts.append(text)
+        self.exact[self._norm(text)] = at
+        for s in self._stems(text):
+            self.by_stem.setdefault(s, []).append(at)
+        return at
+
+
 def fold(parts: list[dict]) -> dict:
     """What every step found, as one preset, without the model: an item
-    several steps found — a rule or fact in other words too
-    (``retrieval.same_fact``: "14 days" and "30 days" stay two), a skill, a
-    template or a term by its name — is kept once, in its most specific
-    wording, and ranks by how many steps found it; ties keep the steps'
-    order, interleaved, so a group's cap keeps some of every step. Nothing
-    is capped here; ``normalise`` caps."""
-    from captain_claw import retrieval
-
-    def stems(text: str) -> list[str]:
-        return list(dict.fromkeys(retrieval.stem(retrieval.fold(t))
-                                  for t in retrieval.query_terms(retrieval.uncontract(text), max_terms=32)))
-
+    several steps found — a rule or fact in other words too (``_Alike``), a
+    skill, a template or a term by its name — is kept once, in its most
+    specific wording, and ranks by how many steps found it; ties keep the
+    steps' order, interleaved, so a group's cap keeps some of every step.
+    Nothing is capped here; ``normalise`` caps."""
     out: dict[str, Any] = {}
     for group, key in _ITEM_KEY.items():
         clusters: list[dict] = []
-        exact: dict[str, int] = {}
-        by_stem: dict[str, list[int]] = {}
+        alike = _Alike(group)
         for row in itertools.zip_longest(*[p.get(group) or [] for p in parts]):
             for item in (x for x in row if x is not None):
                 text = str(item.get(key) or "")
-                norm = " ".join(text.casefold().split())
-                hit = exact.get(norm)
-                mine = stems(text) if group in _REWORDED else []
-                if hit is None and mine:
-                    shared: dict[int, int] = {}
-                    for s in mine:
-                        for c in by_stem.get(s, ()):
-                            shared[c] = shared.get(c, 0) + 1
-                    hit = next((c for c, n in sorted(shared.items(), key=lambda kv: -kv[1])
-                                if n >= len(mine) / 2 and retrieval.same_fact(text, clusters[c]["text"])), None)
+                hit = alike.find(text)
                 if hit is None:
-                    hit = len(clusters)
-                    clusters.append({"item": item, "text": text, "count": 0})
-                    for s in mine:
-                        by_stem.setdefault(s, []).append(hit)
+                    hit = alike.add(text)
+                    clusters.append({"item": item, "count": 0})
                 else:
                     clusters[hit]["item"] = _richer(group, clusters[hit]["item"], item)
                 clusters[hit]["count"] += 1
-                exact[norm] = hit
         out[group] = [c["item"] for c in sorted(clusters, key=lambda c: -c["count"])]  # stable: ties keep order
     for group in ("conflicts", "warnings"):
         rows = itertools.zip_longest(*[p.get(group) or [] for p in parts])
@@ -1271,47 +1327,88 @@ def _sampled(summaries: list[str], limit: int) -> str:
     return " ".join(summaries[::every])[:limit]
 
 
-def _merge_payload(folded: dict, room: int) -> str | None:
-    """The folded preset as the merge call sees it — each group up to twice
-    its cap, else its cap; templates left out (the fold already has them
-    once each) — or None when even that is more than *room* characters."""
+_MERGED = ("rules", "intents", "facts", "escalation", "glossary")   # the groups the merge call sees
+
+
+def _merge_payload(folded: dict, room: int, limits: dict[str, int] | None = None) -> tuple[str, dict[str, int]] | None:
+    """The folded preset as the merge call sees it, and how many of each
+    group that is — a group up to twice LIMITS for the call to keep the best
+    of, or LIMITS (also when the read keeps more of it: the rest follows the
+    call, ``_top_up``); templates left out (the fold already has them once
+    each) — or None when even that is more than *room* characters."""
+    limits = limits or LIMITS
     for times in (2, 1):
-        view = {g: folded[g][:LIMITS[g] * times] for g in ("rules", "intents", "facts", "escalation", "glossary")}
+        view = {g: folded[g][:LIMITS[g] * (times if limits[g] <= LIMITS[g] else 1)] for g in _MERGED}
         view["knowledge"] = [{"doc": k["doc"], "title": k["title"],
                               "summary": _sampled(k["summaries"], _MERGE_SUMMARY_CHARS)} for k in folded["knowledge"]]
         view["conflicts"], view["warnings"] = folded["conflicts"], folded["warnings"]
         payload = json.dumps(view, ensure_ascii=False)
         if len(payload) <= room:
-            return payload
+            return payload, {g: len(view[g]) for g in _MERGED}
     return None
 
 
-async def merge_parts(reader: dict, parts: list[dict], owner_id: str, job: ReadJob) -> dict:
-    """What every step found, as one preset: folded without the model
-    (``fold``), then — however many steps there were — one call that settles
-    what the fold can't (the same thing said very differently, conflicts
-    between steps), keeps each group's best within its cap and writes each
-    document's summary anew. Without that call — too big for one, or an
-    answer that can't be read — the fold stands, capped."""
+def merge_prompt() -> str:
+    """The merge call's prompt, with how many of each group it keeps."""
+    text = _MERGE_PROMPT_FILE.read_text(encoding="utf-8")
+    for g, n in LIMITS.items():
+        text = text.replace(f"{{{g}}}", str(n))
+    return text
+
+
+def _top_up(merged: dict, folded: dict, seen: dict[str, int], limits: dict[str, int]) -> dict:
+    """The merge call's preset and, after it in each group, what the fold has
+    past what the call saw (found by fewer steps), up to *limits*: a long
+    read keeps more than one call can settle. One the call already has, in
+    its words or the fold's, isn't added twice."""
+    out = dict(merged)
+    for group in _MERGED:
+        key = _ITEM_KEY[group]
+        have = list(merged.get(group) or [])
+        alike = _Alike(group)
+        for item in have:
+            alike.add(str(item.get(key) or ""))
+        for item in folded[group][seen.get(group, 0):]:
+            if len(have) >= limits[group]:
+                break
+            text = str(item.get(key) or "")
+            if alike.find(text) is None:
+                alike.add(text)
+                have.append(item)
+        out[group] = have
+    return normalise(out, limits)
+
+
+async def merge_parts(reader: dict, parts: list[dict], owner_id: str, job: ReadJob,
+                      limits: dict[str, int] | None = None, folded: dict | None = None) -> dict:
+    """What every step found, as one preset of at most *limits* (LIMITS) of
+    each group: folded without the model (``fold``, unless given), then —
+    however many steps there were — one call that settles what the fold
+    can't (the same thing said very differently, conflicts between steps)
+    among what most steps found, keeps the best of it and writes each
+    document's summary anew; the rest of the fold follows it (``_top_up``).
+    Without that call — too big for one, or an answer that can't be read —
+    the fold stands, capped."""
     if len(parts) == 1:
         return parts[0]
-    folded = fold(parts)
-    payload = _merge_payload(folded, step_tokens(reader) * pdocs.CHARS_PER_TOKEN)
-    if payload is None:
+    limits = limits or LIMITS
+    folded = folded if folded is not None else fold(parts)
+    got_view = _merge_payload(folded, step_tokens(reader) * pdocs.CHARS_PER_TOKEN, limits)
+    if got_view is None:
         log.info("agent preset: too much for one merge call, the fold stands", parts=len(parts))
-        return normalise(folded)
-    system = _MERGE_PROMPT_FILE.read_text(encoding="utf-8")
+        return normalise(folded, limits)
+    payload, seen = got_view
     try:
-        got = await _ask(reader, system, f"## What the parts found\n{payload}", owner_id, job)
+        got = await _ask(reader, merge_prompt(), f"## What the parts found\n{payload}", owner_id, job)
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         log.warning("agent preset: merging failed, the fold stands", error=str(exc))
         got = None
     if got is None:
-        return normalise(folded)
-    got["templates"] = normalise({"templates": folded["templates"]})["templates"]
-    return whole_summaries(got, parts)
+        return normalise(folded, limits)
+    got["templates"] = folded["templates"]
+    return whole_summaries(_top_up(got, folded, seen, limits), parts)
 
 
 def whole_summaries(merged: dict, parts: list[dict]) -> dict:
@@ -1331,10 +1428,12 @@ def whole_summaries(merged: dict, parts: list[dict]) -> dict:
 
 
 def _finish(preset: dict, docs: list[dict], warnings: list[str], model: str, steps: int, tokens: int,
-            preset_id: str, cover: dict[str, dict] | None = None) -> dict:
+            preset_id: str, cover: dict[str, dict] | None = None, found: dict[str, int] | None = None) -> dict:
     """The read's result: every document with a knowledge entry — summarised
     by the model, else by the person's own words; one the model invented a
-    name for doesn't get in."""
+    name for doesn't get in. ``found``: how many of each group the steps
+    found together, before the read's limits (``limits_for``) kept the most
+    found."""
     names = [d["name"] for d in docs]
     known: dict[str, dict] = {}
     for k in preset["knowledge"]:
@@ -1359,7 +1458,14 @@ def _finish(preset: dict, docs: list[dict], warnings: list[str], model: str, ste
         "model": model,
         "steps": steps,
         "tokens": tokens,
+        **({"found": found} if found else {}),
     }
+
+
+def read_tokens(steps: list[dict], read: set[int]) -> int:
+    """The tokens of material in the steps in *read* (1-based)."""
+    return sum(len(p["text"]) for n, st in enumerate(steps, 1) if n in read
+               for p in st["pieces"]) // pdocs.CHARS_PER_TOKEN
 
 
 async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instructions: str,
@@ -1448,16 +1554,21 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
             model = (reader or {}).get("model") or "the model"
             raise _UnreadableError(f"Couldn't read the material with {model}: {failed}" if failed
                               else "The model's answers couldn't be read. Try again, or with less material.")
+        found: dict[str, int] = {}
         if len(parts) > 1:
             job.phase, job.current = "merging", "Putting the parts together"
             save_job(job)
-            preset = normalise(fold(parts)) if stopped else await merge_parts(reader, parts, owner_id, job)
+            folded = await asyncio.to_thread(fold, parts)
+            found = {g: len(folded[g]) for g in _ITEM_KEY}
+            limits = limits_for(read_tokens(steps, read))
+            preset = (normalise(folded, limits) if stopped
+                      else await merge_parts(reader, parts, owner_id, job, limits, folded))
         else:
             preset = parts[0] if parts else normalise({})
         cover = await asyncio.to_thread(read_coverage, steps, read, docs)
         await asyncio.to_thread(_save_coverage, job, cover)
         job.result = _finish(preset, docs, job.notes + warnings, str((reader or {}).get("model") or ""),
-                             len(steps), job.tokens, job.id, cover)
+                             len(steps), job.tokens, job.id, cover, found)
         job.state, job.finished = "done", time.time()
         if _folder(job).is_dir():
             _write_json(_folder(job) / _RESULT_FILE, job.result)
@@ -1815,6 +1926,9 @@ def _skill_md(intent: dict) -> str:
     cite = _cite(intent["source"])
     if cite:
         lines += [f"Source: {cite} (from your owner, when they set you up)", ""]
+        if (intent["source"].get("doc") or "instructions") != "instructions":
+            lines += ["These steps are a short version: for the details, read that section with the knowledge "
+                      "tool.", ""]
     return "\n".join(lines)
 
 
@@ -1975,15 +2089,19 @@ def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int
     head = ["## Your owner's rules", "",
             "Set up by your owner. Where they differ from the general procedure above, "
             "follow these."]
+    def named(names: list[str], more: str) -> str:
+        rest = len(names) - _BLOCK_NAMES
+        return ", ".join(names[:_BLOCK_NAMES]) + (f", and {rest} more ({more})" if rest > 0 else "")
+
     tail: list[str] = []
     if preset["templates"]:
         tail += ["", "### Templates",
                  "Use these formats when they fit (full text in knowledge/owner-rules.md): "
-                 + ", ".join(t["name"] for t in preset["templates"]) + "."]
+                 + named([t["name"] for t in preset["templates"]], "in knowledge/owner-rules.md") + "."]
     if skills:
         tail += ["", "### What you handle",
                  "You have a skill for each of these — read it before you start: "
-                 + ", ".join(skills) + "."]
+                 + named(skills, "in your skills list") + "."]
     if knowledge or preset["glossary"]:
         line = "Your workspace's knowledge/ folder holds what your owner gave you"
         if knowledge:
@@ -1997,7 +2115,13 @@ def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int
                      "lines), reads a whole section by its title (section) and outlines a document (outline)")
         if any(k.get("map") for k in knowledge):
             line += ". A long document also has a section map (<name>.map.md) saying which lines hold each section"
-        tail += ["", "### Your knowledge", line + "."]
+        line += "."
+        if knowledge:
+            line += (" Your rules, skills, facts and terms are a short version: those drawn from these documents "
+                     "say which document and section they came from (for the rules above, see "
+                     "knowledge/owner-rules.md). When one decides an answer, or you need its exact wording, figures "
+                     "or the steps around it, read that section with the knowledge tool and go by the document.")
+        tail += ["", "### Your knowledge", line]
     if tables:
         tail += ["", "### Your tables",
                  "Your owner's spreadsheets are also tables in your datastore — query them (the datastore tool) "
@@ -2204,7 +2328,7 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     setups (``totals``) and ``warnings`` for the person. The waiting
     documents are dropped afterwards."""
     data = body if isinstance(body, dict) else {}
-    preset = normalise(data)
+    preset = normalise(data, CEILINGS)
     preset_id = str(data.get("id") or "")
     docs = load_docs(owner_id, preset_id) if preset_id else []
     if preset["knowledge"] and not docs and preset_id:
@@ -2219,7 +2343,7 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
         earlier = {}
 
     merged = normalise({g: preset[g] + [i for i in earlier.get(g) or [] if isinstance(i, dict)]
-                        for g in _KEPT_GROUPS})
+                        for g in _KEPT_GROUPS}, TOTALS)
     new_skills = write_skills(skills_dir, preset["intents"])
     skills = new_skills + [n for n in earlier.get("skills") or []
                            if isinstance(n, str) and n not in new_skills and (skills_dir / n / "SKILL.md").is_file()]

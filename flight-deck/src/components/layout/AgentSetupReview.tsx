@@ -146,6 +146,7 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
   const items = review.preset[group]
   const kept = keptIn(review, group)
   const docs = new Map(review.prepared.docs.map((d) => [d.name, d]))
+  const found = group === 'knowledge' ? 0 : review.prepared.found?.[group] ?? 0
   return (
     <section>
       <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -153,6 +154,12 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
         <div className="min-w-0 flex-1">
           <h4 className="text-sm font-semibold text-zinc-100">{title} <span className="font-normal text-zinc-500">· {kept} of {items.length} kept</span></h4>
           <p className="text-xs text-zinc-500">{blurb}</p>
+          {found > items.length && (
+            <p className="mt-1 text-xs text-zinc-500">
+              The read found {found.toLocaleString()}; {items.length === 1 ? 'this is the one' : `these are the ${items.length.toLocaleString()}`} found most often.
+              The agent can still look up the rest in its documents.
+            </p>
+          )}
         </div>
         <div className="flex gap-1 text-[11px]">
           <button disabled={disabled || kept === items.length} onClick={() => onAll(true)} className="rounded-md px-2 py-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-40">Keep all</button>

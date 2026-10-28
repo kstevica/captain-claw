@@ -93,7 +93,9 @@ class KnowledgeTool(Tool):
     description = (
         "Search and read the documents your owner gave you — your knowledge/ folder (the setup's documents, "
         "however long). Use it before you answer from memory, and when you need the exact wording, number or "
-        "steps. Actions: 'search' (query, optionally one doc: the best passages, each with its document, "
+        "steps. The rules, skills, facts and terms your owner's setup gave you are a short version that names "
+        "the document and section each came from: read that section here to check one or get its details. "
+        "Actions: 'search' (query, optionally one doc: the best passages, each with its document, "
         "section and lines; put an exact phrase or code in quotes to require it), 'section' (doc + section "
         "title: that section's whole text), 'outline' (doc: its sections; with section, just that part), "
         "'list' (the documents)."

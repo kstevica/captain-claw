@@ -21,9 +21,9 @@ other. Turn it into the final setup for the agent.
 - **conflicts** — keep every conflict given, and add the ones between items (a refund window of
   14 days in one rule and 30 in another). Say what conflicts with what.
 - **warnings** — keep the ones that still matter.
-- Stay within: 30 rules, 12 intents, 40 facts, 15 when-to-ask, 60 glossary terms. When there is
-  more, keep what the agent would get most wrong without — items earlier in a group were found
-  by more parts.
+- Stay within: {rules} rules, {intents} intents, {facts} facts, {escalation} when-to-ask,
+  {glossary} glossary terms. When there is more, keep what the agent would get most wrong
+  without — items earlier in a group were found by more parts.
 - Never invent anything that isn't given.
 
 ## Output format
