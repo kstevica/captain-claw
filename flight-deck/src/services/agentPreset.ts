@@ -87,6 +87,9 @@ export interface PreparedPreset {
   /** The steps it was read in (0: nothing needed reading). */
   steps: number
   tokens: number
+  /** Read in several steps: how many of each group they found together, before the
+   *  read's limits (which grow with how much was read) kept the ones found most often. */
+  found?: Partial<Record<'rules' | 'intents' | 'facts' | 'escalation' | 'templates' | 'glossary', number>>
 }
 
 /** How much of the material is read, in tokens (the backend's agent_preset_select.BUDGETS):

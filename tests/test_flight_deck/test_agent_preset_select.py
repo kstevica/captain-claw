@@ -197,6 +197,61 @@ async def test_many_parts_take_one_merge_call(monkeypatch):
     assert [t["name"] for t in got["templates"]] == ["Reply"]           # the fold's, kept
     calls.clear()
     small = {**reader, "input_ctx": 0, "provider": "anthropic"}
-    monkeypatch.setattr(ap, "_merge_payload", lambda folded, room: None)
+    monkeypatch.setattr(ap, "_merge_payload", lambda folded, room, limits=None: None)
     got = await ap.merge_parts(small, parts, "", job)
     assert calls == [] and len(got["rules"]) == 12                     # too big for a call: the fold stands
+
+
+def test_a_longer_read_keeps_more_up_to_a_ceiling():
+    assert ap.limits_for(0) == ap.LIMITS == ap.limits_for(ap._STEP_MAX)
+    standard = ap.limits_for(249_000)                                     # a standard read of a long book
+    assert (standard["rules"], standard["facts"], standard["glossary"]) == (118, 158, 237)
+    assert standard["intents"] == ap.CEILINGS["intents"] and standard["knowledge"] == ap.LIMITS["knowledge"]
+    assert ap.limits_for(10_000_000) == ap.CEILINGS
+
+
+async def test_a_long_read_keeps_more_than_the_merge_call_sees(monkeypatch):
+    calls: list[dict] = []
+
+    async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+        calls.append({"system": system, "user": user})
+        sent = json.loads(user.split("\n", 1)[1])
+        # The call says the first two as one, and words one of the fold's later rules its own way.
+        rules = [{"text": "Rules 0 and 30 said as one."}, *sent["rules"][2:30], {"text": "answer customers in croatian."}]
+        return json.dumps({"rules": rules, "knowledge": []}), 50
+
+    monkeypatch.setattr(ap, "call_model", fake_call)
+    reader = {"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:1", "input_ctx": 40_000}
+    parts = [_part(rules=[{"text": f"Rule number {n} of the handbook."} for n in range(k * 30, k * 30 + 30)])
+             for k in range(3)]
+    parts[1]["rules"][11] = {"text": "Answer customers in Croatian.", "source": {"doc": "h.md", "section": ""}}  # 35th in the fold
+    folded = ap.fold(parts)
+    limits = ap.limits_for(100_000)                                       # 75 rules
+    got = await ap.merge_parts(reader, parts, "", ap.ReadJob(id="j", owner="o"), limits, folded)
+    assert len(calls) == 1
+    assert "Stay within: 30 rules, 12 intents, 40 facts, 15 when-to-ask," in calls[0]["system"]
+    assert "{" not in calls[0]["system"].split("Stay within")[1].split("Never invent")[0]
+    assert len(json.loads(calls[0]["user"].split("\n", 1)[1])["rules"]) == ap.LIMITS["rules"]
+    texts = [r["text"] for r in got["rules"]]
+    assert len(texts) == limits["rules"] == 75
+    assert texts[0] == "Rules 0 and 30 said as one." and texts[29] == "answer customers in croatian."
+    assert texts[30] == folded["rules"][30]["text"]                      # then the fold, past what the call saw
+    assert "Rule number 0 of the handbook." not in texts                  # the call's own choice stands
+    assert sum(t.casefold() == "answer customers in croatian." for t in texts) == 1
+
+
+async def test_a_short_read_still_lets_the_call_choose_from_twice_its_limits(monkeypatch):
+    sent: list[dict] = []
+
+    async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+        sent.append(json.loads(user.split("\n", 1)[1]))
+        return json.dumps({"rules": [{"text": "Kept."}], "knowledge": []}), 50
+
+    monkeypatch.setattr(ap, "call_model", fake_call)
+    reader = {"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:1", "input_ctx": 40_000}
+    parts = [_part(rules=[{"text": f"Rule number {n} of the handbook."} for n in range(k * 30, k * 30 + 30)])
+             for k in range(3)]
+    got = await ap.merge_parts(reader, parts, "", ap.ReadJob(id="j", owner="o"))
+    assert len(sent[0]["rules"]) == 2 * ap.LIMITS["rules"]
+    assert [r["text"] for r in got["rules"]][:1] == ["Kept."] and len(got["rules"]) == ap.LIMITS["rules"]
+

@@ -523,6 +523,7 @@ async def test_a_long_document_is_read_in_steps_and_the_parts_merged(deck, monke
     assert job["result"]["preset"]["rules"] == [{"text": "Merged rule.", "source": {"doc": "instructions", "section": ""}}]
     assert job["result"]["preset"]["knowledge"][0]["title"] == "The big one"
     assert job["result"]["tokens"] == 400
+    assert job["result"]["found"]["rules"] == 1                          # the parts' one rule, found three times
 
 
 def test_a_merge_that_copied_one_parts_summary_gets_all_of_them():
@@ -1131,6 +1132,38 @@ def test_rules_block_stays_under_its_cap_and_points_at_the_rest():
     assert "- Ask before any payment." in block          # when-to-ask goes in first
     assert "more rules in knowledge/owner-rules.md" in block
     assert "refund-request" in block and "knowledge/INDEX.md" in block and "Offer" in block
+
+
+def test_the_block_says_the_short_version_is_checked_in_the_documents():
+    preset = ap.normalise({"rules": [{"text": "Use the WACC from the latest filing."}]})
+    skills = [f"skill-{n}" for n in range(35)]
+    block = ap.rules_block(preset, [{"file": "v.md", "title": "Valuation", "summary": ""}], skills)
+    assert "read that section with the knowledge tool and go by the document" in block
+    assert "skill-29, and 5 more (in your skills list)" in block and "skill-30" not in block
+    assert "knowledge tool" not in ap.rules_block(preset, [], [])        # no documents, nothing to check
+
+
+def test_a_skill_from_a_document_says_where_its_details_are():
+    intent = ap.normalise({"intents": [{"name": "dcf", "when": "Valuing a company.", "steps": ["Forecast."],
+                                        "source": {"doc": "valuation.md", "section": "Chapter 8"}},
+                                       {"name": "greet", "when": "Hello.", "steps": ["Greet."]}]})["intents"]
+    assert "Source: valuation.md — Chapter 8" in ap._skill_md(intent[0])
+    assert "read that section with the knowledge tool" in ap._skill_md(intent[0])
+    assert "knowledge tool" not in ap._skill_md(intent[1])               # from the owner's own instructions
+
+
+def test_seed_keeps_what_a_long_read_kept(deck, tmp_path):
+    rules = [{"text": f"Rule number {n}.", "source": {"doc": "book.md", "section": "Chapter 1"}} for n in range(100)]
+    terms = [{"term": f"Term {n}", "meaning": f"Meaning {n}."} for n in range(200)]
+    reviewed = {**ap.normalise({"rules": rules, "glossary": terms}, ap.CEILINGS), "id": ""}
+    agent_dir = tmp_path / "agent"
+    done = ap.seed(agent_dir, agent_dir / "ws", BOB, reviewed)
+    assert done["counts"]["rules"] == 100 and done["counts"]["glossary"] == 200
+    kn = agent_dir / "ws" / "knowledge"
+    assert "- Rule number 99. (from book.md — Chapter 1)" in (kn / "owner-rules.md").read_text()
+    assert "**Term 199**" in (kn / "glossary.md").read_text()
+    again = {**ap.normalise({"rules": [{"text": "One more rule."}]}), "id": ""}
+    assert ap.seed(agent_dir, agent_dir / "ws", BOB, again)["totals"]["rules"] == 101   # adding keeps the earlier
 
 
 def test_an_empty_preset_adds_no_block():
