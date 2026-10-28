@@ -30,9 +30,6 @@ VALID_THREAD_TYPES = frozenset({
     "connection", "pattern", "hypothesis", "association", "unresolved",
 })
 
-# BM25 rank threshold for dedup (FTS5 returns negative ranks; closer to 0 = better).
-_DEDUP_RANK_THRESHOLD = -8.0
-
 # Dreaming trigger defaults (overridden by config).
 _DEFAULT_INTERVAL_MESSAGES = 12
 _DEFAULT_COOLDOWN_SECONDS = 300
@@ -385,29 +382,32 @@ class NervousSystemManager:
         *,
         limit: int = 1,
     ) -> list[dict[str, Any]]:
-        """FTS5 similarity search for dedup."""
+        """Intuitions that state the same thing as *text*, best match first:
+        FTS finds candidates by *text*'s search words, ``retrieval.same_fact``
+        decides (a different number or a negation keeps them two)."""
+        from captain_claw import retrieval
+
         await self._ensure_db()
         assert self._db is not None
 
-        safe = " ".join(w for w in text.split() if len(w) > 2)[:200]
-        if not safe:
+        terms = retrieval.query_terms(retrieval.uncontract(text), max_terms=32)
+        if not terms:
             return []
-
         try:
             rows = await self._db.execute_fetchall(
-                """SELECT i.*, rank FROM intuitions_fts fts
-                   JOIN intuitions i ON i.rowid = fts.rowid
+                """SELECT i.*, bm25(intuitions_fts) AS rank
+                   FROM intuitions_fts JOIN intuitions i ON i.rowid = intuitions_fts.rowid
                    WHERE intuitions_fts MATCH ?
-                   ORDER BY rank LIMIT ?""",
-                (safe, limit),
+                   ORDER BY rank LIMIT 20""",
+                ("{content} : (" + retrieval.fts_match(terms) + ")",),
             )
-        except Exception:
+        except Exception as exc:
+            log.debug("Intuition similarity query failed", error=str(exc))
             return []
 
-        return [
-            self._row_to_dict(r) for r in rows
-            if (r[-1] or 0) > _DEDUP_RANK_THRESHOLD
-        ]
+        found = [item for item in map(self._row_to_dict, rows)
+                 if retrieval.same_fact(text, item.get("content") or "")]
+        return found[:limit]
 
     # ── context / lifecycle ──────────────────────────────────────────
 
