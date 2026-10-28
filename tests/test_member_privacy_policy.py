@@ -61,7 +61,7 @@ _DB_MODULES = ("nervous_system", "sister_session", "intentions", "cognitive_metr
 # Every tool name the tests call (stubs under the real names).
 STUBS = ("insights", "playbooks", "datastore", "write", "edit", "typesense", "send_mail",
          "web_fetch", "shell", "google_mail", "cron", "consult_peer", "flight_deck",
-         "mcp_github_create_issue", "vfs", "read", "glob", "grep", "history", "topics",
+         "mcp_github_create_issue", "vfs", "read", "glob", "grep", "history", "knowledge", "topics",
          "web_search", "todo", "contacts", "docx", "reasoning_effort", "activity", TOOL_NAME)
 
 

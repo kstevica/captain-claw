@@ -74,6 +74,7 @@ from captain_claw.tools.insights import InsightsTool
 from captain_claw.tools.conversation_topics import TopicsTool
 from captain_claw.tools.sessions import SessionsTool
 from captain_claw.tools.session_history import SessionHistoryTool
+from captain_claw.tools.knowledge import KnowledgeTool
 from captain_claw.tools.cron_tool import CronTool
 from captain_claw.tools.twitter import TwitterTool
 from captain_claw.tools.mcp_connector import MCPProxyConnector, MCPProxyTool
@@ -162,6 +163,7 @@ __all__ = [
     "TopicsTool",
     "SessionsTool",
     "SessionHistoryTool",
+    "KnowledgeTool",
     "CronTool",
     "TwitterTool",
     "MCPProxyConnector",

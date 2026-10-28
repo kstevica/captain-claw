@@ -92,6 +92,7 @@ DATASTORE_READS = frozenset({"list_tables", "describe", "query", "sql", "list_pr
 # Everything else — MCP/plugin tools included — is refused with CONTENT_PAUSED_MESSAGE (fail closed).
 CONTENT_TURN_TOOLS: dict[str, frozenset[str] | None] = {
     TOOL_NAME: None, "read": None, "glob": None, "grep": None, "history": None, "topics": None,
+    "knowledge": None,
     # Owner-private stores: reads only — a todo or contact note written now is
     # injected into every later owner turn, outside this turn's taint.
     "todo": frozenset({"list"}),
