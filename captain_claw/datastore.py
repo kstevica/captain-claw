@@ -23,6 +23,7 @@ import csv
 import io
 import json
 import os
+import posixpath
 import re
 import sqlite3
 import time
@@ -2752,7 +2753,8 @@ class DatastoreManager:
                     if s.get("name", "").lower() == sheet_name.lower():
                         target_sheet = s
                         break
-                if not target_sheet:
+                # An element without children is falsy: test for None.
+                if target_sheet is None:
                     raise ValueError(f"Sheet not found: {sheet_name}")
             else:
                 target_sheet = sheets_el[0]
@@ -2763,10 +2765,13 @@ class DatastoreManager:
             sheet_path = None
             for rel in rel_tree.findall("{http://schemas.openxmlformats.org/package/2006/relationships}Relationship"):
                 if rel.get("Id") == rid:
-                    sheet_path = "xl/" + rel.get("Target", "")
+                    sheet_path = _xlsx_part(rel.get("Target", ""))
                     break
 
             if not sheet_path or sheet_path not in zf.namelist():
+                # A sheet asked for by name is that sheet or none at all.
+                if sheet_name:
+                    raise ValueError(f"Sheet not readable: {sheet_name}")
                 # Fallback: try first worksheet
                 candidates = [n for n in zf.namelist() if n.startswith("xl/worksheets/sheet")]
                 if not candidates:
@@ -2778,14 +2783,19 @@ class DatastoreManager:
 
             for row_el in sheet_tree.findall(f"{{{ns}}}sheetData/{{{ns}}}row"):
                 row_vals: dict[int, Any] = {}
+                col_idx = -1
                 for cell in row_el.findall(f"{{{ns}}}c"):
                     ref = cell.get("r", "")
-                    col_idx = _col_ref_to_index(ref)
+                    # A cell without a reference is the one after the last.
+                    col_idx = _col_ref_to_index(ref) if ref else col_idx + 1
                     cell_type = cell.get("t", "")
                     val_el = cell.find(f"{{{ns}}}v")
                     val_text = val_el.text if val_el is not None and val_el.text else ""
 
-                    if cell_type == "s" and val_text:
+                    if cell_type == "inlineStr":
+                        # Plain (<is><t>) or rich text (<is><r><t>…</t></r>…), as openpyxl writes strings.
+                        value = "".join(t.text or "" for t in cell.findall(f"{{{ns}}}is//{{{ns}}}t"))
+                    elif cell_type == "s" and val_text:
                         idx = int(val_text)
                         value = shared[idx] if idx < len(shared) else ""
                     elif cell_type == "b":
@@ -2909,6 +2919,17 @@ class DatastoreManager:
 
 # ── module-level helpers ─────────────────────────────────────────────
 
+def _xlsx_part(target: str) -> str:
+    """A workbook relationship's target as a member of the package: relative
+    to ``xl/`` (Excel), or absolute from the package root (openpyxl writes
+    ``/xl/worksheets/sheet1.xml``)."""
+    if target.startswith("/"):
+        return posixpath.normpath(target.lstrip("/"))
+    if target.startswith("xl/"):
+        return posixpath.normpath(target)
+    return posixpath.normpath(posixpath.join("xl", target))
+
+
 def _col_ref_to_index(ref: str) -> int:
     """Convert Excel column reference (e.g. 'AB3') to 0-based index."""
     col = "".join(c for c in ref if c.isalpha()).upper()
@@ -2982,6 +3003,67 @@ def get_datastore_manager() -> DatastoreManager:
     if _manager is None:
         _manager = DatastoreManager()
     return _manager
+
+
+async def import_pending_tables(manager: DatastoreManager | None = None, path: Path | None = None) -> int:
+    """Make the tables Flight Deck left for this agent while it was off (its
+    owner's spreadsheets — flight_deck.agent_preset_tables.leave_tables):
+    drop the tables they replace, then make each one afresh, and drop the
+    file. How many tables were made."""
+    path = path or Path("~/.captain-claw/pending-tables.json").expanduser()
+    # Taken aside first: what Flight Deck leaves meanwhile waits for the next
+    # start. One a start that stopped midway left aside goes first.
+    work = path.with_name(f"{path.name}.importing")
+    made = 0
+    for _ in range(2):
+        if not work.is_file():
+            try:
+                os.replace(path, work)
+            except OSError:
+                break
+        made += await _import_tables_file(manager or get_datastore_manager(), work)
+    return made
+
+
+async def _import_tables_file(mgr: DatastoreManager, work: Path) -> int:
+    """The tables in one file Flight Deck left, then the file dropped."""
+    try:
+        data = json.loads(work.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.warning("Pending tables unreadable, dropped", path=str(work))
+        data = {}
+    data = data if isinstance(data, dict) else {}
+
+    async def drop(name: str) -> None:
+        try:
+            await mgr.drop_table(name)
+        except ValueError as exc:
+            if "not found" not in str(exc).lower():
+                raise
+
+    for name in data.get("drop") or []:
+        try:
+            await drop(str(name))
+        except Exception as exc:
+            log.warning("Pending table not dropped", table=name, error=str(exc))
+    made = 0
+    tables = [t for t in data.get("tables") or [] if isinstance(t, dict) and t.get("name")]
+    for t in tables:
+        name = str(t["name"])
+        try:
+            await drop(name)
+            columns = [c for c in t.get("columns") or [] if isinstance(c, dict)]
+            await mgr.create_table(name, columns)
+            cols = [str(c.get("name") or "") for c in columns]
+            rows = [r for r in t.get("rows") or [] if isinstance(r, list)]
+            for i in range(0, len(rows), 2000):
+                await mgr.insert_rows(name, [dict(zip(cols, r)) for r in rows[i:i + 2000]])
+            made += 1
+        except Exception as exc:
+            log.warning("Pending table not made", table=name, error=str(exc))
+    work.unlink(missing_ok=True)
+    log.info("Pending tables made", made=made, of=len(tables))
+    return made
 
 
 def get_vfs_datastore_manager(project: str, *, create: bool = True) -> DatastoreManager | None:

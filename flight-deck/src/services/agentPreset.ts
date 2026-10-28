@@ -46,6 +46,8 @@ export interface StagedDoc {
   truncated: boolean
   /** A library pick: the agent whose folder it came from. */
   agent?: string
+  /** A spreadsheet: the datastore tables it also gives the agent (one per sheet with data). */
+  tables?: number
 }
 
 export interface PreparedDoc {
@@ -60,6 +62,8 @@ export interface PreparedDoc {
   /** Read for rules, skills and facts; otherwise kept as knowledge only. */
   read: boolean
   agent?: string
+  /** A spreadsheet: the datastore tables it also gives the agent. */
+  tables?: number
 }
 
 export interface PreparedPreset {
@@ -112,7 +116,11 @@ export type ReviewedPreset = Omit<AgentPreset, 'conflicts' | 'warnings'> & { id:
 /** Added to what an earlier setup gave the agent, or in its place. */
 export type ApplyMode = 'add' | 'replace'
 
-export interface SetupCounts { rules: number; escalation: number; templates: number; glossary: number; intents: number; facts: number; knowledge: number }
+export interface SetupCounts {
+  rules: number; escalation: number; templates: number; glossary: number; intents: number; facts: number; knowledge: number
+  /** Datastore tables from the spreadsheets. */
+  tables?: number
+}
 
 export interface AppliedPreset {
   ok: boolean
@@ -131,6 +139,10 @@ export interface AppliedPreset {
   knowledge: string[]
   /** Files the long documents were split into, so the agent can search all of them. */
   parts: number
+  /** The datastore tables the spreadsheets became (made now, or when the agent is next up). */
+  tables?: string[]
+  /** What was left out of them (sheets past the datastore's room, rows past its cap). */
+  warnings?: string[]
   running: boolean
 }
 
@@ -147,6 +159,7 @@ export interface CurrentSetup {
   skills: string[]
   facts: number
   knowledge: { title: string; parts: number }[]
+  tables?: { name: string; doc: string; sheet: string | null; rows: number }[]
 }
 
 async function send(path: string, init: RequestInit, asUser?: string): Promise<Response> {

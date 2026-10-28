@@ -101,10 +101,17 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 
 
 def datastore_path(slug: str) -> Path | None:
-    """The agent's datastore file: the default under its home, or where its
-    own config moves it — but only ever inside the agent's folder."""
+    """The agent's datastore file, when it has one."""
+    path = datastore_file(_data_dir() / slug)
+    return path if path.is_file() else None
+
+
+def datastore_file(agent_dir: Path) -> Path:
+    """Where the agent in *agent_dir* keeps its datastore: the default under
+    its home, or where its own config moves it — but only ever inside the
+    agent's folder."""
     import yaml
-    agent_dir = (_data_dir() / slug).resolve()
+    agent_dir = agent_dir.resolve()
     home = agent_dir / "data" / "home-config-parent"
     path = home / ".captain-claw" / "datastore.db"
     for cfg_file in (home / ".captain-claw" / "config.yaml", agent_dir / "config.yaml"):
@@ -120,7 +127,7 @@ def datastore_path(slug: str) -> Path | None:
             if p.is_relative_to(agent_dir):
                 path = p
             break
-    return path if path.is_file() else None
+    return path
 
 
 def _casefold(v: Any) -> str | None:

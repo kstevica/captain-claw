@@ -22,12 +22,19 @@
   with an index, glossary and the full rules, and a capped rules block after
   its instructions — stored for the owner and returned; another person's
   preset id brings no documents, another person's agent is a 404;
-* facts go to the agent as insights once it answers; a failure never raises.
+* facts go to the agent as insights once it answers; a failure never raises;
+* a spreadsheet's sheets become datastore tables, without a model: values
+  keep their kind (a code keeps its zeros), a title above the header is left
+  out, names come from the document and sheet and never take a table the
+  agent keeps for itself; the index and the document's own file name them;
+  a running agent gets them through its REST, one that is off at its next
+  start; given again they replace their tables, replace mode drops them all.
 """
 
 from __future__ import annotations
 
 import asyncio
+import datetime as dt
 import json
 import time
 from pathlib import Path
@@ -35,12 +42,15 @@ from pathlib import Path
 import httpx
 import pytest
 
+from captain_claw.datastore import DatastoreManager, import_pending_tables
 from captain_claw.flight_deck import agent_preset as ap
 from captain_claw.flight_deck import agent_preset_docs as pdocs
+from captain_claw.flight_deck import agent_preset_tables as ptables
 from captain_claw.flight_deck import archetypes as arch_mod
 from captain_claw.flight_deck import auth as fd_auth
 from captain_claw.flight_deck import rate_limiter, server
 from captain_claw.flight_deck.auth import create_access_token, set_auth_db
+from captain_claw.flight_deck.data_library import datastore_file
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.skills import _parse_frontmatter
 
@@ -991,7 +1001,7 @@ def test_seed_writes_skills_knowledge_and_the_full_rules(deck, tmp_path):
     block, facts = done["block"], done["facts"]
     assert done["skills"] == ["refund-request", "refund-request-2"]
     assert done["counts"] == {"rules": 1, "escalation": 1, "templates": 1, "glossary": 1,
-                              "intents": 2, "facts": 2, "knowledge": 1}
+                              "intents": 2, "facts": 2, "knowledge": 1, "tables": 0}
 
     skill = agent_dir / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund-request" / "SKILL.md"
     meta = _parse_frontmatter(skill.read_text())
@@ -1134,7 +1144,7 @@ def test_a_setup_can_replace_the_one_before(deck, tmp_path):
     assert not (agent / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund").exists()
     assert "Old rule." not in (kn / "owner-rules.md").read_text()
     assert done["totals"] == {"rules": 1, "escalation": 0, "templates": 0, "glossary": 0, "intents": 0,
-                              "facts": 0, "knowledge": 1}
+                              "facts": 0, "knowledge": 1, "tables": 0}
 
 
 def test_a_setup_from_before_records_is_read_back_from_its_files(deck, tmp_path):
@@ -1327,3 +1337,231 @@ async def test_facts_left_for_an_agent_thats_off_keep_their_document(tmp_path):
         assert got["source_tool"] == "owner_setup"
     finally:
         await mgr.close()
+
+
+# ── Spreadsheets as tables ────────────────────────────────────────────
+
+
+_PRICES = {
+    "Plans": [["Price list 2026"], [], ["SKU", "Plan", "Price (EUR)", "Since"],
+              ["00123", "Basic", 9.5, dt.datetime(2026, 1, 1)], ["00124", "Pro", 19, dt.datetime(2026, 3, 1)]],
+    "Add-ons": [["Code", "Name", "Price", "Price"], ["A-1", "Backup", 3, 4], ["A-2", "Support", 10, None]],
+    "Notes": [],
+}
+_PLANS = ["price_list_plans", "price_list_add_ons"]
+
+
+def _xlsx(path: Path, sheets: dict[str, list[list]] = _PRICES) -> Path:
+    import openpyxl
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb = openpyxl.Workbook()
+    wb.remove(wb.active)
+    for title, rows in sheets.items():
+        ws = wb.create_sheet(title)
+        for row in rows:
+            ws.append(row)
+    wb.save(path)
+    return path
+
+
+def _sheet_doc(path: Path, name: str = "Price list.xlsx") -> dict:
+    return {"name": name, "text": f"# {name}", "source": str(path)}
+
+
+def test_a_workbook_gives_a_table_per_sheet_with_its_values_kept(tmp_path):
+    path = _xlsx(tmp_path / "Price list.xlsx")
+    tables, notes = ptables.read_tables(path)
+    assert notes == [] and [t["sheet"] for t in tables] == ["Plans", "Add-ons"]      # the empty sheet isn't one
+    plans, addons = tables
+    assert plans["columns"] == [{"name": "sku", "type": "text"}, {"name": "plan", "type": "text"},
+                                {"name": "price_eur", "type": "real"}, {"name": "since", "type": "date"}]
+    assert plans["rows"] == [["00123", "Basic", 9.5, "2026-01-01"], ["00124", "Pro", 19, "2026-03-01"]]
+    assert [c["name"] for c in addons["columns"]] == ["code", "name", "price", "price_2"]
+    assert addons["rows"][1] == ["A-2", "Support", 10, None] and not plans["cut"]
+    assert ptables.count_tables(path) == 2
+
+
+def test_a_csv_is_one_table_whatever_its_separator_and_encoding(tmp_path):
+    path = tmp_path / "Cjenik.csv"
+    path.write_bytes("Šifra;Naziv;Cijena\n00123;Čišćenje;12.50\n00124;Pranje;8\n\n".encode("cp1250"))
+    (table,), _ = ptables.read_tables(path)
+    assert table["sheet"] is None
+    assert table["columns"] == [{"name": "sifra", "type": "text"}, {"name": "naziv", "type": "text"},
+                                {"name": "cijena", "type": "real"}]
+    assert table["rows"] == [["00123", "Čišćenje", 12.5], ["00124", "Pranje", 8]]
+    assert ptables.count_tables(path) == 1
+
+
+def test_table_names_come_from_the_document_and_sheet():
+    assert ptables.table_name("Cjenik usluga – čišćenje & đon.xlsx", "Paketi") == "cjenik_usluga_ciscenje_djon_paketi"
+    assert ptables.table_name("2026 prices.csv", None) == "t_2026_prices"
+    assert ptables.table_name("€€€.xlsx", None) == "spreadsheet"
+    assert len(ptables.table_name("x" * 200 + ".xlsx", "Sheet")) == 60
+    assert ptables.unique("prices", {"prices", "prices_2"}) == "prices_3"
+
+
+async def test_a_spreadsheet_is_staged_whole_and_says_its_tables(deck, monkeypatch, tmp_path):
+    raw = _xlsx(tmp_path / "Price list.xlsx").read_bytes()
+    staged = (await _stage(BOB, [("Price list.xlsx", raw), ("notes.txt", b"Plain notes.")]))["docs"]
+    assert staged[0]["tables"] == 2 and "tables" not in staged[1]
+    loaded = pdocs.load_staged(ap.owner_root(BOB), staged[0]["id"])
+    assert Path(loaded["source"]).read_bytes() == raw
+    assert pdocs.load_staged(ap.owner_root(BOB), staged[1]["id"])["source"] == ""
+
+    # Kept as knowledge only, it needs no model — and the file travels on to Apply.
+    r = await _start(BOB, [{"id": staged[0]["id"], "read": False}], instructions="")
+    prepared = (await _wait(BOB, r.json()["id"]))["result"]
+    assert prepared["docs"][0]["tables"] == 2
+    slug = await _spawn(BOB, "Helpdesk", 24306)
+    monkeypatch.setattr(server, "_process_is_alive", lambda s: False)
+    body = (await _apply(BOB, slug, {**prepared["preset"], "id": prepared["id"]})).json()
+    assert body["tables"] == _PLANS and body["counts"]["tables"] == 2 and body["warnings"] == []
+
+
+async def test_a_spreadsheet_becomes_tables_named_in_its_knowledge(deck, tmp_path):
+    agent, ws = tmp_path / "agent", tmp_path / "agent" / "ws"
+    # The agent keeps a table of its own by the name the setup would take.
+    own = DatastoreManager(datastore_file(agent))
+    await own.create_table("price_list_plans", [{"name": "mine", "type": "text"}])
+    await own.close()
+
+    done = ap.seed(agent, ws, BOB, _setup(BOB, [_sheet_doc(_xlsx(tmp_path / "src" / "Price list.xlsx"))]))
+    assert [t["name"] for t in done["tables"]] == ["price_list_plans_2", "price_list_add_ons"]
+    assert done["drop"] == [] and done["counts"]["tables"] == 2 and done["totals"]["tables"] == 2
+    assert done["tables"][0]["rows"][0] == ["00123", "Basic", 9.5, "2026-01-01"]
+    kn = ws / "knowledge"
+    index = (kn / "INDEX.md").read_text()
+    assert ("- `price_list_plans_2` — Price list.xlsx, sheet “Plans”: 2 rows; columns sku, plan, price_eur, since"
+            in index) and "## Tables" in index and "(price-list.md)" in index
+    assert "`price_list_plans_2` (Plans), `price_list_add_ons` (Add-ons)" in (kn / "price-list.md").read_text()
+    assert "### Your tables" in done["block"] and "price_list_add_ons" in done["block"]
+    record = ap.read_record(agent)["tables"]
+    assert [(t["name"], t["sheet"], t["rows"]) for t in record] == [
+        ("price_list_plans_2", "Plans", 2), ("price_list_add_ons", "Add-ons", 2)]
+    assert record[0]["columns"] == ["sku", "plan", "price_eur", "since"]
+
+
+def test_a_spreadsheet_given_again_replaces_its_tables(deck, tmp_path):
+    agent, ws = tmp_path / "agent", tmp_path / "agent" / "ws"
+    stock = tmp_path / "src" / "Stock.csv"
+    stock.parent.mkdir(parents=True)
+    stock.write_text("sku,qty\nA,1\n")
+    first = ap.seed(agent, ws, BOB, _setup(BOB, [_sheet_doc(_xlsx(tmp_path / "src" / "Price list.xlsx")),
+                                                 _sheet_doc(stock, "Stock.csv")]))
+    assert [t["name"] for t in first["tables"]] == [*_PLANS, "stock"]
+
+    # Given again, now with one sheet: its tables go, and it is named from the document alone.
+    v2 = _xlsx(tmp_path / "v2" / "Price list.xlsx", {"Plans": [["SKU", "Price"], ["00123", 11]]})
+    again = ap.seed(agent, ws, BOB, _setup(BOB, [_sheet_doc(v2)]))
+    assert again["drop"] == _PLANS and [t["name"] for t in again["tables"]] == ["price_list"]
+    assert [t["name"] for t in ap.read_record(agent)["tables"]] == ["stock", "price_list"]
+    assert again["totals"]["tables"] == 2 and "price_list_plans" not in (ws / "knowledge" / "INDEX.md").read_text()
+
+    gone = ap.seed(agent, ws, BOB, _setup(BOB, [{"name": "faq.md", "text": "FAQ."}]), mode="replace")
+    assert sorted(gone["drop"]) == ["price_list", "stock"] and gone["tables"] == []
+    assert ap.read_record(agent)["tables"] == [] and "## Tables" not in (ws / "knowledge" / "INDEX.md").read_text()
+
+
+async def test_an_agent_that_is_off_gets_its_tables_when_it_next_starts(deck, monkeypatch, tmp_path):
+    slug = await _spawn(BOB, "Helpdesk", 24307)
+    monkeypatch.setattr(server, "_process_is_alive", lambda s: False)
+    scheduled: list = []
+    monkeypatch.setattr(ap, "schedule_tables", lambda *a, **k: scheduled.append(a))
+    src = _xlsx(tmp_path / "src" / "Price list.xlsx")
+    body = (await _apply(BOB, slug, _setup(BOB, [_sheet_doc(src)]))).json()
+    assert body["tables"] == _PLANS and body["running"] is False
+    pending = ptables.pending_path(server.DATA_DIR / slug)
+    assert scheduled == [] and [t["name"] for t in json.loads(pending.read_text())["tables"]] == _PLANS
+
+    # Given again before it starts: each table waits once, as it is now.
+    await _apply(BOB, slug, _setup(BOB, [_sheet_doc(src)]))
+    waiting = json.loads(pending.read_text())
+    assert waiting["drop"] == _PLANS and [t["name"] for t in waiting["tables"]] == _PLANS
+
+    store = DatastoreManager(tmp_path / "store.db")
+    await store.create_table("price_list_plans", [{"name": "old", "type": "text"}])     # an earlier copy
+    assert await import_pending_tables(store, pending) == 2 and not pending.exists()
+    got = await store.query("price_list_plans", columns=["sku", "plan", "price_eur", "since"])
+    assert got["rows"] == [["00123", "Basic", 9.5, "2026-01-01"], ["00124", "Pro", 19.0, "2026-03-01"]]
+    info = await store.describe_table("price_list_add_ons")
+    assert [(c.name, c.col_type) for c in info.columns] == [
+        ("code", "text"), ("name", "text"), ("price", "integer"), ("price_2", "integer")]
+    assert await import_pending_tables(store, pending) == 0
+    await store.close()
+
+
+async def test_apply_hands_a_running_agent_its_tables(deck, monkeypatch, tmp_path):
+    slug = await _spawn(BOB, "Helpdesk", 24308)
+    given: list = []
+    monkeypatch.setattr(ap, "schedule_tables",
+                        lambda slug, port_of, token, drop, tables, agent_dir: given.append(
+                            (slug, port_of(), token, drop, [t["name"] for t in tables], agent_dir)))
+    await _apply(BOB, slug, _setup(BOB, [_sheet_doc(_xlsx(tmp_path / "src" / "Price list.xlsx"))]))
+    entry = server._load_process_registry()[slug]
+    assert given == [(slug, 24308, entry["web_auth"], [], _PLANS, server.DATA_DIR / slug)]
+    assert not ptables.pending_path(server.DATA_DIR / slug).exists()
+
+
+async def test_a_running_agent_gets_its_tables_through_its_rest(monkeypatch, tmp_path):
+    store = DatastoreManager(tmp_path / "store.db")
+
+    async def agent_rest(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["token"] == "tok" and request.url.port == 24500
+        rest = request.url.path.removeprefix("/api/datastore/tables").strip("/").split("/")
+        try:
+            if request.method == "DELETE":
+                await store.drop_table(rest[0])
+                return httpx.Response(200, json={"ok": True})
+            body = json.loads(request.content)
+            if rest == [""]:
+                if body["name"] == "broken":
+                    return httpx.Response(400, json={"error": "Table limit (50) reached"})
+                await store.create_table(body["name"], body["columns"])
+                return httpx.Response(201, json={"name": body["name"]})
+            return httpx.Response(201, json={"inserted": await store.insert_rows(rest[0], body["rows"])})
+        except ValueError as exc:
+            return httpx.Response(400, json={"error": str(exc)})
+
+    real = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(agent_rest), **kw))
+
+    async def ready(port_of, token, timeout):
+        return port_of()
+
+    monkeypatch.setattr(ap, "_wait_ready", ready)
+    monkeypatch.setattr(ptables, "_BATCH", 1)                  # the rows go in batches
+    read, _ = ptables.read_tables(_xlsx(tmp_path / "Price list.xlsx"))
+    tables = [{**t, "name": n, "doc": "Price list.xlsx"} for t, n in zip(read, _PLANS)]
+    broken = {**tables[1], "name": "broken"}
+    agent = tmp_path / "agent"
+    # Left while it was off: a stale copy of a table it gets now, and a drop of another.
+    ptables.leave_tables(agent, ["stale"], [{**tables[0], "rows": []}])
+
+    assert await ap.give_tables("a", lambda: 24500, "tok", ["old_one"], [*tables, broken], agent) == 2
+    got = await store.query("price_list_plans", columns=["sku", "price_eur"])
+    assert got["rows"] == [["00123", 9.5], ["00124", 19.0]]
+    waiting = json.loads(ptables.pending_path(agent).read_text())
+    assert waiting["drop"] == ["stale"] and [t["name"] for t in waiting["tables"]] == ["broken"]
+    await store.close()
+
+
+async def test_tables_given_twice_to_one_agent_go_one_after_the_other(monkeypatch, tmp_path):
+    order: list = []
+    gate = asyncio.Event()
+
+    async def give(slug, port_of, token, drop, tables, agent_dir, timeout=0):
+        order.append(("start", drop[0]))
+        if drop[0] == "first":
+            await gate.wait()
+        order.append(("end", drop[0]))
+        return 0
+
+    monkeypatch.setattr(ap, "give_tables", give)
+    ap.schedule_tables("a", lambda: 1, "", ["first"], [], tmp_path)
+    ap.schedule_tables("a", lambda: 1, "", ["second"], [], tmp_path)
+    await asyncio.sleep(0.01)
+    assert order == [("start", "first")]
+    gate.set()
+    await asyncio.gather(*list(ap._PENDING))
+    assert order == [("start", "first"), ("end", "first"), ("start", "second"), ("end", "second")]
+    assert "a" not in ap._TABLES_BUSY
