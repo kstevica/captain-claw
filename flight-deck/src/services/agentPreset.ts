@@ -98,10 +98,13 @@ export type ReaderVia = 'agent' | 'tiers' | ''
 export type ReadWait =
   | { why: 'waking'; name: string }
   | { why: 'busy'; model: string; /** Unix seconds. */ until: number }
+  /** Calls spaced out so the provider's caps stay far off. */
+  | { why: 'pacing'; /** Unix seconds. */ until: number }
 
 /** The model that reads — the agent's own, else the person's — how much
- *  material one step gives it, and why it isn't the agent's (`note`). */
-export interface Reader { model: string; step_tokens: number; via?: ReaderVia; note?: string }
+ *  material one step gives it, the tokens a minute the read keeps to
+ *  (`pace_tpm`, 0: unpaced), and why it isn't the agent's (`note`). */
+export interface Reader { model: string; step_tokens: number; pace_tpm?: number; via?: ReaderVia; note?: string }
 
 /** What Apply takes: the prepared id and the items the person kept. */
 export type ReviewedPreset = Omit<AgentPreset, 'conflicts' | 'warnings'> & { id: string }
