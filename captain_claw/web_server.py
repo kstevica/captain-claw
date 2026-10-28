@@ -3730,6 +3730,13 @@ async def _run_server(config: Config) -> None:
         asyncio.create_task(import_pending())
     except Exception as exc:
         log.warning("pending_insights_failed", error=str(exc))
+    # …and the tables its owner's spreadsheets became.
+    try:
+        from captain_claw.datastore import import_pending_tables
+
+        asyncio.create_task(import_pending_tables())
+    except Exception as exc:
+        log.warning("pending_tables_failed", error=str(exc))
 
     await stop_event.wait()
 

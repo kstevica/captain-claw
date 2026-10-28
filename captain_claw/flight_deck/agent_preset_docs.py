@@ -6,7 +6,8 @@ it, so the dialog can say how many pages it has and what reading it in full
 costs before anything is spent. Its whole text reaches the agent's knowledge,
 split into parts its semantic memory indexes (it skips files over 256 KB);
 the model reads it in chunks sized to its context window (``split_text``
-serves both).
+serves both). A spreadsheet (.xlsx, .csv) is kept as it came, too: its
+sheets become tables in the agent's datastore (agent_preset_tables).
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from captain_claw.flight_deck import agent_preset_tables as ptables
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -194,12 +196,15 @@ def public(meta: dict) -> dict:
     out = {k: meta[k] for k in ("id", "name", "origin", "pages", "pages_exact", "chars", "tokens", "truncated")}
     if meta.get("agent"):
         out["agent"] = meta["agent"]
+    if meta.get("source"):
+        out["tables"] = int(meta.get("tables") or 0)
     return out
 
 
-def stage(root: Path, name: str, text: str, origin: str, agent: str = "") -> dict:
+def stage(root: Path, name: str, text: str, origin: str, agent: str = "", raw: bytes | None = None) -> dict:
     """Keep a document's text under *root* (the owner's folder) until the
-    setup reads it; its public description."""
+    setup reads it — a spreadsheet's own bytes (*raw*) too, for its tables —
+    and its public description (a spreadsheet's: how many tables it gives)."""
     truncated = len(text) > MAX_CHARS
     text = text[:MAX_CHARS]
     pages, exact = pages_of(text)
@@ -211,13 +216,17 @@ def stage(root: Path, name: str, text: str, origin: str, agent: str = "") -> dic
     meta = {"id": doc_id, "name": name, "origin": origin, "created": time.time(),
             "pages": pages, "pages_exact": exact, "chars": len(text), "tokens": tokens_of(len(text)),
             "truncated": truncated, **({"agent": agent} if agent else {})}
+    if raw and ptables.is_spreadsheet(name):
+        source = folder / f"source{Path(name).suffix.lower()}"
+        source.write_bytes(raw)
+        meta.update(source=source.name, tables=ptables.count_tables(source))
     (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     return public(meta)
 
 
 def load_staged(root: Path, doc_id: str) -> dict | None:
-    """A staged document (its meta and ``text``); None when it is gone,
-    expired, or not under *root*."""
+    """A staged document (its meta, ``text``, and a spreadsheet's
+    ``source`` file); None when it is gone, expired, or not under *root*."""
     folder = _staged_dir(root, doc_id)
     if folder is None or not (folder / "meta.json").is_file():
         return None
@@ -225,7 +234,10 @@ def load_staged(root: Path, doc_id: str) -> dict | None:
         meta = json.loads((folder / "meta.json").read_text(encoding="utf-8"))
         if time.time() - float(meta.get("created") or 0) > TTL:
             return None
-        return {**meta, "text": (folder / "text.txt").read_text(encoding="utf-8")}
+        source = folder / str(meta.get("source") or "")
+        ok = bool(re.fullmatch(r"source\.(xlsx|csv)", source.name)) and source.is_file()
+        return {**meta, "text": (folder / "text.txt").read_text(encoding="utf-8"),
+                "source": str(source) if ok else ""}
     except Exception:
         log.warning("agent preset: could not read a staged document", doc=doc_id, exc_info=True)
         return None

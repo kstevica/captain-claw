@@ -2984,6 +2984,67 @@ def get_datastore_manager() -> DatastoreManager:
     return _manager
 
 
+async def import_pending_tables(manager: DatastoreManager | None = None, path: Path | None = None) -> int:
+    """Make the tables Flight Deck left for this agent while it was off (its
+    owner's spreadsheets — flight_deck.agent_preset_tables.leave_tables):
+    drop the tables they replace, then make each one afresh, and drop the
+    file. How many tables were made."""
+    path = path or Path("~/.captain-claw/pending-tables.json").expanduser()
+    # Taken aside first: what Flight Deck leaves meanwhile waits for the next
+    # start. One a start that stopped midway left aside goes first.
+    work = path.with_name(f"{path.name}.importing")
+    made = 0
+    for _ in range(2):
+        if not work.is_file():
+            try:
+                os.replace(path, work)
+            except OSError:
+                break
+        made += await _import_tables_file(manager or get_datastore_manager(), work)
+    return made
+
+
+async def _import_tables_file(mgr: DatastoreManager, work: Path) -> int:
+    """The tables in one file Flight Deck left, then the file dropped."""
+    try:
+        data = json.loads(work.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log.warning("Pending tables unreadable, dropped", path=str(work))
+        data = {}
+    data = data if isinstance(data, dict) else {}
+
+    async def drop(name: str) -> None:
+        try:
+            await mgr.drop_table(name)
+        except ValueError as exc:
+            if "not found" not in str(exc).lower():
+                raise
+
+    for name in data.get("drop") or []:
+        try:
+            await drop(str(name))
+        except Exception as exc:
+            log.warning("Pending table not dropped", table=name, error=str(exc))
+    made = 0
+    tables = [t for t in data.get("tables") or [] if isinstance(t, dict) and t.get("name")]
+    for t in tables:
+        name = str(t["name"])
+        try:
+            await drop(name)
+            columns = [c for c in t.get("columns") or [] if isinstance(c, dict)]
+            await mgr.create_table(name, columns)
+            cols = [str(c.get("name") or "") for c in columns]
+            rows = [r for r in t.get("rows") or [] if isinstance(r, list)]
+            for i in range(0, len(rows), 2000):
+                await mgr.insert_rows(name, [dict(zip(cols, r)) for r in rows[i:i + 2000]])
+            made += 1
+        except Exception as exc:
+            log.warning("Pending table not made", table=name, error=str(exc))
+    work.unlink(missing_ok=True)
+    log.info("Pending tables made", made=made, of=len(tables))
+    return made
+
+
 def get_vfs_datastore_manager(project: str, *, create: bool = True) -> DatastoreManager | None:
     """Return a datastore manager whose DB lives INSIDE a shared VFS project
     folder (``vfs:<project>/.datastore/store.db``).
