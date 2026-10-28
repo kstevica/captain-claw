@@ -7,9 +7,10 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
-  READ_BUDGETS, applyAgentPreset, cancelRead, getCurrentSetup, getLatestRead, getRead, getReader, stageDocument, startRead,
-  type AppliedPreset, type ApplyMode, type CurrentSetup, type DocUsage, type ReadBudget, type ReadJob, type Reader,
-  type SetupCounts, type StagedDoc,
+  READ_BUDGETS, applyAgentPreset, cancelRead, getCurrentSetup, getLatestRead, getRead, getReader, stageDocument,
+  stageKnowledge, startRead,
+  type AppliedPreset, type ApplyMode, type CurrentSetup, type DocUsage, type ReadBudget, type ReadJob, type ReadState,
+  type Reader, type SetupCounts, type StagedDoc,
 } from '../../services/agentPreset'
 import { fileLibraryApi, type LibraryItem } from '../../services/fileLibraryApi'
 import type { QuotaStatus } from '../../services/profile'
@@ -75,8 +76,10 @@ interface Doc {
   error?: string
   /** An upload… */
   file?: File
-  /** …or a File library file. */
+  /** …or a File library file… */
   pick?: LibraryItem
+  /** …or one the agent already keeps, not read (or partly): only the rest is read. */
+  known?: boolean
 }
 
 type Step = 'material' | 'reading' | 'review' | 'done'
@@ -265,6 +268,28 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
     setPicking(false)
   }
 
+  /** Documents the agent keeps, not read (or partly), to read now: staged from its knowledge. */
+  const [addingKnown, setAddingKnown] = useState(false)
+  const addKnown = async (names: string[]) => {
+    const have = new Set(docs.filter((d) => d.known).map((d) => d.name))
+    const wanted = names.filter((n) => !have.has(n)).slice(0, MAX_FILES - docs.length)
+    if (!wanted.length || addingKnown) return
+    setAddingKnown(true)
+    setNotice(names.length > wanted.length + have.size ? `Up to ${MAX_FILES} documents.` : '')
+    try {
+      const { docs: got, warnings } = await stageKnowledge(agent.slug, wanted, asUser)
+      updateDocs((prev) => [...prev, ...got.map((st): Doc => ({
+        key: nextKey(), name: st.name, size: st.chars, description: '', usage: st.usage ?? 'auto', read: true,
+        status: 'ready', staged: st, known: true,
+      }))])
+      if (warnings.length) setNotice(warnings.join(' '))
+    } catch (e) {
+      setNotice(message(e))
+    } finally {
+      setAddingKnown(false)
+    }
+  }
+
   const insertStarter = (text: string) => {
     const base = instructions.trimEnd()
     const lead = base ? `${base}\n` : ''
@@ -282,7 +307,8 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
   const ready = docs.filter((d) => d.status === 'ready')
   const staging = docs.some((d) => d.status === 'staging')
   // Every document is kept whole and indexed, read or not.
-  const searchable = { docs: ready.length, bytes: ready.reduce((n, d) => n + (d.size || 0), 0) }
+  const fresh = ready.filter((d) => !d.known)   // the agent's own are searchable already
+  const searchable = { docs: fresh.length, bytes: fresh.reduce((n, d) => n + (d.size || 0), 0) }
   const hasMaterial = ready.length > 0 || !!instructions.trim()
   const stepTokens = reader?.step_tokens || 0
   const readTokens = readTokensOf(docs)
@@ -455,7 +481,11 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
 
         {step === 'material' && !opening && (
           <>
-            {current?.has && <EarlierSetup name={name} current={current} mode={mode} onMode={(m) => { setMode(m); setReview(null) }} />}
+            {current?.has && (
+              <EarlierSetup name={name} current={current} mode={mode} onMode={(m) => { setMode(m); setReview(null) }}
+                added={new Set(docs.filter((d) => d.known).map((d) => d.name))} adding={addingKnown}
+                room={MAX_FILES - docs.length} onRead={(names) => void addKnown(names)} />
+            )}
             <div className="flex min-h-0 flex-1 flex-col overflow-y-auto wide:flex-row wide:overflow-hidden">
               {/* Documents */}
               <section className="order-2 shrink-0 px-4 py-4 wide:order-1 wide:min-h-0 wide:flex-1 wide:shrink wide:overflow-y-auto wide:px-6">
@@ -667,9 +697,11 @@ function DocCard({ doc, agentName, stepTokens, budgeted, onChange, onRemove }: {
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-medium text-zinc-100" title={doc.name}>{doc.name}</p>
           <p className="flex min-w-0 items-center gap-1 text-[11px] text-zinc-500">
-            {doc.pick
-              ? <><Library className="h-3 w-3 shrink-0" /><span className="truncate">From your library · {doc.pick.agent_name}</span></>
-              : <><Upload className="h-3 w-3 shrink-0" /><span>Uploaded</span></>}
+            {doc.known
+              ? <><BookOpen className="h-3 w-3 shrink-0" /><span className="truncate">In {agentName}'s knowledge</span></>
+              : doc.pick
+                ? <><Library className="h-3 w-3 shrink-0" /><span className="truncate">From your library · {doc.pick.agent_name}</span></>
+                : <><Upload className="h-3 w-3 shrink-0" /><span>Uploaded</span></>}
             <span className="shrink-0">· {fmtBytes(doc.size)}</span>
           </p>
           {doc.status === 'staging' && (
@@ -678,7 +710,12 @@ function DocCard({ doc, agentName, stepTokens, budgeted, onChange, onRemove }: {
             </p>
           )}
           {doc.status === 'error' && <p className="mt-0.5 text-[11px] text-red-600 dark:text-red-400">{doc.error}</p>}
-          {st && (
+          {st && doc.known && (
+            <p className="mt-0.5 text-[11px] text-zinc-400">
+              {readLine(st.read)}{' · '}~{kTokens(st.tokens)} tokens left to read
+            </p>
+          )}
+          {st && !doc.known && (
             <p className="mt-0.5 text-[11px] text-zinc-400">
               {st.pages_exact ? plural(st.pages, 'page') : `about ${plural(st.pages, 'page')}`}
               {' · '}{kTokens(st.tokens)} tokens to read in full
@@ -688,9 +725,11 @@ function DocCard({ doc, agentName, stepTokens, budgeted, onChange, onRemove }: {
           {st && (
             <p className="mt-0.5 flex items-center gap-1 text-[11px] text-sky-700 dark:text-sky-400">
               <Search className="h-3 w-3 shrink-0" />
-              {mapped(st)
-                ? `All of it searchable, with a map of its ${st.sections!.toLocaleString()} sections`
-                : 'All of it searchable'}
+              {doc.known
+                ? `Searchable already, with ${mapped(st) ? 'its section map' : 'all of it'}`
+                : mapped(st)
+                  ? `All of it searchable, with a map of its ${st.sections!.toLocaleString()} sections`
+                  : 'All of it searchable'}
               <span className="text-zinc-500">· no tokens</span>
             </p>
           )}
@@ -753,7 +792,7 @@ function DocCard({ doc, agentName, stepTokens, budgeted, onChange, onRemove }: {
             </span>
             <span className="min-w-0 flex-1">
               <span className="flex flex-wrap items-baseline gap-x-2 text-xs text-zinc-200">
-                {doc.read ? 'Read it for rules, skills and facts' : 'Knowledge only'}
+                {doc.read ? (doc.known ? 'Read the rest for rules, skills and facts' : 'Read it for rules, skills and facts') : 'Knowledge only'}
                 <span className="text-[11px] text-zinc-500">
                   {!doc.read ? 'no tokens'
                     : budgeted ? 'its key sections, within your budget'
@@ -761,7 +800,9 @@ function DocCard({ doc, agentName, stepTokens, budgeted, onChange, onRemove }: {
                 </span>
               </span>
               <span className="block text-[11px] leading-snug text-zinc-500">
-                {doc.read
+                {doc.read && doc.known
+                  ? 'Only what wasn’t read before is read; the rest of its setup stays as it is.'
+                  : doc.read
                   ? `${agentName} also keeps the whole document to look things up in.`
                   : `Nothing is read now: ${agentName} keeps the whole document and finds any part of it by search${st && mapped(st) ? ' and its section map' : ''}.`}
               </span>
@@ -771,6 +812,14 @@ function DocCard({ doc, agentName, stepTokens, budgeted, onChange, onRemove }: {
       )}
     </li>
   )
+}
+
+/** How much of a document the agent keeps is read, in a few words. */
+function readLine(read?: ReadState): string {
+  if (!read || read.state === 'unknown') return 'Kept before reads were tracked'
+  if (read.state === 'none') return 'Only kept — not read'
+  if (read.state === 'full') return 'All of it read'
+  return `${read.sections.toLocaleString()} of ${plural(read.of, 'section')} read`
 }
 
 /** "6 rules, 1 skill, 3 documents" — the groups a setup gave, those it has. */
@@ -784,12 +833,30 @@ function setupSummary(c: Pick<SetupCounts, 'rules' | 'escalation' | 'templates' 
 }
 
 /** The setup an agent already has, and whether the new one adds to it or replaces it. */
-function EarlierSetup({ name, current, mode, onMode }: {
+function EarlierSetup({ name, current, mode, onMode, added, adding, room, onRead }: {
   name: string
   current: CurrentSetup
   mode: ApplyMode
   onMode: (m: ApplyMode) => void
+  /** Its documents already among the material, to read. */
+  added: Set<string>
+  adding: boolean
+  /** How many more documents the material takes. */
+  room: number
+  /** Read these of its documents now (their names). */
+  onRead: (names: string[]) => void
 }) {
+  // Its documents not read (or partly), for the person to pick from.
+  const unread = current.knowledge.filter((k) => k.doc && k.read?.state !== 'full')
+  const [picked, setPicked] = useState<Set<string>>(new Set())
+  const choosable = unread.filter((k) => !added.has(k.doc!))
+  const chosen = choosable.filter((k) => picked.has(k.doc!)).map((k) => k.doc!)
+  const toggle = (doc: string) => setPicked((prev) => {
+    const next = new Set(prev)
+    if (next.has(doc)) next.delete(doc)
+    else next.add(doc)
+    return next
+  })
   const summary = setupSummary({
     ...current, intents: current.skills.length, knowledge: current.knowledge.length, tables: current.tables?.length ?? 0,
   })
@@ -819,6 +886,51 @@ function EarlierSetup({ name, current, mode, onMode }: {
           ? 'What you add now joins it. A document you give again replaces its earlier copy (a spreadsheet, its tables too); newer rules come first.'
           : 'Its earlier rules, skills, documents and tables are taken out and this setup goes in their place. Facts it already learned stay.'}
       </p>
+      {unread.length > 0 && (
+        <div className="mt-3 rounded-xl border border-zinc-800 bg-zinc-900/60">
+          <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-2">
+            <BookOpen className="h-3.5 w-3.5 shrink-0 text-violet-500 dark:text-violet-400" />
+            <p className="min-w-0 flex-1 text-xs text-zinc-300">
+              <span className="font-medium text-zinc-200">Not read yet</span>
+              <span className="text-zinc-500"> · {unread.length} of its {plural(current.knowledge.length, 'document')} — searchable, but no rules or skills taken from them</span>
+            </p>
+            {choosable.length > 1 && (
+              <button onClick={() => setPicked(chosen.length === choosable.length ? new Set() : new Set(choosable.map((k) => k.doc!)))}
+                className="shrink-0 text-[11px] text-violet-700 hover:underline dark:text-violet-300">
+                {chosen.length === choosable.length ? 'None' : 'All'}
+              </button>
+            )}
+          </div>
+          <ul className="max-h-36 overflow-y-auto py-1">
+            {unread.map((k) => {
+              const doc = k.doc!
+              const isAdded = added.has(doc)
+              return (
+                <li key={doc}>
+                  <label className={`flex items-center gap-2.5 px-3 py-1.5 text-xs ${isAdded ? 'opacity-60' : 'cursor-pointer hover:bg-zinc-800/60'}`}>
+                    <input type="checkbox" checked={isAdded || picked.has(doc)} disabled={isAdded}
+                      onChange={() => toggle(doc)} className="h-3.5 w-3.5 shrink-0 accent-violet-600" />
+                    <span className="min-w-0 flex-1 truncate text-zinc-200" title={k.title}>{k.title}</span>
+                    <span className={`shrink-0 text-[11px] ${k.read?.state === 'partial' ? 'text-amber-700 dark:text-amber-400' : 'text-zinc-500'}`}>
+                      {isAdded ? 'Added below' : readLine(k.read)}
+                    </span>
+                  </label>
+                </li>
+              )
+            })}
+          </ul>
+          <div className="flex flex-col gap-2 border-t border-zinc-800 px-3 py-2 wide:flex-row wide:items-center">
+            <p className="min-w-0 flex-1 text-[11px] text-zinc-500">
+              Pick the ones to read now. They join your documents below, where you choose how much is read — only what wasn’t read before.
+            </p>
+            <button onClick={() => onRead(chosen)} disabled={!chosen.length || adding || room <= 0}
+              className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-violet-500 disabled:opacity-50">
+              {adding ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+              {chosen.length ? `Add ${plural(chosen.length, 'document')} to read` : 'Add to read'}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -1095,6 +1207,11 @@ function Done({ name, applied, hadSetup }: { name: string; applied: AppliedPrese
       {c.facts > 0 && (
         <p className="mt-4 text-xs text-zinc-500">
           {applied.running ? 'Its facts are being added now.' : `Its facts are added as soon as ${name} is up.`}
+        </p>
+      )}
+      {!!c.read_again && (
+        <p className="mt-4 text-xs text-zinc-500">
+          It read more of {plural(c.read_again, 'document')} it already had; what it already kept stays as it is.
         </p>
       )}
       {c.knowledge > 0 && (

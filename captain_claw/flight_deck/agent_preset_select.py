@@ -26,6 +26,7 @@ log = get_logger(__name__)
 BUDGETS = {"quick": 60_000, "standard": 250_000, "deep": 1_000_000}
 DEFAULT_BUDGET = "standard"
 UNIT_MAX_CHARS = 16_000      # a section longer than this is read in pieces
+WINDOW_CHARS = 8_000         # text without headings, as sections
 MIN_UNIT_CHARS = 200         # a heading with less under it has nothing to read
 FOCUS_WEIGHT = 0.6           # with a focus: how much closeness counts, against instructiveness
 _FOCUS_CHARS = 800           # of a section, what its closeness to the focus is judged on
@@ -74,33 +75,84 @@ def _cuts(text: str, start: int, end: int, limit: int) -> list[tuple[int, int]]:
     return [(x, y) for x, y in out if text[x:y].strip()]
 
 
-def units(text: str, max_chars: int = UNIT_MAX_CHARS) -> list[dict[str, Any]]:
-    """The document as reading units, in order and covering all of it:
-    ``start``/``end`` (offsets), ``title`` and ``path`` (its parents'
-    titles). Each heading's own text, up to its first subsection, is one —
-    the text before the first heading too; a long one is cut into pieces of
-    at most *max_chars*, and so is a text without headings."""
+def spans(text: str) -> list[dict[str, Any]]:
+    """The document's sections, in order and covering all of it: each
+    heading's own text, up to its first subsection — the text before the
+    first heading too — with ``start``/``end``, ``title``, ``path`` (its
+    parents' titles) and ``key``: its path and title (with "#2"… for a
+    repeat), which stay the same when the text is cut into other parts, so
+    a section read once is known again. Text without headings is taken in
+    windows of about WINDOW_CHARS, keyed "Part n"."""
     sections = poutline.outline(text)
-    spans: list[tuple[int, int, str, list[str]]] = []
+    found: list[tuple[int, int, str, list[str]]] = []
     if not sections:
-        spans.append((0, len(text), "", []))
+        found += [(a, b, f"Part {n}", []) for n, (a, b) in enumerate(_cuts(text, 0, len(text), WINDOW_CHARS), 1)]
     else:
         if text[:sections[0]["start"]].strip():
-            spans.append((0, sections[0]["start"], "Its opening", []))
+            found.append((0, sections[0]["start"], "Its opening", []))
         parents: list[tuple[int, str]] = []
         for s in sections:
             while parents and parents[-1][0] >= s["level"]:
                 parents.pop()
-            spans.append((s["start"], s["own"], s["title"], [t for _, t in parents]))
+            found.append((s["start"], s["own"], s["title"], [t for _, t in parents]))
             parents.append((s["level"], s["title"]))
     out: list[dict[str, Any]] = []
-    for start, end, title, path in spans:
-        pieces = _cuts(text, start, end, max(1000, max_chars))
-        for n, (a, b) in enumerate(pieces, 1):
-            name = (f"{title} ({n}/{len(pieces)})" if len(pieces) > 1 else title) if title \
-                else f"Part {n} of {len(pieces)}"
-            out.append({"start": a, "end": b, "path": path, "title": name})
+    seen: dict[str, int] = {}
+    for start, end, title, path in found:
+        base = " › ".join([*path, title])
+        seen[base] = seen.get(base, 0) + 1
+        out.append({"start": start, "end": end, "title": title, "path": path,
+                    "key": base if seen[base] == 1 else f"{base} #{seen[base]}"})
     return out
+
+
+def units(text: str, max_chars: int = UNIT_MAX_CHARS) -> list[dict[str, Any]]:
+    """The document as reading units, in order and covering all of it: its
+    sections (``spans``), a long one cut into pieces of at most *max_chars*,
+    each piece with its section's ``key``."""
+    out: list[dict[str, Any]] = []
+    for s in spans(text):
+        pieces = _cuts(text, s["start"], s["end"], max(1000, max_chars))
+        for n, (a, b) in enumerate(pieces, 1):
+            out.append({"start": a, "end": b, "path": s["path"], "key": s["key"],
+                        "title": f"{s['title']} ({n}/{len(pieces)})" if len(pieces) > 1 else s["title"]})
+    return out
+
+
+def _sized(text: str, s: dict) -> bool:
+    return len(text[s["start"]:s["end"]].strip()) >= MIN_UNIT_CHARS
+
+
+def coverage(text: str, ranges: list[tuple[int, int]], done: set[str] | None = None) -> tuple[list[str], int]:
+    """Which sections of *text* are read, by their keys — those with at least
+    80% of their text within *ranges*, and those in *done* (read before) —
+    and how many sections with something to read it has."""
+    done = done or set()
+    read: list[str] = []
+    total = 0
+    for s in spans(text):
+        if not _sized(text, s):
+            continue
+        total += 1
+        got = sum(max(0, min(b, s["end"]) - max(a, s["start"])) for a, b in ranges)
+        if s["key"] in done or got >= 0.8 * (s["end"] - s["start"]):
+            read.append(s["key"])
+    return read, total
+
+
+def unread(text: str, done: set[str]) -> tuple[int, int, int]:
+    """What reading the rest of *text* takes — the characters of its sections
+    not in *done* — with how many of its sections are read, and of how many."""
+    chars = read = total = 0
+    for s in spans(text):
+        if not _sized(text, s):
+            continue
+        total += 1
+        if s["key"] in done:
+            read += 1
+        else:
+            chars += s["end"] - s["start"]
+    return chars, read, total
 
 
 def _prose(body: str) -> tuple[str, float]:
@@ -169,19 +221,27 @@ def _ranks(values: list[float]) -> list[float]:
 
 def select(docs: list[dict], budget_chars: int, focus: str = "",
            max_chars: int = UNIT_MAX_CHARS) -> tuple[list[dict], list[dict]]:
-    """What to read of *docs* (each ``text``, ``name``, ``usage``) within
-    *budget_chars*: their sections scored, every document first given its
-    best ones up to a share of the budget, then the best of all the rest.
-    Returns the chosen units — each with ``doc`` (its index in *docs*) and
-    ``score`` — in document order, and per document what that is:
-    ``sections`` read of ``of``, and its ``chars``."""
+    """What to read of *docs* (each ``text``, ``name``, ``usage``, and
+    ``skip``: the keys of sections read before) within *budget_chars*: their
+    sections not read yet scored, every document first given its best ones
+    up to a share of the budget, then the best of all the rest. Returns the
+    chosen units — each with ``doc`` (its index in *docs*) and ``score`` —
+    in document order, and per document what that is: ``sections`` read of
+    ``of``, ``before`` (read already), and its ``chars``."""
     every: list[dict] = []
+    before: dict[int, int] = {}
     for i, d in enumerate(docs):
+        skip = set(d.get("skip") or ())
+        known = set()
         for u in units(d["text"], max_chars):
             body = d["text"][u["start"]:u["end"]]
+            if u["key"] in skip:
+                known.add(u["key"])
+                continue
             if len(body.strip()) >= MIN_UNIT_CHARS:
                 every.append({**u, "doc": i, "chars": u["end"] - u["start"],
                               "raw": instructive(body, u["title"]) * _USAGE_WEIGHT.get(d.get("usage") or "", 1.0)})
+        before[i] = len(known)
     scores = _ranks([u["raw"] for u in every])
     if focus.strip():
         near = _ranks(focus_scores([" › ".join([*u["path"], u["title"]]) + "\n"
@@ -208,9 +268,11 @@ def select(docs: list[dict], budget_chars: int, focus: str = "",
             chosen.add(id(u))
             left -= u["chars"]
     picked = sorted((u for u in every if id(u) in chosen), key=lambda u: (u["doc"], u["start"]))
-    summary = [{"sections": sum(1 for u in picked if u["doc"] == i),
-                "of": sum(1 for u in every if u["doc"] == i),
-                "chars": sum(u["chars"] for u in picked if u["doc"] == i)} for i in range(len(docs))]
+    summary = [{"sections": len({u["key"] for u in picked if u["doc"] == i}),
+                "of": len({u["key"] for u in every if u["doc"] == i}) + before.get(i, 0),
+                "before": before.get(i, 0),
+                "chars": sum(u["chars"] for u in picked if u["doc"] == i),
+                "left": sum(u["chars"] for u in every if u["doc"] == i)} for i in range(len(docs))]
     for u in picked:
         u.pop("raw", None)
     return picked, summary

@@ -1166,7 +1166,7 @@ def test_seed_writes_skills_knowledge_and_the_full_rules(deck, tmp_path):
     block, facts = done["block"], done["facts"]
     assert done["skills"] == ["refund-request", "refund-request-2"]
     assert done["counts"] == {"rules": 1, "escalation": 1, "templates": 1, "glossary": 1,
-                              "intents": 2, "facts": 2, "knowledge": 1, "tables": 0}
+                              "intents": 2, "facts": 2, "knowledge": 1, "tables": 0, "read_again": 0}
 
     skill = agent_dir / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund-request" / "SKILL.md"
     meta = _parse_frontmatter(skill.read_text())
@@ -1731,3 +1731,104 @@ async def test_tables_given_twice_to_one_agent_go_one_after_the_other(monkeypatc
     await asyncio.gather(*list(ap._PENDING))
     assert order == [("start", "first"), ("end", "first"), ("start", "second"), ("end", "second")]
     assert "a" not in ap._TABLES_BUSY
+
+
+# ── What is read, and reading the rest later ──────────────────────────
+
+
+def _chaptered(chapters: int = 8) -> str:
+    """A handbook whose chapters each hold a procedure (instructive) and a story (not)."""
+    out = ["# Handbook\n\nAn introduction, long enough to be more than a heading line for the reader.\n"]
+    for c in range(1, chapters + 1):
+        out.append(f"## Chapter {c} story\n\n" + f"Long ago chapter {c} began in a small office by the sea. " * 12 + "\n")
+        out.append(f"## Chapter {c} procedure\n\n" + "".join(
+            f"{n}. Always check item {c}.{n} before you refund more than {n * 10} EUR.\n" for n in range(1, 9)) + "\n")
+    return "\n".join(out)
+
+
+def _record(slug: str) -> dict:
+    return json.loads((server.DATA_DIR / slug / ap._RECORD).read_text())
+
+
+async def _current(uid: str, slug: str) -> dict:
+    async with _client() as c:
+        r = await c.get(f"/fd/agent-preset/current/{slug}", headers=_auth(uid))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def _stage_known(uid: str, slug: str, names: list[str]) -> dict:
+    async with _client() as c:
+        r = await c.post(f"/fd/agent-preset/knowledge/{slug}", headers=_auth(uid), json={"docs": names})
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+async def test_what_was_read_is_kept_and_the_rest_read_later(deck, monkeypatch):
+    monkeypatch.setattr(ap.psel, "BUDGETS", {**ap.psel.BUDGETS, "quick": 500})       # 2,000 characters
+    slug = await _spawn(BOB, "Helpdesk", 24376)
+    calls = _model(monkeypatch, json.dumps({"rules": [{"text": "Check every item first."}],
+                                            "knowledge": [{"doc": "handbook.md", "title": "Handbook",
+                                                           "summary": "Refunds, chapter by chapter."}]}))
+    job = await _prepare(BOB, [("handbook.md", _chaptered().encode()), ("notes.md", b"# Notes\n\nJust notes.\n")],
+                         notes=[{}, {"usage": "reference", "read": False}], agent=slug, budget="quick")
+    assert job["state"] == "done", job
+    first = "\n".join(c["user"] for c in calls)
+    assert "check item 1.1 " in first and "check item 8.1 " not in first              # the budget's worth
+    cov = {d["name"]: d["coverage"] for d in job["result"]["docs"]}
+    assert cov["handbook.md"]["state"] == "partial" and cov["notes.md"]["state"] == "none"
+    r = await _apply(BOB, slug, {**job["result"]["preset"], "id": job["id"]})
+    assert r.status_code == 200, r.text
+    kept = {e["doc"]: e for e in _record(slug)["knowledge"]}
+    read_before = set(kept["handbook.md"]["read"]["keys"])
+    assert "Handbook › Chapter 1 procedure" in read_before and not kept["handbook.md"]["read"]["all"]
+    assert kept["notes.md"]["read"] == {"all": False, "keys": [], "of": 0} or not kept["notes.md"]["read"]["keys"]
+    states = {k["doc"]: k["read"] for k in (await _current(BOB, slug))["knowledge"]}
+    assert states["handbook.md"]["state"] == "partial" and states["handbook.md"]["sections"] == len(read_before)
+    # 8 stories and 8 procedures (its two-line introduction has nothing to read)
+    assert states["handbook.md"]["of"] == 16 and states["notes.md"]["state"] == "none"
+
+    # Later: the rest of the handbook, from the agent's own copy — only what wasn't read.
+    files = {f: (server.DATA_DIR / slug / "data" / "workspace" / "knowledge" / f).read_text()
+             for f in kept["handbook.md"]["files"]}
+    staged = await _stage_known(BOB, slug, ["handbook.md", "gone.md"])
+    (doc,) = staged["docs"]
+    assert doc["origin"] == "knowledge" and doc["usage"] == "auto" and doc["title"] == "Handbook"
+    assert doc["read"] == {"state": "partial", "sections": len(read_before), "of": 16}
+    assert doc["tokens"] < pdocs.tokens_of(len(_chaptered()))                          # what is left
+    assert any("doesn't keep it" in w for w in staged["warnings"])
+    monkeypatch.setattr(ap.psel, "BUDGETS", {**ap.psel.BUDGETS, "quick": 100_000})    # all the rest fits
+    calls.clear()
+    r = await _start(BOB, [{"id": doc["id"]}], instructions="", agent=slug, budget="quick")
+    again = await _wait(BOB, r.json()["id"])
+    assert again["state"] == "done", again
+    read_now = "\n".join(c["user"] for c in calls if "Merging an agent setup" not in c["system"])
+    assert "check item 8.1 " in read_now and "check item 1.1 " not in read_now         # not twice
+    assert any("now all of it is" in w for w in again["result"]["preset"]["warnings"])
+    r = await _apply(BOB, slug, {**again["result"]["preset"], "knowledge": [], "id": again["id"]})
+    assert r.status_code == 200, r.text
+    assert r.json()["counts"]["read_again"] == 1 and r.json()["counts"]["knowledge"] == 0
+    entry = {e["doc"]: e for e in _record(slug)["knowledge"]}["handbook.md"]
+    assert entry["read"]["all"] and read_before <= set(entry["read"]["keys"])
+    assert entry["summary"] == "Refunds, chapter by chapter."                           # kept
+    folder = server.DATA_DIR / slug / "data" / "workspace" / "knowledge"
+    assert {f: (folder / f).read_text() for f in entry["files"]} == files               # its files untouched
+    states = {k["doc"]: k["read"]["state"] for k in (await _current(BOB, slug))["knowledge"]}
+    assert states == {"handbook.md": "full", "notes.md": "none"}
+    done = await _stage_known(BOB, slug, ["handbook.md"])
+    assert done["docs"] == [] and "all of it is read already" in done["warnings"][0]
+
+
+async def test_reading_the_rest_while_replacing_writes_it_again(deck, monkeypatch):
+    slug = await _spawn(BOB, "Sales", 24377)
+    _model(monkeypatch, json.dumps({"rules": [{"text": "A rule."}]}))
+    job = await _prepare(BOB, [("handbook.md", _chaptered(3).encode())], notes=[{"read": False}], agent=slug)
+    assert (await _apply(BOB, slug, {**job["result"]["preset"], "id": job["id"]})).status_code == 200
+    (doc,) = (await _stage_known(BOB, slug, ["handbook.md"]))["docs"]
+    r = await _start(BOB, [{"id": doc["id"]}], instructions="", agent=slug)
+    again = await _wait(BOB, r.json()["id"])
+    r = await _apply(BOB, slug, {**again["result"]["preset"], "id": again["id"]}, mode="replace")
+    assert r.status_code == 200, r.text
+    (entry,) = _record(slug)["knowledge"]
+    assert entry["doc"] == "handbook.md" and entry["read"]["all"]
+    assert (server.DATA_DIR / slug / "data" / "workspace" / "knowledge" / entry["file"]).is_file()

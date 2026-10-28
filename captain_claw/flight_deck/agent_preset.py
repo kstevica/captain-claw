@@ -395,6 +395,8 @@ def save_docs(owner_id: str, docs: list[dict], archetype: str) -> str:
             shutil.copyfile(source, folder / "docs" / kept)
         meta["docs"].append({"name": d["name"], "file": file, "chars": len(d["text"]),
                              "pages": d.get("pages") or 0, "read": bool(d.get("read", True)),
+                             "origin": str(d.get("origin") or "upload"),
+                             **{k: d[k] for k in ("skip", "earlier_summary") if d.get(k)},
                              **({"source": kept} if kept else {}), **note(d)})
     (folder / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
     return preset_id
@@ -417,7 +419,11 @@ def load_docs(owner_id: str, preset_id: str) -> list[dict]:
             return {"source": folder / "docs" / name} if ok else {}
 
         return [{"name": d["name"], "text": (folder / "docs" / d["file"]).read_text(encoding="utf-8"),
-                 "pages": int(d.get("pages") or 0), "read": bool(d.get("read", True)), **source(d), **note(d)}
+                 "pages": int(d.get("pages") or 0), "read": bool(d.get("read", True)),
+                 "origin": str(d.get("origin") or "upload"), "skip": list(d.get("skip") or []),
+                 "earlier_summary": str(d.get("earlier_summary") or ""),
+                 **({"coverage": d["coverage"]} if isinstance(d.get("coverage"), dict) else {}),
+                 **source(d), **note(d)}
                 for d in meta.get("docs") or []
                 if re.fullmatch(r"\d+\.txt", str(d.get("file") or ""))
                 and (folder / "docs" / d["file"]).is_file()]
@@ -504,11 +510,15 @@ def plan_steps(instructions: str, docs: list[dict], step_tok: int, budget: str =
     reading = [d for d in docs if d.get("read", True)]
     notes: list[str] = []
     pieces: list[dict] = []
-    if sum(len(d["text"]) for d in reading) <= budget_chars:
+    # A document the agent already keeps, read again: only its sections not read before.
+    if sum(len(d["text"]) for d in reading) <= budget_chars and not any(d.get("skip") for d in reading):
         for d in reading:
+            at = 0
             parts = pdocs.split_text(d["text"], limit)
             for n, p in enumerate(parts, 1):
-                pieces.append({"doc": d, "text": p["text"], "label": p["label"], "part": n, "parts": len(parts)})
+                pieces.append({"doc": d, "text": p["text"], "label": p["label"], "part": n, "parts": len(parts),
+                               "start": at, "end": at + len(p["text"])})
+                at += len(p["text"])
     else:
         # Sections in pieces that fit a step, and the budget several times over.
         picked, summary = psel.select(reading, budget_chars, focus,
@@ -517,19 +527,27 @@ def plan_steps(instructions: str, docs: list[dict], step_tok: int, budget: str =
         for u in picked:
             d = reading[u["doc"]]
             pieces.append({"doc": d, "text": d["text"][u["start"]:u["end"]], "label": u["title"],
-                           "path": u["path"], "selected": True,
+                           "path": u["path"], "selected": True, "start": u["start"], "end": u["end"],
                            **({"chapters": _chapters(d["text"])} if u["doc"] not in introduced else {})})
             introduced.add(u["doc"])
         why = (f"closest to “{focus.strip()[:80]}” and with the most rules, steps and definitions" if focus.strip()
                else "the ones with the most rules, steps and definitions")
         for d, s in zip(reading, summary):
+            more = " more" if s["before"] else ""
+            earlier = f" ({s['before']} read before)" if s["before"] else ""
             if not s["sections"]:
-                notes.append(f"{d['name']}: none of it fitted in the budget, so it wasn't read. It is still "
-                             "kept whole for the agent to search.")
-            elif s["sections"] < s["of"]:
-                notes.append(f"{d['name']}: read {s['sections']} of its {s['of']} sections, about "
-                             f"{max(1, s['chars'] // pdocs.CHARS_PER_TOKEN // 1000)}k tokens — {why}. The rest "
-                             "wasn't read, but stays whole and searchable for the agent.")
+                if s["before"] < s["of"]:
+                    notes.append(f"{d['name']}: none of it{' that was left' if s['before'] else ''} fitted in the "
+                                 "budget, so it wasn't read. It is still kept whole for the agent to search.")
+            elif s["chars"] < s["left"]:
+                size = f"about {max(1, s['chars'] // pdocs.CHARS_PER_TOKEN // 1000)}k tokens"
+                what = (f"{s['sections']}{more} of its {s['of']} sections{earlier}"
+                        if s["before"] + s["sections"] < s["of"]
+                        else f"about {max(1, round(100 * s['chars'] / s['left']))}% of what was left of it")
+                notes.append(f"{d['name']}: read {what}, {size} — {why}. The rest wasn't read, but stays whole "
+                             "and searchable for the agent.")
+            elif s["before"]:
+                notes.append(f"{d['name']}: read the {s['sections']} sections not read before — now all of it is.")
 
     return _pack(pieces, limit, len(instructions.encode("utf-8")), bool(instructions)), notes
 
@@ -578,9 +596,12 @@ def refit(steps: list[dict], first: int, step_tok: int) -> list[dict]:
                 pieces.append(p)
                 continue
             cut = pdocs.split_text(p["text"], limit)
+            at = int(p.get("start") or 0)
             for n, q in enumerate(cut, 1):
                 label = f"{p['label']} ({n}/{len(cut)})" if p.get("selected") else (q["label"] or p["label"])
-                pieces.append({**p, "text": q["text"], "label": label, **({"chapters": ""} if n > 1 else {})})
+                pieces.append({**p, "text": q["text"], "label": label, "start": at, "end": at + len(q["text"]),
+                               **({"chapters": ""} if n > 1 else {})})
+                at += len(q["text"])
     return steps[:first - 1] + _pack(pieces, limit)
 
 
@@ -846,6 +867,46 @@ def _done_parts(job: ReadJob) -> dict[int, dict | None]:
         if path.stem.isdigit() and isinstance(got, dict):
             out[int(path.stem)] = normalise(got["part"]) if isinstance(got.get("part"), dict) else None
     return out
+
+
+def _read_state(cov: Any) -> dict:
+    """How much of a document is read, for the dialog: ``state`` (none,
+    partial, full — unknown for a setup from before this was kept),
+    ``sections`` read and ``of``."""
+    if not isinstance(cov, dict):
+        return {"state": "unknown", "sections": 0, "of": 0}
+    keys, of = len(cov.get("keys") or []), int(cov.get("of") or 0)
+    state = "full" if cov.get("all") else "partial" if keys else "none"
+    return {"state": state, "sections": min(keys, of) if of else keys, "of": of}
+
+
+def read_coverage(steps: list[dict], read: set[int], docs: list[dict]) -> dict[str, dict]:
+    """Per document, by name: which of its sections are read now — by the
+    steps in *read* (1-based), with those read before (``skip``) — as
+    ``all``, the ``keys`` read and ``of``: its sections."""
+    ranges: dict[int, list[tuple[int, int]]] = {id(d): [] for d in docs}
+    for n, st in enumerate(steps, 1):
+        if n in read:
+            for p in st["pieces"]:
+                if "start" in p and id(p["doc"]) in ranges:
+                    ranges[id(p["doc"])].append((int(p["start"]), int(p["end"])))
+    out: dict[str, dict] = {}
+    for d in docs:
+        keys, of = psel.coverage(d["text"], ranges[id(d)], set(d.get("skip") or ()))
+        out[d["name"]] = {"all": len(keys) >= of if of else bool(ranges[id(d)]), "keys": keys, "of": of}
+    return out
+
+
+def _save_coverage(job: ReadJob, cover: dict[str, dict]) -> None:
+    """What the read covered, beside its documents — for Apply to keep."""
+    path = _folder(job) / "meta.json"
+    meta = _read_json(path)
+    if not isinstance(meta, dict):
+        return
+    for d in meta.get("docs") or []:
+        if isinstance(d, dict) and d.get("name") in cover:
+            d["coverage"] = cover[d["name"]]
+    _write_json(path, meta)
 
 
 async def _tell(job: ReadJob) -> None:
@@ -1270,7 +1331,7 @@ def whole_summaries(merged: dict, parts: list[dict]) -> dict:
 
 
 def _finish(preset: dict, docs: list[dict], warnings: list[str], model: str, steps: int, tokens: int,
-            preset_id: str) -> dict:
+            preset_id: str, cover: dict[str, dict] | None = None) -> dict:
     """The read's result: every document with a knowledge entry — summarised
     by the model, else by the person's own words; one the model invented a
     name for doesn't get in."""
@@ -1283,7 +1344,7 @@ def _finish(preset: dict, docs: list[dict], warnings: list[str], model: str, ste
     preset["knowledge"] = [dict(known.get(n) or {"doc": n, "title": Path(n).stem[:120], "summary": ""})
                            for n in names]
     for k, d in zip(preset["knowledge"], docs):
-        k["summary"] = k["summary"] or d["description"]
+        k["summary"] = k["summary"] or d["description"] or d.get("earlier_summary") or ""
     preset["warnings"] = (warnings + preset["warnings"])[:20]
     return {
         "id": preset_id,
@@ -1292,7 +1353,8 @@ def _finish(preset: dict, docs: list[dict], warnings: list[str], model: str, ste
                   "pages_exact": bool(d.get("pages_exact")), "truncated": bool(d.get("truncated")),
                   "origin": d.get("origin") or "upload", "description": d["description"], "usage": d["usage"],
                   "read": bool(d.get("read", True)), **({"agent": d["agent"]} if d.get("agent") else {}),
-                  **({"tables": int(d["tables"])} if d.get("tables") else {})}
+                  **({"tables": int(d["tables"])} if d.get("tables") else {}),
+                  **({"coverage": _read_state((cover or {}).get(d["name"]))} if cover else {})}
                  for d in docs],
         "model": model,
         "steps": steps,
@@ -1335,6 +1397,7 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
         job.steps = len(steps)
         save_job(job)
         parts: list[dict] = []
+        read: set[int] = set()   # the steps whose part is in
         failed: str = ""
         stopped = False
         system = _PROMPT_FILE.read_text(encoding="utf-8")
@@ -1345,6 +1408,7 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
                                     "so nothing was taken from it.")
                 else:
                     parts.append(done[n])
+                    read.add(n)
                 continue
             if n > 1 and await _quota_spent(owner_id):
                 warnings.append(f"Today's allowance ran out after part {n - 1} of {len(steps)}, so the "
@@ -1379,6 +1443,7 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
                                 "so nothing was taken from it.")
                 continue
             parts.append(got)
+            read.add(n)
         if steps and not parts and not stopped:
             model = (reader or {}).get("model") or "the model"
             raise _UnreadableError(f"Couldn't read the material with {model}: {failed}" if failed
@@ -1389,8 +1454,10 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
             preset = normalise(fold(parts)) if stopped else await merge_parts(reader, parts, owner_id, job)
         else:
             preset = parts[0] if parts else normalise({})
+        cover = await asyncio.to_thread(read_coverage, steps, read, docs)
+        await asyncio.to_thread(_save_coverage, job, cover)
         job.result = _finish(preset, docs, job.notes + warnings, str((reader or {}).get("model") or ""),
-                             len(steps), job.tokens, job.id)
+                             len(steps), job.tokens, job.id, cover)
         job.state, job.finished = "done", time.time()
         if _folder(job).is_dir():
             _write_json(_folder(job) / _RESULT_FILE, job.result)
@@ -1573,6 +1640,8 @@ async def prepare(body: PrepareBody, user: dict = Depends(get_managed_user)) -> 
             warnings.append(f"{name}: only its first {pdocs.MAX_CHARS:,} characters are kept.")
         docs.append({**{k: staged.get(k) for k in ("text", "pages", "pages_exact", "truncated", "origin", "agent",
                                                    "source", "tables")},
+                     # One the agent already keeps (stage_knowledge): what was read of it before, and its summary.
+                     "skip": list(staged.get("read_keys") or []), "earlier_summary": str(staged.get("summary") or ""),
                      "name": name, "read": choice.read, **note(choice.model_dump())})
     if not instructions and not docs:
         raise HTTPException(400, " ".join(warnings) or "None of the documents are there any more.")
@@ -1864,7 +1933,11 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dic
             taken.add(f"{stem}.map")
             (folder / map_name).write_text(
                 poutline.map_md(title, k["doc"], files, poutline.add_gists(text, sections)), encoding="utf-8")
+        cov = doc.get("coverage") if isinstance(doc.get("coverage"), dict) else {}
+        read = {"all": bool(cov.get("all")), "keys": list(cov.get("keys") or []),
+                "of": int(cov["of"]) if "of" in cov else psel.unread(text, set())[2]}
         written.append({"doc": k["doc"], "file": f"{stem}.md", "title": title, "summary": k["summary"], "use": use,
+                        "read": read,
                         "parts": len(parts), "sections": len(sections) if map_name else 0, "map": map_name,
                         "files": [f"{stem}.md", *(f"{stem}-part-{n:02d}.md" for n in range(1, len(parts) + 1)
                                                   if len(parts) > 1), *([map_name] if map_name else [])]})
@@ -2110,6 +2183,15 @@ def new_tables(agent_dir: Path, preset: dict, docs: list[dict], drop: list[str],
     return out, warnings
 
 
+def _more_read(before: Any, now: Any) -> dict:
+    """What is read of a document: what was before, and what was now."""
+    a = before if isinstance(before, dict) else {}
+    b = now if isinstance(now, dict) else {}
+    keys = list(dict.fromkeys([*(a.get("keys") or []), *(b.get("keys") or [])]))
+    of = int(b.get("of") or a.get("of") or 0)
+    return {"all": bool(a.get("all") or b.get("all") or (of and len(keys) >= of)), "keys": keys, "of": of}
+
+
 def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str = "add") -> dict:
     """Write the reviewed preset into an agent's folder — added to what an
     earlier setup gave it (the new items first; a document given again
@@ -2131,6 +2213,7 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     folder = workspace / "knowledge"
     earlier = earlier_setup(agent_dir, workspace)
     earlier_tables = [t for t in earlier.get("tables") or [] if isinstance(t, dict) and isinstance(t.get("name"), str)]
+    before_knowledge = list(earlier.get("knowledge") or [])
     if mode == "replace":
         _undo(earlier, skills_dir, folder)
         earlier = {}
@@ -2140,7 +2223,17 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     new_skills = write_skills(skills_dir, preset["intents"])
     skills = new_skills + [n for n in earlier.get("skills") or []
                            if isinstance(n, str) and n not in new_skills and (skills_dir / n / "SKILL.md").is_file()]
-    given = {k["doc"] for k in preset["knowledge"]} & {d["name"] for d in docs}
+    # Read again from the agent's own knowledge (stage_knowledge): adding, it keeps its files, tables and
+    # summary, and only what is read of it grows; replacing, it is written again like any other.
+    again = {d["name"]: d for d in docs if d.get("origin") == "knowledge"}
+    for name, d in again.items():
+        before = next((e for e in before_knowledge if isinstance(e, dict) and e.get("doc") == name), {})
+        d["coverage"] = _more_read(before.get("read"), d.get("coverage"))
+    if mode != "replace":
+        given_again = set(again)
+    else:
+        given_again = set()
+    given = ({k["doc"] for k in preset["knowledge"]} & {d["name"] for d in docs}) - given_again
     kept: list[dict] = []
     for entry in earlier.get("knowledge") or []:
         if not isinstance(entry, dict) or not entry.get("file"):
@@ -2148,14 +2241,21 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
         if entry.get("doc") in given:
             _unlink(folder, entry.get("files") or [])
         elif (folder / entry["file"]).is_file():
+            if entry.get("doc") in given_again:
+                summary = next((k["summary"] for k in preset["knowledge"] if k["doc"] == entry["doc"]), "")
+                entry = {**entry, "read": again[entry["doc"]]["coverage"],
+                         "summary": entry.get("summary") or summary}
             kept.append(entry)
-    # Replacing drops every table an earlier setup made; adding, those of the documents given again.
-    gone = earlier_tables if mode == "replace" else [t for t in earlier_tables if t.get("doc") in given]
+    # Replacing drops every table an earlier setup made; adding, those of the documents given again. A
+    # document read again from the agent's knowledge keeps its tables either way (its spreadsheet isn't kept).
+    gone = [t for t in earlier_tables if (mode == "replace" or t.get("doc") in given) and t.get("doc") not in again]
     drop = list(dict.fromkeys(t["name"] for t in gone))
     kept_tables = [t for t in earlier_tables if t["name"] not in drop]
     tables, warnings = new_tables(agent_dir, preset, docs, drop, kept_tables)
     all_tables = kept_tables + [_table_summary(t) for t in tables]
-    written = write_knowledge(folder, {**merged, "knowledge": preset["knowledge"]}, docs, kept, all_tables)
+    written = write_knowledge(folder, {**merged, "knowledge": [k for k in preset["knowledge"]
+                                                                if k["doc"] not in given_again]},
+                              docs, kept, all_tables)
     knowledge = kept + written
     facts = int(earlier.get("facts") or 0) + len(preset["facts"])
     agent_dir.mkdir(parents=True, exist_ok=True)
@@ -2177,7 +2277,7 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
         "counts": {"rules": len(preset["rules"]), "escalation": len(preset["escalation"]),
                    "templates": len(preset["templates"]), "glossary": len(preset["glossary"]),
                    "intents": len(new_skills), "facts": len(preset["facts"]), "knowledge": len(written),
-                   "tables": len(tables)},
+                   "tables": len(tables), "read_again": len(given_again)},
         "totals": {**{g: len(merged[g]) for g in _KEPT_GROUPS}, "intents": len(skills), "facts": facts,
                    "knowledge": len(knowledge), "tables": len(all_tables)},
     }
@@ -2386,6 +2486,69 @@ class ApplyBody(BaseModel):
     mode: Literal["add", "replace"] = "add"
 
 
+def knowledge_text(folder: Path, entry: dict) -> str:
+    """A document the agent keeps, as one text again: its parts' text (or
+    its one file's), without the heads the setup put on them."""
+    from captain_claw.tools.knowledge import _body_start
+
+    files = [f for f in entry.get("files") or [] if re.search(r"-part-\d+\.md$", str(f))] or [entry.get("file")]
+    bodies: list[str] = []
+    for name in files:
+        if not (isinstance(name, str) and re.fullmatch(r"[a-z0-9._-]+\.md", name) and (folder / name).is_file()):
+            continue
+        raw = (folder / name).read_text(encoding="utf-8", errors="replace")
+        bodies.append(raw[_body_start(raw):].strip())
+    return "\n\n".join(b for b in bodies if b)
+
+
+_USAGE_OF_LABEL = {label.lower(): key for key, (label, _) in USAGES.items() if label}
+
+
+class KnowledgeStage(BaseModel):
+    docs: list[str] = Field(default_factory=list, max_length=_MAX_FILES)
+
+
+@router.post("/knowledge/{slug}")
+async def stage_knowledge(slug: str, body: KnowledgeStage, user: dict = Depends(get_managed_user)) -> dict:
+    """Take documents the agent already keeps — not read, or only partly —
+    to read them now, as if they were added: their text from its knowledge
+    folder, staged with what of them was read before (only the rest is
+    read), their summary and how they are used. Spends no tokens; Apply
+    keeps their files and only adds what the read finds."""
+    from captain_claw.flight_deck import server as srv
+    owner_id = _owner(user)
+    entry = _own_process(slug, owner_id)
+    agent_dir = srv.DATA_DIR / slug
+    workspace = Path(entry["workspace"]) if entry.get("workspace") else agent_dir / "data" / "workspace"
+    record = await asyncio.to_thread(earlier_setup, agent_dir, workspace)
+    known = {e.get("doc"): e for e in record.get("knowledge") or [] if isinstance(e, dict) and e.get("doc")}
+    root = owner_root(owner_id)
+    out: list[dict] = []
+    warnings: list[str] = []
+    for name in dict.fromkeys(body.docs):
+        e = known.get(name)
+        if e is None:
+            warnings.append(f"{name}: {entry.get('name') or slug} doesn't keep it any more.")
+            continue
+        text = await asyncio.to_thread(knowledge_text, workspace / "knowledge", e)
+        if not text.strip():
+            warnings.append(f"{e.get('title') or name}: its files are gone from the knowledge folder.")
+            continue
+        state = e.get("read") if isinstance(e.get("read"), dict) else {}
+        done = set() if not state else set(state.get("keys") or [])
+        left, read, of = await asyncio.to_thread(psel.unread, text, done)
+        if state.get("all") or (of and read >= of):
+            warnings.append(f"{e.get('title') or name}: all of it is read already.")
+            continue
+        usage = _USAGE_OF_LABEL.get(str(e.get("use") or "").lower(), "auto")
+        staged = await asyncio.to_thread(
+            pdocs.stage, root, name, text, "knowledge", slug, None,
+            {"tokens": pdocs.tokens_of(left), "read_keys": sorted(done), "summary": str(e.get("summary") or "")})
+        out.append({**staged, "title": str(e.get("title") or name), "usage": usage,
+                    "read": {**_read_state(state or None), "sections": read, "of": of}})
+    return {"docs": out, "warnings": warnings}
+
+
 @router.get("/current/{slug}")
 async def current_setup(slug: str, user: dict = Depends(get_managed_user)) -> dict:
     """What earlier setups gave one of the caller's agents — for the dialog
@@ -2401,7 +2564,8 @@ async def current_setup(slug: str, user: dict = Depends(get_managed_user)) -> di
         **{g: len(record.get(g) or []) for g in _KEPT_GROUPS},
         "skills": [n for n in record.get("skills") or [] if isinstance(n, str)],
         "facts": int(record.get("facts") or 0),
-        "knowledge": [{"title": e.get("title") or e.get("doc") or "", "parts": int(e.get("parts") or 1)}
+        "knowledge": [{"title": e.get("title") or e.get("doc") or "", "doc": e.get("doc") or "",
+                       "parts": int(e.get("parts") or 1), "read": _read_state(e.get("read"))}
                       for e in record.get("knowledge") or [] if isinstance(e, dict)],
         "tables": [{"name": t["name"], "doc": t.get("doc") or "", "sheet": t.get("sheet"),
                     "rows": int(t.get("rows") or 0)}

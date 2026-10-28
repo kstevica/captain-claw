@@ -34,11 +34,16 @@ export interface AgentPreset {
 /** How the person wants a document used ("auto": the model decides). */
 export type DocUsage = 'auto' | 'rules' | 'procedures' | 'reference' | 'templates'
 
+/** How much of a document the model has read: none of it (only kept), some sections, all of
+ *  it — or unknown, for one a setup gave before this was kept. */
+export interface ReadState { state: 'none' | 'partial' | 'full' | 'unknown'; sections: number; of: number }
+
 /** A document read in full when it was added, waiting for the setup. */
 export interface StagedDoc {
   id: string
   name: string
-  origin: 'upload' | 'library'
+  /** Uploaded, from the File library, or one the agent already keeps (its knowledge). */
+  origin: 'upload' | 'library' | 'knowledge'
   /** Its pages (or slides): counted for a PDF or a deck, else estimated. */
   pages: number
   pages_exact: boolean
@@ -52,6 +57,10 @@ export interface StagedDoc {
   tables?: number
   /** Its sections, by its headings (a PDF's pages grouped): a long one gets a section map. */
   sections?: number
+  /** One the agent keeps: its title there, how it is used, and how much of it is read (``tokens``: the rest). */
+  title?: string
+  usage?: DocUsage
+  read?: ReadState
 }
 
 export interface PreparedDoc {
@@ -60,7 +69,7 @@ export interface PreparedDoc {
   pages: number
   pages_exact: boolean
   truncated: boolean
-  origin: 'upload' | 'library'
+  origin: 'upload' | 'library' | 'knowledge'
   description: string
   usage: DocUsage
   /** Read for rules, skills and facts; otherwise kept as knowledge only. */
@@ -136,6 +145,8 @@ export interface SetupCounts {
   rules: number; escalation: number; templates: number; glossary: number; intents: number; facts: number; knowledge: number
   /** Datastore tables from the spreadsheets. */
   tables?: number
+  /** Documents it already kept, read further. */
+  read_again?: number
 }
 
 export interface AppliedPreset {
@@ -176,7 +187,7 @@ export interface CurrentSetup {
   glossary: number
   skills: string[]
   facts: number
-  knowledge: { title: string; parts: number }[]
+  knowledge: { title: string; doc?: string; parts: number; read?: ReadState }[]
   tables?: { name: string; doc: string; sheet: string | null; rows: number }[]
 }
 
@@ -248,6 +259,17 @@ export async function getRead(id: string, asUser?: string): Promise<ReadJob> {
 /** Stop a read, or put away one waiting for its review: its documents go. */
 export async function cancelRead(id: string, asUser?: string): Promise<void> {
   await send(`/fd/agent-preset/prepare/${encodeURIComponent(id)}`, { method: 'DELETE' }, asUser).catch(() => undefined)
+}
+
+/** Take documents the agent already keeps — not read, or partly — to read them now: staged like
+ *  added ones, with only what isn't read yet to read. Spends no tokens. */
+export async function stageKnowledge(
+  agent: string, docs: string[], asUser?: string,
+): Promise<{ docs: StagedDoc[]; warnings: string[] }> {
+  const res = await send(`/fd/agent-preset/knowledge/${encodeURIComponent(agent)}`, {
+    method: 'POST', body: JSON.stringify({ docs }),
+  }, asUser)
+  return res.json()
 }
 
 export async function getCurrentSetup(agent: string, asUser?: string): Promise<CurrentSetup> {
