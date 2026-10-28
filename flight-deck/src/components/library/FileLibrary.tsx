@@ -30,6 +30,7 @@ import {
 } from 'lucide-react'
 import { useChatStore } from '../../stores/chatStore'
 import { useNotificationStore } from '../../stores/notificationStore'
+import type { LibraryFocus } from '../../stores/fileLibraryStore'
 import { useProcessStore } from '../../stores/processStore'
 import { FileViewer } from '../agents/FileViewer'
 import { FileActionSheet } from '../agents/FileActionSheet'
@@ -235,10 +236,14 @@ function useFileCreators(items: LibraryItem[]): (item: LibraryItem) => Creator |
   return useCallback((item: LibraryItem) => lists[item.agent_slug]?.get(item.physical), [lists])
 }
 
-export function FileLibrary({ phone = false, initialAgent, onClose, onOpenAgent, onOpenLive, liveReady }: {
+export function FileLibrary({ phone = false, initialAgent, initialFile, onClose, onOpenAgent, onOpenLive, liveReady }: {
   phone?: boolean
   /** Open filtered to this agent's files. */
   initialAgent?: string | null
+  /** Open showing this file: searched for by name, selected once listed (a
+   *  file made a moment ago is listed after the scan opening the library
+   *  starts). */
+  initialFile?: LibraryFocus | null
   onClose: () => void
   /** Chat with the agent a file belongs to. */
   onOpenAgent?: (agentSlug: string) => void
@@ -252,8 +257,10 @@ export function FileLibrary({ phone = false, initialAgent, onClose, onOpenAgent,
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [state, setState] = useState<LibraryState | null>(null)
-  const [query, setQuery] = useState('')
+  const [query, setQuery] = useState(initialFile?.filename ?? '')
   const [debounced, setDebounced] = useState('')
+  // The file asked for, until a load lists it.
+  const wanted = useRef(initialFile ?? null)
   const [agent, setAgent] = useState(initialAgent || '')
   const [category, setCategory] = useState('')
   const [kind, setKind] = useState('')
@@ -295,7 +302,10 @@ export function FileLibrary({ phone = false, initialAgent, onClose, onOpenAgent,
       setPage(res)
       setError('')
       // The open file follows its fresh copy (a summary that just arrived).
-      setSelected((cur) => (cur ? res.items.find((i) => i.id === cur.id) ?? cur : cur))
+      const want = wanted.current
+      const hit = want && res.items.find((i) => i.agent_slug === want.agent && i.rel_path === want.relPath)
+      if (hit) { wanted.current = null; setSelected(hit) }
+      else setSelected((cur) => (cur ? res.items.find((i) => i.id === cur.id) ?? cur : cur))
     } catch (e) {
       if (id === reqId.current && !quiet) setError(e instanceof Error ? e.message : String(e))
     } finally {
