@@ -3108,6 +3108,10 @@ class WebServer:
         provider: Ollama's ``think = False`` after the model rejects thinking.
         Left on the throwaway copy, every later call would repeat the doomed
         think request (a 400 + retry) until the agent's own turn relearned it.
+
+        ``reasoning_effort`` (off … max, or auto; optional) sets how hard a
+        thinking model thinks for this call alone: Flight Deck's setup reads
+        turn it off, so the answer isn't spent on thoughts.
         """
         base = getattr(getattr(self, "agent", None), "provider", None)
         provider = self._scoped_provider()
@@ -3118,7 +3122,12 @@ class WebServer:
         except Exception:
             return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
 
-        from captain_claw.llm import LLMResponse, Message, is_reasoning_backfill_placeholder
+        from captain_claw.llm import (
+            LLMResponse,
+            Message,
+            is_reasoning_backfill_placeholder,
+            reasoning,
+        )
         raw_messages = body.get("messages", [])
         messages = [Message(role=m["role"], content=m["content"]) for m in raw_messages]
         temperature = body.get("temperature")
@@ -3132,12 +3141,13 @@ class WebServer:
             pass
 
         try:
-            resp: LLMResponse = await provider.complete(
-                messages,
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            reasoning = resp.reasoning_content or ""
+            with reasoning.call_effort(body.get("reasoning_effort")):
+                resp: LLMResponse = await provider.complete(
+                    messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+            thoughts = resp.reasoning_content or ""
             return web.json_response({
                 "ok": True,
                 "content": resp.content,
@@ -3146,7 +3156,7 @@ class WebServer:
                 "finish_reason": resp.finish_reason,
                 # A thinking model's chain of thought ("" otherwise), for
                 # callers that show it (WhatsApp Web auto-replies).
-                "reasoning": "" if is_reasoning_backfill_placeholder(reasoning) else reasoning,
+                "reasoning": "" if is_reasoning_backfill_placeholder(thoughts) else thoughts,
             })
         except Exception as exc:
             from captain_claw.exceptions import retry_after

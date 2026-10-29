@@ -57,6 +57,7 @@ from captain_claw.flight_deck import rate_limiter, server
 from captain_claw.flight_deck.auth import create_access_token, set_auth_db
 from captain_claw.flight_deck.data_library import datastore_file
 from captain_claw.flight_deck.db import FlightDeckDB
+from captain_claw.flight_deck.file_library import ModelReply
 from captain_claw.skills import _parse_frontmatter
 
 BOB = "user-bob"
@@ -187,9 +188,9 @@ def _model(monkeypatch, *replies: str) -> list[dict]:
 
     async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
         calls.append({"system": system, "user": user, "owner": owner_id, "max_tokens": max_tokens})
-        return replies[min(len(calls), len(replies)) - 1], 100
+        return ModelReply(replies[min(len(calls), len(replies)) - 1], 100)
 
-    monkeypatch.setattr(ap, "call_model", fake_call)
+    monkeypatch.setattr(ap, "model_reply", fake_call)
     return calls
 
 
@@ -296,8 +297,10 @@ def test_a_part_with_nothing_in_it_is_not_a_failure():
 
 
 def _pdf_text(pages: int, chars_per_page: int = 2000) -> str:
-    """What the PDF extractor makes of a document of *pages* pages."""
-    return "\n".join(["# big.pdf", ""] + [f"## Page {n}\n\n" + ("x" * (chars_per_page - 1)) + "\n" for n in range(1, pages + 1)])
+    """What the PDF extractor makes of a document of *pages* pages: short
+    words, about 4 characters a token."""
+    words = ("abc " * (chars_per_page // 4 + 1))[:chars_per_page - 1]
+    return "\n".join(["# big.pdf", ""] + [f"## Page {n}\n\n" + words + "\n" for n in range(1, pages + 1)])
 
 
 def test_split_cuts_at_pages_and_says_which():
@@ -345,7 +348,7 @@ async def test_documents_are_staged_with_their_size_and_no_model(deck, monkeypat
     out = await _stage(BOB, [("policy.md", big), ("empty.txt", b""), ("scan.txt", b"   \n  ")])
     [doc] = out["docs"]
     assert doc["name"] == "policy.md" and doc["pages"] == 40 and doc["pages_exact"] is True
-    assert doc["chars"] == len(big.decode()) and doc["tokens"] == -(-doc["chars"] // 4)
+    assert doc["chars"] == len(big.decode()) and 0.95 < doc["tokens"] / (doc["chars"] / 4) < 1.05
     assert any("empty.txt" in w for w in out["warnings"]) and any("scan.txt" in w for w in out["warnings"])
     assert pdocs.load_staged(ap.owner_root(BOB), doc["id"])["text"] == big.decode()
     assert pdocs.load_staged(ap.owner_root(CAROL), doc["id"]) is None
@@ -594,9 +597,9 @@ async def test_a_read_can_be_stopped_and_only_its_owner_follows_it(deck, monkeyp
     async def slow_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
         started.set()
         await asyncio.sleep(30)
-        return json.dumps(_REPLY), 100
+        return ModelReply(json.dumps(_REPLY), 100)
 
-    monkeypatch.setattr(ap, "call_model", slow_call)
+    monkeypatch.setattr(ap, "model_reply", slow_call)
     staged = (await _stage(BOB, [("p.txt", b"Refunds.")]))["docs"]
     job_id = (await _start(BOB, [{"id": staged[0]["id"]}])).json()["id"]
     await asyncio.wait_for(started.wait(), 5)
@@ -616,9 +619,9 @@ def _gated(monkeypatch, reply: dict) -> asyncio.Event:
 
     async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
         await gate.wait()
-        return json.dumps(reply), 100
+        return ModelReply(json.dumps(reply), 100)
 
-    monkeypatch.setattr(ap, "call_model", fake_call)
+    monkeypatch.setattr(ap, "model_reply", fake_call)
     return gate
 
 
@@ -681,9 +684,9 @@ async def test_a_read_that_stopped_with_flight_deck_goes_on_from_where_it_was(de
         if len(calls) == 2 and not second.is_set():
             second.set()
             await asyncio.sleep(30)          # Flight Deck stops during part 2
-        return json.dumps({"rules": [{"text": f"Rule from call {len(calls)}."}]}), 100
+        return ModelReply(json.dumps({"rules": [{"text": f"Rule from call {len(calls)}."}]}), 100)
 
-    monkeypatch.setattr(ap, "call_model", fake_call)
+    monkeypatch.setattr(ap, "model_reply", fake_call)
     staged = (await _stage(BOB, [("big.md", _pdf_text(40).encode())]))["docs"]
     r = await _start(BOB, [{"id": staged[0]["id"]}], agent=slug)
     job = ap._JOBS[r.json()["id"]]
@@ -832,7 +835,7 @@ def _agent_model(monkeypatch, *replies, up: bool = True) -> list[dict]:
         reply = replies[min(len(calls), len(replies)) - 1]
         if isinstance(reply, Exception):
             raise reply
-        return reply, 50
+        return reply if isinstance(reply, ModelReply) else ModelReply(reply, 50)
 
     monkeypatch.setattr(ap, "_agent_up", fake_up)
     monkeypatch.setattr(ap, "_agent_complete", fake_complete)
@@ -953,12 +956,13 @@ async def test_an_agents_rest_call_carries_its_model_and_counts_its_tokens(deck,
     reader = ap.agent_reader(slug, reg[slug]) or {"agent": slug, "name": "Helpdesk", "model": "m"}
     reader = {**reader, "byok": True}
 
-    assert await ap._agent_complete(reader, "sys", "material", BOB, 8000) == ("{}", 75)
+    assert await ap._agent_complete(reader, "sys", "material", BOB, 8000) == ModelReply("{}", 75, 70)
     body = json.loads(seen[0].content)
     assert seen[0].url.path == "/api/llm/complete" and seen[0].url.params["token"] == "tok-1"
     assert seen[0].url.port == 24307
     assert body["messages"] == [{"role": "system", "content": "sys"}, {"role": "user", "content": "material"}]
     assert body["max_tokens"] == 8000 and body["timeout"] == ap._CALL_TIMEOUT
+    assert body["reasoning_effort"] == "off"     # a step needn't think: its thoughts would eat the answer
     assert counted == [(BOB, 75, True)]
 
     with pytest.raises(ap._ModelError) as busy:
@@ -1002,9 +1006,9 @@ def _busy_then(monkeypatch, *replies) -> list[int]:
         reply = replies[min(len(calls), len(replies)) - 1]
         if isinstance(reply, Exception):
             raise reply
-        return reply, 100
+        return ModelReply(reply, 100)
 
-    monkeypatch.setattr(ap, "call_model", fake_call)
+    monkeypatch.setattr(ap, "model_reply", fake_call)
     monkeypatch.setattr(ap, "_WAITS", (0, 0, 0))
     return calls
 
@@ -1114,6 +1118,166 @@ async def test_llm_complete_says_how_long_a_busy_server_asked_to_wait():
     data = json.loads(resp.text)
     assert resp.status == 500 and data["ok"] is False and data["retry_after"] == 9.0
     assert "RateLimitError" in data["error"]
+
+
+async def test_llm_complete_sets_how_hard_the_model_thinks_for_one_call(monkeypatch):
+    """A setup read asks for ``reasoning_effort: off``: a hybrid model's
+    thoughts count against the answer's max_tokens. The level reaches that
+    request only; a call that doesn't ask leaves the model's own setting."""
+    import types
+
+    from captain_claw.llm import OllamaProvider
+    from captain_claw.vastai import wake
+    from captain_claw.web_server import WebServer
+
+    async def _no_wake(base_url):
+        return None
+
+    monkeypatch.setattr(wake, "maybe_wake_instance", _no_wake)
+    monkeypatch.delenv("CLAW_OLLAMA_THINK", raising=False)
+    sent: list = []   # each request's ``think``
+
+    def _ollama(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        sent.append(body.get("think"))
+        return httpx.Response(200, json={
+            "model": body["model"], "message": {"role": "assistant", "content": "{}"},
+            "done": True, "done_reason": "stop", "prompt_eval_count": 5, "eval_count": 1,
+        })
+
+    shared = OllamaProvider(model="qwen3:8b", base_url="http://ollama.test:11434", think=True)
+    shared.client = httpx.AsyncClient(transport=httpx.MockTransport(_ollama))
+    web = WebServer.__new__(WebServer)
+    web.agent = types.SimpleNamespace(provider=shared)
+    req = {"messages": [{"role": "user", "content": "Rules, as JSON."}], "max_tokens": 256}
+    for extra in ({"reasoning_effort": "off"}, {}, {"reasoning_effort": "auto"}):
+        resp = await web._llm_complete(_JsonRequest({**req, **extra}))
+        assert resp.status == 200 and json.loads(resp.text)["content"] == "{}"
+    assert sent == [False, True, True] and shared.think is True
+    await shared.client.aclose()
+
+
+# ── A thinking model, a cut-off answer, the model's own count ─────────
+
+
+def _small_tier(monkeypatch) -> dict:
+    """The owner's model with an 8k-token step: _pdf_text(40) reads in 3."""
+    tier = {**_TIER, "input_ctx": 8000 * 2 + 2 * ap._PROMPT_TOKENS}
+
+    async def small_tier(_uid, prefer=()):
+        return tier
+
+    monkeypatch.setattr(ap, "_resolve_tier", small_tier)
+    return tier
+
+
+async def test_reading_asks_a_thinking_model_not_to_think(deck, monkeypatch):
+    """Pulling rules out of material needs no deliberation, and a hybrid
+    model's thoughts count against the answer's max_tokens — Qwen 3.8 spent
+    whole steps thinking. The owner's model is asked for thinking off too
+    (FD_SETUP_REASONING picks another level; auto, the model's own)."""
+    from captain_claw.llm import reasoning
+    levels: list = []
+
+    async def fake_reply(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+        levels.append(reasoning.requested_effort())
+        return ModelReply(json.dumps(_REPLY), 100)
+
+    monkeypatch.setattr(ap, "model_reply", fake_reply)
+    job = await _prepare(BOB, [("p.txt", b"Refunds within 14 days.")])
+    assert job["state"] == "done" and levels == ["off"]
+    assert reasoning.requested_effort() is None          # for that call only
+
+    monkeypatch.setenv("FD_SETUP_REASONING", "low")
+    assert ap.read_effort() == "low"
+    monkeypatch.setenv("FD_SETUP_REASONING", "auto")
+    assert ap.read_effort() is None
+    await _prepare(BOB, [("p.txt", b"Refunds within 14 days.")])
+    assert levels == ["off", None]
+
+
+async def test_an_answer_cut_off_by_thinking_says_so(deck, monkeypatch):
+    """A model that spends all its max_tokens thinking (one that can't stop,
+    or an agent from before it could be asked) gets more room once; cut off
+    again, the review says what happened instead of "couldn't be read"."""
+    tier = _small_tier(monkeypatch)
+    thinking = ModelReply("", 8000, 9000, "length", "Let me think about the refund rules first…")
+    good = ModelReply(json.dumps({"rules": [{"text": "Kept."}]}), 100)
+    replies = [thinking, thinking, good, good, good]
+    calls: list[int] = []
+
+    async def fake_reply(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+        calls.append(max_tokens)
+        return replies[min(len(calls), len(replies)) - 1]
+
+    monkeypatch.setattr(ap, "model_reply", fake_reply)
+    job = await _prepare(BOB, [("big.md", _pdf_text(40).encode())])
+    room = ap._retry_tokens(tier)
+    assert job["state"] == "done" and calls[:2] == [ap._MAX_TOKENS, room] and room > ap._MAX_TOKENS
+    [cut] = [w for w in job["result"]["preset"]["warnings"] if w.startswith("Part 1 of 3")]
+    assert f"couldn't be read: test-model used up its {room:,} tokens thinking before it finished answering" in cut
+    assert [r["text"] for r in job["result"]["preset"]["rules"]] == ["Kept."]
+
+    replies[:] = [thinking]
+    job = await _prepare(BOB, [("p.txt", b"Refunds.")])
+    assert job["state"] == "error"
+    assert job["error"] == (f"Couldn't read the material with test-model: it used up its {room:,} tokens "
+                            "thinking before it finished answering.")
+
+
+def test_a_cut_off_answer_is_told_apart_from_thinking():
+    from captain_claw.flight_deck.file_library import cut_off
+    started = '{"rules": [{"text": "Refunds wit'                 # most of 8,000 tokens went elsewhere
+    assert "thinking" in ap._cut_why(ModelReply("", 1, finish_reason="length"), 8000)
+    assert "thinking" in ap._cut_why(ModelReply(started, 1, finish_reason="length"), 8000)
+    assert "thinking" in ap._cut_why(ModelReply(started * 600, 1, reasoning="Hmm."), 8000)
+    long = '{"rules": [' + '{"text": "Refunds within 14 days."}, ' * 600
+    assert ap._cut_why(ModelReply(long, 1, finish_reason="length"), 8000) == (
+        "ran past 8,000 tokens in its answer, which was cut off")
+    assert cut_off(ModelReply("", 1, finish_reason="max_tokens")) and cut_off(ModelReply("", 1, finish_reason="length"))
+    assert not cut_off(ModelReply("{}", 1, finish_reason="stop")) and not cut_off(ModelReply("{}", 1))
+
+
+def test_tokens_are_estimated_from_what_the_text_is():
+    english = "Refunds are paid within fourteen days of the return, to the card the order was paid with. " * 50
+    croatian = "Kupac ima pravo raskinuti ugovor u roku od četrnaest dana od primitka robe, bez navođenja razloga. " * 50
+    chinese = "买家可以在收到商品后十四天内退货。" * 50
+    assert 4.0 <= pdocs.chars_per_token(english) <= 6.0
+    assert pdocs.chars_per_token(croatian) < pdocs.chars_per_token(english)
+    assert pdocs.chars_per_token(chinese) < 2.5
+    assert pdocs.chars_per_token("x" * 5000) == 6.0 and pdocs.chars_per_token("Short.") == pdocs.CHARS_PER_TOKEN
+    assert abs(pdocs.chars_per_token(english * 100) - pdocs.chars_per_token(english)) < 0.1   # from a sample
+    docs = [_doc("e.md", english), _doc("c.md", croatian * 3), _doc("skip.csv", "x" * 9000, read=False)]
+    assert pdocs.chars_per_token(croatian) < ap.material_cpt(docs) < pdocs.chars_per_token(english)
+
+
+async def test_steps_are_cut_again_to_the_models_own_count(deck, monkeypatch):
+    """Steps are cut by an estimate of the material's tokens, and the model's
+    server says what the first really was. Well off (a language its
+    tokenizer knows less well), the rest are cut again to its count, so no
+    later call is bigger than meant; a count far off the estimate (a server
+    that leaves out what it cached) is no lesson."""
+    _small_tier(monkeypatch)
+    seen: list[int] = []        # each call's prompt, in the model's count
+    rate = [2.5]                # its characters a token: 60% more tokens than estimated
+
+    async def fake_reply(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
+        tokens = int((len(system) + len(user)) / rate[0])
+        seen.append(tokens)
+        return ModelReply(json.dumps({"rules": [{"text": f"Rule {len(seen)}."}]}), 100, tokens)
+
+    monkeypatch.setattr(ap, "model_reply", fake_reply)
+    job = await _prepare(BOB, [("big.md", _pdf_text(40).encode())])
+    assert job["state"] == "done" and job["steps"] > 3 and len(seen) == job["steps"] + 1   # the merge last
+    room = 8000 + ap._PROMPT_TOKENS
+    assert seen[0] > room and max(seen[1:-1]) <= room       # the first ran over; the rest fit
+    plan = json.loads((ap._folder(ap._JOBS[job["id"]]) / ap._PLAN_FILE).read_text())
+    assert abs(plan["cpt"] - 2.5) < 0.01 and len(plan["steps"]) == job["steps"]
+
+    seen.clear()
+    rate[0] = 400.0                                         # "50 tokens": what it had cached left out
+    job = await _prepare(BOB, [("big.md", _pdf_text(40).encode())])
+    assert job["state"] == "done" and job["steps"] == 3
 
 
 # ── Seeding ───────────────────────────────────────────────────────────

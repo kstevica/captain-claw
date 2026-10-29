@@ -222,6 +222,9 @@ def test_local_templates():
         "chat_template_kwargs": {"enable_thinking": False}}
     assert _kwargs("openai", "Qwen/Qwen3.8-Flash-Next", "medium", LOCAL)["extra_body"] == {
         "chat_template_kwargs": {"enable_thinking": True, "reasoning_effort": "medium"}}
+    # A Flight Deck setup read ("off") on a self-hosted Qwen 3.8, which thinks at xhigh unless told.
+    assert _kwargs("openai", "LithosAI/Qwen3.8-27B-DSpark-NVFP4", "off", LOCAL)["extra_body"] == {
+        "chat_template_kwargs": {"enable_thinking": False}}
 
 
 def test_gemini_thinking_config_passthrough():
