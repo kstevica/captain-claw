@@ -15,13 +15,14 @@ Grade each reply against the passage — not against what you know yourself.
   know, refused, or answered something else. Saying it couldn't find the answer is honest:
   `no_answer`, not made up.
 
-`unsupported`: the specific details the reply states as fact — figures, names, dates, deadlines,
-rules — that aren't in the passage and aren't common knowledge, each quoted short from the reply
-(the figure or name with a few words of what it is about, e.g. "0.28 points of TRS per point of
-growth"). You see one passage of the agent's documents; these are checked against the rest of
-them, so list every such detail and don't lower the verdict for them. Hedged guesses
-("probably", "usually") count only when it then acts on them as fact. Empty when there are none.
-`made_up` is true when `unsupported` isn't empty.
+`unsupported`: the figures and names the reply states as fact — amounts, percentages, dates,
+people, companies, titles — that aren't in the passage and aren't common knowledge, each quoted
+short from the reply (the figure or name with a few words of what it is about, e.g. "0.28 points
+of TRS per point of growth"). Only what has a figure or a name in it: not an explanation, a
+summary or the reply's own wording of what it read. You see one passage of the agent's
+documents; these are checked against the rest of them, so list every such detail and don't lower
+the verdict for them. Hedged guesses ("probably", "usually") count only when it then acts on
+them as fact. Empty when there are none. `made_up` is true when `unsupported` isn't empty.
 
 `missing`: the points the reply lacks or gets wrong, as given. `why`: one short sentence for
 the agent's owner — what was right, or what was missing or wrong — in the question's language.
