@@ -178,10 +178,17 @@ def test_the_writers_questions_are_cleaned():
     assert got[0]["points"] == ["long ago", "7"] and got[0]["doc"] == "handbook.md" and got[0]["read"] is False
     assert got[1]["kind"] == "situation" and got[1]["points"] == ["Check items 1.1 to 1.3."]
     assert ex.parse_questions("no json", batch) == []
+    # An answer that only points at its section can't be graded against: no question.
+    vague = json.dumps({"questions": [
+        {"section": 1, "question": "What are the three areas to focus on?", "points": ["three areas named in the section"],
+         "answer": "The section lists three focus areas; the exam expects them as given in the section."},
+        {"section": 2, "question": "What must be checked first?", "answer": "Item 1.1.", "points": ["item 1.1"]}]})
+    assert [q["question"] for q in ex.parse_questions(vague, batch)] == ["What must be checked first?"]
 
 
 def test_the_graders_verdicts_are_cleaned():
-    batch = [{}, {}, {}]
+    # A grader that gives verdicts, not points marked: taken at its word. No answer misses every point.
+    batch = [{}, {"points": ["14 days"]}, {}]
     reply = json.dumps({"grades": [
         {"item": 1, "verdict": "Right", "why": "All there."},
         {"item": 2, "verdict": "No answer", "made_up": True, "missing": ["14 days"]},
@@ -190,12 +197,35 @@ def test_the_graders_verdicts_are_cleaned():
     ]})
     got = ex.parse_grades(reply, batch)
     assert set(got) == {1, 2}
-    assert got[1] == {"verdict": "right", "made_up": False, "unsupported": [], "missing": [], "why": "All there."}
+    assert got[1] == {"verdict": "right", "made_up": False, "unsupported": [], "missing": [], "contradicts": [],
+                      "why": "All there."}
     assert got[2]["verdict"] == "no_answer" and got[2]["made_up"] is True and got[2]["missing"] == ["14 days"]
     # Details it lists outside the passage are checked (settle) before anything counts as made up.
     listed = ex.parse_grades(json.dumps({"grades": [
         {"item": 1, "verdict": "partly", "unsupported": ["0.28 points of TRS", "", 7], "made_up": True}]}), batch)
     assert listed[1]["unsupported"] == ["0.28 points of TRS", "7"] and listed[1]["made_up"] is False
+
+
+def test_the_grader_marks_each_point_and_the_verdict_is_worked_out():
+    batch = [{"points": ["14 days", "receipt"]}] * 5 + [{"points": ["a", "b", "c"]}]
+    reply = json.dumps({"grades": [
+        {"item": 1, "answered": True, "covered": [True, True], "contradicts": [], "why": "All there."},
+        {"item": 2, "answered": True, "covered": [True, False], "why": "No receipt."},
+        {"item": 3, "answered": True, "covered": [False, "false"]},
+        {"item": 4, "answered": True, "covered": [True, True], "contradicts": ["says 30 days", ""]},
+        {"item": 5, "answered": False, "covered": [True, True]},
+        {"item": 6, "covered": [True]},                          # one of three marked: the rest weren't found
+    ]})
+    got = ex.parse_grades(reply, batch)
+    assert [got[i]["verdict"] for i in range(1, 7)] == ["right", "partly", "wrong", "partly", "no_answer", "partly"]
+    assert got[2]["missing"] == ["receipt"] and got[4]["missing"] == [] and got[4]["contradicts"] == ["says 30 days"]
+    assert got[5]["missing"] == ["14 days", "receipt"] and got[6]["missing"] == ["b", "c"]
+    # What it writes about a point, or about detail from elsewhere, has no say in the verdict.
+    chatty = ex.parse_grades(json.dumps({"grades": [{"item": 1, "covered": [True, True], "verdict": "partly",
+                                                     "missing": ["Points were covered; nothing required is missing."],
+                                                     "why": "Right, but adds a Heineken example."}]}), batch)[1]
+    assert chatty["verdict"] == "right" and chatty["missing"] == []
+    assert ex.settle(got[4], [])["verdict"] == "partly"         # a contradiction is a reason
 
 
 # ── Why it went wrong ─────────────────────────────────────────────────

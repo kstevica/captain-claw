@@ -27,7 +27,9 @@ gives. The agent will be asked the questions as its users would ask them, withou
 
 ## The answer
 
-- `answer`: what a correct reply says — short, complete, and taken only from the section.
+- `answer`: what a correct reply says — short, complete, and taken only from the section. Give
+  the answer itself, never "as listed in the section": a section that only says what comes later
+  has nothing to ask — leave it out.
 - `points`: the 1–4 things a reply must contain to be right (a figure, a condition, a name, a
   step), each a few words. Fewer is better: only what matters.
 

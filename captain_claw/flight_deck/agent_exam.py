@@ -277,9 +277,15 @@ def _clean(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+# An answer that points at its section instead of giving it ("the three areas named in the section").
+_POINTS_AT = re.compile(r"\b(?:in|from|by) the (?:section|passage|excerpt)\b|\bas (?:given|listed|named|stated|shown) "
+                        r"(?:in|by)\b|\bthe exam expects\b", re.IGNORECASE)
+
+
 def parse_questions(content: str, batch: list[dict]) -> list[dict]:
     """The writer's questions, each on its section; a section it left out,
-    or answered with something unusable, has none."""
+    or answered with something unusable — nothing, or an answer that only
+    points at the section, which no reply can be graded against — has none."""
     try:
         raw = reply_json(content).get("questions")
     except (ValueError, json.JSONDecodeError):
@@ -300,6 +306,8 @@ def parse_questions(content: str, batch: list[dict]) -> list[dict]:
             continue
         points = [p for p in (_clean(x, 200) for x in item.get("points") or [] if isinstance(x, (str, int, float)))
                   if p][:4]
+        if any(_POINTS_AT.search(x) for x in (*points, answer)):
+            continue
         kind = str(item.get("kind") or "").strip().lower()
         p = batch[n - 1]
         taken.add(n)
@@ -319,13 +327,22 @@ def grading_prompt(batch: list[dict], text_of: dict[str, str | None]) -> str:
         passage = text_of.get(q["id"]) or "(The section is no longer in the agent's knowledge.)"
         blocks.append(
             f"## Item {n}\nQuestion: {q['question']}\n\nPassage ({where(q)}):\n{_excerpt(passage)}\n\n"
-            f"Expected answer: {q['expected']}\nPoints: " + "; ".join(q["points"])
+            f"Expected answer: {q['expected']}\nPoints:\n" + "\n".join(f"{i}. {p}" for i, p in enumerate(q["points"], 1))
             + f"\n\nReply:\n{_excerpt(q.get('answer') or '(no reply)', _ANSWER_CHARS)}")
     return "\n\n".join(blocks)
 
 
+def _texts(value: Any, limit: int, most: int) -> list[str]:
+    return [t for t in (_clean(x, limit) for x in value or [] if isinstance(x, (str, int, float))) if t][:most]
+
+
 def parse_grades(content: str, batch: list[dict]) -> dict[int, dict]:
-    """The grader's verdicts by item number (1-based); an item it left out has none."""
+    """The grader's grades by item number (1-based); an item it left out has
+    none. The grader marks each of a question's points covered or not and
+    names what the reply contradicts; the verdict is worked out from that —
+    every point and nothing contradicted is right, none is wrong, the rest
+    partly — so its view of extra detail, or what it writes about a point,
+    never decides it. A grader that gives a verdict instead is taken at it."""
     try:
         raw = reply_json(content).get("grades")
     except (ValueError, json.JSONDecodeError):
@@ -338,16 +355,27 @@ def parse_grades(content: str, batch: list[dict]) -> dict[int, dict]:
             n = int(item.get("item"))
         except (TypeError, ValueError):
             continue
-        verdict = str(item.get("verdict") or "").strip().lower().replace(" ", "_").replace("-", "_")
-        if not 1 <= n <= len(batch) or verdict not in VERDICTS:
+        if not 1 <= n <= len(batch):
             continue
-        unsupported = [d for d in (_clean(x, 200) for x in item.get("unsupported") or []
-                                   if isinstance(x, (str, int, float))) if d][:_DETAILS_MAX]
+        points = list(batch[n - 1].get("points") or [])
+        verdict = str(item.get("verdict") or "").strip().lower().replace(" ", "_").replace("-", "_")
+        covered = item.get("covered")
+        contradicts = _texts(item.get("contradicts"), 200, 4)
+        if item.get("answered") is False or verdict == "no_answer":
+            verdict, missing, contradicts = "no_answer", points, []
+        elif isinstance(covered, list) and covered:
+            marks = [c is True or str(c).strip().lower() in ("true", "yes") for c in covered][:len(points)]
+            marks += [False] * (len(points) - len(marks))   # a point it didn't mark wasn't found
+            missing = [p for p, on in zip(points, marks, strict=True) if not on]
+            verdict = "wrong" if not any(marks) else "right" if all(marks) and not contradicts else "partly"
+        elif verdict in VERDICTS:
+            missing = _texts(item.get("missing"), 200, 4)
+        else:
+            continue
+        unsupported = _texts(item.get("unsupported"), 200, _DETAILS_MAX)
         # Made up is what its details say (settle); the grader's word only when it names none.
         out[n] = {"verdict": verdict, "made_up": item.get("made_up") is True and not unsupported,
-                  "unsupported": unsupported,
-                  "missing": [m for m in (_clean(x, 200) for x in item.get("missing") or []
-                                          if isinstance(x, (str, int, float))) if m][:4],
+                  "unsupported": unsupported, "missing": missing, "contradicts": contradicts,
                   "why": _clean(item.get("why"), 400)}
     return out
 
@@ -554,12 +582,13 @@ def settle(grade: dict, details: list[dict]) -> dict:
     when one is found nowhere — the grader sees one passage, and a figure
     from another chapter, or a fact the agent was taught, is its owner's
     too. A right answer that makes something up is only partly right; a
-    partly right one with no point missing and nothing made up is right —
-    the grader marked it down for detail it was told not to."""
+    partly right one with no point missing, nothing contradicted and nothing
+    made up is right — the grader marked it down for detail it was told not
+    to."""
     out = {**grade, "details": details}
     if details:
         out["made_up"] = any(not d["found"] for d in details)
-    if out["verdict"] == "partly" and not out["missing"] and not out["made_up"]:
+    if out["verdict"] == "partly" and not out["missing"] and not out.get("contradicts") and not out["made_up"]:
         out["verdict"] = "right"
     if out["made_up"] and out["verdict"] == "right":
         out["verdict"] = "partly"

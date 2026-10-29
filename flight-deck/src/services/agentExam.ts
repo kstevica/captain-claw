@@ -48,6 +48,8 @@ export interface ExamQuestion {
   /** The details the grader found outside the question's passage, and where else they are ('' — nowhere: made up). */
   details?: { text: string; found: '' | 'documents' | 'lessons' | 'looked_up' }[]
   missing?: string[]
+  /** What the reply says that its section says otherwise. */
+  contradicts?: string[]
   why?: string
   cause?: Cause | ''
   /** Asked again: its verdict the time before. */
