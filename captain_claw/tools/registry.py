@@ -900,6 +900,13 @@ class ToolRegistry:
             if privacy_error:
                 raise ToolBlockedError(name, privacy_error)
 
+            # An onboarding exam's question only reads: nothing is sent or changed.
+            from captain_claw import exam_turn as _exam_turn
+
+            exam_error = _exam_turn.tool_block(name, arguments or {}, (arguments or {}).get("_agent"))
+            if exam_error:
+                raise ToolBlockedError(name, exam_error)
+
         # A multi-user deck (deck_confine): an owner call's paths stay in this
         # agent's own roots, and a non-admin's agent runs no code on the host.
         # Inside the tool context, after prepare_call, so shared folders resolve.

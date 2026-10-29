@@ -59,7 +59,7 @@ from typing import Any
 AUTOMATION_KINDS = frozenset({
     "autonomy", "autonomy_tool", "plan", "fd_scheduler", "flow", "flow_tool", "cron",
     "peer", "peer_relay", "sister", "botport", "fd_worker", "being", "mcp_task", "bat", "link",
-    "unknown",
+    "exam", "unknown",
 })
 MAIL_WRITE_ACTIONS = frozenset({"create_draft", "update_draft", "send", "send_draft"})
 # google_mail / microsoft_mail actions that change the mailbox without writing
@@ -90,6 +90,7 @@ KIND_LABELS: dict[str, str] = {
     "mcp_task": "a task sent over MCP",
     "bat": "a Bat run",
     "link": "a connected system",
+    "exam": "an onboarding exam",
     "unknown": "an automation",
 }
 

@@ -954,6 +954,8 @@ class AgentFileOpsMixin:
             return
         self._add_session_message("assistant", content)
         await self.session_manager.save_session(self.session)
+        from captain_claw import exam_turn
         memory = getattr(self, "memory", None)
-        if memory is not None:
+        # An onboarding exam's session is deleted when the turn ends: never indexed.
+        if memory is not None and not exam_turn.active(self):
             memory.schedule_background_sync("assistant_saved")

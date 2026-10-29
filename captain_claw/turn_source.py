@@ -35,6 +35,7 @@ SOURCE_LABELS: dict[str, str] = {
     "autonomy": "Autonomous work",
     "api": "API and MCP",
     "link": "Agent links",
+    "exam": "Onboarding exams",
     "public": "Public link",
     "member": "Shared-agent members",
 }
@@ -68,6 +69,7 @@ _AUTOMATION_SOURCES = {
     "autonomy": "autonomy", "autonomy_tool": "autonomy", "plan": "autonomy", "bat": "autonomy",
     "mcp_task": "api",
     "link": "link",
+    "exam": "exam",
 }
 # A turn's channel (the surface or the entry point) → its source.
 _CHANNEL_SOURCES = {

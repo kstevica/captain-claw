@@ -12,6 +12,7 @@ import { useProcessStore } from '../../stores/processStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { useUIStore } from '../../stores/uiStore'
 import { AgentSetupDialog } from '../layout/AgentSetupDialog'
+import { AgentExamDialog } from '../layout/AgentExamDialog'
 import {
   SHARED_SECTION_ID, sharedNotificationAction, type SharedNotificationAction,
 } from '../../utils/sharedAgent'
@@ -60,12 +61,14 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
   // The same list, big: a dialog that reads long nudges and proposals whole.
   const [big, setBig] = useState(false)
   // An agent whose way-of-working read is done (or stopped): its setup dialog, opened from here.
-  const [setupFor, setSetupFor] = useState<{ slug: string; name: string } | null>(null)
-  const openSetup = (slug: string) => {
+  const [setupFor, setSetupFor] = useState<{ slug: string; name: string; readDocs?: string[] } | null>(null)
+  // An agent whose onboarding exam ended: the exam, opened from here.
+  const [examFor, setExamFor] = useState<{ slug: string; name: string } | null>(null)
+  const openSetup = (slug: string, kind: 'setup' | 'exam' = 'setup') => {
     setOpen(false)
     setBig(false)
     const proc = useProcessStore.getState().processes.find((p) => p.slug === slug)
-    setSetupFor({ slug, name: proc?.name || slug })
+    ;(kind === 'exam' ? setExamFor : setSetupFor)({ slug, name: proc?.name || slug })
   }
 
   return (
@@ -95,12 +98,18 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
       )}
       {big && <NotificationDialog onClose={() => setBig(false)} onOpenSetup={openSetup} />}
       {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
+      {examFor && (
+        <AgentExamDialog agent={examFor} onClose={() => setExamFor(null)}
+          onReadDocs={(readDocs) => { setSetupFor({ ...examFor, readDocs }); setExamFor(null) }} />
+      )}
     </div>
   )
 }
 
 // The bell's list in a dialog: wide, tall, every text whole.
-function NotificationDialog({ onClose, onOpenSetup }: { onClose: () => void; onOpenSetup: (slug: string) => void }) {
+function NotificationDialog({ onClose, onOpenSetup }: {
+  onClose: () => void; onOpenSetup: (slug: string, kind?: 'setup' | 'exam') => void
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -133,7 +142,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
   onClose: () => void
   onEnlarge?: () => void
   /** A notice that an agent's way-of-working read ended opens its setup. */
-  onOpenSetup?: (slug: string) => void
+  onOpenSetup?: (slug: string, kind?: 'setup' | 'exam') => void
   /** In the big dialog: larger text, every text whole, a close button. */
   large?: boolean
 }) {
@@ -221,19 +230,20 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
           <div className="px-3 py-6 text-center text-xs text-zinc-600">No notifications</div>
         ) : (
           filtered.map((n) => {
-            const setup = n.refType === 'agent_setup' && n.refId && onOpenSetup ? n.refId : ''
+            const setup = (n.refType === 'agent_setup' || n.refType === 'agent_exam') && n.refId && onOpenSetup ? n.refId : ''
+            const exam = n.refType === 'agent_exam'
             return (
             <NotificationItem
               key={n.id}
               notification={n}
               large={large}
               action={setup ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
-              hint={setup ? (n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.') : ''}
+              hint={setup ? (exam ? 'Click to see the exam.' : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
                 ? (waiting.has(n.refId) ? 'waiting' : 'answered') : undefined}
               onAnswered={() => { markRead(n.id); loadWaiting() }}
               onRead={() => markRead(n.id)}
-              onActivate={setup ? () => onOpenSetup?.(setup) : activate}
+              onActivate={setup ? () => onOpenSetup?.(setup, exam ? 'exam' : 'setup') : activate}
               onRemove={() => remove(n.id)}
             />
             )

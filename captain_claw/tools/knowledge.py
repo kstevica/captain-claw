@@ -249,7 +249,9 @@ class KnowledgeTool(Tool):
         want = _norm(Path(name).stem if name.lower().endswith(".md") else name)
         if not want:
             return None
-        for test in (lambda d: _norm(d.title) == want or _norm(Path(d.file).stem) == want,
+        # A part's own file (a search hit names "knowledge/<doc>-part-3.md") is its document too.
+        for test in (lambda d: _norm(d.title) == want or _norm(Path(d.file).stem) == want
+                     or any(_norm(Path(f).stem) == want for f in d.files),
                      lambda d: _norm(d.title).startswith(want) or _norm(d.file).startswith(want),
                      lambda d: want in _norm(d.title) or want in _norm(d.file)):
             found = [d for d in docs if test(d)]

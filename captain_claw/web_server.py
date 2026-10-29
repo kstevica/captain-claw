@@ -541,12 +541,14 @@ class WebServer:
             # it: it must not rebind the process-global tools (cron, history,
             # terminal…) to itself, or jobs the main chat creates would land on
             # the automation session.
+            from captain_claw import exam_turn
             from captain_claw.config import get_config
 
             automation = lane == self.normalize_lane(get_config().session.automation_lane or "")
             remote = lane.startswith(self.REMOTE_LANE_PREFIX)
             scoped: dict[str, Any] = {}
-            if automation or remote:
+            # The onboarding exam's lane (exam_turn) neither: Flight Deck opens it, not the user.
+            if automation or remote or lane == exam_turn.LANE:
                 scoped["register_tools"] = False
             if remote:
                 scoped["warm_owner_caches"] = False
@@ -2381,15 +2383,17 @@ class WebServer:
         return await get_message_content(self, request)
 
     async def _get_version(self, request: web.Request) -> web.Response:
-        from captain_claw import __version__, __build_date__
+        from captain_claw import __version__, __build_date__, exam_turn
         from captain_claw.pack_access import PACKS_CAPABILITY
         return web.json_response({
             "version": __version__,
             "build_date": __build_date__,
             "name": "Captain Claw",
             # Flight Deck probes this to tell an agent that understands shared
-            # context packs from one that would ignore them (PR B, J15).
-            "capabilities": [PACKS_CAPABILITY],
+            # context packs from one that would ignore them (PR B, J15) — and
+            # one that can take an onboarding exam (exam_turn) from one that
+            # would answer it as an ordinary automated turn, keeping it.
+            "capabilities": [PACKS_CAPABILITY, exam_turn.CAPABILITY],
         })
 
     # ── Public session API ──────────────────────────────────────────

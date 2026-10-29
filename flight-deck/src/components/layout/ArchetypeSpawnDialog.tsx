@@ -138,7 +138,7 @@ function firstSentence(text: string): string {
 // ── Component ────────────────────────────────────────────────────────
 
 /** What a caller needs to open AgentSetupDialog on the new agent. */
-export interface SetupRequest { slug: string; name: string; role: string }
+export interface SetupRequest { slug: string; name: string; role: string; readDocs?: string[] }
 
 export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, ownerLabel }: {
   /** Slugs of the agents this user can see — the default name avoids them. */

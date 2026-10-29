@@ -2193,3 +2193,213 @@ def test_a_pdf_is_read_by_pymupdf4llm_when_it_is_installed(monkeypatch, tmp_path
     assert pdocs.extract(pdf) == ("", pdocs.NO_TEXT_SCAN)
     monkeypatch.setitem(sys.modules, "pymupdf4llm", None)                 # not installed: page by page
     assert pdocs.extract(pdf) == ("", pdocs.NO_TEXT_SCAN)
+
+
+# ── The onboarding exam (/fd/agent-exam) ──────────────────────────────
+
+
+async def _ex(uid: str, method: str, path: str, **kw) -> httpx.Response:
+    async with _client() as c:
+        return await c.request(method, f"/fd/agent-exam/{path}", headers=_auth(uid), **kw)
+
+
+async def _exam_ends(uid: str, slug: str, exam_id: str) -> dict:
+    for _ in range(500):
+        e = (await _ex(uid, "GET", f"{slug}/{exam_id}")).json()
+        if e["state"] != "running":
+            return e
+        await asyncio.sleep(0.01)
+    raise AssertionError("the exam never ended")
+
+
+async def _examinable(monkeypatch, port: int) -> str:
+    """Bob's agent with a handbook, the setup having read only part of it, on its own model."""
+    monkeypatch.setattr(ap.psel, "BUDGETS", {**ap.psel.BUDGETS, "quick": 500})
+    slug = await _spawn(BOB, "Helpdesk", port)
+    _model(monkeypatch, json.dumps({"rules": [{"text": "Check every item first."}],
+                                    "knowledge": [{"doc": "handbook.md", "title": "Handbook", "summary": "Refunds."}]}))
+    job = await _prepare(BOB, [("handbook.md", _chaptered().encode())], agent=slug, budget="quick")
+    assert (await _apply(BOB, slug, {**job["result"]["preset"], "id": job["id"]})).status_code == 200
+    _own_model(monkeypatch, slug)
+    return slug
+
+
+def _examiner(monkeypatch) -> dict[str, list]:
+    """The agent's own model writes a question per section (about where it is)
+    and grades a reply right when it says "right answer"; the calls it got."""
+    import re as _re
+
+    from captain_claw.flight_deck import agent_exam as ex
+
+    calls: dict[str, list] = {"write": [], "grade": []}
+
+    async def fake_complete(reader, system, prompt, owner_id, max_tokens):
+        if system.startswith("# Writing an onboarding exam"):
+            calls["write"].append(prompt)
+            found = _re.findall(r"^## Section (\d+) — kind: (\w+)\nDocument: .*\nWhere: (.*)$", prompt, _re.M)
+            out = [{"section": int(n), "kind": kind, "question": f"What does {where} say?",
+                    "answer": f"What {where} says.", "points": [where]} for n, kind, where in found]
+            return ModelReply(json.dumps({"questions": out}), 40)
+        calls["grade"].append(prompt)
+        replies = _re.findall(r"^## Item (\d+)\n.*?^Reply:\n(.*?)(?=^## Item |\Z)", prompt, _re.M | _re.S)
+        out = [{"item": int(n), "verdict": "right" if "right answer" in reply else "wrong",
+                "why": "ok" if "right answer" in reply else "It guessed."} for n, reply in replies]
+        return ModelReply(json.dumps({"grades": out}), 30)
+
+    monkeypatch.setattr(ap, "_agent_complete", fake_complete)
+
+    async def fake_up(reader, job):
+        return True
+
+    monkeypatch.setattr(ap, "_agent_up", fake_up)
+    asked: list = []
+
+    async def fake_ask(job, q):
+        asked.append(q["question"])
+        if len(asked) % 2:   # every other one looks it up and gets it right
+            return {"answer": "The right answer.", "tokens": 100, "seconds": 2, "lookups": [
+                {"tool": "knowledge", "args": {"action": "search", "query": "x"}, "ok": True,
+                 "result": f"[1] {ex.hit_place(q)}\n" + "x" * 5000}]}
+        return {"answer": "A wrong guess.", "tokens": 100, "seconds": 1, "lookups": []}
+
+    monkeypatch.setattr(ex, "ask", fake_ask)
+
+    async def knows_exams(job):
+        return True
+
+    monkeypatch.setattr(ex, "can_take_exams", knows_exams)
+    calls["asked"] = asked
+    return calls
+
+
+async def test_an_onboarding_exam_writes_asks_and_grades(deck, monkeypatch):
+    slug = await _examinable(monkeypatch, 24390)
+    calls = _examiner(monkeypatch)
+    over = (await _ex(BOB, "GET", slug)).json()
+    assert over["docs"] == 1 and over["sections"] > 10 and over["exams"] == [] and over["running"] is None
+    assert over["model"] == "claude-haiku-4-5" and over["cost"]["quick"] < over["cost"]["standard"]
+
+    r = await _ex(BOB, "POST", slug, json={"size": "quick"})
+    assert r.status_code == 200, r.text
+    e = await _exam_ends(BOB, slug, r.json()["id"])
+    assert e["state"] == "done", e
+    qs = e["questions"]
+    assert len(qs) == 10 and len(calls["asked"]) == 10 and calls["write"] and calls["grade"]
+    assert {q["read"] for q in qs} == {True, False}                     # the read part and the rest
+    assert any(q["kind"] == "situation" for q in qs)
+    right = [q for q in qs if q["verdict"] == "right"]
+    wrong = [q for q in qs if q["verdict"] == "wrong"]
+    assert len(right) == 5 and len(wrong) == 5
+    assert all(q["looked"] and q["found"] and q["cause"] == "" for q in right)
+    assert all(q["cause"] == "didnt_look" for q in wrong)
+    assert all(len(c["result"]) <= 1200 for q in qs for c in q["lookups"])   # kept short
+    s = e["summary"]
+    assert (s["questions"], s["right"], s["pct"]) == (10, 5, 50) and s["causes"]["didnt_look"] == 5
+    assert e["tokens"] >= 1000 and e["model"] == "claude-haiku-4-5"
+    assert (server.DATA_DIR / slug / "exams" / f"{e['id']}.json").is_file()
+    bell = await deck.list_notifications(BOB)
+    assert any(n["ref_type"] == "agent_exam" and n["ref_id"] == slug and "50%" in n["title"] for n in bell)
+
+    over = (await _ex(BOB, "GET", slug)).json()
+    assert [x["id"] for x in over["exams"]] == [e["id"]] and "questions" not in over["exams"][0]
+    for path in (slug, f"{slug}/{e['id']}"):
+        assert (await _ex(CAROL, "GET", path)).status_code == 404       # not hers
+
+
+async def test_an_exam_asked_again_keeps_its_questions_and_teaches(deck, monkeypatch):
+    slug = await _examinable(monkeypatch, 24391)
+    calls = _examiner(monkeypatch)
+    first = await _exam_ends(BOB, slug, (await _ex(BOB, "POST", slug, json={})).json()["id"])
+    writes = len(calls["write"])
+    wrong = next(q for q in first["questions"] if q["verdict"] == "wrong")
+
+    posted: list = []
+
+    async def offline(port, token, facts):
+        posted.append(facts)
+        return 0
+
+    monkeypatch.setattr(ap, "_post_facts", offline)
+    r = await _ex(BOB, "POST", f"{slug}/{first['id']}/teach", json={"question": wrong["id"]})
+    assert r.json() == {"ok": True, "taught": False, "waiting": True}
+    waiting = json.loads(ap.pending_path(server.DATA_DIR / slug).read_text())
+    assert waiting[-1]["content"] == wrong["expected"]
+    assert waiting[-1]["source_file"] == "handbook.md" and waiting[-1]["source_section"] == wrong["title"]
+    taught = next(q for q in (await _ex(BOB, "GET", f"{slug}/{first['id']}")).json()["questions"]
+                  if q["id"] == wrong["id"])
+    assert taught["taught"] is True and taught["taught_later"] is True
+    assert (await _ex(BOB, "POST", f"{slug}/{first['id']}/teach", json={"question": "q99"})).status_code == 404
+
+    from captain_claw.flight_deck import agent_exam as ex
+
+    async def all_right(job, q):     # it learned: every answer is right this time
+        return {"answer": "The right answer.", "tokens": 100, "seconds": 2, "lookups": []}
+
+    monkeypatch.setattr(ex, "ask", all_right)
+    again = await _exam_ends(BOB, slug, (await _ex(BOB, "POST", slug, json={"again": first["id"]})).json()["id"])
+    assert again["again"] == first["id"] and len(calls["write"]) == writes          # nothing written anew
+    assert [q["question"] for q in again["questions"]] == [q["question"] for q in first["questions"]]
+    assert all("taught" not in q and "taught_later" not in q for q in again["questions"])
+    assert [q["before"] for q in again["questions"]] == [q["verdict"] for q in first["questions"]]
+    assert again["summary"]["changed"] == {"better": 5, "worse": 0, "compared": 10}
+
+    assert (await _ex(BOB, "DELETE", f"{slug}/{first['id']}")).json() == {"ok": True, "stopped": False}
+    assert [x["id"] for x in (await _ex(BOB, "GET", slug)).json()["exams"]] == [again["id"]]
+    assert (await _ex(BOB, "GET", f"{slug}/{first['id']}")).status_code == 404
+
+
+async def test_an_exam_needs_its_agent_on_and_documents(deck, monkeypatch):
+    from captain_claw.flight_deck import agent_exam as ex
+
+    slug = await _examinable(monkeypatch, 24392)
+    _examiner(monkeypatch)
+    monkeypatch.setitem(ex._RUNNING, slug, object())
+    r = await _ex(BOB, "POST", slug, json={})
+    assert r.status_code == 409 and "already under way" in r.json()["detail"]          # one at a time
+    ex._RUNNING.pop(slug)
+    monkeypatch.setattr(ap.agent_idle, "is_available", lambda s: False)
+    r = await _ex(BOB, "POST", slug, json={})
+    assert r.status_code == 409 and r.json()["detail"] == ("Helpdesk is switched off. Switch it on first: "
+                                                          "it answers the exam itself.")
+    assert slug not in ex._RUNNING
+    monkeypatch.setattr(ap.agent_idle, "is_available", lambda s: True)
+
+    # An agent started before it could take an exam: never asked anything.
+    async def an_old_agent(job):
+        return False
+
+    monkeypatch.setattr(ex, "can_take_exams", an_old_agent)
+    e = await _exam_ends(BOB, slug, (await _ex(BOB, "POST", slug, json={})).json()["id"])
+    assert e["state"] == "error" and e["error"].startswith("Restart Helpdesk first") and e["questions"] == []
+
+    fresh = await _spawn(BOB, "Fresh", 24393)
+    _own_model(monkeypatch, fresh)
+    e = await _exam_ends(BOB, fresh, (await _ex(BOB, "POST", fresh, json={})).json()["id"])
+    assert e["state"] == "error" and "no documents" in e["error"]
+
+
+async def test_an_exam_a_restart_stopped_goes_on_where_it_was(deck, monkeypatch):
+    from captain_claw.flight_deck import agent_exam as ex
+
+    slug = await _examinable(monkeypatch, 24394)
+    calls = _examiner(monkeypatch)
+    done = await _exam_ends(BOB, slug, (await _ex(BOB, "POST", slug, json={})).json()["id"])
+    # As Flight Deck left it: running, three questions answered, none graded.
+    left = ex._load(slug, done["id"])
+    left.id, left.state, left.summary, left.finished = "feedbeef00000001", "running", None, None
+    left.questions = [{k: v for k, v in q.items() if k not in ("verdict", "made_up", "missing", "why", "cause")}
+                      for q in left.questions]
+    for q in left.questions[3:]:
+        for k in ("answer", "lookups", "tokens", "seconds", "looked", "found"):
+            q.pop(k, None)
+    ex.save(left)
+    stopped = next(x for x in (await _ex(BOB, "GET", slug)).json()["exams"] if x["id"] == left.id)
+    assert stopped["state"] == "stopped"
+
+    calls["asked"].clear()
+    r = await _ex(BOB, "POST", f"{slug}/{left.id}/continue")
+    assert r.status_code == 200, r.text
+    e = await _exam_ends(BOB, slug, left.id)
+    assert e["state"] == "done" and len(calls["asked"]) == 7                  # only the ones not asked
+    assert all(q.get("verdict") for q in e["questions"])
+    assert (await _ex(BOB, "POST", f"{slug}/{left.id}/continue")).status_code == 409   # nothing left

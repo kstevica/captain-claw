@@ -1636,5 +1636,5 @@ async def test_api_version_has_the_capability():
 
     resp = await WebServer._get_version(WebServer.__new__(WebServer), None)
     body = json.loads(resp.body)
-    assert body["capabilities"] == ["context_packs"]
+    assert body["capabilities"] == ["context_packs", "onboarding_exam"]
     assert {"version", "build_date", "name"} <= set(body)

@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aiohttp import web
 
-from captain_claw import mail_authority
+from captain_claw import exam_turn, mail_authority
 from captain_claw.config import get_config
 from captain_claw.logging import get_logger
 from captain_claw.ws_utils import fire_and_forget_send
@@ -432,14 +432,18 @@ async def enter_task_session(server: Any, agent: Any, task: dict) -> Any:
     return previous if previous is not None else False
 
 
-async def leave_task_session(agent: Any, previous: Any) -> None:
-    """Save the task's session and put *agent* back on *previous*."""
+async def leave_task_session(agent: Any, previous: Any, discard: bool = False) -> None:
+    """Save the task's session — or, *discard*, delete it (an onboarding
+    exam's question keeps nothing) — and put *agent* back on *previous*."""
     if previous is None:
         return
     try:
-        await agent.session_manager.save_session(agent.session)
+        if discard:
+            await agent.session_manager.delete_session(agent.session.id)
+        else:
+            await agent.session_manager.save_session(agent.session)
     except Exception as exc:
-        log.warning("Could not save a scheduled task's session", error=str(exc))
+        log.warning("Could not save a scheduled task's session", error=str(exc), discard=discard)
     if previous is not False:
         agent.session = previous
         agent.refresh_session_runtime_flags()
@@ -868,6 +872,9 @@ async def handle_chat(
     if rerouted:
         lane = rerouted
         no_next_steps = True
+    # An onboarding exam's question (exam_turn): read-only, keeping nothing,
+    # on the exam lane in a session of its own that goes when it ends.
+    exam = automation is not None and getattr(automation, "kind", "") == exam_turn.KIND and not is_public
 
     if is_public:
         # Per-session agent for public users — no global busy check.
@@ -896,7 +903,7 @@ async def handle_chat(
         except Exception as e:
             await server._send(ws, {"type": "error", "message": f"Lane error: {e}"})
             return False
-        if rerouted:
+        if rerouted or exam:
             # Automation waits its turn on the automation lane rather than
             # bouncing: a "busy" reply would leave its caller listening to
             # lane A.
@@ -914,7 +921,7 @@ async def handle_chat(
         # Claimed now, not when the turn task starts: a second frame arriving
         # in between must see the lane taken.
         agent._lane_busy = True  # type: ignore[attr-defined]
-        if rerouted and task:
+        if (rerouted or exam) and task:
             task = {**task, "previous": await enter_task_session(server, agent, task)}
         if rerouted:
             _sync_automation_agent(server, agent)
@@ -1042,8 +1049,10 @@ async def handle_chat(
     if not hasattr(server, "_recent_prompts"):
         server._recent_prompts: list[str] = []
 
-    naming_task = _start_task_naming(agent, content, server._recent_prompts)
-    _remember_prompt(server._recent_prompts, content)
+    # An exam's question names nothing, and isn't kept to name the user's next tasks by.
+    naming_task = None if exam else _start_task_naming(agent, content, server._recent_prompts)
+    if not exam:
+        _remember_prompt(server._recent_prompts, content)
 
     # The surface this turn arrived on, recorded on its opening message
     # (a bridge's socket remembers it for frames routed here without one).
@@ -1586,6 +1595,8 @@ async def _run_agent(
     # with no lane) still broadcasts, because lane A IS the main agent.
     # A member's turn is a side lane of its own, whatever its lane letter.
     _is_side_lane = bool(speaker_key) or lane != server.LANE_MAIN
+    # An onboarding exam's question (exam_turn): read-only, keeping nothing.
+    exam = automation is not None and automation.kind == exam_turn.KIND and not is_public
     if speaker_key:
         send = server._speaker_send(speaker_key)
         no_flow = True
@@ -1621,6 +1632,8 @@ async def _run_agent(
     _grant_tok = None
     _counted = False
     try:
+        if exam:
+            exam_turn.begin(agent)
         if speaker_key:
             from captain_claw import speaker as _speaker
             _speaker_tok = _speaker.bind(getattr(agent, "_speaker_principal", None))
@@ -1675,8 +1688,9 @@ async def _run_agent(
                     })
                 return  # the `finally` resets busy + emits "ready"
 
-        # Provenance: an automated turn is marked as not typed by the user.
-        if automation is not None:
+        # Provenance: an automated turn is marked as not typed by the user —
+        # except an exam's question, which must reach it as a user's would.
+        if automation is not None and not exam:
             content = mail_authority.automated_prefix() + "\n" + content
 
         # Deterministic video preprocessing: when a video was attached, run
@@ -1805,6 +1819,8 @@ async def _run_agent(
                 # A scheduled task: the session it ran in, for Flight Deck.
                 **({"task_session": {"id": agent.session.id, "name": agent.session.name}}
                    if task and getattr(agent, "session", None) is not None else {}),
+                # An exam's question: what it looked up, and its tokens, for the grader.
+                **({"exam": exam_turn.report(agent)} if exam else {}),
             })
             if (rerouted and automation is not None and automation.kind in MIRRORED_AUTOMATION_KINDS
                     and (task is None or task.get("mirror", True))):
@@ -1917,7 +1933,8 @@ async def _run_agent(
         # already dreams and reflects through its tick engine.
         # On a member's turn these still run (open commons, A2 part 0 N8).
         # PR D: a turn that read members' private data feeds no shared learnings (U3).
-        _private = bool(_private_level)
+        # Nor does an exam's question: it keeps nothing (exam_turn).
+        _private = bool(_private_level) or exam
         if not _worker and not _private:
             # Auto-reflection (admin only).
             if not is_public:
@@ -2015,8 +2032,10 @@ async def _run_agent(
                 _spk_end.turn_ended()
         # A scheduled task's session is saved and the lane goes back to its
         # own BEFORE the lane is freed (the next turn must find it there).
+        if exam:
+            exam_turn.end(agent)
         if task and task.get("previous") is not None:
-            await leave_task_session(agent, task["previous"])
+            await leave_task_session(agent, task["previous"], discard=exam)
         if is_public:
             agent._public_busy = False  # type: ignore[attr-defined]
         elif _is_side_lane:

@@ -447,3 +447,23 @@ async def test_end_to_end_reading_turn_then_the_next(isolated, fd, tmp_path, ran
     await agent.complete("Save that Ana uses the report template.")
     assert ran == [("insights", "add")]
     assert member_privacy.turn_level(agent) == ""
+
+
+# ── an onboarding exam's question: it only reads (exam_turn) ─────────
+
+
+async def test_an_exam_turn_only_reads(agent, ran):
+    from captain_claw import exam_turn
+
+    _level(agent, "")
+    exam_turn.begin(agent)
+    try:
+        for call in ("knowledge search", "knowledge section", "read", "grep", "insights search",
+                     "datastore query", "web_search", "todo list", "history"):
+            assert await _run(agent, call, ran) is None, call
+        for call in ("knowledge add", "insights add", "write", "edit", "send_mail", "shell", "cron", "web_fetch",
+                     "mcp_github_create_issue", "todo add", "datastore insert", "flight_deck", "consult_peer"):
+            assert await _run(agent, call, ran) == exam_turn.REFUSED.format(tool=call), call
+    finally:
+        exam_turn.end(agent)
+    assert await _run(agent, "write", ran) is None                    # the next turn is its own again

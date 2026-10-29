@@ -13,7 +13,7 @@ import os
 import re
 from typing import Any
 
-from captain_claw import jev_block_review, mail_authority
+from captain_claw import exam_turn, jev_block_review, mail_authority
 from captain_claw.config import get_config
 from captain_claw.context_spill import SPILL_TOOLS as _SPILL_TOOLS
 from captain_claw.context_spill import governor_enabled as _governor_enabled
@@ -1428,6 +1428,8 @@ class AgentToolLoopMixin:
 
                 # Add result to session
                 _result_content = result.content if result.success else f"Error: {result.error}"
+                # An onboarding exam's question: what it looked up goes back with the reply.
+                exam_turn.note_call(self, tc.name, arguments, result.success, _result_content)
 
                 # ── Guard-refused write: show the guidance, force a retry ──
                 # Increment-1 write guards return a helpful ❌ message in
@@ -2006,7 +2008,7 @@ class AgentToolLoopMixin:
                 # that read members' private data.
                 from captain_claw import member_privacy
                 _owner_capture = (result.success and getattr(self, "_speaker_scoped", False) is not True
-                                  and not member_privacy.private_turn(self))
+                                  and not member_privacy.private_turn(self) and not exam_turn.active(self))
 
                 # Auto-capture contacts from send_mail usage.
                 if _owner_capture and hasattr(self, "_auto_capture_contacts_from_tool_call"):
@@ -2036,7 +2038,7 @@ class AgentToolLoopMixin:
                         log.warning("Auto-capture APIs failed", tool=tc.name, error=str(_ac_err))
 
                 # Auto-extract insights from key tool results.
-                if (result.success and not member_privacy.private_turn(self)
+                if (result.success and not member_privacy.private_turn(self) and not exam_turn.active(self)
                         and hasattr(self, "_maybe_extract_insights_from_tool")):
                     try:
                         await self._maybe_extract_insights_from_tool(
