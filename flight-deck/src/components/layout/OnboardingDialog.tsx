@@ -284,7 +284,9 @@ function Overview({ slug, name, knowledge, lessons, exams, practice, onTab, onSe
               <div className="scale-75 -m-3"><ScoreRing pct={s.pct} /></div>
               <div className="min-w-0">
                 <p className="text-sm font-medium text-zinc-100">{s.right} of {s.questions} right</p>
-                <p className="text-xs text-zinc-500">{last?.model} · {last ? ago(last.finished || last.started) : ''}</p>
+                <p className="text-xs text-zinc-500">
+                  {[last?.model, last ? ago(last.finished || last.started) : ''].filter(Boolean).join(' · ')}
+                </p>
                 {s.changed && s.changed.compared > 0 && (
                   <p className="text-xs text-zinc-500">
                     since before: <span className="text-emerald-600 dark:text-emerald-400">{s.changed.better} better</span>,{' '}

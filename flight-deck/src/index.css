@@ -328,3 +328,25 @@ html.light .bg-violet-500\/5 { background-color: rgba(139,92,246,0.06) !importan
   .fd-file-markdown h2 { font-size: 1.2em; }
   .fd-file-markdown pre, .fd-markdown pre { max-width: 100%; }
 }
+
+/* Exam answers: the chat's markdown, compact — an answer's headings stay small inside its card. */
+.fd-file-markdown.fd-exam-md { font-size: 0.85rem; line-height: 1.65; overflow-wrap: anywhere; }
+.fd-exam-md > :first-child { margin-top: 0; }
+.fd-exam-md > :last-child { margin-bottom: 0; }
+.fd-exam-md :is(h1, h2, h3, h4) { font-size: 0.95em; margin: 0.9em 0 0.3em; padding-bottom: 0; border-bottom: none; }
+.fd-exam-md p { margin: 0.45em 0; }
+.fd-exam-md ul { list-style: disc; }
+.fd-exam-md ol { list-style: decimal; }
+.fd-exam-md li::marker { color: #71717a; }
+.fd-exam-md table { display: block; width: max-content; max-width: 100%; overflow-x: auto; }
+/* A long answer, cut off softly until it's opened. */
+.fd-fade-bottom { -webkit-mask-image: linear-gradient(to bottom, #000 55%, transparent); mask-image: linear-gradient(to bottom, #000 55%, transparent); }
+/* A card arriving, and a line still being written. */
+@keyframes fd-rise { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+.fd-rise { animation: fd-rise 0.35s ease-out both; }
+@keyframes fd-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.fd-shimmer {
+  background: linear-gradient(90deg, rgba(113,113,122,0.12) 25%, rgba(113,113,122,0.3) 50%, rgba(113,113,122,0.12) 75%);
+  background-size: 200% 100%; animation: fd-shimmer 1.6s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) { .fd-rise, .fd-shimmer { animation: none; } }
