@@ -148,9 +148,9 @@ Badge on the Taskboard tile = Needs me count (in v1 only tasks admitted at ≥ 0
 - `GET /fd/taskboard/tasks?view=needs_me|waiting|working|done|all&q=&status=&channel=&agent=&direction=&kind=&party=&evidence=&result=&from=&to=&sort=recent|oldest|due|urgency&limit=&offset=`
   → `{items: [TaskItem], total, facets: {status, channel, agent, direction, kind, evidence, result, party}, counts}`.
   Facets are counted under the other filters (as in the File library). Multi-value filters are comma-separated.
-- `GET /fd/taskboard/tasks/{id}` → `{task: TaskItem, events: [...], links: [...], parties: [...], decisions: [...], proposals: [...]}`
+- `GET /fd/taskboard/tasks/{id}` → `{task: TaskItem, events: [...], events_total, links: [...], parties: [...], decisions: [...], proposals: [...]}` (events = the latest 500, oldest first)
 - `POST /fd/taskboard/tasks/{id}/action` `{action, value?}` — `done | reopen | dismiss | not_task | snooze (value = until epoch) | unsnooze | rename (value) | owes_next (value) | ack_failed | undo` → `{task}`. Each writes a `correction` event and locks the field.
-- `POST /fd/taskboard/sync` → runs the adapters now for this user (also run on dialog open).
+- `POST /fd/taskboard/sync` → runs the adapters now for this user (also run on dialog open). One sweep per user at a time and at most one per 2 s: calls while one waits join it, calls while one reads get the next.
 - `GET /fd/taskboard/summary` → `{needs_me}` (cheap, polled by the tile badge every 30 s).
 - `GET/PUT /fd/taskboard/settings` (v1: caps, auto_close; v2: passive sources with consent).
 - `GET /fd/taskboard/tasks/{id}/why` (v1) → the latest decisions with plain-language reasons.
@@ -180,17 +180,19 @@ Adapters (`taskboard_sources.py`), each idempotent through `task_events UNIQUE(s
 
 | Source | Task | Status mapping |
 |--------|------|----------------|
-| `fd_scheduler` jobs + `scheduler_runs` | one **standing task per job** (`sched:job:<id>`, kind `scheduled`, direction `internal`, channel `scheduled`); each run is an event (`sched:run:<id>`), deliveries become `delivery` events | running → open/agent; last run ok → done (`evidence verified` when a delivery ok, `closed_by source`); error → failed; the next run reopens it to open/agent |
+| `fd_scheduler` jobs + `scheduler_runs` | one **standing task per job** (`sched:job:<id>`, kind `scheduled`, direction `internal`, channel `scheduled`); each run is an event (`sched:run:<id>`), deliveries become `delivery` events | running → open/agent; last run ok → done (`evidence verified` when a delivery ok, `closed_by source`); error → failed; the next run reopens it to open/agent (over the user's Done/Reopen, not Dismiss/Not a task); a run skipped before it began leaves it as it was; a job switched off before a run → owes nobody, deleted → dismissed |
 | autonomy `autonomous_actions` | task per action (`autonomy:<id>`, kind `proposal`), attached to the follow-up's task when `ref_id` points at one | awaiting_approval → open/me (Needs me, inline Approve/Reject); queued/dispatched → open/agent; done → done (`claimed` unless a recorded send exists); failed → failed; rejected → dismissed (`closed_by user`); expired → dismissed (`closed_by source`) |
 | events `follow_ups` (+ origin `external_events` for the Gmail thread key) | task per follow-up (`fu:<id>`, kind `follow_up`), strong link `gmail:thread:<id>` when known | open and due → open/me; open not due → open/them; done → done; dismissed → dismissed; stale → open + `flags.stale` |
-| `gmail_autoreplies` (only rows that reached held / approved / sending / sent / failed) | task per inbound thread (`gmail:thread:<id>`, kind `held_reply`, direction `received`, channel `gmail`), requester from the verified sender | held → open/me; approved/sending → open/agent; sent → done (`verified`); failed → failed |
-| `gmail_sends` | event `sent` on the `gmail:thread:<id>` task; when none exists, a task kind `sent`, direction `sent` | sent → done (`verified`, `closed_by evidence`); recipients become parties |
+| `gmail_autoreplies` (only rows that reached held / approved / sending / sent, or failed after a topic matched) | task per inbound thread (`gmail:thread:<id>`, kind `held_reply`, direction `received`, channel `gmail`), requester from the verified sender | held → open/me; approved/sending → open/agent; sent → done (`verified`); failed → failed |
+| `gmail_sends` | event `sent` on the `gmail:thread:<id>` task; when none exists, a task kind `sent`, direction `sent` | sent → done (`verified`, `closed_by evidence`); recipients become parties; an auto-reply's own send is left to its auto-reply row |
 | `agent_link_events` | task per system message (`link:<link_id>:<msg_id>`, kind `link`, channel `link`) | reply/push delivered → done (`verified`); error → failed; no reply yet → open/agent |
 
 Also in v0:
-- Corrections with field locks; Undo of the last correction.
+- Corrections with field locks; Undo of the last correction (what a source said while the lock held — `refs.held` on its events — is applied then).
+- No message text copied from sources that purge it: a sent auto-reply's result is "Auto-replied (topic)", a link message's "Answered …".
 - `autonomy_routes.reject_action_route` uses `claim_action` (compare-and-set) like approve, so a double click or a stale bell cannot flip an already dispatched action.
-- Agent removal drops its tasks (server.py drop-agent loop, next to the libraries). User deletion drops the user's rows.
+- Agent removal drops its tasks (server.py drop-agent loop, next to the libraries; owner-less ones only on the remover's board). User deletion drops the user's rows, and the sweep never puts a deleted user's ledger rows back.
+- Autonomy approve / reject / undo (and follow-up done / dismiss) act on `local` rows only on a deck without sign-in.
 - Sources sheet lists v0 sources as tracked and the rest as "coming" (agent chats on every channel, opt-in inboxes, history).
 - Tests: `tests/test_flight_deck/test_taskboard_store.py`, `test_taskboard_sources.py`, `test_taskboard_routes.py` (per-user isolation, idempotent re-ingest, status mapping per source, locks win, folded search finds "Đurić" by "duric", facet counts).
 

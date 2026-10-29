@@ -1155,6 +1155,8 @@ async def lifespan(app: FastAPI):
     _audit_stop = asyncio.Event()
     app.state.tool_audit_stop = _audit_stop
     app.state.tool_audit_task = asyncio.create_task(tool_audit_routes.retention_loop(_audit_stop))
+    # ── Taskboard: FD's ledgers read into users' boards every 120 s. ──
+    taskboard.start()
     # ── Payments loop (FD_PAYMENTS): expiry, bank statement syncs (Phase 4). ──
     if payments_routes.enabled():
         from captain_claw.flight_deck.payments_jobs import payments_loop as _pay_loop
@@ -1460,6 +1462,7 @@ async def lifespan(app: FastAPI):
         await tool_audit_routes.close()
     except Exception:
         pass
+    await taskboard.stop()
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
     _stop_all_processes()
@@ -1732,6 +1735,7 @@ from captain_claw.flight_deck.delivery_routes import router as delivery_router
 from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.file_library import router as file_library_router
 from captain_claw.flight_deck.data_library import router as data_library_router
+from captain_claw.flight_deck import taskboard
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
 from captain_claw.flight_deck import (
     agent_exam,
@@ -1838,6 +1842,9 @@ app.include_router(delivery_router)
 app.include_router(agents_fs_router)
 app.include_router(file_library_router)
 app.include_router(data_library_router)
+# Taskboard: every task the user's agents received or sent (taskboard.py).
+taskboard.configure(data_dir=DATA_DIR)
+app.include_router(taskboard.router)
 app.include_router(agent_skills_router)
 app.include_router(agent_preset.router)
 app.include_router(agent_knowledge.router)
@@ -3683,7 +3690,7 @@ async def remove_container(container_id: str, force: bool = False, purge: bool =
     await _forget_shared_agent(agent_ref, owner_id)
     await botport_forget_share("docker", _slug((c.labels or {}).get("flight-deck.agent-name", name)), owner_id)
     if purge:
-        problem = await _purge_agent(name, short_id)
+        problem = await _purge_agent(name, short_id, owner_id)
         if problem:
             return ContainerActionResult(ok=False, container_id=container_id, message=f"Removed '{name}', but {problem}")
     return ContainerActionResult(ok=True, container_id=container_id, message=f"Removed '{name}'")
@@ -3722,11 +3729,12 @@ def _remove_agent_dir(slug: str) -> str:
     return ""
 
 
-async def _purge_agent(slug: str, chat_agent_id: str) -> str:
+async def _purge_agent(slug: str, chat_agent_id: str, owner_id: str | None = None) -> str:
     """Delete what a removed agent leaves on this deck: its folder, Flight
-    Deck's log of the chats with it, its scheduled tasks and what the File and
-    Data libraries keep of it — so a later agent of the same name, whoever's it
-    is, starts clean. Returns "" or what could not go."""
+    Deck's log of the chats with it, its scheduled tasks, what the File and
+    Data libraries keep of it and its tasks on the Taskboard (its owner's —
+    *owner_id*, None for anyone's) — so a later agent of the same name,
+    whoever's it is, starts clean. Returns "" or what could not go."""
     import asyncio
     problem = await asyncio.get_event_loop().run_in_executor(None, _remove_agent_dir, slug)
     if problem:
@@ -3754,6 +3762,10 @@ async def _purge_agent(slug: str, chat_agent_id: str) -> str:
         except Exception as exc:
             log.warning("Could not drop a removed agent's library entries", agent=slug,
                         library=library.__name__.rsplit(".", 1)[-1], error=type(exc).__name__)
+    try:
+        taskboard.forget_agent(owner_id, slug)
+    except Exception as exc:
+        log.warning("Could not drop a removed agent's tasks", agent=slug, error=type(exc).__name__)
     return problem
 
 
@@ -9905,7 +9917,7 @@ async def remove_process(slug: str, force: bool = False, purge: bool = False, re
     await _forget_shared_agent(agent_ref, owner_id)
     await botport_forget_share("process", slug, owner_id)
     if purge:
-        problem = await _purge_agent(slug, f"proc-{slug}")
+        problem = await _purge_agent(slug, f"proc-{slug}", owner_id)
         if problem:
             return ProcessActionResult(ok=False, slug=slug, message=f"Removed '{slug}', but {problem}")
         return ProcessActionResult(ok=True, slug=slug, message=f"Removed '{slug}' and deleted its folder")

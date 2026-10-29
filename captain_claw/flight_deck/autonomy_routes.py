@@ -50,6 +50,16 @@ def _user_id(request: Request) -> str:
     return uid
 
 
+def _owns(row: dict | None, uid: str) -> bool:
+    """*row* (an action, a follow-up) is the caller's to act on: their own —
+    or, with sign-in off, the shared ``local`` bucket's. With it on, a
+    ``local`` row (from before sign-in, or an internal write) is nobody's."""
+    if not row:
+        return False
+    owner = row.get("user_id")
+    return owner == uid or (owner == "local" and not _auth_enabled())
+
+
 def _public_defaults() -> dict[str, Any]:
     """The global defaults as shown to a user. With auth on a deck-wide WhatsApp
     number is someone's personal phone and applies to nobody (see
@@ -410,7 +420,7 @@ async def approve_action_route(
     uid = _user_id(request)
     store = get_store()
     action = store.get_action(action_id)
-    if not action or action.get("user_id") not in (uid, "local"):
+    if not _owns(action, uid):
         raise HTTPException(status_code=404, detail="Action not found")
     if not store.claim_action(action_id, ("awaiting_approval", "queued"), "dispatched"):
         cur = store.get_action(action_id) or action
@@ -444,12 +454,23 @@ async def reject_action_route(
     request: Request,
     _user: dict | None = Depends(get_optional_user),
 ):
-    """Reject a pending action — a strong negative training signal for Topic 3."""
+    """Reject a pending action — a strong negative training signal for Topic 3.
+
+    Compare-and-set, as approve: only a row still ``awaiting_approval`` or
+    ``queued`` is rejected (claimed before learning), so a double click or a
+    stale bell / Taskboard row can't flip one already dispatched or done, or
+    count twice; anything else is a 409."""
     uid = _user_id(request)
     store = get_store()
     action = store.get_action(action_id)
-    if not action or action.get("user_id") not in (uid, "local"):
+    if not _owns(action, uid):
         raise HTTPException(status_code=404, detail="Action not found")
+    if not store.claim_action(action_id, ("awaiting_approval", "queued"), "rejected"):
+        cur = store.get_action(action_id) or action
+        raise HTTPException(
+            status_code=409,
+            detail=f"action is {cur.get('status') or 'unknown'}, not awaiting approval",
+        )
     learned = record_human_feedback(uid, action, False)
     return {"action": store.update_status(
         action_id, "rejected", outcome="fail", outcome_note="rejected by user"),
@@ -466,7 +487,7 @@ async def undo_action_route(
     uid = _user_id(request)
     store = get_store()
     action = store.get_action(action_id)
-    if not action or action.get("user_id") not in (uid, "local"):
+    if not _owns(action, uid):
         raise HTTPException(status_code=404, detail="Action not found")
     if not (action.get("payload") or {}).get("reverse"):
         raise HTTPException(status_code=400, detail="No reverse available for this action")
@@ -547,7 +568,7 @@ async def done_follow_up_route(follow_up_id: str, request: Request,
     from captain_claw.flight_deck.events import get_store as events_store
     es = events_store()
     fu = es.get_follow_up(follow_up_id)
-    if not fu or fu.get("user_id") not in (uid, "local"):
+    if not _owns(fu, uid):
         raise HTTPException(status_code=404, detail="follow-up not found")
     es.mark_follow_up(follow_up_id, "done")
     _learn_from_follow_up(uid, fu, worthwhile=True)
@@ -563,7 +584,7 @@ async def dismiss_follow_up_route(follow_up_id: str, request: Request,
     from captain_claw.flight_deck.events import get_store as events_store
     es = events_store()
     fu = es.get_follow_up(follow_up_id)
-    if not fu or fu.get("user_id") not in (uid, "local"):
+    if not _owns(fu, uid):
         raise HTTPException(status_code=404, detail="follow-up not found")
     es.mark_follow_up(follow_up_id, "dismissed")
     _learn_from_follow_up(uid, fu, worthwhile=False)
