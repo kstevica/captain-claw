@@ -40,6 +40,9 @@ import {
   Moon,
   Bot,
   Wand2,
+  ImageIcon,
+  Globe,
+  ExternalLink,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
@@ -1952,7 +1955,8 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
   const handlePin = useCallback(() => {
     if (!agentId || pinned) return
     pin({ agentId, agentName: sourceName || 'Agent', content: message.content,
-      role: message.role === 'rephrase' ? 'assistant' : message.role, model: message.model })
+      role: message.role === 'rephrase' || message.role === 'image' || message.role === 'html_file'
+        ? 'assistant' : message.role, model: message.model })
   }, [agentId, pinned, pin, sourceName, message])
 
   const handleClip = useCallback(() => {
@@ -2146,6 +2150,10 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     )
   }
 
+  if (message.role === 'image' || message.role === 'html_file') {
+    return <ChatFileCard message={message} conn={agentConn} large={large} />
+  }
+
   // Assistant — strip trailing suggestions/rating prompts
   const cleanContent = stripSuggestions(message.content)
 
@@ -2175,6 +2183,73 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
         </div>
       </div>
       {actionButtons('left')}
+    </div>
+  )
+})
+
+/** A picture the turn made (image_gen, visualize, a chart the reply hands
+ *  over) shown in the chat, or a page it wrote (`html_file`) — each opens full
+ *  size in a new tab. A picture that won't load (the agent is off, the file
+ *  is gone) falls back to its name, never an empty bubble. */
+const ChatFileCard = memo(function ChatFileCard({ message, conn, large }: {
+  message: ChatMessage
+  conn: { host: string; port: number; auth: string } | null
+  large: boolean
+}) {
+  const [failed, setFailed] = useState(false)
+  const path = message.content.trim()
+  const name = path.split(/[\\/]/).pop() || path
+  const url = conn?.port ? agentFileViewUrl(path, conn.host, conn.port, conn.auth) : ''
+  const picture = message.role === 'image'
+  if (picture && url && !failed) {
+    return (
+      <div id={`fd-msg-${message.id}`} className="mb-3 flex flex-col items-start gap-0.5">
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title={`Open ${name}`}
+          className="block max-w-[85%] overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900/40 hover:border-zinc-700"
+        >
+          <img
+            src={url}
+            alt={name}
+            loading="lazy"
+            onError={() => setFailed(true)}
+            className={`block h-auto max-w-full object-contain ${large ? 'max-h-[32rem]' : 'max-h-80'}`}
+          />
+        </a>
+        <span className="flex items-center gap-1 pl-1 text-[10px] text-zinc-600">
+          <ImageIcon className="h-3 w-3" />
+          <span className="truncate">{name}</span>
+          <span>· {formatTime(message.timestamp)}</span>
+        </span>
+      </div>
+    )
+  }
+  const Icon = picture ? ImageIcon : Globe
+  return (
+    <div id={`fd-msg-${message.id}`} className="mb-3 flex flex-col items-start">
+      <div className="flex max-w-[85%] items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2">
+        <Icon className="h-4 w-4 shrink-0 text-zinc-500" />
+        <div className="min-w-0">
+          <div className="truncate text-sm text-zinc-300" title={path}>{name}</div>
+          <div className="text-[10px] text-zinc-600">
+            {picture ? (failed ? "Picture can't be shown here" : 'Picture') : 'Page'} · {formatTime(message.timestamp)}
+          </div>
+        </div>
+        {url && (
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-1 flex shrink-0 items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
+          >
+            <ExternalLink className="h-3 w-3" />
+            Open
+          </a>
+        )}
+      </div>
     </div>
   )
 })

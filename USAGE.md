@@ -1067,6 +1067,7 @@ tools:
     check_replies: true             # flag garbled chat replies and suggest /new
     check_progress: true            # when a turn runs out of steps, let Jev decide whether to extend
     review_blocks: true             # when a guard refuses a repeated call, let Jev pick the next step
+    find_images: true               # when a reply names no picture file, let Jev pick the one it hands over
 ```
 
 **Jev first.** While a key is usable, the system prompt tells the agent to ask Jev whenever a task involves judging content — triage, routing, relevance, claim-vs-source checks, tone/urgency/risk, rubric scores, duplicates, best-of-N, a yes/no check before acting — with one call per piece of content carrying all its questions, and to say when Jev drove a decision. In eco mode `jev` is a core tool, so its schema is always sent (it stays hidden until a key works).
@@ -1084,6 +1085,12 @@ tools:
 The pick's fixed instruction replaces the guard's usual message when p ≥ 0.55. For a read-only call (read, glob, search, fetch, or a `list`/`get`/`search` action), Jev may also judge that the repeat is legitimate because something changed since. At p ≥ 0.8 the call then runs, once per call per turn. A call that sends, creates or changes something is never released. Scale-loop items and Google/Microsoft send or mailbox changes keep their own messages.
 
 At most 3 reviews run per turn, and the `completion_gate` entry shows `step=jev_block_review`, the choice and p. Skipped for shared-member turns. No key, a timeout (8 s) or a Jev error means the usual message. Turn it off with `tools.jev.review_blocks: false`.
+
+**Pictures in the reply.** Pictures made by image_gen, visualize, termux or payments reach the chat and the channel from the tool's `Path:` line. A reply can also hand over a picture made another way: a plotting script wrote `saved/charts/q3.png`, and the reply says "here's the chart: q3.png". Such pictures are now shown in the web chat after the reply and sent to the channel the message came from (WhatsApp, Telegram, a device). Each picture reference in the reply is matched to the pictures the turn wrote under `saved/`. A reference can be a path, `![](…)` or a bare file name. When the reply names none of them but the turn did write pictures, Jev is asked once:
+- whether the reply hands the person a picture (p ≥ 0.7);
+- if the turn wrote more than one, which file it is (p ≥ 0.5 on the pick).
+
+Only deliverables qualify: files inside `saved/` and written this turn, never from scripts/tools/skills/downloads, never a hidden folder and never a file the person attached. A turn that ran no tools is not checked. Skipped for shared-member turns; no key, a timeout (12 s) or a Jev error means no pick. Turn the Jev step off with `tools.jev.find_images: false`.
 
 ### todo
 

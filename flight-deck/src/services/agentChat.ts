@@ -17,8 +17,9 @@ export interface TokenUsage {
 export interface ChatMessage {
   id: string
   /** `rephrase`: the agent's restatement of your request (task_rephrase),
-   *  shown as a small preview like an automated result. */
-  role: 'user' | 'assistant' | 'system' | 'tool' | 'rephrase'
+   *  shown as a small preview like an automated result. `image` / `html_file`:
+   *  a picture or a page the turn made — `content` is its path on the agent. */
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'rephrase' | 'image' | 'html_file'
   content: string
   timestamp: string
   replay?: boolean

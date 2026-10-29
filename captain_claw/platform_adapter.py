@@ -202,6 +202,23 @@ def collect_turn_generated_image_paths(
     return found
 
 
+async def with_reply_images(
+    agent: Any, paths: list[Path], reply: str, turn_start_idx: int, since: float,
+) -> list[Path]:
+    """*paths* plus the pictures the reply hands over that they miss
+    (:mod:`captain_claw.reply_images`: a script's chart anywhere in saved/,
+    or the one Jev picks when the reply names no file)."""
+    from captain_claw import reply_images
+
+    out = list(paths)
+    keys = {str(Path(p).resolve()) for p in out}
+    for path in await reply_images.find(agent, reply, turn_start_idx, since):
+        if str(path) not in keys:
+            keys.add(str(path))
+            out.append(path)
+    return out
+
+
 _DOCUMENT_EXTENSIONS: set[str] = {
     ".pdf", ".docx", ".doc", ".pptx", ".ppt", ".odt", ".ods", ".odp", ".rtf",
     ".xlsx", ".xls", ".csv", ".tsv",
@@ -729,10 +746,11 @@ class PlatformAdapter:
         reply: str = "",
     ) -> None:
         agent = self.ctx.agent
-        generated_paths = collect_turn_generated_image_paths(
+        since = turn_started_at(agent.session, turn_start_idx)
+        generated_paths = await with_reply_images(agent, collect_turn_generated_image_paths(
             agent.session, turn_start_idx, saved_root=saved_root_of(agent),
-            since=turn_started_at(agent.session, turn_start_idx), agent=agent, reply=reply,
-        )
+            since=since, agent=agent, reply=reply,
+        ), reply, turn_start_idx, since)
         for path in generated_paths:
             await self.send_image_file(
                 channel_id, path, caption="Generated image", reply_to=reply_to,

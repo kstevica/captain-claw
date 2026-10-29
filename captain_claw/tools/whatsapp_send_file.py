@@ -378,6 +378,13 @@ async def collect_turn_media(
     found = _deliverables.keep_deliverables(
         found, _deliverables.saved_root_of(agent), since=turn_started_at)
     found.extend(await asyncio.to_thread(_named_new_files, agent, reply, turn_started_at, nameable))
+    # Pictures the reply hands over from anywhere in saved/ (a script's chart,
+    # or one Jev picks when the reply names no file) — ones this surface takes.
+    from captain_claw import reply_images
+
+    takes = _NAMEABLE if nameable is None else nameable
+    found.extend(p for p in await reply_images.find(agent, reply, turn_start_idx, turn_started_at)
+                 if p.suffix.lower() in takes)
     queue: list[Path] = []
     seen = set(already_sent or ())
     for path in found:
