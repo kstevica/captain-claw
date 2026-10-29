@@ -82,8 +82,9 @@ def spans(text: str) -> list[dict[str, Any]]:
     parents' titles) and ``key``: its path and title (with "#2"… for a
     repeat), which stay the same when the text is cut into other parts, so
     a section read once is known again. Text without headings is taken in
-    windows of about WINDOW_CHARS, keyed "Part n"."""
-    sections = poutline.outline(text)
+    windows of about WINDOW_CHARS, keyed "Part n". The headings are taken as
+    written (``tidy=False``): the keys a setup recorded must keep matching."""
+    sections = poutline.outline(text, tidy=False)
     found: list[tuple[int, int, str, list[str]]] = []
     if not sections:
         found += [(a, b, f"Part {n}", []) for n, (a, b) in enumerate(_cuts(text, 0, len(text), WINDOW_CHARS), 1)]

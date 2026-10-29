@@ -899,7 +899,8 @@ function QuestionCard({ n, q, open, onToggle, onTeach, onRead }: {
   onRead?: () => void
 }) {
   const v = q.verdict ? VERDICT[q.verdict] : null
-  const where = [q.doc_title, ...q.path, q.title].join(' › ')
+  // Exams from before titles were tidied keep a PDF's emphasis ("**22**").
+  const where = [q.doc_title, ...q.path, q.title].map((t) => t.replace(/\*\*|__/g, '').trim()).join(' › ')
   return (
     <li className={`overflow-hidden rounded-2xl border transition-colors ${open
       ? 'border-zinc-700 bg-zinc-900/60 shadow-lg shadow-black/5' : 'border-zinc-800 hover:border-zinc-700'}`}>
@@ -925,6 +926,34 @@ function QuestionCard({ n, q, open, onToggle, onTeach, onRead }: {
       </button>
       {open && <QuestionDetail q={q} where={where} onTeach={onTeach} onRead={onRead} />}
     </li>
+  )
+}
+
+const FOUND: Record<string, string> = {
+  documents: 'elsewhere in its documents', lessons: 'in what it was taught', looked_up: 'in what it looked up',
+}
+
+// The details the grader found outside the question's passage, each checked against the rest of
+// its documents: found elsewhere, or made up.
+function Details({ details }: { details: NonNullable<ExamQuestion['details']> }) {
+  return (
+    <div className="mt-3 border-t border-zinc-800 pt-2.5">
+      <p className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">Details beyond this passage</p>
+      <ul className="flex flex-col gap-1.5">
+        {details.map((d) => (
+          <li key={d.text} className="flex items-start gap-2 text-xs">
+            <span className={`mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full ${d.found
+              ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'bg-red-500/15 text-red-600 dark:text-red-400'}`}>
+              {d.found ? <Check className="h-2.5 w-2.5" /> : <X className="h-2.5 w-2.5" />}
+            </span>
+            <span className="text-zinc-300">
+              {d.text}
+              <span className="text-zinc-500"> — {d.found ? FOUND[d.found] ?? 'found' : 'found nowhere: made up'}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 
@@ -987,6 +1016,7 @@ function QuestionDetail({ q, where, onTeach, onRead }: {
           <Panel icon={Lightbulb} title={q.verdict === 'right' ? 'How it was graded' : 'Why it went wrong'} tone={wrong ? 'wrong' : 'right'}>
             {q.why && <p className="text-sm leading-relaxed text-zinc-200">{q.why}</p>}
             {q.cause && <p className="mt-1.5 text-xs text-zinc-500">{CAUSE[q.cause].explain}</p>}
+            {(q.details?.length ?? 0) > 0 && <Details details={q.details ?? []} />}
             {wrong && (
               <div className="mt-3 flex flex-wrap items-center gap-2">
                 {q.taught ? (

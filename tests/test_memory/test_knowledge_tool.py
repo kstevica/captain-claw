@@ -10,7 +10,13 @@ model:
 * a section is read whole by its title, across the parts it spans, a long
   one in pages; outline and list say what there is;
 * the tool shows only when there are documents, and a shared agent's
-  member gets nothing.
+  member gets nothing;
+* a book made from a PDF is read by its subsections, a title its chapters
+  share by its path, without the PDF's page heads; the owner's rules and
+  the glossary give the items that match; a document is found however its
+  name is written; a quoted phrase nowhere gives the closest, said so;
+* before a turn, the sections a message bears on are named for the agent
+  to look up (``pointers``).
 """
 
 from __future__ import annotations
@@ -105,8 +111,10 @@ async def test_an_exact_code_comes_first_and_a_quoted_phrase_is_required(tmp_pat
         assert "RMA-2291" in out.split("\n[2] ")[0]                          # the passage with the code is [1]
         out = (await tool.execute(action="search", query='"beta of regulated peers"')).content
         assert out.count("\n[") == 1 and "regulated peers" in out
-        none = (await tool.execute(action="search", query='"no such phrase anywhere"')).content
-        assert none.startswith("Nothing in your knowledge")
+        # Words in quotes the documents never use (a model's guess at them): the closest, said so.
+        near = (await tool.execute(action="search", query='"cost of equity for insurers" banks')).content
+        assert near.startswith("No passage has the exact words “cost of equity for insurers”; the closest are below.")
+        assert "Cost of equity for banks" in near.split("\n[2] ")[0]
         faq = (await tool.execute(action="search", query="refund code", doc="Client FAQ")).content
         assert "(Client FAQ)" in faq and "Valuation manual ›" not in faq
     finally:
@@ -254,3 +262,110 @@ async def test_add_needs_flight_deck_and_the_tool_shows_there(tmp_path, monkeypa
     assert not got.success and "Flight Deck" in got.error
     monkeypatch.setenv("FD_URL", "http://fd.test")
     assert tool.has_knowledge()                                         # under it: always — it takes files in
+
+
+# ── A book from a PDF, the owner's lists, names written any way ───────
+
+_PROSE = ("Divesting a business unit creates value when other owners believe the unit is worth more to them, "
+          "and the parent can use the proceeds well.")
+
+
+def _chapter(n: int) -> str:
+    body = "\n\n".join(f"{_PROSE} Case {n}.{p}." for p in range(14))
+    return "\n".join([f"# **{n}**", "", f"##### Creating Value {n}", "", body, "",
+                      f"**{470 + n}** **CREATING VALUE THROUGH DIVESTITURES**", "",
+                      "**Why Divestitures Create Value**", "", body, "",
+                      "**SUMMARY**", "", f"Chapter {n} sums up: divest early, from strength, chapter {n}.", "",
+                      body, ""])
+
+
+@pytest.fixture
+def library(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """knowledge/ with a converted book (chapters 22 and 23), the owner's
+    rules and a glossary — as a setup writes them."""
+    from captain_claw.flight_deck import agent_preset_outline as ol
+
+    monkeypatch.setattr(ol, "LONG_STRETCH", 2_000)
+    ws = tmp_path / "ws"
+    k = ws / "knowledge"
+    k.mkdir(parents=True)
+    (k / "INDEX.md").write_text("# Knowledge\n\n- [Valuation](valuation-5ed-mckinsey.md) — the book\n")
+    (k / "valuation-5ed-mckinsey.md").write_text("# Valuation\n\nThe book.\n\n---\n\n" + _chapter(22) + _chapter(23))
+    rules = [f"- Always check item {n} of the closing list before filing report {n}." for n in range(1, 25)]
+    rules[11] = "- Refunds are allowed within a refund window of 14 days of delivery."
+    (k / "owner-rules.md").write_text("# Your owner's rules\n\n## Rules\n" + "\n".join(rules) + "\n")
+    (k / "glossary.md").write_text("# Glossary\n\n" + "\n".join(
+        f"- **Term {n}** — what term {n} means in the closing list." for n in range(1, 20)) + "\n")
+    return ws
+
+
+async def test_a_books_subsections_are_read_and_a_shared_title_by_its_path(library):
+    tool = _tool(library)
+    outline = (await tool.execute(action="outline", doc="valuation")).content
+    assert "- 22 Creating Value 22 (" in outline and "  - Why Divestitures Create Value (" in outline
+    first = (await tool.execute(action="section", doc="Valuation", section="SUMMARY")).content
+    assert "Chapter 22 sums up" in first and "Chapter 23 sums up" not in first
+    assert "1 other section is titled 'SUMMARY' too: 23 Creating Value 23 › SUMMARY." in first
+    assert "CREATING VALUE THROUGH DIVESTITURES" not in first                   # a page head isn't text
+    second = (await tool.execute(action="section", doc="Valuation", section="23 Creating Value 23 › SUMMARY")).content
+    assert "Chapter 23 sums up" in second and "other section" not in second
+    found = (await tool.execute(action="search", query="Chapter 23 sums up divest early")).content
+    assert "section='23 Creating Value 23 › SUMMARY'" in found                    # the hint names it by its path
+
+
+async def test_the_owners_rules_and_the_glossary_give_the_items_that_match(library):
+    tool = _tool(library)
+    out = (await tool.execute(action="search", query="refund window days", doc="owner-rules")).content
+    hit = out.split("\n[2] ")[0]
+    assert "[1] owner-rules › Rules" in hit and "refund window of 14 days" in hit
+    assert hit.count("\n- ") <= 4 and "report 1." not in hit                     # its items, not the whole list
+
+
+async def test_a_document_is_found_however_its_name_is_written(library):
+    tool = _tool(library)
+    for name in ("Valuation 5ed McKinsey.md", "valuation_5ed_mckinsey", "VALUATION-5ED-MCKINSEY"):
+        out = await tool.execute(action="search", query="divest early", doc=name)
+        assert out.success and "(Valuation)" in out.content, name
+    rules = await tool.execute(action="outline", doc="owner-rules")
+    assert rules.success and "Rules" in rules.content
+
+
+async def test_before_a_turn_the_sections_a_message_bears_on_are_named(tmp_path, workspace, monkeypatch):
+    from captain_claw.tools import knowledge as kn
+
+    index = _index(tmp_path, workspace)
+    try:
+        tool = _tool(workspace, index)
+        monkeypatch.setattr(kn, "POINTER_MIN", 0.0)
+        got = await tool.pointers("What beta do we use for the cost of equity for banks?")
+        assert 1 <= len(got) <= kn.POINTERS and all(p["doc"] for p in got)
+        assert len({p["where"] for p in got}) == len(got)                          # each section once
+        note = kn.pointer_note(got)
+        assert note.startswith("Your owner's documents look like they cover this message.")
+        assert f"(doc={got[0]['doc']!r}, section=" in note
+        assert await tool.pointers("thanks!") == []                                 # too short to bear on anything
+        monkeypatch.setattr(kn, "POINTER_MIN", 99.0)
+        assert await tool.pointers("What beta do we use for the cost of equity for banks?") == []
+    finally:
+        index.close()
+    assert await _tool(workspace).pointers("What beta do we use for banks?") == []  # no index: no score to trust
+    assert kn.pointer_note([]) == ""
+
+
+async def test_the_turn_gets_the_note_only_with_the_knowledge_tool():
+    from captain_claw.agent_context_mixin import AgentContextMixin
+
+    class Pointing(KnowledgeTool):
+        async def pointers(self, message: str, limit: int = 2) -> list[dict]:
+            return [{"doc": "Valuation", "where": "Valuation › 28 Capitalized Expenses", "section": "28 Capitalized Expenses",
+                     "ref": "28 Capitalized Expenses", "score": 0.9}]
+
+    registry = ToolRegistry()
+    registry.register(Pointing())
+    agent = types.SimpleNamespace(tools=registry)
+    await AgentContextMixin._refresh_knowledge_context_cache(agent, "Does cutting R&D lift ROIC this year?")
+    note = AgentContextMixin._build_knowledge_context_note(agent)
+    assert "- 28 Capitalized Expenses (doc='Valuation', section='28 Capitalized Expenses')" in note
+    bare = types.SimpleNamespace(tools=ToolRegistry())
+    await AgentContextMixin._refresh_knowledge_context_cache(bare, "Does cutting R&D lift ROIC this year?")
+    assert AgentContextMixin._build_knowledge_context_note(bare) == ""             # no knowledge tool, no note

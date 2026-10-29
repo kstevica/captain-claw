@@ -45,6 +45,8 @@ export interface ExamQuestion {
   error?: string
   verdict?: Verdict
   made_up?: boolean
+  /** The details the grader found outside the question's passage, and where else they are ('' — nowhere: made up). */
+  details?: { text: string; found: '' | 'documents' | 'lessons' | 'looked_up' }[]
   missing?: string[]
   why?: string
   cause?: Cause | ''

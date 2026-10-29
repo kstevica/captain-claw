@@ -1541,6 +1541,11 @@ class AgentOrchestrationMixin:
         _turn_query = msg_origin.model_view_text({"content": user_input})
         await self._refresh_insights_context_cache(query=_turn_query)
         await self._refresh_lessons_context_cache(query=_turn_query)
+        # The owner's documents are the owner's: a member's turn gets no pointers into them.
+        if getattr(self, "_speaker_scoped", False) is not True:
+            await self._refresh_knowledge_context_cache(query=_turn_query)
+        else:
+            self._knowledge_context_cache = []
         if clarification_context_applied:
             self._emit_tool_output(
                 "task_contract",

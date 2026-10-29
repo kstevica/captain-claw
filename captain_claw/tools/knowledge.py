@@ -18,6 +18,13 @@ its knowledge as a setup would put it there (Flight Deck writes it: parts, a
 section map, a spreadsheet's tables, the index), not read for rules; a
 picture or a scan the agent reads first and adds as text.
 
+A book made from a PDF is read by the subsections its outline finds
+(agent_preset_outline), a title its chapters share by its path, without the
+PDF's page heads; a hit in the owner's rules or the glossary is the items
+that match, not the list around them. Before a turn the agent is shown the
+sections its message bears on (``pointers``): a model left to itself
+answers what it thinks it knows, without looking.
+
 The owner's documents are the owner's: a shared agent's member gets no
 knowledge tool (``speaker.allowed_tools``), and a member turn is refused.
 """
@@ -40,7 +47,12 @@ FOLDER = "knowledge"
 PASSAGE_CHARS = 1800     # one search hit, as a passage
 SECTION_CHARS = 12_000   # one page of a section
 OUTLINE_ENTRIES = 400
+OUTLINE_SHOWN = 150      # a whole outline: the levels of its tree that fit this many, the rest counted
 MAX_RESULTS = 10
+LIST_ITEMS = 4           # of the owner's rules or the glossary, the items one hit gives
+POINTERS = 2             # sections a message's note names, at most
+POINTER_MIN = 0.65       # … when the best passage scores this much (semantic memory's hybrid score)
+_POINTER_MIN_CHARS = 12  # a message shorter than this ("thanks", "ok") gets none
 _GROW_LINES = 12         # a paragraph, at most this many lines each way of a line
 _WEAKEST = 0.5           # a hit under this share of the best one's score is left out
 # INDEX.md's lines (agent_preset.write_knowledge): "- [Title](file.md)", then " — summary", " (how it is
@@ -89,6 +101,30 @@ def _norm(s: str) -> str:
     return " ".join(str(s or "").casefold().split())
 
 
+def _name(s: str) -> str:
+    """A document's or section's name to compare: its words alone."""
+    return " ".join(re.sub(r"[\W_]+", " ", str(s or "").casefold()).split())
+
+
+def _shown(text: str) -> str:
+    """*text* without a PDF's running page heads and numbers."""
+    from captain_claw.flight_deck.agent_preset_outline import page_furniture
+
+    return "\n".join(x for x in text.split("\n") if not page_furniture(x))
+
+
+def pointer_note(pointers: list[dict]) -> str:
+    """The turn's note naming the sections its message bears on (``KnowledgeTool.pointers``)."""
+    if not pointers:
+        return ""
+    lines = ["Your owner's documents look like they cover this message. Look it up before you answer from what you "
+             "know — knowledge, action=section (or search):"]
+    for p in pointers:
+        inside = p["where"].removeprefix(f"{p['doc']} › ")
+        lines.append(f"- {inside} (doc={p['doc']!r}, section={p.get('ref') or p['section'] or inside!r})")
+    return "\n".join(lines)
+
+
 def _marks(query: str) -> list[str]:
     """The query's exact things — a code, an amount, a name in capitals
     (``LITELLM_PROXY_URL``, ``14``, ``RMA``) — that a passage holding them
@@ -127,7 +163,8 @@ class KnowledgeTool(Tool):
             "query": {"type": "string", "description": "What to find, in your own words (search)."},
             "doc": {"type": "string",
                     "description": "A document's title or file name: search only it, or read its section/outline."},
-            "section": {"type": "string", "description": "A section's title, as the outline or a search hit gives it."},
+            "section": {"type": "string", "description": "A section's title, as the outline or a search hit gives it "
+                                                         "(with its parents, 'Chapter › Summary', when titles repeat)."},
             "page": {"type": "integer", "description": "A long section's page (section; default 1)."},
             "limit": {"type": "integer", "description": f"Passages for search (default 5, at most {MAX_RESULTS})."},
             "path": {"type": "string", "description": "add: the file to keep (one the user gave you)."},
@@ -245,18 +282,25 @@ class KnowledgeTool(Tool):
         doc.loaded = True
         return doc
 
-    def _find_doc(self, docs: list[_Doc], name: str) -> _Doc | None:
-        want = _norm(Path(name).stem if name.lower().endswith(".md") else name)
+    def _find_doc(self, docs: list[_Doc], name: str, folder: Path | None = None) -> _Doc | None:
+        """The document *name* means: by title or file, however it is
+        written ("Valuation 5ed McKinsey.md" is valuation-5ed-mckinsey.md —
+        how the owner's rules cite one), else glossary.md or owner-rules.md
+        (in *folder*) as one of their own."""
+        want = _name(Path(name).stem if name.lower().endswith(".md") else name)
         if not want:
             return None
         # A part's own file (a search hit names "knowledge/<doc>-part-3.md") is its document too.
-        for test in (lambda d: _norm(d.title) == want or _norm(Path(d.file).stem) == want
-                     or any(_norm(Path(f).stem) == want for f in d.files),
-                     lambda d: _norm(d.title).startswith(want) or _norm(d.file).startswith(want),
-                     lambda d: want in _norm(d.title) or want in _norm(d.file)):
+        for test in (lambda d: _name(d.title) == want or _name(Path(d.file).stem) == want
+                     or any(_name(Path(f).stem) == want for f in d.files),
+                     lambda d: _name(d.title).startswith(want) or _name(d.file).startswith(want),
+                     lambda d: want in _name(d.title) or want in _name(d.file)):
             found = [d for d in docs if test(d)]
             if found:
                 return found[0]
+        extra = next((f for f in _EXTRAS if _name(Path(f).stem) == want), None)
+        if folder is not None and extra and (folder / extra).is_file():
+            return self._cached(folder, _Doc(title=Path(extra).stem, file=extra, files=[extra]))
         return None
 
     # ── Positions ─────────────────────────────────────────────────────
@@ -322,7 +366,7 @@ class KnowledgeTool(Tool):
                 return ToolResult(success=True, content=await self._search(
                     folder, docs, query.strip(), doc or "", max(1, min(MAX_RESULTS, int(limit or 5)))))
             if action in ("section", "outline"):
-                target = self._find_doc(docs, doc or "")
+                target = self._find_doc(docs, doc or "", folder)
                 if target is None:
                     return ToolResult(success=False, error=(f"No document matches {doc!r}. " if doc else
                                                             "Name a document ('doc'). ") + self._list(docs))
@@ -482,29 +526,64 @@ class KnowledgeTool(Tool):
         if not sections:
             return f"{doc.title} has no headings to outline; search it, or read knowledge/{doc.file}."
         base = min(s["level"] for s in sections)
+        # A book's subsections are many: as deep into its tree as OUTLINE_SHOWN entries go, the rest counted.
+        top = min(len(s["path"]) for s in sections)
+        depth = 0
+        while sum(1 for s in sections if len(s["path"]) - top <= depth + 1) <= OUTLINE_SHOWN and any(
+                len(s["path"]) - top > depth for s in sections):
+            depth += 1
+        shown = [s for s in sections if len(s["path"]) - top <= depth]
         lines = [f"{doc.title} — {len(sections)} section{'s' if len(sections) != 1 else ''}"
                  + (" (read one with action=section):" if sections else ":")]
-        for s in sections[:OUTLINE_ENTRIES]:
+        for s in shown[:OUTLINE_ENTRIES]:
             file, line = self._where(doc, s["start"])
-            lines.append("  " * (s["level"] - base) + f"- {s['title']} ({file}, line {line})")
-        if len(sections) > OUTLINE_ENTRIES:
-            lines.append(f"… and {len(sections) - OUTLINE_ENTRIES} more: outline one part (section=…).")
+            inner = sum(1 for x in sections if s["start"] < x["start"] < s["end"] and len(x["path"]) - top > depth)
+            lines.append("  " * (s["level"] - base) + f"- {s['title']} ({file}, line {line})"
+                         + (f" — {inner} part{'s' if inner != 1 else ''} inside" if inner else ""))
+        if len(shown) > OUTLINE_ENTRIES:
+            lines.append(f"… and {len(shown) - OUTLINE_ENTRIES} more: outline one part (section=…).")
+        if len(shown) < len(sections):
+            lines.append("Outline one of them (section=its title) to see the parts inside.")
         return "\n".join(lines)
 
     def _pick_section(self, doc: _Doc, title: str) -> dict | None:
-        want = _norm(title.split(" › ")[-1])
-        for test in (lambda s: _norm(s["title"]) == want,
-                     lambda s: want in _norm(s["title"]),
-                     lambda s: _norm(s["title"]) in want):
+        """The section *title* names: "Parent › Title" for one whose title
+        others share (each chapter's "Summary"), else the first with it; a
+        part of a title, or most of its words, when none has it whole."""
+        parts = [p for p in (_name(x) for x in title.split("›")) if p]
+        if not parts:
+            return None
+        want, above = parts[-1], [p for p in parts[:-1] if p != _name(doc.title)]
+
+        def under(s: dict) -> bool:
+            parents = iter(_name(p) for p in s["path"])
+            return all(any(a == p or a in p for p in parents) for a in above)
+
+        for test in (lambda s: _name(s["title"]) == want,
+                     lambda s: want in _name(s["title"]),
+                     lambda s: _name(s["title"]) in want):
             found = [s for s in doc.sections if test(s)]
             if found:
-                return found[0]
+                return next((s for s in found if under(s)), found[0]) if above else found[0]
         terms = retrieval.query_terms(title, max_terms=12)
         if not terms:
             return None
         scored = [(len(retrieval.matched_terms(terms, s["title"])), s) for s in doc.sections]
         best = max(scored, key=lambda x: x[0], default=(0, None))
         return best[1] if best[0] >= max(1, (len(terms) + 1) // 2) else None
+
+    @staticmethod
+    def _ref(doc: _Doc, s: dict) -> str:
+        """How to name *s* to read it: its title, or with its parents when
+        another section has that title too."""
+        alike = [x for x in doc.sections if _name(x["title"]) == _name(s["title"])]
+        if len(alike) < 2:
+            return s["title"]
+        for n in range(1, len(s["path"]) + 1):
+            ref = " › ".join([*s["path"][-n:], s["title"]])
+            if sum(1 for x in alike if x["path"][-n:] == s["path"][-n:]) == 1:
+                return ref
+        return " › ".join([*s["path"], s["title"]])
 
     def _section(self, doc: _Doc, title: str, page: int) -> str:
         s = self._pick_section(doc, title)
@@ -513,12 +592,41 @@ class KnowledgeTool(Tool):
         text = doc.text[s["start"]:s["end"]].strip()
         pages = max(1, -(-len(text) // SECTION_CHARS))
         page = max(1, min(page, pages))
-        chunk = text[(page - 1) * SECTION_CHARS:page * SECTION_CHARS]
+        chunk = _shown(text[(page - 1) * SECTION_CHARS:page * SECTION_CHARS])
         file, line = self._where(doc, s["start"])
         head = (f"{doc.title} › {' › '.join([*s['path'], s['title']])} — knowledge/{file}, from line {line}"
                 + (f" — page {page} of {pages}" if pages > 1 else ""))
         more = f"\n\n(Continues: page={page + 1}.)" if page < pages else ""
+        others = [x for x in doc.sections if x is not s and _name(x["title"]) == _name(s["title"])]
+        if others and "›" not in title:
+            shown = "; ".join(self._ref(doc, x) for x in others[:5]) + ("; …" if len(others) > 5 else "")
+            more += (f"\n\n({len(others)} other section{'s are' if len(others) > 1 else ' is'} titled "
+                     f"{s['title']!r} too: {shown}. Name one with its path: section={self._ref(doc, others[0])!r}.)")
         return f"{head}\n\n{chunk}{more}"
+
+    # ── Before a turn ─────────────────────────────────────────────────
+
+    async def pointers(self, message: str, limit: int = POINTERS) -> list[dict]:
+        """The sections of the owner's documents *message* bears on most, for
+        a note before the agent answers (``pointer_note``) — a model left to
+        itself answers what it thinks it knows without looking. Searched as
+        ``find`` does, no model called; documents only (the rules and facts
+        reach it as lessons), each section once, none when the best match is
+        weak (under POINTER_MIN) or there is no index to score it."""
+        folder = self._folder()
+        semantic = getattr(getattr(getattr(self, "_agent", None), "memory", None), "semantic", None)
+        if folder is None or semantic is None or len(" ".join(message.split())) < _POINTER_MIN_CHARS:
+            return []
+        docs = await asyncio.to_thread(self._documents, folder)
+        if not docs:
+            return []
+        out: list[dict] = []
+        for p in await self.find(folder, docs, message, None, limit * 3):
+            if p["doc"] and p["score"] >= POINTER_MIN and all(p["where"] != q["where"] for q in out):
+                out.append(p)
+            if len(out) >= limit:
+                break
+        return out
 
     # ── Search ────────────────────────────────────────────────────────
 
@@ -550,22 +658,30 @@ class KnowledgeTool(Tool):
         return passages[:limit]
 
     async def _search(self, folder: Path, docs: list[_Doc], query: str, doc_name: str, limit: int) -> str:
-        only = self._find_doc(docs, doc_name) if doc_name else None
+        only = self._find_doc(docs, doc_name, folder) if doc_name else None
         if doc_name and only is None:
             return f"No document matches {doc_name!r}. " + self._list(docs)
         passages = await self.find(folder, docs, query, only, limit)
+        lead = ""
+        quoted = _QUOTED.findall(query)
+        if not passages and quoted:
+            # A phrase in quotes the documents never use: what is closest, said so.
+            passages = await self.find(folder, docs, _QUOTED.sub(r" \1 ", query), only, limit)
+            words = ", ".join(f"“{q}”" for q in quoted)
+            lead = f"No passage has the exact words {words}; the closest are below. "
         if not passages:
             where = f" in {only.title}" if only else ""
             return (f"Nothing in your knowledge{where} matches {query!r}. Try other words, or look at a "
                     "document's outline (action=outline).")
-        lines = [f"{len(passages)} passage{'s' if len(passages) != 1 else ''} for {query!r} in your knowledge"
+        lines = [lead + f"{len(passages)} passage{'s' if len(passages) != 1 else ''} for {query!r} in your knowledge"
                  + (f" ({only.title})" if only else "") + ":"]
         for n, p in enumerate(passages, 1):
             lines += ["", f"[{n}] {p['where']}", f"    knowledge/{p['file']}, lines {p['first']}–{p['last']}",
                       p["text"]]
         named = next((p for p in passages if p.get("section")), None)
         if named:
-            lines += ["", f"Read a whole section: action=section, doc={named['doc']!r}, section={named['section']!r}."]
+            lines += ["", f"Read a whole section: action=section, doc={named['doc']!r}, "
+                          f"section={named.get('ref') or named['section']!r}."]
         return "\n".join(lines)
 
     @staticmethod
@@ -628,10 +744,16 @@ class KnowledgeTool(Tool):
             if first > last:
                 continue
             focus = _focus(lines, first, last, terms, marks, phrase)
-            a, b = _around(lines, focus, first, last)
+            if file in _EXTRAS:
+                # The owner's rules and the glossary are lists: the items that match, not their neighbours.
+                picked = _list_items(lines, first, last, terms, marks, phrase) or [focus]
+                a, b = picked[0], picked[-1]
+                text = "\n".join(lines[i - 1] for i in picked).strip()
+            else:
+                a, b = _around(lines, focus, first, last)
+                text = _shown("\n".join(lines[a - 1:b])).strip()
             if any(a <= y and b >= x for x, y in taken.get(file, [])):
                 continue
-            text = "\n".join(lines[a - 1:b]).strip()
             folded = _norm(text)
             if any(q not in folded for q in required):
                 continue
@@ -641,36 +763,64 @@ class KnowledgeTool(Tool):
                 score += 0.2 * sum(1 for m in marks if m in folded) / len(marks)
             taken.setdefault(file, []).append((a, b))
             doc = doc_of.get(file)
-            where, section, at = (doc.title if doc else Path(file).stem), "", None
+            where, section, ref, at = (doc.title if doc else Path(file).stem), "", "", None
             if doc is not None:
                 self._load(folder, doc)
                 at = self._offset(doc, file, focus)
                 s = self._section_at(doc, at) if at is not None else None
                 if s:
-                    section = s["title"]
+                    section, ref = s["title"], self._ref(doc, s)
                     where = " › ".join([doc.title, *s["path"], s["title"]])
+            else:
+                head = next((lines[i - 1].lstrip("# ").strip() for i in range(a, 0, -1)
+                             if lines[i - 1].startswith("## ")), "")
+                where += f" › {head}" if head else ""
             out.append({"file": file, "first": a, "last": b, "score": score, "text": text, "where": where,
                         "doc": doc.title if doc else "", "doc_file": doc.file if doc else "",
-                        "section": section, "offset": at, "focus": focus})
+                        "section": section, "ref": ref, "offset": at, "focus": focus})
         out.sort(key=lambda p: -p["score"])
         return out
 
 
+def _line_score(line: str, terms: list[str], marks: list[str], phrase: str) -> float:
+    """How well one line matches the query: its words, a code or amount it
+    names, the whole phrase."""
+    folded = _norm(line)
+    return (len(retrieval.matched_terms(terms, line)) + 2.0 * sum(1 for m in marks if m in folded)
+            + (2.0 if phrase and len(phrase) > 3 and phrase in folded else 0.0))
+
+
 def _focus(lines: list[str], first: int, last: int, terms: list[str], marks: list[str], phrase: str) -> int:
-    """The line of ``first..last`` (1-based) that best matches the query —
-    its words, a code or amount it names, the whole phrase; the middle when
-    none does."""
+    """The line of ``first..last`` (1-based) that best matches the query;
+    the middle when none does."""
     best, best_score = (first + last) // 2, 0.0
     for i in range(first, last + 1):
-        line = lines[i - 1]
-        if not line.strip():
+        if not lines[i - 1].strip():
             continue
-        folded = _norm(line)
-        score = (len(retrieval.matched_terms(terms, line)) + 2.0 * sum(1 for m in marks if m in folded)
-                 + (2.0 if phrase and len(phrase) > 3 and phrase in folded else 0.0))
+        score = _line_score(lines[i - 1], terms, marks, phrase)
         if score > best_score:
             best, best_score = i, score
     return best
+
+
+def _list_items(lines: list[str], first: int, last: int, terms: list[str], marks: list[str],
+                phrase: str) -> list[int]:
+    """The lines of ``first..last`` (1-based) — a list's items — that match
+    the query best: at most LIST_ITEMS of them, within PASSAGE_CHARS, each
+    at least half as good as the best one, in order."""
+    scored = [(_line_score(lines[i - 1], terms, marks, phrase), i) for i in range(first, last + 1)
+              if lines[i - 1].strip() and not lines[i - 1].startswith("#")]
+    best = max((x for x, _ in scored), default=0.0)
+    keep: list[int] = []
+    size = 0
+    for score, i in sorted(scored, key=lambda x: (-x[0], x[1])):
+        if score <= 0 or score < best * _WEAKEST or len(keep) >= LIST_ITEMS:
+            break
+        if keep and size + len(lines[i - 1]) > PASSAGE_CHARS:
+            continue
+        keep.append(i)
+        size += len(lines[i - 1]) + 1
+    return sorted(keep)
 
 
 def _paragraph(lines: list[str], i: int) -> tuple[int, int]:

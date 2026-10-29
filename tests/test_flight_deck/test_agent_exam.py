@@ -10,7 +10,11 @@
   looked and never reached the section, it reached it and still got it
   wrong, or it made things up;
 * the score counts right as 1 and partly as ½, overall, by document, by kind
-  and by whether the setup read that part.
+  and by whether the setup read that part;
+* a long section (a book's chapter) is asked about in windows, the writer
+  and the grader seeing the same one; a detail the grader finds outside its
+  passage is made up only when it is nowhere in the agent's documents, its
+  lessons or what it looked up.
 """
 
 from __future__ import annotations
@@ -116,8 +120,12 @@ def test_the_graders_verdicts_are_cleaned():
     ]})
     got = ex.parse_grades(reply, batch)
     assert set(got) == {1, 2}
-    assert got[1] == {"verdict": "right", "made_up": False, "missing": [], "why": "All there."}
+    assert got[1] == {"verdict": "right", "made_up": False, "unsupported": [], "missing": [], "why": "All there."}
     assert got[2]["verdict"] == "no_answer" and got[2]["made_up"] is True and got[2]["missing"] == ["14 days"]
+    # Details it lists outside the passage are what's made up — until they're checked.
+    listed = ex.parse_grades(json.dumps({"grades": [
+        {"item": 1, "verdict": "partly", "unsupported": ["0.28 points of TRS", "", 7], "made_up": False}]}), batch)
+    assert listed[1]["unsupported"] == ["0.28 points of TRS", "7"] and listed[1]["made_up"] is True
 
 
 # ── Why it went wrong ─────────────────────────────────────────────────
@@ -165,6 +173,84 @@ def test_the_score_counts_partly_as_half():
     assert s["causes"] == {"didnt_look": 1, "wrong_place": 0, "got_wrong": 1, "made_up": 0} and s["made_up"] == 1
     assert [(d["title"], d["questions"]) for d in s["docs"]] == [("Handbook", 3), ("Notes", 1)]
     assert ex.summary([])["pct"] is None
+
+
+# ── A book's long chapters, and details from elsewhere in it ──────────
+
+
+def _book() -> str:
+    """A PDF made into Markdown: chapters as a number's heading and a title's,
+    each one long section."""
+    out = []
+    for c in (1, 2):
+        paras = [f"Chapter {c} paragraph {p}: managers must weigh growth against returns on capital, "
+                 f"and case {c}.{p} shows why the spread over the cost of capital matters most." for p in range(120)]
+        out.append(f"# **{c}**\n\n##### Value Topic {c}\n\n" + "\n\n".join(paras) + "\n")
+    return "\n".join(out)
+
+
+def test_a_long_chapter_is_asked_about_in_windows_named_as_the_outline_names_it():
+    src = _src("book.md", text=_book())
+    cands = [c for c in ex.candidates(src) if c["title"] == "1 Value Topic 1"]
+    assert len(cands) > 1 and all(c["path"] == [] for c in cands)         # "**1**" › "Value Topic 1", tidied
+    assert all(c["end"] - c["start"] <= ex._SECTION_CHARS for c in cands)
+    assert cands[0]["at"][0] == 0 and cands[1]["at"][0] == cands[0]["at"][1]
+    # The writer and the grader see the window the question came from, not the chapter's start.
+    q = {**{k: cands[2][k] for k in ("doc", "key", "at")}}
+    window = ex.section_text([src], q)
+    assert window == src.text[cands[2]["start"]:cands[2]["end"]].strip() and "paragraph 0:" not in window
+    whole = ex.section_text([src], {"doc": "book.md", "key": cands[0]["key"]})    # an earlier exam's: all of it
+    assert whole.startswith("##### Value Topic 1") and "case 1.119 " in whole
+    got = ex.parse_questions(json.dumps({"questions": [{"section": 1, "question": "Which matters most here?",
+                                                        "answer": "The spread.", "points": ["spread"]}]}),
+                            [{**cands[2], "kind": "ask"}])
+    assert got[0]["at"] == cands[2]["at"]
+    short = ex.candidates(_src())
+    assert short and all("at" not in c for c in short)
+
+
+def test_a_detail_from_elsewhere_in_its_documents_or_lessons_isnt_made_up():
+    book = ("Chapter 22. General Dynamics began divesting in 1991; its shareholders earned an annualized 58 percent "
+            "between 1991 and 1995, more than double its peers.\n" + "Filler text about other matters. " * 40
+            + "\nAlmost 60 percent of the companies had executed two or fewer divestitures.").casefold()
+    lessons = ["For each additional percentage point of growth, TRS is higher by 0.28 percentage points; "
+               "for ROIC, by 0.08.".casefold()]
+    corpus = {"documents": [book], "lessons": lessons, "looked_up": []}
+    got = ex.check_details(["General Dynamics: ~58% annualized returns 1991–1995", "0.28 pp vs 0.08 pp",
+                            "~60% made two or fewer divestitures", "FLORCK Capital Partners co-founder",
+                            "General Dynamics returned 71% in 1991", "senior emeritus director at McKinsey"], corpus)
+    assert [d["found"] for d in got] == ["documents", "lessons", "documents", "", "", ""]
+    # Its names and words near each other aren't enough when a word of it is one its documents never use.
+    bio = "tim koller is a partner in mckinsey's new york office. marc is a senior expert; david is a director."
+    assert ex.found_in("Koller: partner in McKinsey's New York office", [bio])
+    assert not ex.found_in("Tim Koller: senior emeritus director at McKinsey", [bio])
+    # A figure must be the figure: 1991 isn't 991, and 58 isn't in 580.
+    assert not ex.found_in("991 percent", [book]) and not ex.found_in("580 percent", ["it was 58 percent"])
+
+
+def test_made_up_stands_only_for_details_found_nowhere():
+    grade = {"verdict": "partly", "made_up": True, "missing": [], "why": "Adds figures."}
+    found = [{"text": "0.28 pp", "found": "lessons"}]
+    assert ex.settle(grade, found)["made_up"] is False and ex.settle(grade, found)["details"] == found
+    nowhere = [*found, {"text": "FLORCK", "found": ""}]
+    assert ex.settle(grade, nowhere)["made_up"] is True
+    right = ex.settle({**grade, "verdict": "right"}, nowhere)
+    assert right["verdict"] == "partly" and right["made_up"] is True    # right, but it made something up
+    assert ex.settle({**grade, "verdict": "right", "made_up": True}, [])["made_up"] is True  # nothing listed to check
+
+
+def test_a_section_read_by_its_numbered_title_reaches_it():
+    q = _q(title="22 Creating Value through Divestitures", path=[], doc_title="Valuation")
+    body = "Divesting a business unit creates value when other owners believe the unit is worth more to them."
+    for asked in ("Creating Value through Divestitures", "22 Creating Value through Divestitures",
+                  "22 Creating Value through Divestitures › Why Divestitures Create Value"[:38]):
+        opened = {"tool": "knowledge", "args": {"action": "section", "doc": "Valuation", "section": asked},
+                  "result": "(another wording)"}
+        assert ex.reached(q, [opened], body), asked
+    # A search hit in one of its subsections is in it.
+    hit = {"tool": "knowledge", "args": {"action": "search", "query": "divest"},
+           "result": "[1] Valuation › 22 Creating Value through Divestitures › Why Divestitures Create Value\n…"}
+    assert ex.reached(q, [hit], body)
 
 
 # ── Asking the agent (its exam lane) ──────────────────────────────────

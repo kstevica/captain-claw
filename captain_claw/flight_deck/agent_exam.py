@@ -56,6 +56,7 @@ from captain_claw.flight_deck import agent_idle, agent_lessons
 from captain_claw.flight_deck import agent_knowledge as ak
 from captain_claw.flight_deck import agent_preset as ap
 from captain_claw.flight_deck import agent_preset_docs as pdocs
+from captain_claw.flight_deck import agent_preset_outline as poutline
 from captain_claw.flight_deck import agent_preset_select as psel
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.flight_deck.file_library import reply_json
@@ -89,6 +90,10 @@ _MAX_TOKENS = 4000         # a writing or grading call's answer
 _ASK_TIMEOUT = 300.0       # a question unanswered this long is stopped
 _DRAIN_S = 60.0            # a stopped question: how long its turn is waited out
 _KEEP = 20                 # exams kept per agent
+_DETAILS_MAX = 8           # details of one reply the grader lists as not in its passage
+_DETAIL_NEAR = 600         # … found elsewhere when its figures, names and words are this close
+_DETAIL_WORDS = 0.8        # … and at least this share of its words (half, with a figure or a name to go by)
+_DETAIL_TRIES = 400        # places a detail's rarest part is looked at, per text
 # Tokens one question costs, about, before the agent's own exams say: the writer's share, the
 # agent's turn (its instructions, tools and what it looks up), the grader's share.
 _COST = {"writing": 1600, "asking": 30000, "grading": 2500}
@@ -114,16 +119,27 @@ class Source:
 def candidates(src: Source) -> list[dict]:
     """The sections of *src* worth a question, in order: each with how much
     it tells an agent to do (``score``) and whether a setup read it (None:
-    not known)."""
+    not known). A long one — a whole chapter, as a PDF's often are — is
+    offered in windows of what the writer and the grader see (``at``: where
+    in the section), so a question can come from any part of it, not only
+    its start. Named as the outline names them (``tidy_path``)."""
     out: list[dict] = []
     for s in psel.spans(src.text):
         body = src.text[s["start"]:s["end"]].strip()
         if len(body) < _MIN_SECTION_CHARS or psel._BOILERPLATE_TITLE.search(s["title"].strip()):
             continue
-        out.append({"doc": src.file, "doc_title": src.title, "doc_name": src.name, "key": s["key"], "title": s["title"],
-                    "path": s["path"], "start": s["start"], "end": s["end"],
-                    "score": psel.instructive(body, s["title"]),
-                    "read": (src.all_read or s["key"] in src.read) if src.known else None})
+        path, title = poutline.tidy_path(s["path"], s["title"])
+        pieces = (psel._cuts(src.text, s["start"], s["end"], _SECTION_CHARS) if len(body) > _SECTION_CHARS
+                  else [(s["start"], s["end"])])
+        for a, b in pieces:
+            text = src.text[a:b].strip()
+            if len(text) < _MIN_SECTION_CHARS:
+                continue
+            out.append({"doc": src.file, "doc_title": src.title, "doc_name": src.name, "key": s["key"],
+                        "title": title, "path": path, "start": a, "end": b,
+                        "score": psel.instructive(text, s["title"]),
+                        "read": (src.all_read or s["key"] in src.read) if src.known else None,
+                        **({"at": [a - s["start"], b - s["start"]]} if len(pieces) > 1 else {})})
     return out
 
 
@@ -287,7 +303,8 @@ def parse_questions(content: str, batch: list[dict]) -> list[dict]:
         kind = str(item.get("kind") or "").strip().lower()
         p = batch[n - 1]
         taken.add(n)
-        out.append({**{k: p[k] for k in ("doc", "doc_title", "doc_name", "key", "title", "path", "read")},
+        out.append({**{k: p[k] for k in ("doc", "doc_title", "doc_name", "key", "title", "path", "read", "at")
+                       if k in p},
                     "kind": kind if kind in KINDS else p["kind"],
                     "question": question, "expected": answer, "points": points or [answer[:200]]})
     return out
@@ -324,11 +341,93 @@ def parse_grades(content: str, batch: list[dict]) -> dict[int, dict]:
         verdict = str(item.get("verdict") or "").strip().lower().replace(" ", "_").replace("-", "_")
         if not 1 <= n <= len(batch) or verdict not in VERDICTS:
             continue
-        out[n] = {"verdict": verdict, "made_up": item.get("made_up") is True,
+        unsupported = [d for d in (_clean(x, 200) for x in item.get("unsupported") or []
+                                   if isinstance(x, (str, int, float))) if d][:_DETAILS_MAX]
+        out[n] = {"verdict": verdict, "made_up": item.get("made_up") is True or bool(unsupported),
+                  "unsupported": unsupported,
                   "missing": [m for m in (_clean(x, 200) for x in item.get("missing") or []
                                           if isinstance(x, (str, int, float))) if m][:4],
                   "why": _clean(item.get("why"), 400)}
     return out
+
+
+# ── Made up, or from elsewhere in its documents ───────────────────────
+
+_FIGURE = re.compile(r"\d+(?:[.,]\d+)*")
+_WORD = re.compile(r"[^\W\d_][\w’'-]*")
+_COMMON = frozenset("""a an the and or but nor of in on at to for from by with as is are was were be been its it this
+that these those their there than then per each about around roughly approximately over under more less most
+least into onto out up down after before between during when while which who whom whose what how why""".split())
+
+
+def _stem(word: str) -> str:
+    return word[:6] if len(word) > 6 else word
+
+
+def _detail_needs(detail: str) -> tuple[list[str], list[str], list[str]]:
+    """What a detail must have nearby to be found: its figures, its names
+    (capitalised words but the first), and its words."""
+    figures = [f.strip(".,") for f in _FIGURE.findall(detail)]
+    words = [w for w in _WORD.findall(detail) if len(w) > 2]
+    names = [w.casefold() for w in words[1:] if w[0].isupper() and w.casefold() not in _COMMON]
+    plain = [_stem(w.casefold()) for w in words if w.casefold() not in _COMMON and len(w) > 3]
+    return figures, names, plain
+
+
+def _has_figure(window: str, figure: str) -> bool:
+    return re.search(rf"(?<![\d.,]){re.escape(figure)}(?!\d|[.,]\d)", window) is not None
+
+
+def found_in(detail: str, texts: list[str]) -> bool:
+    """Whether *detail* (a few words the grader quoted from a reply) is in
+    one of *texts* (casefolded): its figures and names all, and most of its
+    words (a reply words it its own way: half, beside a figure or a name),
+    within _DETAIL_NEAR characters of each other — and, with no figure, no
+    long word of it that *texts* never use."""
+    figures, names, plain = _detail_needs(detail)
+    if not figures and not names and not plain:
+        return False
+    # Without a figure to go by, a word its documents never use ("emeritus") is what was made up.
+    if not figures and any(len(w) >= 6 and not any(w in t for t in texts) for w in plain):
+        return False
+    share = _DETAIL_WORDS if not figures and not names else _DETAIL_WORDS / 2
+    anchor = (figures or sorted(names, key=len, reverse=True) or sorted(plain, key=len, reverse=True))[0]
+    pattern = (re.compile(rf"(?<![\d.,]){re.escape(anchor)}(?!\d|[.,]\d)") if figures
+               else re.compile(re.escape(anchor)))
+    for text in texts:
+        for n, m in enumerate(pattern.finditer(text)):
+            if n >= _DETAIL_TRIES:
+                break
+            window = text[max(0, m.start() - _DETAIL_NEAR):m.end() + _DETAIL_NEAR]
+            if (all(_has_figure(window, f) for f in figures) and all(x in window for x in names)
+                    and sum(1 for w in plain if w in window) >= share * len(plain)):
+                return True
+    return False
+
+
+def check_details(details: list[str], corpus: dict[str, list[str]]) -> list[dict]:
+    """Each detail the grader found outside the question's passage, with
+    where else it is: ``documents`` (anywhere in them), ``lessons`` (a fact
+    or rule it was taught), ``looked_up`` (what its lookups returned) — or
+    "" when nowhere: made up."""
+    return [{"text": d, "found": next((where for where, texts in corpus.items() if found_in(d, texts)), "")}
+            for d in details]
+
+
+def _corpus(srcs: list[Source], lessons: list[str], q: dict) -> dict[str, list[str]]:
+    return {"documents": [s.text.casefold() for s in srcs], "lessons": [x.casefold() for x in lessons],
+            "looked_up": [str(c.get("result") or "").casefold() for c in q.get("lookups") or []]}
+
+
+def _lesson_texts(slug: str) -> list[str]:
+    """What the agent was taught (agent_lessons): its rules, when-to-ask and facts."""
+    from captain_claw.flight_deck import server as srv
+
+    try:
+        record = json.loads((srv.DATA_DIR / slug / agent_lessons._RECORD).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [x["text"] for x in agent_lessons.from_record(record)] if isinstance(record, dict) else []
 
 
 # What it looked up: the knowledge tool, or its files read some other way.
@@ -370,13 +469,27 @@ def reached(q: dict, lookups: list[dict], body: str | None) -> bool:
         result = _norm(str(c.get("result") or ""))
         if place and place in result:
             return True
+        asked, title = _norm(str(args.get("section") or "").split("›")[-1]), _norm(q["title"])
         if (c.get("tool") == "knowledge" and args.get("action") == "section"
-                and _norm(str(args.get("section") or "")) == _norm(q["title"])
+                and asked and (asked == title or title.endswith(asked) or asked.endswith(title))
                 and _norm(str(args.get("doc") or "")) in (_norm(q["doc_title"]), _norm(Path(q["doc"]).stem))):
             return True
         if any(m and m in result for m in marks):
             return True
     return False
+
+
+def settle(grade: dict, details: list[dict]) -> dict:
+    """A grade with its details checked (``check_details``): made up only
+    when one is found nowhere — the grader sees one passage, and a figure
+    from another chapter, or a fact the agent was taught, is its owner's
+    too. A right answer that makes something up is only partly right."""
+    out = {**grade, "details": details}
+    if details:
+        out["made_up"] = any(not d["found"] for d in details)
+    if out["made_up"] and out["verdict"] == "right":
+        out["verdict"] = "partly"
+    return out
 
 
 def cause(q: dict) -> str:
@@ -532,13 +645,18 @@ async def sources(slug: str, workspace: Path) -> list[Source]:
 
 
 def section_text(srcs: list[Source], q: dict) -> str | None:
-    """A question's section as the agent's knowledge has it now — None when
-    the document or the section is gone."""
+    """A question's section (its window, ``at``, of a long one) as the
+    agent's knowledge has it now — None when the document or the section is
+    gone."""
     src = next((s for s in srcs if s.file == q["doc"]), None)
     if src is None:
         return None
     s = next((s for s in psel.spans(src.text) if s["key"] == q["key"]), None)
-    return src.text[s["start"]:s["end"]].strip() if s else None
+    if s is None:
+        return None
+    at = q.get("at")
+    a, b = (int(at[0]), int(at[1])) if isinstance(at, list) and len(at) == 2 else (0, s["end"] - s["start"])
+    return src.text[s["start"] + a:min(s["end"], s["start"] + b)].strip()
 
 
 def cost(n: int, per_question: int = 0) -> int:
@@ -601,6 +719,7 @@ async def _grade(job: ExamJob, reader: dict, srcs: list[Source]) -> None:
         q["cause"] = cause(q)
     todo = [q for q in todo if q.get("answer")]
     job.steps = math.ceil(len(todo) / _GRADE_BATCH)
+    lessons = await asyncio.to_thread(_lesson_texts, job.agent)
     for i in range(0, len(todo), _GRADE_BATCH):
         batch = todo[i:i + _GRADE_BATCH]
         bodies = {q["id"]: section_text(srcs, q) for q in batch}
@@ -610,7 +729,7 @@ async def _grade(job: ExamJob, reader: dict, srcs: list[Source]) -> None:
             g = grades.get(n)
             if g is None:
                 continue
-            q.update(g)
+            q.update(settle(g, await asyncio.to_thread(check_details, g.pop("unsupported"), _corpus(srcs, lessons, q))))
             q["cause"] = cause(q)
         job.step += 1
         save(job)

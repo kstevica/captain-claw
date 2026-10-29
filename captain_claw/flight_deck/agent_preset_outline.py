@@ -9,6 +9,18 @@ most central sentence by the local model2vec embeddings semantic memory uses,
 else its first — and ``map_md`` writes ``<name>.map.md``: every section with
 the file and lines it is on, so the agent reads that section, not a 200 KB
 part. No model is called and nothing leaves the machine.
+
+A PDF made into Markdown keeps few of its headings: a book's chapters, say,
+each a heading of its number ("**22**") and one of its title, with what is
+inside them only in bold lines. ``outline`` tidies that up: titles without
+their Markdown emphasis, a number's heading and the title after it one
+section ("22 Creating Value through Divestitures"), and in a long stretch
+with no heading the bold lines that stand alone before prose taken as its
+subheadings — so a chapter of 40,000 characters is read, found and named by
+its parts. ``tidy=False`` gives the headings as written: the sections read
+tracking keys (agent_preset_select.spans), which must stay as recorded.
+``page_furniture`` tells a PDF's running page heads and numbers apart, for
+the knowledge tool to leave out of what it shows.
 """
 
 from __future__ import annotations
@@ -33,10 +45,56 @@ _SENT_SPLIT = re.compile(r"(?<=[.!?…])\s+(?=[\"'(\[“‘]?[A-Z0-9ČĆŠŽĐ])
 # Lines that aren't prose: a link definition ("[docs]: https://…"), a badge or image row, a bare URL.
 _NOT_PROSE = re.compile(r"^\s*(\[[^\]]*\]:\s*\S|\[?!\[|<?https?://\S+>?\s*$)")
 _NOISE = re.compile(r"!\[[^\]]*\]\([^)]*\)|<[^>]+>|`{1,3}|\*\*|__|^#+\s*|^\s*[-*+]\s+|^\s*\d+[.)]\s+", re.M)
+_EMPHASIS = re.compile(r"\*\*|__|`")
+# A heading that is only a number or a letter: a chapter's or an appendix's, its title the next heading.
+_NUMBER_ONLY = re.compile(r"^(?:\d{1,3}|[A-Z]|[IVXLC]{1,6})\.?$")
+_NAMED_WITHIN = 300        # … when at most this much text comes between them
+LONG_STRETCH = 8_000       # text this long with no heading is looked over for bold subheadings
+_BOLD_ALONE = re.compile(r"^\*\*([^*\n]{3,90})\*\*$")
+_NOT_A_HEAD = re.compile(r"^(?:exhibit|figure|fig\.|table|source|note|chart|slika|tablica|izvor)\b", re.I)
+_PROSE_AFTER = 60          # a subheading's next line is prose: at least this long, not bold or a table
+_BOLD_SPAN = re.compile(r"\*\*([^*\n]+)\*\*")
+_PAGE_NO = re.compile(r"\d{1,4}|[ivxlc]{1,7}")   # a page's number, the front matter's in roman numerals
 
 
-def _headings(text: str) -> list[tuple[int, int, str]]:
-    """(offset, level, title) of every Markdown heading outside fenced code."""
+def clean_title(title: str) -> str:
+    """A heading's title as a reader says it: no Markdown emphasis, one space."""
+    return re.sub(r"\s+", " ", _EMPHASIS.sub("", title)).strip(" *_#")
+
+
+def tidy_path(path: list[str], title: str) -> tuple[list[str], str]:
+    """A section's parents and title as ``outline`` names it: cleaned, and a
+    parent that is only a number joined to it ("22", "Creating Value…" →
+    "22 Creating Value…")."""
+    parents, own = [clean_title(p) for p in path], clean_title(title)
+    if parents and _NUMBER_ONLY.match(parents[-1]):
+        return parents[:-1], f"{parents[-1].rstrip('.')} {own}"
+    return parents, own
+
+
+def page_furniture(line: str) -> bool:
+    """Whether *line* is a PDF's running page head or page number, not text:
+    bold, a page number first or last, and the rest a title in capitals or
+    one bold title ("**470** **CREATING VALUE**", "**469**", "**Valuation**
+    **12**", "**xvi** **PREFACE**" — a page cut can leave "478** **CREATING
+    VALUE**")."""
+    bare = line.strip()
+    if "**" not in bare:
+        return False
+    words = bare.replace("*", " ").split()
+    if not words or not (_PAGE_NO.fullmatch(words[0]) or _PAGE_NO.fullmatch(words[-1])):
+        return False
+    rest = [w for w in words if not _PAGE_NO.fullmatch(w)]
+    if all(w.upper() == w for w in rest):
+        return True
+    spans = [s for s in _BOLD_SPAN.findall(bare) if s.strip()]
+    return (len(spans) == 2 and not _BOLD_SPAN.sub("", bare).strip(" *")
+            and any(len(s.split()) >= 3 for s in spans))
+
+
+def _headings(text: str, tidy: bool = True) -> list[tuple[int, int, str]]:
+    """(offset, level, title) of every Markdown heading outside fenced code
+    (*tidy*: titles cleaned)."""
     out: list[tuple[int, int, str]] = []
     pos, fenced = 0, False
     for line in text.splitlines(keepends=True):
@@ -46,19 +104,80 @@ def _headings(text: str) -> list[tuple[int, int, str]]:
         elif not fenced:
             m = _HEAD.match(bare)
             if m:
-                title = re.sub(r"\s+", " ", m[2]).strip()
+                title = clean_title(m[2]) if tidy else re.sub(r"\s+", " ", m[2]).strip()
                 if title:
                     out.append((pos, len(m[1]), title[:160]))
         pos += len(line)
     return out
 
 
-def outline(text: str, max_sections: int = MAX_SECTIONS) -> list[dict[str, Any]]:
+def _named(text: str, heads: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """A number's heading and the heading right after it, its title, as one."""
+    out: list[tuple[int, int, str]] = []
+    i = 0
+    while i < len(heads):
+        start, lvl, title = heads[i]
+        if i + 1 < len(heads) and _NUMBER_ONLY.match(title):
+            nxt = heads[i + 1]
+            between = text[start:nxt[0]].split("\n", 1)[1] if "\n" in text[start:nxt[0]] else ""
+            if len("".join(between.split())) <= _NAMED_WITHIN:
+                out.append((start, lvl, f"{title.rstrip('.')} {nxt[2]}"[:160]))
+                i += 2
+                continue
+        out.append(heads[i])
+        i += 1
+    return out
+
+
+def _subheadings(text: str, a: int, b: int, level: int) -> list[tuple[int, int, str]]:
+    """The bold lines of ``text[a:b]`` that stand alone after a blank line
+    with prose after them — a PDF's subheadings — a level under *level*,
+    those in capitals above those that aren't."""
+    lines = text[a:b].split("\n")
+    out: list[tuple[int, int, str]] = []
+    pos, capitals, fenced = a, False, False
+    for i, line in enumerate(lines):
+        if _FENCE.match(line):
+            fenced = not fenced
+        m = None if fenced else _BOLD_ALONE.match(line.strip())
+        if m and (i == 0 or not lines[i - 1].strip()) and not page_furniture(line):
+            title = clean_title(m[1])
+            nxt = next((x.strip() for x in lines[i + 1:i + 4] if x.strip()), "")
+            if (sum(c.isalpha() for c in title) >= 3 and not title.endswith((".", ":", ",")) and title[0].isupper()
+                    and not _NOT_A_HEAD.match(title) and len(nxt) >= _PROSE_AFTER
+                    and not nxt.startswith(("**", "|", "#", "!["))):
+                upper = title.upper() == title
+                capitals = capitals or upper
+                out.append((pos, level + (1 if upper or not capitals else 2), title))
+        pos += len(line) + 1
+    return out
+
+
+def _tidy(text: str, heads: list[tuple[int, int, str]]) -> list[tuple[int, int, str]]:
+    """The headings of a converted document, tidied (see the module): numbers
+    named, and long stretches without one given their bold subheadings."""
+    heads = _named(text, heads)
+    starts = [h[0] for h in heads]
+    extra: list[tuple[int, int, str]] = []
+    # Before the first heading, and under each one (past its own line).
+    for n, (a, b) in enumerate(zip([0, *starts], [*starts, len(text)], strict=True)):
+        if b - a < LONG_STRETCH:
+            continue
+        if n:
+            a = text.find("\n", a, b) + 1 or b
+        extra += _subheadings(text, a, b, heads[n - 1][1] if n else 0)
+    return sorted(heads + extra) if extra else heads
+
+
+def outline(text: str, max_sections: int = MAX_SECTIONS, *, tidy: bool = True) -> list[dict[str, Any]]:
     """The document's sections: ``level`` (1 at the top), ``title``, ``start``
     and ``end`` (character offsets; a section runs to the next heading of its
     level or above, its subsections included) and ``own`` (where its own text
-    ends — at its first subsection). Empty for a text with no headings."""
-    heads = _headings(text)
+    ends — at its first subsection). Empty for a text with no headings.
+    *tidy* (see the module): False gives the headings as written."""
+    heads = _headings(text, tidy)
+    if tidy:
+        heads = _tidy(text, heads)
     marks = [h for h in heads if _MARK.match(h[2])]
     real = [h for h in heads if not _MARK.match(h[2])]
     if marks and len(real) < 3:

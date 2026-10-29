@@ -1334,6 +1334,25 @@ class AgentContextMixin:
         from captain_claw import lessons
         return lessons.note(getattr(self, "_lessons_context_cache", None) or [])
 
+    async def _refresh_knowledge_context_cache(self, query: str | None = None) -> None:
+        """The sections of the owner's documents this turn's message bears on
+        (knowledge tool ``pointers``): without being told, a model answers
+        what it thinks it knows and doesn't look."""
+        self._knowledge_context_cache = []
+        if not (query or "").strip() or not self.tools.has_tool("knowledge"):
+            return
+        try:
+            self._knowledge_context_cache = await self.tools.get("knowledge").pointers(str(query))
+        except Exception as exc:
+            log.debug("Knowledge pointers for the turn unavailable", error=str(exc))
+            self._knowledge_context_cache = []
+
+    def _build_knowledge_context_note(self) -> str:
+        if getattr(self, "_suppress_memory_context", False):
+            return ""
+        from captain_claw.tools.knowledge import pointer_note
+        return pointer_note(getattr(self, "_knowledge_context_cache", None) or [])
+
     def _build_insights_context_note(self, query: str = "") -> str:
         """Build context note from relevant insights."""
         if getattr(self, "_suppress_memory_context", False):
@@ -4283,6 +4302,9 @@ class AgentContextMixin:
         lessons_note = self._build_lessons_context_note()
         if lessons_note:
             notes.append(("lessons_context", lessons_note))
+        knowledge_note = self._build_knowledge_context_note() if owner_notes else ""
+        if knowledge_note:
+            notes.append(("knowledge_context", knowledge_note))
         insights_note = self._build_insights_context_note()
         if insights_note:
             notes.append(("insights_context", insights_note))
