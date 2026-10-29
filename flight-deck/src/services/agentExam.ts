@@ -6,7 +6,7 @@
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
 import { actAsHeaders } from './onboardingAs'
 
-export type ExamSize = 'quick' | 'standard' | 'deep'
+export type ExamSize = 'quick' | 'standard' | 'deep' | 'marathon'
 export type ExamKind = 'ask' | 'situation'
 export type Verdict = 'right' | 'partly' | 'wrong' | 'no_answer'
 /** Why a question went wrong: it didn't look, looked in the wrong place, found it and still got it
@@ -74,6 +74,8 @@ export interface Exam {
   agent_name: string
   size: ExamSize
   focus: string
+  /** The documents (their files in knowledge/) it was examined on — empty: all of them. */
+  docs?: string[]
   /** The exam whose questions it asks again. */
   again: string
   /** ready: passed on with the archetype it was made from — its questions, waiting to be asked. */
@@ -107,6 +109,10 @@ export interface ExamOverview {
   /** About what each size costs, in tokens. */
   cost: Record<ExamSize, number>
   sizes: Record<ExamSize, number>
+  /** Each document it can be examined on, with its sections worth a question — to pick from. */
+  materials: { file: string; title: string; sections: number }[]
+  /** About what one question costs, in tokens. */
+  per_question: number
 }
 
 async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -132,7 +138,7 @@ const base = (slug: string) => `/fd/agent-exam/${encodeURIComponent(slug)}`
 
 export const agentExamApi = {
   overview: (slug: string) => call<ExamOverview>(base(slug)),
-  start: (slug: string, body: { size?: ExamSize; focus?: string; again?: string }) =>
+  start: (slug: string, body: { size?: ExamSize; focus?: string; docs?: string[]; again?: string }) =>
     call<Exam>(base(slug), { method: 'POST', body: JSON.stringify(body) }),
   get: (slug: string, id: string) => call<Exam>(`${base(slug)}/${encodeURIComponent(id)}`),
   stop: (slug: string, id: string) => call<{ ok: boolean }>(`${base(slug)}/${encodeURIComponent(id)}`, { method: 'DELETE' }),
