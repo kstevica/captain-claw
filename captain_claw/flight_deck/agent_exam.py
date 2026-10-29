@@ -374,21 +374,31 @@ def _decimals(text: str) -> str:
     return re.sub(r"(\d?)([½¼¾])", lambda m: (m[1] or "0") + _FRACTIONS[m[2]], text)
 
 
-def _detail_parts(detail: str) -> tuple[list[str], list[str]]:
+# A place in a document a reply points to — "Exhibits 27.4–27.6", "Ch. 33", "pp. 12–15" — and its numbers.
+_REFERENCE = re.compile(
+    r"\b(?:exhibits?|ch(?:apters?)?\.?|figs?\.|figures?|tables?|appendi(?:x|ces)|sections?|pp?\.)\s*"
+    r"(\d+(?:\.\d+)?(?:\s*(?:[–—-]|,|and|&)\s*\d+(?:\.\d+)?)*)", re.IGNORECASE)
+
+
+def _detail_parts(detail: str) -> tuple[list[str], list[str], list[str]]:
     """What a detail is found by: its figures (a year range's short end in
-    full — 2005–07 is 2005 and 2007; decimals as _decimals writes them) and
-    its names (capitalised words but the first, without a possessive; not a
-    short acronym, which a reply shortens on its own: USD, COGS). The rest
-    is the reply's own wording."""
+    full — 2005–07 is 2005 and 2007; decimals as _decimals writes them), its
+    names (capitalised words but the first, without a possessive; not a
+    short acronym, plural or not, which a reply shortens on its own: USD,
+    COGS, CRPs) and its references (the numbers of the exhibits, chapters
+    and pages it names). The rest is the reply's own wording."""
+    refs = [n for m in _REFERENCE.finditer(detail) for n in re.findall(r"\d+(?:\.\d+)?", m[1])]
+    detail = _REFERENCE.sub(" ", detail)
     detail = _decimals(_YEARS.sub(lambda m: f"{m[1]}{m[2]}{m[3]}{m[4]}{m[1]}{m[5]}{m[6]}", detail))
     figures = [f.strip(".,") for f in _FIGURE.findall(detail)]
     names = []
     for word in _WORD.findall(detail)[1:]:
         for part in re.sub(r"[’']s?$", "", word).split("-"):
+            core = part[:-1] if part.endswith("s") and part[:-1].isupper() else part
             if (len(part) > 2 and part.isalpha() and part[0].isupper() and part.casefold() not in _COMMON
-                    and "LATIN" in unicodedata.name(part[0], "") and not (part.isupper() and len(part) <= 4)):
+                    and "LATIN" in unicodedata.name(part[0], "") and not (core.isupper() and len(core) <= 4)):
                 names.append(part.casefold())
-    return figures, names
+    return figures, names, refs
 
 
 _NUMBER_WORDS = "zero one two three four five six seven eight nine ten eleven twelve".split()
@@ -411,15 +421,20 @@ def found_in(detail: str, texts: list[str]) -> bool:
     """Whether *detail* (a figure or a name the grader quoted from a reply,
     with a few words of what it is about) is in one of *texts*
     (casefolded): all its figures and names within _DETAIL_NEAR characters
-    of each other — an exhibit's title and its table are that far apart.
-    A detail with neither has nothing to find it by."""
-    figures, names = _detail_parts(detail)
+    of each other — an exhibit's title and its table are that far apart —
+    and the exhibits and chapters it names anywhere in it (two exhibits it
+    cites together can be pages apart). A detail with none of them has
+    nothing to find it by."""
+    figures, names, refs = _detail_parts(detail)
     patterns = [_part_pattern(f, True) for f in figures] + [_part_pattern(n, False) for n in names]
-    if not patterns:
+    places = [_part_pattern(r, True) for r in refs]
+    if not patterns and not places:
         return False
     for text in texts:
-        if not all(p.search(text) for p in patterns):
+        if not all(p.search(text) for p in patterns + places):
             continue
+        if not patterns:
+            return True
         rarest = min(patterns, key=lambda p: len(p.findall(text)))
         for n, m in enumerate(rarest.finditer(text)):
             if n >= _DETAIL_TRIES:
@@ -430,27 +445,35 @@ def found_in(detail: str, texts: list[str]) -> bool:
     return False
 
 
+# Arithmetic: an operator between two figures ("0.40 × 4,314", "(100 + 216)"), or a chain of "=".
+_CALCULATION = re.compile(r"\d\s*(?:[×*÷+−^/]|\s[-–]\s)\s*[$€£(]?\s*\d")
+
+
 def checkable(detail: str) -> bool:
-    """Whether *detail* has a figure or a name to check it by."""
-    return any(_detail_parts(detail))
+    """Whether *detail* has a figure, a name or a reference to check it by —
+    and isn't the reply's own arithmetic ("PV = 0.40 × 4,314 = $1,725.6M"),
+    which it works out rather than finds."""
+    calculation = bool(_CALCULATION.search(detail)) or detail.count("=") >= 2
+    return any(_detail_parts(detail)) and not calculation
 
 
-_CLAUSE = re.compile(r"\s[—–]\s|;\s")   # "16% a year — double the 6½% long-run average"
+_CLAUSE = re.compile(r"\s[—–]\s|;\s|\.{3}|…")   # "16% a year — double the 6½% long-run average"
 
 
 def check_details(details: list[str], corpus: dict[str, list[str]]) -> list[dict]:
     """Each detail the grader found outside the question's passage, with
     where else it is: ``documents`` (anywhere in them), ``lessons`` (a fact
     or rule it was taught), ``looked_up`` (what its lookups returned) — or
-    "" when nowhere: made up. One that joins facts (" — ", "; ") is found
-    when each of them is, wherever. One with no figure or name to check it
-    by (the reply putting what it read its own way) is left out."""
+    "" when nowhere: made up. One that joins facts (" — ", "; ", "…") is
+    found when each of them is, wherever. One with nothing to check it by
+    (the reply putting what it read its own way, or its own arithmetic) is
+    left out."""
     out = []
     for d in details:
-        if not checkable(d):
+        clauses = [c for c in _CLAUSE.split(d) if checkable(c)]
+        if not clauses:
             continue
-        wheres = [next((where for where, texts in corpus.items() if found_in(c, texts)), "")
-                  for c in _CLAUSE.split(d) if checkable(c)]
+        wheres = [next((where for where, texts in corpus.items() if found_in(c, texts)), "") for c in clauses]
         out.append({"text": d, "found": wheres[0] if all(wheres) else ""})
     return out
 

@@ -9,7 +9,8 @@ Grade each reply against the passage — not against what you know yourself.
 
 - `right` — every point is there, in any words or language, and nothing contradicts the passage.
   More detail is fine: judge the verdict on the points alone.
-- `partly` — some of the points, or the core is right but a detail that matters is wrong or missing.
+- `partly` — some of the points, or the core is right but a detail that matters is wrong or
+  missing, or something it says contradicts the passage.
 - `wrong` — the core is missing or contradicts the passage.
 - `no_answer` — it didn't answer: it asked a question back, said it couldn't find or doesn't
   know, refused, or answered something else. Saying it couldn't find the answer is honest:
@@ -19,13 +20,17 @@ Grade each reply against the passage — not against what you know yourself.
 people, companies, titles — that aren't in the passage and aren't common knowledge, each quoted
 short from the reply (the figure or name with a few words of what it is about, e.g. "0.28 points
 of TRS per point of growth"). Only what has a figure or a name in it: not an explanation, a
-summary or the reply's own wording of what it read. You see one passage of the agent's
-documents; these are checked against the rest of them, so list every such detail and don't lower
-the verdict for them. Hedged guesses ("probably", "usually") count only when it then acts on
-them as fact. Empty when there are none. `made_up` is true when `unsupported` isn't empty.
+summary or the reply's own wording of what it read; not a figure it works out itself from the
+question's numbers (its arithmetic); not what it says the documents don't cover or leave out.
+You see one passage of the agent's documents; these are checked against the rest of them, so list
+every such detail and don't lower the verdict for them. Hedged guesses ("probably", "usually")
+count only when it then acts on them as fact. Empty when there are none. `made_up` is true when
+`unsupported` isn't empty.
 
-`missing`: the points the reply lacks or gets wrong, as given. `why`: one short sentence for
-the agent's owner — what was right, or what was missing or wrong — in the question's language.
+`missing`: the points the reply lacks or gets wrong, as given — and anything it says that
+contradicts the passage, in a few words. A verdict below `right` always has something here or in
+`unsupported`. `why`: one short sentence for the agent's owner — what was right, or what was
+missing or wrong — in the question's language.
 
 ## Output format
 

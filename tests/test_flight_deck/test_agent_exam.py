@@ -331,6 +331,30 @@ def test_a_detail_is_found_however_the_book_writes_it():
         {"text": "t = 4.19", "found": ""}]
 
 
+def test_references_acronyms_and_arithmetic_are_read_for_what_they_are():
+    # Details from a Pi exam: exhibits cited together pages apart, a plural acronym, facts joined by "…".
+    book = ex._checked(
+        "## 27 Leases\n\nEXHIBIT 27.4 Leasing Example: Current Capital Structure\n" + "A row of the table 12 34 56.\n" * 300
+        + "EXHIBIT 27.6 Leasing Example: Free Cash Flow\n"
+        + "A second adviser used a very high country risk premium of 11 percent on top of the WACC, with real "
+          "sales growth of almost 10 percent and a ROIC increasing to 46 percent in the long term.\n")
+    assert ex.found_in("Ch. 27, Exhibits 27.4–27.6", [book]) and not ex.found_in("Exhibit 27.9", [book])
+    assert ex._detail_parts("see Exhibits 27.4–27.6 and pp. 12–15")[2] == ["27.4", "27.6", "12", "15"]
+    assert ex.found_in("a second adviser used ~11% CRPs", [book])
+    corpus = {"documents": [book], "lessons": [], "looked_up": []}
+    joined = "advisers using ~11% CRPs... 10% real sales growth, ROIC rising to 46% in chemicals"
+    assert ex.check_details([joined], corpus) == [{"text": joined, "found": "documents"}]
+    # Its own arithmetic is worked out, not found: left out. A figure it states stays checked.
+    for sum_ in ["PV(Testing) = 0.40 × 4,314 + 0.60 × 0 = $1,725.6M", "PV of investments (100 + 216) $316M",
+                 "σ = 15%, T = 1 yr → u = e^0.15 = 1.1618", "WACC 10.5%, growth 6.5% → 1/(0.04) = 25x",
+                 "Capex = 300 - 250 + 23.8"]:
+        assert not ex.checkable(sum_), sum_
+    for fact in ["t = 4.19", "R² = 0.45", "Ba2/BB spread of 577 bp", "General Dynamics, 1991–1995"]:
+        assert ex.checkable(fact), fact
+    assert ex.check_details(["0.06 × 4,314 = $258.8M", "Standard NPV −$57.2M"], corpus) == [
+        {"text": "Standard NPV −$57.2M", "found": ""}]
+
+
 def test_made_up_stands_only_for_details_found_nowhere():
     grade = {"verdict": "partly", "made_up": True, "missing": [], "why": "Adds figures."}
     found = [{"text": "0.28 pp", "found": "lessons"}]
