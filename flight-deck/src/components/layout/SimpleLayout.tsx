@@ -143,6 +143,12 @@ function dockerState(status: string): AgentState {
   return 'unknown'
 }
 
+/** Under an agent's name in its menu: what it does while it runs, else its state. */
+function menuSubtitle(a: SimpleAgent): string {
+  if (a.kind === 'shared') return `Shared by ${a.ownerName || 'another user'}`
+  return a.state === 'running' && a.reachable && a.description ? a.description : stateLabel(a)
+}
+
 function stateLabel(a: SimpleAgent): string {
   if (a.asleep) return 'Asleep — wakes when you open it'
   if (a.state === 'running') return a.reachable ? 'Running' : 'Running — no web port'
@@ -604,46 +610,47 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const agentMenuItems = (a: SimpleAgent): AgentMenuItem[] => {
     if (a.kind === 'shared') {
       return agentPanels(a.id, memberWorkspace, sharedAgents).region === 'member'
-        ? [{ icon: FolderOpen, label: 'Files & data', hint: 'What everyone who uses it can open', onSelect: () => setFilesDataId(a.id) }]
+        ? [{ icon: FolderOpen, label: 'Files & data', hint: 'What everyone who uses it can open', tone: 'amber', onSelect: () => setFilesDataId(a.id) }]
         : []
     }
     const up = a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
     const items: AgentMenuItem[] = [{
       icon: Info, label: 'Info', hint: up ? 'Its intentions and topics' : 'Power it on to see its intentions and topics',
-      onSelect: () => setAgentInfoId(a.id), disabled: !up,
+      tone: 'sky', onSelect: () => setAgentInfoId(a.id), disabled: !up,
     }]
     // Read from the agent itself: a stopped one has none to show.
     if (!inLibraries(a)) {
       items.push({
-        icon: FolderOpen, label: 'Files & data',
+        icon: FolderOpen, label: 'Files & data', tone: 'amber',
         hint: up ? 'Its files and datastore tables' : 'Its files and tables show while it runs',
         onSelect: () => setFilesDataId(a.id), disabled: !up,
       })
     }
     if (a.kind === 'docker' || a.kind === 'process') {
       items.push({
-        icon: Activity, label: 'Activity', hint: 'Every tool it used, and with what',
+        icon: Activity, label: 'Activity', hint: 'Every tool it used, and with what', tone: 'emerald',
         onSelect: () => openActivity(a.kind === 'process' ? { slug: a.startKey } : { ref: a.startKey }),
       })
     }
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
-        { icon: BookOpen, label: 'Instructions, insights & skills', hint: 'What it keeps in mind, has learned, and knows how to do', onSelect: () => setAgentInstructionsId(a.id) },
+        { icon: BookOpen, label: 'Instructions, insights & skills', hint: 'What it keeps in mind, has learned, and knows how to do',
+          tone: 'violet', onSelect: () => setAgentInstructionsId(a.id) },
       )
       // Your documents and way of working → its rules, skills and knowledge (process agents: FD writes its folder).
       if (a.kind === 'process') {
         items.push({ icon: GraduationCap, label: 'Onboarding', hint: 'Its documents, the lessons it was taught, and how well it knows them',
-          onSelect: () => setOnboardingFor({ slug: a.startKey, name: a.name, tab: 'overview' }) })
+          tone: 'fuchsia', onSelect: () => setOnboardingFor({ slug: a.startKey, name: a.name, tab: 'overview' }) })
       }
       items.push(
-        { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', onSelect: () => setAgentSettingsId(a.id) },
+        { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', tone: 'zinc', onSelect: () => setAgentSettingsId(a.id) },
       )
       const net = networkShareAction(netAgents[shareKeyOf(a)], {
         canShare: netCanShare, admin: netAdmin, deckName: netDeck, displayName: a.name, setShared: netSetShared,
         ask: netAskShare,
         onError: (m) => useNotificationStore.getState().add('error', 'BotPort network', m),
       })
-      if (net.show) items.push({ icon: Globe, label: net.label, hint: net.hint, onSelect: net.onClick, disabled: net.disabled })
+      if (net.show) items.push({ icon: Globe, label: net.label, hint: net.hint, tone: 'cyan', onSelect: net.onClick, disabled: net.disabled })
       items.push(
         { icon: Trash2, label: 'Remove agent', hint: 'Delete it and its folder', danger: true,
           onSelect: () => setAgentRemoveId(a.id), disabled: switching.has(a.id) },
@@ -1645,7 +1652,7 @@ function AgentsColumn({
                     <Settings className="h-3.5 w-3.5" />
                   </button>
                 )}
-                {menu.length > 0 && <AgentMenu agentName={a.name} items={menu} />}
+                {menu.length > 0 && <AgentMenu agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} />}
                 {canPower && (
                   <button
                     onClick={() => onPower(a, !powered)}
@@ -2179,7 +2186,7 @@ function PhoneLayout({
           >
             <FolderOpen className="h-5 w-5" />
           </button>
-          {a && menu.length > 0 && <AgentMenu agentName={a.name} items={menu} phone />}
+          {a && menu.length > 0 && <AgentMenu agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} phone />}
         </header>
         <main className="flex min-h-0 flex-1 flex-col overflow-hidden pb-[env(safe-area-inset-bottom)]">
           <ChatPanel variant="simple" />
@@ -2323,7 +2330,7 @@ function PhoneLayout({
                     {working ? <Loader2 className="h-5 w-5 animate-spin" /> : <Power className="h-5 w-5" />}
                   </button>
                 )}
-                {menu.length > 0 && <AgentMenu agentName={a.name} items={menu} phone />}
+                {menu.length > 0 && <AgentMenu agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} phone />}
                 {shared && (
                   <button
                     onClick={() => onLeave(a)}
