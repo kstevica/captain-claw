@@ -9,7 +9,9 @@ message) and knowledge/owner-rules.md again, and — when what is always in
 mind changed — its instructions' block, returned for the chat to send.
 
     GET    /fd/agent-lessons/{slug}         its lessons, and which always-in-mind ones its block has no room for
-    POST   /fd/agent-lessons/{slug}         add one (kind, text, always)
+    POST   /fd/agent-lessons/{slug}         add one (kind, text, always; taught in a chat or a practice run)
+    POST   /fd/agent-lessons/{slug}/draft   a lesson drafted from the owner's words (a correction in a chat,
+                                            what a practice answer should have been), by the agent's model
     PATCH  /fd/agent-lessons/{slug}/{id}    reword it, or switch always
     DELETE /fd/agent-lessons/{slug}/{id}    take it away
 """
@@ -26,6 +28,7 @@ from pydantic import BaseModel, Field
 from captain_claw.flight_deck import agent_lessons
 from captain_claw.flight_deck import agent_preset as ap
 from captain_claw.flight_deck.auth import get_managed_user
+from captain_claw.flight_deck.file_library import reply_json
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -34,6 +37,9 @@ router = APIRouter(prefix="/fd/agent-lessons", tags=["agent-lessons"])
 
 _GROUP = {"rule": "rules", "ask_first": "escalation"}     # where a setup record keeps these kinds
 _TEXT_MAX = 400
+_TAUGHT_BY = ("you", "chat", "practice")                  # who teaches by hand: the page, a chat, a practice run
+_DRAFT_PROMPT = Path(__file__).parent.parent / "instructions" / "agent_lesson_draft_prompt.md"
+_DRAFT_TOKENS = 600
 
 
 def _place(slug: str, user: dict) -> tuple[str, Path, Path]:
@@ -106,24 +112,27 @@ class LessonBody(BaseModel):
     kind: str = Field("rule", max_length=20)
     text: str = Field(..., max_length=2000)
     always: bool = False
+    taught_by: str = Field("you", max_length=20)
 
 
 @router.post("/{slug}")
 async def add_lesson(slug: str, body: LessonBody, user: dict = Depends(get_managed_user)) -> dict:
-    """A lesson its owner gives by hand (``taught_by: you``)."""
+    """A lesson its owner gives by hand — on this page (``taught_by: you``),
+    from a chat, or after a practice answer."""
     owner_id, agent_dir, workspace = _place(slug, user)
     if body.kind not in agent_lessons.KINDS:
         raise HTTPException(400, "A lesson is a rule, something to ask you first, or a fact.")
+    taught_by = body.taught_by if body.taught_by in _TAUGHT_BY else "you"
     text = _clean(body.text)
     record = await asyncio.to_thread(ap.earlier_setup, agent_dir, workspace)
     if _taken(record, body.kind, text):
         raise HTTPException(409, "It has that lesson already.")
     if body.kind in _GROUP:
         item = {"text": text, "always": body.always, "source": {"doc": "instructions", "section": ""},
-                "taught_by": "you", "added": time.time()}
+                "taught_by": taught_by, "added": time.time()}
         record = {**record, _GROUP[body.kind]: [item, *(record.get(_GROUP[body.kind]) or [])]}
     else:
-        record, _ = agent_lessons.taught(record, "fact", text, taught_by="you")
+        record, _ = agent_lessons.taught(record, "fact", text, taught_by=taught_by)
     log.info("agent lessons: one added", agent=slug, kind=body.kind)
     return await _save(slug, owner_id, agent_dir, workspace, record)
 
@@ -171,3 +180,45 @@ async def remove_lesson(slug: str, lesson_id: str, user: dict = Depends(get_mana
     del items[i]
     log.info("agent lessons: one taken away", agent=slug, group=group)
     return await _save(slug, owner_id, agent_dir, workspace, {**record, group: items})
+
+
+class DraftBody(BaseModel):
+    said: str = Field(..., max_length=4000)      # the owner's words
+    reply: str = Field("", max_length=8000)      # what the agent had answered
+    task: str = Field("", max_length=2000)       # the practice task it answered
+
+
+@router.post("/{slug}/draft")
+async def draft_lesson(slug: str, body: DraftBody, user: dict = Depends(get_managed_user)) -> dict:
+    """One lesson drafted from the owner's words, for them to check before
+    it's taught: by the agent's own model (thinking off, as reads), with the
+    answer it corrects. Without a model — or one that can't say — their words
+    as a rule (``drafted`` false); ``text`` empty when they teach nothing."""
+    from captain_claw.flight_deck.agent_exam import ExamJob
+
+    owner_id, _, _ = _place(slug, user)
+    said = " ".join(body.said.split())
+    if not said:
+        raise HTTPException(400, "Say what it should learn.")
+    plain = {"kind": "rule", "text": said[:_TEXT_MAX], "always": False, "drafted": False}
+    if await ap._quota_spent(owner_id):
+        return plain
+    reader, _ = await ap.choose_reader(owner_id, slug)
+    if not reader:
+        return plain
+    job = ExamJob(id="draft", agent=slug, owner_id=owner_id, owner=ap.owner_key(owner_id))
+    prompt = "\n\n".join(x for x in (
+        body.task.strip() and f"## The task it was given\n{body.task.strip()}",
+        body.reply.strip() and f"## What the agent answered\n{body.reply.strip()[:6000]}",
+        f"## What the owner said\n{said}") if x)
+    try:
+        got = reply_json((await ap._call(reader, _DRAFT_PROMPT.read_text(encoding="utf-8"), prompt, owner_id, job,
+                                         _DRAFT_TOKENS)).text)
+    except Exception as exc:
+        log.info("agent lessons: no draft", agent=slug, error=str(exc)[:200])
+        return plain
+    kind = str(got.get("kind") or "").strip().lower()
+    kind = kind if kind in agent_lessons.KINDS else "rule"
+    text = " ".join(str(got.get("text") or "").split())[:_TEXT_MAX]
+    return {"kind": kind, "text": text, "always": got.get("always") is True and kind != "fact" and bool(text),
+            "drafted": True}

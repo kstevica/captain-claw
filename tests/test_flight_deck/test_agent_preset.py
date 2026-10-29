@@ -2490,3 +2490,112 @@ async def test_always_in_mind_lessons_without_room_still_reach_it(deck):
     assert (await _apply(BOB, slug, _setup(BOB, [], rules=many))).status_code == 200
     got = (await _ls(BOB, "GET", slug)).json()
     assert got["counts"]["always"] == 20 and 0 < len(got["not_in_block"]) < 20
+
+
+# ── Practice, and lessons from the owner's words (/fd/agent-practice, …/draft) ──
+
+
+async def _pr(uid: str, method: str, path: str, **kw) -> httpx.Response:
+    async with _client() as c:
+        return await c.request(method, f"/fd/agent-practice/{path}", headers=_auth(uid), **kw)
+
+
+async def _settled(uid: str, slug: str, task_id: str) -> dict:
+    for _ in range(300):
+        t = next(t for t in (await _pr(uid, "GET", slug)).json()["tasks"] if t["id"] == task_id)
+        if all(a["state"] != "answering" for a in t["attempts"]):
+            return t
+        await asyncio.sleep(0.01)
+    raise AssertionError("the answer never came")
+
+
+def _practising(monkeypatch) -> list:
+    from captain_claw.flight_deck import agent_exam as ex
+
+    asked: list = []
+
+    async def knows(job):
+        return True
+
+    async def answer(job, q):
+        asked.append((job.agent, q["question"]))
+        return {"answer": f"Answer {len(asked)}.", "tokens": 50, "seconds": 1,
+                "lookups": [{"tool": "knowledge", "args": {"action": "search"}, "ok": True, "result": "x" * 3000}]}
+
+    monkeypatch.setattr(ex, "can_take_exams", knows)
+    monkeypatch.setattr(ex, "ask", answer)
+    return asked
+
+
+async def test_practice_tries_a_task_marks_it_and_tries_again(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24398)
+    _own_model(monkeypatch, slug)
+    asked = _practising(monkeypatch)
+    r = await _pr(BOB, "POST", slug, json={"task": "A customer wants a refund for a damaged parcel. What do you reply?"})
+    assert r.status_code == 200, r.text
+    t = await _settled(BOB, slug, r.json()["id"])
+    (first,) = t["attempts"]
+    assert first["state"] == "done" and first["answer"] == "Answer 1." and first["verdict"] == ""
+    assert len(first["lookups"][0]["result"]) <= 1200 and asked == [(slug, t["task"])]
+
+    t = (await _pr(BOB, "POST", f"{slug}/{t['id']}/mark", json={"attempt": first["id"], "verdict": "fix",
+                                                                 "note": "Offer the refund at once.", "lesson": "l1"})).json()
+    assert (t["attempts"][0]["verdict"], t["attempts"][0]["note"], t["attempts"][0]["lesson"]) == ("fix", "Offer the refund at once.", "l1")
+    t = await _settled(BOB, slug, (await _pr(BOB, "POST", f"{slug}/{t['id']}/try")).json()["id"])
+    assert [a["answer"] for a in t["attempts"]] == ["Answer 1.", "Answer 2."]
+    t = (await _pr(BOB, "POST", f"{slug}/{t['id']}/mark", json={"attempt": t["attempts"][1]["id"], "verdict": "good"})).json()
+    assert t["attempts"][1]["verdict"] == "good"
+    assert json.loads((server.DATA_DIR / slug / "practice.json").read_text())["tasks"][0]["id"] == t["id"]
+
+    assert (await _pr(BOB, "POST", f"{slug}/{t['id']}/mark", json={"attempt": "nope", "verdict": "good"})).status_code == 404
+    assert (await _pr(BOB, "POST", f"{slug}/{t['id']}/mark", json={"attempt": first["id"], "verdict": "great"})).status_code == 400
+    assert (await _pr(BOB, "POST", slug, json={"task": "  "})).status_code == 400
+    assert (await _pr(CAROL, "GET", slug)).status_code == 404
+    assert (await _pr(BOB, "DELETE", f"{slug}/{t['id']}")).json() == {"ok": True}
+    assert (await _pr(BOB, "GET", slug)).json()["tasks"] == []
+    monkeypatch.setattr(ap.agent_idle, "is_available", lambda s: False)
+    r = await _pr(BOB, "POST", slug, json={"task": "Anything?"})
+    assert r.status_code == 409 and "Switch it on" in r.json()["detail"]
+
+
+async def test_practice_suggests_tasks_from_its_documents(deck, monkeypatch):
+    slug = await _examinable(monkeypatch, 24399)
+    calls = _examiner(monkeypatch)
+    got = (await _pr(BOB, "POST", f"{slug}/suggest", json={})).json()["tasks"]
+    assert 1 <= len(got) <= 3 and calls["write"]
+    assert all(s["task"].startswith("What does ") and s["expected"] and s["source"]["doc"] == "handbook.md" for s in got)
+    assert "kind: situation" in calls["write"][0]                     # tasks are situations
+
+
+async def test_a_lesson_is_drafted_from_the_owners_words(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24400)
+    _own_model(monkeypatch, slug)
+    calls = _agent_model(monkeypatch, json.dumps({"kind": "ask_first", "always": True,
+                                                  "text": "Ask before  promising a delivery date."}))
+    async with _client() as c:
+        r = await c.post(f"/fd/agent-lessons/{slug}/draft", headers=_auth(BOB), json={
+            "said": "No — ask me before you promise dates!", "reply": "It ships Monday.", "task": "When does it ship?"})
+    assert r.json() == {"kind": "ask_first", "text": "Ask before promising a delivery date.", "always": True, "drafted": True}
+    prompt = calls[0]["user"]
+    assert "## What the owner said\nNo — ask me before you promise dates!" in prompt
+    assert "It ships Monday." in prompt and "When does it ship?" in prompt
+
+    _agent_model(monkeypatch, "not json at all")
+    async with _client() as c:
+        r = await c.post(f"/fd/agent-lessons/{slug}/draft", headers=_auth(BOB), json={"said": "Never use  emoji."})
+        assert r.json() == {"kind": "rule", "text": "Never use emoji.", "always": False, "drafted": False}
+        assert (await c.post(f"/fd/agent-lessons/{slug}/draft", headers=_auth(BOB), json={"said": " "})).status_code == 400
+        assert (await c.post(f"/fd/agent-lessons/{slug}/draft", headers=_auth(CAROL), json={"said": "x"})).status_code == 404
+    _agent_model(monkeypatch, json.dumps({"kind": "fact", "text": "", "always": True}))
+    async with _client() as c:
+        r = await c.post(f"/fd/agent-lessons/{slug}/draft", headers=_auth(BOB), json={"said": "Thanks!"})
+    assert r.json() == {"kind": "fact", "text": "", "always": False, "drafted": True}      # nothing to teach
+
+
+async def test_a_lesson_taught_in_a_chat_or_in_practice_says_so(deck):
+    slug = await _spawn(BOB, "Helpdesk", 24401)
+    r = await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Never use emoji.", "taught_by": "chat"})
+    r = await _ls(BOB, "POST", slug, json={"kind": "fact", "text": "Zone B is 11.40 EUR.", "taught_by": "practice"})
+    r = await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Be brief.", "taught_by": "an exam, honest"})
+    by = {x["text"]: x["taught_by"] for x in r.json()["lessons"]}
+    assert by == {"Never use emoji.": "chat", "Zone B is 11.40 EUR.": "practice", "Be brief.": "you"}
