@@ -56,7 +56,6 @@ from __future__ import annotations
 import asyncio
 import itertools
 import json
-import math
 import os
 import re
 import secrets
@@ -100,12 +99,14 @@ FACT_CATEGORIES = ("contact", "decision", "preference", "fact", "deadline", "pro
                    "workflow", "feedback", "reference")
 # The most of each group a preset keeps from a step's worth of material (and
 # what one step, or the merge call, gives); a longer read keeps more
-# (``limits_for``), up to CEILINGS. TOTALS: what an agent keeps from all its
-# setups together — a book read in passes, several books.
+# (``limits_for``: as GROWTH's power of how many steps' worth it read, else
+# their square root), up to CEILINGS. TOTALS: what an agent keeps from all
+# its setups together — a book read in passes, several books.
 LIMITS = {"rules": 30, "intents": 12, "facts": 40, "escalation": 15, "templates": 8,
           "glossary": 60, "knowledge": 12}
-CEILINGS = {"rules": 150, "intents": 30, "facts": 300, "escalation": 30, "templates": 20,
+CEILINGS = {"rules": 150, "intents": 30, "facts": 1000, "escalation": 30, "templates": 20,
             "glossary": 400, "knowledge": 12}
+GROWTH = {"facts": 0.75, "glossary": 0.75}  # each section has facts and terms of its own; rules repeat
 TOTALS = {g: n * 3 for g, n in CEILINGS.items()}
 _BLOCK_NAMES = 30                      # skills or templates the block names; the rest are in their folders
 
@@ -188,10 +189,11 @@ def _strings(raw: Any, limit: int, count: int) -> list[str]:
 def limits_for(tokens: int) -> dict[str, int]:
     """What a read of *tokens* tokens of material keeps of each group:
     LIMITS for a step's worth, more as the square root of what was read —
-    a long read finds more, though it repeats itself more too — up to
+    a long read finds more, though it repeats itself more too — and facts
+    and terms faster (GROWTH: a book's every chapter has its own), up to
     CEILINGS."""
-    grow = max(1.0, math.sqrt(max(0, tokens) / _STEP_MAX))
-    return {g: min(CEILINGS[g], round(n * grow)) for g, n in LIMITS.items()}
+    steps = max(1.0, max(0, tokens) / _STEP_MAX)
+    return {g: min(CEILINGS[g], round(n * steps ** GROWTH.get(g, 0.5))) for g, n in LIMITS.items()}
 
 
 def normalise(raw: Any, limits: dict[str, int] | None = None) -> dict:
@@ -2545,10 +2547,7 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     # Lessons beyond the rules: facts (a setup's own, replaced with it) and what exams taught (kept).
     lessons = [x for x in before_lessons if isinstance(x, dict)
                and (mode != "replace" or x.get("taught_by") != "setup" or base(x))]
-    record: dict[str, Any] = {"lessons": lessons}
-    for x in agent_lessons.facts_as_lessons(preset["facts"]):
-        record, _ = agent_lessons.taught(record, "fact", x["text"], x["source"], taught_by="setup",
-                                         importance=x["importance"], layer=layer)
+    record = agent_lessons.taught_facts({"lessons": lessons}, preset["facts"], taught_by="setup", layer=layer)
     fact_lessons = [x for x in record["lessons"] if x.get("kind") == "fact"]
     written = write_knowledge(folder, {**merged, "facts": [{"content": x["text"], "source": x.get("source") or {}}
                                                            for x in fact_lessons],
