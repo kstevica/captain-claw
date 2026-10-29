@@ -415,9 +415,12 @@ export class AgentChatWS {
     this.ws.send(JSON.stringify({ type: 'fd_wake' }))
   }
 
-  sendBtw(content: string) {
+  /** A note for the agent's running turn. `runningOnly`: for that turn
+   *  only — with none on, the agent refuses it (`busy: false` on the /btw
+   *  command_result) instead of keeping it for the next turn. */
+  sendBtw(content: string, opts?: { runningOnly?: boolean }) {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(JSON.stringify({ type: 'btw', content }))
+    this.ws.send(JSON.stringify({ type: 'btw', content, ...(opts?.runningOnly ? { running_only: true } : {}) }))
   }
 
   cancel() {

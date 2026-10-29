@@ -302,7 +302,7 @@ async def _speaker_btw(server: WebServer, ws: Any, data: dict) -> None:
     agent = await server.resolve_agent(ws)
     if not getattr(agent, "_lane_busy", False):
         await server._send(ws, {
-            "type": "command_result", "command": "/btw",
+            "type": "command_result", "command": "/btw", "busy": False,
             "content": "Nothing is running right now — send it as a message instead.",
         })
         return
@@ -318,7 +318,7 @@ async def _speaker_btw(server: WebServer, ws: Any, data: dict) -> None:
     notes.append(content)
     log.info("BTW instruction added", count=len(notes), speaker=True)
     await server._send(ws, {
-        "type": "command_result", "command": "/btw",
+        "type": "command_result", "command": "/btw", "busy": True,
         "content": f"Got it — noted for the remaining steps: *{content[:500]}*",
     })
 

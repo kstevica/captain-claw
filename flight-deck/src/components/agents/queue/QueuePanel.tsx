@@ -57,6 +57,9 @@ export interface QueueActs {
   setAuto: (on: boolean) => void
   clearFinished: () => void
   clearWaiting: () => void
+  /** Hand a waiting task to the running turn now, as an extra instruction
+   *  (it leaves the queue); with no turn on, it runs next on its own. */
+  insertNow: (id: string) => void
 }
 
 /** What every part of the panel reads: the model, the UI state of items,
@@ -162,6 +165,7 @@ export function QueuePanel({ sessionKey, agentId, shared, conn, variant, onGoToC
     restoreQueueItems: st.restoreQueueItems,
     extendQueueAnswerWait: st.extendQueueAnswerWait,
     cancelTask: st.cancelTask,
+    insertNow: st.insertQueueItemNow,
     openSharedChat: st.openSharedChat,
   })))
   const quotaSpent = useQuotaStore((q) => !!q.status?.blocked && !q.status.exempt)
@@ -419,6 +423,19 @@ export function QueuePanel({ sessionKey, agentId, shared, conn, variant, onGoToC
     },
     move: (id, beforeId) => moveTask(id, beforeId),
     runNext: () => store.runQueueNext(sessionKey),
+    insertNow: (id) => {
+      const next = neighbour(pendingIds, id)
+      if (store.insertNow(sessionKey, id)) {
+        // No undo: the agent has the note already.
+        showToast('Handed to the running task')
+        focusRow(next)
+        return
+      }
+      // The turn ended as the button was pressed: it runs on its own, next.
+      const first = model.next
+      if (first && first.id !== id) moveTask(id, first.id)
+      store.runQueueNext(sessionKey)
+    },
     stop: () => store.cancelTask(sessionKey),
     setPaused: (paused) => store.setQueuePaused(sessionKey, paused),
     setAuto: (on) => store.setQueueAutoMode(sessionKey, on),
