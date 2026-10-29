@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Bot, Box, Cpu, Loader2, Play, Plus, RefreshCw, RotateCw, Settings, Square, Trash2, Wand2, X } from 'lucide-react'
+import { Bot, Box, Cpu, GraduationCap, Loader2, Play, Plus, RefreshCw, RotateCw, Settings, Square, Trash2, X } from 'lucide-react'
 import {
   listContainers, listProcesses,
   startContainer, stopContainer, restartContainer, removeContainer,
@@ -10,6 +10,7 @@ import {
 import { useAuthStore } from '../../stores/authStore'
 import { AgentConfigEditor } from './AgentConfigEditor'
 import { AgentSetupDialog } from '../layout/AgentSetupDialog'
+import { OnboardingDialog } from '../layout/OnboardingDialog'
 import { ArchetypeSpawnDialog, type SetupRequest } from '../layout/ArchetypeSpawnDialog'
 
 // ── Admin: another user's agents ─────────────────────────────────────
@@ -62,6 +63,8 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
   const [busy, setBusy] = useState<Set<string>>(() => new Set())   // agents with an action running
   const [creating, setCreating] = useState(false)
   const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
+  // Its onboarding, for the user: what the admin teaches here is the agent's base, which its user adds to.
+  const [onboarding, setOnboarding] = useState<{ slug: string; name: string } | null>(null)
   const [editing, setEditing] = useState<ManagedAgent | null>(null)
 
   const load = useCallback(async () => {
@@ -88,11 +91,11 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
 
   // Escape closes this dialog only when no child dialog is open on top of it.
   useEffect(() => {
-    if (creating || editing || setupFor) return
+    if (creating || editing || setupFor || onboarding) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [creating, editing, setupFor, onClose])
+  }, [creating, editing, setupFor, onboarding, onClose])
 
   const run = async (a: ManagedAgent, action: 'start' | 'stop' | 'restart' | 'remove') => {
     if (action === 'remove' && !confirm(
@@ -193,9 +196,9 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
                       <button onClick={() => run(a, 'start')} disabled={working} className={btn}><Play className="h-3 w-3" /> Start</button>
                     )}
                     {a.kind === 'process' && (
-                      <button onClick={() => setSetupFor({ slug: a.id, name: a.name, role: '' })} disabled={working} className={btn}
-                        title="Their instructions and documents, as its rules, skills and knowledge">
-                        <Wand2 className="h-3 w-3" /> Way of working
+                      <button onClick={() => setOnboarding({ slug: a.id, name: a.name })} disabled={working} className={btn}
+                        title="Its documents, lessons, practice and exams — what you teach it is its base, which they add to">
+                        <GraduationCap className="h-3 w-3" /> Onboarding
                       </button>
                     )}
                     <button onClick={() => setEditing(a)} disabled={working} className={btn}><Settings className="h-3 w-3" /> Config</button>
@@ -220,6 +223,10 @@ export function UserAgentsDialog({ userId, userLabel, onClose }: {
             onClose={() => setCreating(false)}
             onSpawned={(_slug, setup) => { setCreating(false); if (setup) setSetupFor(setup); load() }}
           />
+        )}
+        {onboarding && !setupFor && (
+          <OnboardingDialog agent={onboarding} asUser={actAs} ownerLabel={userLabel} onClose={() => setOnboarding(null)}
+            onSetup={(readDocs) => setSetupFor({ ...onboarding, role: '', readDocs })} />
         )}
         {setupFor && (
           <AgentSetupDialog agent={setupFor} asUser={actAs} ownerLabel={userLabel} onClose={() => setSetupFor(null)} />

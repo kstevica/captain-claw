@@ -3,6 +3,7 @@
  *  it reads the folder itself, so the agent may be off). Read-only. */
 
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+import { actAsHeaders } from './onboardingAs'
 import type { ReadState } from './agentPreset'
 
 export interface KnowledgeDoc {
@@ -90,7 +91,7 @@ export interface KnowledgeHit {
 async function get<T>(path: string): Promise<T> {
   const headers = (): Record<string, string> => {
     const { token, authEnabled } = useAuthStore.getState()
-    return authEnabled && token ? { Authorization: `Bearer ${token}` } : {}
+    return { ...(authEnabled && token ? { Authorization: `Bearer ${token}` } : {}), ...actAsHeaders() }
   }
   const go = () => fetch(path, { headers: headers(), credentials: 'include', cache: 'no-store' })
   let res = await go()

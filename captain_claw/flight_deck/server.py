@@ -1738,6 +1738,7 @@ from captain_claw.flight_deck import (
     agent_knowledge,
     agent_lessons,
     agent_onboarding,
+    agent_package,
     agent_practice,
     agent_preset,
 )
@@ -1842,6 +1843,7 @@ app.include_router(agent_preset.router)
 app.include_router(agent_knowledge.router)
 app.include_router(agent_exam.router)
 app.include_router(agent_onboarding.router)
+app.include_router(agent_package.router)
 app.include_router(agent_practice.router)
 app.include_router(system_router)
 app.include_router(share_router)
@@ -1920,6 +1922,8 @@ class AgentConfig(BaseModel):
     # came from, and whether it is on the owner's own API key (byok.py).
     _model_tier: str = PrivateAttr(default="")
     _byok: bool = PrivateAttr(default=False)
+    # An archetype passed on from an onboarded agent: its package and whose it is (agent_package).
+    _onboarding: dict = PrivateAttr(default_factory=dict)
     # Identity
     name: str = ""
     description: str = ""
@@ -2163,6 +2167,12 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
         config.grid_memory_tags = [str(t) for t in arch["memory_tags"]]
     if arch.get("recall_mode"):
         config.grid_recall_mode = str(arch["recall_mode"])
+    # Passed on from an onboarded agent: the spawn unpacks its onboarding — only a package of the
+    # archetype's own owner's (the caller's, or whoever shared it with them).
+    onboarding = arch.get("onboarding")
+    if isinstance(onboarding, dict) and onboarding.get("package"):
+        config._onboarding = {"package": str(onboarding["package"]),
+                              "owner": str(arch.get("shared_owner") or "") if arch.get("source") == "shared" else uid}
 
     # Model: the requested tier (`@tier` wins, else the archetype's own default
     # tier) resolved against the OWNER's Library tier config — the same source
@@ -9518,6 +9528,13 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     # Never another agent's shared context (packs); a re-spawn of the same
     # agent gets its own back once the registry entry is saved (below).
     await context_packs.remove_files_locked(agent_dir, "process")
+    # Made from an archetype an onboarded agent was passed on with: its onboarding is this one's base.
+    if config._onboarding:
+        from captain_claw.flight_deck import agent_package
+        config.fleet_instructions = await agent_package.unpack_on_spawn(
+            config._onboarding, slug, agent_dir,
+            Path(config.workspace_path) if config.workspace_path else agent_dir / "data" / "workspace",
+            config.name or slug, config.fleet_instructions, owner_id or "")
 
     # Open log file
     log_file = agent_dir / "process.log"

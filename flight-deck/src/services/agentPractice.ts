@@ -3,6 +3,7 @@
  *  a correction becomes a lesson (agentLessons). */
 
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+import { actAsHeaders } from './onboardingAs'
 import type { Lookup } from './agentExam'
 
 export interface PracticeAttempt {
@@ -40,7 +41,7 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     const { token, authEnabled } = useAuthStore.getState()
     const h: Record<string, string> = typeof init.body === 'string' ? { 'Content-Type': 'application/json' } : {}
     if (authEnabled && token) h['Authorization'] = `Bearer ${token}`
-    return h
+    return { ...h, ...actAsHeaders() }
   }
   const go = () => fetch(path, { ...init, headers: headers(), credentials: 'include', cache: 'no-store' })
   let res = await go()

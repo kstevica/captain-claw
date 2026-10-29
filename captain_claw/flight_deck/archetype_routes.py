@@ -109,6 +109,15 @@ def _validate(body: ArchetypeBody) -> dict:
     }
 
 
+def _onboarding(row: dict | None) -> dict:
+    """The onboarding a stored archetype row carries (agent_package); {} for none."""
+    try:
+        got = json.loads((row or {}).get("data") or "{}").get("onboarding")
+    except (json.JSONDecodeError, AttributeError):
+        return {}
+    return got if isinstance(got, dict) else {}
+
+
 def _read_back(archetype: dict) -> dict:
     """An archetype as the Library and Forge see it. A row saved before a
     tool's retirement (gws) still lists that tool; drop it on the way out."""
@@ -187,6 +196,11 @@ async def update_archetype(
     data["id"] = archetype_id
     existing = await db.get_user_archetype(user["id"], archetype_id)
     if existing:
+        # An archetype passed on from an onboarded agent keeps its package (agent_package): the
+        # body can't name one, so the stored row's is kept.
+        kept = _onboarding(existing)
+        if kept:
+            data["onboarding"] = kept
         return await db.update_user_archetype(user["id"], archetype_id, json.dumps(data))
     # Upsert: allow PUT to create (e.g. saving an override of a base archetype).
     return await db.create_user_archetype(user["id"], archetype_id, json.dumps(data))
@@ -195,9 +209,14 @@ async def update_archetype(
 @router.delete("/{archetype_id}")
 async def delete_archetype(archetype_id: str, user: dict = Depends(get_current_user)):
     db = get_db()
+    package = _onboarding(await db.get_user_archetype(user["id"], archetype_id)).get("package")
     ok = await db.delete_user_archetype(user["id"], archetype_id)
     if not ok:
         raise HTTPException(404, "Archetype not found")
+    if package:
+        # Agents made from it keep what they unpacked; the package itself goes with it.
+        from captain_claw.flight_deck import agent_package
+        agent_package.forget(str(package))
     return {"ok": True}
 
 

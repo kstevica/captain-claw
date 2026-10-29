@@ -2599,3 +2599,239 @@ async def test_a_lesson_taught_in_a_chat_or_in_practice_says_so(deck):
     r = await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Be brief.", "taught_by": "an exam, honest"})
     by = {x["text"]: x["taught_by"] for x in r.json()["lessons"]}
     assert by == {"Never use emoji.": "chat", "Zone B is 11.40 EUR.": "practice", "Be brief.": "you"}
+
+
+# ── Layers: an admin's onboarding is the base its user adds to ──
+
+
+ADMIN = "user-admin"
+
+
+async def _admin(deck) -> None:
+    await deck._db.execute(
+        "INSERT INTO users (id, email, password_hash, display_name, role, created_at, updated_at)"
+        " VALUES (?, ?, 'h', 'Ana', 'admin', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')", (ADMIN, "ana@x.co"))
+    await deck._db.commit()
+
+
+def _for(uid: str) -> dict:
+    """An admin acting for *uid* (X-FD-Act-As)."""
+    return {**_auth(ADMIN), fd_auth.ACT_AS_HEADER: uid}
+
+
+async def test_an_admins_onboarding_is_the_base_its_user_adds_to(deck):
+    await _admin(deck)
+    slug = await _spawn(BOB, "Helpdesk", 24402)
+    preset = _setup(BOB, [{"name": "policy.md", "text": "Refunds within 14 days."}],
+                    rules=[{"text": "Answer in Croatian.", "always": True}],
+                    facts=[{"content": "The warehouse closes at 15:00 on Fridays.", "category": "fact"}])
+    async with _client() as c:
+        r = await c.post("/fd/agent-preset/apply", headers=_for(BOB), json={"agent": slug, "preset": preset})
+    assert r.status_code == 200, r.text
+    record = ap.read_record(server.DATA_DIR / slug)
+    assert record["rules"][0]["layer"] == "base" and record["knowledge"][0]["layer"] == "base"
+    on_disk = json.loads(agent_lessons.path(server.DATA_DIR / slug).read_text())["lessons"]
+    assert {x["text"]: x["layer"] for x in on_disk} == {"Answer in Croatian.": "base",
+                                                         "The warehouse closes at 15:00 on Fridays.": "base"}
+
+    # Its user sees them locked: they add, but can't reword, pin or take away the base's.
+    got = (await _ls(BOB, "GET", slug)).json()
+    assert got["base_locked"] is True and all(x["layer"] == "base" for x in got["lessons"])
+    rule = next(x for x in got["lessons"] if x["kind"] == "rule")
+    for method, body in (("PATCH", {"text": "Answer in English."}), ("PATCH", {"always": False}), ("DELETE", None)):
+        r = await _ls(BOB, method, f"{slug}/{rule['id']}", **({"json": body} if body else {}))
+        assert r.status_code == 403 and "admin" in r.json()["detail"]
+    r = await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Sign off with my name.", "always": True})
+    own = next(x for x in r.json()["lessons"] if x["text"] == "Sign off with my name.")
+    assert own["layer"] == "" and (await _ls(BOB, "DELETE", f"{slug}/{own['id']}")).status_code == 200
+
+    # Their own setup in place of it keeps the base — its rules, facts and document — and can't claim to be it.
+    mine = _setup(BOB, [{"name": "policy.md", "text": "Refunds within 30 days."}, {"name": "faq.md", "text": "FAQ."}],
+                  rules=[{"text": "Be brief.", "layer": "base"}])
+    r = await _apply(BOB, slug, mine, mode="replace")
+    assert r.status_code == 200, r.text
+    assert any("policy.md" in w for w in r.json()["warnings"])
+    record = ap.read_record(server.DATA_DIR / slug)
+    assert [(x["text"], x.get("layer", "")) for x in record["rules"]] == [("Answer in Croatian.", "base"), ("Be brief.", "")]
+    assert {e["doc"]: e.get("layer", "") for e in record["knowledge"]} == {"policy.md": "base", "faq.md": ""}
+    knowledge = server.DATA_DIR / slug / "data" / "workspace" / "knowledge"
+    assert "14 days" in (knowledge / "policy.md").read_text()
+    texts = [x["text"] for x in (await _ls(BOB, "GET", slug)).json()["lessons"]]
+    assert "The warehouse closes at 15:00 on Fridays." in texts and "Answer in Croatian." in r.json()["instructions"]
+
+    # Nor from a chat: a document of the same name, given to it there, leaves the admin's in place.
+    got = await ap.add_document(slug, BOB, "policy.md", "Refunds within 60 days.")
+    assert any("policy.md" in w for w in got["warnings"]) and "14 days" in (knowledge / "policy.md").read_text()
+    assert got["replaced"] is False
+
+    # The admin can change the base.
+    async with _client() as c:
+        r = await c.delete(f"/fd/agent-lessons/{slug}/{rule['id']}", headers=_for(BOB))
+    assert r.status_code == 200 and r.json()["base_locked"] is False
+    assert "Answer in Croatian." not in [x["text"] for x in r.json()["lessons"]]
+
+
+async def test_an_admin_teaching_their_own_agent_locks_nothing(deck):
+    await _admin(deck)
+    slug = await _spawn(ADMIN, "Desk", 24403)
+    r = await _ls(ADMIN, "POST", slug, json={"kind": "rule", "text": "Be brief."})
+    assert r.json()["base_locked"] is False and r.json()["lessons"][0]["layer"] == ""
+    assert (await _ls(ADMIN, "DELETE", f"{slug}/{r.json()['lessons'][0]['id']}")).status_code == 200
+
+
+# ── Members' suggestions on a shared agent ──
+
+
+async def test_a_member_suggests_a_lesson_its_owner_takes(deck, monkeypatch):
+    from captain_claw.flight_deck import agent_sharing as sharing
+    slug = await _spawn(BOB, "Helpdesk", 24404)
+    ref = sharing.process_ref(slug, server._load_process_registry()[slug])
+    monkeypatch.setattr(sharing, "sharing_active", lambda: True)
+
+    async def member(db, agent_ref, owner, uid, max_age=0):
+        return agent_ref == ref and owner == BOB and uid == CAROL
+
+    monkeypatch.setattr(sharing, "member_check", member)
+    said = {"agent_ref": ref, "said": "No — shipping to Zone B is 11.40 EUR, not 9.", "reply": "Zone B is 9 EUR."}
+    async with _client() as c:
+        r = await c.post("/fd/agent-lessons/shared/suggest", headers=_auth(CAROL), json=said)
+        assert r.status_code == 200 and r.json() == {"ok": True, "already": False}
+        assert (await c.post("/fd/agent-lessons/shared/suggest", headers=_auth(CAROL), json=said)).json()["already"]
+        assert (await c.post("/fd/agent-lessons/shared/suggest", headers=_auth(BOB), json=said)).status_code == 404
+        r = await c.post("/fd/agent-lessons/shared/suggest", headers=_auth(CAROL), json={**said, "agent_ref": "process:x:y"})
+        assert r.status_code == 404
+    bell = [n for n in await deck.list_notifications(BOB) if n["ref_type"] == "agent_lessons"]
+    assert len(bell) == 1 and bell[0]["ref_id"] == slug and "suggested a lesson" in bell[0]["title"]
+
+    # Its owner sees it waiting; a member can't take it for them.
+    got = (await _ls(BOB, "GET", slug)).json()
+    [waiting] = got["suggestions"]
+    assert waiting["said"] == said["said"] and waiting["reply"] == said["reply"] and "by" not in waiting
+    assert (await _ls(CAROL, "POST", f"{slug}/suggestions/{waiting['id']}", json={"state": "taken"})).status_code == 404
+    assert (await _ls(BOB, "POST", f"{slug}/suggestions/{waiting['id']}", json={"state": "maybe"})).status_code == 400
+
+    # Taken as a lesson from a member: the member hears so, and it waits no more.
+    r = await _ls(BOB, "POST", slug, json={"kind": "fact", "text": "Shipping to Zone B is 11.40 EUR.", "taught_by": "member"})
+    lesson = next(x for x in r.json()["lessons"] if x["kind"] == "fact")
+    assert lesson["taught_by"] == "member"
+    r = await _ls(BOB, "POST", f"{slug}/suggestions/{waiting['id']}", json={"state": "taken", "lesson": lesson["id"]})
+    assert r.status_code == 200 and r.json()["suggestions"] == []
+    assert (await _ls(BOB, "POST", f"{slug}/suggestions/{waiting['id']}", json={"state": "declined"})).status_code == 404
+    assert any("learned what you suggested" in n["title"] for n in await deck.list_notifications(CAROL))
+    kept = json.loads((server.DATA_DIR / slug / "lesson-suggestions.json").read_text())
+    assert kept[0]["state"] == "taken" and kept[0]["lesson"] == lesson["id"]
+
+
+# ── Passing an onboarded agent on, with an archetype ──
+
+
+def _exam_file(slug: str) -> None:
+    folder = server.DATA_DIR / slug / "exams"
+    folder.mkdir(parents=True, exist_ok=True)
+    q = {"id": "q1", "kind": "ask", "question": "How long do refunds take?", "expected": "14 days.",
+         "points": ["14 days"], "doc": "policy.md", "doc_title": "Policy", "title": "Refunds", "path": [],
+         "key": "Refunds", "read": True, "answer": "30 days.", "verdict": "wrong", "tokens": 9}
+    (folder / "aaaa1111bbbb2222.json").write_text(json.dumps({
+        "id": "aaaa1111bbbb2222", "agent": slug, "state": "done", "finished": 5.0, "size": "quick",
+        "questions": [q], "summary": {"pct": 0}}))
+
+
+async def test_an_onboarded_agent_is_passed_on_with_an_archetype(deck, monkeypatch, tmp_path):
+    from captain_claw.flight_deck import agent_exam
+    from captain_claw.flight_deck import agent_package as pkg
+
+    async def merged(db, uid):
+        rows, shared = await arch_mod._owned_and_shared(db, uid) if uid else ([], [])
+        return arch_mod.merge_archetypes([dict(_ARCH)], rows, shared)
+
+    monkeypatch.setattr(arch_mod, "merged_archetypes", merged)
+    monkeypatch.setattr(server, "_process_is_alive", lambda s: False)
+    slug = await _spawn(BOB, "Helpdesk", 24405)
+    src = _xlsx(tmp_path / "src" / "Price list.xlsx")
+    preset = _setup(BOB, [{"name": "policy.md", "text": "# Refunds\nRefunds within 14 days."}, _sheet_doc(src)],
+                    rules=[{"text": "Answer in Croatian.", "always": True}],
+                    intents=[{"name": "Refund request", "when": "Money back.", "steps": ["Check the date."]}],
+                    facts=[{"content": "The warehouse closes at 15:00 on Fridays.", "category": "fact"}])
+    assert (await _apply(BOB, slug, preset)).status_code == 200
+    store = DatastoreManager(datastore_file(server.DATA_DIR / slug))     # its tables, as it made them at start
+    assert await import_pending_tables(store, ptables.pending_path(server.DATA_DIR / slug)) == 2
+    await store.close()
+    assert (await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Sign off with the shop's name."})).status_code == 200
+    _exam_file(slug)
+
+    async with _client() as c:
+        assert (await c.post(f"/fd/agent-package/{slug}", headers=_auth(CAROL), json={"role": "x"})).status_code == 404
+        assert (await c.post(f"/fd/agent-package/{slug}", headers=_auth(BOB), json={"role": " "})).status_code == 400
+        r = await c.post(f"/fd/agent-package/{slug}", headers=_auth(BOB), json={"role": "Refund desk"})
+    assert r.status_code == 200, r.text
+    made = r.json()["archetype"]
+    assert made["id"] == "refund-desk" and made["fleet_instructions"] == "You answer customers kindly."
+    assert made["tools"]                                                 # the agent's own, else its archetype's
+    assert r.json()["counts"] == {"docs": 2, "tables": 2, "skills": 1, "lessons": 3, "questions": 1}
+    package_id = made["onboarding"]["package"]
+    assert (pkg.packages_dir() / package_id / "knowledge" / "policy.md").is_file()
+
+    # Saved again from the Library, it keeps its package (the body can't name one).
+    async with _client() as c:
+        r = await c.put("/fd/archetypes/refund-desk", headers=_auth(BOB),
+                        json={"role": "Refund desk", "tier": "balanced", "fleet_instructions": made["fleet_instructions"],
+                              "onboarding": {"package": "0" * 16}})
+    assert r.status_code == 200
+    row = await deck.get_user_archetype(BOB, "refund-desk")
+    assert json.loads(row["data"])["onboarding"]["package"] == package_id
+
+    # An agent of his own made from it starts with all of it, as his own.
+    async with _client() as c:
+        r = await c.post("/fd/spawn-process", headers=_auth(BOB), json={
+            "name": "Second desk", "archetype": "refund-desk", "botport_enabled": False,
+            "web_enabled": True, "web_port": 24406})
+    assert r.status_code == 200, r.text
+    new = server.DATA_DIR / r.json()["slug"]
+    record = ap.read_record(new)
+    assert {e["doc"] for e in record["knowledge"]} == {"policy.md", "Price list.xlsx"}
+    assert not any(e.get("layer") for e in record["knowledge"] + record["rules"] + record["lessons"])
+    assert record["skills"] == ["refund-request"] and record["base_skills"] == []
+    assert (new / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund-request" / "SKILL.md").is_file()
+    assert "14 days" in (new / "data" / "workspace" / "knowledge" / "policy.md").read_text()
+    lessons = {x["text"]: x["layer"] for x in json.loads(agent_lessons.path(new).read_text())["lessons"]}
+    assert lessons == {"Answer in Croatian.": "", "Sign off with the shop's name.": "",
+                       "The warehouse closes at 15:00 on Fridays.": ""}
+    assert (await _ls(BOB, "GET", new.name)).json()["base_locked"] is True       # nothing of it is the base
+    assert [t["name"] for t in json.loads(ptables.pending_path(new).read_text())["tables"]] == _PLANS
+    [exam] = [json.loads(f.read_text()) for f in (new / "exams").glob("*.json")]
+    assert exam["state"] == "ready" and exam["questions"][0]["question"] == "How long do refunds take?"
+    assert "answer" not in exam["questions"][0] and "verdict" not in exam["questions"][0]
+    assert agent_exam._load(new.name, exam["id"]).state == "ready"
+    stored = json.loads(await deck.get_setting(BOB, INSTR))[new.name]
+    assert stored.startswith("You answer customers kindly.") and "Answer in Croatian." in stored
+    assert stored.count(ap._BLOCK_OPEN) == 1 and r.json()["fleet_instructions"] == stored
+
+    # Shared with Carol: hers starts the same, all of it the base, which she can't change.
+    async def shared(db, uid):
+        if uid != CAROL:
+            return await merged(db, uid)
+        return [dict(_ARCH), {**made, "source": "shared", "shared_owner": BOB}]
+
+    monkeypatch.setattr(arch_mod, "merged_archetypes", shared)
+    async with _client() as c:
+        r = await c.post("/fd/spawn-process", headers=_auth(CAROL), json={
+            "name": "Carols desk", "archetype": "refund-desk", "botport_enabled": False,
+            "web_enabled": True, "web_port": 24407})
+    carols = r.json()["slug"]
+    record = ap.read_record(server.DATA_DIR / carols)
+    assert all(e["layer"] == "base" for e in record["knowledge"] + record["rules"] + record["lessons"] + record["tables"])
+    assert record["base_skills"] == ["refund-request"]
+    got = (await _ls(CAROL, "GET", carols)).json()
+    assert got["base_locked"] and len(got["lessons"]) == 3 and {x["layer"] for x in got["lessons"]} == {"base"}
+    assert (await _ls(CAROL, "DELETE", f"{carols}/{got['lessons'][0]['id']}")).status_code == 403
+
+    # Someone else's package isn't unpacked, nor into an agent that has an onboarding already.
+    other = server.DATA_DIR / "someone"
+    assert pkg.unpack(package_id, CAROL, other, other / "data" / "workspace", "Someone") is None
+    assert pkg.unpack(package_id, BOB, new, new / "data" / "workspace", "Second desk") is None
+    assert not other.exists()
+
+    # Taking the archetype away takes its package with it.
+    async with _client() as c:
+        assert (await c.delete("/fd/archetypes/refund-desk", headers=_auth(BOB))).status_code == 200
+    assert not (pkg.packages_dir() / package_id).exists()

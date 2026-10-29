@@ -4,6 +4,7 @@
  *  came from — with why a wrong one went wrong. */
 
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
+import { actAsHeaders } from './onboardingAs'
 
 export type ExamSize = 'quick' | 'standard' | 'deep'
 export type ExamKind = 'ask' | 'situation'
@@ -73,7 +74,8 @@ export interface Exam {
   focus: string
   /** The exam whose questions it asks again. */
   again: string
-  state: 'running' | 'done' | 'stopped' | 'error'
+  /** ready: passed on with the archetype it was made from — its questions, waiting to be asked. */
+  state: 'running' | 'done' | 'stopped' | 'error' | 'ready'
   phase: 'writing' | 'asking' | 'grading'
   /** Where it is in its phase. */
   step: number
@@ -110,7 +112,7 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
     const { token, authEnabled } = useAuthStore.getState()
     const h: Record<string, string> = typeof init.body === 'string' ? { 'Content-Type': 'application/json' } : {}
     if (authEnabled && token) h['Authorization'] = `Bearer ${token}`
-    return h
+    return { ...h, ...actAsHeaders() }
   }
   const go = () => fetch(path, { ...init, headers: headers(), credentials: 'include', cache: 'no-store' })
   let res = await go()

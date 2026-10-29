@@ -7,6 +7,10 @@ section) and who taught it (a setup, an exam's "Teach it this"). The
 agent's instructions hold only the few marked ``always`` (they apply to
 every conversation); the rest reach it with the messages they bear on.
 
+A lesson's ``layer`` is ``base`` when an admin taught it — setting the
+agent up for its user, or in the archetype it was made from — and the
+agent's own user can add to that but not change it; empty otherwise.
+
 Flight Deck keeps them, in the agent's setup record (``.owner-setup.json``,
 agent_preset): rules and when-to-ask as the setup's groups, facts and taught
 items under ``lessons``. It writes them for the agent to read
@@ -52,12 +56,13 @@ def _source(raw: Any) -> dict:
 
 
 def _lesson(kind: str, text: Any, source: Any = None, *, always: bool = False, taught_by: str = "setup",
-            importance: int = 5, added: float = 0.0) -> dict | None:
+            importance: int = 5, added: float = 0.0, layer: str = "") -> dict | None:
     body = " ".join(str(text or "").split())[:_TEXT_MAX]
     if not body:
         return None
     return {"id": lesson_id(kind, body), "kind": kind, "text": body, "source": _source(source),
-            "always": bool(always), "taught_by": taught_by, "importance": int(importance), "added": added}
+            "always": bool(always), "taught_by": taught_by, "importance": int(importance), "added": added,
+            "layer": "base" if layer == "base" else ""}
 
 
 def from_record(record: dict) -> list[dict]:
@@ -76,12 +81,13 @@ def from_record(record: dict) -> list[dict]:
             if isinstance(r, dict):
                 keep(_lesson(kind, r.get("text"), r.get("source"),
                              always=r.get("always") is True if kind == "rule" else r.get("always") is not False,
-                             taught_by=str(r.get("taught_by") or "setup"), added=float(r.get("added") or 0.0)))
+                             taught_by=str(r.get("taught_by") or "setup"), added=float(r.get("added") or 0.0),
+                             layer=str(r.get("layer") or "")))
     for x in record.get("lessons") or []:
         if isinstance(x, dict) and x.get("kind") in KINDS:
             keep(_lesson(x["kind"], x.get("text"), x.get("source"), always=x.get("always") is True,
                          taught_by=str(x.get("taught_by") or "setup"), importance=int(x.get("importance") or 5),
-                         added=float(x.get("added") or 0.0)))
+                         added=float(x.get("added") or 0.0), layer=str(x.get("layer") or "")))
     return out
 
 
@@ -129,10 +135,11 @@ def ensure_all(data_dir: Path) -> int:
 
 
 def taught(record: dict, kind: str, text: str, source: Any = None, *, taught_by: str,
-           always: bool = False, importance: int = 8) -> tuple[dict, bool]:
+           always: bool = False, importance: int = 8, layer: str = "") -> tuple[dict, bool]:
     """*record* with one lesson more under ``lessons`` (a fact a setup read,
     an answer an exam taught); False when it already has it."""
-    item = _lesson(kind, text, source, always=always, taught_by=taught_by, importance=importance, added=time.time())
+    item = _lesson(kind, text, source, always=always, taught_by=taught_by, importance=importance, added=time.time(),
+                   layer=layer)
     if item is None or item["id"] in {x["id"] for x in from_record(record)}:
         return record, False
     return {**record, "lessons": [*(record.get("lessons") or []), item]}, True
@@ -143,6 +150,28 @@ def facts_as_lessons(facts: list[dict]) -> list[dict]:
     now = time.time()
     return [x for x in (_lesson("fact", f.get("content"), f.get("source"), importance=int(f.get("importance") or 5),
                                 added=now) for f in facts if isinstance(f, dict)) if x]
+
+
+def teaching(request: Any, user: dict) -> tuple[str, bool]:
+    """``(layer, keep_base)`` for what *user* teaches an agent now: an admin
+    acting for its user (``X-FD-Act-As``) teaches the base; the agent's own
+    user, unless they are an admin, adds to it and keeps it."""
+    if getattr(getattr(request, "state", None), "acting_admin", None):
+        return "base", False
+    return "", user.get("role") != "admin"
+
+
+async def keeps_base(owner_id: str) -> bool:
+    """Whether what *owner_id* teaches their agent leaves its base alone —
+    everyone but an admin (and nobody, on a deck without sign-in)."""
+    if not owner_id:
+        return False
+    from captain_claw.flight_deck.auth import get_db
+    try:
+        user = await get_db().get_user_by_id(owner_id)
+    except Exception:
+        return True
+    return not user or user.get("role") != "admin"
 
 
 def counts(record: dict) -> dict[str, int]:
