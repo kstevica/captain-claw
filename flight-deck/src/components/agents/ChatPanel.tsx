@@ -49,7 +49,7 @@ import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
 import { EffortMenu } from './EffortMenu'
 import { ChatFilesMenu } from './ChatFilesMenu'
-import { SaveLessonDialog } from '../layout/LessonDraft'
+import { SaveLessonDialog, SuggestLessonDialog } from '../layout/LessonDraft'
 import { isManagedAgent } from '../../utils/managedAgents'
 import { AttachmentChip } from './AttachmentChip'
 import { appendAttachmentRefs, useFileAttachments } from '../../hooks/useFileAttachments'
@@ -2047,9 +2047,12 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     </div>
   )
 
-  // The owner's own agent (a process it runs): what they say to it can be taught as a lesson.
+  // The owner's own agent (a process it runs): what they say to it can be taught as a lesson. Someone's
+  // shared agent: a member suggests it to its owner instead.
   const ownAgent = message.role === 'user' && agentId
     ? processes.find((p) => `proc-${p.slug}` === agentId) : undefined
+  const sharedRef = message.role === 'user' && agentId?.startsWith('shared:') ? agentId.slice('shared:'.length) : ''
+  const teachable = !!ownAgent || !!sharedRef
   const saveLesson = () => setLessonFrom({ said: message.content || '', reply: replyBefore(message.id) })
 
   if (message.role === 'user') {
@@ -2065,14 +2068,14 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
           </span>
         </div>
         <div className="flex items-center gap-1">
-          {ownAgent && looksLikeLesson(message.content || '') && (
+          {teachable && looksLikeLesson(message.content || '') && (
             <button onClick={saveLesson}
               className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 px-2 py-0.5 text-[11px] text-violet-700 hover:bg-violet-500/10 dark:text-violet-300">
-              <GraduationCap className="h-3 w-3" /> Save as a lesson?
+              <GraduationCap className="h-3 w-3" /> {ownAgent ? 'Save as a lesson?' : 'Suggest as a lesson?'}
             </button>
           )}
-          {ownAgent && !looksLikeLesson(message.content || '') && (
-            <button onClick={saveLesson} title="Save as a lesson"
+          {teachable && !looksLikeLesson(message.content || '') && (
+            <button onClick={saveLesson} title={ownAgent ? 'Save as a lesson' : 'Suggest as a lesson to its owner'}
               className="rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-700/50 hover:text-violet-400 group-hover:opacity-100">
               <GraduationCap className="h-3 w-3" />
             </button>
@@ -2082,6 +2085,11 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
         {lessonFrom && ownAgent && (
           <SaveLessonDialog agent={{ slug: ownAgent.slug, name: ownAgent.name }} said={lessonFrom.said} reply={lessonFrom.reply}
             onClose={() => setLessonFrom(null)} />
+        )}
+        {lessonFrom && sharedRef && (
+          <SuggestLessonDialog agentRef={sharedRef} agentName={sourceName || 'This agent'}
+            ownerName={useSharedAgentStore.getState().agents.find((a) => a.agent_ref === sharedRef)?.owner_name ?? ''}
+            said={lessonFrom.said} reply={lessonFrom.reply} onClose={() => setLessonFrom(null)} />
         )}
       </div>
     )

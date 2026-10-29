@@ -1,15 +1,21 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  AlertTriangle, BookMarked, BookOpen, Check, CheckCircle2, Dumbbell, FilePlus2, GraduationCap, Hand, Lightbulb,
-  Loader2, Pencil, Pin, PinOff, Plus, RotateCcw, ScrollText, Search, Sparkles, Trash2, X,
+  AlertTriangle, BookMarked, BookOpen, Check, CheckCircle2, Dumbbell, FilePlus2, Gift, GraduationCap, Hand, Lightbulb,
+  Loader2, Lock, MessageSquarePlus, Pencil, Pin, PinOff, Plus, RotateCcw, ScrollText, Search, ShieldCheck, Sparkles,
+  Trash2, X,
 } from 'lucide-react'
 import { agentExamApi, type ExamOverview } from '../../services/agentExam'
 import { agentKnowledgeApi, type KnowledgeOverview } from '../../services/agentKnowledge'
-import { agentLessonsApi, type Lesson, type LessonKind, type LessonsChanged, type LessonsView } from '../../services/agentLessons'
+import {
+  agentLessonsApi, type Lesson, type LessonKind, type LessonSuggestion, type LessonsChanged, type LessonsView,
+} from '../../services/agentLessons'
+import { passOn, type PassedOn } from '../../services/agentPackage'
 import { agentPracticeApi, type PracticeTask } from '../../services/agentPractice'
+import { onboardingAs } from '../../services/onboardingAs'
 import { KnowledgeBrowser } from '../library/KnowledgeBrowser'
 import { AgentExamPanel, ScoreRing } from './AgentExamDialog'
+import { LessonDraftForm } from './LessonDraft'
 import { syncInstructions } from './lessonSync'
 import { PracticePanel } from './PracticePanel'
 
@@ -31,6 +37,12 @@ import { PracticePanel } from './PracticePanel'
 //
 // Giving it documents, or reading more of them, is Way of working: this
 // dialog hands over to it (onSetup).
+//
+// What an admin taught it is its base: its user adds to it, but can't change
+// it (a lock on those lessons). An admin opens a user's agent here from
+// Users → Agents (asUser): what they teach is that agent's base. Members of a
+// shared agent suggest lessons; they wait in the Lessons tab for its owner.
+// "Pass it on" saves the whole onboarding with a new archetype.
 
 export type OnboardingTab = 'overview' | 'lessons' | 'practice' | 'materials' | 'exams'
 
@@ -49,6 +61,7 @@ const KIND: Record<LessonKind, { label: string; badge: string; icon: typeof Book
 }
 const TAUGHT: Record<string, string> = {
   setup: 'from a setup', exam: 'taught after an exam', you: 'added by you', chat: 'taught in a chat', practice: 'taught in practice',
+  member: 'suggested by a member',
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
@@ -60,14 +73,20 @@ const ago = (epoch: number) => {
   return `${Math.round(s / 86400)} days ago`
 }
 
-export function OnboardingDialog({ agent, initialTab = 'overview', phone = false, onClose, onSetup }: {
+export function OnboardingDialog({ agent, initialTab = 'overview', phone = false, asUser, ownerLabel, onClose, onSetup }: {
   agent: { slug: string; name: string }
   initialTab?: OnboardingTab
   phone?: boolean
+  /** An admin onboarding a user's agent for them (Users → Agents), and who that is. */
+  asUser?: string
+  ownerLabel?: string
   onClose: () => void
   /** Open its Way of working — to give it documents, or (with their setup names) to read ones it keeps. */
   onSetup: (readDocs?: string[]) => void
 }) {
+  // Before any call below (its panels' first loads run before this dialog's own effects).
+  onboardingAs.set(asUser ?? '')
+  useEffect(() => () => onboardingAs.set(''), [])
   const [tab, setTab] = useState<OnboardingTab>(initialTab)
   const [knowledge, setKnowledge] = useState<KnowledgeOverview | null>(null)
   const [lessons, setLessons] = useState<LessonsView | null>(null)
@@ -108,7 +127,10 @@ export function OnboardingDialog({ agent, initialTab = 'overview', phone = false
           </span>
           <div className="min-w-0 flex-1">
             <h3 className="truncate text-base font-semibold text-zinc-100">{agent.name}'s onboarding</h3>
-            <p className="truncate text-xs text-zinc-500">{subtitle}</p>
+            <p className="truncate text-xs text-zinc-500">
+              {asUser ? <span className="text-amber-600 dark:text-amber-400">For {ownerLabel || 'its user'} — what you teach is its base · </span> : null}
+              {subtitle}
+            </p>
           </div>
           <button onClick={onClose} aria-label="Close" title="Close" className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
             <X className="h-5 w-5" />
@@ -143,8 +165,8 @@ export function OnboardingDialog({ agent, initialTab = 'overview', phone = false
               ) : !knowledge || !lessons || !exams ? (
                 <Centered><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></Centered>
               ) : (
-                <Overview name={agent.name} knowledge={knowledge} lessons={lessons} exams={exams} practice={practice ?? []}
-                  onTab={setTab} onSetup={onSetup} />
+                <Overview slug={agent.slug} name={agent.name} knowledge={knowledge} lessons={lessons} exams={exams}
+                  practice={practice ?? []} onTab={setTab} onSetup={onSetup} />
               )}
             </div>
           )}
@@ -188,7 +210,8 @@ function Centered({ children }: { children: ReactNode }) {
 
 interface Step { key: string; icon: typeof BookOpen; text: string; action: string; go: () => void }
 
-function Overview({ name, knowledge, lessons, exams, practice, onTab, onSetup }: {
+function Overview({ slug, name, knowledge, lessons, exams, practice, onTab, onSetup }: {
+  slug: string
   name: string
   knowledge: KnowledgeOverview
   lessons: LessonsView
@@ -207,8 +230,19 @@ function Overview({ name, knowledge, lessons, exams, practice, onTab, onSetup }:
   const { totals } = knowledge
   const readPct = totals.tracked ? Math.round((totals.read / Math.max(1, totals.sections)) * 100) : null
   const rules = lessons.counts.rule + lessons.counts.ask_first
+  const ready = exams.exams.find((e) => e.state === 'ready')
+  const waiting = lessons.suggestions?.length ?? 0
+  const [passing, setPassing] = useState(false)
 
   const steps: Step[] = []
+  if (waiting) {
+    steps.push({ key: 'suggested', icon: MessageSquarePlus, action: 'See them', go: () => onTab('lessons'),
+      text: `${plural(waiting, 'suggestion')} from the people who use ${name} ${waiting === 1 ? 'waits' : 'wait'} for you: take ${waiting === 1 ? 'it' : 'them'} as lessons, or decline.` })
+  }
+  if (ready && !running) {
+    steps.push({ key: 'ready', icon: GraduationCap, action: 'Ask them', go: () => onTab('exams'),
+      text: `${plural(ready.steps, 'exam question')} came with the archetype it was made from: ask them, to see how well it knows what it was given.` })
+  }
   if (!docs.length) {
     steps.push({ key: 'docs', icon: FilePlus2, text: `Give ${name} the documents it works from — policies, price lists, procedures.`,
       action: 'Add documents', go: () => onSetup() })
@@ -218,7 +252,7 @@ function Overview({ name, knowledge, lessons, exams, practice, onTab, onSetup }:
       text: `${plural(unread.length, 'document')} ${unread.length === 1 ? 'is' : 'are'} only kept, not read for rules and facts: ${unread.slice(0, 3).map((d) => d.title).join(', ')}${unread.length > 3 ? '…' : ''}.`,
       go: () => onSetup(unread.map((d) => d.doc)) })
   }
-  if (docs.length && !last && !running) {
+  if (docs.length && !last && !running && !ready) {
     steps.push({ key: 'exam', icon: GraduationCap, text: 'Run a first exam, to see how well it knows its documents.',
       action: 'Start an exam', go: () => onTab('exams') })
   }
@@ -242,7 +276,7 @@ function Overview({ name, knowledge, lessons, exams, practice, onTab, onSetup }:
   return (
     <div className="mx-auto flex max-w-5xl flex-col gap-5 p-4 wide:p-6">
       <div className="grid gap-3 md:grid-cols-3">
-        <Card title="Exam" onOpen={() => onTab('exams')} open={last || running ? 'Open exams' : 'Start an exam'}>
+        <Card title="Exam" onOpen={() => onTab('exams')} open={last || running || ready ? 'Open exams' : 'Start an exam'}>
           {running ? (
             <p className="flex items-center gap-2 text-sm text-zinc-300"><Loader2 className="h-4 w-4 animate-spin text-violet-500" />An exam is under way…</p>
           ) : s ? (
@@ -259,6 +293,10 @@ function Overview({ name, knowledge, lessons, exams, practice, onTab, onSetup }:
                 )}
               </div>
             </div>
+          ) : ready ? (
+            <p className="text-sm text-zinc-300">
+              {plural(ready.steps, 'question')} came with the archetype it was made from, ready to ask.
+            </p>
           ) : (
             <p className="text-sm text-zinc-500">No exam yet. One asks it questions from its documents, as your users would.</p>
           )}
@@ -312,7 +350,121 @@ function Overview({ name, knowledge, lessons, exams, practice, onTab, onSetup }:
           </ul>
         )}
       </div>
+
+      {(docs.length > 0 || lessons.lessons.length > 0) && (
+        <div className="flex flex-col gap-3 rounded-xl border border-zinc-800 p-4 sm:flex-row sm:items-center">
+          <Gift className="hidden h-5 w-5 shrink-0 text-violet-500 sm:block dark:text-violet-400" />
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-zinc-200">Pass it on</p>
+            <p className="text-xs text-zinc-500">
+              Save {name}'s onboarding as an archetype: an agent made from it starts with these documents, lessons and skills,
+              and this exam's questions to ask it. Shared with others, it is the base their agents start from — they add to it,
+              but can't change it.
+            </p>
+          </div>
+          <button onClick={() => setPassing(true)}
+            className="shrink-0 self-start rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 sm:self-auto">
+            Save as an archetype
+          </button>
+        </div>
+      )}
+      {passing && <PassOnDialog slug={slug} name={name} hasExam={!!last} onClose={() => setPassing(false)} />}
     </div>
+  )
+}
+
+function PassOnDialog({ slug, name, hasExam, onClose }: { slug: string; name: string; hasExam: boolean; onClose: () => void }) {
+  const [role, setRole] = useState(name)
+  const [description, setDescription] = useState('')
+  const [what, setWhat] = useState({ docs: true, lessons: true, skills: true, exam: hasExam })
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const [done, setDone] = useState<PassedOn | null>(null)
+  const save = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      setDone(await passOn(slug, { role, description, ...what }))
+    } catch (e) {
+      setErr(message(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const options: { key: keyof typeof what; label: string; off?: boolean }[] = [
+    { key: 'docs', label: 'Its documents, and their tables' },
+    { key: 'lessons', label: 'Its lessons — rules, things to ask first, facts' },
+    { key: 'skills', label: 'Its skills' },
+    { key: 'exam', label: 'Its last exam’s questions', off: !hasExam },
+  ]
+  return createPortal(
+    <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-4" onClick={onClose}>
+      <div role="dialog" aria-label="Pass it on" onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-lg rounded-t-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-2xl sm:rounded-2xl">
+        <div className="mb-3 flex items-center gap-2.5">
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-100 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
+            <Gift className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold text-zinc-100">Pass {name}'s onboarding on</h3>
+            <p className="truncate text-xs text-zinc-500">As a new archetype: agents made from it start where {name} is</p>
+          </div>
+          <button onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        {done ? (
+          <div className="flex flex-col gap-3">
+            <p className="flex items-start gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">
+              <Check className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>Saved as the archetype “{done.archetype.role}” —{' '}
+                {[plural(done.counts.docs, 'document'), plural(done.counts.lessons, 'lesson'), plural(done.counts.skills, 'skill'),
+                  done.counts.questions ? plural(done.counts.questions, 'exam question') : ''].filter(Boolean).join(', ')}.</span>
+            </p>
+            <p className="text-xs text-zinc-500">
+              Pick it when you make a new agent. To let others make one, share it from Library → Archetypes.
+            </p>
+            <button onClick={onClose} className="self-end rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800">Done</button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            <label className="flex flex-col gap-1 text-xs text-zinc-400">
+              Its role
+              <input value={role} onChange={(e) => setRole(e.target.value)} maxLength={120} autoFocus
+                className="rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-100 focus:border-violet-500 focus:outline-none" />
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-zinc-400">
+              <span>What it is for <span className="text-zinc-600">(optional)</span></span>
+              <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={2} maxLength={1000}
+                placeholder={`e.g. Answers customers about shipping and refunds, as ${name} does.`}
+                className="resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-500 focus:outline-none" />
+            </label>
+            <fieldset className="flex flex-col gap-1.5">
+              <legend className="mb-1 text-xs text-zinc-400">What it passes on</legend>
+              {options.map((o) => (
+                <label key={o.key} className={`flex items-center gap-2 text-sm ${o.off ? 'text-zinc-600' : 'text-zinc-300'}`}>
+                  <input type="checkbox" checked={what[o.key] && !o.off} disabled={o.off}
+                    onChange={(e) => setWhat((w) => ({ ...w, [o.key]: e.target.checked }))} className="h-3.5 w-3.5 accent-violet-600" />
+                  {o.label}{o.off ? ' — no exam yet' : ''}
+                </label>
+              ))}
+            </fieldset>
+            <p className="text-xs text-zinc-500">
+              Also its instructions, tools and model tier. Its chats, memory and practice stay with {name}.
+            </p>
+            {err && <p className="text-xs text-red-500">{err}</p>}
+            <div className="flex justify-end gap-2">
+              <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800">Cancel</button>
+              <button onClick={() => void save()} disabled={busy || !role.trim() || !(what.docs || what.lessons || what.skills)}
+                className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50">
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Gift className="h-3.5 w-3.5" />} Save as an archetype
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>,
+    document.body,
   )
 }
 
@@ -343,12 +495,14 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
   const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
 
+  const [tick, setTick] = useState(0)
+
   useEffect(() => {
     let live = true
     agentLessonsApi.list(slug).then((v) => { if (live) { setData(v); onChanged(v) } }).catch((e) => { if (live) setErr(message(e)) })
     return () => { live = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slug])
+  }, [slug, tick])
 
   const change = async (key: string, fn: () => Promise<LessonsChanged>): Promise<boolean> => {
     setBusy(key)
@@ -380,6 +534,7 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
       : <Centered><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></Centered>
   }
   const missing = new Set(data.not_in_block)
+  const anyBase = data.lessons.some((x) => x.layer === 'base')
   const chips: { id: Filter; label: string; n: number }[] = [
     { id: 'all', label: 'All', n: data.lessons.length },
     { id: 'always', label: 'Always in mind', n: data.counts.always },
@@ -394,7 +549,27 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
         What you and its setups taught {name}. <Pin className="inline h-3.5 w-3.5 text-violet-500" /> <b className="font-medium">Always in mind</b>{' '}
         ones are in its instructions, for every conversation; the rest reach it with the messages they bear on — found by what a
         message says and what it means. A change counts from its next message.
+        {anyBase && (data.base_locked ? (
+          <span className="mt-1.5 block"><Lock className="inline h-3.5 w-3.5 text-zinc-500" /> Those with a lock are its base — taught
+            by an admin, or with the archetype it was made from. They stay as they were set; add lessons of your own on top.</span>
+        ) : (
+          <span className="mt-1.5 block"><ShieldCheck className="inline h-3.5 w-3.5 text-zinc-500" /> <b className="font-medium">Base</b>{' '}
+            lessons were taught by an admin: its user adds to them, but can't change them. You can.</span>
+        ))}
       </div>
+
+      {data.suggestions?.length > 0 && (
+        <section>
+          <h4 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-zinc-200">
+            <MessageSquarePlus className="h-4 w-4 text-amber-500" /> Suggested by the people who use {name}
+          </h4>
+          <ul className="flex flex-col gap-2">
+            {data.suggestions.map((s) => (
+              <SuggestionRow key={s.id} slug={slug} s={s} onSettled={() => setTick((n) => n + 1)} />
+            ))}
+          </ul>
+        </section>
+      )}
 
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
         <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-950 px-2.5">
@@ -437,6 +612,7 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
         <ul className="flex flex-col gap-2">
           {shown.map((x) => (
             <LessonRow key={x.id} lesson={x} busy={busy === x.id} noRoom={missing.has(x.id)}
+              locked={data.base_locked && x.layer === 'base'}
               onAlways={(always) => void change(x.id, () => agentLessonsApi.change(slug, x.id, { always }))}
               onSave={(text) => change(x.id, () => agentLessonsApi.change(slug, x.id, { text }))}
               onRemove={() => void change(x.id, () => agentLessonsApi.remove(slug, x.id))} />
@@ -444,6 +620,54 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
         </ul>
       )}
     </div>
+  )
+}
+
+function SuggestionRow({ slug, s, onSettled }: { slug: string; s: LessonSuggestion; onSettled: () => void }) {
+  const [taking, setTaking] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState('')
+  const settle = async (state: 'taken' | 'declined', lesson = '') => {
+    setBusy(true)
+    setErr('')
+    try {
+      await agentLessonsApi.settle(slug, s.id, state, lesson)
+      onSettled()
+    } catch (e) {
+      setErr(message(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <li className="rounded-xl border border-amber-500/30 bg-amber-500/[0.04] px-3 py-2.5">
+      <p className="text-[11px] text-zinc-500"><span className="font-medium text-zinc-400">{s.by_name}</span> suggested · {ago(s.created)}</p>
+      <p className="mt-1 whitespace-pre-wrap text-sm text-zinc-200">{s.said}</p>
+      {s.reply && (
+        <details className="mt-1">
+          <summary className="cursor-pointer text-[11px] text-zinc-500 hover:text-zinc-300">The answer it corrects</summary>
+          <p className="mt-1 line-clamp-6 whitespace-pre-wrap border-l-2 border-zinc-700 pl-2 text-xs text-zinc-400">{s.reply}</p>
+        </details>
+      )}
+      {taking ? (
+        <div className="mt-2 rounded-lg border border-zinc-800 p-2.5">
+          <LessonDraftForm slug={slug} said={s.said} reply={s.reply} taughtBy="member"
+            onDone={(id) => void settle('taken', id)} onCancel={() => setTaking(false)} />
+        </div>
+      ) : (
+        <div className="mt-2 flex flex-wrap gap-2">
+          <button onClick={() => setTaking(true)} disabled={busy}
+            className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50">
+            <GraduationCap className="h-3.5 w-3.5" /> Make it a lesson
+          </button>
+          <button onClick={() => void settle('declined')} disabled={busy}
+            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-50">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />} Decline
+          </button>
+        </div>
+      )}
+      {err && <p className="mt-1.5 text-xs text-red-500">{err}</p>}
+    </li>
   )
 }
 
@@ -488,10 +712,12 @@ function AddLesson({ busy, onAdd, onCancel }: {
   )
 }
 
-function LessonRow({ lesson: x, busy, noRoom, onAlways, onSave, onRemove }: {
+function LessonRow({ lesson: x, busy, noRoom, locked, onAlways, onSave, onRemove }: {
   lesson: Lesson
   busy: boolean
   noRoom: boolean
+  /** Its admin's (the base): this user can't change it. */
+  locked: boolean
   onAlways: (always: boolean) => void
   onSave: (text: string) => Promise<boolean>
   onRemove: () => void
@@ -525,11 +751,24 @@ function LessonRow({ lesson: x, busy, noRoom, onAlways, onSave, onRemove }: {
           )}
           <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-zinc-500">
             {where && <span className="inline-flex min-w-0 items-center gap-1"><BookOpen className="h-3 w-3 shrink-0" /><span className="truncate">{where}</span></span>}
-            <span>{TAUGHT[x.taught_by] ?? x.taught_by}{x.added ? ` · ${ago(x.added)}` : ''}</span>
+            {x.layer === 'base' && (
+              <span className="inline-flex items-center gap-1 text-zinc-400">
+                {locked ? <Lock className="h-3 w-3" /> : <ShieldCheck className="h-3 w-3" />}{locked ? 'part of its base' : 'base'}
+              </span>
+            )}
+            <span>
+              {x.layer === 'base' && x.taught_by === 'you' ? 'added by hand' : TAUGHT[x.taught_by] ?? x.taught_by}
+              {x.added ? ` · ${ago(x.added)}` : ''}
+            </span>
             {noRoom && <span className="text-amber-600 dark:text-amber-400">no room in its instructions — it comes up when it matters</span>}
           </p>
         </div>
-        {!editing && (
+        {!editing && locked && x.always && (
+          <span title="Always in mind — part of its base" className="shrink-0 p-1.5 text-violet-600 dark:text-violet-300">
+            <Pin className="h-4 w-4" />
+          </span>
+        )}
+        {!editing && !locked && (
           <div className="flex shrink-0 items-center gap-0.5">
             {x.kind !== 'fact' && (
               <button onClick={() => onAlways(!x.always)} disabled={busy} aria-pressed={x.always}

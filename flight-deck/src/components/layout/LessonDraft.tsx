@@ -1,15 +1,19 @@
 import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, GraduationCap, Hand, Lightbulb, Loader2, ScrollText, X } from 'lucide-react'
-import { agentLessonsApi, type LessonKind } from '../../services/agentLessons'
+import { Check, GraduationCap, Hand, Lightbulb, Loader2, ScrollText, Send, X } from 'lucide-react'
+import { agentLessonsApi, type LessonKind, type TaughtBy } from '../../services/agentLessons'
 import { syncInstructions } from './lessonSync'
 
 // ── A lesson from the owner's words ──────────────────────────────────
 //
 // What they said — a correction in a chat, what a practice answer should
-// have been — drafted into one lesson by the agent's model
-// (/fd/agent-lessons/{slug}/draft), for them to check and teach: a rule,
-// something to ask first, or a fact; always in mind or when it matters.
+// have been, what a member of their shared agent suggested — drafted into
+// one lesson by the agent's model (/fd/agent-lessons/{slug}/draft), for them
+// to check and teach: a rule, something to ask first, or a fact; always in
+// mind or when it matters.
+//
+// A member of someone's shared agent can't teach it: they suggest the lesson
+// to its owner instead (SuggestLessonDialog), who takes it or declines.
 
 const KINDS: { id: LessonKind; label: string; icon: typeof ScrollText; tone: string }[] = [
   { id: 'rule', label: 'Rule', icon: ScrollText, tone: 'bg-violet-500/10 text-violet-700 dark:text-violet-300' },
@@ -26,7 +30,7 @@ export function LessonDraftForm({ slug, said, reply = '', task = '', taughtBy, o
   /** What the agent had answered, and the practice task it answered. */
   reply?: string
   task?: string
-  taughtBy: 'chat' | 'practice'
+  taughtBy: Exclude<TaughtBy, 'you'>
   /** Taught: the new lesson's id. */
   onDone: (lessonId: string) => void
   onCancel: () => void
@@ -146,6 +150,77 @@ export function SaveLessonDialog({ agent, said, reply, onClose }: {
           </div>
         ) : (
           <LessonDraftForm slug={agent.slug} said={said} reply={reply} taughtBy="chat" onDone={() => setSaved(true)} onCancel={onClose} />
+        )}
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/** "Suggest as a lesson", from a member's chat with someone's shared agent: their words (and the answer they
+ *  correct) go to its owner, who takes it as a lesson or declines it. Nothing is drafted until they look. */
+export function SuggestLessonDialog({ agentRef, agentName, ownerName, said, reply, onClose }: {
+  agentRef: string
+  agentName: string
+  ownerName: string
+  said: string
+  reply?: string
+  onClose: () => void
+}) {
+  const [text, setText] = useState(said)
+  const [busy, setBusy] = useState(false)
+  const [sent, setSent] = useState(false)
+  const [err, setErr] = useState('')
+  const owner = ownerName || 'its owner'
+  const send = async () => {
+    setBusy(true)
+    setErr('')
+    try {
+      await agentLessonsApi.suggest(agentRef, text, reply ?? '')
+      setSent(true)
+    } catch (e) {
+      setErr(message(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-4" onClick={onClose}>
+      <div role="dialog" aria-label="Suggest as a lesson" onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-lg rounded-t-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-2xl sm:rounded-2xl">
+        <div className="mb-3 flex items-center gap-2.5">
+          <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-violet-100 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
+            <GraduationCap className="h-4 w-4" />
+          </span>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-semibold text-zinc-100">Suggest as a lesson</h3>
+            <p className="truncate text-xs text-zinc-500">{agentName} is {owner}'s: they decide what it learns</p>
+          </div>
+          <button onClick={onClose} aria-label="Close" className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        {sent ? (
+          <div className="flex items-center justify-between gap-3">
+            <p className="flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">
+              <Check className="h-4 w-4" /> Sent to {owner}. You'll hear when it learns it.
+            </p>
+            <button onClick={onClose} className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800">Done</button>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            <p className="text-xs text-zinc-500">What should it learn? {owner} sees this, and the answer it corrects.</p>
+            <textarea value={text} onChange={(e) => setText(e.target.value)} rows={3} maxLength={4000} autoFocus
+              className="w-full resize-y rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-100 focus:border-violet-500 focus:outline-none" />
+            <div className="flex justify-end gap-2">
+              <button onClick={onClose} className="rounded-lg px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800">Cancel</button>
+              <button onClick={() => void send()} disabled={busy || !text.trim()}
+                className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50">
+                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />} Suggest it
+              </button>
+            </div>
+            {err && <p className="text-xs text-red-500">{err}</p>}
+          </div>
         )}
       </div>
     </div>,

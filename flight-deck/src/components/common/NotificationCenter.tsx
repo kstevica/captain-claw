@@ -18,6 +18,9 @@ import {
   SHARED_SECTION_ID, sharedNotificationAction, type SharedNotificationAction,
 } from '../../utils/sharedAgent'
 
+// What a bell row opens of an agent: its Way of working, or its onboarding's exams or lessons.
+type SetupKind = 'setup' | 'exam' | 'lessons'
+
 function relativeTime(iso: string): string {
   const diff = Date.now() - new Date(iso).getTime()
   const s = Math.floor(diff / 1000)
@@ -63,14 +66,15 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
   const [big, setBig] = useState(false)
   // An agent whose way-of-working read is done (or stopped): its setup dialog, opened from here.
   const [setupFor, setSetupFor] = useState<{ slug: string; name: string; readDocs?: string[] } | null>(null)
-  // An agent whose onboarding exam ended: its onboarding, on its exams, opened from here.
-  const [examFor, setExamFor] = useState<{ slug: string; name: string } | null>(null)
+  // An agent whose onboarding exam ended, or a member suggested a lesson for: its onboarding, on that tab.
+  const [examFor, setExamFor] = useState<{ slug: string; name: string; tab: 'exams' | 'lessons' } | null>(null)
   const { isMobile: phone } = useIsMobile()
-  const openSetup = (slug: string, kind: 'setup' | 'exam' = 'setup') => {
+  const openSetup = (slug: string, kind: SetupKind = 'setup') => {
     setOpen(false)
     setBig(false)
     const proc = useProcessStore.getState().processes.find((p) => p.slug === slug)
-    ;(kind === 'exam' ? setExamFor : setSetupFor)({ slug, name: proc?.name || slug })
+    if (kind === 'setup') setSetupFor({ slug, name: proc?.name || slug })
+    else setExamFor({ slug, name: proc?.name || slug, tab: kind === 'lessons' ? 'lessons' : 'exams' })
   }
 
   return (
@@ -101,7 +105,7 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
       {big && <NotificationDialog onClose={() => setBig(false)} onOpenSetup={openSetup} />}
       {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
       {examFor && (
-        <OnboardingDialog agent={examFor} initialTab="exams" phone={phone} onClose={() => setExamFor(null)}
+        <OnboardingDialog agent={examFor} initialTab={examFor.tab} phone={phone} onClose={() => setExamFor(null)}
           onSetup={(readDocs) => { setSetupFor({ ...examFor, readDocs }); setExamFor(null) }} />
       )}
     </div>
@@ -110,7 +114,7 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
 
 // The bell's list in a dialog: wide, tall, every text whole.
 function NotificationDialog({ onClose, onOpenSetup }: {
-  onClose: () => void; onOpenSetup: (slug: string, kind?: 'setup' | 'exam') => void
+  onClose: () => void; onOpenSetup: (slug: string, kind?: SetupKind) => void
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -144,7 +148,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
   onClose: () => void
   onEnlarge?: () => void
   /** A notice that an agent's way-of-working read ended opens its setup. */
-  onOpenSetup?: (slug: string, kind?: 'setup' | 'exam') => void
+  onOpenSetup?: (slug: string, kind?: SetupKind) => void
   /** In the big dialog: larger text, every text whole, a close button. */
   large?: boolean
 }) {
@@ -236,20 +240,23 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
           <div className="px-3 py-6 text-center text-xs text-zinc-600">No notifications</div>
         ) : (
           shown.map((n) => {
-            const setup = (n.refType === 'agent_setup' || n.refType === 'agent_exam') && n.refId && onOpenSetup ? n.refId : ''
+            const setup = (n.refType === 'agent_setup' || n.refType === 'agent_exam' || n.refType === 'agent_lessons')
+              && n.refId && onOpenSetup ? n.refId : ''
             const exam = n.refType === 'agent_exam'
+            const lessons = n.refType === 'agent_lessons'
             return (
             <NotificationItem
               key={n.id}
               notification={n}
               large={large}
               action={setup ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
-              hint={setup ? (exam ? 'Click to see the exam.' : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.') : ''}
+              hint={setup ? (exam ? 'Click to see the exam.' : lessons ? 'Click to take it, or decline.'
+                : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
                 ? (waiting.has(n.refId) ? 'waiting' : 'answered') : undefined}
               onAnswered={() => { markRead(n.id); loadWaiting() }}
               onRead={() => markRead(n.id)}
-              onActivate={setup ? () => onOpenSetup?.(setup, exam ? 'exam' : 'setup') : activate}
+              onActivate={setup ? () => onOpenSetup?.(setup, exam ? 'exam' : lessons ? 'lessons' : 'setup') : activate}
               onRemove={() => remove(n.id)}
             />
             )

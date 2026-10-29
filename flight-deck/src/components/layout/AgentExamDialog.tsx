@@ -370,7 +370,8 @@ function StartPanel({ overview, size, setSize, focus, setFocus, busy, err, onSta
                       {sizeLabel(e.size)}{e.again ? ' · asked again' : ''}{e.focus ? ` · ${e.focus}` : ''}
                     </span>
                     <span className="block truncate text-xs text-zinc-500">
-                      {when(e.started)} · {e.model}{e.state !== 'done' ? ` · ${e.state === 'error' ? 'stopped by an error' : 'stopped'}` : ''}
+                      {e.state === 'ready' ? 'from its archetype · ready to ask'
+                        : `${when(e.started)} · ${e.model}${e.state !== 'done' ? ` · ${e.state === 'error' ? 'stopped by an error' : 'stopped'}` : ''}`}
                     </span>
                   </span>
                 </button>
@@ -485,7 +486,20 @@ function ResultsPanel({ exam, busy, err, onAgain, onResume, onNew, onTeach, onRe
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-5 p-4 wide:p-6">
-      {unfinished && (
+      {exam.state === 'ready' && (
+        <div className="flex flex-col gap-3 rounded-xl border border-violet-500/30 bg-violet-500/5 p-4 sm:flex-row sm:items-center">
+          <GraduationCap className="h-5 w-5 shrink-0 text-violet-500" />
+          <p className="flex-1 text-sm text-zinc-300">
+            {exam.notes?.[0] || 'Questions passed on with the archetype it was made from.'} Ask them to see how well it knows
+            what it was given — {questions.length === 1 ? 'one question' : `${questions.length} questions`}.
+          </p>
+          <button onClick={onResume} disabled={busy}
+            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-60">
+            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />} Ask them
+          </button>
+        </div>
+      )}
+      {unfinished && exam.state !== 'ready' && (
         <div className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 sm:flex-row sm:items-center">
           <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
           <p className="flex-1 text-sm text-zinc-300">

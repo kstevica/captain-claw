@@ -67,7 +67,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal
 
 import yaml
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
 from captain_claw.exceptions import is_busy, retry_after
@@ -233,8 +233,9 @@ def normalise(raw: Any, limits: dict[str, int] | None = None) -> dict:
                         "examples": _strings(i.get("examples"), 200, 3), "source": _source(i.get("source"))})
 
     def taught(r: dict) -> dict:
-        # A rule taught by hand or by an exam keeps who taught it, and when.
-        return {k: r[k] for k in ("taught_by", "added") if isinstance(r.get(k), (str, int, float)) and r.get(k)}
+        # A rule taught by hand or by an exam keeps who taught it, and when — and an admin's, that it is the base.
+        return {k: r[k] for k in ("taught_by", "added", "layer")
+                if isinstance(r.get(k), (str, int, float)) and r.get(k)}
 
     facts: list[dict] = []
     for f in items("facts"):
@@ -259,10 +260,10 @@ def normalise(raw: Any, limits: dict[str, int] | None = None) -> dict:
                                "source": _source(r.get("source")), **taught(r)}
                               for r in items("escalation")], "text", "escalation"),
         "templates": unique([{"name": _line(t.get("name"), 80), "body": _body(t.get("body"), 3000),
-                              "source": _source(t.get("source"))}
+                              "source": _source(t.get("source")), **taught(t)}
                              for t in items("templates") if str(t.get("body") or "").strip()], "name", "templates"),
         "glossary": unique([{"term": _line(g.get("term"), 80), "meaning": _line(g.get("meaning"), 300),
-                             "source": _source(g.get("source"))}
+                             "source": _source(g.get("source")), **taught(g)}
                             for g in items("glossary") if str(g.get("meaning") or "").strip()], "term", "glossary"),
         "knowledge": unique([{"doc": _line(k.get("doc"), 160), "title": _line(k.get("title"), 120),
                               "summary": _line(k.get("summary"), 800)}
@@ -2438,7 +2439,8 @@ def _more_read(before: Any, now: Any) -> dict:
     return {"all": bool(a.get("all") or b.get("all") or (of and len(keys) >= of)), "keys": keys, "of": of}
 
 
-def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str = "add") -> dict:
+def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str = "add",
+         layer: str = "", keep_base: bool = False) -> dict:
     """Write the reviewed preset into an agent's folder — added to what an
     earlier setup gave it (the new items first; a document given again
     replaces its earlier copy, its tables too), or in its place
@@ -2450,7 +2452,13 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     make in its datastore and those to ``drop`` first, what this setup wrote
     (``skills``, ``knowledge``, ``counts``), what the agent now has from
     setups (``totals``) and ``warnings`` for the person. The waiting
-    documents are dropped afterwards."""
+    documents are dropped afterwards.
+
+    *layer* ``base``: an admin sets the agent up for its user — what this
+    writes is the base, which its user can add to but not change. With
+    *keep_base* (its own user setting it up) the base stays whatever the
+    mode: its rules, facts, documents, skills and tables, and a document of
+    theirs given again is left as it is."""
     data = body if isinstance(body, dict) else {}
     preset = normalise(data, CEILINGS)
     preset_id = str(data.get("id") or "")
@@ -2463,13 +2471,41 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     before_lessons = list(earlier.get("lessons") or [])
     earlier_tables = [t for t in earlier.get("tables") or [] if isinstance(t, dict) and isinstance(t.get("name"), str)]
     before_knowledge = list(earlier.get("knowledge") or [])
-    if mode == "replace":
-        _undo(earlier, skills_dir, folder)
-        # What its owner or an exam taught by hand isn't a setup's: it stays.
-        earlier = {g: [i for i in earlier.get(g) or [] if isinstance(i, dict)
-                       and i.get("taught_by") not in (None, "", "setup")] for g in ("rules", "escalation")}
 
-    merged = normalise({g: preset[g] + [i for i in earlier.get(g) or [] if isinstance(i, dict)]
+    def base(i: Any) -> bool:
+        return keep_base and isinstance(i, dict) and i.get("layer") == "base"
+
+    base_skills = [n for n in earlier.get("base_skills") or [] if isinstance(n, str)]
+    warnings_base: list[str] = []
+    if keep_base:
+        # The base's documents stay theirs: one given again by this user isn't written over them (adding,
+        # reading more of it from the agent's own knowledge is fine: it stays the base's, read further).
+        mine = {e.get("doc") for e in before_knowledge if base(e)}
+        if mode != "replace":
+            mine -= {d["name"] for d in docs if d.get("origin") == "knowledge"}
+        clash = sorted(n for n in {k["doc"] for k in preset["knowledge"]} & mine if n)
+        if clash:
+            preset["knowledge"] = [k for k in preset["knowledge"] if k["doc"] not in clash]
+            warnings_base.append("Kept your admin's " + ", ".join(clash) + ": a document they gave can't be replaced here.")
+    # Only an admin's setup sets the base: a layer in what anyone else sends is dropped.
+    for g in _KEPT_GROUPS:
+        preset[g] = [{**{k: v for k, v in i.items() if k != "layer"}, **({"layer": layer} if layer else {})}
+                     for i in preset[g]]
+    if mode == "replace":
+        _undo({**earlier, "skills": [n for n in earlier.get("skills") or [] if n not in (base_skills if keep_base else [])],
+               "knowledge": [e for e in earlier.get("knowledge") or [] if not base(e)]}, skills_dir, folder)
+        # What its owner or an exam taught by hand isn't a setup's, and the base isn't this user's: they stay.
+        earlier = {**{g: [i for i in earlier.get(g) or [] if isinstance(i, dict) and (
+                       base(i) or (g in ("rules", "escalation") and i.get("taught_by") not in (None, "", "setup")))]
+                      for g in _KEPT_GROUPS},
+                   "knowledge": [e for e in earlier.get("knowledge") or [] if base(e)],
+                   "skills": base_skills if keep_base else []}
+        if not keep_base:
+            base_skills = []
+
+    # The base first, so the same rule given again by its user stays the base's.
+    merged = normalise({g: [i for i in earlier.get(g) or [] if base(i)] + preset[g]
+                        + [i for i in earlier.get(g) or [] if isinstance(i, dict) and not base(i)]
                         for g in _KEPT_GROUPS}, TOTALS)
     new_skills = write_skills(skills_dir, preset["intents"])
     skills = new_skills + [n for n in earlier.get("skills") or []
@@ -2499,27 +2535,33 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
             kept.append(entry)
     # Replacing drops every table an earlier setup made; adding, those of the documents given again. A
     # document read again from the agent's knowledge keeps its tables either way (its spreadsheet isn't kept).
-    gone = [t for t in earlier_tables if (mode == "replace" or t.get("doc") in given) and t.get("doc") not in again]
+    gone = [t for t in earlier_tables if (mode == "replace" or t.get("doc") in given) and t.get("doc") not in again
+            and not base(t)]
     drop = list(dict.fromkeys(t["name"] for t in gone))
     kept_tables = [t for t in earlier_tables if t["name"] not in drop]
     tables, warnings = new_tables(agent_dir, preset, docs, drop, kept_tables)
-    all_tables = kept_tables + [_table_summary(t) for t in tables]
+    warnings = warnings_base + warnings
+    all_tables = kept_tables + [{**_table_summary(t), **({"layer": layer} if layer else {})} for t in tables]
     # Lessons beyond the rules: facts (a setup's own, replaced with it) and what exams taught (kept).
     lessons = [x for x in before_lessons if isinstance(x, dict)
-               and (mode != "replace" or x.get("taught_by") != "setup")]
+               and (mode != "replace" or x.get("taught_by") != "setup" or base(x))]
     record: dict[str, Any] = {"lessons": lessons}
     for x in agent_lessons.facts_as_lessons(preset["facts"]):
         record, _ = agent_lessons.taught(record, "fact", x["text"], x["source"], taught_by="setup",
-                                         importance=x["importance"])
+                                         importance=x["importance"], layer=layer)
     fact_lessons = [x for x in record["lessons"] if x.get("kind") == "fact"]
     written = write_knowledge(folder, {**merged, "facts": [{"content": x["text"], "source": x.get("source") or {}}
                                                            for x in fact_lessons],
                                        "knowledge": [k for k in preset["knowledge"] if k["doc"] not in given_again]},
                               docs, kept, all_tables)
+    if layer:
+        written = [{**w, "layer": layer} for w in written]
+        base_skills = list(dict.fromkeys([*base_skills, *new_skills]))
     knowledge = kept + written
     facts = int(earlier.get("facts") or 0) + len(preset["facts"])
     agent_dir.mkdir(parents=True, exist_ok=True)
     record = {"updated": time.time(), **{g: merged[g] for g in _KEPT_GROUPS}, "skills": skills,
+              "base_skills": [n for n in base_skills if n in skills],
               "knowledge": knowledge, "tables": all_tables, "facts": facts, "lessons": record["lessons"]}
     (agent_dir / _RECORD).write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
     agent_lessons.write(agent_dir, record)
@@ -2845,7 +2887,8 @@ async def add_document(slug: str, owner_id: str, name: str, text: str, raw: byte
                  "usage": usage if usage in USAGES else "auto"}]
         preset_id = await asyncio.to_thread(save_docs, owner_id, docs, "")
         body = {"id": preset_id, "knowledge": [{"doc": name, "title": title.strip() or Path(name).stem, "summary": note}]}
-        done = await asyncio.to_thread(seed, agent_dir, workspace, owner_id, body, "add")
+        done = await asyncio.to_thread(seed, agent_dir, workspace, owner_id, body, "add",
+                                       keep_base=await agent_lessons.keeps_base(owner_id))
     finally:
         shutil.rmtree(root / "staged" / staged["id"], ignore_errors=True)
     await deliver(slug, entry, owner_id, agent_dir, done)
@@ -2855,26 +2898,29 @@ async def add_document(slug: str, owner_id: str, name: str, text: str, raw: byte
     return {"doc": name, "title": written.get("title") or name, "file": written.get("file") or "",
             "parts": int(written.get("parts") or 1), "sections": int(written.get("sections") or 0),
             "map": written.get("map") or "", "chars": len(text), "truncated": bool(full.get("truncated")),
-            "tables": [t["name"] for t in done["tables"]], "replaced": name in had, "warnings": done["warnings"]}
+            "tables": [t["name"] for t in done["tables"]], "replaced": name in had and bool(done["knowledge"]),
+            "warnings": done["warnings"]}
 
 
 @router.post("/apply")
-async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict:
+async def apply(body: ApplyBody, request: Request, user: dict = Depends(get_managed_user)) -> dict:
     """Give one of the caller's process agents the reviewed preset — added to
     what an earlier setup gave it, or in its place: skills and knowledge
     into its folder, the owner's block in its instructions (stored for the
     owner, and returned for the chat to send), its rules, when-to-ask and
     facts as lessons it reads with each message, and the spreadsheets as
     datastore tables once it answers — or, when it is off, at its next
-    start. Works on a running agent: no restart."""
+    start. Works on a running agent: no restart. An admin setting it up for
+    its user sets its base, which that user adds to (agent_lessons.teaching)."""
     from captain_claw.flight_deck import server as srv
     owner_id = _owner(user)
     slug = body.agent
     entry = _own_process(slug, owner_id)
     agent_dir = srv.DATA_DIR / slug
     workspace = Path(entry["workspace"]) if entry.get("workspace") else agent_dir / "data" / "workspace"
+    layer, keep_base = agent_lessons.teaching(request, user) if _auth_enabled() else ("", False)
     try:
-        done = await asyncio.to_thread(seed, agent_dir, workspace, owner_id, body.preset, body.mode)
+        done = await asyncio.to_thread(seed, agent_dir, workspace, owner_id, body.preset, body.mode, layer, keep_base)
     except Exception:
         log.warning("agent preset: could not write the setup", agent=slug, exc_info=True)
         raise HTTPException(500, "The setup couldn't be written into the agent's folder.")
