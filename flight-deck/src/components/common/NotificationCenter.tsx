@@ -12,7 +12,8 @@ import { useProcessStore } from '../../stores/processStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { useUIStore } from '../../stores/uiStore'
 import { AgentSetupDialog } from '../layout/AgentSetupDialog'
-import { AgentExamDialog } from '../layout/AgentExamDialog'
+import { OnboardingDialog } from '../layout/OnboardingDialog'
+import { useIsMobile } from '../../hooks/useMediaQuery'
 import {
   SHARED_SECTION_ID, sharedNotificationAction, type SharedNotificationAction,
 } from '../../utils/sharedAgent'
@@ -62,8 +63,9 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
   const [big, setBig] = useState(false)
   // An agent whose way-of-working read is done (or stopped): its setup dialog, opened from here.
   const [setupFor, setSetupFor] = useState<{ slug: string; name: string; readDocs?: string[] } | null>(null)
-  // An agent whose onboarding exam ended: the exam, opened from here.
+  // An agent whose onboarding exam ended: its onboarding, on its exams, opened from here.
   const [examFor, setExamFor] = useState<{ slug: string; name: string } | null>(null)
+  const { isMobile: phone } = useIsMobile()
   const openSetup = (slug: string, kind: 'setup' | 'exam' = 'setup') => {
     setOpen(false)
     setBig(false)
@@ -99,8 +101,8 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
       {big && <NotificationDialog onClose={() => setBig(false)} onOpenSetup={openSetup} />}
       {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
       {examFor && (
-        <AgentExamDialog agent={examFor} onClose={() => setExamFor(null)}
-          onReadDocs={(readDocs) => { setSetupFor({ ...examFor, readDocs }); setExamFor(null) }} />
+        <OnboardingDialog agent={examFor} initialTab="exams" phone={phone} onClose={() => setExamFor(null)}
+          onSetup={(readDocs) => { setSetupFor({ ...examFor, readDocs }); setExamFor(null) }} />
       )}
     </div>
   )

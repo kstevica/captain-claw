@@ -1733,7 +1733,7 @@ from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.file_library import router as file_library_router
 from captain_claw.flight_deck.data_library import router as data_library_router
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
-from captain_claw.flight_deck import agent_exam, agent_knowledge, agent_lessons, agent_preset
+from captain_claw.flight_deck import agent_exam, agent_knowledge, agent_lessons, agent_onboarding, agent_preset
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck import public_file_shares
@@ -1834,6 +1834,7 @@ app.include_router(agent_skills_router)
 app.include_router(agent_preset.router)
 app.include_router(agent_knowledge.router)
 app.include_router(agent_exam.router)
+app.include_router(agent_onboarding.router)
 app.include_router(system_router)
 app.include_router(share_router)
 # Public file links: owner API (port-addressed → the ownership guard above

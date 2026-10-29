@@ -33,12 +33,10 @@ import {
   Trash2,
   BookOpen,
   GraduationCap,
-  BookMarked,
   ShieldCheck,
   Smartphone,
   Activity,
   KeyRound,
-  Wand2,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -75,8 +73,7 @@ import { SharedFilesPanel } from '../agents/SharedFilesPanel'
 import { SharedDatastorePanel } from '../agents/SharedDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
 import { AgentSetupDialog } from './AgentSetupDialog'
-import { KnowledgeBrowser } from '../library/KnowledgeBrowser'
-import { AgentExamDialog } from './AgentExamDialog'
+import { OnboardingDialog, type OnboardingTab } from './OnboardingDialog'
 import { ArchetypeSpawnDialog, type SetupRequest } from './ArchetypeSpawnDialog'
 import { KioskByokDialog } from './KioskByokDialog'
 import { useByokStore } from '../../stores/byokStore'
@@ -240,8 +237,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // A new agent whose "way of working" setup opens right after it is created.
   const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   // An agent's knowledge, to browse (its ⋯ menu → Knowledge).
-  const [knowledgeFor, setKnowledgeFor] = useState<{ slug: string; name: string } | null>(null)
-  const [examFor, setExamFor] = useState<{ slug: string; name: string } | null>(null)
+  // An agent's onboarding page; Way of working opened from it comes back to it when it closes.
+  const [onboardingFor, setOnboardingFor] = useState<{ slug: string; name: string; tab: OnboardingTab } | null>(null)
+  const [setupBack, setSetupBack] = useState<{ slug: string; name: string; tab: OnboardingTab } | null>(null)
   // Agents just spawned or powered on: Flight Deck lists one as running the
   // moment it launches, seconds before its web server binds — a chat opened
   // then fails. They stay "starting" until they answer.
@@ -634,12 +632,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       )
       // Your documents and way of working → its rules, skills and knowledge (process agents: FD writes its folder).
       if (a.kind === 'process') {
-        items.push({ icon: BookMarked, label: 'Knowledge', hint: 'Its documents — browse their sections, search them, see what was read',
-          onSelect: () => setKnowledgeFor({ slug: a.startKey, name: a.name }) })
-        items.push({ icon: Wand2, label: 'Way of working', hint: 'Your instructions and documents, as its rules, skills and knowledge',
-          onSelect: () => setSetupFor({ slug: a.startKey, name: a.name, role: '' }) })
-        items.push({ icon: GraduationCap, label: 'Onboarding exam', hint: 'Questions from its documents — does it really know them?',
-          onSelect: () => setExamFor({ slug: a.startKey, name: a.name }) })
+        items.push({ icon: GraduationCap, label: 'Onboarding', hint: 'Its documents, the lessons it was taught, and how well it knows them',
+          onSelect: () => setOnboardingFor({ slug: a.startKey, name: a.name, tab: 'overview' }) })
       }
       items.push(
         { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', onSelect: () => setAgentSettingsId(a.id) },
@@ -797,25 +791,25 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           }}
         />
       )}
-      {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
-      {examFor && (
-        <AgentExamDialog
-          key={examFor.slug}
-          agent={examFor}
-          onClose={() => setExamFor(null)}
-          onReadDocs={(readDocs) => { setSetupFor({ slug: examFor.slug, name: examFor.name, role: '', readDocs }); setExamFor(null) }}
-        />
+      {setupFor && (
+        <AgentSetupDialog agent={setupFor} onClose={() => {
+          setSetupFor(null)
+          if (setupBack) { setOnboardingFor(setupBack); setSetupBack(null) }
+        }} />
       )}
-      {knowledgeFor && (
-        <KioskWideDialog label={`${knowledgeFor.name}'s knowledge`} phone={isMobile} onClose={() => setKnowledgeFor(null)} widest>
-          <KnowledgeBrowser
-            key={knowledgeFor.slug}
-            agent={knowledgeFor}
-            phone={isMobile}
-            onClose={() => setKnowledgeFor(null)}
-            onSetup={() => { setSetupFor({ slug: knowledgeFor.slug, name: knowledgeFor.name, role: '' }); setKnowledgeFor(null) }}
-          />
-        </KioskWideDialog>
+      {onboardingFor && (
+        <OnboardingDialog
+          key={onboardingFor.slug}
+          agent={onboardingFor}
+          initialTab={onboardingFor.tab}
+          phone={isMobile}
+          onClose={() => setOnboardingFor(null)}
+          onSetup={(readDocs) => {
+            setSetupBack({ ...onboardingFor, tab: 'overview' })
+            setSetupFor({ slug: onboardingFor.slug, name: onboardingFor.name, role: '', readDocs })
+            setOnboardingFor(null)
+          }}
+        />
       )}
 
       {locked && settingsOpen && (

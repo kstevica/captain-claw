@@ -232,6 +232,10 @@ def normalise(raw: Any, limits: dict[str, int] | None = None) -> dict:
         intents.append({"name": name, "when": when, "steps": steps,
                         "examples": _strings(i.get("examples"), 200, 3), "source": _source(i.get("source"))})
 
+    def taught(r: dict) -> dict:
+        # A rule taught by hand or by an exam keeps who taught it, and when.
+        return {k: r[k] for k in ("taught_by", "added") if isinstance(r.get(k), (str, int, float)) and r.get(k)}
+
     facts: list[dict] = []
     for f in items("facts"):
         category = str(f.get("category") or "").strip().lower()
@@ -247,12 +251,12 @@ def normalise(raw: Any, limits: dict[str, int] | None = None) -> dict:
         # ``always``: kept in the agent's instructions (it applies to every conversation); the rest reach
         # it as lessons with the messages they bear on (agent_lessons). Asking first is always, unless unset.
         "rules": unique([{"text": _line(r.get("text"), 400), "always": r.get("always") is True,
-                          "source": _source(r.get("source"))}
+                          "source": _source(r.get("source")), **taught(r)}
                          for r in items("rules")], "text", "rules"),
         "intents": intents[:caps["intents"]],
         "facts": unique(facts, "content", "facts"),
         "escalation": unique([{"text": _line(r.get("text"), 400), "always": r.get("always") is not False,
-                               "source": _source(r.get("source"))}
+                               "source": _source(r.get("source")), **taught(r)}
                               for r in items("escalation")], "text", "escalation"),
         "templates": unique([{"name": _line(t.get("name"), 80), "body": _body(t.get("body"), 3000),
                               "source": _source(t.get("source"))}
@@ -2461,7 +2465,9 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     before_knowledge = list(earlier.get("knowledge") or [])
     if mode == "replace":
         _undo(earlier, skills_dir, folder)
-        earlier = {}
+        # What its owner or an exam taught by hand isn't a setup's: it stays.
+        earlier = {g: [i for i in earlier.get(g) or [] if isinstance(i, dict)
+                       and i.get("taught_by") not in (None, "", "setup")] for g in ("rules", "escalation")}
 
     merged = normalise({g: preset[g] + [i for i in earlier.get(g) or [] if isinstance(i, dict)]
                         for g in _KEPT_GROUPS}, TOTALS)
@@ -2747,6 +2753,49 @@ async def current_setup(slug: str, user: dict = Depends(get_managed_user)) -> di
     }
 
 
+async def instruct(slug: str, owner_id: str, block: str, block_all: str) -> tuple[bool, str, str]:
+    """The owner's block in the agent's stored instructions, in place of an
+    earlier one — the one with every rule that fits (*block_all*) for an
+    agent running from before lessons. Returns (stored — without accounts the
+    browser keeps the instructions and puts the block in itself —, the
+    instructions, the block used)."""
+    from captain_claw.flight_deck import server as srv
+    caps = await agent_lessons.capabilities(slug) if srv._process_is_alive(slug) else None
+    used = block_all if caps is not None and agent_lessons.CAPABILITY not in caps else block
+    instructions = ""
+    stored = bool(owner_id) and _auth_enabled()
+    if stored:
+        current = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "")
+        instructions = with_block(current, used)
+        if instructions != current:
+            await srv._set_owner_agent_instructions(owner_id, "process", slug, instructions, strict=True)
+    return stored, instructions, used
+
+
+def rewrite_lessons(agent_dir: Path, workspace: Path, record: dict) -> dict:
+    """An agent's setup record changed by hand (its lessons edited): the
+    record, its lessons, knowledge/owner-rules.md written again, and the
+    blocks its instructions end with (``block``; ``block_all`` for an agent
+    running from before lessons)."""
+    record = {**record, "updated": time.time()}
+    agent_dir.mkdir(parents=True, exist_ok=True)
+    (agent_dir / _RECORD).write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    agent_lessons.write(agent_dir, record)
+    preset = normalise({g: record.get(g) or [] for g in _KEPT_GROUPS}, TOTALS)
+    facts = [{"content": x["text"], "source": x.get("source") or {}} for x in agent_lessons.from_record(record)
+             if x["kind"] == "fact"]
+    folder = workspace / "knowledge"
+    if preset["rules"] or preset["escalation"] or preset["templates"] or facts:
+        folder.mkdir(parents=True, exist_ok=True)
+    _write_or_drop(folder / "owner-rules.md", (preset["rules"] or preset["escalation"] or preset["templates"] or facts)
+                   and _owner_rules_md({**preset, "facts": facts}))
+    knowledge = [k for k in record.get("knowledge") or [] if isinstance(k, dict) and k.get("title")]
+    skills = [n for n in record.get("skills") or [] if isinstance(n, str)]
+    tables = [t for t in record.get("tables") or [] if isinstance(t, dict) and t.get("name")]
+    return {"block": rules_block(preset, knowledge, skills, tables=tables, facts=len(facts)),
+            "block_all": rules_block(preset, knowledge, skills, tables=tables)}
+
+
 async def deliver(slug: str, entry: dict, owner_id: str, agent_dir: Path, done: dict) -> tuple[bool, str, bool]:
     """What a written setup (``seed``) still needs: the owner's block in the
     agent's stored instructions, spreadsheets as datastore tables — through
@@ -2756,17 +2805,7 @@ async def deliver(slug: str, entry: dict, owner_id: str, agent_dir: Path, done: 
     restarted. Returns (instructions stored, the instructions, running)."""
     from captain_claw.flight_deck import server as srv
     running = srv._process_is_alive(slug)
-    caps = await agent_lessons.capabilities(slug) if running else None
-    block = done["block_all"] if caps is not None and agent_lessons.CAPABILITY not in caps else done["block"]
-    done["block"] = block
-    # Without accounts the browser keeps the instructions: it puts the block in itself.
-    instructions = ""
-    stored = bool(owner_id) and _auth_enabled()
-    if stored:
-        current = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "")
-        instructions = with_block(current, block)
-        if instructions != current:
-            await srv._set_owner_agent_instructions(owner_id, "process", slug, instructions, strict=True)
+    stored, instructions, done["block"] = await instruct(slug, owner_id, done["block"], done["block_all"])
 
     def port_of() -> int:
         return (srv._load_process_registry().get(slug) or {}).get("web_port") or 0

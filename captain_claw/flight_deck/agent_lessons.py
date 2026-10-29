@@ -71,12 +71,12 @@ def from_record(record: dict) -> list[dict]:
             seen.add(item["id"])
             out.append(item)
 
-    for r in record.get("rules") or []:
-        if isinstance(r, dict):
-            keep(_lesson("rule", r.get("text"), r.get("source"), always=r.get("always") is True))
-    for r in record.get("escalation") or []:
-        if isinstance(r, dict):
-            keep(_lesson("ask_first", r.get("text"), r.get("source"), always=r.get("always") is not False))
+    for group, kind in (("rules", "rule"), ("escalation", "ask_first")):
+        for r in record.get(group) or []:
+            if isinstance(r, dict):
+                keep(_lesson(kind, r.get("text"), r.get("source"),
+                             always=r.get("always") is True if kind == "rule" else r.get("always") is not False,
+                             taught_by=str(r.get("taught_by") or "setup"), added=float(r.get("added") or 0.0)))
     for x in record.get("lessons") or []:
         if isinstance(x, dict) and x.get("kind") in KINDS:
             keep(_lesson(x["kind"], x.get("text"), x.get("source"), always=x.get("always") is True,

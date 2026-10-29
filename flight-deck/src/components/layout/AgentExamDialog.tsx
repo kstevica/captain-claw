@@ -88,6 +88,28 @@ export function AgentExamDialog({ agent, onClose, onReadDocs }: {
   /** Open its Way of working with these documents (their setup names) staged to read. */
   onReadDocs?: (docs: string[]) => void
 }) {
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 wide:items-center wide:p-4" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-label={`${agent.name}'s onboarding exam`}
+        className="relative flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-900 shadow-2xl wide:h-[min(90vh,56rem)] wide:max-w-5xl wide:rounded-2xl wide:border wide:border-zinc-800"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <AgentExamPanel agent={agent} onClose={onClose} onReadDocs={onReadDocs} />
+      </div>
+    </div>,
+    document.body,
+  )
+}
+
+/** The exam itself — in its own dialog (with *onClose*: a header with a close button), or a tab of
+ *  the Onboarding page (a slim bar of its own). */
+export function AgentExamPanel({ agent, onClose, onReadDocs }: {
+  agent: { slug: string; name: string }
+  onClose?: () => void
+  onReadDocs?: (docs: string[]) => void
+}) {
   const [overview, setOverview] = useState<ExamOverview | null>(null)
   const [loadErr, setLoadErr] = useState('')
   const [exam, setExam] = useState<Exam | null>(null)
@@ -173,27 +195,23 @@ export function AgentExamDialog({ agent, onClose, onReadDocs }: {
     ? `${plural(overview.docs, 'document')} · answered by ${overview.model || 'its model'}`
     : 'Does it really know its documents?'
 
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 wide:items-center wide:p-4" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-label={`${agent.name}'s onboarding exam`}
-        className="relative flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-900 shadow-2xl wide:h-[min(90vh,56rem)] wide:max-w-5xl wide:rounded-2xl wide:border wide:border-zinc-800"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex shrink-0 items-center gap-3 border-b border-zinc-800 px-4 py-3 wide:px-5">
+  return (
+    <div className="flex h-full min-h-0 flex-col">
+        <div className={`flex shrink-0 items-center gap-3 border-b border-zinc-800 ${onClose ? 'px-4 py-3 wide:px-5' : 'px-4 py-2 wide:px-5'}`}>
           {view === 'start' && exam ? (
             <button onClick={() => setView('exam')} aria-label="Back to the exam"
               className="-ml-2 rounded-lg p-2 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
               <ArrowLeft className="h-5 w-5" />
             </button>
-          ) : (
+          ) : onClose && (
             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-violet-100 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
               <GraduationCap className="h-4 w-4" />
             </span>
           )}
           <div className="min-w-0">
-            <h3 className="truncate text-base font-semibold text-zinc-100">{agent.name}'s onboarding exam</h3>
+            {onClose
+              ? <h3 className="truncate text-base font-semibold text-zinc-100">{agent.name}'s onboarding exam</h3>
+              : <h3 className="truncate text-sm font-semibold text-zinc-200">{view === 'start' ? 'A new exam' : 'Exams'}</h3>}
             <p className="truncate text-xs text-zinc-500">{subtitle}</p>
           </div>
           <div className="ml-auto flex shrink-0 items-center gap-1">
@@ -203,10 +221,12 @@ export function AgentExamDialog({ agent, onClose, onReadDocs }: {
                 <Play className="h-3.5 w-3.5" /> New exam
               </button>
             )}
-            <button onClick={onClose} aria-label="Close" title="Close"
-              className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
-              <X className="h-5 w-5" />
-            </button>
+            {onClose && (
+              <button onClick={onClose} aria-label="Close" title="Close"
+                className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+                <X className="h-5 w-5" />
+              </button>
+            )}
           </div>
         </div>
 
@@ -242,9 +262,7 @@ export function AgentExamDialog({ agent, onClose, onReadDocs }: {
             />
           )}
         </div>
-      </div>
-    </div>,
-    document.body,
+    </div>
   )
 }
 
@@ -574,7 +592,8 @@ function ResultsPanel({ exam, busy, err, onAgain, onResume, onNew, onTeach, onRe
   )
 }
 
-function ScoreRing({ pct }: { pct: number | null }) {
+/** An exam score as a ring, coloured by how good it is. */
+export function ScoreRing({ pct }: { pct: number | null }) {
   const r = 34
   const c = 2 * Math.PI * r
   const tone = pct === null ? 'stroke-zinc-600' : pct >= 80 ? 'stroke-emerald-500' : pct >= 50 ? 'stroke-amber-500' : 'stroke-red-500'

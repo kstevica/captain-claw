@@ -91,9 +91,11 @@ function ReadDot({ read }: { read: boolean | null }) {
     : <span className="h-1.5 w-1.5 shrink-0 rounded-full ring-1 ring-inset ring-zinc-600" title="Not read — searchable" />
 }
 
-export function KnowledgeBrowser({ agent, phone = false, onClose, onSetup }: {
+export function KnowledgeBrowser({ agent, phone = false, embedded = false, onClose, onSetup }: {
   agent: { slug: string; name: string }
   phone?: boolean
+  /** Inside another dialog (the Onboarding page's Materials): no header of its own, and Escape doesn't close it. */
+  embedded?: boolean
   onClose: () => void
   /** Open the agent's Way of working — to give it documents, or read more of them. */
   onSetup?: () => void
@@ -291,8 +293,8 @@ export function KnowledgeBrowser({ agent, phone = false, onClose, onSetup }: {
   const hasKids = (s: KnowledgeSection) => !!detail && detail.sections[s.i + 1]?.level > s.level
 
   // Keys: / to search, ↑ ↓ through the sections, Escape out of a search, a pane, the dialog.
-  const state = useRef({ query, pane, visible, sectionI, phone })
-  useEffect(() => { state.current = { query, pane, visible, sectionI, phone } })
+  const state = useRef({ query, pane, visible, sectionI, phone, embedded })
+  useEffect(() => { state.current = { query, pane, visible, sectionI, phone, embedded } })
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement
@@ -301,7 +303,7 @@ export function KnowledgeBrowser({ agent, phone = false, onClose, onSetup }: {
         if (s.query) { setQuery(''); return }
         if (s.phone && s.pane === 'reader') { setPane('sections'); return }
         if (s.phone && s.pane === 'sections') { setPane('docs'); return }
-        onClose()
+        if (!s.embedded) onClose()
         return
       }
       if (typing) return
@@ -577,7 +579,7 @@ export function KnowledgeBrowser({ agent, phone = false, onClose, onSetup }: {
 
   return (
     <div className="flex h-full flex-col bg-zinc-950">
-      {header}
+      {!embedded && header}
       {toolbar}
       <div className="min-h-0 flex-1">{body}</div>
     </div>
