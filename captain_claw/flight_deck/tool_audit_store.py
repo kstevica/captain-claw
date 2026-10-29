@@ -338,6 +338,9 @@ class ToolAuditStore:
             if f.get(col):
                 clauses.append(f"{col} = ?")
                 args.append(f[col])
+        if f.get("not_source"):
+            clauses.append("(source IS NULL OR source != ?)")
+            args.append(f["not_source"])
         for col in ("member", "private"):
             if f.get(col) is not None:
                 clauses.append(f"{col} = ?")

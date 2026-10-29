@@ -241,9 +241,10 @@ DIGEST_ROWS = 5000
 def _agent_scope(who: dict[str, str]) -> dict[str, Any]:
     """This agent's calls in its owner's turns, none made while the turn held
     members' private data (their parameters may restate it, and what the
-    agent reads here reaches its reflections). The owner too: a slug reused
-    after an agent was removed doesn't inherit the old agent's record."""
-    return {"agent_slug": who["slug"], "owner_id": who["owner"], "member": 0, "private": 0}
+    agent reads here reaches its reflections), nor in an onboarding exam's
+    questions (which keep nothing). The owner too: a slug reused after an
+    agent was removed doesn't inherit the old agent's record."""
+    return {"agent_slug": who["slug"], "owner_id": who["owner"], "member": 0, "private": 0, "not_source": "exam"}
 
 
 @router.get("/fd/tool-audit/agent/mine")

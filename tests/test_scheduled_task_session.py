@@ -37,6 +37,7 @@ class FakeSM:
     def __init__(self, *sessions: Session):
         self.rows = {s.id: s for s in sessions}
         self.saved: list[str] = []
+        self.deleted: list[str] = []
         self.created = 0
 
     async def load_session(self, sid):
@@ -58,6 +59,10 @@ class FakeSM:
     async def save_session(self, session):
         self.saved.append(session.id)
         self.rows[session.id] = session
+
+    async def delete_session(self, sid):
+        self.deleted.append(sid)
+        return self.rows.pop(sid, None) is not None
 
 
 class TaskAgent:
@@ -229,3 +234,66 @@ async def test_a_task_turn_runs_in_its_session_names_it_and_mirrors_by_choice(
         assert notes and notes[0]["content"].startswith('[Scheduled task "Morning briefing" — ran in its own')
     else:
         assert not mirrored and not notes
+
+
+# ── an onboarding exam's question (exam_turn) ──
+
+async def test_an_exam_question_keeps_nothing_and_its_session_goes(monkeypatch):
+    from captain_claw import exam_turn
+
+    jobs: list[str] = []
+    for target in ("captain_claw.reflections.maybe_auto_reflect",
+                   "captain_claw.insights.maybe_extract_insights",
+                   "captain_claw.nervous_system.maybe_dream",
+                   "captain_claw.conversation_topics.maybe_classify_topics",
+                   "captain_claw.intentions_generator.maybe_auto_propose"):
+        async def _record(*a, _name=target, **k):
+            jobs.append(_name)
+        monkeypatch.setattr(target, _record)
+    monkeypatch.setattr(get_config().ui, "next_steps", False)
+
+    class ExamAgent(TaskAgent):
+        seen_content = ""
+        active = False
+
+        async def complete(self, content):
+            self.seen_content = content
+            self.active = exam_turn.active(self)
+            exam_turn.note_call(self, "knowledge", {"action": "search", "query": "refund", "_agent": self},
+                                True, "[1] Handbook › Refunds\n" + "x" * 9000)
+            self.last_usage = {"prompt_tokens": 900, "completion_tokens": 100, "total_tokens": 1000}
+            return await super().complete(content)
+
+    s = _server()
+    caller = FakeWS()
+    s._lane_sockets = {exam_turn.LANE: {caller}}
+    sm = FakeSM()
+    agent = ExamAgent(sm, reply="14 days.")
+    task = chat_handler.task_marker({"id": "exam-ab-q1", "name": "Onboarding exam", "mirror": False})
+    task = {**task, "previous": await chat_handler.enter_task_session(s, agent, task)}
+
+    await chat_handler._run_agent(
+        s, caller, agent, "What is our refund window?", None, lane=exam_turn.LANE, no_flow=True,
+        no_next_steps=True, no_rephrase=True,
+        automation=mail_authority.Authority(mode="automated", kind=exam_turn.KIND), fd_delivers=True, task=task)
+    for _ in range(10):
+        await asyncio.sleep(0)
+
+    assert agent.seen_content == "What is our refund window?"    # as a user would ask it: no automated-turn line
+    assert agent.active and not exam_turn.active(agent)           # an exam turn while it ran, not after
+    assert agent.seen_session == "new-1" and agent.session.id == "lane-AUTO"
+    assert sm.deleted == ["new-1"] and "new-1" not in sm.saved and "new-1" not in sm.rows
+    (reply,) = [f for f in caller.frames() if f.get("role") == "assistant"]
+    assert reply["content"] == "14 days." and reply["exam"]["usage"]["total_tokens"] == 1000
+    (call,) = reply["exam"]["lookups"]
+    assert call["tool"] == "knowledge" and call["args"] == {"action": "search", "query": "refund"}
+    assert call["ok"] and len(call["result"]) == 4000
+    assert jobs == []                                             # no reflection, insights, dreams, topics
+
+
+def test_the_exam_kind_is_known():
+    from captain_claw import turn_source
+
+    assert mail_authority.from_wire({"kind": "exam"}, default_kind="unknown").kind == "exam"
+    assert turn_source.from_automation("exam") == "exam"
+    assert turn_source.label_for("exam") == "Onboarding exams"

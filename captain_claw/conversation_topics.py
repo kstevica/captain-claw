@@ -942,9 +942,10 @@ def get_topics_manager() -> ConversationTopicsManager:
 
 def record_narration(agent: Any, text: str) -> None:
     """Buffer a narration blurb on the agent for the next classification pass."""
-    # PR D: a turn that read members' private data narrates nothing into topics.
-    from captain_claw import member_privacy
-    if member_privacy.private_turn(agent):
+    # PR D: a turn that read members' private data narrates nothing into topics;
+    # nor does an onboarding exam's question.
+    from captain_claw import exam_turn, member_privacy
+    if member_privacy.private_turn(agent) or exam_turn.active(agent):
         return
     from captain_claw.config import get_config
     if not get_config().conversation_topics.include_narration:

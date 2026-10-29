@@ -258,6 +258,17 @@ def test_private_turn_calls_are_never_read_back(env):
     assert asyncio.run(store.verify())["ok"]
 
 
+def test_onboarding_exam_calls_are_never_read_back(env):
+    client, store = env
+    _send(client, _rec(params={"command": "plain"}),
+          _rec(tool="knowledge", params={"action": "search", "query": "refund window"}, source="exam",
+               source_label="Onboarding exams"))
+    page = _mine(client)
+    assert [c["target"] for c in page["calls"]] == ["command=plain"] and page["total"] == 1
+    assert client.get("/fd/tool-audit/agent/digest", headers=A).json()["total"] == 1
+    assert sorted(r["source"] for r in asyncio.run(store.list({}))) == ["exam", "web"]   # people still see them
+
+
 def test_the_flag_is_chained_without_breaking_older_rows(tmp_path):
     import sqlite3
 

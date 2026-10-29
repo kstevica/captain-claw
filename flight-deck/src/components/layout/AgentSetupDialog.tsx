@@ -120,8 +120,9 @@ const STEPS: { id: Step; label: string }[] = [
 ]
 
 export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
-  /** The agent just created: its slug, display name and archetype role. */
-  agent: { slug: string; name: string; role?: string }
+  /** The agent just created: its slug, display name and archetype role — and documents it keeps to
+   *  read now (the exam's "Read this part"), staged as soon as it opens. */
+  agent: { slug: string; name: string; role?: string; readDocs?: string[] }
   /** Admin setting up an agent FOR that user (their model, their library). */
   asUser?: string
   ownerLabel?: string
@@ -162,10 +163,12 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
     getCurrentSetup(agent.slug, asUser).then(setCurrent).catch(() => setCurrent(null))
   }, [agent.slug, asUser])
   // A read started earlier goes on in the background: open on it — still reading, or ready to review.
+  // Not when opened to read documents it keeps (the exam's "Read this part"): that's a new read.
+  const toRead = !!agent.readDocs?.length
   useEffect(() => {
     let live = true
     getLatestRead(agent.slug, asUser).then((found) => {
-      if (!live || !found) return
+      if (!live || !found || toRead) return
       setOpening(false)
       if (found.state === 'running') {
         setJob(found)
@@ -179,7 +182,9 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
       }
     }).catch(() => undefined).finally(() => { if (live) setOpening(false) })
     return () => { live = false }
-  }, [agent.slug, asUser])
+  }, [agent.slug, asUser, toRead])
+  // A review the material changed under is gone: back to the material, never a blank step.
+  useEffect(() => { if (step === 'review' && !review) setStep('material') }, [step, review])
 
   useEffect(() => {
     if (step !== 'reading') return
@@ -289,6 +294,13 @@ export function AgentSetupDialog({ agent, asUser, ownerLabel, onClose }: {
       setAddingKnown(false)
     }
   }
+  const askedToRead = useRef(false)
+  useEffect(() => {
+    if (askedToRead.current || !agent.readDocs?.length) return
+    askedToRead.current = true
+    void addKnown(agent.readDocs)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const insertStarter = (text: string) => {
     const base = instructions.trimEnd()

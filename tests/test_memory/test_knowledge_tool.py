@@ -136,6 +136,9 @@ async def test_a_section_is_read_whole_across_its_parts_and_in_pages(workspace, 
     assert "page 2 of " in second
     missing = (await tool.execute(action="section", doc="manual", section="Nothing like it")).content
     assert missing.startswith("No section of Valuation manual matches")
+    # A part's own file, as a search hit names it, finds its document (an onboarding exam saw an agent try).
+    by_part = (await tool.execute(action="section", doc=parts[-1], section="Chapter 3: Topic 3")).content
+    assert by_part.startswith(head)
 
 
 async def test_outline_and_list_say_what_there_is(workspace):

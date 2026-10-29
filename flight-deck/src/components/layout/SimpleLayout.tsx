@@ -32,6 +32,7 @@ import {
   SlidersHorizontal,
   Trash2,
   BookOpen,
+  GraduationCap,
   BookMarked,
   ShieldCheck,
   Smartphone,
@@ -75,6 +76,7 @@ import { SharedDatastorePanel } from '../agents/SharedDatastorePanel'
 import { AgentConfigEditor } from '../agents/AgentConfigEditor'
 import { AgentSetupDialog } from './AgentSetupDialog'
 import { KnowledgeBrowser } from '../library/KnowledgeBrowser'
+import { AgentExamDialog } from './AgentExamDialog'
 import { ArchetypeSpawnDialog, type SetupRequest } from './ArchetypeSpawnDialog'
 import { KioskByokDialog } from './KioskByokDialog'
 import { useByokStore } from '../../stores/byokStore'
@@ -239,6 +241,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   // An agent's knowledge, to browse (its ⋯ menu → Knowledge).
   const [knowledgeFor, setKnowledgeFor] = useState<{ slug: string; name: string } | null>(null)
+  const [examFor, setExamFor] = useState<{ slug: string; name: string } | null>(null)
   // Agents just spawned or powered on: Flight Deck lists one as running the
   // moment it launches, seconds before its web server binds — a chat opened
   // then fails. They stay "starting" until they answer.
@@ -635,6 +638,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onSelect: () => setKnowledgeFor({ slug: a.startKey, name: a.name }) })
         items.push({ icon: Wand2, label: 'Way of working', hint: 'Your instructions and documents, as its rules, skills and knowledge',
           onSelect: () => setSetupFor({ slug: a.startKey, name: a.name, role: '' }) })
+        items.push({ icon: GraduationCap, label: 'Onboarding exam', hint: 'Questions from its documents — does it really know them?',
+          onSelect: () => setExamFor({ slug: a.startKey, name: a.name }) })
       }
       items.push(
         { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', onSelect: () => setAgentSettingsId(a.id) },
@@ -793,6 +798,14 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         />
       )}
       {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
+      {examFor && (
+        <AgentExamDialog
+          key={examFor.slug}
+          agent={examFor}
+          onClose={() => setExamFor(null)}
+          onReadDocs={(readDocs) => { setSetupFor({ slug: examFor.slug, name: examFor.name, role: '', readDocs }); setExamFor(null) }}
+        />
+      )}
       {knowledgeFor && (
         <KioskWideDialog label={`${knowledgeFor.name}'s knowledge`} phone={isMobile} onClose={() => setKnowledgeFor(null)} widest>
           <KnowledgeBrowser
