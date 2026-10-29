@@ -362,12 +362,25 @@ that these those their there than then per each about around roughly approximate
 least into onto out up down after before between during when while which who whom whose what how why""".split())
 
 
+_DECIMAL_COMMA = re.compile(r"(?<=\d),(?=(?:\d{1,2}|\d{4,})(?!\d))")
+_FRACTIONS = {"½": ".5", "¼": ".25", "¾": ".75"}
+
+
+def _decimals(text: str) -> str:
+    """Decimals written one way: a decimal comma as a point (0,28 is 0.28 —
+    a comma before three digits stays a thousands one: 3,143) and a fraction
+    sign as its decimal (6½ is 6.5)."""
+    text = _DECIMAL_COMMA.sub(".", text)
+    return re.sub(r"(\d?)([½¼¾])", lambda m: (m[1] or "0") + _FRACTIONS[m[2]], text)
+
+
 def _detail_parts(detail: str) -> tuple[list[str], list[str]]:
     """What a detail is found by: its figures (a year range's short end in
-    full — 2005–07 is 2005 and 2007) and its names (capitalised words but
-    the first, without a possessive; not a short acronym, which a reply
-    shortens on its own: USD, COGS). The rest is the reply's own wording."""
-    detail = _YEARS.sub(lambda m: f"{m[1]}{m[2]}{m[3]}{m[4]}{m[1]}{m[5]}{m[6]}", detail)
+    full — 2005–07 is 2005 and 2007; decimals as _decimals writes them) and
+    its names (capitalised words but the first, without a possessive; not a
+    short acronym, which a reply shortens on its own: USD, COGS). The rest
+    is the reply's own wording."""
+    detail = _decimals(_YEARS.sub(lambda m: f"{m[1]}{m[2]}{m[3]}{m[4]}{m[1]}{m[5]}{m[6]}", detail))
     figures = [f.strip(".,") for f in _FIGURE.findall(detail)]
     names = []
     for word in _WORD.findall(detail)[1:]:
@@ -422,19 +435,30 @@ def checkable(detail: str) -> bool:
     return any(_detail_parts(detail))
 
 
+_CLAUSE = re.compile(r"\s[—–]\s|;\s")   # "16% a year — double the 6½% long-run average"
+
+
 def check_details(details: list[str], corpus: dict[str, list[str]]) -> list[dict]:
     """Each detail the grader found outside the question's passage, with
     where else it is: ``documents`` (anywhere in them), ``lessons`` (a fact
     or rule it was taught), ``looked_up`` (what its lookups returned) — or
-    "" when nowhere: made up. One with no figure or name to check it by (the
-    reply putting what it read its own way) is left out."""
-    return [{"text": d, "found": next((where for where, texts in corpus.items() if found_in(d, texts)), "")}
-            for d in details if checkable(d)]
+    "" when nowhere: made up. One that joins facts (" — ", "; ") is found
+    when each of them is, wherever. One with no figure or name to check it
+    by (the reply putting what it read its own way) is left out."""
+    out = []
+    for d in details:
+        if not checkable(d):
+            continue
+        wheres = [next((where for where, texts in corpus.items() if found_in(c, texts)), "")
+                  for c in _CLAUSE.split(d) if checkable(c)]
+        out.append({"text": d, "found": wheres[0] if all(wheres) else ""})
+    return out
 
 
 def _checked(text: str) -> str:
-    # A converted PDF's decimal point can come out as "300 _._ 0".
-    return re.sub(r"(?<=\d) _\._ (?=\d)", ".", text.casefold())
+    # A converted PDF's decimal point can come out as "300 _._ 0", and 6½ as "6 [1] /2".
+    text = re.sub(r"(?<=\d) _\._ (?=\d)", ".", text.casefold())
+    return _decimals(re.sub(r"(?<=\d) ?\[1\] ?/ ?2\b", ".5", text))
 
 
 def _corpus(srcs: list[Source], lessons: list[str], q: dict) -> dict[str, list[str]]:
@@ -506,10 +530,14 @@ def settle(grade: dict, details: list[dict]) -> dict:
     """A grade with its details checked (``check_details``): made up only
     when one is found nowhere — the grader sees one passage, and a figure
     from another chapter, or a fact the agent was taught, is its owner's
-    too. A right answer that makes something up is only partly right."""
+    too. A right answer that makes something up is only partly right; a
+    partly right one with no point missing and nothing made up is right —
+    the grader marked it down for detail it was told not to."""
     out = {**grade, "details": details}
     if details:
         out["made_up"] = any(not d["found"] for d in details)
+    if out["verdict"] == "partly" and not out["missing"] and not out["made_up"]:
+        out["verdict"] = "right"
     if out["made_up"] and out["verdict"] == "right":
         out["verdict"] = "partly"
     return out
