@@ -78,10 +78,12 @@ from captain_claw.flight_deck import agent_preset_select as psel
 from captain_claw.flight_deck import agent_preset_tables as ptables
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.flight_deck.file_library import (
+    ModelReply,
     _auth_enabled,
     _quota_spent,
     _resolve_tier,
-    call_model,
+    cut_off,
+    model_reply,
     reply_json,
 )
 from captain_claw.logging import get_logger
@@ -126,6 +128,9 @@ _AGENT_READY_S = 90.0                  # an agent just created, or being woken, 
 _PACE_TPM = 40_000                     # a read's tokens a minute, at most (FD_SETUP_TOKENS_PER_MIN; 0: unpaced)
 _PACE_GAP = 3.0                        # seconds between two calls' starts, at least
 _RETRY_NUDGE = "Reply now with the JSON object only: no thinking aloud, no prose."
+_READ_EFFORT = "off"                   # a thinking model on a step (FD_SETUP_REASONING: a level, or auto)
+_LEARN_MIN_CHARS = 8000                # a prompt this long, at least, teaches the read the model's count
+_RECUT = (0.87, 1.3)                   # the model's count this far off the steps' estimate: the rest cut again
 _TTL = 24 * 3600                       # a prepared preset nobody created waits this long
 _BLOCK_CAP = 5000                      # the rules block in the agent's instructions
 _MAX_INSTRUCTIONS_TOTAL = 64000        # AgentConfig.fleet_instructions' own cap
@@ -514,8 +519,18 @@ def _chapters(text: str) -> str:
     return line
 
 
+def material_cpt(docs: list[dict]) -> float:
+    """The characters a token of the documents to read, about
+    (``pdocs.chars_per_token``, each weighed by its length)."""
+    texts = [d["text"] for d in docs if d.get("read", True) and d.get("text")]
+    chars = sum(len(t) for t in texts)
+    if not chars:
+        return float(pdocs.CHARS_PER_TOKEN)
+    return chars / sum(len(t) / pdocs.chars_per_token(t) for t in texts)
+
+
 def plan_steps(instructions: str, docs: list[dict], step_tok: int, budget: str = psel.DEFAULT_BUDGET,
-               focus: str = "") -> tuple[list[dict], list[str]]:
+               focus: str = "", cpt: float = pdocs.CHARS_PER_TOKEN) -> tuple[list[dict], list[str]]:
     """The steps the model reads the material in — each at most *step_tok*
     tokens, small documents sharing one, a long one across many, the
     instructions in the first — and what the person should know about what
@@ -524,9 +539,10 @@ def plan_steps(instructions: str, docs: list[dict], step_tok: int, budget: str =
     read front to back: its most instructive sections are (closest to
     *focus*, when one is given — agent_preset_select), in document order,
     the first of each document with its chapters, so the model knows what
-    the whole of it covers."""
-    limit = step_tok * pdocs.CHARS_PER_TOKEN
-    budget_chars = psel.BUDGETS.get(budget, psel.BUDGETS[psel.DEFAULT_BUDGET]) * pdocs.CHARS_PER_TOKEN
+    the whole of it covers. *cpt*: the material's characters a token
+    (``material_cpt``)."""
+    limit = int(step_tok * cpt)
+    budget_chars = int(psel.BUDGETS.get(budget, psel.BUDGETS[psel.DEFAULT_BUDGET]) * cpt)
     reading = [d for d in docs if d.get("read", True)]
     notes: list[str] = []
     pieces: list[dict] = []
@@ -560,7 +576,7 @@ def plan_steps(instructions: str, docs: list[dict], step_tok: int, budget: str =
                     notes.append(f"{d['name']}: none of it{' that was left' if s['before'] else ''} fitted in the "
                                  "budget, so it wasn't read. It is still kept whole for the agent to search.")
             elif s["chars"] < s["left"]:
-                size = f"about {max(1, s['chars'] // pdocs.CHARS_PER_TOKEN // 1000)}k tokens"
+                size = f"about {max(1, int(s['chars'] / cpt) // 1000)}k tokens"
                 what = (f"{s['sections']}{more} of its {s['of']} sections{earlier}"
                         if s["before"] + s["sections"] < s["of"]
                         else f"about {max(1, round(100 * s['chars'] / s['left']))}% of what was left of it")
@@ -569,17 +585,18 @@ def plan_steps(instructions: str, docs: list[dict], step_tok: int, budget: str =
             elif s["before"]:
                 notes.append(f"{d['name']}: read the {s['sections']} sections not read before — now all of it is.")
 
-    return _pack(pieces, limit, len(instructions.encode("utf-8")), bool(instructions)), notes
+    return _pack(pieces, limit, len(instructions), bool(instructions)), notes
 
 
 def _pack(pieces: list[dict], limit: int, lead: int = 0, instructions: bool = False) -> list[dict]:
-    """*pieces* in steps of at most *limit* bytes — the first with *lead*
-    bytes of instructions in it — each labelled with what it reads."""
+    """*pieces* in steps of at most *limit* characters — the first with
+    *lead* characters of instructions in it — each labelled with what it
+    reads."""
     steps: list[dict] = []
     cur: list[dict] = []
     size = lead
     for piece in pieces:
-        piece_size = len(piece["text"].encode("utf-8"))
+        piece_size = len(piece["text"])
         if cur and size + piece_size > limit:
             steps.append({"pieces": cur})
             cur, size = [], 0
@@ -603,16 +620,17 @@ def _pack(pieces: list[dict], limit: int, lead: int = 0, instructions: bool = Fa
     return steps
 
 
-def refit(steps: list[dict], first: int, step_tok: int) -> list[dict]:
+def refit(steps: list[dict], first: int, step_tok: int, cpt: float = pdocs.CHARS_PER_TOKEN) -> list[dict]:
     """The steps from *first* (1-based) on, cut again for a reader that
     takes less in one step — a read that went on after a restart with
-    another model: a piece too big for it in parts, all of them packed anew.
-    The steps before *first* stay as they are."""
-    limit = step_tok * pdocs.CHARS_PER_TOKEN
+    another model — or to the model's own count of the material's tokens
+    (*cpt*, characters a token): a piece too big in parts, all of them
+    packed anew. The steps before *first* stay as they are."""
+    limit = int(step_tok * cpt)
     pieces: list[dict] = []
     for st in steps[first - 1:]:
         for p in st["pieces"]:
-            if len(p["text"].encode("utf-8")) <= limit:
+            if len(p["text"]) <= limit:
                 pieces.append(p)
                 continue
             cut = pdocs.split_text(p["text"], limit)
@@ -753,6 +771,9 @@ class ReadJob:
     steps: int = 0
     current: str = ""
     tokens: int = 0
+    cpt: float = 0.0                # the material's characters a token, as the steps are cut
+    seen_chars: int = 0             # prompts the model counted (_learn) …
+    seen_tokens: int = 0            # … and its count of them
     started: float = field(default_factory=time.time)
     finished: float | None = None
     error: str = ""
@@ -845,12 +866,14 @@ def _find(key: str, preset_id: str) -> ReadJob | None:
     return job
 
 
-def _save_plan(job: ReadJob, steps: list[dict], notes: list[str], docs: list[dict], step_tok: int) -> None:
+def _save_plan(job: ReadJob, steps: list[dict], notes: list[str], docs: list[dict], step_tok: int,
+               cpt: float) -> None:
     """The steps as planned — their text, each piece's document by its place
-    in the preset, the step size they were cut to — so a read that goes on
-    after a restart reads the same."""
+    in the preset, the step size they were cut to and the characters a
+    token they were cut by — so a read that goes on after a restart reads
+    the same."""
     index = {id(d): n for n, d in enumerate(docs)}
-    plan = {"notes": notes, "step_tokens": step_tok, "steps": [
+    plan = {"notes": notes, "step_tokens": step_tok, "cpt": round(cpt, 3), "steps": [
         {"label": st["label"], "pieces": [{**{k: v for k, v in p.items() if k != "doc"}, "doc": index[id(p["doc"])]}
                                           for p in st["pieces"]]} for st in steps]}
     folder = _folder(job)
@@ -859,7 +882,7 @@ def _save_plan(job: ReadJob, steps: list[dict], notes: list[str], docs: list[dic
         _write_json(folder / _PLAN_FILE, plan)
 
 
-def _load_plan(job: ReadJob, docs: list[dict]) -> tuple[list[dict], list[str], int] | None:
+def _load_plan(job: ReadJob, docs: list[dict]) -> tuple[list[dict], list[str], int, float] | None:
     plan = _read_json(_folder(job) / _PLAN_FILE)
     if not isinstance(plan, dict):
         return None
@@ -867,9 +890,10 @@ def _load_plan(job: ReadJob, docs: list[dict]) -> tuple[list[dict], list[str], i
         steps = [{"label": st["label"], "pieces": [{**p, "doc": docs[int(p["doc"])]} for p in st["pieces"]]}
                  for st in plan["steps"]]
         step_tok = int(plan.get("step_tokens") or 0)
+        cpt = float(plan.get("cpt") or pdocs.CHARS_PER_TOKEN)   # a plan from before: cut at 4
     except (KeyError, IndexError, TypeError, ValueError):
         return None
-    return steps, [str(n) for n in plan.get("notes") or []], step_tok
+    return steps, [str(n) for n in plan.get("notes") or []], step_tok, cpt
 
 
 def _save_part(job: ReadJob, n: int, part: dict | None) -> None:
@@ -1108,9 +1132,19 @@ async def _count(owner_id: str, tokens: int, byok: bool) -> None:
         log.debug("agent preset: token report failed", exc_info=True)
 
 
+def read_effort() -> str | None:
+    """How hard a thinking model thinks on a reading step or the merge: off —
+    it extracts, it needn't deliberate, and its thoughts count against the
+    answer's max_tokens (a model that can't stop thinking takes its lowest
+    level) — or FD_SETUP_REASONING's level; None ("auto") leaves the model's
+    own."""
+    from captain_claw.llm import reasoning
+    return reasoning.normalize_level(os.environ.get("FD_SETUP_REASONING", "").strip() or _READ_EFFORT)
+
+
 async def _agent_complete(reader: dict, system: str, prompt: str, owner_id: str,
-                          max_tokens: int) -> tuple[str, int]:
-    """One call to the agent's own model, through its REST: (reply, tokens)."""
+                          max_tokens: int) -> ModelReply:
+    """One call to the agent's own model, through its REST."""
     import httpx
 
     from captain_claw.flight_deck import server as srv
@@ -1120,13 +1154,15 @@ async def _agent_complete(reader: dict, system: str, prompt: str, owner_id: str,
     if not port or not srv._process_is_alive(slug):
         raise _AgentGoneError("not running")
     agent_idle.touch(slug)
+    effort = read_effort()
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(2 * _CALL_TIMEOUT + 30, connect=5.0),
                                      trust_env=False) as client:
             resp = await client.post(
                 f"http://127.0.0.1:{port}/api/llm/complete", params={"token": token} if token else {},
                 json={"messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}],
-                      "temperature": 0.2, "max_tokens": max_tokens, "timeout": _CALL_TIMEOUT})
+                      "temperature": 0.2, "max_tokens": max_tokens, "timeout": _CALL_TIMEOUT,
+                      **({"reasoning_effort": effort} if effort else {})})
     except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
         raise _AgentGoneError("not answering") from exc
     finally:
@@ -1144,26 +1180,31 @@ async def _agent_complete(reader: dict, system: str, prompt: str, owner_id: str,
     tokens = int(usage.get("total_tokens") or 0) or (
         int(usage.get("prompt_tokens") or 0) + int(usage.get("completion_tokens") or 0))
     await _count(owner_id, tokens, bool(reader.get("byok")))
-    return str(data.get("content") or ""), tokens
+    return ModelReply(str(data.get("content") or ""), tokens, int(usage.get("prompt_tokens") or 0),
+                      str(data.get("finish_reason") or ""), str(data.get("reasoning") or ""))
 
 
-async def _call(reader: dict, system: str, prompt: str, owner_id: str, job: ReadJob, max_tokens: int) -> str:
+async def _call(reader: dict, system: str, prompt: str, owner_id: str, job: ReadJob,
+                max_tokens: int) -> ModelReply:
     """One model call: the agent's model, or the owner's tier. A server that
     says "not now" (a rate limit, overloaded) is waited out — for as long as
     it asks, else 15 s, 30 s, then a minute at a time, some 5 minutes in
-    all; an agent that stops answering hands over to the owner's model."""
+    all; an agent that stops answering hands over to the owner's model.
+    Either thinks as hard as ``read_effort`` says."""
     waits = iter(_WAITS)
-    tokens_in = (len(system) + len(prompt)) // pdocs.CHARS_PER_TOKEN
+    tokens_in = int((len(system) + len(prompt)) / (job.cpt or pdocs.CHARS_PER_TOKEN))
     while True:
         await _pace(reader, job, tokens_in + min(max_tokens, 2000))  # the reply, as one usually runs
         try:
             if reader.get("agent"):
-                content, tokens = await _agent_complete(reader, system, prompt, owner_id, max_tokens)
+                reply = await _agent_complete(reader, system, prompt, owner_id, max_tokens)
             else:
-                content, tokens = await call_model(reader, system, prompt, owner_id, max_tokens=max_tokens,
-                                                   request_timeout=_CALL_TIMEOUT)
-            job.tokens += int(tokens or 0)
-            return content
+                from captain_claw.llm import reasoning
+                with reasoning.call_effort(read_effort()):
+                    reply = await model_reply(reader, system, prompt, owner_id, max_tokens=max_tokens,
+                                              request_timeout=_CALL_TIMEOUT)
+            job.tokens += int(reply.tokens or 0)
+            return reply
         except asyncio.CancelledError:
             raise
         except _AgentGoneError as exc:
@@ -1189,16 +1230,58 @@ async def _call(reader: dict, system: str, prompt: str, owner_id: str, job: Read
                 job.waiting = None
 
 
+class _CutOffError(Exception):
+    """The model's answer stopped at its max_tokens, twice, without the JSON:
+    what happened, after the model's name ("used up its … thinking")."""
+
+
+def _cut_why(reply: ModelReply, max_tokens: int) -> str:
+    # Its thoughts, or an answer far shorter than its room would hold (some
+    # 3–4 characters a token): the rest went on thinking — which not every
+    # provider hands back (Ollama's don't reach the reply).
+    if reply.reasoning or len(reply.text) < 2 * max_tokens:
+        return f"used up its {max_tokens:,} tokens thinking before it finished answering"
+    return f"ran past {max_tokens:,} tokens in its answer, which was cut off"
+
+
+def _learn(job: ReadJob, chars: int, prompt_tokens: int) -> None:
+    """A prompt of *chars* characters the model counted as *prompt_tokens*:
+    the read cuts its next steps by what it has learned (``learned_cpt``).
+    A count far off the estimate — a server that leaves out what it had
+    cached — teaches nothing."""
+    expected = chars / (job.cpt or pdocs.CHARS_PER_TOKEN)
+    if chars >= _LEARN_MIN_CHARS and prompt_tokens > 0 and 0.5 <= expected / prompt_tokens <= 2.0:
+        job.seen_chars += chars
+        job.seen_tokens += prompt_tokens
+
+
+def learned_cpt(job: ReadJob) -> float | None:
+    """The characters a token of the read's prompts, in the model's own count."""
+    if not job.seen_tokens:
+        return None
+    return min(6.0, max(1.5, job.seen_chars / job.seen_tokens))
+
+
 async def _ask(reader: dict, system: str, prompt: str, owner_id: str, job: ReadJob) -> dict | None:
     """One step's model call — again, with room and a nudge, when the reply
     isn't JSON (a reasoning model that thought past the budget, prose around
-    it). None when it never is."""
+    it). None when it never is; :class:`_CutOffError` when that's because
+    the answer was cut off. The first call's prompt, in the model's count,
+    teaches the read its tokens (``_learn``)."""
     for attempt in range(2):
-        content = await _call(reader, system, prompt if attempt == 0 else f"{prompt}\n\n{_RETRY_NUDGE}",
-                              owner_id, job, _MAX_TOKENS if attempt == 0 else _retry_tokens(reader))
-        got = _parse_part(content)
+        max_tokens = _MAX_TOKENS if attempt == 0 else _retry_tokens(reader)
+        reply = await _call(reader, system, prompt if attempt == 0 else f"{prompt}\n\n{_RETRY_NUDGE}",
+                            owner_id, job, max_tokens)
+        if attempt == 0:
+            _learn(job, len(system) + len(prompt), reply.prompt_tokens)
+        got = _parse_part(reply.text)
         if got is not None:
             return got
+        if cut_off(reply):
+            log.warning("agent preset: the answer was cut off", model=reader.get("model"), max_tokens=max_tokens,
+                        answer_chars=len(reply.text), thinking_chars=len(reply.reasoning))
+    if cut_off(reply):
+        raise _CutOffError(_cut_why(reply, max_tokens))
     return None
 
 
@@ -1393,7 +1476,7 @@ async def merge_parts(reader: dict, parts: list[dict], owner_id: str, job: ReadJ
         return parts[0]
     limits = limits or LIMITS
     folded = folded if folded is not None else fold(parts)
-    got_view = _merge_payload(folded, step_tokens(reader) * pdocs.CHARS_PER_TOKEN, limits)
+    got_view = _merge_payload(folded, int(step_tokens(reader) * (job.cpt or pdocs.CHARS_PER_TOKEN)), limits)
     if got_view is None:
         log.info("agent preset: too much for one merge call, the fold stands", parts=len(parts))
         return normalise(folded, limits)
@@ -1462,10 +1545,10 @@ def _finish(preset: dict, docs: list[dict], warnings: list[str], model: str, ste
     }
 
 
-def read_tokens(steps: list[dict], read: set[int]) -> int:
+def read_tokens(steps: list[dict], read: set[int], cpt: float = pdocs.CHARS_PER_TOKEN) -> int:
     """The tokens of material in the steps in *read* (1-based)."""
-    return sum(len(p["text"]) for n, st in enumerate(steps, 1) if n in read
-               for p in st["pieces"]) // pdocs.CHARS_PER_TOKEN
+    return int(sum(len(p["text"]) for n, st in enumerate(steps, 1) if n in read
+                   for p in st["pieces"]) / cpt)
 
 
 async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instructions: str,
@@ -1478,7 +1561,10 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
     skipped; the person's allowance running out, or the model's server
     staying busy, stops the reading but keeps what was found. A read that
     Flight Deck stopped mid-way (``resume_reads``) plans nothing again and
-    reads no step twice."""
+    reads no step twice. Steps are cut to the material's tokens as
+    estimated (``material_cpt``), then — once the model has said how it
+    counts them, and that is well off — the rest are cut again to its
+    count."""
     try:
         if reader and reader.get("agent") and not await _agent_up(reader, job):
             if not _fall_back(reader, job, "{name} didn't answer, so {model} read your material "
@@ -1491,14 +1577,17 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
         if planned is not None and planned[2] > step_tok:
             # Going on with a model that takes less at once: nothing read yet, plan again; else cut the rest smaller.
             planned = None if not done else (
-                refit(planned[0], max(done) + 1, step_tok), planned[1], step_tok)
+                refit(planned[0], max(done) + 1, step_tok, planned[3]), planned[1], step_tok, planned[3])
             if planned is not None:
-                await asyncio.to_thread(_save_plan, job, planned[0], planned[1], docs, step_tok)
+                await asyncio.to_thread(_save_plan, job, planned[0], planned[1], docs, step_tok, planned[3])
         if planned is None:
-            steps, notes = await asyncio.to_thread(plan_steps, instructions, docs, step_tok, job.budget, job.focus)
-            await asyncio.to_thread(_save_plan, job, steps, notes, docs, step_tok)
+            cpt = await asyncio.to_thread(material_cpt, docs)
+            steps, notes = await asyncio.to_thread(plan_steps, instructions, docs, step_tok, job.budget, job.focus,
+                                                   cpt)
+            await asyncio.to_thread(_save_plan, job, steps, notes, docs, step_tok, cpt)
         else:
-            steps, notes, _ = planned
+            steps, notes, _, cpt = planned
+        job.cpt = cpt
         warnings = warnings + notes
         job.steps = len(steps)
         save_job(job)
@@ -1507,7 +1596,10 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
         failed: str = ""
         stopped = False
         system = _PROMPT_FILE.read_text(encoding="utf-8")
-        for n, step in enumerate(steps, 1):
+        n = 0
+        while n < len(steps):
+            n += 1
+            step = steps[n - 1]
             if n in done:
                 if done[n] is None:
                     warnings.append(f"Part {n} of {len(steps)} ({step['label']}) couldn't be read by the model, "
@@ -1521,8 +1613,19 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
                                 "rest wasn't read. The documents are still kept whole for the agent.")
                 stopped = True
                 break
+            seen = learned_cpt(job)
+            if seen and not _RECUT[0] <= seen / cpt <= _RECUT[1]:
+                # The model counts this material otherwise than estimated: the rest cut again to its count.
+                log.info("agent preset: steps cut again to the model's count", model=(reader or {}).get("model"),
+                         estimated=round(cpt, 2), counted=round(seen, 2), step=n)
+                cpt = job.cpt = seen
+                steps = refit(steps, n, step_tok, cpt)
+                step = steps[n - 1]
+                job.steps = len(steps)
+                await asyncio.to_thread(_save_plan, job, steps, notes, docs, step_tok, cpt)
             job.step, job.current = n, step["label"]
             save_job(job)
+            why = ""
             try:
                 got = await _ask(reader, system, step_prompt(arch, instructions, step, n, len(steps)),
                                  owner_id, job)
@@ -1541,12 +1644,14 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
                 break
             except Exception as exc:
                 log.warning("agent preset: a step failed", step=n, model=(reader or {}).get("model"), error=str(exc))
-                failed = failed or str(exc)
+                if isinstance(exc, _CutOffError):
+                    why = f"{(reader or {}).get('model') or 'the model'} {exc}"
+                failed = failed or (f"it {exc}." if isinstance(exc, _CutOffError) else str(exc))
                 got = None
             _save_part(job, n, got)
             if got is None:
-                warnings.append(f"Part {n} of {len(steps)} ({step['label']}) couldn't be read by the model, "
-                                "so nothing was taken from it.")
+                warnings.append(f"Part {n} of {len(steps)} ({step['label']}) couldn't be read"
+                                f"{': ' + why if why else ' by the model'}, so nothing was taken from it.")
                 continue
             parts.append(got)
             read.add(n)
@@ -1560,7 +1665,7 @@ async def run_read(job: ReadJob, reader: dict | None, arch: dict | None, instruc
             save_job(job)
             folded = await asyncio.to_thread(fold, parts)
             found = {g: len(folded[g]) for g in _ITEM_KEY}
-            limits = limits_for(read_tokens(steps, read))
+            limits = limits_for(read_tokens(steps, read, cpt))
             preset = (normalise(folded, limits) if stopped
                       else await merge_parts(reader, parts, owner_id, job, limits, folded))
         else:
@@ -2667,7 +2772,8 @@ async def stage_knowledge(slug: str, body: KnowledgeStage, user: dict = Depends(
         usage = _USAGE_OF_LABEL.get(str(e.get("use") or "").lower(), "auto")
         staged = await asyncio.to_thread(
             pdocs.stage, root, name, text, "knowledge", slug, None,
-            {"tokens": pdocs.tokens_of(left), "read_keys": sorted(done), "summary": str(e.get("summary") or "")})
+            {"tokens": pdocs.tokens_of(left, pdocs.chars_per_token(text)), "read_keys": sorted(done),
+             "summary": str(e.get("summary") or "")})
         out.append({**staged, "title": str(e.get("title") or name), "usage": usage,
                     "read": {**_read_state(state or None), "sections": read, "of": of}})
     return {"docs": out, "warnings": warnings}

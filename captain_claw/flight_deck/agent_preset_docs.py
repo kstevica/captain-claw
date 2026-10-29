@@ -185,8 +185,51 @@ def pages_of(text: str) -> tuple[int, bool]:
     return max(1, math.ceil(len(text) / CHARS_PER_PAGE)), False
 
 
-def tokens_of(chars: int) -> int:
-    return math.ceil(chars / CHARS_PER_TOKEN)
+def tokens_of(chars: int, cpt: float = CHARS_PER_TOKEN) -> int:
+    """*chars* characters in tokens, at *cpt* characters a token."""
+    return math.ceil(chars / cpt)
+
+
+# What a model counts as a token, roughly: a word of English one (a long
+# one more), a word with accented letters about one per 4 letters, one in
+# another script about one per 6, Chinese or Japanese about two characters,
+# a digit, a mark or a line break most of one. Within −15%…+9% of Qwen's
+# count on English and technical text (mostly 5%), a little over on German,
+# Spanish or Russian; a language its tokenizer knows less well (Croatian:
+# ~40% more tokens) is learned from the model's own counts as the read goes
+# (agent_preset.run_read).
+_PIECE = re.compile(r"[^\W\d_]+|\d|\n+|[^\w\s]")
+_SAMPLE_CHARS = 200_000
+
+
+def estimate_tokens(text: str) -> int:
+    n = 0.0
+    for m in _PIECE.finditer(text):
+        s = m.group()
+        if not s[0].isalpha():
+            n += 0.8
+        elif s.isascii():
+            n += 1 + len(s) // 9
+        elif ord(s[0]) >= 0x2E80:       # CJK, kana, hangul
+            n += len(s) / 2
+        elif ord(s[0]) < 0x0250:        # Latin with accents
+            n += 1 + len(s) / 4
+        else:
+            n += 1 + len(s) // 6
+    return math.ceil(n)
+
+
+def chars_per_token(text: str) -> float:
+    """How many of *text*'s characters make a token, about (1.5–6), from a
+    sample spread over all of it; CHARS_PER_TOKEN when there's too little
+    to tell."""
+    if len(text) > _SAMPLE_CHARS:
+        every, take = len(text) // 20, _SAMPLE_CHARS // 20
+        text = "".join(text[i:i + take] for i in range(0, len(text), every))
+    tokens = estimate_tokens(text)
+    if len(text) < 200 or not tokens:
+        return float(CHARS_PER_TOKEN)
+    return min(6.0, max(1.5, len(text) / tokens))
 
 
 # ── Splitting ─────────────────────────────────────────────────────────
@@ -307,7 +350,7 @@ def stage(root: Path, name: str, text: str, origin: str, agent: str = "", raw: b
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "text.txt").write_text(text, encoding="utf-8")
     meta = {"id": doc_id, "name": name, "origin": origin, "created": time.time(),
-            "pages": pages, "pages_exact": exact, "chars": len(text), "tokens": tokens_of(len(text)),
+            "pages": pages, "pages_exact": exact, "chars": len(text), "tokens": tokens_of(len(text), chars_per_token(text)),
             "sections": len(outline(text.strip())),
             "truncated": truncated, **({"agent": agent} if agent else {})}
     if raw and ptables.is_spreadsheet(name):

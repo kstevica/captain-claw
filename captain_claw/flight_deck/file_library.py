@@ -42,7 +42,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, Response
@@ -631,6 +631,21 @@ class PictureRefusedError(RuntimeError):
     without it, so the reply says nothing about the picture."""
 
 
+class ModelReply(NamedTuple):
+    """One model call's answer, and what it says about how it went."""
+
+    text: str
+    tokens: int                # spent, prompt and reply: toward the owner's day
+    prompt_tokens: int = 0     # the server's own count of what it was sent (0: it didn't say)
+    finish_reason: str = ""    # "length" / "max_tokens": cut off at max_tokens
+    reasoning: str = ""        # a thinking model's thoughts, when its server sends them apart
+
+
+def cut_off(reply: ModelReply) -> bool:
+    """The answer stopped at its max_tokens, not where the model ended it."""
+    return reply.finish_reason.strip().lower() in ("length", "max_tokens")
+
+
 async def call_model(tier: dict, system: str, user: str, owner_id: str,
                      max_tokens: int = _MAX_TOKENS,
                      request_timeout: float | None = None,
@@ -640,8 +655,20 @@ async def call_model(tier: dict, system: str, user: str, owner_id: str,
     the provider's own (Ollama's is 120s) for a long background call.
     ``images`` go with the user message (``EncodedImage``); raises
     :class:`PictureRefusedError` when the server would not take them."""
+    reply = await model_reply(tier, system, user, owner_id, max_tokens=max_tokens,
+                              request_timeout=request_timeout, images=images)
+    return reply.text, reply.tokens
+
+
+async def model_reply(tier: dict, system: str, user: str, owner_id: str,
+                      max_tokens: int = _MAX_TOKENS,
+                      request_timeout: float | None = None,
+                      images: list | None = None) -> ModelReply:
+    """:func:`call_model`, with what the server said about the call. A
+    reasoning level set around it (``reasoning.call_effort``) reaches the
+    request."""
     from captain_claw.flight_deck.basna_routes import tier_api_key
-    from captain_claw.llm import Message, create_provider
+    from captain_claw.llm import Message, create_provider, is_reasoning_backfill_placeholder
     provider = create_provider(
         provider=tier.get("provider", "anthropic"), model=tier.get("model", ""),
         base_url=tier.get("base_url") or None, api_key=tier_api_key(tier),
@@ -668,7 +695,10 @@ async def call_model(tier: dict, system: str, user: str, owner_id: str,
             log.debug("library: token report failed", exc_info=True)
     if images and getattr(provider, "sees_images", None) is False:
         raise PictureRefusedError(f"{tier.get('model') or 'the model'} would not take the picture")
-    return resp.content or "", tokens
+    reasoning = str(getattr(resp, "reasoning_content", "") or "")
+    return ModelReply(resp.content or "", tokens, int(usage.get("prompt_tokens") or 0),
+                      str(getattr(resp, "finish_reason", "") or ""),
+                      "" if is_reasoning_backfill_placeholder(reasoning) else reasoning)
 
 
 # ── Pictures, recordings and videos ───────────────────────────────────

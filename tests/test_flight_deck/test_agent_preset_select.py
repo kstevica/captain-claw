@@ -25,6 +25,7 @@ import numpy as np
 from captain_claw.flight_deck import agent_preset as ap
 from captain_claw.flight_deck import agent_preset_outline as ol
 from captain_claw.flight_deck import agent_preset_select as sel
+from captain_claw.flight_deck.file_library import ModelReply
 
 _PROCEDURE = ("1. Check the order date in the shop admin.\n"
               "2. A refund is allowed only if the order is no more than 14 days old.\n"
@@ -182,9 +183,9 @@ async def test_many_parts_take_one_merge_call(monkeypatch):
 
     async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
         calls.append({"system": system, "user": user})
-        return json.dumps(merged), 50
+        return ModelReply(json.dumps(merged), 50)
 
-    monkeypatch.setattr(ap, "call_model", fake_call)
+    monkeypatch.setattr(ap, "model_reply", fake_call)
     reader = {"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:1", "input_ctx": 40_000}
     parts = [_part(rules=[{"text": f"Rule number {n} of the handbook."}], templates=[{"name": "Reply", "body": "Hi"}],
                    knowledge=[{"doc": "h.md", "title": "Handbook", "summary": f"Part {n}."}]) for n in range(12)]
@@ -218,9 +219,9 @@ async def test_a_long_read_keeps_more_than_the_merge_call_sees(monkeypatch):
         sent = json.loads(user.split("\n", 1)[1])
         # The call says the first two as one, and words one of the fold's later rules its own way.
         rules = [{"text": "Rules 0 and 30 said as one."}, *sent["rules"][2:30], {"text": "answer customers in croatian."}]
-        return json.dumps({"rules": rules, "knowledge": []}), 50
+        return ModelReply(json.dumps({"rules": rules, "knowledge": []}), 50)
 
-    monkeypatch.setattr(ap, "call_model", fake_call)
+    monkeypatch.setattr(ap, "model_reply", fake_call)
     reader = {"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:1", "input_ctx": 40_000}
     parts = [_part(rules=[{"text": f"Rule number {n} of the handbook."} for n in range(k * 30, k * 30 + 30)])
              for k in range(3)]
@@ -245,9 +246,9 @@ async def test_a_short_read_still_lets_the_call_choose_from_twice_its_limits(mon
 
     async def fake_call(tier, system, user, owner_id, max_tokens=0, request_timeout=None, images=None):
         sent.append(json.loads(user.split("\n", 1)[1]))
-        return json.dumps({"rules": [{"text": "Kept."}], "knowledge": []}), 50
+        return ModelReply(json.dumps({"rules": [{"text": "Kept."}], "knowledge": []}), 50)
 
-    monkeypatch.setattr(ap, "call_model", fake_call)
+    monkeypatch.setattr(ap, "model_reply", fake_call)
     reader = {"provider": "ollama", "model": "m", "base_url": "http://127.0.0.1:1", "input_ctx": 40_000}
     parts = [_part(rules=[{"text": f"Rule number {n} of the handbook."} for n in range(k * 30, k * 30 + 30)])
              for k in range(3)]
