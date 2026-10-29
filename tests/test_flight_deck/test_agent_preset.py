@@ -2411,3 +2411,82 @@ def test_the_block_keeps_what_is_always_in_mind_and_says_what_comes_when_it_matt
     assert "When it matters" not in legacy
     assert ap.rules_block(ap.normalise({"rules": [{"text": "Only this.", "always": True}]}), [], [], facts=0) \
         .count("When it matters") == 0                               # nothing else to say
+
+
+# ── Lessons, seen and changed by their owner (/fd/agent-lessons) ──────
+
+
+async def _ls(uid: str, method: str, path: str, **kw) -> httpx.Response:
+    async with _client() as c:
+        return await c.request(method, f"/fd/agent-lessons/{path}", headers=_auth(uid), **kw)
+
+
+async def test_an_owner_adds_rewords_pins_and_takes_away_lessons(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24395)
+    preset = _setup(BOB, [{"name": "policy.md", "text": "Policy."}],
+                    rules=[{"text": "Answer in Croatian.", "always": True}, {"text": "Refunds take 14 days."}],
+                    facts=[{"content": "The warehouse closes at 15:00 on Fridays.", "category": "fact"}])
+    assert (await _apply(BOB, slug, preset)).status_code == 200
+    agent = server.DATA_DIR / slug
+    got = (await _ls(BOB, "GET", slug)).json()
+    assert [(x["kind"], x["text"], x["always"]) for x in got["lessons"]] == [
+        ("rule", "Answer in Croatian.", True), ("rule", "Refunds take 14 days.", False),
+        ("fact", "The warehouse closes at 15:00 on Fridays.", False)]
+    assert got["counts"] == {"rule": 2, "ask_first": 0, "fact": 1, "always": 1} and got["not_in_block"] == []
+
+    # Added by hand, always in mind: in its instructions at once, and kept as taught by its owner.
+    r = await _ls(BOB, "POST", slug, json={"kind": "ask_first", "text": "Ask me before  promising a delivery date.",
+                                           "always": True})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    added = next(x for x in body["lessons"] if x["kind"] == "ask_first")
+    assert added["text"] == "Ask me before promising a delivery date." and added["taught_by"] == "you" and added["added"] > 0
+    stored = json.loads(await deck.get_setting(BOB, INSTR))[slug]
+    assert body["stored"] and stored == body["instructions"] and "Ask me before promising a delivery date." in stored
+    assert stored.count(ap._BLOCK_OPEN) == 1 and stored.startswith("You answer customers kindly.")
+    on_disk = json.loads(agent_lessons.path(agent).read_text())["lessons"]
+    assert any(x["text"] == added["text"] and x["taught_by"] == "you" for x in on_disk)
+    assert (await _ls(BOB, "POST", slug, json={"kind": "ask_first", "text": "ask me before promising a delivery date."})
+            ).status_code == 409                                            # it has it already
+    assert (await _ls(BOB, "POST", slug, json={"kind": "whim", "text": "x"})).status_code == 400
+    assert (await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "   "})).status_code == 400
+
+    # Reworded: its record, lessons and owner-rules.md follow.
+    fact = next(x for x in body["lessons"] if x["kind"] == "fact")
+    r = await _ls(BOB, "PATCH", f"{slug}/{fact['id']}", json={"text": "The warehouse closes at 14:00 on Fridays."})
+    assert r.status_code == 200 and any(x["text"] == "The warehouse closes at 14:00 on Fridays." for x in r.json()["lessons"])
+    rules_md = (agent / "data" / "workspace" / "knowledge" / "owner-rules.md").read_text()
+    assert "14:00 on Fridays" in rules_md and "15:00" not in rules_md
+    assert (await _ls(BOB, "PATCH", f"{slug}/{fact['id']}", json={"always": True})).status_code == 404   # its id moved on
+    new_fact = next(x for x in r.json()["lessons"] if x["kind"] == "fact")
+    assert (await _ls(BOB, "PATCH", f"{slug}/{new_fact['id']}", json={"always": True})).status_code == 400
+
+    # Brought up only when it matters: out of its instructions; then taken away altogether.
+    rule = next(x for x in r.json()["lessons"] if x["text"] == "Answer in Croatian.")
+    r = await _ls(BOB, "PATCH", f"{slug}/{rule['id']}", json={"always": False})
+    assert "Answer in Croatian." not in r.json()["instructions"] and "2 more rules" in r.json()["instructions"]
+    r = await _ls(BOB, "DELETE", f"{slug}/{rule['id']}")
+    assert all(x["id"] != rule["id"] for x in r.json()["lessons"])
+    assert "Answer in Croatian." not in json.dumps(json.loads(agent_lessons.path(agent).read_text()))
+    assert (await _ls(BOB, "DELETE", f"{slug}/{rule['id']}")).status_code == 404
+    assert (await _ls(CAROL, "GET", slug)).status_code == 404                # not hers
+    assert (await _ls(CAROL, "POST", slug, json={"kind": "rule", "text": "x"})).status_code == 404
+
+
+async def test_rules_taught_by_hand_outlive_a_setup_given_in_place(deck):
+    slug = await _spawn(BOB, "Helpdesk", 24396)
+    assert (await _apply(BOB, slug, _setup(BOB, [], rules=[{"text": "Old setup rule."}]))).status_code == 200
+    assert (await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "My own rule.", "always": True})).status_code == 200
+    r = await _apply(BOB, slug, _setup(BOB, [], rules=[{"text": "New setup rule."}]), mode="replace")
+    assert r.status_code == 200
+    texts = [x["text"] for x in (await _ls(BOB, "GET", slug)).json()["lessons"]]
+    assert "My own rule." in texts and "New setup rule." in texts and "Old setup rule." not in texts
+    assert "My own rule." in r.json()["instructions"]                        # still always in mind
+
+
+async def test_always_in_mind_lessons_without_room_still_reach_it(deck):
+    slug = await _spawn(BOB, "Helpdesk", 24397)
+    many = [{"text": f"Always rule number {n}: " + "be careful with this case. " * 12, "always": True} for n in range(20)]
+    assert (await _apply(BOB, slug, _setup(BOB, [], rules=many))).status_code == 200
+    got = (await _ls(BOB, "GET", slug)).json()
+    assert got["counts"]["always"] == 20 and 0 < len(got["not_in_block"]) < 20
