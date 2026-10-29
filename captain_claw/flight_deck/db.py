@@ -4342,6 +4342,23 @@ class FlightDeckDB:
         rows = await self._db.execute_fetchall(q, tuple(args))
         return [dict(r) for r in rows]
 
+    async def list_notifications_by_ref(
+        self, user_id: str, ref_type: str, ref_ids: Iterable[str],
+    ) -> list[dict]:
+        """This user's notifications about any of `ref_ids` (of `ref_type`),
+        newest first, however old."""
+        assert self._db is not None
+        ids = [str(i) for i in ref_ids if i]
+        if not ids:
+            return []
+        marks = ",".join("?" * len(ids))
+        rows = await self._db.execute_fetchall(
+            f"SELECT * FROM notifications WHERE user_id = ? AND ref_type = ? AND ref_id IN ({marks})"
+            " ORDER BY created_at DESC",
+            (user_id, ref_type, *ids),
+        )
+        return [dict(r) for r in rows]
+
     async def count_unread_notifications(self, user_id: str) -> int:
         assert self._db is not None
         async with self._db.execute(
