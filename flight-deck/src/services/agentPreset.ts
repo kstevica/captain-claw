@@ -12,7 +12,9 @@ import { ACT_AS_HEADER } from './docker'
 
 export interface PresetSource { doc: string; section: string }
 
-export interface PresetRule { text: string; source: PresetSource }
+/** ``always``: kept in its instructions (it applies to every conversation); otherwise it reaches the agent with
+ *  the messages it bears on (a lesson). */
+export interface PresetRule { text: string; source: PresetSource; always?: boolean }
 export interface PresetIntent { name: string; when: string; steps: string[]; examples: string[]; source: PresetSource }
 export interface PresetFact { content: string; category: string; importance: number; source: PresetSource }
 export interface PresetTemplate { name: string; body: string; source: PresetSource }

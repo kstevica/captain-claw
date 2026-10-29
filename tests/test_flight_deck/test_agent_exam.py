@@ -255,8 +255,10 @@ async def test_only_an_agent_that_knows_exams_takes_one(monkeypatch):
     import httpx
 
     from captain_claw import exam_turn
+    from captain_claw.flight_deck import server as srv
 
     _agent_socket(monkeypatch, _FakeSocket([]))
+    monkeypatch.setattr(srv, "_process_is_alive", lambda slug: True)
     asked: list = []
     caps: list = []
 

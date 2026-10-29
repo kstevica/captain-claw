@@ -10,7 +10,8 @@ other. Turn it into the final setup for the agent.
 
 - **Same meaning, one item.** Rules, facts, when-to-ask items and glossary terms that still say
   the same thing become one item; keep the most specific wording (real names, numbers,
-  thresholds) and its `source`.
+  thresholds) and its `source`. Keep each rule's `always` (it applies to every conversation);
+  a rule made from two is `always` when either was.
 - **Intents** that describe the same request become one intent: one `name`, one `when`, the
   steps in order without repeats, up to 3 `examples`.
 - **knowledge** — exactly ONE entry per document (`doc` is its file name exactly as given):

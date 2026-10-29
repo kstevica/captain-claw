@@ -2383,7 +2383,7 @@ class WebServer:
         return await get_message_content(self, request)
 
     async def _get_version(self, request: web.Request) -> web.Response:
-        from captain_claw import __version__, __build_date__, exam_turn
+        from captain_claw import __version__, __build_date__, exam_turn, lessons
         from captain_claw.pack_access import PACKS_CAPABILITY
         return web.json_response({
             "version": __version__,
@@ -2392,8 +2392,9 @@ class WebServer:
             # Flight Deck probes this to tell an agent that understands shared
             # context packs from one that would ignore them (PR B, J15) — and
             # one that can take an onboarding exam (exam_turn) from one that
-            # would answer it as an ordinary automated turn, keeping it.
-            "capabilities": [PACKS_CAPABILITY, exam_turn.CAPABILITY],
+            # would answer it as an ordinary automated turn, keeping it — and
+            # one that reads its owner's lessons (lessons.py) each turn.
+            "capabilities": [PACKS_CAPABILITY, exam_turn.CAPABILITY, lessons.CAPABILITY],
         })
 
     # ── Public session API ──────────────────────────────────────────

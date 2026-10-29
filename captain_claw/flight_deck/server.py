@@ -1042,6 +1042,11 @@ async def lifespan(app: FastAPI):
         await _startup_team_keys_then_reattach()
         # An agent setup's reads that were under way go on where they were — with their agents back.
         await agent_preset.resume_reads(delay=0)
+        # Agents set up before lessons, or whose record changed while the deck was down: their lessons written.
+        try:
+            await asyncio.to_thread(agent_lessons.ensure_all, DATA_DIR)
+        except Exception:
+            log.warning("agent lessons: couldn't write them at start", exc_info=True)
     asyncio.create_task(_deferred_reattach())
     print(f"Flight Deck: {origin_guard.describe_policy()}")
     # Initialize database for auth & settings — always, see _init_fd_db.
@@ -1728,7 +1733,7 @@ from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.file_library import router as file_library_router
 from captain_claw.flight_deck.data_library import router as data_library_router
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
-from captain_claw.flight_deck import agent_exam, agent_knowledge, agent_preset
+from captain_claw.flight_deck import agent_exam, agent_knowledge, agent_lessons, agent_preset
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck import public_file_shares

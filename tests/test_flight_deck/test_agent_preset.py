@@ -27,7 +27,10 @@
   with an index, glossary and the full rules, and a capped rules block after
   its instructions — stored for the owner and returned; another person's
   preset id brings no documents, another person's agent is a 404;
-* facts go to the agent as insights once it answers; a failure never raises;
+* rules, when-to-ask and facts become the agent's lessons (agent_lessons):
+  its instructions keep only those marked always, the rest reach it with the
+  messages they bear on — an agent running from before lessons keeps every
+  rule that fits in its instructions until it's restarted;
 * a spreadsheet's sheets become datastore tables, without a model: values
   keep their kind (a code keeps its zeros), a title above the header is left
   out, names come from the document and sheet and never take a table the
@@ -48,12 +51,12 @@ import httpx
 import pytest
 
 from captain_claw.datastore import DatastoreManager, import_pending_tables
+from captain_claw.flight_deck import agent_lessons, rate_limiter, server
 from captain_claw.flight_deck import agent_preset as ap
 from captain_claw.flight_deck import agent_preset_docs as pdocs
 from captain_claw.flight_deck import agent_preset_tables as ptables
 from captain_claw.flight_deck import archetypes as arch_mod
 from captain_claw.flight_deck import auth as fd_auth
-from captain_claw.flight_deck import rate_limiter, server
 from captain_claw.flight_deck.auth import create_access_token, set_auth_db
 from captain_claw.flight_deck.data_library import datastore_file
 from captain_claw.flight_deck.db import FlightDeckDB
@@ -164,6 +167,11 @@ async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     # Apply asks a running agent to index its knowledge: recorded here, never sent (test_agent_preset_outline).
     deck_indexed.clear()
     monkeypatch.setattr(ap, "schedule_index", lambda slug, port_of, token: deck_indexed.append((slug, port_of(), token)))
+
+    async def no_answer(slug):                 # what a running agent can do: not asked here (none answers)
+        return None
+
+    monkeypatch.setattr(agent_lessons, "capabilities", no_answer)
     server._save_process_registry({})
     try:
         yield db
@@ -523,7 +531,8 @@ async def test_a_long_document_is_read_in_steps_and_the_parts_merged(deck, monke
     assert len(reads) == 3 and len(merges) == 1 and job["steps"] == 3
     assert "This is part 2 of 3" in reads[1]["user"] and "Be brief." not in reads[1]["user"]
     assert "### big.md — pages" in reads[0]["user"] and "(part 1 of 3 of this document)" in reads[0]["user"]
-    assert job["result"]["preset"]["rules"] == [{"text": "Merged rule.", "source": {"doc": "instructions", "section": ""}}]
+    assert job["result"]["preset"]["rules"] == [{"text": "Merged rule.", "always": False,
+                                                 "source": {"doc": "instructions", "section": ""}}]
     assert job["result"]["preset"]["knowledge"][0]["title"] == "The big one"
     assert job["result"]["tokens"] == 400
     assert job["result"]["found"]["rules"] == 1                          # the parts' one rule, found three times
@@ -1360,7 +1369,7 @@ def test_seed_writes_skills_knowledge_and_the_full_rules(deck, tmp_path):
     agent_dir = tmp_path / "agent"
     workspace = agent_dir / "data" / "workspace"
     done = ap.seed(agent_dir, workspace, BOB, reviewed)
-    block, facts = done["block"], done["facts"]
+    block, block_all = done["block"], done["block_all"]
     assert done["skills"] == ["refund-request", "refund-request-2"]
     assert done["counts"] == {"rules": 1, "escalation": 1, "templates": 1, "glossary": 1,
                               "intents": 2, "facts": 2, "knowledge": 1, "tables": 0, "read_again": 0}
@@ -1377,8 +1386,20 @@ def test_seed_writes_skills_knowledge_and_the_full_rules(deck, tmp_path):
     assert "Use it as: rules to follow." in (kn / "policy.md").read_text()
     assert "[Refund policy](policy.md) — How refunds work. (rules to follow)" in (kn / "INDEX.md").read_text()
     assert "## Template: Refund reply" in (kn / "owner-rules.md").read_text()
-    assert "Always answer in Croatian." in block and "Ask before refunding" in block
-    assert [f["content"] for f in facts] == ["Refund window is 14 days.", "Support email is help@acme.test"]
+    # Only what's always in mind is in its instructions; the rest are lessons it's told about.
+    assert "Ask before refunding" in block and "Always answer in Croatian." not in block
+    assert "Your owner also taught you 1 more rule and 2 facts." in block
+    assert "Always answer in Croatian." in block_all and "Ask before refunding" in block_all   # from before lessons
+    lessons = json.loads(agent_lessons.path(agent_dir).read_text())["lessons"]
+    assert [(x["kind"], x["text"], x["always"], x["taught_by"]) for x in lessons] == [
+        ("rule", "Always answer in Croatian.", False, "setup"),
+        ("ask_first", "Ask before refunding more than 200 EUR.", True, "setup"),
+        ("fact", "Refund window is 14 days.", False, "setup"),
+        ("fact", "Support email is help@acme.test", False, "setup")]
+    assert lessons[0]["source"] == {"doc": "policy.txt", "section": "Tone"} and lessons[3]["source"]["doc"] == ""
+    assert "## Facts\n- Refund window is 14 days. (from policy.txt)\n- Support email is help@acme.test" in (
+        kn / "owner-rules.md").read_text()
+    assert "facts" not in done
     assert ap.load_docs(BOB, preset_id) == []      # the waiting documents are dropped
 
 
@@ -1404,9 +1425,6 @@ async def test_apply_sets_up_an_existing_agent_and_stores_its_instructions(deck,
 
     _model(monkeypatch, json.dumps(_REPLY))
     prepared = (await _prepare(BOB, [("policy.txt", b"Refunds within 14 days.")], agent=slug))["result"]
-    given: list = []
-    monkeypatch.setattr(ap, "schedule_facts",
-                        lambda slug, port_of, token, facts, **kw: given.append((slug, port_of(), token, facts)))
     r = await _apply(BOB, slug, {**prepared["preset"], "id": prepared["id"]})
     assert r.status_code == 200, r.text
     body = r.json()
@@ -1419,7 +1437,9 @@ async def test_apply_sets_up_an_existing_agent_and_stores_its_instructions(deck,
     assert (agent / "data" / "workspace" / "knowledge" / "policy.md").is_file()
     assert (agent / "data" / "home-config-parent" / ".captain-claw" / "skills" / "refund-request" / "SKILL.md").is_file()
     entry = server._load_process_registry()[slug]
-    assert given == [(slug, 24300, entry["web_auth"], given[0][3])] and len(given[0][3]) == 2
+    lessons = json.loads(agent_lessons.path(agent).read_text())["lessons"]
+    assert sum(x["kind"] == "fact" for x in lessons) == 2           # its facts: lessons, not insights
+    assert "Your owner also taught you" in body["block"]
     assert deck_indexed == [(slug, 24300, entry["web_auth"])]   # its new documents, indexed now
     assert ap.load_docs(BOB, prepared["id"]) == []      # the waiting documents are used up
     assert _FakePopen.calls == [slug]                    # no restart
@@ -1542,15 +1562,17 @@ def test_a_setup_from_before_records_is_read_back_from_its_files(deck, tmp_path)
 
 async def test_applying_twice_keeps_one_block_and_says_what_it_has(deck, monkeypatch):
     slug = await _spawn(BOB, "Helpdesk", 24303)
-    monkeypatch.setattr(ap, "schedule_facts", lambda *a, **k: None)
-    first = _setup(BOB, [{"name": "a.md", "text": "A."}], rules=[{"text": "Rule one."}])
+    first = _setup(BOB, [{"name": "a.md", "text": "A."}], rules=[{"text": "Rule one.", "always": True}])
     assert (await _apply(BOB, slug, first)).status_code == 200
     second = _setup(BOB, [{"name": "b.md", "text": "B."}], rules=[{"text": "Rule two."}])
     r = await _apply(BOB, slug, second)
     body = r.json()
     stored = json.loads(await deck.get_setting(BOB, INSTR))[slug]
     assert stored == body["instructions"] and stored.count(ap._BLOCK_OPEN) == 1
-    assert "Rule one." in stored and "Rule two." in stored and stored.startswith("You answer customers kindly.")
+    assert "Rule one." in stored and "Rule two." not in stored and stored.startswith("You answer customers kindly.")
+    assert "1 more rule" in stored                                  # Rule two reaches it as a lesson
+    assert [x["text"] for x in json.loads(agent_lessons.path(server.DATA_DIR / slug).read_text())["lessons"]
+            ] == ["Rule two.", "Rule one."]
     assert body["totals"]["knowledge"] == 2 and body["counts"]["knowledge"] == 1 and body["stored"] is True
     async with _client() as c:
         cur = (await c.get(f"/fd/agent-preset/current/{slug}", headers=_auth(BOB))).json()
@@ -1561,16 +1583,34 @@ async def test_applying_twice_keeps_one_block_and_says_what_it_has(deck, monkeyp
     assert r.json()["instructions"] == "You answer customers kindly."
 
 
-async def test_an_agent_that_is_off_gets_its_facts_when_it_next_starts(deck, monkeypatch, tmp_path):
+async def test_an_agent_that_is_off_has_its_lessons_waiting(deck, monkeypatch):
     slug = await _spawn(BOB, "Helpdesk", 24304)
     monkeypatch.setattr(server, "_process_is_alive", lambda s: False)
-    scheduled: list = []
-    monkeypatch.setattr(ap, "schedule_facts", lambda *a, **k: scheduled.append(a))
     preset = _setup(BOB, [], facts=[{"content": "Refund window is 14 days.", "category": "fact"}])
     assert (await _apply(BOB, slug, preset)).json()["running"] is False
-    pending = ap.pending_path(server.DATA_DIR / slug)
-    assert scheduled == [] and json.loads(pending.read_text())[0]["content"] == "Refund window is 14 days."
+    lessons = json.loads(agent_lessons.path(server.DATA_DIR / slug).read_text())["lessons"]
+    assert [(x["kind"], x["text"]) for x in lessons] == [("fact", "Refund window is 14 days.")]
 
+
+async def test_an_agent_running_from_before_lessons_keeps_every_rule_in_its_instructions(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24305)
+
+    async def old_agent(s):
+        return ["context_packs"]
+
+    monkeypatch.setattr(agent_lessons, "capabilities", old_agent)
+    body = (await _apply(BOB, slug, _setup(BOB, [], rules=[{"text": "Rule one."}, {"text": "Rule two."}]))).json()
+    assert "Rule one." in body["block"] and "Rule two." in body["block"] and "When it matters" not in body["block"]
+
+    async def new_agent(s):
+        return ["context_packs", agent_lessons.CAPABILITY]
+
+    monkeypatch.setattr(agent_lessons, "capabilities", new_agent)
+    body = (await _apply(BOB, slug, _setup(BOB, [], rules=[{"text": "Rule three."}]))).json()
+    assert "Rule three." not in body["block"] and "3 more rules" in body["block"]
+
+
+async def test_facts_an_older_deck_left_are_added_once(tmp_path):
     from captain_claw import insights
 
     class _Mgr:
@@ -1583,54 +1623,13 @@ async def test_an_agent_that_is_off_gets_its_facts_when_it_next_starts(deck, mon
             self.added.append((content, category, kw.get("tags")))
             return "id"
 
-    ap.leave_facts(server.DATA_DIR / slug, [{"content": "Refund window is 14 days.", "category": "fact",
-                                             "importance": 5}])
+    pending = tmp_path / "pending-insights.json"
+    pending.write_text(json.dumps([{"content": "Refund window is 14 days.", "category": "fact", "importance": 5,
+                                    "tags": "owner-setup"}]))
     mgr = _Mgr()
     assert await insights.import_pending(mgr, pending) == 1
     assert mgr.added == [("Refund window is 14 days.", "fact", "owner-setup")] and not pending.exists()
     assert await insights.import_pending(mgr, pending) == 0
-
-
-async def test_facts_an_agent_never_took_wait_for_its_next_start(monkeypatch, tmp_path):
-    async def never(port_of, token, timeout):
-        return 0
-
-    monkeypatch.setattr(ap, "_wait_ready", never)
-    facts = ap.normalise(_REPLY)["facts"]
-    assert await ap.give_facts("a", lambda: 0, "", facts, agent_dir=tmp_path) == 0
-    assert len(json.loads(ap.pending_path(tmp_path).read_text())) == 2
-
-
-# ── Facts ─────────────────────────────────────────────────────────────
-
-
-async def test_facts_wait_for_the_agent_and_never_raise(monkeypatch):
-    posted: list = []
-
-    async def ready(port_of, token, timeout):
-        return port_of()
-
-    async def post(port, token, facts):
-        posted.append((port, token, len(facts)))
-        return len(facts)
-
-    monkeypatch.setattr(ap, "_wait_ready", ready)
-    monkeypatch.setattr(ap, "_post_facts", post)
-    facts = ap.normalise(_REPLY)["facts"]
-    assert await ap.give_facts("a", lambda: 24500, "tok", facts) == 2
-    assert posted == [(24500, "tok", 2)]
-
-    async def never(port_of, token, timeout):
-        return 0
-
-    monkeypatch.setattr(ap, "_wait_ready", never)
-    assert await ap.give_facts("a", lambda: 24500, "tok", facts) == 0
-
-    async def boom(port_of, token, timeout):
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(ap, "_wait_ready", boom)
-    assert await ap.give_facts("a", lambda: 24500, "tok", facts) == 0
 
 
 # ── Where things came from ────────────────────────────────────────────
@@ -1660,41 +1659,23 @@ def test_rules_and_terms_say_which_document_they_came_from(tmp_path):
                                  "source": {"doc": "policy.pdf", "section": "p. 3"}}]
 
 
-def test_a_fact_keeps_its_document_as_the_agents_insight_does():
-    assert ap.fact_source({"source": {"doc": "price-list.pdf", "section": "page 4"}}) == {
-        "source_file": "price-list.pdf", "source_section": "page 4"}
-    assert ap.fact_source({"source": {"doc": "price-list.pdf", "section": ""}}) == {"source_file": "price-list.pdf"}
-    assert ap.fact_source({"source": {"doc": "instructions", "section": "x"}}) == {}
-    assert ap.fact_source({}) == {}
+def test_a_lesson_keeps_its_document():
+    record = {"rules": [{"text": "Refunds within 14 days.", "source": {"doc": "price-list.pdf", "section": "page 4"}}],
+              "lessons": [{"kind": "fact", "text": "The owner is Ana.", "source": {"doc": "instructions"}}]}
+    rule, fact = agent_lessons.from_record(record)
+    assert rule["source"] == {"doc": "price-list.pdf", "section": "page 4"}
+    assert fact["source"] == {"doc": "", "section": ""}           # the owner's own instructions: no document
 
 
-async def test_facts_reach_the_agent_with_their_document(monkeypatch):
-    seen: list[dict] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(json.loads(request.content))
-        return httpx.Response(201, json={"id": "x"})
-
-    real_client = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(handler), **kw))
-    facts = [{"content": "Shipping is free over 50 EUR.", "category": "fact", "importance": 7,
-              "source": {"doc": "price-list.pdf", "section": "page 4"}},
-             {"content": "The owner is Ana.", "category": "fact", "importance": 5, "source": {"doc": "instructions"}}]
-    assert await ap._post_facts(24500, "tok", facts) == 2
-    assert seen[0]["source_file"] == "price-list.pdf" and seen[0]["source_section"] == "page 4"
-    assert "source_file" not in seen[1]
-
-
-async def test_facts_left_for_an_agent_thats_off_keep_their_document(tmp_path):
+async def test_facts_an_older_deck_left_keep_their_document(tmp_path):
     from captain_claw import insights
-    facts = [{"content": "Shipping is free over 50 EUR.", "category": "fact", "importance": 7,
-              "source": {"doc": "price-list.pdf", "section": "page 4"}}]
-    ap.leave_facts(tmp_path, facts)
-    waiting = json.loads(ap.pending_path(tmp_path).read_text())
-    assert waiting[0]["source_file"] == "price-list.pdf"
+    pending = tmp_path / "pending-insights.json"
+    pending.write_text(json.dumps([{"content": "Shipping is free over 50 EUR.", "category": "fact", "importance": 7,
+                                    "tags": "owner-setup", "source_file": "price-list.pdf",
+                                    "source_section": "page 4"}]))
     mgr = insights.InsightsManager(tmp_path / "insights.db")
     try:
-        assert await insights.import_pending(mgr, ap.pending_path(tmp_path)) == 1
+        assert await insights.import_pending(mgr, pending) == 1
         got = (await mgr.list_recent(limit=1))[0]
         assert got["source_file"] == "price-list.pdf" and got["source_section"] == "page 4"
         assert got["source_tool"] == "owner_setup"
@@ -2055,7 +2036,7 @@ async def test_the_knowledge_browser_lists_reads_and_finds(deck, monkeypatch):
     hb, notes = over["documents"]
     assert hb["id"] == "handbook.md" and hb["summary"] == "Refunds." and hb["read"]["state"] == "partial"
     assert notes["read"]["state"] == "none" and notes["use"] == "Reference"
-    assert {"id": "owner-rules.md", "title": "Your rules"} in over["extras"]
+    assert {"id": "owner-rules.md", "title": "Rules and facts"} in over["extras"]
     assert over["totals"]["documents"] == 2 and over["totals"]["read"] == hb["read"]["sections"]
 
     doc = (await _kb(BOB, f"{slug}/doc", id="handbook.md")).json()
@@ -2313,21 +2294,19 @@ async def test_an_exam_asked_again_keeps_its_questions_and_teaches(deck, monkeyp
     writes = len(calls["write"])
     wrong = next(q for q in first["questions"] if q["verdict"] == "wrong")
 
-    posted: list = []
-
-    async def offline(port, token, facts):
-        posted.append(facts)
-        return 0
-
-    monkeypatch.setattr(ap, "_post_facts", offline)
     r = await _ex(BOB, "POST", f"{slug}/{first['id']}/teach", json={"question": wrong["id"]})
-    assert r.json() == {"ok": True, "taught": False, "waiting": True}
-    waiting = json.loads(ap.pending_path(server.DATA_DIR / slug).read_text())
-    assert waiting[-1]["content"] == wrong["expected"]
-    assert waiting[-1]["source_file"] == "handbook.md" and waiting[-1]["source_section"] == wrong["title"]
+    assert r.json() == {"ok": True, "taught": True}
+    agent = server.DATA_DIR / slug
+    lesson = json.loads(agent_lessons.path(agent).read_text())["lessons"][-1]
+    assert (lesson["kind"], lesson["text"], lesson["taught_by"]) == ("fact", wrong["expected"], "exam")
+    assert lesson["source"] == {"doc": "handbook.md", "section": wrong["title"]}
+    record = json.loads((agent / ap._RECORD).read_text())
+    assert record["lessons"][-1]["id"] == lesson["id"] and record["knowledge"]      # the rest of it kept
     taught = next(q for q in (await _ex(BOB, "GET", f"{slug}/{first['id']}")).json()["questions"]
                   if q["id"] == wrong["id"])
-    assert taught["taught"] is True and taught["taught_later"] is True
+    assert taught["taught"] is True
+    again_taught = await _ex(BOB, "POST", f"{slug}/{first['id']}/teach", json={"question": wrong["id"]})
+    assert again_taught.json() == {"ok": True, "taught": False}                     # it has it already
     assert (await _ex(BOB, "POST", f"{slug}/{first['id']}/teach", json={"question": "q99"})).status_code == 404
 
     from captain_claw.flight_deck import agent_exam as ex
@@ -2339,7 +2318,7 @@ async def test_an_exam_asked_again_keeps_its_questions_and_teaches(deck, monkeyp
     again = await _exam_ends(BOB, slug, (await _ex(BOB, "POST", slug, json={"again": first["id"]})).json()["id"])
     assert again["again"] == first["id"] and len(calls["write"]) == writes          # nothing written anew
     assert [q["question"] for q in again["questions"]] == [q["question"] for q in first["questions"]]
-    assert all("taught" not in q and "taught_later" not in q for q in again["questions"])
+    assert all("taught" not in q for q in again["questions"])
     assert [q["before"] for q in again["questions"]] == [q["verdict"] for q in first["questions"]]
     assert again["summary"]["changed"] == {"better": 5, "worse": 0, "compared": 10}
 
@@ -2403,3 +2382,32 @@ async def test_an_exam_a_restart_stopped_goes_on_where_it_was(deck, monkeypatch)
     assert e["state"] == "done" and len(calls["asked"]) == 7                  # only the ones not asked
     assert all(q.get("verdict") for q in e["questions"])
     assert (await _ex(BOB, "POST", f"{slug}/{left.id}/continue")).status_code == 409   # nothing left
+
+
+# ── Lessons: what's always in mind, and what reaches it when it matters ──
+
+
+def test_a_rule_is_always_in_mind_only_when_marked_and_asking_first_always_is():
+    p = ap.normalise({"rules": [{"text": "Answer in Croatian.", "always": True}, {"text": "Refunds take 14 days."}],
+                      "escalation": [{"text": "Ask before refunds."}, {"text": "Ask about VIPs.", "always": False}]})
+    assert [r["always"] for r in p["rules"]] == [True, False]
+    assert [r["always"] for r in p["escalation"]] == [True, False]
+    # Two steps saw the same rule, one of them as applying to everything: it does.
+    folded = ap.fold([{"rules": [{"text": "Answer in Croatian.", "always": False}]},
+                      {"rules": [{"text": "Answer in Croatian!", "always": True}]}])
+    assert folded["rules"][0]["always"] is True
+
+
+def test_the_block_keeps_what_is_always_in_mind_and_says_what_comes_when_it_matters():
+    preset = ap.normalise({"rules": [{"text": "Answer in Croatian.", "always": True},
+                                     {"text": "Refunds take 14 days."}, {"text": "Ship on Mondays."}],
+                           "escalation": [{"text": "Ask before refunds."}]})
+    block = ap.rules_block(preset, [], [], facts=3)
+    assert "Answer in Croatian." in block and "Ask before refunds." in block
+    assert "Refunds take 14 days." not in block and "Ship on Mondays." not in block
+    assert "Your owner also taught you 2 more rules and 3 facts." in block
+    legacy = ap.rules_block(preset, [], [])
+    assert all(r in legacy for r in ("Answer in Croatian.", "Refunds take 14 days.", "Ship on Mondays."))
+    assert "When it matters" not in legacy
+    assert ap.rules_block(ap.normalise({"rules": [{"text": "Only this.", "always": True}]}), [], [], facts=0) \
+        .count("When it matters") == 0                               # nothing else to say

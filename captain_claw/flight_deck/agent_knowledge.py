@@ -50,7 +50,7 @@ PAGE_CHARS = 30_000      # one page of a section
 SNIPPET_CHARS = 700      # a search hit, as the list shows it
 SEARCH_RESULTS = 20
 _KEEP_AGENTS = 4         # agents whose documents stay read in memory
-_EXTRAS = {"glossary.md": "Glossary", "owner-rules.md": "Your rules"}
+_EXTRAS = {"glossary.md": "Glossary", "owner-rules.md": "Rules and facts"}
 
 # Per agent's workspace, a knowledge tool holding its documents' text, and
 # each document's sections: the agents browsed last stay read.

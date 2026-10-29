@@ -71,7 +71,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from captain_claw.exceptions import is_busy, retry_after
-from captain_claw.flight_deck import agent_idle, file_library
+from captain_claw.flight_deck import agent_idle, agent_lessons, file_library
 from captain_claw.flight_deck import agent_preset_docs as pdocs
 from captain_claw.flight_deck import agent_preset_outline as poutline
 from captain_claw.flight_deck import agent_preset_select as psel
@@ -135,7 +135,6 @@ _TTL = 24 * 3600                       # a prepared preset nobody created waits 
 _BLOCK_CAP = 5000                      # the rules block in the agent's instructions
 _MAX_INSTRUCTIONS_TOTAL = 64000        # AgentConfig.fleet_instructions' own cap
 _FACTS_READY_S = 90.0
-_TAG = "owner-setup"
 _MAX_DESCRIPTION = 500
 
 # How the person wants a document used: what the model is told, and what the
@@ -245,11 +244,15 @@ def normalise(raw: Any, limits: dict[str, int] | None = None) -> dict:
                       "importance": importance, "source": _source(f.get("source"))})
 
     return {
-        "rules": unique([{"text": _line(r.get("text"), 400), "source": _source(r.get("source"))}
+        # ``always``: kept in the agent's instructions (it applies to every conversation); the rest reach
+        # it as lessons with the messages they bear on (agent_lessons). Asking first is always, unless unset.
+        "rules": unique([{"text": _line(r.get("text"), 400), "always": r.get("always") is True,
+                          "source": _source(r.get("source"))}
                          for r in items("rules")], "text", "rules"),
         "intents": intents[:caps["intents"]],
         "facts": unique(facts, "content", "facts"),
-        "escalation": unique([{"text": _line(r.get("text"), 400), "source": _source(r.get("source"))}
+        "escalation": unique([{"text": _line(r.get("text"), 400), "always": r.get("always") is not False,
+                               "source": _source(r.get("source"))}
                               for r in items("escalation")], "text", "escalation"),
         "templates": unique([{"name": _line(t.get("name"), 80), "body": _body(t.get("body"), 3000),
                               "source": _source(t.get("source"))}
@@ -1305,7 +1308,10 @@ def _richer(group: str, kept: dict, other: dict) -> dict:
         s = str(x.get(field_) or "")
         return len(re.findall(r"\d", s)), len(s)
 
-    return other if weight(other) > weight(kept) else kept
+    best = other if weight(other) > weight(kept) else kept
+    if group in ("rules", "escalation") and (kept.get("always") or other.get("always")):
+        best = {**best, "always": True}   # one step saw it apply to everything
+    return best
 
 
 class _Alike:
@@ -2007,16 +2013,6 @@ def _unfrom(line: str) -> tuple[str, dict]:
     return m["text"], {"doc": m["doc"], "section": m["section"] or ""}
 
 
-def fact_source(fact: dict) -> dict:
-    """Where a fact came from, as the agent's insights keep it: the
-    document's file name — none for the owner's own instructions — and the
-    section or page in it."""
-    source = fact.get("source") or {}
-    doc = "" if source.get("doc") in (None, "", "instructions") else str(source["doc"])
-    return {k: v for k, v in (("source_file", doc), ("source_section", doc and str(source.get("section") or "")))
-            if v}
-
-
 def _skill_md(intent: dict) -> str:
     title = intent["name"].replace("-", " ").capitalize()
     lines = ["---", f"name: {intent['name']}",
@@ -2057,6 +2053,8 @@ def _owner_rules_md(preset: dict) -> str:
         lines += ["## Rules", *[f"- {r['text']}{_from(r.get('source') or {})}" for r in preset["rules"]], ""]
     if preset["escalation"]:
         lines += ["## Ask your owner first", *[f"- {r['text']}{_from(r.get('source') or {})}" for r in preset["escalation"]], ""]
+    if preset.get("facts"):
+        lines += ["## Facts", *[f"- {f['content']}{_from(f.get('source') or {})}" for f in preset["facts"]], ""]
     for t in preset["templates"]:
         lines += [f"## Template: {t['name']}", "", t["body"], ""]
     return "\n".join(lines)
@@ -2173,8 +2171,8 @@ def write_knowledge(folder: Path, preset: dict, docs: list[dict], kept: list[dic
     _write_or_drop(folder / "glossary.md", preset["glossary"] and "\n".join([
         "# Glossary", "", *[f"- **{g['term']}** — {g['meaning']}{_from(g.get('source') or {})}" for g in preset["glossary"]],
         ""]))
-    _write_or_drop(folder / "owner-rules.md", (preset["rules"] or preset["escalation"] or preset["templates"])
-                   and _owner_rules_md(preset))
+    _write_or_drop(folder / "owner-rules.md", (preset["rules"] or preset["escalation"] or preset["templates"]
+                                                or preset.get("facts")) and _owner_rules_md(preset))
     return written
 
 
@@ -2187,10 +2185,13 @@ def _write_or_drop(path: Path, text: Any) -> None:
 
 
 def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int = _BLOCK_CAP,
-                tables: list[dict] | None = None) -> str:
+                tables: list[dict] | None = None, facts: int | None = None) -> str:
     """The short block the new agent's instructions end with — at most
-    ``cap`` characters. When-to-ask goes in before the other rules; what
-    doesn't fit is pointed at in knowledge/owner-rules.md."""
+    ``cap`` characters. With lessons (*facts*: how many facts it was taught
+    as lessons): only the rules and when-to-ask marked ``always`` — the rest
+    reach it with the messages they bear on (agent_lessons), which it's told.
+    Without (an agent running from before lessons): every rule that fits,
+    the rest pointed at in knowledge/owner-rules.md."""
     head = ["## Your owner's rules", "",
             "Set up by your owner. Where they differ from the general procedure above, "
             "follow these."]
@@ -2233,11 +2234,23 @@ def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int
                  "for exact values such as prices, plans and codes, rather than searching the text: "
                  + ", ".join(t["name"] for t in tables)[:600] + " (what is in each: knowledge/INDEX.md)."]
 
+    lessons = facts is not None
+    if lessons:
+        later = sum(1 for g in ("rules", "escalation") for r in preset[g] if not r.get("always"))
+        if later or facts:
+            what = " and ".join(x for x in (later and f"{later} more rule{'s' if later != 1 else ''}",
+                                             facts and f"{facts} fact{'s' if facts != 1 else ''}") if x)
+            tail = ["", "### When it matters",
+                    f"Your owner also taught you {what}. Each reaches you with the messages it bears on, under "
+                    "\"Your owner's lessons\" — follow them as you follow these; all of them are in "
+                    "knowledge/owner-rules.md.", *tail]
     budget = cap - len("\n".join(head + tail)) - 200  # room for headings and the pointer
     kept: dict[str, list[str]] = {"escalation": [], "rules": []}
     dropped = 0
     for group in ("escalation", "rules"):
         for r in preset[group]:
+            if lessons and not r.get("always"):
+                continue
             line = f"- {r['text']}"
             if len(line) + 1 <= budget:
                 kept[group].append(line)
@@ -2249,7 +2262,7 @@ def rules_block(preset: dict, knowledge: list[dict], skills: list[str], cap: int
         body += ["", "### Rules", *kept["rules"]]
     if kept["escalation"]:
         body += ["", "### Ask your owner first", *kept["escalation"]]
-    if dropped:
+    if dropped and not lessons:
         body += ["", f"({dropped} more rule{'s' if dropped != 1 else ''} in knowledge/owner-rules.md — read it.)"]
     if not body and not tail:
         return ""
@@ -2426,8 +2439,10 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     earlier setup gave it (the new items first; a document given again
     replaces its earlier copy, its tables too), or in its place
     (``mode="replace"``: the earlier skills, documents, tables and rules go
-    first; facts it learned stay). Returns the ``block`` its instructions
-    end with, the new ``facts`` to give it as insights, the ``tables`` to
+    first; facts it learned, and lessons an exam taught it, stay). Its rules,
+    when-to-ask and facts become its lessons (agent_lessons, written for it
+    here). Returns the ``block`` its instructions end with (``block_all``:
+    the one for an agent running from before lessons), the ``tables`` to
     make in its datastore and those to ``drop`` first, what this setup wrote
     (``skills``, ``knowledge``, ``counts``), what the agent now has from
     setups (``totals``) and ``warnings`` for the person. The waiting
@@ -2441,6 +2456,7 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     skills_dir = agent_dir / "data" / "home-config-parent" / ".captain-claw" / "skills"
     folder = workspace / "knowledge"
     earlier = earlier_setup(agent_dir, workspace)
+    before_lessons = list(earlier.get("lessons") or [])
     earlier_tables = [t for t in earlier.get("tables") or [] if isinstance(t, dict) and isinstance(t.get("name"), str)]
     before_knowledge = list(earlier.get("knowledge") or [])
     if mode == "replace":
@@ -2482,22 +2498,31 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
     kept_tables = [t for t in earlier_tables if t["name"] not in drop]
     tables, warnings = new_tables(agent_dir, preset, docs, drop, kept_tables)
     all_tables = kept_tables + [_table_summary(t) for t in tables]
-    written = write_knowledge(folder, {**merged, "knowledge": [k for k in preset["knowledge"]
-                                                                if k["doc"] not in given_again]},
+    # Lessons beyond the rules: facts (a setup's own, replaced with it) and what exams taught (kept).
+    lessons = [x for x in before_lessons if isinstance(x, dict)
+               and (mode != "replace" or x.get("taught_by") != "setup")]
+    record: dict[str, Any] = {"lessons": lessons}
+    for x in agent_lessons.facts_as_lessons(preset["facts"]):
+        record, _ = agent_lessons.taught(record, "fact", x["text"], x["source"], taught_by="setup",
+                                         importance=x["importance"])
+    fact_lessons = [x for x in record["lessons"] if x.get("kind") == "fact"]
+    written = write_knowledge(folder, {**merged, "facts": [{"content": x["text"], "source": x.get("source") or {}}
+                                                           for x in fact_lessons],
+                                       "knowledge": [k for k in preset["knowledge"] if k["doc"] not in given_again]},
                               docs, kept, all_tables)
     knowledge = kept + written
     facts = int(earlier.get("facts") or 0) + len(preset["facts"])
     agent_dir.mkdir(parents=True, exist_ok=True)
-    (agent_dir / _RECORD).write_text(json.dumps({
-        "updated": time.time(), **{g: merged[g] for g in _KEPT_GROUPS},
-        "skills": skills, "knowledge": knowledge, "tables": all_tables, "facts": facts},
-        ensure_ascii=False), encoding="utf-8")
+    record = {"updated": time.time(), **{g: merged[g] for g in _KEPT_GROUPS}, "skills": skills,
+              "knowledge": knowledge, "tables": all_tables, "facts": facts, "lessons": record["lessons"]}
+    (agent_dir / _RECORD).write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    agent_lessons.write(agent_dir, record)
     if preset_id:
         discard(owner_id, preset_id)
         _JOBS.pop(preset_id, None)
     return {
-        "block": rules_block(merged, knowledge, skills, tables=all_tables),
-        "facts": preset["facts"],
+        "block": rules_block(merged, knowledge, skills, tables=all_tables, facts=len(fact_lessons)),
+        "block_all": rules_block(merged, knowledge, skills, tables=all_tables),
         "tables": tables,
         "drop": drop,
         "skills": new_skills,
@@ -2510,24 +2535,6 @@ def seed(agent_dir: Path, workspace: Path, owner_id: str, body: Any, mode: str =
         "totals": {**{g: len(merged[g]) for g in _KEPT_GROUPS}, "intents": len(skills), "facts": facts,
                    "knowledge": len(knowledge), "tables": len(all_tables)},
     }
-
-
-async def _post_facts(port: int, token: str, facts: list[dict]) -> int:
-    import httpx
-    params = {"token": token} if token else {}
-    base = f"http://127.0.0.1:{port}"
-    async with httpx.AsyncClient(timeout=10.0) as client:
-        given = 0
-        for f in facts:
-            try:
-                resp = await client.post(f"{base}/api/insights", params=params, json={
-                    "content": f["content"], "category": f["category"],
-                    "importance": f["importance"], "tags": _TAG, **fact_source(f)})
-                if resp.status_code < 300:
-                    given += 1
-            except Exception:
-                pass
-        return given
 
 
 async def _wait_ready(port_of: Callable[[], int], token: str, timeout: float) -> int:
@@ -2553,72 +2560,9 @@ async def _wait_ready(port_of: Callable[[], int], token: str, timeout: float) ->
     return 0
 
 
-def pending_path(agent_dir: Path) -> Path:
-    """Where facts wait for an agent that is off: ``~/.captain-claw`` under
-    its HOME, which it reads when it starts (``insights.import_pending``)."""
-    return agent_dir / "data" / "home-config-parent" / ".captain-claw" / "pending-insights.json"
-
-
-def leave_facts(agent_dir: Path, facts: list[dict]) -> None:
-    """Leave facts for the agent to add itself when it next starts — with
-    any already waiting (it deduplicates them as any other insight)."""
-    if not facts:
-        return
-    path = pending_path(agent_dir)
-    try:
-        waiting = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else []
-    except (OSError, ValueError):
-        waiting = []
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps([*(waiting if isinstance(waiting, list) else []),
-                                *({"content": f["content"], "category": f["category"],
-                                   "importance": f["importance"], "tags": _TAG, **fact_source(f)}
-                                  for f in facts)],
-                               ensure_ascii=False), encoding="utf-8")
-
-
-async def give_facts(slug: str, port_of: Callable[[], int], token: str, facts: list[dict],
-                     timeout: float = _FACTS_READY_S, agent_dir: Path | None = None) -> int:
-    """Give an agent its owner's facts as insights once it answers. Never
-    raises: what it couldn't be given waits in its folder for its next start
-    (``agent_dir``), else it simply goes without."""
-    if not facts:
-        return 0
-    given = 0
-    try:
-        port = await _wait_ready(port_of, token, timeout)
-        if port:
-            given = await _post_facts(port, token, facts)
-            log.info("agent preset: facts given", agent=slug, given=given, of=len(facts))
-        else:
-            log.warning("agent preset: the agent never came up, facts left for its next start", agent=slug)
-    except Exception:
-        log.warning("agent preset: giving facts failed", agent=slug, exc_info=True)
-    if given < len(facts) and agent_dir is not None:
-        try:
-            leave_facts(agent_dir, facts)
-        except Exception:
-            log.warning("agent preset: could not leave the facts for later", agent=slug, exc_info=True)
-    return given
-
-
-# Facts still on their way to a new agent: a task nobody holds can be
-# garbage-collected before it runs.
+# Work still on its way to an agent (indexing, tables): a task nobody holds
+# can be garbage-collected before it runs.
 _PENDING: set[asyncio.Task] = set()
-
-
-def schedule_facts(slug: str, port_of: Callable[[], int], token: str, facts: list[dict],
-                   agent_dir: Path | None = None) -> None:
-    if not facts:
-        return
-    try:
-        task = asyncio.get_running_loop().create_task(
-            give_facts(slug, port_of, token, facts, agent_dir=agent_dir))
-    except RuntimeError:
-        log.warning("agent preset: no loop to give facts on", agent=slug)
-        return
-    _PENDING.add(task)
-    task.add_done_callback(_PENDING.discard)
 
 
 async def ask_to_index(slug: str, port_of: Callable[[], int], token: str, timeout: float = _FACTS_READY_S) -> bool:
@@ -2805,29 +2749,28 @@ async def current_setup(slug: str, user: dict = Depends(get_managed_user)) -> di
 
 async def deliver(slug: str, entry: dict, owner_id: str, agent_dir: Path, done: dict) -> tuple[bool, str, bool]:
     """What a written setup (``seed``) still needs: the owner's block in the
-    agent's stored instructions, facts as insights, spreadsheets as datastore
-    tables — through its REST while it runs, else at its next start — and
-    its documents indexed. Returns (instructions stored, the instructions,
-    running)."""
+    agent's stored instructions, spreadsheets as datastore tables — through
+    its REST while it runs, else at its next start — and its documents
+    indexed (its lessons it reads itself). An agent running from before
+    lessons gets the block with every rule that fits, as before, until it's
+    restarted. Returns (instructions stored, the instructions, running)."""
     from captain_claw.flight_deck import server as srv
+    running = srv._process_is_alive(slug)
+    caps = await agent_lessons.capabilities(slug) if running else None
+    block = done["block_all"] if caps is not None and agent_lessons.CAPABILITY not in caps else done["block"]
+    done["block"] = block
     # Without accounts the browser keeps the instructions: it puts the block in itself.
     instructions = ""
     stored = bool(owner_id) and _auth_enabled()
     if stored:
         current = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "")
-        instructions = with_block(current, done["block"])
+        instructions = with_block(current, block)
         if instructions != current:
             await srv._set_owner_agent_instructions(owner_id, "process", slug, instructions, strict=True)
-    running = srv._process_is_alive(slug)
 
     def port_of() -> int:
         return (srv._load_process_registry().get(slug) or {}).get("web_port") or 0
 
-    if done["facts"]:
-        if running:
-            schedule_facts(slug, port_of, str(entry.get("web_auth") or ""), done["facts"], agent_dir=agent_dir)
-        else:
-            await asyncio.to_thread(leave_facts, agent_dir, done["facts"])
     if done["tables"] or done["drop"]:
         if running:
             schedule_tables(slug, port_of, str(entry.get("web_auth") or ""), done["drop"], done["tables"], agent_dir)
@@ -2881,9 +2824,10 @@ async def apply(body: ApplyBody, user: dict = Depends(get_managed_user)) -> dict
     """Give one of the caller's process agents the reviewed preset — added to
     what an earlier setup gave it, or in its place: skills and knowledge
     into its folder, the owner's block in its instructions (stored for the
-    owner, and returned for the chat to send), facts as insights and the
-    spreadsheets as datastore tables once it answers — or, when it is off,
-    at its next start. Works on a running agent: no restart."""
+    owner, and returned for the chat to send), its rules, when-to-ask and
+    facts as lessons it reads with each message, and the spreadsheets as
+    datastore tables once it answers — or, when it is off, at its next
+    start. Works on a running agent: no restart."""
     from captain_claw.flight_deck import server as srv
     owner_id = _owner(user)
     slug = body.agent
