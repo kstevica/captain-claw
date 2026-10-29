@@ -408,6 +408,7 @@ export function deriveQueueModel(inp: QueueModelInput): QueueModel {
     .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))
   const d = done.length
   const s = done.filter((q) => q.endedHow === 'skipped').length
+  const ins = done.filter((q) => q.endedHow === 'inserted').length
   const totals: QueueTotals = { time: 0, tokens: 0, tools: 0 }
   for (const q of done) {
     const end = workEndedAt(q)
@@ -776,6 +777,7 @@ export function deriveQueueModel(inp: QueueModelInput): QueueModel {
       totals.time ? `Took ${fmtDuration(totals.time)} in total` : '',
       totals.tokens ? `${fmtTokens(totals.tokens)} tokens` : '',
       s ? `${s} skipped` : '',
+      ins ? `${ins} inserted into a running task` : '',
     ].filter(Boolean)
     return row({
       id: 'all-done', tone: 'emerald', icon: 'check', pill: 'All done',

@@ -1,7 +1,7 @@
 import { useRef, useState } from 'react'
 import {
   ArrowDown, ArrowUp, ArrowUpToLine, Check, ChevronRight, Clock, CopyPlus, CornerDownRight, GripVertical,
-  MessageSquare, MoreHorizontal, PenLine, Play, RotateCcw, SkipForward, Trash2, X,
+  Merge, MessageSquare, MoreHorizontal, PenLine, Play, RotateCcw, SkipForward, Trash2, X,
 } from 'lucide-react'
 import { isQueueCommand, useChatStore, type QueuedMessage } from '../../../stores/chatStore'
 import { fmtTokens } from '../../../utils/format'
@@ -147,11 +147,18 @@ function UpNextRow({ ctx, item, n, isNext, firstTask, prevTask, nextTask, twoAft
   const menuOpen = ctx.menuFor === item.id
   const editing = ctx.editing?.id === item.id ? ctx.editing : null
   const running = !!ctx.model.D
+  // A turn is on (the queue's, or a message typed in the chat) that this
+  // task can join now, as an extra instruction, instead of waiting its turn.
+  const joinable = ctx.busy && !ctx.stopping && ctx.connected
   const startEdit = () => ctx.act.startEdit(item, 'edit', 'Save')
   const moveUp = () => { if (prevTask) { ctx.act.move(item.id, prevTask.id); ctx.focusRow(item.id) } }
   const moveDown = () => { if (nextTask) { ctx.act.move(item.id, twoAfter?.id ?? null); ctx.focusRow(item.id) } }
 
   const menu: MenuEntry[] = [
+    {
+      label: 'Insert now', icon: Merge, hidden: !joinable,
+      onSelect: () => ctx.act.insertNow(item.id),
+    },
     {
       label: 'Run now', icon: Play, hidden: running,
       onSelect: () => {
@@ -191,6 +198,7 @@ function UpNextRow({ ctx, item, n, isNext, firstTask, prevTask, nextTask, twoAft
         const plain = !e.metaKey && !e.ctrlKey && !e.altKey
         if ((e.key === 'Enter' || e.key === ' ') && plain) { e.preventDefault(); ctx.toggleExpanded(item.id) }
         else if ((e.key === 'e' || e.key === 'E') && plain) { e.preventDefault(); startEdit() }
+        else if ((e.key === 'i' || e.key === 'I') && plain && joinable) { e.preventDefault(); ctx.act.insertNow(item.id) }
         else if ((e.key === 'Delete' || e.key === 'Backspace') && plain) { e.preventDefault(); ctx.act.removeWaiting(item.id) }
         else if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); moveUp() }
         else if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); moveDown() }
@@ -251,6 +259,21 @@ function UpNextRow({ ctx, item, n, isNext, firstTask, prevTask, nextTask, twoAft
           <div className="mt-1.5 flex flex-wrap gap-1">
             {item.stuck && <Pill tone="red">Gave up last time</Pill>}
             {ctx.edited.has(item.id) && <Pill tone="zinc">Edited</Pill>}
+          </div>
+        )}
+        {joinable && !editing && (
+          <div className="mt-2">
+            <button
+              type="button"
+              onClick={() => ctx.act.insertNow(item.id)}
+              title="Hand this to the running task now, as an extra instruction for its remaining steps (I)"
+              className={`inline-flex items-center gap-1 rounded-md border border-zinc-700 px-2 text-[11px] font-medium text-zinc-300 hover:border-violet-500/40 hover:bg-violet-500/10 hover:text-violet-700 dark:hover:text-violet-300 ${FOCUS} ${
+                ctx.phone ? 'h-9 px-3 text-xs' : 'h-6 pointer-coarse:h-8'
+              }`}
+            >
+              <Merge className="h-3.5 w-3.5" />
+              Insert now
+            </button>
           </div>
         )}
         {isNext && ctx.model.caption && (
@@ -396,20 +419,22 @@ function DoneRow({ ctx, item }: { ctx: QueueCtx; item: QueuedMessage }) {
   const open = ctx.expanded.has(item.id)
   const p = parseAttachmentRefs(item.content)
   const skipped = item.endedHow === 'skipped'
+  const inserted = item.endedHow === 'inserted'
   const noAnswer = item.endedHow === 'no-answer'
-  const Icon = skipped ? SkipForward : noAnswer ? CornerDownRight : Check
-  const iconCls = skipped ? 'text-zinc-500' : noAnswer ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400'
+  const Icon = skipped ? SkipForward : noAnswer ? CornerDownRight : inserted ? Merge : Check
+  const iconCls = skipped ? 'text-zinc-500' : noAnswer ? 'text-amber-600 dark:text-amber-400'
+    : inserted ? 'text-violet-700 dark:text-violet-300' : 'text-emerald-600 dark:text-emerald-400'
   const ran = !!item.dispatchedAt
   const end = workEndedAt(item)
   const elapsed = ran && end ? fmtElapsed(item.dispatchedAt, end) : ''
   const tokens = taskTokens(item)
-  const label = (skipped ? 'Skipped · ' : noAnswer ? 'Moved on, no answer · ' : '')
+  const label = (skipped ? 'Skipped · ' : noAnswer ? 'Moved on, no answer · ' : inserted ? 'Inserted into the running task · ' : '')
     + (firstLine(p.text, 200) || p.files.map((f) => f.name).join(', '))
   const u = item.usage
   const cached = (u?.cache_read_input_tokens || 0) + (u?.cache_creation_input_tokens || 0)
   const stats = [
     ran ? `Started ${fmtClock(item.dispatchedAt)}` : '',
-    item.completedAt ? `${skipped && !ran ? 'Skipped' : 'Finished'} ${fmtClock(item.completedAt)}` : '',
+    item.completedAt ? `${skipped && !ran ? 'Skipped' : inserted ? 'Inserted' : 'Finished'} ${fmtClock(item.completedAt)}` : '',
     elapsed ? `took ${elapsed}` : '',
     item.toolCount ? `${item.toolCount} tool${item.toolCount === 1 ? '' : 's'}` : '',
     u?.prompt_tokens ? `${fmtTokens(u.prompt_tokens)} in` : '',

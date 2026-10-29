@@ -474,8 +474,9 @@ export interface QueuedMessage {
   usage?: TokenUsage
   toolCount?: number
   // How a finished item ended when it wasn't simply done: skipped by the
-  // user, or moved on from when a question went unanswered.
-  endedHow?: 'skipped' | 'no-answer'
+  // user, moved on from when a question went unanswered, or handed to the
+  // turn that was running (Insert now) instead of waiting for its own.
+  endedHow?: 'skipped' | 'no-answer' | 'inserted'
   // The queue holds on this item, and this says why: the turn errored, the
   // daily allowance refused it, or the user stopped it. `refused`: the agent
   // (or Flight Deck) never took the item's frame, so no reply that comes in
@@ -638,6 +639,11 @@ const _lastFrame = new Map<string, SentFrame>()
 /** When the turn running on each lane began, as far as we know: when its
  *  frame went out (one of ours), or when the agent said it started. */
 const _turns = new Map<string, number>()
+/** Per lane, the waiting tasks handed to the running turn (Insert now), in
+ *  the order sent, until the agent's /btw command_result answers each: taken
+ *  (`busy`), or refused because that turn had just ended — then the task
+ *  goes back to the front of the queue and runs on its own. */
+const _inserts = new Map<string, QueuedMessage[]>()
 /** When each lane last went idle by the agent's word (its "ready"). */
 const _idleAt = new Map<string, number>()
 /** The task each lane had in flight when the page loaded, until the lane's
@@ -1639,7 +1645,7 @@ interface ChatStore {
   removeQueueItem: (containerId: string, id: string) => void
   /** `how` records a Skip, or moving on from an unanswered question. Skipping
    *  a waiting item never starts the queue. */
-  markQueueItemDone: (containerId: string, id: string, opts?: { how?: 'skipped' | 'no-answer' }) => void
+  markQueueItemDone: (containerId: string, id: string, opts?: { how?: 'skipped' | 'no-answer' | 'inserted' }) => void
   toggleQueueAutoMode: (containerId: string) => void
   /** Run the next pending item now, even while the queue is paused (once the
    *  agent is free, when it is busy). */
@@ -1652,6 +1658,11 @@ interface ChatStore {
   editQueueItem: (key: string, id: string, content: string) => boolean
   /** Move a waiting item before another waiting one (null: to the end). */
   moveQueueItem: (key: string, id: string, beforeId: string | null) => void
+  /** Insert now: hand a waiting task to the turn that is running, as an
+   *  extra instruction for its remaining steps, and retire it from the
+   *  queue. False when there is no turn to hand it to (the caller runs it
+   *  on its own instead). */
+  insertQueueItemNow: (key: string, id: string) => boolean
   /** Undo: put saved copies back where they were. */
   restoreQueueItems: (key: string, entries: { item: QueuedMessage; index: number }[]) => void
   /** Restart the 3-minute wait on an unanswered question. */
@@ -2289,6 +2300,28 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ws.on('command_result', (data) => {
       const command = (data.command as string || '').trim().toLowerCase()
       const content = String(data.content || '')
+      // A note for the running turn (a waiting task's Insert now). The turn
+      // goes on, so nothing here is answered or freed: taken, the agent's
+      // line goes in the chat; refused (`busy: false` — the turn had ended
+      // as it was sent), the task goes back to the front of the queue and
+      // runs on its own, as the button promised it would go now.
+      if (command === '/btw') {
+        const insert = _inserts.get(key)?.shift()
+        if (data.busy === false) {
+          const s = insert && useChatStore.getState().sessions.get(key)
+          if (!insert || !s) return
+          // Back in front of the first waiting task (behind a fresh-start
+          // step ahead of it), whether or not it was cleared meanwhile.
+          const back: QueuedMessage = { ...insert, status: 'pending', completedAt: undefined, endedHow: undefined }
+          const rest = s.queue.filter((q) => q.id !== back.id)
+          const at = rest.findIndex((q) => q.status === 'pending' && !isSlashCommand(q.content))
+          updateSession(key, { queue: at < 0 ? [...rest, back] : [...rest.slice(0, at), back, ...rest.slice(at)] })
+          tryDispatchNext(key, { force: true })
+          return
+        }
+        addMessage(key, { id: nextId(), role: 'system', content, timestamp: new Date().toISOString() })
+        return
+      }
       // /new (typed, the New-topic button, or a "new topic" cue the agent
       // acted on), /session new|switch and /clear move or reset the agent's
       // context. The transcript is one continuous timeline: they mark a
@@ -3139,9 +3172,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       resetStallNudges(containerId)
     }
     updateSession(containerId, patch)
-    // Skipping a task that is only waiting tidies the list; it is not a
-    // reason to start whatever comes next.
-    if (opts?.how === 'skipped' && session.queueDispatchedId !== id) return
+    // Skipping a task that is only waiting tidies the list, and handing one
+    // to the running turn keeps that turn going; neither is a reason to
+    // start whatever comes next.
+    if ((opts?.how === 'skipped' || opts?.how === 'inserted') && session.queueDispatchedId !== id) return
     tryDispatchNext(containerId)
   },
 
@@ -3287,6 +3321,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const rest = session.queue.filter((q) => q.id !== id)
     const at = beforeId === null ? rest.length : rest.findIndex((q) => q.id === beforeId)
     updateSession(key, { queue: [...rest.slice(0, at), item, ...rest.slice(at)] })
+  },
+
+  insertQueueItemNow: (key, id) => {
+    const session = get().sessions.get(key)
+    if (!session) return false
+    const item = session.queue.find((q) => q.id === id)
+    if (!item || item.status !== 'pending' || isSlashCommand(item.content)) return false
+    // Only a turn that is on can take it. (`stopping`: the turn is ending
+    // on the user's word — a note for its remaining steps would be lost.)
+    if (!session.busy || session.stopping || !session.connected) return false
+    session.ws.sendBtw(item.content, { runningOnly: true })
+    _inserts.set(key, [...(_inserts.get(key) ?? []), item])
+    get().markQueueItemDone(key, id, { how: 'inserted' })
+    return true
   },
 
   restoreQueueItems: (key, entries) => {

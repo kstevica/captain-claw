@@ -353,6 +353,18 @@ async def _handle_telegram_delegate_result(
     asyncio.ensure_future(_run())
 
 
+def turn_in_flight(server: WebServer, ws: web.WebSocketResponse, agent: Agent) -> bool:
+    """Whether *agent* (the one *ws* talks to) is in the middle of a turn:
+    its own busy flag on a public session or a side lane, the server's on
+    the main lane (``_run_agent`` sets and clears them)."""
+    if getattr(ws, "_public_session_id", None):
+        return bool(getattr(agent, "_public_busy", False))
+    lane = server.normalize_lane(getattr(ws, "_lane", ""))
+    if lane != server.LANE_MAIN:
+        return bool(getattr(agent, "_lane_busy", False))
+    return bool(getattr(server, "_busy", False))
+
+
 async def handle_ws_message(
     server: WebServer, ws: web.WebSocketResponse, data: dict
 ) -> None:
@@ -699,20 +711,36 @@ async def handle_ws_message(
                      agent_busy=server._busy, trigger=trigger)
 
     elif msg_type == "btw":
-        # Inject additional instructions while a task is running.
+        # Inject additional instructions while a task is running. The reply
+        # says whether a turn was on to take them (`busy`); without one the
+        # note waits for the next turn (the council sends its context that
+        # way, right before its first turn). A queued task handed to the
+        # running turn (the queue's Insert now) sends `running_only`: it
+        # wants the turn that is on, not the next one, so with none in
+        # flight it is refused and the client runs the task on its own.
         btw_content = str(data.get("content", "")).strip()
-        _pub_sid = getattr(ws, "_public_session_id", None)
         _target_agent = await server.resolve_agent(ws)
         if btw_content and _target_agent:
-            if not hasattr(_target_agent, "_btw_instructions"):
-                _target_agent._btw_instructions = []
-            _target_agent._btw_instructions.append(btw_content)
-            log.info("BTW instruction added", count=len(_target_agent._btw_instructions))
-            await server._send(ws, {
-                "type": "command_result",
-                "command": "/btw",
-                "content": f"Got it — noted for the remaining steps: *{btw_content}*",
-            })
+            _running = turn_in_flight(server, ws, _target_agent)
+            if bool(data.get("running_only")) and not _running:
+                await server._send(ws, {
+                    "type": "command_result",
+                    "command": "/btw",
+                    "busy": False,
+                    "content": "Nothing is running right now — it goes as its own message instead.",
+                })
+            else:
+                if not hasattr(_target_agent, "_btw_instructions"):
+                    _target_agent._btw_instructions = []
+                _target_agent._btw_instructions.append(btw_content)
+                log.info("BTW instruction added", count=len(_target_agent._btw_instructions),
+                         running=_running)
+                await server._send(ws, {
+                    "type": "command_result",
+                    "command": "/btw",
+                    "busy": _running,
+                    "content": f"Got it — noted for the remaining steps: *{btw_content}*",
+                })
 
     elif msg_type == "set_model":
         # Switch model for the current session via direct WebSocket message.
