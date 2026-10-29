@@ -160,14 +160,15 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
   }, [aboutAgents])
   // Autonomous Work proposals: which still wait for an answer (those get
   // Approve / Reject here — the kiosk has no other place to answer them).
-  const aboutProposals = notifications.some((n) => n.refType === 'autonomy_action')
+  // Asked again when a new one comes in, so it gets its buttons.
+  const proposalIds = notifications.filter((n) => n.refType === 'autonomy_action').map((n) => n.refId).join(',')
   const [waiting, setWaiting] = useState<Set<string> | null>(null)
   const loadWaiting = () => {
     fetchWaitingProposalIds().then(setWaiting).catch(() => setWaiting(null))
   }
   useEffect(() => {
-    if (aboutProposals) loadWaiting()
-  }, [aboutProposals])
+    if (proposalIds) loadWaiting()
+  }, [proposalIds])
 
   const activate = (action: SharedNotificationAction) => {
     if (action.kind === 'none') return
@@ -183,6 +184,9 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
   }
 
   const filtered = filter === 'all' ? notifications : notifications.filter((n) => n.type === filter)
+  // What still waits for Approve / Reject goes on top; the rest keep their order.
+  const waits = (n: Notification) => n.refType === 'autonomy_action' && !!n.refId && !!waiting?.has(n.refId)
+  const shown = [...filtered.filter(waits), ...filtered.filter((n) => !waits(n))]
 
   return (
     <div className={`flex flex-col ${large ? 'h-full' : 'max-h-[480px]'}`}>
@@ -226,10 +230,10 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
       </div>
 
       <div className="flex-1 overflow-y-auto">
-        {filtered.length === 0 ? (
+        {shown.length === 0 ? (
           <div className="px-3 py-6 text-center text-xs text-zinc-600">No notifications</div>
         ) : (
-          filtered.map((n) => {
+          shown.map((n) => {
             const setup = (n.refType === 'agent_setup' || n.refType === 'agent_exam') && n.refId && onOpenSetup ? n.refId : ''
             const exam = n.refType === 'agent_exam'
             return (

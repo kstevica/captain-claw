@@ -225,6 +225,22 @@ async def bell_backfill(user_id: str) -> int:
         return 0
 
 
+async def waiting_bells(user_id: str, have: set[str], *, unread_only: bool = False) -> list[dict[str, Any]]:
+    """The bell notifications of proposals still waiting for this user that
+    aren't in `have` (notification ids): older than the bell's page, yet
+    still to be answered there. Never raises."""
+    try:
+        from captain_claw.flight_deck.auth import get_db
+
+        aids = [str(a.get("id") or "") for a in
+                get_store().list_actions(user_id, status="awaiting_approval", limit=200)]
+        rows = await get_db().list_notifications_by_ref(user_id, BELL_REF, aids)
+        return [r for r in rows if r.get("id") not in have and not (unread_only and r.get("read"))]
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("waiting bells for %s failed: %s", user_id, exc)
+        return []
+
+
 def waiting_may_have_changed(user_id: str) -> None:
     """From the ledger (sync): bring the devices' count up to date, later on
     this event loop. No loop (a script, a test): nothing to do."""
