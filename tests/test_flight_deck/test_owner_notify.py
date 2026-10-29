@@ -376,3 +376,49 @@ def test_the_bell_fills_in_waiting_proposals_it_lacks(store, monkeypatch):
     assert rows == [{"user": ALICE, "type": "autonomy_proposal", "ref_type": "autonomy_action",
                      "ref_id": old["id"], "body": "Re-run the stock search\nPrices moved."}]
     assert _run_coro(owner_notify.bell_backfill(ALICE)) == 0  # once
+
+
+async def test_a_waiting_proposal_stays_in_the_bell_past_its_page(store, tmp_path, monkeypatch):
+    """However many notices came after it, a proposal still waiting for an
+    answer comes with the bell's list — once, and only while it waits."""
+    import httpx
+
+    from captain_claw.flight_deck import auth as fd_auth, notification_routes
+    from captain_claw.flight_deck.auth import get_current_user, set_auth_db
+    from captain_claw.flight_deck.db import FlightDeckDB
+
+    async def no_devices(user_id, count, text="", beep=False):
+        return []
+
+    monkeypatch.setattr(device_bridge, "push_waiting", no_devices)
+    prev = fd_auth._db
+    db = FlightDeckDB(tmp_path / "fd.db")
+    await db.init()
+    set_auth_db(db)
+    try:
+        act = store.add_action(ALICE, kind="run_prompt", title="Re-run the stock search",
+                               status="awaiting_approval")
+        bell = await db.add_notification(ALICE, "autonomy_proposal", "Waiting for you", "Re-run",
+                                         ref_type="autonomy_action", ref_id=act["id"])
+        await db._db.execute("UPDATE notifications SET created_at = ? WHERE id = ?",
+                             ("2026-01-01T00:00:00+00:00", bell))
+        await db._db.commit()
+        for i in range(5):
+            await db.add_notification(ALICE, "info", f"Notice {i}")
+        app = FastAPI()
+        app.include_router(notification_routes.router)
+        app.dependency_overrides[get_current_user] = lambda: {"id": ALICE}
+
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fd.test") as c:
+            async def ids(limit):
+                r = await c.get(f"/fd/notifications?limit={limit}")
+                return [n["id"] for n in r.json()["notifications"]]
+
+            got = await ids(3)
+            assert len(got) == 4 and got[-1] == bell
+            assert (await ids(50)).count(bell) == 1  # on the page already: not twice
+            store.update_status(act["id"], "rejected")
+            assert bell not in await ids(3)
+    finally:
+        await db.close()
+        fd_auth._db = prev
