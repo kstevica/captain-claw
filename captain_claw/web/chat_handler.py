@@ -216,6 +216,37 @@ async def _send_device_media(
         log.warning("Device media listing failed", error=str(exc))
 
 
+async def _send_reply_images(
+    send: Any, agent: Any, turn_start_idx: int, reply: str, started_at: float,
+) -> None:
+    """After the reply: show in the web chat the pictures it hands the person
+    that no tool output put there already (:mod:`captain_claw.reply_images`
+    finds them; Jev decides when the reply names no file). Never raises."""
+    from captain_claw import reply_images
+    from captain_claw.platform_adapter import (
+        effective_turn_start_idx,
+        extract_image_paths_from_tool_output,
+    )
+
+    try:
+        session = getattr(agent, "session", None)
+        start = effective_turn_start_idx(agent, turn_start_idx)
+        # The web chat already showed every picture these tools reported.
+        shown = {
+            str(path)
+            for msg in (session.messages[start:] if session is not None else [])
+            if str(msg.get("role", "")) == "tool"
+            and str(msg.get("tool_name", "")).strip().lower() in ("image_gen", "visualize", "termux", "browser")
+            for path in extract_image_paths_from_tool_output(str(msg.get("content", "") or ""))
+        }
+        for path in await reply_images.find(agent, reply, turn_start_idx, started_at):
+            if str(path) not in shown:
+                send({"type": "chat_message", "role": "image", "content": str(path),
+                      "timestamp": datetime.now(UTC).isoformat()})
+    except Exception as exc:
+        log.warning("Reply pictures not shown", error=str(exc))
+
+
 def automation_lane_for(server: Any, automation: Any, lane: str, is_public: bool) -> str:
     """The lane an automated turn on the main chat moves to ("" = it stays)."""
     if automation is None or is_public or lane != server.LANE_MAIN:
@@ -1788,6 +1819,13 @@ async def _run_agent(
                     turn_started_at=_wa_started_at,
                     already_sent=_wa_files.sent_this_turn(agent),
                 ))
+            # Pictures the reply hands over that no tool output showed: into
+            # the web chat beside it (awaited below, before 'ready').
+            from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
+            _images_task: asyncio.Task | None = None
+            if not no_broadcast and not _is_fd_spawned_worker():
+                _images_task = asyncio.create_task(_send_reply_images(
+                    send, agent, _wa_turn_start, str(response or ""), _wa_started_at))
             if turn_channel == "device":
                 asyncio.create_task(_send_device_media(
                     send, agent, _wa_turn_start, str(response or ""), _wa_started_at))
@@ -1800,7 +1838,6 @@ async def _run_agent(
             # A person's reply that came out garbled gets a /new hint (Jev
             # judges; it runs beside the next-steps call, awaited below so the
             # hint lands before 'ready').
-            from captain_claw.agent_reasoning_mixin import _is_fd_spawned_worker
             _garble_task: asyncio.Task | None = None
             if (automation is None and not is_public and not speaker_key and not no_broadcast
                     and not _is_fd_spawned_worker()):
@@ -1830,6 +1867,8 @@ async def _run_agent(
 
             if _garble_task is not None and await _garble_task:
                 send(_garbled_reply.hint_frame())
+            if _images_task is not None:
+                await _images_task
 
         # Send updated usage/session info.
         send({

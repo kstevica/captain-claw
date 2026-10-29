@@ -1316,10 +1316,12 @@ async def _tg_process_with_typing(
                 from captain_claw.turn_deliverables import saved_root_of
                 turn_start_idx = effective_turn_start_idx(user_agent, turn_start_idx)
                 if user_agent.session and server._telegram_bridge:
-                    for img_path in collect_turn_generated_image_paths(
+                    from captain_claw.platform_adapter import with_reply_images
+
+                    for img_path in await with_reply_images(user_agent, collect_turn_generated_image_paths(
                         user_agent.session, turn_start_idx, saved_root=saved_root_of(user_agent),
                         since=turn_started_at, agent=user_agent, reply=full_reply or "",
-                    ):
+                    ), full_reply or "", turn_start_idx, turn_started_at):
                         try:
                             await server._telegram_bridge.send_photo(
                                 chat_id, img_path, reply_to_message_id=reply_to_message_id,
