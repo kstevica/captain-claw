@@ -20,6 +20,9 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
+
+import pytest
 
 from captain_claw.flight_deck import agent_exam as ex
 
@@ -90,6 +93,73 @@ def test_a_focus_leans_the_sample(monkeypatch):
 def _batch() -> list[dict]:
     return [c | {"kind": "situation" if "procedure" in c["title"] else "ask"}
             for c in ex.candidates(_src(read=set()))[:2]]
+
+
+async def test_an_exam_on_picked_documents_asks_only_from_them(monkeypatch):
+    written = iter(range(1000))
+
+    class _Reply:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+    async def call(reader, system, prompt, owner_id, job, max_tokens):
+        return _Reply(json.dumps({"questions": [
+            {"section": i, "question": f"Question {n}?", "answer": f"Answer {n}."}
+            for i, n in zip(range(1, ex._WRITE_BATCH + 1), written)]}))
+
+    monkeypatch.setattr(ex.ap, "_call", call)
+    monkeypatch.setattr(ex, "save", lambda job: None)
+    srcs = [_src("handbook.md"), _src("pricing.md"), _src("returns.md")]
+    job = ex.ExamJob(id="abc123def4567890", agent="helpdesk", size="standard", docs=["pricing.md", "returns.md"])
+    await ex._write(job, {}, srcs)
+    assert job.questions and {q["doc"] for q in job.questions} == {"pricing.md", "returns.md"}
+    with pytest.raises(ex._ExamError):
+        await ex._write(ex.ExamJob(id="abc123def4567890", agent="helpdesk", docs=["gone.md"]), {}, srcs)
+    assert ex.SIZES["marathon"] == 2 * ex.SIZES["deep"]
+
+
+async def test_the_pick_is_kept_with_the_exam_and_asked_again(monkeypatch):
+    from fastapi import HTTPException
+
+    class _Doc:
+        def __init__(self, file: str) -> None:
+            self.file = file
+
+    async def docs(workspace):
+        return None, None, [_Doc("a.md"), _Doc("b.md"), _Doc("c.md")]
+
+    async def no(*a):
+        return False
+
+    async def reader(*a):
+        return {"model": "m"}
+
+    async def run(job, reader, workspace):
+        return None
+
+    monkeypatch.setattr(ex, "_place", lambda slug, user: ("u1", {"name": "Helpdesk"}, Path("/nowhere")))
+    monkeypatch.setattr(ex.ap, "_quota_spent", no)
+    monkeypatch.setattr(ex, "_reader", reader)
+    monkeypatch.setattr(ex.ak, "_docs", docs)
+    monkeypatch.setattr(ex, "run_exam", run)
+    monkeypatch.setattr(ex, "save", lambda job: None)
+    monkeypatch.setattr(ex, "_RUNNING", {})
+
+    async def start(**body) -> dict:
+        got = await ex.start("helpdesk", ex.StartBody(**body), user={})
+        ex._RUNNING.clear()
+        return got
+
+    got = await start(size="marathon", docs=["b.md", "gone.md", "b.md"])
+    assert got["docs"] == ["b.md"] and got["size"] == "marathon"      # known, once each
+    assert (await start(docs=["c.md", "a.md", "b.md"]))["docs"] == []   # every one of them: all
+    with pytest.raises(HTTPException):
+        await start(docs=["gone.md"])
+    earlier = ex.ExamJob(id="e1", agent="helpdesk", size="deep", docs=["a.md"],
+                         questions=[{"id": "q1", "question": "Q?", "verdict": "right"}])
+    monkeypatch.setattr(ex, "_exam", lambda slug, exam_id: earlier)
+    again = await start(again="e1", docs=["c.md"])
+    assert again["docs"] == ["a.md"] and again["size"] == "deep"      # as it was the first time
 
 
 def test_the_writers_questions_are_cleaned():

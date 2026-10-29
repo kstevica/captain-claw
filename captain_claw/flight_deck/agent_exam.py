@@ -4,15 +4,15 @@ An agent's owner gives it documents (agent_preset: its knowledge/ folder,
 read for rules and skills, or only kept to search). The exam checks what it
 does with them, as its users would find out:
 
-- **writing** — sections of its documents are sampled, never the whole of
-  them: every document gets a share, each from the parts the setup read and
-  the parts it didn't, leaning to sections that tell it what to do
-  (agent_preset_select.instructive) and to a focus when one is given. The
-  agent's own model writes one question per section with the answer the
-  section gives: an ``ask`` ("what's our refund window?") or, from the
-  sections with rules, a ``situation`` ("a customer wants a refund on day
-  40 — what do you reply?"), which only goes right when the rule reaches it
-  without being told to look;
+- **writing** — sections of its documents (all, or the ones picked) are
+  sampled, never the whole of them: every document gets a share, each from
+  the parts the setup read and the parts it didn't, leaning to sections that
+  tell it what to do (agent_preset_select.instructive) and to a focus when
+  one is given. The agent's own model writes one question per section with
+  the answer the section gives: an ``ask`` ("what's our refund window?")
+  or, from the sections with rules, a ``situation`` ("a customer wants a
+  refund on day 40 — what do you reply?"), which only goes right when the
+  rule reaches it without being told to look;
 - **asking** — each question goes to the agent through its real chat, a
   fresh private session each, which keeps nothing in its memory and can't
   send or change anything; what it looked up on the way is kept with its
@@ -28,7 +28,7 @@ document, a fact taught, or a model switch shows in the score. Each answer
 the exam wanted can be taught to it: the answer as a fact from that section.
 
     GET    /fd/agent-exam/{slug}                 its exams, the running one, what one costs
-    POST   /fd/agent-exam/{slug}                 start one (size, focus) or run one again (again)
+    POST   /fd/agent-exam/{slug}                 start one (size, focus, docs) or run one again (again)
     GET    /fd/agent-exam/{slug}/{id}            one exam, with its questions
     DELETE /fd/agent-exam/{slug}/{id}            stop it, or forget it
     POST   /fd/agent-exam/{slug}/{id}/continue   go on with one a restart stopped
@@ -71,7 +71,7 @@ _QUESTIONS_PROMPT = Path(__file__).parent.parent / "instructions" / "agent_exam_
 _GRADE_PROMPT = Path(__file__).parent.parent / "instructions" / "agent_exam_grade_prompt.md"
 
 # How many questions an exam asks: the person picks one.
-SIZES = {"quick": 10, "standard": 25, "deep": 60}
+SIZES = {"quick": 10, "standard": 25, "deep": 60, "marathon": 120}
 DEFAULT_SIZE = "quick"
 KINDS = ("ask", "situation")
 VERDICTS = ("right", "partly", "wrong", "no_answer")
@@ -601,6 +601,7 @@ class ExamJob:
     agent_name: str = ""
     size: str = DEFAULT_SIZE
     focus: str = ""
+    docs: list[str] = field(default_factory=list)   # the documents (files) it is examined on; [] — all of them
     again: str = ""                 # the exam whose questions it asks again
     state: str = "running"          # running | done | stopped | error
     phase: str = "writing"          # writing | asking | grading
@@ -619,7 +620,7 @@ class ExamJob:
     summary: dict | None = None
     task: asyncio.Task | None = None
 
-    _KEPT = ("id", "agent", "owner_id", "owner", "agent_name", "size", "focus", "again", "state", "phase", "step",
+    _KEPT = ("id", "agent", "owner_id", "owner", "agent_name", "size", "focus", "docs", "again", "state", "phase", "step",
              "steps", "model", "via", "tokens", "started", "finished", "error", "notes", "questions", "summary")
 
     def view(self, questions: bool = False) -> dict:
@@ -729,6 +730,10 @@ async def _write(job: ExamJob, reader: dict, srcs: list[Source]) -> None:
     """The questions: sampled sections, a writing call for each few."""
     n = SIZES.get(job.size, SIZES[DEFAULT_SIZE])
     seed = int(job.id[:8], 16) if re.fullmatch(r"[0-9a-f]{8}.*", job.id) else 0
+    if job.docs:
+        srcs = [s for s in srcs if s.file in job.docs]
+        if not srcs:
+            raise _ExamError("The documents picked for this exam aren't in its knowledge any more.")
     picks = await asyncio.to_thread(sample, srcs, n, job.focus, seed)
     if not picks:
         raise _ExamError("Its documents have no sections long enough to ask about.")
@@ -1006,12 +1011,16 @@ async def overview(slug: str, user: dict = Depends(get_managed_user)) -> dict:
         "running": running.view() if running else None,
         "docs": len(srcs), "sections": sections, "model": str(reader.get("model") or ""),
         "sizes": SIZES, "cost": {k: cost(min(n, sections) or n, per_question) for k, n in SIZES.items()},
+        # Each document it can be examined on, to pick from; what one question costs, for the picked.
+        "materials": [{"file": s.file, "title": s.title, "sections": len(candidates(s))} for s in srcs],
+        "per_question": cost(1, per_question),
     }
 
 
 class StartBody(BaseModel):
     size: str = Field(DEFAULT_SIZE, max_length=20)
     focus: str = Field("", max_length=300)
+    docs: list[str] = Field(default_factory=list, max_length=500)   # the files to be examined on; [] — all
     again: str = Field("", max_length=40)    # an earlier exam's id: its questions again
 
 
@@ -1026,14 +1035,23 @@ async def start(slug: str, body: StartBody, user: dict = Depends(get_managed_use
         raise HTTPException(429, "Today's allowance is used up. Try the exam again tomorrow.")
     reader = await _reader(owner_id, slug, entry)
     size = body.size if body.size in SIZES else DEFAULT_SIZE
+    picked: list[str] = []
+    if body.docs and not body.again:
+        _, _, docs = await ak._docs(workspace)
+        files = {d.file for d in docs}
+        picked = [f for f in dict.fromkeys(body.docs) if f in files]
+        if not picked:
+            raise HTTPException(400, "None of the documents picked are in its knowledge. Pick again.")
+        if len(picked) == len(files):
+            picked = []   # every one of them: all, as an exam without a pick is
     job = ExamJob(id=secrets.token_hex(8), agent=slug, owner_id=owner_id, owner=ap.owner_key(owner_id),
-                  agent_name=str(entry.get("name") or slug), size=size, focus=body.focus.strip(),
+                  agent_name=str(entry.get("name") or slug), size=size, focus=body.focus.strip(), docs=picked,
                   model=str(reader.get("model") or ""), via="agent")
     if body.again:
         earlier = _exam(slug, body.again)
         if not earlier.questions:
             raise HTTPException(409, "That exam has no questions to ask again.")
-        job.size, job.focus = earlier.size, earlier.focus
+        job.size, job.focus, job.docs = earlier.size, earlier.focus, list(earlier.docs or [])
         job.again = earlier.again or earlier.id
         keep = ("id", "kind", "question", "expected", "points", "doc", "doc_title", "doc_name", "title", "path", "key",
                 "read")

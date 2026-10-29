@@ -19,8 +19,9 @@ import {
 // its users would ask them, in private sessions that keep nothing — then
 // graded against the section each came from.
 //
-//   start    — what it is examined on, how many questions (Quick / Standard
-//              / Deep) and what that costs, an optional focus, earlier exams;
+//   start    — what it is examined on (all its documents, or the ones
+//              picked), how many questions (Quick / Standard / Deep /
+//              Marathon) and what that costs, an optional focus, earlier exams;
 //   running  — writing, asking, grading, live: the question it is asked now,
 //              and the answers as they come, rendered as the chat renders them;
 //   results  — the score and how the answers went, by kind, by document and
@@ -35,7 +36,11 @@ const SIZES: { id: ExamSize; label: string; hint: string }[] = [
   { id: 'quick', label: 'Quick', hint: 'A first look' },
   { id: 'standard', label: 'Standard', hint: 'A fair picture' },
   { id: 'deep', label: 'Deep', hint: 'Into every corner' },
+  { id: 'marathon', label: 'Marathon', hint: 'As wide as it goes' },
 ]
+
+/** Past this many documents, the pick gets a search. */
+const MATERIALS_SEARCH = 8
 
 // A verdict's label, its colour in a bar (dot), on a question's number (badge) and as a tag (pill).
 const VERDICT: Record<Verdict, { label: string; dot: string; badge: string; pill: string }> = {
@@ -124,6 +129,8 @@ export function AgentExamPanel({ agent, onClose, onReadDocs }: {
   const [view, setView] = useState<'start' | 'exam'>('start')
   const [size, setSize] = useState<ExamSize>('quick')
   const [focus, setFocus] = useState('')
+  // The documents picked to be examined on (their files) — null: all of them.
+  const [picked, setPicked] = useState<string[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [tries, setTries] = useState(0)
@@ -171,7 +178,7 @@ export function AgentExamPanel({ agent, onClose, onReadDocs }: {
       setBusy(false)
     }
   }
-  const start = () => act(() => agentExamApi.start(agent.slug, { size, focus: focus.trim() }))
+  const start = () => act(() => agentExamApi.start(agent.slug, { size, focus: focus.trim(), docs: picked ?? [] }))
   const again = (id: string) => act(() => agentExamApi.start(agent.slug, { again: id }))
   const resume = (id: string) => act(() => agentExamApi.resume(agent.slug, id))
   const stop = async (id: string) => {
@@ -251,7 +258,7 @@ export function AgentExamPanel({ agent, onClose, onReadDocs }: {
           ) : view === 'start' || (!exam && !err) ? (
             view === 'start' ? (
               <StartPanel overview={overview} size={size} setSize={setSize} focus={focus} setFocus={setFocus}
-                busy={busy} err={err} onStart={start} onOpen={open} onForget={forget} />
+                picked={picked} setPicked={setPicked} busy={busy} err={err} onStart={start} onOpen={open} onForget={forget} />
             ) : <Centered><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></Centered>
           ) : !exam ? (
             <Centered><p className="text-sm text-red-500">{err}</p></Centered>
@@ -280,12 +287,14 @@ function Centered({ children }: { children: ReactNode }) {
 
 // ── Start ─────────────────────────────────────────────────────────────
 
-function StartPanel({ overview, size, setSize, focus, setFocus, busy, err, onStart, onOpen, onForget }: {
+function StartPanel({ overview, size, setSize, focus, setFocus, picked, setPicked, busy, err, onStart, onOpen, onForget }: {
   overview: ExamOverview
   size: ExamSize
   setSize: (s: ExamSize) => void
   focus: string
   setFocus: (f: string) => void
+  picked: string[] | null
+  setPicked: (p: string[] | null) => void
   busy: boolean
   err: string
   onStart: () => void
@@ -293,6 +302,12 @@ function StartPanel({ overview, size, setSize, focus, setFocus, busy, err, onSta
   onForget: (id: string) => void
 }) {
   const nothing = overview.docs === 0 || overview.sections === 0
+  const materials = overview.materials ?? []
+  const chosen = picked === null ? materials : materials.filter((m) => picked.includes(m.file))
+  // What the picked documents have to ask about: the most questions any size can have.
+  const sections = picked === null ? overview.sections : chosen.reduce((n, m) => n + m.sections, 0)
+  const costOf = (s: ExamSize) => (overview.per_question
+    ? Math.min(overview.sizes[s], sections) * overview.per_question : overview.cost[s])
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-6 p-4 wide:p-6">
       <div className="rounded-xl border border-violet-500/20 bg-violet-500/5 p-4">
@@ -316,26 +331,28 @@ function StartPanel({ overview, size, setSize, focus, setFocus, busy, err, onSta
         </div>
       ) : (
         <>
+          {materials.length > 1 && <MaterialsPick materials={materials} picked={picked} setPicked={setPicked} />}
+
           <div>
             <div className="mb-2 flex items-baseline justify-between gap-2">
               <h4 className="text-sm font-semibold text-zinc-200">How many questions</h4>
               <span className="text-xs text-zinc-500">
-                from {plural(overview.docs, 'document')} · {plural(overview.sections, 'section')} to ask about
+                from {plural(chosen.length, 'document')} · {plural(sections, 'section')} to ask about
               </span>
             </div>
-            <div className="grid grid-cols-3 gap-2" role="radiogroup" aria-label="Exam size">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4" role="radiogroup" aria-label="Exam size">
               {SIZES.map((s) => {
-                const n = Math.min(overview.sizes[s.id], overview.sections)
+                const n = Math.min(overview.sizes[s.id], sections)
                 const on = size === s.id
                 return (
                   <button key={s.id} role="radio" aria-checked={on} onClick={() => setSize(s.id)}
-                    className={`rounded-xl border p-3 text-left transition-colors ${on
+                    className={`flex flex-col rounded-xl border p-3 text-left transition-colors ${on
                       ? 'border-violet-500 bg-violet-500/10 ring-1 ring-violet-500/40'
                       : 'border-zinc-800 hover:border-zinc-700 hover:bg-zinc-800/50'}`}>
                     <span className="block text-sm font-semibold text-zinc-100">{s.label}</span>
                     <span className="mt-0.5 block text-2xl font-semibold tabular-nums text-zinc-100">{n}</span>
                     <span className="block text-[11px] text-zinc-500">questions · {s.hint}</span>
-                    <span className="mt-2 block text-[11px] text-zinc-500">about {kTokens(overview.cost[s.id])} tokens</span>
+                    <span className="mt-2 block text-[11px] text-zinc-500">about {kTokens(costOf(s.id))} tokens</span>
                   </button>
                 )
               })}
@@ -355,7 +372,12 @@ function StartPanel({ overview, size, setSize, focus, setFocus, busy, err, onSta
           {err && <p className="flex items-start gap-1.5 text-sm text-red-500"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{err}</p>}
 
           <div className="flex items-center justify-end gap-3">
-            <button onClick={onStart} disabled={busy}
+            {sections === 0 && (
+              <span className="text-xs text-zinc-500">
+                {chosen.length === 0 ? 'Pick at least one document.' : 'The picked documents have nothing long enough to ask about.'}
+              </span>
+            )}
+            <button onClick={onStart} disabled={busy || sections === 0}
               className="flex items-center gap-2 rounded-lg bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-500 disabled:opacity-60">
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} Start the exam
             </button>
@@ -373,7 +395,8 @@ function StartPanel({ overview, size, setSize, focus, setFocus, busy, err, onSta
                   <ScoreRing pct={e.summary?.pct ?? null} size={44} />
                   <span className="min-w-0">
                     <span className="block truncate text-sm text-zinc-200">
-                      {sizeLabel(e.size)}{e.again ? ' · asked again' : ''}{e.focus ? ` · ${e.focus}` : ''}
+                      {sizeLabel(e.size)}{e.again ? ' · asked again' : ''}{e.docs?.length ? ` · ${plural(e.docs.length, 'document')}` : ''}
+                      {e.focus ? ` · ${e.focus}` : ''}
                     </span>
                     <span className="block truncate text-xs text-zinc-500">
                       {e.state === 'ready' ? 'from its archetype · ready to ask'
@@ -391,6 +414,63 @@ function StartPanel({ overview, size, setSize, focus, setFocus, busy, err, onSta
           </ul>
         </div>
       )}
+    </div>
+  )
+}
+
+/** Which documents the exam asks about: all of them (*picked* null), or the ones ticked. */
+function MaterialsPick({ materials, picked, setPicked }: {
+  materials: ExamOverview['materials']
+  picked: string[] | null
+  setPicked: (p: string[] | null) => void
+}) {
+  const [query, setQuery] = useState('')
+  const toggle = (file: string) => {
+    const now = picked ?? materials.map((m) => m.file)
+    const next = now.includes(file) ? now.filter((f) => f !== file) : [...now, file]
+    setPicked(next.length === materials.length ? null : next)
+  }
+  const q = query.trim().toLowerCase()
+  const shown = q ? materials.filter((m) => `${m.title} ${m.file}`.toLowerCase().includes(q)) : materials
+  const link = 'font-medium text-violet-600 hover:underline disabled:text-zinc-600 disabled:no-underline dark:text-violet-400'
+  return (
+    <div>
+      <div className="mb-2 flex items-baseline justify-between gap-2">
+        <h4 className="text-sm font-semibold text-zinc-200">Materials</h4>
+        <span className="flex items-center gap-2 text-xs text-zinc-500">
+          {picked === null ? materials.length : picked.length} of {materials.length} picked
+          <button onClick={() => setPicked(null)} disabled={picked === null} className={link}>All</button>
+          <button onClick={() => setPicked([])} disabled={picked?.length === 0} className={link}>None</button>
+        </span>
+      </div>
+      {materials.length > MATERIALS_SEARCH && (
+        <div className="relative mb-2">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
+          <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Find a document" aria-label="Find a document"
+            className="w-full rounded-lg border border-zinc-700 bg-zinc-950 py-1.5 pl-8 pr-3 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-violet-500 focus:outline-none" />
+        </div>
+      )}
+      <ul role="group" aria-label="Materials" className="max-h-64 divide-y divide-zinc-800 overflow-y-auto rounded-xl border border-zinc-800">
+        {shown.map((m) => {
+          const ticked = picked === null || picked.includes(m.file)
+          return (
+            <li key={m.file}>
+              <button role="checkbox" aria-checked={ticked} onClick={() => toggle(m.file)}
+                className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-zinc-800/50">
+                <span className={`flex h-4 w-4 shrink-0 items-center justify-center rounded border ${ticked
+                  ? 'border-violet-500 bg-violet-500 text-white' : 'border-zinc-600'}`}>
+                  {ticked && <Check className="h-3 w-3" />}
+                </span>
+                <FileText className="h-4 w-4 shrink-0 text-zinc-500" />
+                <span className="min-w-0 flex-1 truncate text-sm text-zinc-200" title={m.file}>{m.title}</span>
+                <span className="shrink-0 text-xs text-zinc-500">{m.sections ? plural(m.sections, 'section') : 'nothing to ask'}</span>
+              </button>
+            </li>
+          )
+        })}
+        {shown.length === 0 && <li className="px-3 py-3 text-sm text-zinc-500">No document matches “{query.trim()}”.</li>}
+      </ul>
+      <span className="mt-1 block text-xs text-zinc-500">Questions come only from the ticked documents.</span>
     </div>
   )
 }
@@ -629,6 +709,8 @@ function ResultsPanel({ exam, busy, err, onAgain, onResume, onNew, onTeach, onRe
   ))
   // The documents with unread parts it got wrong: one click reads them.
   const toRead = [...new Set(questions.filter((q) => wentWrong(q) && q.read === false && q.doc_name).map((q) => q.doc_name))]
+  // The documents it was examined on, when they were picked: by title.
+  const picks = (exam.docs ?? []).map((f) => questions.find((q) => q.doc === f)?.doc_title ?? f)
   const b = band(s?.pct ?? null)
   const tiles = s ? [
     { label: 'Questions', hint: 'asked straight out', score: s.kinds.ask },
@@ -685,6 +767,11 @@ function ResultsPanel({ exam, busy, err, onAgain, onResume, onNew, onTeach, onRe
               </h4>
               <div className="mt-2.5 flex flex-wrap gap-1.5">
                 <Meta icon={GraduationCap}>{sizeLabel(exam.size)} exam{exam.again ? ', asked again' : ''}</Meta>
+                {picks.length > 0 && (
+                  <span title={picks.join('\n')} className="contents">
+                    <Meta icon={FileText}>{picks.length === 1 ? picks[0] : `${picks.length} documents`}</Meta>
+                  </span>
+                )}
                 {exam.focus && <Meta icon={Target}>{exam.focus}</Meta>}
                 {exam.model && <Meta icon={Cpu}>{exam.model}</Meta>}
                 <Meta icon={CalendarDays}>{when(exam.started)}</Meta>
