@@ -242,6 +242,18 @@ def test_a_detail_is_found_however_the_book_writes_it():
                    "Home Depot 2006: $39,275m excluding goodwill vs. $46,543m including it",
                    "cost of goods sold (COGS) for the 8.74 percent"]:
         assert ex.found_in(detail, [book]), detail
+    # A reply in another language writes its decimals with a comma, or as a fraction (6½% is 6.5 percent).
+    lessons = [ex._checked("One point of growth adds 0.28 percentage point to TRS; the long-run real return is 6.5 percent.")]
+    assert ex.found_in("+1pp rasta ≈ +0,28pp TRS-a", lessons) and ex.found_in("long-run real average of 6½%", lessons)
+    assert ex._detail_parts("od 0,28 do 6½% i ¼, a NPV je $3,143")[0] == ["0.28", "6.5", "0.25", "3,143"]
+    assert ex.found_in("NPV jumps to $3,143", [ex._checked("contingent npv jumps to $3,143")])
+    assert ex.found_in("a 6½% long-run real return", [ex._checked("that 6 [1] /2 percent long-term real return")])
+    # A detail that joins two facts is found when each is, one in the book and one in a lesson.
+    corpus = {"documents": [ex._checked("From 1982 to 1996 the S&P 500 returned 16 percent, 12 percent real.")],
+              "lessons": lessons, "looked_up": []}
+    joined = "S&P 500: 16% nominal / 12% real a year — over twice the 6½% long-run real return"
+    assert ex.check_details([joined], corpus) == [{"text": joined, "found": "documents"}]
+    assert ex.check_details([joined.replace("6½%", "9%")], corpus)[0]["found"] == ""
     # A figure it never gives is made up; wording with nothing to check it by isn't listed at all.
     assert not ex.found_in("t = 4.19 for the change in P/E", [book])
     corpus = {"documents": [book], "lessons": [], "looked_up": []}
@@ -258,6 +270,11 @@ def test_made_up_stands_only_for_details_found_nowhere():
     right = ex.settle({**grade, "verdict": "right"}, nowhere)
     assert right["verdict"] == "partly" and right["made_up"] is True    # right, but it made something up
     assert ex.settle({**grade, "verdict": "right", "made_up": True}, [])["made_up"] is True  # nothing listed to check
+    # Partly right with no point missing and nothing made up: marked down for detail, so right.
+    extra = {"verdict": "partly", "made_up": False, "missing": [], "why": "Adds examples not in the passage."}
+    assert ex.settle(extra, found)["verdict"] == "right"
+    assert ex.settle({**extra, "missing": ["patent protection"]}, found)["verdict"] == "partly"
+    assert ex.settle(extra, nowhere)["verdict"] == "partly"
     # A grader that only listed the reply's own wording: nothing was checked, nothing made up.
     worded = ex.parse_grades(json.dumps({"grades": [{"item": 1, "verdict": "right", "made_up": True,
                                                     "unsupported": ["a self-contained DCF handbook"]}]}), [{}])[1]
