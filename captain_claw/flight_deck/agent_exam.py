@@ -45,6 +45,7 @@ import random
 import re
 import secrets
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -91,8 +92,7 @@ _ASK_TIMEOUT = 300.0       # a question unanswered this long is stopped
 _DRAIN_S = 60.0            # a stopped question: how long its turn is waited out
 _KEEP = 20                 # exams kept per agent
 _DETAILS_MAX = 8           # details of one reply the grader lists as not in its passage
-_DETAIL_NEAR = 600         # … found elsewhere when its figures, names and words are this close
-_DETAIL_WORDS = 0.8        # … and at least this share of its words (half, with a figure or a name to go by)
+_DETAIL_NEAR = 3500        # … found elsewhere when its figures and names are this close (an exhibit and its text)
 _DETAIL_TRIES = 400        # places a detail's rarest part is looked at, per text
 # Tokens one question costs, about, before the agent's own exams say: the writer's share, the
 # agent's turn (its instructions, tools and what it looks up), the grader's share.
@@ -343,7 +343,8 @@ def parse_grades(content: str, batch: list[dict]) -> dict[int, dict]:
             continue
         unsupported = [d for d in (_clean(x, 200) for x in item.get("unsupported") or []
                                    if isinstance(x, (str, int, float))) if d][:_DETAILS_MAX]
-        out[n] = {"verdict": verdict, "made_up": item.get("made_up") is True or bool(unsupported),
+        # Made up is what its details say (settle); the grader's word only when it names none.
+        out[n] = {"verdict": verdict, "made_up": item.get("made_up") is True and not unsupported,
                   "unsupported": unsupported,
                   "missing": [m for m in (_clean(x, 200) for x in item.get("missing") or []
                                           if isinstance(x, (str, int, float))) if m][:4],
@@ -355,68 +356,90 @@ def parse_grades(content: str, batch: list[dict]) -> dict[int, dict]:
 
 _FIGURE = re.compile(r"\d+(?:[.,]\d+)*")
 _WORD = re.compile(r"[^\W\d_][\w’'-]*")
+_YEARS = re.compile(r"\b(1[89]|20)(\d\d)(s?)\s*([–—-])\s*(\d\d)(s?)\b")   # 2005–07, 1980s–90s
 _COMMON = frozenset("""a an the and or but nor of in on at to for from by with as is are was were be been its it this
 that these those their there than then per each about around roughly approximately over under more less most
 least into onto out up down after before between during when while which who whom whose what how why""".split())
 
 
-def _stem(word: str) -> str:
-    return word[:6] if len(word) > 6 else word
-
-
-def _detail_needs(detail: str) -> tuple[list[str], list[str], list[str]]:
-    """What a detail must have nearby to be found: its figures, its names
-    (capitalised words but the first), and its words."""
+def _detail_parts(detail: str) -> tuple[list[str], list[str]]:
+    """What a detail is found by: its figures (a year range's short end in
+    full — 2005–07 is 2005 and 2007) and its names (capitalised words but
+    the first, without a possessive; not a short acronym, which a reply
+    shortens on its own: USD, COGS). The rest is the reply's own wording."""
+    detail = _YEARS.sub(lambda m: f"{m[1]}{m[2]}{m[3]}{m[4]}{m[1]}{m[5]}{m[6]}", detail)
     figures = [f.strip(".,") for f in _FIGURE.findall(detail)]
-    words = [w for w in _WORD.findall(detail) if len(w) > 2]
-    names = [w.casefold() for w in words[1:] if w[0].isupper() and w.casefold() not in _COMMON]
-    plain = [_stem(w.casefold()) for w in words if w.casefold() not in _COMMON and len(w) > 3]
-    return figures, names, plain
+    names = []
+    for word in _WORD.findall(detail)[1:]:
+        for part in re.sub(r"[’']s?$", "", word).split("-"):
+            if (len(part) > 2 and part.isalpha() and part[0].isupper() and part.casefold() not in _COMMON
+                    and "LATIN" in unicodedata.name(part[0], "") and not (part.isupper() and len(part) <= 4)):
+                names.append(part.casefold())
+    return figures, names
 
 
-def _has_figure(window: str, figure: str) -> bool:
-    return re.search(rf"(?<![\d.,]){re.escape(figure)}(?!\d|[.,]\d)", window) is not None
+_NUMBER_WORDS = "zero one two three four five six seven eight nine ten eleven twelve".split()
+
+
+def _part_pattern(part: str, figure: bool) -> re.Pattern:
+    """A figure as itself (300.0 as 300 too, and up to twelve as its word
+    too: "from six years to four"), or a name at the start of a word (Pepsi
+    in PepsiCo)."""
+    if not figure:
+        return re.compile(rf"(?<![^\W\d_]){re.escape(part)}")
+    whole = re.sub(r"\.0+$", "", part)
+    ways = [rf"(?<![\d.,]){re.escape(whole)}(?:\.0+)?(?!\d|[.,]\d)"]
+    if whole.isdigit() and int(whole) < len(_NUMBER_WORDS):
+        ways.append(rf"\b{_NUMBER_WORDS[int(whole)]}\b")
+    return re.compile("|".join(ways))
 
 
 def found_in(detail: str, texts: list[str]) -> bool:
-    """Whether *detail* (a few words the grader quoted from a reply) is in
-    one of *texts* (casefolded): its figures and names all, and most of its
-    words (a reply words it its own way: half, beside a figure or a name),
-    within _DETAIL_NEAR characters of each other — and, with no figure, no
-    long word of it that *texts* never use."""
-    figures, names, plain = _detail_needs(detail)
-    if not figures and not names and not plain:
+    """Whether *detail* (a figure or a name the grader quoted from a reply,
+    with a few words of what it is about) is in one of *texts*
+    (casefolded): all its figures and names within _DETAIL_NEAR characters
+    of each other — an exhibit's title and its table are that far apart.
+    A detail with neither has nothing to find it by."""
+    figures, names = _detail_parts(detail)
+    patterns = [_part_pattern(f, True) for f in figures] + [_part_pattern(n, False) for n in names]
+    if not patterns:
         return False
-    # Without a figure to go by, a word its documents never use ("emeritus") is what was made up.
-    if not figures and any(len(w) >= 6 and not any(w in t for t in texts) for w in plain):
-        return False
-    share = _DETAIL_WORDS if not figures and not names else _DETAIL_WORDS / 2
-    anchor = (figures or sorted(names, key=len, reverse=True) or sorted(plain, key=len, reverse=True))[0]
-    pattern = (re.compile(rf"(?<![\d.,]){re.escape(anchor)}(?!\d|[.,]\d)") if figures
-               else re.compile(re.escape(anchor)))
     for text in texts:
-        for n, m in enumerate(pattern.finditer(text)):
+        if not all(p.search(text) for p in patterns):
+            continue
+        rarest = min(patterns, key=lambda p: len(p.findall(text)))
+        for n, m in enumerate(rarest.finditer(text)):
             if n >= _DETAIL_TRIES:
                 break
             window = text[max(0, m.start() - _DETAIL_NEAR):m.end() + _DETAIL_NEAR]
-            if (all(_has_figure(window, f) for f in figures) and all(x in window for x in names)
-                    and sum(1 for w in plain if w in window) >= share * len(plain)):
+            if all(p.search(window) for p in patterns):
                 return True
     return False
+
+
+def checkable(detail: str) -> bool:
+    """Whether *detail* has a figure or a name to check it by."""
+    return any(_detail_parts(detail))
 
 
 def check_details(details: list[str], corpus: dict[str, list[str]]) -> list[dict]:
     """Each detail the grader found outside the question's passage, with
     where else it is: ``documents`` (anywhere in them), ``lessons`` (a fact
     or rule it was taught), ``looked_up`` (what its lookups returned) — or
-    "" when nowhere: made up."""
+    "" when nowhere: made up. One with no figure or name to check it by (the
+    reply putting what it read its own way) is left out."""
     return [{"text": d, "found": next((where for where, texts in corpus.items() if found_in(d, texts)), "")}
-            for d in details]
+            for d in details if checkable(d)]
+
+
+def _checked(text: str) -> str:
+    # A converted PDF's decimal point can come out as "300 _._ 0".
+    return re.sub(r"(?<=\d) _\._ (?=\d)", ".", text.casefold())
 
 
 def _corpus(srcs: list[Source], lessons: list[str], q: dict) -> dict[str, list[str]]:
-    return {"documents": [s.text.casefold() for s in srcs], "lessons": [x.casefold() for x in lessons],
-            "looked_up": [str(c.get("result") or "").casefold() for c in q.get("lookups") or []]}
+    return {"documents": [_checked(s.text) for s in srcs], "lessons": [_checked(x) for x in lessons],
+            "looked_up": [_checked(str(c.get("result") or "")) for c in q.get("lookups") or []]}
 
 
 def _lesson_texts(slug: str) -> list[str]:

@@ -122,10 +122,10 @@ def test_the_graders_verdicts_are_cleaned():
     assert set(got) == {1, 2}
     assert got[1] == {"verdict": "right", "made_up": False, "unsupported": [], "missing": [], "why": "All there."}
     assert got[2]["verdict"] == "no_answer" and got[2]["made_up"] is True and got[2]["missing"] == ["14 days"]
-    # Details it lists outside the passage are what's made up — until they're checked.
+    # Details it lists outside the passage are checked (settle) before anything counts as made up.
     listed = ex.parse_grades(json.dumps({"grades": [
-        {"item": 1, "verdict": "partly", "unsupported": ["0.28 points of TRS", "", 7], "made_up": False}]}), batch)
-    assert listed[1]["unsupported"] == ["0.28 points of TRS", "7"] and listed[1]["made_up"] is True
+        {"item": 1, "verdict": "partly", "unsupported": ["0.28 points of TRS", "", 7], "made_up": True}]}), batch)
+    assert listed[1]["unsupported"] == ["0.28 points of TRS", "7"] and listed[1]["made_up"] is False
 
 
 # ── Why it went wrong ─────────────────────────────────────────────────
@@ -220,12 +220,33 @@ def test_a_detail_from_elsewhere_in_its_documents_or_lessons_isnt_made_up():
                             "~60% made two or fewer divestitures", "FLORCK Capital Partners co-founder",
                             "General Dynamics returned 71% in 1991", "senior emeritus director at McKinsey"], corpus)
     assert [d["found"] for d in got] == ["documents", "lessons", "documents", "", "", ""]
-    # Its names and words near each other aren't enough when a word of it is one its documents never use.
-    bio = "tim koller is a partner in mckinsey's new york office. marc is a senior expert; david is a director."
-    assert ex.found_in("Koller: partner in McKinsey's New York office", [bio])
-    assert not ex.found_in("Tim Koller: senior emeritus director at McKinsey", [bio])
+    # A name its documents never use is made up, however close the rest is.
+    crew = "the apollo 8 crew: frank borman, james lovell and william a. anders."
+    assert not ex.found_in("Apollo 8 astronaut Bill Anderson", [crew])
+    assert ex.found_in("Apollo 8's Anders and Lovell", [crew])
     # A figure must be the figure: 1991 isn't 991, and 58 isn't in 580.
     assert not ex.found_in("991 percent", [book]) and not ex.found_in("580 percent", ["it was 58 percent"])
+
+
+def test_a_detail_is_found_however_the_book_writes_it():
+    # Details from an exam on a converted book, all of them in it, written its own way.
+    book = ex._checked(
+        "Between 2005 and 2007, DuPont used an 8.74 percent expected return on plan assets.\n"
+        "Reducing from six years to four the time it takes for a new drug to reach 80 percent of peak sales.\n"
+        "Capital Expenditures = $300 _._ 0 million − $250 _._ 0 million + $23 _._ 8 million\n"
+        "Both Coca-Cola’s and PepsiCo’s soft-drink businesses earn high returns.\n"
+        "EXHIBIT 10.7 Home Depot: Invested Capital, 2006\n" + "Row of figures 12 34 56.\n" * 120
+        + "Invested capital (excluding goodwill) 39,275 37,209\nInvested capital 46,543 38,567\n")
+    for detail in ["DuPont: 8.74% for 2005–07", "time for a drug to reach 80% of peak sales (6 → 4 years)",
+                   "Capex = $300.0m − $250.0m + $23.8m", "Coca-Cola and Pepsi earn high returns",
+                   "Home Depot 2006: $39,275m excluding goodwill vs. $46,543m including it",
+                   "cost of goods sold (COGS) for the 8.74 percent"]:
+        assert ex.found_in(detail, [book]), detail
+    # A figure it never gives is made up; wording with nothing to check it by isn't listed at all.
+    assert not ex.found_in("t = 4.19 for the change in P/E", [book])
+    corpus = {"documents": [book], "lessons": [], "looked_up": []}
+    assert ex.check_details(["the stock approach is more stable", "t = 4.19"], corpus) == [
+        {"text": "t = 4.19", "found": ""}]
 
 
 def test_made_up_stands_only_for_details_found_nowhere():
@@ -237,6 +258,12 @@ def test_made_up_stands_only_for_details_found_nowhere():
     right = ex.settle({**grade, "verdict": "right"}, nowhere)
     assert right["verdict"] == "partly" and right["made_up"] is True    # right, but it made something up
     assert ex.settle({**grade, "verdict": "right", "made_up": True}, [])["made_up"] is True  # nothing listed to check
+    # A grader that only listed the reply's own wording: nothing was checked, nothing made up.
+    worded = ex.parse_grades(json.dumps({"grades": [{"item": 1, "verdict": "right", "made_up": True,
+                                                    "unsupported": ["a self-contained DCF handbook"]}]}), [{}])[1]
+    corpus = {"documents": ["a book"], "lessons": [], "looked_up": []}
+    settled = ex.settle(worded, ex.check_details(worded.pop("unsupported"), corpus))
+    assert settled["verdict"] == "right" and settled["made_up"] is False and settled["details"] == []
 
 
 def test_a_section_read_by_its_numbered_title_reaches_it():
