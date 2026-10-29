@@ -1,17 +1,17 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  AlertTriangle, BookMarked, BookOpen, Check, CheckCircle2, FilePlus2, GraduationCap, Hand, Lightbulb, Loader2,
-  Pencil, Pin, PinOff, Plus, RotateCcw, ScrollText, Search, Sparkles, Trash2, X,
+  AlertTriangle, BookMarked, BookOpen, Check, CheckCircle2, Dumbbell, FilePlus2, GraduationCap, Hand, Lightbulb,
+  Loader2, Pencil, Pin, PinOff, Plus, RotateCcw, ScrollText, Search, Sparkles, Trash2, X,
 } from 'lucide-react'
 import { agentExamApi, type ExamOverview } from '../../services/agentExam'
 import { agentKnowledgeApi, type KnowledgeOverview } from '../../services/agentKnowledge'
 import { agentLessonsApi, type Lesson, type LessonKind, type LessonsChanged, type LessonsView } from '../../services/agentLessons'
-import { useChatStore } from '../../stores/chatStore'
-import { useProcessStore } from '../../stores/processStore'
+import { agentPracticeApi, type PracticeTask } from '../../services/agentPractice'
 import { KnowledgeBrowser } from '../library/KnowledgeBrowser'
 import { AgentExamPanel, ScoreRing } from './AgentExamDialog'
-import { stripOwnerBlock } from './agentSetup'
+import { syncInstructions } from './lessonSync'
+import { PracticePanel } from './PracticePanel'
 
 // ── An agent's onboarding, in one place ──────────────────────────────
 //
@@ -24,17 +24,20 @@ import { stripOwnerBlock } from './agentSetup'
 //               where it came from and who taught it: add one, reword one,
 //               keep it always in mind or bring it up when it matters, or
 //               take it away (/fd/agent-lessons) — its instructions follow;
+//   practice  — try it on real tasks and correct it: a correction becomes a
+//               lesson (PracticePanel);
 //   materials — its documents (the Knowledge browser), and more to give it;
 //   exams     — its onboarding exams (AgentExamPanel).
 //
 // Giving it documents, or reading more of them, is Way of working: this
 // dialog hands over to it (onSetup).
 
-export type OnboardingTab = 'overview' | 'lessons' | 'materials' | 'exams'
+export type OnboardingTab = 'overview' | 'lessons' | 'practice' | 'materials' | 'exams'
 
 const TABS: { id: OnboardingTab; label: string; icon: typeof BookOpen }[] = [
   { id: 'overview', label: 'Overview', icon: Sparkles },
   { id: 'lessons', label: 'Lessons', icon: ScrollText },
+  { id: 'practice', label: 'Practice', icon: Dumbbell },
   { id: 'materials', label: 'Materials', icon: BookMarked },
   { id: 'exams', label: 'Exams', icon: GraduationCap },
 ]
@@ -44,7 +47,9 @@ const KIND: Record<LessonKind, { label: string; badge: string; icon: typeof Book
   ask_first: { label: 'Ask first', badge: 'bg-amber-500/10 text-amber-700 dark:text-amber-300', icon: Hand },
   fact: { label: 'Fact', badge: 'bg-sky-500/10 text-sky-700 dark:text-sky-300', icon: Lightbulb },
 }
-const TAUGHT: Record<string, string> = { setup: 'from a setup', exam: 'taught after an exam', you: 'added by you' }
+const TAUGHT: Record<string, string> = {
+  setup: 'from a setup', exam: 'taught after an exam', you: 'added by you', chat: 'taught in a chat', practice: 'taught in practice',
+}
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 const plural = (n: number, one: string, many = `${one}s`) => `${n.toLocaleString()} ${n === 1 ? one : many}`
@@ -53,16 +58,6 @@ const ago = (epoch: number) => {
   if (s < 3600) return `${Math.max(1, Math.round(s / 60))} min ago`
   if (s < 86400) return `${Math.round(s / 3600)} h ago`
   return `${Math.round(s / 86400)} days ago`
-}
-
-/** What a lesson change did to its instructions, mirrored into the chat's copy and sent to it. */
-function syncInstructions(slug: string, res: LessonsChanged) {
-  const procs = useProcessStore.getState()
-  const had = procs.getFleetInstructions(slug)
-  const next = res.stored ? res.instructions : [stripOwnerBlock(had), res.block].filter(Boolean).join('\n\n')
-  if (next !== had) {
-    void procs.setFleetInstructions(slug, next).then(() => useChatStore.getState().resendFleetIdentity(`proc-${slug}`))
-  }
 }
 
 export function OnboardingDialog({ agent, initialTab = 'overview', phone = false, onClose, onSetup }: {
@@ -77,6 +72,7 @@ export function OnboardingDialog({ agent, initialTab = 'overview', phone = false
   const [knowledge, setKnowledge] = useState<KnowledgeOverview | null>(null)
   const [lessons, setLessons] = useState<LessonsView | null>(null)
   const [exams, setExams] = useState<ExamOverview | null>(null)
+  const [practice, setPractice] = useState<PracticeTask[] | null>(null)
   const [loadErr, setLoadErr] = useState('')
   const [tick, setTick] = useState(0)
 
@@ -84,8 +80,9 @@ export function OnboardingDialog({ agent, initialTab = 'overview', phone = false
   useEffect(() => {
     if (tab !== 'overview' && knowledge && lessons && exams) return
     let live = true
-    Promise.all([agentKnowledgeApi.overview(agent.slug), agentLessonsApi.list(agent.slug), agentExamApi.overview(agent.slug)])
-      .then(([k, l, e]) => { if (live) { setKnowledge(k); setLessons(l); setExams(e); setLoadErr('') } })
+    Promise.all([agentKnowledgeApi.overview(agent.slug), agentLessonsApi.list(agent.slug), agentExamApi.overview(agent.slug),
+      agentPracticeApi.list(agent.slug)])
+      .then(([k, l, e, p]) => { if (live) { setKnowledge(k); setLessons(l); setExams(e); setPractice(p.tasks); setLoadErr('') } })
       .catch((e) => { if (live) setLoadErr(message(e)) })
     return () => { live = false }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -121,7 +118,7 @@ export function OnboardingDialog({ agent, initialTab = 'overview', phone = false
           {TABS.map((t) => {
             const on = tab === t.id
             const count = t.id === 'lessons' ? lessons?.lessons.length : t.id === 'materials' ? knowledge?.totals.documents
-              : t.id === 'exams' ? exams?.exams.length : undefined
+              : t.id === 'exams' ? exams?.exams.length : t.id === 'practice' ? practice?.length : undefined
             return (
               <button key={t.id} role="tab" aria-selected={on} onClick={() => setTab(t.id)}
                 className={`-mb-px flex shrink-0 items-center gap-1.5 border-b-2 px-3 py-2 text-sm transition-colors ${on
@@ -146,7 +143,7 @@ export function OnboardingDialog({ agent, initialTab = 'overview', phone = false
               ) : !knowledge || !lessons || !exams ? (
                 <Centered><Loader2 className="h-6 w-6 animate-spin text-zinc-500" /></Centered>
               ) : (
-                <Overview name={agent.name} knowledge={knowledge} lessons={lessons} exams={exams}
+                <Overview name={agent.name} knowledge={knowledge} lessons={lessons} exams={exams} practice={practice ?? []}
                   onTab={setTab} onSetup={onSetup} />
               )}
             </div>
@@ -155,6 +152,9 @@ export function OnboardingDialog({ agent, initialTab = 'overview', phone = false
             <div className="h-full overflow-y-auto">
               <LessonsPanel slug={agent.slug} name={agent.name} initial={lessons} onChanged={setLessons} />
             </div>
+          )}
+          {tab === 'practice' && (
+            <div className="h-full overflow-y-auto"><PracticePanel slug={agent.slug} name={agent.name} /></div>
           )}
           {tab === 'materials' && (
             <div className="flex h-full flex-col">
@@ -188,11 +188,12 @@ function Centered({ children }: { children: ReactNode }) {
 
 interface Step { key: string; icon: typeof BookOpen; text: string; action: string; go: () => void }
 
-function Overview({ name, knowledge, lessons, exams, onTab, onSetup }: {
+function Overview({ name, knowledge, lessons, exams, practice, onTab, onSetup }: {
   name: string
   knowledge: KnowledgeOverview
   lessons: LessonsView
   exams: ExamOverview
+  practice: PracticeTask[]
   onTab: (t: OnboardingTab) => void
   onSetup: (readDocs?: string[]) => void
 }) {
@@ -228,6 +229,10 @@ function Overview({ name, knowledge, lessons, exams, onTab, onSetup }: {
   if (last && last.finished && lastTaught > last.finished) {
     steps.push({ key: 'again', icon: RotateCcw, action: 'Ask the same again', go: () => onTab('exams'),
       text: 'It was taught more since its last exam: ask the same questions again to see what changed.' })
+  }
+  if (docs.length && practice.length === 0) {
+    steps.push({ key: 'practice', icon: Dumbbell, action: 'Practise', go: () => onTab('practice'),
+      text: 'Try it on a real task, the way your users would — and correct it where it goes wrong.' })
   }
   if (rules > 0 && lessons.counts.always === 0) {
     steps.push({ key: 'always', icon: Pin, action: 'Open lessons', go: () => onTab('lessons'),

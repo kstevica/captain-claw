@@ -28,6 +28,10 @@ export interface LessonsView {
   not_in_block: string[]
 }
 
+/** A lesson drafted from the owner's words — empty ``text`` when they teach nothing; ``drafted`` false when no
+ *  model could (their words, as a rule). */
+export interface LessonDraft { kind: LessonKind; text: string; always: boolean; drafted: boolean }
+
 export interface LessonsChanged extends LessonsView {
   /** The instructions Flight Deck stored (with accounts), or the block for the browser to put in. */
   stored: boolean
@@ -58,8 +62,10 @@ const base = (slug: string) => `/fd/agent-lessons/${encodeURIComponent(slug)}`
 
 export const agentLessonsApi = {
   list: (slug: string) => call<LessonsView>(base(slug)),
-  add: (slug: string, body: { kind: LessonKind; text: string; always: boolean }) =>
+  add: (slug: string, body: { kind: LessonKind; text: string; always: boolean; taught_by?: 'you' | 'chat' | 'practice' }) =>
     call<LessonsChanged>(base(slug), { method: 'POST', body: JSON.stringify(body) }),
+  draft: (slug: string, body: { said: string; reply?: string; task?: string }) =>
+    call<LessonDraft>(`${base(slug)}/draft`, { method: 'POST', body: JSON.stringify(body) }),
   change: (slug: string, id: string, patch: { text?: string; always?: boolean }) =>
     call<LessonsChanged>(`${base(slug)}/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   remove: (slug: string, id: string) =>

@@ -43,11 +43,13 @@ import {
   ImageIcon,
   Globe,
   ExternalLink,
+  GraduationCap,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
 import { EffortMenu } from './EffortMenu'
 import { ChatFilesMenu } from './ChatFilesMenu'
+import { SaveLessonDialog } from '../layout/LessonDraft'
 import { isManagedAgent } from '../../utils/managedAgents'
 import { AttachmentChip } from './AttachmentChip'
 import { appendAttachmentRefs, useFileAttachments } from '../../hooks/useFileAttachments'
@@ -1879,9 +1881,29 @@ function processImagePaths(content: string, agentHost?: string, agentPort?: numb
 // compare on {message, sourceName, agentId} skips every unchanged bubble when a
 // later turn streams — no markdown re-parse. This is the heavy-chat fix.
 // `large` — the simple layout's chat: the conversation in bigger type.
+// A message of the owner's that reads like a correction, or something to remember: offered as a lesson.
+const LESSON_HINT = new RegExp(
+  "^\\s*(no\\b|nope\\b|wrong\\b|not quite|that'?s not|that is not|actually\\b|incorrect|ne\\b|nije\\b|krivo|pogrešno|zapravo)"
+  + "|\\b(from now on|next time|in (the )?future|remember (that|to)|keep in mind|always|never|don'?t ever|ubuduće|od sada|uvijek|nikad|zapamti|imaj na umu)\\b",
+  'i')
+const looksLikeLesson = (text: string) => text.length >= 12 && text.length <= 1500 && !text.trimStart().startsWith('/')
+  && LESSON_HINT.test(text)
+
+/** The agent's answer just before *messageId* in its chat (what the owner corrects). */
+function replyBefore(messageId: string): string {
+  for (const s of useChatStore.getState().sessions.values()) {
+    const at = s.messages.findIndex((m) => m.id === messageId)
+    if (at < 0) continue
+    for (let i = at - 1; i >= 0; i--) if (s.messages[i].role === 'assistant') return s.messages[i].content || ''
+    return ''
+  }
+  return ''
+}
+
 const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId, large = false }: { message: ChatMessage; sourceName?: string; agentId?: string; large?: boolean }) {
   const bodyText = large ? 'text-base leading-relaxed' : 'text-sm'
   const [toolExpanded, setToolExpanded] = useState(false)
+  const [lessonFrom, setLessonFrom] = useState<{ said: string; reply: string } | null>(null)
   const [copied, setCopied] = useState(false)
   const [showForward, setShowForward] = useState(false)
 
@@ -2025,6 +2047,11 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     </div>
   )
 
+  // The owner's own agent (a process it runs): what they say to it can be taught as a lesson.
+  const ownAgent = message.role === 'user' && agentId
+    ? processes.find((p) => `proc-${p.slug}` === agentId) : undefined
+  const saveLesson = () => setLessonFrom({ said: message.content || '', reply: replyBefore(message.id) })
+
   if (message.role === 'user') {
     return (
       <div id={`fd-msg-${message.id}`} className="group mb-3 flex flex-col items-end gap-0.5">
@@ -2037,7 +2064,25 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
             {formatTime(message.timestamp)}
           </span>
         </div>
-        {actionButtons('right')}
+        <div className="flex items-center gap-1">
+          {ownAgent && looksLikeLesson(message.content || '') && (
+            <button onClick={saveLesson}
+              className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 px-2 py-0.5 text-[11px] text-violet-700 hover:bg-violet-500/10 dark:text-violet-300">
+              <GraduationCap className="h-3 w-3" /> Save as a lesson?
+            </button>
+          )}
+          {ownAgent && !looksLikeLesson(message.content || '') && (
+            <button onClick={saveLesson} title="Save as a lesson"
+              className="rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-700/50 hover:text-violet-400 group-hover:opacity-100">
+              <GraduationCap className="h-3 w-3" />
+            </button>
+          )}
+          {actionButtons('right')}
+        </div>
+        {lessonFrom && ownAgent && (
+          <SaveLessonDialog agent={{ slug: ownAgent.slug, name: ownAgent.name }} said={lessonFrom.said} reply={lessonFrom.reply}
+            onClose={() => setLessonFrom(null)} />
+        )}
       </div>
     )
   }
