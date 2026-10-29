@@ -1,7 +1,9 @@
 """Section maps of an agent's knowledge — token-free: the sections come from
 the headings (a PDF's pages grouped), each gets a gist from its own text, and
 the map says the file and lines that hold it — lines that really do start
-at the section's heading in the files written."""
+at the section's heading in the files written. A PDF made into Markdown is
+tidied: chapters named by their number and title, their bold subheadings
+found, page heads told apart; read tracking keeps the headings as written."""
 
 from __future__ import annotations
 
@@ -183,3 +185,62 @@ async def test_the_agents_sync_route_indexes_in_the_background():
     assert resp.status == 200 and json.loads(resp.text) == {"ok": True} and reasons == ["requested"]
     off = types.SimpleNamespace(agent=types.SimpleNamespace(memory=types.SimpleNamespace(semantic=None)))
     assert (await rsm.sync(off, None)).status == 503
+
+
+# ── A PDF made into Markdown ──────────────────────────────────────────
+
+_PROSE = ("Divesting a business unit creates value when other owners believe the unit is worth more to them, "
+          "and the parent can use the proceeds well.")
+
+
+def _converted_chapter(n: int) -> str:
+    """A book chapter as a PDF's conversion leaves it: a number's heading and
+    a title's, then subheadings only in bold, page heads, an exhibit's labels."""
+    body = "\n\n".join(_PROSE for _ in range(12))
+    return "\n".join([
+        f"# **{n}**", "", f"##### Creating Value {n}", "", body, "",
+        f"**{470 + n}** **CREATING VALUE THROUGH DIVESTITURES**", "",
+        "**VALUE CREATION FROM DIVESTITURES**", "", body, "",
+        "**Evidence for Value from Divestitures**", "", body, "",
+        "**Use of proceeds**", "", "**Debt**", "", "2,126", "",
+        "**Why Executives Shy Away**", "", body, "",
+        "**SUMMARY**", "", body, ""])
+
+
+def test_a_converted_books_chapters_are_named_and_split_by_their_bold_subheadings(monkeypatch):
+    monkeypatch.setattr(ol, "LONG_STRETCH", 2_000)
+    text = _converted_chapter(22) + "\n" + _converted_chapter(23)
+    secs = ol.outline(text)
+    assert [(s["level"], s["title"]) for s in secs[:5]] == [
+        (1, "22 Creating Value 22"), (2, "VALUE CREATION FROM DIVESTITURES"),
+        (3, "Evidence for Value from Divestitures"), (3, "Why Executives Shy Away"), (2, "SUMMARY")]
+    assert [s["title"] for s in secs].count("SUMMARY") == 2 and len(secs) == 10
+    assert not any(t in s["title"] for s in secs for t in ("Use of proceeds", "Debt", "472", "CREATING VALUE THROUGH"))
+    assert secs[0]["end"] == secs[5]["start"] and text[secs[0]["start"]:].startswith("# **22**")
+    # Read tracking keeps the headings as written: the keys a setup recorded still match.
+    raw = ol.outline(text, tidy=False)
+    assert [s["title"] for s in raw] == ["**22**", "Creating Value 22", "**23**", "Creating Value 23"]
+    from captain_claw.flight_deck import agent_preset_select as psel
+    assert psel.spans(text)[1]["key"] == "**22** › Creating Value 22"
+
+
+def test_a_short_stretch_and_a_documents_own_headings_are_left_as_they_are():
+    text = "# Guide\n\n**Note**\n\n" + _PROSE + "\n\n## 1.1 Returns\n\n" + _PROSE + "\n"
+    assert [s["title"] for s in ol.outline(text)] == ["Guide", "1.1 Returns"]
+    assert [s["title"] for s in ol.outline("# **Pricing** `v2`\n\ntext\n")] == ["Pricing v2"]
+
+
+def test_page_heads_and_numbers_are_told_from_text():
+    for line in ("**470** **CREATING VALUE THROUGH DIVESTITURES**", "**VALUE CREATION FROM DIVESTITURES** **471**",
+                 "**469**", "478** **CREATING VALUE THROUGH DIVESTITURES**", "**12** **Valuation of Companies Today**",
+                 "**xvi** **ACKNOWLEDGMENTS**", "**PREFACE** **xvii**"):
+        assert ol.page_furniture(line), line
+    for line in ("**Mergers and acquisitions**", "**2004** revenue was up", "**Total** **125**", "2,126",
+                 "Plain prose 12", "**Exhibit 22.1** Divestitures by type", "**Tim** **Koller** is a partner in"):
+        assert not ol.page_furniture(line), line
+
+
+def test_a_sections_path_is_named_as_the_outline_names_it():
+    assert ol.tidy_path(["**22**"], "Creating Value") == ([], "22 Creating Value")
+    assert ol.tidy_path(["**VALUATION**", "**B**"], "Economic Profit") == (["VALUATION"], "B Economic Profit")
+    assert ol.tidy_path(["Guide"], "**Returns**") == (["Guide"], "Returns")

@@ -10,7 +10,9 @@ its instructions, its surfaced memory, its knowledge tool — but:
   to-dos or contacts, and its session is never indexed into semantic memory;
 - it can't send or change anything: only the tools (and actions) that read
   run (:data:`EXAM_TOOLS`); anything else is refused, MCP and plugin tools
-  included (fail closed);
+  included (fail closed). The web isn't among them: the exam asks what its
+  documents say, and a grader judging against them can't tell a page it
+  found from something made up;
 - what it looked up goes back with the reply (:func:`report`), for the
   grader to tell "didn't look" from "looked in the wrong place".
 
@@ -47,12 +49,12 @@ EXAM_TOOLS: dict[str, frozenset[str] | None] = {
     "vfs": frozenset({"info", "list_projects", "ls", "tree", "stat"}),
     "typesense": frozenset({"search"}),
     "docx": frozenset({"read", "changes", "comments"}),
-    "web_search": None, "web_get": None,
     "reasoning_effort": frozenset({"get"}),
 }
 
 REFUSED = ("{tool} isn't available in this conversation: it is an onboarding exam, where nothing is sent, saved "
-           "or changed. Answer from what you know and what you can look up — say so if you can't find it.")
+           "or changed, and the web isn't searched. Answer from your documents (knowledge) — say so if you can't "
+           "find it there.")
 
 
 def active(agent: Any) -> bool:

@@ -55,6 +55,60 @@ def _normalize_tool_name(value: str) -> str:
     return str(value or "").strip().lower()
 
 
+# A model writing its calls as Qwen's XML (``<parameter=name>value</parameter>``) that leaves one
+# open sends the rest inside it — {"action": "search\n<parameter=query>\nWACC weights"} — or a
+# closing tag's debris after a value ("search>\n\n</invoke>").
+_LEAKED_PARAMETER = re.compile(r"<parameter=([A-Za-z_][\w-]*)>")
+_TAG_DEBRIS = re.compile(r"\s*(?:</?(?:parameter|invoke|function|tool_call)\b[^>]*>|>)\s*$")
+
+
+def _debris_off(value: str) -> str:
+    before = None
+    while value != before:
+        before, value = value, _TAG_DEBRIS.sub("", value)
+    return value.strip()
+
+
+def _typed(raw: str, spec: dict[str, Any]) -> Any:
+    """A leaked parameter's text as its schema's type, when it reads as one."""
+    kind = spec.get("type") if isinstance(spec, dict) else None
+    if kind == "integer" and re.fullmatch(r"-?\d+", raw):
+        return int(raw)
+    if kind == "number" and re.fullmatch(r"-?\d+(?:\.\d+)?", raw):
+        return float(raw)
+    if kind == "boolean" and raw.lower() in ("true", "false"):
+        return raw.lower() == "true"
+    return raw
+
+
+def repair_arguments(arguments: dict[str, Any], parameters: dict[str, Any] | None) -> dict[str, Any]:
+    """*arguments* with what a model's XML tool call left in them put right:
+    parameters left inside another's value split out (one it also gave
+    itself is kept), and a closing tag's debris taken off a value that must
+    be one of the schema's few words. The same dict when nothing needed it."""
+    props = (parameters or {}).get("properties") if isinstance(parameters, dict) else None
+    if not isinstance(props, dict) or not props or not isinstance(arguments, dict):
+        return arguments
+    out = dict(arguments)
+    for key, value in arguments.items():
+        if not isinstance(value, str) or str(key).startswith("_"):
+            continue
+        if "<parameter=" in value:
+            pieces = _LEAKED_PARAMETER.split(value)
+            out[key] = _debris_off(pieces[0])
+            for name, raw in zip(pieces[1::2], pieces[2::2], strict=True):
+                if name in props and out.get(name) in (None, ""):
+                    out[name] = _typed(_debris_off(raw), props[name])
+        enum = props.get(key, {}).get("enum") if isinstance(props.get(key), dict) else None
+        if enum and out[key] not in enum:
+            word = _debris_off(out[key])
+            first = re.split(r"[\s<>]+", word, maxsplit=1)[0]
+            fixed = word if word in enum else first if first in enum else None
+            if fixed is not None:
+                out[key] = fixed
+    return out if out != arguments else arguments
+
+
 def _compile_shell_pattern(pattern: str) -> re.Pattern[str]:
     """Compile regex pattern with literal fallback for invalid regex input."""
     try:
@@ -755,6 +809,12 @@ class ToolRegistry:
         """
         from captain_claw import tool_audit
 
+        if name in self._tools:
+            repaired = repair_arguments(arguments, getattr(self._tools[name], "parameters", None))
+            if repaired is not arguments:
+                log.info("Tool call arguments repaired", tool=name,
+                         keys=sorted(k for k in repaired if repaired.get(k) != arguments.get(k)))
+                arguments = repaired
         try:
             member = self._is_speaker_call(session_id, arguments)
         except Exception:

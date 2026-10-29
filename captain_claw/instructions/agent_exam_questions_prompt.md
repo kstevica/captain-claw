@@ -19,6 +19,9 @@ gives. The agent will be asked the questions as its users would ask them, withou
   conditions, exceptions, order of steps — not about something anyone would guess.
 - **Not trivia.** No page or figure numbers, link addresses, version numbers or changelog
   entries, unless that is what the section is about.
+- **Not about now.** Don't ask what is current, latest or true today of something the section
+  gives as of its writing — a person's role, a price, a year's figure: ask it without "current"
+  or "now", and answer as the section gives it.
 - **Its own language.** Write the question and the answer in the section's language.
 - A section with nothing to ask (a table of contents, a list of links, a title page): leave it out.
 
