@@ -1139,9 +1139,9 @@ def get_insights_manager() -> InsightsManager:
 
 
 async def import_pending(manager: InsightsManager | None = None, path: Path | None = None) -> int:
-    """Add the facts Flight Deck left for this agent while it was off (its
-    owner's setup — flight_deck.agent_preset.leave_facts), deduplicated as
-    any other insight, and drop the file. How many were new."""
+    """Add the facts Flight Deck left for this agent while it was off (an
+    owner's setup, before setups gave facts as lessons — lessons.py),
+    deduplicated as any other insight, and drop the file. How many were new."""
     path = path or Path("~/.captain-claw/pending-insights.json").expanduser()
     if not path.is_file():
         return 0

@@ -1537,10 +1537,10 @@ class AgentOrchestrationMixin:
             await self._refresh_scripts_context_cache()
             await self._refresh_apis_context_cache()
             await self._refresh_datastore_context_cache()
-        # Insights (the shared commons) follow what this turn is about.
-        await self._refresh_insights_context_cache(
-            query=msg_origin.model_view_text({"content": user_input}),
-        )
+        # Insights (the shared commons) follow what this turn is about; so do the owner's lessons.
+        _turn_query = msg_origin.model_view_text({"content": user_input})
+        await self._refresh_insights_context_cache(query=_turn_query)
+        await self._refresh_lessons_context_cache(query=_turn_query)
         if clarification_context_applied:
             self._emit_tool_output(
                 "task_contract",

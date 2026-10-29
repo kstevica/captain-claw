@@ -52,7 +52,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-from captain_claw.flight_deck import agent_idle
+from captain_claw.flight_deck import agent_idle, agent_lessons
 from captain_claw.flight_deck import agent_knowledge as ak
 from captain_claw.flight_deck import agent_preset as ap
 from captain_claw.flight_deck import agent_preset_docs as pdocs
@@ -708,23 +708,12 @@ async def _asking(job: ExamJob, srcs: list[Source]) -> None:
 async def can_take_exams(job: ExamJob) -> bool:
     """Whether the agent (woken if asleep) knows an exam's turn — one started
     before it could would answer as an ordinary automated turn and keep it."""
-    import httpx
-
     from captain_claw import exam_turn
-    from captain_claw.flight_deck import server as srv
 
     if not await ap._agent_up({"agent": job.agent, "name": job.agent_name}, job):
         raise _ExamError(f"{job.agent_name or job.agent} isn't running. Switch it on and try again.")
-    entry = srv._load_process_registry().get(job.agent) or {}
-    token = str(entry.get("web_auth") or "")
-    try:
-        async with httpx.AsyncClient(timeout=10.0, trust_env=False) as client:
-            resp = await client.get(f"http://127.0.0.1:{int(entry.get('web_port') or 0)}/api/version",
-                                    params={"token": token} if token else {})
-        caps = resp.json().get("capabilities") if resp.status_code == 200 else None
-    except (httpx.HTTPError, ValueError, AttributeError):
-        return False
-    return isinstance(caps, list) and exam_turn.CAPABILITY in caps
+    caps = await agent_lessons.capabilities(job.agent)
+    return caps is not None and exam_turn.CAPABILITY in caps
 
 
 async def run_exam(job: ExamJob, reader: dict, workspace: Path) -> None:
@@ -930,29 +919,29 @@ class TeachBody(BaseModel):
 
 @router.post("/{slug}/{exam_id}/teach")
 async def teach(slug: str, exam_id: str, body: TeachBody, user: dict = Depends(get_managed_user)) -> dict:
-    """Teach the agent the answer a question wanted: a fact from that
-    section, which reaches its answers when a message is about it. An agent
-    that's off gets it when it starts."""
+    """Teach the agent the answer a question wanted: a lesson from that
+    section (agent_lessons), which reaches it with the messages it bears on
+    — from its next one, running or not."""
     from captain_claw.flight_deck import server as srv
-    _, entry, _ = _place(slug, user)
+    _, _, workspace = _place(slug, user)
     job = _exam(slug, exam_id)
     q = next((q for q in job.questions if q.get("id") == body.question), None)
     if q is None:
         raise HTTPException(404, "That question isn't in the exam.")
-    fact = {"content": q["expected"][:1000], "category": "fact", "importance": 8,
-            "source": {"doc": q["doc"], "section": q["title"]}}
-    token = str(entry.get("web_auth") or "")
+    agent_dir = srv.DATA_DIR / slug
 
-    def port_of() -> int:
-        return int((srv._load_process_registry().get(slug) or {}).get("web_port") or 0)
+    def _add() -> bool:
+        # An agent set up before setups kept a record: its record from its files, so nothing of it is lost.
+        record = ap.earlier_setup(agent_dir, workspace)
+        record, added = agent_lessons.taught(record, "fact", q["expected"], {"doc": q["doc"], "section": q["title"]},
+                                             taught_by="exam")
+        if added:
+            (agent_dir / ap._RECORD).write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            agent_lessons.write(agent_dir, record)
+        return added
 
-    given = 0
-    if srv._process_is_alive(slug) and port_of():
-        given = await ap._post_facts(port_of(), token, [fact])
-    if not given:
-        await asyncio.to_thread(ap.leave_facts, srv.DATA_DIR / slug, [fact])
+    added = await asyncio.to_thread(_add)
     q["taught"] = True
-    q["taught_later"] = not given     # it gets it when it next starts
     if _RUNNING.get(slug) is not job:
         save(job)
-    return {"ok": True, "taught": bool(given), "waiting": not given}
+    return {"ok": True, "taught": added}

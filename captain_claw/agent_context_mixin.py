@@ -1305,6 +1305,35 @@ class AgentContextMixin:
         except Exception:
             self._insights_context_cache = []
 
+    async def _refresh_lessons_context_cache(self, query: str | None = None) -> None:
+        """The owner's lessons this turn's message bears on (lessons.py): by
+        its words and its meaning, none already in the instructions."""
+        self._lessons_context_cache = []
+        if not (query or "").strip():
+            return
+        try:
+            import asyncio as _asyncio
+
+            from captain_claw import lessons
+            from captain_claw.conversation_topics import topic_embedder
+
+            given = ""
+            if self.session and isinstance(self.session.metadata, dict):
+                given = str(self.session.metadata.get("fleet_instructions") or "")
+            given = given or str(getattr(self, "_fleet_instructions", "") or "")
+            self._lessons_context_cache = await _asyncio.to_thread(
+                lessons.get_book().relevant, str(query), instructions=given,
+                embed=topic_embedder(self, local_only=True))
+        except Exception as exc:
+            log.debug("Lessons for the turn unavailable", error=str(exc))
+            self._lessons_context_cache = []
+
+    def _build_lessons_context_note(self) -> str:
+        if getattr(self, "_suppress_memory_context", False):
+            return ""
+        from captain_claw import lessons
+        return lessons.note(getattr(self, "_lessons_context_cache", None) or [])
+
     def _build_insights_context_note(self, query: str = "") -> str:
         """Build context note from relevant insights."""
         if getattr(self, "_suppress_memory_context", False):
@@ -4251,6 +4280,9 @@ class AgentContextMixin:
         datastore_note = self._build_datastore_context_note() if owner_notes else ""
         if datastore_note:
             notes.append(("datastore_context", datastore_note))
+        lessons_note = self._build_lessons_context_note()
+        if lessons_note:
+            notes.append(("lessons_context", lessons_note))
         insights_note = self._build_insights_context_note()
         if insights_note:
             notes.append(("insights_context", insights_note))

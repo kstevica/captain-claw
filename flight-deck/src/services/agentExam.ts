@@ -49,9 +49,8 @@ export interface ExamQuestion {
   cause?: Cause | ''
   /** Asked again: its verdict the time before. */
   before?: Verdict
-  /** Taught to it as a fact, after this exam — when it was off, for its next start. */
+  /** Taught to it as a lesson, after this exam. */
   taught?: boolean
-  taught_later?: boolean
 }
 
 export interface Score { questions: number; points: number; pct: number | null; right: number }
@@ -136,7 +135,7 @@ export const agentExamApi = {
   resume: (slug: string, id: string) =>
     call<Exam>(`${base(slug)}/${encodeURIComponent(id)}/continue`, { method: 'POST' }),
   teach: (slug: string, id: string, question: string) =>
-    call<{ ok: boolean; taught: boolean; waiting: boolean }>(`${base(slug)}/${encodeURIComponent(id)}/teach`, {
+    call<{ ok: boolean; taught: boolean }>(`${base(slug)}/${encodeURIComponent(id)}/teach`, {
       method: 'POST', body: JSON.stringify({ question }),
     }),
 }

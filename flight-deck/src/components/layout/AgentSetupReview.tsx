@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import type { ReactNode } from 'react'
-import { AlertTriangle, FileText, Library } from 'lucide-react'
+import { AlertTriangle, FileText, Library, Pin, PinOff } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import type { AgentPreset, PresetSource } from '../../services/agentPreset'
 import { GROUPS, GROUP_ORDER, USAGE_LOOKS, keptIn, type Group, type Review } from './agentSetup'
@@ -183,6 +183,10 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
               />
               <div className="min-w-0 flex-1 space-y-1.5">
                 <ItemFields group={group} item={item} disabled={disabled || !on} onEdit={(patch) => onEdit(i, patch)} />
+                {(group === 'rules' || group === 'escalation') && (
+                  <AlwaysToggle always={!!(item as { always?: boolean }).always} disabled={disabled || !on}
+                    onChange={(always) => onEdit(i, { always })} />
+                )}
                 {doc && (
                   <p className="flex flex-wrap items-center gap-1.5 text-[10px] text-zinc-500">
                     <span className="inline-flex items-center gap-1">
@@ -207,6 +211,21 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
         })}
       </ul>
     </section>
+  )
+}
+
+/** Whether a rule is in its instructions all the time, or reaches it with the messages it bears on. */
+function AlwaysToggle({ always, disabled, onChange }: { always: boolean; disabled: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button type="button" onClick={() => onChange(!always)} disabled={disabled} aria-pressed={always}
+      title={always ? 'In its instructions, for every conversation — click to bring it up only when it matters'
+        : 'It\'s reminded of this when a message is about it — click to keep it in mind all the time'}
+      className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] transition-colors disabled:opacity-50 ${always
+        ? 'bg-violet-500/10 text-violet-700 hover:bg-violet-500/20 dark:text-violet-300'
+        : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'}`}>
+      {always ? <Pin className="h-3 w-3" /> : <PinOff className="h-3 w-3" />}
+      {always ? 'Always in mind' : 'When it matters'}
+    </button>
   )
 }
 

@@ -165,8 +165,8 @@ export function AgentExamDialog({ agent, onClose, onReadDocs }: {
     await agentExamApi.stop(agent.slug, id).catch(() => undefined)
     setOverview((o) => (o ? { ...o, exams: o.exams.filter((x) => x.id !== id) } : o))
   }
-  const taught = (qid: string, later: boolean) => setExam((e) => (e && e.questions
-    ? { ...e, questions: e.questions.map((q) => (q.id === qid ? { ...q, taught: true, taught_later: later } : q)) } : e))
+  const taught = (qid: string) => setExam((e) => (e && e.questions
+    ? { ...e, questions: e.questions.map((q) => (q.id === qid ? { ...q, taught: true } : q)) } : e))
 
   const running = exam?.state === 'running'
   const subtitle = overview
@@ -235,8 +235,8 @@ export function AgentExamDialog({ agent, onClose, onReadDocs }: {
               onAgain={() => void again(exam.id)} onResume={() => void resume(exam.id)}
               onNew={() => { setErr(''); setView('start') }}
               onTeach={async (q) => {
-                const r = await agentExamApi.teach(agent.slug, exam.id, q.id)
-                taught(q.id, r.waiting)
+                await agentExamApi.teach(agent.slug, exam.id, q.id)
+                taught(q.id)
               }}
               onRead={onReadDocs}
             />
@@ -724,11 +724,11 @@ function QuestionDetail({ q, where, onTeach, onRead }: {
               {q.taught ? (
                 <span className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
                   <Check className="h-3.5 w-3.5" />
-                  {q.taught_later ? 'Taught — it gets it when it next starts' : 'Taught — ask the same again to check'}
+                  Taught — a lesson from its next message; ask the same again to check
                 </span>
               ) : (
                 <button onClick={() => void teach()} disabled={teaching}
-                  title="The answer becomes a fact it's reminded of when a message is about it"
+                  title="The answer becomes a lesson it's reminded of when a message is about it"
                   className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-60">
                   {teaching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GraduationCap className="h-3.5 w-3.5" />} Teach it this
                 </button>

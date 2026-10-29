@@ -13,6 +13,10 @@ only what is specific to this owner and their material.
 - **rules** — standing rules: always / never, tone and voice, language, formatting habits,
   limits, things that need the owner's approval first. One rule per item, imperative,
   self-contained ("Always answer customers in Croatian unless they write in English.").
+  `always`: true when the rule applies to every conversation, whatever it is about — language,
+  tone, format, how to address people, what never to do; false when it applies only when a
+  certain topic comes up (refunds, one product, one kind of request). The agent keeps the
+  `always` ones in mind at all times and is reminded of the others when they come up.
 - **intents** — the requests this agent will handle for the owner, each with the procedure
   the material describes. `name` is a short lowercase-hyphenated id ("refund-request");
   `when` says in one sentence when this applies, written so it can be recognised from what
@@ -60,7 +64,7 @@ Every item except `conflicts` and `warnings` carries a `source`: `{"doc": "<file
 
 Return **only** one JSON object — no prose, no markdown fences:
 
-{"rules": [{"text": "...", "source": {"doc": "...", "section": "..."}}],
+{"rules": [{"text": "...", "always": false, "source": {"doc": "...", "section": "..."}}],
  "intents": [{"name": "...", "when": "...", "steps": ["..."], "examples": ["..."], "source": {...}}],
  "facts": [{"content": "...", "category": "fact", "importance": 6, "source": {...}}],
  "escalation": [{"text": "...", "source": {...}}],

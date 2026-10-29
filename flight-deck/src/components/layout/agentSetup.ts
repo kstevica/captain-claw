@@ -52,9 +52,9 @@ export type Group = 'rules' | 'intents' | 'facts' | 'escalation' | 'templates' |
 export const GROUP_ORDER: Group[] = ['rules', 'intents', 'facts', 'escalation', 'templates', 'glossary', 'knowledge']
 
 export const GROUPS: Record<Group, { icon: LucideIcon; title: string; blurb: string }> = {
-  rules: { icon: ScrollText, title: 'Rules', blurb: 'Standing rules it always follows.' },
+  rules: { icon: ScrollText, title: 'Rules', blurb: 'Standing rules it follows — those always in mind in every conversation, the rest when a message is about them.' },
   intents: { icon: ListChecks, title: 'What it handles', blurb: 'Requests it knows a procedure for — one skill each.' },
-  facts: { icon: Lightbulb, title: 'Facts', blurb: 'Things it remembers from the start.' },
+  facts: { icon: Lightbulb, title: 'Facts', blurb: 'Things it’s reminded of when a message is about them.' },
   escalation: { icon: Hand, title: 'When to ask you', blurb: 'It stops and checks with you first.' },
   templates: { icon: LayoutTemplate, title: 'Templates', blurb: 'Formats it uses for its answers.' },
   glossary: { icon: BookA, title: 'Glossary', blurb: 'Your terms and what they mean.' },
