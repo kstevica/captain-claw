@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState, type ReactNode } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
-  AlertTriangle, ArrowLeft, BookOpen, Check, ChevronDown, ChevronRight, CircleDashed, GraduationCap, Lightbulb,
-  Loader2, MessageSquareText, Play, RotateCcw, Search, Square, Trash2, X,
+  AlertTriangle, ArrowLeft, BookOpen, CalendarDays, Check, ChevronDown, CircleDashed, Clock, Cpu, Equal, FileText,
+  GraduationCap, Info, Lightbulb, List, ListTree, Loader2, MessageSquareText, Play, RotateCcw, Search, Square, Target, Timer,
+  Trash2, TrendingDown, TrendingUp, Wrench, X, Zap,
 } from 'lucide-react'
 import {
   agentExamApi, type Cause, type Exam, type ExamOverview, type ExamQuestion, type ExamSize, type Lookup, type Score,
@@ -20,11 +21,13 @@ import {
 //
 //   start    — what it is examined on, how many questions (Quick / Standard
 //              / Deep) and what that costs, an optional focus, earlier exams;
-//   running  — writing, asking, grading, live, the answers as they come;
-//   results  — the score, by kind, by document and by whether the setup read
-//              that part; each question with its answer, the answer its
-//              document gives, what it looked up, why it went wrong — and the
-//              fix: teach it the answer, or read the part it was never read.
+//   running  — writing, asking, grading, live: the question it is asked now,
+//              and the answers as they come, rendered as the chat renders them;
+//   results  — the score and how the answers went, by kind, by document and
+//              by whether the setup read that part; each question with its
+//              answer, the answer its document gives, what it looked up, why
+//              it went wrong — and the fix: teach it the answer, or read the
+//              part it was never read.
 
 const POLL_MS = 2000
 
@@ -34,11 +37,16 @@ const SIZES: { id: ExamSize; label: string; hint: string }[] = [
   { id: 'deep', label: 'Deep', hint: 'Into every corner' },
 ]
 
-const VERDICT: Record<Verdict, { label: string; tone: string; dot: string }> = {
-  right: { label: 'Right', tone: 'text-emerald-700 dark:text-emerald-400', dot: 'bg-emerald-500' },
-  partly: { label: 'Partly right', tone: 'text-amber-700 dark:text-amber-400', dot: 'bg-amber-500' },
-  wrong: { label: 'Wrong', tone: 'text-red-700 dark:text-red-400', dot: 'bg-red-500' },
-  no_answer: { label: 'No answer', tone: 'text-zinc-400', dot: 'bg-zinc-500' },
+// A verdict's label, its colour in a bar (dot), on a question's number (badge) and as a tag (pill).
+const VERDICT: Record<Verdict, { label: string; dot: string; badge: string; pill: string }> = {
+  right: { label: 'Right', dot: 'bg-emerald-500', badge: 'bg-emerald-500/15 text-emerald-700 ring-emerald-500/30 dark:text-emerald-300',
+    pill: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400' },
+  partly: { label: 'Partly right', dot: 'bg-amber-500', badge: 'bg-amber-500/15 text-amber-700 ring-amber-500/30 dark:text-amber-300',
+    pill: 'bg-amber-500/10 text-amber-700 dark:text-amber-400' },
+  wrong: { label: 'Wrong', dot: 'bg-red-500', badge: 'bg-red-500/15 text-red-700 ring-red-500/30 dark:text-red-300',
+    pill: 'bg-red-500/10 text-red-700 dark:text-red-400' },
+  no_answer: { label: 'No answer', dot: 'bg-zinc-500', badge: 'bg-zinc-800 text-zinc-400 ring-zinc-700',
+    pill: 'bg-zinc-800 text-zinc-400' },
 }
 
 const CAUSES: Cause[] = ['didnt_look', 'wrong_place', 'got_wrong', 'made_up']
@@ -50,7 +58,7 @@ const CAUSE: Record<Cause, { label: string; explain: string }> = {
 }
 
 const PHASES: { id: Exam['phase']; label: string }[] = [
-  { id: 'writing', label: 'Writing questions' },
+  { id: 'writing', label: 'Writing' },
   { id: 'asking', label: 'Asking' },
   { id: 'grading', label: 'Grading' },
 ]
@@ -358,20 +366,19 @@ function StartPanel({ overview, size, setSize, focus, setFocus, busy, err, onSta
       {overview.exams.length > 0 && (
         <div>
           <h4 className="mb-2 text-sm font-semibold text-zinc-200">Earlier exams</h4>
-          <ul className="divide-y divide-zinc-800 overflow-hidden rounded-xl border border-zinc-800">
+          <ul className="divide-y divide-zinc-800 overflow-hidden rounded-2xl border border-zinc-800">
             {overview.exams.map((e) => (
               <li key={e.id} className="group flex items-center gap-3 px-3 py-2.5 hover:bg-zinc-800/40">
                 <button onClick={() => onOpen(e.id)} className="flex min-w-0 flex-1 items-center gap-3 text-left">
-                  <span className={`w-12 shrink-0 text-right text-lg font-semibold tabular-nums ${scoreTone(e.summary?.pct ?? null)}`}>
-                    {e.summary?.pct != null ? `${e.summary.pct}%` : '—'}
-                  </span>
+                  <ScoreRing pct={e.summary?.pct ?? null} size={44} />
                   <span className="min-w-0">
                     <span className="block truncate text-sm text-zinc-200">
                       {sizeLabel(e.size)}{e.again ? ' · asked again' : ''}{e.focus ? ` · ${e.focus}` : ''}
                     </span>
                     <span className="block truncate text-xs text-zinc-500">
                       {e.state === 'ready' ? 'from its archetype · ready to ask'
-                        : `${when(e.started)} · ${e.model}${e.state !== 'done' ? ` · ${e.state === 'error' ? 'stopped by an error' : 'stopped'}` : ''}`}
+                        : [when(e.started), e.model, e.state === 'done' ? '' : e.state === 'error' ? 'stopped by an error' : 'stopped']
+                          .filter(Boolean).join(' · ')}
                     </span>
                   </span>
                 </button>
@@ -388,79 +395,217 @@ function StartPanel({ overview, size, setSize, focus, setFocus, busy, err, onSta
   )
 }
 
+// ── Pieces both views use ─────────────────────────────────────────────
+
+/** A question's number, coloured by how it went (grey until graded; a spinner while it's graded). */
+function NumberBadge({ n, verdict, pending = false }: { n: number; verdict?: Verdict; pending?: boolean }) {
+  const v = verdict ? VERDICT[verdict] : null
+  return (
+    <span title={v?.label ?? (pending ? 'Being graded' : 'Not graded')}
+      className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold tabular-nums ring-1 ${v
+        ? v.badge : 'bg-zinc-800 text-zinc-400 ring-zinc-700'}`}>
+      {pending ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : n}
+    </span>
+  )
+}
+
+function KindTag({ kind }: { kind: ExamQuestion['kind'] }) {
+  return (
+    <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${kind === 'situation'
+      ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-zinc-800 text-zinc-400'}`}>
+      {kind === 'situation' ? 'Situation' : 'Question'}
+    </span>
+  )
+}
+
+function Meta({ icon: Icon, children }: { icon: typeof Clock; children: ReactNode }) {
+  return (
+    <span className="inline-flex max-w-full items-center gap-1 rounded-md bg-zinc-800/70 px-2 py-0.5 text-[11px] text-zinc-400">
+      <Icon className="h-3 w-3 shrink-0 text-zinc-500" /><span className="truncate">{children}</span>
+    </span>
+  )
+}
+
+/** An answer, as the chat shows it: rendered markdown, cut off softly past *max* px until it's opened. */
+function Answer({ text, max }: { text: string; max: number }) {
+  const ref = useRef<HTMLDivElement>(null)
+  const [long, setLong] = useState(false)
+  const [open, setOpen] = useState(false)
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    const check = () => setLong(el.scrollHeight > max + 8)
+    const ro = new ResizeObserver(check)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [max])
+  return (
+    <div>
+      <div ref={ref} style={open ? undefined : { maxHeight: max }}
+        className={`fd-file-markdown fd-exam-md ${open ? '' : 'overflow-hidden'} ${long && !open ? 'fd-fade-bottom' : ''}`}>
+        <Markdown remarkPlugins={[remarkGfm]} components={MD}>{text}</Markdown>
+      </div>
+      {long && (
+        <button onClick={() => setOpen((v) => !v)}
+          className="mt-1.5 inline-flex items-center gap-1 text-xs font-medium text-violet-600 hover:text-violet-500 dark:text-violet-400 dark:hover:text-violet-300">
+          {open ? 'Show less' : 'Show the whole answer'}
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} />
+        </button>
+      )}
+    </div>
+  )
+}
+
 // ── Running ───────────────────────────────────────────────────────────
 
 function RunningPanel({ exam, busy, onStop }: { exam: Exam; busy: boolean; onStop: () => void }) {
   const at = PHASES.findIndex((p) => p.id === exam.phase)
   const pct = exam.steps ? Math.round((exam.step / exam.steps) * 100) : 0
-  const asked = (exam.questions ?? []).filter((q) => q.answer !== undefined || q.error)
+  const questions = exam.questions ?? []
+  const number = new Map(questions.map((q, i) => [q.id, i + 1]))
+  const asked = questions.filter((q) => q.answer !== undefined || q.error)
+  const now = exam.phase === 'asking' ? questions.find((q) => q.answer === undefined && !q.error) : undefined
+  const lookups = asked.reduce((n, q) => n + (q.lookups?.length ?? 0), 0)
   const waiting = exam.waiting
   const note = !waiting ? ''
     : waiting.why === 'pacing' ? 'Pacing the calls, to keep well within the model’s limits…'
       : waiting.why === 'busy' ? `${waiting.model || 'The model'} is busy — waiting and trying again…`
         : waiting.why === 'waking' ? `Waking ${waiting.name || 'the agent'}…` : ''
+  const headline = exam.phase === 'writing' ? 'Writing the questions'
+    : exam.phase === 'asking' ? `Question ${Math.min(exam.step + 1, exam.steps)} of ${exam.steps}`
+      : `Grading ${Math.min(exam.step + 1, exam.steps)} of ${exam.steps}`
+  const sub = exam.phase === 'writing' ? 'From its documents — asked the way your users would ask them.'
+    : exam.phase === 'asking' ? 'It answers in a private session, looking things up in its documents as it would for a user.'
+      : 'Each answer is checked against the part of the document it came from.'
+
   return (
     <div className="mx-auto flex max-w-3xl flex-col gap-5 p-4 wide:p-6">
-      <div className="rounded-xl border border-zinc-800 p-4">
-        <ol className="mb-4 flex flex-wrap items-center gap-2 text-xs" aria-label="Exam steps">
-          {PHASES.map((p, i) => (
-            <li key={p.id} className="flex items-center gap-2">
-              {i > 0 && <span className="h-px w-5 bg-zinc-700" />}
-              <span className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 ${i === at
-                ? 'bg-violet-500/15 font-medium text-violet-700 dark:text-violet-200' : i < at ? 'text-zinc-400' : 'text-zinc-600'}`}>
-                {i < at ? <Check className="h-3 w-3 text-emerald-500" /> : i === at ? <Loader2 className="h-3 w-3 animate-spin" /> : <CircleDashed className="h-3 w-3" />}
-                {p.label}
+      <section className="relative overflow-hidden rounded-2xl border border-violet-500/20 bg-gradient-to-br from-violet-500/[0.12] via-transparent to-sky-500/[0.06] p-5">
+        <div className="flex items-start gap-4">
+          <div className="min-w-0 flex-1">
+            <p className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wider text-violet-700 dark:text-violet-300">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-60" />
+                <span className="relative inline-flex h-2 w-2 rounded-full bg-violet-500" />
               </span>
-            </li>
-          ))}
-        </ol>
-        <div className="flex items-baseline justify-between gap-3">
-          <p className="text-sm text-zinc-200">
-            {exam.phase === 'writing' ? 'Writing questions from its documents'
-              : exam.phase === 'asking' ? `Asking question ${Math.min(exam.step + 1, exam.steps)} of ${exam.steps}`
-                : 'Checking its answers against the documents'}
-          </p>
-          <span className="text-xs tabular-nums text-zinc-500">{took(exam)} · {kTokens(exam.tokens)} tokens</span>
-        </div>
-        <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-zinc-800">
-          <div className="h-full rounded-full bg-violet-500 transition-all" style={{ width: `${Math.max(3, pct)}%` }} />
-        </div>
-        {note && <p className="mt-2 text-xs text-zinc-500">{note}</p>}
-        <div className="mt-4 flex items-center justify-between gap-3">
-          <p className="text-xs text-zinc-500">You can close this — the exam goes on, and the bell tells you when it's done.</p>
+              Exam under way
+            </p>
+            <h4 className="mt-2 text-xl font-semibold tracking-tight text-zinc-100 wide:text-2xl">{headline}</h4>
+            <p className="mt-1 text-sm text-zinc-400">{sub}</p>
+          </div>
           <button onClick={onStop} disabled={busy}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-60">
+            className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900/60 px-3 py-1.5 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-60">
             <Square className="h-3 w-3" /> Stop
           </button>
         </div>
-      </div>
+
+        <ol className="mt-5 grid grid-cols-3 gap-2" aria-label="Exam steps">
+          {PHASES.map((p, i) => {
+            const fill = i < at ? 100 : i === at ? Math.max(4, pct) : 0
+            return (
+              <li key={p.id} className="min-w-0">
+                <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800">
+                  <div className={`h-full rounded-full transition-[width] duration-700 ease-out ${i < at
+                    ? 'bg-emerald-500' : 'bg-gradient-to-r from-violet-500 to-fuchsia-500'}`} style={{ width: `${fill}%` }} />
+                </div>
+                <p className={`mt-1.5 flex items-center gap-1 truncate text-[11px] ${i === at
+                  ? 'font-medium text-zinc-200' : i < at ? 'text-zinc-400' : 'text-zinc-600'}`}>
+                  {i < at ? <Check className="h-3 w-3 shrink-0 text-emerald-500" />
+                    : i === at ? <Loader2 className="h-3 w-3 shrink-0 animate-spin text-violet-500" />
+                      : <CircleDashed className="h-3 w-3 shrink-0" />}
+                  {p.label}
+                </p>
+              </li>
+            )
+          })}
+        </ol>
+
+        <div className="mt-4 flex flex-wrap gap-1.5">
+          <Meta icon={Clock}>{took(exam)}</Meta>
+          <Meta icon={Zap}>{kTokens(exam.tokens)} tokens</Meta>
+          {exam.model && <Meta icon={Cpu}>{exam.model}</Meta>}
+          {lookups > 0 && <Meta icon={Search}>{plural(lookups, 'lookup')} so far</Meta>}
+        </div>
+        {note && <p className="mt-3 flex items-center gap-1.5 text-xs text-amber-700 dark:text-amber-400"><Timer className="h-3.5 w-3.5" />{note}</p>}
+        <p className="mt-3 text-xs text-zinc-500">You can close this — the exam goes on, and the bell tells you when it's done.</p>
+      </section>
+
+      {exam.phase === 'writing' && (
+        <ul className="flex flex-col gap-2.5" aria-hidden>
+          {[0, 1, 2].map((i) => (
+            <li key={i} className="rounded-2xl border border-zinc-800 p-4" style={{ opacity: 1 - i * 0.25 }}>
+              <div className="fd-shimmer h-3.5 w-3/4 rounded" />
+              <div className="fd-shimmer mt-2.5 h-3 w-1/2 rounded" />
+            </li>
+          ))}
+        </ul>
+      )}
+
+      {now && (
+        <div className="fd-rise rounded-2xl border border-violet-500/30 bg-violet-500/[0.04] p-4">
+          <div className="flex items-start gap-3">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-violet-500/15 text-xs font-semibold tabular-nums text-violet-700 ring-1 ring-violet-500/30 dark:text-violet-300">
+              {number.get(now.id)}
+            </span>
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-violet-700 dark:text-violet-300">Asking now</p>
+              <p className="mt-1 text-sm font-medium leading-snug text-zinc-100">{now.question}</p>
+              <div className="mt-3 space-y-2" aria-hidden>
+                <div className="fd-shimmer h-2.5 w-full rounded" />
+                <div className="fd-shimmer h-2.5 w-5/6 rounded" />
+                <div className="fd-shimmer h-2.5 w-2/3 rounded" />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {asked.length > 0 && (
-        <div>
-          <h4 className="mb-2 text-sm font-semibold text-zinc-200">Answered so far</h4>
-          <ul className="flex flex-col gap-2">
+        <section>
+          <h4 className="mb-2.5 flex items-baseline gap-2 text-sm font-semibold text-zinc-200">
+            Answered so far <span className="text-xs font-normal tabular-nums text-zinc-500">{asked.length} of {questions.length}</span>
+          </h4>
+          <ul className="flex flex-col gap-2.5">
             {[...asked].reverse().map((q) => (
-              <li key={q.id} className="rounded-xl border border-zinc-800 p-3">
-                <p className="text-sm text-zinc-200">{q.question}</p>
-                <p className="mt-1 line-clamp-2 text-xs text-zinc-500">
-                  {q.error ? q.error : q.answer}
-                </p>
-                <p className="mt-1.5 flex items-center gap-1.5 text-[11px] text-zinc-600">
-                  {q.lookups && q.lookups.length > 0
-                    ? <><Search className="h-3 w-3" /> looked up {plural(q.lookups.length, 'thing')}</>
-                    : <>answered without looking anything up</>}
-                  {q.seconds !== undefined && <> · {q.seconds} s</>}
-                </p>
+              <li key={q.id} className="fd-rise rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
+                <div className="flex items-start gap-3">
+                  <NumberBadge n={number.get(q.id) ?? 0} verdict={q.verdict} pending={exam.phase === 'grading' && !q.verdict && !q.error} />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium leading-snug text-zinc-100">{q.question}</p>
+                    <div className="mt-2.5 rounded-xl border border-zinc-800 bg-zinc-950/40 px-3.5 py-3">
+                      {q.error ? <p className="text-sm text-red-500">{q.error}</p> : <Answer text={q.answer ?? ''} max={132} />}
+                    </div>
+                    <div className="mt-2.5 flex flex-wrap items-center gap-1.5">
+                      <KindTag kind={q.kind} />
+                      {q.verdict && <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${VERDICT[q.verdict].pill}`}>{VERDICT[q.verdict].label}</span>}
+                      <Meta icon={Search}>
+                        {q.lookups?.length ? `looked up ${plural(q.lookups.length, 'thing')}` : 'looked nothing up'}
+                      </Meta>
+                      {q.seconds !== undefined && <Meta icon={Clock}>{q.seconds} s</Meta>}
+                    </div>
+                  </div>
+                </div>
               </li>
             ))}
           </ul>
-        </div>
+        </section>
       )}
     </div>
   )
 }
 
 // ── Results ───────────────────────────────────────────────────────────
+
+/** How a score reads, and the colours it is shown in. */
+function band(pct: number | null) {
+  if (pct === null) return { word: 'Not graded', glow: 'from-zinc-500/10', ring: 'border-zinc-800', text: 'text-zinc-400' }
+  if (pct >= 80) {
+    return { word: pct >= 95 ? 'Excellent' : 'Strong', glow: 'from-emerald-500/[0.14]', ring: 'border-emerald-500/25',
+      text: 'text-emerald-700 dark:text-emerald-400' }
+  }
+  if (pct >= 50) return { word: 'Getting there', glow: 'from-amber-500/[0.14]', ring: 'border-amber-500/25', text: 'text-amber-700 dark:text-amber-400' }
+  return { word: 'Needs work', glow: 'from-red-500/[0.12]', ring: 'border-red-500/25', text: 'text-red-700 dark:text-red-400' }
+}
 
 function ResultsPanel({ exam, busy, err, onAgain, onResume, onNew, onTeach, onRead }: {
   exam: Exam
@@ -475,6 +620,7 @@ function ResultsPanel({ exam, busy, err, onAgain, onResume, onNew, onTeach, onRe
   const [filter, setFilter] = useState<Filter>('all')
   const [openQ, setOpenQ] = useState<string | null>(null)
   const questions = useMemo(() => exam.questions ?? [], [exam.questions])
+  const number = new Map(questions.map((q, i) => [q.id, i + 1]))
   const graded = questions.filter((q) => q.verdict)
   const s = exam.summary
   const unfinished = exam.state !== 'done'
@@ -483,24 +629,36 @@ function ResultsPanel({ exam, busy, err, onAgain, onResume, onNew, onTeach, onRe
   ))
   // The documents with unread parts it got wrong: one click reads them.
   const toRead = [...new Set(questions.filter((q) => wentWrong(q) && q.read === false && q.doc_name).map((q) => q.doc_name))]
+  const b = band(s?.pct ?? null)
+  const tiles = s ? [
+    { label: 'Questions', hint: 'asked straight out', score: s.kinds.ask },
+    { label: 'Situations', hint: 'a rule decides what to do', score: s.kinds.situation },
+    // What the setup read: only when reads were tracked for what was asked.
+    ...(s.read.read.questions || s.read.unread.questions ? [
+      { label: 'Parts it read', hint: 'rules and facts taken', score: s.read.read },
+      { label: 'Parts never read', hint: 'only searchable', score: s.read.unread },
+    ] : []),
+  ] : []
 
   return (
     <div className="mx-auto flex max-w-4xl flex-col gap-5 p-4 wide:p-6">
       {exam.state === 'ready' && (
-        <div className="flex flex-col gap-3 rounded-xl border border-violet-500/30 bg-violet-500/5 p-4 sm:flex-row sm:items-center">
-          <GraduationCap className="h-5 w-5 shrink-0 text-violet-500" />
+        <div className="flex flex-col gap-3 rounded-2xl border border-violet-500/30 bg-gradient-to-br from-violet-500/[0.1] to-transparent p-4 sm:flex-row sm:items-center">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-500/15 text-violet-600 dark:text-violet-300">
+            <GraduationCap className="h-5 w-5" />
+          </span>
           <p className="flex-1 text-sm text-zinc-300">
             {exam.notes?.[0] || 'Questions passed on with the archetype it was made from.'} Ask them to see how well it knows
             what it was given — {questions.length === 1 ? 'one question' : `${questions.length} questions`}.
           </p>
           <button onClick={onResume} disabled={busy}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-60">
+            className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm shadow-violet-600/30 hover:bg-violet-500 disabled:opacity-60">
             {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />} Ask them
           </button>
         </div>
       )}
       {unfinished && exam.state !== 'ready' && (
-        <div className="flex flex-col gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-4 sm:flex-row sm:items-center">
+        <div className="flex flex-col gap-3 rounded-2xl border border-amber-500/30 bg-amber-500/5 p-4 sm:flex-row sm:items-center">
           <AlertTriangle className="h-5 w-5 shrink-0 text-amber-500" />
           <p className="flex-1 text-sm text-zinc-300">
             {exam.state === 'error' ? exam.error || 'The exam stopped.' : 'The exam was stopped.'}
@@ -508,7 +666,7 @@ function ResultsPanel({ exam, busy, err, onAgain, onResume, onNew, onTeach, onRe
           </p>
           {questions.length > 0 && (
             <button onClick={onResume} disabled={busy}
-              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-60">
+              className="flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-2 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-60">
               {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />} Continue
             </button>
           )}
@@ -517,154 +675,223 @@ function ResultsPanel({ exam, busy, err, onAgain, onResume, onNew, onTeach, onRe
       {err && <p className="flex items-start gap-1.5 text-sm text-red-500"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{err}</p>}
 
       {s && s.questions > 0 && (
-        <div className="flex flex-col gap-4 rounded-xl border border-zinc-800 p-4 sm:flex-row sm:items-center">
-          <ScoreRing pct={s.pct} />
-          <div className="min-w-0 flex-1">
-            <p className="text-lg font-semibold text-zinc-100">
-              {s.right} of {s.questions} right
-              {s.questions - s.right > 0 && (
-                <span className="text-sm font-normal text-zinc-500">
-                  {' '}· {questions.filter((q) => q.verdict === 'partly').length} partly
-                </span>
-              )}
-            </p>
-            <p className="mt-0.5 text-xs text-zinc-500">
-              {sizeLabel(exam.size)} exam{exam.again ? ', asked again' : ''}{exam.focus ? ` · focus: ${exam.focus}` : ''} · {exam.model} · {when(exam.started)} · {took(exam)} · {kTokens(exam.tokens)} tokens
-            </p>
-            {s.changed && s.changed.compared > 0 && (
-              <p className="mt-1 text-xs text-zinc-400">
-                Since last time: <span className="text-emerald-600 dark:text-emerald-400">{s.changed.better} better</span>
-                {' · '}<span className="text-red-600 dark:text-red-400">{s.changed.worse} worse</span>
-                {' · '}{s.changed.compared - s.changed.better - s.changed.worse} the same
-                {s.questions < 20 && <span className="text-zinc-500"> — with few questions, some change is chance: a model doesn't answer the same way twice</span>}
-              </p>
-            )}
-            {exam.notes.length > 0 && <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">{exam.notes.join(' ')}</p>}
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button onClick={onAgain} disabled={busy}
-                title="The same questions again, with what it knows and the model it has now"
-                className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 disabled:opacity-60">
-                {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />} Ask the same again
-              </button>
-              <button onClick={onNew}
-                className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800 sm:hidden">
-                <Play className="h-3.5 w-3.5" /> New exam
-              </button>
-              {toRead.length > 0 && onRead && (
-                <button onClick={() => onRead(toRead)}
-                  title="Its rules and facts are taken from the parts it was never read"
-                  className="flex items-center gap-1.5 rounded-lg border border-violet-500/40 px-3 py-1.5 text-xs font-medium text-violet-700 hover:bg-violet-500/10 dark:text-violet-300">
-                  <BookOpen className="h-3.5 w-3.5" /> Read the parts it missed
-                </button>
-              )}
+        <section className={`relative overflow-hidden rounded-2xl border ${b.ring} bg-gradient-to-br ${b.glow} via-transparent to-transparent p-5 wide:p-6`}>
+          <div className="flex flex-col gap-5 sm:flex-row sm:items-center">
+            <ScoreRing pct={s.pct} size={120} />
+            <div className="min-w-0 flex-1">
+              <p className={`text-[11px] font-semibold uppercase tracking-wider ${b.text}`}>{b.word}</p>
+              <h4 className="mt-1 text-2xl font-semibold tracking-tight text-zinc-100">
+                {s.right} of {s.questions} right
+              </h4>
+              <div className="mt-2.5 flex flex-wrap gap-1.5">
+                <Meta icon={GraduationCap}>{sizeLabel(exam.size)} exam{exam.again ? ', asked again' : ''}</Meta>
+                {exam.focus && <Meta icon={Target}>{exam.focus}</Meta>}
+                {exam.model && <Meta icon={Cpu}>{exam.model}</Meta>}
+                <Meta icon={CalendarDays}>{when(exam.started)}</Meta>
+                <Meta icon={Clock}>{took(exam)}</Meta>
+                <Meta icon={Zap}>{kTokens(exam.tokens)} tokens</Meta>
+              </div>
+              <Spread questions={questions} />
             </div>
           </div>
-        </div>
-      )}
 
-      {s && s.questions > 0 && (
-        <div className="grid min-w-0 grid-cols-1 gap-3 sm:grid-cols-2">
-          <Breakdown title="By kind of question" rows={[
-            { label: 'Questions', hint: 'asked straight out', score: s.kinds.ask },
-            { label: 'Situations', hint: 'a rule decides what to do', score: s.kinds.situation },
-          ]} />
-          <Breakdown title="By what the setup read" rows={[
-            { label: 'Parts it was read', hint: 'rules and facts taken from them', score: s.read.read },
-            { label: 'Parts never read', hint: 'only searchable', score: s.read.unread },
-          ]} />
-          {s.docs.length > 1 && (
-            <div className="min-w-0 sm:col-span-2">
-              <Breakdown title="By document" rows={s.docs.map((d) => ({ label: d.title, hint: '', score: d }))} />
+          {s.changed && s.changed.compared > 0 && (
+            <div className="mt-4 flex flex-wrap items-center gap-1.5 border-t border-zinc-800/80 pt-4 text-xs">
+              <span className="mr-1 text-zinc-400">Since last time</span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 font-medium text-emerald-700 dark:text-emerald-400">
+                <TrendingUp className="h-3 w-3" />{s.changed.better} better
+              </span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-red-500/10 px-2 py-0.5 font-medium text-red-700 dark:text-red-400">
+                <TrendingDown className="h-3 w-3" />{s.changed.worse} worse
+              </span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-zinc-800 px-2 py-0.5 text-zinc-400">
+                <Equal className="h-3 w-3" />{s.changed.compared - s.changed.better - s.changed.worse} the same
+              </span>
+              {s.questions < 20 && (
+                <span className="w-full pt-1 text-[11px] text-zinc-500 sm:w-auto sm:pl-1 sm:pt-0">
+                  With few questions, some change is chance: a model doesn't answer the same way twice.
+                </span>
+              )}
             </div>
           )}
-        </div>
+          {exam.notes.length > 0 && (
+            <p className="mt-3 flex items-start gap-1.5 text-xs text-zinc-400">
+              <Info className="mt-px h-3.5 w-3.5 shrink-0 text-zinc-500" />{exam.notes.join(' ')}
+            </p>
+          )}
+
+          <div className="mt-5 flex flex-wrap gap-2">
+            <button onClick={onAgain} disabled={busy}
+              title="The same questions again, with what it knows and the model it has now"
+              className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3.5 py-2 text-xs font-semibold text-white shadow-sm shadow-violet-600/30 hover:bg-violet-500 disabled:opacity-60">
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />} Ask the same again
+            </button>
+            <button onClick={onNew}
+              className="flex items-center gap-1.5 rounded-lg border border-zinc-700 bg-zinc-900/60 px-3.5 py-2 text-xs font-medium text-zinc-200 hover:bg-zinc-800 sm:hidden">
+              <Play className="h-3.5 w-3.5" /> New exam
+            </button>
+            {toRead.length > 0 && onRead && (
+              <button onClick={() => onRead(toRead)}
+                title="Its rules and facts are taken from the parts it was never read"
+                className="flex items-center gap-1.5 rounded-lg border border-violet-500/40 px-3.5 py-2 text-xs font-medium text-violet-700 hover:bg-violet-500/10 dark:text-violet-300">
+                <BookOpen className="h-3.5 w-3.5" /> Read the parts it missed
+              </button>
+            )}
+          </div>
+        </section>
       )}
 
+      {tiles.length > 0 && (
+        <div className={`grid min-w-0 grid-cols-2 gap-3 ${tiles.length > 2 ? 'wide:grid-cols-4' : ''}`}>
+          {tiles.map((t) => <Tile key={t.label} {...t} />)}
+        </div>
+      )}
+      {s && s.docs.length > 1 && <DocScores docs={s.docs} />}
+
       {questions.length > 0 && (
-        <div>
-          <div className="mb-3 flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Show">
-            <FilterChip on={filter === 'all'} onClick={() => setFilter('all')} label="All" count={questions.length} />
-            <FilterChip on={filter === 'wrong'} onClick={() => setFilter('wrong')} label="Not right" count={questions.filter(wentWrong).length} />
-            <FilterChip on={filter === 'right'} onClick={() => setFilter('right')} label="Right" count={questions.filter((q) => q.verdict === 'right').length} />
+        <section>
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <div className="inline-flex gap-0.5 rounded-xl bg-zinc-800/60 p-1" role="tablist" aria-label="Show">
+              <Segment on={filter === 'all'} onClick={() => setFilter('all')} label="All" count={questions.length} />
+              <Segment on={filter === 'wrong'} onClick={() => setFilter('wrong')} label="Not right" count={questions.filter(wentWrong).length} />
+              <Segment on={filter === 'right'} onClick={() => setFilter('right')} label="Right" count={questions.filter((q) => q.verdict === 'right').length} />
+            </div>
             {s && CAUSES.filter((c) => s.causes[c] > 0).map((c) => (
-              <FilterChip key={c} on={filter === c} onClick={() => setFilter(c)} label={CAUSE[c].label} count={s.causes[c]} subtle />
+              <button key={c} role="tab" aria-selected={filter === c} onClick={() => setFilter(c)}
+                className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${filter === c
+                  ? 'border-violet-500 bg-violet-500/15 text-violet-700 dark:text-violet-200'
+                  : 'border-zinc-800 text-zinc-500 hover:text-zinc-300'}`}>
+                {CAUSE[c].label}<span className="tabular-nums text-zinc-500">{s.causes[c]}</span>
+              </button>
             ))}
           </div>
           {shown.length === 0 ? (
-            <p className="rounded-xl border border-zinc-800 p-6 text-center text-sm text-zinc-500">Nothing here.</p>
+            <p className="rounded-2xl border border-dashed border-zinc-800 p-8 text-center text-sm text-zinc-500">Nothing here.</p>
           ) : (
-            <ul className="flex flex-col gap-2">
+            <ul className="flex flex-col gap-2.5">
               {shown.map((q) => (
-                <QuestionCard key={q.id} q={q} open={openQ === q.id} onToggle={() => setOpenQ(openQ === q.id ? null : q.id)}
+                <QuestionCard key={q.id} n={number.get(q.id) ?? 0} q={q} open={openQ === q.id}
+                  onToggle={() => setOpenQ(openQ === q.id ? null : q.id)}
                   onTeach={() => onTeach(q)} onRead={q.read === false && q.doc_name && onRead ? () => onRead([q.doc_name]) : undefined} />
               ))}
             </ul>
           )}
-        </div>
+        </section>
       )}
     </div>
   )
 }
 
-/** An exam score as a ring, coloured by how good it is. */
-export function ScoreRing({ pct }: { pct: number | null }) {
+/** An exam score as a ring, drawn in on arrival and coloured by how good it is. */
+export function ScoreRing({ pct, size = 96 }: { pct: number | null; size?: number }) {
+  const gradient = `fd-ring-${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`
+  const [drawn, setDrawn] = useState(0)
+  useEffect(() => {
+    const f = requestAnimationFrame(() => setDrawn(pct ?? 0))
+    return () => cancelAnimationFrame(f)
+  }, [pct])
   const r = 34
   const c = 2 * Math.PI * r
-  const tone = pct === null ? 'stroke-zinc-600' : pct >= 80 ? 'stroke-emerald-500' : pct >= 50 ? 'stroke-amber-500' : 'stroke-red-500'
+  const [from, to] = pct === null ? ['#71717a', '#52525b'] : pct >= 80 ? ['#34d399', '#059669']
+    : pct >= 50 ? ['#fbbf24', '#d97706'] : ['#f87171', '#dc2626']
   return (
-    <div className="relative h-24 w-24 shrink-0 self-center">
+    <div className="relative shrink-0 self-center" style={{ width: size, height: size }}>
       <svg viewBox="0 0 80 80" className="h-full w-full -rotate-90" aria-hidden>
-        <circle cx="40" cy="40" r={r} className="fill-none stroke-zinc-800" strokeWidth="7" />
-        <circle cx="40" cy="40" r={r} className={`fill-none ${tone}`} strokeWidth="7" strokeLinecap="round"
-          strokeDasharray={`${(c * (pct ?? 0)) / 100} ${c}`} />
+        <defs>
+          <linearGradient id={gradient} x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stopColor={from} />
+            <stop offset="1" stopColor={to} />
+          </linearGradient>
+        </defs>
+        <circle cx="40" cy="40" r={r} className="fill-none stroke-zinc-800" strokeWidth="6" />
+        <circle cx="40" cy="40" r={r} fill="none" stroke={`url(#${gradient})`} strokeWidth="6" strokeLinecap="round"
+          strokeDasharray={`${(c * drawn) / 100} ${c}`} style={{ transition: 'stroke-dasharray 900ms cubic-bezier(.2,.8,.2,1)' }} />
       </svg>
-      <span className={`absolute inset-0 flex items-center justify-center text-2xl font-bold tabular-nums ${scoreTone(pct)}`}>
-        {pct === null ? '—' : `${pct}%`}
+      <span className={`absolute inset-0 flex items-center justify-center font-bold tabular-nums tracking-tight ${scoreTone(pct)}`}
+        style={{ fontSize: Math.round(size * 0.25) }}>
+        {pct === null ? '—' : <>{pct}<span className="font-semibold opacity-70" style={{ fontSize: Math.round(size * 0.13) }}>%</span></>}
       </span>
     </div>
   )
 }
 
-function Breakdown({ title, rows }: { title: string; rows: { label: string; hint: string; score: Score }[] }) {
+/** How the answers went, as one bar: right, partly, wrong, no answer. */
+function Spread({ questions }: { questions: ExamQuestion[] }) {
+  const parts = (['right', 'partly', 'wrong', 'no_answer'] as Verdict[])
+    .map((v) => ({ v, n: questions.filter((q) => q.verdict === v).length })).filter((x) => x.n > 0)
+  const total = parts.reduce((n, x) => n + x.n, 0)
+  if (!total) return null
   return (
-    <div className="min-w-0 rounded-xl border border-zinc-800 p-3">
-      <h5 className="mb-2 text-xs font-semibold uppercase tracking-wide text-zinc-500">{title}</h5>
-      <ul className="flex flex-col gap-2">
-        {rows.map((r) => (
-          <li key={r.label}>
-            <div className="flex items-baseline justify-between gap-2">
-              <span className="min-w-0 truncate text-sm text-zinc-200">
-                {r.label}{r.hint && <span className="text-xs text-zinc-500"> · {r.hint}</span>}
-              </span>
-              <span className={`shrink-0 text-sm font-semibold tabular-nums ${scoreTone(r.score.pct)}`}>
-                {r.score.questions ? `${r.score.pct}%` : '—'}
-                <span className="ml-1 text-xs font-normal text-zinc-500">{r.score.questions ? `of ${r.score.questions}` : 'none asked'}</span>
-              </span>
-            </div>
-            <div className="mt-1 h-1 overflow-hidden rounded-full bg-zinc-800">
-              <div className={`h-full rounded-full ${scoreBar(r.score.pct)}`} style={{ width: `${r.score.pct ?? 0}%` }} />
-            </div>
-          </li>
+    <div className="mt-4">
+      <div className="flex h-2 gap-0.5 overflow-hidden rounded-full">
+        {parts.map((x) => (
+          <div key={x.v} className={`${VERDICT[x.v].dot} first:rounded-l-full last:rounded-r-full`} style={{ width: `${(x.n / total) * 100}%` }} />
         ))}
-      </ul>
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1">
+        {parts.map((x) => (
+          <span key={x.v} className="flex items-center gap-1.5 text-xs text-zinc-400">
+            <span className={`h-2 w-2 rounded-full ${VERDICT[x.v].dot}`} />{VERDICT[x.v].label}
+            <span className="tabular-nums text-zinc-500">{x.n}</span>
+          </span>
+        ))}
+      </div>
     </div>
   )
 }
 
-function FilterChip({ on, onClick, label, count, subtle = false }: {
-  on: boolean; onClick: () => void; label: string; count: number; subtle?: boolean
-}) {
+function Tile({ label, hint, score }: { label: string; hint: string; score: Score }) {
+  const none = !score.questions
+  return (
+    <div className={`min-w-0 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 ${none ? 'opacity-60' : ''}`}>
+      <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{label}</p>
+      <p className={`mt-1.5 text-2xl font-semibold tabular-nums tracking-tight ${none ? 'text-zinc-500' : scoreTone(score.pct)}`}>
+        {none ? '—' : `${score.pct}%`}
+      </p>
+      <div className="mt-2 h-1 overflow-hidden rounded-full bg-zinc-800">
+        <div className={`h-full rounded-full ${scoreBar(score.pct)}`} style={{ width: `${none ? 0 : score.pct ?? 0}%` }} />
+      </div>
+      <p className="mt-2 text-[11px] text-zinc-400">{none ? 'none asked' : `${score.right} of ${score.questions} right`}</p>
+      <p className="truncate text-[11px] text-zinc-500" title={hint}>{hint}</p>
+    </div>
+  )
+}
+
+function DocScores({ docs }: { docs: (Score & { doc: string; title: string })[] }) {
+  return (
+    <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
+      <h5 className="mb-3 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">By document</h5>
+      <ul className="flex flex-col gap-2.5">
+        {docs.map((d) => (
+          <li key={d.doc} className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 sm:grid-cols-[minmax(0,14rem)_minmax(0,1fr)_auto]">
+            <span className="flex min-w-0 items-center gap-1.5 text-sm text-zinc-200">
+              <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-500" /><span className="truncate">{d.title}</span>
+            </span>
+            <div className="order-last col-span-2 h-1.5 overflow-hidden rounded-full bg-zinc-800 sm:order-none sm:col-span-1">
+              <div className={`h-full rounded-full ${scoreBar(d.pct)}`} style={{ width: `${d.pct ?? 0}%` }} />
+            </div>
+            <span className={`text-right text-sm font-semibold tabular-nums ${scoreTone(d.pct)}`}>
+              {d.pct ?? '—'}{d.pct !== null && '%'}<span className="ml-1 text-xs font-normal text-zinc-500">of {d.questions}</span>
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+function Segment({ on, onClick, label, count }: { on: boolean; onClick: () => void; label: string; count: number }) {
   return (
     <button role="tab" aria-selected={on} onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition-colors ${on
-        ? 'border-violet-500 bg-violet-500/15 text-violet-700 dark:text-violet-200'
-        : subtle ? 'border-zinc-800 text-zinc-500 hover:text-zinc-300' : 'border-zinc-700 text-zinc-300 hover:bg-zinc-800'}`}>
-      {label}<span className="tabular-nums text-zinc-500">{count}</span>
+      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${on
+        ? 'bg-zinc-900 text-zinc-100 shadow-sm ring-1 ring-zinc-700' : 'text-zinc-400 hover:text-zinc-200'}`}>
+      {label}<span className={`tabular-nums ${on ? 'text-zinc-400' : 'text-zinc-500'}`}>{count}</span>
     </button>
   )
 }
 
-function QuestionCard({ q, open, onToggle, onTeach, onRead }: {
+function QuestionCard({ n, q, open, onToggle, onTeach, onRead }: {
+  n: number
   q: ExamQuestion
   open: boolean
   onToggle: () => void
@@ -674,25 +901,27 @@ function QuestionCard({ q, open, onToggle, onTeach, onRead }: {
   const v = q.verdict ? VERDICT[q.verdict] : null
   const where = [q.doc_title, ...q.path, q.title].join(' › ')
   return (
-    <li className={`overflow-hidden rounded-xl border ${open ? 'border-zinc-700' : 'border-zinc-800'}`}>
-      <button onClick={onToggle} aria-expanded={open} className="flex w-full items-start gap-3 p-3 text-left hover:bg-zinc-800/30">
-        <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${v ? v.dot : 'bg-zinc-700'}`} title={v?.label ?? 'Not graded'} />
+    <li className={`overflow-hidden rounded-2xl border transition-colors ${open
+      ? 'border-zinc-700 bg-zinc-900/60 shadow-lg shadow-black/5' : 'border-zinc-800 hover:border-zinc-700'}`}>
+      <button onClick={onToggle} aria-expanded={open} className="flex w-full items-start gap-3 p-4 text-left">
+        <NumberBadge n={n} verdict={q.verdict} />
         <span className="min-w-0 flex-1">
-          <span className={`block text-sm text-zinc-100 ${open ? '' : 'line-clamp-2'}`}>{q.question}</span>
-          <span className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-zinc-500">
-            <span className={`rounded px-1.5 py-0.5 ${q.kind === 'situation' ? 'bg-sky-500/10 text-sky-700 dark:text-sky-300' : 'bg-zinc-800 text-zinc-400'}`}>
-              {q.kind === 'situation' ? 'Situation' : 'Question'}
-            </span>
-            {v && <span className={v.tone}>{v.label}</span>}
+          <span className={`block text-sm font-medium leading-snug text-zinc-100 ${open ? '' : 'line-clamp-2'}`}>{q.question}</span>
+          <span className="mt-2 flex flex-wrap items-center gap-1.5 text-[11px]">
+            <KindTag kind={q.kind} />
+            {v && <span className={`rounded-md px-1.5 py-0.5 font-medium ${v.pill}`}>{v.label}</span>}
             {q.before && q.verdict && q.before !== q.verdict && (
-              <span className="text-zinc-500">(was {VERDICT[q.before].label.toLowerCase()})</span>
+              <span className="rounded-md bg-zinc-800 px-1.5 py-0.5 text-zinc-400">was {VERDICT[q.before].label.toLowerCase()}</span>
             )}
-            {q.cause && <span className="text-zinc-400">· {CAUSE[q.cause].label}</span>}
-            {q.made_up && q.cause !== 'made_up' && <span className="text-red-600 dark:text-red-400">· made things up</span>}
-            <span className="min-w-0 truncate">· {where}</span>
+            {q.cause && <span className="text-zinc-400">{CAUSE[q.cause].label}</span>}
+            {q.made_up && q.cause !== 'made_up' && <span className="text-red-600 dark:text-red-400">made things up</span>}
+            {q.taught && <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400"><GraduationCap className="h-3 w-3" />taught</span>}
+            <span className="inline-flex min-w-0 max-w-full items-center gap-1 text-zinc-500">
+              <BookOpen className="h-3 w-3 shrink-0" /><span className="truncate">{where}</span>
+            </span>
           </span>
         </span>
-        {open ? <ChevronDown className="mt-0.5 h-4 w-4 shrink-0 text-zinc-500" /> : <ChevronRight className="mt-0.5 h-4 w-4 shrink-0 text-zinc-500" />}
+        <ChevronDown className={`mt-1 h-4 w-4 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && <QuestionDetail q={q} where={where} onTeach={onTeach} onRead={onRead} />}
     </li>
@@ -716,106 +945,133 @@ function QuestionDetail({ q, where, onTeach, onRead }: {
       setTeaching(false)
     }
   }
+  const wrong = wentWrong(q)
   return (
-    <div className="grid gap-4 border-t border-zinc-800 bg-zinc-950/40 p-4 lg:grid-cols-2">
-      <Section icon={<MessageSquareText className="h-3.5 w-3.5" />} title={`Its answer${q.seconds !== undefined ? ` · ${q.seconds} s` : ''}`}>
-        {q.answer ? (
-          <div className="fd-file-markdown max-h-72 overflow-y-auto text-sm">
-            <Markdown remarkPlugins={[remarkGfm]} components={MD}>{q.answer}</Markdown>
-          </div>
-        ) : <p className="text-sm text-zinc-500">{q.error || 'No answer.'}</p>}
-      </Section>
-
-      <Section icon={<BookOpen className="h-3.5 w-3.5" />} title="What its documents say">
-        <p className="text-sm text-zinc-300">{q.expected}</p>
-        <ul className="mt-2 flex flex-col gap-1">
-          {q.points.map((p) => {
-            const miss = missing.has(p)
-            return (
-              <li key={p} className="flex items-start gap-1.5 text-xs">
-                {miss ? <X className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-500" /> : <Check className="mt-0.5 h-3.5 w-3.5 shrink-0 text-emerald-500" />}
-                <span className={miss ? 'text-zinc-400' : 'text-zinc-300'}>{p}</span>
-              </li>
-            )
-          })}
-        </ul>
-        <p className="mt-2 text-[11px] text-zinc-500">
-          From {where} · {q.read === true ? 'read in its setup' : q.read === false ? 'never read — only searchable' : 'read before reads were tracked'}
-        </p>
-      </Section>
-
-      <Section icon={<Search className="h-3.5 w-3.5" />} title="What it looked up">
-        <Lookups lookups={q.lookups ?? []} />
-      </Section>
-
-      {(q.why || q.cause) && (
-        <Section icon={<Lightbulb className="h-3.5 w-3.5" />} title={q.verdict === 'right' ? 'Graded' : 'Why it went wrong'}>
-          {q.why && <p className="text-sm text-zinc-300">{q.why}</p>}
-          {q.cause && <p className="mt-1.5 text-xs text-zinc-500">{CAUSE[q.cause].explain}</p>}
-          {wentWrong(q) && (
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              {q.taught ? (
-                <span className="flex items-center gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
-                  <Check className="h-3.5 w-3.5" />
-                  Taught — a lesson from its next message; ask the same again to check
-                </span>
-              ) : (
-                <button onClick={() => void teach()} disabled={teaching}
-                  title="The answer becomes a lesson it's reminded of when a message is about it"
-                  className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-60">
-                  {teaching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GraduationCap className="h-3.5 w-3.5" />} Teach it this
-                </button>
-              )}
-              {onRead && (
-                <button onClick={onRead}
-                  title="Read this document's unread parts for rules and facts, in Way of working"
-                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800">
-                  <BookOpen className="h-3.5 w-3.5" /> Read this part
-                </button>
-              )}
-              {teachErr && <span className="text-xs text-red-500">{teachErr}</span>}
-            </div>
+    <div className="fd-rise flex flex-col gap-3 border-t border-zinc-800 p-4">
+      <div className="grid gap-3 lg:grid-cols-2">
+        <Panel icon={MessageSquareText} title="Its answer" aside={q.seconds !== undefined ? `${q.seconds} s` : ''}>
+          {q.answer ? <Answer text={q.answer} max={320} /> : <p className="text-sm text-zinc-500">{q.error || 'No answer.'}</p>}
+        </Panel>
+        <Panel icon={BookOpen} title="What its documents say" tone="source">
+          <p className="text-sm leading-relaxed text-zinc-200">{q.expected}</p>
+          {q.points.length > 0 && (
+            <ul className="mt-3 flex flex-col gap-1.5">
+              {q.points.map((p) => {
+                const miss = missing.has(p)
+                return (
+                  <li key={p} className="flex items-start gap-2 text-xs">
+                    <span className={`mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full ${miss
+                      ? 'bg-red-500/15 text-red-600 dark:text-red-400' : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'}`}>
+                      {miss ? <X className="h-2.5 w-2.5" /> : <Check className="h-2.5 w-2.5" />}
+                    </span>
+                    <span className={miss ? 'text-zinc-400' : 'text-zinc-300'}>{p}{miss && <span className="text-zinc-500"> — missing</span>}</span>
+                  </li>
+                )
+              })}
+            </ul>
           )}
-        </Section>
-      )}
+          <p className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-zinc-800 pt-2.5 text-[11px] text-zinc-500">
+            <span className="min-w-0 truncate">{where}</span>
+            <span className={`shrink-0 rounded-md px-1.5 py-0.5 ${q.read === false ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400' : 'bg-zinc-800 text-zinc-400'}`}>
+              {q.read === true ? 'read in its setup' : q.read === false ? 'never read — only searchable' : 'read before reads were tracked'}
+            </span>
+          </p>
+        </Panel>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        <Panel icon={Search} title="What it looked up" aside={q.lookups?.length ? plural(q.lookups.length, 'lookup') : ''}>
+          <Lookups lookups={q.lookups ?? []} />
+        </Panel>
+        {(q.why || q.cause) && (
+          <Panel icon={Lightbulb} title={q.verdict === 'right' ? 'How it was graded' : 'Why it went wrong'} tone={wrong ? 'wrong' : 'right'}>
+            {q.why && <p className="text-sm leading-relaxed text-zinc-200">{q.why}</p>}
+            {q.cause && <p className="mt-1.5 text-xs text-zinc-500">{CAUSE[q.cause].explain}</p>}
+            {wrong && (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                {q.taught ? (
+                  <span className="flex items-center gap-1.5 text-xs text-emerald-700 dark:text-emerald-400">
+                    <Check className="h-3.5 w-3.5" />
+                    Taught — a lesson from its next message; ask the same again to check
+                  </span>
+                ) : (
+                  <button onClick={() => void teach()} disabled={teaching}
+                    title="The answer becomes a lesson it's reminded of when a message is about it"
+                    className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white shadow-sm shadow-violet-600/30 hover:bg-violet-500 disabled:opacity-60">
+                    {teaching ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GraduationCap className="h-3.5 w-3.5" />} Teach it this
+                  </button>
+                )}
+                {onRead && (
+                  <button onClick={onRead}
+                    title="Read this document's unread parts for rules and facts, in Way of working"
+                    className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs font-medium text-zinc-200 hover:bg-zinc-800">
+                    <BookOpen className="h-3.5 w-3.5" /> Read this part
+                  </button>
+                )}
+                {teachErr && <span className="text-xs text-red-500">{teachErr}</span>}
+              </div>
+            )}
+          </Panel>
+        )}
+      </div>
     </div>
   )
 }
 
-function Section({ icon, title, children }: { icon: ReactNode; title: string; children: ReactNode }) {
+const PANEL_TONE = {
+  plain: 'border-zinc-800 bg-zinc-950/30',
+  source: 'border-sky-500/20 bg-sky-500/[0.04]',
+  right: 'border-emerald-500/20 bg-emerald-500/[0.04]',
+  wrong: 'border-amber-500/25 bg-amber-500/[0.05]',
+}
+
+function Panel({ icon: Icon, title, aside = '', tone = 'plain', children }: {
+  icon: typeof Clock; title: string; aside?: string; tone?: keyof typeof PANEL_TONE; children: ReactNode
+}) {
   return (
-    <section className="min-w-0">
-      <h6 className="mb-1.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">{icon}{title}</h6>
+    <section className={`min-w-0 rounded-xl border p-3.5 ${PANEL_TONE[tone]}`}>
+      <h6 className="mb-2.5 flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-zinc-500">
+        <Icon className="h-3.5 w-3.5" />{title}
+        {aside && <span className="ml-auto font-normal normal-case tracking-normal tabular-nums">{aside}</span>}
+      </h6>
       {children}
     </section>
   )
 }
 
-/** A lookup as a person reads it: what it searched for, or what it opened. */
-function lookupText(c: Lookup): string {
+/** A lookup as a person reads it: what it searched for, or what it opened — and its icon. */
+function lookupText(c: Lookup): { icon: typeof Clock; text: string } {
   const a = c.args
   const str = (k: string) => (typeof a[k] === 'string' ? (a[k] as string) : '')
   if (c.tool === 'knowledge') {
     const action = str('action')
-    if (action === 'search') return `Searched its documents for “${str('query')}”${str('doc') ? ` in ${str('doc')}` : ''}`
-    if (action === 'section') return `Opened ${str('doc')} › ${str('section')}`
-    if (action === 'outline') return `Looked at the outline of ${str('doc')}`
-    if (action === 'list') return 'Listed its documents'
+    if (action === 'search') return { icon: Search, text: `Searched its documents for “${str('query')}”${str('doc') ? ` in ${str('doc')}` : ''}` }
+    if (action === 'section') return { icon: FileText, text: `Opened ${str('doc')} › ${str('section')}` }
+    if (action === 'outline') return { icon: ListTree, text: `Looked at the outline of ${str('doc')}` }
+    if (action === 'list') return { icon: List, text: 'Listed its documents' }
   }
   const what = str('query') || str('pattern') || str('path') || str('action')
-  return `${c.tool}${what ? ` — ${what}` : ''}`
+  return { icon: Wrench, text: `${c.tool}${what ? ` — ${what}` : ''}` }
 }
 
 function Lookups({ lookups }: { lookups: Lookup[] }) {
   if (!lookups.length) return <p className="text-sm text-zinc-500">Nothing — it answered without looking anything up.</p>
   return (
-    <ol className="flex flex-col gap-1.5">
-      {lookups.map((c, i) => (
-        <li key={i} className="flex items-start gap-1.5 text-xs">
-          <span className="mt-0.5 w-4 shrink-0 text-right tabular-nums text-zinc-600">{i + 1}.</span>
-          <span className={c.ok ? 'text-zinc-300' : 'text-zinc-500 line-through decoration-zinc-600'}>{lookupText(c)}</span>
-        </li>
-      ))}
+    <ol className="relative flex flex-col gap-2.5 before:absolute before:bottom-2 before:left-[9px] before:top-2 before:w-px before:bg-zinc-700">
+      {lookups.map((c, i) => {
+        const { icon: Icon, text } = lookupText(c)
+        return (
+          <li key={i} className="relative flex items-start gap-2.5 text-xs">
+            <span className={`relative flex h-5 w-5 shrink-0 items-center justify-center rounded-full ring-1 ${c.ok
+              ? 'bg-zinc-900 text-zinc-400 ring-zinc-700' : 'bg-zinc-900 text-red-500 ring-red-500/40'}`}>
+              <Icon className="h-2.5 w-2.5" />
+            </span>
+            <span className={`min-w-0 pt-0.5 [overflow-wrap:anywhere] ${c.ok ? 'text-zinc-300' : 'text-zinc-500'}`}>
+              {text}{!c.ok && <span className="ml-1.5 rounded bg-red-500/10 px-1 text-[10px] text-red-600 dark:text-red-400">failed</span>}
+            </span>
+          </li>
+        )
+      })}
     </ol>
   )
 }

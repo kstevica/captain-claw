@@ -905,6 +905,9 @@ async def resume(slug: str, exam_id: str, user: dict = Depends(get_managed_user)
     if job.state == "done" or not job.questions:
         raise HTTPException(409, "There's nothing left to do in that exam. Run it again instead.")
     reader = await _reader(owner_id, slug, entry)
+    if job.state == "ready":
+        # Passed on with its archetype (agent_package): asked for the first time now, by its own model.
+        job.started, job.model, job.via = time.time(), str(reader.get("model") or ""), "agent"
     job.state, job.error, job.finished, job.owner_id = "running", "", None, owner_id
     job.owner = ap.owner_key(owner_id)
     _RUNNING[slug] = job

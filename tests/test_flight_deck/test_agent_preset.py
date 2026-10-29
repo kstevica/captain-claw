@@ -2384,6 +2384,26 @@ async def test_an_exam_a_restart_stopped_goes_on_where_it_was(deck, monkeypatch)
     assert (await _ex(BOB, "POST", f"{slug}/{left.id}/continue")).status_code == 409   # nothing left
 
 
+async def test_questions_passed_on_are_asked_from_when_they_start(deck, monkeypatch):
+    from captain_claw.flight_deck import agent_exam as ex
+
+    slug = await _examinable(monkeypatch, 24408)
+    _examiner(monkeypatch)
+    done = await _exam_ends(BOB, slug, (await _ex(BOB, "POST", slug, json={})).json()["id"])
+    # As agent_package leaves it: the questions alone, ready, from when it was unpacked, with no model yet.
+    keep = ("id", "kind", "question", "expected", "points", "doc", "doc_title", "doc_name", "title", "path", "key", "read")
+    ready = ex.ExamJob(id="feedbeef00000002", agent=slug, state="ready", phase="asking", started=time.time() - 3600,
+                       steps=len(done["questions"]),
+                       questions=[{k: q[k] for k in keep if k in q} for q in done["questions"]])
+    ex.save(ready)
+    before = time.time()
+    r = await _ex(BOB, "POST", f"{slug}/{ready.id}/continue")
+    assert r.status_code == 200, r.text
+    assert r.json()["started"] >= before and r.json()["model"]
+    e = await _exam_ends(BOB, slug, ready.id)
+    assert e["state"] == "done" and all(q.get("verdict") for q in e["questions"])
+
+
 # ── Lessons: what's always in mind, and what reaches it when it matters ──
 
 
