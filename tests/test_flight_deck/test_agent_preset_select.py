@@ -206,9 +206,22 @@ async def test_many_parts_take_one_merge_call(monkeypatch):
 def test_a_longer_read_keeps_more_up_to_a_ceiling():
     assert ap.limits_for(0) == ap.LIMITS == ap.limits_for(ap._STEP_MAX)
     standard = ap.limits_for(249_000)                                     # a standard read of a long book
-    assert (standard["rules"], standard["facts"], standard["glossary"]) == (118, 158, 237)
+    assert (standard["rules"], standard["facts"], standard["glossary"]) == (118, 313, 400)
     assert standard["intents"] == ap.CEILINGS["intents"] and standard["knowledge"] == ap.LIMITS["knowledge"]
     assert ap.limits_for(10_000_000) == ap.CEILINGS
+
+
+def test_facts_and_terms_grow_faster_than_rules():
+    # Rules repeat from chapter to chapter, so they grow as the square root of what was read; every
+    # chapter has facts and terms of its own, so those grow faster — 71 steps of a 32k model's read
+    # keep 856 facts, not the 300 they stopped at.
+    assert ap.CEILINGS["facts"] == 1000 and ap.TOTALS["facts"] == 3000
+    small = ap.limits_for(100_000)
+    assert (small["rules"], small["facts"], small["glossary"]) == (75, 158, 237)
+    book = ap.limits_for(71 * 13_384)
+    assert (book["rules"], book["facts"], book["glossary"]) == (150, 856, 400)
+    assert book["facts"] / ap.LIMITS["facts"] > 2 * book["rules"] / ap.LIMITS["rules"]
+    assert ap.limits_for(2_000_000)["facts"] == ap.CEILINGS["facts"]
 
 
 async def test_a_long_read_keeps_more_than_the_merge_call_sees(monkeypatch):

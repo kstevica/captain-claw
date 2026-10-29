@@ -15,6 +15,8 @@ const fieldCls = 'w-full rounded-lg border border-zinc-800 bg-zinc-950 px-2.5 py
 
 type View = Group | 'notices'
 
+const PAGE = 200   // a long group's items shown at first, and added by Show more (a long read keeps 1,000 facts)
+
 export function PresetReview({ review, disabled, onChange }: {
   review: Review
   disabled: boolean
@@ -107,6 +109,7 @@ export function PresetReview({ review, disabled, onChange }: {
             </section>
           ) : (
             <GroupView
+              key={view}
               group={view}
               review={review}
               disabled={disabled}
@@ -143,6 +146,7 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
   onEdit: (i: number, patch: Record<string, unknown>) => void
 }) {
   const { icon: Icon, title, blurb } = GROUPS[group]
+  const [limit, setLimit] = useState(PAGE)
   const items = review.preset[group]
   const kept = keptIn(review, group)
   const docs = new Map(review.prepared.docs.map((d) => [d.name, d]))
@@ -167,7 +171,7 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
         </div>
       </div>
       <ul className="space-y-2">
-        {items.map((item, i) => {
+        {items.slice(0, limit).map((item, i) => {
           const key = `${group}:${i}`
           const on = !review.off.has(key)
           const doc = group === 'knowledge' ? docs.get((item as { doc: string }).doc) : undefined
@@ -210,6 +214,14 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
           )
         })}
       </ul>
+      {items.length > limit && (
+        <div className="flex justify-center pt-3">
+          <button onClick={() => setLimit((n) => n + PAGE)}
+            className="rounded-lg border border-zinc-800 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800/60">
+            Show more ({(items.length - limit).toLocaleString()} left)
+          </button>
+        </div>
+      )}
     </section>
   )
 }

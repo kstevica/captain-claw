@@ -152,6 +152,19 @@ def facts_as_lessons(facts: list[dict]) -> list[dict]:
                                 added=now) for f in facts if isinstance(f, dict)) if x]
 
 
+def taught_facts(record: dict, facts: list[dict], *, taught_by: str, layer: str = "") -> dict:
+    """*record* with a setup's *facts* as lessons, those it has already left
+    out: ``taught`` for a long read's thousand at once, looking over the
+    record once rather than once a fact."""
+    have = {x["id"] for x in from_record(record)}
+    added: list[dict] = []
+    for x in facts_as_lessons(facts):
+        if x["id"] not in have:
+            have.add(x["id"])
+            added.append({**x, "taught_by": taught_by, "layer": "base" if layer == "base" else ""})
+    return {**record, "lessons": [*(record.get("lessons") or []), *added]}
+
+
 def teaching(request: Any, user: dict) -> tuple[str, bool]:
     """``(layer, keep_base)`` for what *user* teaches an agent now: an admin
     acting for its user (``X-FD-Act-As``) teaches the base; the agent's own

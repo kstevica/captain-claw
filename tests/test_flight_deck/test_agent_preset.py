@@ -1339,6 +1339,37 @@ def test_seed_keeps_what_a_long_read_kept(deck, tmp_path):
     assert ap.seed(agent_dir, agent_dir / "ws", BOB, again)["totals"]["rules"] == 101   # adding keeps the earlier
 
 
+def test_seed_keeps_a_long_reads_thousand_facts_and_adds_more_on_top(deck, tmp_path):
+    def facts(start: int, n: int) -> list[dict]:
+        return [{"content": f"Parcel {k} to zone {k % 7} costs {k}.40 EUR before VAT.", "importance": 5,
+                 "source": {"doc": "book.md", "section": f"Chapter {k // 50}"}} for k in range(start, start + n)]
+
+    agent_dir = tmp_path / "agent"
+    first = {**ap.normalise({"facts": facts(0, 1200)}, ap.CEILINGS), "id": ""}
+    assert len(first["facts"]) == ap.CEILINGS["facts"] == 1000
+    done = ap.seed(agent_dir, agent_dir / "ws", BOB, first)
+    assert done["counts"]["facts"] == 1000 and done["totals"]["facts"] == 1000
+    # A second read of the book, overlapping the first by 100: the repeats are taught once.
+    second = {**ap.normalise({"facts": facts(900, 1000)}, ap.CEILINGS), "id": ""}
+    done = ap.seed(agent_dir, agent_dir / "ws", BOB, second)
+    got = [x for x in json.loads(agent_lessons.path(agent_dir).read_text())["lessons"] if x["kind"] == "fact"]
+    assert len(got) == 1900 and len({x["id"] for x in got}) == 1900
+    assert {x["taught_by"] for x in got} == {"setup"} and got[-1]["source"] == {"doc": "book.md", "section": "Chapter 37"}
+    assert "- Parcel 1899 to zone 2 costs 1899.40 EUR before VAT." in (
+        agent_dir / "ws" / "knowledge" / "owner-rules.md").read_text()
+
+
+def test_an_admins_facts_are_taught_as_the_base_in_one_pass():
+    record = {"lessons": [{"id": agent_lessons.lesson_id("fact", "Zone B costs 11.40 EUR."), "kind": "fact",
+                           "text": "Zone B costs 11.40 EUR.", "taught_by": "exam"}]}
+    got = agent_lessons.taught_facts(record, [{"content": "Zone B costs 11.40 EUR."}, {"content": "Zone C costs 13 EUR.",
+                                              "importance": 7}, {"content": "zone c costs 13 eur."}, {"content": ""}],
+                                     taught_by="setup", layer="base")
+    assert [(x["text"], x["taught_by"], x.get("layer", "")) for x in got["lessons"]] == [
+        ("Zone B costs 11.40 EUR.", "exam", ""), ("Zone C costs 13 EUR.", "setup", "base")]
+    assert got["lessons"][1]["importance"] == 7 and record["lessons"][0]["taught_by"] == "exam"
+
+
 def test_an_empty_preset_adds_no_block():
     assert ap.rules_block(ap.normalise({}), [], []) == ""
     assert ap.with_block("Base.", "") == "Base."

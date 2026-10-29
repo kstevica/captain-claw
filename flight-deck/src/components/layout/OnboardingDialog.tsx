@@ -484,6 +484,8 @@ function Card({ title, open, onOpen, children }: { title: string; open: string; 
 
 type Filter = 'all' | 'always' | LessonKind
 
+const LESSONS_PAGE = 200
+
 function LessonsPanel({ slug, name, initial, onChanged }: {
   slug: string
   name: string
@@ -496,6 +498,11 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
   const [query, setQuery] = useState('')
   const [adding, setAdding] = useState(false)
   const [busy, setBusy] = useState<string | null>(null)
+  // How many of a long list show (a long read teaches 1,000 facts): PAGE more at a time, from PAGE again
+  // whenever the filter or search changes.
+  const [more, setMore] = useState({ key: '', n: LESSONS_PAGE })
+  const listKey = `${filter}\n${query}`
+  const limit = more.key === listKey ? more.n : LESSONS_PAGE
 
   const [tick, setTick] = useState(0)
 
@@ -612,7 +619,7 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
         <p className="rounded-xl border border-zinc-800 p-6 text-center text-sm text-zinc-500">Nothing here.</p>
       ) : (
         <ul className="flex flex-col gap-2">
-          {shown.map((x) => (
+          {shown.slice(0, limit).map((x) => (
             <LessonRow key={x.id} lesson={x} busy={busy === x.id} noRoom={missing.has(x.id)}
               locked={data.base_locked && x.layer === 'base'}
               onAlways={(always) => void change(x.id, () => agentLessonsApi.change(slug, x.id, { always }))}
@@ -620,6 +627,14 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
               onRemove={() => void change(x.id, () => agentLessonsApi.remove(slug, x.id))} />
           ))}
         </ul>
+      )}
+      {shown.length > limit && (
+        <div className="flex justify-center">
+          <button onClick={() => setMore({ key: listKey, n: limit + LESSONS_PAGE })}
+            className="rounded-lg border border-zinc-800 px-4 py-2 text-sm text-zinc-300 hover:bg-zinc-800/60">
+            Show more ({(shown.length - limit).toLocaleString()} left)
+          </button>
+        </div>
       )}
     </div>
   )
