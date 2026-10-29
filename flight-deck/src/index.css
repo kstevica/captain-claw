@@ -350,3 +350,15 @@ html.light .bg-violet-500\/5 { background-color: rgba(139,92,246,0.06) !importan
   background-size: 200% 100%; animation: fd-shimmer 1.6s linear infinite;
 }
 @media (prefers-reduced-motion: reduce) { .fd-rise, .fd-shimmer { animation: none; } }
+
+/* The agent menu: the backdrop fades in, the sheet rises from the bottom —
+   on a larger screen (the `wide:` test) the card pops in where it is. */
+@keyframes fd-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes fd-sheet-up { from { opacity: 0; transform: translateY(28px); } to { opacity: 1; transform: none; } }
+@keyframes fd-pop { from { opacity: 0; transform: translateY(6px) scale(0.97); } to { opacity: 1; transform: none; } }
+.fd-fade { animation: fd-fade 0.18s ease-out both; }
+.fd-sheet { animation: fd-sheet-up 0.28s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+@media (min-width: 640px) and (min-height: 501px), (min-width: 640px) and (pointer: fine) {
+  .fd-sheet.fd-card-wide { animation: fd-pop 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
+}
+@media (prefers-reduced-motion: reduce) { .fd-fade, .fd-sheet, .fd-sheet.fd-card-wide { animation: none; } }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertTriangle,
@@ -6,6 +6,7 @@ import {
   Brain,
   BrainCog,
   Check,
+  ChevronRight,
   Cpu,
   Database,
   Eye,
@@ -66,95 +67,88 @@ export interface AgentMenuItem {
   onSelect: () => void
   danger?: boolean
   disabled?: boolean
+  /** Its icon's colour in the menu. */
+  tone?: MenuTone
 }
 
 // ── The "⋯" menu ──
+//
+// A modal of its own: the agent at the top, what can be done with it as
+// tiles — each with its icon and a word on what it opens — and Remove kept
+// apart at the bottom. A card in the middle of a larger screen, a sheet from
+// the bottom on a phone. Arrow keys move between the tiles; Esc closes it and
+// gives focus back to the "⋯".
 
-const MENU_WIDTH = 240
-/** Kept clear of the screen's edges, and the gap to the trigger. */
-const MENU_MARGIN = 8
-const MENU_GAP = 4
+export type MenuTone = 'violet' | 'fuchsia' | 'sky' | 'cyan' | 'emerald' | 'amber' | 'zinc'
 
-type MenuPos = { left: number; top: number; maxHeight: number }
-
-/** Under the trigger, right edges aligned — above it when the menu doesn't fit
- *  below. When it fits on neither side (a long menu on a short screen), it
- *  sits as low as it can without leaving the screen and scrolls if it must:
- *  never an item above the top, out of reach. */
-function placeMenu(t: DOMRect, height: number): MenuPos {
-  const vh = window.innerHeight
-  const left = Math.max(MENU_MARGIN, Math.min(t.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - MENU_MARGIN))
-  const below = vh - MENU_MARGIN - (t.bottom + MENU_GAP)
-  const above = t.top - MENU_GAP - MENU_MARGIN
-  if (height <= below) return { left, top: t.bottom + MENU_GAP, maxHeight: below }
-  if (height <= above) return { left, top: t.top - MENU_GAP - height, maxHeight: above }
-  const top = Math.max(MENU_MARGIN, vh - MENU_MARGIN - height)
-  return { left, top, maxHeight: vh - MENU_MARGIN - top }
+const TONE: Record<MenuTone, string> = {
+  violet: 'bg-violet-500/15 text-violet-600 ring-violet-500/20 dark:text-violet-300',
+  fuchsia: 'bg-fuchsia-500/15 text-fuchsia-600 ring-fuchsia-500/20 dark:text-fuchsia-300',
+  sky: 'bg-sky-500/15 text-sky-600 ring-sky-500/20 dark:text-sky-300',
+  cyan: 'bg-cyan-500/15 text-cyan-600 ring-cyan-500/20 dark:text-cyan-300',
+  emerald: 'bg-emerald-500/15 text-emerald-600 ring-emerald-500/20 dark:text-emerald-300',
+  amber: 'bg-amber-500/15 text-amber-600 ring-amber-500/20 dark:text-amber-300',
+  zinc: 'bg-zinc-500/15 text-zinc-600 ring-zinc-500/20 dark:text-zinc-300',
 }
 
-export function AgentMenu({ agentName, items, phone = false, shown = false }: {
+const initials = (name: string) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || '?'
+
+export function AgentMenu({ agentName, items, subtitle = '', status, phone = false, shown = false }: {
   agentName: string
   items: AgentMenuItem[]
-  /** Phone row: a 44px touch target, always shown. */
+  /** Under its name: what it does, or its state. */
+  subtitle?: string
+  /** Its state as a dot, on the corner of its picture. */
+  status?: ReactNode
+  /** Phone row: a 44px touch target, always shown — and the menu a sheet from the bottom. */
   phone?: boolean
   /** Shown all the time — otherwise only while its row is hovered (or on a touch screen). */
   shown?: boolean
 }) {
   const [open, setOpen] = useState(false)
-  // Where it sits (placeMenu); none yet while it is drawn unseen to be measured.
-  const [pos, setPos] = useState<MenuPos | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const close = useCallback(() => {
+    setOpen(false)
+    triggerRef.current?.focus()
+  }, [])
 
-  const toggle = () => {
-    if (open) { setOpen(false); return }
-    setPos(null)
-    setOpen(true)
-  }
-  // Placed by its real height, before it shows: a hint that wraps makes its
-  // row taller than any guess.
-  useLayoutEffect(() => {
-    if (!open) return
-    const t = triggerRef.current?.getBoundingClientRect()
-    const m = menuRef.current
-    if (t && m) setPos(placeMenu(t, m.offsetHeight))
-  }, [open])
-
+  // The first tile that can be used takes the focus; arrows move it — across a row, and up and down a column.
   useEffect(() => {
     if (!open) return
-    const onDown = (e: PointerEvent) => {
-      const n = e.target as Node
-      if (menuRef.current?.contains(n) || triggerRef.current?.contains(n)) return
-      setOpen(false)
-    }
+    const tiles = () => [...(panelRef.current?.querySelectorAll<HTMLButtonElement>('[data-tile]:not(:disabled)') ?? [])]
+    tiles()[0]?.focus()
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
-      e.stopPropagation()
-      setOpen(false)
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        close()
+        return
+      }
+      const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: phone ? 1 : 2, ArrowUp: phone ? -1 : -2 }[e.key]
+      if (!step) return
+      const all = tiles()
+      const at = all.indexOf(document.activeElement as HTMLButtonElement)
+      if (at < 0) return
+      e.preventDefault()
+      all[Math.max(0, Math.min(all.length - 1, at + step))]?.focus()
     }
-    const close = () => setOpen(false)
-    // The page scrolling moves the trigger away; the menu's own scroll doesn't.
-    const onScroll = (e: Event) => {
-      if (!menuRef.current?.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('pointerdown', onDown)
     window.addEventListener('keydown', onKey, true)
-    window.addEventListener('resize', close)
-    window.addEventListener('scroll', onScroll, true)
-    return () => {
-      document.removeEventListener('pointerdown', onDown)
-      window.removeEventListener('keydown', onKey, true)
-      window.removeEventListener('resize', close)
-      window.removeEventListener('scroll', onScroll, true)
-    }
-  }, [open])
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [open, phone, close])
+
+  const choose = (onSelect: () => void) => {
+    setOpen(false)
+    onSelect()
+  }
+  const main = items.filter((x) => !x.danger)
+  const danger = items.filter((x) => x.danger)
 
   return (
     <>
       <button
         ref={triggerRef}
-        onClick={toggle}
-        aria-haspopup="menu"
+        onClick={() => setOpen((v) => !v)}
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`More for ${agentName}`}
         title={`More — ${agentName}`}
@@ -167,31 +161,87 @@ export function AgentMenu({ agentName, items, phone = false, shown = false }: {
       </button>
       {open && createPortal(
         <div
-          ref={menuRef}
-          role="menu"
-          aria-label={agentName}
-          className="fixed z-50 overflow-y-auto overscroll-contain rounded-xl border border-zinc-700/60 bg-zinc-900 p-1 shadow-2xl shadow-black/40"
-          style={pos ? { ...pos, width: MENU_WIDTH } : { left: 0, top: 0, width: MENU_WIDTH, visibility: 'hidden' }}
+          className={`fd-fade fixed inset-0 z-50 flex justify-center bg-black/50 backdrop-blur-[2px] ${phone ? 'items-end' : 'items-end wide:items-center wide:p-4'}`}
+          onClick={close}
         >
-          {items.map(({ icon: Icon, label, hint, onSelect, danger, disabled }) => (
-            <button
-              key={label}
-              role="menuitem"
-              disabled={disabled}
-              onClick={() => { setOpen(false); onSelect() }}
-              className={`flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                danger
-                  ? 'text-red-600 hover:bg-red-500/10 dark:text-red-400'
-                  : 'text-zinc-200 hover:bg-zinc-800'
-              } ${phone ? 'py-3' : ''}`}
-            >
-              <Icon className={`mt-0.5 h-4 w-4 shrink-0 ${danger ? '' : 'text-zinc-400'}`} />
-              <span className="min-w-0">
-                <span className="block text-sm font-medium">{label}</span>
-                {hint && <span className="block text-[11px] leading-snug text-zinc-500">{hint}</span>}
+          <div
+            ref={panelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={agentName}
+            onClick={(e) => e.stopPropagation()}
+            className={`${phone ? 'fd-sheet' : 'fd-sheet fd-card-wide'} relative flex max-h-[88dvh] w-full flex-col overflow-hidden border border-zinc-800 bg-zinc-900 pb-[env(safe-area-inset-bottom)] shadow-2xl shadow-black/40 ${
+              phone ? 'rounded-t-3xl' : 'rounded-t-3xl wide:max-w-lg wide:rounded-3xl wide:pb-0'}`}
+          >
+            <div className={`mx-auto mt-2.5 h-1 w-10 shrink-0 rounded-full bg-zinc-700 ${phone ? '' : 'wide:hidden'}`} aria-hidden />
+            <div className="flex shrink-0 items-center gap-3.5 px-5 pb-4 pt-4 wide:pt-5">
+              <span className="relative flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-sm font-semibold text-white shadow-lg shadow-violet-500/25">
+                {initials(agentName)}
+                {status && <span className="absolute -bottom-1 -right-1 flex rounded-full bg-zinc-900 p-[3px]">{status}</span>}
               </span>
-            </button>
-          ))}
+              <div className="min-w-0 flex-1">
+                <h2 className="truncate text-base font-semibold text-zinc-100">{agentName}</h2>
+                {subtitle && <p className="truncate text-xs text-zinc-500">{subtitle}</p>}
+              </div>
+              <button onClick={close} aria-label="Close" title="Close"
+                className="-mr-1.5 rounded-full p-2 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="min-h-0 overflow-y-auto overscroll-contain px-4 pb-4 wide:px-5 wide:pb-5">
+              <div className="grid grid-cols-2 gap-2.5">
+                {main.map(({ icon: Icon, label, hint, onSelect, disabled, tone = 'violet' }, i) => {
+                  // An odd one out takes the whole last row, laid out across it.
+                  const across = main.length % 2 === 1 && i === main.length - 1
+                  return (
+                    <button
+                      key={label}
+                      data-tile
+                      disabled={disabled}
+                      onClick={() => choose(onSelect)}
+                      title={hint}
+                      className={`group relative flex min-w-0 rounded-2xl border border-zinc-800 bg-zinc-950/40 text-left transition-all hover:-translate-y-px hover:border-zinc-700 hover:bg-zinc-800/60 hover:shadow-lg hover:shadow-black/10 focus-visible:border-violet-500 focus-visible:bg-violet-500/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:translate-y-0 disabled:hover:border-zinc-800 disabled:hover:bg-zinc-950/40 disabled:hover:shadow-none ${
+                        across ? 'col-span-2 items-center gap-3.5 p-3.5' : 'flex-col p-3.5'}`}
+                    >
+                      <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ring-1 ${TONE[tone]}`}>
+                        <Icon className="h-5 w-5" />
+                      </span>
+                      <span className={`min-w-0 ${across ? 'flex-1' : 'mt-3'}`}>
+                        <span className="block text-sm font-semibold leading-snug text-zinc-100">{label}</span>
+                        {hint && <span className="mt-0.5 line-clamp-2 text-xs leading-snug text-zinc-500">{hint}</span>}
+                      </span>
+                      <ChevronRight className={`h-4 w-4 shrink-0 text-zinc-600 transition-all group-hover:translate-x-0.5 group-hover:text-zinc-400 group-disabled:opacity-0 ${
+                        across ? '' : 'absolute right-3 top-3.5'}`} />
+                    </button>
+                  )
+                })}
+              </div>
+
+              {danger.length > 0 && (
+                <div className="mt-3 border-t border-zinc-800 pt-3">
+                  {danger.map(({ icon: Icon, label, hint, onSelect, disabled }) => (
+                    <button
+                      key={label}
+                      data-tile
+                      disabled={disabled}
+                      onClick={() => choose(onSelect)}
+                      className="group flex w-full items-center gap-3.5 rounded-2xl p-3 text-left transition-colors hover:bg-red-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent"
+                    >
+                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-500/10 text-red-600 ring-1 ring-red-500/20 dark:text-red-400">
+                        <Icon className="h-5 w-5" />
+                      </span>
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-semibold text-red-600 dark:text-red-400">{label}</span>
+                        {hint && <span className="block truncate text-xs text-zinc-500">{hint}</span>}
+                      </span>
+                      <ChevronRight className="h-4 w-4 shrink-0 text-red-400/50 transition-transform group-hover:translate-x-0.5" />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>,
         document.body,
       )}
