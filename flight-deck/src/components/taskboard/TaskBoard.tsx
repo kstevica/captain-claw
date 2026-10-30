@@ -31,7 +31,7 @@ import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
   AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, ExportPanel, FoldHighlight, HistoryChip, InstructionsChip,
   KeyHint, KeySheet, LaneChip, LowConfidenceHint, MultiFacet, NoteChip, OwesChip, ProposalButtons, ResultChip, StatusChip,
-  SyncStatus, TaskIcon,
+  SyncStatus, TaskIcon, TaskText,
 } from './taskboardParts'
 import { BoardSettings } from './TaskboardSettings'
 import { SourcesSheet } from './TaskboardSources'
@@ -1041,7 +1041,7 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-100">
-              <FoldHighlight text={task.title || 'Untitled task'} terms={terms} />
+              <TaskText text={task.title || 'Untitled task'} terms={terms} />
             </span>
             {flags.contains_instructions && <InstructionsChip compact />}
             <EvidenceBadge evidence={task.evidence} />
@@ -1060,14 +1060,14 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
             )}
           </span>
           {task.ask && (
-            <span className={`mt-1 block text-xs leading-relaxed text-zinc-400 ${task.result_text ? 'line-clamp-1' : 'line-clamp-2'}`}>
-              <FoldHighlight text={task.ask} terms={terms} />
+            <span className={`mt-1 text-xs leading-relaxed text-zinc-400 ${task.result_text ? 'line-clamp-1' : 'line-clamp-2'}`}>
+              <TaskText text={task.ask} terms={terms} />
             </span>
           )}
           {task.result_text && (
-            <span className={`mt-0.5 block text-xs leading-relaxed text-zinc-500 ${task.ask ? 'line-clamp-1' : 'line-clamp-2'}`}>
+            <span className={`mt-0.5 text-xs leading-relaxed text-zinc-500 ${task.ask ? 'line-clamp-2' : 'line-clamp-3'}`}>
               <ArrowRight className="mr-1 inline h-3 w-3 align-[-2px]" />
-              <FoldHighlight text={task.result_text} terms={terms} />
+              <TaskText text={task.result_text} terms={terms} />
             </span>
           )}
           {reason && !waiting && (
@@ -1075,7 +1075,7 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
               <Hand className="h-3 w-3 shrink-0" />
               <span className="min-w-0 truncate">
                 {reason.text}
-                {reason.more && <span className="font-normal text-zinc-400"> — <FoldHighlight text={reason.more} terms={terms} /></span>}
+                {reason.more && <span className="font-normal text-zinc-400"> — <TaskText text={reason.more} terms={terms} /></span>}
               </span>
             </span>
           )}
@@ -1370,7 +1370,7 @@ function TaskDetailPane({
               </form>
             ) : (
               <h3 className="break-words text-base font-semibold leading-snug text-zinc-100">
-                <FoldHighlight text={task.title || 'Untitled task'} terms={terms} />
+                <TaskText text={task.title || 'Untitled task'} terms={terms} />
               </h3>
             )}
             <div className="mt-0.5 truncate text-xs text-zinc-500">
@@ -1459,7 +1459,7 @@ function TaskDetailPane({
           <section className="mt-4">
             <h4 className={sectionTitle}>What was asked</h4>
             <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-300">
-              <FoldHighlight text={task.ask} terms={terms} />
+              <TaskText text={task.ask} terms={terms} />
             </p>
           </section>
         )}
@@ -1467,7 +1467,7 @@ function TaskDetailPane({
           <section className="mt-4">
             <h4 className={sectionTitle}>Result</h4>
             <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-300">
-              <FoldHighlight text={task.result_text} terms={terms} />
+              <TaskText text={task.result_text} terms={terms} />
             </p>
           </section>
         )}
@@ -1475,7 +1475,7 @@ function TaskDetailPane({
           <section className="mt-4">
             <h4 className={sectionTitle}>{shortOf.id === 'agent_declined' ? 'Why the agent couldn\'t do it' : 'What\'s still missing'}</h4>
             <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-300">
-              <FoldHighlight text={shortOf.detail} terms={terms} />
+              <TaskText text={shortOf.detail} terms={terms} />
             </p>
           </section>
         )}
@@ -1756,7 +1756,7 @@ function Timeline({ events, total, terms, picked = null, onPick }: {
                 </div>
                 {e.summary && (
                   <p className="mt-0.5 whitespace-pre-wrap break-words text-xs leading-relaxed text-zinc-400">
-                    <FoldHighlight text={e.summary} terms={terms} />
+                    <TaskText text={e.summary} terms={terms} />
                   </p>
                 )}
               </div>

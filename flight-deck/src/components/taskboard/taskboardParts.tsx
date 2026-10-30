@@ -1,10 +1,10 @@
-import { useState, type ReactNode } from 'react'
+import { Fragment, useMemo, useState, type ReactNode } from 'react'
 import { AlertTriangle, Check, CircleDot, FileDown, History, ListTodo, Loader2, ShieldAlert, Sparkles } from 'lucide-react'
 import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskboardStatus } from '../../services/taskboardApi'
 import { resolveProposal } from '../../services/notifications'
 import {
   JUDGE_LABEL, KEY_SHEET, OWES_LABEL, RESULT_LABEL, STATUS_LABEL, agoRelative, channelInfo, foldChar, keyLabel,
-  type DatePreset, type DateRange, type TaskNote,
+  markdownPieces, type DatePreset, type DateRange, type TaskNote,
 } from './taskboardText'
 
 // Pieces of the Taskboard: search highlighting (the server's folding, so
@@ -12,6 +12,25 @@ import {
 // filter, the chips a task wears, the sync line, quick answers, the
 // download menu and the board's switch. Their words and plain helpers are
 // in taskboardText.
+
+/** What a task says, its Markdown read rather than shown (taskboardText:
+ *  markdownPieces), search terms lit up as everywhere. All inline, so it can sit
+ *  on a clamped line of a row. */
+export function TaskText({ text, terms }: { text: string; terms: string[] }) {
+  const pieces = useMemo(() => markdownPieces(text), [text])
+  return (
+    <>
+      {pieces.map((p, i) => {
+        let el: ReactNode = <FoldHighlight text={p.text} terms={terms} />
+        if (p.code) el = <code className="rounded bg-zinc-800/70 px-1 font-mono text-[0.9em]">{el}</code>
+        if (p.strike) el = <s>{el}</s>
+        if (p.italic) el = <em>{el}</em>
+        if (p.bold) el = <strong className="font-semibold">{el}</strong>
+        return <Fragment key={i}>{el}</Fragment>
+      })}
+    </>
+  )
+}
 
 /** Search terms, folded on both sides: "duric" lights up "Đurić". `terms`
  *  come folded (foldText). */
