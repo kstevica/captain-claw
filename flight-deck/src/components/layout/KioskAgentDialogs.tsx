@@ -260,9 +260,10 @@ export function AgentMenu({ agentName, items, subtitle = '', status, phone = fal
 
 const DIALOG_SIZE = {
   sm: 'max-h-[100dvh] max-w-md rounded-t-2xl border border-zinc-800 wide:max-h-[88vh]',
-  // A sheet on a phone like `sm`; on a big screen wide enough for two columns.
+  // A sheet on a phone like `sm`; on a big screen wide enough for two columns,
+  // and one height, so switching tabs doesn't move it.
   // (Plain sm:/lg: widths: a `wide:` one would outrank lg: in the stylesheet.)
-  wide: 'max-h-[100dvh] rounded-t-2xl border border-zinc-800 wide:max-h-[88vh] sm:max-w-2xl lg:max-w-5xl',
+  wide: 'max-h-[100dvh] rounded-t-2xl border border-zinc-800 wide:h-[min(88vh,60rem)] sm:max-w-2xl lg:max-w-5xl',
   md: 'h-[100dvh] wide:h-[80vh] wide:max-w-2xl wide:border wide:border-zinc-800',
   lg: 'h-[100dvh] wide:h-[88vh] wide:max-w-5xl wide:border wide:border-zinc-800',
 }
@@ -365,6 +366,12 @@ export function KioskAgentInfoDialog({ agent, phone, onClose }: { agent: KioskAg
 }
 
 // ── Settings: model, vision, cognitive mode and reasoning effort ──
+//
+// Two tabs: what it runs on and how it thinks, then its reasoning effort per
+// source (KioskReasoningSettings). Both stay mounted, so switching keeps a
+// model change being typed.
+
+type SettingsTab = 'model' | 'reasoning'
 
 const VISION_CHOICES = VISION_OPTIONS.map((o) => {
   const [title, detail = ''] = o.label.split(' — ')
@@ -390,6 +397,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   onClose: () => void
 }) {
   const { kind, startKey: key } = agent
+  const [tab, setTab] = useState<SettingsTab>('model')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [mode, setMode] = useState('neutra')
@@ -402,6 +410,8 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   // The endpoint follows the provider until it is typed in.
   const [urlTouched, setUrlTouched] = useState(false)
   const [modelSaved, setModelSaved] = useState(false)
+  // The reasoning levels are the model's: a saved change reads them afresh.
+  const [modelRev, setModelRev] = useState(0)
   const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model'>('')
   // Model and vision are read when the agent starts: changed since it last did.
   const [pendingRestart, setPendingRestart] = useState(false)
@@ -446,6 +456,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
       if (kind === 'process') useProcessStore.getState().setModelOverride(key, next.provider, next.model)
       setModel(next)
       setDraft(next)
+      setModelRev((n) => n + 1)
       setApiKey(''); setUrlTouched(false)
       setPendingRestart(true); setRestarted(false)
       setModelSaved(true)
@@ -517,14 +528,23 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
 
   return (
     <AgentDialog title="Agent settings" icon={SlidersHorizontal} agentName={agent.name} size="wide" onClose={close}>
-      <div className="min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain p-5 lg:p-6">
+      <div className="shrink-0 border-b border-zinc-800 p-2">
+        <div className="grid grid-cols-2 rounded-xl bg-zinc-900 p-1 wide:max-w-md" role="tablist">
+          <TabButton on={tab === 'model'} onClick={() => setTab('model')} icon={Cpu} iconClass="text-violet-400" label="Model & thinking">
+            {modelDirty && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" title="Not saved yet" />}
+          </TabButton>
+          <TabButton on={tab === 'reasoning'} onClick={() => setTab('reasoning')} icon={Brain} iconClass="text-amber-400" label="Reasoning effort" />
+        </div>
+      </div>
+
+      <div role="tabpanel" className={tab === 'model' ? 'min-h-0 flex-1 space-y-6 overflow-y-auto overscroll-contain p-5 lg:p-6' : 'hidden'}>
         {loading ? (
           <div className="flex items-center justify-center py-10 text-sm text-zinc-500">
             <Loader2 className="mr-2 h-4 w-4 animate-spin" /> Loading…
           </div>
         ) : (
           // Two columns on a big screen: what it runs on (model, vision) on
-          // the left, how it thinks (mode, reasoning effort) on the right.
+          // the left, how it thinks on the right.
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2 lg:gap-8">
             <div className="min-w-0 space-y-6">
               <section>
@@ -655,8 +675,6 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                 </div>
                 <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">{current.description}</p>
               </section>
-
-              <KioskReasoningSettings kind={kind} agentKey={key} />
             </div>
           </div>
         )}
@@ -666,6 +684,11 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
           </div>
         )}
       </div>
+
+      <div role="tabpanel" className={tab === 'reasoning' ? 'min-h-0 flex-1 overflow-y-auto overscroll-contain p-5 lg:p-6' : 'hidden'}>
+        <KioskReasoningSettings key={modelRev} kind={kind} agentKey={key} />
+      </div>
+
       {(pendingRestart || restarted) && (
         <div className="shrink-0 border-t border-zinc-800 px-5 py-3">
           {pendingRestart ? (
@@ -790,15 +813,15 @@ export function KioskAgentInstructionsDialog({ agent, initialTab = 'instructions
     <AgentDialog title="Instructions, insights & skills" icon={BookOpen} agentName={agent.name} size="lg" onClose={close}>
       <div className="shrink-0 border-b border-zinc-800 p-2">
         <div className="grid grid-cols-3 rounded-xl bg-zinc-900 p-1 wide:max-w-md" role="tablist">
-          <MindTabButton on={tab === 'instructions'} onClick={() => setTab('instructions')} icon={BookOpen} iconClass="text-violet-400" label="Instructions">
+          <TabButton on={tab === 'instructions'} onClick={() => setTab('instructions')} icon={BookOpen} iconClass="text-violet-400" label="Instructions">
             {dirty && <span className="h-1.5 w-1.5 rounded-full bg-amber-500" title="Not saved yet" />}
-          </MindTabButton>
-          <MindTabButton on={tab === 'insights'} onClick={() => setTab('insights')} icon={Brain} iconClass="text-amber-400" label="Insights">
+          </TabButton>
+          <TabButton on={tab === 'insights'} onClick={() => setTab('insights')} icon={Brain} iconClass="text-amber-400" label="Insights">
             {total !== null && <TabCount n={total} />}
-          </MindTabButton>
-          <MindTabButton on={tab === 'skills'} onClick={() => setTab('skills')} icon={Wand2} iconClass="text-sky-400" label="Skills">
+          </TabButton>
+          <TabButton on={tab === 'skills'} onClick={() => setTab('skills')} icon={Wand2} iconClass="text-sky-400" label="Skills">
             {skillCount !== null && <TabCount n={skillCount} />}
-          </MindTabButton>
+          </TabButton>
         </div>
       </div>
 
@@ -863,7 +886,7 @@ function TabCount({ n }: { n: number }) {
   return <span className="rounded-full bg-zinc-700/70 px-1.5 text-[10px] font-semibold tabular-nums text-zinc-300">{n}</span>
 }
 
-function MindTabButton({ on, onClick, icon: Icon, iconClass, label, children }: {
+function TabButton({ on, onClick, icon: Icon, iconClass, label, children }: {
   on: boolean
   onClick: () => void
   icon: typeof Info
