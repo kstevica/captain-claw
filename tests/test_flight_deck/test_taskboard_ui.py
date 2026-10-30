@@ -804,3 +804,21 @@ def test_the_whole_email_is_only_fetched_in_the_bigger_view_and_shown_as_text():
     email = (_SRC / "components" / "taskboard" / "TaskEmail.tsx").read_text()
     assert "dangerouslySetInnerHTML" not in email and "<a " not in email and "<img" not in email
 
+
+def test_next_move_is_the_boards_own_menu_on_a_key():
+    board, parts = _source(_BOARD), _source(_PARTS)
+    assert 'aria-label="Who moves next"' not in board, "no browser select any more"
+    assert "<NextMoveMenu" in board and 'role="listbox"' in parts and 'aria-haspopup="listbox"' in parts
+    assert "[TASK_KEYS.move]: [!closed && !failed, () => setMoveOpen(true)]" in board
+    out = _run([(_TEXT, _KEYS)], "globalThis.out = TASK_KEYS.move")
+    assert out == "m"
+
+
+def test_with_the_menu_open_the_tasks_other_keys_wait():
+    board, parts = _source(_BOARD), _source(_PARTS)
+    assert "if (busy || handing || moveOpen) return false" in board
+    assert "pinned.current = splitting || snoozeOpen || handing || moveOpen" in board
+    start = parts.index("const onKey = (e: KeyboardEvent) =>")
+    keys = parts[start:parts.index("const Current =", start)]
+    assert "e.stopPropagation()" in keys and "else return" in keys, "a key it doesn't use isn't swallowed"
+
