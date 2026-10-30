@@ -390,6 +390,18 @@ export function stepTo(ids: string[], openId: string | null, last: number, step:
   return to >= ids.length || to < 0 ? -1 : to
 }
 
+/** An email's text, its long links down to where they go (a tracking link can
+ *  run for lines) and its runs of blank lines closed up. */
+export function readableEmail(text: string): string {
+  const host = (url: string) => /^https?:\/\/([^/?#\s>]+)/i.exec(url)?.[1] ?? url
+  return String(text || '')
+    .replace(/<\s*(https?:\/\/[^\s>]+)\s*>/gi, (_all, url: string) => `[${host(url)}]`)
+    .replace(/https?:\/\/[^\s<>)\]]{60,}/gi, (url) => `${host(url)}/…`)
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
 // ── Markdown in what a task says ──────────────────────────────────────
 
 /** A run of text and how it is marked. */

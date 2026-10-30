@@ -36,6 +36,7 @@ import {
 } from './taskboardParts'
 import { BoardSettings } from './TaskboardSettings'
 import { SourcesSheet } from './TaskboardSources'
+import { TaskEmail } from './TaskEmail'
 import { HandOverForm, NextStepCard, SuggestNextStep } from './TaskNextStep'
 import {
   MergedIntoBanner, MergedList, MergePicker, SameAsBanner, SplitBar, ThreadNoticeBar, type ThreadNotice,
@@ -1510,6 +1511,8 @@ function TaskDetailPane({
             </p>
           </section>
         )}
+
+        {focused && task.links?.gmail_thread_id && <TaskEmail taskId={task.id} terms={terms} />}
 
         {people.length > 0 && (
           <section className="mt-4">
