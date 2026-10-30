@@ -141,6 +141,9 @@ build-backend = "setuptools.build_meta"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# Drop a passing test's tmp_path right away: runs that end in os._exit keep their
+# lock, so pytest's own cleanup leaves them on disk for days.
+tmp_path_retention_policy = "failed"
 
 [tool.ruff]
 line-length = 100
