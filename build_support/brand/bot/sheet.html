@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Captain Bot, Six Ways</title>
+</head>
+<body>
+
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Sora:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a one-line brief, then a 3-up grid of cards; each card = the big colour render on the icon's navy slab, two device thumbnails (round colour screen, 1-bit e-paper), one line on what changed. */
+:root {
+  --bg: #eef0f6; --card: #ffffff; --fg: #141a33; --muted: #5b6482; --rule: #d9dcea;
+  --accent: #b8861f; --tag-bg: #f4ecd8; --tag-fg: #7a5a12;
+  --slab-a: #1a1a4a; --slab-b: #050516;           /* the icon's slab, fixed */
+  --paper: #ecebe3; --paper-edge: #c9c8bd;         /* e-paper, fixed */
+  --display: "Sora", "Avenir Next", "Segoe UI", sans-serif;
+  --body-font: "IBM Plex Sans", "Helvetica Neue", Arial, sans-serif;
+  --mono: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0a0b1c; --card: #13142b; --fg: #e6e9f5; --muted: #9aa3c2; --rule: #272a4a;
+  --accent: #dfa93f; --tag-bg: #2a2440; --tag-fg: #f0cf7a; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0a0b1c; --card: #13142b; --fg: #e6e9f5; --muted: #9aa3c2; --rule: #272a4a;
+  --accent: #dfa93f; --tag-bg: #2a2440; --tag-fg: #f0cf7a; color-scheme: dark; }
+
+body { background: var(--bg); color: var(--fg); font-family: var(--body-font); font-size: 15px; line-height: 1.5;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 28px 48px; }
+.wrap { max-width: 1180px; margin: 0 auto; }
+h1 { font-family: var(--display); font-weight: 700; font-size: clamp(26px, 3.4vw, 36px); letter-spacing: -0.015em; margin: 0 0 6px; text-wrap: balance; }
+.lede { color: var(--muted); max-width: 64ch; margin: 0 0 8px; }
+.ref { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 14px 0 26px; padding: 12px 14px; border: 1px solid var(--rule); border-radius: 12px; background: var(--card); }
+.ref .lbl { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.ref svg { width: 64px; height: 64px; display: block; }
+.ref .ic { width: 64px; height: 64px; border-radius: 14px; background: linear-gradient(135deg, var(--slab-a), var(--slab-b)); display: grid; place-items: center; }
+.ref .ic svg { width: 56px; height: 56px; }
+.ref .sep { width: 1px; height: 44px; background: var(--rule); }
+.ref p { margin: 0; color: var(--muted); font-size: 13.5px; max-width: 52ch; min-width: 0; }
+.ref .disc { width: 64px; height: 64px; border-radius: 50%; background: #000; box-shadow: 0 0 0 4px #1a1a1e; display: grid; place-items: center; }
+.ref .pap { width: 64px; height: 64px; border-radius: 6px; background: var(--paper); border: 1px solid var(--paper-edge); display: grid; place-items: center; }
+
+.grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 22px; }
+@media (max-width: 980px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 620px) { .grid { grid-template-columns: 1fr; } }
+.card { background: var(--card); border: 1px solid var(--rule); border-radius: 16px; padding: 16px 16px 18px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.card h2 { font-family: var(--display); font-weight: 600; font-size: 19px; margin: 0; display: flex; align-items: center; gap: 10px; }
+.tag { font-family: var(--mono); font-size: 12px; font-weight: 500; background: var(--tag-bg); color: var(--tag-fg); border-radius: 6px; padding: 2px 7px; letter-spacing: .04em; }
+.stage { aspect-ratio: 1; max-width: 100%; border-radius: 22px; background: linear-gradient(135deg, var(--slab-a), var(--slab-b)); display: grid; place-items: center; overflow: hidden; }
+.stage svg { width: 100%; height: 100%; display: block; }
+.devices { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.dev { display: flex; flex-direction: column; align-items: center; gap: 6px; min-width: 0; }
+.dev .disc { width: 100%; max-width: 150px; aspect-ratio: 1; border-radius: 50%; background: #000; box-shadow: 0 0 0 5px #1a1a1e, 0 0 0 7px #0a0a0c; overflow: hidden; }
+.dev .pap { width: 100%; max-width: 150px; aspect-ratio: 1; border-radius: 4px; background: var(--paper); border: 1px solid var(--paper-edge); box-shadow: 0 0 0 6px #d4d5dc; overflow: hidden; }
+.dev svg { width: 100%; height: 100%; display: block; }
+.dev .cap { font-family: var(--mono); font-size: 11px; color: var(--muted); letter-spacing: .04em; text-align: center; }
+.blurb { margin: 0; color: var(--muted); font-size: 14px; }
+.blurb b { color: var(--fg); font-weight: 500; }
+.note { color: var(--muted); font-size: 13.5px; max-width: 70ch; margin: 28px 0 0; }
+.defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+/* ── the drawings: one geometry, two palettes ───────────────────────────── */
+.sym-color { --body:#96a0af; --plate:#1e2430; --eye:#3ce6ff; --gold:#dfa93f; --goldD:#a8741d; --goldS:#dfa93f;
+  --navy:#182357; --navyD:#0e1640; --white:#f1f5f9; --coral:#e8574c; --lamp:#ff4646; --cyan:#22d3ee;
+  --line:none; --sw:0; --wire:#96a0af; --shade:1; --inkonly:0; --ringP:#dfa93f; --ringD:#a8741d; --paper:#ecebe3; --ink:#111; }
+.sym-ink { --body:#ecebe3; --plate:#111; --eye:#ecebe3; --gold:#ecebe3; --goldD:#111; --goldS:#111;
+  --navy:#111; --navyD:#111; --white:#ecebe3; --coral:#111; --lamp:#111; --cyan:#111;
+  --line:#111; --sw:2.4; --wire:#111; --shade:0; --inkonly:1; --ringP:#ecebe3; --ringD:#111; --paper:#ecebe3; --ink:#111; }
+.body  { fill: var(--body);  stroke: var(--line); stroke-width: var(--sw); }
+.plate { fill: var(--plate); }
+.eye   { fill: var(--eye); }
+.gold  { fill: var(--gold);  stroke: var(--line); stroke-width: var(--sw); }
+.goldD { fill: var(--goldD); }
+.navy  { fill: var(--navy);  stroke: var(--line); stroke-width: var(--sw); }
+.navyD { fill: var(--navyD); }
+.white { fill: var(--white); stroke: var(--line); stroke-width: var(--sw); }
+.coral { fill: var(--coral); stroke: var(--line); stroke-width: var(--sw); }
+.lamp  { fill: var(--lamp); }
+.wire  { stroke: var(--wire); stroke-width: 3; fill: none; stroke-linecap: round; }
+.wave  { stroke: var(--cyan); stroke-width: 4; fill: none; stroke-linecap: round; }
+.ray   { stroke: var(--goldS); stroke-width: 3; fill: none; stroke-linecap: round; }
+.ringD { stroke: var(--ringD); fill: none; }
+.ringP { stroke: var(--ringP); fill: none; }
+.ringI { stroke: var(--goldS); fill: none; }
+.spoke { stroke: var(--navy); stroke-width: 6; fill: none; stroke-linecap: round; }
+.hose  { stroke: var(--navy); stroke-width: 5; fill: none; stroke-linecap: round; }
+.shade { opacity: var(--shade); }
+.inkonly { opacity: var(--inkonly); }
+@media (prefers-reduced-motion: no-preference) { .card { transition: transform .15s ease; } }
+</style>
+
+<svg class="defs" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <!-- the bot as the firmware draws it (face.cpp drawBot), in its own 1x units, centred on 0,0 -->
+    <g id="faceparts">
+      <rect class="eye" x="-26" y="-14" width="16" height="11" rx="3"/>
+      <rect class="eye" x="10" y="-14" width="16" height="11" rx="3"/>
+      <g class="eye">
+        <rect x="-24" y="13.5" width="5" height="5" rx="1.5"/>
+        <rect x="-17" y="12.5" width="5" height="7" rx="1.5"/>
+        <rect x="-10" y="11.5" width="5" height="9" rx="1.5"/>
+        <rect x="-3"  y="11"   width="5" height="10" rx="1.5"/>
+        <rect x="4"   y="11.5" width="5" height="9" rx="1.5"/>
+        <rect x="11"  y="12.5" width="5" height="7" rx="1.5"/>
+        <rect x="18"  y="13.5" width="5" height="5" rx="1.5"/>
+      </g>
+    </g>
+    <g id="face">
+      <rect class="plate" x="-36" y="-28" width="72" height="58" rx="9"/>
+      <use href="#faceparts"/>
+    </g>
+    <g id="head">
+      <rect class="body" x="-52" y="-12" width="8" height="24" rx="3"/>
+      <rect class="body" x="44" y="-12" width="8" height="24" rx="3"/>
+      <rect class="body" x="-44" y="-36" width="88" height="76" rx="14"/>
+      <use href="#face"/>
+    </g>
+    <!-- the original, for reference -->
+    <g id="d-orig">
+      <line class="wire" x1="0" y1="-46" x2="0" y2="-34"/>
+      <circle class="lamp" cy="-48" r="5"/>
+      <use href="#head"/>
+    </g>
+
+    <!-- 1 · At the helm -->
+    <g id="d-helm">
+      <line class="spoke" x1="0" y1="0" x2="0" y2="-70"/>
+      <line class="spoke" x1="0" y1="0" x2="49.5" y2="-49.5"/>
+      <line class="spoke" x1="0" y1="0" x2="70" y2="0"/>
+      <line class="spoke" x1="0" y1="0" x2="49.5" y2="49.5"/>
+      <line class="spoke" x1="0" y1="0" x2="0" y2="70"/>
+      <line class="spoke" x1="0" y1="0" x2="-49.5" y2="49.5"/>
+      <line class="spoke" x1="0" y1="0" x2="-70" y2="0"/>
+      <line class="spoke" x1="0" y1="0" x2="-49.5" y2="-49.5"/>
+      <path class="gold" fill-rule="evenodd" d="M-80 0a80 80 0 1 0 160 0a80 80 0 1 0-160 0ZM-69 0a69 69 0 1 1 138 0a69 69 0 1 1-138 0Z"/>
+      <path class="shade" d="M-62 -48A78 78 0 0 1 -8 -77" stroke="#fff" stroke-opacity=".32" stroke-width="3" fill="none" stroke-linecap="round"/>
+      <g transform="rotate(0)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="lamp" cy="-99" r="7.5"/></g>
+      <g transform="rotate(45)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g>
+      <g transform="rotate(90)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g>
+      <g transform="rotate(135)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g>
+      <g transform="rotate(180)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g>
+      <g transform="rotate(225)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g>
+      <g transform="rotate(270)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g>
+      <g transform="rotate(315)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g>
+      <use href="#head" transform="translate(0 -2)"/>
+    </g>
+
+    <!-- 2 · Captain's cap -->
+    <g id="d-cap">
+      <line class="wire" x1="0" y1="-68" x2="0" y2="-78"/>
+      <circle class="lamp" cy="-81" r="5"/>
+      <use href="#head"/>
+      <rect class="navy" x="-46" y="-68" width="92" height="28" rx="10"/>
+      <rect class="gold" x="-46" y="-44" width="92" height="7" rx="2"/>
+      <ellipse class="navyD" cx="0" cy="-34" rx="50" ry="5.5"/>
+      <circle class="gold" cy="-55" r="7"/>
+      <circle class="navy" cy="-55" r="4"/>
+      <circle class="gold" cy="-55" r="1.6"/>
+    </g>
+
+    <!-- 3 · Sailor -->
+    <g id="d-sailor">
+      <line class="wire" x1="0" y1="-62" x2="0" y2="-72"/>
+      <circle class="lamp" cy="-75" r="5"/>
+      <rect class="plate" x="-9" y="34" width="18" height="12"/>
+      <rect class="body" x="-40" y="48" width="7" height="18" rx="3"/>
+      <rect class="body" x="33" y="48" width="7" height="18" rx="3"/>
+      <rect class="white" x="-32" y="42" width="64" height="38" rx="7"/>
+      <rect class="navy" x="-30" y="65" width="60" height="3.5"/>
+      <rect class="navy" x="-30" y="72" width="60" height="3.5"/>
+      <path class="navy" d="M-31 46L31 46L31 52L0 64L-31 52Z"/>
+      <circle class="coral" cy="60" r="4.5"/>
+      <use href="#head"/>
+      <rect class="white" x="-30" y="-62" width="60" height="24" rx="6"/>
+      <rect class="white" x="-40" y="-46" width="80" height="12" rx="6"/>
+      <rect class="shade" x="-40" y="-46" width="80" height="12" rx="6" fill="#182357" opacity=".14"/>
+      <line class="shade" x1="-29" y1="-46" x2="29" y2="-46" stroke="#9aa1b3" stroke-width="2.2"/>
+    </g>
+
+    <!-- 4 · Deep-sea diver -->
+    <g id="d-diver">
+      <path class="hose" d="M58 10C72 30 62 52 46 60"/>
+      <path class="hose" d="M-58 10C-72 30 -62 52 -46 60"/>
+      <rect class="navy" x="-42" y="44" width="84" height="16" rx="5"/>
+      <circle class="gold" cx="-30" cy="52" r="2.2"/><circle class="gold" cx="-15" cy="52" r="2.2"/><circle class="gold" cx="0" cy="52" r="2.2"/><circle class="gold" cx="15" cy="52" r="2.2"/><circle class="gold" cx="30" cy="52" r="2.2"/>
+      <rect class="gold" x="-5" y="-62" width="10" height="14" rx="2"/>
+      <circle class="gold" cx="-54" r="11"/>
+      <circle class="gold" cx="54" r="11"/>
+      <circle class="ringD" cx="-54" r="5.5" stroke-width="3"/>
+      <circle class="ringD" cx="54" r="5.5" stroke-width="3"/>
+      <circle class="gold" r="50"/>
+      <ellipse class="shade" cx="-22" cy="-30" rx="12" ry="6" fill="#fff" opacity=".2" transform="rotate(-38 -22 -30)"/>
+      <circle class="goldD" cx="40.65" cy="16.84" r="2.6"/><circle class="goldD" cx="16.84" cy="40.65" r="2.6"/>
+      <circle class="goldD" cx="-16.84" cy="40.65" r="2.6"/><circle class="goldD" cx="-40.65" cy="16.84" r="2.6"/>
+      <circle class="goldD" cx="-40.65" cy="-16.84" r="2.6"/><circle class="goldD" cx="-16.84" cy="-40.65" r="2.6"/>
+      <circle class="goldD" cx="16.84" cy="-40.65" r="2.6"/><circle class="goldD" cx="40.65" cy="-16.84" r="2.6"/>
+      <circle class="ringD" cy="1" r="36" stroke-width="5"/>
+      <circle class="plate" cy="1" r="33"/>
+      <use href="#faceparts"/>
+      <circle class="lamp" cy="-63" r="6"/>
+    </g>
+
+    <!-- 5 · Beacon buoy -->
+    <g id="d-buoy">
+      <clipPath id="buoyClip"><path d="M-28 42H28L36 84H-36Z"/></clipPath>
+      <circle class="shade" cy="-50" r="13" fill="#ff4646" opacity=".22"/>
+      <line class="ray" x1="0" y1="-67" x2="0" y2="-61"/>
+      <line class="ray" x1="-13" y1="-62" x2="-9" y2="-58"/>
+      <line class="ray" x1="13" y1="-62" x2="9" y2="-58"/>
+      <line class="ray" x1="-18" y1="-50" x2="-12" y2="-50"/>
+      <line class="ray" x1="18" y1="-50" x2="12" y2="-50"/>
+      <line class="wire" x1="0" y1="-46" x2="0" y2="-36"/>
+      <circle class="lamp" cy="-50" r="6.5"/>
+      <rect class="plate" x="-9" y="34" width="18" height="12"/>
+      <g clip-path="url(#buoyClip)">
+        <rect class="coral" x="-40" y="42" width="80" height="14"/>
+        <rect class="white" x="-40" y="56" width="80" height="14"/>
+        <rect class="coral" x="-40" y="70" width="80" height="14"/>
+      </g>
+      <path class="inkonly" d="M-28 42H28L36 84H-36Z" fill="none" stroke="var(--ink)" stroke-width="2.4"/>
+      <use href="#head"/>
+      <path class="wave" d="M-80 78q10 -9 20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0"/>
+      <path class="wave" d="M-70 90q10 -9 20 0t20 0t20 0t20 0t20 0t20 0t20 0"/>
+    </g>
+
+    <!-- 6 · Anchor -->
+    <g id="d-anchor" style="--body: var(--navy); --wire: var(--goldS)">
+      <rect class="gold" x="-5" y="36" width="10" height="50" rx="2"/>
+      <path class="gold" d="M-54 54Q0 106 54 54L50 62Q0 84 -50 62Z"/>
+      <path class="gold" d="M-58 58L-68 42L-44 46Z"/>
+      <path class="gold" d="M58 58L68 42L44 46Z"/>
+      <use href="#head"/>
+      <rect class="ringP" x="-36" y="-28" width="72" height="58" rx="9" stroke-width="2.5"/>
+      <rect class="gold" x="-58" y="-44" width="116" height="7" rx="3.5"/>
+      <circle class="gold" cx="-60" cy="-40.5" r="5"/>
+      <circle class="gold" cx="60" cy="-40.5" r="5"/>
+      <line class="wire" x1="0" y1="-47" x2="0" y2="-44"/>
+      <circle class="ringI" cy="-55" r="6.5" stroke-width="4"/>
+      <circle class="lamp" cy="-55" r="3"/>
+    </g>
+  </defs>
+</svg>
+
+<div class="wrap">
+  <h1>Captain Bot, six ways</h1>
+  <p class="lede">The Bot character from the watch and e-paper clients, restyled to sit next to the new helm icon. Same eyes, grille and antenna lamp in every one, so it stays the Bot; the maritime part is what changes.</p>
+
+  <div class="ref">
+    <span class="lbl">Starting points</span>
+    <div class="disc"><svg viewBox="0 0 240 240" class="sym-color"><use href="#d-orig" transform="translate(120 124) scale(1.6)"/></svg></div>
+    <div class="pap"><svg viewBox="0 0 240 240" class="sym-ink"><use href="#d-orig" transform="translate(120 124) scale(1.6)"/></svg></div>
+    <div class="ic"><svg viewBox="0 0 240 240" class="sym-color"><g transform="translate(120 120) scale(1.0)">
+      <line class="spoke" x1="0" y1="0" x2="0" y2="-70"/><line class="spoke" x1="0" y1="0" x2="49.5" y2="-49.5"/><line class="spoke" x1="0" y1="0" x2="70" y2="0"/><line class="spoke" x1="0" y1="0" x2="49.5" y2="49.5"/><line class="spoke" x1="0" y1="0" x2="0" y2="70"/><line class="spoke" x1="0" y1="0" x2="-49.5" y2="49.5"/><line class="spoke" x1="0" y1="0" x2="-70" y2="0"/><line class="spoke" x1="0" y1="0" x2="-49.5" y2="-49.5"/>
+      <path class="gold" fill-rule="evenodd" d="M-80 0a80 80 0 1 0 160 0a80 80 0 1 0-160 0ZM-69 0a69 69 0 1 1 138 0a69 69 0 1 1-138 0Z"/>
+      <g transform="rotate(0)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g><g transform="rotate(45)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g><g transform="rotate(90)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g><g transform="rotate(135)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g><g transform="rotate(180)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g><g transform="rotate(225)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g><g transform="rotate(270)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g><g transform="rotate(315)"><rect class="gold" x="-4.5" y="-96" width="9" height="19" rx="3"/><circle class="gold" cy="-99" r="7.5"/></g>
+      <circle class="navyD" r="30"/><circle class="ringI" r="30" stroke-width="4"/><circle fill="#22d3ee" r="8"/>
+      <ellipse class="ringI" rx="22" ry="9" stroke-width="2" transform="rotate(0)"/><ellipse class="ringI" rx="22" ry="9" stroke-width="2" transform="rotate(60)"/><ellipse class="ringI" rx="22" ry="9" stroke-width="2" transform="rotate(120)"/>
+    </g></svg></div>
+    <p>Left to right: the Bot on the watch, the Bot in ink on the Waveshare, and the helm icon whose navy, gold and cyan these borrow.</p>
+  </div>
+
+  <div class="grid" id="grid"></div>
+
+  <p class="note">Every shape here is a rounded rect, circle, arc, line or triangle, so whichever one you pick ports straight to the M5Canvas calls in face.cpp and the e-paper sleeper. The round thumbnail is the StopWatch's 240 px colour screen; the square one is the Waveshare 1.54" in 1-bit, where fills become outlines and colour becomes ink.</p>
+</div>
+
+<script>
+(function () {
+  var designs = [
+    { id: 'helm', n: '1', name: 'At the helm', t: 'translate(120 120) scale(1.1)', tr: 'translate(120 120) scale(0.95)', tp: 'translate(120 120) scale(1.0)',
+      blurb: '<b>The wheel from the icon sits behind the head.</b> Eight navy spokes reach out from under it to the gold rim, and the antenna lamp becomes the top handle’s knob.' },
+    { id: 'cap', n: '2', name: 'Captain’s cap', t: 'translate(120 154) scale(1.5)', tr: 'translate(120 148) scale(1.3)', tp: 'translate(120 150) scale(1.35)',
+      blurb: '<b>A navy cap with a gold band</b>, the badge a tiny helm. The antenna pokes up through the crown, so the lamp stays.' },
+    { id: 'sailor', n: '3', name: 'Sailor', t: 'translate(120 120) scale(1.4)', tr: 'translate(120 120) scale(1.25)', tp: 'translate(120 120) scale(1.3)',
+      blurb: '<b>White dixie-cup hat, navy collar, coral neckerchief</b> and Breton stripes on a small body, like the sleeper on the e-paper.' },
+    { id: 'diver', n: '4', name: 'Deep-sea diver', t: 'translate(120 126) scale(1.5)', tr: 'translate(120 124) scale(1.3)', tp: 'translate(120 124) scale(1.35)',
+      blurb: '<b>The head is a brass diving helmet.</b> The face plate becomes a round porthole with bolts, the ears become side ports with air hoses, and the lamp sits on the top valve.' },
+    { id: 'buoy', n: '5', name: 'Beacon buoy', t: 'translate(120 104) scale(1.3)', tr: 'translate(120 108) scale(1.15)', tp: 'translate(120 106) scale(1.2)',
+      blurb: '<b>The head rides a red-and-white buoy on two waves.</b> The antenna lamp is the beacon, with rays; the waves can roll while it listens.' },
+    { id: 'anchor', n: '6', name: 'Anchor', t: 'translate(120 105) scale(1.3)', tr: 'translate(120 108) scale(1.15)', tp: 'translate(120 106) scale(1.2)',
+      blurb: '<b>Navy body, gold hardware.</b> The anchor’s stock rests across the head, the shank and flukes hang below, and the lamp sits inside the anchor ring.' }
+  ];
+  var html = designs.map(function (d) {
+    return '<article class="card" id="' + d.id + '">' +
+      '<h2><span class="tag">' + d.n + '</span>' + d.name + '</h2>' +
+      '<div class="stage"><svg viewBox="0 0 240 240" class="sym-color" role="img" aria-label="' + d.name + ', colour"><use href="#d-' + d.id + '" transform="' + d.t + '"/></svg></div>' +
+      '<div class="devices">' +
+        '<div class="dev"><div class="disc"><svg viewBox="0 0 240 240" class="sym-color" aria-hidden="true"><use href="#d-' + d.id + '" transform="' + d.tr + '"/></svg></div><span class="cap">StopWatch · colour</span></div>' +
+        '<div class="dev"><div class="pap"><svg viewBox="0 0 240 240" class="sym-ink" aria-hidden="true"><use href="#d-' + d.id + '" transform="' + d.tp + '"/></svg></div><span class="cap">Waveshare 1.54 · 1-bit</span></div>' +
+      '</div>' +
+      '<p class="blurb">' + d.blurb + '</p>' +
+    '</article>';
+  }).join('');
+  document.getElementById('grid').innerHTML = html;
+})();
+</script>
+</body>
+</html>

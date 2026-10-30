@@ -6,8 +6,12 @@ packaging:
 
   desktop/icons/icon.png      – 512×512 PNG  (electron-builder / Linux)
   desktop/icons/icon.ico      – multi-size Windows ICO
-  desktop/icons/icon.icns     – macOS ICNS   (requires macOS + iconutil)
+  desktop/icons/icon.icns     – macOS ICNS   (requires macOS + iconutil);
+                                framed at 824/1024 px with a shadow, as macOS expects
   desktop/icons/icon_1024.png – 1024×1024 high-res source
+
+The source is the icon's rounded square filling the whole image, with
+transparent corners (the Flight Deck favicons use the same file).
 
 Usage:
   python build_support/generate_icons.py [path/to/source.png]
@@ -62,11 +66,35 @@ def create_ico(source: Image.Image, path: Path) -> None:
     images[-1].save(str(path), format="ICO", append_images=images[:-1])
 
 
+def frame_for_macos(source: Image.Image) -> Image.Image:
+    """Place the icon on the macOS canvas the way Apple's own icons sit.
+
+    The rounded square covers 824 of the 1024 px and casts a soft shadow
+    below it; the rest is transparent so the Dock shows it at the same size
+    as every other app.
+    """
+    from PIL import ImageFilter
+
+    inner, canvas_size = 824, 1024
+    off = (canvas_size - inner) // 2
+    icon = source.resize((inner, inner), Image.LANCZOS)
+
+    shadow = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    shadow.paste((0, 0, 0, 90), (off, off + 10, off + inner, off + inner + 10), icon.getchannel("A"))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(14))
+
+    canvas = Image.new("RGBA", (canvas_size, canvas_size), (0, 0, 0, 0))
+    canvas.alpha_composite(shadow)
+    canvas.alpha_composite(icon, (off, off))
+    return canvas
+
+
 def create_icns(source: Image.Image, path: Path) -> None:
     """Create a macOS .icns file using iconutil (macOS only)."""
     if sys.platform != "darwin":
         print("  Note: .icns requires macOS iconutil – skipping.")
         return
+    source = frame_for_macos(source)
 
     with tempfile.TemporaryDirectory() as tmpdir:
         iconset = Path(tmpdir) / "icon.iconset"
