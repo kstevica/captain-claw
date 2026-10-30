@@ -204,8 +204,9 @@ static void handleRoot() {
              "green, then blue, then yellow as sleep nears.</small>"
              "<label>Key beeps (A and B)</label><select name=clicks>");
     } else {
-      h += F("</select><small>The green light blinks while it records you, for each step while the agent works, "
-             "and with the voice. Low and Bright are the same on this one.</small>"
+      h += F("</select><small>The green light: steady while it records you, breathing while the agent works, "
+             "with the voice while it speaks, two blinks every 5 s while something waits in Flight Deck, a blink "
+             "every 10 s when it's just awake. The red one is the charger's.</small>"
              "<label>Key beeps</label><select name=clicks>");
     }
     h += option("1", "On", settings.keyClicks) + option("0", "Off", !settings.keyClicks);
@@ -231,12 +232,26 @@ static void handleRoot() {
              " the battery lasts hours, not days.</small>");
     } else {
       h += F("<label>Redraw the sleeping screen</label><select name=slpref>");
-      h += option("0", "Never", settings.asleepRefreshMin == 0);
+      if (board::kSleepClock) {
+        h += option("1", "Every minute", settings.asleepRefreshMin == 1);
+        h += option("2", "Every 2 min", settings.asleepRefreshMin == 2);
+        h += option("5", "Every 5 min", settings.asleepRefreshMin == 5);
+        h += option("10", "Every 10 min", settings.asleepRefreshMin == 10);
+      } else {
+        h += option("0", "Never", settings.asleepRefreshMin == 0);
+      }
       h += option("30", "Every 30 min", settings.asleepRefreshMin == 30);
       h += option("60", "Every hour", settings.asleepRefreshMin == 60);
       h += option("180", "Every 3 hours", settings.asleepRefreshMin == 180);
-      h += F("</select><small>Asleep, the paper keeps the last answer (or a pinned one) with the date, the room's"
-             " temperature and the battery; a redraw takes ~20 s of battery.</small>");
+      if (board::kSleepClock) h += option("0", "Never", settings.asleepRefreshMin == 0);
+      if (board::kSleepClock) {
+        h += F("</select><small>Asleep, the screen keeps the clock, the date and the room, as of the last redraw."
+               " Each redraw wakes it for about a second, so the rarer they are, the longer the battery lasts; under"
+               " 10% it goes hourly.</small>");
+      } else {
+        h += F("</select><small>Asleep, the paper keeps the last answer (or a pinned one) with the date, the room's"
+               " temperature and the battery; a redraw takes ~20 s of battery.</small>");
+      }
     }
   } else {
     h += F("<label>Screen off when idle</label><select name=scroff>");
@@ -295,7 +310,7 @@ static void handleSave() {
   if (board::kEpaper) {
     int pm = server.arg("pwroffm").toInt(), sr = server.arg("slpref").toInt();
     if (server.hasArg("pwroffm") && powerOffMinValid(pm)) settings.powerOffMin = pm;
-    if (server.hasArg("slpref")) settings.asleepRefreshMin = (sr == 0 || sr == 30 || sr == 180) ? sr : 60;
+    if (server.hasArg("slpref")) settings.asleepRefreshMin = asleepMinValid(sr) ? sr : 60;
     settings.rotation = constrain(server.arg("rot").toInt(), 0, 3);
     settings.ledLevel = constrain(server.arg("leds").toInt(), 0, 2);
     settings.keyClicks = server.arg("clicks") != "0";

@@ -12,6 +12,11 @@ static constexpr uint8_t kPowerOffMins[] = {1, 3, 10, 30, 60, 120, 0};
 bool powerOffMinValid(int minutes);
 String powerOffText(uint8_t minutes);  // "3 min", "1 hour", "never"
 
+// How often the sleeping screen is redrawn, in minutes (0 = never). Under 30 only
+// where the panel is quick enough for a clock (board::kSleepClock).
+static constexpr uint8_t kAsleepMins[] = {1, 2, 5, 10, 30, 60, 180, 0};
+bool asleepMinValid(int minutes);
+
 struct WifiNet {
   String ssid;
   String pass;
@@ -49,7 +54,7 @@ struct Settings {
   uint8_t ledLevel = 1;     // status lights: 0 off, 1 low, 2 bright
   bool keyClicks = true;    // a click for every button press (the paper changes slowly)
   uint8_t powerOffMin = 3;  // deep sleep after this many idle minutes: kPowerOffMins (0 = never)
-  uint8_t asleepRefreshMin = 60;  // redraw the sleeping screen every 30 / 60 / 180 min (0 = never)
+  uint8_t asleepRefreshMin = 60;  // redraw the sleeping screen: kAsleepMins
   bool speakMenu = true;    // read the highlighted menu row aloud (the paper shows it ~20 s later)
 
   // Idle time before deep sleep, for this device.

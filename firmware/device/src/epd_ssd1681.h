@@ -12,9 +12,9 @@ namespace epd {
 constexpr int kWidth = 200, kHeight = 200, kFrameBytes = kWidth * kHeight / 8;
 
 void begin();
-// The whole panel flashes to the frame (~2 s), from a reset controller.
+// The whole panel flashes to the frame (1.8 s), from a reset controller.
 bool full(const uint8_t* frame);
-// Only the pixels that differ change, without a flash (~0.4 s). `shown` is
+// Only the pixels that differ change, without a flash (0.6 s). `shown` is
 // what the panel shows now: the controller's own copy is gone after a deep
 // sleep, and this puts it back.
 bool partial(const uint8_t* frame, const uint8_t* shown);

@@ -131,12 +131,35 @@ static bool readSht40(float* t, float* rh) {
 }
 #endif
 
+#if defined(BOARD_EPAPER154)
+// This small board warms its own sensor. In a room of about 24 °C, on USB, it
+// read 28.8 °C straight after a long sleep, then rose to 32.7 °C awake, with a
+// time constant of 260 s. On battery nothing should heat it while it sleeps.
+static constexpr float kUsbHeatC = 4.8f, kAwakeHeatC = 4.0f, kAwakeTauS = 260.0f;
+RTC_DATA_ATTR static float rtcHeat = 0;     // what being awake had added when it went to sleep
+RTC_DATA_ATTR static time_t rtcHeatAt = 0;
+static float bootHeat = 0;                  // what's left of that at this boot (it cools as it warmed)
+
+static float awakeHeat() { return kAwakeHeatC + (bootHeat - kAwakeHeatC) * expf(-(millis() / 1000.0f) / kAwakeTauS); }
+
+static float saturationHpa(float c) { return 6.112f * expf(17.62f * c / (243.12f + c)); }  // Magnus
+
+static void roomFromSensor(float* t, float* rh) {
+  const float room = *t - (hw::onUsbPower() ? kUsbHeatC : 0.0f) - awakeHeat();
+  *rh = constrain(*rh * saturationHpa(*t) / saturationHpa(room), 0.0f, 100.0f);  // the same air, cooler
+  *t = room;
+}
+#endif
+
 bool climate(float* tempC, float* humidity) {
   if (!haveClimate) return false;
   if (isnan(lastT) || millis() - climateAt > 30000) {
     climateAt = millis();
     float t, rh;
     if (readSht40(&t, &rh)) {
+#if defined(BOARD_EPAPER154)
+      roomFromSensor(&t, &rh);
+#endif
       lastT = t;
       lastRh = rh;
     }
@@ -168,10 +191,19 @@ bool onUsbPower() {
 
 // ── public ───────────────────────────────────────────────────────────
 
+void beforeSleep() {
+#if defined(BOARD_EPAPER154)
+  rtcHeat = awakeHeat();
+  rtcHeatAt = time(nullptr);
+#endif
+}
+
 void begin() {
   haveImu = M5.Imu.isEnabled();
 #if defined(BOARD_EPAPER154)
   hw::clockFromRtc();
+  const time_t now = time(nullptr);
+  bootHeat = rtcHeatAt && now > rtcHeatAt ? rtcHeat * expf(-(float)(now - rtcHeatAt) / kAwakeTauS) : rtcHeat;
 #else
   if (M5.Rtc.isEnabled()) {
     m5::rtc_datetime_t dt;
@@ -194,6 +226,9 @@ void begin() {
     float t, rh;
     haveClimate = readSht40(&t, &rh);  // not there: never ask again
     if (haveClimate) {
+#if defined(BOARD_EPAPER154)
+      roomFromSensor(&t, &rh);
+#endif
       lastT = t, lastRh = rh;
       climateAt = millis();
     }

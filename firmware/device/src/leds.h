@@ -11,7 +11,8 @@
 // minute), the left one blinks blue with no Wi-Fi, the right one with Wi-Fi
 // but no Flight Deck or agent; idle, a short blink every 10 s says how close
 // sleep is; while proposals wait in Flight Deck, that blink is magenta on
-// the right. Devices without lights ignore all of it.
+// the right. Devices without lights ignore all of it. The Waveshare 1.54" has
+// one green light, so it says these with rhythm instead (leds.cpp, monoLevel).
 #pragma once
 
 #include <Arduino.h>

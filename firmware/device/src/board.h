@@ -10,7 +10,7 @@
 //                       (400×600, ~20 s to redraw), three buttons, two RGB
 //                       LEDs, SHT40 temperature/humidity, RTC
 //   -DBOARD_EPAPER154   Waveshare ESP32-S3-ePaper-1.54 (SKU 32298): 200×200
-//                       black-and-white e-paper (2 s full, 0.4 s partial), BOOT
+//                       black-and-white e-paper (1.8 s full, 0.6 s partial), BOOT
 //                       + PWR buttons, one green LED, SHTC3, RTC, microSD;
 //                       with -DEPAPER154_TOUCH the Touch version (SKU 34212)
 #pragma once
@@ -140,7 +140,7 @@ constexpr int kScreenW = 200, kScreenH = 200;
 constexpr bool kRound = false;
 constexpr bool kEpaper = true;
 constexpr bool kHasMotor = false;
-constexpr bool kHasLeds = true;  // the one green one (leds.cpp)
+constexpr bool kHasLeds = true;  // the green one (leds.cpp); the red one is the charger's
 constexpr bool kHasClimate = true;  // SHTC3
 constexpr bool kOfflineNotes = true;
 constexpr bool kHasSdCard = true;  // microSD on its own SDMMC pins
@@ -211,6 +211,21 @@ constexpr bool kSlowPaper = false;
 constexpr bool kTapTalkDefault = true;
 #else
 constexpr bool kTapTalkDefault = false;
+#endif
+
+// A double-click of the side button goes to the home screen, from wherever it
+// is. Elsewhere it replays an answer (here the talk button's double press does).
+#if defined(BOARD_EPAPER154)
+constexpr bool kDoubleHome = true;
+#else
+constexpr bool kDoubleHome = false;
+#endif
+
+// Fast enough to keep a clock going asleep: "Redraw asleep" can be every minute.
+#if defined(BOARD_EPAPER154)
+constexpr bool kSleepClock = true;
+#else
+constexpr bool kSleepClock = false;
 #endif
 
 }  // namespace board

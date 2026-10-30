@@ -3,8 +3,8 @@
 //
 // A screen is drawn into a canvas at once, as on the stick; a background task
 // takes the latest one to the panel, so nothing waits for it. Only a frame
-// that differs goes, and without a flash (a partial refresh, ~0.4 s). A full
-// refresh (~2 s, flashing) is for what partial ones leave behind: the first
+// that differs goes, and without a flash (a partial refresh, 0.6 s). A full
+// refresh (1.8 s, flashing) is for what partial ones leave behind: the first
 // frame after power-up, the QR codes, the sleeping screen, the home screen left
 // alone a while, and at the latest after kMaxPartials. Each full refresh starts
 // from a reset controller (epd_ssd1681.cpp), as on the PaperColor.
@@ -24,6 +24,8 @@
 #include "ui.h"
 
 #ifndef PREVIEW
+#include <esp_sleep.h>
+
 #include "epd_ssd1681.h"
 #endif
 
@@ -406,6 +408,14 @@ static bool localNow(struct tm* t) {
   return true;
 }
 
+// "Fri 30 Oct". (Not strftime's %-d: the Mac takes it, the board's newlib stops there.)
+static String dateText(const struct tm& t) {
+  char wday[8], mon[8];
+  strftime(wday, sizeof(wday), "%a", &t);
+  strftime(mon, sizeof(mon), "%b", &t);
+  return String(wday) + " " + String(t.tm_mday) + " " + mon;
+}
+
 static String roomLine() {
   float t, rh;
   if (!telemetry::climate(&t, &rh)) return "";
@@ -482,29 +492,31 @@ void showSetup(const char* reason, const char* apName, const char* ip) {
 // The minute it was last drawn with: tick() redraws it when that changes.
 static int homeMinute = -1;
 
-void showHome(const Home& home) {
-  lastHome = home;
-  drawing(Screen::Home);
-  canvas.fillScreen(kPaper);
-  drawBar();
+// The big clock, and under it the date and the room: awake and asleep alike.
+static void drawClock() {
   struct tm t;
   const bool clock = localNow(&t);
   homeMinute = clock ? t.tm_min : -1;
-  char buf[32];
+  char buf[8];
   if (clock) strftime(buf, sizeof(buf), "%H:%M", &t);
   else strcpy(buf, "--:--");
   canvas.setFont(&fonts::FreeSansBold24pt7b);
   text(buf, W / 2, 26, top_center);
   canvas.setFont(&efont::efont14);
   String under;
-  if (clock) {
-    strftime(buf, sizeof(buf), "%a %-d %b", &t);
-    under = buf;
-  }
+  if (clock) under = dateText(t);
   const String room = roomLine();
   if (room.length()) under += (under.length() ? "  ·  " : "") + room;
   if (under.length()) text(under, W / 2, 68, top_center);
   canvas.drawFastHLine(PAD, 88, W - 2 * PAD, kInk);
+}
+
+void showHome(const Home& home) {
+  lastHome = home;
+  drawing(Screen::Home);
+  canvas.fillScreen(kPaper);
+  drawBar();
+  drawClock();
 
   int y = 94;
   if (home.noteMode) {
@@ -922,30 +934,57 @@ void showStoredImage() {
 
 // ── asleep, and what happens by itself ─────────────────────────────────
 
+// A robot asleep, dreaming its Zzz in a cloud (between the rule and the hint).
+static void drawSleeper() {
+  static constexpr int cx = 58;
+  // Antenna, drooping a little.
+  canvas.drawWideLine(cx, 106, cx - 5, 97, 1.0f, kInk);
+  canvas.fillCircle(cx - 6, 95, 3, kInk);
+  // Head, ears, shut eyes, a small snoring mouth.
+  canvas.fillRoundRect(cx - 32, 116, 6, 14, 2, kInk);
+  canvas.fillRoundRect(cx + 26, 116, 6, 14, 2, kInk);
+  canvas.fillRoundRect(cx - 26, 104, 52, 38, 9, kInk);
+  canvas.fillRoundRect(cx - 24, 106, 48, 34, 7, kPaper);
+  for (int eye : {cx - 12, cx + 12}) canvas.fillArc(eye, 118, 7, 5, 20, 160, kInk);
+  canvas.fillCircle(cx, 132, 3, kInk);
+  canvas.fillCircle(cx, 132, 1, kPaper);
+  // Body and arms.
+  canvas.fillRoundRect(cx - 26, 148, 6, 14, 2, kInk);
+  canvas.fillRoundRect(cx + 20, 148, 6, 14, 2, kInk);
+  canvas.fillRoundRect(cx - 20, 144, 40, 24, 6, kInk);
+  canvas.fillRoundRect(cx - 18, 146, 36, 20, 4, kPaper);
+  canvas.fillCircle(cx, 156, 3, kInk);
+  // Thought bubbles up to the cloud.
+  canvas.fillCircle(96, 122, 2, kInk);
+  canvas.fillCircle(104, 114, 3, kInk);
+  // The cloud: its circles in ink, then again smaller in paper, leaves the outline.
+  static constexpr int puffs[][3] = {{124, 122, 13}, {143, 110, 16}, {164, 114, 14}, {180, 124, 11}};
+  for (const auto& p : puffs) canvas.fillCircle(p[0], p[1], p[2] + 2, kInk);
+  canvas.fillRoundRect(122, 122, 60, 15, 7, kInk);
+  for (const auto& p : puffs) canvas.fillCircle(p[0], p[1], p[2], kPaper);
+  canvas.fillRoundRect(124, 122, 56, 13, 5, kPaper);
+  // Zzz, growing as they rise.
+  canvas.setTextDatum(baseline_left);
+  canvas.setTextColor(kInk);
+  canvas.setFont(&fonts::FreeSansBold9pt7b);
+  canvas.drawString("z", 127, 131);
+  canvas.drawString("z", 140, 125);
+  canvas.setFont(&fonts::FreeSansBold12pt7b);
+  canvas.drawString("Z", 153, 121);
+}
+
 void showSleeping(const String& hint, uint8_t) {
   drawing(Screen::Sleeping);
   canvas.fillScreen(kPaper);
   drawBar(false);  // (no links asleep: Wi-Fi is off)
-  // A crescent, out of two circles.
-  canvas.fillCircle(W / 2, 62, 26, kInk);
-  canvas.fillCircle(W / 2 + 12, 54, 24, kPaper);
-  struct tm t;
-  char buf[32];
-  int y = 100;
-  if (localNow(&t)) {
-    strftime(buf, sizeof(buf), "%a %-d %b", &t);
-    canvas.setFont(&efont::efont16);
-    text(buf, W / 2, y, top_center);
-    y += 20;
-  }
-  const String room = roomLine();
-  if (room.length()) {
-    canvas.setFont(&efont::efont14);
-    text(room, W / 2, y, top_center);
-  }
+  drawClock();
+  drawSleeper();
   pill(hint, 3, H - 28, W - 6, 24);
 #ifndef PREVIEW
-  push(rtcPartials >= kSleepCleanAfter);
+  // Falling asleep clears what the partial refreshes left. A timer's redraw, every
+  // minute for the clock, can't flash: it leaves that to kMaxPartials.
+  const bool timer = esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER;
+  push(rtcPartials >= (timer ? kMaxPartials : kSleepCleanAfter));
   flush();
 #else
   push();
