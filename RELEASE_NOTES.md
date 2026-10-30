@@ -1,268 +1,367 @@
-# Captain Claw v0.8.3 Release Notes
+# Captain Claw v0.8.4 Release Notes
 
-**Release title:** Plugged In, On the Record
-**Release date:** 2026-10-27
+**Release title:** Onboarded, On the Board
+**Release date:** 2026-10-30
 
-0.8.2 let Flight Decks work with each other. 0.8.3 lets the rest of your world
-in, and keeps a record of everything your agents do with it.
+0.8.3 kept a record of everything your agents do. 0.8.4 teaches them your work,
+and shows you where every piece of it stands.
 
-**Agent links** connect any system to an agent. Give your CRM, shop or
-monitoring its own key and it talks to the agent over a WebSocket, plain HTTP
-or signed webhooks, with files both ways. Or let Flight Deck dial out to an
-orchestrator's `wss://` address, so an agent behind a home router needs no
-public address at all. The agent can write to the system on its own with the
-new `linked_system` tool.
+**Onboarding** gets an agent ready for the job. Give it your documents and your
+instructions. It keeps every document whole as a knowledge base it can search,
+at no token cost, reads as much as you budget for, and turns that into rules,
+skills, facts and lessons you review before it gets them. Then test it: an
+**exam** writes questions from the documents, asks them through the agent's real
+chat, grades the answers, and says why a wrong one went wrong. **Practice** on
+real tasks, correct it, and it tries again.
 
-**WhatsApp Web** links *your own* WhatsApp to Flight Deck as a linked device.
-Your agents read your chats, files and voice notes, and, only if you turn it
-on, send to the chats you whitelist. Pick a few chats and an agent answers
-there when someone calls it by name. It is opt-in, off by default, and
-experimental (see [the warning](#whatsapp-web-your-own-whatsapp-experimental)).
+**The Taskboard** is one place for everything your agents were asked and sent,
+on every channel: **Needs me**, **Waiting on others**, **Agents working**,
+**Done**. It works like Gmail, keys included. Next steps wait for your approval,
+you can hand a task to an agent, and the board **checks that the agent really
+did it** instead of taking its word.
 
-**The tool-call register** writes down every tool call every agent makes:
-what it was, what started it, and how it ended, in an append-only, HMAC-chained
-log. You see your own agents' calls under **Activity**; admins see everything
-under **Audit**. Agents can read their own calls back with the new `activity`
-tool ("did that email really go out?").
+**Team decks got much tighter.** On a deck with sign-in, agents are confined to
+their own files, non-admins' agents no longer run code, and the team's API keys
+can't be read or sent anywhere the team didn't choose.
+**[Read this before you upgrade a team deck.](#before-you-upgrade-a-team-deck)**
 
-Also in 0.8.3: nudges and proposals that wait for your approval reach
-**WhatsApp, Telegram, your devices and the bell**, with Approve and Reject
-right there; **idle agents can sleep** and wake when they're needed; the kiosk
-gets **Shared folders** with **OneDrive** beside Google Drive; and agents gain
-**six new tools**, among them Word documents with **real tracked changes**.
+Also in 0.8.4: **your own AI keys** with no daily limits; a **Profile** with a
+researcher that drafts your texts; **two new tools**, `knowledge` and
+`visualize`; pictures that reach the chat and the channel; a slicker kiosk; the
+**Waveshare ePaper 1.54** boards; and a new Captain icon.
+
+71 pull requests, three days after 0.8.3.
 
 **Restart Flight Deck, then every agent.** See [Upgrading](#upgrading).
 
 ## Highlights
 
-### Agent links: connect any system to an agent
+### Onboarding: teach an agent your work
 
-```
- Your system (CRM, shop, monitor)        Flight Deck                    Agent
- WebSocket   /link/ws          ──▶   cc_link_… key → the link's  ──▶   a 🔗 session of its own
- HTTP  POST  /link/messages    ──▶   queue, events, files               linked_system tool
- signed webhook                ◀──   answers, files, messages     ◀──   (writes on its own)
-```
+**⋯ → Onboarding** on an agent opens one page with five tabs: **Overview**
+(how it did, what to do next), **Lessons**, **Practice**, **Materials** and
+**Exams**. When you create an agent, tick *Set up its way of working next* to
+start there.
 
-- **Connections → Systems** (in the kiosk too) adds a link to one of your
-  agents. The system gets its own `cc_link_…` key, shown once.
-- **Three ways in:**
-  - a WebSocket at `/link/ws`;
-  - HTTP: `POST /link/messages` (add `?wait=` to get the answer in the same
-    call), `GET /link/events`, `GET /link/files/<id>`;
-  - a webhook Flight Deck signs with HMAC-SHA256 and never follows redirects
-    for.
-- **Or Flight Deck dials out.** A link can name an orchestrator's `wss://`
-  address and the key it issued; Flight Deck keeps the connection open while
-  the agent runs. The Systems screen shows *Who connects* and the connection's
-  state.
-- **The agent can write first.** The new `linked_system` tool (`list`, `send`)
-  messages a linked system on the agent's own initiative, if the link allows it
-  (*the agent can message it*, on by default).
-- **Kept apart.** A link's turns run in a session of their own, are never
-  mirrored into your chat, and may write email only if the link's own
-  instructions ask for it. Keys are stored only as a hash; the webhook secret
-  and an outbound link's remote key are sealed. Shared-agent members can't use
-  `linked_system`.
-- Webhooks and outbound links go only to public `https://` and `wss://`
-  addresses unless `FD_LINK_PRIVATE_ADDRESSES=1`.
+**Way of working: your material goes in**
 
-### WhatsApp Web: your own WhatsApp (experimental)
+- Add up to 12 documents by drag and drop, upload or from the File library
+  (PDF, Word, Excel, PowerPoint, CSV, Markdown, text, HTML; up to 3,000 PDF pages
+  each), say how the agent should use each one (rules, procedures, reference,
+  templates, or let it decide), and add instructions of your own.
+- **A knowledge base that costs no tokens.** Every document reaches the agent
+  whole: an overview, parts under 200 KB, and a map of its sections. Semantic
+  memory indexes `knowledge/` first, and the new `knowledge` tool searches and
+  reads it.
+- **A budget for reading.** **Quick** (60k tokens), **Standard** (250k) or
+  **Deep** (1M). Material over the budget is read by its most instructive
+  sections, chosen without a model and pulled towards an optional **Focus on**.
+- **Read in the background.** Close the dialog or restart Flight Deck and it
+  goes on; the bell says when it's ready. Each step stays small and calls are
+  paced, and if the model server says "not now", the read waits it out and shows
+  the wait.
+- **The agent reads with its own model**, with thinking off, on its own key and
+  endpoint. Your tiers step in only if it's off or stops answering, and the
+  review says so.
+- **You review before anything lands.** Rules, what it should ask about first,
+  skills, facts, templates and a glossary, each with its source. A longer read
+  keeps more: up to 150 rules, 30 skills, 1,000 facts, 30 ask-first items, 20
+  templates and 400 terms from one read.
+- **Spreadsheets become tables.** An `.xlsx` or `.csv` also gives the agent one
+  datastore table per sheet, with no model involved, so prices and SKUs are exact
+  lookups. Codes like `00123` keep their zeros.
+- **Read the rest later.** Each document tracks which sections were read; pick
+  what to read next and only the unread part costs tokens.
+- **Add to it or replace it**, on new and existing agents alike. Learned facts
+  and the agent's own files stay either way, and an agent that's off gets
+  everything when it starts.
+- **Keep a file from chat.** "Put this in your knowledge" stores a chat file the
+  same way, with no model reading it.
 
-> **Read this first.** WhatsApp Web support uses an unofficial client
-> ([neonize](https://github.com/krypton-byte/neonize)). That is against
-> WhatsApp's terms of service, and WhatsApp can ban an account that uses one.
-> It is off until an admin allows it and each user consents, and it isn't
-> available in the desktop app.
+**Lessons: the right rule at the right moment**
 
-- **Link your own number** in **Connections → WhatsApp Web** by scanning a QR
-  code or typing a pairing code, like any linked device. Flight Deck keeps the history, sealed at rest,
-  for as long as you choose (7, 30, 90, 365 days, or everything).
-- **Your agents read it** with the new `whatsapp_web` tool: chats, recent
-  messages, search, contacts, and attachments, with voice notes transcribed
-  when Soniox is set up. Each turn starts with a line on what came in since the
-  agent's last turn. Only the owner's agents read it; shared-agent members
-  never do.
-- **Sending is yours to switch on.** Off by default. When on, an agent sends
-  only to chats you whitelisted, which must already exist (it never starts a
-  conversation), within a daily limit (30, up to 200), 6 a minute per chat,
-  and never the same text to the same chat twice in 24 hours. Every message
-  carries your signature (*— sent by my assistant* unless you change it). It
-  never reacts, marks messages read or changes your presence. The fabrication
-  guard now also catches a WhatsApp send that didn't happen.
-- **Auto-replies in chats you choose.** Tick *auto-reply* on a whitelisted
-  chat, pick one of your agents and its trigger words. The agent answers when
-  it's named, called by a trigger word or `@word`, or replied to, and may keep
-  talking for 15 minutes after its last message. It sees only that chat's last
-  30 messages and may run one web search; never your mail, files, calendar,
-  memory or other chats. It answers at most 10 times an hour per chat, ignores
-  messages older than 10 minutes, and never answers another assistant. Nobody
-  in the chat can change its rules.
-- **See why it answered, or didn't.** *Auto-reply activity* lists each
-  decision with a one-line reason, the reply or the reason for silence, the
-  model's reasoning, the search, tokens and time.
-- Install with `pip install 'captain-claw[whatsapp-web]'`. Kill switches:
-  `FD_WHATSAPP_WEB=off`, `FD_WHATSAPP_WEB_SEND=off`,
-  `FD_WHATSAPP_WEB_AUTOREPLY=off`.
+- A setup's rules, ask-first items and facts become the agent's lessons, each
+  with its source and who taught it. Add one by hand, reword it, or take it away.
+- **Always in mind** lessons stay in the instructions. **When it matters** lessons
+  reach the agent with the messages they bear on, picked by words and by meaning,
+  at most 6 items and 1,800 characters a turn, with no model call.
+- **Save as a lesson** on your chat messages: a hover action, and a chip when a
+  message reads like a correction or something to remember (English and Croatian).
 
-The WhatsApp Cloud API channel you already have is unchanged, except that a
-refused send now logs Meta's error code, and a de-registered number is an error
-that names the fix (`POST /<phone-number-id>/register`). The Connections test
-button says so too.
+**Exams: does it really know this?**
 
-### The tool-call register: every call, on the record
+- **Quick** (10 questions), **Standard** (25), **Deep** (60) or **Marathon** (120),
+  on all documents or the ones you tick. Token estimates follow your pick.
+- Questions are asked through the agent's real chat, on a private lane that keeps
+  nothing. Every answer is graded point by point against its section.
+- A wrong answer comes with its cause: didn't look, looked in the wrong place,
+  found it and got it wrong, or made things up.
+- **Teach it this** turns an answer into a lesson, **Read the parts it missed**
+  queues those documents, and asking the same exam again shows better or worse
+  since last time.
 
-- **Every tool call** by every agent the deck runs is recorded: the agent, the
-  time, the tool, its parameters with secrets masked, what started it (a chat,
-  a channel, a schedule, a link…), and how it ended: `ok`, `error`, `blocked`,
-  `timeout`, `aborted` or `interrupted`. Calls are recorded *before* the safety
-  checks, so refused calls show up too.
-- **Where you see it:**
-  - **Activity** in the kiosk's Settings, and **⋯ → Activity** on each agent:
-    your own agents' calls.
-  - **Admin console → Audit**: every call on the deck, an integrity check of
-    the chain, and the retention (90 days by default, 7 to 3,650).
-  - CSV and JSON-lines export.
-- **Tamper-evident.** Rows are append-only and HMAC-chained, and gaps show.
-  Someone with access to the host *and* the deck's key could still rebuild the
-  chain, and tools a model provider runs on its own side aren't recorded.
-- **A shared agent's owner** sees members' calls without their parameters or
-  errors.
-- **Agents read their own record.** The new `activity` tool (`list`,
-  `summary`) answers "what did you do overnight?" from the register, not from
-  memory. It sees only the agent's own calls from its owner's turns, never
-  members' calls or file and mail bodies, and is refused in public-link,
-  member, Telegram-group and link turns. Self-reflection now also gets a
-  digest of repeated failures and repeated calls.
+**Practice: real work, nothing sent**
 
-### Nudges and proposals reach you
+- Give it a task as a user would, or take one of three suggested from its
+  documents. It answers on the same private lane. **Good**, or **Fix it**: what it
+  should have done becomes a lesson, and it tries again.
 
-- **Autonomous Work's nudges and the proposals waiting for your approval** now
-  go where you are:
-  - **WhatsApp** (as before, now with proposals);
-  - **Telegram** (new, off until you turn it on);
-  - **your devices** (new, on): a beep, a banner, and a *Waiting* count;
-  - **the bell** in Flight Deck, with **Approve / Reject** on each proposal.
-- Choose them on the new **Notifications** card in Connections (the kiosk's
-  Settings and the admin console have it too). Quiet hours send the count
-  without the beep.
-- The bell lists every waiting proposal, including ones made before this
-  release, once each. **⤢ Show bigger** opens it in a large dialog, and
-  nudges and proposals render as Markdown (pictures dropped, links shown as
-  text).
-- Devices only ever get the count and a beep; the text stays in Flight Deck.
+**For a team**
 
-### Idle agents sleep
+- **An admin's base.** What an admin teaches a user's agent is its base. The user
+  adds to it, but can't reword or remove it, and their own Replace keeps it.
+- **Members suggest.** On a shared agent, *Suggest as a lesson* waits for the owner
+  in the bell and the Lessons tab.
+- **Pass it on.** Package an onboarded agent's documents, tables, lessons, skills
+  and exam questions as a new archetype, ready for anyone to start from.
 
-- An admin can let idle agents sleep to free memory: **Admin console →
-  Settings → Agents → Put idle agents to sleep**, from 10 minutes to a week
-  (off by default).
-- A sleeping agent wakes **five minutes before** its scheduled tasks and cron
-  jobs, and **when something needs it**: a chat, a channel message, a device,
-  a link, a member, another agent, a Flow or an auto-reply.
-- The kiosk shows *Asleep*, process cards an `asleep` badge, and the
-  Processes page counts sleeping agents apart.
-- Never put to sleep: run workers, Iskra beings, agents with a Telegram,
-  Slack or Discord bot of their own, an agent with a run in flight, and Docker
-  agents.
+**Also in the kiosk**
 
-### The kiosk: Shared folders, with OneDrive
+- **Instructions, insights & skills** (⋯) replaces Instructions. Insights are
+  cards with their source document, which you can search, teach, correct or forget.
+  Skills can be read, switched on or off, and corrected where the agent keeps them
+  itself.
+- **Materials** browses the documents: a read meter, sections as a tree marked
+  read or searchable only, a reader and search across all of it.
 
-- A fourth tile, **Folders**, beside Scheduled, Library and Data: the shared
-  VFS as a library. Recent files; My folders, Agent runs, Shared with me,
-  Linked and Google Drive; preview, edit and save, rename, drag-and-drop
-  upload, search, and a `vfs:` address to copy for your agents. The dialog
-  opens with a card that explains what the VFS is.
-- **OneDrive folders mount like Google Drive**, read-only: your own or one
-  shared with you, through your Microsoft connection. Agents reach it as
-  `vfs:<name>/`.
-- **Fullscreen** on the File library, the Data library (and an open table) and
-  Shared folders.
-- **⌘/Ctrl+Enter queues a message.** Enter still sends; ⌘/Ctrl+Enter adds the
-  message to the lane's queue, switches the queue to Auto and opens it.
-- The browser tab's icon is the deck's **Branding** logo.
+### The Taskboard: where everything stands
 
-### Six new tools
+**Tasks** in the kiosk, **⋯ → Tasks** on an agent, or **Settings → Taskboard**. A
+badge counts what needs you. Every user has their own board: a member's tasks go
+to that member, and owners and admins never see them.
+
+- **What's on it.** Every turn your agents run, on any channel; scheduled jobs and
+  their runs; Autonomous Work proposals; follow-ups; held Gmail auto-replies and
+  Gmail sends; linked systems; agents' to-do lists; and the last 30 days of each
+  agent's chats, read once, marked as history and never acted on.
+- **Your own inboxes, if you want.** Telegram inbox, WhatsApp Web and Gmail are each
+  off until you consent. Their text is kept 30 days, and switching one off deletes
+  it, names and addresses included.
+- **It reads the work.** One call on the agent's own model writes the title, the
+  ask, the result and who's involved. [Jev](https://console.typesafe.ai/keys) then
+  decides whether it's a task, who owes the next move, and whether it's done;
+  without Jev, rules decide. **Why is this here?** shows every decision.
+- **Like Gmail.** `j`/`k`, `e` Done, `b` Snooze, `/` search, `g` then a lane, `?` for
+  the list. A person's reply brings the same task back to **Needs me**, marked
+  *New reply*, with its history. Your corrections stick against later sweeps, with
+  Undo.
+- **Read it properly.** **Open bigger** (`f`) fills the board with one task. A task
+  with a Gmail thread shows the whole email there, fetched with your own token when
+  you open it and kept nowhere. Markdown renders in rows and the timeline; links
+  and pictures show as words, since this can be anyone's text.
+- **Next steps wait for you.** With Jev, the agent's model drafts a reply, a reminder
+  or a question as a proposal you edit, approve or reject. Email only ever becomes a
+  draft; recipients come only from verified parties, never from model text; and no
+  key or one-click button approves a next step. Nothing is proposed on a message
+  flagged as carrying instructions, or on history.
+- **Hand it to an agent.** **Next move** (`m`) → *The agent…*: pick the agent, say what
+  to do, **Hand over**. It runs as your own request in a session of its own, with
+  your words first and the task's text fenced as data. Sending still goes by your
+  Email sending switch and its recipient list.
+- **Then it checks.** An agent's "done" is only its word, so the board compares the
+  reply with the tool-call register, and reads Gmail and Google Calendar with your
+  token, to see that the message went out and the event exists. Jev then compares
+  your words with the record. **What the agent did** shows the verdict. In doubt, the
+  task stays open and yours.
+- **Merge, split, export.** Threads attach by strong keys; merge, unmerge and split
+  with Undo; Jev can suggest a merge but never applies one. Export as CSV or JSONL.
+
+Agents report their turns once restarted; the rest of the board fills from what the
+deck already records. Plan and known gaps: [docs/taskboard-plan.md](https://github.com/kstevica/captain-claw/blob/main/docs/taskboard-plan.md).
+
+### Security: a deck for people who don't share a machine
+
+Every process agent runs as the deck's OS user, so until now, on a multi-user deck,
+an agent's tools could reach other users' files. On a deck with sign-in:
+
+- **Agents stay in their own files.** Path arguments are checked by real path against
+  the agent's folder, its workspace, its owner's VFS and the call's shared folders.
+  `.env` is out of reach, control files can't be written, `glob` and `grep` results are
+  filtered, and the browser takes web URLs only.
+- **Non-admins' agents don't run code or drive the host.** `shell`, `terminal`,
+  `scripts`, `app_runner`, `code`, `termux`, `bat`, `desktop_action`, `screen_capture`
+  and `pinchtab` are refused and hidden. No skill dependency installs, no links outside
+  the user's VFS, no read folders. Their outbound web tools take public addresses only.
+- **Hosted apps are admin-only.** Publishing or starting one runs a command on the
+  server. Static sites stay open to everyone. Adding VFS links and browsing the host's
+  folders are admin-only too.
+- **Team keys stay put.** Non-admins read a team key as `····` and its last four; saving
+  a masked value keeps the key. A team key, and any key in Flight Deck's own environment,
+  goes only to the provider's own endpoint or one the published team sets route it
+  through. A change that would send it elsewhere is refused or re-keyed.
+- **Environment pins.** The variables that would have a non-admin's agent load code from
+  a path or route its calls elsewhere keep Flight Deck's values. Saving a new one in the
+  agent editor is now refused and named, not silently ignored.
+- **Callers are who they prove they are.** Agent routes bind an owner only from a verified
+  bearer or the agent's own token; a `source_port` or `owner_id` in a request counts as
+  identity only with sign-in off.
+
+This is containment, not an OS sandbox: an admin's agent still has a shell that reaches the
+whole host. The sandbox is designed and parked in
+[docs/agent-os-sandbox-plan.md](https://github.com/kstevica/captain-claw/blob/main/docs/agent-os-sandbox-plan.md).
+
+### Your own AI keys
+
+- **Settings → Your own AI keys**: Anthropic, OpenAI, Google Gemini, OpenRouter or xAI. Each
+  key is checked with the provider before it's saved, sealed at rest, and never returned.
+- While it's on, your tier set runs on your keys and **no daily limits apply**. A tier on a
+  provider you have a key for keeps its model, any other moves to one of yours (pick per
+  tier), and local tiers stay. Existing agents follow, and running ones restart.
+- Turn it off and the old models return, with the team key back through the healer. On a shared
+  agent the owner's keys are what count.
+- On by default. An admin can turn it off for the deck, which moves everyone back.
+
+### Profile, with a researcher
+
+**Settings → Profile** is now **Personal · Deck-wide · Password**.
+
+- **Personal** holds who you are as material: your name, your links, your company and its
+  links, and documents such as a CV or a bio.
+- **Fill it in for me** reads those documents, visits the links, looks you and the company up on
+  the web, and drafts *About me*, *My company* and *My standing preferences*. It runs on your
+  go-ahead, on the team's model and credentials, and is followed live; the bell says when it's
+  finished. **Nothing reaches your agents until you Use a draft and Save.** Links to private hosts
+  are never fetched.
+- **Deck-wide**: an admin edits the defaults in place; everyone else reads them.
+
+### Two new tools
 
 | Tool | What it does |
 |---|---|
-| `docx` | Creates Word files from Markdown, reads them, and edits them as **real Word tracked changes**; lists, accepts and rejects changes and comments. A user's upload is never changed: the redline is a new file. Members can use it, and their changes carry their own name. Checked in Microsoft Word. |
-| `self_check` | Tests the agent's live connections and models and reports its server. Read-only. |
-| `reasoning_effort` | Reads or changes the agent's own reasoning effort when you ask, from any channel; it changes the same setting you would. Owner-only. |
-| `activity` | The agent's own tool calls, read back from the register (above). |
-| `linked_system` | Messages a linked system (above). |
-| `whatsapp_web` | Reads, and with your consent sends to, your own WhatsApp (above). |
+| `knowledge` | Searches and reads the owner's documents, with no model: `search` (hybrid; exact codes first, quoted phrases required), `section` (a section whole, across parts), `outline`, `list`, and `add` (keep a file from chat). Shows on every Flight Deck agent; shared-agent members never get it. |
+| `visualize` | HTML in, the page and a PNG of it out: a fragment or whole page, with pinned Chart.js, ECharts, Plotly, D3, Mermaid or Leaflet. The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a `.docx`. Script errors, failed loads and blank pictures come back for the agent to fix. The page never touches the host. Always on. |
 
-`write` and `edit` now refuse `.docx` files and point to `docx`. That makes
-**63 built-in tools** per agent.
+That makes **65 built-in tools** per agent.
 
-### Mail
+### The chat
 
-- When the repeat check refuses a send, it now says that a new edition of a
-  recurring report isn't a repeat: put the date in the subject and send again.
-  A real same-day duplicate is still refused.
+- **Pictures show up.** On signed-in decks chat pictures were blank; that's fixed, and a
+  picture that can't load shows its name. A picture the turn saved but no picture tool reported
+  (a plotting script's chart) now reaches the web chat and the channels: from the reply's words,
+  or, when it names none, one Jev call decides (`tools.jev.find_images: false` turns that off).
+- **Files menu** in the composer: the last five files the agent made in this chat, with **Open** and
+  **Show in library**.
+- **Insert now** on a queued message (or `I`): hand it to the running turn, which reads it on its
+  next step. Inserting never starts the next queued task, and a click as the turn ends isn't lost.
+- **Compact cards** for automation results and the agent's rephrasing of your request: a small
+  card with a two-line preview and **Open**, instead of a full reply bubble.
+
+### The kiosk
+
+- The agent's **⋯** opens a card of icon tiles (a sheet on a phone), and **Settings** shares the same
+  sheet, grouped, with a real dark-theme switch. Arrow keys move between tiles.
+- **Agent settings** has two tabs: *Model & thinking* and *Reasoning effort*. A model change being
+  typed survives switching, and saving a new model reads its reasoning levels afresh.
+- **The bell** puts proposals waiting for Approve or Reject on top, even ones older than the page.
+
+### WhatsApp Web: a ban doesn't take your history
+
+A burner number can be banned, and the ban took the kept messages with it. Now every way a link can
+end moves the store aside, and only you delete it. **Disconnect** and a new **Switch number** ask
+first; a ban or a removal on the phone keeps it. Agents read the linked number and what's kept as one.
+Sending, the whitelist and auto-replies stay with the linked number, because an old number's chats are
+first contacts for a new one, the main ban trigger. This hasn't been tried against a real ban.
 
 ### Devices
 
-- **Firmware 0.19.1** (StickS3, StopWatch, PaperColor A) and **1.0.21**
-  (PaperColor B):
-  - a beep, a banner (StopWatch and StickS3) and a magenta **count badge** on
-    every screen when something waits for you in Flight Deck;
-  - the device **renews its link to the deck** by itself: 30 seconds after its
-    agent goes missing (backing off to every 10 minutes), and after 20 minutes
-    idle, never in the middle of something.
-- Older firmware ignores the new count, so the deck can go first.
+- **Waveshare ESP32-S3-ePaper-1.54**, with and without touch (SKU 32298 and 34212, **V2 boards only**).
+  A 200×200 black-and-white panel, fast enough for a drawn menu and answers that page with the voice
+  (partial refresh 0.6 s, full 1.8 s).
+  - BOOT talks and PWR cancels a recording; double-click PWR (or double-tap the touch board) for home.
+  - Only a press ends a recording here: this mic's level cut sentences short.
+  - The sleeping screen keeps the clock, with a sleeping robot, and redraws on a timer you pick.
+  - The green LED shows what it's doing: steady recording, breathing while the agent works, two
+    blinks when something waits.
+  - The onboard sensor isn't used: the board's own heat throws it off.
+  - Flash it once over USB (`pio run -e epaper154 -t upload`, or `-e epaper154_touch`); it updates over
+    the air after that.
+- **Blue for asleep, red for stopped.** The agent's dot on every device now says why it can't be
+  reached: blue while Flight Deck has put it to sleep (talking wakes it), red while it's switched off.
+  A deck that doesn't say keeps the old yellow.
+- **Firmware 0.19.10** / PaperColor B **1.0.22**. For M5Stack boards the only change since 0.19.1 is
+  that dot (0.19.2); the rest is the Waveshare board's.
 
-### Security fix
+### Memory and fixes
 
-- A removed agent whose folder was kept can no longer pass that folder, and
-  its files, to another user who creates an agent with the same name. Flight
-  Deck now marks each agent folder with its owner. An unmarked leftover folder
-  that holds files and has no owner on record is refused to everyone: pick
-  another name, or purge it. Purging an agent now also drops its File and Data
-  library rows.
+- **Insights stop repeating themselves.** An exact repeat, or the same fact reworded, is dropped;
+  "within 14 days" and "30 days" stay two facts. Insights keep the file and section they came from,
+  and a dropped repeat fills that in if the stored fact lacks it. Dreams' intuitions get the same check.
+- **Spreadsheets read properly.** Workbooks from openpyxl and similar writers came out as their title
+  alone in `xlsx_extract`, and the datastore read only the first sheet. Both are fixed, and asking for a
+  sheet by name now gets that sheet or an error.
+- **Ollama.** Assistant tool calls are now sent back to the model, which stops Gemma 4 repeating a call
+  every turn, and `-cloud` models no longer get the 32k cap meant for local caches.
+- **PDFs with structure.** The optional `pdf` extra reads headings and tables, so a book's section map
+  follows its chapters. Without it, PDFs are read page by page as before.
+- **Malformed tool calls.** Parameters a model's XML call left inside another's value are split out before
+  the register and the guards see them.
+
+### And
+
+- **A new icon.** The Captain icon is now the Bot in a captain's cap, everywhere an icon lives, the
+  desktop app and PWA included.
+- **deed.page example.** An optional [MCP example](https://github.com/kstevica/captain-claw/blob/main/examples/mcp/deed-page.md) for publishing pages,
+  thanks to [@f-o-x11](https://github.com/f-o-x11).
+
+## Before you upgrade a team deck
+
+These apply on a deck with sign-in (`FD_AUTH_ENABLED`), when each agent next starts.
+
+- **Non-admins' agents lose `shell`, `terminal`, `scripts`, `app_runner`, `code`, `termux`, `bat`,
+  `desktop_action`, `screen_capture` and `pinchtab`.** If someone relies on those, make them an admin or,
+  on a deck whose users all trust each other, set `FD_AGENT_CONFINE=off`.
+- **Agents can't read or write outside their own files**, admins' agents included: an admin's agent keeps
+  its linked folders and read folders, and its shell is not held back.
+- **Publishing or starting a hosted app, adding a VFS link and browsing the host's folders are admin-only.**
+- **A non-admin can't send a team key to another endpoint.** Moving an agent re-keys it to that endpoint's own
+  team key, or is refused. An `.env` edit that would send it elsewhere, or that adds a pinned variable such as
+  `HTTP_PROXY` or `PATH`, answers 400 and writes nothing.
+
+Decks with sign-in off, such as the desktop app and one person's deck, are unchanged.
 
 ## Upgrading
 
-1. **Each Flight Deck** — pull, and `pip install .` where Captain Claw is
-   installed non-editable. Add `pip install 'captain-claw[whatsapp-web]'` only
-   if you'll allow WhatsApp Web.
-2. **Restart Flight Deck, then every agent** — including Docker and standalone
-   agents. Flight Deck creates its new tables on start; agents need the
-   restart for the six tools, the register and link turns. Then hard-refresh
+1. **Each Flight Deck** — pull, and `pip install .` where Captain Claw is installed non-editable. Add
+   `pip install 'captain-claw[pdf]'` for PDFs with headings and tables. PyMuPDF is AGPL-3.0, so it stays optional.
+2. **Restart Flight Deck, then every agent** — including Docker and standalone agents. Agents need the
+   restart for confinement, the new tools, lessons, exams and reporting turns to the Taskboard. An agent
+   without it is told to restart before an exam and keeps its old instructions block. Then hard-refresh
    every browser.
-3. **Devices** — publish the new firmware from `firmware/device` with
-   `python tools/publish.py <env> --deck https://<deck>`; devices take it from
-   *Menu → Software update* or by themselves.
-4. **Opt in, as an admin** — *Allow WhatsApp Web*, the idle-sleep time, and
-   the audit retention, all in the admin console. Users turn on Telegram
-   notifications themselves.
+3. **WhatsApp Web** — its service outlives a Flight Deck restart, so restart it too (turn *Allow WhatsApp Web*
+   off and on again), or it goes on deleting the history on a ban. Until then it answers 404 to the new
+   disconnect rather than deleting what you asked to keep.
+4. **Devices** — publish the new firmware from `firmware/device` with
+   `python tools/publish.py <env> --deck https://<deck>`; devices take it from *Menu → Software update* or by
+   themselves. Waveshare boards need one flash over USB first.
+5. **For the Taskboard's next steps** — a Jev key (*Connections → Jev*, or the team's). Each user turns on their
+   own inboxes on the board.
 
-BotPort hubs need nothing new: 0.8.3 keeps protocol 2.
+BotPort hubs need nothing new: 0.8.4 keeps protocol 2, and BotPort's code is unchanged since 0.8.2.
 
 **Changed**
 
-- An agent folder left over from a removed agent, with files and no owner on
-  record, can't be reused by anyone (see [Security fix](#security-fix)).
-- `write` and `edit` refuse `.docx`; agents use `docx`.
-- `FD_LINK_WEBHOOKS_PRIVATE` is now `FD_LINK_PRIVATE_ADDRESSES`; the old name
-  still works.
+- Non-admins' agents on a sign-in deck lose the tools that run code, and every agent is held to its own files
+  (see [above](#before-you-upgrade-a-team-deck)).
+- The agent's **⋯** menu: *Instructions* is now *Instructions, insights & skills*, and *Onboarding* is new.
+- A setup's facts are lessons, not insights, so they reach the agent when they bear on a message.
+- Reject on an Autonomous Work proposal is compare-and-set, like Approve.
 
 **New settings**
 
 | Setting | Default | What it does |
 |---|---|---|
-| `FD_LINK_PRIVATE_ADDRESSES` | off | Allow `ws://`, `http://` and private hosts for webhooks and outbound links |
-| `FD_WHATSAPP_WEB` / `_SEND` / `_AUTOREPLY` | — | `off` switches WhatsApp Web, its sending, or its auto-replies off deck-wide |
-| *Allow WhatsApp Web* (admin) | off | Lets users link their own WhatsApp |
-| *Put idle agents to sleep* (admin) | off | Idle time before an agent sleeps, 10 min to a week |
-| `FD_AGENT_IDLE_STOP_S` / `FD_AGENT_IDLE_TICK_S` | — / `60` | Idle time in seconds, overriding the admin setting; how often the controller looks |
-| Audit retention (admin) | 90 days | How long tool calls are kept, 7 to 3,650 days |
-| `CLAW_TOOL_AUDIT` (agent) | on | `off` stops an agent recording its tool calls |
-| Notifications: WhatsApp / Telegram / devices (per user) | on / off / on | Where nudges and waiting proposals go |
-| WhatsApp Web sending, daily limit, signature, retention (per user) | off, 30, *— sent by my assistant*, everything | |
-| *The agent can message it* (per link) | on | Whether `linked_system` may write to that system |
+| `FD_AGENT_CONFINE` | on with sign-in | `off` turns confinement off, for a deck whose users all trust each other |
+| `FD_TASKBOARD_DISABLED` | — | `true` stops the Taskboard's sweep and triage; it then fills only when opened |
+| `CLAW_TURN_REGISTER` (agent) | on | `off` stops an agent reporting its turns |
+| `FD_SETUP_TOKENS_PER_MIN` | `40000` | How fast a setup read may go; `0` is unpaced. Models on the same machine aren't paced |
+| `FD_SETUP_REASONING` | `off` | Thinking level for setup reads; `auto` leaves the model's own |
+| `FD_PROFILE_REASONING` | `low` | Thinking level for the Profile researcher |
+| `memory.max_knowledge_files` | `3000` | Semantic memory's cap for `knowledge/`, kept apart from other files |
+| `tools.jev.find_images` | `true` | Let Jev pick the picture a reply hands over |
+| *Your own AI keys* (admin) | on | Lets users run their agents on their own keys |
+| Taskboard inboxes (per user) | off | Telegram inbox, WhatsApp Web and Gmail on your board |
+| Taskboard auto-close, Jev and reading caps (per user) | on, 200, 100 a day | Whether Jev may close tasks, and how many calls a board makes a day; `0` is no cap |
+| `pdf` extra | not installed | `pip install 'captain-claw[pdf]'`: PDFs with headings and tables |
 
-New Flight Deck stores create themselves on start: `agent_links`,
-`agent_link_events`, `agent_link_files`, `tool_audit.db` with its key file, and
-each user's WhatsApp Web store. No manual migration.
+New stores create themselves on start: `taskboard.db` on the deck; `lessons.json`, `practice.json` and
+`.owner-setup.json` for each onboarded agent. No manual migration.

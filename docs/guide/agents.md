@@ -18,9 +18,16 @@ Mix providers freely — each session independently selects its model.
 | LiteRT (on-device) | `.litertlm` Gemma models running locally via an isolated subprocess worker |
 | OpenRouter | 200+ models via meta-router |
 
-## 63 built-in tools
+## 65 built-in tools
 
 Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), Microsoft 365 (Outlook mail, Calendar, OneDrive), Jev calibrated judgments (TypeSafe AI), Soniox speech in and out (`audio`), public file links, topic switching by asking (`sessions`), a read-only Telegram inbox, the StopWatch's background picture, bill payments (opt-in), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), Basna (read and start multi-agent ensemble runs), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
+
+New in 0.8.4:
+
+| Tool | What it does |
+|---|---|
+| `knowledge` | Searches and reads the documents the owner gave the agent, with no model: `search` (hybrid; exact codes first, quoted phrases required), `section` (a section whole, across parts), `outline`, `list`, and `add` to keep a file from chat. See [Onboarding](flight-deck.md#onboarding). Shows on every Flight Deck agent; shared-agent members never get it. |
+| `visualize` | HTML in, the page and a PNG of it out, with pinned Chart.js, ECharts, Plotly, D3, Mermaid or Leaflet. The PNG reaches the chat and the channels and goes into a `.docx`. Script errors, failed loads and blank pictures come back to fix. The page never touches the host. Always on. |
 
 New in 0.8.3:
 
@@ -44,6 +51,8 @@ Three layers of protection that run before, during, and after agent operations:
 - **Output guards** — Validate tool results for hallucinations and safety
 - **Action honesty** (0.8.0) — a fabrication guard rejects replies that claim an email was sent or a calendar event changed when no tool did it, and automated turns may write email only when their own instructions ask for it
 - **Every call on the record** (0.8.3) — each tool call lands in the deck's append-only, HMAC-chained [tool-call register](flight-deck.md#activity-and-audit), refused calls included; self-reflection reads a digest of repeated failures and repeated calls from it
+- **Held to its own files** (0.8.4) — on a deck with sign-in, file tools are checked by real path against the agent's folder, its workspace, its owner's VFS and the call's shared folders; a non-admin's agent also loses the tools that run code or drive the host. See the [checklist](../team-deployment.md#what-the-launch-hardening-changed-08x)
+- **Checked on hand-over** (0.8.4) — when you hand an agent a task on the [Taskboard](flight-deck.md#the-taskboard), its reply is compared with the tool-call register, Gmail and Calendar before anyone believes it
 
 Guards support two modes: `stop_suspicious` (block automatically) or `ask_for_approval` (prompt the user).
 

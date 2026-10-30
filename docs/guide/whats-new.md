@@ -4,7 +4,34 @@
 
 Every release from the newest back to 0.4.29. The full notes for each, with upgrade steps, are in [release-notes/](../../release-notes/).
 
-**Jump to:** [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+**Jump to:** [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+
+## What's New in 0.8.4
+
+**Onboarded, On the Board.** Teach an agent your work and test it, see every task in one place, and run a deck for people who don't share a machine. 71 merged PRs in the three days after 0.8.3. **Restart Flight Deck, then every agent, and on a team deck [read this first](../../release-notes/RELEASE_NOTES_0.8.4.md#before-you-upgrade-a-team-deck):** non-admins' agents lose the tools that run code.
+
+- **Onboarding** (⋯ → Onboarding: Overview, Lessons, Practice, Materials, Exams).
+  - **Way of working:** up to 12 documents, each reaching the agent whole as a knowledge base at no token cost; a reading budget (Quick 60k, Standard 250k, Deep 1M tokens) with an optional focus; a background read on the agent's own model that survives a restart; a review of the rules, skills and facts before they land. Spreadsheets also become datastore tables.
+  - **Lessons:** *Always in mind* stays in the instructions; *When it matters* reaches the agent with the messages it bears on. Save one from chat.
+  - **Exams:** 10 to 120 questions from the documents, asked through the real chat on a private lane, graded point by point, with why a wrong answer went wrong. **Practice** on real tasks, with nothing sent.
+  - **For a team:** an admin's base layer, members' suggestions, and **Pass it on** as an archetype.
+- **The Taskboard.**
+  - Everything agents were asked and sent, on any channel: *Needs me*, *Waiting on others*, *Agents working*, *Done*, with Gmail's keys, search, merge and split, and CSV/JSONL export.
+  - The agent's model and Jev read the work; **Why is this here?** shows every decision; a reply brings the same task back.
+  - Next steps wait for your approval, and email only ever becomes a draft.
+  - **Hand a task to an agent**, and the board checks the tool-call register, Gmail and Calendar to see that it really did it.
+  - Your own inboxes are opt-in, kept 30 days and deleted when switched off.
+- **Security on sign-in decks.** Agents stay in their own files; non-admins' agents don't run code or drive the host, and their web tools take public addresses only; hosted apps and host folders are admin-only; team keys are masked for non-admins and go only to the team's endpoints. Containment, not an OS sandbox. `FD_AGENT_CONFINE=off` turns it off.
+- **Your own AI keys** (Settings): Anthropic, OpenAI, Gemini, OpenRouter or xAI, checked and sealed, with no daily limits. Existing agents follow.
+- **Profile**: Personal · Deck-wide · Password, and **Fill it in for me**, a researcher that reads your documents and links and drafts your texts for review.
+- **Two new tools**: `knowledge` (search and read the owner's documents, with no model) and `visualize` (HTML in, the page and a PNG out): **65 built-in tools** in all.
+- **The chat**: pictures reach the chat and the channels, a **Files** menu in the composer, **Insert now** for a queued message, and compact cards for automated results.
+- **The kiosk**: the agent's **⋯** and **Settings** are cards of tiles, agent settings have two tabs, **Instructions, insights & skills** in one dialog, and waiting proposals top the bell.
+- **Devices**: the **Waveshare ePaper 1.54**, with and without touch; blue for an agent asleep and red for one stopped; firmware **0.19.10** / PaperColor B **1.0.22**.
+- **Fixes**: a WhatsApp Web ban or switch keeps the history; insights and intuitions drop exact and reworded repeats; openpyxl workbooks read properly; Ollama gets its tool calls back, and `-cloud` models skip the local cap.
+- **And**: a new Captain icon, and an optional [deed.page MCP example](../../examples/mcp/deed-page.md).
+
+See [RELEASE_NOTES_0.8.4.md](../../release-notes/RELEASE_NOTES_0.8.4.md).
 
 ## What's New in 0.8.3
 

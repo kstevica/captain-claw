@@ -12,7 +12,7 @@ A full management dashboard for running teams of AI agents. Spawn, monitor, conf
 flight-deck        # http://0.0.0.0:25080   (alias: captain-claw-fd; add --simple-chat for a kiosk)
 ```
 
-**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Idle agents sleep](#idle-agents-sleep)
+**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Onboarding](#onboarding) · [The Taskboard](#the-taskboard) · [Your own AI keys and Profile](#your-own-ai-keys-and-profile) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Idle agents sleep](#idle-agents-sleep)
 
 ## Seven orchestration modes
 
@@ -89,9 +89,12 @@ The chat-first view your team's non-admins live in is a complete place to work:
 - **Shared folders** (0.8.3): the shared VFS as a library — recent files, your folders, agent runs, what's shared with you, linked folders, and **Google Drive** and **OneDrive** folders mounted read-only — with preview, edit, rename, drag-and-drop upload, search and a `vfs:` address to hand your agents;
 - **fullscreen** on the File library, the Data library and Shared folders (0.8.3);
 - **Scheduled tasks** that deliver to chat, email or Telegram;
+- a **[Taskboard](#the-taskboard)** of everything the agents were asked and sent, and what needs you (0.8.4);
 - one **timeline** per agent with named topics, and a **reasoning-effort** picker;
-- a **⋯** menu per agent for its model, instructions and settings, which also **shares it on the network** and shows its **Activity**;
-- **⌘/Ctrl+Enter** to queue a message on the lane's queue, switched to Auto (0.8.3); Enter still sends.
+- a **⋯** menu per agent, a card of tiles since 0.8.4, for its model, its instructions, insights and skills, and its **[Onboarding](#onboarding)**, which also **shares it on the network** and shows its **Activity** and **Tasks**;
+- a **Files** menu in the composer with the last five files the agent made in this chat, with **Open** and **Show in library** (0.8.4);
+- pictures the reply hands over, in the chat and the channel, and **compact cards** for automated results and the agent's rephrasing of your request (0.8.4);
+- **⌘/Ctrl+Enter** to queue a message on the lane's queue, switched to Auto (0.8.3); Enter still sends. **Insert now** (or `I`) hands a queued message to the running turn, which reads it on its next step (0.8.4).
 
 Admins get an **Admin console**, invitations by email, a waitlist that answers applicants, branding and daily plan limits.
 
@@ -100,6 +103,54 @@ Admins get an **Admin console**, invitations by email, a waitlist that answers a
 [![The simple layout — agents with a power switch on the left, chat in the middle, the agent's files and datastore on the right](../screenshots/simple-layout.webp)](../team-deployment.md)
 
 The chat-first **simple layout** (Cmd/Ctrl+\) with agents, chat, files and datastore — `flight-deck --simple-chat` turns it into a **kiosk** for non-admins. Before a second person logs in, set `FD_AUTH_ENABLED`, a fixed `FD_JWT_SECRET` and `FD_PUBLIC_URL` / `FD_ALLOWED_HOSTS`; the first account becomes the admin, **Admin → Users** adds the rest, and **Library → Publish to team** gives them models without pasting keys. The full checklist is [docs/team-deployment.md](../team-deployment.md).
+
+## Onboarding
+
+New in 0.8.4: **⋯ → Onboarding** gets an agent ready for the job, on one page with five tabs: **Overview**, **Lessons**, **Practice**, **Materials** and **Exams**. Tick *Set up its way of working next* when you create an agent to start there.
+
+**Way of working: your material goes in.**
+
+- Up to 12 documents by drag and drop, upload or from the File library (PDF, Word, Excel, PowerPoint, CSV, Markdown, text, HTML; up to 3,000 PDF pages each), each with how the agent should use it, plus instructions of your own.
+- **A knowledge base that costs no tokens.** Every document reaches the agent whole: an overview, parts under 200 KB and a map of its sections. Semantic memory indexes `knowledge/` first, and the `knowledge` tool searches and reads it. Install `captain-claw[pdf]` for PDFs with headings and tables.
+- **A reading budget.** Quick (60k tokens), Standard (250k) or Deep (1M). Material over the budget is read by its most instructive sections, chosen without a model and pulled towards an optional **Focus on**.
+- **Read in the background, by the agent's own model, with thinking off.** Closing the dialog or restarting Flight Deck doesn't stop it, and the bell says when it's ready. Steps stay small, calls are paced, and rate limits are waited out.
+- **You review it**: rules, what to ask about first, skills, facts, templates and a glossary, each with its source. A longer read keeps more, up to 150 rules, 30 skills, 1,000 facts, 30 ask-first items, 20 templates and 400 terms.
+- **Spreadsheets become tables**: one datastore table per sheet, with no model involved.
+- **Read the rest later**: each document tracks which sections were read, and only the unread part costs tokens.
+- **Add to it or replace it**, on new and existing agents. Learned facts and the agent's own files stay either way. "Put this in your knowledge" keeps a file from chat.
+
+**Lessons.** A setup's rules, ask-first items and facts are the agent's lessons, each with its source and who taught it. *Always in mind* stays in the instructions; *When it matters* reaches the agent with the messages it bears on, picked by words and by meaning, at most 6 items and 1,800 characters a turn. Add, reword or remove them here, or use **Save as a lesson** on a chat message.
+
+**Exams.** Quick (10 questions), Standard (25), Deep (60) or Marathon (120), on all documents or the ones you tick. Flight Deck writes the questions, asks them through the agent's real chat on a private lane that keeps nothing, and grades every answer point by point. A wrong answer says why: it didn't look, looked in the wrong place, found it and got it wrong, or made things up. **Teach it this** makes it a lesson, **Read the parts it missed** queues those documents, and asking again shows better or worse.
+
+**Practice.** Give it a real task, or take one of three suggested from its documents. Nothing is sent or kept. **Good**, or **Fix it**: the correction becomes a lesson and it tries again.
+
+**For a team.** What an admin teaches a user's agent is its base, which the user adds to but can't change. On a shared agent, a member's *Suggest as a lesson* waits for the owner. **Pass it on** packages an onboarded agent's documents, tables, lessons, skills and exam questions as a new archetype.
+
+**Materials** browses it all: a read meter per document, sections as a tree marked read or searchable only, a reader and search. **Instructions, insights & skills** (⋯) shows what the agent has learned as cards to search, teach, correct or forget, and its skills to read, switch and correct.
+
+## The Taskboard
+
+New in 0.8.4: everything your agents were asked and sent, on every channel, in lanes: **Needs me**, **Waiting on others**, **Agents working**, **Done** and **All**. Open it from **Tasks** in the kiosk, **⋯ → Tasks** on an agent or **Settings → Taskboard**. Every user has their own board: a member's tasks go to that member, and owners and admins never see them.
+
+- **What's on it**: every agent turn, scheduled jobs, Autonomous Work proposals, follow-ups, held Gmail auto-replies and sends, linked systems, agents' to-do lists, and the last 30 days of each agent's chats, marked as history and never acted on.
+- **Your own inboxes** (Telegram inbox, WhatsApp Web, Gmail) are off until you consent, kept 30 days, and deleted when switched off.
+- **It reads the work.** The agent's own model writes the title, the ask, the result and who's involved; Jev decides whether it's a task, who owes the next move and whether it's done; without Jev, rules decide. **Why is this here?** shows every decision.
+- **Keys like Gmail's**: `j`/`k`, `e` Done, `b` Snooze, `r` next step, `m` Next move, `f` Open bigger, `/` search, `g` then a lane, `?` for the list. Nothing approves a next step by key.
+- **A reply brings the same task back** to Needs me, marked *New reply*, with its history. Your corrections stick against later sweeps, with Undo.
+- **Open bigger** shows one task over the board, and a task with a Gmail thread shows the whole email, fetched with your token when you open it and kept nowhere.
+- **Next steps wait for you.** With Jev, the agent's model drafts a reply, a reminder or a question as a proposal you edit, approve or reject. Email only ever becomes a draft, and recipients come only from verified parties.
+- **Hand it to an agent**: Next move → *The agent…*, say what to do, **Hand over**. It runs as your own request, and your Email sending switch still applies.
+- **Then it checks**: the reply is compared with the tool-call register, and with Gmail and Google Calendar read with your token, and Jev compares your words with the record. **What the agent did** shows the verdict; in doubt, the task stays open and yours.
+- **Merge, unmerge and split** with Undo, and export as CSV or JSONL. `?taskboard=<id>` links open a task.
+
+Plan and known gaps: [docs/taskboard-plan.md](../taskboard-plan.md). `FD_TASKBOARD_DISABLED=true` stops the sweep and triage; `CLAW_TURN_REGISTER=off` stops an agent reporting its turns.
+
+## Your own AI keys and Profile
+
+**Your own AI keys** (0.8.4, Settings): add Anthropic, OpenAI, Google Gemini, OpenRouter or xAI keys, each checked with the provider and sealed at rest. While it's on, your tier set runs on them with **no daily limits**, and existing agents follow. An admin can turn it off for the deck.
+
+**Profile** (0.8.4, Settings) is **Personal · Deck-wide · Password**. **Fill it in for me** reads your documents and links, looks you and your company up on the web, and drafts *About me*, *My company* and *My standing preferences* on the team's model. Nothing reaches your agents until you **Use** a draft and **Save**.
 
 ## Activity and audit
 
@@ -119,6 +170,7 @@ New in 0.8.3: the **tool-call register** records every tool call every agent on 
 - **Connections** — One tab per service: Google, Microsoft, ChatGPT, Antigravity, MCP Servers, WhatsApp, Telegram, Deep memory, Jev — each person connects their own accounts, and an agent only ever gets its owner's token. *Agent access for Claude (MCP)* issues the personal access tokens the HUD and the devices use too.
 - **MCP Connections** — Add Model Context Protocol servers (HTTP or stdio) once and every entitled agent in the fleet picks up their tools — no per-agent config. Phase 2 adds stdio transport for `npx`/`uvx`-shipped servers, per-agent allowlists, hot tool-list reload over SSE, and streaming tool calls.
 - **Branding** — the deck's name and logo on the sign-in page and, since 0.8.3, in the browser tab.
+- **Confinement** (0.8.4) — with sign-in on, agents stay in their own files, non-admins' agents don't run code or drive the host, hosted apps and host folders are admin-only, and team keys are masked for non-admins and go only to the team's endpoints. See the [checklist](../team-deployment.md#what-the-launch-hardening-changed-08x).
 
 The step-by-step checklist is [docs/team-deployment.md](../team-deployment.md).
 

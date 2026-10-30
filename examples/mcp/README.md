@@ -21,7 +21,7 @@ Use the fields in [parallel-search.json](parallel-search.json):
 - Name: `parallel-search`
 - Transport: `http`
 - URL: `https://search.parallel.ai/mcp`
-- Headers: `{"User-Agent": "captain-claw-flight-deck/0.8.3"}`
+- Headers: `{"User-Agent": "captain-claw-flight-deck/0.8.4"}`
 - Enabled: on
 - OAuth client ID, client secret and token endpoint: leave empty
 

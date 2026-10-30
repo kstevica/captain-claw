@@ -98,12 +98,17 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Web UI](#web-ui)
 - [Flight Deck](#flight-deck)
   - [Public file links](#public-file-links--new-in-081)
+  - [Confinement on a multi-user deck](#confinement-on-a-multi-user-deck--new-in-084)
 - [Kiosk (Simple Layout)](#kiosk-simple-layout)
   - [The agent menu](#the-agent-menu--new-in-081)
   - [The chat timeline](#the-chat-timeline-topics-and-other-channels--new-in-081)
   - [File library](#file-library--new-in-081)
   - [Data library](#data-library--new-in-081)
   - [Scheduled tasks](#scheduled-tasks--new-in-081)
+  - [Onboarding](#onboarding--new-in-084)
+  - [Taskboard](#taskboard--new-in-084)
+  - [Your own AI keys](#your-own-ai-keys--new-in-084)
+  - [Profile](#profile--new-in-084)
   - [Desktop app mode](#desktop-app-mode--new-in-081)
 - [Deck Administration — NEW in 0.8.1](#deck-administration--new-in-081)
   - [Admin console](#admin-console)
@@ -1319,6 +1324,41 @@ What the agent gets back is less than people see in **Activity** and the console
 **Reflections use it too.** Each self-reflection gets the patterns among the agent's calls since the previous reflection — tools that failed three or more times, the same failure three or more times, the same call repeated — from the same calls the tool reads, with the rule never to write an instruction from one failure or about getting past the guard. When nothing repeats, it is told nothing calls for a change.
 
 Routes (the agent's own auth token, identified by Flight Deck): `GET /fd/tool-audit/agent/mine` and `GET /fd/tool-audit/agent/digest`.
+
+### knowledge — NEW in 0.8.4
+
+Searches and reads the documents the owner gave the agent (its `knowledge/` folder), with no model. It reads the files itself, so it works before the index has caught up. Shows on every Flight Deck agent; shared-agent members never get it.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `search`, `section`, `outline`, `list` or `add` |
+| `query` | string | search | What to find. Hybrid search; exact codes rank first, and a quoted phrase is required |
+| `doc` | string | no | A document's title or file name: search only it, or read its section or outline |
+| `section` | string | section | A section's title, with its parents (`Chapter › Summary`) when titles repeat |
+| `page` | integer | no | A long section's page (default 1) |
+| `limit` | integer | no | Passages for `search` (default 5) |
+| `path` | string | add | The file to keep: PDF, Word, Excel, PowerPoint, CSV, Markdown, text or HTML |
+| `text`, `name` | string | add | Text to keep instead of a file (what a picture or scan says), under this file name |
+| `title`, `note`, `use` | string | no | add: its title, what it is, and how to use it (`reference`, `rules`, `procedures`, `templates` or `auto`) |
+
+A search hit is a passage with its document, section and lines. `add` makes the file searchable at once but doesn't read it for rules or skills; the owner does that in [Way of working](#onboarding--new-in-084). Before an owner's turn, the sections the message bears on are named in a context note, with no model call. Install `captain-claw[pdf]` so PDFs keep their headings and tables.
+
+### visualize — NEW in 0.8.4
+
+HTML in, the page and a PNG of it out, for charts, diagrams and dashboards instead of plotting scripts that often leave nothing to show. Always on.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `html` | string | yes | Body content (with `<style>`/`<script>` as needed) or a full document |
+| `title` | string | no | The page title and the file name |
+| `libraries` | array | no | Pinned libraries to load: `chartjs`, `echarts`, `plotly`, `d3`, `mermaid`, `leaflet` |
+| `width`, `height` | integer | no | Page width (320–2400) and a fixed height; leave height out to capture the whole page |
+| `selector` | string | no | One element to picture alone (`#chart`) |
+| `scale` | number | no | PNG pixel density, 1–3 (default 2) |
+| `wait_ms` | integer | no | Extra wait after the page settles, up to 10000; or set `window.vizReady = true` when done |
+| `output_path` | string | no | An `.html` path (default `saved/showcase/<session>/`); the PNG goes next to it |
+
+The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a `.docx` or `.md` as `![caption](path)`. Script errors, failed loads, empty canvases and a blank picture come back for the agent to fix. The page never touches the host: it's served from an address that doesn't exist, every request goes through the public-only client, and WebSockets are closed.
 
 ### basna
 
@@ -4773,6 +4813,18 @@ Three cross-mode capabilities landed in 0.7.3 for Basna, Vatra, and Code. **All 
 - **One deck, one state.** Several decks on one host no longer share MCP servers, code apps or the agent secret — each resolves them from `CAPTAIN_CLAW_FD_HOME`, else `FD_DATA_DIR`, else the legacy `~/.captain-claw-fd`. A deck moving to `FD_DATA_DIR` copies its `mcp_servers.json` there once to keep its servers.
 - **Chat bridges send only deliverables.** Telegram, Slack, Discord and WhatsApp auto-send a file only if this turn wrote it inside the agent's `saved/` area (never a `Path:` line from an email or web page). See [Telegram: Per-User Sessions](#telegram-per-user-sessions).
 
+### Confinement on a multi-user deck — NEW in 0.8.4
+
+Every process agent runs as the deck's OS user. On a deck with sign-in, Flight Deck pins `CLAW_CONFINE=user|admin`, the agent's home and its workspace, after the agent's own `.env` and env vars (`captain_claw/deck_confine.py`):
+
+- **Files.** Path arguments are checked by real path. Reads: the agent's folder (not its `.env`), its workspace, its owner's VFS and the call's shared folders; for an admin's agent also linked and read folders. Writes: the workspace and the VFS, never control files. `glob` and `grep` results are filtered, and the browser takes web URLs only.
+- **Running code.** A non-admin's agent never gets `shell`, `terminal`, `scripts`, `app_runner`, `code`, `termux`, `bat`, `desktop_action`, `screen_capture` or `pinchtab`, and installs no skill dependencies. Its `browser`, `direct_api`, `apis` and `web_fetch` take public addresses only.
+- **Admin-only with sign-in on.** Publishing or starting a hosted app (static sites stay open), `POST /fd/vfs/links` and `/fd/vfs/browse-fs`.
+- **Keys.** Non-admins read secret-named `.env` values and team keys as `····` and the last four; `PUT /fd/agent-config` swaps a placeholder back for the value on disk. A team key, or a key in Flight Deck's environment, goes only to the provider's own endpoint or one the published team sets route it through.
+- **Pinned variables.** `PATH`, `PYTHON*`, `LD_*`, `GIT_*`, `NODE_*`, `PIP_*`, `HTTP_PROXY`, CA bundles and the like keep Flight Deck's values for a non-admin's agent, and saving one answers 400, naming it.
+
+`FD_AGENT_CONFINE=off` turns it off. A role change applies at the agent's next start. An admin's agent still has a shell that reaches the whole host: this stops tenants and prompt-injected file calls, not an admin's own shell. The OS sandbox is designed and parked in [docs/agent-os-sandbox-plan.md](docs/agent-os-sandbox-plan.md).
+
 ### Running Flight Deck for a team — NEW in 0.8.0
 
 - **Users** (Admin → Users in 0.8.0; its own **Users** page since 0.8.1). Add users (email, password, role) or invite them by email, set a password, and open a user's **Agents** to create (archetype picker), start, stop, restart, configure or remove their agents — every action logged as `admin_act_as`. It is not a login-as: an admin acts on agent-management routes only. The rest of an admin's work — the Admin console, invitations, the waitlist, passwords, branding, daily limits — is in [Deck Administration](#deck-administration--new-in-081).
@@ -5806,6 +5858,10 @@ Flight Deck uses environment variables:
 | `FD_ENABLEBANKING_APP_ID` / `FD_ENABLEBANKING_KEY` | (unset) | **NEW in 0.8.1.** The deck's Enable Banking application (pay-by-bank links and bank statements) |
 | `FD_LINK_CLIENT_ID` / `FD_LINK_CLIENT_SECRET` / `FD_LINK_PUBLISHABLE_KEY` / `FD_LINK_TEST` | (unset) | **NEW in 0.8.1.** Stripe Link agent wallet for purchases; `FD_LINK_TEST=1` makes test requests |
 | `FD_AP2` | (unset) | **NEW in 0.8.1.** `1` turns on AP2 checkout with merchant agents |
+| `FD_AGENT_CONFINE` | on with sign-in | **NEW in 0.8.4.** `off` turns off [confinement](#confinement-on-a-multi-user-deck--new-in-084), for a deck whose users all trust each other |
+| `FD_TASKBOARD_DISABLED` | (unset) | **NEW in 0.8.4.** `true` stops the [Taskboard](#taskboard--new-in-084)'s sweep and triage; it then fills only when opened |
+| `FD_SETUP_TOKENS_PER_MIN` / `FD_SETUP_REASONING` | `40000` / `off` | **NEW in 0.8.4.** Pace and thinking level of a [setup read](#onboarding--new-in-084); `0` is unpaced, `auto` leaves the model's own level |
+| `FD_PROFILE_REASONING` | `low` | **NEW in 0.8.4.** Thinking level for the [Profile](#profile--new-in-084) researcher |
 
 A deck on more than one person's network: see [docs/team-deployment.md](docs/team-deployment.md) for the full checklist (`FD_AUTH_ENABLED`, `FD_JWT_SECRET`, `FD_LOCKDOWN`, `FD_AGENT_SHARED_SECRET`, `FD_GLASSES_BRIDGE_TOKEN`, …).
 
@@ -5851,10 +5907,10 @@ A kiosk user's first visit opens a step-by-step guide: what the deck is, creatin
 
 ### The kiosk screen — NEW in 0.8.1
 
-- **Left column:** the agents, each with a **Busy** pill, an on/off power switch and a **⋯** menu (see [The agent menu](#the-agent-menu--new-in-081)); **New agent**; three tiles — **Scheduled · Library · Data**; then **Info** and **Settings**. The column collapses to a rail with the same buttons.
+- **Left column:** the agents, each with a **Busy** pill, an on/off power switch and a **⋯** menu (see [The agent menu](#the-agent-menu--new-in-081)); **New agent**; the tiles — **Tasks · Scheduled · Library · Data · Folders**; then **Info** and **Settings**. The column collapses to a rail with the same buttons.
 - **The chat** in the middle. There is no right-hand column: files and tables live in the [File library](#file-library--new-in-081) and the [Data library](#data-library--new-in-081).
 - **Info** (`GET /fd/info`) shows the user's corner of the deck in one read: the tier set their agents are created on (their own Library set, else the admin's team default) with each tier's provider, model, endpoint host, context sizes, image support and how many archetypes use it — never a key; their agents and each one's model; archetype counts by source; the deck-wide profile defaults, their own profile, and the exact text their agents receive (full, and the compact one eco agents get); their plan with today's usage meters and free resets; and their Google, Microsoft, Telegram and Jev status.
-- **Settings** is one button opening a dialog: light / dark theme, **Connections** (Google, Microsoft, Telegram, MCP Servers, Jev and Soniox), **Scheduled tasks**, **File library**, **Data library**, **Profile** (with its Password card), **Refresh agents**, **Getting started** and **Sign out**.
+- **Settings** is one button opening a dialog: light / dark theme, **Connections** (Google, Microsoft, Telegram, MCP Servers, Jev and Soniox), **Scheduled tasks**, **Taskboard**, **Activity**, **File library**, **Data library**, **Shared folders**, **Profile** (with its **Password** tab), **Your own AI keys**, **Refresh agents**, **Getting started** and **Sign out**.
 - **New agent** opens a two-pane archetype picker: search by role, task or skill, family filter chips with counts, and cards with each archetype's model class and thinking style; the detail pane explains the pick ("Runs on", "Thinks", "What it can do") above the name field and the **Create** button. Enter on a narrowed search picks the first card.
 - The deck's default name is **Captain**, with the Captain icon, until an admin sets an instance name.
 
@@ -5862,11 +5918,13 @@ A kiosk user's first visit opens a step-by-step guide: what the deck is, creatin
 
 ### The agent menu — NEW in 0.8.1
 
-Each of the user's own agents has a **⋯** menu (on its row, and on the phone list and the phone chat header):
+Each of the user's own agents has a **⋯** menu (on its row, and on the phone list and the phone chat header). Since 0.8.4 it opens as a card of icon tiles, a sheet on a phone, with **Remove agent** set apart:
 
 - **Info** — a dialog with two tabs, the agent's **Intentions** and its **Topics** (while it runs).
-- **Instructions** — the owner's standing instructions for this agent. Saving sends open chats the agent's identity again, so they apply from its next reply without a reconnect.
-- **Settings** — a wide dialog (a sheet on a phone), in two columns on a large screen:
+- **Instructions, insights & skills** (0.8.4) — three tabs. **Instructions** holds the owner's standing instructions for this agent. Saving sends open chats the agent's identity again, so they apply from its next reply without a reconnect. **Insights** shows what it has learned as cards, with the document each came from, to search, teach, correct or forget. **Skills** lists its skills to read, switch on or off, and correct where the agent keeps them itself.
+- **Onboarding** (0.8.4) — its documents, lessons, practice and exams; see [Onboarding](#onboarding--new-in-084).
+- **Tasks** (0.8.4) — the [Taskboard](#taskboard--new-in-084), on this agent.
+- **Settings** — a wide dialog (a sheet on a phone), with two tabs since 0.8.4: *Model & thinking* holds model, vision and how it thinks, and *Reasoning effort* the rest:
   - **Model:** provider (only providers an agent can run on — `PUT /fd/agent-model` refuses others), model, API key and an optional endpoint. Switching provider drops the old provider's key and resets the endpoint to the new provider's default unless you give one.
   - **Vision:** auto / on / off (see [Native Vision](#native-vision--new-in-081)).
   - **How it thinks:** the cognitive mode — Neutra, Ionian, Dorian, Phrygian, Lydian, Mixolydian, Aeolian or Locrian.
@@ -5887,6 +5945,12 @@ Each of the user's own agents has a **⋯** menu (on its row, and on the phone l
 - **New topic** and **Topics** are buttons beside the lane tabs (see the next section); the lane tabs scroll sideways without a bar.
 - **Daily allowance.** Under the lane tabs a line shows today's messages and AI tokens against the user's plan (always in the kiosk; in the full layout only near the limit). When the allowance is spent the composer closes until the UTC day resets or the user spends a free reset. See [Daily plan limits and free resets](#daily-plan-limits-and-free-resets).
 
+**Files menu (0.8.4).** A **Files** button beside "What can I do?" lists the last five files the agent made in this chat, newest first, with **Open** and **Show in library**. A file counts when the reply names it or a file-making tool reports it, never what you attached.
+
+**Compact cards (0.8.4).** Results the automation lane mirrors into the chat (Autonomous Work, plans, scheduled jobs) and the agent's rephrasing of your request show as a small card labelled with what produced them, with a two-line preview and **Open**.
+
+**Save as a lesson (0.8.4).** On your messages to your own agent, a hover action, and a chip when a message reads like a correction or something to remember. See [Onboarding](#onboarding--new-in-084).
+
 ### The chat timeline: topics and other channels — NEW in 0.8.1
 
 The chat is one continuous transcript per agent lane, in both layouts, the way the WhatsApp and Telegram bridges already behave.
@@ -5906,6 +5970,8 @@ Flight Deck's chat log is the transcript: `GET /fd/chat/sessions/{id}/topics`, `
 The queue is redesigned. One card on top says what is happening and offers the next step; below it are **Up next** (numbered, reorderable, editable) and a folded **Done** list with times and tokens. **Undo** covers remove, skip and clear, and the mode switch reads **Auto | Step by step**. The same queue runs in the simple layout's column (hidden by default in the kiosk), as its own view on a phone, and in the fullscreen sidebar, where collapsing folds just the queue into a bar.
 
 After **Stop** the lane stays busy until the stopped turn has ended, and the stop's reply is never counted as the task's result. A busy refusal sends the task back to waiting; a reload doesn't re-send held tasks; a task held because the daily allowance is spent retries once it resets; the next task starts when the agent says it is ready. The earlier queue behaviour is described in [The task queue](#the-task-queue--long-work-that-runs-unattended-new-in-078).
+
+**Insert now (0.8.4).** While a turn runs, a queued message shows **Insert now** (also in the row's ⋯ menu, and on the `I` key). It goes to the running turn as a `btw` note, which the model reads on its next step, and the row retires to Done. Inserting never starts the next queued task. If the turn ends first, the task goes back to the front of the queue and runs on its own.
 
 ### File library — NEW in 0.8.1
 
@@ -5943,6 +6009,71 @@ Routes (owner-checked): `/fd/file-library/status`, `/fd/file-library/scan`, `/fd
 **Run history.** Every run is logged with its result and how each delivery went: an **All activity** feed with search, and a history per task. **Run now** runs a task in the background.
 
 Due tasks run concurrently, one at a time per agent, and wait up to 20 minutes for a reply. When the owner's daily token allowance is spent, tasks are skipped (a one-shot retries after the reset). `FD_SCHEDULER_QUIET_HOURS` (e.g. `22-08`) holds deliveries until the window ends. A non-admin's task can't drive another owner's agent, and an agent can't choose whom a task emails. Routes: `/scheduler/jobs`, `GET /scheduler/runs?q=`, `POST /scheduler/preview`, `GET /scheduler/delivery-options`, and `POST /scheduler/jobs/{id}/run?background=1`.
+
+### Onboarding — NEW in 0.8.4
+
+**⋯ → Onboarding** is one page per agent: **Overview** (the last exam, how much was read, what to do next), **Lessons**, **Practice**, **Materials** and **Exams**. Tick *Set up its way of working next* in the New agent dialog to start there; admins get a button in **Users → Agents**.
+
+**Way of working** (the setup dialog):
+
+- **Material.** Up to 12 documents by drag and drop, upload or from the File library, up to 3,000 PDF pages each, each with how the agent should use it (`auto`, rules, procedures, reference, templates), plus your instructions.
+- **Knowledge base.** Every document goes to `knowledge/` whole, as an overview, parts under 200 KB and a `<name>.map.md` of its sections. It costs no tokens. Semantic memory indexes it first under its own cap (`memory.max_knowledge_files`, 3000), and the [`knowledge`](#knowledge--new-in-084) tool reads it. PDFs keep their headings and tables with `pip install 'captain-claw[pdf]'` (PyMuPDF, AGPL-3.0); otherwise they're read page by page.
+- **Reading.** How much to read: Quick (60,000 tokens), Standard (250,000) or Deep (1,000,000), with an optional **Focus on**. Material over the budget is read by its most instructive sections. A read runs in the background on the agent's own model with thinking off (`FD_SETUP_REASONING`), and survives closing the dialog and a Flight Deck restart. A step carries at most 16,000 tokens of material and calls are paced to 40,000 tokens a minute (`FD_SETUP_TOKENS_PER_MIN`, `0` = unpaced; models on the same machine aren't paced). A rate limit is waited out for about five minutes, then the read stops and keeps what it found. The owner's tiers read only when the agent is off or stops answering.
+- **Review.** Rules, ask-first items, skills, facts, templates and a glossary, each with its source. A longer read keeps more: up to 150 rules, 30 skills, 1,000 facts, 30 ask-first items, 20 templates and 400 terms; three times that in all when adding to an earlier setup.
+- **Spreadsheets.** An `.xlsx` or `.csv` also becomes one datastore table per sheet, with no model reading it. An agent that's off finds them in `pending-tables.json` when it starts.
+- **Add or Replace.** Add puts new items first and dedupes; a document given again replaces its files. Replace removes earlier rules, skills and documents; learned facts and the agent's own files stay. Each setup is recorded in `.owner-setup.json`.
+- **Read more later.** Each document records which sections were read; picking it again reads only the rest.
+
+**Lessons.** A setup's rules, ask-first items and facts, and what an exam, practice or chat teaches. Flight Deck writes `~/.captain-claw/lessons.json` for the agent. *Always in mind* lessons stay in its instructions block; the others are picked per turn by words and by meaning, at most 6 items and 1,800 characters. An agent that hasn't restarted keeps its old full block.
+
+**Exams.** Quick (10 questions), Standard (25), Deep (60) or Marathon (120), on all documents or a pick. The agent's own model writes the questions; each is asked through its real chat on a private `exam` lane that only reads and keeps nothing; each answer is graded point by point, and the verdict is worked out in code. A wrong answer's cause comes from what the agent did: didn't look, looked in the wrong place, found it and got it wrong, made things up. **Teach it this**, **Read the parts it missed**, and asking the same again for better or worse. An agent without the capability is told to restart, never asked.
+
+**Practice.** A task you give, or one of three suggested from its documents, answered on the same lane. **Good**, or **Fix it**, which drafts a lesson and tries again. Kept in the agent's `practice.json`.
+
+**Team layers.** What an admin teaches, acting for a user, is the agent's base: the user can't reword, pin or remove it, and their own Replace keeps it. A shared agent's member can *Suggest as a lesson*, which waits for the owner. **Pass it on** packages documents, tables, lessons, skills and the last exam's questions as a new archetype.
+
+**Materials** browses the documents: a read meter, sections as a tree marked read or searchable only, a reader and search (`/fd/agent-knowledge/{slug}`, owner only).
+
+### Taskboard — NEW in 0.8.4
+
+Everything a user's agents were asked and sent, on every channel, in `taskboard.db`, per user. Open it from the **Tasks** tile, **⋯ → Tasks**, **Settings → Taskboard** or the phone header. Lanes: **Needs me**, **Waiting on others**, **Agents working**, **Done**, **All**. A member's turn goes to the member's board only; owners and admins never see it.
+
+**Sources.** Scheduled jobs, Autonomous Work proposals, follow-ups, held Gmail auto-replies and sends, and linked systems, swept 20 s after start and then every 120 s. Agents report each turn through the turn register (`captain_claw/turn_register.py`, `CLAW_TURN_REGISTER=off` stops it). Agents' to-do lists show as tasks. The last 30 days of each agent's chats are read once, marked as history, and never proposed on or notified. `FD_TASKBOARD_DISABLED=true` stops the sweep and triage; the board then fills only when opened.
+
+**Inboxes.** Telegram inbox, WhatsApp Web and Gmail are each off until the user consents. They read only that user's data, keep it 30 days, and delete it when switched off, names and addresses included.
+
+**Triage.** One call on the agent's own model (owner's tier as fallback) writes the title, ask, result and parties. Jev, on the board user's own or the team's key, answers whether it's a task, who owes the next move, whether it's fulfilled, and whether it should reopen. Without Jev, rules decide. **Why is this here?** shows each decision. Board settings hold auto-close (on) and daily caps (200 Jev calls, 100 readings; `0` = none).
+
+**Working a task.**
+
+- `j`/`k` move, `o` or Enter open, `u` back, `/` search, `g` then `n`, `i`, `o`, `w`, `d` or `a` for a lane or view, `?` for the list. On a task: `e` Done, `U` Reopen, `I` Got it, `!` Not a task, `y` Yes, `b` Snooze, `l` Rename, `v` Merge into, `r` next step, `m` Next move, `a` the agent, `f` Open bigger, `z` Undo. Nothing approves or rejects a next step by key.
+- A user's correction locks that field against later sweeps, with Undo.
+- A person's reply brings the same task back to Needs me, marked *New reply*: after Done, with the next move someone else's, or snoozed. Not a task, Dismiss, mute rules and an agent at work on it stay as they are.
+- **Open bigger** shows the task in a centred column. A task with a Gmail thread shows the whole email, read with the user's token when opened and kept nowhere.
+- **Merge, unmerge, split** with Undo. Jev can suggest a merge but never applies one.
+- **Export** CSV or JSONL of your own tasks, with the board's filters. `?taskboard=<id>` opens a task.
+
+**Next steps.** With Jev, the agent's own model drafts a reply, a reminder or a clarifying question. It waits as an Autonomous Work proposal you edit, approve or reject, through **Review**, never one click. Email only becomes a draft; chats use `reply.on_origin`, delivered to the task's own origin. Recipients come only from verified parties. None on a task flagged as carrying instructions, on history, or without Jev. They expire when the task closes or after 7 days.
+
+**Hand-over.** **Next move → The agent…** asks which agent and what it should do. Nothing goes until **Hand over**. It runs as the user's own request in a session of its own, with their words first and the task fenced as data; sending still goes by the Email sending switch and its recipient list. One hand-over at a time per task.
+
+**Proof.** Triage checks each run (`taskboard_proof.py`) with no model: the tool-call register says what the tools answered in that turn, and Gmail and Google Calendar are read with the user's token. Jev then compares the user's words with the record; without Jev the result is never "proven". **What the agent did** shows the verdict. In doubt the task stays open and the user's, and gets no next step.
+
+Plan and known gaps: [docs/taskboard-plan.md](docs/taskboard-plan.md).
+
+### Your own AI keys — NEW in 0.8.4
+
+**Settings → Your own AI keys**: Anthropic, OpenAI, Google Gemini, OpenRouter or xAI (`captain_claw/flight_deck/byok.py`). Each key is checked with the provider before it's saved, sealed at rest and never returned.
+
+While on, the user's tier set runs on those keys: a tier on a provider they have a key for keeps its model, any other moves to one of theirs (pickable per tier), and local tiers stay. New agents, Flight Deck's own calls for them and their existing agents follow; running agents restart. Their tokens go to `daily_usage.byok_tokens` and don't count against daily limits. On a shared agent, the owner's keys count. Turning it off puts the old models back. On by default; an admin can turn it off for the deck, which moves everyone back.
+
+### Profile — NEW in 0.8.4
+
+**Settings → Profile** has three tabs:
+
+- **Personal** — name, links (LinkedIn, GitHub, a site), company name and links, uploaded documents, and the texts themselves. **Fill it in for me** reads the documents, visits the links and a company site's About page, looks the person and the company up on the web, and drafts *About me*, *My company* and *My standing preferences*, on the team's published tier set (the person's own tiers if none is published; `FD_PROFILE_REASONING`, default `low`). The run is followed live and kept across reopenings, and the bell says when it's finished. Nothing reaches the agents until **Use** and **Save**. Links to private hosts are never fetched.
+- **Deck-wide** — an admin edits the defaults in place; everyone else reads them.
+- **Password** — on a deck with accounts.
 
 ### Desktop app mode — NEW in 0.8.1
 
@@ -6210,7 +6341,9 @@ This section is a summary. Every screen, setting and button, the build and flash
 | Talk button | front (A) | yellow (A) | top (C) on the A build, A on the B build |
 | Extras | motion sensor | vibration, clock face, raise to wake | two RGB status lights, temperature and humidity sensor, clock, microSD slot |
 | PlatformIO env | `sticks3` | `stopwatch` | `papercolor` (A build) / `papercolor_b` (B build) |
-| Firmware (0.8.1) | 0.18.1 | 0.18.1 | A: 0.18.1 · B: 1.0.16 |
+| Firmware (0.8.4) | 0.19.10 | 0.19.10 | A: 0.19.10 · B: 1.0.22 |
+
+The same firmware also runs on the **Waveshare ESP32-S3-ePaper-1.54** (0.8.4), V2 boards only: `epaper154` (SKU 32298) and `epaper154_touch` (SKU 34212), a 200×200 black-and-white panel. BOOT talks, and only a press ends a recording; PWR cancels a recording. Flash it once over USB; updates come over the air after that. Details in [its section of the firmware README](firmware/device/README.md#waveshare-esp32-s3-epaper-154-epaper154-epaper154_touch).
 
 ### Deck side and setup
 
@@ -6776,6 +6909,7 @@ workspace/saved/
 | `STREAM_NARRATION` | Live narration (one message per note the agent writes beside its tool calls) is on by default. `off` turns it off: Telegram folds the notes into the final answer (NEW in 0.8.1), the WhatsApp and Messenger bridges leave them out |
 | `DEVICE_VOICE_MALE` / `DEVICE_VOICE_FEMALE` | Flight Deck: the Soniox voices the M5Stack devices' male / female choice uses (default `Adrian` / `Emma`) |
 | `FD_PAYMENTS`, `FD_SCHEDULER_QUIET_HOURS`, `FD_AGENT_WS_WAIT_S`, `FD_DESKTOP`, `FD_DATA_KEY_FILE`, … | Flight Deck settings — see the Configuration table under [Flight Deck](#flight-deck) |
+| `CLAW_TURN_REGISTER` | `off` stops the agent reporting its turns to the [Taskboard](#taskboard--new-in-084) (on by default since 0.8.4) |
 | `CLAW_WRITE_GUARD` | `0` turns off the `write` tool's empty/placeholder refusal and read-back check (on by default since 0.8.0) |
 | `FD_JEV_BASE_URL` | Flight Deck: send every user's Jev calls to another Jev-compatible endpoint (a proxy in front of `https://api.typesafe.ai`, or a local stub); default `https://api.typesafe.ai` |
 | `CLAW_BOTPORT__URL` | BotPort WebSocket URL for the agent's direct (legacy) link (e.g. `wss://botport.kstevica.com/ws`) |
