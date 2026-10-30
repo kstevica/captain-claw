@@ -462,6 +462,10 @@ async def handle_ws_message(
         from captain_claw.web.chat_handler import task_marker
         task = (task_marker(data["automation"].get("task"))
                 if automation is not None and isinstance(data.get("automation"), dict) else None)
+        # What the automation runs for (an Autonomous Work action, a connected
+        # system's message): the Taskboard's record of the turn names it.
+        from captain_claw import turn_register
+        turn_register.note_frame_automation(data.get("automation") if automation is not None else None)
 
         if not content and not has_attachments:
             return

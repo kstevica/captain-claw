@@ -5,6 +5,7 @@ facets counted under the other filters, and the lanes."""
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 
@@ -248,6 +249,21 @@ def test_a_closed_task_opened_again_is_the_users_move(store, action):
     # Who owes it before the close stays when it wasn't nobody.
     kept = _task(store, key="k:2", owes_next="them", patch={"status": "done", "closed_by": "source"})
     assert store.correct(ALICE, kept, action)["owes_next"] == "them"
+
+
+@pytest.mark.parametrize("action", ["not_done", "reopen", "undo"])
+def test_opening_a_task_again_takes_off_its_new_message_mark(store, action):
+    """Someone wrote after it was done (``new_since_done``): opened again by
+    the user (or their Undo of Jev's close) it is seen — a later close
+    doesn't say it again. Its other flags stay."""
+    tid = _task(store)
+    _jev_close(store, tid)
+    store.update_fields(ALICE, tid, {"flags": {"new_since_done": True, "own_chat": True}})
+    task = store.correct(ALICE, tid, action)
+    flags = json.loads(task["flags"])
+    assert task["status"] == "open" and flags["new_since_done"] is False and flags["own_chat"] is True
+    store.correct(ALICE, tid, "done")
+    assert json.loads(store.get_task(ALICE, tid)["flags"])["new_since_done"] is False
 
 
 def test_the_timeline_is_the_latest_events_and_their_count(store):

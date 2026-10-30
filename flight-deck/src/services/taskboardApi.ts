@@ -25,6 +25,9 @@ export interface TaskParty {
   party_id?: string | null
   /** Taken from a header, the register or the speaker, not from text. */
   verified: number | boolean
+  /** The board user (kind fd_user, their own id): said as "You". A deck
+   *  user's id is never shown. */
+  me?: boolean
 }
 
 /** A linked Autonomous Work action (`status` 'awaiting_approval' waits for you). */
@@ -44,6 +47,19 @@ export interface TaskFlags {
   historical?: boolean
   /** Answered in the same turn on your own chat. */
   answered_in_chat?: boolean
+  /** Your own conversation with the agent (your chat, a shared chat, your
+   *  own WhatsApp / Telegram / Messenger, your devices and glasses). */
+  own_chat?: boolean
+  /** The summary's reading of the agent's reply: did it do what was asked? */
+  answered?: 'yes' | 'partly' | 'no'
+  /** Why not, in a few words ('' when it did). */
+  blocker?: string
+  /** The agent said it couldn't do it (nothing failed): your move. */
+  agent_declined?: boolean
+  /** Only part of it was done: your move. */
+  partly_done?: boolean
+  /** Someone wrote again after it was done (it stays done). */
+  new_since_done?: boolean
   /** Taken in as a task with less certainty: not counted in the badge. */
   low_confidence?: boolean
   /** Why it is here, in a few words. */
@@ -177,11 +193,16 @@ export interface TaskCounts {
 
 export type TaskFacetKey = 'status' | 'channel' | 'agent' | 'direction' | 'kind' | 'evidence' | 'result' | 'party'
 
+/** A filter value; a People one says whether it is the board user. */
+export interface TaskFacet extends Facet {
+  me?: boolean
+}
+
 export interface TaskPage {
   items: TaskItem[]
   total: number
   /** Each counted under the other filters. */
-  facets: Record<TaskFacetKey, Facet[]>
+  facets: Record<TaskFacetKey, TaskFacet[]>
   counts: TaskCounts
 }
 

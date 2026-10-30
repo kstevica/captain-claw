@@ -85,7 +85,8 @@ async def test_the_list_and_the_detail(api):
     out = await _tasks(api, view="all")
     assert set(out) == {"items", "total", "facets", "counts", "view"} and out["total"] == 6
     assert set(out["facets"]) == {"status", "channel", "agent", "direction", "kind", "evidence", "result", "party"}
-    assert all(set(f) == {"id", "label", "count"} for facet in out["facets"].values() for f in facet)
+    assert all(set(f) == {"id", "label", "count", *(("me",) if dim == "party" else ())}
+               for dim, facet in out["facets"].items() for f in facet)
     for item in out["items"]:
         assert set(item) == ITEM_FIELDS and set(item["links"]) == LINK_FIELDS
         assert isinstance(item["channels"], list) and isinstance(item["flags"], dict)
@@ -457,3 +458,58 @@ async def test_the_badge_leaves_out_low_confidence_tasks(api):
     assert (await _get(api, "/fd/taskboard/status"))["counts"]["needs_me"] == 2  # the tab still lists it
     out = await _tasks(api, view="all", status="maybe")
     assert out["total"] == 1 and {f["id"] for f in out["facets"]["status"]} == {"open", "maybe"}
+
+
+# ── v1.1: parties ─────────────────────────────────────────────────────
+
+
+async def test_parties_say_which_is_me_and_name_each_person_once(api):
+    """The board user's own party says ``me`` (the UI never needs a deck
+    user's id to show it); a name read out of the text adds nothing when
+    that person is there already — on a board written before extraction kept
+    them apart too (an address wins over a bare name). A recorded party is
+    always kept, and someone else's deck user is not ``me``."""
+    board, uid = api.env.board, api.env.alice
+    key = secrets.token_hex(8)
+    tid, _ = board.ingest(uid, keys=[f"turn:{key}"], event={"source": "t", "source_ref": key}, create={
+        "title": "Capital of Croatia", "kind": "request", "status": "done", "owes_next": "nobody"}, parties=[
+        {"role": "requester", "kind": "fd_user", "address": uid, "display": "Ada Admin", "verified": True},
+        {"role": "requester", "kind": "name", "address": "ada admin", "display": "Ada Admin"},
+        {"role": "mentioned", "kind": "name", "address": "ana", "display": "Ana"},
+        {"role": "recipient", "kind": "email", "address": "ana@x.co", "display": "ANA"},
+        {"role": "cc", "kind": "fd_user", "address": api.env.bob, "display": "Bob", "verified": True}])
+    want = [("fd_user", uid, True), ("email", "ana@x.co", False), ("fd_user", api.env.bob, False)]
+    [item] = (await _tasks(api, view="all"))["items"]
+    assert [(p["kind"], p["address"], p["me"]) for p in item["parties"]] == want
+    detail = await _get(api, f"/fd/taskboard/tasks/{tid}")
+    assert [(p["kind"], p["address"], p["me"]) for p in detail["parties"]] == want
+    assert detail["task"]["parties"] == detail["parties"]
+
+
+async def test_the_people_filter_says_which_value_is_me_whatever_the_page_holds(api):
+    """Sign-in off (the board user is ``local``): the People filter marks
+    their own value ``me`` even on a page none of whose tasks is theirs to
+    say — so it reads "You", never "Someone else"."""
+    api.be({})
+    board = api.env.board
+    for n, party in enumerate((
+            {"role": "requester", "kind": "fd_user", "address": "local", "display": "You", "verified": True},
+            {"role": "requester", "kind": "email", "address": "ana@x.co", "display": "Ana", "verified": True})):
+        board.ingest("local", keys=[f"turn:t{n}"], event={"source": "t", "source_ref": f"t{n}"}, parties=[party],
+                     create={"title": f"Task {n}", "kind": "request", "status": "open", "owes_next": "agent"})
+    out = await _tasks(api, view="all", party="email:ana@x.co")
+    assert [i["title"] for i in out["items"]] == ["Task 1"]
+    assert not any(p.get("me") for i in out["items"] for p in i["parties"])
+    assert {f["id"]: f["me"] for f in out["facets"]["party"]} == {"fd_user:local": True, "email:ana@x.co": False}
+
+
+async def test_why_never_says_the_same_reason_twice(api):
+    """The live case through the route: answered in chat by rules."""
+    board, uid = api.env.board, api.env.alice
+    tid = _maybe(board, uid, status="done", owes="nobody", answered_in_chat=True)
+    fp = board.get_task(uid, tid)["fingerprint"]
+    board.triage_write(uid, tid, fp, decided=True, state="ok", decision={
+        "judge": "rule", "qset": "taskboard.rules.v1", "applied": "open → done",
+        "why": "The agent answered it in your chat, with no step failing, so it is done."})
+    out = await _get(api, f"/fd/taskboard/tasks/{tid}/why")
+    assert out["summary"] == "The agent answered it in your chat, with no step failing, so it is done."

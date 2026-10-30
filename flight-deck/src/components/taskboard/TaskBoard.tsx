@@ -3,10 +3,12 @@ import {
   AlarmClock, AlertTriangle, ArrowLeft, ArrowRight, Ban, BellOff, Check, Clock, Hand, HelpCircle, Layers, ListChecks,
   Loader2, Lock, MessageSquare, Pencil, RotateCcw, RotateCw, Search, Settings2, SlidersHorizontal, Undo2, Wrench, X,
 } from 'lucide-react'
+import { useAuthStore } from '../../stores/authStore'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { useTaskboardStore } from '../../stores/taskboardStore'
 import { useGmailAutoReplyStore } from '../../stores/gmailAutoReplyStore'
 import { HeldCard } from '../connections/GmailAutoReplySection'
+import type { TabId as ConnectionsTab } from '../../pages/ConnectionsPage'
 import { fmtWhen } from '../../services/schedulerApi'
 import {
   taskboardApi,
@@ -26,13 +28,14 @@ import {
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
   AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, FoldHighlight, InstructionsChip, LaneChip, LowConfidenceHint,
-  MultiFacet, OwesChip, ProposalButtons, ResultChip, StatusChip, SyncStatus,
+  MultiFacet, NoteChip, OwesChip, ProposalButtons, ResultChip, StatusChip, SyncStatus,
 } from './taskboardParts'
 import { BoardSettings } from './TaskboardSettings'
 import { WhyThisHere } from './TaskWhy'
 import {
   DIRECTION_LABEL, EVENT_LABEL, EVIDENCE_LABEL, KIND_LABEL, NO_DATES, OWES_LABEL, RESULT_LABEL, ROLE_LABEL, STATUS_DOT,
-  STATUS_LABEL, agoRelative, channelLabel, dateBounds, foldText, isSnoozed, type DateRange,
+  STATUS_LABEL, agoRelative, answeredInChat, channelLabel, dateBounds, distinctParties, foldText, isMe, isSnoozed,
+  partyAddress, partyFacetLabel, partyName, taskNotes, type BoardUser, type DateRange,
 } from './taskboardText'
 
 // ── Taskboard ───────────────────────────────────────────────────────
@@ -119,28 +122,46 @@ const sectionTitle = 'text-[11px] font-medium uppercase tracking-wider text-zinc
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
 const sameList = (a: string[], b: string[]) => a.length === b.length && a.every((v, i) => v === b[i])
 
-/** Why a task in Needs me is there, in a few words. */
-function needsReason(t: TaskItem): string {
-  if (t.proposal?.status === 'awaiting_approval') return 'Approve the next step'
+/** Why a task in Needs me is there, in a few words — and, when the agent
+ *  couldn't do it (or did only part), why not (`more`, '' when unsaid). */
+function needsReason(t: TaskItem): { text: string; more: string } | null {
+  const say = (text: string, more = '') => ({ text, more })
+  if (t.proposal?.status === 'awaiting_approval') return say('Approve the next step')
   // A held reply's own task, or one held on the thread a request started.
   if (t.status === 'open' && (t.kind === 'held_reply' || (t.owes_next === 'me' && t.links?.autoreply_id))) {
-    return 'A reply waits for your OK'
+    return say('A reply waits for your OK')
   }
-  if (t.status === 'failed') return 'It failed — take a look'
-  if (t.flags?.probably_done) return 'Probably done?'
-  if (t.flags?.overdue) return 'Overdue'
-  if (t.owes_next === 'me') return 'Your move'
-  return t.due_at && t.due_at <= Date.now() / 1000 ? 'Due now' : ''
+  if (t.status === 'failed') return say('It failed — take a look')
+  const note = taskNotes(t).find((n) => n.id !== 'new_since_done')
+  if (note) return say(note.label, note.detail)
+  if (t.flags?.probably_done) return say('Probably done?')
+  if (t.flags?.overdue) return say('Overdue')
+  if (t.owes_next === 'me') return say('Your move')
+  return t.due_at && t.due_at <= Date.now() / 1000 ? say('Due now') : null
 }
 
-/** The people on a task other than whoever did it, as one line. */
-function partyLine(parties: TaskParty[] | undefined): string {
+/** The people on a task other than whoever did it, as one line ("You" for
+ *  you; a name read out of the text that repeats one already there, once). */
+function partyLine(parties: TaskParty[] | undefined, me?: BoardUser): string {
   const names: string[] = []
-  for (const p of parties ?? []) {
-    const n = p.role === 'doer' ? '' : p.display || p.address
+  for (const p of distinctParties(parties, me)) {
+    const n = p.role === 'doer' ? '' : partyName(p, me)
     if (n && !names.includes(n)) names.push(n)
   }
   return names.length > 2 ? `${names.slice(0, 2).join(', ')} +${names.length - 2}` : names.join(', ')
+}
+
+/** Who is looking: the signed-in user — or, sign-in off, whoever the
+ *  server marks as you on the tasks shown (the People filter's values carry
+ *  the server's mark of their own, whatever the page holds). */
+function useBoardUser(items: TaskItem[]): BoardUser {
+  const id = useAuthStore((s) => s.user?.id ?? '')
+  const name = useAuthStore((s) => s.user?.display_name ?? '')
+  const marked = useMemo(() => {
+    for (const t of items) for (const p of t.parties ?? []) if (p.me && p.address) return p.address
+    return ''
+  }, [items])
+  return useMemo(() => ({ id: id || marked, name }), [id, marked, name])
 }
 
 function closedByText(t: TaskItem): string {
@@ -163,8 +184,9 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   onOpenScheduled?: (jobId: string) => void
   /** The task's own conversation in its agent's chat. */
   onOpenChat?: (agentSlug: string, sessionId: string) => void
-  /** Connections → Google, where a held reply the board can't show waits. */
-  onOpenConnections?: () => void
+  /** Connections on a tab: Google, where a held reply the board can't show
+   *  waits; Jev, from the board settings when it isn't connected. */
+  onOpenConnections?: (tab: ConnectionsTab) => void
 }) {
   const notify = useNotificationStore((s) => s.add)
   const fetchSummary = useTaskboardStore((s) => s.fetchSummary)
@@ -371,7 +393,8 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
     return () => document.removeEventListener('mousedown', onDown)
   }, [settingsOpen, phone])
 
-  const items = page?.items ?? []
+  const items = useMemo(() => page?.items ?? [], [page])
+  const me = useBoardUser(items)
   const counts = page?.counts ?? status?.counts
   const terms = useMemo(() => foldText(debounced).split(/\s+/).filter(Boolean), [debounced])
   // "Between…" with no dates picked yet filters nothing.
@@ -382,6 +405,8 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   // means that agent has none yet, not that a search missed.
   const agentOnly = filters.agent.length === 1 && filterCount === 1 && !debounced
   const clearFilters = () => { setFilters(NO_FILTERS); setDates(NO_DATES) }
+  // "Connect Jev" in the settings: they close, and Connections opens on Jev.
+  const connectJev = onOpenConnections && (() => { setSettingsOpen(false); onOpenConnections('jev') })
   const setFacet = (key: TaskFacetKey, values: string[]) => setFilters((cur) => ({ ...cur, [key]: values }))
 
   const header = (
@@ -412,7 +437,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         </button>
         {settingsOpen && !phone && (
           <div className="absolute right-0 top-full z-40 mt-2 w-[340px]">
-            <BoardSettings phone={false} onClose={() => setSettingsOpen(false)} />
+            <BoardSettings phone={false} onClose={() => setSettingsOpen(false)} onConnectJev={connectJev} />
           </div>
         )}
       </span>
@@ -493,6 +518,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       failed={!!error && !page}
       filters={filters}
       dates={dates}
+      me={me}
       onFacet={setFacet}
       onDates={setDates}
     />
@@ -510,6 +536,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       filtered={filtered}
       agentOnly={agentOnly}
       terms={terms}
+      me={me}
       selectedId={selected?.id ?? null}
       loadingMore={loadingMore}
       onSelect={setSelected}
@@ -528,6 +555,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       task={selected}
       rev={rev}
       terms={terms}
+      me={me}
       phone={phone}
       onClose={() => setSelected(null)}
       onAct={(action, value) => act(selected, action, value)}
@@ -581,7 +609,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         )}
         {settingsOpen && (
           <div className="absolute inset-0 z-20 flex flex-col bg-zinc-950">
-            <BoardSettings phone onClose={() => setSettingsOpen(false)} />
+            <BoardSettings phone onClose={() => setSettingsOpen(false)} onConnectJev={connectJev} />
           </div>
         )}
         {sources}
@@ -608,12 +636,14 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
 
 // ── Filters ──
 
-function Filters({ facets, failed, filters, dates, onFacet, onDates }: {
+function Filters({ facets, failed, filters, dates, me, onFacet, onDates }: {
   facets: TaskPage['facets'] | undefined
   /** The tasks didn't load: there is nothing to filter yet. */
   failed: boolean
   filters: Filters
   dates: DateRange
+  /** People names you "You", and never by a deck user's id. */
+  me: BoardUser
   onFacet: (key: TaskFacetKey, values: string[]) => void
   onDates: (v: DateRange) => void
 }) {
@@ -628,7 +658,8 @@ function Filters({ facets, failed, filters, dates, onFacet, onDates }: {
         return (
           <MultiFacet
             key={key} title={title} facets={list} values={filters[key]}
-            onChange={(v) => onFacet(key, v)} labelOf={labelOf} dot={dot}
+            onChange={(v) => onFacet(key, v)} dot={dot}
+            labelOf={key === 'party' ? (id, label, f) => partyFacetLabel(id, label, me, f.me) : labelOf}
           />
         )
       })}
@@ -640,13 +671,13 @@ function Filters({ facets, failed, filters, dates, onFacet, onDates }: {
 // ── Results ──
 
 function ResultList({
-  view, items, total, query, gathering, loading, error, filtered, agentOnly, terms, selectedId, loadingMore,
+  view, items, total, query, gathering, loading, error, filtered, agentOnly, terms, me, selectedId, loadingMore,
   onSelect, onMore, onClear, onRetry, onAll, onAnswered, onAct,
 }: {
   view: TaskView; items: TaskItem[]; total: number; query: string
   /** The sources are being read: more may come. */
   gathering: boolean
-  loading: boolean; error: string; filtered: boolean; agentOnly: boolean; terms: string[]
+  loading: boolean; error: string; filtered: boolean; agentOnly: boolean; terms: string[]; me: BoardUser
   selectedId: string | null; loadingMore: boolean
   onSelect: (t: TaskItem) => void; onMore: () => void; onClear: () => void; onRetry: () => void
   onAll: () => void
@@ -699,7 +730,7 @@ function ResultList({
         {items.map((t) => (
           <li key={t.id}>
             <TaskRow
-              task={t} terms={terms} active={t.id === selectedId} onClick={() => onSelect(t)} onAnswered={onAnswered}
+              task={t} terms={terms} me={me} active={t.id === selectedId} onClick={() => onSelect(t)} onAnswered={onAnswered}
               onAct={(action) => onAct(t, action)}
             />
           </li>
@@ -738,17 +769,19 @@ const DONE_ANSWERS: Answer[] = [
 const isMaybe = (t: TaskItem) => t.status === 'maybe'
 const isProbablyDone = (t: TaskItem) => t.status === 'open' && !!t.flags?.probably_done
 
-function TaskRow({ task, terms, active, onClick, onAnswered, onAct }: {
-  task: TaskItem; terms: string[]; active: boolean; onClick: () => void; onAnswered: () => Promise<void>
+function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
+  task: TaskItem; terms: string[]; me: BoardUser; active: boolean; onClick: () => void; onAnswered: () => Promise<void>
   onAct: (action: TaskAction) => Promise<void>
 }) {
   const waiting = task.proposal?.status === 'awaiting_approval' ? task.proposal : null
   const maybe = !waiting && isMaybe(task)
   // Its question is the reason line: "Probably done?", with the answers.
   const probablyDone = !waiting && !maybe && isProbablyDone(task)
-  const reason = task.lane === 'needs_me' && !probablyDone ? needsReason(task) : ''
+  const reason = task.lane === 'needs_me' && !probablyDone ? needsReason(task) : null
+  // Done, and someone wrote again since (Done and All show it).
+  const since = taskNotes(task).find((n) => n.id === 'new_since_done')
   const flags = task.flags ?? {}
-  const people = partyLine(task.parties)
+  const people = partyLine(task.parties, me)
   const agentLabel = task.agent_name || task.agent_slug
   return (
     <div className={`overflow-hidden rounded-xl border transition-colors ${
@@ -764,7 +797,7 @@ function TaskRow({ task, terms, active, onClick, onAnswered, onAct }: {
             </span>
             {flags.contains_instructions && <InstructionsChip compact />}
             <EvidenceBadge evidence={task.evidence} />
-            {flags.answered_in_chat && <ResultChip result={task.result} answeredInChat />}
+            {answeredInChat(flags) && <ResultChip result={task.result} answeredInChat />}
             <LaneChip task={task} />
           </span>
           <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
@@ -785,8 +818,17 @@ function TaskRow({ task, terms, active, onClick, onAnswered, onAct }: {
             </span>
           )}
           {reason && !waiting && (
-            <span className="mt-1 flex items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-400">
-              <Hand className="h-3 w-3" />{reason}
+            <span className="mt-1 flex min-w-0 items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+              <Hand className="h-3 w-3 shrink-0" />
+              <span className="min-w-0 truncate">
+                {reason.text}
+                {reason.more && <span className="font-normal text-zinc-400"> — <FoldHighlight text={reason.more} terms={terms} /></span>}
+              </span>
+            </span>
+          )}
+          {since && (
+            <span className="mt-1 flex items-center gap-1 text-[11px] font-medium text-sky-700 dark:text-sky-400">
+              <MessageSquare className="h-3 w-3 shrink-0" />{since.label}
             </span>
           )}
         </span>
@@ -816,9 +858,9 @@ function TaskRow({ task, terms, active, onClick, onAnswered, onAct }: {
 // ── One task ──
 
 function TaskDetailPane({
-  task, rev, terms, phone, onClose, onAct, onAgent, onAnswered, onOpenScheduled, onOpenChat, onOpenConnections,
+  task, rev, terms, me, phone, onClose, onAct, onAgent, onAnswered, onOpenScheduled, onOpenChat, onOpenConnections,
 }: {
-  task: TaskItem; rev: number; terms: string[]; phone: boolean
+  task: TaskItem; rev: number; terms: string[]; me: BoardUser; phone: boolean
   onClose: () => void
   onAct: (action: TaskAction, value?: string | number) => Promise<void>
   /** Only this agent's tasks. */
@@ -827,7 +869,7 @@ function TaskDetailPane({
   onAnswered: () => Promise<void>
   onOpenScheduled?: (jobId: string) => void
   onOpenChat?: (agentSlug: string, sessionId: string) => void
-  onOpenConnections?: () => void
+  onOpenConnections?: (tab: ConnectionsTab) => void
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [detail, setDetail] = useState<TaskDetail | null>(null)
@@ -887,7 +929,10 @@ function TaskDetailPane({
     .find((e) => e.source === 'gmail_autoreplies' && typeof e.refs?.state === 'string')
   const held = task.status === 'open' && task.owes_next === 'me'
     && (task.kind === 'held_reply' || lastReply?.refs.state === 'held')
-  const parties = detail?.parties ?? task.parties ?? []
+  const parties = distinctParties(detail?.parties ?? task.parties, me)
+  const notes = taskNotes(task)
+  // The agent couldn't do it, or did only part: what stopped it.
+  const shortOf = notes.find((n) => n.id !== 'new_since_done' && n.detail)
   const jobId = task.links?.scheduled_job_id || ''
   const sessionId = task.links?.session_id || ''
   const sessionAgent = task.links?.session_agent || task.agent_slug
@@ -976,7 +1021,11 @@ function TaskDetailPane({
           {failed && task.lane === 'needs_me' && <StatusChip status={task.status} />}
           {!closed && !failed && <OwesChip owes={task.owes_next} />}
           <EvidenceBadge evidence={task.evidence} />
-          <ResultChip result={task.result} answeredInChat={!!flags.answered_in_chat} />
+          {/* "Partly done" once: the note says it when the result would too. */}
+          {!(task.result === 'partial' && notes.some((n) => n.id === 'partly_done')) && (
+            <ResultChip result={task.result} answeredInChat={answeredInChat(flags)} />
+          )}
+          {notes.map((n) => <NoteChip key={n.id} note={n} />)}
           {flags.contains_instructions && <InstructionsChip />}
           {flags.overdue && <span className="rounded-md bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">Overdue</span>}
           {flags.stale && <span className="rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">Gone quiet</span>}
@@ -1047,29 +1096,39 @@ function TaskDetailPane({
             </p>
           </section>
         )}
+        {shortOf && (
+          <section className="mt-4">
+            <h4 className={sectionTitle}>{shortOf.id === 'agent_declined' ? 'Why the agent couldn\'t do it' : 'What\'s still missing'}</h4>
+            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-300">
+              <FoldHighlight text={shortOf.detail} terms={terms} />
+            </p>
+          </section>
+        )}
 
         {parties.length > 0 && (
           <section className="mt-4">
             <h4 className={sectionTitle}>People</h4>
             <ul className="mt-1.5 flex flex-col gap-1.5">
-              {parties.map((p, i) => (
-                <li key={`${p.role}:${p.kind}:${p.address}:${i}`} className="flex min-w-0 items-center gap-2 text-xs">
-                  <span className="w-[68px] shrink-0">
-                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">{ROLE_LABEL[p.role] || p.role}</span>
-                  </span>
-                  <span className="min-w-0 truncate text-zinc-300" title={p.address || undefined}>
-                    <FoldHighlight text={p.display || p.address} terms={terms} />
-                  </span>
-                  {p.display && p.address && p.display !== p.address && (
-                    <span className="min-w-0 truncate text-zinc-500">{p.address}</span>
-                  )}
-                  {!!p.verified && (
-                    <span title="Taken from the message itself, not from what anyone wrote" className="shrink-0">
-                      <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+              {parties.map((p, i) => {
+                // You are "You", and a deck user's id is never shown.
+                const address = partyAddress(p, me)
+                return (
+                  <li key={`${p.role}:${p.kind}:${p.address}:${i}`} className="flex min-w-0 items-center gap-2 text-xs">
+                    <span className="w-[68px] shrink-0">
+                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">{ROLE_LABEL[p.role] || p.role}</span>
                     </span>
-                  )}
-                </li>
-              ))}
+                    <span className={`min-w-0 truncate ${isMe(p, me) ? 'font-medium text-zinc-200' : 'text-zinc-300'}`} title={address || undefined}>
+                      <FoldHighlight text={partyName(p, me)} terms={terms} />
+                    </span>
+                    {address && <span className="min-w-0 truncate text-zinc-500">{address}</span>}
+                    {!!p.verified && (
+                      <span title="Taken from the message itself, not from what anyone wrote" className="shrink-0">
+                        <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                      </span>
+                    )}
+                  </li>
+                )
+              })}
             </ul>
           </section>
         )}
@@ -1265,7 +1324,7 @@ function HeldReply({ task, detail, detailFailed, onDone, onOpenConnections }: {
   /** The task's detail didn't load: look by the thread alone. */
   detailFailed: boolean
   onDone: () => Promise<void>
-  onOpenConnections?: () => void
+  onOpenConnections?: (tab: ConnectionsTab) => void
 }) {
   const notify = useNotificationStore((s) => s.add)
   const activity = useGmailAutoReplyStore((s) => s.activity)
@@ -1310,7 +1369,7 @@ function HeldReply({ task, detail, detailFailed, onDone, onOpenConnections }: {
         <p className="mt-1 text-xs text-zinc-400">
           It waits under Connections → Google → Topic auto-replies.
           {onOpenConnections && (
-            <button onClick={onOpenConnections} className="ml-1 font-medium text-teal-600 hover:underline dark:text-teal-400">Open it there</button>
+            <button onClick={() => onOpenConnections('google')} className="ml-1 font-medium text-teal-600 hover:underline dark:text-teal-400">Open it there</button>
           )}
         </p>
       )}

@@ -10,7 +10,12 @@ nothing; the tool calls of a turn are on its task's timeline, an ok send as
 recorded evidence (and its Gmail thread linked); with Jev, its answers move
 the tasks by the plan's thresholds, ``/why`` explains them, the badge leaves
 out a task admitted at low confidence, the member's task is never asked with
-the owner's key, and the user's confirm / not-done win."""
+the owner's key, and the user's confirm / not-done win.
+
+v1.1: the owner's own WhatsApp number is their own chat (a stranger's isn't);
+a request the agent said it couldn't do waits on the user; a burst of tool
+calls is one decision; an Autonomous Work turn is on its action's task and
+the agent's own cron job is one standing task."""
 
 from __future__ import annotations
 
@@ -112,7 +117,9 @@ async def deck(env, tmp_path, monkeypatch):  # noqa: F811
 
     monkeypatch.setattr(agent_sharing, "member_check", member_check)
     # No model and no Jev until a test sets them up.
-    model = SimpleNamespace(tier=None, calls=[], titles={})
+    # ``readings``: what the model says of a conversation holding the key
+    # (its reading of the reply, the people it names…), over the plain answer.
+    model = SimpleNamespace(tier=None, calls=[], titles={}, readings={})
 
     async def resolve_tier(user_id, prefer=("fast", "balanced")):
         return model.tier
@@ -121,7 +128,8 @@ async def deck(env, tmp_path, monkeypatch):  # noqa: F811
         model.calls.append(SimpleNamespace(system=system, prompt=user, owner=owner_id))
         title = next((t for k, t in model.titles.items() if k in user), "")
         out = {"title": title, "ask": "", "requester": "", "parties": [], "due_at": None,
-               "expected_deliverable": "", "result_text": "", "next_steps": []}
+               "expected_deliverable": "", "result_text": "", "next_steps": [],
+               **next((r for k, r in model.readings.items() if k in user), {})}
         return file_library.ModelReply(text="```json\n" + json.dumps(out) + "\n```", tokens=42)
 
     monkeypatch.setattr(file_library, "_resolve_tier", resolve_tier)
@@ -206,11 +214,14 @@ def _answers(is_task: float, owes: tuple[str, float], fulfilled: float, urgency:
             "urgency": _jev("score", urgency)}
 
 
-async def _turn(deck, text: str, reply: str, *, calls=(), member: bool = False, saves: str = "", **kw) -> str:
+async def _turn(deck, text: str, reply: str, *, calls=(), member: bool = False, saves: str = "",
+                meta: dict | None = None, **kw) -> str:
     """One turn as the agent runs it: opened, its tool calls made in it (each
     ``(tool, params, outcome, result text)``), closed — then both registers
-    shipped to the deck. The turn's id."""
+    shipped to the deck. *meta*: what its session keeps (a WhatsApp chat's
+    number). The turn's id."""
     agent = AgentTurn(deck.saved, text, **kw)
+    agent.session.metadata.update(meta or {})
     bound = speaker.bind(speaker.Principal(speaker_id=deck.bob, display_name="Bob", owner_name="Alice", lane="A",
                                            agent_ref=HELPER_REF)) if member else None
     try:
@@ -253,10 +264,20 @@ def _task_of(deck, uid: str, turn_id: str) -> dict | None:
     return deck.board.get_task(uid, task_id) if task_id else None
 
 
+def _settled(deck) -> None:
+    """A close or a tool call queues triage a little ahead (a burst of them
+    is one decision): that while has passed."""
+    now = time.time()
+    deck.board._conn.execute("UPDATE tasks SET triage_after = ? WHERE triage_state = 'pending' AND triage_after > ?",
+                             (now - 1, now))
+    deck.board._conn.commit()
+
+
 async def _sweep_and_triage(deck) -> dict:
     import asyncio
 
     await asyncio.to_thread(taskboard_sources.run_sweep, deck.board)
+    _settled(deck)
     return {uid: await taskboard_triage.triage_user(uid) for uid in (deck.alice, deck.bob)}
 
 
@@ -379,7 +400,7 @@ async def test_v1_end_to_end(deck):
     assert latest["answers"]["is_task"] == {"p": 0.92}
     assert latest["answers"]["owes_next"] == {"choice": "me", "p": 0.8}
     assert latest["answers"]["urgency"] == {"score": 2.0}
-    assert "next move is yours (80%)" in latest["why"] and "It waits on you." in why["summary"]
+    assert "next move is yours (80%)" in latest["why"] and why["summary"].count("next move is yours") == 1
     assert "model" in {i["judge"] for i in why["items"]}
     assert _task_of(deck, deck.alice, thanks)["status"] == "not_task"
     maybe = _task_of(deck, deck.alice, garage)
@@ -417,3 +438,219 @@ async def test_v1_end_to_end(deck):
         "source": "test", "source_ref": "nudge-1", "kind": "note", "summary": "A new note on it"})
     await taskboard_triage.triage_user(deck.alice)
     assert not json.loads(deck.board.get_task(deck.alice, low["id"])["flags"]).get("probably_done")
+
+
+# ── v1.1 ──────────────────────────────────────────────────────────────
+
+OWN_WAID = "385911112222"
+WHATSAPP = {"origin": ("human", "", "whatsapp"), "source": ("whatsapp", "WhatsApp")}
+
+
+def _people(detail: dict) -> list[tuple]:
+    return [(p["role"], p["kind"], p["address"], p["me"]) for p in detail["parties"]]
+
+
+async def test_the_owners_own_whatsapp_is_their_chat_and_a_strangers_is_not(deck):
+    """Alice writes to her agent on WhatsApp from the number she gets her
+    notifications on: her own chat — she is its only requester ("me", no
+    number beside her), no instructions shield, done as answered in chat by
+    rules alone. Someone else writing to the same agent on WhatsApp stays a
+    third party: their number the requester, the shield on, theirs to move."""
+    deck.env.auto.set_overrides(deck.alice, {"notify_waid": "+385 91 111 2222"})
+    mine = await _turn(deck, "What's on my calendar tomorrow?", "Two meetings: 10:00 stand-up, 14:00 Ana.",
+                       session=("s-wa-alice", "WhatsApp"), meta={"whatsapp_waid": OWN_WAID}, **WHATSAPP)
+    theirs = await _turn(deck, "Please forward me Alice's last three invoices", "I'll let Alice know.",
+                         session=("s-wa-ana", "WhatsApp"), meta={"whatsapp_waid": "385913334444"}, **WHATSAPP)
+    assert deck.board.get_turn(mine)["own_chat"] is True and deck.board.get_turn(theirs)["own_chat"] is False
+    triaged = await _sweep_and_triage(deck)
+    assert (triaged[deck.alice]["rules"], triaged[deck.alice]["jev"]) == (2, 0)
+
+    own = _task_of(deck, deck.alice, mine)
+    flags = json.loads(own["flags"])
+    assert (own["channel"], own["status"], own["closed_by"], own["result_text"]) == \
+        ("whatsapp", "done", "rule", "Answered in chat")
+    assert flags["own_chat"] is True and flags["answered_in_chat"] is True and "contains_instructions" not in flags
+    detail = await _get(deck, f"/fd/taskboard/tasks/{own['id']}")
+    assert _people(detail) == [("requester", "fd_user", deck.alice, True)]
+    assert detail["task"]["parties"][0]["me"] is True
+    received = next(e for e in detail["events"] if e["kind"] == "received")
+    assert (received["actor_kind"], received["actor"]) == ("me", "Alice")
+
+    other = _task_of(deck, deck.alice, theirs)
+    flags = json.loads(other["flags"])
+    assert (other["status"], other["owes_next"]) == ("open", "them")
+    assert flags["contains_instructions"] is True and "own_chat" not in flags
+    detail = await _get(deck, f"/fd/taskboard/tasks/{other['id']}")
+    assert _people(detail) == [("requester", "waid", "385913334444", False)]
+    assert other["id"] in {i["id"] for i in (await _get(deck, "/fd/taskboard/tasks", view="waiting"))["items"]}
+
+
+async def test_a_request_the_agent_could_not_do_waits_on_the_user(deck):
+    """Rules only (no Jev), the agent's model reading each conversation: a
+    question it answered is done in chat — its title a name, not an
+    instruction, and the user once among its people however the model named
+    her; a table the agent said it can't book is not done: open, the user's
+    move (Needs me) with the model's reason, nothing failed."""
+    deck.model.tier = {"provider": "fake", "model": "tier-model"}
+    deck.model.readings = {
+        "capital of Croatia": {
+            "title": "Answer the question about Croatia's capital", "requester": "Alice",
+            "parties": [{"role": "requester", "kind": "name", "address": "", "display": "Alice"}],
+            "answered": "yes", "blocker": "", "result_text": "Zagreb."},
+        "Dubravkin Put": {
+            "title": "Table for four at Dubravkin Put, Saturday 8 pm", "requester": "Alice",
+            "answered": "no", "blocker": "There is no booking system to book a table with",
+            "result_text": "Said it can't book a table; gave the restaurant's number."},
+    }
+    capital = await _turn(deck, "What is the capital of Croatia?", "Zagreb.")
+    table = await _turn(deck, "Book me a table for four at Dubravkin Put on Saturday at 8 pm",
+                        "I can't book tables — I have no booking system. Their number is +385 1 234 5678.")
+    triaged = await _sweep_and_triage(deck)
+    assert (triaged[deck.alice]["extracted"], triaged[deck.alice]["rules"], triaged[deck.alice]["jev"]) == (2, 2, 0)
+
+    asked = _task_of(deck, deck.alice, capital)
+    flags = json.loads(asked["flags"])
+    assert (asked["title"], asked["status"], asked["closed_by"]) == ("Croatia's capital", "done", "rule")
+    assert (flags["answered"], flags["answered_in_chat"]) == ("yes", True)
+    detail = await _get(deck, f"/fd/taskboard/tasks/{asked['id']}")
+    assert _people(detail) == [("requester", "fd_user", deck.alice, True)]
+    why = await _get(deck, f"/fd/taskboard/tasks/{asked['id']}/why")
+    assert why["summary"] == "The agent answered it in your chat, with no step failing, so it is done."
+
+    declined = _task_of(deck, deck.alice, table)
+    flags = json.loads(declined["flags"])
+    assert (declined["status"], declined["owes_next"], declined["result"], declined["closed_by"]) == \
+        ("open", "me", "", "")
+    assert (flags["answered"], flags["agent_declined"], flags["answered_in_chat"]) == ("no", True, False)
+    assert flags["blocker"] == "There is no booking system to book a table with"
+    needs = await _get(deck, "/fd/taskboard/tasks", view="needs_me")
+    assert [i["id"] for i in needs["items"]] == [declined["id"]] and needs["items"][0]["lane"] == "needs_me"
+    assert (await _get(deck, "/fd/taskboard/summary")) == {"needs_me": 1}
+    why = await _get(deck, f"/fd/taskboard/tasks/{declined['id']}/why")
+    assert why["summary"] == ("It waits on you — the agent could not do it: "
+                              "There is no booking system to book a table with.")
+    # The People filter names Alice once (her, not a name the model read).
+    people = (await _get(deck, "/fd/taskboard/tasks", view="all"))["facets"]["party"]
+    assert [f["id"] for f in people] == [f"fd_user:{deck.alice}"]
+
+
+async def test_a_burst_of_tool_calls_is_one_decision(deck):
+    """A turn's tool calls reach the deck in bursts — some while it runs,
+    the rest after it closed: each puts its task off a little (the close
+    until the calls it counted are in), so triage decides once, with all of
+    them on the timeline."""
+    agent = AgentTurn(deck.saved, "Plan my Saturday: trains to Split, the weather there, a lunch spot")
+    turn = turn_register.open_turn(agent)
+
+    def call(query: str) -> None:
+        handle = tool_audit.start("web_search", {"query": query}, session_id=agent.session.id)
+        tool_audit.finish(handle, "ok", "", result=ToolResult(success=True, content="3 results"))
+
+    async def ship(*registers) -> None:
+        for module in registers:
+            await module.flush_now()
+
+    call("trains Zagreb Split Saturday")
+    call("Split weather Saturday")
+    await ship(turn_register, tool_audit)
+    taskboard_sources.run_sweep(deck.board)
+    task_id = deck.board.task_for_key(deck.alice, f"turn:{turn.turn_id}")
+    assert deck.board.get_task(deck.alice, task_id)["triage_after"] >= time.time() + 40
+    assert (await taskboard_triage.triage_user(deck.alice))["picked"] == 0
+    call("lunch Split old town")
+    call("Split ferry to Hvar")
+    turn_register.close_turn(turn, "ok", "Trains at 7:05 and 9:10, sunny, lunch at Fife.", agent=agent)
+    await ship(turn_register)   # the close first: two of its four calls are still on their way
+    assert deck.board.get_task(deck.alice, task_id)["triage_after"] >= time.time() + 150
+    assert (await taskboard_triage.triage_user(deck.alice))["picked"] == 0
+    await ship(tool_audit)
+    taskboard_sources.run_sweep(deck.board)
+    assert (await taskboard_triage.triage_user(deck.alice))["picked"] == 0
+
+    _settled(deck)
+    triaged = await taskboard_triage.triage_user(deck.alice)
+    assert (triaged["picked"], triaged["rules"]) == (1, 1)
+    task = deck.board.get_task(deck.alice, task_id)
+    assert (task["status"], task["closed_by"]) == ("done", "rule")
+    assert [e["kind"] for e in deck.board.events(deck.alice, task_id)].count("tool_call") == 4
+    assert [d["judge"] for d in deck.board.decisions(deck.alice, task_id)] == ["rule"]
+    # Nothing new: a later sweep and pass decide nothing more.
+    taskboard_sources.run_sweep(deck.board)
+    _settled(deck)
+    assert (await taskboard_triage.triage_user(deck.alice))["picked"] == 0
+    assert len(deck.board.decisions(deck.alice, task_id)) == 1
+
+
+async def test_an_autonomous_work_turn_is_told_on_its_action(deck):
+    """Flight Deck runs an Autonomous Work action on the agent: the chat
+    frame names the action (``automation.ref``, fd_dispatch), so the agent's
+    turn is on the action's own task once the sweep has read it — its reply
+    an event there, no task of its own, nothing for triage."""
+    from captain_claw import mail_authority
+    from captain_claw.flight_deck import fd_dispatch
+
+    action = deck.env.auto.add_action(deck.alice, kind="nudge", title="Tell Alice that Ana is waiting",
+                                      status="dispatched")
+    frame = dict(fd_dispatch._AUTONOMY_AUTOMATION, ref=str(action["id"]))
+    reset = turn_register._AUTOMATION_REF.set(("", "", ""))
+    try:
+        turn_register.note_frame_automation(frame)   # ws_handler, as the frame comes in
+        with mail_authority.bound(mail_authority.from_wire(frame, default_kind="unknown")):
+            tid = await _turn(deck, "[Autonomous nudge] Tell Alice that Ana is waiting for her reply.",
+                              "Ana is still waiting for your reply about the Q3 invoice.",
+                              origin=("autonomy", "nudge", None), source=("autonomy", "Autonomous Work"))
+    finally:
+        turn_register._AUTOMATION_REF.reset(reset)
+    turn = deck.board.get_turn(tid)
+    assert turn["automation"] == {"kind": "autonomy", "id": str(action["id"])} and turn["gate"] == "waiting"
+
+    await _sweep_and_triage(deck)
+    key = f"autonomy:{action['id']}"
+    task_id = deck.board.task_for_key(deck.alice, key)
+    turn = deck.board.get_turn(tid)
+    assert (turn["gate"], turn["task_id"], turn["task_key"]) == ("attached", task_id, key)
+    detail = await _get(deck, f"/fd/taskboard/tasks/{task_id}")
+    assert detail["task"]["kind"] == "proposal"
+    assert [e["summary"] for e in detail["events"] if e["source"] == "agent_turns"] == \
+        ["Ana is still waiting for your reply about the Q3 invoice."]
+    assert _task_of(deck, deck.alice, tid) is None
+    assert (await _get(deck, "/fd/taskboard/tasks", view="all"))["total"] == 1
+
+
+async def test_the_agents_own_cron_job_is_one_standing_task(deck):
+    """The agent's own scheduler fires one of its cron jobs twice: one
+    standing task for the job (kind scheduled, as a Flight Deck job's), on
+    the board at its first run with no sweep and no wait — each run, its
+    tool calls and its answer events on it, done when a run answers, never
+    a task per run and never triaged."""
+    from captain_claw import mail_authority
+
+    async def run(reply: str, calls=()) -> str:
+        reset = turn_register.bind_automation("cron", "job-7", "Water the plants\nAll six pots on the balcony.")
+        try:
+            with mail_authority.bound(mail_authority.automated("cron", "", "deny")):
+                return await _turn(deck, "[SCHEDULED TASK — cron job job-7 is firing NOW]\n\nTask:\nWater the plants",
+                                   reply, calls=calls, origin=("cron", "", None), source=("scheduled", ""),
+                                   session=("s-main", "Main"))
+        finally:
+            turn_register.reset_automation(reset)
+
+    first = await run("Watered all six pots.", calls=[("shell", {"command": "valve open"}, "ok", "opened")])
+    key = "cron:helper:job-7"
+    task_id = deck.board.task_for_key(deck.alice, key)
+    assert task_id and deck.board.get_turn(first)["gate"] == "attached"
+    task = deck.board.get_task(deck.alice, task_id)
+    assert (task["kind"], task["channel"], task["title"], task["triage_state"]) == \
+        ("scheduled", "scheduled", "Water the plants", "skipped")
+    assert (task["status"], task["result"], task["result_text"]) == ("done", "success", "Watered all six pots.")
+
+    second = await run("Watered them; pot 3 needs repotting.")
+    assert deck.board.get_turn(second)["task_id"] == task_id
+    task = deck.board.get_task(deck.alice, task_id)
+    assert (task["status"], task["result_text"]) == ("done", "Watered them; pot 3 needs repotting.")
+    await _sweep_and_triage(deck)
+    detail = await _get(deck, f"/fd/taskboard/tasks/{task_id}")
+    assert [e["kind"] for e in detail["events"]] == ["status", "tool_call", "reply", "status", "reply"]
+    assert detail["task"]["lane"] == "done" and detail["task"]["triage_state"] == "skipped"
+    assert _task_of(deck, deck.alice, first) is None and _task_of(deck, deck.alice, second) is None
+    assert (await _get(deck, "/fd/taskboard/tasks", view="all"))["total"] == 1

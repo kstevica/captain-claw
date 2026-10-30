@@ -17,7 +17,9 @@ decides what the turn is to the board:
 * a scheduled task's, an Autonomous Work action's or a linked system's turn
   is told on the task v0 keeps for it (by its session, action or message),
   never a task of its own; when the sweep hasn't read that run yet, the turn
-  waits for it (six hours at most);
+  waits for it (six hours at most). One of the agent's own cron jobs has no
+  v0 task: it gets a standing task of its own (``cron:<slug>:<job id>``, as a
+  Flight Deck job's), each run an event on it;
 * a worker Flight Deck runs itself (a run's worker, a being's body) makes
   nothing.
 
@@ -28,6 +30,17 @@ tool-call register identifies a caller), never from the body; a member counts
 only while they are a member of that agent, and a member's turn that names no
 such member is dropped, never shown to the owner. Texts are masked again here.
 
+The board user's own conversation with the agent (``own_chat``): their chat
+(web, a member's), their glasses and devices, and a one-to-one WhatsApp or
+Telegram chat from a handle they registered as theirs on this deck (their
+notification number, their Telegram linked to the deck's bot — or, on
+Telegram, the chat the agent itself knows as its owner's). Its requester is
+the board user, and only them. A notification number is only the user's
+word (nothing checks they hold it): it makes the owner's own chat, never
+moves a turn to a member's board. A member's own Telegram on a shared agent
+(the account they linked with the bot's one-time code) is on the member's
+board, never the owner's — with the calls made in it. A group never is.
+
 The tool-call register's rows name the turn they were made in: the sweep
 reads them (:func:`tool_calls`) onto that turn's task — the tool, its action
 and how it ended, never its parameters — and an ok call that sends something
@@ -35,8 +48,14 @@ out is recorded evidence. A call that names its Gmail thread links a
 person's request to it, so what v0 reads about the thread lands on the same
 task (an automation's standing task never takes the threads it mails).
 
-A new event on a turn's open task puts it back in the triage queue
-(``taskboard_triage``).
+A turn's close brings the calls the register has from it along, so triage
+judges a turn with its calls once. A new event on a turn's open task puts it
+back in the triage queue (``taskboard_triage``) — its close and its tool calls
+settle a while first (a burst of calls is one decision), a new turn at once.
+Someone writing on a done request again (a reply on its email thread) queues
+it at once too, flagged ``new_since_done``: Jev asks whether that reopens it —
+unless the source moved it with that (an auto-reply held for approval or
+sent), and that move stands.
 """
 
 from __future__ import annotations
@@ -77,12 +96,18 @@ _CALLS_WAITING_KEPT = 1000
 _CLOCK_SKEW_S = 300.0
 _PRUNE_EVERY_S = 3600.0   # turns past 30 days are forgotten this often as agents post (the sweep may be off)
 _pruned_at = 0.0
+_SETTLE_S = 45.0          # a close or a tool call queues triage this long ahead (a burst is one decision)
+_LATE_CALLS_S = taskboard_sources.SWEEP_EVERY_S + _SETTLE_S  # … this long when calls are still to come
 
 # Turns from these sources (turn_source) are automated whatever they say.
 _AUTOMATED_SOURCES = ("scheduled", "flow", "agent", "autonomy", "exam", "link")
 # Channels only the board user speaks on (taskboard_triage.OWN_CHANNELS), and
 # the sources where someone else writes in.
 _OWN_CHANNELS = ("web", "member", "glasses", "device", "api", "mcp")
+# The board user's own conversation with the agent, whoever's handle it is
+# (a one-to-one WhatsApp or Telegram chat is by the handle: _handle).
+_OWN_CHAT_CHANNELS = ("web", "member", "glasses", "device")
+_HANDLE_CHANNELS = ("whatsapp", "telegram")  # a one-to-one chat known by its handle (_handle)
 _OUTSIDE_SOURCES = ("whatsapp", "telegram", "messenger", "discord", "public")
 # A session's stored origin kind → the turn channel it is an address on.
 _ORIGIN_CHANNELS = {"whatsapp": "whatsapp", "waid": "whatsapp", "telegram": "telegram", "tg": "telegram",
@@ -173,33 +198,131 @@ def _name(user: dict | None) -> str:
     return str((user or {}).get("display_name") or (user or {}).get("email") or "")
 
 
-async def _board(rec: TurnRecord, who: dict[str, str], token: str,
-                 cache: dict[str, Any]) -> tuple[str | None, str, str]:
-    """``(board user, speaker id, speaker name)`` for an open record: the
-    owner's board — or the member's who spoke, on a shared agent. The board
-    is None when the turn is nobody's: an agent without a (living) owner, or
-    a member's turn that names no member of this agent."""
+_Board = tuple[str | None, str, str, bool]
+
+
+async def _board(rec: TurnRecord, who: dict[str, str], token: str, cache: dict[str, Any]) -> _Board:
+    """``(board user, speaker id, speaker name, own chat)`` for an open
+    record: the owner's board — or the member's who spoke, on a shared agent
+    (on the agent's chat, or from the Telegram account the member linked to
+    the deck's bot). The board is None when the turn is nobody's: an
+    agent without a (living) owner, or a member's turn that names no member
+    of this agent. *own chat*: the board user's own conversation with the
+    agent (:data:`_OWN_CHAT_CHANNELS`, or their own handle: :func:`_handle`)."""
     label = " ".join(rec.speaker_label.split())[:120]
+    channel = rec.channel.strip().lower()
+    chat = channel.partition(":")[0] in _OWN_CHAT_CHANNELS
     # Nobody's name stands in for someone else's words (a stranger on Messenger).
-    own = _own_channel(rec.channel.strip().lower(), turn_source.normalize(rec.source) or rec.source.strip())
+    own = _own_channel(channel, turn_source.normalize(rec.source) or rec.source.strip())
+    handle = _handle(rec)
     if not taskboard_sources._auth_enabled():
-        return "local", "local" if own else "", label or ("You" if own else "")
+        chat = chat or bool(handle and "local" in await _handle_users(rec, handle, "local", cache))
+        # On their own chat the deck's one user is "You", never a bridge's name for them.
+        return "local", "local" if own or chat else "", "You" if chat else label or ("You" if own else ""), chat
     owner = who["owner"]
     if not owner or owner == "local":
-        return None, "", ""
+        return None, "", "", False
     owner_user = await _user(owner, cache)
     if owner_user is None:
-        return None, "", ""
+        return None, "", "", False
     sid = rec.speaker_id.strip()
     if sid.startswith(GROUP_SPEAKER_PREFIX):
         sid = ""  # a Telegram group: the owner's agent, other people speaking
     if sid == owner:
-        return owner, owner, label or _name(owner_user)
+        return owner, owner, (_name(owner_user) if chat else "") or label or _name(owner_user), chat
     if sid and await _is_member(sid, who, token, cache):
-        return sid, sid, label or _name(await _user(sid, cache)) or "Member"
+        user = await _user(sid, cache)
+        return sid, sid, (_name(user) if chat else "") or label or _name(user) or "Member", chat
     if rec.member:
-        return None, "", ""  # a member's words, and no member to show them to
-    return owner, "", label or (_name(owner_user) if own else "")
+        return None, "", "", False  # a member's words, and no member to show them to
+    if handle and handle[0] == "whatsapp":
+        # A notification number is the user's say-so — anyone may claim an
+        # allowlisted number unclaimed yet: the owner's own chat only when
+        # the owner alone claims it, and never a turn off the owner's board
+        # (a member's claim would carry someone else's messages to theirs).
+        if await _handle_users(rec, handle, owner, cache) == {owner}:
+            return owner, owner, _name(owner_user) or label, True
+    elif handle:
+        users = await _handle_users(rec, handle, owner, cache)
+        if owner in users:
+            return owner, owner, _name(owner_user) or label, True
+        # A member of this agent writing from the Telegram account they linked
+        # (the bot's one-time code proved it theirs): their board, never the
+        # owner's (several claiming it: nobody's own words).
+        mine = [u for u in sorted(users) if await _is_member(u, who, token, cache)]
+        if len(mine) == 1:
+            return mine[0], mine[0], _name(await _user(mine[0], cache)) or "Member", True
+    return owner, "", (_name(owner_user) if chat else "") or label or (_name(owner_user) if own else ""), chat
+
+
+def _handle(rec: TurnRecord) -> tuple[str, str] | None:
+    """The handle a one-to-one WhatsApp or Telegram chat came from, as its
+    bridge named it: ``("whatsapp", waid)``, ``("telegram", chat id)`` — a
+    private chat's id is its person's, a group's (a negative id, a group
+    principal) nobody's. None on any other channel."""
+    channel, ext = rec.channel.strip().lower(), rec.ext_refs
+    origin = ext.get("origin") if isinstance(ext.get("origin"), dict) else {}
+    okind = _ORIGIN_CHANNELS.get(str(origin.get("kind") or "").strip().lower(), "")
+    address = str(origin.get("address") or "").strip()[:64] if okind and okind == channel else ""
+    if channel == "whatsapp":
+        waid = re.sub(r"\D", "", str(ext.get("waid") or "")[:64]) or re.sub(r"\D", "", address)
+        return ("whatsapp", waid) if waid else None
+    if channel == "telegram" and not rec.speaker_id.startswith(GROUP_SPEAKER_PREFIX):
+        chat = _ref(ext, "telegram", "chat_id") or address
+        return ("telegram", chat) if re.fullmatch(r"\d{1,20}", chat) else None
+    return None
+
+
+async def _handle_users(rec: TurnRecord, handle: tuple[str, str], owner: str, cache: dict[str, Any]) -> set[str]:
+    """Who on this deck registered *handle* as their own: the WhatsApp
+    number they get their notifications on (``notify_waid``; with sign-in
+    off, :func:`_waid_users`), the Telegram account they linked
+    to the deck's shared bot — and, on Telegram, *owner* when the agent
+    itself says the chat is its owner's (``telegram_owner``: its owner lane,
+    which only the owner's linked chat or the user they marked as themselves
+    reaches). Fails closed: none."""
+    kind, value = handle
+    key = f"handle:{kind}:{value}"
+    if key not in cache:
+        users: set[str] = set()
+        try:
+            if kind == "whatsapp":
+                users = await asyncio.to_thread(_waid_users, value)
+            elif kind == "telegram":
+                users = {str(link.get("user_id") or "") for link in await get_db().list_telegram_links()
+                         if link.get("status") == "approved" and str(link.get("tg_user_id") or "") == value}
+        except Exception as exc:
+            log.warning("Taskboard turns: handle lookup failed", kind=kind, error=type(exc).__name__)
+        cache[key] = users - {""}
+    users = set(cache[key])
+    if kind == "telegram" and rec.ext_refs.get("telegram_owner") is True:
+        users.add(owner)
+    return users - {""}
+
+
+def _waid_users(waid: str) -> set[str]:
+    """The users whose notification number (``notify_waid``, comma-separated)
+    is *waid* — with sign-in off, the one user's when it is the number bound
+    for them (their ``notify_waid``, or the deck config's), or, with none
+    bound, the bridge allowlist's only number. Several allowlisted numbers
+    are several people: a nudge may go to each, but none is the user's own
+    words for that."""
+    from captain_claw.flight_deck import autonomy
+
+    def numbers(raw: Any) -> set[str]:
+        return {re.sub(r"\D", "", n) for n in str(raw or "").split(",")} - {""}
+
+    if not taskboard_sources._auth_enabled():
+        from captain_claw.flight_deck.whatsapp_bridge import _allowed_waids
+
+        bound = numbers(autonomy.resolve_config("local").get("notify_waid"))
+        allowed = numbers(",".join(_allowed_waids()))
+        return {"local"} if waid in (bound or (allowed if len(allowed) == 1 else set())) else set()
+    out: set[str] = set()
+    for uid, overrides in autonomy.get_store().all_overrides().items():
+        if waid in numbers((overrides or {}).get("notify_waid")):
+            out.add(str(uid))
+    return out
 
 
 @router.post("/fd/taskboard/agent/turns")
@@ -210,9 +333,9 @@ async def agent_turns(body: TurnBatch, request: Request) -> dict:
     who = await _identify(request)
     token = request.headers.get("X-Agent-Auth", "") or ""
     cache: dict[str, Any] = {}
-    items: list[tuple[TurnRecord, tuple[str | None, str, str]]] = []
+    items: list[tuple[TurnRecord, _Board]] = []
     for rec in body.records:
-        items.append((rec, await _board(rec, who, token, cache) if rec.phase == "open" else (None, "", "")))
+        items.append((rec, await _board(rec, who, token, cache) if rec.phase == "open" else (None, "", "", False)))
     touched = await asyncio.to_thread(_take, body.boot, who, items)
     for uid in touched:
         _kick(uid)
@@ -244,7 +367,18 @@ def _files(paths: list[str]) -> list[str]:
     return out[:20]
 
 
-def _take(boot: str, who: dict[str, str], items: list[tuple[TurnRecord, tuple[str | None, str, str]]]) -> set[str]:
+def _automation(raw: dict, kind: str) -> dict:
+    """A turn's automation as kept: its kind, its id and — one of the
+    agent's own cron jobs — the job's first line (masked)."""
+    from captain_claw.tool_audit import mask_text
+
+    if not kind:
+        return {}
+    name = mask_text(" ".join(str(raw.get("name") or "").split())[:400])[:160]
+    return {"kind": kind, "id": str(raw.get("id") or "").strip()[:128], **({"name": name} if name else {})}
+
+
+def _take(boot: str, who: dict[str, str], items: list[tuple[TurnRecord, _Board]]) -> set[str]:
     """Keep each record once and put what it adds on the board. The boards
     with a task now in the triage queue."""
     from captain_claw.tool_audit import mask_text
@@ -262,7 +396,7 @@ def _take(boot: str, who: dict[str, str], items: list[tuple[TurnRecord, tuple[st
             taskboard_sources.prune_turns(store, now)
         except Exception as exc:
             log.warning("Taskboard turns prune failed", error=str(exc))
-    for rec, (board, speaker_id, speaker_name) in items:
+    for rec, (board, speaker_id, speaker_name, own_chat) in items:
         if rec.at < now - TURNS_KEPT_S:
             continue  # older than the board keeps turns
         at = rec.at if rec.at <= now + _CLOCK_SKEW_S else now
@@ -281,9 +415,10 @@ def _take(boot: str, who: dict[str, str], items: list[tuple[TurnRecord, tuple[st
                 "channel": rec.channel.strip().lower(), "source": turn_source.normalize(rec.source) or rec.source.strip(),
                 "source_label": _head(rec.source_label, 80), "speaker_id": speaker_id, "speaker_label": speaker_name,
                 "member": member, "private": rec.private or member,  # a member's words are theirs
+                "own_chat": own_chat,
                 "opener": rec.opener, "human": rec.human, "literal": rec.literal.strip().lower(),
                 "text_head": mask_text(rec.text_head)[:_HEAD_MAX], "ext_refs": _small(rec.ext_refs),
-                "automation": {"kind": kind, "id": str(rec.automation.get("id") or "").strip()[:128]} if kind else {},
+                "automation": _automation(rec.automation, kind),
                 "started_at": at,
             }
         else:
@@ -293,7 +428,7 @@ def _take(boot: str, who: dict[str, str], items: list[tuple[TurnRecord, tuple[st
                       "failed_tool_calls": min(rec.failed_tool_calls, rec.tool_calls)}
         if store.save_turn(rec.turn_id, rec.phase, ref, fields) != "new":
             continue
-        uid = settle(store, rec.turn_id, agents=agents, managed=managed)
+        uid = settle(store, rec.turn_id, agents=agents, managed=managed, calls=True)
         if uid:
             touched.add(uid)
     return touched
@@ -326,11 +461,12 @@ def _kick(uid: str) -> None:
 
 
 def settle(store: TaskboardStore, turn_id: str, *, agents: dict[str, dict] | None = None,
-           managed: bool = False, now: float | None = None) -> str | None:
+           managed: bool = False, now: float | None = None, calls: bool = False) -> str | None:
     """Put what is known of a turn on the board: once its open is here, the
     gate's verdict (once — a waiting automation turn is tried again); once
-    its close is, the reply on the task it is on. The board user when that
-    put one of their tasks in the triage queue."""
+    its close is, the reply on the task it is on — and, with *calls*, the
+    turn's tool calls the register already has (:func:`_turn_calls`). The
+    board user when that put one of their tasks in the triage queue."""
     now = time.time() if now is None else now
     turn = store.get_turn(turn_id)
     if turn is None or turn["started_at"] is None or not turn["user_id"]:
@@ -346,7 +482,10 @@ def settle(store: TaskboardStore, turn_id: str, *, agents: dict[str, dict] | Non
         task = store.get_task(turn["user_id"], task_id) if gate == "task" else None
         queued = task is not None and task["triage_state"] == "pending"
     if turn["gate"] in ("task", "attached") and turn["ended_at"] is not None:
-        queued |= _reply(store, turn, agents, now)
+        new, requeued = _reply(store, turn, agents, now)
+        queued |= requeued
+        if new and calls:
+            queued |= _turn_calls(store, turn, agents, now)
     return turn["user_id"] if queued else None
 
 
@@ -361,11 +500,20 @@ def _gate(store: TaskboardStore, turn: dict, agents: dict[str, dict], managed: b
         if kind not in AUTOMATIONS:
             return "skipped:automated", "", ""
         keys = _automation_keys(turn)
+        held = store.tasks_for_keys(turn["user_id"], keys) if keys else {}
+        key = next((k for k in keys if k in held), "")
+        if key:
+            return "attached", held[key], key
+        if _own_cron(turn):
+            # The agent's own job: nothing of Flight Deck's will ever name it.
+            job = str(turn["automation"].get("id") or "")
+            if not job:
+                return "skipped:no_task", "", ""
+            key = f"cron:{turn['agent_slug']}:{job}"
+            return "attached", _cron_run(store, turn, key, agents), key
         if not keys:
             return "skipped:no_task", "", ""  # nothing names its task
-        held = store.tasks_for_keys(turn["user_id"], keys)
-        key = next((k for k in keys if k in held), "")
-        return ("attached", held[key], key) if key else ("waiting", "", "")
+        return "waiting", "", ""
     why = _not_a_persons(turn)
     if why:
         return f"skipped:{why}", "", ""
@@ -462,8 +610,13 @@ def _requester(turn: dict) -> dict:
     the person on this board who spoke (an FD user), but only on a channel of
     the board user's own or as a confirmed member. Anyone else — a stranger
     on Messenger, a visitor on the public link, Discord, a bridge turn whose
-    id didn't come — is a name, unverified: never the board user's own words."""
+    id didn't come — is a name, unverified: never the board user's own words.
+    The board user's own chat (``own_chat``: their own number too) is theirs
+    alone: the board user, verified, and no handle beside them."""
     ext, name, channel = turn["ext_refs"], turn["speaker_label"], turn["channel"]
+    if turn.get("own_chat"):
+        return {"role": "requester", "kind": "fd_user", "address": turn["user_id"], "display": name or "You",
+                "verified": True}
     origin = ext.get("origin") if isinstance(ext.get("origin"), dict) else {}
     okind = _ORIGIN_CHANNELS.get(str(origin.get("kind") or "").strip().lower(), "")
     address = str(origin.get("address") or "").strip()[:320] if okind and okind == channel else ""
@@ -544,7 +697,8 @@ def _admit(store: TaskboardStore, turn: dict, requester: dict, effect: str, agen
     """A person's turn as a task of its own: what they asked (the first line
     its title until extraction writes a better one), owed by the agent and
     queued for triage — or, muted by a rule, kept quietly (nobody owes it,
-    never triaged)."""
+    never triaged). The board user's own chat is flagged ``own_chat`` (what
+    it asks is theirs, never someone else's message)."""
     tid, text = turn["turn_id"], turn["text_head"]
     first = next((line.strip() for line in text.splitlines() if line.strip()), "")
     channel = turn["channel"]
@@ -558,7 +712,7 @@ def _admit(store: TaskboardStore, turn: dict, requester: dict, effect: str, agen
         "kind": "request", "direction": "received", "channel": channel, "status": "open",
         "owes_next": "nobody" if muted else "agent", "triage_state": "skipped" if muted else "pending",
         "triage_after": time.time(), "private": int(turn["private"]), "source": "agent_turns", "source_ref": tid,
-        "flags": {"rule": effect} if effect else {},
+        "flags": {**({"rule": effect} if effect else {}), **({"own_chat": True} if turn.get("own_chat") else {})},
     }
     task_id, _ = store.ingest(
         turn["user_id"], keys=[f"turn:{tid}"], create=create, parties=[requester],
@@ -569,34 +723,153 @@ def _admit(store: TaskboardStore, turn: dict, requester: dict, effect: str, agen
     return task_id or ""
 
 
-def _requeue(store: TaskboardStore, uid: str, task_id: str, now: float) -> dict | None:
+def _requeue(store: TaskboardStore, uid: str, task_id: str, now: float, *, settle: bool = False) -> dict | None:
     """The patch that puts a turn's task back in the triage queue — only a
     task a turn made (kind request) that is still open, and never one a
-    mute rule keeps quiet (never triaged)."""
+    mute rule keeps quiet (never triaged). *settle* (a close, a tool call):
+    not before :data:`_SETTLE_S` from now, nor before it was due already —
+    so the rest of a burst lands first and triage decides once."""
     task = store.get_task(uid, task_id) if task_id else None
     if task is None or task["kind"] != "request" or task["status"] not in ("open", "maybe"):
         return None
     if task["triage_state"] == "skipped" or _json(task.get("flags"), {}).get("rule") == "mute":
         return None
-    return {"triage_state": "pending", "triage_after": now}
+    due = float(task["triage_after"] or 0) if task["triage_state"] == "pending" else 0.0
+    return {"triage_state": "pending", "triage_after": max(due, now + _SETTLE_S) if settle else now}
 
 
-def _reply(store: TaskboardStore, turn: dict, agents: dict[str, dict], now: float) -> bool:
+def _reply(store: TaskboardStore, turn: dict, agents: dict[str, dict], now: float) -> tuple[bool, bool]:
     """A turn's close on its task: the reply, how the turn ended and the
-    files it saved (as refs) — once. True when that queued the task for
-    triage again."""
+    files it saved (as refs) — once; on one of the agent's own cron jobs,
+    how the run ended too (:func:`_cron_end`). ``(the reply was new, that
+    queued the task for triage again)``."""
     uid, tid, outcome = turn["user_id"], turn["turn_id"], turn["outcome"]
     info = agents.get(turn["agent_slug"]) or {}
-    patch = _requeue(store, uid, turn["task_id"], now)
+    name = info.get("name") or turn["agent_slug"]
+    cron = turn["task_key"].startswith("cron:")
+    patch = _cron_end(turn, name) if cron else _requeue(store, uid, turn["task_id"], now, settle=True)
     _, new = store.ingest(
         uid, keys=[turn["task_key"]], patch=patch,
         event={"source": "agent_turns", "source_ref": f"{tid}:close", "at": turn["ended_at"], "kind": "reply",
-               "channel": turn["channel"], "actor_kind": "agent", "actor": info.get("name") or turn["agent_slug"],
+               "channel": turn["channel"], "actor_kind": "agent", "actor": name,
                "summary": _head(turn["reply_head"], 500) or _END_SUMMARY.get(outcome, "Answered"),
                "outcome": outcome if outcome in ("ok", "error", "blocked") else "", "private": turn["private"],
                "refs": {"turn_id": tid, "outcome": outcome, "deliverables": turn["deliverables"],
                         "tool_calls": turn["tool_calls"], "failed_tool_calls": turn["failed_tool_calls"]}})
-    return new and patch is not None
+    return new, new and not cron and patch is not None
+
+
+def _turn_calls(store: TaskboardStore, turn: dict, agents: dict[str, dict], now: float) -> bool:
+    """The tool calls of a turn just closed that the register already has,
+    onto its task now — so triage judges the turn with its calls in one
+    decision, not once more when the sweep brings them (it reads them again,
+    adding nothing). Fewer ended than the close counted: the rest are on
+    their way, and triage waits for a sweep to bring them. True when that
+    queued the task for triage again."""
+    path = _audit_path()
+    if not turn["tool_calls"] or not path.is_file():
+        return False
+    if "turn_id" not in {r["name"] for r in _rows(path, "PRAGMA table_info(tool_calls)")}:
+        return False
+    rows = _rows(path, "SELECT * FROM tool_calls WHERE turn_id = ? AND agent_slug = ? ORDER BY id LIMIT ?",
+                 (turn["turn_id"], turn["agent_slug"], taskboard_sources._BATCH))
+    p = taskboard_sources._Pass(store, None, agents=agents)
+    queued = False
+    for row in rows:
+        queued |= _call(p, row, now) not in ("", "wait")
+    if sum(1 for r in rows if r.get("outcome") != "running") < turn["tool_calls"]:
+        task = store.get_task(turn["user_id"], turn["task_id"]) if turn["gate"] == "task" else None
+        if task is not None and task["triage_state"] == "pending":
+            store.update_fields(turn["user_id"], task["id"],
+                                {"triage_after": max(float(task["triage_after"] or 0), now + _LATE_CALLS_S)})
+    return queued
+
+
+# ── The agent's own cron jobs ─────────────────────────────────────────
+
+
+def _own_cron(turn: dict) -> bool:
+    """A run of one of the agent's own cron jobs (its scheduler binds
+    ``cron``; Flight Deck's scheduler binds ``fd_scheduler``)."""
+    return (str(turn["automation"].get("kind") or "") == "scheduled"
+            and str(turn["origin_detail"].get("automation") or "") == "cron")
+
+
+def _cron_title(turn: dict) -> str:
+    """The job as the board names it: its first line, as the agent said —
+    else the task line of the prompt it fired with — else its id."""
+    name = " ".join(str(turn["automation"].get("name") or "").split())
+    if not name:
+        task = re.search(r"(?m)^Task:[ \t]*\n\s*(\S.*)$", turn["text_head"])
+        name = " ".join(task.group(1).split()) if task else ""
+    return name[:160] or f"Scheduled task {str(turn['automation'].get('id') or '')[:8]}".strip()
+
+
+def _cron_run(store: TaskboardStore, turn: dict, key: str, agents: dict[str, dict]) -> str:
+    """A run of the agent's own cron job on the job's one standing task (made
+    at its first run, kind scheduled, as a Flight Deck job's): it opens the
+    task again for the agent — over the user's Done or Reopen, which were
+    about the run before, not their Dismiss or Not a task (about the job)."""
+    uid, tid = turn["user_id"], turn["turn_id"]
+    info = agents.get(turn["agent_slug"]) or {}
+    title = _cron_title(turn)
+    create = {
+        "title": title, "ask": title, "agent_slug": turn["agent_slug"],
+        "agent_name": info.get("name") or turn["agent_slug"], "agent_ref": info.get("ref") or "",
+        "agent_owner_id": turn["agent_owner_id"], "kind": "scheduled", "direction": "internal",
+        "channel": "scheduled", "owes_next": "agent", "triage_state": "skipped", "private": int(turn["private"]),
+        "source": "agent_turns", "source_ref": key,
+    }
+    held = store.task_for_key(uid, key)
+    cur = store.get_task(uid, held) if held else None
+    unlock = ("status",) if cur and cur["status"] not in ("dismissed", "not_task") else ()
+    task_id, _ = store.ingest(
+        uid, keys=[key], create=create, unlock=unlock,
+        touch={"title": title, "ask": title} if turn["automation"].get("name") else None,
+        patch={"status": "open", "owes_next": "agent", "evidence": "none"},
+        event={"source": "agent_turns", "source_ref": f"{tid}:open", "at": turn["started_at"], "kind": "status",
+               "channel": "scheduled", "actor_kind": "system", "actor": "Scheduler", "summary": "Run started",
+               "private": turn["private"], "refs": {"turn_id": tid, "job_id": turn["automation"].get("id") or ""}})
+    return task_id or ""
+
+
+def _cron_end(turn: dict, agent_name: str) -> dict:
+    """What a cron run's end makes of its standing task (as a Flight Deck
+    job's run): done on an answer, failed on an error or a block; stopped
+    before it finished, nobody is on it now."""
+    outcome, reply = turn["outcome"], _head(turn["reply_head"], 600)
+    if outcome == "ok":
+        return {"status": "done", "owes_next": "nobody", "closed_by": "source", "closed_by_party": agent_name,
+                "evidence": "claimed", "result": "success", "result_text": reply or "Run finished"}
+    if outcome in ("error", "blocked"):
+        return {"status": "failed", "result": "failed", "closed_by": "source",
+                "result_text": reply or _END_SUMMARY[outcome]}
+    return {"owes_next": "nobody"}
+
+
+# ── New inbound on a closed request ───────────────────────────────────
+
+
+def inbound_after_done(store: TaskboardStore, uid: str, task_id: str, keys: list[str] | tuple[str, ...],
+                       now: float | None = None) -> bool:
+    """Someone wrote on a person's request after it was done (a reply on its
+    email thread), found by a strong key: back in the triage queue at once,
+    so Jev asks whether it opens the task again — without Jev it stays done —
+    and flagged ``new_since_done`` for the board. A task a mute rule keeps
+    quiet stays out of the queue. True when it was queued (the caller kicks
+    triage)."""
+    task = store.get_task(uid, task_id)
+    if task is None or task["kind"] != "request" or task["status"] != "done":
+        return False
+    strength = {link["key"]: link["strength"] for link in store.links(uid, [task_id]).get(task_id, [])}
+    found = next((k for k in keys if k in strength), "")
+    if strength.get(found) != "strong":
+        return False
+    if _json(task.get("flags"), {}).get("rule") == "mute":
+        return False
+    return store.update_fields(uid, task_id, {"triage_state": "pending",
+                                               "triage_after": time.time() if now is None else now,
+                                               "flags": {"new_since_done": True}})
 
 
 # ── Sweep adapters (taskboard_sources.ADAPTERS) ───────────────────────
@@ -619,14 +892,22 @@ def _audit_path() -> Path:
     return taskboard_store.data_dir() / "tool_audit.db"  # the register's, beside the board
 
 
-def _call_board(p: taskboard_sources._Pass, row: dict) -> str | None:
+def _call_board(p: taskboard_sources._Pass, row: dict, turn: dict) -> str | None:
     """The board a call belongs on, by the rule a turn's goes by: the member's
-    whose turn it was (the register verified them), else the owner's."""
+    whose turn it was (the register verified them), else the owner's — and a
+    member's own one-to-one chat (on their board by its handle: the Telegram
+    account they linked; the bridge runs it as the owner's agent, with no
+    member named, so its calls carry the agent's own identity) takes the
+    calls made in it."""
     if not p.auth:
         return "local"
     if row.get("member"):
         return str(row.get("speaker_id") or "") or None
-    return str(row.get("owner_id") or "") or None
+    owner = str(row.get("owner_id") or "") or None
+    if (owner and owner == turn["agent_owner_id"] and turn["member"] and turn["own_chat"]
+            and turn["channel"] in _HANDLE_CHANNELS):
+        return turn["user_id"]
+    return owner
 
 
 def tool_calls(p: taskboard_sources._Pass) -> None:
@@ -681,7 +962,7 @@ def _call(p: taskboard_sources._Pass, row: dict, now: float) -> str:
         return "wait" if now - float(turn["received_at"] or now) < _TURN_WAIT_S else ""
     if turn["gate"] not in ("task", "attached") or not turn["task_key"]:
         return ""
-    uid = _call_board(p, row)
+    uid = _call_board(p, row, turn)
     if uid is None or uid != turn["user_id"]:
         return ""  # a member's call never on the owner's board, nor the owner's on a member's
     if p.user_id is not None and p.auth and uid != p.user_id:
@@ -697,7 +978,7 @@ def _call(p: taskboard_sources._Pass, row: dict, now: float) -> str:
     # task (a scheduled job's one standing task) would gather every thread
     # the job ever mailed, and a reply on one would land there.
     thread = refs.get("gmail_thread_id", "") if turn["gate"] == "task" else ""
-    patch = _requeue(p.store, uid, turn["task_id"], now)
+    patch = _requeue(p.store, uid, turn["task_id"], now, settle=True)
     _, new = p.ingest(
         "tool_audit", uid, keys=[turn["task_key"]], patch=patch,
         extra_keys=[f"gmail:thread:{thread}"] if thread else [],

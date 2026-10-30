@@ -21,6 +21,7 @@ from fastapi import FastAPI
 
 from captain_claw.flight_deck import (
     auth,
+    jev_routes,
     taskboard,
     taskboard_ingest,
     taskboard_sources,
@@ -44,8 +45,11 @@ async def api(env, tmp_path, monkeypatch):  # noqa: F811
     """The v0 deck (Alice owns "helper"; Bob is a member of it) with the turn
     and tool-call routes, a managed worker of Alice's, another user's agent,
     and the triage kicks caught."""
-    from captain_claw.flight_deck import agent_sharing, context_packs, server
+    from captain_claw.flight_deck import agent_sharing, context_packs, server, taskboard_store
 
+    # The first import of server points the board at the deck's real data
+    # dir (taskboard.configure): back to this deck's, where its ledgers are.
+    monkeypatch.setattr(taskboard_store, "_DATA_DIR", env.tmp)
     carol = (await env.db.create_user("carol@x.co", "h", "Carol"))["id"]
     auth.set_auth_db(env.db)
     audit = ToolAuditStore(tmp_path / "tool_audit.db")
@@ -349,10 +353,19 @@ async def test_a_muted_task_stays_out_of_triage(api):
 def _autoreply(api, message_id, state, reason=""):
     conn = sqlite3.connect(api.env.tmp / "flight-deck.db")
     now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    row_id = secrets.token_hex(8)
     conn.execute("INSERT INTO gmail_autoreplies (id, owner_id, inbound_message_id, thread_id, from_addr, state, "
                  "reason, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                 (secrets.token_hex(8), api.alice, message_id, "T-" + message_id, "Ana@Client.co", state, reason,
-                  now, now))
+                 (row_id, api.alice, message_id, "T-" + message_id, "Ana@Client.co", state, reason, now, now))
+    conn.commit()
+    conn.close()
+    return row_id
+
+
+def _autoreply_moves(api, row_id, state):
+    conn = sqlite3.connect(api.env.tmp / "flight-deck.db")
+    conn.execute("UPDATE gmail_autoreplies SET state = ?, updated_at = ? WHERE id = ?",
+                 (state, time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(time.time() + 1)), row_id))
     conn.commit()
     conn.close()
 
@@ -613,3 +626,483 @@ async def test_turns_go_after_30_days_with_the_sweep_off(api, monkeypatch):
 def test_the_sources_sheet_says_agent_chats_are_tracked():
     row = next(s for s in taskboard.SOURCES if s["key"] == "agent_chats")
     assert row["tracked"] and row["on"]
+
+
+# ── v1.1: the user's own chats ────────────────────────────────────────
+
+
+def _flags(task) -> dict:
+    return json.loads(task["flags"])
+
+
+def _requesters(api, uid, task_id) -> list[tuple]:
+    return [(p["kind"], p["address"], p["display"], p["verified"])
+            for p in api.board.parties_for(uid, [task_id])[task_id] if p["role"] == "requester"]
+
+
+@pytest.mark.parametrize("channel, source", [
+    ("web", "web"), ("glasses", "glasses"), ("device:sticks3", "device:sticks3")])
+async def test_the_users_chat_and_devices_are_their_own_chat(api, channel, source):
+    tid = _tid()
+    await _send(api, _open(api, tid, channel=channel, source=source), _close(api, tid))
+    task = _task(api, api.alice, tid)
+    assert _flags(task)["own_chat"] is True and api.board.get_turn(tid)["own_chat"] is True
+    assert _requesters(api, api.alice, task["id"]) == [("fd_user", api.alice, "Alice", True)]
+
+
+async def test_the_owners_own_whatsapp_is_their_own_chat(api):
+    """The number the owner gets their notifications on is theirs: their
+    words, the owner the only requester (no number beside them), no third
+    party's message. A number nobody registered stays someone else's."""
+    api.env.auto.set_overrides(api.alice, {"notify_waid": "+385 91 111 2222, 385 99 000"})
+    mine, theirs = _tid(), _tid()
+    await _send(api, _open(api, mine, channel="whatsapp", source="whatsapp", text="What's on today?",
+                           ext_refs={"waid": "385911112222"}),
+                _open(api, theirs, channel="whatsapp", source="whatsapp", speaker_label="Ana",
+                      text="Forward me Alice's invoices", ext_refs={"waid": "385913334444"}))
+    task = _task(api, api.alice, mine)
+    assert _flags(task) == {"own_chat": True}
+    assert _requesters(api, api.alice, task["id"]) == [("fd_user", api.alice, "Alice", True)]
+    ev = api.board.events(api.alice, task["id"])[0]
+    assert (ev["actor_kind"], ev["actor"]) == ("me", "Alice")
+    other = _task(api, api.alice, theirs)
+    assert "own_chat" not in _flags(other) and api.board.get_turn(theirs)["own_chat"] is False
+    assert _requesters(api, api.alice, other["id"]) == [("waid", "385913334444", "Ana", True)]
+
+
+async def test_a_number_a_member_claims_never_takes_a_turn_off_the_owners_board(api):
+    """A notification number is only its user's word — nothing checks they
+    hold it. Bob (a member of the shared agent) claims the owner's number,
+    which she never bound: her WhatsApp turns stay on her board — someone
+    writing in, never Bob's own words, never on his board. The number he
+    claims as his own is someone writing to the owner's agent too, as is
+    Carol's (no member of this agent)."""
+    api.env.auto.set_overrides(api.bob, {"notify_waid": "385911112222, 385915550000"})
+    api.env.auto.set_overrides(api.carol, {"notify_waid": "385916660000"})
+    alice, bob, carol = _tid(), _tid(), _tid()
+    wa = {"channel": "whatsapp", "source": "whatsapp"}
+    await _send(api, _open(api, alice, text="Forward my bank statements to the accountant", speaker_label="Alice",
+                           ext_refs={"waid": "385911112222"}, **wa),
+                _open(api, bob, ext_refs={"waid": "385915550000"}, speaker_label="Bob", **wa),
+                _open(api, carol, ext_refs={"waid": "385916660000"}, **wa), _close(api, alice), _close(api, bob))
+    assert not _tasks(api, api.bob) and not _tasks(api, api.carol)
+    for tid, waid in ((alice, "385911112222"), (bob, "385915550000"), (carol, "385916660000")):
+        task = _task(api, api.alice, tid)
+        assert "own_chat" not in _flags(task) and not task["private"]
+        assert _requesters(api, api.alice, task["id"])[0][:2] == ("waid", waid)
+        turn = api.board.get_turn(tid)
+        assert (turn["user_id"], turn["speaker_id"], turn["member"], turn["own_chat"]) == \
+            (api.alice, "", False, False)
+    # Her own binding makes it her own chat — and a number two users claim is nobody's.
+    api.env.auto.set_overrides(api.alice, {"notify_waid": "385917770000"})
+    api.env.auto.set_overrides(api.carol, {"notify_waid": "385917770000"})
+    mine, both = _tid(), _tid()
+    await _send(api, _open(api, mine, ext_refs={"waid": "385917770000"}, **wa))
+    assert "own_chat" not in _flags(_task(api, api.alice, mine))
+    api.env.auto.set_overrides(api.carol, {"notify_waid": ""})
+    await _send(api, _open(api, both, ext_refs={"waid": "385917770000"}, **wa))
+    assert _flags(_task(api, api.alice, both))["own_chat"] is True
+
+
+async def test_a_members_own_telegram_is_on_the_members_board_with_its_calls(api):
+    """Bob linked his Telegram to the deck's bot (its one-time code proves
+    the account his) and writes to the shared agent's own bot: his board,
+    his own chat, private — and the calls made in that turn, which the
+    bridge runs as the owner's agent, land on his task (their thread with
+    it), never on the owner's board."""
+    await api.env.db.create_telegram_link(api.bob, "bobs-agent", "Bob's agent", "code2")
+    await api.env.db.update_telegram_link(api.bob, status="approved", tg_user_id="5552")
+    tid = _tid()
+    await _send(api, _open(api, tid, channel="telegram", source="telegram", text="Email Ana the invoice",
+                           ext_refs={"telegram_chat_id": "5552"}))
+    await _calls(api, _call(api, tid, tool="google_mail", params={"action": "send"},
+                            refs={"gmail_thread_id": "T-88", "gmail_message_id": "M-8"}))
+    await _send(api, _close(api, tid, tool_calls=1))
+    task = _task(api, api.bob, tid)
+    assert task["private"] and _flags(task)["own_chat"] is True
+    assert _requesters(api, api.bob, task["id"]) == [("fd_user", api.bob, "Bob", True)]
+    calls = [e for e in api.board.events(api.bob, task["id"]) if e["source"] == "tool_audit"]
+    assert [(e["kind"], e["summary"], e["evidence"]) for e in calls] == [("sent", "google_mail send: ok", "recorded")]
+    assert api.board.task_for_key(api.bob, "gmail:thread:T-88") == task["id"]
+    run_sweep()   # read again by the sweep: nothing more, and nothing on the owner's board
+    assert len([e for e in api.board.events(api.bob, task["id"]) if e["source"] == "tool_audit"]) == 1
+    assert not _tasks(api, api.alice) and api.board.task_for_key(api.alice, "gmail:thread:T-88") is None
+
+
+async def test_the_owners_own_telegram_is_their_own_chat_a_group_never(api):
+    """The Telegram account the owner linked to the deck's shared bot is
+    theirs, and so is the chat the agent knows as its owner's (its owner
+    lane); a group never is, whatever it claims."""
+    await api.env.db.create_telegram_link(api.alice, "helper", "Helper", "code1")
+    await api.env.db.update_telegram_link(api.alice, status="approved", tg_user_id="5551")
+    linked, hinted, stranger, group = _tid(), _tid(), _tid(), _tid()
+    tg = {"channel": "telegram", "source": "telegram"}
+    await _send(api, _open(api, linked, ext_refs={"telegram_chat_id": "5551"}, **tg),
+                _open(api, hinted, ext_refs={"telegram_chat_id": "777", "telegram_owner": True}, **tg),
+                _open(api, stranger, ext_refs={"telegram_chat_id": "888"}, speaker_label="Ivo", **tg),
+                _open(api, group, ext_refs={"telegram_chat_id": "-100123", "telegram_owner": True},
+                      speaker_id="tg-group:-100123", speaker_label="Team chat", **tg))
+    for tid in (linked, hinted):
+        task = _task(api, api.alice, tid)
+        assert _flags(task)["own_chat"] is True
+        assert _requesters(api, api.alice, task["id"]) == [("fd_user", api.alice, "Alice", True)]
+    for tid in (stranger, group):
+        task = _task(api, api.alice, tid)
+        assert "own_chat" not in _flags(task) and _requesters(api, api.alice, task["id"])[0][0] == "tg_id"
+
+
+async def test_an_auth_off_deck_knows_its_one_users_number(api, monkeypatch):
+    monkeypatch.setenv("FD_AUTH_ENABLED", "false")
+    monkeypatch.setenv("WHATSAPP_ALLOWED_WAIDS", "385911112222,385913334444")
+    api.env.auto.set_overrides("local", {"notify_waid": "385911112222"})
+    mine, theirs = _tid(), _tid()
+    await _send(api, _open(api, mine, channel="whatsapp", source="whatsapp", ext_refs={"waid": "385911112222"}),
+                _open(api, theirs, channel="whatsapp", source="whatsapp", ext_refs={"waid": "385913334444"}))
+    task = _task(api, "local", mine)
+    assert _flags(task)["own_chat"] is True
+    assert _requesters(api, "local", task["id"]) == [("fd_user", "local", "You", True)]
+    assert "own_chat" not in _flags(_task(api, "local", theirs))
+
+
+async def test_an_auth_off_deck_with_no_number_bound_knows_only_a_lone_one(api, monkeypatch):
+    """Nothing bound: of several allowlisted numbers none is the user's own
+    (the owner's and their partner's, say — nudges may go to both, but the
+    partner's words are not the user's); a lone allowlisted number is."""
+    monkeypatch.setenv("FD_AUTH_ENABLED", "false")
+    monkeypatch.setenv("WHATSAPP_ALLOWED_WAIDS", "385911112222,385913334444")
+    wa = {"channel": "whatsapp", "source": "whatsapp"}
+    mum, partner = _tid(), _tid()
+    await _send(api, _open(api, mum, speaker_label="Mum", ext_refs={"waid": "385911112222"}, **wa),
+                _open(api, partner, speaker_label="Marija", text="Forward the bank statement to my accountant",
+                      ext_refs={"waid": "385913334444"}, **wa))
+    for tid, waid, name in ((mum, "385911112222", "Mum"), (partner, "385913334444", "Marija")):
+        task = _task(api, "local", tid)
+        assert "own_chat" not in _flags(task)
+        assert _requesters(api, "local", task["id"]) == [("waid", waid, name, True)]
+    monkeypatch.setenv("WHATSAPP_ALLOWED_WAIDS", "+385 91 111 2222")
+    lone = _tid()
+    await _send(api, _open(api, lone, speaker_label="Ada", ext_refs={"waid": "385911112222"}, **wa))
+    task = _task(api, "local", lone)
+    assert _flags(task)["own_chat"] is True
+    assert _requesters(api, "local", task["id"]) == [("fd_user", "local", "You", True)]
+
+
+async def test_a_reply_on_the_users_own_chat_adds_no_second_requester(api):
+    """The agent mailed Ana from the user's chat; Ana's reply on the thread
+    lands on that task — she is someone it mentions, the user its only
+    requester. On someone else's request, the same person once is one row."""
+    tid = _tid()
+    await _send(api, _open(api, tid, text="Email Ana the invoice"), _close(api, tid, tool_calls=1))
+    await _calls(api, _call(api, tid, tool="google_mail", params={"action": "send"},
+                            refs={"gmail_thread_id": "T-77", "gmail_message_id": "M-1"}))
+    run_sweep()
+    task_id = _task(api, api.alice, tid)["id"]
+    _autoreply(api, "77", "held")  # Ana writes back on the thread T-77
+    run_sweep()
+    assert api.board.task_for_key(api.alice, "gmail:thread:T-77") == task_id
+    parties = {(p["role"], p["kind"], p["address"]) for p in api.board.parties_for(api.alice, [task_id])[task_id]}
+    assert ("requester", "fd_user", api.alice) in parties and ("mentioned", "email", "ana@client.co") in parties
+    assert _requesters(api, api.alice, task_id) == [("fd_user", api.alice, "Alice", True)]
+
+    p = taskboard_sources._Pass(api.board, None)
+    other = _tid()
+    await _send(api, _open(api, other, channel="whatsapp", source="whatsapp", speaker_label="Ana Kovač",
+                           ext_refs={"waid": "385913334444"}))
+    other_id = _task(api, api.alice, other)["id"]
+    p.ingest("follow_ups", api.alice, keys=[f"turn:{other}"],
+             parties=[{"role": "requester", "kind": "name", "address": "ana", "display": "Ana Kovac"},
+                      {"role": "requester", "kind": "email", "address": "ivo@x.co", "display": "Ivo"}],
+             event={"source": "test", "source_ref": "n-1", "kind": "note", "summary": "seen"})
+    assert [r[2] for r in _requesters(api, api.alice, other_id)] == ["Ana Kovač", "Ivo"]
+
+
+# ── v1.1: a close and its calls are judged once ───────────────────────
+
+
+async def test_a_close_and_a_burst_of_calls_are_judged_once(api):
+    """The admit is triaged at once; the close brings the calls the register
+    already has with it and settles 45 s (so a burst is one decision); the
+    sweep reading them again changes nothing; a later call never makes a
+    task due sooner than it was."""
+    tid = _tid()
+    await _send(api, _open(api, tid))
+    assert _task(api, api.alice, tid)["triage_after"] <= time.time()
+    await _calls(api, _call(api, tid), _call(api, tid, tool="web_search", params={"query": "trains"}))
+    before = time.time()
+    await _send(api, _close(api, tid, tool_calls=2))
+    task = _task(api, api.alice, tid)
+    assert sorted(e["kind"] for e in api.board.events(api.alice, task["id"])) == \
+        ["received", "reply", "tool_call", "tool_call"]   # no sweep needed
+    after = task["triage_after"]
+    assert task["triage_state"] == "pending" and before + taskboard_ingest._SETTLE_S <= after <= time.time() + 46
+    assert api.board.triage_queue(api.alice, now=time.time() + 30) == []
+    run_sweep()
+    again = _task(api, api.alice, tid)
+    assert (again["fingerprint"], again["triage_after"]) == (task["fingerprint"], after)
+
+    # A call that comes later still settles — but never earlier than due.
+    api.board._conn.execute("UPDATE tasks SET triage_after = ? WHERE id = ?", (time.time() + 500, task["id"]))
+    api.board._conn.commit()
+    await _calls(api, _call(api, tid, tool="read", params={"path": "a.txt"}))
+    run_sweep()
+    assert _task(api, api.alice, tid)["triage_after"] >= time.time() + 450
+    # Judged meanwhile (not pending): the next call settles from now.
+    api.board._conn.execute("UPDATE tasks SET triage_state = 'ok', triage_after = NULL WHERE id = ?", (task["id"],))
+    api.board._conn.commit()
+    await _calls(api, _call(api, tid, tool="read", params={"path": "b.txt"}))
+    run_sweep()
+    late = _task(api, api.alice, tid)
+    assert late["triage_state"] == "pending" and late["triage_after"] >= time.time() + 40
+
+
+async def test_a_close_whose_calls_are_still_coming_waits_for_a_sweep(api):
+    tid = _tid()
+    await _send(api, _open(api, tid))
+    await _calls(api, _call(api, tid))
+    await _send(api, _close(api, tid, tool_calls=3))  # two more on their way
+    task = _task(api, api.alice, tid)
+    assert task["triage_after"] >= time.time() + taskboard_ingest._LATE_CALLS_S - 5
+    assert [e["kind"] for e in api.board.events(api.alice, task["id"])].count("tool_call") == 1
+
+
+# ── v1.1: automation turns on their tasks ─────────────────────────────
+
+
+async def test_an_autonomous_work_turn_is_told_on_its_action(api):
+    action = api.env.auto.add_action(api.alice, kind="nudge", title="Ana is waiting", status="dispatched")
+    tid = _tid()
+    await _send(api, _open(api, tid, origin="autonomy", human=False, channel="autonomy", source="autonomy",
+                           literal="autonomy", text="[Autonomous nudge] Tell the user Ana is waiting",
+                           automation={"kind": "autonomy", "id": action["id"]}),
+                _close(api, tid, reply="Ana is waiting for your reply."))
+    assert api.board.get_turn(tid)["gate"] == "waiting"   # the sweep hasn't read the action yet
+    run_sweep()
+    task_id = api.board.task_for_key(api.alice, f"autonomy:{action['id']}")
+    turn = api.board.get_turn(tid)
+    assert (turn["gate"], turn["task_id"]) == ("attached", task_id)
+    assert [e["summary"] for e in api.board.events(api.alice, task_id) if e["source"] == "agent_turns"] == \
+        ["Ana is waiting for your reply."]
+    assert api.board.task_for_key(api.alice, f"turn:{tid}") is None and api.kicks == []
+
+
+async def test_a_linked_systems_turn_is_told_on_its_message(api):
+    link = await api.env.db.create_agent_link(api.alice, name="Shop", agent_slug="helper", instructions="",
+                                              key_hash="kh", key_hint="abcd")
+    tid = _tid()
+    await _send(api, _open(api, tid, origin="automated", human=False, channel="link", source="link",
+                           text="Order 12 for Ana", automation={"kind": "link", "id": link["id"]},
+                           ext_refs={"link_id": link["id"], "link_msg_id": "m-1"}),
+                _close(api, tid, reply="Filed the order."))
+    assert api.board.get_turn(tid)["gate"] == "waiting"
+    await api.env.db.add_link_event(link["id"], "reply", "m-1", {"text": "Filed the order."})
+    run_sweep()
+    task_id = api.board.task_for_key(api.alice, f"link:{link['id']}:m-1")
+    assert api.board.get_turn(tid)["task_id"] == task_id
+    assert [e["summary"] for e in api.board.events(api.alice, task_id) if e["source"] == "agent_turns"] == \
+        ["Filed the order."]
+
+
+def _cron(api, tid, job_id="job-9", **kw):
+    return _open(api, tid, origin="cron", human=False, channel="scheduled", source="scheduled", literal="cron",
+                 session_id="s-main", text="[SCHEDULED TASK — cron job job-9 is firing NOW]\n…\n\nTask:\nWater the plants",
+                 origin_detail={"automation": "cron"}, automation={"kind": "scheduled", "id": job_id, **kw})
+
+
+async def test_the_agents_own_cron_job_is_one_standing_task_its_runs_move(api):
+    tid = _tid()
+    await _send(api, _cron(api, tid, name="Water the plants"))
+    key = "cron:helper:job-9"
+    task = api.board.get_task(api.alice, api.board.task_for_key(api.alice, key))
+    assert (task["kind"], task["direction"], task["channel"], task["status"], task["owes_next"]) == \
+        ("scheduled", "internal", "scheduled", "open", "agent")
+    assert (task["title"], task["triage_state"], task["agent_name"]) == ("Water the plants", "skipped", "Helper")
+    assert api.board.get_turn(tid)["gate"] == "attached"   # at once, never waiting
+    await _calls(api, _call(api, tid, tool="shell", params={"command": "water"}))
+    await _send(api, _close(api, tid, reply="Watered all six pots.", tool_calls=1))
+    task = api.board.get_task(api.alice, task["id"])
+    assert (task["status"], task["result"], task["evidence"], task["closed_by"], task["result_text"]) == \
+        ("done", "success", "claimed", "source", "Watered all six pots.")
+    assert [e["kind"] for e in api.board.events(api.alice, task["id"])] == ["status", "tool_call", "reply"]
+
+    # The next run opens it again — over the user's Done; it fails on an error.
+    api.board.correct(api.alice, task["id"], "done", actor="Alice")
+    run2 = _tid()
+    await _send(api, _cron(api, run2))
+    assert api.board.get_task(api.alice, task["id"])["status"] == "open"
+    await _send(api, _close(api, run2, outcome="error", reply=""))
+    task = api.board.get_task(api.alice, task["id"])
+    assert (task["status"], task["result"], task["title"]) == ("failed", "failed", "Water the plants")
+    assert len(_tasks(api, api.alice)) == 1 and api.kicks == []
+    # Dismissed by the user: a run leaves it so.
+    api.board.correct(api.alice, task["id"], "dismiss", actor="Alice")
+    run3 = _tid()
+    await _send(api, _cron(api, run3), _close(api, run3))
+    assert api.board.get_task(api.alice, task["id"])["status"] == "dismissed"
+
+    # A cron run that names no job is let go at once (no six-hour wait).
+    bare = _tid()
+    await _send(api, _cron(api, bare, job_id=""))
+    assert api.board.get_turn(bare)["gate"] == "skipped:no_task"
+
+
+async def test_a_cron_jobs_name_falls_back_to_the_task_line(api):
+    tid = _tid()
+    await _send(api, _cron(api, tid, job_id="job-2"))
+    task_id = api.board.task_for_key(api.alice, "cron:helper:job-2")
+    assert api.board.get_task(api.alice, task_id)["title"] == "Water the plants"
+
+
+# ── v1.1: an agent's email, and a reply after it was done ─────────────
+
+
+async def test_an_email_the_chat_sent_lands_on_the_chat_not_a_task_of_its_own(api):
+    """The deck's record of the send is read before the agent's tool call
+    names its thread: it waits (the cursor stays on it) and then lands on
+    the chat's task as evidence — no "sent" task beside it."""
+    tid = _tid()
+    await _send(api, _open(api, tid, text="Email Ana the invoice"), _close(api, tid, tool_calls=1))
+    await api.env.db.add_gmail_send(api.alice, "helper", to_addrs="Ana <ana@client.co>", subject="Invoice",
+                                    gmail_message_id="M-1", thread_id="T-77")
+    run_sweep()
+    assert api.board.task_for_key(api.alice, "gmail:thread:T-77") is None
+    await _calls(api, _call(api, tid, tool="google_mail", params={"action": "send"},
+                            refs={"gmail_thread_id": "T-77", "gmail_message_id": "M-1"}))
+    run_sweep()
+    task = _task(api, api.alice, tid)
+    assert api.board.task_for_key(api.alice, "gmail:thread:T-77") == task["id"]
+    sends = [e for e in api.board.events(api.alice, task["id"]) if e["source"] == "gmail_sends"]
+    assert [(e["kind"], e["evidence"]) for e in sends] == [("sent", "recorded")]
+    assert [t["kind"] for t in _tasks(api, api.alice)] == ["request"]
+
+
+async def test_a_message_after_a_request_was_done_queues_it_again(api):
+    """Someone writes on a done request by a strong key: back in the queue
+    at once (Jev asks whether it reopens), still done, flagged for the board
+    — not by a weak key, nor what the user wrote, nor on a muted task."""
+    tid = _tid()
+    await _send(api, _open(api, tid, text="Email Ana the invoice"), _close(api, tid, tool_calls=1))
+    await _calls(api, _call(api, tid, tool="google_mail", params={"action": "send"}, refs={"gmail_thread_id": "T-5"}))
+    run_sweep()
+    task_id = _task(api, api.alice, tid)["id"]
+    api.board.add_link(api.alice, "autoreply:x1", task_id, "weak")
+
+    def done():
+        api.board._conn.execute("UPDATE tasks SET status = 'done', triage_state = 'ok', triage_after = NULL, "
+                                "flags = '{\"own_chat\": true}' WHERE id = ?", (task_id,))
+        api.board._conn.commit()
+
+    p = taskboard_sources._Pass(api.board, None)
+
+    def inbound(key, ref, actor_kind="party"):
+        p.ingest("gmail_autoreplies", api.alice, keys=[key],
+                 event={"source": "test", "source_ref": ref, "kind": "received", "actor_kind": actor_kind,
+                        "actor": "Ana", "summary": "Email: one more thing"})
+
+    done()
+    api.kicks.clear()
+    inbound("autoreply:x1", "r-weak")
+    inbound("gmail:thread:T-5", "r-mine", actor_kind="me")
+    task = api.board.get_task(api.alice, task_id)
+    assert task["triage_state"] == "ok" and "new_since_done" not in _flags(task) and api.kicks == []
+    inbound("gmail:thread:T-5", "r-1")
+    task = api.board.get_task(api.alice, task_id)
+    assert (task["status"], task["triage_state"]) == ("done", "pending") and task["triage_after"] <= time.time()
+    assert _flags(task)["new_since_done"] is True and api.kicks == [api.alice]
+    # A task a mute rule keeps quiet stays out of the queue.
+    done()
+    api.board._conn.execute("UPDATE tasks SET flags = '{\"rule\": \"mute\"}' WHERE id = ?", (task_id,))
+    api.board._conn.commit()
+    inbound("gmail:thread:T-5", "r-2")
+    assert api.board.get_task(api.alice, task_id)["triage_state"] == "ok"
+
+
+def _rules_only(monkeypatch) -> None:
+    """Triage as a deck without a Jev key or a model runs it: rules decide."""
+    async def no_jev(*args, **kw):
+        raise jev_routes.JevNotConnected()
+
+    async def no_model(task, user_id):
+        return None
+
+    async def open_quota(user_id):
+        return False
+
+    monkeypatch.setattr(jev_routes, "ask_for_owner", no_jev)
+    monkeypatch.setattr(taskboard_triage, "reader_for", no_model)
+    monkeypatch.setattr(taskboard_triage, "_quota_spent", open_quota)
+    monkeypatch.setattr(taskboard_triage, "_RUNNING", set())
+
+
+async def _triage_due(api, uid) -> dict:
+    """One triage pass over *uid*'s board, its queued tasks due now."""
+    api.board._conn.execute("UPDATE tasks SET triage_after = ? WHERE user_id = ? AND triage_state = 'pending'",
+                            (time.time() - 1, uid))
+    api.board._conn.commit()
+    return await taskboard_triage.triage_user(uid)
+
+
+async def test_a_reply_held_on_a_done_requests_thread_stays_in_needs_me(api, monkeypatch):
+    """The user's chat had Ana emailed and the rules closed it as answered
+    in chat. Ana writes back on the thread and the auto-reply is held for
+    approval: the task opens for the user, and triage — queued again by the
+    new message — leaves that move standing (no second "answered in chat").
+    Approved and sent, the auto-reply closes it, with nothing left marked
+    new since it was done."""
+    _rules_only(monkeypatch)
+    tid = _tid()
+    await _send(api, _open(api, tid, text="Email Ana the Q3 invoice"), _close(api, tid, tool_calls=1))
+    await _calls(api, _call(api, tid, tool="google_mail", params={"action": "send"}, refs={"gmail_thread_id": "T-5"}))
+    run_sweep()
+    await _triage_due(api, api.alice)
+    task_id = _task(api, api.alice, tid)["id"]
+    assert (_task(api, api.alice, tid)["status"], _task(api, api.alice, tid)["closed_by"]) == ("done", "rule")
+
+    row = _autoreply(api, "5", "held")
+    run_sweep()
+    task = _task(api, api.alice, tid)
+    assert (task["status"], task["owes_next"], task["triage_state"]) == ("open", "me", "pending")
+    assert _flags(task)["new_since_done"] is False   # what came in is what opened it
+    res = await _triage_due(api, api.alice)
+    assert res["rules"] == 1
+    task = _task(api, api.alice, tid)
+    assert (task["status"], task["owes_next"], task["closed_at"]) == ("open", "me", None)
+    assert api.board.lane_of(api.alice, task_id) == "needs_me"
+    flags = _flags(task)
+    assert flags["answered_in_chat"] is False and flags["why"].startswith("What its source recorded")
+    # A straggling event queues it again: still the source's move that stands.
+    api.board.update_fields(api.alice, task_id, {"triage_state": "pending", "triage_after": time.time() - 1})
+    api.board._conn.execute("UPDATE tasks SET decided_fp = '' WHERE id = ?", (task_id,))
+    api.board._conn.commit()
+    await _triage_due(api, api.alice)
+    assert (_task(api, api.alice, tid)["status"], _task(api, api.alice, tid)["owes_next"]) == ("open", "me")
+
+    _autoreply_moves(api, row, "approved")
+    run_sweep()
+    assert _task(api, api.alice, tid)["owes_next"] == "agent"
+    _autoreply_moves(api, row, "sent")
+    run_sweep()
+    task = _task(api, api.alice, tid)
+    assert (task["status"], task["closed_by"], task["result"]) == ("done", "source", "success")
+    assert not _flags(task).get("new_since_done")
+    summary = taskboard_triage.why_summary(api.board.get_task(api.alice, task_id),
+                                           api.board.decisions(api.alice, task_id))
+    assert "came in after it was closed" not in summary and "answered in your chat" not in summary
+
+
+async def test_a_reply_answered_at_once_closes_a_done_request_with_nothing_new(api, monkeypatch):
+    """The auto-reply sent straight away (never held): the source closes the
+    request again after the message it answered — nothing marked new since
+    done, and triage leaves it so."""
+    _rules_only(monkeypatch)
+    tid = _tid()
+    await _send(api, _open(api, tid, text="Email Ana the Q3 invoice"), _close(api, tid, tool_calls=1))
+    await _calls(api, _call(api, tid, tool="google_mail", params={"action": "send"}, refs={"gmail_thread_id": "T-6"}))
+    run_sweep()
+    await _triage_due(api, api.alice)
+    _autoreply(api, "6", "sent")
+    run_sweep()
+    task = _task(api, api.alice, tid)
+    assert (task["status"], task["closed_by"]) == ("done", "source") and _flags(task)["new_since_done"] is False
+    await _triage_due(api, api.alice)
+    task = _task(api, api.alice, tid)
+    assert (task["status"], task["closed_by"]) == ("done", "source") and not _flags(task)["new_since_done"]

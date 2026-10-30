@@ -2,7 +2,7 @@ import {
   AlarmClock, Bot, Code2, Glasses, Inbox, Link2, Mail, MessageCircle, MessagesSquare, Plug, Send, Smartphone, Sparkles,
   Users, Watch,
 } from 'lucide-react'
-import type { TaskAnswer } from '../../services/taskboardApi'
+import type { TaskAnswer, TaskFlags, TaskParty } from '../../services/taskboardApi'
 import { fmtRelative } from '../../services/schedulerApi'
 
 // The Taskboard's words and plain helpers (no components, so its parts file
@@ -93,6 +93,106 @@ export const EVENT_LABEL: Record<string, string> = {
   received: 'Received', reply: 'Reply', sent: 'Sent', tool_call: 'Tool call', delivery: 'Delivered', status: 'Status',
   proposal: 'Proposed', approval: 'Approved', rejection: 'Rejected', decision: 'Decided', correction: 'You changed it',
   note: 'Note',
+}
+
+// ── People ──
+
+/** Who is looking at the board: their id and name (both '' when sign-in is
+ *  off — the server's `me` still says which party is them). */
+export interface BoardUser { id: string; name: string }
+
+/** Whether a party is the board user: the server says so; a deck user's
+ *  party with the board user's own id, when it doesn't. */
+export function isMe(p: TaskParty, me?: BoardUser): boolean {
+  if (typeof p.me === 'boolean') return p.me
+  return p.kind === 'fd_user' && !!me?.id && p.address === me.id
+}
+
+/** A party's name: "You" for you, and never a deck user's id (another deck
+ *  user without a name is "Someone else"). */
+export function partyName(p: TaskParty, me?: BoardUser): string {
+  if (isMe(p, me)) return 'You'
+  const display = (p.display || '').trim()
+  if (p.kind === 'fd_user') return display && display !== p.address && display !== 'You' ? display : 'Someone else'
+  return display || p.address
+}
+
+const nameKey = (s: string) => foldText(s).replace(/\s+/g, ' ').trim()
+
+/** The address shown beside a party's name: none for a deck user (their id)
+ *  or for a bare name (its address is the name, folded), nor when it only
+ *  repeats the name. */
+export function partyAddress(p: TaskParty, me?: BoardUser): string {
+  if (p.kind === 'fd_user' || p.kind === 'name' || isMe(p, me)) return ''
+  const display = (p.display || '').trim()
+  return display && p.address && nameKey(display) !== nameKey(p.address) ? p.address : ''
+}
+
+/** The parties worth listing, in their order. A party read out of the text
+ *  (not recorded) adds nothing when someone of the same name — folded, so
+ *  "Ada Admin" and "ada admin" — is already there: a recorded party (you go
+ *  by your own name too), or an earlier one read out of the text. A recorded
+ *  party is dropped only when it is the same one twice. */
+export function distinctParties(parties: TaskParty[] | undefined, me?: BoardUser): TaskParty[] {
+  const list = parties ?? []
+  const recorded = (p: TaskParty) => !!p.verified || isMe(p, me)
+  const keys = (p: TaskParty) => [p.display || p.address, isMe(p, me) ? me?.name || '' : '']
+    .map(nameKey).filter(Boolean)
+  const strong = new Set(list.filter(recorded).flatMap(keys))
+  const names = new Set<string>()
+  const ids = new Set<string>()
+  return list.filter((p) => {
+    const ks = keys(p)
+    if (recorded(p)) {
+      const id = `${p.role}\u0000${p.kind}\u0000${p.address}`
+      if (ids.has(id)) return false
+      ids.add(id)
+      return true
+    }
+    if (!ks.length || ks.some((k) => strong.has(k) || names.has(k))) return false
+    ks.forEach((k) => names.add(k))
+    return true
+  })
+}
+
+/** A People filter value's name: the server's id is `kind:address`, its
+ *  label the party's name — "You" for you (the server's `me` on the value,
+ *  so whatever tasks the page holds), never a deck user's id. */
+export function partyFacetLabel(id: string, label: string, me?: BoardUser, isYou?: boolean): string {
+  const at = id.indexOf(':')
+  const party: TaskParty = {
+    role: '', kind: at < 0 ? '' : id.slice(0, at), address: at < 0 ? id : id.slice(at + 1), display: label, verified: 0,
+    ...(typeof isYou === 'boolean' ? { me: isYou } : {}),
+  }
+  return partyName(party, me)
+}
+
+// ── Notes ──
+
+/** What a task's flags add to its lane, in a few words: the agent couldn't
+ *  do it (and why), only partly did it, or someone wrote again after it was
+ *  done. For the row's reason line and the detail's chips. */
+export interface TaskNote {
+  id: 'agent_declined' | 'partly_done' | 'new_since_done'
+  label: string
+  /** Why not ('' when the summary didn't say). */
+  detail: string
+}
+
+export function taskNotes(t: { status: string; flags?: TaskFlags | null }): TaskNote[] {
+  const f = t.flags ?? {}
+  const blocker = typeof f.blocker === 'string' ? f.blocker.trim() : ''
+  const out: TaskNote[] = []
+  if (f.agent_declined) out.push({ id: 'agent_declined', label: 'Agent couldn\'t do it', detail: blocker })
+  else if (f.partly_done) out.push({ id: 'partly_done', label: 'Partly done', detail: blocker })
+  if (f.new_since_done && t.status === 'done') out.push({ id: 'new_since_done', label: 'New message since done', detail: '' })
+  return out
+}
+
+/** "Answered in chat" — not for a reply that said it couldn't, or did only
+ *  part of it. */
+export function answeredInChat(flags: TaskFlags | null | undefined): boolean {
+  return !!flags?.answered_in_chat && !flags.agent_declined && !flags.partly_done
 }
 
 // ── Decisions ──

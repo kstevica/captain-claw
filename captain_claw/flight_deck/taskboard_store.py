@@ -221,6 +221,9 @@ _TABLES: dict[str, list[tuple[str, str]]] = {
         ("open_ref", "TEXT NOT NULL DEFAULT ''"),
         ("close_ref", "TEXT NOT NULL DEFAULT ''"),
         ("received_at", "REAL NOT NULL DEFAULT 0"),
+        # v1.1: the board user's own conversation with the agent (their chat,
+        # their devices, their own WhatsApp / Telegram) — the ingest's verdict.
+        ("own_chat", "INTEGER NOT NULL DEFAULT 0"),
     ],
     "source_cursors": [
         ("source", "TEXT PRIMARY KEY"),
@@ -271,7 +274,7 @@ _WRITABLE = _TASK_COLUMNS - {"id", "user_id", "search_text", "fingerprint", "use
 _TURN_FIELDS = {name for name, _ in _TABLES["turns"]} - {
     "turn_id", "gate", "task_id", "task_key", "open_ref", "close_ref", "received_at"}
 _TURN_JSON = {"origin_detail": {}, "ext_refs": {}, "deliverables": [], "automation": {}}
-_TURN_FLAGS = ("member", "opener", "human", "private")
+_TURN_FLAGS = ("member", "opener", "human", "private", "own_chat")
 TURN_DROPPED = "skipped:dropped"
 
 # What a facet counts, by the column it reads.
@@ -470,7 +473,9 @@ class TaskboardStore:
         """Write *fields* the way a source may: never a field the user locked
         (closing fields count as the status), ``claimed`` never over
         ``verified``, flags merged key by key. A status that closes the task
-        stamps when; one that opens it clears who closed it."""
+        stamps when; one that opens it clears who closed it. A status move
+        (opening it, or a source closing it again) answers what came in after
+        it was done: ``new_since_done`` goes, unless the same write sets it."""
         row = self._row(task_id)
         if row is None:
             return False
@@ -498,6 +503,10 @@ class TaskboardStore:
         elif status is not None and status != row["status"]:
             sets.update(closed_at=None, closed_by="", closed_by_party="")
             sets.setdefault("result", "")
+        flags = _loads(sets.get("flags", row["flags"]), {})
+        if (status is not None and flags.get("new_since_done") and "new_since_done" not in locks
+                and "new_since_done" not in (fields.get("flags") or {})):
+            sets["flags"] = json.dumps({**flags, "new_since_done": False})
         sets = {k: v for k, v in sets.items() if row.get(k) != v}
         if not sets:
             return False
@@ -1012,7 +1021,8 @@ class TaskboardStore:
         still *fingerprint* (a new event since the read leaves the task to the
         next pass, which reads it anew): *fields* as a machine pass writes
         them (never a field the user locked), *parties* unverified (a model
-        named them: never a recipient), *decision* logged, the fingerprints
+        named them: never a recipient) and only those the task doesn't name
+        already, *decision* logged, the fingerprints
         it settles stamped, and its triage *state* (None leaves it). False
         when nothing was written."""
         with self._lock:
@@ -1022,7 +1032,8 @@ class TaskboardStore:
             now = time.time()
             changed = self._machine_write(task_id, fields, now) if fields else False
             if parties:
-                changed |= self._add_parties(user_id, task_id, [{**p, "verified": False} for p in parties]) > 0
+                fresh = self._new_parties(user_id, task_id, parties)
+                changed |= self._add_parties(user_id, task_id, [{**p, "verified": False} for p in fresh]) > 0
             if decision:
                 self._conn.execute(
                     "INSERT INTO task_decisions (task_id, user_id, at, judge, qset, state_hash, answers, applied, why) "
@@ -1044,6 +1055,21 @@ class TaskboardStore:
                 self._refresh(task_id)
             self._conn.commit()
         return True
+
+    def _new_parties(self, user_id: str, task_id: str, parties: tuple[dict, ...] | list[dict]) -> list[dict]:
+        """Of the *parties* a model named, those that add someone: not one
+        whose folded name is a party's the task has already (its requester,
+        the board user under their own name) or one named before it."""
+        seen = {" ".join(_fold(str(r[0] or "")).split()) for r in self._conn.execute(
+            "SELECT display FROM task_parties WHERE user_id = ? AND task_id = ?", (user_id, task_id))}
+        out = []
+        for p in parties:
+            name = " ".join(_fold(str(p.get("display") or "")).split())
+            if name and name in seen:
+                continue
+            seen.add(name)
+            out.append(p)
+        return out
 
     def daily_counts(self, user_id: str, day: str | None = None) -> dict:
         """The user's Jev questions and extractions on this UTC *day*:
@@ -1302,8 +1328,8 @@ def _correction(row: dict, action: str, value: Any, now: float, actor: str) -> t
         flags = _loads(row["flags"], {})
         if not flags.get("probably_done") and row["status"] != "done":
             raise ValueError("only a task that looks done is marked not done")
-        fields = {**(_reopened(row) if row["status"] != "open" else {"status": "open"}),
-                  "flags": {**flags, "probably_done": False}}
+        opened = _reopened(row) if row["status"] != "open" else {"status": "open"}
+        fields = {**opened, "flags": {**(opened.get("flags") or flags), "probably_done": False}}
         return fields, ["status", "probably_done"], "Not done yet"
     raise ValueError(f"unknown action: {action}")
 
@@ -1312,11 +1338,16 @@ def _reopened(row: dict) -> dict:
     """The fields that open *row* again: who closed it and how cleared, and —
     when its close left nobody owing a move (a source's or a machine pass's
     close does) — the next move the user's: they just said it isn't
-    finished, so it comes back in Needs me rather than in no lane at all."""
+    finished, so it comes back in Needs me rather than in no lane at all.
+    What came in after it was done (``new_since_done``) is what they open it
+    for: seen, so a later close doesn't say it again."""
     fields: dict[str, Any] = {"status": "open", "closed_at": None, "closed_by": "", "closed_by_party": "",
                               "result": ""}
     if row["status"] != "open" and row["owes_next"] == "nobody":
         fields["owes_next"] = "me"
+    flags = _loads(row["flags"], {})
+    if flags.get("new_since_done"):
+        fields["flags"] = {**flags, "new_since_done": False}
     return fields
 
 

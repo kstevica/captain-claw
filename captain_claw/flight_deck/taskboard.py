@@ -51,6 +51,7 @@ from captain_claw.flight_deck.taskboard_store import (
     VIEWS,
 )
 from captain_claw.logging import get_logger
+from captain_claw.outbound_guard import _fold
 
 log = get_logger(__name__)
 
@@ -220,14 +221,45 @@ def _link_ids(links: list[dict], proposal: dict | None) -> dict[str, str]:
     return out
 
 
-def _item(row: dict, parties: list[dict], links: list[dict], proposal: dict | None, lane: str) -> dict:
+# The kinds a model names a party by (taskboard_triage): such a party, never
+# verified, is only a name read out of the text.
+_READ_KINDS = ("email", "phone", "telegram", "name")
+
+
+def _shown_parties(uid: str, parties: list[dict]) -> list[dict]:
+    """The parties as the UI shows them: ``me`` on the board user's own (a
+    deck user's id is never the name to show), and each person once — a
+    party read out of the text adds nothing when someone of its folded name
+    is there already (a recorded party, the board user going by their own
+    name, or one read before it; one with an address wins over a bare name).
+    A recorded party is always kept."""
+    def name(p: dict) -> str:
+        return " ".join(_fold(str(p.get("display") or "")).split())
+
+    def read(p: dict) -> bool:
+        return not p.get("verified") and p.get("kind") in _READ_KINDS
+
+    recorded = {name(p) for p in parties if not read(p)}
+    best: dict[str, int] = {}
+    for i, p in enumerate(parties):
+        n = name(p)
+        if n and read(p) and n not in recorded:
+            j = best.get(n)
+            if j is None or (parties[j]["kind"] == "name" and p["kind"] != "name"):
+                best[n] = i
+    return [{**p, "me": p.get("kind") == "fd_user" and p.get("address") == uid}
+            for i, p in enumerate(parties)
+            if not (read(p) and name(p) and (name(p) in recorded or best.get(name(p)) != i))]
+
+
+def _item(uid: str, row: dict, parties: list[dict], links: list[dict], proposal: dict | None, lane: str) -> dict:
     item = {k: v for k, v in row.items() if k not in _HIDDEN}
     item["channels"] = _loads(row.get("channels"), [])
     item["user_locks"] = _loads(row.get("user_locks"), {})
     item["flags"] = _loads(row.get("flags"), {})
     item["next_steps"] = _loads(row.get("next_steps"), [])
     item["private"] = bool(row.get("private"))
-    item["parties"] = parties[:5]
+    item["parties"] = _shown_parties(uid, parties)[:5]
     item["lane"] = lane
     item["proposal"] = proposal
     item["links"] = _link_ids(links, proposal)
@@ -238,7 +270,7 @@ def _items(uid: str, rows: list[dict], proposals: dict[str, dict]) -> list[dict]
     ids = [r["id"] for r in rows]
     parties = store().parties_for(uid, ids)
     links = store().links(uid, ids)
-    return [_item(r, parties.get(r["id"], []), links.get(r["id"], []), proposals.get(r["id"]),
+    return [_item(uid, r, parties.get(r["id"], []), links.get(r["id"], []), proposals.get(r["id"]),
                   str(r.get("lane") or "other")) for r in rows]
 
 
@@ -258,9 +290,15 @@ def _facet_label(dim: str, value: str, label: str) -> str:
     return _FACET_LABELS.get(dim, {}).get(value, value)
 
 
-def _facets(raw: dict[str, list[tuple[str, str, int]]]) -> dict[str, list[dict]]:
-    return {dim: [{"id": v or "", "label": _facet_label(dim, v or "", label or ""), "count": n}
-                  for v, label, n in raw.get(dim, [])] for dim in FACETS}
+def _facets(uid: str, raw: dict[str, list[tuple[str, str, int]]]) -> dict[str, list[dict]]:
+    """Each filter's values with their counts; a People value says whether
+    it is the board user (``me``, as their parties do), so the board names
+    them "You" whatever the tasks on the page are."""
+    def value(dim: str, v: str, label: str, n: int) -> dict:
+        out = {"id": v, "label": _facet_label(dim, v, label), "count": n}
+        return {**out, "me": v == f"fd_user:{uid}"} if dim == "party" else out
+
+    return {dim: [value(dim, v or "", label or "", n) for v, label, n in raw.get(dim, [])] for dim in FACETS}
 
 
 def _counts(uid: str, proposals: dict[str, dict] | None = None) -> dict[str, int]:
@@ -309,7 +347,7 @@ async def taskboard_tasks(
         res = store().query(uid, view=view, q=q[:200], filters=filters, date_from=date_from, date_to=date_to,
                             sort=sort, limit=limit, offset=offset, proposal_tasks=list(proposals))
         return {"items": _items(uid, res["rows"], proposals), "total": res["total"],
-                "facets": _facets(res["facets"]), "counts": res["counts"], "view": view}
+                "facets": _facets(uid, res["facets"]), "counts": res["counts"], "view": view}
 
     return await asyncio.to_thread(page)
 
@@ -331,7 +369,7 @@ async def taskboard_task(task_id: str, user: dict = Depends(get_current_user)) -
             "events_total": store().event_count(uid, task_id),
             "links": [{"key": link["key"], "strength": link["strength"], "created_at": link["created_at"]}
                       for link in links],
-            "parties": store().parties_for(uid, [task_id]).get(task_id, []),
+            "parties": _shown_parties(uid, store().parties_for(uid, [task_id]).get(task_id, [])),
             "decisions": [{k: v for k, v in d.items() if k != "user_id"} for d in store().decisions(uid, task_id)],
             "proposals": _proposals(uid, links),
         }

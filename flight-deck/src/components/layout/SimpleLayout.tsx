@@ -751,10 +751,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     if (locked) { openConnections(); return }
     useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('connections')
   }
-  // A held reply the Taskboard can't show waits under Connections → Google.
-  const taskboardConnections = () => {
+  // A held reply the Taskboard can't show waits under Connections → Google;
+  // its settings' "Connect Jev" opens Connections → Jev.
+  const taskboardConnections = (tab: ConnectionsTab = 'google') => {
     closeTaskboard()
-    if (locked) { openConnections('google'); return }
+    if (locked) { openConnections(tab); return }
+    // Taskboard: the full Connections page opens on the tab it remembers — this one.
+    try { localStorage.setItem('fd:connections-tab', tab) } catch { /* storage blocked: its last tab */ }
     useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('connections')
   }
 

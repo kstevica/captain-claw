@@ -808,7 +808,8 @@ async def test_execute_and_judge_always_denies_mail(store, evstore, monkeypatch,
                            status="dispatched")
     await fd_dispatch._execute_and_judge(UID, row, _AGENT, approved_by_human=approved)
     ((prompt, kw),) = sent
-    assert kw["automation"] == _DENY
+    # Always deny — and the action's id, so the agent's turn names what it runs for.
+    assert kw["automation"] == {**_DENY, "ref": row["id"]}
     assert fd_dispatch._NO_MAIL_LINE in prompt
     rel = store.reliability_for(UID, "run_prompt", "mail")
     if approved:

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Check, Loader2, Settings2, X } from 'lucide-react'
+import { Check, Loader2, Plug, Settings2, X } from 'lucide-react'
 import {
   EXTRACT_PER_DAY_MAX, JEV_PER_DAY_MAX, taskboardApi, type TaskboardSettings, type TaskboardSettingsPatch,
 } from '../../services/taskboardApi'
@@ -8,9 +8,10 @@ import { BoardSwitch } from './taskboardParts'
 
 // The board's own settings: whether Jev may close a task by itself, how
 // many Jev decisions and summaries a day it may spend, what today used, and
-// whether Jev is connected at all. A popover under the header's gear on a
-// desktop, a full-screen sheet on a phone (like the filters). Nothing
-// changes until Save.
+// whether Jev is connected at all (when it isn't, Connect Jev opens
+// Connections on Jev — anyone can add their own key there). A popover under
+// the header's gear on a desktop, a full-screen sheet on a phone (like the
+// filters). Nothing changes until Save.
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
@@ -37,7 +38,49 @@ function usedToday(c: TaskboardSettings['counters']): { jev: number; extract: nu
   return current ? { jev: Number(c.jev) || 0, extract: Number(c.extract) || 0 } : { jev: 0, extract: 0 }
 }
 
-export function BoardSettings({ phone, onClose }: { phone: boolean; onClose: () => void }) {
+/** Whether Jev is connected, and with whose key; when it isn't, the way to
+ *  Connections → Jev (`onConnect`, when the board can open it). */
+export function JevSection({ jev, phone, onConnect }: {
+  jev: NonNullable<TaskboardSettings['jev']>; phone: boolean; onConnect?: () => void
+}) {
+  return (
+    <section>
+      <h4 className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Jev</h4>
+      {jev.connected ? (
+        <p className="mt-1.5 flex items-center gap-1.5 text-sm text-zinc-200">
+          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
+          Connected{jev.source === 'own' ? ' with your own key' : jev.source === 'team' ? ' with the team key' : ''}
+        </p>
+      ) : (
+        <>
+          <p className="mt-1.5 flex items-center gap-1.5 text-sm text-zinc-300">
+            <span className="h-2 w-2 shrink-0 rounded-full bg-zinc-600" />
+            {onConnect ? 'Not connected' : 'Not connected — connect Jev in Connections'}
+          </p>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500">
+            Until then, simple rules sort your tasks.{onConnect ? ' Your own Jev key works too.' : ''}
+          </p>
+          {onConnect && (
+            <button
+              type="button"
+              onClick={onConnect}
+              className={`mt-2 flex items-center gap-1.5 rounded-lg border border-zinc-800 font-medium text-teal-600 transition-colors hover:bg-teal-500/10 dark:text-teal-400 ${
+                phone ? 'h-11 px-3.5 text-sm' : 'px-2.5 py-1.5 text-xs'}`}
+            >
+              <Plug className={phone ? 'h-4 w-4' : 'h-3.5 w-3.5'} />Connect Jev
+            </button>
+          )}
+        </>
+      )}
+    </section>
+  )
+}
+
+export function BoardSettings({ phone, onClose, onConnectJev }: {
+  phone: boolean; onClose: () => void
+  /** Connections → Jev (the board closes its settings first). */
+  onConnectJev?: () => void
+}) {
   const [saved, setSaved] = useState<TaskboardSettings | null>(null)
   const [form, setForm] = useState<Form | null>(null)
   const [loadError, setLoadError] = useState('')
@@ -142,25 +185,7 @@ export function BoardSettings({ phone, onClose }: { phone: boolean; onClose: () 
         </p>
       </section>
 
-      {jevState && (
-        <section>
-          <h4 className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Jev</h4>
-          {jevState.connected ? (
-            <p className="mt-1.5 flex items-center gap-1.5 text-sm text-zinc-200">
-              <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
-              Connected{jevState.source === 'own' ? ' with your own key' : jevState.source === 'team' ? ' with the team key' : ''}
-            </p>
-          ) : (
-            <>
-              <p className="mt-1.5 flex items-center gap-1.5 text-sm text-zinc-300">
-                <span className="h-2 w-2 shrink-0 rounded-full bg-zinc-600" />
-                Not connected — connect Jev in Connections
-              </p>
-              <p className="mt-0.5 text-[11px] leading-relaxed text-zinc-500">Until then, simple rules sort your tasks.</p>
-            </>
-          )}
-        </section>
-      )}
+      {jevState && <JevSection jev={jevState} phone={phone} onConnect={onConnectJev} />}
     </div>
   )
 

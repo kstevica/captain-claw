@@ -370,7 +370,9 @@ async def _execute_and_judge(
         res = await _dispatch_one(
             int(agent.get("port") or 0), str(agent.get("auth", "")),
             _instruction_for(action, approved_by_human=approved_by_human), 180.0,
-            automation=dict(_AUTONOMY_AUTOMATION, **_nudge_delivery_mark(user_id, action)),
+            # ``ref``: the action this turn runs for, so the agent's turn
+            # register names it and the Taskboard tells the turn on its task.
+            automation=dict(_AUTONOMY_AUTOMATION, ref=str(aid), **_nudge_delivery_mark(user_id, action)),
         )
         output = str(res.get("output") or "").strip()
         cfg = resolve_config(user_id)

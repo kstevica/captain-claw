@@ -217,6 +217,174 @@ def test_a_links_turn_carries_the_link(reg):
     assert opened["ext_refs"]["link_id"] == "abc123"
 
 
+@pytest.fixture()
+def no_ref():
+    """The automation ref is a ContextVar of this module: none from a test before."""
+    tok = turn_register._AUTOMATION_REF.set(("", "", ""))
+    yield
+    turn_register._AUTOMATION_REF.reset(tok)
+
+
+def test_a_links_turn_names_the_message_it_answers(reg, no_ref):
+    """Flight Deck names the connected system's message (``automation.ref``,
+    agent_link): the turn carries it, so the board finds that message's task."""
+    from captain_claw import mail_authority
+
+    agent = FakeAgent(origin=("automated", "link", None), source=("link", "CRM"))
+    agent.session.metadata["scheduled_task"] = "link-abc123"
+    turn_register.note_frame_automation({"kind": "link", "ref": "m-17", "task": {"id": "link-abc123"}})
+    with mail_authority.bound(mail_authority.automated("link")):
+        reg.close_turn(reg.open_turn(agent), "ok")
+    opened = _turns()[0]
+    assert opened["automation"] == {"kind": "link", "id": "abc123"}
+    assert (opened["ext_refs"]["link_id"], opened["ext_refs"]["link_msg_id"]) == ("abc123", "m-17")
+
+
+def test_an_autonomous_work_turn_names_its_action(reg, no_ref):
+    from captain_claw import mail_authority
+
+    agent = FakeAgent(text="[Autonomous nudge] Tell the user", origin=("autonomy", "nudge", None),
+                      source=("autonomy", ""))
+    turn_register.note_frame_automation({"kind": "autonomy", "mail_write": "deny", "ref": "act_9f"})
+    with mail_authority.bound(mail_authority.automated("autonomy", "", "deny")):
+        reg.close_turn(reg.open_turn(agent), "ok")
+        # The next frame names no action: its turn names none (never the one before's).
+        turn_register.note_frame_automation({"kind": "autonomy", "mail_write": "deny"})
+        reg.close_turn(reg.open_turn(agent), "ok")
+        # An id bound for another automation kind isn't this turn's.
+        turn_register.note_frame_automation({"kind": "link", "ref": "m-1"})
+        reg.close_turn(reg.open_turn(agent), "ok")
+        # Not an id: nothing bound.
+        turn_register.note_frame_automation({"kind": "autonomy", "ref": "act 9; rm -rf"})
+        reg.close_turn(reg.open_turn(agent), "ok")
+    opens = [r for r in _turns() if r["phase"] == "open"]
+    assert [r["automation"] for r in opens] == [{"kind": "autonomy", "id": "act_9f"}] + \
+        [{"kind": "autonomy", "id": ""}] * 3
+    # A person's turn never takes an automation's id.
+    turn_register.note_frame_automation({"kind": "autonomy", "ref": "act_9f"})
+    reg.close_turn(reg.open_turn(FakeAgent()), "ok")
+    assert [r for r in _turns() if r["phase"] == "open"][-1]["automation"] == {"kind": "", "id": ""}
+
+
+def test_the_agents_own_cron_job_is_named_with_its_first_line(reg, no_ref):
+    from captain_claw import mail_authority
+
+    agent = FakeAgent(text="[SCHEDULED TASK — cron job job-9 is firing NOW]", origin=("cron", "", None),
+                      source=("scheduled", ""))
+    tok = turn_register.bind_automation("cron", "job-9", "Water the plants\nand the lawn")
+    try:
+        with mail_authority.bound(mail_authority.automated("cron", "", "deny")):
+            reg.close_turn(reg.open_turn(agent), "ok")
+    finally:
+        turn_register.reset_automation(tok)
+    assert turn_register._AUTOMATION_REF.get() == ("", "", "")
+    opened = _turns()[0]
+    assert opened["automation"] == {"kind": "scheduled", "id": "job-9", "name": "Water the plants"}
+    assert opened["origin_detail"]["automation"] == "cron"
+
+
+def test_the_owners_own_telegram_chat_says_so(reg):
+    """web/telegram.py's owner lane (the only turn with _telegram_user_id) is
+    the owner's own chat; anyone else's chat, and a group, isn't."""
+    from captain_claw import speaker
+
+    owner = FakeAgent(origin=("human", "", "telegram"), source=("telegram", "Telegram"))
+    owner._telegram_chat_id, owner._telegram_user_id = 5551, "5551"
+    other = FakeAgent(origin=("human", "", "telegram"), source=("telegram", "Telegram"))
+    other._telegram_chat_id = 777
+    reg.close_turn(reg.open_turn(owner), "ok")
+    reg.close_turn(reg.open_turn(other), "ok")
+    tok = speaker.bind(speaker.group_principal(-100123, "Team chat"))
+    try:
+        reg.close_turn(reg.open_turn(owner), "ok")
+    finally:
+        speaker.reset(tok)
+    opens = [r for r in _turns() if r["phase"] == "open"]
+    assert [r["ext_refs"] for r in opens] == [
+        {"telegram_chat_id": "5551", "telegram_owner": True}, {"telegram_chat_id": "777"},
+        {"telegram_chat_id": "-100123"}]
+
+
+class _CronAgent:
+    """What run_prompt_in_active_session needs of an agent (a cron run)."""
+
+    def __init__(self) -> None:
+        self.seen: list = []
+        self.session = None
+        self._turn_is_automated = False
+        self.session_manager = type("SM", (), {"load_cron_job": staticmethod(self._load)})()
+
+    @staticmethod
+    async def _load(job_id):
+        return None
+
+    def _record_timing_event(self, kind):
+        return None
+
+    async def complete(self, prompt):
+        self.seen.append(turn_register._AUTOMATION_REF.get())
+        return ""
+
+    async def stream(self, prompt):
+        self.seen.append(turn_register._AUTOMATION_REF.get())
+        if False:
+            yield ""
+
+
+class _Ui:
+    def can_capture_escape(self):
+        return False
+
+    def __getattr__(self, name):
+        return lambda *a, **kw: None
+
+
+@pytest.mark.asyncio
+async def test_a_cron_run_binds_its_job_for_the_turn(monkeypatch, no_ref):
+    from types import SimpleNamespace
+
+    from captain_claw import cron_dispatch
+    from captain_claw.prompt_execution import run_prompt_in_active_session
+
+    async def _noop(*a, **kw):
+        return None
+
+    monkeypatch.setattr(cron_dispatch, "cron_chat_event", _noop)
+    monkeypatch.setattr(cron_dispatch, "cron_monitor_event", _noop)
+    agent = _CronAgent()
+    ctx = SimpleNamespace(agent=agent, ui=_Ui(), on_cron_output=None, last_next_steps=[])
+    await run_prompt_in_active_session(ctx, "Water the plants", cron_job_id="job-9", queue=False)
+    await run_prompt_in_active_session(ctx, "What's the weather?", queue=False)
+    assert agent.seen == [("cron", "job-9", "Water the plants"), ("", "", "")]
+    assert turn_register._AUTOMATION_REF.get() == ("", "", "")
+
+
+@pytest.mark.asyncio
+async def test_a_chat_frame_names_its_automations_id_for_the_turn(monkeypatch, no_ref):
+    """ws_handler notes each chat frame's ``automation.ref`` before the turn
+    starts (its task copies it), and a frame without one clears it."""
+    from types import SimpleNamespace
+
+    from captain_claw.web import chat_handler
+    from captain_claw.web.ws_handler import handle_ws_message
+
+    seen: list = []
+
+    async def _chat(server, ws, content, **kw):
+        seen.append(turn_register._AUTOMATION_REF.get())
+
+    async def _send(ws, msg):
+        return None
+
+    monkeypatch.setattr(chat_handler, "handle_chat", _chat)
+    server = SimpleNamespace(agent=SimpleNamespace(plan_mode_auto=False), _send=_send,
+                             _broadcast=lambda msg: None)
+    for frame in ({"automation": {"kind": "autonomy", "mail_write": "deny", "ref": "act_1"}},
+                  {"automation": {"kind": "autonomy", "mail_write": "deny"}}, {}):
+        await handle_ws_message(server, object(), {"type": "chat", "content": "go", **frame})
+    assert seen == [("autonomy", "act_1", ""), ("", "", ""), ("", "", "")]
+
+
 def test_text_and_reply_are_masked_and_cut(reg):
     secret = "sk-ant-api03-abcdefghijklmnopqrstuvwxyz"
     agent = FakeAgent(text=f"use key {secret} and card 4111 1111 1111 1111 " + "x" * 3000)

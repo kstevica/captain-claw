@@ -248,9 +248,13 @@ async def run_prompt_in_active_session(
         # Bound for the whole turn and reset in the same coroutine, so it
         # never leaks into the caller (queue=False awaits this directly).
         _auth_tok = mail_authority.bind(await _turn_authority())
+        # A cron run's job, for the Taskboard's record of the turn.
+        from captain_claw import turn_register
+        _ref_tok = turn_register.bind_automation("cron", cron_job_id, prompt_text) if cron_job_id else None
         try:
             await _execute_turn()
         finally:
+            turn_register.reset_automation(_ref_tok)
             mail_authority.reset(_auth_tok)
 
     async def _execute_turn() -> None:

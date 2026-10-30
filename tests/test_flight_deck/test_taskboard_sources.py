@@ -443,7 +443,7 @@ async def test_an_auto_reply_is_sent_once_and_what_it_said_stays_off_the_board(e
     assert not any("open at 9" in e["summary"] for e in events)
 
 
-async def test_a_send_on_a_known_thread_is_evidence_and_a_new_one_its_own_task(env):
+async def test_a_send_on_a_known_thread_is_evidence_and_a_new_one_its_own_task(env, monkeypatch):
     await _held(env, env.alice)
     run_sweep()
     await env.db.add_gmail_send(env.alice, "helper", to_addrs="Ana <ana@x.co>", subject="Re: Opening hours?",
@@ -454,12 +454,41 @@ async def test_a_send_on_a_known_thread_is_evidence_and_a_new_one_its_own_task(e
     held = _one(env, env.alice, "gmail:thread:t-1")
     assert (held["kind"], held["status"], held["evidence"]) == ("held_reply", "open", "verified")
     assert any(e["kind"] == "sent" and e["evidence"] == "recorded" for e in _events(env, env.alice, "gmail:thread:t-1"))
+    # An agent's send on a thread the board doesn't have waits a while for
+    # the tool call that would put it on its chat's task — then is its own.
+    assert env.board.task_for_key(env.alice, "gmail:thread:t-5") is None
+    monkeypatch.setattr(taskboard_sources, "_SEND_WAIT_S", 0.0)   # ten minutes on
+    run_sweep()
     sent = _one(env, env.alice, "gmail:thread:t-5")
     assert (sent["kind"], sent["direction"], sent["status"], sent["evidence"], sent["closed_by"]) == \
         ("sent", "sent", "done", "verified", "evidence")
     roles = {(p["role"], p["address"]) for p in env.board.parties_for(env.alice, [sent["id"]])[sent["id"]]}
     assert roles == {("recipient", "bo@y.org"), ("cc", "cy@z.org")}
     assert sent["agent_name"] == "Helper"
+
+
+async def test_an_agents_fresh_send_waits_and_the_cursor_stays_on_it(env, monkeypatch):
+    """An agent's send on a thread the board doesn't have waits for its turn's
+    tool call (ten minutes at most) — read again every pass, the cursor never
+    past it; one with no thread can't be named by a call, so it doesn't wait."""
+    old = await env.db.add_gmail_send(env.alice, "helper", to_addrs="a@x.co", subject="Old", thread_id="t-old")
+    _sent_ago(env, old, minutes=11)
+    fresh = await env.db.add_gmail_send(env.alice, "helper", to_addrs="b@x.co", subject="Fresh", thread_id="t-new")
+    await env.db.add_gmail_send(env.alice, "helper", to_addrs="c@x.co", subject="No thread", gmail_message_id="g-9")
+    run_sweep()
+    assert _one(env, env.alice, "gmail:thread:t-old")["kind"] == "sent"
+    assert _one(env, env.alice, "gmail:msg:g-9")["kind"] == "sent"
+    assert env.board.task_for_key(env.alice, "gmail:thread:t-new") is None
+    conn = sqlite3.connect(env.tmp / "flight-deck.db")
+    (fresh_at,) = conn.execute("SELECT created_at FROM gmail_sends WHERE id = ?", (fresh,)).fetchone()
+    conn.close()
+    assert env.board.get_cursor("gmail_sends") == fresh_at
+    before = _board_size(env)
+    run_sweep()
+    assert _board_size(env) == before   # read again, still waiting, nothing added
+    monkeypatch.setattr(taskboard_sources, "_SEND_WAIT_S", 0.0)   # ten minutes on
+    run_sweep()
+    assert _one(env, env.alice, "gmail:thread:t-new")["kind"] == "sent"
 
 
 # ── Linked systems ────────────────────────────────────────────────────
@@ -503,6 +532,14 @@ async def test_what_a_link_message_said_stays_off_the_board(env):
 # ── The sweep ─────────────────────────────────────────────────────────
 
 
+def _sent_ago(env, send_id: str, *, minutes: float) -> None:
+    """A gmail_sends row as if it went out *minutes* ago."""
+    conn = sqlite3.connect(env.tmp / "flight-deck.db")
+    conn.execute("UPDATE gmail_sends SET created_at = ? WHERE id = ?", (_iso(minutes=-minutes), send_id))
+    conn.commit()
+    conn.close()
+
+
 async def _seed_everything(env, owner):
     job = _job(env, owner)
     run = env.sched.start_run(job, "scheduled")
@@ -510,8 +547,9 @@ async def _seed_everything(env, owner):
     env.auto.add_action(owner, kind="nudge", title="Nudge", status="awaiting_approval")
     env.events.add_follow_up(owner, summary="Follow up", follow_up_at=_iso(days=1))
     await _held(env, owner, msg=f"m-{owner}", thread=f"t-{owner}")
-    await env.db.add_gmail_send(owner, "helper", to_addrs="x@y.z", subject="s", gmail_message_id=f"g-{owner}",
-                                thread_id=f"t2-{owner}")
+    sent = await env.db.add_gmail_send(owner, "helper", to_addrs="x@y.z", subject="s", gmail_message_id=f"g-{owner}",
+                                       thread_id=f"t2-{owner}")
+    _sent_ago(env, sent, minutes=11)  # past the wait for its tool call: a "sent" task of its own
     link = await env.db.create_agent_link(owner, name="Shop", agent_slug="", instructions="",
                                           key_hash=f"kh-{owner}", key_hint="abcd")
     await env.db.add_link_event(link["id"], "reply", "m-1", {"text": "ok"})

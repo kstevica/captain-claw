@@ -15,6 +15,12 @@ set):
   guard, ``cancelled``), the start of the reply, the files saved during the
   turn and how many tool calls it made and how many of those failed.
 
+What an automation runs for comes from where it starts the turn: Flight
+Deck's chat frame names an Autonomous Work action or a connected system's
+message (``automation.ref``, noted by ``ws_handler``), this agent's own cron
+names its job (``prompt_execution``), and a scheduled task's session names
+its job. The owner's own Telegram chat (the owner lane) says so too.
+
 A turn's id is in :data:`current_turn_id` while it runs, so each tool call it
 makes carries it (``tool_audit.py``). Only the outermost entry is a turn: a
 ``complete()`` that runs inside one (``stream()`` re-entering it, a worker
@@ -78,6 +84,11 @@ _AUTOMATIONS = {
     "autonomy": "autonomy", "autonomy_tool": "autonomy", "plan": "autonomy",
     "link": "link",
 }
+# What an automation's own id may look like (an Autonomous Work action's, a
+# connected system's message's, a cron job's).
+_REF_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+# The automation field Flight Deck names that id in (fd_dispatch, agent_link).
+REF_FIELD = "ref"
 
 
 @dataclass
@@ -93,6 +104,44 @@ class Turn:
 # The running turn: its id (what tool calls carry) and its state.
 current_turn_id: ContextVar[str] = ContextVar("claw_turn_id", default="")
 _CURRENT: ContextVar[Turn | None] = ContextVar("claw_turn", default=None)
+# What the automation that starts the next turn here runs for: ``(its
+# mail_authority kind, its id, a name)`` — an Autonomous Work action, a
+# connected system's message, one of this agent's own cron jobs.
+_AUTOMATION_REF: ContextVar[tuple[str, str, str]] = ContextVar("claw_turn_automation_ref", default=("", "", ""))
+
+
+def bind_automation(kind: str, ref: Any, name: Any = "") -> contextvars.Token:
+    """The turns started in this context run for automation *kind*'s *ref*
+    (a cron job's id, with its *name*); pair with :func:`reset_automation`.
+    A ref that isn't an id binds nothing."""
+    ref = str(ref or "").strip()
+    first = next((ln.strip() for ln in str(name or "").splitlines() if ln.strip()), "")
+    value = (str(kind or "").strip(), ref, first[:160]) if _REF_RE.match(ref) else ("", "", "")
+    return _AUTOMATION_REF.set(value)
+
+
+def reset_automation(token: contextvars.Token | None) -> None:
+    if token is None:
+        return
+    try:
+        _AUTOMATION_REF.reset(token)
+    except (ValueError, RuntimeError):
+        _AUTOMATION_REF.set(("", "", ""))
+
+
+def note_frame_automation(raw: Any) -> None:
+    """An agent socket's chat frame: what its ``automation`` marker names the
+    turn it starts for (``ref`` — an Autonomous Work action's id, a connected
+    system's message's), or nothing. Set for each chat frame, so one never
+    carries the frame before's; the turn's task copies it when it starts.
+    Never raises."""
+    try:
+        if isinstance(raw, dict):
+            bind_automation(str(raw.get("kind") or ""), raw.get(REF_FIELD))
+        else:
+            _AUTOMATION_REF.set(("", "", ""))
+    except Exception:
+        pass
 
 
 def current() -> Turn | None:
@@ -263,9 +312,12 @@ def channel_for(source: str, raw_channel: str = "") -> str:
     return _SOURCE_CHANNELS.get(turn_source.channel_of(source), "")
 
 
-def _automation(agent: Any) -> tuple[str, str, str]:
-    """``(automation kind as bound, board automation, its id)``: a scheduled
-    job's id, a link's id; "" when the turn is a person's."""
+def _automation(agent: Any) -> tuple[str, str, str, str, str]:
+    """``(automation kind as bound, board automation, its id, the message
+    id, a name)``: a Flight Deck scheduled job's id (its session's), this
+    agent's own cron job's (and its first line), an Autonomous Work action's,
+    a link's (and the connected system's message id); "" when the turn is a
+    person's. An id bound for another automation kind is not this turn's."""
     try:
         from captain_claw import mail_authority
 
@@ -273,15 +325,22 @@ def _automation(agent: Any) -> tuple[str, str, str]:
     except Exception:
         bound = None
     if bound is None or bound.mode != "automated":
-        return "", "", ""
+        return "", "", "", "", ""
     kind = _AUTOMATIONS.get(bound.kind, "")
-    task_id = ""
+    ref_kind, ref, name = _AUTOMATION_REF.get()
+    if ref_kind != bound.kind:
+        ref = name = ""
+    task_id, msg_id = "", ""
     if kind in ("scheduled", "link"):
         meta = getattr(getattr(agent, "session", None), "metadata", None)
         task_id = _short(meta.get("scheduled_task") if isinstance(meta, dict) else "", 128)
         if kind == "link":
-            task_id = task_id.removeprefix("link-")
-    return bound.kind, kind, task_id
+            task_id, msg_id = task_id.removeprefix("link-"), ref
+    if bound.kind == "cron":
+        task_id = ref or task_id   # this agent's own job
+    elif kind == "autonomy":
+        task_id = ref              # the action
+    return bound.kind, kind, task_id, msg_id, name if bound.kind == "cron" else ""
 
 
 def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
@@ -300,7 +359,7 @@ def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
     session = getattr(agent, "session", None)
     channel = channel_for(source, raw_channel)
     literal = msg_origin.detect_literal(text)
-    bound_kind, automation, automation_id = _automation(agent)
+    bound_kind, automation, automation_id, link_msg_id, automation_name = _automation(agent)
 
     p = speaker.principal_for(agent)
     group = speaker.is_group_principal(p)
@@ -322,8 +381,15 @@ def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
                    else getattr(agent, "_telegram_chat_id", ""))
         if isinstance(chat_id, (int, str)) and str(chat_id).strip():
             refs["telegram_chat_id"] = _short(chat_id, 32)
+        # The owner's own private chat (web/telegram.py's owner lane, the only
+        # turn that sets _telegram_user_id): the deck's shared bot, or the
+        # approved user the owner marked as themselves on a bot of the agent's.
+        if not group and _short(getattr(agent, "_telegram_user_id", "")):
+            refs["telegram_owner"] = True
     if automation == "link" and automation_id:
         refs["link_id"] = automation_id
+        if link_msg_id:
+            refs["link_msg_id"] = link_msg_id
 
     opener = {"role": "user", "origin": kind}
     origin_detail = {k: v for k, v in (
@@ -343,7 +409,8 @@ def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
         "opener": msg_origin.is_turn_opener(opener), "human": msg_origin.is_human_input(opener),
         "literal": literal[0] if literal else "",
         "text_head": _head(text), "ext_refs": refs,
-        "automation": {"kind": automation, "id": automation_id},
+        "automation": {"kind": automation, "id": automation_id,
+                       **({"name": _head(automation_name)[:160]} if automation_name else {})},
     }
 
 

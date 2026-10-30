@@ -13,7 +13,8 @@ on the board of the user the row belongs to:
                      needs me), or an event on the follow-up it is about
   gmail_autoreplies  a task per inbound thread an auto-reply held or sent
   gmail_sends        an event on the thread's task — or a "sent" task of its own
-                     (an auto-reply's send is its auto-reply's)
+                     (an auto-reply's send is its auto-reply's; an agent's
+                     waits ten minutes for the tool call that names its thread)
   agent_links        a task per message a linked system got an answer to, or
                      the agent sent it on its own
 
@@ -30,6 +31,11 @@ v1 adds two, over what the agents report (``taskboard_ingest``):
 The agents' turns themselves come in as they happen
 (``POST /fd/taskboard/agent/turns``) and are kept 30 days (each full sweep
 forgets older ones).
+
+Every adapter's writes go through one place (``_Pass.ingest``): a task gets
+one requester row per person (none beside the user on their own chat), and
+someone writing in on a request that was done queues it for triage again
+(``taskboard_ingest.inbound_after_done``).
 
 Rows change after they are first read (a proposal is approved, a follow-up
 done, a run finishes), so no adapter trusts a plain "newer than" cursor: each
@@ -189,11 +195,11 @@ def _user_ids() -> set[str] | None:
 class _Pass:
     """One sweep: the store, whose rows (everyone's, or one user's), the agents."""
 
-    def __init__(self, store: TaskboardStore, user_id: str | None) -> None:
+    def __init__(self, store: TaskboardStore, user_id: str | None, *, agents: dict[str, dict] | None = None) -> None:
         self.store = store
         self.user_id = user_id
         self.auth = _auth_enabled()
-        self.agents = _agent_index()
+        self.agents = _agent_index() if agents is None else agents
         self.users = _user_ids() if self.auth else None
         self.new_events: dict[str, int] = {}
 
@@ -232,10 +238,49 @@ class _Pass:
         return {"agent_slug": slug or "", "agent_name": name or slug or "", "agent_ref": "", "agent_owner_id": ""}
 
     def ingest(self, source: str, uid: str, **kw: Any) -> tuple[str | None, bool]:
+        if kw.get("parties"):
+            kw["parties"] = _parties_to_add(self.store, uid, kw.get("keys") or [], kw["parties"])
         task_id, new = self.store.ingest(uid, **kw)
         if new:
             self.new_events[source] = self.new_events.get(source, 0) + 1
+            ev = kw.get("event") or {}
+            if task_id and ev.get("kind") == "received" and ev.get("actor_kind") == "party":
+                # Someone writing on a request that was done (a reply on its thread).
+                from captain_claw.flight_deck import taskboard_ingest
+
+                if taskboard_ingest.inbound_after_done(self.store, uid, task_id, kw.get("keys") or []):
+                    taskboard_ingest._kick(uid)
         return task_id, new
+
+
+def _parties_to_add(store: TaskboardStore, uid: str, keys: list[str], parties: list[dict]) -> list[dict]:
+    """What of *parties* a source adds to the task *keys* already find: a
+    requester only when the task has none of that name yet (one person, not
+    two rows) — and on the board user's own chat (``flags.own_chat``) none
+    at all, the user is its only requester: someone it names is mentioned,
+    unless they are on the task already. All of them for a new task."""
+    if not any(p.get("role") == "requester" for p in parties):
+        return list(parties)
+    held = next((t for t in (store.task_for_key(uid, k) for k in keys) if t), None)
+    if held is None:
+        return list(parties)
+    from captain_claw.outbound_guard import _fold
+
+    task = store.get_task(uid, held) or {}
+    own = bool(_json(task.get("flags"), {}).get("own_chat"))
+    have = store.parties_for(uid, [held]).get(held, [])
+    named = {_fold(p["display"] or p["address"]) for p in have if p["role"] == "requester"}
+    on_task = {(p["kind"], p["address"]) for p in have}
+    out = []
+    for p in parties:
+        if p.get("role") != "requester":
+            out.append(p)
+        elif own:
+            if (p.get("kind") or "email", str(p.get("address") or "").strip()) not in on_task:
+                out.append({**p, "role": "mentioned"})
+        elif _fold(p.get("display") or p.get("address") or "") not in named:
+            out.append(p)
+    return out
 
 
 # ── Scheduled tasks (fd_scheduler: scheduler_jobs + scheduler_runs) ───
@@ -680,6 +725,9 @@ def _autoreplies(p: _Pass) -> None:
 
 # gmail_send_routes.AUTOREPLY_ORIGINS: sends the auto-reply engine made.
 _AUTOREPLY_ORIGINS = ("autoreply", "autoreply_approved")
+# An agent's email not on the board yet waits this long for the tool-call
+# record of the turn that sent it, which puts its thread on that turn's task.
+_SEND_WAIT_S = 600.0
 
 
 def _gmail_sends(p: _Pass) -> None:
@@ -687,6 +735,8 @@ def _gmail_sends(p: _Pass) -> None:
     since = p.cursor("gmail_sends")
     rows = _rows(_fd_db_path(), f"SELECT * FROM gmail_sends WHERE created_at >= ?{mine} ORDER BY created_at LIMIT ?",
                  (since, *mine_args, _BATCH))
+    now = time.time()
+    put_off = ""  # the oldest row left for a later pass: the cursor stays on it
     for row in rows:
         uid = p.board_user(row.get("owner_id"))
         if uid is None or row.get("origin") in _AUTOREPLY_ORIGINS:
@@ -694,6 +744,14 @@ def _gmail_sends(p: _Pass) -> None:
         thread = str(row.get("thread_id") or "").strip()
         message = str(row.get("gmail_message_id") or "").strip()
         key = f"gmail:thread:{thread}" if thread else f"gmail:msg:{message or row['id']}"
+        sent_at = _epoch(row.get("created_at"))
+        if (thread and str(row.get("origin") or "agent") == "agent" and sent_at is not None
+                and now - sent_at < _SEND_WAIT_S and not p.store.task_for_key(uid, key)):
+            # Sent by an agent a moment ago: the chat that asked for it is on
+            # the board once its tool call is read (with this thread) — not a
+            # "sent" task of its own beside it.
+            put_off = put_off or str(row.get("created_at") or "")
+            continue
         to = str(row.get("to_addrs") or "")
         parties = _addresses(to, "recipient") + _addresses(row.get("cc_addrs"), "cc")
         sent = row.get("status") == "sent"
@@ -720,7 +778,7 @@ def _gmail_sends(p: _Pass) -> None:
                         "closed_by_party": agent["agent_name"], "evidence": "verified" if sent else "claimed",
                         "result": "success" if sent else "unknown", "result_text": f"Sent to {names}"})
     if rows:
-        p.save_cursor("gmail_sends", max(str(r.get("created_at") or "") for r in rows) or since)
+        p.save_cursor("gmail_sends", put_off or max(str(r.get("created_at") or "") for r in rows) or since)
 
 
 _LINK_WAITING_KEPT = 1000

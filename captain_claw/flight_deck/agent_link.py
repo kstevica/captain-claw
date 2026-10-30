@@ -204,12 +204,15 @@ def link_context_notes(link: dict) -> list[str]:
     return notes
 
 
-def link_automation(link: dict) -> dict:
+def link_automation(link: dict, msg_id: str = "") -> dict:
     """The turn's ``automation`` marker: a connected system, judged on the
     owner's instructions for the link (never on what the system sent), in the
     link's own session, its reply delivered here and not mirrored to the
-    owner's chat."""
+    owner's chat. ``ref``: the system's id of the message the turn answers
+    (the agent's turn register names it, so the Taskboard tells the turn on
+    that message's task)."""
     return {
+        **({"ref": msg_id} if msg_id else {}),
         "kind": "link",
         "job_text": str(link.get("instructions") or "")[:MAX_INSTRUCTIONS_CHARS],
         "mail_write": "intent",
@@ -355,7 +358,7 @@ class _LinkConn(BusClient):
             "content": text,
             "source": "link", "source_label": str(self.link.get("name") or "").strip() or "Agent link",
             "context_notes": link_context_notes(self.link),
-            "automation": link_automation(self.link),
+            "automation": link_automation(self.link, self.re),
             **(ctx or {}),
         }
 

@@ -1,11 +1,10 @@
 import { useState, type ReactNode } from 'react'
 import { AlertTriangle, Check, CircleDot, Loader2, ShieldAlert, Sparkles } from 'lucide-react'
-import type { Facet } from '../../services/fileLibraryApi'
-import type { TaskAction, TaskItem, TaskboardStatus } from '../../services/taskboardApi'
+import type { TaskAction, TaskFacet, TaskItem, TaskboardStatus } from '../../services/taskboardApi'
 import { resolveProposal } from '../../services/notifications'
 import {
   JUDGE_LABEL, OWES_LABEL, RESULT_LABEL, STATUS_LABEL, agoRelative, channelInfo, foldChar, type DatePreset,
-  type DateRange,
+  type DateRange, type TaskNote,
 } from './taskboardText'
 
 // Pieces of the Taskboard: search highlighting (the server's folding, so
@@ -139,6 +138,18 @@ export function InstructionsChip({ compact = false }: { compact?: boolean }) {
   )
 }
 
+const NOTE_TONE: Record<TaskNote['id'], string> = {
+  agent_declined: 'bg-amber-500/15 text-amber-700 dark:text-amber-300',
+  partly_done: 'bg-amber-500/10 text-amber-700 dark:text-amber-300',
+  new_since_done: 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
+}
+
+/** What a task's flags add (taskNotes): the agent couldn't do it — why, on
+ *  hover — partly done, a new message since it was done. */
+export function NoteChip({ note }: { note: TaskNote }) {
+  return <span title={note.detail || undefined} className={`${chip} ${NOTE_TONE[note.id]}`}>{note.label}</span>
+}
+
 /** Taken in as a task with less certainty: it isn't counted in the badge. */
 export function LowConfidenceHint() {
   return (
@@ -166,10 +177,12 @@ export function JudgeChip({ judge }: { judge: string }) {
  *  A ticked value that no longer has anything still shows (at 0), so it can
  *  be cleared. A long list shows its first few until asked for the rest. */
 export function MultiFacet({ title, facets, values, onChange, dot, labelOf, limit = 8 }: {
-  title: string; facets: Facet[]; values: string[]
+  title: string; facets: TaskFacet[]; values: string[]
   onChange: (v: string[]) => void; dot?: (id: string) => ReactNode
-  /** The label of a value the server names only by its id. */
-  labelOf?: (id: string) => string
+  /** The label of a value the server names only by its id (or names in a
+   *  way the board says otherwise: its own label comes second, the value
+   *  itself third). */
+  labelOf?: (id: string, label: string, facet: TaskFacet) => string
   limit?: number
 }) {
   const [all, setAll] = useState(false)
@@ -182,8 +195,8 @@ export function MultiFacet({ title, facets, values, onChange, dot, labelOf, limi
   const toggle = (id: string) => onChange(values.includes(id) ? values.filter((v) => v !== id) : [...values, id])
   // The board's own words first, so a filter reads like the chips on the
   // rows; the server's label for a value the board has no name for.
-  const label = (f: Facet) => {
-    const mine = labelOf?.(f.id)
+  const label = (f: TaskFacet) => {
+    const mine = labelOf?.(f.id, f.label, f)
     return mine && mine !== f.id ? mine : f.label || f.id
   }
   return (
