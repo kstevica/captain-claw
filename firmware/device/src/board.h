@@ -127,7 +127,7 @@ constexpr const char* kTalkButton = "BOOT button";
 constexpr const char* kSideButton = "PWR button";
 constexpr const char* kTalkHint = "Press BOOT to talk";
 constexpr bool kTalkToggles = true;
-constexpr bool kTalkFromSleep = true;  // the paper looks awake when it sleeps: a press talks
+constexpr bool kTalkFromSleep = false;  // a press that wakes it only wakes it; the next one talks
 constexpr char kTalkM5 = 'A', kSideM5 = 'B', kBackM5 = 0;  // hw::update() feeds M5.BtnA / M5.BtnB
 constexpr const char* kTalkKey = "BOOT";
 constexpr const char* kSideKey = "PWR";
