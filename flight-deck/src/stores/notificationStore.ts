@@ -25,6 +25,9 @@ function mapServerType(t: string): NotificationType {
   // An agent's way-of-working read ended with the dialog closed: ready to review, or stopped.
   if (t === 'agent_setup') return 'success'
   if (t === 'agent_setup_error') return 'error'
+  // The profile researcher finished with the Profile closed: drafts ready, or why it stopped.
+  if (t === 'profile_research') return 'success'
+  if (t === 'profile_research_error') return 'error'
   if (t === 'autonomy_nudge') return 'info'
   if (t === 'share' || t === 'info') return 'info'
   if (t === 'success' || t === 'warning' || t === 'error') return t

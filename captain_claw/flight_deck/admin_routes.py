@@ -241,6 +241,13 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
         await tenant_profile.refresh_agents(db, user_id)
     except Exception:
         pass
+    # …and the documents behind it (profile_sources keeps them on disk).
+    try:
+        from captain_claw.flight_deck import profile_sources
+
+        profile_sources.remove_all(user_id)
+    except Exception:
+        pass
     try:
         from captain_claw.flight_deck import context_packs
 

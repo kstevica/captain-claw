@@ -17,12 +17,24 @@ function _authHeaders(): Record<string, string> {
 }
 
 async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  return _request(path, () => ({ headers: _authHeaders(), credentials: 'include', ...init }))
+}
+
+/** A multipart POST: the browser sets the Content-Type (with its boundary). */
+async function fdUpload<T>(path: string, form: FormData): Promise<T> {
+  return _request(path, () => {
+    const headers = _authHeaders()
+    delete headers['Content-Type']
+    return { method: 'POST', body: form, headers, credentials: 'include' }
+  })
+}
+
+async function _request<T>(path: string, build: () => RequestInit): Promise<T> {
   const _state = useAuthStore.getState()
   if (_state.authEnabled === true && !_state.token) {
     const refreshed = await refreshAccessToken()
     if (!refreshed) throw new Error('Not authenticated')
   }
-  const build = (): RequestInit => ({ headers: _authHeaders(), credentials: 'include', ...init })
   let res = await fetch(`${FD_BASE}${path}`, build())
   // Only a failed refresh ends the session (see docker.ts fdFetch).
   if (res.status === 401 && useAuthStore.getState().authEnabled) {
@@ -166,10 +178,15 @@ export function rebaseDraft(draft: ProfileFields, base: ProfileFields, next: Pro
   return out
 }
 
-/** Whether the Profile page edits the deck-wide defaults itself: only on an
- *  auth-off deck (no Admin page there), and never from the kiosk. */
-export function deckDefaultsEditable(authEnabled: boolean | null | undefined, kiosk: boolean): boolean {
-  return authEnabled === false && !kiosk
+/** Whether the Profile page edits the deck-wide defaults itself: on an
+ *  auth-off deck (its one user is the admin, and there is no Admin page), and
+ *  for an admin on a deck with accounts — never from the kiosk, where a
+ *  visitor must not change what every agent on the deck receives. */
+export function deckDefaultsEditable(
+  authEnabled: boolean | null | undefined, kiosk: boolean, isAdmin = false,
+): boolean {
+  if (kiosk) return false
+  return authEnabled === false || (authEnabled === true && isAdmin)
 }
 
 /** While `dirty`, closing or reloading the browser tab asks first. Returns the
@@ -186,6 +203,224 @@ export function guardUnload(
   target.addEventListener('beforeunload', onBeforeUnload)
   return () => target.removeEventListener('beforeunload', onBeforeUnload)
 }
+
+// ── The material behind the profile (/fd/profile/sources, /fd/profile/documents) ──
+// The person's links, their company's name and links, and their documents (a
+// CV, a bio): what the researcher drafts the three texts from. The name is the
+// account's display name (changed through /fd/auth/me, see authStore).
+
+export interface ProfileLink {
+  url: string
+  label: string
+}
+
+export interface ProfileDocument {
+  id: string
+  name: string
+  pages: number
+  chars: number
+  /** Unix seconds. */
+  added: number
+}
+
+export interface SourceCaps {
+  links: number
+  company_links: number
+  documents: number
+  url: number
+  label: number
+  company_name: number
+  document_bytes: number
+}
+
+export interface ProfileSources {
+  name: string
+  email: string
+  /** The account can be renamed here (not the auth-off deck's local user). */
+  can_rename: boolean
+  links: ProfileLink[]
+  company_name: string
+  company_links: ProfileLink[]
+  documents: ProfileDocument[]
+  caps: SourceCaps
+  /** File kinds a document may be (".pdf", ".docx", …). */
+  kinds: string[]
+  /** On an upload: the files that could not be kept, and why. */
+  warnings?: string[]
+}
+
+export const DEFAULT_SOURCE_CAPS: SourceCaps = {
+  links: 8, company_links: 8, documents: 10, url: 500, label: 40, company_name: 120,
+  document_bytes: 25 * 1024 * 1024,
+}
+
+export const DEFAULT_DOCUMENT_KINDS = ['.pdf', '.docx', '.xlsx', '.pptx', '.txt', '.md', '.csv', '.html', '.htm']
+
+export const EMPTY_SOURCES: ProfileSources = {
+  name: '', email: '', can_rename: false, links: [], company_name: '', company_links: [],
+  documents: [], caps: DEFAULT_SOURCE_CAPS, kinds: DEFAULT_DOCUMENT_KINDS,
+}
+
+function _links(raw: unknown): ProfileLink[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((l): l is { url: string; label?: unknown } => !!l && typeof l === 'object' && typeof (l as { url?: unknown }).url === 'string')
+    .map((l) => ({ url: l.url, label: _str(l.label) }))
+}
+
+function _documents(raw: unknown): ProfileDocument[] {
+  if (!Array.isArray(raw)) return []
+  return raw
+    .filter((d): d is Record<string, unknown> => !!d && typeof d === 'object' && typeof (d as { id?: unknown }).id === 'string')
+    .map((d) => ({
+      id: d.id as string, name: _str(d.name) || 'document',
+      pages: Number(d.pages) || 0, chars: Number(d.chars) || 0, added: Number(d.added) || 0,
+    }))
+}
+
+function _normalizeSources(r: Partial<ProfileSources>): ProfileSources {
+  return {
+    name: _str(r.name),
+    email: _str(r.email),
+    can_rename: r.can_rename === true,
+    links: _links(r.links),
+    company_name: _str(r.company_name),
+    company_links: _links(r.company_links),
+    documents: _documents(r.documents),
+    caps: { ...DEFAULT_SOURCE_CAPS, ...(r.caps || {}) },
+    kinds: Array.isArray(r.kinds) && r.kinds.length ? r.kinds.map(String) : DEFAULT_DOCUMENT_KINDS,
+    warnings: Array.isArray(r.warnings) ? r.warnings.map(String) : undefined,
+  }
+}
+
+export const getProfileSources = () =>
+  fdFetch<Partial<ProfileSources>>('/profile/sources').then(_normalizeSources)
+
+export interface SourcesPatch {
+  links?: ProfileLink[]
+  company_name?: string
+  company_links?: ProfileLink[]
+}
+
+/** Partial: only the fields given change. Documents go through their own calls. */
+export const saveProfileSources = (patch: SourcesPatch) =>
+  fdFetch<Partial<ProfileSources>>('/profile/sources', {
+    method: 'PUT',
+    body: JSON.stringify(patch),
+  }).then(_normalizeSources)
+
+/** Upload documents; each is read in full and kept. The ones that could not
+ *  be read come back in `warnings`, the rest are kept. */
+export const uploadProfileDocuments = (files: File[]) => {
+  const form = new FormData()
+  for (const f of files) form.append('files', f)
+  return fdUpload<Partial<ProfileSources>>('/profile/documents', form).then(_normalizeSources)
+}
+
+export const deleteProfileDocument = (id: string) =>
+  fdFetch<Partial<ProfileSources>>(`/profile/documents/${encodeURIComponent(id)}`, { method: 'DELETE' })
+    .then(_normalizeSources)
+
+// ── The researcher (/fd/profile/research) ──
+// Reads the documents and links, looks the person and the company up on the
+// web, and drafts the three texts on the team's model. The drafts are shown
+// for review — nothing is saved to the profile until the person saves.
+
+export type ResearchState = 'idle' | 'running' | 'done' | 'error' | 'cancelled'
+
+export interface ResearchLogEntry {
+  ts: number
+  message: string
+  kind: 'info' | 'warn'
+}
+
+export interface ResearchSource {
+  kind: 'document' | 'link' | 'page' | 'search'
+  name: string
+  url?: string
+  ok: boolean
+  chars?: number
+  /** Why a link couldn't be read. */
+  why?: string
+  /** A search: how many results it gave. */
+  results?: number
+}
+
+export interface ProfileResearch {
+  state: ResearchState
+  stage: string
+  started: number | null
+  finished: number | null
+  log: ResearchLogEntry[]
+  sources: ResearchSource[]
+  drafts: ProfileFields | null
+  notes: string[]
+  tokens: number
+  model: string
+  model_source: 'team' | 'own' | ''
+  error: string
+}
+
+export const IDLE_RESEARCH: ProfileResearch = {
+  state: 'idle', stage: '', started: null, finished: null, log: [], sources: [], drafts: null,
+  notes: [], tokens: 0, model: '', model_source: '', error: '',
+}
+
+/** How often the page asks after a run under way. */
+export const RESEARCH_POLL_MS = 2000
+
+/** What each stage of a run says while it is on. */
+export const RESEARCH_STAGES: Record<string, string> = {
+  starting: 'Starting…',
+  reading: 'Reading your documents…',
+  visiting: 'Visiting your links…',
+  searching: 'Searching the web…',
+  writing: 'Writing the three texts…',
+  finished: 'Finished.',
+}
+
+const _STATES: ResearchState[] = ['idle', 'running', 'done', 'error', 'cancelled']
+
+function _normalizeResearch(r: Partial<ProfileResearch>): ProfileResearch {
+  const state = _STATES.includes(r.state as ResearchState) ? (r.state as ResearchState) : 'idle'
+  const drafts = r.drafts && typeof r.drafts === 'object'
+    ? { about_me: _str(r.drafts.about_me), company: _str(r.drafts.company), instructions: _str(r.drafts.instructions) }
+    : null
+  return {
+    state,
+    stage: _str(r.stage),
+    started: typeof r.started === 'number' ? r.started : null,
+    finished: typeof r.finished === 'number' ? r.finished : null,
+    log: Array.isArray(r.log)
+      ? r.log.map((e) => ({ ts: Number(e?.ts) || 0, message: _str(e?.message), kind: e?.kind === 'warn' ? 'warn' as const : 'info' as const }))
+      : [],
+    sources: Array.isArray(r.sources)
+      ? r.sources.map((s) => ({
+        kind: (['document', 'link', 'page', 'search'].includes(String(s?.kind)) ? s.kind : 'link') as ResearchSource['kind'],
+        name: _str(s?.name), url: s?.url ? _str(s.url) : undefined, ok: s?.ok === true,
+        chars: typeof s?.chars === 'number' ? s.chars : undefined,
+        why: s?.why ? _str(s.why) : undefined,
+        results: typeof s?.results === 'number' ? s.results : undefined,
+      }))
+      : [],
+    drafts,
+    notes: Array.isArray(r.notes) ? r.notes.map(String) : [],
+    tokens: Number(r.tokens) || 0,
+    model: _str(r.model),
+    model_source: r.model_source === 'team' || r.model_source === 'own' ? r.model_source : '',
+    error: _str(r.error),
+  }
+}
+
+export const getProfileResearch = () =>
+  fdFetch<Partial<ProfileResearch>>('/profile/research').then(_normalizeResearch)
+
+/** Start a run (409 while one is under way, 400 with nothing to read from). */
+export const startProfileResearch = () =>
+  fdFetch<Partial<ProfileResearch>>('/profile/research', { method: 'POST' }).then(_normalizeResearch)
+
+export const stopProfileResearch = () =>
+  fdFetch<{ stopped: boolean }>('/profile/research', { method: 'DELETE' })
 
 // ── The kiosk Info dialog (/fd/info) ──
 // The signed-in user's corner of the deck in one read: the tier set their
