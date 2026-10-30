@@ -31,7 +31,7 @@ import {
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
   AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, ExportPanel, FoldHighlight, HistoryChip, InstructionsChip,
-  KeyHint, KeySheet, LaneChip, LowConfidenceHint, MultiFacet, NoteChip, OwesChip, ProposalButtons, ResultChip, StatusChip,
+  KeyHint, KeySheet, LaneChip, LowConfidenceHint, MultiFacet, NextMoveMenu, NoteChip, OwesChip, ProposalButtons, ResultChip, StatusChip,
   SyncStatus, TaskIcon, TaskText,
 } from './taskboardParts'
 import { BoardSettings } from './TaskboardSettings'
@@ -1181,6 +1181,7 @@ function TaskDetailPane({
   const [name, setName] = useState(task.title)
   const [snoozeOpen, setSnoozeOpen] = useState(false)
   const [handing, setHanding] = useState(false)
+  const [moveOpen, setMoveOpen] = useState(false)
   const [handWords, setHandWords] = useState('')
   const [merging, setMerging] = useState(false)
   // Splitting: the events ticked to move to a new task.
@@ -1310,9 +1311,9 @@ function TaskDetailPane({
   const paneRef = useRef<HTMLDivElement>(null)
   const askNextStep = useRef<(() => void) | null>(null)
   useEffect(() => {
-    pinned.current = splitting || snoozeOpen || handing
+    pinned.current = splitting || snoozeOpen || handing || moveOpen
     keys.current = (key) => {
-      if (busy || handing) return false
+      if (busy || handing || moveOpen) return false
       if (snoozeOpen) {
         const pick = SNOOZES[Number(key) - 1]
         if (pick) void run('snooze', snoozeUntil(pick.id))
@@ -1330,6 +1331,7 @@ function TaskDetailPane({
         [TASK_KEYS.merge]: [!merged, () => setMerging((m) => !m)],
         [TASK_KEYS.undo]: [canUndo, () => void run('undo')],
         [TASK_KEYS.agent]: [!closed && !failed, () => setHanding(true)],
+        [TASK_KEYS.move]: [!closed && !failed, () => setMoveOpen(true)],
         [TASK_KEYS.nextStep]: [!!boardStep || canSuggest, () => {
           // Read and edited on its card: approving it stays a click.
           const card = paneRef.current?.querySelector<HTMLElement>('[data-next-step]')
@@ -1683,26 +1685,23 @@ function TaskDetailPane({
               <Pencil className="h-4 w-4" />Rename<KeyHint k={TASK_KEYS.rename} />
             </button>
             {!closed && !failed && (
-              <label className="col-span-2 flex items-center gap-2 rounded-lg border border-zinc-800 px-3 py-1.5 text-sm">
-                <span className="shrink-0 text-zinc-500">Next move</span>
-                <select
-                  value={OWES.includes(task.owes_next) ? task.owes_next : 'unclear'}
-                  // The agent's move is one it is told: which agent, and to do what.
-                  onChange={(e) => { if (e.target.value === 'agent') setHanding(true); else void run('owes_next', e.target.value) }}
-                  disabled={!!busy}
-                  aria-label="Who moves next"
-                  className="min-w-0 flex-1 bg-zinc-950 py-0.5 text-zinc-200 focus:outline-none disabled:opacity-50"
-                >
-                  {OWES.map((o) => <option key={o} value={o}>{OWES_LABEL[o]}{o === 'agent' ? '…' : ''}</option>)}
-                </select>
-                {busy === 'owes_next' && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-zinc-500" />}
+              <NextMoveMenu
+                value={OWES.includes(task.owes_next) ? task.owes_next : 'unclear'}
+                options={OWES.map((o) => ({ id: o, label: `${OWES_LABEL[o]}${o === 'agent' ? '…' : ''}` }))}
+                open={moveOpen}
+                busy={busy === 'owes_next'}
+                disabled={!!busy}
+                onOpenChange={setMoveOpen}
+                // The agent's move is one it is told: which agent, and to do what.
+                onPick={(o) => { if (o === 'agent') setHanding(true); else if (o !== task.owes_next) void run('owes_next', o) }}
+              >
                 {task.owes_next === 'agent' && (
                   <button type="button" onClick={() => setHanding(true)} disabled={!!busy}
                     className="shrink-0 text-xs font-medium text-teal-600 hover:underline disabled:opacity-50 dark:text-teal-400">
                     Instruct…<KeyHint k={TASK_KEYS.agent} />
                   </button>
                 )}
-              </label>
+              </NextMoveMenu>
             )}
             {canUndo && (
               <button onClick={() => run('undo')} disabled={!!busy} className={`${btn} col-span-2`} title="Take back the last change to this task">

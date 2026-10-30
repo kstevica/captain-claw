@@ -317,9 +317,9 @@ def test_picking_the_agent_asks_before_anything_moves():
 
     src = Path(__file__).resolve().parents[2] / "flight-deck" / "src" / "components" / "taskboard"
     pane, step = (src / "TaskBoard.tsx").read_text(), (src / "TaskNextStep.tsx").read_text()
-    assert "if (e.target.value === 'agent') setHanding(true); else void run('owes_next', e.target.value)" in pane
+    assert "onPick={(o) => { if (o === 'agent') setHanding(true); else if (o !== task.owes_next) void run('owes_next', o) }}" in pane
     assert "pinned.current = splitting || snoozeOpen || handing" in pane
-    assert "if (busy || handing) return false" in pane
+    assert "if (busy || handing || moveOpen) return false" in pane
     assert "const ready = !!agent && !!words.trim() && !busy" in step
 
 
