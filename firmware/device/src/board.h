@@ -230,6 +230,16 @@ constexpr bool kSilenceStop = false;
 constexpr bool kSilenceStop = true;
 #endif
 
+// The blips that say a recording started or ended: how long they sound, how long
+// after the start blip the mic listens, and how long after the mic stops the end
+// blip plays. The Waveshare's codec swallows the start of a sound just after it
+// wakes, so these are longer there, with room for the codec to change over.
+#if defined(BOARD_EPAPER154)
+constexpr uint32_t kTalkStartCueMs = 160, kTalkEndCueMs = 160, kTalkMicAfterMs = 500, kTalkEndAfterMs = 500;
+#else
+constexpr uint32_t kTalkStartCueMs = 70, kTalkEndCueMs = 80, kTalkMicAfterMs = 250, kTalkEndAfterMs = 0;
+#endif
+
 // While it records, the side button drops the recording.
 #if defined(BOARD_EPAPER154)
 constexpr bool kSideCancels = true;

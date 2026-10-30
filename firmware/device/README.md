@@ -294,7 +294,7 @@ has to follow, and at 1.8 s that's no quicker than letting the first one finish.
 
 | | `epaper154` | `epaper154_touch` |
 |---|---|---|
-| talk | BOOT: press, talk, press again | the same, or the Talk button on the screen |
+| talk | BOOT: press, a blip, and 0.5 s later it listens; press again to send, and 0.5 s later a lower blip | the same, or the Talk button on the screen |
 | wake | BOOT or PWR: only wakes it; the next BOOT press talks | the same |
 | cancel | PWR while recording: dropped, nothing sent | the same |
 | next | PWR: next row or page · hold = menu | the same, or swipe; in a list, tap the left or right third to move, the middle to choose |
