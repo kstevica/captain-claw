@@ -31,7 +31,7 @@ import {
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
   AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, ExportPanel, FoldHighlight, HistoryChip, InstructionsChip,
-  KeyHint, KeySheet, LaneChip, LowConfidenceHint, MultiFacet, NextMoveMenu, NoteChip, OwesChip, ProposalButtons, ResultChip, StatusChip,
+  KeyHint, KeySheet, LaneChip, LowConfidenceHint, MultiFacet, NextMoveMenu, NoteChip, OwesChip, ProofSection, ProposalButtons, ResultChip, StatusChip,
   SyncStatus, TaskIcon, TaskText,
 } from './taskboardParts'
 import { BoardSettings } from './TaskboardSettings'
@@ -1265,7 +1265,7 @@ function TaskDetailPane({
   const people = peopleRows(detail?.parties ?? task.parties, me)
   const notes = taskNotes(task)
   // The agent couldn't do it, or did only part: what stopped it.
-  const shortOf = notes.find((n) => n.id !== 'new_since_done' && n.detail)
+  const shortOf = notes.find((n) => n.id !== 'new_since_done' && n.id !== 'not_proven' && n.detail)
   const jobId = task.links?.scheduled_job_id || ''
   const sessionId = task.links?.session_id || ''
   const sessionAgent = task.links?.session_agent || task.agent_slug
@@ -1506,6 +1506,7 @@ function TaskDetailPane({
             </p>
           </section>
         )}
+        {task.flags?.proof && <ProofSection proof={task.flags.proof} focused={focused} />}
         {shortOf && (
           <section className="mt-4">
             <h4 className={sectionTitle}>{shortOf.id === 'agent_declined' ? 'Why the agent couldn\'t do it' : 'What\'s still missing'}</h4>

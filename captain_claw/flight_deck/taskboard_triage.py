@@ -58,7 +58,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-from captain_claw.flight_deck import jev_routes, taskboard_sources, taskboard_store
+from captain_claw.flight_deck import jev_routes, taskboard_proof, taskboard_sources, taskboard_store
 from captain_claw.flight_deck.gmail_autoreply_judges import neutralise_markers, new_nonce
 from captain_claw.flight_deck.taskboard_store import (
     _LOCK_GROUP,
@@ -386,6 +386,24 @@ def _not_done_move(f: dict) -> tuple[dict, list[str]]:
     return fields, [_end(f"The agent {what}" + (f": {f['blocker']}" if f["blocker"] else ""))]
 
 
+def _in_doubt(f: dict) -> bool:
+    """What the agent says it did on a task handed to it isn't borne out (``taskboard_proof``)."""
+    return (f.get("proof") or {}).get("state") in taskboard_proof.DOUBTS
+
+
+def _with_proof(task: dict, f: dict, fields: dict, why: list[str]) -> tuple[dict, list[str]]:
+    """The moves on a task handed to an agent, with what its run was checked to
+    have done (``flags.proof``). In doubt it is the user's to look at, and the
+    board says why first."""
+    proof = f.get("proof")
+    if not proof:
+        return fields, why
+    out = {**fields, "flags": {**(fields.get("flags") or {}), "proof": proof}}
+    if _in_doubt(f) and fields.get("status", task["status"]) == "open":
+        out["owes_next"] = "me"
+    return out, [proof["note"], *why] if proof.get("note") else why
+
+
 def _came_back(task: dict) -> bool:
     """Someone's reply brought it back to Needs me (``TaskboardStore.reply_came_back``)
     and the user hasn't seen to it yet: there it stays, whatever is read of it."""
@@ -526,6 +544,7 @@ def _answered_moves(task: dict, f: dict, ans: dict, *, auto_close: bool) -> tupl
     (Jev may still say who moves next, and that it looks done). What a reply
     brought back stays with the user: Jev may only say that it looks done."""
     back = _came_back(task)
+    doubt = _in_doubt(f)
     locked = back or "status" in _locks(task)
     fields: dict[str, Any] = {}
     flags: dict[str, Any] = {}
@@ -587,14 +606,14 @@ def _answered_moves(task: dict, f: dict, ans: dict, *, auto_close: bool) -> tupl
     if status != "open":
         return ({**fields, "flags": flags} if flags else fields), lead + notes
     owes, conf = _choice(ans, "owes_next")
-    if owes in _NEXT and conf >= CONFIDENT and not back:
+    if owes in _NEXT and conf >= CONFIDENT and not back and not doubt:
         fields["owes_next"] = owes
         notes.append(f"Jev says {_NEXT[owes]} ({_pct(conf)}).")
     elif locked and f["outcome"] and task["owes_next"] == "agent":
         fields["owes_next"] = "me"  # As the rules have it: kept open by the user's word, the agent's turn over.
     p_done = _p(ans, "fulfilled")
     if p_done is not None and not f["running"]:
-        if p_done >= DONE_SURE and auto_close and not locked:
+        if p_done >= DONE_SURE and auto_close and not locked and not doubt:
             picked, sure = _choice(ans, "result")
             result = _RESULTS.get(picked, "unknown") if sure >= CONFIDENT else "unknown"
             fields.update(_close("failed" if result == "failed" else "done", "jev", "Jev", result))
@@ -605,7 +624,7 @@ def _answered_moves(task: dict, f: dict, ans: dict, *, auto_close: bool) -> tupl
             flags.update({k: False for k in ("agent_declined", "partly_done") if old.get(k)})
             told = f" ({RESULT_LABELS[result].lower()})" if result in ("partial", "failed") else ""
             lead, notes = [f"Jev is {_pct(p_done)} sure this was done{told}, so it was closed — Undo puts it back."], []
-        elif p_done >= DONE_LIKELY:
+        elif p_done >= DONE_LIKELY and not doubt:
             flags["probably_done"] = True
             lead.append(f"Jev thinks it is probably done ({_pct(p_done)}) — confirm it, or say it isn't.")
         else:
@@ -628,7 +647,7 @@ def _answered_moves(task: dict, f: dict, ans: dict, *, auto_close: bool) -> tupl
 
 
 # Flags that describe a task rather than move it: never "the move".
-_NOT_MOVES = ("why", "expected_deliverable", "answered", "blocker", "answered_on", "own_chat")
+_NOT_MOVES = ("why", "expected_deliverable", "answered", "blocker", "answered_on", "own_chat", "proof")
 
 
 def applied_text(task: dict, fields: dict) -> str:
@@ -1037,6 +1056,15 @@ def jev_item(view: dict, f: dict, now: float | None = None) -> dict:
         # reason quoted, as a model wrote it from what people wrote).
         item["model_reading"] = {"answered": f["answered"]}
         item["quoted"]["why_not_done"] = _quote(f["blocker"], 160)
+    proof = f.get("proof")
+    if proof:
+        # What the owner handed over, and what the register and the source show came of it.
+        actions = proof.get("actions") or []
+        item["handed_over"] = {"board_check": proof["state"], "actions_on_record": [
+            {"what": a["kind"], "outcome": a["outcome"], "confirmed_at_source": a["seen"] not in ("", taskboard_proof.GONE)}
+            for a in actions]}
+        item["quoted"]["owner_asked"] = _quote(f.get("handed_words"), 600)
+        item["quoted"]["action_details"] = [_quote(a["label"], 200) for a in actions]
     if f["closed"]:
         item["closed"] = {"by": task.get("closed_by") or "", "ago": _ago(now - float(task.get("closed_at") or now)),
                           "new_message_since": f["new_inbound"]}
@@ -1085,6 +1113,14 @@ def questions(i: int, f: dict) -> dict[str, dict]:
     }
     if f["third_party"]:
         out.update(act_question(i))
+    if f.get("proof"):
+        out[f"t{i}_did_as_asked"] = {
+            "type": "noul",
+            "instructions": f"The board's owner handed {ref} to the assistant with the request in quoted.owner_asked. "
+                            "Going only by handed_over.actions_on_record and quoted.action_details, and not by what "
+                            "the assistant's reply says it did: was what the owner asked for really done?",
+            "yes_means": "All the owner asked for is on record, or they only asked for an answer and the reply gives it.",
+            "no_means": "Something the owner asked for isn't on record."}
     if f["closed"] and f["new_inbound"]:
         out[f"t{i}_reopen"] = {
             "type": "noul",
@@ -1334,6 +1370,27 @@ def _settled(task: dict, fields: dict) -> dict:
     return {k: v for k, v in fields.items() if k not in ("status", "closed_at", "closed_by", "closed_by_party")}
 
 
+async def _prove(user_id: str, w: dict) -> float | None:
+    """A task an agent just ran what the user handed it: what the run really did
+    goes on its facts (``taskboard_proof``). When to look again if its tool calls
+    are still on their way, else None. A check that breaks leaves no verdict."""
+    f = w["facts"]
+    aid = str(((f.get("turn") or {}).get("automation") or {}).get("id") or "")
+    if not (f.get("handed") and f["outcome"] and aid):
+        return None
+    try:
+        words = await asyncio.to_thread(_store().hand_over_words, user_id, aid)
+        if not words:
+            return None
+        proof, until = await taskboard_proof.for_triage(user_id, w["view"], f, words)
+    except Exception as exc:  # noqa: BLE001 — triage goes on, and the task stays as it stands
+        log.warning("Taskboard proof failed", user=user_id, error=str(exc)[:200])
+        return None
+    if proof:
+        f.update(proof=proof, handed_words=words)
+    return until
+
+
 async def _decide_all(user_id: str, work: list[dict], out: dict) -> None:
     board = _store()
     settings = await asyncio.to_thread(board.get_settings, user_id)
@@ -1341,6 +1398,13 @@ async def _decide_all(user_id: str, work: list[dict], out: dict) -> None:
     for w in work:
         task = w["view"]["task"]
         if task["fingerprint"] != task["decided_fp"] or w.get("reread"):
+            until = await _prove(user_id, w)
+            if until is not None:
+                # Its run's tool calls are still on their way: what it did is checked with all of them.
+                await asyncio.to_thread(board.triage_write, user_id, task["id"], task["fingerprint"],
+                                        error=w["error"], state="pending", after=until)
+                out["deferred"] += 1
+                continue
             pending.append(w)
         else:  # only its extraction was due
             await asyncio.to_thread(board.triage_write, user_id, task["id"], task["fingerprint"],
@@ -1393,6 +1457,8 @@ async def _decide_all(user_id: str, work: list[dict], out: dict) -> None:
             out["deferred"] += 1
             continue
         if asked:
+            if f.get("proof"):
+                f["proof"] = taskboard_proof.judged(f["proof"], _p(asked["answers"], "did_as_asked"))
             fields, why = jev_moves(task, f, asked["answers"], auto_close=auto_close)
             decision = {"judge": "jev", "qset": QSET, "state_hash": asked["state_hash"], "answers": asked["answers"]}
             out["jev"] += 1
@@ -1401,6 +1467,7 @@ async def _decide_all(user_id: str, work: list[dict], out: dict) -> None:
             decision = {"judge": "rule", "qset": RULES_QSET, "answers": {},
                         "state_hash": _hash(f"{task['id']}:{task['fingerprint']}")}
             out["rules"] += 1
+        fields, why = _with_proof(task, f, fields, why)
         fields = _settled(task, fields)
         if why:
             fields["flags"] = {"why": why[0][:160], **(fields.get("flags") or {})}
@@ -1488,6 +1555,8 @@ def why_summary(task: dict, decisions: list[dict], *, unread: bool = False) -> s
     flags = _loads(task.get("flags"), {})
     status, owes = task.get("status"), task.get("owes_next")
     blocker = _line(flags.get("blocker"), 160)
+    proof = flags.get("proof") if isinstance(flags.get("proof"), dict) else {}
+    proof_note = _line(proof.get("note"), 300) if proof.get("state") in (*taskboard_proof.DOUBTS, taskboard_proof.NO_RECORD) else ""
     # {keys, text, plain}: a plain line is the board's general wording, which
     # a decision's sentence about the same reason stands in for.
     lines: list[dict] = []
@@ -1507,6 +1576,8 @@ def why_summary(task: dict, decisions: list[dict], *, unread: bool = False) -> s
         what = "could not do it" if declined else "did only part of it"
         say(_end(f"It waits on you — the agent {what}" + (f": {blocker}" if blocker else "")),
             "declined" if declined else "partly", "owes:me", plain=False)
+    elif status == "open" and owes == "me" and proof_note:
+        say(proof_note, "proof", "owes:me", plain=False)
     elif status == "open" and owes == "me" and flags.get("came_back"):
         say("A new reply came in, so it came back to you.", "came_back", "owes:me", plain=False)
     elif status == "open" and owes in OWES_LABELS:

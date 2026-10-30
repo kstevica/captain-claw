@@ -16,7 +16,8 @@ The turn comes back to the task through the turn register (``autonomy:<action>``
 the ledger row this makes), with the agent's reply on the timeline and triage
 reading it (``TaskboardStore.triage_view``: a hand-over's turn reads as the
 agent's latest on the task, where the task came in). This module also waits for
-the reply, so an agent the register can't reach still ends in Needs me.
+the reply, so an agent the register can't reach still ends in Needs me. Triage then
+checks what the agent says it did against what is on record (``taskboard_proof``).
 
   GET  /fd/taskboard/agents                 the caller's agents a task can go to
   POST /fd/taskboard/tasks/{id}/hand_over   {agent, instructions} → {task}
@@ -30,7 +31,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from captain_claw.flight_deck import taskboard_store, taskboard_triage
+from captain_claw.flight_deck import taskboard_proof, taskboard_store, taskboard_triage
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.autonomy import TASKBOARD_SOURCE
 from captain_claw.flight_deck.autonomy import get_store as autonomy_store
@@ -44,9 +45,11 @@ router = APIRouter(prefix="/fd/taskboard", tags=["taskboard"])
 INSTRUCTIONS_MAX = 4000
 _EVENTS_QUOTED = 12
 _FAILED_NOTE = "it didn't answer in time"
+_CHECK_WAIT_S = 120.0  # how long a run's turn has to reach the board before the task says it can't be checked
 
-# Hand-overs still running, off the request that made them.
+# Hand-overs still running, off the request that made them, and those waiting to be checked.
 _RUNNING: dict[tuple[str, str], asyncio.Task] = {}
+_CHECKS: set[asyncio.Task] = set()
 
 
 def _board() -> taskboard_store.TaskboardStore:
@@ -158,6 +161,19 @@ async def _run(uid: str, task_id: str, action: dict, agent: dict, prompt: str, a
         log.warning("Taskboard hand-over end not recorded", task=task_id, error=str(exc)[:200])
     finally:
         _RUNNING.pop((uid, task_id), None)
+    check = asyncio.create_task(_say_if_unrecorded(uid, aid))
+    _CHECKS.add(check)
+    check.add_done_callback(_CHECKS.discard)
+
+
+async def _say_if_unrecorded(uid: str, action_id: str) -> None:
+    """Triage checks a run by its turn (``taskboard_proof``). An agent that reports
+    none never gets there, and the task says it can't be checked. Never raises."""
+    await asyncio.sleep(_CHECK_WAIT_S)
+    try:
+        await asyncio.to_thread(_board().hand_over_unrecorded, uid, action_id, taskboard_proof.NO_RECORD_NOTE)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Taskboard hand-over check not recorded", action=action_id, error=str(exc)[:200])
 
 
 async def hand_over(uid: str, task_id: str, slug: str, instructions: str, *, actor: str = "") -> dict:

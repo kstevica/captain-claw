@@ -286,6 +286,30 @@ def test_a_new_message_since_done_shows_only_on_a_done_task():
     assert _notes({"status": "done"}) == []
 
 
+def test_a_hand_over_that_isnt_borne_out_says_so_on_an_open_task():
+    note = {"state": "not_done", "note": "It says it sent the email, but no send is on record."}
+    assert _notes({"status": "open", "flags": {"proof": note}}) == [
+        {"id": "not_proven", "label": "Not proven", "detail": note["note"]}]
+    assert _notes({"status": "open", "flags": {"proof": {"state": "failed", "note": "x"}}})[0]["label"] == "Didn't go through"
+    assert _notes({"status": "open", "flags": {"proof": {"state": "no_record"}}})[0]["label"] == "Can't check"
+    assert _notes({"status": "done", "flags": {"proof": note}}) == []    # the user's word closed it
+    for fine in ("proven", "recorded", "answered"):
+        assert _notes({"status": "open", "flags": {"proof": {"state": fine}}}) == []
+    assert _notes({"status": "open", "flags": {"proof": None}}) == []
+
+
+def test_each_action_says_what_stands_behind_it():
+    out = _run([(_TEXT, ["proofRow"])], """
+      out = [proofRow({ outcome: 'ok', seen: 'gmail' }), proofRow({ outcome: 'ok', seen: 'calendar' }),
+             proofRow({ outcome: 'ok', seen: '' }), proofRow({ outcome: 'ok', seen: 'gone' }),
+             proofRow({ outcome: 'error', reason: 'Email sending is off' }), proofRow({ outcome: 'timeout' })];
+    """)
+    assert [r["good"] for r in out] == [True, True, True, False, False, False]
+    assert [r["detail"] for r in out] == [
+        "Gmail has it", "Google Calendar has it", "Recorded by the tool",
+        "Recorded, but your Google account doesn't have it", "Email sending is off", "It didn't go through"]
+
+
 def test_answered_in_chat_never_for_a_declined_or_partial_reply():
     out = _run([(_TEXT, _NOTES)], """
       out = [answeredInChat({ answered_in_chat: true }), answeredInChat({ answered_in_chat: true, agent_declined: true }),
@@ -320,6 +344,10 @@ def test_needs_me_reason_keeps_its_order_around_the_new_notes():
     assert _reason({"flags": {"came_back": True}}) == {"text": "New reply", "more": ""}
     assert _reason({"flags": {"came_back": True, "probably_done": True}})["text"] == "Probably done?"
     assert _reason({"owes_next": "them", "flags": {"came_back": True}}) is None
+    # A hand-over that isn't borne out says so before anything else about the task.
+    proof = {"state": "not_done", "note": "No send is on record."}
+    assert _reason({"flags": {"proof": proof, "came_back": True, "probably_done": True}}) == {
+        "text": "Not proven", "more": "No send is on record."}
     # New since done is the done row's own line, never a Needs me reason.
     assert _reason({"owes_next": "agent", "status": "done", "flags": {"new_since_done": True}}) is None
 
