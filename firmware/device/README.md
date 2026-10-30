@@ -342,8 +342,9 @@ More → *Redraw asleep*, or the phone page: every minute, 2, 5, 10 or 30 min, 1
 3 h, never; at 2, 5 or 10 the time on screen is the last round one, like 19:25).
 Under 10% battery it goes hourly.
 
-It draws the sleeping screen, waits 10 s with Wi-Fi still on (a press just goes
-back), and doesn't go down within 5 s of a redraw. Status → *Woke* lists the last
+Falling asleep, it goes to the home screen for 5 s, draws the sleeping screen and
+waits 10 s with Wi-Fi still on (a press at either stage just goes back), and doesn't
+go down within 5 s of a redraw. Status → *Woke* lists the last
 boots that weren't the clock's usual tick, newest first, with the seconds since it
 went to sleep ("PWR 240s  timer 12s  restart"). From the schematic, holding G17 high feeds
 T2's base through 1K, so about 2.6 mA flows whenever it sleeps on battery,

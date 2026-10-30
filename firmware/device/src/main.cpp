@@ -53,7 +53,7 @@
 #if defined(PAPER_B)
 #define FW_VERSION "1.0.22"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.19.9"
+#define FW_VERSION "0.19.10"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -2639,6 +2639,19 @@ static void goToSleep() {
   audio::playStop();
   uint32_t t0 = millis();
   if (board::kEpaper) {
+#if defined(BOARD_EPAPER154)
+    // The home screen first, from wherever it was, for a few seconds: a press just goes back.
+    if (mode != Mode::Home && !(mode == Mode::Idle && !ui::hasReply())) {
+      mode = Mode::Home;
+      redraw();
+    }
+    for (const uint32_t onHome = millis(); millis() - onHome < 5000 && (int32_t)(buttonSeenMs - t0) <= 0;) delay(20);
+    if ((int32_t)(buttonSeenMs - t0) > 0) {
+      touch();
+      backToMain();
+      return;
+    }
+#endif
     ui::setBar(agentName, "asleep", kText);
     ui::showSleeping(sleepHint(), settings.character);  // waits for the paper (~20 s)
 #if defined(BOARD_EPAPER154)
