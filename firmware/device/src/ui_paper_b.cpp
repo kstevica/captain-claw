@@ -600,7 +600,7 @@ static void startRefresh() {
 
 // ── what the paper may draw, and when ──────────────────────────────────
 
-enum class Kind : uint8_t { None, Dash, Reply, Link, Setup };
+enum class Kind : uint8_t { None, Dash, Reply, Link, Setup, Off };
 
 #ifndef RTC_DATA_ATTR
 #define RTC_DATA_ATTR  // (the preview has no deep sleep)
@@ -769,10 +769,11 @@ uint32_t dashboardDueInSec() {
 }
 
 // Due by the clock — or at once when the paper shows a code that's no longer
-// open (the options page closes when its screen is left; setup restarts).
+// open (the options page closes when its screen is left; setup restarts), or
+// the capsized robot, switched on again.
 static bool dashDue() {
-  const bool code = everShown && (shownKind == Kind::Link || shownKind == Kind::Setup);
-  return code || dashboardDueInSec() == 0;
+  const bool stale = everShown && (shownKind == Kind::Link || shownKind == Kind::Setup || shownKind == Kind::Off);
+  return stale || dashboardDueInSec() == 0;
 }
 
 // ── chrome ─────────────────────────────────────────────────────────────
@@ -1107,7 +1108,8 @@ static void dashTick() {
 
 // The dashboard on its five-minute mark, or when it was asked for (drawNow).
 static void dashboardIfDue() {
-  const bool now = forceNext && millis() - forceAtMs < 3000;
+  // (Back from the robot it's as good as asked for: no white pass first.)
+  const bool now = (forceNext && millis() - forceAtMs < 3000) || (everShown && shownKind == Kind::Off);
   forceNext = false;
   if (now || (dashDue() && !held)) askDashboard(false, !now);
 }
@@ -1130,6 +1132,95 @@ void showSleeping(const String&, uint8_t) {
   forceNext = false;
   if (dashDue()) askDashboard(true, true);
   flush();
+}
+
+// ── switched off ───────────────────────────────────────────────────────
+
+// A drawing made upright on its own canvas, then turned onto the page. Not
+// smoothed: a blend of two inks would snap to a third (yellow and black: green).
+template <typename Fn>
+static void drawTurned(int w, int h, int x, int y, float angle, Fn fn) {
+  M5Canvas c(&canvas);
+  c.setPsram(true);
+  c.setColorDepth(16);
+  if (!c.createSprite(w, h)) return;
+  c.fillScreen(kPaper);
+  fn(c);
+  c.pushRotateZoom(&canvas, x, y, angle, 1.0f, 1.0f, kPaper);
+  c.deleteSprite();
+}
+
+// The robot capsized: feet in the air, head in the sea, its hat floating off.
+static void drawCapsized(const String& hint) {
+  drawTurned(240, 292, W / 2, 288, 200, [](M5Canvas& c) {
+    static constexpr int cx = 120;
+    // Antenna, bent by the fall.
+    c.drawWideLine(cx, 36, cx + 5, 21, 2.5f, kInk);
+    c.drawWideLine(cx + 5, 21, cx + 26, 13, 2.5f, kInk);
+    c.fillCircle(cx + 31, 13, 8, kRed);
+    // Head, ears, eyes, a surprised mouth.
+    c.fillRoundRect(cx - 83, 62, 15, 36, 5, kRed);
+    c.fillRoundRect(cx + 68, 62, 15, 36, 5, kRed);
+    c.fillRoundRect(cx - 68, 31, 136, 99, 24, kInk);
+    c.fillRoundRect(cx - 63, 36, 126, 89, 19, kPaper);
+    for (int eye : {cx - 31, cx + 31}) {
+      c.drawWideLine(eye - 13, 55, eye + 13, 81, 3.0f, kInk);
+      c.drawWideLine(eye + 13, 55, eye - 13, 81, 3.0f, kInk);
+    }
+    c.fillCircle(cx, 104, 10, kInk);
+    c.fillCircle(cx, 104, 5, kPaper);
+    // Arms flung out, then the body over them.
+    c.drawWideLine(cx - 52, 156, cx - 94, 187, 6.5f, kInk);
+    c.drawWideLine(cx + 52, 156, cx + 94, 130, 6.5f, kInk);
+    c.fillRoundRect(cx - 52, 135, 104, 62, 16, kInk);
+    c.fillRoundRect(cx - 47, 140, 94, 52, 11, kYellow);
+    c.fillCircle(cx, 166, 8, kRed);
+    // Legs and feet.
+    c.fillRoundRect(cx - 36, 197, 16, 47, 5, kInk);
+    c.fillRoundRect(cx + 21, 197, 16, 36, 5, kInk);
+    c.fillRoundRect(cx - 57, 239, 42, 16, 8, kRed);
+    c.fillRoundRect(cx + 16, 228, 42, 16, 8, kRed);
+  });
+  drawTurned(84, 62, 335, 388, 18, [](M5Canvas& c) {
+    static constexpr int cx = 42;
+    // The crown, wider at the top; its ink, then again smaller in paper.
+    c.fillEllipse(cx, 15, 37, 13, kInk);
+    c.fillTriangle(cx - 37, 18, cx + 37, 18, cx + 18, 42, kInk);
+    c.fillTriangle(cx - 37, 18, cx + 18, 42, cx - 18, 42, kInk);
+    c.fillEllipse(cx, 15, 33, 9, kPaper);
+    c.fillTriangle(cx - 31, 18, cx + 31, 18, cx + 13, 37, kPaper);
+    c.fillTriangle(cx - 31, 18, cx + 13, 37, cx - 13, 37, kPaper);
+    c.fillCircle(cx, 24, 5, kRed);  // the badge
+    // Band and peak.
+    c.fillRect(cx - 20, 37, 40, 11, kInk);
+    c.fillEllipse(cx, 51, 26, 7, kInk);
+  });
+  // Bubbles.
+  static constexpr int bubbles[][3] = {{72, 396, 11}, {50, 356, 8}, {74, 324, 6}};
+  for (const auto& b : bubbles) {
+    canvas.fillCircle(b[0], b[1], b[2], kBlue);
+    canvas.fillCircle(b[0], b[1], b[2] - 3, kPaper);
+  }
+  // The sea, its crest hiding what's under it, and a wave in it.
+  for (int x = 0; x < W; ++x) {
+    const int y = 408 + (int)(14 * fabsf(sinf(x * 3.14159f / 64)));
+    canvas.drawFastVLine(x, y, H - y, kBlue);
+    canvas.fillRect(x, 452 + (int)(10 * fabsf(sinf((x + 24) * 3.14159f / 76))), 1, 3, kPaper);
+  }
+  font(vlw::BodyS);
+  text(hint, W / 2, H - 58, kPaper, middle_center);
+}
+
+void showSwitchedOff(const String& hint, void (*whileDrawing)()) {
+  draw(Kind::Off, [=] {
+    drawHeader("Switched off", false);
+    drawCapsized(hint);
+  });
+  do {  // (tick(): a dashboard on its way is cut short, then this one goes on)
+    tick();
+    if (whileDrawing) whileDrawing();
+    delay(20);
+  } while (refreshing || want.active);
 }
 
 // ── the answer: at the largest size that fits ──────────────────────────

@@ -204,6 +204,9 @@ int main(int argc, char** argv) {
   ui::showHome(home);
   save("13_dashboard_agent_stopped");
 
+  ui::showSwitchedOff("Power button to switch on");
+  save("14_switched_off");
+
   // (Asleep: the dashboard goes by the clock's five-minute marks — the Mac's
   // real clock here, so a jump of the stand-in millis() doesn't make it due.)
   return 0;

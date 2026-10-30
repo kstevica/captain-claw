@@ -1072,7 +1072,7 @@ static void drawCapsized() {
   canvas.drawCircle(42, 107, 2, kInk);
 }
 
-void showSwitchedOff(const String& hint) {
+void showSwitchedOff(const String& hint, void (*)()) {
   drawing(Screen::Other);
   canvas.fillScreen(kPaper);
   drawBar(false);

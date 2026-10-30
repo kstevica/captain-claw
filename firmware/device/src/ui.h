@@ -211,8 +211,13 @@ void notesChanged();
 // The panel's controller to sleep, before the device's deep sleep (the
 // picture stays; ui_epaper154.cpp keeps it, for the next refresh to start from).
 void panelSleep();
-// Switched off: the capsized robot, and how to switch it back on.
-void showSwitchedOff(const String& hint);
+#endif
+
+#if defined(BOARD_EPAPER154) || defined(PAPER_B)
+// Switched off: the capsized robot, and how to switch it back on. The B paper
+// returns with the picture on the paper (about 20 s), calling `whileDrawing`
+// all the while.
+void showSwitchedOff(const String& hint, void (*whileDrawing)() = nullptr);
 #endif
 
 // How many proposals wait in Flight Deck, as last heard (0: none): a magenta
