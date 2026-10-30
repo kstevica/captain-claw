@@ -1,10 +1,12 @@
-import { useState, type ReactNode } from 'react'
-import { AlertTriangle, Check, CircleDot, FileDown, History, ListTodo, Loader2, ShieldAlert, Sparkles } from 'lucide-react'
+import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
+import {
+  AlertTriangle, Bot, Check, ChevronDown, CircleDot, CircleSlash, FileDown, Hand, HelpCircle, History, ListTodo, Loader2, ShieldAlert, Sparkles, Users,
+} from 'lucide-react'
 import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskboardStatus } from '../../services/taskboardApi'
 import { resolveProposal } from '../../services/notifications'
 import {
-  JUDGE_LABEL, KEY_SHEET, OWES_LABEL, RESULT_LABEL, STATUS_LABEL, agoRelative, channelInfo, foldChar, keyLabel,
-  type DatePreset, type DateRange, type TaskNote,
+  JUDGE_LABEL, KEY_SHEET, OWES_LABEL, RESULT_LABEL, STATUS_LABEL, TASK_KEYS, agoRelative, channelInfo, foldChar, keyLabel,
+  markdownPieces, type DatePreset, type DateRange, type TaskNote,
 } from './taskboardText'
 
 // Pieces of the Taskboard: search highlighting (the server's folding, so
@@ -12,6 +14,25 @@ import {
 // filter, the chips a task wears, the sync line, quick answers, the
 // download menu and the board's switch. Their words and plain helpers are
 // in taskboardText.
+
+/** What a task says, its Markdown read rather than shown (taskboardText:
+ *  markdownPieces), search terms lit up as everywhere. All inline, so it can sit
+ *  on a clamped line of a row. */
+export function TaskText({ text, terms }: { text: string; terms: string[] }) {
+  const pieces = useMemo(() => markdownPieces(text), [text])
+  return (
+    <>
+      {pieces.map((p, i) => {
+        let el: ReactNode = <FoldHighlight text={p.text} terms={terms} />
+        if (p.code) el = <code className="rounded bg-zinc-800/70 px-1 font-mono text-[0.9em]">{el}</code>
+        if (p.strike) el = <s>{el}</s>
+        if (p.italic) el = <em>{el}</em>
+        if (p.bold) el = <strong className="font-semibold">{el}</strong>
+        return <Fragment key={i}>{el}</Fragment>
+      })}
+    </>
+  )
+}
 
 /** Search terms, folded on both sides: "duric" lights up "Đurić". `terms`
  *  come folded (foldText). */
@@ -567,6 +588,99 @@ export function KeySheet({ onClose }: { onClose: () => void }) {
           ))}
         </div>
       </div>
+    </div>
+  )
+}
+
+const MOVE_ICONS: Record<string, typeof Hand> = { me: Hand, agent: Bot, them: Users, nobody: CircleSlash, unclear: HelpCircle }
+
+/** Who moves next on a task: a menu of the board's own, opening upwards from the
+ *  bottom of the task, by click or key. With it open, arrows (or j and k) and Enter
+ *  or a digit pick, and Esc leaves it as it was. Whatever is going on elsewhere on
+ *  the board waits: the task's other keys and moving away are held meanwhile. */
+export function NextMoveMenu({ value, options, open, busy, disabled, onOpenChange, onPick, children }: {
+  value: string
+  options: { id: string; label: string }[]
+  open: boolean
+  busy: boolean
+  disabled: boolean
+  onOpenChange: (open: boolean) => void
+  onPick: (id: string) => void
+  /** What else sits on its row. */
+  children?: ReactNode
+}) {
+  // Where the keys are: the current one until they move it.
+  const [active, setActive] = useState<number | null>(null)
+  const trigger = useRef<HTMLButtonElement>(null)
+  const list = useRef<HTMLDivElement>(null)
+  useEffect(() => { if (open) list.current?.focus() }, [open])
+  const at = active ?? Math.max(options.findIndex((o) => o.id === value), 0)
+  const shut = () => { setActive(null); onOpenChange(false) }
+  const pick = (i: number) => { shut(); onPick(options[i].id) }
+  const onKey = (e: KeyboardEvent) => {
+    const step = (by: number) => setActive((at + by + options.length) % options.length)
+    const digit = Number(e.key)
+    if (e.key === 'ArrowDown' || e.key === 'j') step(1)
+    else if (e.key === 'ArrowUp' || e.key === 'k') step(-1)
+    else if (e.key === 'Home') setActive(0)
+    else if (e.key === 'End') setActive(options.length - 1)
+    else if (e.key === 'Enter' || e.key === ' ') pick(at)
+    else if (digit >= 1 && digit <= options.length) pick(digit - 1)
+    else if (e.key === 'Escape' || e.key === TASK_KEYS.move) { shut(); trigger.current?.focus() }
+    else if (e.key === 'Tab') shut()
+    else return
+    e.preventDefault()
+    e.stopPropagation()
+  }
+  const Current = MOVE_ICONS[value] ?? HelpCircle
+  return (
+    <div className="relative col-span-2" onBlur={(e) => { if (open && !e.currentTarget.contains(e.relatedTarget)) shut() }}>
+      <div className="flex items-center gap-2 rounded-lg border border-zinc-800 px-3 py-1.5 text-sm">
+        <span className="shrink-0 text-zinc-500">Next move</span>
+        <button
+          ref={trigger}
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => (open ? shut() : onOpenChange(true))}
+          disabled={disabled}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          aria-label="Who moves next"
+          className="flex min-w-0 flex-1 items-center gap-1.5 rounded py-0.5 text-left text-zinc-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-teal-500/60 disabled:opacity-50"
+        >
+          <Current className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+          <span className="min-w-0 flex-1 truncate">{options.find((o) => o.id === value)?.label ?? value}</span>
+          <KeyHint k={TASK_KEYS.move} />
+          {busy ? <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-zinc-500" />
+            : <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-180' : ''}`} />}
+        </button>
+        {children}
+      </div>
+      {open && (
+        <div ref={list} role="listbox" tabIndex={-1} aria-label="Who moves next" aria-activedescendant={`next-move-${options[at]?.id}`} onKeyDown={onKey}
+          className="absolute bottom-full left-0 right-0 z-30 mb-1 overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900 py-1 shadow-xl focus:outline-none">
+          {options.map((o, i) => {
+            const Icon = MOVE_ICONS[o.id] ?? HelpCircle
+            return (
+              <div
+                key={o.id}
+                id={`next-move-${o.id}`}
+                role="option"
+                aria-selected={o.id === value}
+                onMouseDown={(e) => e.preventDefault()}
+                onMouseEnter={() => setActive(i)}
+                onClick={() => pick(i)}
+                className={`flex cursor-pointer items-center gap-2 px-3 py-2 text-sm wide:py-1.5 ${i === at ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-300'}`}
+              >
+                <Icon className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+                <span className="min-w-0 flex-1 truncate">{o.label}</span>
+                {o.id === value && <Check className="h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />}
+                <KeyHint k={String(i + 1)} />
+              </div>
+            )
+          })}
+        </div>
+      )}
     </div>
   )
 }

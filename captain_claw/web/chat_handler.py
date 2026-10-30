@@ -161,9 +161,9 @@ async def _generate_task_name(
 # chat. Delegated results and flow consults stay where they are: they carry
 # on a conversation (or a flow step) that lives in the main chat.
 REROUTED_AUTOMATION_KINDS = frozenset({
-    "fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan", "peer", "botport", "mcp_task", "link",
+    "fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan", "peer", "botport", "mcp_task", "link", "taskboard",
 })
-MIRRORED_AUTOMATION_KINDS = frozenset({"fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan"})
+MIRRORED_AUTOMATION_KINDS = frozenset({"fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan", "taskboard"})
 
 
 def _reply_waid(whatsapp_waid: str | None, origin: dict | None,
@@ -360,11 +360,12 @@ def task_marker(raw: Any) -> dict | None:
         "session_id": str(raw.get("session_id") or "").strip()[:128],
         "mirror": raw.get("mirror") is not False,
         **({"link": True} if raw.get("link") is True else {}),
+        **({"board": True} if raw.get("board") is True else {}),
     }
 
 
 def task_session_name(task: dict) -> str:
-    return f"{'🔗' if task.get('link') else '⏰'} {task['name']}"
+    return f"{'🔗' if task.get('link') else '📋' if task.get('board') else '⏰'} {task['name']}"
 
 
 def _live_session(server: Any, session_id: str) -> Any:
@@ -472,7 +473,7 @@ async def _mirror_automation_result(
     pending.append({"label": label, "lane": lane, "text": text,
                     "at": datetime.now(UTC).isoformat(),
                     **({"fd_delivers": True} if fd_delivers else {}),
-                    **({"task": {k: task[k] for k in ("id", "name", "session_id")}} if task else {})})
+                    **({"task": {k: task[k] for k in ("id", "name", "session_id", "board") if k in task}} if task else {})})
     del pending[: max(0, len(pending) - _PENDING_RESULTS_KEPT)]
     for _ in range(_MIRROR_WAIT_TICKS):
         if not server._busy:

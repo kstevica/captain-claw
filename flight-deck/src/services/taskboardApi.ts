@@ -395,6 +395,19 @@ async function download(path: string, fallback: string): Promise<void> {
 
 export interface HandOverAgent { slug: string; name: string; asleep: boolean }
 
+/** One email of a task's thread, read from Gmail when asked for. */
+export interface TaskEmailMessage {
+  id: string
+  from_name: string
+  from_address: string
+  to: string[]
+  cc: string[]
+  date: number
+  subject: string
+  text: string
+  attachments: string[]
+}
+
 export const taskboardApi = {
   /** What the board reads, each view's count, the sweep and (v2) the history fill. */
   status: () => api<TaskboardStatus>(`${BASE}/status`),
@@ -434,6 +447,8 @@ export const taskboardApi = {
   merge: (id: string, into: string) =>
     api<{ task: TaskItem }>(taskPath(id, '/merge'), { method: 'POST', body: JSON.stringify({ into }) }),
   unmerge: (id: string) => api<{ task: TaskItem; into: TaskItem | null }>(taskPath(id, '/unmerge'), { method: 'POST' }),
+  /** The whole email behind a task, read from Gmail now (`reason`: why there is none). */
+  email: (id: string) => api<{ messages: TaskEmailMessage[]; more: number; reason: string }>(taskPath(id, '/email')),
   /** The caller's agents a task can be handed to (asleep: it wakes for it). */
   agents: () => api<{ agents: HandOverAgent[] }>('/fd/taskboard/agents'),
   /** Hand the task to an agent: it starts on it now. */

@@ -312,7 +312,7 @@ export function answerText(question: string, a: TaskAnswer): string {
  *  snooze, label, move to, reply and undo. Approving a next step has no key. */
 export const TASK_KEYS = {
   done: 'e', reopen: 'U', gotIt: 'I', notTask: '!', yes: 'y', snooze: 'b', rename: 'l', merge: 'v', nextStep: 'r', undo: 'z',
-  agent: 'a',
+  agent: 'a', focus: 'f', move: 'm',
 } as const
 
 /** `g`, then one of these within {@link GO_WAIT_MS}: Gmail's "go to". */
@@ -329,6 +329,7 @@ export const KEY_SHEET: { title: string; rows: { keys: string[]; what: string }[
   { title: 'Move around', rows: [
     { keys: ['j', 'k'], what: 'Next or previous task' },
     { keys: ['o', 'Enter'], what: 'Open the task' },
+    { keys: [TASK_KEYS.focus], what: 'Open the task bigger, or back' },
     { keys: ['u'], what: 'Back to the list' },
     { keys: ['/'], what: 'Search' },
     { keys: ['g n'], what: 'Go to Needs me' },
@@ -348,6 +349,7 @@ export const KEY_SHEET: { title: string; rows: { keys: string[]; what: string }[
     { keys: [TASK_KEYS.rename], what: 'Rename' },
     { keys: [TASK_KEYS.merge], what: 'Merge into…' },
     { keys: [TASK_KEYS.nextStep], what: 'Review or suggest a next step' },
+    { keys: [TASK_KEYS.move], what: 'Next move, then 1–5 to pick' },
     { keys: [TASK_KEYS.agent], what: 'Hand to an agent' },
     { keys: [TASK_KEYS.undo], what: 'Undo last change' },
     { keys: ['Esc'], what: 'Close what is on top' },
@@ -387,6 +389,99 @@ export function stepTo(ids: string[], openId: string | null, last: number, step:
   if (from < 0) return 0
   const to = from + step
   return to >= ids.length || to < 0 ? -1 : to
+}
+
+/** An email's text, its long links down to where they go (a tracking link can
+ *  run for lines) and its runs of blank lines closed up. */
+export function readableEmail(text: string): string {
+  const host = (url: string) => /^https?:\/\/([^/?#\s>]+)/i.exec(url)?.[1] ?? url
+  return String(text || '')
+    .replace(/<\s*(https?:\/\/[^\s>]+)\s*>/gi, (_all, url: string) => `[${host(url)}]`)
+    .replace(/https?:\/\/[^\s<>)\]]{60,}/gi, (url) => `${host(url)}/…`)
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+// ── Markdown in what a task says ──────────────────────────────────────
+
+/** A run of text and how it is marked. */
+export interface TextPiece { text: string; bold?: boolean; italic?: boolean; code?: boolean; strike?: boolean }
+
+const WORD_CHAR = /[\p{L}\p{N}_]/u
+const isSpace = (ch: string | undefined) => !ch || /\s/.test(ch)
+const isWord = (ch: string | undefined) => !!ch && WORD_CHAR.test(ch)
+
+/** One line's own marks gone: a heading's hashes, a quote's bar, a rule; a list
+ *  item's marker reads as a bullet. */
+function cleanMarkdownLine(line: string): string {
+  if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) return ''
+  return line
+    .replace(/^\s{0,3}#{1,6}\s+/, '')
+    .replace(/^\s*>\s?/, '')
+    .replace(/^\s*[-*+]\s+/, '• ')
+    // What the board keeps of a reply has its lines run together, so these come mid-line:
+    .replace(/(^|[:.!?…]\s+)>\s+(?=[*_"“'])/g, '$1')
+    .replace(/(^|\s)#{2,6}\s+/g, '$1')
+}
+
+function inlinePieces(s: string, marks: Omit<TextPiece, 'text'>, out: TextPiece[]): void {
+  let plain = ''
+  const flush = () => { if (plain) { out.push({ text: plain, ...marks }); plain = '' } }
+  const inside = (text: string, more: Omit<TextPiece, 'text'>) => { flush(); inlinePieces(text, { ...marks, ...more }, out) }
+  for (let i = 0; i < s.length;) {
+    const ch = s[i]
+    const before = s[i - 1]
+    if (ch === '`') {
+      const end = s.indexOf('`', i + 1)
+      if (end > i + 1 && !s.slice(i, end).includes('\n')) {
+        flush()
+        out.push({ text: s.slice(i + 1, end), ...marks, code: true })
+        i = end + 1
+        continue
+      }
+    } else if (s.startsWith('**', i) || s.startsWith('~~', i)) {
+      const mark = s.slice(i, i + 2)
+      let end = s.indexOf(mark, i + 2)
+      while (end > 0 && isSpace(s[end - 1])) end = s.indexOf(mark, end + 1)
+      while (end > 0 && s[end + 2] === mark[0]) end += 1  // **a *b***: the last two close it
+      if (end > i + 2 && !isSpace(s[i + 2])) {
+        inside(s.slice(i + 2, end), mark === '**' ? { bold: true } : { strike: true })
+        i = end + 2
+        continue
+      }
+      // Clipped where the board keeps it, its other half is gone: it isn't text. 2**3 is.
+      if (mark === '**' && isSpace(before) !== isSpace(s[i + 2])) { i += 2; continue }
+    } else if ((ch === '*' || ch === '_') && !isWord(before) && before !== ch && !isSpace(s[i + 1]) && s[i + 1] !== ch) {
+      let end = s.indexOf(ch, i + 2)
+      while (end > 0 && (isSpace(s[end - 1]) || isWord(s[end + 1]) || s[end + 1] === ch)) end = s.indexOf(ch, end + 1)
+      if (end > 0 && !s.slice(i, end).includes('\n')) {
+        inside(s.slice(i + 1, end), { italic: true })
+        i = end + 1
+        continue
+      }
+    } else if (ch === '[' || (ch === '!' && s[i + 1] === '[')) {
+      // A link's or a picture's words: nothing here is followed or loaded.
+      const m = /^!?\[([^\]\n]*)\]\([^)\s]+(?:\s+"[^"\n]*")?\)/.exec(s.slice(i))
+      if (m) {
+        inside(m[1], {})
+        i += m[0].length
+        continue
+      }
+    }
+    plain += ch
+    i += 1
+  }
+  flush()
+}
+
+/** What a task says as runs of marked text, its Markdown read rather than shown:
+ *  bold, italic, code and struck through, links as their words, line marks gone.
+ *  Never HTML, and nothing is followed or loaded: it can be anyone's text. */
+export function markdownPieces(text: string): TextPiece[] {
+  const out: TextPiece[] = []
+  inlinePieces(String(text || '').split('\n').map(cleanMarkdownLine).join('\n'), {}, out)
+  return out
 }
 
 export function agoRelative(epoch: number): string {

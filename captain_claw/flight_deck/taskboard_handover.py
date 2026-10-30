@@ -6,9 +6,11 @@ goes to the agent as a turn of its own, in a session of its own for the task
 continues it, and "Continue in chat" opens it), with the user's words first and
 the task as the board keeps it fenced as data behind them.
 
-What it may do follows the user's words only: ``job_text`` is what they typed,
-never what anyone wrote on the task, so it may write email only when they asked
-for that (``mail_authority``, as a scheduled task's prompt).
+It is the user's own request, not autonomous work: they typed it and clicked, so
+the agent is told so and may do it, email included (``kind: taskboard``,
+``mail_write: allow``, as any action a human approved). Sending still goes by the
+user's own switch (Connections → Google → Email sending). What anyone wrote on the
+task reaches it fenced as data, never as part of the request.
 
 The turn comes back to the task through the turn register (``autonomy:<action>``,
 the ledger row this makes), with the agent's reply on the timeline and triage
@@ -79,8 +81,9 @@ def prompt_for(view: dict, instructions: str, nonce: str) -> str:
     q = taskboard_triage._quote
     flags = taskboard_triage._loads(task.get("flags"), {})
     lines = [
-        "Your owner is handing you a task from their Taskboard. Do what they ask, then say briefly what you did and "
-        "what, if anything, is left for them.",
+        "Your owner is handing you a task from their Taskboard. This is their own request: carry it out now with your "
+        "tools, including writing the email or message if that is what it takes, rather than describing what you would "
+        "do or asking them to confirm. Then say briefly what you did and what, if anything, is left for them.",
         "",
         "What they ask:",
         instructions,
@@ -96,6 +99,11 @@ def prompt_for(view: dict, instructions: str, nonce: str) -> str:
         f"Asked: {q(task.get('ask'), 600)}",
         f"Done so far: {q(task.get('result_text'), 600) or '(nothing recorded)'}",
     ]
+    keys = [str(link["key"]) for link in _board().links(str(task.get("user_id") or ""), [task["id"]]).get(task["id"], [])]
+    thread = next((k.removeprefix("gmail:thread:") for k in reversed(keys) if k.startswith("gmail:thread:")), "")
+    message = next((k.removeprefix("gmail:msg:") for k in reversed(keys) if k.startswith("gmail:msg:")), "")
+    if thread:
+        lines.append(f"Email thread id: {q(thread, 120)}" + (f"; latest message id: {q(message, 120)}" if message else ""))
     people = [f"{q(p.get('display'), 80)} ({q(p.get('address'), 120)})" for p in view.get("parties") or []
               if p.get("role") in ("requester", "recipient", "cc")][:8]
     if people:
@@ -192,10 +200,11 @@ async def hand_over(uid: str, task_id: str, slug: str, instructions: str, *, act
         autonomy_store().update_status(str(action["id"]), "done", outcome="fail", outcome_note="its task went")
         raise LookupError(task_id)
     automation = {
-        "kind": "autonomy", "ref": str(action["id"]),
-        # Only the user's own words can ask it for email, never the task's.
-        "job_text": words, "mail_write": "intent", "fd_delivers": True,
-        "task": {"id": task_id, "name": title or "Taskboard task", "session_id": _session_of(uid, task_id, slug)},
+        "kind": "taskboard", "ref": str(action["id"]),
+        # A human's click, as an approved action's: what the task's text says never gets here.
+        "job_text": words, "mail_write": "allow", "fd_delivers": True,
+        "task": {"id": task_id, "name": title or "Taskboard task", "session_id": _session_of(uid, task_id, slug),
+                 "board": True},
     }
     _RUNNING[(uid, task_id)] = asyncio.create_task(_run(uid, task_id, action, agent, prompt, automation))
     return row
