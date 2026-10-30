@@ -52,10 +52,13 @@ A turn's close brings the calls the register has from it along, so triage
 judges a turn with its calls once. A new event on a turn's open task puts it
 back in the triage queue (``taskboard_triage``) — its close and its tool calls
 settle a while first (a burst of calls is one decision), a new turn at once.
-Someone writing on a done request again (a reply on its email thread) queues
-it at once too, flagged ``new_since_done``: Jev asks whether that reopens it —
-unless the source moved it with that (an auto-reply held for approval or
-sent), and that move stands.
+Someone writing again on a conversation that wasn't waiting on the user (a
+reply on its email thread, after it was done, moved to someone else or
+snoozed) brings the same task back to Needs me at once, as a reply brings a
+thread back to Gmail's inbox (:func:`reply_brings_back`) — unless the source
+moved it with that (an auto-reply held for approval or sent), and that move
+stands. Only a message dated long before the close is history: Jev asks
+whether that reopens it, flagged ``new_since_done``.
 """
 
 from __future__ import annotations
@@ -854,26 +857,65 @@ def _cron_end(turn: dict, agent_name: str) -> dict:
     return {"owes_next": "nobody"}
 
 
-# ── New inbound on a closed request ───────────────────────────────────
+# ── New inbound on a task the user wasn't looking at ──────────────────
+
+# A message reaches the board up to a sweep or two after it was sent (and clocks
+# differ), so one dated this long before the close is still news to the user.
+# Older, it is history being read (an inbox just switched on).
+_NEWS_LAG_S = 900.0
+_ANSWERED_KINDS = ("request", "message", "follow_up")
+_LEDGERS_OWN = ("follow_up",)  # its ledger says when it is over, and triage never reads it
+
+
+def is_news(task: dict, at: float) -> bool:
+    """A message dated *at* is new to what the task stands on: not from well
+    before it was closed (or, still open, made)."""
+    return at >= float(task.get("closed_at") or task.get("created_at") or 0) - _NEWS_LAG_S
+
+
+def _found_strongly(store: TaskboardStore, uid: str, task: dict, keys: list[str] | tuple[str, ...]) -> bool:
+    """The message was on this task by a strong key, and no mute rule keeps it quiet."""
+    strength = {link["key"]: link["strength"] for link in store.links(uid, [task["id"]]).get(task["id"], [])}
+    found = next((k for k in keys if k in strength), "")
+    return strength.get(found) == "strong" and _json(task.get("flags"), {}).get("rule") != "mute"
+
+
+def reply_brings_back(store: TaskboardStore, uid: str, task_id: str, keys: list[str] | tuple[str, ...], at: float,
+                      now: float | None = None) -> bool:
+    """Someone wrote on a conversation the user wasn't looking at (it was
+    closed, the next move someone else's, or snoozed), found by a strong key:
+    the same task is back in Needs me (``TaskboardStore.reply_came_back``), by
+    their word alone, as a reply brings a thread back to Gmail's inbox. Not
+    "not a task" or dismissed (the user said it isn't one), a merged-in row,
+    what an agent is working on, or history (:func:`is_news`). True when it
+    came back (the caller kicks triage)."""
+    task = store.get_task(uid, task_id)
+    if task is None or task["kind"] not in _ANSWERED_KINDS or task["merged_into"] or not is_news(task, at):
+        return False
+    now = time.time() if now is None else now
+    status, owes = task["status"], task["owes_next"]
+    if status in ("done", "failed"):
+        back = task["kind"] not in _LEDGERS_OWN
+    else:
+        back = status == "open" and owes != "agent" and (owes != "me" or float(task["snooze_until"] or 0) > now)
+    if not back or not _found_strongly(store, uid, task, keys):
+        return False
+    return store.reply_came_back(uid, task_id, read=task["kind"] not in _LEDGERS_OWN, now=now)
 
 
 def inbound_after_done(store: TaskboardStore, uid: str, task_id: str, keys: list[str] | tuple[str, ...],
                        now: float | None = None, *, ref: str = "") -> bool:
-    """Someone wrote on a person's request after it was done (a reply on its
-    email thread), found by a strong key: back in the triage queue at once,
-    so Jev asks whether it opens the task again — without Jev it stays done —
-    and flagged ``new_since_done`` for the board, with the message that says
-    so (*ref*, its ``source_ref``: it may be dated before the close). A task a
-    mute rule keeps quiet stays out of the queue. True when it was queued
-    (the caller kicks triage)."""
+    """A message dated long before a person's request was done reached the
+    board only now (not :func:`is_news`: its inbox was switched on since),
+    found by a strong key: back in the triage queue at once, so Jev asks whether
+    it opens the task again — without Jev it stays done — and flagged
+    ``new_since_done`` for the board, with the message that says so (*ref*, its
+    ``source_ref``). A task a mute rule keeps quiet stays out of the queue.
+    True when it was queued (the caller kicks triage)."""
     task = store.get_task(uid, task_id)
     if task is None or task["kind"] != "request" or task["status"] != "done":
         return False
-    strength = {link["key"]: link["strength"] for link in store.links(uid, [task_id]).get(task_id, [])}
-    found = next((k for k in keys if k in strength), "")
-    if strength.get(found) != "strong":
-        return False
-    if _json(task.get("flags"), {}).get("rule") == "mute":
+    if not _found_strongly(store, uid, task, keys):
         return False
     return store.update_fields(uid, task_id, {"triage_state": "pending",
                                                "triage_after": time.time() if now is None else now,

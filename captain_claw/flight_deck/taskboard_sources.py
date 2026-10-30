@@ -34,8 +34,8 @@ forgets older ones).
 
 Every adapter's writes go through one place (``_Pass.ingest``): a task gets
 one requester row per person (none beside the user on their own chat), and
-someone writing in on a request that was done queues it for triage again
-(``taskboard_ingest.inbound_after_done``).
+someone writing on a conversation the user wasn't looking at brings it back
+to Needs me (``taskboard_ingest.reply_brings_back``).
 
 Rows change after they are first read (a proposal is approved, a follow-up
 done, a run finishes), so no adapter trusts a plain "newer than" cursor: each
@@ -244,19 +244,24 @@ class _Pass:
                     "agent_owner_id": info["owner"]}
         return {"agent_slug": slug or "", "agent_name": name or slug or "", "agent_ref": "", "agent_owner_id": ""}
 
-    def ingest(self, source: str, uid: str, **kw: Any) -> tuple[str | None, bool]:
+    def ingest(self, source: str, uid: str, *, quiet: bool = False, **kw: Any) -> tuple[str | None, bool]:
+        """One record onto the board. *quiet*: a mute rule covers this message,
+        so it brings nothing back."""
         if kw.get("parties"):
             kw["parties"] = _parties_to_add(self.store, uid, kw.get("keys") or [], kw["parties"])
+        ev, keys = kw.get("event") or {}, kw.get("keys") or []
+        # Someone writing on a task the board has already (a reply on its thread), not the record that makes one.
+        reply = (not quiet and ev.get("kind") == "received" and ev.get("actor_kind") == "party"
+                 and any(self.store.task_for_key(uid, k) for k in keys))
         task_id, new = self.store.ingest(uid, **kw)
         if new:
             self.new_events[source] = self.new_events.get(source, 0) + 1
-            ev = kw.get("event") or {}
-            if task_id and ev.get("kind") == "received" and ev.get("actor_kind") == "party":
-                # Someone writing on a request that was done (a reply on its thread).
+            if task_id and reply:
                 from captain_claw.flight_deck import taskboard_ingest
 
-                if taskboard_ingest.inbound_after_done(self.store, uid, task_id, kw.get("keys") or [],
-                                                       ref=str(ev.get("source_ref") or "")):
+                if (taskboard_ingest.reply_brings_back(self.store, uid, task_id, keys, float(ev.get("at") or time.time()))
+                        or taskboard_ingest.inbound_after_done(self.store, uid, task_id, keys,
+                                                               ref=str(ev.get("source_ref") or ""))):
                     taskboard_ingest._kick(uid)
         return task_id, new
 

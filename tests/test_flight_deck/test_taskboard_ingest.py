@@ -1006,8 +1006,9 @@ async def test_a_message_after_a_request_was_done_queues_it_again(api):
     assert task["triage_state"] == "ok" and "new_since_done" not in _flags(task) and api.kicks == []
     inbound("gmail:thread:T-5", "r-1")
     task = api.board.get_task(api.alice, task_id)
-    assert (task["status"], task["triage_state"]) == ("done", "pending") and task["triage_after"] <= time.time()
-    assert _flags(task)["new_since_done"] is True and api.kicks == [api.alice]
+    assert (task["status"], task["owes_next"], task["triage_state"]) == ("open", "me", "pending")
+    assert task["triage_after"] <= time.time() and task["closed_at"] is None
+    assert _flags(task)["came_back"] is True and api.kicks == [api.alice]
     # A task a mute rule keeps quiet stays out of the queue.
     done()
     api.board._conn.execute("UPDATE tasks SET flags = '{\"rule\": \"mute\"}' WHERE id = ?", (task_id,))
@@ -1061,14 +1062,15 @@ async def test_a_reply_held_on_a_done_requests_thread_stays_in_needs_me(api, mon
     run_sweep()
     task = _task(api, api.alice, tid)
     assert (task["status"], task["owes_next"], task["triage_state"]) == ("open", "me", "pending")
-    assert _flags(task)["new_since_done"] is False   # what came in is what opened it
+    assert not _flags(task).get("new_since_done")   # what came in is what opened it
     res = await _triage_due(api, api.alice)
     assert res["rules"] == 1
     task = _task(api, api.alice, tid)
     assert (task["status"], task["owes_next"], task["closed_at"]) == ("open", "me", None)
     assert api.board.lane_of(api.alice, task_id) == "needs_me"
     flags = _flags(task)
-    assert flags["answered_in_chat"] is False and flags["why"].startswith("What its source recorded")
+    assert flags["answered_in_chat"] is False and flags["came_back"] is True
+    assert "came back to you" in taskboard_triage.why_summary(task, api.board.decisions(api.alice, task_id))
     # A straggling event queues it again: still the source's move that stands.
     api.board.update_fields(api.alice, task_id, {"triage_state": "pending", "triage_after": time.time() - 1})
     api.board._conn.execute("UPDATE tasks SET decided_fp = '' WHERE id = ?", (task_id,))
@@ -1102,7 +1104,8 @@ async def test_a_reply_answered_at_once_closes_a_done_request_with_nothing_new(a
     _autoreply(api, "6", "sent")
     run_sweep()
     task = _task(api, api.alice, tid)
-    assert (task["status"], task["closed_by"]) == ("done", "source") and _flags(task)["new_since_done"] is False
+    assert (task["status"], task["closed_by"]) == ("done", "source") and not _flags(task).get("new_since_done")
+    assert _flags(task)["came_back"] is False   # the reply that came back is answered
     await _triage_due(api, api.alice)
     task = _task(api, api.alice, tid)
-    assert (task["status"], task["closed_by"]) == ("done", "source") and not _flags(task)["new_since_done"]
+    assert (task["status"], task["closed_by"]) == ("done", "source") and not _flags(task).get("new_since_done")

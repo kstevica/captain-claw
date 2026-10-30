@@ -100,6 +100,8 @@ export interface TaskFlags {
   partly_done?: boolean
   /** Someone wrote again after it was done (it stays done). */
   new_since_done?: boolean
+  /** Someone's reply brought it back to Needs me, and the user hasn't seen to it yet. */
+  came_back?: boolean
   /** Taken in as a task with less certainty: not counted in the badge. */
   low_confidence?: boolean
   /** Why it is here, in a few words. */
