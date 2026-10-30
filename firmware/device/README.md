@@ -296,8 +296,9 @@ has to follow, and at 1.8 s that's no quicker than letting the first one finish.
 |---|---|---|
 | talk | BOOT: press, talk, press again | the same, or the Talk button on the screen |
 | wake | BOOT or PWR: only wakes it; the next BOOT press talks | the same |
+| cancel | PWR while recording: dropped, nothing sent | the same |
 | next | PWR: next row or page · hold = menu | the same, or swipe; in a list, tap the left or right third to move, the middle to choose |
-| home | PWR: double-click, from any screen (not while it records or the agent works) | the same |
+| home | PWR: double-click, from any screen (not while it records or the agent works) | the same, or a double tap off the Talk button |
 | replay | BOOT: double press, or Menu → *Replay answer* | the same |
 | off | PWR held 4 s (on USB: deep sleep, since USB keeps it powered) | the same |
 | Wi-Fi & settings | Menu → *Wi-Fi & settings* | the same |

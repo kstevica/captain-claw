@@ -213,8 +213,9 @@ constexpr bool kTapTalkDefault = true;
 constexpr bool kTapTalkDefault = false;
 #endif
 
-// A double-click of the side button goes to the home screen, from wherever it
-// is. Elsewhere it replays an answer (here the talk button's double press does).
+// A double-click of the side button, or a double tap, goes to the home screen from
+// wherever it is. Elsewhere a double-click replays an answer (here the talk button's
+// double press does).
 #if defined(BOARD_EPAPER154)
 constexpr bool kDoubleHome = true;
 #else
@@ -227,6 +228,13 @@ constexpr bool kDoubleHome = false;
 constexpr bool kSilenceStop = false;
 #else
 constexpr bool kSilenceStop = true;
+#endif
+
+// While it records, the side button drops the recording.
+#if defined(BOARD_EPAPER154)
+constexpr bool kSideCancels = true;
+#else
+constexpr bool kSideCancels = false;
 #endif
 
 // Fast enough to keep a clock going asleep: "Redraw asleep" can be every minute.

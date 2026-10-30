@@ -151,8 +151,10 @@ static void touchBegin() {
   touchPanel.setRotation(0);
   touchPanel.setTouch(&touchChip);
   touchDevice.setPanel(&touchPanel);
-  if (touchPanel.initTouch()) M5.Touch.begin(&touchDevice);
-  else Serial.println("[claw] touch chip not answering");
+  // Its reset pulse is what this starts, and the chip needs a few hundred ms after
+  // it: this first read fails, and each poll tries again until the chip answers.
+  touchPanel.initTouch();
+  M5.Touch.begin(&touchDevice);
 }
 
 void setTouchRotation(uint8_t rotation) { touchPanel.setRotation(rotation & 3); }
