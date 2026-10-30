@@ -572,11 +572,12 @@ void showListening(int level, uint32_t elapsedMs) {
     if (i < cells) canvas.fillRect(x, 142, 16, 8, kInk);
     else canvas.drawRect(x, 142, 16, 8, kInk);
   }
+  canvas.setFont(kSmall);
   if (tapButton != TapButton::Off) {
+    text("PWR cancels", W / 2, 156, top_center);
     drawTapButton();
   } else {
-    canvas.setFont(kSmall);
-    text(note ? "press BOOT to keep it" : "press BOOT to send", W / 2, 170, top_center);
+    text(note ? "BOOT keeps it · PWR cancels" : "BOOT sends · PWR cancels", W / 2, 170, top_center);
   }
   push();
 }

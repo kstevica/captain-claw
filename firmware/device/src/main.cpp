@@ -53,7 +53,7 @@
 #if defined(PAPER_B)
 #define FW_VERSION "1.0.22"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.19.6"
+#define FW_VERSION "0.19.8"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -491,6 +491,7 @@ static void syncTapButton() { ui::setTapButton(tapButtonKind()); }
 
 // The battery as a line for the home screen: how long it has, or until full.
 static String batteryLine() {
+  if (board::kSleepClock && hw::batteryLevel() < 0) return "on USB";  // no battery fitted
   if (battery::charging()) {
     const int m = battery::minutesToFull();
     return m == 0 ? String("full") : m > 0 ? "full in ≈ " + ui::timeSpan(m) : String("charging");
@@ -3342,6 +3343,15 @@ static void chooseHere() {
 // tap goes home. With Tap to talk on, a tap on the button on the screen
 // starts a recording and a second tap sends it. A touch on a dark screen
 // only wakes it.
+// A tap soon after the last one.
+static bool secondTap() {
+  static uint32_t lastTapMs = 0;
+  const uint32_t now = millis();
+  const bool second = lastTapMs && now - lastTapMs < kDoubleMs + 100;
+  lastTapMs = second ? 0 : (now ? now : 1);
+  return second;
+}
+
 static void pollTouch(bool dark) {
   if (!M5.Touch.isEnabled()) return;
   static bool woke = false;  // this touch began on a dark screen
@@ -3372,6 +3382,13 @@ static void pollTouch(bool dark) {
   }
   if (dist > 25) return;
   const int x = t.base_x, y = t.base_y;
+  const ui::TapButton button = tapButtonKind();
+  const bool onButton = button != ui::TapButton::Off && ui::tapButtonHit(x, y);  // acts at once: not half of a double tap
+  if (board::kDoubleHome && !onButton && secondTap()) {  // from any screen; the first tap has done its own thing
+    pendingTapMs = 0;
+    goHome();
+    return;
+  }
   if (picker) {  // the chevrons, and the badge between them to choose
     if (x < board::kScreenW / 3) {
       hapticTick();
@@ -3404,17 +3421,12 @@ static void pollTouch(bool dark) {
     replayAnswer();
     return;
   }
-  const ui::TapButton button = tapButtonKind();
-  if (button == ui::TapButton::Off || !ui::tapButtonHit(x, y)) {
-    static uint32_t lastTapMs = 0;  // taps on the button act at once, so only these count
-    if (lastTapMs && millis() - lastTapMs < kDoubleMs + 100) {
-      lastTapMs = 0;
+  if (!onButton) {
+    if (!board::kDoubleHome && secondTap()) {
       pendingTapMs = 0;
       goHome();
-    } else {
-      lastTapMs = millis();
-      if (!lastTapMs) lastTapMs = 1;
-      if (mode == Mode::Image) pendingTapMs = lastTapMs;  // a single tap, unless a second follows
+    } else if (mode == Mode::Image) {
+      pendingTapMs = millis() ? millis() : 1;  // a single tap, unless a second follows
     }
     return;
   }
@@ -3677,7 +3689,13 @@ void loop() {
 #endif
 
   // Side button: page / next row · hold = menu (hold again = close).
-  if (dark && (sideBtn().wasHold() || sideBtn().wasClicked())) {
+  if (board::kSideCancels && (prerollOn ? !prerollEndMs : mode == Mode::Listening)) {
+    if (sideBtn().wasClicked() || sideBtn().wasHold()) {  // on letting go: not a click left over for the next screen
+      touch();
+      cancelTapRecording();
+      if (settings.keyClicks) audio::click(true);
+    }
+  } else if (dark && (sideBtn().wasHold() || sideBtn().wasClicked())) {
     touch();  // woken only — though a second click makes it a double-click
     if (sideBtn().wasClicked() && onAnswer()) noteSideClick(true);
   } else if (sideBtn().wasHold()) {
