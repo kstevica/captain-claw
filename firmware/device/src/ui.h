@@ -211,6 +211,8 @@ void notesChanged();
 // The panel's controller to sleep, before the device's deep sleep (the
 // picture stays; ui_epaper154.cpp keeps it, for the next refresh to start from).
 void panelSleep();
+// Switched off: the capsized robot, and how to switch it back on.
+void showSwitchedOff(const String& hint);
 #endif
 
 // How many proposals wait in Flight Deck, as last heard (0: none): a magenta

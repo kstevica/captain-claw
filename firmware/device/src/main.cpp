@@ -53,7 +53,7 @@
 #if defined(PAPER_B)
 #define FW_VERSION "1.0.22"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.19.10"
+#define FW_VERSION "0.19.11"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -3000,7 +3000,7 @@ static void switchOff() {
   ws.disconnect();
   WiFi.disconnect(true);
   ui::setBar(agentName, "off", kText);
-  ui::showMessage("Switched off", "Press PWR to switch it on.", kText);
+  ui::showSwitchedOff("Press PWR to switch on");
   ui::panelSleep();
   hw::powerOff();
 }

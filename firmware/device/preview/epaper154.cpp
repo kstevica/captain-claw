@@ -218,7 +218,7 @@ int main(int argc, char** argv) {
   save("20_asleep");
 
   ui::setBar("Captain", "off", 0);
-  ui::showMessage("Switched off", "Press PWR to switch it on.", 0);
+  ui::showSwitchedOff("Press PWR to switch on");
   save("21_switched_off");
   return 0;
 }
