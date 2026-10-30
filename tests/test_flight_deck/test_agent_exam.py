@@ -178,10 +178,17 @@ def test_the_writers_questions_are_cleaned():
     assert got[0]["points"] == ["long ago", "7"] and got[0]["doc"] == "handbook.md" and got[0]["read"] is False
     assert got[1]["kind"] == "situation" and got[1]["points"] == ["Check items 1.1 to 1.3."]
     assert ex.parse_questions("no json", batch) == []
+    # An answer that only points at its section can't be graded against: no question.
+    vague = json.dumps({"questions": [
+        {"section": 1, "question": "What are the three areas to focus on?", "points": ["three areas named in the section"],
+         "answer": "The section lists three focus areas; the exam expects them as given in the section."},
+        {"section": 2, "question": "What must be checked first?", "answer": "Item 1.1.", "points": ["item 1.1"]}]})
+    assert [q["question"] for q in ex.parse_questions(vague, batch)] == ["What must be checked first?"]
 
 
 def test_the_graders_verdicts_are_cleaned():
-    batch = [{}, {}, {}]
+    # A grader that gives verdicts, not points marked: taken at its word. No answer misses every point.
+    batch = [{}, {"points": ["14 days"]}, {}]
     reply = json.dumps({"grades": [
         {"item": 1, "verdict": "Right", "why": "All there."},
         {"item": 2, "verdict": "No answer", "made_up": True, "missing": ["14 days"]},
@@ -190,12 +197,35 @@ def test_the_graders_verdicts_are_cleaned():
     ]})
     got = ex.parse_grades(reply, batch)
     assert set(got) == {1, 2}
-    assert got[1] == {"verdict": "right", "made_up": False, "unsupported": [], "missing": [], "why": "All there."}
+    assert got[1] == {"verdict": "right", "made_up": False, "unsupported": [], "missing": [], "contradicts": [],
+                      "why": "All there."}
     assert got[2]["verdict"] == "no_answer" and got[2]["made_up"] is True and got[2]["missing"] == ["14 days"]
     # Details it lists outside the passage are checked (settle) before anything counts as made up.
     listed = ex.parse_grades(json.dumps({"grades": [
         {"item": 1, "verdict": "partly", "unsupported": ["0.28 points of TRS", "", 7], "made_up": True}]}), batch)
     assert listed[1]["unsupported"] == ["0.28 points of TRS", "7"] and listed[1]["made_up"] is False
+
+
+def test_the_grader_marks_each_point_and_the_verdict_is_worked_out():
+    batch = [{"points": ["14 days", "receipt"]}] * 5 + [{"points": ["a", "b", "c"]}]
+    reply = json.dumps({"grades": [
+        {"item": 1, "answered": True, "covered": [True, True], "contradicts": [], "why": "All there."},
+        {"item": 2, "answered": True, "covered": [True, False], "why": "No receipt."},
+        {"item": 3, "answered": True, "covered": [False, "false"]},
+        {"item": 4, "answered": True, "covered": [True, True], "contradicts": ["says 30 days", ""]},
+        {"item": 5, "answered": False, "covered": [True, True]},
+        {"item": 6, "covered": [True]},                          # one of three marked: the rest weren't found
+    ]})
+    got = ex.parse_grades(reply, batch)
+    assert [got[i]["verdict"] for i in range(1, 7)] == ["right", "partly", "wrong", "partly", "no_answer", "partly"]
+    assert got[2]["missing"] == ["receipt"] and got[4]["missing"] == [] and got[4]["contradicts"] == ["says 30 days"]
+    assert got[5]["missing"] == ["14 days", "receipt"] and got[6]["missing"] == ["b", "c"]
+    # What it writes about a point, or about detail from elsewhere, has no say in the verdict.
+    chatty = ex.parse_grades(json.dumps({"grades": [{"item": 1, "covered": [True, True], "verdict": "partly",
+                                                     "missing": ["Points were covered; nothing required is missing."],
+                                                     "why": "Right, but adds a Heineken example."}]}), batch)[1]
+    assert chatty["verdict"] == "right" and chatty["missing"] == []
+    assert ex.settle(got[4], [])["verdict"] == "partly"         # a contradiction is a reason
 
 
 # ── Why it went wrong ─────────────────────────────────────────────────
@@ -329,6 +359,30 @@ def test_a_detail_is_found_however_the_book_writes_it():
     corpus = {"documents": [book], "lessons": [], "looked_up": []}
     assert ex.check_details(["the stock approach is more stable", "t = 4.19"], corpus) == [
         {"text": "t = 4.19", "found": ""}]
+
+
+def test_references_acronyms_and_arithmetic_are_read_for_what_they_are():
+    # Details from a Pi exam: exhibits cited together pages apart, a plural acronym, facts joined by "…".
+    book = ex._checked(
+        "## 27 Leases\n\nEXHIBIT 27.4 Leasing Example: Current Capital Structure\n" + "A row of the table 12 34 56.\n" * 300
+        + "EXHIBIT 27.6 Leasing Example: Free Cash Flow\n"
+        + "A second adviser used a very high country risk premium of 11 percent on top of the WACC, with real "
+          "sales growth of almost 10 percent and a ROIC increasing to 46 percent in the long term.\n")
+    assert ex.found_in("Ch. 27, Exhibits 27.4–27.6", [book]) and not ex.found_in("Exhibit 27.9", [book])
+    assert ex._detail_parts("see Exhibits 27.4–27.6 and pp. 12–15")[2] == ["27.4", "27.6", "12", "15"]
+    assert ex.found_in("a second adviser used ~11% CRPs", [book])
+    corpus = {"documents": [book], "lessons": [], "looked_up": []}
+    joined = "advisers using ~11% CRPs... 10% real sales growth, ROIC rising to 46% in chemicals"
+    assert ex.check_details([joined], corpus) == [{"text": joined, "found": "documents"}]
+    # Its own arithmetic is worked out, not found: left out. A figure it states stays checked.
+    for sum_ in ["PV(Testing) = 0.40 × 4,314 + 0.60 × 0 = $1,725.6M", "PV of investments (100 + 216) $316M",
+                 "σ = 15%, T = 1 yr → u = e^0.15 = 1.1618", "WACC 10.5%, growth 6.5% → 1/(0.04) = 25x",
+                 "Capex = 300 - 250 + 23.8"]:
+        assert not ex.checkable(sum_), sum_
+    for fact in ["t = 4.19", "R² = 0.45", "Ba2/BB spread of 577 bp", "General Dynamics, 1991–1995"]:
+        assert ex.checkable(fact), fact
+    assert ex.check_details(["0.06 × 4,314 = $258.8M", "Standard NPV −$57.2M"], corpus) == [
+        {"text": "Standard NPV −$57.2M", "found": ""}]
 
 
 def test_made_up_stands_only_for_details_found_nowhere():

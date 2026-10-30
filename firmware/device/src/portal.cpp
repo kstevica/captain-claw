@@ -7,6 +7,7 @@
 
 #include "audio.h"
 #include "board.h"
+#include "hw.h"
 #include "face.h"
 #include "settings.h"
 #include "ui.h"
@@ -158,7 +159,10 @@ static void handleRoot() {
   h += F("</select><h2>Screen</h2>");
   if (board::kEpaper) {
     h += F("<label>Orientation</label><select name=rot>");
-    const char* rots[] = {"Portrait", "Landscape", "Portrait, flipped", "Landscape, flipped"};
+    const char* rots[] = {board::kScreenW == board::kScreenH ? "Upright" : "Portrait",
+                          board::kScreenW == board::kScreenH ? "Turned right" : "Landscape",
+                          board::kScreenW == board::kScreenH ? "Upside down" : "Portrait, flipped",
+                          board::kScreenW == board::kScreenH ? "Turned left" : "Landscape, flipped"};
     for (int k = 0; k < 4; ++k) h += option(String(k), rots[k], settings.rotation == k);
     h += F("</select>");
   } else {
@@ -193,11 +197,17 @@ static void handleRoot() {
     h += F("<label>Status lights</label><select name=leds>");
     const char* lv[] = {"Off", "Low", "Bright"};
     for (int k = 0; k < 3; ++k) h += option(String(k), lv[k], settings.ledLevel == k);
-    h += F("</select><small>Red blinks while it records you; while the agent works, a blink for each step "
-           "(light blue a tool, dark blue narration, purple the model); green blinks with the voice. Starting "
-           "up: left = Wi-Fi, right = agent (yellow trying, green up, red not). Idle: a blink every 10 s, "
-           "green, then blue, then yellow as sleep nears.</small>"
-           "<label>Key beeps (A and B)</label><select name=clicks>");
+    if (board::kSlowPaper) {
+      h += F("</select><small>Red blinks while it records you; while the agent works, a blink for each step "
+             "(light blue a tool, dark blue narration, purple the model); green blinks with the voice. Starting "
+             "up: left = Wi-Fi, right = agent (yellow trying, green up, red not). Idle: a blink every 10 s, "
+             "green, then blue, then yellow as sleep nears.</small>"
+             "<label>Key beeps (A and B)</label><select name=clicks>");
+    } else {
+      h += F("</select><small>The green light blinks while it records you, for each step while the agent works, "
+             "and with the voice. Low and Bright are the same on this one.</small>"
+             "<label>Key beeps</label><select name=clicks>");
+    }
     h += option("1", "On", settings.keyClicks) + option("0", "Off", !settings.keyClicks);
     h += F("</select>");
   }
@@ -360,7 +370,7 @@ void runSetupPortal(const char* reason) {
     }
     dns.processNextRequest();
     server.handleClient();
-    M5.update();
+    hw::update();
     // The B paper: every press beeps, and a short press of A (the button
     // that goes back from the options) leaves without saving — a restart,
     // back to how it was. Elsewhere B held does (the PaperColor's B, the

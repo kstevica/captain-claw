@@ -277,9 +277,15 @@ def _clean(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+# An answer that points at its section instead of giving it ("the three areas named in the section").
+_POINTS_AT = re.compile(r"\b(?:in|from|by) the (?:section|passage|excerpt)\b|\bas (?:given|listed|named|stated|shown) "
+                        r"(?:in|by)\b|\bthe exam expects\b", re.IGNORECASE)
+
+
 def parse_questions(content: str, batch: list[dict]) -> list[dict]:
     """The writer's questions, each on its section; a section it left out,
-    or answered with something unusable, has none."""
+    or answered with something unusable — nothing, or an answer that only
+    points at the section, which no reply can be graded against — has none."""
     try:
         raw = reply_json(content).get("questions")
     except (ValueError, json.JSONDecodeError):
@@ -300,6 +306,8 @@ def parse_questions(content: str, batch: list[dict]) -> list[dict]:
             continue
         points = [p for p in (_clean(x, 200) for x in item.get("points") or [] if isinstance(x, (str, int, float)))
                   if p][:4]
+        if any(_POINTS_AT.search(x) for x in (*points, answer)):
+            continue
         kind = str(item.get("kind") or "").strip().lower()
         p = batch[n - 1]
         taken.add(n)
@@ -319,13 +327,22 @@ def grading_prompt(batch: list[dict], text_of: dict[str, str | None]) -> str:
         passage = text_of.get(q["id"]) or "(The section is no longer in the agent's knowledge.)"
         blocks.append(
             f"## Item {n}\nQuestion: {q['question']}\n\nPassage ({where(q)}):\n{_excerpt(passage)}\n\n"
-            f"Expected answer: {q['expected']}\nPoints: " + "; ".join(q["points"])
+            f"Expected answer: {q['expected']}\nPoints:\n" + "\n".join(f"{i}. {p}" for i, p in enumerate(q["points"], 1))
             + f"\n\nReply:\n{_excerpt(q.get('answer') or '(no reply)', _ANSWER_CHARS)}")
     return "\n\n".join(blocks)
 
 
+def _texts(value: Any, limit: int, most: int) -> list[str]:
+    return [t for t in (_clean(x, limit) for x in value or [] if isinstance(x, (str, int, float))) if t][:most]
+
+
 def parse_grades(content: str, batch: list[dict]) -> dict[int, dict]:
-    """The grader's verdicts by item number (1-based); an item it left out has none."""
+    """The grader's grades by item number (1-based); an item it left out has
+    none. The grader marks each of a question's points covered or not and
+    names what the reply contradicts; the verdict is worked out from that —
+    every point and nothing contradicted is right, none is wrong, the rest
+    partly — so its view of extra detail, or what it writes about a point,
+    never decides it. A grader that gives a verdict instead is taken at it."""
     try:
         raw = reply_json(content).get("grades")
     except (ValueError, json.JSONDecodeError):
@@ -338,16 +355,27 @@ def parse_grades(content: str, batch: list[dict]) -> dict[int, dict]:
             n = int(item.get("item"))
         except (TypeError, ValueError):
             continue
-        verdict = str(item.get("verdict") or "").strip().lower().replace(" ", "_").replace("-", "_")
-        if not 1 <= n <= len(batch) or verdict not in VERDICTS:
+        if not 1 <= n <= len(batch):
             continue
-        unsupported = [d for d in (_clean(x, 200) for x in item.get("unsupported") or []
-                                   if isinstance(x, (str, int, float))) if d][:_DETAILS_MAX]
+        points = list(batch[n - 1].get("points") or [])
+        verdict = str(item.get("verdict") or "").strip().lower().replace(" ", "_").replace("-", "_")
+        covered = item.get("covered")
+        contradicts = _texts(item.get("contradicts"), 200, 4)
+        if item.get("answered") is False or verdict == "no_answer":
+            verdict, missing, contradicts = "no_answer", points, []
+        elif isinstance(covered, list) and covered:
+            marks = [c is True or str(c).strip().lower() in ("true", "yes") for c in covered][:len(points)]
+            marks += [False] * (len(points) - len(marks))   # a point it didn't mark wasn't found
+            missing = [p for p, on in zip(points, marks, strict=True) if not on]
+            verdict = "wrong" if not any(marks) else "right" if all(marks) and not contradicts else "partly"
+        elif verdict in VERDICTS:
+            missing = _texts(item.get("missing"), 200, 4)
+        else:
+            continue
+        unsupported = _texts(item.get("unsupported"), 200, _DETAILS_MAX)
         # Made up is what its details say (settle); the grader's word only when it names none.
         out[n] = {"verdict": verdict, "made_up": item.get("made_up") is True and not unsupported,
-                  "unsupported": unsupported,
-                  "missing": [m for m in (_clean(x, 200) for x in item.get("missing") or []
-                                          if isinstance(x, (str, int, float))) if m][:4],
+                  "unsupported": unsupported, "missing": missing, "contradicts": contradicts,
                   "why": _clean(item.get("why"), 400)}
     return out
 
@@ -374,21 +402,31 @@ def _decimals(text: str) -> str:
     return re.sub(r"(\d?)([½¼¾])", lambda m: (m[1] or "0") + _FRACTIONS[m[2]], text)
 
 
-def _detail_parts(detail: str) -> tuple[list[str], list[str]]:
+# A place in a document a reply points to — "Exhibits 27.4–27.6", "Ch. 33", "pp. 12–15" — and its numbers.
+_REFERENCE = re.compile(
+    r"\b(?:exhibits?|ch(?:apters?)?\.?|figs?\.|figures?|tables?|appendi(?:x|ces)|sections?|pp?\.)\s*"
+    r"(\d+(?:\.\d+)?(?:\s*(?:[–—-]|,|and|&)\s*\d+(?:\.\d+)?)*)", re.IGNORECASE)
+
+
+def _detail_parts(detail: str) -> tuple[list[str], list[str], list[str]]:
     """What a detail is found by: its figures (a year range's short end in
-    full — 2005–07 is 2005 and 2007; decimals as _decimals writes them) and
-    its names (capitalised words but the first, without a possessive; not a
-    short acronym, which a reply shortens on its own: USD, COGS). The rest
-    is the reply's own wording."""
+    full — 2005–07 is 2005 and 2007; decimals as _decimals writes them), its
+    names (capitalised words but the first, without a possessive; not a
+    short acronym, plural or not, which a reply shortens on its own: USD,
+    COGS, CRPs) and its references (the numbers of the exhibits, chapters
+    and pages it names). The rest is the reply's own wording."""
+    refs = [n for m in _REFERENCE.finditer(detail) for n in re.findall(r"\d+(?:\.\d+)?", m[1])]
+    detail = _REFERENCE.sub(" ", detail)
     detail = _decimals(_YEARS.sub(lambda m: f"{m[1]}{m[2]}{m[3]}{m[4]}{m[1]}{m[5]}{m[6]}", detail))
     figures = [f.strip(".,") for f in _FIGURE.findall(detail)]
     names = []
     for word in _WORD.findall(detail)[1:]:
         for part in re.sub(r"[’']s?$", "", word).split("-"):
+            core = part[:-1] if part.endswith("s") and part[:-1].isupper() else part
             if (len(part) > 2 and part.isalpha() and part[0].isupper() and part.casefold() not in _COMMON
-                    and "LATIN" in unicodedata.name(part[0], "") and not (part.isupper() and len(part) <= 4)):
+                    and "LATIN" in unicodedata.name(part[0], "") and not (core.isupper() and len(core) <= 4)):
                 names.append(part.casefold())
-    return figures, names
+    return figures, names, refs
 
 
 _NUMBER_WORDS = "zero one two three four five six seven eight nine ten eleven twelve".split()
@@ -411,15 +449,20 @@ def found_in(detail: str, texts: list[str]) -> bool:
     """Whether *detail* (a figure or a name the grader quoted from a reply,
     with a few words of what it is about) is in one of *texts*
     (casefolded): all its figures and names within _DETAIL_NEAR characters
-    of each other — an exhibit's title and its table are that far apart.
-    A detail with neither has nothing to find it by."""
-    figures, names = _detail_parts(detail)
+    of each other — an exhibit's title and its table are that far apart —
+    and the exhibits and chapters it names anywhere in it (two exhibits it
+    cites together can be pages apart). A detail with none of them has
+    nothing to find it by."""
+    figures, names, refs = _detail_parts(detail)
     patterns = [_part_pattern(f, True) for f in figures] + [_part_pattern(n, False) for n in names]
-    if not patterns:
+    places = [_part_pattern(r, True) for r in refs]
+    if not patterns and not places:
         return False
     for text in texts:
-        if not all(p.search(text) for p in patterns):
+        if not all(p.search(text) for p in patterns + places):
             continue
+        if not patterns:
+            return True
         rarest = min(patterns, key=lambda p: len(p.findall(text)))
         for n, m in enumerate(rarest.finditer(text)):
             if n >= _DETAIL_TRIES:
@@ -430,27 +473,35 @@ def found_in(detail: str, texts: list[str]) -> bool:
     return False
 
 
+# Arithmetic: an operator between two figures ("0.40 × 4,314", "(100 + 216)"), or a chain of "=".
+_CALCULATION = re.compile(r"\d\s*(?:[×*÷+−^/]|\s[-–]\s)\s*[$€£(]?\s*\d")
+
+
 def checkable(detail: str) -> bool:
-    """Whether *detail* has a figure or a name to check it by."""
-    return any(_detail_parts(detail))
+    """Whether *detail* has a figure, a name or a reference to check it by —
+    and isn't the reply's own arithmetic ("PV = 0.40 × 4,314 = $1,725.6M"),
+    which it works out rather than finds."""
+    calculation = bool(_CALCULATION.search(detail)) or detail.count("=") >= 2
+    return any(_detail_parts(detail)) and not calculation
 
 
-_CLAUSE = re.compile(r"\s[—–]\s|;\s")   # "16% a year — double the 6½% long-run average"
+_CLAUSE = re.compile(r"\s[—–]\s|;\s|\.{3}|…")   # "16% a year — double the 6½% long-run average"
 
 
 def check_details(details: list[str], corpus: dict[str, list[str]]) -> list[dict]:
     """Each detail the grader found outside the question's passage, with
     where else it is: ``documents`` (anywhere in them), ``lessons`` (a fact
     or rule it was taught), ``looked_up`` (what its lookups returned) — or
-    "" when nowhere: made up. One that joins facts (" — ", "; ") is found
-    when each of them is, wherever. One with no figure or name to check it
-    by (the reply putting what it read its own way) is left out."""
+    "" when nowhere: made up. One that joins facts (" — ", "; ", "…") is
+    found when each of them is, wherever. One with nothing to check it by
+    (the reply putting what it read its own way, or its own arithmetic) is
+    left out."""
     out = []
     for d in details:
-        if not checkable(d):
+        clauses = [c for c in _CLAUSE.split(d) if checkable(c)]
+        if not clauses:
             continue
-        wheres = [next((where for where, texts in corpus.items() if found_in(c, texts)), "")
-                  for c in _CLAUSE.split(d) if checkable(c)]
+        wheres = [next((where for where, texts in corpus.items() if found_in(c, texts)), "") for c in clauses]
         out.append({"text": d, "found": wheres[0] if all(wheres) else ""})
     return out
 
@@ -531,12 +582,13 @@ def settle(grade: dict, details: list[dict]) -> dict:
     when one is found nowhere — the grader sees one passage, and a figure
     from another chapter, or a fact the agent was taught, is its owner's
     too. A right answer that makes something up is only partly right; a
-    partly right one with no point missing and nothing made up is right —
-    the grader marked it down for detail it was told not to."""
+    partly right one with no point missing, nothing contradicted and nothing
+    made up is right — the grader marked it down for detail it was told not
+    to."""
     out = {**grade, "details": details}
     if details:
         out["made_up"] = any(not d["found"] for d in details)
-    if out["verdict"] == "partly" and not out["missing"] and not out["made_up"]:
+    if out["verdict"] == "partly" and not out["missing"] and not out.get("contradicts") and not out["made_up"]:
         out["verdict"] = "right"
     if out["made_up"] and out["verdict"] == "right":
         out["verdict"] = "partly"

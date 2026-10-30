@@ -45,6 +45,8 @@ KIND_LABELS: dict[str, str] = {
     "device:sticks3": "M5Stack StickS3",
     "device:stopwatch": "M5Stack StopWatch",
     "device:papercolor": "M5Stack PaperColor",
+    "device:epaper154": "Waveshare ePaper 1.54",
+    "device:epaper154_touch": "Waveshare Touch ePaper 1.54",
     "glasses:meta-display": "Meta Ray-Ban Display",
     "glasses:rokid-lumen": "Rokid glasses",
     "app:android": "Captain Claw app (Android)",
@@ -55,7 +57,8 @@ KIND_LABELS: dict[str, str] = {
 # not among them — its effort is the chat box's picker.
 SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Messaging", ("whatsapp", "telegram", "messenger", "discord")),
-    ("Apps and devices", ("app", "glasses", "device:sticks3", "device:stopwatch", "device:papercolor")),
+    ("Apps and devices", ("app", "glasses", "device:sticks3", "device:stopwatch", "device:papercolor",
+                          "device:epaper154", "device:epaper154_touch")),
     ("Automated", ("scheduled", "flow", "agent", "autonomy", "api", "link")),
     ("Other people", ("member", "public")),
 )

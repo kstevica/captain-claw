@@ -41,6 +41,7 @@
 #include "portal.h"
 #include "settings.h"
 #include "battery.h"
+#include "hw.h"
 #include "telemetry.h"
 #include "ui.h"
 
@@ -514,9 +515,9 @@ static ui::Status statusNow() {
   s.agentLinked = agentLinked;
   s.agentAsleep = agentAsleep();
   s.agentOff = agentOff();
-  s.batteryPct = M5.Power.getBatteryLevel();
-  s.batteryMv = M5.Power.getBatteryVoltage();
-  s.charging = M5.Power.isCharging() == m5::Power_Class::is_charging;
+  s.batteryPct = hw::batteryLevel();
+  s.batteryMv = hw::batteryMv();
+  s.charging = hw::charging();
   s.usb = telemetry::onUsbPower();
   s.minutesLeft = battery::minutesLeft();
   s.minutesToFull = battery::minutesToFull();
@@ -629,7 +630,7 @@ static bool rowShown(int row) {
   // The PaperColor's menu is read aloud, so it keeps two rows: Options (a QR
   // code for the settings page on the phone, where everything else is set)
   // and the software update.
-  if (board::kEpaper) return row == MPhone || row == MUpdate;
+  if (board::kSlowPaper) return row == MPhone || row == MUpdate;
   if (row == MMore) return !menuMore;
   if (row == MBack) return menuMore;
   if (menuMore == topRow(row)) return false;  // the other level's
@@ -651,7 +652,10 @@ static bool rowShown(int row) {
   }
 }
 
-static const char* const kRotations[] = {"portrait", "landscape", "portrait, flipped", "landscape, flipped"};
+static const char* const kRotations[] = {board::kScreenW == board::kScreenH ? "upright" : "portrait",
+                                         board::kScreenW == board::kScreenH ? "turned right" : "landscape",
+                                         board::kScreenW == board::kScreenH ? "upside down" : "portrait, flipped",
+                                         board::kScreenW == board::kScreenH ? "turned left" : "landscape, flipped"};
 static const char* const kLedLevels[] = {"off", "low", "bright"};
 
 static String asleepLabel() {
@@ -701,7 +705,7 @@ static String menuLabel(int row) {
     case MClicks: return String("Key clicks: ") + (settings.keyClicks ? "on" : "off");
     case MSayMenu: return String("Read menu aloud: ") + (settings.speakMenu ? "on" : "off");
     case MAsleep: return "Redraw asleep: " + asleepLabel();
-    case MPhone: return board::kEpaper ? "Options »" : "Settings on phone »";
+    case MPhone: return board::kSlowPaper ? "Options »" : "Settings on phone »";
     case MUpdate: return offer.valid() ? "Update to " + offer.version + " »" : String("Software " FW_VERSION " · check");
     case MAutoUpdate: return String("Auto update: ") + (settings.autoUpdate ? "on" : "off");
     default: return "Wi-Fi & settings…";
@@ -798,7 +802,7 @@ static ui::Item menuItem(int row) {
       it.note = "date, room and battery on the sleeping paper";
       break;
     case MPhone:
-      it.title = board::kEpaper ? "Options" : "Settings on phone";
+      it.title = board::kSlowPaper ? "Options" : "Settings on phone";
       it.glyph = ui::Glyph::Wifi;
       it.note = "every setting, from your phone";
       break;
@@ -862,7 +866,7 @@ static uint8_t nextStep(const uint8_t (&steps)[N], uint8_t now) {
 // Reads a row aloud a moment after the last press (e-paper: the paper shows
 // it ~20 s later). Quick presses say only where they stopped.
 static void sayLater(String text) {
-  if (!board::kEpaper || !settings.speakMenu) return;
+  if (!board::kSlowPaper || !settings.speakMenu) return;
   text.replace(" »", "");
   text.replace(":", ",");  // "Volume, 75%" reads better than "Volume: 75%"
   sayText = text;
@@ -969,7 +973,7 @@ static void redraw() {
     }
     case Mode::Notice: break;  // stays until the next event
     case Mode::Link:
-      if (board::kEpaper) {
+      if (board::kSlowPaper) {
         String title = offer.valid() ? "Options · update ready" : "Options · " FW_VERSION;
         ui::showLink(title.c_str(), phoneUrl, "Scan it with your phone (same Wi-Fi): every setting is there.");
       } else {
@@ -1025,7 +1029,7 @@ static void leaveBackdrop() {
 
 static void openMenu() {
   menuMore = false;
-  menuSel = board::kEpaper ? MPhone : canReplay() ? MReplay : MStatus;
+  menuSel = board::kSlowPaper ? MPhone : canReplay() ? MReplay : MStatus;
   menuOpenedMs = millis();
   mode = Mode::Menu;
   ui::fade();
@@ -1326,6 +1330,7 @@ static void startPreroll(uint32_t maxMs = kPrerollMaxMs) {
   if (!preroll) return;
   M5.Speaker.end();
   M5.Mic.begin();
+  hw::micStarted();
   if (!M5.Mic.record(preroll, prerollCap, audio::kMicRate)) {  // fills in the background, in real time
     M5.Mic.end();
     free(preroll);
@@ -1469,7 +1474,7 @@ static void keepOffline(uint32_t stopAt) {
   const size_t n = prerollReady(stopAt);
   M5.Mic.end();  // nothing more lands in the buffer
   time_t when = telemetry::clockSet() ? time(nullptr) - (time_t)((millis() - prerollStartMs) / 1000) : 0;
-  if (!board::kEpaper) ui::showMessage("Saving", "Keeping the voice note offline…", kText);
+  if (!board::kSlowPaper) ui::showMessage("Saving", "Keeping the voice note offline…", kText);
   if (board::kHasSdCard) notes::poll();  // a card put in since it was last looked for: this note goes there
   bool kept = board::kOfflineNotes && n >= audio::kMicRate && notes::save(preroll, n, audio::kMicRate, when);
   if (kept) notesDeclined = -1;  // something new to ask about
@@ -1943,7 +1948,7 @@ static void waitingCue() {
   touch();
   // What came, on the screen at once (a press goes back) — not over an
   // answer, a menu or a question; the paper's lights say it.
-  if (!board::kEpaper && (mode == Mode::Idle || mode == Mode::Home || mode == Mode::Backdrop ||
+  if (!board::kSlowPaper && (mode == Mode::Idle || mode == Mode::Home || mode == Mode::Backdrop ||
                           mode == Mode::Notice)) {
     String body = waitingLine.length() ? waitingLine : String("Something new");
     body += "\n\nOpen the bell";  // Flight Deck's notifications (the badge up top says how many wait)
@@ -2276,7 +2281,7 @@ static void imageData(const uint8_t* data, size_t len, bool last) {
   ui::storeImage(imgPart, imgPartLen);  // the screen keeps the bytes
   imgPart = nullptr;
   imgPartLen = 0;
-  if (board::kEpaper && ui::hasReply()) {
+  if (board::kSlowPaper && ui::hasReply()) {
     // The answer card has room for it beside the words.
     if (mode == Mode::Reply || mode == Mode::Idle) redraw();
   } else if (!(settings.iconMode && audio::playing())) {
@@ -2374,7 +2379,8 @@ static void connectServer() {
   if (settings.rotation & 1 && board::kEpaper) std::swap(sw, sh);  // turned paper
   String path = prefix + "/device/ws?device=" + urlEncode(deviceId()) + "&sw=" + String(sw) + "&sh=" + String(sh);
   if (board::kRound) path += "&round=1";               // fit pictures inside the circle
-  if (board::kEpaper) path += "&paper=1";              // pictures at their own shape, on white
+  if (board::kSlowPaper) path += "&paper=1";           // pictures at their own shape, on white
+  else if (board::kEpaper) path += "&mono=1";          // the same, on a small black-and-white screen
   if (board::kChunkedImages) path += "&img=chunks";    // pictures bigger than one frame
   if (settings.token.length()) path += "&token=" + urlEncode(settings.token);
   if (settings.agent.length()) path += "&agent=" + urlEncode(settings.agent);
@@ -2440,7 +2446,7 @@ static void startInstall() {
     notice("Not now", "Finish the conversation first.", kOrange);
     return;
   }
-  int pct = M5.Power.getBatteryLevel();
+  int pct = hw::batteryLevel();
   if (!telemetry::onUsbPower() && pct >= 0 && pct < 30) {
     notice("Battery low", "Charge to 30% (or plug in) to update.", kOrange);
     return;
@@ -2503,6 +2509,10 @@ static void paperLights(bool on) {
   paperLights(false);  // nothing to show asleep
 #endif
   ui::brightness(0);
+#if defined(BOARD_EPAPER154)
+  ui::panelSleep();
+  hw::prepareSleep();
+#endif
   // The paper's panel powers itself down after every redraw and keeps its
   // picture; its controller's deep sleep would need a reset pulse to wake,
   // which a boot that keeps the picture doesn't send.
@@ -2804,7 +2814,7 @@ static void updateLeds() {
   static uint32_t batteryAt = 0;
   if (millis() - batteryAt > 30000 || !batteryAt) {
     batteryAt = millis();
-    batteryPct = telemetry::onUsbPower() ? 100 : M5.Power.getBatteryLevel();
+    batteryPct = telemetry::onUsbPower() ? 100 : hw::batteryLevel();
   }
   if (prerollOn || mode == Mode::Listening) {
     leds::set(S::Listening, micLevel);
@@ -2843,12 +2853,35 @@ static void paperPower() {
   pm1Up = pm1.begin(&M5.In_I2C, M5PM1_DEFAULT_ADDR, M5PM1_I2C_FREQ_100K) == M5PM1_OK;
   if (pm1Up) pm1.setChargeEnable(true);
   paperLights(settings.ledLevel > 0);
-  int mv = M5.Power.getBatteryVoltage();
+  int mv = hw::batteryMv();
   if (mv > 0 && mv < 3300 && !telemetry::onUsbPower()) {
     ui::showMessage("Battery empty", "Charge it over USB-C, then press the power button.", kRed);
     ui::flush();
     M5.Power.powerOff();
   }
+}
+#endif
+
+#if defined(BOARD_EPAPER154)
+// An empty battery leaves "charge me" on the paper and switches off.
+static void epaperPower() {
+  const int mv = hw::batteryMv();
+  if (mv >= 2500 && mv < 3300 && !telemetry::onUsbPower()) {
+    ui::showMessage("Battery empty", "Charge it over USB-C, then press PWR.", kRed);
+    ui::panelSleep();
+    hw::powerOff();
+  }
+}
+
+// PWR held 4 s: off (on USB, as off as it gets: asleep until a press).
+static void switchOff() {
+  audio::playStop();
+  ws.disconnect();
+  WiFi.disconnect(true);
+  ui::setBar(agentName, "off", kText);
+  ui::showMessage("Switched off", "Press PWR to switch it on.", kText);
+  ui::panelSleep();
+  hw::powerOff();
 }
 #endif
 
@@ -2918,11 +2951,7 @@ static int strongestSavedNetwork() {
 }
 
 void setup() {
-  auto cfg = M5.config();
-  cfg.internal_mic = true;
-  cfg.internal_spk = true;
-  if (board::kEpaper) cfg.clear_display = false;  // the paper keeps what it showed while asleep
-  M5.begin(cfg);
+  hw::begin();
   Serial.begin(115200);
   settings.load();
   setenv("TZ", settings.tz.c_str(), 1);  // local time before NTP (the RTC keeps UTC)
@@ -2957,6 +2986,8 @@ void setup() {
   ui::setWaiting(waitingCount);
 #if defined(BOARD_PAPERCOLOR)
   paperPower();
+#elif defined(BOARD_EPAPER154)
+  epaperPower();
 #endif
   if (board::kEpaper && esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER) {
     asleepRedraw();  // returns only when a button was pressed meanwhile
@@ -2974,7 +3005,7 @@ void setup() {
                 probation ? " (on probation)" : "", talking ? " (talking)" : "", settings.netCount,
                 settings.server.c_str());
 
-  M5.update();
+  hw::update();
   // Held at a cold boot: setup. (A wake press still held isn't that.)
   if ((!talking && !wokenByTalk() && talkBtn().isPressed()) || !settings.configured()) {
     runSetupPortal(settings.configured() ? "Setup" : "First-time setup");
@@ -2987,7 +3018,7 @@ void setup() {
   leds::tick();
   // The paper keeps the sleeping screen while it connects (a redraw would
   // take longer than connecting); the lights say how it's going.
-  if (!board::kEpaper) ui::showMessage("Connecting to Wi-Fi", settings.nets[0].ssid, kText);
+  if (!board::kSlowPaper) ui::showMessage("Connecting to Wi-Fi", settings.nets[0].ssid, kText);
   WiFi.mode(WIFI_STA);
   WiFi.setHostname(deviceId().c_str());
   for (int i = 0; i < settings.netCount; ++i) {
@@ -3010,13 +3041,13 @@ void setup() {
     } else if (net >= 0) {
       WiFi.begin(settings.nets[net].ssid.c_str(), settings.nets[net].pass.c_str());
       while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) {
-        M5.update();
+        hw::update();
         delay(50);
       }
     }
   }
   while (!offline && WiFi.status() != WL_CONNECTED && wifiMulti.run(5000) != WL_CONNECTED) {
-    M5.update();
+    hw::update();
     // A fresh update that can't even reach Wi-Fi goes back to the old version
     // (which may well be fine) rather than into setup.
     if (probation && millis() - t0 > 30000) ota::rollBack();
@@ -3039,7 +3070,7 @@ void setup() {
   } else {
     Serial.printf("[claw] wifi %s ip %s\n", WiFi.SSID().c_str(), WiFi.localIP().toString().c_str());
     ui::setHealth(wifiHealth(), ui::Down);
-    if (!board::kEpaper) ui::showMessage("Wi-Fi connected", WiFi.SSID() + "  " + WiFi.localIP().toString(), kGreen);
+    if (!board::kSlowPaper) ui::showMessage("Wi-Fi connected", WiFi.SSID() + "  " + WiFi.localIP().toString(), kGreen);
   }
   configTzTime(settings.tz.c_str(), "pool.ntp.org", "time.google.com");  // clocks; the RTC follows
   connectServer();  // it connects by itself once Wi-Fi is back
@@ -3118,7 +3149,7 @@ static void stopOnSilence() {
   cancelTapRecording();
   leds::alert();
   hapticError();
-  if (!board::kEpaper) notice("Nothing heard", "It stopped after 2.5 s of quiet. Tap and talk again.", kOrange);
+  if (!board::kSlowPaper) notice("Nothing heard", "It stopped after 2.5 s of quiet. Tap and talk again.", kOrange);
 }
 
 // A swipe on an answer: the next (forward) or previous screen of it — the
@@ -3432,7 +3463,7 @@ void loop() {
 #ifdef CLAW_PERF
   uint32_t loopT0 = micros();
 #endif
-  PERF_T(pfUpdMax, M5.update());
+  PERF_T(pfUpdMax, hw::update());
   noteButtonActivity();
   bool wasUp = wsUp;
   // Everything that's waiting, not one frame: the library reads one per
@@ -3481,7 +3512,7 @@ void loop() {
     if (sideBtn().wasPressed() ||
         (talkBtn().wasPressed() && (inMenu || mode == Mode::Link || mode == Mode::Ask))) {
       audio::click();
-    } else if (backBtn().wasPressed()) {
+    } else if (board::kBackPin >= 0 && backBtn().wasPressed()) {
       audio::click(true);
     }
   }
@@ -3505,7 +3536,7 @@ void loop() {
         ui::leaveOptions();
 #endif
         backToMain();
-      } else if (board::kEpaper) {
+      } else if (board::kSlowPaper) {
         updateSoftware();  // the Options screen: the talk button updates
       } else {
         backToMain();
@@ -3551,6 +3582,10 @@ void loop() {
   if (board::kHasTouch) pollTouch(dark);
   stopOnSilence();
 
+#if defined(BOARD_EPAPER154)
+  if (sideBtn().pressedFor(4000)) switchOff();
+#endif
+
   // Side button: page / next row · hold = menu (hold again = close).
   if (dark && (sideBtn().wasHold() || sideBtn().wasClicked())) {
     touch();  // woken only — though a second click makes it a double-click
@@ -3568,11 +3603,11 @@ void loop() {
       mode = Mode::Menu;
       menuOpenedMs = millis();
       redraw();
-    } else if (inMenu || (board::kEpaper && mode == Mode::Link)) {
+    } else if (inMenu || (board::kSlowPaper && mode == Mode::Link)) {
       ui::fade();
       backToMain();
     } else if (mode != Mode::Listening) {
-      if (board::kEpaper) openOptions();  // the paper's whole menu
+      if (board::kSlowPaper) openOptions();  // the paper's whole menu
       else openMenu();
     }
   } else if (sideBtn().wasClicked()) {
@@ -3615,7 +3650,7 @@ void loop() {
 
   // Menus close by themselves after a while — on paper much later, since
   // each step takes a redraw to show.
-  const uint32_t menuIdle = board::kEpaper ? 180000 : 20000;
+  const uint32_t menuIdle = board::kSlowPaper ? 180000 : 20000;
   if ((mode == Mode::Menu || mode == Mode::Agents) && millis() - menuOpenedMs > menuIdle) backToMain();
   if (mode == Mode::CharPick && millis() - menuOpenedMs > menuIdle * 3) backToMain();
   if (mode == Mode::Link && millis() - menuOpenedMs > 600000) backToMain();

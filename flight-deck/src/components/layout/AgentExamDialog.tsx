@@ -1086,6 +1086,18 @@ function QuestionDetail({ q, where, onTeach, onRead }: {
               })}
             </ul>
           )}
+          {(q.contradicts ?? []).length > 0 && (
+            <ul className="mt-2 flex flex-col gap-1.5">
+              {q.contradicts!.map((c) => (
+                <li key={c} className="flex items-start gap-2 text-xs">
+                  <span className="mt-px flex h-4 w-4 shrink-0 items-center justify-center rounded-full bg-red-500/15 text-red-600 dark:text-red-400">
+                    <AlertTriangle className="h-2.5 w-2.5" />
+                  </span>
+                  <span className="text-zinc-400">{c}<span className="text-zinc-500"> — its documents say otherwise</span></span>
+                </li>
+              ))}
+            </ul>
+          )}
           <p className="mt-3 flex flex-wrap items-center gap-1.5 border-t border-zinc-800 pt-2.5 text-[11px] text-zinc-500">
             <span className="min-w-0 truncate">{where}</span>
             <span className={`shrink-0 rounded-md px-1.5 py-0.5 ${q.read === false ? 'bg-amber-500/10 text-amber-700 dark:text-amber-400' : 'bg-zinc-800 text-zinc-400'}`}>

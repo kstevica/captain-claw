@@ -9,6 +9,10 @@
 //   -DBOARD_PAPERCOLOR  M5Stack PaperColor: 4" Spectra 6 colour e-paper
 //                       (400×600, ~20 s to redraw), three buttons, two RGB
 //                       LEDs, SHT40 temperature/humidity, RTC
+//   -DBOARD_EPAPER154   Waveshare ESP32-S3-ePaper-1.54 (SKU 32298): 200×200
+//                       black-and-white e-paper (2 s full, 0.4 s partial), BOOT
+//                       + PWR buttons, one green LED, SHTC3, RTC, microSD;
+//                       with -DEPAPER154_TOUCH the Touch version (SKU 34212)
 #pragma once
 
 #include <driver/gpio.h>
@@ -103,6 +107,46 @@ constexpr bool kHasTouch = false;
 constexpr bool kLoudPeakRestarts = false;
 constexpr bool kChunkedImages = true;
 
+#elif defined(BOARD_EPAPER154)
+
+// Both are the V2 board (ESP32-S3-PICO-1-N8R8, "V2" on the silkscreen); a V1
+// (4 MB flash, 2 MB PSRAM) is too small for this firmware.
+#if defined(EPAPER154_TOUCH)
+constexpr const char* kModel = "TouchPaper154";
+constexpr const char* kHw = "epaper154_touch";
+constexpr const char* kIdPrefix = "tpaper";
+constexpr bool kHasTouch = true;  // FT6336: tap to talk, swipes page
+#else
+constexpr const char* kModel = "ePaper154";
+constexpr const char* kHw = "epaper154";
+constexpr const char* kIdPrefix = "epaper";
+constexpr bool kHasTouch = false;
+#endif
+constexpr const char* kNoun = "device";
+constexpr const char* kTalkButton = "BOOT button";
+constexpr const char* kSideButton = "PWR button";
+constexpr const char* kTalkHint = "Press BOOT to talk";
+constexpr bool kTalkToggles = true;
+constexpr bool kTalkFromSleep = true;  // the paper looks awake when it sleeps: a press talks
+constexpr char kTalkM5 = 'A', kSideM5 = 'B', kBackM5 = 0;  // hw::update() feeds M5.BtnA / M5.BtnB
+constexpr const char* kTalkKey = "BOOT";
+constexpr const char* kSideKey = "PWR";
+constexpr const char* kBackKey = "";
+constexpr gpio_num_t kTalkPin = GPIO_NUM_0;   // BOOT: a strapping pin, read only at power-on and reset
+constexpr gpio_num_t kSidePin = GPIO_NUM_18;  // PWR: on battery it also switches the board on
+constexpr gpio_num_t kBackPin = GPIO_NUM_NC;
+constexpr gpio_num_t kMonoLed = GPIO_NUM_3;   // green, active low
+constexpr int kScreenW = 200, kScreenH = 200;
+constexpr bool kRound = false;
+constexpr bool kEpaper = true;
+constexpr bool kHasMotor = false;
+constexpr bool kHasLeds = true;  // the one green one (leds.cpp)
+constexpr bool kHasClimate = true;  // SHTC3
+constexpr bool kOfflineNotes = true;
+constexpr bool kHasSdCard = true;  // microSD on its own SDMMC pins
+constexpr bool kLoudPeakRestarts = false;
+constexpr bool kChunkedImages = true;
+
 #else  // BOARD_STICKS3
 
 constexpr const char* kModel = "StickS3";
@@ -147,10 +191,26 @@ constexpr bool kPaperB = false;
 // Note-taking mode (hold the talk button): every recording is kept as a voice
 // note, written to flash (or a card) as it's recorded, and they all go to the
 // agent once the mode is turned off. The B paper and the StopWatch.
-#if defined(PAPER_B) || defined(BOARD_STOPWATCH)
+#if defined(PAPER_B) || defined(BOARD_STOPWATCH) || defined(BOARD_EPAPER154)
 constexpr bool kNoteMode = true;
 #else
 constexpr bool kNoteMode = false;
+#endif
+
+// A screen that takes ~20 s to redraw (Spectra 6): the menu is read aloud
+// instead of drawn, and only what must be on it goes on it. kEpaper alone is
+// what every e-paper shares: it keeps its picture unpowered, no backlight.
+#if defined(BOARD_PAPERCOLOR)
+constexpr bool kSlowPaper = true;
+#else
+constexpr bool kSlowPaper = false;
+#endif
+
+// Tap to talk's first setting, until it's changed on the phone page.
+#if defined(BOARD_EPAPER154)
+constexpr bool kTapTalkDefault = true;
+#else
+constexpr bool kTapTalkDefault = false;
 #endif
 
 }  // namespace board

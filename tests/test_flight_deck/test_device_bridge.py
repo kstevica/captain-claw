@@ -677,6 +677,21 @@ def test_paper_pictures_keep_their_shape_on_white():
     assert min(im.getpixel((200, 100))) > 240  # transparency on white paper
 
 
+def test_picture_options_for_a_small_black_and_white_paper():
+    assert db._picture_options({"sw": "200", "sh": "200", "img": "chunks", "mono": "1"}) == {
+        "screen": (200, 200), "round_screen": False, "chunked": True, "mono": True}
+
+
+def test_a_small_black_and_white_paper_says_so_and_keeps_its_own_fonts():
+    conn = db._DeviceConn(_WS(), {"id": "u1"}, "epaper", lang="", speak=False, screen=(200, 200),
+                          chunked=True, mono=True, hw="epaper154", fw="0.19.2")
+    assert "1.54-inch black-and-white e-paper (200×200 px)" in conn.system_context()
+    assert "colour" not in conn.system_context()
+    assert conn.paper is False  # efont has no Đ: the colour paper's Inter does
+    assert "Waveshare ePaper 1.54" in db.device_context_line(_READINGS, "epaper154")
+    assert "Waveshare Touch ePaper 1.54" in db.device_context_line(_READINGS, "epaper154_touch")
+
+
 def test_picture_options_for_e_paper():
     assert db._picture_options({"sw": "400", "sh": "600", "img": "chunks", "paper": "1"}) == {
         "screen": (400, 600), "round_screen": False, "chunked": True, "paper": True}
