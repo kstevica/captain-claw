@@ -294,7 +294,8 @@ has to follow, and at 1.8 s that's no quicker than letting the first one finish.
 
 | | `epaper154` | `epaper154_touch` |
 |---|---|---|
-| talk | BOOT: press, talk, press again; wakes and records from sleep | the same, or the Talk button on the screen |
+| talk | BOOT: press, talk, press again | the same, or the Talk button on the screen |
+| wake | BOOT or PWR: only wakes it; the next BOOT press talks | the same |
 | next | PWR: next row or page · hold = menu | the same, or swipe; in a list, tap the left or right third to move, the middle to choose |
 | home | PWR: double-click, from any screen (not while it records or the agent works) | the same |
 | replay | BOOT: double press, or Menu → *Replay answer* | the same |

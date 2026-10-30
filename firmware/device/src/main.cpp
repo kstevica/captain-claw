@@ -53,7 +53,7 @@
 #if defined(PAPER_B)
 #define FW_VERSION "1.0.22"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.19.5"
+#define FW_VERSION "0.19.6"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -215,8 +215,7 @@ static bool sideClickWoke = false;   // that click only woke the screen
 // Talking from sleep: the talk button woke the device and is still held. The
 // mic records into PSRAM at once (M5Unified fills the buffer by itself) while
 // Wi-Fi and the deck connect; then it all goes up, as if spoken just now.
-// A wake-to-talk recording. (Where only a press ends one, as long as any other.)
-static constexpr uint32_t kPrerollMaxMs = board::kSilenceStop ? 30000 : 110000;
+static constexpr uint32_t kPrerollMaxMs = 30000;   // a wake-to-talk recording
 static constexpr uint32_t kOfflineMaxMs = 60000;   // a voice note kept offline (notes.h)
 static constexpr uint32_t kTalkMaxMs = 110000;     // a recording sent as it's made (the server caps at 120 s)
 static uint32_t prerollMaxMs = kPrerollMaxMs;      // this recording's cap
@@ -2544,7 +2543,8 @@ static void startInstall() {
 static volatile uint32_t buttonSeenMs = 0;
 
 static String sleepHint() {
-  return board::kEpaper ? String(board::kTalkHint) : String("Press the talk button to wake.");
+  if (!board::kEpaper) return "Press the talk button to wake.";
+  return board::kTalkFromSleep ? String(board::kTalkHint) : "Press " + String(board::kTalkKey) + " to wake";
 }
 
 #if defined(BOARD_PAPERCOLOR)
