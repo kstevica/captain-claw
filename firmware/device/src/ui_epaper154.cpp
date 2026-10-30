@@ -997,6 +997,92 @@ void showSleeping(const String& hint, uint8_t) {
 #endif
 }
 
+// A drawing made upright on its own canvas, then turned onto the page, smoothed
+// (the push makes every pixel ink or paper again).
+template <typename Draw>
+static void drawTurned(int w, int h, int x, int y, float angle, float zoom, Draw draw) {
+  M5Canvas c(&canvas);
+  c.setPsram(true);
+  c.setColorDepth(16);
+  if (!c.createSprite(w, h)) return;
+  c.fillScreen(kPaper);
+  draw(c);
+  c.pushRotateZoomWithAA(&canvas, x, y, angle, zoom, zoom, kPaper);
+  c.deleteSprite();
+}
+
+// The sleeper again, capsized: feet in the air, eyes crossed out, its hat floating off.
+static void drawCapsized() {
+  drawTurned(92, 112, 100, 100, 200, 1.2f, [](M5Canvas& c) {
+    static constexpr int cx = 46;
+    // Antenna, bent by the fall.
+    c.drawWideLine(cx, 14, cx + 2, 8, 1.0f, kInk);
+    c.drawWideLine(cx + 2, 8, cx + 10, 5, 1.0f, kInk);
+    c.fillCircle(cx + 12, 5, 3, kInk);
+    // Head, ears, eyes, a surprised mouth.
+    c.fillRoundRect(cx - 32, 24, 6, 14, 2, kInk);
+    c.fillRoundRect(cx + 26, 24, 6, 14, 2, kInk);
+    c.fillRoundRect(cx - 26, 12, 52, 38, 9, kInk);
+    c.fillRoundRect(cx - 24, 14, 48, 34, 7, kPaper);
+    for (int eye : {cx - 12, cx + 12}) {
+      c.drawWideLine(eye - 5, 21, eye + 5, 31, 1.2f, kInk);
+      c.drawWideLine(eye + 5, 21, eye - 5, 31, 1.2f, kInk);
+    }
+    c.fillCircle(cx, 40, 4, kInk);
+    c.fillCircle(cx, 40, 2, kPaper);
+    // Arms flung out, then the body over them.
+    c.drawWideLine(cx - 20, 60, cx - 36, 72, 2.5f, kInk);
+    c.drawWideLine(cx + 20, 60, cx + 36, 50, 2.5f, kInk);
+    c.fillRoundRect(cx - 20, 52, 40, 24, 6, kInk);
+    c.fillRoundRect(cx - 18, 54, 36, 20, 4, kPaper);
+    c.fillCircle(cx, 64, 3, kInk);
+    // Legs and feet.
+    c.fillRoundRect(cx - 14, 76, 6, 18, 2, kInk);
+    c.fillRoundRect(cx + 8, 76, 6, 14, 2, kInk);
+    c.fillRoundRect(cx - 22, 92, 16, 6, 3, kInk);
+    c.fillRoundRect(cx + 6, 88, 16, 6, 3, kInk);
+  });
+  drawTurned(38, 28, 167, 130, 18, 1.0f, [](M5Canvas& c) {
+    static constexpr int cx = 19;
+    // The crown, wider at the top; its ink, then again smaller in paper.
+    c.fillEllipse(cx, 7, 17, 6, kInk);
+    c.fillTriangle(cx - 17, 8, cx + 17, 8, cx + 8, 19, kInk);
+    c.fillTriangle(cx - 17, 8, cx + 8, 19, cx - 8, 19, kInk);
+    c.fillEllipse(cx, 7, 15, 4, kPaper);
+    c.fillTriangle(cx - 14, 8, cx + 14, 8, cx + 6, 17, kPaper);
+    c.fillTriangle(cx - 14, 8, cx + 6, 17, cx - 6, 17, kPaper);
+    c.fillCircle(cx, 11, 2, kInk);  // the badge
+    // Band and peak.
+    c.fillRect(cx - 9, 17, 18, 5, kInk);
+    c.fillEllipse(cx, 23, 12, 3, kInk);
+  });
+  // The waves, the nearer over the farther, each hiding what's under it.
+  for (int row = 0; row < 2; ++row) {
+    const int y0 = 146 + row * 10, depth = 6 - row;
+    const float period = 28 + row * 4, shift = row * 11;
+    for (int x = 0; x < W; ++x) {
+      const int y = y0 + (int)(depth * fabsf(sinf((x + shift) * 3.14159f / period)));
+      canvas.drawFastVLine(x, y + 2, H - 28 - y - 2, kPaper);
+      canvas.fillRect(x, y, 1, 2, kInk);
+    }
+  }
+  // Bubbles.
+  canvas.drawCircle(40, 134, 4, kInk);
+  canvas.drawCircle(31, 119, 3, kInk);
+  canvas.drawCircle(42, 107, 2, kInk);
+}
+
+void showSwitchedOff(const String& hint) {
+  drawing(Screen::Other);
+  canvas.fillScreen(kPaper);
+  drawBar(false);
+  drawCapsized();
+  canvas.setFont(&efont::efont16);
+  text("Switched off", W / 2, BAR + 5, top_center);
+  pill(hint, 3, H - 28, W - 6, 24);
+  push(true);  // it stays there: a clean picture, not over what the partial refreshes left
+}
+
 void tick() {
   if (current != Screen::Home) return;
   static uint32_t lastCheckMs = 0;
