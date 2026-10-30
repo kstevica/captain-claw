@@ -308,7 +308,13 @@ async def _handle_message(psid: str, message: dict[str, Any]) -> None:
             ch.context_sent = True
         else:
             agent_content = effective_text
-        payload_obj: dict[str, Any] = {"type": "chat", "content": agent_content, "surface": "messenger"}
+        payload_obj: dict[str, Any] = {
+            "type": "chat", "content": agent_content, "surface": "messenger",
+            # This turn's own origin (the Taskboard's record of it): a reply the
+            # user approves there goes back on this channel, which forwards to
+            # the thread. Not the session's durable origin.
+            "turn_origin": {"kind": "channel", "address": ch.channel_id},
+        }
         if image_path:
             payload_obj["image_path"] = image_path
         try:

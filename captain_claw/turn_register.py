@@ -108,6 +108,10 @@ _CURRENT: ContextVar[Turn | None] = ContextVar("claw_turn", default=None)
 # mail_authority kind, its id, a name)`` — an Autonomous Work action, a
 # connected system's message, one of this agent's own cron jobs.
 _AUTOMATION_REF: ContextVar[tuple[str, str, str]] = ContextVar("claw_turn_automation_ref", default=("", "", ""))
+# The chat the next turn's frame came from, for a reply to it: ``(kind,
+# address)`` — a channel on Flight Deck's bus (a device, a Messenger thread).
+_FRAME_ORIGIN: ContextVar[tuple[str, str]] = ContextVar("claw_turn_frame_origin", default=("", ""))
+_FRAME_ORIGIN_KINDS = ("channel",)
 
 
 def bind_automation(kind: str, ref: Any, name: Any = "") -> contextvars.Token:
@@ -140,6 +144,22 @@ def note_frame_automation(raw: Any) -> None:
             bind_automation(str(raw.get("kind") or ""), raw.get(REF_FIELD))
         else:
             _AUTOMATION_REF.set(("", "", ""))
+    except Exception:
+        pass
+
+
+def note_frame_origin(raw: Any) -> None:
+    """An agent socket's chat frame: the channel its turn came in on as the
+    bridge names it for a reply (``turn_origin`` — a device's or a Messenger
+    thread's channel on Flight Deck's bus), or nothing. The turn's own, kept
+    on its record only — never the session's durable origin, which later
+    results (a cron run) follow. Set for each chat frame, as
+    :func:`note_frame_automation`. Never raises."""
+    try:
+        kind = str(raw.get("kind") or "").strip() if isinstance(raw, dict) else ""
+        address = str(raw.get("address") or "").strip() if isinstance(raw, dict) else ""
+        ok = kind in _FRAME_ORIGIN_KINDS and bool(_REF_RE.match(address))
+        _FRAME_ORIGIN.set((kind, address) if ok else ("", ""))
     except Exception:
         pass
 
@@ -371,6 +391,10 @@ def _open_record(agent: Any, turn: Turn) -> dict[str, Any]:
     found = origin.get_session_origin(session)
     if found:
         refs["origin"] = {"kind": _short(found["kind"], 32), "address": _short(found["address"], 128)}
+    frame_kind, frame_address = _FRAME_ORIGIN.get()
+    if frame_kind:
+        # The chat this turn came from (a device, a Messenger thread): a reply goes there.
+        refs["turn_origin"] = {"kind": frame_kind, "address": frame_address}
     meta = getattr(session, "metadata", None)
     meta = meta if isinstance(meta, dict) else {}
     if channel == "whatsapp" and meta.get("whatsapp_waid"):

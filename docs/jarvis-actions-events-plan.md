@@ -198,7 +198,9 @@ they fire and you just get told. #5 later confirms the hold actually landed.
 - **Execution home for agent actions: WS `run_tool`** (parity with the notification path).
 - **Catalog v1:** 4 reversible auto-eligible — `note.write`, `calendar.hold`,
   `mail.draft` (draft, NOT send), `reminder.schedule`; + 4 in-catalog-but-human-only —
-  `mail.send`, `calendar.invite`/`calendar.delete`, `message.send`, `drive.delete`.
+  `mail.send`, `calendar.invite`/`calendar.delete`, `message.send`, `drive.delete`
+  (both of the last since removed; the Taskboard's human-only, never-proposable
+  `reply.on_origin` replaced `message.send`).
   **Hard-excluded from the autonomous catalog entirely:** raw `shell`, `browser`
   form-submit, social posting, anything payment-like (available in normal chat, never autonomous).
 - **Events store: dedicated `events.db`** under FD_DATA_DIR (matches per-subsystem DB

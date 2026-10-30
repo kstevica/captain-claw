@@ -12,6 +12,7 @@ import {
   Copy,
   History,
   Inbox,
+  ListChecks,
   Loader2,
   Mail,
   MessageSquare,
@@ -93,7 +94,7 @@ const TEMPLATES: { title: string; prompt: string; form: Partial<ScheduleForm> }[
 const iconBtn = 'rounded-lg p-2 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50'
 
 export function ScheduledTasks({
-  initialTaskId, newForAgent, defaultAgentSlug, phone = false, onClose, onOpenChat, onOpenConnections,
+  initialTaskId, newForAgent, defaultAgentSlug, phone = false, onClose, onOpenChat, onOpenConnections, onOpenTaskboard,
 }: {
   initialTaskId?: string | null
   /** Open straight on a new task (for this agent when not empty). */
@@ -105,6 +106,8 @@ export function ScheduledTasks({
   /** Continue a task's conversation: open the agent's chat on its session. */
   onOpenChat?: (agentSlug: string, sessionId: string) => void
   onOpenConnections?: () => void
+  /** A run's "Open task": the Taskboard on this task's own task there (by its job id). */
+  onOpenTaskboard?: (jobId: string) => void
 }) {
   const jobs = useScheduledStore((s) => s.jobs)
   const loaded = useScheduledStore((s) => s.loaded)
@@ -261,12 +264,13 @@ export function ScheduledTasks({
         onDeleted={async () => { await fetchJobs(); go({ kind: 'all' }) }}
         onChanged={fetchJobs}
         onOpenChat={onOpenChat}
+        onOpenTaskboard={onOpenTaskboard}
       />
     )
   } else if (loaded && jobs.length === 0 && !query) {
     detail = <EmptyState onStart={startNew} />
   } else {
-    detail = <ActivityFeed query={query} jobs={jobs} onOpenTask={(id) => go({ kind: 'task', id })} />
+    detail = <ActivityFeed query={query} jobs={jobs} onOpenTask={(id) => go({ kind: 'task', id })} onOpenTaskboard={onOpenTaskboard} />
   }
 
   if (phone) {
@@ -447,7 +451,9 @@ function useRuns(jobId: string | null, query: string, live: boolean) {
   return { runs, loading, hasMore, loadMore, reload: () => load(true) }
 }
 
-function ActivityFeed({ query, jobs, onOpenTask }: { query: string; jobs: ScheduledJob[]; onOpenTask: (id: string) => void }) {
+function ActivityFeed({ query, jobs, onOpenTask, onOpenTaskboard }: {
+  query: string; jobs: ScheduledJob[]; onOpenTask: (id: string) => void; onOpenTaskboard?: (jobId: string) => void
+}) {
   const { runs, loading, hasMore, loadMore } = useRuns(null, query, jobs.some((j) => j.running))
   return (
     <div className="h-full overflow-y-auto px-4 py-4 wide:px-6">
@@ -458,14 +464,16 @@ function ActivityFeed({ query, jobs, onOpenTask }: { query: string; jobs: Schedu
         {!loading && <span className="text-[11px] text-zinc-500">{runs.length}{hasMore ? '+' : ''} run{runs.length === 1 ? '' : 's'}</span>}
       </div>
       <RunList runs={runs} loading={loading} hasMore={hasMore} onMore={loadMore} showTask onOpenTask={onOpenTask} query={query}
+        onOpenTaskboard={onOpenTaskboard}
         empty={query ? 'Nothing matches that search.' : 'No runs yet. A task\'s results show up here as soon as it runs.'} />
     </div>
   )
 }
 
-function RunList({ runs, loading, hasMore, onMore, showTask, onOpenTask, empty, query }: {
+function RunList({ runs, loading, hasMore, onMore, showTask, onOpenTask, onOpenTaskboard, empty, query }: {
   runs: TaskRun[]; loading: boolean; hasMore: boolean; onMore: () => void
-  showTask?: boolean; onOpenTask?: (id: string) => void; empty: string; query: string
+  showTask?: boolean; onOpenTask?: (id: string) => void; onOpenTaskboard?: (jobId: string) => void
+  empty: string; query: string
 }) {
   const [more, setMore] = useState(false)
   if (loading && runs.length === 0) {
@@ -480,7 +488,7 @@ function RunList({ runs, loading, hasMore, onMore, showTask, onOpenTask, empty, 
   }
   return (
     <div className="flex flex-col gap-3">
-      {runs.map((r) => <RunCard key={r.id} run={r} showTask={showTask} onOpenTask={onOpenTask} query={query} />)}
+      {runs.map((r) => <RunCard key={r.id} run={r} showTask={showTask} onOpenTask={onOpenTask} onOpenTaskboard={onOpenTaskboard} query={query} />)}
       {hasMore && (
         <button
           onClick={async () => { setMore(true); try { await onMore() } finally { setMore(false) } }}
@@ -511,8 +519,11 @@ const VIA: Record<string, { label: string; Icon: typeof Mail }> = {
   channel: { label: 'Channel', Icon: MessageSquare },
 }
 
-function RunCard({ run, showTask, onOpenTask, query }: {
-  run: TaskRun; showTask?: boolean; onOpenTask?: (id: string) => void; query: string
+function RunCard({ run, showTask, onOpenTask, onOpenTaskboard, query }: {
+  run: TaskRun; showTask?: boolean; onOpenTask?: (id: string) => void
+  /** The Taskboard on the task this run is part of. */
+  onOpenTaskboard?: (jobId: string) => void
+  query: string
 }) {
   const tone = runTone(run.status)
   const pill = TONE_PILL[tone]
@@ -543,6 +554,15 @@ function RunCard({ run, showTask, onOpenTask, query }: {
         {fmtDuration(run) && <span className="text-[11px] text-zinc-600">· {fmtDuration(run)}</span>}
         {hits > 0 && <span className="rounded bg-violet-500/15 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 dark:text-violet-300">{hits} match{hits === 1 ? '' : 'es'}</span>}
         <span className="ml-auto flex items-center gap-1">
+          {onOpenTaskboard && run.job_id && (
+            <button
+              onClick={() => onOpenTaskboard(run.job_id)}
+              className="flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200"
+              title="This task on the Taskboard — every run, what it delivered, and whether it needs you"
+            >
+              <ListChecks className="h-3.5 w-3.5" />Open task
+            </button>
+          )}
           {run.result && (
             <button onClick={copy} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" title="Copy result">
               {copied ? <Check className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" /> : <Copy className="h-3.5 w-3.5" />}
@@ -616,10 +636,11 @@ function DeliveryChip({ d }: { d: RunDelivery }) {
 
 // ── One task ──
 
-function TaskDetail({ job, agentName, agentRunning, query, onEdit, onDeleted, onChanged, onOpenChat }: {
+function TaskDetail({ job, agentName, agentRunning, query, onEdit, onDeleted, onChanged, onOpenChat, onOpenTaskboard }: {
   job: ScheduledJob; agentName: string; agentRunning: boolean; query: string
   onEdit: () => void; onDeleted: () => void; onChanged: () => void
   onOpenChat?: (agentSlug: string, sessionId: string) => void
+  onOpenTaskboard?: (jobId: string) => void
 }) {
   const notify = useNotificationStore((s) => s.add)
   const [busy, setBusy] = useState<'' | 'run' | 'toggle' | 'delete'>('')
@@ -734,7 +755,7 @@ function TaskDetail({ job, agentName, agentRunning, query, onEdit, onDeleted, on
           </button>
         )}
       </div>
-      <RunList runs={runs} loading={loading} hasMore={hasMore} onMore={loadMore} query={query}
+      <RunList runs={runs} loading={loading} hasMore={hasMore} onMore={loadMore} query={query} onOpenTaskboard={onOpenTaskboard}
         empty={query ? 'No run of this task matches.' : 'It hasn\'t run yet. Use “Run now” to try it.'} />
     </div>
   )

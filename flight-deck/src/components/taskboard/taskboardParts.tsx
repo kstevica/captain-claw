@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
-import { AlertTriangle, Check, CircleDot, Loader2, ShieldAlert, Sparkles } from 'lucide-react'
-import type { TaskAction, TaskFacet, TaskItem, TaskboardStatus } from '../../services/taskboardApi'
+import { AlertTriangle, Check, CircleDot, FileDown, History, ListTodo, Loader2, ShieldAlert, Sparkles } from 'lucide-react'
+import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskboardStatus } from '../../services/taskboardApi'
 import { resolveProposal } from '../../services/notifications'
 import {
   JUDGE_LABEL, OWES_LABEL, RESULT_LABEL, STATUS_LABEL, agoRelative, channelInfo, foldChar, type DatePreset,
@@ -9,8 +9,9 @@ import {
 
 // Pieces of the Taskboard: search highlighting (the server's folding, so
 // what it finds is what lights up), a multi-select filter list, the date
-// filter, the chips a task wears, the sync line, quick answers and the
-// board's switch. Their words and plain helpers are in taskboardText.
+// filter, the chips a task wears, the sync line, quick answers, the
+// download menu and the board's switch. Their words and plain helpers are
+// in taskboardText.
 
 /** Search terms, folded on both sides: "duric" lights up "Đurić". `terms`
  *  come folded (foldText). */
@@ -53,6 +54,13 @@ export function ChannelIcon({ channel, className = 'h-4 w-4' }: { channel: strin
   const info = channelInfo(channel)
   const Icon = info?.Icon || CircleDot
   return <Icon className={`${className} shrink-0 ${info?.tone || 'text-zinc-500'}`} />
+}
+
+/** A task's own icon: an agent's to-do item is one; anything else wears
+ *  the channel it came in on. */
+export function TaskIcon({ task, className = 'h-4 w-4' }: { task: Pick<TaskItem, 'kind' | 'channel'>; className?: string }) {
+  if (task.kind === 'todo') return <ListTodo className={`${className} shrink-0 text-teal-600 dark:text-teal-400`} />
+  return <ChannelIcon channel={task.channel} className={className} />
 }
 
 // ── Chips ──
@@ -148,6 +156,19 @@ const NOTE_TONE: Record<TaskNote['id'], string> = {
  *  hover — partly done, a new message since it was done. */
 export function NoteChip({ note }: { note: TaskNote }) {
   return <span title={note.detail || undefined} className={`${chip} ${NOTE_TONE[note.id]}`}>{note.label}</span>
+}
+
+/** Filled in from the last 30 days of chats when the board first opened:
+ *  it never gets a next step or a notification. */
+export function HistoryChip() {
+  return (
+    <span
+      title="Filled in from your agents' chats of the last 30 days — no next step is suggested for it"
+      className={`${chip} flex items-center gap-0.5 bg-zinc-800 text-zinc-400`}
+    >
+      <History className="h-3 w-3" />From history
+    </span>
+  )
 }
 
 /** Taken in as a task with less certainty: it isn't counted in the badge. */
@@ -292,10 +313,22 @@ export function DateFacet({ value, onChange }: { value: DateRange; onChange: (v:
 
 // ── Sync ──
 
-/** Where the board's read of its sources stands: reading, why it stopped,
- *  or up to date. */
+/** Where the board's read of its sources stands: the last 30 days being
+ *  filled in (once), reading, why it stopped, or up to date. */
 export function SyncStatus({ status, syncing }: { status: TaskboardStatus | null; syncing: boolean }) {
   const sweep = status?.sweep
+  const fill = status?.backfill
+  if (fill?.state === 'running') {
+    const { agents_done: done = 0, agents_total: total = 0, tasks = 0 } = fill.progress ?? {}
+    const more = [total > 0 ? `${Math.min(done, total)} of ${total} agent${total === 1 ? '' : 's'}` : '',
+      tasks > 0 ? `${tasks} task${tasks === 1 ? '' : 's'} found` : ''].filter(Boolean).join(' · ')
+    return (
+      <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-400" title="Your agents' chats of the last 30 days, read once">
+        <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-teal-600 dark:text-teal-400" />
+        <span className="truncate">Reading the last 30 days…{more ? ` ${more}` : ''}</span>
+      </div>
+    )
+  }
   if (syncing || sweep?.running) {
     return (
       <div className="flex min-w-0 items-center gap-2 text-xs text-zinc-400">
@@ -398,6 +431,54 @@ export function AnswerButtons({ choices, onAct }: {
         ))}
       </div>
       {error && <p className="mt-1 text-[11px] text-red-600 dark:text-red-400">{error}</p>}
+    </div>
+  )
+}
+
+// ── Download ──
+
+const EXPORTS: { id: ExportFormat; label: string; detail: string }[] = [
+  { id: 'csv', label: 'Spreadsheet (CSV)', detail: 'One row per task — opens in Excel, Numbers or Sheets' },
+  { id: 'jsonl', label: 'Data (JSONL)', detail: 'One JSON object per line, every field' },
+]
+
+/** The header's download menu: the tasks this tab shows, under the search
+ *  and filters, as a file. Only your own tasks are in it. */
+export function ExportPanel({ onExport }: { onExport: (format: ExportFormat) => Promise<void> }) {
+  const [busy, setBusy] = useState<ExportFormat | null>(null)
+  const [error, setError] = useState('')
+  const run = async (format: ExportFormat) => {
+    setBusy(format)
+    setError('')
+    try {
+      await onExport(format)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+  return (
+    <div role="menu" aria-label="Download tasks" className="w-64 overflow-hidden rounded-xl border border-zinc-800 bg-zinc-950 p-1.5 shadow-2xl shadow-black/30">
+      <p className="px-2.5 pb-1.5 pt-1 text-[11px] leading-relaxed text-zinc-500">The tasks this tab shows, with your search and filters.</p>
+      {EXPORTS.map((x) => (
+        <button
+          key={x.id}
+          role="menuitem"
+          disabled={busy !== null}
+          onClick={() => run(x.id)}
+          className="flex w-full items-start gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-zinc-800/60 disabled:opacity-60"
+        >
+          {busy === x.id
+            ? <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-teal-600 dark:text-teal-400" />
+            : <FileDown className="mt-0.5 h-4 w-4 shrink-0 text-teal-600 dark:text-teal-400" />}
+          <span className="min-w-0">
+            <span className="block text-sm text-zinc-200">{x.label}</span>
+            <span className="block text-[11px] leading-snug text-zinc-500">{x.detail}</span>
+          </span>
+        </button>
+      ))}
+      {error && <p className="px-2.5 pb-1 pt-0.5 text-[11px] text-red-600 dark:text-red-400">{error}</p>}
     </div>
   )
 }

@@ -68,10 +68,12 @@ async def _act(api, task_id, action, value=None):
 
 async def test_status_lists_the_sources_counts_and_the_sweep(api):
     out = await _get(api, "/fd/taskboard/status")
-    assert set(out) == {"sources", "counts", "sweep"}
+    # v2: the 30-day history fill (contract 5) and the agents' to-do lists.
+    assert set(out) == {"sources", "counts", "sweep", "backfill"}
     tracked = {s["key"] for s in out["sources"] if s["tracked"]}
     assert tracked == {"fd_scheduler", "autonomy", "follow_ups", "gmail_autoreplies", "gmail_sends", "agent_links",
-                       "agent_chats"}
+                       "agent_chats", "agent_todos"}
+    assert out["backfill"]["state"] == "idle" and set(out["backfill"]) == {"state", "done_at", "progress", "message"}
     assert all(set(s) == {"key", "label", "tracked", "on", "note"} for s in out["sources"])
     assert out["counts"] == {"needs_me": 0, "waiting": 0, "working": 0, "done": 0, "all": 0}
     assert set(out["sweep"]) == {"running", "last_at", "message"}
@@ -93,7 +95,9 @@ async def test_the_list_and_the_detail(api):
     by_kind = {i["kind"]: i for i in out["items"]}
     proposal = by_kind["proposal"]
     assert proposal["lane"] == "needs_me"
-    assert set(proposal["proposal"]) == {"id", "status", "title"} and proposal["proposal"]["status"] == "awaiting_approval"
+    # v2: a ProposalView (contract 1) — an Autonomous Work proposal is shown, never edited from the board.
+    assert set(proposal["proposal"]) == {"id", "status", "title", "kind", "source", "editable", "payload"}
+    assert proposal["proposal"]["status"] == "awaiting_approval" and proposal["proposal"]["editable"] is False
     assert proposal["links"]["autonomy_id"] == proposal["proposal"]["id"]
     scheduled = by_kind["scheduled"]
     assert scheduled["links"]["scheduled_job_id"] and scheduled["proposal"] is None and scheduled["lane"] == "done"
@@ -102,8 +106,8 @@ async def test_the_list_and_the_detail(api):
     assert held["parties"][0]["address"] == "ana@x.co"
 
     detail = await _get(api, f"/fd/taskboard/tasks/{proposal['id']}")
-    assert set(detail) == {"task", "events", "events_total", "links", "parties", "decisions", "proposals"}
-    assert detail["task"]["id"] == proposal["id"] and detail["decisions"] == []
+    assert set(detail) == {"task", "events", "events_total", "links", "parties", "decisions", "proposals", "merged"}
+    assert detail["task"]["id"] == proposal["id"] and detail["decisions"] == [] and detail["merged"] == []
     assert detail["events_total"] == len(detail["events"]) > 0
     assert [p["id"] for p in detail["proposals"]] == [proposal["proposal"]["id"]]
     assert detail["links"][0]["key"].startswith("autonomy:")
@@ -500,7 +504,9 @@ async def test_the_people_filter_says_which_value_is_me_whatever_the_page_holds(
     out = await _tasks(api, view="all", party="email:ana@x.co")
     assert [i["title"] for i in out["items"]] == ["Task 1"]
     assert not any(p.get("me") for i in out["items"] for p in i["parties"])
-    assert {f["id"]: f["me"] for f in out["facets"]["party"]} == {"fd_user:local": True, "email:ana@x.co": False}
+    # v2: Ana (a recorded address) is a person the board knows, by her party id.
+    ana = f"party:{out['items'][0]['parties'][0]['party_id']}"
+    assert {f["id"]: f["me"] for f in out["facets"]["party"]} == {"fd_user:local": True, ana: False}
 
 
 async def test_why_never_says_the_same_reason_twice(api):

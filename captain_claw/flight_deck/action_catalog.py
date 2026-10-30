@@ -113,12 +113,22 @@ CATALOG: dict[str, dict[str, Any]] = {
         "risk": "high", "reversibility": "irreversible", "reverse": None,
         "grant": "calendar", "human_only": True,
     },
-    "message.send": {
-        "label": "Send a message to a contact", "home": "agent", "tool": "whatsapp_send_file",
-        "base_args": {"action": "send_text"}, "required": ["to", "text"], "optional": [],
+    # A Taskboard next step (taskboard_nextsteps): the approved text goes to the
+    # chat the task came from, through Flight Deck's own delivery
+    # (delivery_routes.deliver_to_origin) — no agent, no tool. The payload
+    # names the task's origin, never a free address, so nothing but the
+    # Taskboard proposes it (not ``proposable``: the arbiter and plans never
+    # see it, and the manual exerciser can't run an ``fd`` action).
+    "reply.on_origin": {
+        "label": "Reply on the chat a task came from — always needs your approval",
+        "home": "fd", "tool": "fd_deliver", "base_args": {},
+        "required": ["task_id", "to", "text"], "optional": [],
         "risk": "high", "reversibility": "irreversible", "reverse": None,
-        "grant": "messaging", "human_only": True,
+        "grant": "taskboard", "human_only": True,
     },
+    # (No message.send: it called whatsapp_send_file's ``send_text``, an action
+    # that tool doesn't have, so it could only ever fail. A reply to a person
+    # goes as reply.on_origin, to a task's stored origin.)
     # (No drive.delete: the google_drive tool has no delete action, so the
     # entry that used to sit here dispatched to a nonexistent action and always
     # errored. Drive access is read-oriented; deletion isn't offered.)

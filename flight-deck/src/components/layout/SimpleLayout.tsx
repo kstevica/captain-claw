@@ -61,7 +61,7 @@ import { useDataLibraryStore } from '../../stores/dataLibraryStore'
 import { DataLibrary } from '../library/DataLibrary'
 import { useActivityStore } from '../../stores/activityStore'
 import { ToolCallRegister } from '../audit/ToolCallRegister'
-import { useTaskboardStore } from '../../stores/taskboardStore'
+import { takeTaskboardLink, useTaskboardStore } from '../../stores/taskboardStore'
 import { TaskBoard } from '../taskboard/TaskBoard'
 import { SharedFolders } from '../vfs/SharedFolders'
 import { DialogFullscreen } from '../library/dialogFullscreen'
@@ -334,6 +334,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const taskboardAgent = useTaskboardStore((s) => s.agentFilter)
   const taskboardFocus = useTaskboardStore((s) => s.focus)
   const openTaskboard = useTaskboardStore((s) => s.openTaskboard)
+  const showTaskboardTask = useTaskboardStore((s) => s.showTask)
   const closeTaskboard = useTaskboardStore((s) => s.close)
   const fetchTaskboardSummary = useTaskboardStore((s) => s.fetchSummary)
   const taskboardCount = useTaskboardStore((s) => s.needsMe)
@@ -356,6 +357,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     const t = setInterval(fetchTaskboardSummary, 30000)
     return () => clearInterval(t)
   }, [fetchTaskboardSummary, authEnabled, isAuthenticated])
+  // Taskboard v2: a link with ?taskboard=<task id> (a nudge, a bell item, a
+  // notification) opens the board on that task, once the user is signed in.
+  useEffect(() => {
+    if (authEnabled === null || (authEnabled && !isAuthenticated)) return
+    const taskId = takeTaskboardLink()
+    if (taskId) showTaskboardTask(taskId)
+  }, [showTaskboardTask, authEnabled, isAuthenticated])
 
   // Keep the agent list fresh — the Desktop page normally does this polling,
   // and it isn't mounted here. Same auth guard as there: with auth on and no
@@ -650,6 +658,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         onSelect: () => openActivity(a.kind === 'process' ? { slug: a.startKey } : { ref: a.startKey }),
       })
     }
+    // Taskboard v2: its tasks — what it was asked and sent, and what needs you.
+    if (a.kind === 'process' && !a.managed) {
+      items.push({
+        icon: ListChecks, label: 'Tasks', hint: 'What it was asked and sent, and what needs you', tone: 'teal',
+        onSelect: () => openTaskboard(a.startKey),
+      })
+    }
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
         { icon: BookOpen, label: 'Instructions, insights & skills', hint: 'What it keeps in mind, has learned, and knows how to do',
@@ -890,6 +905,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             onClose={closeScheduled}
             onOpenChat={openTaskChat}
             onOpenConnections={scheduledConnections}
+            onOpenTaskboard={(jobId) => { closeScheduled(); showTaskboardTask(`sched:job:${jobId}`) }}
           />
         </KioskWideDialog>
       )}

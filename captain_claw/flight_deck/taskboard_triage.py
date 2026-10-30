@@ -77,6 +77,14 @@ QSET = "taskboard.v1"
 RULES_QSET = "taskboard.rules.v1"
 EXTRACT_QSET = "taskboard.extract.v1"
 JEV_SOURCE = "taskboard"
+# v2: Jev answers about a task that aren't about where it stands — "the same
+# task as …?" (taskboard_threads) and "the next move?" (taskboard_nextsteps).
+_ASIDE_QSETS = ("taskboard.same.v1", "taskboard.next.v2")
+# The kinds triage reads: a person's request and a one-shot send — and (v2)
+# someone's message in the user's own inbox — and those Jev and the
+# extraction are asked about.
+_TRIAGED = ("request", "sent", "message")
+_ASKED = ("request", "message")
 
 EVERY_S = 20.0
 PASS_LIMIT = 20           # tasks one pass takes from a board
@@ -244,8 +252,11 @@ def _moved_since(turn: dict | None, events: list[dict]) -> bool:
     # Events come oldest first: none of the turn's in sight, all are newer.
     since = max((_int(e.get("id")) for e in events
                  if e.get("source") == "agent_turns" and e.get("source_ref") in marks), default=0)
+    # v2: an Autonomous Work action on a person's request (a board next step,
+    # proposed, approved, delivered) never moves the task (the autonomy
+    # adapter leaves an attached task's status alone): its states are no move.
     return any(_int(e.get("id")) > since and "state" in (e.get("refs") or {})
-               and e.get("source") not in ("agent_turns", "tool_audit")
+               and e.get("source") not in ("agent_turns", "tool_audit", "autonomy")
                and "status" not in ((e.get("refs") or {}).get("held") or {}) for e in events)
 
 
@@ -371,6 +382,10 @@ def rule_moves(task: dict, f: dict) -> tuple[dict, list[str]]:
         if f["sends"] and task["status"] == "open" and not locked:
             return _close("done", "evidence", "", "success"), ["A send was recorded, so it is done."]
         return {}, []
+    if task["kind"] == "message":
+        # v2 passive: someone's message in the user's own inbox waits (a maybe)
+        # for Jev's is_task or the user — rules only fail it closed.
+        return ({"flags": {"contains_instructions": True}} if f["third_party"] else {}), []
     if task["kind"] != "request" or task["status"] not in ("open", "done", "failed"):
         return {}, []
     flags: dict[str, Any] = {"contains_instructions": True} if f["third_party"] else {}
@@ -929,6 +944,10 @@ def jev_item(view: dict, f: dict, now: float | None = None) -> dict:
     if f["closed"]:
         item["closed"] = {"by": task.get("closed_by") or "", "ago": _ago(now - float(task.get("closed_at") or now)),
                           "new_message_since": f["new_inbound"]}
+    if f.get("next_move"):
+        # v2 next steps (taskboard_nextsteps): whom a next step could reach.
+        from captain_claw.flight_deck import taskboard_nextsteps
+        taskboard_nextsteps.add_context(item, view)
     return item
 
 
@@ -974,6 +993,10 @@ def questions(i: int, f: dict) -> dict[str, dict]:
             "type": "noul",
             "instructions": f"{ref} was closed, and something new came in after. Does it ask for more work or show "
                             "the task isn't finished?"}
+    if f.get("next_move"):
+        # v2 next steps (taskboard_nextsteps): the next move, of a task that may get one.
+        from captain_claw.flight_deck import taskboard_nextsteps
+        out.update(taskboard_nextsteps.questions(i))
     return out
 
 
@@ -1085,7 +1108,7 @@ async def _triage(user_id: str, limit: int, out: dict) -> None:
             continue
         task, f = view["task"], facts(view, user_id)
         fp = task["fingerprint"]
-        if task["kind"] not in ("request", "sent"):
+        if task["kind"] not in _TRIAGED:
             await asyncio.to_thread(board.triage_write, user_id, task["id"], fp, state="skipped")
             continue
         if f["running"] and now - (f["started_at"] or now) < _TURN_WAIT_S:
@@ -1094,7 +1117,7 @@ async def _triage(user_id: str, limit: int, out: dict) -> None:
                                     after=now + _TURN_RECHECK_S)
             out["deferred"] += 1
             continue
-        extract_it = task["kind"] == "request" and fp != task["extracted_fp"]
+        extract_it = task["kind"] in _ASKED and fp != task["extracted_fp"]
         if extract_it and not _new_text(view):
             # Only tool calls since the last extraction: what it wrote still holds.
             await asyncio.to_thread(board.triage_write, user_id, task["id"], fp, extracted=True)
@@ -1108,6 +1131,10 @@ async def _triage(user_id: str, limit: int, out: dict) -> None:
         return
     await _extract_all(user_id, work, out)
     await _decide_all(user_id, [w for w in work if not w["skip"]], out)
+    # v2 threads (taskboard_threads): is one of these the same task as an
+    # older one? Jev's sure "yes" is only ever a suggestion (flags.same_as).
+    from captain_claw.flight_deck import taskboard_threads
+    await taskboard_threads.same_task_pass(user_id, [w["view"]["task"]["id"] for w in work if not w["skip"]])
 
 
 async def _extract_all(user_id: str, work: list[dict], out: dict) -> None:
@@ -1213,11 +1240,14 @@ async def _decide_all(user_id: str, work: list[dict], out: dict) -> None:
     answers: dict[str, dict] = {}
     # A task its source moved after the turn has nothing for Jev to settle:
     # that move stands (rules say so), and no question is spent on it.
-    asking = [w for w in pending if w["view"]["task"]["kind"] == "request" and not w["facts"]["moved_by_source"]]
+    asking = [w for w in pending if w["view"]["task"]["kind"] in _ASKED and not w["facts"]["moved_by_source"]]
     if asking and int(settings.get("jev_per_day") or 0) > 0:
         granted = await asyncio.to_thread(board.take_daily, user_id, "jev", len(asking))
         if granted < len(asking) and not out["message"]:
             out["message"] = "Today's Jev cap is reached — the rest are sorted by rules."
+        # v2 next steps (taskboard_nextsteps): which of them Jev is asked the next move of.
+        from captain_claw.flight_deck import taskboard_nextsteps
+        await taskboard_nextsteps.mark_next_move(user_id, asking[:granted])
         items = [(w["view"], w["facts"], jev_item(w["view"], w["facts"])) for w in asking[:granted]]
         unused = granted
         for batch in _batches(items):
@@ -1272,6 +1302,11 @@ async def _decide_all(user_id: str, work: list[dict], out: dict) -> None:
                                         **_after_pass(w))
         if not wrote:
             out["moved_on"] += 1
+        else:
+            # v2 next steps (taskboard_nextsteps): a closed task loses what waited
+            # on it; Jev's sure next move gets its next step (none without Jev).
+            from captain_claw.flight_deck import taskboard_nextsteps
+            await taskboard_nextsteps.after_decision(user_id, task["id"], asked["answers"] if asked else {}, f)
 
 
 def _reading_due(task: dict, f: dict, w: dict, now: float | None = None) -> float | None:
@@ -1383,7 +1418,8 @@ def why_summary(task: dict, decisions: list[dict]) -> str:
         holds.add(f"owes:{owes}")
         holds |= {k for k, flag in (("probably", "probably_done"), ("low", "low_confidence"),
                                   ("declined", "agent_declined"), ("partly", "partly_done")) if flags.get(flag)}
-    latest = next((d for d in decisions if d.get("judge") != "model"), None)
+    # v2: Jev's "same task?" and "next move?" answers say nothing of where the task stands.
+    latest = next((d for d in decisions if d.get("judge") != "model" and d.get("qset") not in _ASIDE_QSETS), None)
     for sentence in _SENTENCE_RE.split(str((latest or {}).get("why") or "").strip()):
         key = _reason(sentence)
         line = next((ln for ln in lines if key and key in ln["keys"]), None)

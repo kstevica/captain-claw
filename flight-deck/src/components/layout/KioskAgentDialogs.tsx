@@ -40,8 +40,9 @@ import { useProcessStore } from '../../stores/processStore'
 //
 // The "⋯" on a kiosk agent row opens what a kiosk user may do with one agent
 // of theirs besides chatting and the power switch: look at what it means to
-// do and what they talked about (Info: its intentions and topics), open its
-// files and data, give it standing instructions and see what it remembers and
+// do and what they talked about (Info: its intentions and topics), see its
+// tasks (the Taskboard, filtered to it), open its files and data, give it
+// standing instructions and see what it remembers and
 // knows how to do (Instructions, insights & skills), change its model, how it
 // thinks and whether it sees images itself (Settings), or remove it for good,
 // folder and all (Remove).
@@ -79,13 +80,15 @@ export interface AgentMenuItem {
 // the bottom on a phone. Arrow keys move between the tiles; Esc closes it and
 // gives focus back to the "⋯".
 
-export type MenuTone = 'violet' | 'fuchsia' | 'sky' | 'cyan' | 'emerald' | 'amber' | 'zinc'
+export type MenuTone = 'violet' | 'fuchsia' | 'sky' | 'cyan' | 'teal' | 'emerald' | 'amber' | 'zinc'
 
 const TONE: Record<MenuTone, string> = {
   violet: 'bg-violet-500/15 text-violet-600 ring-violet-500/20 dark:text-violet-300',
   fuchsia: 'bg-fuchsia-500/15 text-fuchsia-600 ring-fuchsia-500/20 dark:text-fuchsia-300',
   sky: 'bg-sky-500/15 text-sky-600 ring-sky-500/20 dark:text-sky-300',
   cyan: 'bg-cyan-500/15 text-cyan-600 ring-cyan-500/20 dark:text-cyan-300',
+  // The Taskboard's own colour (its tile, its header).
+  teal: 'bg-teal-500/15 text-teal-600 ring-teal-500/20 dark:text-teal-300',
   emerald: 'bg-emerald-500/15 text-emerald-600 ring-emerald-500/20 dark:text-emerald-300',
   amber: 'bg-amber-500/15 text-amber-600 ring-amber-500/20 dark:text-amber-300',
   zinc: 'bg-zinc-500/15 text-zinc-600 ring-zinc-500/20 dark:text-zinc-300',

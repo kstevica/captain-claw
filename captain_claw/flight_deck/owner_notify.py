@@ -52,7 +52,9 @@ _sent_count: dict[str, int] = {}
 
 
 def waiting_count(user_id: str) -> int:
-    """How many of this user's proposals wait for their approval."""
+    """How many of this user's proposals wait for their approval (a
+    Taskboard next step that waited a week expires first)."""
+    get_store().expire_taskboard_proposals(user_id)
     return get_store().count_status(user_id, "awaiting_approval")
 
 
@@ -72,12 +74,63 @@ def device_line(text: str) -> str:
     return line if len(line) <= DEVICE_LINE_MAX else line[:DEVICE_LINE_MAX - 1].rstrip() + "…"
 
 
+def taskboard_link(task_id: str, base: str = "") -> str:
+    """The link that opens the Taskboard at a task: ``?taskboard=<id>`` on
+    ``base`` (the deck's public URL), or on the page the bell is read on."""
+    if not task_id:
+        return ""
+    if not base:
+        return f"?taskboard={task_id}"
+    sep = "&" if "?" in base else ("" if base.endswith("/") else "/") + "?"
+    return f"{base}{sep}taskboard={task_id}"
+
+
+def task_of(action: dict[str, Any]) -> str:
+    """The Taskboard task an action is about ('' when none): a next step's
+    own, else the one the board keeps it on (``autonomy:<id>``, or its
+    follow-up's ``fu:<id>``) — on the action's user's board only."""
+    from captain_claw.flight_deck.autonomy import TASKBOARD_SOURCE
+
+    payload = action.get("payload") or {}
+    if action.get("source") == TASKBOARD_SOURCE and payload.get("task_id"):
+        return str(payload["task_id"])
+    try:
+        from captain_claw.flight_deck.taskboard_nextsteps import open_board
+
+        board, uid = open_board(), _norm_user(str(action.get("user_id") or ""))
+        if board is None:
+            return ""
+        keys = [f"autonomy:{action.get('id')}"] + ([f"fu:{payload['follow_up_id']}"]
+                                                   if payload.get("follow_up_id") else [])
+        return next((t for t in (board.task_for_key(uid, k) for k in keys) if t), "")
+    except Exception as exc:  # noqa: BLE001 — a link is a courtesy, never a failure
+        _log.debug("no Taskboard task for %s: %s", action.get("id"), exc)
+        return ""
+
+
 def proposal_text(action: dict[str, Any], waiting: int) -> str:
-    """What WhatsApp and Telegram say about a new proposal."""
+    """What WhatsApp and Telegram say about a new proposal — the link opens
+    its task on the Taskboard when it is about one."""
     title = str(action.get("title") or "").strip() or "a new proposal"
     more = f" ({waiting} waiting)" if waiting > 1 else ""
     url = os.environ.get("FD_PUBLIC_URL", "").strip()
+    task_id = task_of(action) if url else ""
+    if task_id:
+        url = taskboard_link(task_id, url)
     return f"Waiting for your approval in Flight Deck{more}: {title}" + (f"\n{url}" if url else "")
+
+
+def nudge_texts(action: dict[str, Any], text: str) -> tuple[str, str]:
+    """A nudge as WhatsApp / Telegram say it and as the bell does: with the
+    link to its task on the Taskboard when it is about one (WhatsApp and
+    Telegram only on a deck with a public URL; the bell's link opens in
+    place). Devices show the first line, never the link."""
+    task_id = task_of(action)
+    if not task_id:
+        return text, text
+    url = os.environ.get("FD_PUBLIC_URL", "").strip()
+    out = f"{text}\n{taskboard_link(task_id, url)}" if url else text
+    return out, f"{text}\n[Open in Taskboard]({taskboard_link(task_id)})"
 
 
 def _device_key(user_id: str, device_id: str) -> str:
@@ -195,11 +248,14 @@ async def notify_proposal(user_id: str, action: dict[str, Any]) -> dict[str, Any
 
 
 def _proposal_bell(action: dict[str, Any]) -> tuple[str, str, str]:
-    """A proposal's bell notification: (type, title, body)."""
+    """A proposal's bell notification: (type, title, body) — its last line
+    the link to its task on the Taskboard when it is about one."""
     title = str(action.get("title") or "").strip()
     rationale = str(action.get("rationale") or "").strip()
+    task_id = task_of(action)
     return ("autonomy_proposal", "Waiting for your approval",
-            (title or "A new proposal") + (f"\n{rationale[:600]}" if rationale else ""))
+            (title or "A new proposal") + (f"\n{rationale[:600]}" if rationale else "")
+            + (f"\n[Open in Taskboard]({taskboard_link(task_id)})" if task_id else ""))
 
 
 async def bell_backfill(user_id: str) -> int:

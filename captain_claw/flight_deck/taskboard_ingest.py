@@ -714,8 +714,16 @@ def _admit(store: TaskboardStore, turn: dict, requester: dict, effect: str, agen
         "triage_after": time.time(), "private": int(turn["private"]), "source": "agent_turns", "source_ref": tid,
         "flags": {**({"rule": effect} if effect else {}), **({"own_chat": True} if turn.get("own_chat") else {})},
     }
-    task_id, _ = store.ingest(
-        turn["user_id"], keys=[f"turn:{tid}"], create=create, parties=[requester],
+    # v2 threads: a turn that answers the agent's question on an open request,
+    # or goes on someone's WhatsApp conversation, is on that task — not one of
+    # its own (taskboard_threads.turn_host); the people on it are named. A
+    # history turn (taskboard_backfill) is long over: never on a live task.
+    from captain_claw.flight_deck import taskboard_threads
+
+    task_id, _ = taskboard_threads.attach_or_create(
+        store, turn["user_id"], keys=[f"turn:{tid}"], create=create, parties=[requester], agents=agents,
+        host=("", "") if muted or turn.get("historical") else taskboard_threads.turn_host(store, turn, requester),
+        on_attach=taskboard_threads.turn_attach_patch(turn),
         event={"source": "agent_turns", "source_ref": f"{tid}:open", "at": turn["started_at"], "kind": "received",
                "channel": channel, "actor_kind": "me" if requester["kind"] == "fd_user" else "party",
                "actor": requester["display"], "summary": _head(text, 500) or "(no text)",

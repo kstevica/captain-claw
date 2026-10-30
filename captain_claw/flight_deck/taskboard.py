@@ -9,7 +9,13 @@
   GET  /fd/taskboard/tasks/{id}/why      the latest decisions about a task, and why it is where it is
   POST /fd/taskboard/sync                read the sources now, for the caller's board
   GET  /fd/taskboard/summary             {needs_me} — the tile badge's poll
-  GET/PUT /fd/taskboard/settings         auto-close, the daily caps (and today's counts), Jev
+  GET/PUT /fd/taskboard/settings         auto-close, the daily caps (and today's counts), Jev,
+                                         the opt-in inboxes (taskboard_passive)
+  GET  /fd/taskboard/export              the caller's tasks under the same filters, as CSV or JSONL
+
+v2 routes live with what they do: ``/tasks/{id}/propose`` (taskboard_nextsteps),
+``/tasks/{id}/merge|unmerge|split|not_same`` (taskboard_threads) and
+``/backfill`` (taskboard_backfill); each module has its own router.
 
 A task belongs to exactly one board (``user_id``): the caller sees only their
 own, and someone else's task is a 404 — there is no owner or admin view of
@@ -29,13 +35,16 @@ after either moves the row to its new lane at once.
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import json
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel
 
 from captain_claw.flight_deck import taskboard_sources, taskboard_store, taskboard_triage
@@ -61,7 +70,8 @@ ACTIONS = ("done", "reopen", "dismiss", "not_task", "snooze", "unsnooze", "renam
            "ack_failed", "undo", "confirm_task", "not_done")
 PASSIVE_SOURCES = ("telegram_inbox", "whatsapp_web", "gmail")
 
-# What the Sources sheet lists: what the board reads, and what is still to come.
+# What the Sources sheet lists: what the board reads, what it reads only once
+# the user switches it on, and what it doesn't.
 SOURCES: list[dict[str, Any]] = [
     {"key": "fd_scheduler", "label": "Scheduled tasks", "tracked": True, "on": True,
      "note": "Every scheduled task, each of its runs and how its result was delivered."},
@@ -78,17 +88,23 @@ SOURCES: list[dict[str, Any]] = [
     {"key": "agent_chats", "label": "Agent chats on every channel", "tracked": True, "on": True,
      "note": "Every turn your agents take for you — web chat, WhatsApp, Telegram, devices, linked systems "
              "and the rest — with the tool calls in it and what they sent."},
+    # v2 passive: off until the user switches one on (taskboard_passive.sources says which is).
     {"key": "telegram_inbox", "label": "Your Telegram inbox", "tracked": False, "on": False,
-     "note": "Coming, and only if you switch it on."},
+     "note": "Off — read only once you switch it on."},
     {"key": "whatsapp_web", "label": "Your WhatsApp chats", "tracked": False, "on": False,
-     "note": "Coming, and only if you switch it on."},
+     "note": "Off — read only once you switch it on."},
     {"key": "gmail_inbox", "label": "Your Gmail inbox", "tracked": False, "on": False,
-     "note": "Coming, and only if you switch it on."},
+     "note": "Off — read only once you switch it on."},
+    # v2 history: taskboard_backfill.sources_view says how the fill stands (and adds the to-do lists).
     {"key": "history", "label": "The last 30 days", "tracked": False, "on": False,
-     "note": "Coming: your agents' earlier chats, filled in once."},
+     "note": "Your agents' chats of the last 30 days, filled in once."},
     {"key": "not_covered", "label": "Not tracked", "tracked": False, "on": False,
-     "note": "Outlook inbound mail, Slack, Discord and Twitter, Docker agents' history, calendar invites, "
-             "payment approvals and delegations between agents."},
+     "note": "Outlook inbound mail; Slack, Discord and Twitter; Docker agents' history and to-do lists; chats "
+             "compacted away before the history was filled in; calendar invites; a voice note asking several "
+             "things (one task); payment approvals; delegations between agents; a Messenger chat as your own. "
+             "Next steps are suggested for requests and sent messages only, and a reply in a chat goes only "
+             "where Captain can write: WhatsApp numbers on the deck's allowlist, Telegram chats of the deck's "
+             "own bot, devices and Messenger chats while connected."},
 ]
 
 _HIDDEN = ("user_id", "agent_owner_id", "search_text", "fingerprint", "extracted_fp", "decided_fp")
@@ -130,6 +146,10 @@ def start() -> None:
 async def stop() -> None:
     global _loop_task, _loop_stop
     await taskboard_triage.stop()
+    # v2 history: a backfill still reading stops (it starts again on the next open).
+    from captain_claw.flight_deck import taskboard_backfill
+
+    await taskboard_backfill.stop()
     if _loop_stop is not None:
         _loop_stop.set()
     if _loop_task is not None:
@@ -174,23 +194,14 @@ def _loads(raw: Any, default: Any) -> Any:
 
 
 def _waiting_proposals(uid: str) -> dict[str, dict]:
-    """``{task_id: {id, status, title}}`` — the newest Autonomous Work action
+    """``{task_id: ProposalView}`` — the newest Autonomous Work action
     awaiting approval on each of the user's tasks (read live, so the row moves
-    lanes the moment it is approved)."""
-    try:
-        from captain_claw.flight_deck.autonomy import get_store as autonomy_store
-        actions = autonomy_store().list_actions(uid, status="awaiting_approval", limit=500)
-    except Exception as exc:
-        log.debug("Taskboard: proposals unavailable", error=str(exc))
-        return {}
-    by_key = {f"autonomy:{a['id']}": a for a in actions}
-    out: dict[str, dict] = {}
-    held = store().tasks_for_keys(uid, list(by_key))
-    for a in actions:  # newest first
-        task_id = held.get(f"autonomy:{a['id']}")
-        if task_id:
-            out.setdefault(task_id, {"id": a["id"], "status": a["status"], "title": a.get("title") or ""})
-    return out
+    lanes the moment it is approved), a board next step with its wording and
+    recipients; next steps whose task closed expire first
+    (taskboard_nextsteps.waiting_proposals)."""
+    from captain_claw.flight_deck import taskboard_nextsteps
+
+    return taskboard_nextsteps.waiting_proposals(uid)
 
 
 def _link_ids(links: list[dict], proposal: dict | None) -> dict[str, str]:
@@ -321,7 +332,19 @@ async def taskboard_status(user: dict = Depends(get_current_user)) -> dict:
     """What the board tracks (and what not yet), each view's count and the sweep."""
     uid = _uid(user)
     counts = await asyncio.to_thread(_counts, uid)
-    return {"sources": SOURCES, "counts": counts, "sweep": taskboard_sources.sweep_state(uid)}
+    out = {"sources": SOURCES, "counts": counts, "sweep": taskboard_sources.sweep_state(uid)}
+    # v2 history (taskboard_backfill): the 30-day backfill — started by the
+    # first look while the board's background work runs, never twice — and
+    # the Sources sheet's lines for it and for the agents' to-do lists.
+    from captain_claw.flight_deck import taskboard_backfill
+
+    out["backfill"] = await taskboard_backfill.status(uid, start=_loop_task is not None)
+    out["sources"] = taskboard_backfill.sources_view(out["sources"], out["backfill"])
+    # v2 passive (taskboard_passive): the user's own inboxes, tracked while switched on.
+    from captain_claw.flight_deck import taskboard_passive
+
+    out["sources"] = await taskboard_passive.sources_view(uid, out["sources"])
+    return out
 
 
 @router.get("/tasks")
@@ -338,9 +361,8 @@ async def taskboard_tasks(
     uid = _uid(user)
     if view not in VIEWS:
         raise HTTPException(400, f"view is one of {', '.join(VIEWS)}")
-    filters = {"status": _csv(status), "channel": _csv(channel), "agent": _csv(agent),
-               "direction": _csv(direction), "kind": _csv(kind), "party": _csv(party),
-               "evidence": _csv(evidence), "result": _csv(result)}
+    filters = _filters(status=status, channel=channel, agent=agent, direction=direction, kind=kind, party=party,
+                       evidence=evidence, result=result)
 
     def page() -> dict:
         proposals = _waiting_proposals(uid)
@@ -352,18 +374,147 @@ async def taskboard_tasks(
     return await asyncio.to_thread(page)
 
 
+def _filters(**raw: str) -> dict[str, list[str]]:
+    """The multi-value filters of a list (or an export) query, each comma-separated."""
+    return {name: _csv(raw.get(name, "")) for name in FACETS}
+
+
+# ── Export (v2): the caller's tasks as a file ─────────────────────────
+
+
+EXPORT_FORMATS = ("csv", "jsonl")
+_EXPORT_MAX = 10000
+_EXPORT_COLUMNS = (
+    "id", "title", "status", "lane", "owes_next", "kind", "direction", "channel", "channels", "agent", "parties",
+    "ask", "result_text", "result", "evidence", "urgency", "due_at", "created_at", "last_event_at", "closed_at",
+    "closed_by", "closed_by_party", "why", "historical", "private", "retention_until")
+_EXPORT_TIMES = ("due_at", "created_at", "updated_at", "last_event_at", "closed_at", "retention_until")
+# A cell a spreadsheet would read as a formula (someone's message may start so).
+_FORMULA_START = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _export_party(p: dict) -> dict:
+    """A party as the file names it: never a deck user's id (the board user
+    is "You", another deck user their name)."""
+    deck_user = p.get("kind") == "fd_user"
+    name = "You" if p.get("me") else str(p.get("name") or p.get("display") or "")
+    if deck_user and not p.get("me") and name == str(p.get("address") or ""):
+        name = "Someone else"
+    return {"role": p.get("role") or "", "name": name, "kind": "" if deck_user else str(p.get("kind") or ""),
+            "address": "" if deck_user else str(p.get("address") or ""), "verified": bool(p.get("verified"))}
+
+
+def _export_rows(uid: str, rows: list[dict], proposals: dict[str, dict]) -> list[dict]:
+    """One record per task — what the board shows of it, every party."""
+    ids = [r["id"] for r in rows]
+    parties = store().parties_for(uid, ids)
+    out = []
+    for item in _items(uid, rows, proposals):
+        flags = item["flags"]
+        out.append({
+            **{k: item.get(k) for k in ("id", "title", "status", "lane", "owes_next", "kind", "direction", "channel",
+                                        "channels", "agent_slug", "ask", "result_text", "result", "evidence",
+                                        "urgency", "closed_by", "closed_by_party", "private", *_EXPORT_TIMES)},
+            "agent": item.get("agent_name") or item.get("agent_slug") or "",
+            "parties": [_export_party(p) for p in _shown_parties(uid, parties.get(item["id"], []))],
+            "why": str(flags.get("why") or ""), "historical": bool(flags.get("historical")),
+            "flags": {k: v for k, v in flags.items() if k != "why"},
+            "proposal": {k: (item["proposal"] or {}).get(k) for k in ("id", "status", "title")}
+            if item.get("proposal") else None,
+        })
+    return out
+
+
+def _iso_time(value: Any) -> str:
+    try:
+        return datetime.fromtimestamp(float(value), UTC).strftime("%Y-%m-%dT%H:%M:%SZ") if value else ""
+    except (TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def _cell(value: Any) -> str:
+    text = "" if value is None else str(value)
+    return "'" + text if text.startswith(_FORMULA_START) else text
+
+
+def _csv_cells(rec: dict) -> list[str]:
+    def party(p: dict) -> str:
+        who = p["name"] or p["address"]
+        if p["address"] and p["address"] != who:
+            who = f"{who} <{p['address']}>"
+        return f"{who} ({p['role']})" if p["role"] else who
+
+    shown = {**rec, "channels": ", ".join(rec.get("channels") or []),
+             "parties": "; ".join(party(p) for p in rec["parties"]),
+             "historical": "yes" if rec["historical"] else "", "private": "yes" if rec.get("private") else "",
+             **{k: _iso_time(rec.get(k)) for k in _EXPORT_TIMES}}
+    return [_cell(shown.get(col)) for col in _EXPORT_COLUMNS]
+
+
+@router.get("/export")
+async def taskboard_export(
+    format: str = "csv", view: str = "all", q: str = "", status: str = "", channel: str = "", agent: str = "",
+    direction: str = "", kind: str = "", party: str = "", evidence: str = "", result: str = "",
+    date_from: float | None = Query(None, alias="from"), date_to: float | None = Query(None, alias="to"),
+    sort: str = "recent", user: dict = Depends(get_current_user),
+) -> Response:
+    """The caller's own tasks — the view, search and filters of ``/tasks``
+    — as a file to save (``Content-Disposition: attachment``): CSV, one
+    task a row, or JSONL, one task a line. Only ever the caller's board
+    (someone else's tasks are never in it, whoever asks), without the
+    search text or fingerprints, and never a deck user's id; at most
+    10,000 tasks, in the list's order (``sort``)."""
+    uid = _uid(user)
+    if format not in EXPORT_FORMATS:
+        raise HTTPException(400, f"format is one of {', '.join(EXPORT_FORMATS)}")
+    if view not in VIEWS:
+        raise HTTPException(400, f"view is one of {', '.join(VIEWS)}")
+    filters = _filters(status=status, channel=channel, agent=agent, direction=direction, kind=kind, party=party,
+                       evidence=evidence, result=result)
+
+    def read() -> list[dict]:
+        proposals = _waiting_proposals(uid)
+        out: list[dict] = []
+        while len(out) < _EXPORT_MAX:
+            res = store().query(uid, view=view, q=q[:200], filters=filters, date_from=date_from, date_to=date_to,
+                                sort=sort, limit=200, offset=len(out), proposal_tasks=list(proposals),
+                                with_facets=False)
+            out += _export_rows(uid, res["rows"], proposals)
+            if not res["rows"] or len(out) >= res["total"]:
+                break
+        return out[:_EXPORT_MAX]
+
+    records = await asyncio.to_thread(read)
+    if format == "jsonl":
+        body = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
+        media = "application/x-ndjson"
+    else:
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(_EXPORT_COLUMNS)
+        writer.writerows(_csv_cells(r) for r in records)
+        body, media = "\ufeff" + buf.getvalue(), "text/csv"  # the BOM: a spreadsheet reads it as UTF-8
+    name = f"taskboard-{view}-{time.strftime('%Y%m%d')}.{format}"
+    return Response(body, media_type=f"{media}; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"', "Cache-Control": "no-store"})
+
+
 @router.get("/tasks/{task_id}")
 async def taskboard_task(task_id: str, user: dict = Depends(get_current_user)) -> dict:
     """One of the caller's tasks, whole: its timeline across channels (the
     latest 500 events, and how many there are), the keys that link it back,
     every party, the decisions about it and the Autonomous Work actions on it
-    (their status now)."""
+    (their status now) — and (v2) the tasks merged into it. A task merged
+    into another reads as itself (``merged_into`` says where it went)."""
+    from captain_claw.flight_deck import taskboard_threads
+
     uid = _uid(user)
 
     def detail() -> dict:
         row = _owned(uid, task_id)
         links = store().links(uid, [task_id]).get(task_id, [])
         return {
+            **taskboard_threads.detail_extras(uid, task_id),
             "task": _task_item(uid, row),
             "events": [{k: v for k, v in e.items() if k != "user_id"} for e in store().events(uid, task_id)],
             "events_total": store().event_count(uid, task_id),
@@ -513,6 +664,10 @@ async def _settings_view(uid: str) -> dict:
     caller (their own key, or the team's)."""
     out = await asyncio.to_thread(_settings, uid)
     out["jev"] = await taskboard_triage.jev_connection(uid)
+    # v2 passive (taskboard_passive): each inbox's switch, and whether it is there to read.
+    from captain_claw.flight_deck import taskboard_passive
+
+    out["passive"] = await taskboard_passive.settings_view(uid)
     return out
 
 
@@ -525,6 +680,7 @@ class SettingsBody(BaseModel):
     auto_close: bool | None = None
     jev_per_day: int | None = None
     extract_per_day: int | None = None
+    passive: dict[str, Any] | None = None  # v2 passive: {inbox: {on, consent}}
 
 
 @router.put("/settings")
@@ -532,15 +688,24 @@ async def taskboard_save_settings(body: SettingsBody, user: dict = Depends(get_c
     """Whether Jev may close a task by itself (on by default; off, a task it
     is sure of is marked "probably done" for the user to confirm) and the
     daily caps: tasks Jev is asked about (0–2000) and extractions (0–1000);
-    0 = none, rules alone then. The opt-in inboxes are switched on with their
-    consent, not here."""
+    0 = none, rules alone then. An opt-in inbox is switched on only with its
+    consent (``passive: {inbox: {on: true, consent: true}}``) and off
+    deleting what it put on the board — then the answer is ``{settings,
+    deleted}`` (the settings' fields also at the top, as otherwise)."""
     uid = _uid(user)
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    passive = fields.pop("passive", None)
     for name, top in (("jev_per_day", JEV_PER_DAY_MAX), ("extract_per_day", EXTRACT_PER_DAY_MAX)):
         if name in fields and not 0 <= fields[name] <= top:
             raise HTTPException(400, f"{name} is a number from 0 to {top}")
     if "auto_close" in fields:
         fields["auto_close"] = int(fields["auto_close"])
+    deleted = None
+    if passive is not None:  # v2 passive (taskboard_passive): checked whole before anything moves
+        from captain_claw.flight_deck import taskboard_passive
+
+        deleted = await taskboard_passive.apply(uid, passive)
     await asyncio.to_thread(lambda: store().save_settings(uid, **fields))
-    return await _settings_view(uid)
+    out = await _settings_view(uid)
+    return out if deleted is None else {**out, "settings": out, "deleted": deleted}
 

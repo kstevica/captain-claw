@@ -59,6 +59,7 @@ import { useChatStore } from './stores/chatStore'
 import { useContainerStore } from './stores/containerStore'
 import { useLocalAgentStore } from './stores/localAgentStore'
 import { useNotificationStore } from './stores/notificationStore'
+import { hasTaskboardLink, takeTaskboardLink } from './stores/taskboardStore'
 import { usePipelineStore } from './stores/pipelineStore'
 import { hydrateAllStores } from './services/settingsSync'
 import { reportPublicOrigin } from './services/publicLinks'
@@ -333,6 +334,23 @@ function AppContent() {
   }, [setWsConnected, upsertInstance, removeInstance, updateInstanceActivity, fetchConcerns, fetchStats, addNotification])
 
   const { isMobile, isTablet } = useIsMobile()
+  // Taskboard v2: a ?taskboard=<task id> link (a nudge, a bell item) opens the
+  // board on that task in the simple layout, where the board lives and which
+  // takes the link (SimpleLayout). The full desktop layout switches to it (one
+  // click goes back); where no board opens — the Admin console, a phone's or
+  // a tablet's layout — the link is taken out of the address, and they're told.
+  const setLayoutMode = useUIStore((s) => s.setLayoutMode)
+  const deciding = adminSignedIn && consoleAdmin && isAppShell()
+  useEffect(() => {
+    if (kioskLocked || deciding || !hasTaskboardLink()) return
+    if (!inConsole && !isMobile && !isTablet) {
+      if (layoutMode !== 'simple') setLayoutMode('simple')
+      return
+    }
+    if (takeTaskboardLink()) {
+      addNotification('info', 'Taskboard', 'That link opens a task on the Taskboard — it is in the simple layout on a computer.')
+    }
+  }, [kioskLocked, deciding, inConsole, isMobile, isTablet, layoutMode, setLayoutMode, addNotification])
   const mobilePanel = useUIStore((s) => s.mobilePanel)
   const setMobilePanel = useUIStore((s) => s.setMobilePanel)
   const sidebarDrawerOpen = useUIStore((s) => s.sidebarDrawerOpen)

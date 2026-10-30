@@ -88,6 +88,13 @@ SOURCE_LABELS = {
 AGENT_LABELS = {
     "agent_turns": "Agent chats on every channel",
     "tool_audit": "Your agents' tool calls",
+    "agent_todos": "Your agents' to-do lists",  # v2 (taskboard_backfill)
+}
+# v2 passive: the user's own inboxes, each read only while they switch it on (taskboard_passive).
+PASSIVE_LABELS = {
+    "telegram_inbox": "Your Telegram inbox",
+    "whatsapp_web": "Your WhatsApp chats",
+    "gmail_inbox": "Your Gmail inbox",
 }
 
 _STATE: dict[str, Any] = {"running": False, "last_at": None, "message": ""}
@@ -604,6 +611,14 @@ def _autonomy(p: _Pass) -> None:
             host = p.store.task_for_key(uid, f"fu:{fu_id}")
             if host:
                 p.store.add_link(uid, key, host)
+        board = row.get("source") == autonomy.TASKBOARD_SOURCE
+        if host is None and board:
+            # A Taskboard next step is on its own task (ref_id) — this pass may
+            # read it before propose() linked it there — and never a task of its own.
+            host = str(row.get("ref_id") or "")
+            if not host or p.store.get_task(uid, host) is None:
+                continue
+            p.store.add_link(uid, key, host)
         attached = host is not None and (p.store.get_task(uid, host) or {}).get("kind") != "proposal"
         create = {"title": _head(row.get("title"), 160) or "Proposal", "ask": _head(row.get("rationale"), 600),
                   **agent, "kind": "proposal", "direction": "internal", "channel": "autonomy",
@@ -611,7 +626,8 @@ def _autonomy(p: _Pass) -> None:
         p.ingest("autonomy", uid, keys=[key], create=create,
                  touch=None if attached or not slug else agent,
                  event={"source": "autonomy", "source_ref": f"{row['id']}:made", "at": _epoch(row.get("created_at")),
-                        "kind": "proposal", "channel": "autonomy", "actor_kind": "agent", "actor": "Autonomous work",
+                        "kind": "proposal", "channel": "autonomy", "actor_kind": "agent" if not board else "system",
+                        "actor": "Taskboard" if board else "Autonomous work",
                         "summary": f"Proposed: {_head(row.get('title'), 200)}",
                         "refs": {"autonomy_id": row["id"], "kind": row.get("kind")}})
         status = str(row.get("status") or "")
@@ -701,12 +717,19 @@ def _autoreplies(p: _Pass) -> None:
         refs = {"autoreply_id": row["id"], "thread_id": thread}
         inbound = str(row.get("inbound_message_id") or "")
         extra = [f"autoreply:{row['id']}"] + ([f"gmail:msg:{inbound}"] if inbound else [])
-        p.ingest("gmail_autoreplies", uid, keys=[key], create=create, parties=sender, extra_keys=extra,
-                 event={"source": "gmail_autoreplies", "source_ref": f"{row['id']}:received",
-                        "at": _epoch(row.get("received_at")) or _epoch(row.get("created_at")), "kind": "received",
-                        "channel": "gmail", "actor_kind": "party",
-                        "actor": sender[0]["display"] if sender else str(row.get("from_addr") or ""),
-                        "summary": f"Email: {subject}" if subject else "Email received", "refs": refs})
+        # v2 threads: an email whose thread is new to the board, but which an
+        # open task already holds by its own id, goes on that task.
+        from captain_claw.flight_deck import taskboard_threads
+
+        taskboard_threads.attach_or_create(
+            p.store, uid, ingest=lambda u, **kw: p.ingest("gmail_autoreplies", u, **kw), agents=p.agents,
+            attach=[f"gmail:msg:{inbound}"] if thread and inbound else [],
+            keys=[key], create=create, parties=sender, extra_keys=extra,
+            event={"source": "gmail_autoreplies", "source_ref": f"{row['id']}:received",
+                   "at": _epoch(row.get("received_at")) or _epoch(row.get("created_at")), "kind": "received",
+                   "channel": "gmail", "actor_kind": "party",
+                   "actor": sender[0]["display"] if sender else str(row.get("from_addr") or ""),
+                   "summary": f"Email: {subject}" if subject else "Email received", "refs": refs})
         # held → approved → (the send failed) → held again: each move counts.
         ref = p.store.next_state_ref("gmail_autoreplies", row["id"], state)
         if not ref:
@@ -770,13 +793,21 @@ def _gmail_sends(p: _Pass) -> None:
             # On a thread the board already has: what was sent, as evidence.
             p.ingest("gmail_sends", uid, keys=[key], extra_keys=extra, parties=parties, event=event)
             continue
-        p.ingest("gmail_sends", uid, keys=[key], extra_keys=extra, parties=parties, event=event,
-                 create={"title": subject or f"Email to {names}", "ask": "", **agent, "kind": "sent",
-                         "direction": "sent", "channel": "gmail", "owes_next": "nobody", "source": "gmail_sends",
-                         "source_ref": str(row["id"]), "triage_state": "skipped"},
-                 patch={"status": "done", "owes_next": "nobody", "closed_by": "evidence",
-                        "closed_by_party": agent["agent_name"], "evidence": "verified" if sent else "claimed",
-                        "result": "success" if sent else "unknown", "result_text": f"Sent to {names}"})
+        # v2 threads: a reply to an email an open task holds (In-Reply-To) is
+        # sent on that task, not a "sent" task of its own.
+        from captain_claw.flight_deck import taskboard_threads
+
+        answers = str(row.get("in_reply_to_message_id") or "").strip()
+        taskboard_threads.attach_or_create(
+            p.store, uid, ingest=lambda u, **kw: p.ingest("gmail_sends", u, **kw), agents=p.agents,
+            attach=[f"gmail:msg:{answers}"] if answers else [],
+            keys=[key], extra_keys=extra, parties=parties, event=event,
+            create={"title": subject or f"Email to {names}", "ask": "", **agent, "kind": "sent",
+                    "direction": "sent", "channel": "gmail", "owes_next": "nobody", "source": "gmail_sends",
+                    "source_ref": str(row["id"]), "triage_state": "skipped"},
+            patch={"status": "done", "owes_next": "nobody", "closed_by": "evidence",
+                   "closed_by_party": agent["agent_name"], "evidence": "verified" if sent else "claimed",
+                   "result": "success" if sent else "unknown", "result_text": f"Sent to {names}"})
     if rows:
         p.save_cursor("gmail_sends", put_off or max(str(r.get("created_at") or "") for r in rows) or since)
 
@@ -857,6 +888,22 @@ def _tool_calls(p: _Pass) -> None:
     taskboard_ingest.tool_calls(p)
 
 
+def _agent_todos(p: _Pass) -> None:
+    from captain_claw.flight_deck import taskboard_backfill
+
+    taskboard_backfill.agent_todos(p)
+
+
+def _passive(key: str) -> Any:
+    """v2 passive: the adapter of one of the user's own inboxes (taskboard_passive)."""
+    def adapter(p: _Pass) -> None:
+        from captain_claw.flight_deck import taskboard_passive
+
+        taskboard_passive.sweep(p, key)
+
+    return adapter
+
+
 # In this order: an action finds the follow-up it is about, an automation turn
 # the task its run or message made, a tool call its turn's task — and a send
 # the thread an auto-reply or a turn's own send put on the board (the agent's
@@ -867,9 +914,14 @@ ADAPTERS = (
     ("autonomy", _autonomy),
     ("gmail_autoreplies", _autoreplies),
     ("agent_links", _links),
+    ("agent_todos", _agent_todos),
     ("agent_turns", _waiting_turns),
     ("tool_audit", _tool_calls),
     ("gmail_sends", _gmail_sends),
+    # v2 passive, last: an email or a message an agent sent is on its own records by then.
+    ("telegram_inbox", _passive("telegram_inbox")),
+    ("whatsapp_web", _passive("whatsapp_web")),
+    ("gmail_inbox", _passive("gmail")),
 )
 
 
@@ -910,7 +962,7 @@ def run_sweep(store: TaskboardStore | None = None, user_id: str | None = None) -
                     log.warning("Taskboard turns prune failed", error=str(exc))
         finally:
             now = time.time()
-            labels = {**SOURCE_LABELS, **AGENT_LABELS}
+            labels = {**SOURCE_LABELS, **AGENT_LABELS, **PASSIVE_LABELS}  # v2 passive: its adapters' names
             message = ("Couldn't read " + ", ".join(labels[n] for n in problems)) if problems else ""
             if user_id is None:
                 _STATE.update(running=False, last_at=now, message=message)

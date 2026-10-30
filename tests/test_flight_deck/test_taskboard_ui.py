@@ -11,7 +11,10 @@ when Node or the frontend dependencies aren't installed.
 Covered: the board user is "You" and a deck user's id is never shown; a name
 the model read out of the text that repeats a recorded party adds nothing;
 the agent couldn't do it / partly done / a new message since done, as notes
-and Needs me reasons; and the settings' Connect Jev.
+and Needs me reasons; and the settings' Connect Jev. v2: one People row per
+person with every handle, a person's People filter value by their name, a
+next step's kind and recipient in words, and the ``?taskboard=`` links — the
+one the address opens, the bell line it is taken out of.
 """
 
 from __future__ import annotations
@@ -29,6 +32,10 @@ _TEXT = _SRC / "components" / "taskboard" / "taskboardText.ts"
 _BOARD = _SRC / "components" / "taskboard" / "TaskBoard.tsx"
 _SETTINGS = _SRC / "components" / "taskboard" / "TaskboardSettings.tsx"
 _LAYOUT = _SRC / "components" / "layout" / "SimpleLayout.tsx"
+_STORE = _SRC / "stores" / "taskboardStore.ts"
+_BELL = _SRC / "components" / "common" / "NotificationCenter.tsx"
+_THREADS = _SRC / "components" / "taskboard" / "TaskThreads.tsx"
+_API = _SRC / "services" / "taskboardApi.ts"
 _TS = _FD / "node_modules" / "typescript"
 
 pytestmark = pytest.mark.skipif(
@@ -70,7 +77,7 @@ const js = ts.transpileModule(
   fileName: 'lifted.tsx',
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.React },
 }).outputText;
-const ctx = vm.createContext({ exports: {}, out: null });
+const ctx = vm.createContext({ exports: {}, out: null, URL });
 vm.runInContext(js, ctx);
 process.stdout.write(JSON.stringify(ctx.out));
 """
@@ -384,3 +391,123 @@ def test_the_kiosk_opens_connections_on_the_tab_the_board_asks_for():
     assert "if (locked) { openConnections(tab); return }" in layout
     # The full layout's Connections page opens on the tab it remembers.
     assert "localStorage.setItem('fd:connections-tab', tab)" in layout
+
+
+# ── v2: people, next steps, links ──
+
+_ROWS = [*_PEOPLE, "peopleRows", "HANDLE_CHANNEL", "handleChannel"]
+_CHANNEL_NAMES = ["CHANNELS", "DEVICE_KINDS", "channelInfo", "channelLabel"]
+# The icons the channel table names, as plain names (no lucide-react in the vm).
+_ICONS = "".join(f"const {n} = '{n}';" for n in (
+    "AlarmClock Bot Code2 Glasses Inbox Link2 Mail MessageCircle MessagesSquare Plug Send Smartphone Sparkles "
+    "Users Watch").split())
+
+
+def test_one_people_row_per_person_with_every_handle_and_you_once():
+    parties = [
+        {"role": "requester", "kind": "email", "address": "ana@x.co", "display": "Ana Horvat", "verified": 1,
+         "party_id": "pt_ana", "name": "Ana Horvat"},
+        {"role": "requester", "kind": "waid", "address": "385911234567", "display": "Ana", "verified": 1,
+         "party_id": "pt_ana", "name": "Ana Horvat"},
+        {"role": "recipient", "kind": "email", "address": "ana@x.co", "display": "Ana Horvat", "verified": 1,
+         "party_id": "pt_ana", "name": "Ana Horvat"},
+        {"role": "cc", "kind": "fd_user", "address": _ME["id"], "display": "Ada Admin", "verified": 1, "me": True},
+    ]
+    out = _run([(_TEXT, _ROWS)], f"""
+      out = peopleRows({json.dumps(parties)}, {json.dumps(_ME)})
+        .map((r) => [r.role, r.name, r.me, r.handles.map((h) => [handleChannel(h.kind), h.address])]);
+    """)
+    assert out == [
+        ["requester", "Ana Horvat", False, [["email", "ana@x.co"], ["whatsapp", "385911234567"]]],
+        ["recipient", "Ana Horvat", False, [["email", "ana@x.co"]]],
+        ["cc", "You", True, []],
+    ]
+
+
+def test_a_persons_people_filter_value_reads_as_their_name():
+    out = _people(f"""
+      const me = {json.dumps(_ME)};
+      out = [partyFacetLabel('party:pt_ana', 'Ana Horvat', me), partyFacetLabel('party:pt_x', '  ', me),
+             partyFacetLabel('party:pt_me', 'Ada Admin', me, true),
+             partyFacetLabel('waid:385911234567', '+385911234567', me)];
+    """)
+    assert out == ["Ana Horvat", "Someone", "You", "+385911234567"]
+
+
+def test_a_next_step_says_what_it_does_and_to_whom():
+    out = _run([(_TEXT, [*_CHANNEL_NAMES, "nameKey", *_FOLD, "proposalLabel", "recipientText"])], """
+      out = [
+        proposalLabel({ kind: 'mail.draft' }), proposalLabel({ kind: 'reply.on_origin', payload: { channel: 'whatsapp' } }),
+        proposalLabel({ kind: 'reply.on_origin', payload: { channel: 'device:stopwatch' } }),
+        proposalLabel({ kind: 'reply.on_origin' }), proposalLabel({ kind: 'nudge' }), proposalLabel({ kind: 'track' }),
+        recipientText({ address: 'ana@x.co', display: 'Ana Horvat', kind: 'email' }),
+        recipientText({ address: '385911234567', display: 'Ana Horvat', kind: 'waid' }),
+        recipientText({ address: '385911234567', display: '+385911234567', kind: 'waid' }),
+        recipientText({ address: '777', display: 'Ana on Telegram', kind: 'telegram' }),
+        recipientText({ address: 'ana@x.co', display: '' }),
+      ];
+    """, prelude=_ICONS)
+    assert out == ["Draft email", "Reply on WhatsApp", "Reply on Device · StopWatch", "Reply", "Reminder",
+                   "Next step", "Ana Horvat <ana@x.co>", "Ana Horvat (+385911234567)", "+385911234567",
+                   "Ana on Telegram", "ana@x.co"]
+
+
+def test_the_address_opens_one_task_once_and_only_a_task_id():
+    prelude = """
+      const window = { location: { href: '' }, history: { state: null,
+        replaceState(state, title, url) { window.location.href = 'https://deck.example' + url; } } };
+    """
+    out = _run([(_STORE, ["LINKED", "hasTaskboardLink", "takeTaskboardLink"])], """
+      const seen = [];
+      for (const href of ['https://deck.example/?taskboard=tb_1a2b&x=1#top', 'https://deck.example/?taskboard=%3Cscript%3E',
+                          'https://deck.example/?other=1']) {
+        window.location.href = href;
+        seen.push([hasTaskboardLink(), takeTaskboardLink(), window.location.href, hasTaskboardLink()]);
+      }
+      out = seen;
+    """, prelude=prelude)
+    assert out == [
+        [True, "tb_1a2b", "https://deck.example/?x=1#top", False],
+        [True, "", "https://deck.example/", False],   # not a task id: taken out, opens nothing
+        [False, "", "https://deck.example/?other=1", False],
+    ]
+
+
+def test_a_bell_line_names_its_task_and_loses_its_link_line():
+    body = "Ana is waiting for a reply.\n\n[Open in Taskboard](?taskboard=tb_1)"
+    out = _run([(_BELL, ["TASK_LINK", "TASK_LINK_LINE"])], f"""
+      const text = {json.dumps(body)};
+      out = [TASK_LINK.exec(text)?.[1] ?? null, text.replace(TASK_LINK_LINE, ''),
+             TASK_LINK.exec('[x](?taskboard=<script>)')?.[1] ?? null,
+             'No link here.'.replace(TASK_LINK_LINE, '')];
+    """)
+    assert out == ["tb_1", "Ana is waiting for a reply.\n", None, "No link here."]
+
+
+def test_a_same_as_can_be_turned_down_and_a_next_step_is_offered_only_where_the_server_makes_one():
+    threads, api, board = _source(_THREADS), _source(_API), _source(_BOARD)
+    assert "notSame: (id: string) => api<{ task: TaskItem }>(taskPath(id, '/not_same'), { method: 'POST' })" in api
+    assert "/>}Not the same\n" in threads and "onNotSame()" in threads
+    assert "onNotSame={onNotSame}" in board and "onNotSame={() => notSame(selected)}" in board
+    assert "(task.kind === 'request' || task.kind === 'sent')" in board
+    # The bell never shows a dead "Open in Taskboard" link where the board doesn't open.
+    assert "const message = n.message.replace(TASK_LINK_LINE, '')" in _source(_BELL)
+
+
+def test_a_moment_ago_is_just_now_never_in_a_moment():
+    """A change made this second (the row's time set from the browser's
+    clock) reads "just now" — fmtRelative reads the clock again, so the old
+    clamp to now came out "in a moment"."""
+    prelude = """
+      function fmtRelative(epoch) {
+        const secs = Math.round(epoch - Date.now() / 1000)
+        const abs = Math.abs(secs)
+        if (abs < 45) return secs >= 0 ? 'in a moment' : 'just now'
+        return secs >= 0 ? 'in ' + abs + 's' : Math.round(abs / 60) + ' min ago'
+      }
+    """
+    out = _run([(_TEXT, ["agoRelative"])], """
+      const now = Date.now() / 1000;
+      out = [agoRelative(now), agoRelative(now + 30), agoRelative(now - 10), agoRelative(now - 600)];
+    """, prelude=prelude)
+    assert out == ["just now", "just now", "just now", "10 min ago"]

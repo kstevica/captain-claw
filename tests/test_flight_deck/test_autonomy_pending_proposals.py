@@ -166,3 +166,38 @@ def test_store_expiry_is_scoped_to_user_and_status(store):
     assert store.get_action(mine["id"])["status"] == "expired"
     assert store.get_action(theirs["id"])["status"] == "awaiting_approval"
     assert store.get_action(running["id"])["status"] == "dispatched"
+
+
+# ── Taskboard next steps are the user's tasks, not the loop's work ───
+
+def _board_pending(store, title, *, hours_old=1.0, status="awaiting_approval"):
+    row = store.add_action(UID, kind="tool_action", title=title, source="taskboard", status=status,
+                           payload={"action_id": "reply.on_origin", "task_id": "tb_1"})
+    _backdate(store, row["id"], hours_old)
+    return row
+
+
+def test_taskboard_proposals_dont_fill_the_pending_cap(store, ranker):
+    for i in range(5):
+        _board_pending(store, f"Reply to Ana {i}")
+    res = _run()
+    assert res["ran"] is True and res.get("proposed") == 1, res
+
+
+def test_taskboard_work_in_flight_and_today_doesnt_hit_the_loops_caps(store, ranker, monkeypatch):
+    for i in range(2):
+        _board_pending(store, f"Sent to Ana {i}", status="dispatched")
+    for i in range(6):
+        _board_pending(store, f"Board step {i}", status="done")
+    res = _run()
+    assert res["ran"] is True and res.get("proposed") == 1, res
+
+
+def test_the_48h_ttl_leaves_taskboard_proposals_and_a_week_expires_them(store, ranker):
+    waiting = _board_pending(store, "Reply to Ana", hours_old=60)
+    old = _board_pending(store, "Remind Bo", hours_old=8 * 24)
+    _run()
+    assert store.get_action(waiting["id"])["status"] == "awaiting_approval"
+    got = store.get_action(old["id"])
+    assert got["status"] == "expired" and "7 days" in got["outcome_note"]
+    assert any(r["event"] == "expired Taskboard next steps" for r in store.list_log(UID))

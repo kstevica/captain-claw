@@ -24,7 +24,12 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from captain_claw.flight_deck.autonomy import get_store, resolve_config
+from captain_claw.flight_deck.autonomy import (
+    TASKBOARD_SOURCE,
+    TASKBOARD_TTL_DAYS,
+    get_store,
+    resolve_config,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -435,21 +440,30 @@ async def maybe_run_arbiter(
             expired = store.expire_stale_proposals(user_id, ttl_cutoff)
             if expired:
                 emit("expired stale proposals", f"{expired} awaiting approval for over {ttl}h")
+        # The Taskboard's next steps wait for their task, a week at most
+        # (the one closing them sooner is taskboard_nextsteps).
+        week = (datetime.now(timezone.utc) - timedelta(days=TASKBOARD_TTL_DAYS)).isoformat()
+        if store.expire_taskboard_proposals(user_id, week):
+            emit("expired Taskboard next steps", f"waiting over {TASKBOARD_TTL_DAYS} days")
 
         if _in_quiet_hours(int(cfg.get("quiet_hours_start", 22)), int(cfg.get("quiet_hours_end", 8))):
             emit("skipped: quiet hours", f"{cfg.get('quiet_hours_start')}–{cfg.get('quiet_hours_end')} UTC", routine=True)
             return {"ran": False, "reason": "quiet-hours"}
 
+        # The Taskboard's next steps are the user's own tasks, not the loop's
+        # work: they count toward none of its caps.
         cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
-        if store.count_since(user_id, cutoff) >= int(cfg.get("max_actions_per_day", 6)):
+        if store.count_since(user_id, cutoff, exclude_source=TASKBOARD_SOURCE) >= int(
+                cfg.get("max_actions_per_day", 6)):
             emit("skipped: daily cap reached", f"max={cfg.get('max_actions_per_day')}", routine=True)
             return {"ran": False, "reason": "daily-cap"}
 
         open_actions = store.open_actions(user_id)
+        mine = [a for a in open_actions if a.get("source") != TASKBOARD_SOURCE]
         # Proposals waiting on the human are not running work: they get their own
         # cap, and a full queue is a stall the user must see (not a routine skip).
-        pending = [a for a in open_actions if a.get("status") == "awaiting_approval"]
-        in_flight = [a for a in open_actions if a.get("status") != "awaiting_approval"]
+        pending = [a for a in mine if a.get("status") == "awaiting_approval"]
+        in_flight = [a for a in mine if a.get("status") != "awaiting_approval"]
         if len(pending) >= int(cfg.get("max_pending_proposals", 5)):
             event = f"loop paused: {len(pending)} proposals awaiting approval"
             last = store.list_log(user_id, limit=1)

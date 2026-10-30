@@ -734,6 +734,10 @@ class _DeviceConn(BusClient):
             # Which device it was (turn_source): recorded on the message
             # and the key of the agent's reasoning effort for devices.
             **self.source_fields(),
+            # This turn's own origin (the Taskboard's record of it): a reply the
+            # user approves there comes back to this device's channel. Not the
+            # session's durable origin, which a cron result follows.
+            "turn_origin": {"kind": "channel", "address": self.channel_id},
         }
         readings = device_context_line(ctx, self.hw)
         notes = ([readings] if readings else []) + list(extra_notes or [])

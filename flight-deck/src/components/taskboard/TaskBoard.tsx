@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  AlarmClock, AlertTriangle, ArrowLeft, ArrowRight, Ban, BellOff, Check, Clock, Hand, HelpCircle, Layers, ListChecks,
-  Loader2, Lock, MessageSquare, Pencil, RotateCcw, RotateCw, Search, Settings2, SlidersHorizontal, Undo2, Wrench, X,
+  AlarmClock, AlertTriangle, ArrowLeft, ArrowRight, Ban, BellOff, Check, Clock, Download, GitMerge, Hand, HelpCircle,
+  Layers, ListChecks, Loader2, Lock, MessageSquare, Pencil, RotateCcw, RotateCw, Search, Settings2, SlidersHorizontal,
+  Split, Undo2, Wrench, X,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { useNotificationStore } from '../../stores/notificationStore'
@@ -12,6 +13,7 @@ import type { TabId as ConnectionsTab } from '../../pages/ConnectionsPage'
 import { fmtWhen } from '../../services/schedulerApi'
 import {
   taskboardApi,
+  type ExportFormat,
   type TaskAction,
   type TaskDetail,
   type TaskEvent,
@@ -27,15 +29,21 @@ import {
 } from '../../services/taskboardApi'
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
-  AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, FoldHighlight, InstructionsChip, LaneChip, LowConfidenceHint,
-  MultiFacet, NoteChip, OwesChip, ProposalButtons, ResultChip, StatusChip, SyncStatus,
+  AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, ExportPanel, FoldHighlight, HistoryChip, InstructionsChip,
+  LaneChip, LowConfidenceHint, MultiFacet, NoteChip, OwesChip, ProposalButtons, ResultChip, StatusChip, SyncStatus,
+  TaskIcon,
 } from './taskboardParts'
 import { BoardSettings } from './TaskboardSettings'
+import { SourcesSheet } from './TaskboardSources'
+import { NextStepCard, SuggestNextStep } from './TaskNextStep'
+import {
+  MergedIntoBanner, MergedList, MergePicker, SameAsBanner, SplitBar, ThreadNoticeBar, type ThreadNotice,
+} from './TaskThreads'
 import { WhyThisHere } from './TaskWhy'
 import {
   DIRECTION_LABEL, EVENT_LABEL, EVIDENCE_LABEL, KIND_LABEL, NO_DATES, OWES_LABEL, RESULT_LABEL, ROLE_LABEL, STATUS_DOT,
-  STATUS_LABEL, agoRelative, answeredInChat, channelLabel, dateBounds, distinctParties, foldText, isMe, isSnoozed,
-  partyAddress, partyFacetLabel, partyName, taskNotes, type BoardUser, type DateRange,
+  STATUS_LABEL, agoRelative, answeredInChat, channelLabel, dateBounds, distinctParties, foldText, handleChannel,
+  isSnoozed, partyFacetLabel, partyName, peopleRows, proposalLabel, taskNotes, type BoardUser, type DateRange,
 } from './taskboardText'
 
 // ── Taskboard ───────────────────────────────────────────────────────
@@ -50,6 +58,14 @@ import {
 // ("Why is this here?" says how); opening the board reads them again. What
 // you change here (Done, Snooze, Rename…) holds: nothing automatic changes
 // it back (but a scheduled task's next run opens it again).
+//
+// v2: a next step the board proposes (an email draft, a reply where the task
+// came in, a reminder) shows on its task to edit and approve — nothing leaves
+// without your click, and email is only ever a draft; tasks merge and split
+// ("Same as …?" when Jev thinks two are one); people are people across their
+// handles; your own inboxes can be switched on (Sources); the last 30 days
+// are filled in once ("From history"); the agents' to-do lists are on it; and
+// it downloads as CSV or JSONL.
 
 const PAGE = 60
 
@@ -94,7 +110,7 @@ const EMPTY: Record<TaskView, { title: string; text: string }> = {
   done: { title: 'Nothing done yet', text: 'Finished tasks collect here, with who did them and how it went.' },
   all: {
     title: 'No tasks yet',
-    text: 'What you ask your agents in any chat, scheduled tasks, proposals, follow-ups, held replies, sent mail and messages from linked systems collect here.',
+    text: 'What you ask your agents in any chat, scheduled tasks, proposals, follow-ups, held replies, sent mail, messages from linked systems and your agents\' to-do lists collect here.',
   },
 }
 
@@ -208,10 +224,18 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [sourcesOpen, setSourcesOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  // The gear and its popover (desktop): a click outside both closes it.
+  const [exportOpen, setExportOpen] = useState(false)
+  // What a merge, an unmerge or a split just did to the open task.
+  const [notice, setNotice] = useState<ThreadNotice | null>(null)
+  // The gear and its popover (desktop), the download button and its menu:
+  // a click outside one closes it.
   const settingsBox = useRef<HTMLSpanElement>(null)
+  const exportBox = useRef<HTMLSpanElement>(null)
   const reqId = useRef(0)
   const shown = useRef(PAGE)
+  // The read of every source that opening the board starts (a task looked
+  // up by its key waits for it when it isn't there yet).
+  const firstSync = useRef<Promise<void> | null>(null)
 
   useEffect(() => {
     const t = setTimeout(() => setDebounced(query.trim()), query ? 250 : 0)
@@ -298,36 +322,53 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
     }
   }, [applyStatus, fetchSummary, notify])
 
-  useEffect(() => { void syncNow() }, [syncNow])
+  useEffect(() => { firstSync.current = syncNow() }, [syncNow])
 
-  // While a sweep runs: its state often, the list as tasks land…
+  // While a sweep runs, or the last 30 days are being filled in: its state
+  // often, the list as tasks land…
   const running = !!status?.sweep?.running
+  const reading = running || status?.backfill?.state === 'running'
   useEffect(() => {
-    if (!running) return
+    if (!reading) return
     const t = setInterval(() => {
       taskboardApi.status().then(setStatus).catch(() => {})
       loadRef.current(true)
     }, 2500)
     return () => clearInterval(t)
-  }, [running])
+  }, [reading])
   // …and once more when it finishes.
   const wasRunning = useRef(false)
   useEffect(() => {
-    if (wasRunning.current && !running) { loadRef.current(true); fetchSummary() }
-    wasRunning.current = running
-  }, [running, fetchSummary])
+    if (wasRunning.current && !reading) { loadRef.current(true); fetchSummary() }
+    wasRunning.current = reading
+  }, [reading, fetchSummary])
 
-  // Opened on one task: shown at once, on the tab it is in.
+  // Opened on one task — its id, or a key it links back with (a proposal in
+  // the bell, a scheduled task's run): shown at once, on the tab it is in.
+  // One the board hasn't read yet is looked for again once the read that
+  // opening it started is done; one merged into another opens that one.
   useEffect(() => {
     if (!initialTask) return
     let gone = false
-    taskboardApi.task(initialTask)
-      .then((d) => {
+    void (async () => {
+      try {
+        let found = await taskboardApi.findTask(initialTask)
+        if (!found && firstSync.current) {
+          await firstSync.current
+          if (gone) return
+          found = await taskboardApi.findTask(initialTask)
+        }
+        const into = found?.merged_into
+        if (into) found = await taskboardApi.task(into).then((d) => d.task).catch(() => found)
         if (gone) return
-        setSelected(d.task)
-        setView(VIEWS.some((v) => v.id === d.task.lane) ? (d.task.lane as TaskView) : 'all')
-      })
-      .catch((e) => { if (!gone) notify('warning', 'Task not found', errText(e)) })
+        if (!found) { notify('warning', 'Task not found', 'It isn\'t on the Taskboard (yet).'); return }
+        const lane = found.lane
+        setSelected(found)
+        setView(VIEWS.some((v) => v.id === lane) ? (lane as TaskView) : 'all')
+      } catch (e) {
+        if (!gone) notify('warning', 'Task not found', errText(e))
+      }
+    })()
     return () => { gone = true }
   }, [initialTask, notify])
 
@@ -343,19 +384,94 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
     setPage((cur) => cur && { ...cur, items: cur.items.map((i) => (i.id === fresh.id ? fresh : i)) })
     refreshAfter()
   }
+  // The open task read again (a next step made, changed or answered): it
+  // may not be in the list on screen.
+  const reloadTask = useCallback(async (id: string) => {
+    try {
+      const { task: fresh } = await taskboardApi.task(id)
+      setSelected((cur) => (cur?.id === fresh.id ? fresh : cur))
+      setPage((cur) => cur && { ...cur, items: cur.items.map((i) => (i.id === fresh.id ? fresh : i)) })
+    } catch { /* the next read catches up */ }
+  }, [])
   // A proposal or held reply was answered where it lives: the board reads
   // that source again, so the task moves on now rather than at the next sweep.
   const answered = async () => {
     try { applyStatus(await taskboardApi.sync()) } catch { /* the next sweep catches up */ }
     setRev((n) => n + 1)
     load(true)
+    if (selectedRef.current) void reloadTask(selectedRef.current.id)
     fetchSummary()
   }
+  // A next step was asked for, or its wording saved: the task and its timeline read again.
+  const nextStepChanged = (id: string) => {
+    setRev((n) => n + 1)
+    void reloadTask(id)
+    refreshAfter()
+  }
 
-  // Escape: the settings close first, then the Sources sheet, then the
-  // filters (phone), then the open task (phone), then the board. Not while
-  // writing (a held reply's text), nor when something inside used it to
-  // close itself (the Snooze picker, "Why is this here?").
+  // Threads: a merge opens the task it went into (with Undo); taking one
+  // out again, or a split, stays where you are (with the way to the other).
+  const untitled = (t: TaskItem) => t.title || 'Untitled task'
+  const openTask = async (id: string) => {
+    try {
+      setSelected((await taskboardApi.task(id)).task)
+    } catch (e) {
+      notify('warning', 'Task not found', errText(e))
+    }
+  }
+  const unmerge = async (id: string, back: boolean) => {
+    const { task: freed } = await taskboardApi.unmerge(id)
+    const here = selectedRef.current
+    if (back || !here || here.id === freed.id) setSelected(freed)
+    else {
+      setRev((n) => n + 1)
+      void reloadTask(here.id)
+      setNotice({ taskId: here.id, text: `“${untitled(freed)}” is a task of its own again.`,
+        action: { label: 'Open it', run: () => setSelected(freed) } })
+    }
+    refreshAfter()
+  }
+  const merge = async (source: TaskItem, into: string) => {
+    const { task: res } = await taskboardApi.merge(source.id, into)
+    const target = res.id === into ? res : (await taskboardApi.task(into)).task
+    setSelected(target)
+    setNotice({ taskId: target.id, text: `“${untitled(source)}” was merged into this task.`,
+      action: { label: 'Undo', run: () => unmerge(source.id, true) } })
+    refreshAfter()
+  }
+  // Jev's "Same as …?" turned down: it goes, and Undo on the task brings it back.
+  const notSame = async (task: TaskItem) => {
+    const { task: fresh } = await taskboardApi.notSame(task.id)
+    setSelected((cur) => (cur?.id === fresh.id ? fresh : cur))
+    setPage((cur) => cur && { ...cur, items: cur.items.map((i) => (i.id === fresh.id ? fresh : i)) })
+    setRev((n) => n + 1)
+    refreshAfter()
+  }
+  const split = async (task: TaskItem, eventIds: number[]) => {
+    const { task: rest, new_task: made } = await taskboardApi.split(task.id, eventIds)
+    setSelected(rest)
+    setRev((n) => n + 1)
+    const n = eventIds.length
+    setNotice({ taskId: rest.id, text: `${n} event${n === 1 ? '' : 's'} moved to a new task, “${untitled(made)}”.`,
+      action: { label: 'Open it', run: () => setSelected(made) } })
+    refreshAfter()
+  }
+  // A notice is about the task it was given on: opening another lets it go.
+  if (notice && notice.taskId !== selected?.id) setNotice(null)
+
+  // The tasks this tab shows, under the search and filters, as a file.
+  const exportTasks = async (format: ExportFormat) => {
+    await taskboardApi.exportTasks(format, params)
+    setExportOpen(false)
+  }
+
+  // Escape: the download menu and the settings close first, then the
+  // Sources sheet, then the filters (phone), then the open task (phone),
+  // then the board. Not while writing (a held reply's text, a next step's
+  // words), nor when something inside used it to close itself (the Snooze
+  // picker, "Why is this here?", Merge into…, a split, a switch's question).
+  const exportRef = useRef(exportOpen)
+  exportRef.current = exportOpen
   const settingsRef = useRef(settingsOpen)
   settingsRef.current = settingsOpen
   const sourcesRef = useRef(sourcesOpen)
@@ -371,6 +487,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       if (el instanceof HTMLTextAreaElement || el?.isContentEditable) return
       setTimeout(() => {
         if (e.defaultPrevented) return
+        if (exportRef.current) { setExportOpen(false); return }
         if (settingsRef.current) { setSettingsOpen(false); return }
         if (sourcesRef.current) { setSourcesOpen(false); return }
         if (filtersRef.current) { setFiltersOpen(false); return }
@@ -392,6 +509,14 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
   }, [settingsOpen, phone])
+  useEffect(() => {
+    if (!exportOpen) return
+    const onDown = (e: MouseEvent) => {
+      if (exportBox.current && !exportBox.current.contains(e.target as Node)) setExportOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [exportOpen])
 
   const items = useMemo(() => page?.items ?? [], [page])
   const me = useBoardUser(items)
@@ -410,7 +535,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   const setFacet = (key: TaskFacetKey, values: string[]) => setFilters((cur) => ({ ...cur, [key]: values }))
 
   const header = (
-    <div className="flex items-center gap-3 border-b border-zinc-800 px-4 py-3 wide:px-5">
+    <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-3 wide:gap-3 wide:px-5">
       <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-teal-500/15 text-teal-600 dark:text-teal-400">
         <ListChecks className="h-[18px] w-[18px]" />
       </span>
@@ -422,9 +547,24 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       <button onClick={() => syncNow(true)} disabled={syncing || running} className={iconBtn} title="Check for new tasks now" aria-label="Check for new tasks now">
         <RotateCw className={`h-4 w-4 ${syncing || running ? 'animate-spin' : ''}`} />
       </button>
-      <button onClick={() => setSourcesOpen(true)} className={iconBtn} title="Sources — what the Taskboard reads" aria-label="Sources">
+      <button onClick={() => setSourcesOpen(true)} className={iconBtn} title="Sources — what the Taskboard reads, and your own inboxes" aria-label="Sources">
         <Layers className="h-4 w-4" />
       </button>
+      <span ref={exportBox} className="relative">
+        <button
+          onClick={() => setExportOpen((o) => !o)}
+          className={iconBtn}
+          title="Download these tasks — CSV or JSONL"
+          aria-label="Download tasks"
+          aria-haspopup="menu"
+          aria-expanded={exportOpen}
+        >
+          <Download className="h-4 w-4" />
+        </button>
+        {exportOpen && (
+          <div className="absolute right-0 top-full z-40 mt-2"><ExportPanel onExport={exportTasks} /></div>
+        )}
+      </span>
       <span ref={settingsBox} className="relative">
         <button
           onClick={() => setSettingsOpen((o) => !o)}
@@ -557,17 +697,33 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       terms={terms}
       me={me}
       phone={phone}
+      notice={notice?.taskId === selected.id ? notice : null}
+      onDismissNotice={() => setNotice(null)}
       onClose={() => setSelected(null)}
       onAct={(action, value) => act(selected, action, value)}
       onAgent={() => setFacet('agent', [selected.agent_slug])}
       onAnswered={answered}
+      onNextStep={() => nextStepChanged(selected.id)}
+      onOpenTask={openTask}
+      onMerge={(into) => merge(selected, into)}
+      onNotSame={() => notSame(selected)}
+      onUnmerge={unmerge}
+      onSplit={(ids) => split(selected, ids)}
       onOpenScheduled={onOpenScheduled}
       onOpenChat={onOpenChat}
       onOpenConnections={onOpenConnections}
     />
   )
 
-  const sources = sourcesOpen && <SourcesSheet status={status} onClose={() => setSourcesOpen(false)} />
+  const sources = sourcesOpen && (
+    <SourcesSheet
+      status={status}
+      phone={phone}
+      onClose={() => setSourcesOpen(false)}
+      onChanged={refreshAfter}
+      onOpenConnections={onOpenConnections && ((tab) => { setSourcesOpen(false); onOpenConnections(tab) })}
+    />
+  )
 
   if (phone) {
     return (
@@ -788,7 +944,7 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
       active ? 'border-teal-500/40 bg-teal-500/5' : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700 hover:bg-zinc-900/80'}`}>
       <button onClick={onClick} className="flex w-full gap-3 px-3 py-2.5 text-left">
         <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-800/80">
-          <ChannelIcon channel={task.channel} />
+          <TaskIcon task={task} />
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
@@ -805,6 +961,11 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
             {people ? <><FoldHighlight text={people} terms={terms} />{' · '}</> : null}
             {agoRelative(task.last_event_at ?? task.created_at)}
             {flags.low_confidence && <span className="italic" title="Jev wasn't sure this is a task, so it isn't counted on the Taskboard button"> · low confidence</span>}
+            {flags.historical && (
+              <span className="ml-1.5 rounded bg-zinc-800 px-1 py-px text-[10px] font-medium text-zinc-400" title="Filled in from your agents' chats of the last 30 days">
+                From history
+              </span>
+            )}
           </span>
           {task.ask && (
             <span className={`mt-1 block text-xs leading-relaxed text-zinc-400 ${task.result_text ? 'line-clamp-1' : 'line-clamp-2'}`}>
@@ -837,6 +998,7 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
         <div className="flex flex-wrap items-center gap-2 border-t border-amber-500/20 bg-amber-500/5 px-3 py-2">
           <span className="min-w-0 flex-1 text-xs font-medium text-amber-800 dark:text-amber-300">
             Needs you: approve next step
+            {waiting.source === 'taskboard' && <span className="font-normal"> · {proposalLabel(waiting)}</span>}
             {waiting.title && <span className="font-normal text-zinc-400"> — {waiting.title}</span>}
           </span>
           <ProposalButtons id={waiting.id} onAnswered={onAnswered} />
@@ -858,15 +1020,30 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
 // ── One task ──
 
 function TaskDetailPane({
-  task, rev, terms, me, phone, onClose, onAct, onAgent, onAnswered, onOpenScheduled, onOpenChat, onOpenConnections,
+  task, rev, terms, me, phone, notice, onDismissNotice, onClose, onAct, onAgent, onAnswered, onNextStep, onOpenTask,
+  onMerge, onNotSame, onUnmerge, onSplit, onOpenScheduled, onOpenChat, onOpenConnections,
 }: {
   task: TaskItem; rev: number; terms: string[]; me: BoardUser; phone: boolean
+  /** What a merge, an unmerge or a split just did here. */
+  notice: ThreadNotice | null
+  onDismissNotice: () => void
   onClose: () => void
   onAct: (action: TaskAction, value?: string | number) => Promise<void>
   /** Only this agent's tasks. */
   onAgent: () => void
   /** A proposal or held reply was answered. */
   onAnswered: () => Promise<void>
+  /** A next step was asked for, or its wording saved. */
+  onNextStep: () => void
+  onOpenTask: (id: string) => Promise<void>
+  /** This task goes into another (`into`, a task id). */
+  onMerge: (into: string) => Promise<void>
+  /** Jev's "Same as …?" isn't: the suggestion goes. */
+  onNotSame: () => Promise<void>
+  /** A task merged into another is its own again (`back`: open it). */
+  onUnmerge: (id: string, back: boolean) => Promise<void>
+  /** These events make a task of their own. */
+  onSplit: (eventIds: number[]) => Promise<void>
   onOpenScheduled?: (jobId: string) => void
   onOpenChat?: (agentSlug: string, sessionId: string) => void
   onOpenConnections?: (tab: ConnectionsTab) => void
@@ -878,6 +1055,10 @@ function TaskDetailPane({
   const [renaming, setRenaming] = useState(false)
   const [name, setName] = useState(task.title)
   const [snoozeOpen, setSnoozeOpen] = useState(false)
+  const [merging, setMerging] = useState(false)
+  // Splitting: the events ticked to move to a new task.
+  const [splitIds, setSplitIds] = useState<Set<number> | null>(null)
+  const closeMerge = useCallback(() => setMerging(false), [])
 
   // Its timeline, people and links — read again whenever it moves.
   useEffect(() => {
@@ -895,6 +1076,20 @@ function TaskDetailPane({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [snoozeOpen])
+  // …and stops a split, the same way.
+  const splitting = splitIds !== null
+  useEffect(() => {
+    if (!splitting) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); setSplitIds(null) } }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [splitting])
+  const toggleSplit = (id: number) => setSplitIds((cur) => {
+    const next = new Set(cur ?? [])
+    if (next.has(id)) next.delete(id)
+    else next.add(id)
+    return next
+  })
 
   const run = async (action: TaskAction, value?: string | number) => {
     setBusy(action)
@@ -923,13 +1118,15 @@ function TaskDetailPane({
   const waiting = task.proposal?.status === 'awaiting_approval'
     ? task.proposal
     : detail?.proposals?.find((p) => p.status === 'awaiting_approval') ?? null
+  // One the board proposed: the next-step card, to read, edit and approve.
+  const boardStep = waiting && waiting.source === 'taskboard' ? waiting : null
   // A held auto-reply waits for your OK: a held reply's own task, or one on
   // the thread a request of yours started (the auto-reply's latest state says).
   const lastReply = [...(detail?.events ?? [])].reverse()
     .find((e) => e.source === 'gmail_autoreplies' && typeof e.refs?.state === 'string')
   const held = task.status === 'open' && task.owes_next === 'me'
     && (task.kind === 'held_reply' || lastReply?.refs.state === 'held')
-  const parties = distinctParties(detail?.parties ?? task.parties, me)
+  const people = peopleRows(detail?.parties ?? task.parties, me)
   const notes = taskNotes(task)
   // The agent couldn't do it, or did only part: what stopped it.
   const shortOf = notes.find((n) => n.id !== 'new_since_done' && n.detail)
@@ -942,8 +1139,16 @@ function TaskDetailPane({
   const canUndo = locks.length > 0 || task.closed_by === 'jev'
   // A scheduled task's Done or Reopen holds until its next run.
   const untilNextRun = task.kind === 'scheduled' && locks.includes('status') && (task.status === 'done' || task.status === 'open')
-  const channels = task.channels?.length ? task.channels : [task.channel]
+  const channels = (task.channels?.length ? task.channels : [task.channel]).filter(Boolean)
   const by = closedByText(task)
+  const merged = !!task.merged_into
+  // A next step can be asked for on an open request or sent message that has
+  // none waiting (the only kinds the server drafts one for) — never for one
+  // with someone else's instructions in it, one filled in from history, or
+  // one with a reply of its own held for you.
+  const canSuggest = task.status === 'open' && (task.kind === 'request' || task.kind === 'sent') && !waiting
+    && !held && !merged && !flags.contains_instructions && !flags.historical
+  const eventCount = detail ? Math.max(detail.events_total ?? 0, detail.events?.length ?? 0) : 0
 
   const meta: [string, ReactNode][] = []
   // A task no agent handled (a proposal, a follow-up) has no Agent row.
@@ -953,7 +1158,7 @@ function TaskDetailPane({
     </button>
   )])
   meta.push(
-    ['Channel', channels.map(channelLabel).join(', ')],
+    ['Channel', channels.length ? channels.map(channelLabel).join(', ') : '—'],
     ['Kind', `${KIND_LABEL[task.kind] || task.kind}${DIRECTION_LABEL[task.direction] ? ` · ${DIRECTION_LABEL[task.direction].toLowerCase()}` : ''}`],
     ['Started', fmtWhen(task.created_at)],
     ['Last activity', fmtWhen(task.last_event_at ?? task.created_at)],
@@ -961,6 +1166,8 @@ function TaskDetailPane({
   if (task.due_at) meta.push(['Due', fmtWhen(task.due_at)])
   if (snoozed) meta.push(['Snoozed', `until ${fmtWhen(task.snooze_until!)}`])
   if (task.closed_at && closed) meta.push([task.status === 'done' ? 'Done' : 'Closed', `${fmtWhen(task.closed_at)}${by ? ` · ${by}` : ''}`])
+  // From one of your own inboxes: kept as long as its source keeps its text.
+  if (task.retention_until) meta.push(['Kept until', fmtWhen(task.retention_until)])
 
   const btn = 'flex items-center justify-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800/60 disabled:opacity-50'
   const primary = 'flex items-center justify-center gap-1.5 rounded-lg bg-teal-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-teal-500 disabled:opacity-60'
@@ -982,9 +1189,10 @@ function TaskDetailPane({
         )}
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        {notice && <ThreadNoticeBar notice={notice} onDismiss={onDismissNotice} />}
         <div className="flex items-start gap-3">
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-800/80">
-            <ChannelIcon channel={task.channel} className="h-5 w-5" />
+            <TaskIcon task={task} className="h-5 w-5" />
           </span>
           <div className="min-w-0 flex-1">
             {renaming ? (
@@ -1011,7 +1219,9 @@ function TaskDetailPane({
                 <FoldHighlight text={task.title || 'Untitled task'} terms={terms} />
               </h3>
             )}
-            <div className="mt-0.5 truncate text-xs text-zinc-500">{KIND_LABEL[task.kind] || task.kind} · {channelLabel(task.channel)}</div>
+            <div className="mt-0.5 truncate text-xs text-zinc-500">
+              {[KIND_LABEL[task.kind] || task.kind, task.channel ? channelLabel(task.channel) : ''].filter(Boolean).join(' · ')}
+            </div>
           </div>
         </div>
 
@@ -1042,10 +1252,20 @@ function TaskDetailPane({
             </span>
           )}
           {flags.low_confidence && <LowConfidenceHint />}
+          {flags.historical && <HistoryChip />}
         </div>
         <WhyThisHere task={task} phone={phone} />
 
-        {waiting && (
+        {merged && (
+          <MergedIntoBanner onOpen={() => void onOpenTask(task.merged_into!)} onUnmerge={() => onUnmerge(task.id, true)} />
+        )}
+        {!merged && flags.same_as?.task_id && flags.same_as.task_id !== task.id && (
+          <SameAsBanner sameAs={flags.same_as} onMerge={() => onMerge(flags.same_as!.task_id)} onNotSame={onNotSame} onOpen={() => void onOpenTask(flags.same_as!.task_id)} />
+        )}
+
+        {boardStep ? (
+          <NextStepCard key={boardStep.id} proposal={boardStep} phone={phone} onAnswered={onAnswered} onSaved={onNextStep} />
+        ) : waiting && (
           <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
             <div className="text-xs font-medium text-amber-800 dark:text-amber-300">Needs you: approve the next step</div>
             {waiting.title && <p className="mt-1 break-words text-sm text-zinc-300">{waiting.title}</p>}
@@ -1079,6 +1299,7 @@ function TaskDetailPane({
             <div className="mt-2"><AnswerButtons choices={DONE_ANSWERS} onAct={(a) => onAct(a)} /></div>
           </div>
         )}
+        {canSuggest && <SuggestNextStep taskId={task.id} phone={phone} onProposed={onNextStep} />}
 
         {task.ask && (
           <section className="mt-4">
@@ -1105,32 +1326,46 @@ function TaskDetailPane({
           </section>
         )}
 
-        {parties.length > 0 && (
+        {people.length > 0 && (
           <section className="mt-4">
             <h4 className={sectionTitle}>People</h4>
             <ul className="mt-1.5 flex flex-col gap-1.5">
-              {parties.map((p, i) => {
-                // You are "You", and a deck user's id is never shown.
-                const address = partyAddress(p, me)
-                return (
-                  <li key={`${p.role}:${p.kind}:${p.address}:${i}`} className="flex min-w-0 items-center gap-2 text-xs">
-                    <span className="w-[68px] shrink-0">
-                      <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">{ROLE_LABEL[p.role] || p.role}</span>
+              {people.map((p) => (
+                // You are "You", and a deck user's id is never shown; a
+                // person reached several ways is one row with each handle.
+                <li key={p.key} className="flex min-w-0 items-start gap-2 text-xs">
+                  <span className="w-[68px] shrink-0 pt-px">
+                    <span className="rounded bg-zinc-800 px-1.5 py-0.5 text-[10px] font-medium text-zinc-400">{ROLE_LABEL[p.role] || p.role}</span>
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-1.5">
+                      <span className={`min-w-0 truncate ${p.me ? 'font-medium text-zinc-200' : 'text-zinc-300'}`}>
+                        <FoldHighlight text={p.name} terms={terms} />
+                      </span>
+                      {p.verified && (
+                        <span title="Taken from the message itself, not from what anyone wrote" className="shrink-0">
+                          <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                        </span>
+                      )}
                     </span>
-                    <span className={`min-w-0 truncate ${isMe(p, me) ? 'font-medium text-zinc-200' : 'text-zinc-300'}`} title={address || undefined}>
-                      <FoldHighlight text={partyName(p, me)} terms={terms} />
-                    </span>
-                    {address && <span className="min-w-0 truncate text-zinc-500">{address}</span>}
-                    {!!p.verified && (
-                      <span title="Taken from the message itself, not from what anyone wrote" className="shrink-0">
-                        <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                    {p.handles.length > 0 && (
+                      <span className="mt-0.5 flex flex-wrap gap-x-2.5 gap-y-0.5">
+                        {p.handles.map((h) => (
+                          <span key={`${h.kind}:${h.address}`} className="flex min-w-0 max-w-full items-center gap-1 text-zinc-500" title={h.address}>
+                            {handleChannel(h.kind) && <ChannelIcon channel={handleChannel(h.kind)} className="h-3 w-3" />}
+                            <span className="min-w-0 truncate"><FoldHighlight text={h.address} terms={terms} /></span>
+                          </span>
+                        ))}
                       </span>
                     )}
-                  </li>
-                )
-              })}
+                  </span>
+                </li>
+              ))}
             </ul>
           </section>
+        )}
+        {(detail?.merged?.length ?? 0) > 0 && (
+          <MergedList merged={detail!.merged!} onOpen={(id) => void onOpenTask(id)} onUnmerge={(id) => onUnmerge(id, false)} />
         )}
 
         <dl className="mt-5 grid grid-cols-[84px_1fr] gap-x-3 gap-y-2 text-xs">
@@ -1142,7 +1377,7 @@ function TaskDetailPane({
           ))}
         </dl>
 
-        {(canScheduled || canChat) && (
+        {(canScheduled || canChat || !merged) && (
           <div className="mt-4 flex flex-wrap gap-2">
             {canScheduled && (
               <button onClick={() => onOpenScheduled!(jobId)} className={linkBtn} title="The task, its schedule and every run, in Scheduled tasks">
@@ -1154,12 +1389,34 @@ function TaskDetailPane({
                 <MessageSquare className="h-3.5 w-3.5" />Continue in chat
               </button>
             )}
+            {!merged && (
+              <button onClick={() => setMerging((m) => !m)} aria-expanded={merging} className={linkBtn}
+                title="It is part of another task: put the two together (you can take it out again)">
+                <GitMerge className="h-3.5 w-3.5" />Merge into…
+              </button>
+            )}
           </div>
+        )}
+        {merging && !merged && (
+          <MergePicker task={task} phone={phone} onPick={(target) => onMerge(target.id)} onClose={closeMerge} />
         )}
 
         <section className="mt-5">
-          <h4 className={sectionTitle}>What happened</h4>
-          {detail ? <Timeline events={detail.events ?? []} total={detail.events_total} terms={terms} />
+          <div className="flex items-center gap-2">
+            <h4 className={`${sectionTitle} min-w-0 flex-1`}>What happened</h4>
+            {eventCount > 1 && !merged && !splitting && (
+              <button onClick={() => setSplitIds(new Set())} className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-teal-600 hover:underline dark:text-teal-400"
+                title="Part of this belongs to another task: move it to a new one">
+                <Split className="h-3 w-3" />Split…
+              </button>
+            )}
+          </div>
+          {splitIds && (
+            <SplitBar picked={splitIds.size} total={eventCount} onCancel={() => setSplitIds(null)}
+              onSplit={async () => { await onSplit([...splitIds]); setSplitIds(null) }} />
+          )}
+          {detail ? <Timeline events={detail.events ?? []} total={detail.events_total} terms={terms}
+            picked={splitIds} onPick={toggleSplit} />
             : detailError ? <p className="mt-2 text-xs text-red-600 dark:text-red-400">{detailError}</p>
               : <Loader2 className="mt-3 h-4 w-4 animate-spin text-zinc-500" />}
         </section>
@@ -1263,7 +1520,12 @@ function toolName(e: TaskEvent): string {
   return ''
 }
 
-function Timeline({ events, total, terms }: { events: TaskEvent[]; total?: number; terms: string[] }) {
+function Timeline({ events, total, terms, picked = null, onPick }: {
+  events: TaskEvent[]; total?: number; terms: string[]
+  /** Splitting: the events ticked to move to a new task (a box on each). */
+  picked?: Set<number> | null
+  onPick?: (id: number) => void
+}) {
   const [all, setAll] = useState(false)
   if (!events.length) return <p className="mt-2 text-xs text-zinc-500">Nothing recorded yet.</p>
   const sorted = [...events].sort((a, b) => a.at - b.at || Number(a.id) - Number(b.id))
@@ -1282,32 +1544,47 @@ function Timeline({ events, total, terms }: { events: TaskEvent[]; total?: numbe
         {shown.map((e) => {
           const actor = e.actor_kind === 'me' ? 'You' : e.actor_kind === 'jev' ? 'Jev' : e.actor
           const tool = e.kind === 'tool_call' ? toolName(e) : ''
+          const ticked = !!picked?.has(e.id)
           return (
-            <li key={e.id} className="relative">
+            <li key={e.id} className={`relative ${picked ? 'flex items-start gap-2' : ''}`}>
               <span className="absolute -left-[27px] top-0 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-900 ring-1 ring-zinc-800">
                 {e.kind === 'tool_call'
                   ? <Wrench className="h-3 w-3 shrink-0 text-zinc-400" />
                   : <ChannelIcon channel={e.channel || 'agent'} className="h-3 w-3" />}
               </span>
-              <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-zinc-500">
-                <span className="font-medium text-zinc-200">{EVENT_LABEL[e.kind] || e.kind}</span>
-                {tool && <span className="rounded bg-zinc-800 px-1 font-mono text-[10px] text-zinc-300">{tool}</span>}
-                <span className="min-w-0 truncate" title={fmtWhen(e.at)}>{[actor, agoRelative(e.at)].filter(Boolean).join(' · ')}</span>
-                {e.kind === 'tool_call' && e.outcome === 'ok' && <span className="font-medium text-emerald-700 dark:text-emerald-400">ok</span>}
-                {e.evidence === 'recorded' && (
-                  <span className="flex items-center gap-0.5 text-emerald-700 dark:text-emerald-400" title="Flight Deck recorded it">
-                    <Check className="h-3 w-3" />recorded
-                  </span>
-                )}
-                {e.evidence === 'said' && <span className="italic" title="Only the agent's word">agent says</span>}
-                {e.outcome === 'error' && <span className="font-medium text-red-600 dark:text-red-400">failed</span>}
-                {e.outcome === 'blocked' && <span className="font-medium text-amber-700 dark:text-amber-400">blocked</span>}
-              </div>
-              {e.summary && (
-                <p className="mt-0.5 whitespace-pre-wrap break-words text-xs leading-relaxed text-zinc-400">
-                  <FoldHighlight text={e.summary} terms={terms} />
-                </p>
+              {picked && (
+                <button
+                  role="checkbox"
+                  aria-checked={ticked}
+                  aria-label={`Move “${EVENT_LABEL[e.kind] || e.kind}” to the new task`}
+                  onClick={() => onPick?.(e.id)}
+                  className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
+                    ticked ? 'border-teal-600 bg-teal-600 text-white' : 'border-zinc-600'}`}
+                >
+                  {ticked && <Check className="h-3 w-3" strokeWidth={3} />}
+                </button>
               )}
+              <div className={picked ? 'min-w-0 flex-1' : undefined}>
+                <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-zinc-500">
+                  <span className="font-medium text-zinc-200">{EVENT_LABEL[e.kind] || e.kind}</span>
+                  {tool && <span className="rounded bg-zinc-800 px-1 font-mono text-[10px] text-zinc-300">{tool}</span>}
+                  <span className="min-w-0 truncate" title={fmtWhen(e.at)}>{[actor, agoRelative(e.at)].filter(Boolean).join(' · ')}</span>
+                  {e.kind === 'tool_call' && e.outcome === 'ok' && <span className="font-medium text-emerald-700 dark:text-emerald-400">ok</span>}
+                  {e.evidence === 'recorded' && (
+                    <span className="flex items-center gap-0.5 text-emerald-700 dark:text-emerald-400" title="Flight Deck recorded it">
+                      <Check className="h-3 w-3" />recorded
+                    </span>
+                  )}
+                  {e.evidence === 'said' && <span className="italic" title="Only the agent's word">agent says</span>}
+                  {e.outcome === 'error' && <span className="font-medium text-red-600 dark:text-red-400">failed</span>}
+                  {e.outcome === 'blocked' && <span className="font-medium text-amber-700 dark:text-amber-400">blocked</span>}
+                </div>
+                {e.summary && (
+                  <p className="mt-0.5 whitespace-pre-wrap break-words text-xs leading-relaxed text-zinc-400">
+                    <FoldHighlight text={e.summary} terms={terms} />
+                  </p>
+                )}
+              </div>
             </li>
           )
         })}
@@ -1373,67 +1650,6 @@ function HeldReply({ task, detail, detailFailed, onDone, onOpenConnections }: {
           )}
         </p>
       )}
-    </div>
-  )
-}
-
-// ── Sources ──
-
-/** What the board reads, whether it does yet, and what it can't (the
- *  server's `not_covered` entry, said under the list). */
-function SourcesSheet({ status, onClose }: { status: TaskboardStatus | null; onClose: () => void }) {
-  const sources = (status?.sources ?? []).filter((s) => s.key !== 'not_covered')
-  const uncovered = status?.sources?.find((s) => s.key === 'not_covered')
-  return (
-    <div className="absolute inset-0 z-30 flex items-stretch justify-center bg-black/50 wide:items-center wide:p-6" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-label="Sources"
-        onClick={(e) => e.stopPropagation()}
-        className="flex w-full flex-col overflow-hidden bg-zinc-950 shadow-2xl wide:max-h-full wide:max-w-lg wide:rounded-xl wide:border wide:border-zinc-800"
-      >
-        <div className="flex items-center gap-3 border-b border-zinc-800 px-4 py-3">
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-teal-500/15 text-teal-600 dark:text-teal-400">
-            <Layers className="h-4 w-4" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <h3 className="truncate text-base font-semibold text-zinc-100">Sources</h3>
-            <p className="truncate text-xs text-zinc-500">Where the Taskboard finds its tasks</p>
-          </div>
-          <button onClick={onClose} className={iconBtn} title="Close" aria-label="Close sources"><X className="h-4 w-4" /></button>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {!status ? (
-            <div className="flex justify-center py-8 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /></div>
-          ) : sources.length === 0 ? (
-            <p className="px-4 py-6 text-center text-sm text-zinc-500">No sources yet.</p>
-          ) : (
-            <ul className="divide-y divide-zinc-800/70">
-              {sources.map((s) => {
-                const state = s.tracked ? (s.on ? 'Tracked' : 'Off') : 'Not tracked yet'
-                return (
-                  <li key={s.key} className="flex items-start gap-3 px-4 py-3">
-                    <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${s.tracked && s.on ? 'bg-emerald-500' : s.tracked ? 'bg-zinc-500' : 'bg-zinc-700'}`} />
-                    <div className="min-w-0 flex-1">
-                      <div className="text-sm text-zinc-200">{s.label}</div>
-                      {s.note && <div className="mt-0.5 text-xs leading-relaxed text-zinc-500">{s.note}</div>}
-                    </div>
-                    <span className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-medium ${
-                      s.tracked && s.on ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300' : 'bg-zinc-800 text-zinc-400'}`}>
-                      {state}
-                    </span>
-                  </li>
-                )
-              })}
-            </ul>
-          )}
-          {uncovered?.note && (
-            <p className="border-t border-zinc-800 px-4 py-3 text-[11px] leading-relaxed text-zinc-500">
-              <span className="font-medium text-zinc-400">{uncovered.label || 'Not tracked'}:</span> {uncovered.note}
-            </p>
-          )}
-        </div>
-      </div>
     </div>
   )
 }

@@ -76,7 +76,7 @@ export const STATUS_DOT: Record<string, string> = {
 }
 export const KIND_LABEL: Record<string, string> = {
   request: 'Request', sent: 'Sent', scheduled: 'Scheduled task', proposal: 'Proposal', follow_up: 'Follow-up',
-  held_reply: 'Held reply', link: 'Linked system', todo: 'To-do', message: 'Message',
+  held_reply: 'Held reply', link: 'Linked system', todo: 'Agent to-do', message: 'Message',
 }
 export const DIRECTION_LABEL: Record<string, string> = { received: 'Received', sent: 'Sent', internal: 'Internal' }
 export const EVIDENCE_LABEL: Record<string, string> = { verified: 'Recorded', claimed: 'Agent says', none: 'No record' }
@@ -109,10 +109,11 @@ export function isMe(p: TaskParty, me?: BoardUser): boolean {
 }
 
 /** A party's name: "You" for you, and never a deck user's id (another deck
- *  user without a name is "Someone else"). */
+ *  user without a name is "Someone else"). v2: the person's name first (a
+ *  party is a person, whichever handle this is), else the source's. */
 export function partyName(p: TaskParty, me?: BoardUser): string {
   if (isMe(p, me)) return 'You'
-  const display = (p.display || '').trim()
+  const display = (p.name || p.display || '').trim()
   if (p.kind === 'fd_user') return display && display !== p.address && display !== 'You' ? display : 'Someone else'
   return display || p.address
 }
@@ -124,7 +125,7 @@ const nameKey = (s: string) => foldText(s).replace(/\s+/g, ' ').trim()
  *  repeats the name. */
 export function partyAddress(p: TaskParty, me?: BoardUser): string {
   if (p.kind === 'fd_user' || p.kind === 'name' || isMe(p, me)) return ''
-  const display = (p.display || '').trim()
+  const display = (p.name || p.display || '').trim()
   return display && p.address && nameKey(display) !== nameKey(p.address) ? p.address : ''
 }
 
@@ -136,7 +137,7 @@ export function partyAddress(p: TaskParty, me?: BoardUser): string {
 export function distinctParties(parties: TaskParty[] | undefined, me?: BoardUser): TaskParty[] {
   const list = parties ?? []
   const recorded = (p: TaskParty) => !!p.verified || isMe(p, me)
-  const keys = (p: TaskParty) => [p.display || p.address, isMe(p, me) ? me?.name || '' : '']
+  const keys = (p: TaskParty) => [(p.name || p.display || '').trim() || p.address, isMe(p, me) ? me?.name || '' : '']
     .map(nameKey).filter(Boolean)
   const strong = new Set(list.filter(recorded).flatMap(keys))
   const names = new Set<string>()
@@ -155,16 +156,89 @@ export function distinctParties(parties: TaskParty[] | undefined, me?: BoardUser
   })
 }
 
-/** A People filter value's name: the server's id is `kind:address`, its
- *  label the party's name — "You" for you (the server's `me` on the value,
- *  so whatever tasks the page holds), never a deck user's id. */
+/** A People filter value's name: the server's id is `party:<id>` for a
+ *  person (v2) or `kind:address` for a handle no person has yet, its label
+ *  the name — "You" for you (the server's `me` on the value, so whatever
+ *  tasks the page holds), never a deck user's id. */
 export function partyFacetLabel(id: string, label: string, me?: BoardUser, isYou?: boolean): string {
+  if (id.startsWith('party:') && isYou !== true) return label.trim() || 'Someone'
   const at = id.indexOf(':')
   const party: TaskParty = {
     role: '', kind: at < 0 ? '' : id.slice(0, at), address: at < 0 ? id : id.slice(at + 1), display: label, verified: 0,
     ...(typeof isYou === 'boolean' ? { me: isYou } : {}),
   }
   return partyName(party, me)
+}
+
+/** A person on a task: their name, their role, and every handle they were
+ *  reached by on it (an email address, a WhatsApp number…) — one row for
+ *  one person in one role, however many handles. */
+export interface PersonRow {
+  key: string
+  role: string
+  name: string
+  me: boolean
+  verified: boolean
+  handles: { kind: string; address: string }[]
+}
+
+/** The People list: the parties worth listing (distinctParties), the same
+ *  person (`party_id`) in the same role once with all their handles. */
+export function peopleRows(parties: TaskParty[] | undefined, me?: BoardUser): PersonRow[] {
+  const rows: PersonRow[] = []
+  const byPerson = new Map<string, PersonRow>()
+  for (const p of distinctParties(parties, me)) {
+    const person = p.party_id ? `${p.role}\u0000${p.party_id}` : ''
+    let row = person ? byPerson.get(person) : undefined
+    if (!row) {
+      row = {
+        key: person || `${p.role}\u0000${p.kind}\u0000${p.address}\u0000${rows.length}`,
+        role: p.role, name: partyName(p, me), me: isMe(p, me), verified: !!p.verified, handles: [],
+      }
+      rows.push(row)
+      if (person) byPerson.set(person, row)
+    } else {
+      row.verified ||= !!p.verified
+      if (isMe(p, me)) { row.me = true; row.name = 'You' }
+    }
+    const address = partyAddress(p, me)
+    if (address && !row.handles.some((h) => h.address === address)) row.handles.push({ kind: p.kind, address })
+  }
+  return rows
+}
+
+// The channel a handle is reached on, for its icon.
+const HANDLE_CHANNEL: Record<string, string> = {
+  email: 'email', waid: 'whatsapp', wa_jid: 'waweb', tg_id: 'telegram', telegram: 'telegram', link: 'link',
+}
+export const handleChannel = (kind: string): string => HANDLE_CHANNEL[kind] || ''
+
+// ── Next steps ──
+
+/** What a board proposal does, in two or three words: "Draft email",
+ *  "Reply on WhatsApp", "Reminder". */
+export function proposalLabel(p: { kind?: string; payload?: { channel?: string } }): string {
+  if (p.kind === 'mail.draft') return 'Draft email'
+  if (p.kind === 'reply.on_origin') {
+    const channel = p.payload?.channel || ''
+    return channel ? `Reply on ${channelLabel(channel)}` : 'Reply'
+  }
+  if (p.kind === 'nudge') return 'Reminder'
+  return 'Next step'
+}
+
+/** A recipient as one line: "Ana Horvat <ana@example.com>", "Ana Horvat
+ *  (+385911234567)" for a WhatsApp number, the name alone for a handle
+ *  nobody reads (a Telegram id, a chat jid) — or whichever there is. */
+export function recipientText(r: { address: string; display: string; kind?: string }): string {
+  const name = (r.display || '').trim()
+  if (!name || nameKey(name) === nameKey(r.address)) return r.address || name
+  if (!r.address) return name
+  if (r.kind === 'waid' || r.kind === 'phone') {
+    const number = `+${r.address.replace(/\D/g, '')}`
+    return name.replace(/\D/g, '') === number.slice(1) ? name : `${name} (${number})`
+  }
+  return !r.kind || r.kind === 'email' ? `${name} <${r.address}>` : name
 }
 
 // ── Notes ──
@@ -224,7 +298,9 @@ export function answerText(question: string, a: TaskAnswer): string {
 
 /** How long ago, never "in a moment" for a server clock a little ahead. */
 export function agoRelative(epoch: number): string {
-  return fmtRelative(Math.min(epoch, Date.now() / 1000))
+  // fmtRelative reads the clock again, so a time clamped to "now" can still
+  // come out a hair ahead of it ("in a moment"): the last 45 s are "just now".
+  return epoch > Date.now() / 1000 - 45 ? 'just now' : fmtRelative(epoch)
 }
 
 /** Whether a snooze is still on. */

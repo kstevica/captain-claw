@@ -266,6 +266,34 @@ def test_an_autonomous_work_turn_names_its_action(reg, no_ref):
     assert [r for r in _turns() if r["phase"] == "open"][-1]["automation"] == {"kind": "", "id": ""}
 
 
+def test_a_bridges_frame_names_the_chat_its_turn_came_from_never_the_sessions_origin(reg):
+    """A device's or a Messenger thread's frame carries its channel as the
+    turn's own origin (``turn_origin``): the record keeps it beside the
+    session's durable origin, which it never touches; each frame overwrites
+    it, and only a channel's well-formed address counts."""
+    from captain_claw import origin
+
+    tok = turn_register._FRAME_ORIGIN.set(("", ""))
+    try:
+        agent = FakeAgent(origin=("human", "", "device:stick"), source=("device:stick", "Stick"))
+        origin.set_session_origin(agent.session, origin.KIND_WHATSAPP, "385911234567")
+        turn_register.note_frame_origin({"kind": "channel", "address": "device:u1:stick"})
+        reg.close_turn(reg.open_turn(agent), "ok")
+        # The next frame names none (a web turn): neither does its turn.
+        turn_register.note_frame_origin(None)
+        reg.close_turn(reg.open_turn(agent), "ok")
+        for bad in ({"kind": "whatsapp", "address": "385911234567"}, {"kind": "channel", "address": "a b; rm"}):
+            turn_register.note_frame_origin(bad)
+            reg.close_turn(reg.open_turn(agent), "ok")
+    finally:
+        turn_register._FRAME_ORIGIN.reset(tok)
+    opens = [r["ext_refs"] for r in _turns() if r["phase"] == "open"]
+    assert opens[0]["turn_origin"] == {"kind": "channel", "address": "device:u1:stick"}
+    assert all("turn_origin" not in refs for refs in opens[1:])
+    assert all(refs["origin"] == {"kind": "whatsapp", "address": "385911234567"} for refs in opens)
+    assert origin.get_session_origin(agent.session)["kind"] == "whatsapp"
+
+
 def test_the_agents_own_cron_job_is_named_with_its_first_line(reg, no_ref):
     from captain_claw import mail_authority
 

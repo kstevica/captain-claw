@@ -100,8 +100,10 @@ async def list_agent_tools(user_id: str) -> dict[str, Any]:
 
 async def run_action(
     user_id: str, action_id: str, args: dict[str, Any], *, approved_by_human: bool = False,
+    agent: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Resolve + validate + execute a catalog action. Returns
+    """Resolve + validate + execute a catalog action on ``agent`` (dispatch's
+    pick, see fd_dispatch._dispatch_agent), else the user's strongest. Returns
     ``{ok, content, error, action_id, risk, reversibility}``.
 
     The tool call carries the ``autonomy_tool`` marker: ``mail_write`` is
@@ -120,7 +122,7 @@ async def run_action(
 
     if spec.get("home") == "agent":
         from captain_claw.flight_deck.fd_dispatch import _strongest_agent
-        agent = _strongest_agent(user_id)
+        agent = agent or _strongest_agent(user_id)
         if not agent:
             return {"ok": False, "error": "no running agent to act through", **meta}
         res = await run_tool_on_agent(agent, tool, tool_args, automation={

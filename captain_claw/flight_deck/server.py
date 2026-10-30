@@ -1735,7 +1735,13 @@ from captain_claw.flight_deck.delivery_routes import router as delivery_router
 from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.file_library import router as file_library_router
 from captain_claw.flight_deck.data_library import router as data_library_router
-from captain_claw.flight_deck import taskboard, taskboard_ingest
+from captain_claw.flight_deck import (
+    taskboard,
+    taskboard_backfill,
+    taskboard_ingest,
+    taskboard_nextsteps,
+    taskboard_threads,
+)
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
 from captain_claw.flight_deck import (
     agent_exam,
@@ -1848,6 +1854,11 @@ app.include_router(taskboard.router)
 # v1: the agents' turns (agent auth, as the tool-call register) and their
 # tool calls reach the board (taskboard_ingest.py).
 app.include_router(taskboard_ingest.router)
+# v2: next steps proposed for the user's Approve, merge/split, the 30-day
+# history (the opt-in inboxes go through taskboard.py's settings routes).
+app.include_router(taskboard_nextsteps.router)
+app.include_router(taskboard_threads.router)
+app.include_router(taskboard_backfill.router)
 app.include_router(agent_skills_router)
 app.include_router(agent_preset.router)
 app.include_router(agent_knowledge.router)

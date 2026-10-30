@@ -22,7 +22,7 @@ import os
 import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,13 @@ ACTION_STATUSES = (
     "candidate", "queued", "awaiting_approval", "dispatched",
     "done", "rejected", "expired", "undone",
 )
+
+# The ``source`` of a Taskboard next step (taskboard_nextsteps). Not the
+# arbiter's work: it never counts toward the arbiter's caps, isn't expired by
+# its 48 h TTL (it waits for its task — :data:`TASKBOARD_TTL_DAYS` at most),
+# and an Approve or Reject of one teaches Autonomous Work nothing.
+TASKBOARD_SOURCE = "taskboard"
+TASKBOARD_TTL_DAYS = 7
 
 
 def _norm_user(user_id: str | None) -> str:
@@ -141,6 +148,11 @@ def record_human_feedback(
     ``learning_enabled`` and ``judge_mode`` (human|both). Best-effort: returns the
     updated reliability row, or None when learning is off for this user.
     """
+    if str(action.get("source") or "") == TASKBOARD_SOURCE:
+        # A next step the board proposed: the user deciding this task, not a
+        # verdict on what the arbiter proposes (rejecting a board draft must
+        # not suppress Autonomous Work's own mail.draft).
+        return None
     cfg = resolve_config(user_id)
     if not cfg.get("learning_enabled"):
         return None
@@ -485,16 +497,17 @@ class AutonomyStore:
             _status_changed(str(row.get("user_id") or ""))
         return row
 
-    def count_since(self, user_id: str, iso_cutoff: str) -> int:
+    def count_since(self, user_id: str, iso_cutoff: str, *, exclude_source: str = "") -> int:
         """How many actions this user created at/after ``iso_cutoff`` — the
-        daily-cap counter. ISO-8601 strings sort lexicographically, so a string
-        comparison is a correct time comparison here."""
+        daily-cap counter (leaving out those of ``exclude_source``). ISO-8601
+        strings sort lexicographically, so a string comparison is a correct
+        time comparison here."""
         uid = _norm_user(user_id)
         with self._lock:
             r = self._c().execute(
                 "SELECT COUNT(*) AS n FROM autonomous_actions"
-                " WHERE user_id = ? AND created_at >= ?",
-                (uid, iso_cutoff),
+                " WHERE user_id = ? AND created_at >= ? AND source != ?",
+                (uid, iso_cutoff, exclude_source),
             ).fetchone()
         return int(r["n"] if r else 0)
 
@@ -525,20 +538,81 @@ class AutonomyStore:
 
     def expire_stale_proposals(self, user_id: str, iso_cutoff: str) -> int:
         """Move this user's proposals still ``awaiting_approval`` and created
-        before ``iso_cutoff`` to ``expired``. Returns how many expired."""
+        before ``iso_cutoff`` to ``expired``. Returns how many expired. A
+        Taskboard next step isn't one of them: it waits for its task
+        (:meth:`expire_taskboard_proposals`)."""
         uid = _norm_user(user_id)
         with self._lock:
             conn = self._c()
             cur = conn.execute(
                 "UPDATE autonomous_actions SET status = 'expired', completed_at = ?,"
                 " outcome_note = 'expired: no approval in time'"
-                " WHERE user_id = ? AND status = 'awaiting_approval' AND created_at < ?",
-                (_utcnow_iso(), uid, iso_cutoff),
+                " WHERE user_id = ? AND status = 'awaiting_approval' AND created_at < ?"
+                " AND source != ?",
+                (_utcnow_iso(), uid, iso_cutoff, TASKBOARD_SOURCE),
             )
             conn.commit()
         if cur.rowcount:
             _status_changed(uid)
         return int(cur.rowcount or 0)
+
+    def expire_taskboard_proposals(self, user_id: str, iso_cutoff: str | None = None) -> int:
+        """This user's Taskboard next steps still waiting that were made
+        before ``iso_cutoff`` (by default a week ago) → ``expired``. How many."""
+        uid = _norm_user(user_id)
+        if iso_cutoff is None:
+            iso_cutoff = (datetime.now(UTC) - timedelta(days=TASKBOARD_TTL_DAYS)).isoformat()
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute(
+                "UPDATE autonomous_actions SET status = 'expired', completed_at = ?,"
+                f" outcome_note = 'expired: no approval in {TASKBOARD_TTL_DAYS} days'"
+                " WHERE user_id = ? AND status = 'awaiting_approval' AND created_at < ?"
+                " AND source = ?",
+                (_utcnow_iso(), uid, iso_cutoff, TASKBOARD_SOURCE),
+            )
+            conn.commit()
+        if cur.rowcount:
+            _status_changed(uid)
+        return int(cur.rowcount or 0)
+
+    def expire_actions(self, action_ids: list[str], note: str) -> int:
+        """These actions → ``expired`` with ``note``, each only while it
+        still waits for approval (compare-and-set: one approved meanwhile
+        stays approved). How many expired."""
+        ids = [str(a) for a in action_ids if a]
+        if not ids:
+            return 0
+        marks = ",".join("?" for _ in ids)
+        with self._lock:
+            conn = self._c()
+            users = [r["user_id"] for r in conn.execute(
+                f"SELECT DISTINCT user_id FROM autonomous_actions WHERE id IN ({marks})"
+                " AND status = 'awaiting_approval'", ids).fetchall()]
+            cur = conn.execute(
+                "UPDATE autonomous_actions SET status = 'expired', completed_at = ?, outcome_note = ?"
+                f" WHERE id IN ({marks}) AND status = 'awaiting_approval'",
+                (_utcnow_iso(), str(note)[:500], *ids),
+            )
+            conn.commit()
+        if cur.rowcount:
+            for uid in users:
+                _status_changed(uid)
+        return int(cur.rowcount or 0)
+
+    def edit_proposal(self, action_id: str, *, title: str, payload: dict[str, Any]) -> bool:
+        """Replace a proposal's title and payload — only while it still
+        waits for approval (compare-and-set against an Approve or Reject in
+        between). True when this call wrote it."""
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute(
+                "UPDATE autonomous_actions SET title = ?, payload = ?"
+                " WHERE id = ? AND status = 'awaiting_approval'",
+                (str(title)[:200], json.dumps(payload or {}), action_id),
+            )
+            conn.commit()
+        return int(cur.rowcount or 0) == 1
 
     def open_actions(self, user_id: str) -> list[dict[str, Any]]:
         """Unresolved actions — candidate/awaiting/queued/dispatched — used for

@@ -5,6 +5,7 @@ Scoped to the logged-in user. Phase 1 surface:
   * GET/PUT /fd/autonomy/config       — per-user effective config + overrides
   * GET     /fd/autonomy/actions       — the action ledger (the page's feed)
   * POST    /fd/autonomy/actions/{id}/approve|reject — resolve a pending action
+  * PATCH   /fd/autonomy/actions/{id}  — edit a Taskboard next step before approving it
   * GET     /fd/autonomy/reliability   — learned per-kind weights
   * POST    /fd/autonomy/nudge         — force one arbiter pass (no-op until Phase 2)
   * GET/PUT /fd/autonomy/whatsapp      — this user's WhatsApp nudge number (+ POST …/test)
@@ -25,6 +26,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from captain_claw.flight_deck.auth import get_optional_user
 from captain_claw.flight_deck.autonomy import (
+    TASKBOARD_SOURCE,
     _norm_user,
     global_defaults,
     get_store,
@@ -401,6 +403,9 @@ async def list_actions_route(
 ):
     """The action ledger — what the loop considered, queued, dispatched, or did."""
     uid = _user_id(request)
+    # A Taskboard next step that waited a week is never listed as waiting
+    # (the arbiter that would expire it may be off).
+    get_store().expire_taskboard_proposals(uid)
     return {"actions": get_store().list_actions(uid, status=status_filter, limit=limit)}
 
 
@@ -422,6 +427,14 @@ async def approve_action_route(
     action = store.get_action(action_id)
     if not _owns(action, uid):
         raise HTTPException(status_code=404, detail="Action not found")
+    if action.get("source") == TASKBOARD_SOURCE:
+        # A next step whose task closed meanwhile has nothing left to do: it
+        # expires here instead of running (taskboard_nextsteps).
+        from captain_claw.flight_deck import taskboard_nextsteps
+        gone = await taskboard_nextsteps.task_gone(action)
+        if gone:
+            store.expire_actions([action_id], f"expired: {gone}")
+            raise HTTPException(status_code=409, detail=f"action expired: {gone}")
     if not store.claim_action(action_id, ("awaiting_approval", "queued"), "dispatched"):
         cur = store.get_action(action_id) or action
         raise HTTPException(
@@ -472,9 +485,48 @@ async def reject_action_route(
             detail=f"action is {cur.get('status') or 'unknown'}, not awaiting approval",
         )
     learned = record_human_feedback(uid, action, False)
-    return {"action": store.update_status(
-        action_id, "rejected", outcome="fail", outcome_note="rejected by user"),
-        "reliability": learned}
+    row = store.update_status(action_id, "rejected", outcome="fail", outcome_note="rejected by user")
+    if action.get("source") == TASKBOARD_SOURCE:
+        # Its task hears of it now and stays where it is: open, the next move as it was.
+        from captain_claw.flight_deck import taskboard_nextsteps
+        await taskboard_nextsteps.rejected(row or action)
+    return {"action": row, "reliability": learned}
+
+
+@router.patch("/actions/{action_id}")
+async def edit_action_route(
+    action_id: str,
+    request: Request,
+    _user: dict | None = Depends(get_optional_user),
+):
+    """Edit a Taskboard next step before approving it: ``{text?, subject?,
+    to?, channel?}`` — the recipient only one of the task's own
+    (``payload.to_options``). Only the action's owner (404 for anyone else),
+    only a Taskboard proposal and only while it waits for approval (409
+    otherwise — an Approve or Reject in between included)."""
+    uid = _user_id(request)
+    store = get_store()
+    action = store.get_action(action_id)
+    if not _owns(action, uid):
+        raise HTTPException(status_code=404, detail="Action not found")
+    body = await request.json()
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
+    if action.get("source") != TASKBOARD_SOURCE:
+        raise HTTPException(status_code=409, detail="only a Taskboard next step is edited before approval")
+    if action.get("status") != "awaiting_approval":
+        raise HTTPException(status_code=409, detail=f"action is {action.get('status') or 'unknown'}, "
+                                                    "not awaiting approval")
+    from captain_claw.flight_deck import taskboard_nextsteps
+    try:
+        title, payload = taskboard_nextsteps.edited(action, body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    if not store.edit_proposal(action_id, title=title, payload=payload):
+        cur = store.get_action(action_id) or action
+        raise HTTPException(status_code=409, detail=f"action is {cur.get('status') or 'unknown'}, "
+                                                    "not awaiting approval")
+    return {"action": store.get_action(action_id)}
 
 
 @router.post("/actions/{action_id}/undo")
