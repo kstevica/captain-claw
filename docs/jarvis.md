@@ -207,6 +207,8 @@ a `reverse` spec (how to undo), a `verify` spec (how to confirm), and a `grant`.
   (**draft, never send**), `reminder.schedule`.
 - *In catalog but human-only (irreversible / outward-facing):* `mail.send`,
   `calendar.invite`, `calendar.delete`, `message.send`, `drive.delete`.
+  (Since removed: `drive.delete`, and `message.send` — the Taskboard's
+  `reply.on_origin`, human-only and never proposable, took its place.)
 - **Hard-excluded entirely** (never autonomously reachable, by design): raw
   `shell`, `browser` form-submit, social posting, anything payment-like. These stay
   available in normal chat; the autonomous loop simply cannot get to them.

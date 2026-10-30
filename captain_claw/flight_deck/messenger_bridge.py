@@ -94,6 +94,11 @@ def _allowed_psids() -> set[str]:
     return {p.strip() for p in raw.split(",") if p.strip()}
 
 
+def psid_allowed(psid: str) -> bool:
+    """Whether this deck talks to *psid* at all (``MESSENGER_ALLOWED_PSIDS``)."""
+    return bool(psid) and psid in _allowed_psids()
+
+
 def _default_channel() -> str:
     return _env("MESSENGER_DEFAULT_CHANNEL") or "messenger"
 
@@ -308,7 +313,13 @@ async def _handle_message(psid: str, message: dict[str, Any]) -> None:
             ch.context_sent = True
         else:
             agent_content = effective_text
-        payload_obj: dict[str, Any] = {"type": "chat", "content": agent_content, "surface": "messenger"}
+        payload_obj: dict[str, Any] = {
+            "type": "chat", "content": agent_content, "surface": "messenger",
+            # This turn's own origin (the Taskboard's record of it): a reply the
+            # user approves there goes to this person alone — the channel they
+            # are on forwards to everyone on it. Not the session's durable origin.
+            "turn_origin": {"kind": "messenger", "address": psid},
+        }
         if image_path:
             payload_obj["image_path"] = image_path
         try:
@@ -357,22 +368,24 @@ _MESSENGER_API = "https://graph.facebook.com/v18.0/me/messages"
 _MAX_CHUNK = 1900
 
 
-async def _send_messenger_text(psid: str, text: str) -> None:
+async def _send_messenger_text(psid: str, text: str) -> bool:
+    """Send *text* to one person. True when Messenger took all of it."""
     token = _env("MESSENGER_PAGE_ACCESS_TOKEN")
     if not token:
-        return  # No token → silently no-op (still appears on glasses HUD).
+        return False  # No token → silently no-op (still appears on glasses HUD).
     text = text.strip()
     if not text:
-        return
+        return False
 
     chunks: list[str] = []
     while text:
         chunks.append(text[:_MAX_CHUNK])
         text = text[_MAX_CHUNK:]
 
+    taken = True
     async with httpx.AsyncClient(timeout=20.0) as client:
         for chunk in chunks:
-            await client.post(
+            r = await client.post(
                 _MESSENGER_API,
                 params={"access_token": token},
                 json={
@@ -381,6 +394,8 @@ async def _send_messenger_text(psid: str, text: str) -> None:
                     "messaging_type": "RESPONSE",
                 },
             )
+            taken = taken and r.is_success
+    return taken
 
 
 async def _download(url: str) -> bytes:

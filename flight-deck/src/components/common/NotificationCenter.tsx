@@ -2,9 +2,11 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Bell, X, CheckCheck, Trash2, AlertTriangle, Info, CheckCircle2, AlertCircle, Loader2, Maximize2 } from 'lucide-react'
+import { Bell, X, CheckCheck, Trash2, AlertTriangle, Info, CheckCircle2, AlertCircle, ListChecks, Loader2, Maximize2 } from 'lucide-react'
 import { useNotificationStore, type Notification, type NotificationType } from '../../stores/notificationStore'
-import { fetchWaitingProposalIds, resolveProposal } from '../../services/notifications'
+import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
+import { taskboardApi } from '../../services/taskboardApi'
+import { useTaskboardStore } from '../../stores/taskboardStore'
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
 import { useAuthStore, selectKioskLocked } from '../../stores/authStore'
 import { useChatStore } from '../../stores/chatStore'
@@ -136,6 +138,12 @@ function NotificationDialog({ onClose, onOpenSetup }: {
   )
 }
 
+// Taskboard: a link to a task in a notice's text, and the notice's own last
+// line that is only that link ("[Open in Taskboard](?taskboard=…)") — shown
+// as the "Open task" button instead where the board can open.
+const TASK_LINK = /[?&]taskboard=([A-Za-z0-9_.:-]{1,200})/
+const TASK_LINK_LINE = /\n?\[[^\]\n]*\]\([^)\s]*[?&]taskboard=[^)\s]*\)\s*$/
+
 // The Agent Desktop may still be mounting after setView('desktop'): look for
 // the "Shared with me" section for a moment before giving up.
 function revealSharedSection(tries = 20): void {
@@ -160,6 +168,10 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
   const kioskLocked = useAuthStore(selectKioskLocked)
   const layoutMode = useUIStore((s) => s.layoutMode)
   const layout = kioskLocked || layoutMode === 'simple' ? 'simple' : 'full'
+  // Where the Taskboard can open (the kiosk, the simple layout on a desktop):
+  // a proposal or a notice about a task leads to it there ("Open task").
+  const { isMobile, isTablet } = useIsMobile()
+  const boardHere = kioskLocked || (layoutMode === 'simple' && !isMobile && !isTablet)
   const aboutAgents = notifications.some((n) => n.refType === 'agent')
   useEffect(() => {
     if (aboutAgents) void useSharedAgentStore.getState().fetch()
@@ -168,13 +180,36 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
   // Approve / Reject here — the kiosk has no other place to answer them).
   // Asked again when a new one comes in, so it gets its buttons.
   const proposalIds = notifications.filter((n) => n.refType === 'autonomy_action').map((n) => n.refId).join(',')
-  const [waiting, setWaiting] = useState<Set<string> | null>(null)
+  const [waiting, setWaiting] = useState<Map<string, WaitingProposal> | null>(null)
+  // Taskboard: the task each waiting proposal is on (a board proposal's own
+  // task, else the one the board keeps for the proposal).
+  const [proposalTasks, setProposalTasks] = useState<Map<string, string> | null>(null)
   const loadWaiting = () => {
-    fetchWaitingProposalIds().then(setWaiting).catch(() => setWaiting(null))
+    fetchWaitingProposals().then(setWaiting).catch(() => setWaiting(null))
   }
   useEffect(() => {
     if (proposalIds) loadWaiting()
   }, [proposalIds])
+  useEffect(() => {
+    if (!proposalIds || !boardHere) return
+    let gone = false
+    taskboardApi.waitingProposals()
+      .then((m) => { if (!gone) setProposalTasks(m) })
+      .catch(() => { if (!gone) setProposalTasks(null) })
+    return () => { gone = true }
+  }, [proposalIds, boardHere])
+  // The task a row is about — the one its text links to (`?taskboard=<task
+  // id>`, the deck's own "Open in Taskboard"), else a waiting proposal's —
+  // opened on the board.
+  const taskOf = (n: Notification): string => {
+    if (!boardHere) return ''
+    const linked = TASK_LINK.exec(n.message || '')?.[1]
+    return linked || (n.refType === 'autonomy_action' && n.refId ? proposalTasks?.get(n.refId) : '') || ''
+  }
+  const openTask = (ref: string) => {
+    onClose()
+    useTaskboardStore.getState().showTask(ref)
+  }
 
   const activate = (action: SharedNotificationAction) => {
     if (action.kind === 'none') return
@@ -242,6 +277,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
           shown.map((n) => {
             const setup = (n.refType === 'agent_setup' || n.refType === 'agent_exam' || n.refType === 'agent_lessons')
               && n.refId && onOpenSetup ? n.refId : ''
+            const task = taskOf(n)
             const exam = n.refType === 'agent_exam'
             const lessons = n.refType === 'agent_lessons'
             return (
@@ -254,7 +290,10 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
                 : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
                 ? (waiting.has(n.refId) ? 'waiting' : 'answered') : undefined}
+              step={n.refType === 'autonomy_action' && n.refId && waiting?.get(n.refId)?.taskboard
+                ? waiting.get(n.refId) : undefined}
               onAnswered={() => { markRead(n.id); loadWaiting() }}
+              onOpenTask={task ? () => { markRead(n.id); openTask(task) } : undefined}
               onRead={() => markRead(n.id)}
               onActivate={setup ? () => onOpenSetup?.(setup, exam ? 'exam' : lessons ? 'lessons' : 'setup') : activate}
               onRemove={() => remove(n.id)}
@@ -269,7 +308,13 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
 
 // A proposal's answer, from the bell: Approve sends it to your agent, Reject
 // drops it (and teaches Autonomous Work not to suggest its like).
-function ProposalButtons({ id, large, onAnswered }: { id: string; large: boolean; onAnswered: () => void }) {
+function ProposalButtons({ id, large, canApprove, onAnswered }: {
+  id: string
+  large: boolean
+  /** No Approve here: its words are read, and edited, on its task first. */
+  canApprove: boolean
+  onAnswered: () => void
+}) {
   const [busy, setBusy] = useState<'approve' | 'reject' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const answer = async (approve: boolean) => {
@@ -287,10 +332,12 @@ function ProposalButtons({ id, large, onAnswered }: { id: string; large: boolean
   return (
     <div className="mt-1" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center gap-1.5">
-        <button disabled={busy !== null} onClick={() => answer(true)}
-          className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}>
-          {busy === 'approve' && <Loader2 className="h-3 w-3 animate-spin" />} Approve
-        </button>
+        {canApprove && (
+          <button disabled={busy !== null} onClick={() => answer(true)}
+            className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}>
+            {busy === 'approve' && <Loader2 className="h-3 w-3 animate-spin" />} Approve
+          </button>
+        )}
         <button disabled={busy !== null} onClick={() => answer(false)}
           className={`${btn} bg-zinc-800 text-zinc-300 hover:bg-zinc-700`}>
           {busy === 'reject' && <Loader2 className="h-3 w-3 animate-spin" />} Reject
@@ -301,14 +348,19 @@ function ProposalButtons({ id, large, onAnswered }: { id: string; large: boolean
   )
 }
 
-function NotificationItem({ notification: n, large, action, hint, proposal, onAnswered, onRead, onActivate, onRemove }: {
+function NotificationItem({ notification: n, large, action, hint, proposal, step, onAnswered, onOpenTask, onRead, onActivate, onRemove }: {
   notification: Notification
   large: boolean
   action: SharedNotificationAction
   /** What a click does, when it isn't the shared-agent action's. */
   hint?: string
   proposal?: 'waiting' | 'answered'
+  /** A Taskboard next step waiting: Approve only with its words in sight —
+   *  on its task where the board opens, else here. */
+  step?: WaitingProposal
   onAnswered: () => void
+  /** Taskboard: the task this is about, on the board. */
+  onOpenTask?: () => void
   onRead: () => void
   onActivate: (action: SharedNotificationAction) => void
   onRemove: () => void
@@ -319,6 +371,10 @@ function NotificationItem({ notification: n, large, action, hint, proposal, onAn
   // one opens up on a click (in the big dialog it's whole).
   const autonomy = n.refType === 'autonomy_action' || n.refType === 'autonomy_nudge'
   const [expanded, setExpanded] = useState(false)
+  // Its "Open in Taskboard" link line is the button below, where there is one
+  // — and where the board doesn't open here (the full layout, a phone's), no
+  // dead link either.
+  const message = n.message.replace(TASK_LINK_LINE, '')
 
   return (
     <div
@@ -336,17 +392,33 @@ function NotificationItem({ notification: n, large, action, hint, proposal, onAn
         </div>
         {autonomy && large ? (
           <div className="fd-file-markdown mt-1 [&_ol]:list-decimal [&_ul]:list-disc">
-            <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={BELL_MD}>{keepBreaks(n.message)}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={BELL_MD}>{keepBreaks(message)}</Markdown>
           </div>
         ) : autonomy ? (
           <div className={`mt-0.5 text-[10px] text-zinc-500 ${COMPACT_MD} ${expanded ? '' : 'line-clamp-6'}`}>
-            <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={BELL_MD}>{keepBreaks(n.message)}</Markdown>
+            <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={BELL_MD}>{keepBreaks(message)}</Markdown>
           </div>
         ) : (
-          <p className={`${large ? 'text-sm' : 'text-[10px]'} text-zinc-500 mt-0.5`}>{n.message}</p>
+          <p className={`${large ? 'text-sm' : 'text-[10px]'} text-zinc-500 mt-0.5`}>{message}</p>
         )}
-        {proposal === 'waiting' && n.refId && <ProposalButtons id={n.refId} large={large} onAnswered={onAnswered} />}
+        {proposal === 'waiting' && step && !onOpenTask && (
+          <p className={`mt-1 whitespace-pre-wrap break-words rounded border border-zinc-800 px-2 py-1 text-zinc-300 ${large ? 'text-xs' : 'text-[10px]'}`}>
+            {step.to && <span className="text-zinc-500">To {step.to}: </span>}{step.text}
+          </p>
+        )}
+        {proposal === 'waiting' && n.refId && (
+          <ProposalButtons id={n.refId} large={large} canApprove={!step || !onOpenTask} onAnswered={onAnswered} />
+        )}
         {proposal === 'answered' && <p className={`mt-0.5 ${large ? 'text-xs' : 'text-[10px]'} text-zinc-600`}>No longer waiting.</p>}
+        {onOpenTask && (
+          <button
+            onClick={(e) => { e.stopPropagation(); onOpenTask() }}
+            className={`mt-1 flex items-center gap-1 font-medium text-teal-600 hover:underline dark:text-teal-400 ${large ? 'text-xs' : 'text-[10px]'}`}
+            title="This task on the Taskboard — its whole story, and the next step to edit before you approve"
+          >
+            <ListChecks className="h-3 w-3" />{proposal === 'waiting' && step ? 'Read it and approve' : 'Open task'}
+          </button>
+        )}
         {(hint || action.kind !== 'none') && (
           <p className="mt-0.5 text-[10px] text-sky-700 dark:text-sky-400">{hint || (action.kind !== 'none' ? action.hint : '')}</p>
         )}

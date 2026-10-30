@@ -70,6 +70,9 @@ interface UIStore {
   setSidebarDrawerOpen: (v: boolean) => void
   setForgeProjectId: (id: string) => void
   setLayoutMode: (mode: LayoutMode) => void
+  /** Show a layout for this visit without choosing it: never saved, so one
+   *  followed link doesn't change what opens on every device from then on. */
+  visitLayout: (mode: LayoutMode) => void
   toggleLayoutMode: () => void
   setSimpleLeftOpen: (v: boolean) => void
   setSimpleRightOpen: (v: boolean) => void
@@ -84,6 +87,9 @@ interface UIStore {
  */
 // A layout picked while signed-in settings are loading wins over the loaded one.
 let layoutChosenSinceHydrate = false
+// A layout shown for this visit only (a ?taskboard= link): settings loading
+// meanwhile leave it on screen, and nothing saves it.
+let layoutVisited = false
 
 /** Call right before hydrating the signed-in settings. */
 export function beginLayoutHydrate() {
@@ -121,7 +127,13 @@ export const useUIStore = create<UIStore>((set, get) => ({
     // in the full layout) must not write localStorage or PUT /fd/settings.
     if (get().layoutMode === layoutMode) return
     layoutChosenSinceHydrate = true
+    layoutVisited = false
     persist(LAYOUT_MODE_KEY, layoutMode)
+    set({ layoutMode })
+  },
+  visitLayout: (layoutMode) => {
+    if (get().layoutMode === layoutMode) return
+    layoutVisited = true
     set({ layoutMode })
   },
   toggleLayoutMode: () => {
@@ -162,7 +174,7 @@ registerHydrator((settings) => {
   }
   const admin = useAuthStore.getState().user?.role === 'admin'
   const patch = {
-    layoutMode: layoutChosenSinceHydrate ? useUIStore.getState().layoutMode
+    layoutMode: layoutChosenSinceHydrate || layoutVisited ? useUIStore.getState().layoutMode
       : mode === undefined && admin ? 'console' as const : asLayoutMode(mode),
     simpleLeftOpen: bool(SIMPLE_LEFT_OPEN_KEY, true),
     simpleRightOpen: bool(SIMPLE_RIGHT_OPEN_KEY, true),

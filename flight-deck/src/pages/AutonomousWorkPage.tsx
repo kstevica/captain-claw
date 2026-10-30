@@ -335,6 +335,12 @@ function ActionCard({ action, onApprove, onReject, onUndo }: {
       </div>
       <div className="text-sm font-medium text-zinc-100">{action.title || '(untitled)'}</div>
       {action.rationale && <p className="mt-0.5 text-xs text-zinc-400">{action.rationale}</p>}
+      {/* A Taskboard next step: what Approve sends, in the model's words. */}
+      {action.source === 'taskboard' && !!(action.payload as { text?: unknown } | undefined)?.text && (
+        <p className="mt-1.5 whitespace-pre-wrap break-words rounded-lg border border-zinc-800 px-2 py-1.5 text-xs text-zinc-300">
+          {String((action.payload as { text?: unknown }).text)}
+        </p>
+      )}
       <div className="mt-2 flex items-center gap-2 text-[11px] text-zinc-500">
         <Gauge className="h-3 w-3" /> score {action.score.toFixed(2)}
         {action.outcome && <span>· outcome {action.outcome}</span>}

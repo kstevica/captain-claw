@@ -284,3 +284,106 @@ def test_export_neutralises_formulas_and_hides_members_params(env):
     lines = [ln for ln in r.text.splitlines() if ln]
     assert len(lines) == 2 and "mia's" in r.text
     assert client.get("/fd/tool-audit/export", params={"format": "xml"}).status_code == 400
+
+
+# ── Turn id and result refs (Taskboard) ───────────────────────────────
+
+TURN = "ab" * 16
+
+
+def test_turn_id_and_refs_are_stored_with_or_without_them(env):
+    client, _current, store, _ = env
+    assert _send(client,
+                 _rec(1, tool="google_mail", params={"action": "send"}, turn_id=TURN,
+                      refs={"gmail_message_id": "18c2f", "gmail_thread_id": "18c2e", "body": "not an id"}),
+                 _rec(2, tool="google_mail", params={"action": "send"}, turn_id=TURN, outcome="error",
+                      refs={"gmail_message_id": "18c30"}),
+                 _rec(3)).status_code == 200                       # an older agent's record
+    by = {c["seq"]: c for c in _calls(client)}
+    assert by[1]["turn_id"] == TURN and by[1]["refs"] == {"gmail_message_id": "18c2f", "gmail_thread_id": "18c2e"}
+    assert by[2]["refs"] == {}                                     # only an ok call made something
+    assert by[3]["turn_id"] == "" and by[3]["refs"] == {}
+    assert {r["seq"] for r in asyncio.run(store.list({"turn_id": TURN}))} == {1, 2}
+    assert _send(client, _rec(4, turn_id="not-a-turn")).status_code == 422
+
+
+def test_a_members_refs_are_hidden_from_the_owner(env):
+    client, current, *_ = env
+    _send(client, _rec(1, tool="whatsapp_web", params={"action": "send"}, speaker_id=MEMBER["id"],
+                       speaker_name="Mia", source="member", turn_id=TURN, refs={"waweb_message_id": "3EB0"}))
+    (c,) = _calls(client)
+    assert c["hidden"] and c["refs"] is None and c["turn_id"] == TURN
+    current["user"] = MEMBER
+    (c,) = _calls(client)
+    assert c["refs"] == {"waweb_message_id": "3EB0"}
+
+
+def test_refs_settle_with_the_outcome_under_its_mac(env):
+    client, current, store, _ = env
+    current["user"] = ADMIN
+    _send(client, _rec(1, phase="start", outcome="", turn_id=TURN))
+    _send(client, {"boot": BOOT, "seq": 1, "phase": "end", "started_at": 0, "outcome": "ok",
+                   "refs": {"calendar_event_id": "ev1"}, "duration_ms": 3, "ended_at": time.time()})
+    (c,) = _calls(client, "/fd/admin/tool-audit/calls")
+    assert (c["outcome"], c["refs"], c["turn_id"]) == ("ok", {"calendar_event_id": "ev1"}, TURN)
+    assert client.get("/fd/admin/tool-audit/verify").json()["ok"]
+    _raw(store, "UPDATE tool_calls SET refs='{\"calendar_event_id\":\"other\"}' WHERE seq=1")
+    assert [p["problem"] for p in client.get("/fd/admin/tool-audit/verify").json()["problems"]] == ["outcome"]
+    _raw(store, "UPDATE tool_calls SET refs='{\"calendar_event_id\":\"ev1\"}', turn_id='' WHERE seq=1")
+    assert [p["problem"] for p in client.get("/fd/admin/tool-audit/verify").json()["problems"]] == ["row"]
+
+
+def test_a_register_from_before_turn_ids_migrates_and_still_verifies(tmp_path):
+    import hashlib
+    import hmac
+    import sqlite3
+
+    from captain_claw.flight_deck import tool_audit_store as tas
+
+    db_path = tmp_path / "tool_audit.db"
+    old_ddl = tas._DDL.replace("    turn_id       TEXT NOT NULL DEFAULT '',\n", "").replace(
+        "    refs          TEXT NOT NULL DEFAULT '{}',\n", "")
+    assert "turn_id" not in old_ddl and "refs" not in old_ddl
+    key = tas._load_key(db_path.with_suffix(".key"))
+    conn = sqlite3.connect(str(db_path))
+    conn.executescript(old_ddl)
+    prev = tas.GENESIS
+    for seq, private in ((1, 0), (2, 1)):
+        # Recorded by the register as it was: its MACs over the fields it had.
+        row = {"owner_id": OWNER["id"], "member": 0, "speaker_id": "", "speaker_label": "", "agent_slug": "helper",
+               "agent_name": "Helper", "agent_ref": "proc-helper", "boot": BOOT, "seq": seq, "started_at": 1.0,
+               "received_at": 2.0, "tool": "shell", "risk": "exec", "params": "{}", "session_id": "",
+               "source": "web", "source_label": "Web chat"}
+        values = [row[f] for f in tas._CHAIN_FIELDS] + ([["private", 1]] if private else [])
+        row_hash = hmac.new(key, prev.encode() + b"\n" + tas._canon(values), hashlib.sha256).hexdigest()
+        end = ["ok", "", 5, 3.0]
+        end_mac = hmac.new(key, row_hash.encode() + b"\n" + tas._canon(end), hashlib.sha256).hexdigest()
+        cols = list(row) + ["private", "outcome", "reason", "duration_ms", "ended_at", "prev_hash", "hash", "end_mac"]
+        conn.execute(f"INSERT INTO tool_calls ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                     [*row.values(), private, *end, prev, row_hash, end_mac])
+        prev = row_hash
+    conn.commit()
+    conn.close()
+
+    store = ToolAuditStore(db_path)
+
+    async def run():
+        assert (await store.verify())["ok"]
+        db = await store._ensure_db()
+        async with db.execute("PRAGMA index_list(tool_calls)") as cur:
+            assert "idx_tool_calls_turn" in {r[1] for r in await cur.fetchall()}
+        old = await store.list({})
+        assert {(r["turn_id"], r["refs"]) for r in old} == {("", "{}")}
+        await store.record([{
+            "phase": "full", "owner_id": OWNER["id"], "member": 0, "speaker_id": "", "speaker_label": "",
+            "agent_slug": "helper", "agent_name": "Helper", "agent_ref": "proc-helper", "boot": BOOT, "seq": 3,
+            "started_at": 4.0, "tool": "google_mail", "risk": "send", "params": "{}", "session_id": "",
+            "source": "web", "source_label": "Web chat", "outcome": "ok", "reason": "", "duration_ms": 1,
+            "ended_at": 5.0, "private": 0, "turn_id": TURN, "refs": '{"gmail_message_id":"m1"}'}])
+        res = await store.verify()
+        assert res["ok"] and res["checked"] == 3
+        (new,) = await store.list({"turn_id": TURN})
+        assert new["refs"] == '{"gmail_message_id":"m1"}'
+        await store.close()
+
+    asyncio.run(run())

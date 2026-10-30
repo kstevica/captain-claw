@@ -227,6 +227,13 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
     from captain_claw.flight_deck import payments_routes
 
     await payments_routes.forget_user(user_id)
+    # …and their Taskboard (taskboard.db keeps no FK to users).
+    try:
+        from captain_claw.flight_deck import taskboard
+
+        taskboard.forget_user(user_id)
+    except Exception:
+        pass
     # Their profile went with them: their agents' copies of it go too.
     try:
         from captain_claw.flight_deck import tenant_profile

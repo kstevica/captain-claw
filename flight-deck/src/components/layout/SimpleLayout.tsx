@@ -29,6 +29,7 @@ import {
   Compass,
   AlarmClock,
   LibraryBig,
+  ListChecks,
   SlidersHorizontal,
   Trash2,
   BookOpen,
@@ -60,6 +61,8 @@ import { useDataLibraryStore } from '../../stores/dataLibraryStore'
 import { DataLibrary } from '../library/DataLibrary'
 import { useActivityStore } from '../../stores/activityStore'
 import { ToolCallRegister } from '../audit/ToolCallRegister'
+import { takeTaskboardLink, useTaskboardStore } from '../../stores/taskboardStore'
+import { TaskBoard } from '../taskboard/TaskBoard'
 import { SharedFolders } from '../vfs/SharedFolders'
 import { DialogFullscreen } from '../library/dialogFullscreen'
 import { isManagedAgent } from '../../utils/managedAgents'
@@ -326,6 +329,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const activityRef = useActivityStore((s) => s.agentRef)
   const openActivity = useActivityStore((s) => s.openActivity)
   const closeActivity = useActivityStore((s) => s.close)
+  // Taskboard: every task the agents got or sent, and how many need the user.
+  const taskboardOpen = useTaskboardStore((s) => s.open)
+  const taskboardAgent = useTaskboardStore((s) => s.agentFilter)
+  const taskboardFocus = useTaskboardStore((s) => s.focus)
+  const openTaskboard = useTaskboardStore((s) => s.openTaskboard)
+  const showTaskboardTask = useTaskboardStore((s) => s.showTask)
+  const closeTaskboard = useTaskboardStore((s) => s.close)
+  const fetchTaskboardSummary = useTaskboardStore((s) => s.fetchSummary)
+  const taskboardCount = useTaskboardStore((s) => s.needsMe)
   // Shared folders: the files the agents keep together (vfs:<folder>/…).
   const [foldersOpen, setFoldersOpen] = useState(false)
   const openFolders = () => setFoldersOpen(true)
@@ -338,6 +350,20 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     const t = setInterval(fetchScheduled, 30000)
     return () => clearInterval(t)
   }, [fetchScheduled, authEnabled, isAuthenticated])
+  // The Taskboard's Needs me count, for the badge on its buttons.
+  useEffect(() => {
+    if (authEnabled === true && !isAuthenticated) return
+    fetchTaskboardSummary()
+    const t = setInterval(fetchTaskboardSummary, 30000)
+    return () => clearInterval(t)
+  }, [fetchTaskboardSummary, authEnabled, isAuthenticated])
+  // Taskboard v2: a link with ?taskboard=<task id> (a nudge, a bell item, a
+  // notification) opens the board on that task, once the user is signed in.
+  useEffect(() => {
+    if (authEnabled === null || (authEnabled && !isAuthenticated)) return
+    const taskId = takeTaskboardLink()
+    if (taskId) showTaskboardTask(taskId)
+  }, [showTaskboardTask, authEnabled, isAuthenticated])
 
   // Keep the agent list fresh — the Desktop page normally does this polling,
   // and it isn't mounted here. Same auth guard as there: with auth on and no
@@ -632,6 +658,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         onSelect: () => openActivity(a.kind === 'process' ? { slug: a.startKey } : { ref: a.startKey }),
       })
     }
+    // Taskboard v2: its tasks — what it was asked and sent, and what needs you.
+    if (a.kind === 'process' && !a.managed) {
+      items.push({
+        icon: ListChecks, label: 'Tasks', hint: 'What it was asked and sent, and what needs you', tone: 'teal',
+        onSelect: () => openTaskboard(a.startKey),
+      })
+    }
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
         { icon: BookOpen, label: 'Instructions, insights & skills', hint: 'What it keeps in mind, has learned, and knows how to do',
@@ -667,8 +700,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
 
   const refresh = () => { fetchContainers(); fetchProcesses(); fetchShared(); probeAll() }
 
-  // "Continue in chat": the task's agent opens on the task's own session
-  // (the agent's /session switch, as a Topics resume) once its chat is up.
+  // "Continue in chat" (Scheduled tasks, the Taskboard): the task's agent
+  // opens on the task's own session (the agent's /session switch, as a
+  // Topics resume) once its chat is up.
   const openTaskChat = (slug: string, sessionId: string) => {
     const a = agents.find((x) => x.id === `proc-${slug}`)
     if (!a || (!a.reachable && !useChatStore.getState().sessions.has(a.id))) {
@@ -676,6 +710,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       return
     }
     closeScheduled()
+    closeTaskboard()
     handleOpen(a)
     let tries = 0
     const attempt = () => {
@@ -715,8 +750,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     return !!a && a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
-  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || !!filesData
-  const closePhoneOverlays = () => { closeLibrary(); closeData(); closeActivity(); setFoldersOpen(false); setFilesDataId(null) }
+  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || !!filesData
+  const closePhoneOverlays = () => {
+    closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null)
+  }
   // Drive and OneDrive folders want the user's Google or Microsoft account:
   // Connections, on that tab.
   const foldersConnections = (service: 'google' | 'microsoft') => {
@@ -727,6 +764,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const scheduledConnections = () => {
     closeScheduled()
     if (locked) { openConnections(); return }
+    useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('connections')
+  }
+  // A held reply the Taskboard can't show waits under Connections → Google;
+  // its settings' "Connect Jev" opens Connections → Jev.
+  const taskboardConnections = (tab: ConnectionsTab = 'google') => {
+    closeTaskboard()
+    if (locked) { openConnections(tab); return }
+    // Taskboard: the full Connections page opens on the tab it remembers — this one.
+    try { localStorage.setItem('fd:connections-tab', tab) } catch { /* storage blocked: its last tab */ }
     useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('connections')
   }
 
@@ -827,6 +873,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onConnections={() => { setSettingsOpen(false); openConnections() }}
           onProfile={() => { setSettingsOpen(false); setProfileOpen(true) }}
           onGuide={() => { setSettingsOpen(false); setGuideOpen(true) }}
+          onTaskboard={() => { setSettingsOpen(false); openTaskboard() }}
           onScheduled={() => { setSettingsOpen(false); openScheduled() }}
           onLibrary={() => { setSettingsOpen(false); openLibrary() }}
           onData={() => { setSettingsOpen(false); openData() }}
@@ -858,6 +905,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             onClose={closeScheduled}
             onOpenChat={openTaskChat}
             onOpenConnections={scheduledConnections}
+            onOpenTaskboard={(jobId) => { closeScheduled(); showTaskboardTask(`sched:job:${jobId}`) }}
           />
         </KioskWideDialog>
       )}
@@ -871,6 +919,19 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             onOpenAgent={openLibraryAgent}
             onOpenLive={locked ? openLibraryLive : undefined}
             liveReady={locked ? libraryLiveReady : undefined}
+          />
+        </KioskWideDialog>
+      )}
+      {taskboardOpen && (
+        <KioskWideDialog label="Taskboard" phone={isMobile} onClose={closeTaskboard} widest>
+          <TaskBoard
+            phone={isMobile}
+            initialAgent={taskboardAgent}
+            initialTask={taskboardFocus}
+            onClose={closeTaskboard}
+            onOpenScheduled={(jobId) => { closeTaskboard(); openScheduled(jobId) }}
+            onOpenChat={openTaskChat}
+            onOpenConnections={taskboardConnections}
           />
         </KioskWideDialog>
       )}
@@ -963,6 +1024,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onSpawn={goSpawn}
           onSettings={locked ? () => setSettingsOpen(true) : undefined}
           onInfo={locked ? () => setInfoOpen(true) : undefined}
+          onTaskboard={() => openTaskboard()}
+          taskboardCount={taskboardCount}
           onScheduled={() => openScheduled()}
           scheduledRunning={scheduledRunning}
           onLibrary={() => openLibrary()}
@@ -996,6 +1059,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         onOptions={setOptionsAgent}
         onSettings={locked ? () => setSettingsOpen(true) : undefined}
         onInfo={locked ? () => setInfoOpen(true) : undefined}
+        onTaskboard={() => openTaskboard()}
+        taskboardCount={taskboardCount}
         onScheduled={() => openScheduled()}
         scheduledCount={scheduledCount}
         scheduledRunning={scheduledRunning}
@@ -1037,7 +1102,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
 // the Getting started guide, and sign-out (how a shared kiosk hands the
 // screen to the next person).
 
-function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onScheduled, onLibrary, onData, onFolders, onActivity, onByok }: {
+function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onTaskboard, onScheduled, onLibrary, onData, onFolders, onActivity, onByok }: {
   /** The desktop app's admin in the users' kiosk: back to the Admin console. */
   onAdmin?: () => void
   onClose: () => void
@@ -1045,6 +1110,7 @@ function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onPro
   onConnections: () => void
   onProfile: () => void
   onGuide: () => void
+  onTaskboard: () => void
   onScheduled: () => void
   onLibrary: () => void
   onData: () => void
@@ -1075,6 +1141,7 @@ function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onPro
       detail: quota.byok ? 'On — your agents run on your keys, no daily limits' : 'Run your agents on your own API keys, with no daily limits',
       onClick: onByok,
     }] : []),
+    { icon: ListChecks, title: 'Taskboard', detail: 'Every task your agents got or sent — and what needs you', onClick: onTaskboard },
     { icon: AlarmClock, title: 'Scheduled tasks', detail: 'Your agents on a timer — results by chat or email', onClick: onScheduled },
     { icon: LibraryBig, title: 'File library', detail: 'Every file your agents made, summarised and searchable', onClick: onLibrary },
     { icon: Database, title: 'Data library', detail: 'Every table your agents keep, summarised and easy to read', onClick: onData },
@@ -1258,18 +1325,34 @@ const TILE_COLS: Record<number, string> = {
   2: 'grid-cols-[repeat(2,minmax(max-content,1fr))]',
   3: 'grid-cols-[repeat(3,minmax(max-content,1fr))]',
   4: 'grid-cols-[repeat(4,minmax(max-content,1fr))]',
+  5: 'grid-cols-[repeat(5,minmax(max-content,1fr))]',
 }
 
-/** The agent column's row of tools — Scheduled tasks (how many are active,
- *  a pulse while one runs), the File library, the Data library and the
- *  shared folders — as tiles, an icon over its name. */
-function ToolTiles({ onScheduled, scheduledCount, scheduledRunning, onLibrary, onData, onFolders }: {
+/** The agent column's row of tools — the Taskboard (how many tasks need
+ *  you), Scheduled tasks (how many are active, a pulse while one runs), the
+ *  File library, the Data library and the shared folders — as tiles, an
+ *  icon over its name. */
+function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, scheduledRunning, onLibrary, onData, onFolders }: {
+  onTaskboard?: () => void; taskboardCount: number
   onScheduled?: () => void; scheduledCount: number; scheduledRunning: boolean
   onLibrary?: () => void; onData?: () => void; onFolders?: () => void
 }) {
-  const n = [onScheduled, onLibrary, onData, onFolders].filter(Boolean).length
+  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders].filter(Boolean).length
   return (
     <div className={`grid gap-0.5 border-t border-zinc-800 p-2 pb-0 ${TILE_COLS[n] ?? 'grid-cols-1'}`}>
+      {onTaskboard && (
+        <button onClick={onTaskboard} className={toolTile} title="Taskboard — every task your agents got or sent, and what needs you">
+          <span className="relative">
+            <ListChecks className="h-[18px] w-[18px] text-teal-600 dark:text-teal-400" />
+            {taskboardCount > 0 && (
+              <span className="absolute -right-2.5 -top-1.5 min-w-[16px] rounded-full bg-teal-600 px-1 text-center text-[9px] font-semibold leading-4 text-white">
+                {taskboardCount > 99 ? '99+' : taskboardCount}
+              </span>
+            )}
+          </span>
+          <span className="max-w-full truncate">Tasks</span>
+        </button>
+      )}
       {onScheduled && (
         <button onClick={onScheduled} className={toolTile} title="Scheduled tasks — your agents on a timer">
           <span className="relative">
@@ -1308,6 +1391,7 @@ function ToolTiles({ onScheduled, scheduledCount, scheduledRunning, onLibrary, o
 
 function AgentsColumn({
   agents, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onLeave, onRefresh, onSpawn, onOptions, onSettings, onInfo,
+  onTaskboard, taskboardCount = 0,
   onScheduled, scheduledCount = 0, scheduledRunning = false, onLibrary, onData, onFolders, menuFor, locked = false, adminSwitch = false,
 }: {
   agents: SimpleAgent[]
@@ -1328,6 +1412,9 @@ function AgentsColumn({
   onSettings?: () => void
   /** Kiosk only: the Info button beside Settings. */
   onInfo?: () => void
+  /** Opens the Taskboard; its badge is the Needs me count. */
+  onTaskboard?: () => void
+  taskboardCount?: number
   /** Opens Scheduled tasks. */
   onScheduled?: () => void
   scheduledCount?: number
@@ -1429,8 +1516,23 @@ function AgentsColumn({
             <Plus className="h-4 w-4" />
           </button>
         </div>
-        {(onScheduled || onLibrary || onData || onFolders) && (
+        {(onTaskboard || onScheduled || onLibrary || onData || onFolders) && (
           <div className="flex flex-col items-center gap-0.5 border-t border-zinc-800 py-2">
+            {onTaskboard && (
+              <button
+                onClick={onTaskboard}
+                title={taskboardCount > 0 ? `Taskboard — ${taskboardCount} need${taskboardCount === 1 ? 's' : ''} you` : 'Taskboard'}
+                aria-label="Taskboard"
+                className="relative flex h-10 w-10 items-center justify-center rounded-lg text-teal-600 transition-colors hover:bg-zinc-800 dark:text-teal-400"
+              >
+                <ListChecks className="h-5 w-5" />
+                {taskboardCount > 0 && (
+                  <span className="absolute right-0.5 top-0.5 min-w-[16px] rounded-full bg-teal-600 px-1 text-center text-[9px] font-semibold leading-4 text-white">
+                    {taskboardCount > 99 ? '99+' : taskboardCount}
+                  </span>
+                )}
+              </button>
+            )}
             {onScheduled && (
               <button
                 onClick={onScheduled}
@@ -1696,8 +1798,10 @@ function AgentsColumn({
         </ul>
       </div>
 
-      {(onScheduled || onLibrary || onData || onFolders) && (
+      {(onTaskboard || onScheduled || onLibrary || onData || onFolders) && (
         <ToolTiles
+          onTaskboard={onTaskboard}
+          taskboardCount={taskboardCount}
           onScheduled={onScheduled}
           scheduledCount={scheduledCount}
           scheduledRunning={scheduledRunning}
@@ -2031,8 +2135,8 @@ function KioskFilesDataDialog({ agentId, agentName, onClose }: { agentId: string
 
 function PhoneLayout({
   agents, activeAgent, activeAgentId, activeSessionName, sessionInfo, switching, booting,
-  onOpen, onPower, onLeave, onSpawn, onSettings, onInfo, onScheduled, scheduledRunning = false, onLibrary, onData, onFolders, menuFor, locked, adminSwitch = false,
-  overlayOpen = false, onCloseOverlays, chatOpens = 0,
+  onOpen, onPower, onLeave, onSpawn, onSettings, onInfo, onTaskboard, taskboardCount = 0, onScheduled, scheduledRunning = false,
+  onLibrary, onData, onFolders, menuFor, locked, adminSwitch = false, overlayOpen = false, onCloseOverlays, chatOpens = 0,
 }: {
   agents: SimpleAgent[]
   activeAgent: SimpleAgent | null
@@ -2047,6 +2151,8 @@ function PhoneLayout({
   onSpawn: () => void
   onSettings?: () => void
   onInfo?: () => void
+  onTaskboard?: () => void
+  taskboardCount?: number
   onScheduled?: () => void
   scheduledRunning?: boolean
   onLibrary?: () => void
@@ -2056,8 +2162,9 @@ function PhoneLayout({
   menuFor?: (a: SimpleAgent) => AgentMenuItem[]
   locked: boolean
   adminSwitch?: boolean
-  /** The File or Data library, the shared folders or an agent's Files &
-   *  data is open (they live a level up): Back closes them before anything else. */
+  /** The Taskboard, the File or Data library, the shared folders or an
+   *  agent's Files & data is open (they live a level up): Back closes them
+   *  before anything else. */
   overlayOpen?: boolean
   onCloseOverlays?: () => void
   /** Counts the chats opened (see SimpleLayout's handleOpen). */
@@ -2149,6 +2256,9 @@ function PhoneLayout({
   }, [agents, search, searchable])
 
   const phoneBtn = 'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors active:bg-zinc-800 hover:bg-zinc-800 hover:text-zinc-100'
+  // The agent list's header carries every tool: a little narrower, so seven
+  // of them and the bell still leave the logo its room on a 375 px phone.
+  const toolBtn = 'flex h-10 w-9 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors active:bg-zinc-800 hover:bg-zinc-800 hover:text-zinc-100'
 
   if (showChat) {
     const a = activeAgent
@@ -2200,42 +2310,52 @@ function PhoneLayout({
 
   return (
     <div className="flex h-[100dvh] flex-col overflow-hidden bg-zinc-950">
-      <header className="flex h-14 shrink-0 items-center gap-1 border-b border-zinc-800 pl-3 pr-1.5">
+      <header className="flex h-14 shrink-0 items-center gap-0.5 border-b border-zinc-800 pl-3 pr-1.5">
         <div className="@container min-w-0 flex-1"><BrandMark connected={wsConnected} caption={adminSwitch ? 'User view' : undefined} compact /></div>
         {adminSwitch && (
-          <button onClick={leaveKioskView} className={phoneBtn} aria-label="Switch to admin view" title="Switch to admin view">
+          <button onClick={leaveKioskView} className={toolBtn} aria-label="Switch to admin view" title="Switch to admin view">
             <ShieldCheck className="h-5 w-5 text-violet-600 dark:text-violet-400" />
           </button>
         )}
         <NotificationBell />
+        {onTaskboard && (
+          <button onClick={onTaskboard} className={`${toolBtn} relative`} aria-label="Taskboard" title="Taskboard">
+            <ListChecks className="h-5 w-5 text-teal-600 dark:text-teal-400" />
+            {taskboardCount > 0 && (
+              <span className="absolute right-0 top-1 min-w-[16px] rounded-full bg-teal-600 px-1 text-center text-[9px] font-semibold leading-4 text-white">
+                {taskboardCount > 99 ? '99+' : taskboardCount}
+              </span>
+            )}
+          </button>
+        )}
         {onScheduled && (
-          <button onClick={onScheduled} className={`${phoneBtn} relative`} aria-label="Scheduled tasks" title="Scheduled tasks">
+          <button onClick={onScheduled} className={`${toolBtn} relative`} aria-label="Scheduled tasks" title="Scheduled tasks">
             <AlarmClock className="h-5 w-5 text-amber-600 dark:text-amber-400" />
-            {scheduledRunning && <span className="absolute right-2 top-2 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-950 dark:bg-amber-400" />}
+            {scheduledRunning && <span className="absolute right-1.5 top-2 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-950 dark:bg-amber-400" />}
           </button>
         )}
         {onLibrary && (
-          <button onClick={onLibrary} className={phoneBtn} aria-label="File library" title="File library">
+          <button onClick={onLibrary} className={toolBtn} aria-label="File library" title="File library">
             <LibraryBig className="h-5 w-5 text-violet-600 dark:text-violet-400" />
           </button>
         )}
         {onData && (
-          <button onClick={onData} className={phoneBtn} aria-label="Data library" title="Data library">
+          <button onClick={onData} className={toolBtn} aria-label="Data library" title="Data library">
             <Database className="h-5 w-5 text-emerald-600 dark:text-emerald-400" />
           </button>
         )}
         {onFolders && (
-          <button onClick={onFolders} className={phoneBtn} aria-label="Shared folders" title="Shared folders">
+          <button onClick={onFolders} className={toolBtn} aria-label="Shared folders" title="Shared folders">
             <Folders className="h-5 w-5 text-sky-600 dark:text-sky-400" />
           </button>
         )}
         {onInfo && (
-          <button onClick={onInfo} className={phoneBtn} aria-label="Info" title="Info">
+          <button onClick={onInfo} className={toolBtn} aria-label="Info" title="Info">
             <Info className="h-5 w-5" />
           </button>
         )}
         {onSettings && (
-          <button onClick={onSettings} className={phoneBtn} aria-label="Settings" title="Settings">
+          <button onClick={onSettings} className={toolBtn} aria-label="Settings" title="Settings">
             <Settings className="h-5 w-5" />
           </button>
         )}

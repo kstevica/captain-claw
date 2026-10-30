@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, useCallback } from 'react'
+import { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react'
 import { Sidebar } from './components/layout/Sidebar'
 import { TopBar } from './components/layout/TopBar'
 import { MobileNav } from './components/layout/MobileNav'
@@ -59,6 +59,7 @@ import { useChatStore } from './stores/chatStore'
 import { useContainerStore } from './stores/containerStore'
 import { useLocalAgentStore } from './stores/localAgentStore'
 import { useNotificationStore } from './stores/notificationStore'
+import { hasTaskboardLink, takeTaskboardLink, useTaskboardStore } from './stores/taskboardStore'
 import { usePipelineStore } from './stores/pipelineStore'
 import { hydrateAllStores } from './services/settingsSync'
 import { reportPublicOrigin } from './services/publicLinks'
@@ -177,8 +178,10 @@ function AppContent() {
   const kioskView = useAuthStore((s) => s.kioskView)
   const consoleRequested = useConsoleStore((s) => s.requested)
   const adminSignedIn = useAuthStore((s) => s.adminStartPending)
+  // A followed Taskboard link (see below) wins over an admin's default console.
+  const [boardVisit] = useState(() => !isAppShell() && hasTaskboardLink())
   const inConsole = consoleAdmin && (isAppShell() || consoleRequested
-    || ((layoutMode === 'console' || adminSignedIn) && !PAYMENTS_LINK))
+    || ((layoutMode === 'console' || adminSignedIn) && !PAYMENTS_LINK && !boardVisit))
   useEffect(() => {
     window.addEventListener('popstate', syncConsoleFromUrl)
     return () => window.removeEventListener('popstate', syncConsoleFromUrl)
@@ -333,6 +336,27 @@ function AppContent() {
   }, [setWsConnected, upsertInstance, removeInstance, updateInstanceActivity, fetchConcerns, fetchStats, addNotification])
 
   const { isMobile, isTablet } = useIsMobile()
+  // Taskboard v2: a ?taskboard=<task id> link (a nudge, a bell item) opens the
+  // board on that task in the simple layout, where the board lives and which
+  // takes the link (SimpleLayout). For this visit only, never as their choice
+  // (one click or a reload goes back), and on any screen: most links are
+  // tapped on a phone, and an admin's own default is the console. Only the
+  // apps' console (they have their own switch) and a console address, which
+  // says where it wants to be, open no board: the link is taken out of the
+  // address there, and they're told.
+  const visitLayout = useUIStore((s) => s.visitLayout)
+  const deciding = adminSignedIn && consoleAdmin && isAppShell()
+  // Before the first paint and any child's effect (SimpleLayout takes the link).
+  useLayoutEffect(() => {
+    if (kioskLocked || deciding || !hasTaskboardLink()) return
+    if (isAppShell() || consoleRequested) {
+      if (takeTaskboardLink()) {
+        addNotification('info', 'Taskboard', 'That link opens a task on the Taskboard, which isn\'t part of the Admin console.')
+      }
+      return
+    }
+    if (layoutMode !== 'simple') visitLayout('simple')
+  }, [kioskLocked, deciding, consoleRequested, layoutMode, visitLayout, addNotification])
   const mobilePanel = useUIStore((s) => s.mobilePanel)
   const setMobilePanel = useUIStore((s) => s.setMobilePanel)
   const sidebarDrawerOpen = useUIStore((s) => s.sidebarDrawerOpen)
@@ -449,6 +473,16 @@ function AppContent() {
 
   // ── Admin console ── (every form factor; admins are never kiosk-locked)
   if (inConsole) return <ConsoleLayout />
+
+  // A followed Taskboard link, on a phone or a tablet too (see boardVisit).
+  if (boardVisit && layoutMode === 'simple') {
+    return (
+      <>
+        <SimpleLayout />
+        {shortcutsOpen && <ShortcutsOverlay onClose={() => setShortcutsOpen(false)} />}
+      </>
+    )
+  }
 
   // ── Mobile layout ──
   if (isMobile) {
@@ -626,6 +660,9 @@ async function landAdminAfterSignIn() {
       await startDesktop({ signedIn: true })
       return
     }
+    // They signed in to follow a Taskboard link: the board, not the console
+    // (settings load slower than the board opens, so the link may be taken).
+    if (hasTaskboardLink() || useTaskboardStore.getState().open) return
     auth.setKioskView(false)
     // A console address (a bookmark, the page a session expired on) says where.
     openConsole(pageFromPath(window.location.pathname) ?? consoleHome())

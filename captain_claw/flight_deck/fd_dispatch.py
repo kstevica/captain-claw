@@ -2,7 +2,8 @@
 
 The Arbiter decides *what*; this module does it and then learns from how it went.
 
-Dispatch hands an action to the user's strongest running agent — reusing Basna's
+Dispatch hands an action to the user's strongest running agent (or the one its
+payload names, ``target_agent`` — a Taskboard next step's own agent) — reusing Basna's
 proven ``_dispatch_one`` (send an instruction, stream the turn to completion,
 collect the final output + tool actions). It runs as a background task so the
 heartbeat / approve request returns immediately; the action moves to ``dispatched``
@@ -77,6 +78,31 @@ def _strongest_agent(user_id: str) -> dict[str, Any] | None:
         return sorted(agents, key=_agent_rank, reverse=True)[0]
     except Exception:
         return None
+
+
+def _dispatch_agent(user_id: str, action: dict[str, Any]) -> dict[str, Any] | None:
+    """The agent an action runs on: the one its payload names
+    (``target_agent`` — a Taskboard next step names the task's own agent)
+    while that agent is the user's and running, else the strongest — and
+    then the ledger's log says why the named one wasn't used."""
+    slug = str((action.get("payload") or {}).get("target_agent") or "").strip()
+    if not slug:
+        return _strongest_agent(user_id)
+    try:
+        from captain_claw.flight_deck.consciousness import _user_agents
+
+        named = next((a for a in _user_agents(user_id) if a.get("slug") == slug), None)
+    except Exception:
+        named = None
+    if named is not None:
+        return named
+    other = _strongest_agent(user_id)
+    why = (f"{slug} isn't running or isn't yours — "
+           + (f"used {other.get('slug', '?')} instead" if other else "no other agent is running"))
+    get_store().log(user_id, "dispatch: target agent unavailable", why, "warn")
+    if action.get("id"):
+        get_store().update_payload(str(action["id"]), {"dispatch_note": why})
+    return other
 
 
 def _grounding_suffix(action: dict[str, Any]) -> str:
@@ -370,7 +396,9 @@ async def _execute_and_judge(
         res = await _dispatch_one(
             int(agent.get("port") or 0), str(agent.get("auth", "")),
             _instruction_for(action, approved_by_human=approved_by_human), 180.0,
-            automation=dict(_AUTONOMY_AUTOMATION, **_nudge_delivery_mark(user_id, action)),
+            # ``ref``: the action this turn runs for, so the agent's turn
+            # register names it and the Taskboard tells the turn on its task.
+            automation=dict(_AUTONOMY_AUTOMATION, ref=str(aid), **_nudge_delivery_mark(user_id, action)),
         )
         output = str(res.get("output") or "").strip()
         cfg = resolve_config(user_id)
@@ -390,10 +418,13 @@ async def _execute_and_judge(
             # Also send the nudge to the owner's own channels — the ones they
             # switched on (the agent turn already surfaces it in web chat).
             if output:
-                from captain_claw.flight_deck.owner_notify import notify_owner
+                from captain_claw.flight_deck.owner_notify import notify_owner, nudge_texts, task_of
                 name = str(agent.get("name") or agent.get("slug") or "").strip()
-                await notify_owner(user_id, "nudge", output, cfg=cfg, action_id=str(aid),
-                                   bell=("autonomy_nudge", f"Nudge from {name}" if name else "Nudge", output))
+                # With the link to its task on the Taskboard, when it is about one
+                # (off this loop: the board's lock can be held for a while).
+                said, bell_body = nudge_texts(await asyncio.to_thread(task_of, action), output)
+                await notify_owner(user_id, "nudge", said, cfg=cfg, action_id=str(aid), device_text=output,
+                                   bell=("autonomy_nudge", f"Nudge from {name}" if name else "Nudge", bell_body))
             # If this nudge was reminding about a tracked follow-up, re-arm it
             # (escalate: sooner each time) — or retire it after enough nudges.
             fu_id = str((action.get("payload") or {}).get("follow_up_id") or "")
@@ -598,6 +629,62 @@ def _enrich_args_from_event(action_id: str, args: dict[str, Any], event_ref: str
     return out
 
 
+async def _deliver_reply(user_id: str, origin: dict[str, Any], text: str, agent_slug: str) -> tuple[bool, str]:
+    """A reply the user approved, to the task's own origin: ``(delivered,
+    note)``, a ValueError when that chat can't be written to now. Only here
+    may Flight Deck write through the shared Telegram bot (a chat it holds
+    for this agent, on this board) or to a Messenger thread (the person who
+    wrote, never the bus channel they were on), and only here does a device
+    show what it isn't waiting for."""
+    from captain_claw.flight_deck.delivery_routes import (
+        channel_listening,
+        deliver_to_origin,
+        telegram_relayed,
+    )
+
+    kind, address = str(origin.get("kind") or ""), str(origin.get("address") or "")
+    if kind == "telegram":
+        if not telegram_relayed(address, agent_slug, user_id):
+            raise ValueError("that Telegram chat isn't one the deck's bot holds for this agent")
+        from captain_claw.flight_deck import telegram_shared
+        from captain_claw.flight_deck.meta_webhook_bridge import strip_markdown
+
+        sent = await telegram_shared.send_text(address, strip_markdown(text))
+        return sent, "ok (shared bot)" if sent else "error:telegram-shared-not-delivered"
+    if kind == "messenger":
+        from captain_claw.flight_deck import messenger_bridge
+
+        if not messenger_bridge.psid_allowed(address):
+            raise ValueError("that Messenger chat isn't on this deck's allowed list")
+        sent = await messenger_bridge._send_messenger_text(address, text)
+        return sent, "ok" if sent else "error:messenger-not-delivered"
+    if kind == "channel" and not channel_listening(address):
+        raise ValueError("nobody is on that channel now: the device is off")
+    return await deliver_to_origin(origin, text, proactive=True)
+
+
+async def _run_fd_action(action_id: str, args: dict[str, Any], agent_slug: str = "", user_id: str = "") -> dict[str, Any]:
+    """A catalog action Flight Deck carries out itself (``home: fd``), in
+    run_action's ``{ok, content, error}``. Today: reply.on_origin — the text
+    to the task's origin through the deck's own delivery (the WhatsApp
+    allowlist and /mute, the deck's shared Telegram bot for a chat it holds
+    for *agent_slug*'s agent on *user_id*'s board, the person on Messenger,
+    the user's device while it is on). A chat the deck can't reach now is
+    not sent to: the task records why."""
+    if action_id != "reply.on_origin":
+        return {"ok": False, "error": f"unknown action: {action_id}"}
+    origin = args.get("origin") or {}
+    try:
+        delivered, note = await _deliver_reply(user_id, origin, str(args.get("text") or ""), agent_slug)
+    except ValueError as exc:
+        return {"ok": False, "error": f"not delivered ({exc})"}
+    except Exception as exc:  # noqa: BLE001 — a channel's failure is the action's outcome
+        return {"ok": False, "error": f"delivery failed: {exc}"}
+    if delivered:
+        return {"ok": True, "content": f"Delivered ({note})"}
+    return {"ok": False, "error": f"not delivered ({note})"}
+
+
 async def _dispatch_tool_action(
     user_id: str, action: dict[str, Any], *, approved_by_human: bool = False,
 ) -> dict[str, Any]:
@@ -609,24 +696,43 @@ async def _dispatch_tool_action(
     reached any other way it is held as a proposal (J16, belt to
     ``should_auto_dispatch``). Email/human-only actions never learn trust (J2)."""
     from captain_claw.flight_deck import action_catalog
+    from captain_claw.flight_deck.autonomy import TASKBOARD_SOURCE
 
     store = get_store()
     payload = action.get("payload") or {}
     action_id = str(payload.get("action_id") or "")
     spec = action_catalog.get_action(action_id, user_id)
-    if action_catalog.is_mail_write(spec) and not approved_by_human:
-        note = "email actions need your approval"
+    board = str(action.get("source") or "") == TASKBOARD_SOURCE
+    if (action_catalog.is_mail_write(spec) or board) and not approved_by_human:
+        # A Taskboard next step, whatever it does, leaves only on the user's Approve.
+        note = "email actions need your approval" if not board else "a Taskboard next step needs your approval"
         store.update_status(action["id"], "awaiting_approval", outcome_note=note)
         store.log(user_id, f"held: {action_id} needs approval", str(action.get("title") or ""), "warn")
         return {"ok": False, "target": action_id, "note": note}
-    args = dict(payload.get("args")) if isinstance(payload.get("args"), dict) else {}
-    # Theme B: ground a reply draft on the real event so it targets the actual
-    # sender/thread instead of whatever the arbiter guessed.
-    args = _enrich_args_from_event(action_id, args, str(payload.get("event_ref") or ""))
+    if board:
+        # Its call is built from what the user approved (edited or not), the
+        # recipient checked against the task's own once more.
+        from captain_claw.flight_deck import taskboard_nextsteps
+        try:
+            args = taskboard_nextsteps.dispatch_args(action)
+        except ValueError as exc:
+            note = f"not sent: {exc}"[:500]
+            store.update_status(action["id"], "done", outcome="fail", outcome_note=note)
+            store.log(user_id, f"tool_action: {action_id} (refused)", note, "warn")
+            return {"ok": True, "target": action_id, "note": note}
+    else:
+        args = dict(payload.get("args")) if isinstance(payload.get("args"), dict) else {}
+        # Theme B: ground a reply draft on the real event so it targets the actual
+        # sender/thread instead of whatever the arbiter guessed.
+        args = _enrich_args_from_event(action_id, args, str(payload.get("event_ref") or ""))
     store.update_status(action["id"], "dispatched")
     from captain_claw.flight_deck.actions import run_action
 
-    res = await run_action(user_id, action_id, args, approved_by_human=approved_by_human)
+    if spec and spec.get("home") == "fd":
+        res = await _run_fd_action(action_id, args, str(payload.get("target_agent") or ""), user_id)
+    else:
+        res = await run_action(user_id, action_id, args, approved_by_human=approved_by_human,
+                               agent=_dispatch_agent(user_id, action) if payload.get("target_agent") else None)
     ok = bool(res.get("ok"))
     note = str(res.get("content") or res.get("error") or "")[:500]
     result_text = f"{res.get('error') or ''} {res.get('content') or ''}"
@@ -673,7 +779,9 @@ async def _dispatch_tool_action(
 async def dispatch_action(
     user_id: str, action: dict[str, Any], *, approved_by_human: bool = False,
 ) -> dict[str, Any]:
-    """Execute one action by handing it to the strongest agent, in the background.
+    """Execute one action by handing it to an agent (the one its payload names
+    as ``target_agent`` while that one is the user's and running, else the
+    strongest), in the background.
     Marks the action ``dispatched`` and spawns the run+judge task. Returns
     ``{ok, target, note}`` — ok=False (note set) when no agent is reachable, and
     the action keeps its prior status for the caller to resolve.
@@ -686,7 +794,7 @@ async def dispatch_action(
         return await _dispatch_tool_action(user_id, action, approved_by_human=approved_by_human)
     if str(action.get("kind")) == "track":
         return await _dispatch_track(user_id, action)
-    agent = _strongest_agent(user_id)
+    agent = _dispatch_agent(user_id, action)
     if not agent:
         return {"ok": False, "target": "", "note": "no running agent to dispatch to"}
     store = get_store()

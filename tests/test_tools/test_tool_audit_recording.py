@@ -258,3 +258,97 @@ async def test_ship_loop_keeps_records_when_flight_deck_refuses(spool, monkeypat
     with pytest.raises(asyncio.CancelledError):
         await spool._ship_loop()
     assert spool._spool().pending()
+
+
+# ── Turn id and result refs (Taskboard) ───────────────────────────────
+
+
+class MailTool(Tool):
+    name = "google_mail"
+    description = "Mail"
+    parameters = {"type": "object", "properties": {}, "required": []}
+
+    async def execute(self, **kwargs):
+        if kwargs.get("action") == "search":
+            return ToolResult(success=True, content="  Message ID: m-listed\n  Thread ID: t-listed")
+        if kwargs.get("fail"):
+            return ToolResult(success=False, error="Message ID: m-failed")
+        return ToolResult(success=True, content="Email sent.\n  To: ana@example.com\n"
+                                                "  Message ID: 18c2f0a1b\n  Thread ID: 18c2e9f00")
+
+
+@pytest.mark.asyncio
+async def test_calls_carry_their_turns_id_and_count_for_it(spool):
+    from captain_claw import turn_register
+
+    reg = ToolRegistry()
+    reg.register(EchoTool())
+    turn = turn_register.Turn(turn_id="ab" * 16, started_at=0.0)
+    tokens = (turn_register.current_turn_id.set(turn.turn_id), turn_register._CURRENT.set(turn))
+    try:
+        await reg.execute("echo", {})
+        await reg.execute("echo", {"fail": True})
+        with pytest.raises(ToolBlockedError):
+            await reg.execute("echo", {}, task_policy=ToolPolicy(deny=["echo"]))
+    finally:
+        turn_register.current_turn_id.reset(tokens[0])
+        turn_register._CURRENT.reset(tokens[1])
+    await reg.execute("echo", {})
+    recs = _ended(spool)
+    assert [r["turn_id"] for r in recs] == ["ab" * 16] * 3 + [""]
+    assert (turn.tool_calls, turn.failed_tool_calls) == (3, 1)     # a refusal isn't a failed call
+
+
+@pytest.mark.asyncio
+async def test_an_ok_send_records_the_ids_its_result_named(spool):
+    reg = ToolRegistry()
+    reg.register(MailTool())
+    await reg.execute("google_mail", {"action": "send", "to": "ana@example.com", "body": "hi"})
+    await reg.execute("google_mail", {"action": "search", "query": "x"})
+    await reg.execute("google_mail", {"action": "send", "fail": True})
+    sent, searched, failed = _ended(spool)
+    assert sent["refs"] == {"gmail_message_id": "18c2f0a1b", "gmail_thread_id": "18c2e9f00"}
+    assert "refs" not in searched and "refs" not in failed
+
+
+@pytest.mark.parametrize("tool, action, content, refs", [
+    ("google_mail", "create_draft", "Draft created.\n  Threaded under: t-9 (reply to m-1)\n  Draft ID: r-5\n"
+     "  Message ID: m-6", {"gmail_draft_id": "r-5", "gmail_message_id": "m-6", "gmail_thread_id": "t-9"}),
+    ("google_mail", "send", "Email sent.\n  Message ID: ?\n  Thread ID: ?", {}),
+    ("whatsapp_web", "send", "Sent to Ana on WhatsApp (message id 3EB0C4F2).\nText as sent:\nMessage ID: no",
+     {"waweb_message_id": "3EB0C4F2"}),
+    ("whatsapp_send_file", "", "Sent 'report.pdf' to WhatsApp 38591234567 as a document.",
+     {"wa_id": "38591234567"}),
+    ("google_calendar", "create_event", "Created event 'Lunch' on Google Calendar.\n  ID: ev123\n  When: Fri",
+     {"calendar_event_id": "ev123"}),
+    ("microsoft_calendar", "update_event", "Updated event 'Sync'.\n  ID: AAMkAD=\n  When: Mon",
+     {"calendar_event_id": "AAMkAD="}),
+    ("google_calendar", "list_events", "  ID: ev1\n  ID: ev2", {}),
+    ("web_fetch", "", "Message ID: x", {}),
+])
+def test_result_refs(tool, action, content, refs):
+    assert tool_audit.result_refs(tool, action, ToolResult(success=True, content=content)) == refs
+
+
+def test_clean_refs_keeps_known_id_shaped_values():
+    assert tool_audit.clean_refs({"gmail_message_id": "18c", "body": "secret text", "wa_id": 385912,
+                                  "gmail_thread_id": "has spaces in it", "calendar_event_id": True}) == {
+        "gmail_message_id": "18c", "wa_id": "385912"}
+    assert tool_audit.clean_refs("nope") == {}
+
+
+def test_a_spool_an_older_agent_left_still_ships(tmp_path, monkeypatch, spool):
+    import sqlite3
+
+    path = tmp_path / "old_spool.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(tool_audit._SPOOL_DDL.replace("    refs        TEXT NOT NULL DEFAULT '',\n", ""))
+    conn.execute("INSERT INTO calls (boot, seq, started_at, body, ended, outcome) VALUES (?, 1, 1.0, ?, 1, 'ok')",
+                 ("f" * 16, json.dumps({"tool": "echo", "params": {}})))
+    conn.commit()
+    conn.close()
+    monkeypatch.setenv("CLAW_TOOL_AUDIT_SPOOL", str(path))
+    spool.finish(spool.start("echo", {}), "ok")
+    old_rec, new_rec = _ended(spool)
+    assert (old_rec["boot"], old_rec["seq"], old_rec["phase"], old_rec["outcome"]) == ("f" * 16, 1, "full", "ok")
+    assert new_rec["boot"] == spool._BOOT and "turn_id" in new_rec

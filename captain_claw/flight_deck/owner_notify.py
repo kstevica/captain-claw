@@ -16,6 +16,10 @@ goes to every channel the user switched on in their autonomy config:
 And always the bell — Flight Deck's own notifications, in the full view and
 the kiosk alike: where the text is read, and a proposal approved or rejected.
 
+During the user's quiet hours a proposal rings no phone: it goes to the bell
+and, silently, to the devices' count (it can wait for the morning — the arbiter
+makes none then, the Taskboard's triage runs at any hour).
+
 The devices' count follows the ledger: every status change calls
 ``waiting_may_have_changed`` (autonomy.py), which sends a silent update
 when the number moved.
@@ -52,7 +56,9 @@ _sent_count: dict[str, int] = {}
 
 
 def waiting_count(user_id: str) -> int:
-    """How many of this user's proposals wait for their approval."""
+    """How many of this user's proposals wait for their approval (a
+    Taskboard next step that waited a week expires first)."""
+    get_store().expire_taskboard_proposals(user_id)
     return get_store().count_status(user_id, "awaiting_approval")
 
 
@@ -72,12 +78,62 @@ def device_line(text: str) -> str:
     return line if len(line) <= DEVICE_LINE_MAX else line[:DEVICE_LINE_MAX - 1].rstrip() + "…"
 
 
-def proposal_text(action: dict[str, Any], waiting: int) -> str:
-    """What WhatsApp and Telegram say about a new proposal."""
+def taskboard_link(task_id: str, base: str = "") -> str:
+    """The link that opens the Taskboard at a task: ``?taskboard=<id>`` on
+    ``base`` (the deck's public URL), or on the page the bell is read on."""
+    if not task_id:
+        return ""
+    if not base:
+        return f"?taskboard={task_id}"
+    sep = "&" if "?" in base else ("" if base.endswith("/") else "/") + "?"
+    return f"{base}{sep}taskboard={task_id}"
+
+
+def task_of(action: dict[str, Any]) -> str:
+    """The Taskboard task an action is about ('' when none): a next step's
+    own, else the one the board keeps it on (``autonomy:<id>``, or its
+    follow-up's ``fu:<id>``) — on the action's user's board only. It takes
+    the board's lock, which a long read can hold: off the event loop."""
+    from captain_claw.flight_deck.autonomy import TASKBOARD_SOURCE
+
+    payload = action.get("payload") or {}
+    if action.get("source") == TASKBOARD_SOURCE and payload.get("task_id"):
+        return str(payload["task_id"])
+    try:
+        from captain_claw.flight_deck.taskboard_nextsteps import open_board
+
+        board, uid = open_board(), _norm_user(str(action.get("user_id") or ""))
+        if board is None:
+            return ""
+        keys = [f"autonomy:{action.get('id')}"] + ([f"fu:{payload['follow_up_id']}"]
+                                                   if payload.get("follow_up_id") else [])
+        return next((t for t in (board.task_for_key(uid, k) for k in keys) if t), "")
+    except Exception as exc:  # noqa: BLE001 — a link is a courtesy, never a failure
+        _log.debug("no Taskboard task for %s: %s", action.get("id"), exc)
+        return ""
+
+
+def proposal_text(action: dict[str, Any], waiting: int, task_id: str = "") -> str:
+    """What WhatsApp and Telegram say about a new proposal — the link opens
+    its task (*task_id*) on the Taskboard when it is about one."""
     title = str(action.get("title") or "").strip() or "a new proposal"
     more = f" ({waiting} waiting)" if waiting > 1 else ""
     url = os.environ.get("FD_PUBLIC_URL", "").strip()
+    if url and task_id:
+        url = taskboard_link(task_id, url)
     return f"Waiting for your approval in Flight Deck{more}: {title}" + (f"\n{url}" if url else "")
+
+
+def nudge_texts(task_id: str, text: str) -> tuple[str, str]:
+    """A nudge as WhatsApp / Telegram say it and as the bell does: with the
+    link to its task (*task_id*) on the Taskboard when it is about one
+    (WhatsApp and Telegram only on a deck with a public URL; the bell's link
+    opens in place). Devices show the first line, never the link."""
+    if not task_id:
+        return text, text
+    url = os.environ.get("FD_PUBLIC_URL", "").strip()
+    out = f"{text}\n{taskboard_link(task_id, url)}" if url else text
+    return out, f"{text}\n[Open in Taskboard]({taskboard_link(task_id)})"
 
 
 def _device_key(user_id: str, device_id: str) -> str:
@@ -106,8 +162,15 @@ async def notify_owner(
         _log.debug("notify: no config for %s: %s", user_id, exc)
         return out
     store = get_store()
+    hushed = False
+    try:
+        hushed = kind == "proposal" and _quiet(cfg)
+        if hushed:
+            store.log(user_id, "proposal → bell only", "quiet hours: WhatsApp and Telegram not rung")
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("quiet hours for %s unknown: %s", user_id, exc)
 
-    if cfg.get("nudge_to_whatsapp", True):
+    if cfg.get("nudge_to_whatsapp", True) and not hushed:
         try:
             from captain_claw.flight_deck.fd_dispatch import _nudge_waids
             from captain_claw.flight_deck.whatsapp_bridge import push_to_waid
@@ -125,7 +188,7 @@ async def notify_owner(
         except Exception as exc:  # noqa: BLE001
             _log.debug("%s whatsapp delivery failed: %s", kind, exc)
 
-    if cfg.get("notify_telegram", False):
+    if cfg.get("notify_telegram", False) and not hushed:
         try:
             from captain_claw.flight_deck.fd_scheduler import _deliver_telegram_owner
 
@@ -187,19 +250,33 @@ async def notify_proposal(user_id: str, action: dict[str, Any]) -> dict[str, Any
         _log.debug("proposal notify: no count for %s: %s", user_id, exc)
         waiting = 1
     title = str(action.get("title") or "").strip()
+    task_id = await asyncio.to_thread(task_of, action)
     return await notify_owner(
-        user_id, "proposal", proposal_text(action, waiting),
+        user_id, "proposal", proposal_text(action, waiting, task_id),
         device_text=f"Waiting for your approval: {title}" if title else "A proposal waits in Flight Deck",
-        bell=_proposal_bell(action), action_id=str(action.get("id") or ""),
+        bell=_proposal_bell(action, task_id), action_id=str(action.get("id") or ""),
     )
 
 
-def _proposal_bell(action: dict[str, Any]) -> tuple[str, str, str]:
-    """A proposal's bell notification: (type, title, body)."""
+def _proposal_bell(action: dict[str, Any], task_id: str = "") -> tuple[str, str, str]:
+    """A proposal's bell notification: (type, title, body) — its last line
+    the link to its task (*task_id*) on the Taskboard when it is about one."""
     title = str(action.get("title") or "").strip()
     rationale = str(action.get("rationale") or "").strip()
     return ("autonomy_proposal", "Waiting for your approval",
-            (title or "A new proposal") + (f"\n{rationale[:600]}" if rationale else ""))
+            (title or "A new proposal") + (f"\n{rationale[:600]}" if rationale else "")
+            + (f"\n[Open in Taskboard]({taskboard_link(task_id)})" if task_id else ""))
+
+
+async def bells_told_plain(user_id: str, action_ids: list[str]) -> None:
+    """The bell's copy of these proposals keeps nothing of what they said (an
+    opt-in inbox's text they were written from has gone). Never raises."""
+    try:
+        from captain_claw.flight_deck.auth import get_db
+
+        await get_db().tell_notifications_plain(_norm_user(user_id), BELL_REF, action_ids, "A next step expired")
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("bell copy of %s not told plain: %s", user_id, exc)
 
 
 async def bell_backfill(user_id: str) -> int:
@@ -217,7 +294,8 @@ async def bell_backfill(user_id: str) -> int:
             if not aid or await db.count_notifications_since(
                     _norm_user(user_id), "", "autonomy_proposal", ref_type=BELL_REF, ref_id=aid):
                 continue
-            if await _to_bell(user_id, *_proposal_bell(action), action_id=aid):
+            task_id = await asyncio.to_thread(task_of, action)
+            if await _to_bell(user_id, *_proposal_bell(action, task_id), action_id=aid):
                 added += 1
         return added
     except Exception as exc:  # noqa: BLE001
@@ -243,12 +321,18 @@ async def waiting_bells(user_id: str, have: set[str], *, unread_only: bool = Fal
 
 def waiting_may_have_changed(user_id: str) -> None:
     """From the ledger (sync): bring the devices' count up to date, later on
-    this event loop. No loop (a script, a test): nothing to do."""
+    this event loop — from a worker thread (the Taskboard writes the ledger
+    off the loop), on the deck's. No loop (a script, a test): nothing to do."""
     try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
+        asyncio.get_running_loop().create_task(_sync_count(user_id))
         return
-    loop.create_task(_sync_count(user_id))
+    except RuntimeError:
+        pass
+    from captain_claw.flight_deck.taskboard_passive import _main_loop
+
+    loop = _main_loop()
+    if loop is not None:
+        asyncio.run_coroutine_threadsafe(_sync_count(user_id), loop)
 
 
 async def _sync_count(user_id: str) -> None:

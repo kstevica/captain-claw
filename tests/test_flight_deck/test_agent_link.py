@@ -222,7 +222,8 @@ async def test_a_message_runs_as_a_link_turn_and_its_answer_names_it(deck):
     assert sent["client_msg_id"].startswith("lnk_")
     assert (sent["source"], sent["source_label"]) == ("link", "Acme CRM")
     assert sent["context_notes"] == al.link_context_notes(LINK)
-    assert sent["automation"] == al.link_automation(LINK)
+    # The system's id of the message: the agent's turn names what it answers.
+    assert sent["automation"] == al.link_automation(LINK, "m1") == {**al.link_automation(LINK), "ref": "m1"}
     assert "surface" not in sent
     await deck.frame({"type": "status", "status": "thinking"})  # the agent's own, said once more
     await deck.answer("Filed: Ana (Acme).", session="s-9")

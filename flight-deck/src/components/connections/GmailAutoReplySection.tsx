@@ -1727,8 +1727,9 @@ function ActivityRow({ row, accountEmail, open, onToggle, onDone }: {
 
 // A reply that waits for the owner: send it as it is, edit and send, or
 // dismiss it. Flight Deck re-checks it for sensitive data and that nobody
-// answered in the thread meanwhile; a second click is refused.
-function HeldCard({ row, gmailUrl, onDone }: {
+// answered in the thread meanwhile; a second click is refused. The
+// Taskboard shows the same card on the held reply's task.
+export function HeldCard({ row, gmailUrl, onDone }: {
   row: AutoReplyActivity
   gmailUrl: string
   onDone: (message: string) => Promise<void>

@@ -46,13 +46,25 @@ export async function markAllNotificationsRead(): Promise<void> {
 
 // ── Autonomous Work proposals in the bell (ref_type 'autonomy_action') ──
 
-/** The ids of this user's proposals still waiting for approval. */
-export async function fetchWaitingProposalIds(): Promise<Set<string>> {
+export interface WaitingProposal {
+  /** A Taskboard next step: its wording is a model's, read before it is approved. */
+  taskboard: boolean
+  text: string
+  to: string
+}
+
+/** This user's proposals still waiting for approval, by id. */
+export async function fetchWaitingProposals(): Promise<Map<string, WaitingProposal>> {
   const r = await fdFetch('/fd/autonomy/actions?status_filter=awaiting_approval&limit=200')
   if (!r.ok) throw new Error(`HTTP ${r.status}`)
   const data = await r.json()
-  const actions: { id?: string }[] = Array.isArray(data?.actions) ? data.actions : []
-  return new Set(actions.map((a) => String(a.id || '')).filter(Boolean))
+  type Row = { id?: string; source?: string; payload?: { text?: string; to?: string; to_options?: { address?: string; display?: string }[] } }
+  const actions: Row[] = Array.isArray(data?.actions) ? data.actions : []
+  return new Map(actions.filter((a) => a.id).map((a) => {
+    const p = a.payload ?? {}
+    const to = p.to_options?.find((o) => o.address === p.to)?.display || p.to || ''
+    return [String(a.id), { taskboard: a.source === 'taskboard', text: String(p.text || ''), to }]
+  }))
 }
 
 /** Approve or reject a waiting proposal; throws with the deck's reason. */

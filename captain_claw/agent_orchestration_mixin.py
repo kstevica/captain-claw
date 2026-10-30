@@ -1228,8 +1228,10 @@ class AgentOrchestrationMixin:
         # repeats from turn to turn once auto-compaction resets the list.
         self._scale_reply_gate_turn_idx: int | None = None
         self._pw_enforcement_streak: int = 0
-        # Reset per-turn success flag (updated by finish()).
+        # Reset per-turn success flag (updated by finish()), and whether the
+        # user stopped the turn (the Taskboard tells a Stop from a failure).
         self._last_complete_success = True
+        self._last_complete_cancelled = False
         # Scale-progress tracker: populated when the scale advisory fires.
         # The tool loop uses this to emit "3 of 27 (11%)" progress.
         self._scale_progress: dict[str, Any] | None = None
@@ -2017,6 +2019,7 @@ class AgentOrchestrationMixin:
                 self._set_runtime_status("waiting")
                 self._emit_thinking("Cancelled", phase="done")
                 cancel_ev.clear()
+                self._last_complete_cancelled = True
                 return finish("Request cancelled by user.", success=False)
 
             # ── Pipeline runtime tick ─────────────────────────────

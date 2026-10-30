@@ -13,6 +13,12 @@ all of which already lives here:
 This is the durable counterpart to the old per-turn channel binding: it works
 long after the live turn ended, because the origin came from the session's
 persisted metadata rather than an in-memory map.
+
+A Taskboard reply the user approved goes out through fd_dispatch._run_fd_action,
+which alone may write through the deck's shared Telegram bot (a chat it holds
+for that task's agent, on that board: :func:`telegram_relayed`) — the route here
+is open to any signed-in user and any agent, and the bot's chats are other
+people's.
 """
 
 from __future__ import annotations
@@ -39,8 +45,10 @@ _log = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def deliver_to_origin(origin: dict, text: str) -> tuple[bool, str]:
-    """Send ``text`` to ``origin``. Returns ``(delivered, note)``."""
+async def deliver_to_origin(origin: dict, text: str, *, proactive: bool = False) -> tuple[bool, str]:
+    """Send ``text`` to ``origin``. Returns ``(delivered, note)``. *proactive*:
+    a device on a channel shows it although it isn't waiting for an answer
+    (bus_client.on_bus) — what the user just approved, nothing else."""
     o = normalize_origin(origin)
     if not o:
         return False, "no-origin"
@@ -67,6 +75,7 @@ async def deliver_to_origin(origin: dict, text: str) -> tuple[bool, str]:
             "type": "agent",
             "text": text,
             "source": "async",
+            **({"proactive": True} if proactive else {}),
             "ts": datetime.now(timezone.utc).isoformat(),
         })
         return True, "ok"
@@ -77,6 +86,38 @@ async def deliver_to_origin(origin: dict, text: str) -> tuple[bool, str]:
         return True, "noop:web"
 
     return False, f"error:unknown-kind:{kind}"
+
+
+def telegram_relayed(chat: str, slug: str, owner: str | None = None) -> bool:
+    """Whether the deck's shared Telegram bot holds *chat* for *slug*'s agent
+    (an approved user's linked chat, or a group they brought that agent into)
+    — that user being *owner*, when given. Its token never leaves Flight
+    Deck, so a chat on an agent's own bot is never one."""
+    from captain_claw.flight_deck import telegram_shared
+
+    chat = str(chat or "").strip()
+    if not chat or not telegram_shared.token():
+        return False
+    return chat in telegram_shared.chats_for_slug(slug, owner) | telegram_shared.groups_for_slug(slug, owner)
+
+
+def channel_listening(address: str) -> bool:
+    """Whether anyone takes what goes out on the channel bus *address* now:
+    a page subscribed to it, a device whose socket is open, a forwarder
+    wired to it. A device switched off is nobody."""
+    from captain_claw.flight_deck import glasses_bridge
+    from captain_claw.flight_deck.bus_client import BusClient
+
+    ch = glasses_bridge._channels.get(str(address or ""))
+    if ch is None:
+        return False
+    if ch.subscribers:
+        return True
+    for cb in ch.callback_subscribers:
+        owner = getattr(cb, "__self__", None)
+        if not isinstance(owner, BusClient) or (not owner.closed and owner.TAKES_PROACTIVE):
+            return True
+    return False
 
 
 def _deliver_caller_ok(request: Request, user: dict | None) -> bool:
