@@ -2,7 +2,7 @@ import {
   AlarmClock, Bot, Code2, Glasses, Inbox, Link2, Mail, MessageCircle, MessagesSquare, Plug, Send, Smartphone, Sparkles,
   Users, Watch,
 } from 'lucide-react'
-import type { TaskAnswer, TaskFlags, TaskParty } from '../../services/taskboardApi'
+import type { TaskAnswer, TaskFlags, TaskParty, TaskView } from '../../services/taskboardApi'
 import { fmtRelative } from '../../services/schedulerApi'
 
 // The Taskboard's words and plain helpers (no components, so its parts file
@@ -305,6 +305,88 @@ export function answerText(question: string, a: TaskAnswer): string {
 // ── Time ──
 
 /** How long ago, never "in a moment" for a server clock a little ahead. */
+// ── Keyboard: Gmail's keys wherever a button means the same ───────────
+
+/** What the open task's buttons answer to, as `KeyboardEvent.key` (so however
+ *  a keyboard's layout types it): Gmail's archive, mark read and unread, spam,
+ *  snooze, label, move to, reply and undo. Approving a next step has no key. */
+export const TASK_KEYS = {
+  done: 'e', reopen: 'U', gotIt: 'I', notTask: '!', yes: 'y', snooze: 'b', rename: 'l', merge: 'v', nextStep: 'r', undo: 'z',
+} as const
+
+/** `g`, then one of these within {@link GO_WAIT_MS}: Gmail's "go to". */
+export const GO_KEYS: Record<string, TaskView> = { i: 'needs_me', n: 'needs_me', o: 'waiting', w: 'working', d: 'done', a: 'all' }
+export const GO_WAIT_MS = 1500
+
+/** How a key reads on a button: a capital is typed with Shift. */
+export function keyLabel(key: string): string {
+  return /^[A-Z]$/.test(key) ? `⇧${key}` : key
+}
+
+/** The `?` sheet. */
+export const KEY_SHEET: { title: string; rows: { keys: string[]; what: string }[] }[] = [
+  { title: 'Move around', rows: [
+    { keys: ['j', 'k'], what: 'Next or previous task' },
+    { keys: ['o', 'Enter'], what: 'Open the task' },
+    { keys: ['u'], what: 'Back to the list' },
+    { keys: ['/'], what: 'Search' },
+    { keys: ['g n'], what: 'Go to Needs me' },
+    { keys: ['g o'], what: 'Go to Waiting on others' },
+    { keys: ['g w'], what: 'Go to Agents working' },
+    { keys: ['g d'], what: 'Go to Done' },
+    { keys: ['g a'], what: 'Go to All' },
+    { keys: ['?'], what: 'This list' },
+  ] },
+  { title: 'On the open task', rows: [
+    { keys: [TASK_KEYS.done], what: 'Done' },
+    { keys: [TASK_KEYS.reopen], what: 'Reopen' },
+    { keys: [TASK_KEYS.gotIt], what: 'Got it' },
+    { keys: [TASK_KEYS.notTask], what: 'Not a task' },
+    { keys: [TASK_KEYS.yes], what: 'Yes, it is a task' },
+    { keys: [TASK_KEYS.snooze], what: 'Snooze, then 1–3 to pick how long' },
+    { keys: [TASK_KEYS.rename], what: 'Rename' },
+    { keys: [TASK_KEYS.merge], what: 'Merge into…' },
+    { keys: [TASK_KEYS.nextStep], what: 'Review or suggest a next step' },
+    { keys: [TASK_KEYS.undo], what: 'Undo last change' },
+    { keys: ['Esc'], what: 'Close what is on top' },
+  ] },
+]
+
+/** The key a press means to the board — '' when it isn't the board's: typed
+ *  into a field or a list, with a modifier held (Cmd+K and the like), while
+ *  composing, or from somewhere outside the board (*root*). Enter only from
+ *  nowhere in particular: on a button, it presses that button. */
+export function boardKey(
+  e: { key: string; ctrlKey?: boolean; metaKey?: boolean; altKey?: boolean; isComposing?: boolean; defaultPrevented?: boolean
+    target?: unknown },
+  root?: { contains(el: never): boolean } | null,
+): string {
+  if (e.ctrlKey || e.metaKey || e.altKey || e.isComposing || e.defaultPrevented) return ''
+  const el = e.target as { tagName?: string; isContentEditable?: boolean } | null | undefined
+  const tag = el?.tagName ?? ''
+  if (el?.isContentEditable || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return ''
+  const nowhere = !tag || tag === 'BODY'
+  if (root && !nowhere && !root.contains(el as never)) return ''
+  if (e.key === 'Enter') return nowhere ? 'Enter' : ''
+  return e.key.length === 1 ? e.key : ''
+}
+
+/** The row `j` (*step* 1) or `k` (-1) goes to, -1 for none. From the open task;
+ *  one that just left the list (Done, on Needs me) leaves its place to the next,
+ *  which `j` takes; with none open, from *last*, where the cursor was. */
+export function stepTo(ids: string[], openId: string | null, last: number, step: 1 | -1): number {
+  if (!ids.length) return -1
+  const at = openId ? ids.indexOf(openId) : -1
+  if (openId && at < 0) {
+    const place = Math.min(Math.max(last, 0), ids.length)
+    return step > 0 ? Math.min(place, ids.length - 1) : Math.max(place - 1, 0)
+  }
+  const from = at >= 0 ? at : last
+  if (from < 0) return 0
+  const to = from + step
+  return to >= ids.length || to < 0 ? -1 : to
+}
+
 export function agoRelative(epoch: number): string {
   // fmtRelative reads the clock again, so a time clamped to "now" can still
   // come out a hair ahead of it ("in a moment"): the last 45 s are "just now".
