@@ -69,12 +69,25 @@ export interface WhatsAppWebMessage {
   reactions: string[]
 }
 
+// History from a link that ended (disconnected with "keep", removed on the phone,
+// banned): the user's agents still read it, nothing is sent from it, and it stays
+// until the user deletes it.
+export interface WhatsAppWebKept {
+  id: string
+  number: string
+  kept_at: string | null
+  // Days the messages are kept, as chosen for that link; null = everything.
+  retention_days: number | null
+  stats: { messages: number; chats: number; oldest: number | null; newest: number | null }
+}
+
 export interface MyWhatsAppWeb {
   available: boolean
   reason: string
   allowed: boolean
   can_admin: boolean
   link: WhatsAppWebLink
+  kept?: WhatsAppWebKept[]
   // After a disconnect: whether the device also left the phone's Linked devices.
   removed_from_phone?: boolean
 }
@@ -129,7 +142,10 @@ export const linkWhatsAppWeb = () => post<MyWhatsAppWeb>('/fd/whatsapp-web/link'
 export const whatsAppWebPairCode = (phone: string) => post<MyWhatsAppWeb>('/fd/whatsapp-web/pair-code', { phone })
 export const reconnectWhatsAppWeb = () => post<MyWhatsAppWeb>('/fd/whatsapp-web/reconnect')
 export const cancelWhatsAppWeb = () => post<MyWhatsAppWeb>('/fd/whatsapp-web/cancel')
-export const unlinkWhatsAppWeb = () => fdFetch<MyWhatsAppWeb>('/fd/whatsapp-web', { method: 'DELETE' })
+export const unlinkWhatsAppWeb = (keepHistory: boolean) =>
+  fdFetch<MyWhatsAppWeb>(`/fd/whatsapp-web?keep_history=${keepHistory}`, { method: 'DELETE' })
+export const deleteWhatsAppWebKept = (id: string) =>
+  fdFetch<MyWhatsAppWeb>(`/fd/whatsapp-web/kept/${encodeURIComponent(id)}`, { method: 'DELETE' })
 
 export const setWhatsAppWebRetention = (days: number | null) =>
   fdFetch<MyWhatsAppWeb>('/fd/whatsapp-web/retention', { method: 'PUT', body: JSON.stringify({ days }) })

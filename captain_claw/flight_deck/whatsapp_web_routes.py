@@ -3,8 +3,9 @@ end of it: :mod:`.whatsapp_web_supervisor`).
 
 * ``/fd/whatsapp-web`` — the user's own link (Connections → WhatsApp Web):
   link with consent (a QR follows), a pairing code instead of the QR,
-  reconnect, cancel, disconnect.
-  Also the retention choice and a peek at what's kept.
+  reconnect, cancel, disconnect (the user says whether the history stays).
+  Also the retention choice, a peek at what's kept, and deleting what's kept
+  from earlier links.
 * ``/fd/whatsapp-web/agent/*`` — what the user's agents read: owner only,
   identified like the Google / Telegram routes (``X-Agent-Auth``); a shared
   agent's member never gets here (GrantGuardMiddleware refuses member markers).
@@ -84,6 +85,8 @@ async def _view(user: dict, *, link: dict[str, Any] | None = None) -> dict[str, 
         "allowed": (await load_cfg(db))["allowed"],
         "can_admin": user.get("role") == "admin",
         "link": {"state": "off", "running": False},
+        # History from earlier links: a banned number's, one the user switched from.
+        "kept": s.kept(uid) if s is not None else [],
     }
     if link is not None:
         out["link"] = link
@@ -157,10 +160,11 @@ async def cancel(user: dict = Depends(get_current_user)) -> dict[str, Any]:
 
 
 @router.delete("/fd/whatsapp-web")
-async def unlink(user: dict = Depends(get_current_user)) -> dict[str, Any]:
+async def unlink(keep_history: bool = True, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     """Disconnect: log the device out (it leaves the phone's Linked devices) and
-    delete everything kept. With the service off, the files go and the phone
-    still lists the device until it's removed there."""
+    forget the link. The messages stay readable for the user's agents, unless
+    the user says ``keep_history=false``. With the service off, this happens to
+    the files and the phone still lists the device until it's removed there."""
     s = _supervisor()
     uid = user["id"]
     if not s.user_has_link(uid):
@@ -169,19 +173,45 @@ async def unlink(user: dict = Depends(get_current_user)) -> dict[str, Any]:
         return out
     reason = await _unavailable_reason(get_db())
     if reason:
-        s.forget_local(uid)
+        s.forget_local(uid, keep_history=keep_history)
         out = await _view(user)
         out["removed_from_phone"] = False
         return out
     try:
-        link = await s.request("DELETE", f"/links/{uid}")
-    except (sup.ServiceDown, sup.ServiceError) as exc:
-        log.warning("WhatsApp Web unlink for %s via the service failed (%s); deleting locally", uid, exc)
-        s.forget_local(uid)
+        link = await s.request("POST", f"/links/{uid}/disconnect", {"keep_history": keep_history})
+    except sup.ServiceError as exc:
+        if exc.status in (404, 405):
+            # Flight Deck adopts a running service, and an older one can't keep history.
+            raise HTTPException(status_code=409, detail=(
+                "The WhatsApp Web service is older than this Flight Deck, so nothing was changed. "
+                "An admin can restart it by turning Allow WhatsApp Web off and on.")) from None
+        raise _service_error(exc) from None
+    except sup.ServiceDown as exc:
+        log.warning("WhatsApp Web unlink for %s via the service failed (%s); doing it locally", uid, exc)
+        s.forget_local(uid, keep_history=keep_history)
         link = {"state": "off", "running": False, "removed_from_phone": False}
     out = await _view(user, link={k: v for k, v in link.items() if k != "removed_from_phone"})
     out["removed_from_phone"] = bool(link.get("removed_from_phone"))
     return out
+
+
+@router.delete("/fd/whatsapp-web/kept/{entry}")
+async def delete_kept(entry: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Delete what's kept from one earlier link: only ever the user's own call."""
+    s = _supervisor()
+    uid = user["id"]
+    if not any(k["id"] == entry for k in s.kept(uid)):
+        raise HTTPException(status_code=404, detail="Nothing like that is kept")
+    if await _unavailable_reason(get_db()):
+        s.forget_kept_local(uid, entry)
+        return await _view(user)
+    try:
+        await s.request("DELETE", f"/links/{uid}/kept/{entry}")
+    except sup.ServiceDown:
+        s.forget_kept_local(uid, entry)
+    except sup.ServiceError as exc:
+        raise _service_error(exc) from None
+    return await _view(user)
 
 
 # ── the deck's switch ───────────────────────────────────────────────
@@ -240,7 +270,7 @@ async def recent(limit: int = 20, user: dict = Depends(get_current_user)) -> dic
         return {"messages": []}
     try:
         data = await s.request("POST", f"/links/{user['id']}/messages",
-                               {"limit": max(1, min(int(limit or 20), 100))})
+                               {"limit": max(1, min(int(limit or 20), 100)), "kept": True})
     except (sup.ServiceDown, sup.ServiceError) as exc:
         raise _service_error(exc) from None
     return {"messages": data.get("messages") or []}
@@ -372,7 +402,8 @@ def _agent_slug(request: Request) -> str:
 
 def _readable(s: sup.Supervisor, owner: str) -> bool:
     link = s.offline_view(owner) if s.user_has_link(owner) else {"state": "off"}
-    return link.get("state") in _READABLE and bool(link.get("linked_at"))
+    # With no link at all, agents still read what's kept from an earlier one.
+    return (link.get("state") in _READABLE and bool(link.get("linked_at"))) or s.has_kept(owner)
 
 
 async def _agent_ready(request: Request) -> tuple[str, sup.Supervisor]:
@@ -406,7 +437,7 @@ async def agent_status(request: Request) -> dict[str, Any]:
 
 @router.post("/fd/whatsapp-web/agent/chats")
 async def agent_chats(request: Request) -> dict[str, Any]:
-    _owner, data = await _agent_call(request, "/chats")
+    _owner, data = await _agent_call(request, "/chats?kept=true")
     return data
 
 
@@ -424,7 +455,7 @@ async def agent_messages(body: AgentMessagesBody, request: Request) -> dict[str,
     ``query`` keeps those containing every word. A look at the newest ones
     (no ``until``, no ``query``) counts as seen for this agent's news line."""
     _owner, data = await _agent_call(request, "/messages", {
-        **body.model_dump(), "agent": _agent_slug(request), "mark_seen": True,
+        **body.model_dump(), "agent": _agent_slug(request), "mark_seen": True, "kept": True,
     })
     return data
 

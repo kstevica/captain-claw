@@ -7,6 +7,7 @@ import {
   reconnectWhatsAppWeb,
   cancelWhatsAppWeb,
   unlinkWhatsAppWeb,
+  deleteWhatsAppWebKept,
   getWhatsAppWebAdmin,
   setWhatsAppWebAllowed,
   setWhatsAppWebRetention,
@@ -33,7 +34,9 @@ import {
 // the chats on their whitelist, within a daily limit, signed; nothing is ever
 // marked read or shown as "online" in the user's name. In whitelisted chats the
 // user marks for auto-reply, the agent they pick answers by itself when it's
-// mentioned (captain_claw/flight_deck/whatsapp_web_autoreply.py).
+// mentioned (captain_claw/flight_deck/whatsapp_web_autoreply.py). When a link ends
+// its messages stay, because numbers get banned: disconnecting asks, a ban or a
+// removal on the phone keeps them, and only the user deletes them.
 
 type Tone = 'on' | 'wait' | 'warn' | 'off'
 
@@ -45,7 +48,7 @@ const STATE: Record<WhatsAppWebState, { text: string; tone: Tone }> = {
   disconnected: { text: 'Reconnecting', tone: 'wait' },
   expired: { text: 'Code expired', tone: 'off' },
   failed: { text: 'Couldn’t link', tone: 'warn' },
-  logged_out: { text: 'Unlinked on the phone', tone: 'warn' },
+  logged_out: { text: 'Unlinked', tone: 'warn' },
   stream_replaced: { text: 'Taken over elsewhere', tone: 'warn' },
   temporary_ban: { text: 'Temporarily banned', tone: 'warn' },
   outdated: { text: 'Needs an update', tone: 'warn' },
@@ -541,6 +544,8 @@ export default function WhatsAppWebConnection() {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [recent, setRecent] = useState<WhatsAppWebMessage[] | null>(null)
+  // Disconnecting or switching number with messages kept: the keep-or-delete question is open.
+  const [leaving, setLeaving] = useState<'disconnect' | 'switch' | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -566,15 +571,7 @@ export default function WhatsAppWebConnection() {
     setError('')
     setNotice('')
     try {
-      const v = await fn()
-      setView(v)
-      if (key === 'unlink') {
-        setConsent(false)
-        setByPhone(false)
-        setNotice(v.removed_from_phone
-          ? 'Disconnected. “Captain Claw” is gone from your phone’s Linked devices.'
-          : 'Disconnected here. Also remove “Captain Claw” on your phone: WhatsApp → Settings → Linked devices.')
-      }
+      setView(await fn())
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -585,18 +582,38 @@ export default function WhatsAppWebConnection() {
   const link = view?.link
   const label = STATE[state] ?? STATE.off
   const spin = (key: string) => busy === key && <Loader2 className="h-3 w-3 animate-spin" />
+  const messagesKept = link?.stats?.messages ?? 0
+  const leave = (mode: 'disconnect' | 'switch', keepHistory: boolean) => {
+    setLeaving(null)
+    run('unlink', async () => {
+      const v = await unlinkWhatsAppWeb(keepHistory)
+      setConsent(false)
+      setByPhone(false)
+      setNotice([
+        v.removed_from_phone
+          ? 'Disconnected. “Captain Claw” is gone from your phone’s Linked devices.'
+          : 'Disconnected here. Also remove “Captain Claw” on your phone: WhatsApp → Settings → Linked devices.',
+        messagesKept > 0 && (keepHistory ? 'The history stays here.' : 'This number’s history is deleted.'),
+        mode === 'switch' && 'Link the other number below.',
+      ].filter(Boolean).join(' '))
+      return v
+    })
+  }
+  // No messages known, nothing to ask. Still "keep": with the service down the card
+  // can't count them, and the service drops a store with nothing in it anyway.
+  const askToLeave = (mode: 'disconnect' | 'switch') => {
+    if (messagesKept > 0) setLeaving(mode)
+    else if (confirm('Disconnect WhatsApp? The device is removed from your phone’s Linked devices.')) leave(mode, true)
+  }
   const disconnect = (
-    <button
-      onClick={() => {
-        if (confirm('Disconnect WhatsApp? The device is removed from your phone’s Linked devices and everything Flight Deck kept for it is deleted.')) {
-          run('unlink', unlinkWhatsAppWeb)
-        }
-      }}
-      disabled={!!busy}
-      className={`${SECONDARY} hover:text-red-400`}
-    >
-      {spin('unlink')} Disconnect
-    </button>
+    <>
+      <button onClick={() => askToLeave('switch')} disabled={!!busy} className={SECONDARY}>
+        Switch number
+      </button>
+      <button onClick={() => askToLeave('disconnect')} disabled={!!busy} className={`${SECONDARY} hover:text-red-400`}>
+        {spin('unlink')} Disconnect
+      </button>
+    </>
   )
 
   let body: ReactNode = null
@@ -628,8 +645,9 @@ export default function WhatsAppWebConnection() {
               does, through an <span className="text-zinc-100">unofficial client</span>: that goes against
               WhatsApp’s terms, and WhatsApp bans some accounts that do it. Flight Deck keeps a copy of my
               chats — mine and other people’s messages — encrypted on this deck, my agents read them, and
-              what they read goes to the AI model they use. Disconnecting removes the device and deletes
-              everything kept.
+              what they read goes to the AI model they use. When I disconnect, I choose whether what’s kept
+              stays or goes; if the link ends any other way (removed on the phone, a ban), it stays until I
+              delete it.
             </span>
           </label>
           <div className="flex flex-wrap gap-2">
@@ -796,9 +814,31 @@ export default function WhatsAppWebConnection() {
           )}
           {disconnect}
         </div>
+        {leaving && (
+          <div className={`${BOX} space-y-2`}>
+            <div className="text-sm font-medium text-zinc-100">
+              {leaving === 'switch' ? 'Switch to another number' : 'Disconnect WhatsApp'}
+            </div>
+            <div className="text-zinc-300">
+              “Captain Claw” leaves the Linked devices of {link.number || 'your phone'}. Keep the history from
+              this number ({messagesKept.toLocaleString()} message{messagesKept === 1 ? '' : 's'})?
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button onClick={() => leave(leaving, true)} className={PRIMARY}>Keep the history</button>
+              <button onClick={() => leave(leaving, false)} className={`${SECONDARY} hover:text-red-400`}>Delete it</button>
+              <button onClick={() => setLeaving(null)} className={SECONDARY}>Cancel</button>
+            </div>
+            <div className="text-zinc-500">
+              If you keep it, your agents can still read it, nothing is sent from it, and you can delete it here
+              at any time.
+            </div>
+          </div>
+        )}
       </>
     )
   }
+
+  const kept = view?.kept ?? []
 
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 overflow-hidden">
@@ -836,6 +876,36 @@ export default function WhatsAppWebConnection() {
         <div className="px-5 py-4 space-y-3">
           {view?.can_admin && <AdminSwitch onChange={load} />}
           {body}
+          {kept.length > 0 && (
+            <div className={`${BOX} space-y-2`}>
+              <div className="text-sm font-medium text-zinc-100">History kept from earlier links</div>
+              {kept.map((k) => (
+                <div key={k.id} className="flex flex-wrap items-center gap-2">
+                  <span className="flex-1 min-w-0">
+                    <span className="text-zinc-100">{k.number || 'An earlier link'}</span>
+                    {' — '}{k.stats.messages.toLocaleString()} message{k.stats.messages === 1 ? '' : 's'} in{' '}
+                    {k.stats.chats} chat{k.stats.chats === 1 ? '' : 's'}
+                    {k.stats.oldest ? `, ${day(k.stats.oldest)} to ${day(k.stats.newest)}` : ''}
+                    {k.retention_days ? `. Older than ${k.retention_days} days goes, as you chose for that link` : ''}.
+                  </span>
+                  <button
+                    onClick={() => {
+                      if (confirm(`Delete the ${k.stats.messages.toLocaleString()} messages kept from ${k.number || 'this link'}? This can’t be undone.`)) {
+                        run(`kept:${k.id}`, () => deleteWhatsAppWebKept(k.id))
+                      }
+                    }}
+                    disabled={!!busy}
+                    className={`${SECONDARY} hover:text-red-400`}
+                  >
+                    {spin(`kept:${k.id}`)} Delete
+                  </button>
+                </div>
+              ))}
+              {view?.available && (
+                <div className="text-zinc-500">Your agents can still read these. Nothing is sent from them.</div>
+              )}
+            </div>
+          )}
           {notice && <div className="text-xs text-emerald-600 dark:text-emerald-500">{notice}</div>}
           {error && (
             <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">

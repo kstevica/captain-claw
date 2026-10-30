@@ -12,7 +12,8 @@ States:
 * ``connected`` / ``disconnected`` — whatsmeow reconnects on its own
 * ``expired`` — nobody scanned in time; the session was discarded
 * ``failed`` — the connection could not be set up
-* ``logged_out`` — unlinked from the phone; the session is gone
+* ``logged_out`` — unlinked from the phone, or WhatsApp banned the number; the
+  session is gone, the messages stay (:mod:`.kept_history`)
 * ``stream_replaced`` — another client took this session over
 * ``temporary_ban`` — WhatsApp barred the account for a while
 * ``outdated`` — WhatsApp refuses this client version (update neonize)
@@ -197,11 +198,12 @@ def apply_event(st: LinkState, name: str, data: dict[str, Any] | None = None,
         return None
     if name == "logged_out":
         st.state = "logged_out"
-        st.detail = "Unlinked from the phone."
+        st.detail = "WhatsApp ended this link: it was removed on the phone, or WhatsApp banned the number."
         return Notice(
             "WhatsApp Web was unlinked",
-            f"{number_of(st.jid) or 'Your account'} is no longer linked to Flight Deck. "
-            "Link it again in Connections → WhatsApp Web.")
+            f"{number_of(st.jid) or 'Your account'} is no longer linked to Flight Deck: it was removed on "
+            "the phone, or WhatsApp banned it. Your messages stay, and your agents can still read them. "
+            "Link a number or delete them in Connections → WhatsApp Web.")
     if name == "stream_replaced":
         st.state = "stream_replaced"
         st.detail = "Another WhatsApp Web session took this link over."

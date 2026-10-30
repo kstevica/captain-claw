@@ -34,7 +34,7 @@ from typing import Any
 
 import httpx
 
-from captain_claw.flight_deck.whatsapp_web import DIR_NAME
+from captain_claw.flight_deck.whatsapp_web import DIR_NAME, kept_history
 from captain_claw.flight_deck.whatsapp_web.link_state import LinkState
 from captain_claw.logging import get_logger
 
@@ -157,11 +157,28 @@ class Supervisor:
         out["has_session"] = (self.root / user_id / "session.sqlite3").exists()
         return out
 
-    def forget_local(self, user_id: str) -> None:
-        """Delete a user's link files without the service (it's off)."""
+    def kept(self, user_id: str) -> list[dict[str, Any]]:
+        """What's kept from the user's earlier links (read from disk)."""
+        return kept_history.entries(self.root, user_id)
+
+    def has_kept(self, user_id: str) -> bool:
+        return bool(self.kept(user_id))
+
+    def forget_local(self, user_id: str, *, keep_history: bool = True) -> None:
+        """Forget a user's link without the service (it's off): their messages
+        move aside first, unless they said to delete them. If they can't be
+        moved, the OSError leaves everything in place."""
         import shutil
 
+        if keep_history:
+            st = LinkState.load(self.root / user_id / "state.json")
+            kept_history.archive(self.root, user_id, self.root / user_id, jid=st.jid if st else "",
+                                 linked_at=st.linked_at if st else "", reason="disconnected", now=time.time())
         shutil.rmtree(self.root / user_id, ignore_errors=True)
+
+    def forget_kept_local(self, user_id: str, entry_id: str) -> int:
+        """Delete what's kept from one earlier link without the service."""
+        return kept_history.discard(self.root, user_id, entry_id)
 
     # ── the process ─────────────────────────────────────────────────
 

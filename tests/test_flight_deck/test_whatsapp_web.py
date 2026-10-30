@@ -6,7 +6,7 @@
   check refuses a missing / different neonize before it could fetch a library;
   the libmagic stand-in;
 * engine — through a fake client: pairing, expiry, pairing code, cancel,
-  unlink (logout + delete), the phone unlinking, "stream replaced", resume
+  unlink (logout, forget the link), the phone unlinking, "stream replaced", resume
   after a restart, one client per user however often Link is pressed, late
   events from a stopped client ignored;
 * api — the bearer secret, errors as HTTP statuses;
@@ -455,7 +455,7 @@ def test_api_needs_the_secret_and_maps_errors(tmp_path, fake):
     assert r.status_code == 422
     for bad in ("..", ".hidden", "..bad", "a%2Fb"):
         assert client.get(f"/links/{bad}", headers=h).status_code in (400, 404), bad
-    assert client.delete(f"/links/{ALICE}", headers=h).json()["state"] == "off"
+    assert client.post(f"/links/{ALICE}/disconnect", json={}, headers=h).json()["state"] == "off"
     assert client.get("/events?after=0", headers=h).json() == {"events": []}
 
 
@@ -521,7 +521,13 @@ class FakeSupervisor:
     def offline_view(self, uid):
         return {"state": "connecting", "running": False}
 
-    def forget_local(self, uid):
+    def kept(self, uid):
+        return []
+
+    def has_kept(self, uid):
+        return False
+
+    def forget_local(self, uid, *, keep_history=True):
         self.calls.append(("forget", uid))
         self.links.discard(uid)
 
@@ -539,7 +545,7 @@ class FakeSupervisor:
         if method == "POST" and path.endswith("/start"):
             self.links.add(uid)
             return {"state": "pairing", "running": True}
-        if method == "DELETE":
+        if path.endswith("/disconnect"):
             self.links.discard(uid)
             return {"state": "off", "running": False, "removed_from_phone": True}
         return {"state": "connected", "running": True}
@@ -600,7 +606,7 @@ async def test_link_needs_consent_and_reaches_only_your_own(deck):
     assert fs.calls[-1][:2] == ("POST", f"/links/{BOB}/pair-code")
     assert c.get("/fd/whatsapp-web", headers=_as(ALICE)).json()["link"]["state"] == "off"
     v = c.delete("/fd/whatsapp-web", headers=_as(BOB)).json()
-    assert v["removed_from_phone"] is True and fs.calls[-1][:2] == ("DELETE", f"/links/{BOB}")
+    assert v["removed_from_phone"] is True and fs.calls[-1][:2] == ("POST", f"/links/{BOB}/disconnect")
 
 
 async def test_kill_switch_and_turning_it_off(deck, monkeypatch):
@@ -614,7 +620,7 @@ async def test_kill_switch_and_turning_it_off(deck, monkeypatch):
     monkeypatch.delenv("FD_WHATSAPP_WEB")
     c.put("/fd/admin/whatsapp-web", json={"allowed": False}, headers=_as(ALICE, "admin"))
     assert fs.stopped
-    # Disconnecting while it's off still deletes what's kept.
+    # Disconnecting while it's off still forgets the link.
     v = c.delete("/fd/whatsapp-web", headers=_as(BOB)).json()
     assert v["removed_from_phone"] is False and ("forget", BOB) in fs.calls
 

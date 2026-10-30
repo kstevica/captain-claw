@@ -11,9 +11,11 @@ person and only ever passes their own id.
 * ``POST   /links/{user_id}/pair-code``  ``{"phone": "…"}`` → an 8-character code
 * ``POST   /links/{user_id}/reconnect``  start again on the kept session
 * ``POST   /links/{user_id}/cancel``     forget a link that never paired
-* ``DELETE /links/{user_id}``            log out, stop, delete
-* ``GET    /links/{user_id}/chats``      the chats kept, latest first
-* ``POST   /links/{user_id}/messages``   ``{chat, query, since, until, limit, agent, mark_seen}``
+* ``POST   /links/{user_id}/disconnect`` ``{keep_history}`` log out, stop, forget the link
+* ``DELETE /links/{user_id}/kept/{entry}`` delete what's kept from one earlier link
+* ``GET    /links/{user_id}/chats``      the linked account's chats, latest first (``?kept=true``
+  with what's kept from earlier links)
+* ``POST   /links/{user_id}/messages``   ``{chat, query, since, until, limit, agent, mark_seen, kept}``
 * ``POST   /links/{user_id}/contacts``   ``{query, limit}``
 * ``POST   /links/{user_id}/news``       ``{agent}`` → what's new for that agent (moves its cursor)
 * ``PUT    /links/{user_id}/retention``  ``{days}`` (null = keep everything)
@@ -56,6 +58,12 @@ class MessagesBody(BaseModel):
     # The agent reading (its news cursor), and whether this look counts as seen.
     agent: str = ""
     mark_seen: bool = False
+    # Also what's kept from earlier links (agents reading, not the auto-replies).
+    kept: bool = False
+
+
+class DisconnectBody(BaseModel):
+    keep_history: bool = True
 
 
 class ContactsBody(BaseModel):
@@ -157,19 +165,25 @@ def build_app(engine: Engine, secret: str, *, version: str = "", lifespan: Any =
     async def cancel(user_id: str) -> dict[str, Any]:
         return await answer(engine.cancel)(user_id)
 
-    @app.delete("/links/{user_id}", dependencies=auth)
-    async def unlink(user_id: str) -> dict[str, Any]:
-        return await answer(engine.unlink)(user_id)
+    # A new path rather than DELETE /links/{user_id}: a service from before kept
+    # history answers 404 instead of deleting what the user asked to keep.
+    @app.post("/links/{user_id}/disconnect", dependencies=auth)
+    async def disconnect(user_id: str, body: DisconnectBody) -> dict[str, Any]:
+        return await answer(engine.unlink)(user_id, keep_history=body.keep_history)
+
+    @app.delete("/links/{user_id}/kept/{entry}", dependencies=auth)
+    async def delete_kept(user_id: str, entry: str) -> dict[str, Any]:
+        return await answer(engine.delete_kept)(user_id, entry)
 
     @app.get("/links/{user_id}/chats", dependencies=auth)
-    async def chats(user_id: str) -> dict[str, Any]:
-        return await answer(engine.chats)(user_id)
+    async def chats(user_id: str, kept: bool = False) -> dict[str, Any]:
+        return await answer(engine.chats)(user_id, with_kept=kept)
 
     @app.post("/links/{user_id}/messages", dependencies=auth)
     async def messages(user_id: str, body: MessagesBody) -> dict[str, Any]:
         return await answer(engine.messages)(
             user_id, chat=body.chat, query=body.query, since=body.since, until=body.until,
-            limit=body.limit, agent=body.agent, mark_seen=body.mark_seen)
+            limit=body.limit, agent=body.agent, mark_seen=body.mark_seen, with_kept=body.kept)
 
     @app.post("/links/{user_id}/contacts", dependencies=auth)
     async def contacts(user_id: str, body: ContactsBody) -> dict[str, Any]:

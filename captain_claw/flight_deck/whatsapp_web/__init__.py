@@ -14,6 +14,8 @@ library) per linked user and answers Flight Deck on a loopback port:
 * :mod:`.engine` — the links: link, pairing code, cancel, unlink, resume after
   a restart, the pairing timeout, the events Flight Deck turns into bells,
   ingest into the store and the reads agents make.
+* :mod:`.kept_history` — what's kept from links that ended (a banned number, a
+  switch to another one), until the user deletes it.
 * :mod:`.neonize_adapter` — the only module that touches neonize: the version
   pin, the libmagic stand-in, and every event handler wrapped so an exception
   is logged (neonize drops them silently).
@@ -33,6 +35,8 @@ Data, under ``<FD data dir>/whatsapp_web/`` (0700, files 0600):
   whoever has the file has the account
 * ``<user_id>/state.json`` — the link's state (no keys, no messages)
 * ``<user_id>/store.sqlite3`` — the messages kept (sealed; JIDs plain)
+* ``.kept/<user_id>/<entry>/`` — the same store from an earlier link, and
+  ``kept.json`` saying which number it was and how much it holds
 """
 
 from __future__ import annotations
