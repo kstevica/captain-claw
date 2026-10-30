@@ -288,7 +288,7 @@ _TABLES["passive_marks"] = [
 _TABLE_TAIL["passive_marks"] = "PRIMARY KEY (user_id, source, task_id, what, ref)"
 _INDEXES = (*_INDEXES, "CREATE INDEX IF NOT EXISTS idx_passive_marks_task ON passive_marks(task_id)")
 # Flags that repeat what a task's text said (a model read them from it).
-_PASSIVE_TEXT_FLAGS = ("expected_deliverable", "blocker", "why", "answered", "answered_on")
+_PASSIVE_TEXT_FLAGS = ("expected_deliverable", "blocker", "why", "answered", "answered_on", "proof")
 # The fields a correction's ``before`` may hold an inbox's text in.
 _PASSIVE_TEXT_FIELDS = ("title", "ask", "result_text", "next_steps")
 # The opt-in inboxes' event and task sources (taskboard_passive.SOURCE).
@@ -1522,12 +1522,40 @@ class TaskboardStore:
                 user_id, keys=[key], unlock=("owes_next",),
                 patch={"status": "open", "owes_next": "agent", "agent_slug": agent["slug"], "agent_name": agent["name"],
                        # What was said of the last try is old news: the agent is on it now.
-                       "flags": {k: False for k in (*_OLD_NEWS, "came_back")}},
+                       "flags": {**{k: False for k in (*_OLD_NEWS, "came_back")}, "proof": None}},
                 event={"source": "taskboard_handover", "source_ref": f"{action_id}:handed", "at": time.time(),
                        "kind": "status", "actor_kind": "me", "actor": actor,
                        "summary": f"Handed to {agent['name']}: {' '.join(str(words).split())}",
-                       "refs": {"autonomy_id": action_id, "agent": agent["slug"]}})
+                       "refs": {"autonomy_id": action_id, "agent": agent["slug"], "words": str(words)[:1000]}})
             return self._owned(user_id, task_id)
+
+    def hand_over_words(self, user_id: str, action_id: str) -> str:
+        """What the user asked in the hand-over *action_id*: "" when that action wasn't one."""
+        with self._lock:
+            row = self._conn.execute("SELECT summary, refs FROM task_events WHERE user_id = ? "
+                                     "AND source = 'taskboard_handover' AND source_ref = ?",
+                                     (user_id, f"{action_id}:handed")).fetchone()
+        if row is None:
+            return ""
+        return str(_loads(row["refs"], {}).get("words") or str(row["summary"] or "").partition(": ")[2])
+
+    def hand_over_unrecorded(self, user_id: str, action_id: str, note: str) -> bool:
+        """The hand-over *action_id*'s run left no turn on the board: there is
+        nothing to check what it says against, and the task says so. True when it
+        did; False when a turn did come, or the task went."""
+        key = f"autonomy:{action_id}"
+        now = time.time()
+        with self._lock:
+            task_id = self._key_task(user_id, key)
+            row = self._row(task_id) if task_id else None
+            if row is None or self._conn.execute("SELECT 1 FROM turns WHERE user_id = ? AND task_key = ? LIMIT 1",
+                                                 (user_id, key)).fetchone():
+                return False
+            if not self._machine_write(task_id, {"flags": {"proof": {"state": "no_record", "note": note, "actions": []}}}, now):
+                return False
+            self._refresh(task_id)
+            self._conn.commit()
+        return True
 
     def hand_over_ended(self, user_id: str, action_id: str, *, agent_name: str, text: str | None, why: str = "",
                         session_key: str = "") -> str | None:

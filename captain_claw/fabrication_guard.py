@@ -1717,10 +1717,19 @@ def _whatsapp_claim(reply: str, facts: TurnFacts) -> tuple[frozenset[int], bool]
         return frozenset(), False
     if any(step.name == "whatsapp_send_file" for step in facts.turn_steps):
         return frozenset(), False
-    text = str(reply or "")
+    lines = _whatsapp_claim_lines(str(reply or ""))
     evidence = _whatsapp_evidence(facts.turn_steps) or _whatsapp_evidence(facts.session_steps)
+    return lines, bool(lines) and not evidence
+
+
+def claims_whatsapp_sent(text: str) -> bool:
+    """Whether *text* says a WhatsApp message went out."""
+    return bool(_whatsapp_claim_lines(str(text or "")))
+
+
+def _whatsapp_claim_lines(text: str) -> frozenset[int]:
+    """The lines of *text* that say a WhatsApp message went out."""
     lines: set[int] = set()
-    false = False
     for pattern in (_WA_I_CLAIM_RE, _WA_STATE_CLAIM_RE):
         for match in pattern.finditer(text):
             start, end = _line_bounds(text, match.start())
@@ -1735,9 +1744,7 @@ def _whatsapp_claim(reply: str, facts: TurnFacts) -> tuple[frozenset[int], bool]
                     or before.count('"') % 2 == 1 or before.count("“") > before.count("”")):
                 continue
             lines.add(text.count("\n", 0, start))
-            if not evidence:
-                false = True
-    return frozenset(lines), false
+    return frozenset(lines)
 
 
 def whatsapp_corrective() -> str:

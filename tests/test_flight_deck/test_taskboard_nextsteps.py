@@ -110,10 +110,10 @@ def _jev_answer(kind: str, value) -> dict:
 
 
 _KINDS = {"is_task": "noul", "owes_next": "choice", "fulfilled": "noul", "result": "choice", "urgency": "score",
-          "asks_assistant_to_act": "noul", "reopen": "noul", "next_move": "choice", "fits": "noul"}
+          "asks_assistant_to_act": "noul", "reopen": "noul", "next_move": "choice", "fits": "noul", "did_as_asked": "noul"}
 _DEFAULT = {"is_task": 0.9, "owes_next": ("them", 0.8), "fulfilled": 0.2, "result": ("success", 0.9),
             "urgency": 1, "asks_assistant_to_act": 0.1, "reopen": 0.1, "next_move": ("reply_with_result", 0.9),
-            "fits": 0.9}
+            "fits": 0.9, "did_as_asked": 0.9}
 
 
 @pytest.fixture()
