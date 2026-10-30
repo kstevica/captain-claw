@@ -146,7 +146,7 @@ def test_the_automation_kinds_are_unchanged():
     assert mail_authority.AUTOMATION_KINDS == frozenset({
         "autonomy", "autonomy_tool", "plan", "fd_scheduler", "flow", "flow_tool", "cron",
         "peer", "peer_relay", "sister", "botport", "fd_worker", "being", "mcp_task", "bat",
-        "link", "exam", "unknown",
+        "link", "exam", "taskboard", "unknown",
     })
     assert not any("reply" in kind for kind in mail_authority.AUTOMATION_KINDS)
     assert set(mail_authority.KIND_LABELS) == set(mail_authority.AUTOMATION_KINDS)

@@ -11,6 +11,7 @@ import time
 
 import pytest
 
+from captain_claw import mail_authority
 from captain_claw.flight_deck import (
     agent_idle,
     consciousness,
@@ -65,8 +66,8 @@ async def test_it_goes_to_the_agent_picked_with_the_users_words(board, ledger, r
     assert call["prompt"].index("Call them back") < call["prompt"].index("<<<DATA")
 
 
-async def test_only_the_users_words_can_ask_for_email_and_the_task_is_fenced(board, ledger, relay):  # noqa: F811
-    """Whatever someone wrote on the task, the agent's authority is what the user typed."""
+async def test_it_is_the_users_own_request_and_the_task_is_fenced(board, ledger, relay):  # noqa: F811
+    """Not autonomous work: they typed it and clicked. What anyone wrote on the task is only data."""
     t = _task(board, flags={}, pending=False)
     board.ingest(ALICE, keys=[next(k["key"] for k in board.links(ALICE, [t])[t])], event={
         "source": "agent_turns", "source_ref": "evil", "at": time.time(), "kind": "received", "actor_kind": "party",
@@ -75,8 +76,10 @@ async def test_only_the_users_words_can_ask_for_email_and_the_task_is_fenced(boa
     await _settle()
     call = relay["calls"][0]
     auto = call["automation"]
-    assert auto["job_text"] == "Check the booking." and auto["mail_write"] == "intent"
-    assert auto["kind"] == "autonomy" and auto["ref"].startswith("act_") and auto["fd_delivers"] is True
+    assert auto["job_text"] == "Check the booking." and auto["mail_write"] == "allow"
+    assert auto["kind"] == "taskboard" and auto["ref"].startswith("act_") and auto["fd_delivers"] is True
+    assert auto["task"]["board"] is True
+    assert "carry it out now" in call["prompt"]
     head, _, rest = call["prompt"].partition("<<<DATA")
     assert "mallory" not in head and "mallory" in rest
     nonce = rest.split(">>>")[0].strip()
@@ -318,3 +321,67 @@ def test_picking_the_agent_asks_before_anything_moves():
     assert "pinned.current = splitting || snoozeOpen || handing" in pane
     assert "if (busy || handing) return false" in pane
     assert "const ready = !!agent && !!words.trim() && !busy" in step
+
+
+# ── The agent's side: not an automation ───────────────────────────────
+
+
+def _bound_to(kind, words, mode):
+    return mail_authority.bind(mail_authority.from_wire({"kind": kind, "job_text": words, "mail_write": mode}, default_kind="unknown"))
+
+
+def test_a_hand_over_may_write_the_email_however_its_worded():
+    """The hand-over that was refused: nothing in it says "email", and it is plainly a reply."""
+    words = "thank her politely and tell we will skip WebSummit this year"
+    token = _bound_to("taskboard", words, "allow")
+    try:
+        assert mail_authority.check_mail_write("google_mail", "create_draft") is None
+        assert mail_authority.check_mail_write("google_mail", "send") is None
+        assert mail_authority.check_notify_others("invitations") is None
+    finally:
+        mail_authority.reset(token)
+
+
+def test_autonomous_work_is_still_refused_the_same_words():
+    token = _bound_to("autonomy", "thank her politely and tell we will skip WebSummit this year", "intent")
+    try:
+        refused = mail_authority.check_mail_write("google_mail", "create_draft")
+        assert refused and mail_authority.MAIL_REFUSAL_TAG in refused
+    finally:
+        mail_authority.reset(token)
+
+
+def test_the_agent_is_told_it_comes_from_its_owner():
+    token = _bound_to("taskboard", "Book it.", "allow")
+    try:
+        prefix = mail_authority.automated_prefix()
+    finally:
+        mail_authority.reset(token)
+    assert "owner" in prefix and "Not a live message" not in prefix and "Automated" not in prefix
+    assert mail_authority.strip_automated_prefix(f"{prefix}\nBook it.") == "Book it."
+
+
+def test_it_is_labelled_the_taskboards_and_still_comes_back_to_the_task():
+    from captain_claw import turn_register, turn_source
+
+    assert turn_register._AUTOMATIONS["taskboard"] == "autonomy", "its turn attaches by autonomy:<id>"
+    assert turn_source.from_automation("taskboard") == "taskboard"
+    assert turn_source.SOURCE_LABELS["taskboard"] == "Taskboard"
+
+
+def test_its_session_and_result_read_as_the_taskboards():
+    from captain_claw.web import chat_handler
+
+    assert "taskboard" in chat_handler.REROUTED_AUTOMATION_KINDS and "taskboard" in chat_handler.MIRRORED_AUTOMATION_KINDS
+    task = chat_handler.task_marker({"id": "tb_1", "name": "Last call", "board": True})
+    assert task["board"] is True and chat_handler.task_session_name(task) == "📋 Last call"
+    assert chat_handler.task_session_name(chat_handler.task_marker({"id": "j1", "name": "Digest"})) == "⏰ Digest"
+
+
+async def test_an_email_tasks_thread_goes_along_so_it_can_reply_in_it(board, ledger, relay):  # noqa: F811
+    t = _task(board, flags={}, pending=False)
+    board.add_link(ALICE, "gmail:thread:t-9", t)
+    board.add_link(ALICE, "gmail:msg:m-3", t)
+    await handover.hand_over(ALICE, t, "helper", "Reply to her.")
+    await _settle()
+    assert "Email thread id: t-9; latest message id: m-3" in relay["calls"][0]["prompt"]

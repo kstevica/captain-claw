@@ -78,7 +78,7 @@ ALL_ORIGINS = (
 
 # Automation kinds (mail_authority.AUTOMATION_KINDS) → turn origin.
 _AUTOMATION_ORIGIN = {
-    "autonomy": "autonomy", "autonomy_tool": "autonomy", "plan": "autonomy",
+    "autonomy": "autonomy", "autonomy_tool": "autonomy", "plan": "autonomy", "taskboard": "autonomy",
     "fd_scheduler": "cron", "cron": "cron",
     "flow": "flow", "flow_tool": "flow",
     "peer": "peer", "botport": "peer",

@@ -59,7 +59,7 @@ from typing import Any
 AUTOMATION_KINDS = frozenset({
     "autonomy", "autonomy_tool", "plan", "fd_scheduler", "flow", "flow_tool", "cron",
     "peer", "peer_relay", "sister", "botport", "fd_worker", "being", "mcp_task", "bat", "link",
-    "exam", "unknown",
+    "exam", "taskboard", "unknown",
 })
 MAIL_WRITE_ACTIONS = frozenset({"create_draft", "update_draft", "send", "send_draft"})
 # google_mail / microsoft_mail actions that change the mailbox without writing
@@ -91,10 +91,14 @@ KIND_LABELS: dict[str, str] = {
     "bat": "a Bat run",
     "link": "a connected system",
     "exam": "an onboarding exam",
+    "taskboard": "your Taskboard",
     "unknown": "an automation",
 }
 
 AUTOMATED_TURN_PREFIX = "[Automated turn — {label}. Not a live message from the user.]"
+# A hand-over on the Taskboard: the owner typed it and clicked, it just isn't a
+# chat message. It is their request, so it isn't told it is an automation.
+OWNER_REQUEST_PREFIX = "[From your owner, handed to you on their Taskboard: this is their own request.]"
 
 _MAIL_WRITE_MODES = frozenset({"intent", "allow", "deny"})
 
@@ -1887,6 +1891,8 @@ def automated_prefix() -> str:
     a = current()
     if a.mode == "human":
         return ""
+    if a.kind == "taskboard":
+        return OWNER_REQUEST_PREFIX
     return AUTOMATED_TURN_PREFIX.format(label=_label(a.kind))
 
 
@@ -1897,7 +1903,7 @@ def strip_automated_prefix(text: str) -> str:
     """*text* without a leading :data:`AUTOMATED_TURN_PREFIX` line (for
     detectors that look at how the job's own text starts)."""
     s = str(text or "")
-    if s.startswith(_PREFIX_LEAD):
+    if s.startswith((_PREFIX_LEAD, OWNER_REQUEST_PREFIX)):
         head, sep, rest = s.partition("\n")
         if sep and head.endswith("]"):
             return rest

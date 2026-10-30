@@ -71,6 +71,7 @@ import { useTraceStore, selectSpanCount } from '../../stores/traceStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useAuthStore, selectKioskLocked } from '../../stores/authStore'
 import { useScheduledStore } from '../../stores/scheduledStore'
+import { useTaskboardStore } from '../../stores/taskboardStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { sharedCaps, sharedCloseInfo } from '../../utils/sharedAgent'
 import { SharedAgentNotice } from './SharedAgentNotice'
@@ -2326,15 +2327,15 @@ const CompactMessage = memo(function CompactMessage({ message, content, actions 
       <div className={`w-full max-w-[85%] rounded-lg border border-dashed border-zinc-700 bg-zinc-900/40 px-3 py-2 ${message.replay ? 'opacity-60' : ''}`}>
         <div className="flex min-w-0 items-center gap-1.5 text-[10px] text-zinc-500">
           <Icon className="h-3 w-3 shrink-0" />
-          <span className="shrink-0 font-semibold uppercase tracking-wider">{rephrase ? 'Rephrased task' : 'Automatic'}</span>
+          <span className="shrink-0 font-semibold uppercase tracking-wider">{rephrase ? 'Rephrased task' : task?.board ? 'You asked' : 'Automatic'}</span>
           {!rephrase && <span className="shrink-0 text-zinc-600">·</span>}
           {rephrase ? null : task ? (
             <button
-              onClick={() => useScheduledStore.getState().openTasks(task.id)}
+              onClick={() => (task.board ? useTaskboardStore.getState().showTask(task.id) : useScheduledStore.getState().openTasks(task.id))}
               className="flex min-w-0 items-center gap-1 font-medium text-amber-700 hover:underline dark:text-amber-400"
-              title="Open this scheduled task and its history"
+              title={task.board ? 'Open this task on the Taskboard' : 'Open this scheduled task and its history'}
             >
-              <AlarmClock className="h-3 w-3 shrink-0" />
+              {task.board ? <ListChecks className="h-3 w-3 shrink-0" /> : <AlarmClock className="h-3 w-3 shrink-0" />}
               <span className="truncate">{task.name}</span>
             </button>
           ) : (
@@ -2372,8 +2373,8 @@ function CompactMessageDialog({ message, content, onClose }: {
   const rephrase = message.role === 'rephrase'
   const Icon = rephrase ? Wand2 : Bot
   const title = rephrase ? 'Rephrased task'
-    : message.task ? `Scheduled · ${message.task.name}` : message.automation || 'Automated turn'
-  const kind = rephrase ? 'How the agent restated your request' : 'Automatic result'
+    : message.task ? `${message.task.board ? 'Taskboard' : 'Scheduled'} · ${message.task.name}` : message.automation || 'Automated turn'
+  const kind = rephrase ? 'How the agent restated your request' : message.task?.board ? 'What you handed over' : 'Automatic result'
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }

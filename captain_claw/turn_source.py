@@ -33,6 +33,7 @@ SOURCE_LABELS: dict[str, str] = {
     "flow": "Flows",
     "agent": "Other agents",
     "autonomy": "Autonomous work",
+    "taskboard": "Taskboard",
     "api": "API and MCP",
     "link": "Agent links",
     "exam": "Onboarding exams",
@@ -59,7 +60,7 @@ SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Messaging", ("whatsapp", "telegram", "messenger", "discord")),
     ("Apps and devices", ("app", "glasses", "device:sticks3", "device:stopwatch", "device:papercolor",
                           "device:epaper154", "device:epaper154_touch")),
-    ("Automated", ("scheduled", "flow", "agent", "autonomy", "api", "link")),
+    ("Automated", ("scheduled", "flow", "agent", "autonomy", "taskboard", "api", "link")),
     ("Other people", ("member", "public")),
 )
 
@@ -73,6 +74,7 @@ _AUTOMATION_SOURCES = {
     "mcp_task": "api",
     "link": "link",
     "exam": "exam",
+    "taskboard": "taskboard",
 }
 # A turn's channel (the surface or the entry point) → its source.
 _CHANNEL_SOURCES = {

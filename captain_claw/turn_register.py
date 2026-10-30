@@ -75,13 +75,13 @@ _GUARD_BLOCK_RE = re.compile(r"^Blocked by \w+ guard\b")
 # A source (turn_source) → the Taskboard's channel.
 _SOURCE_CHANNELS = {
     "web": "web", "app": "web", "glasses": "glasses", "whatsapp": "whatsapp", "telegram": "telegram",
-    "messenger": "messenger", "device": "device", "scheduled": "scheduled", "autonomy": "autonomy",
+    "messenger": "messenger", "device": "device", "scheduled": "scheduled", "autonomy": "autonomy", "taskboard": "autonomy",
     "api": "api", "link": "link", "member": "member",
 }
 # An automation kind (mail_authority) → the automation the board knows.
 _AUTOMATIONS = {
     "fd_scheduler": "scheduled", "cron": "scheduled",
-    "autonomy": "autonomy", "autonomy_tool": "autonomy", "plan": "autonomy",
+    "autonomy": "autonomy", "autonomy_tool": "autonomy", "plan": "autonomy", "taskboard": "autonomy",
     "link": "link",
 }
 # What an automation's own id may look like (an Autonomous Work action's, a

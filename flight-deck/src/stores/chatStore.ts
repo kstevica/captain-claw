@@ -106,6 +106,7 @@ function taskMark(raw: unknown): ChatMessage['task'] {
   return {
     id, name: String(t.name || 'Scheduled task'),
     ...(t.session_id ? { session_id: String(t.session_id) } : {}),
+    ...(t.board === true ? { board: true } : {}),
   }
 }
 
