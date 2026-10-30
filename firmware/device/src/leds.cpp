@@ -2,6 +2,7 @@
 
 #include <M5Unified.h>
 #include <esp32-hal-rmt.h>
+#include <esp_timer.h>
 #include <math.h>
 
 #include "board.h"
@@ -14,18 +15,20 @@ namespace leds {
 // Arduino core's RMT, the way its neopixelWrite() does it: 100 ns ticks,
 // 24 bits per LED, green-red-blue.
 //
-// The Waveshare 1.54" board has one green LED instead, on or off: whatever the
-// left light would show at a quarter of full strength or more lights it, so it
-// blinks with the recording, the steps of the work and the voice.
+// The Waveshare 1.54" board has one green LED we can drive (PWM, active low): see
+// monoLevel(). The red one beside it is the charger chip's, wired to its STAT pin
+// with no GPIO on the way, so nothing here can change or read it.
 static rmt_obj_t* rmt = nullptr;
 static bool ready = false;
 static uint8_t maxBright = 48;
+#if defined(BOARD_EPAPER154)
+static constexpr uint8_t kMonoPwm = 7;  // an LEDC channel nothing else uses
+#endif
 
 static void write(uint32_t a, uint32_t b) {
 #if defined(BOARD_EPAPER154)
-  (void)b;
-  const uint8_t strongest = max((a >> 16) & 0xFF, max((a >> 8) & 0xFF, a & 0xFF));
-  digitalWrite(board::kMonoLed, strongest >= max<uint8_t>(1, maxBright / 4) ? LOW : HIGH);
+  (void)b;  // a = the duty, 0..255
+  ledcWrite(kMonoPwm, 255 - min<uint32_t>(a, 255));
   return;
 #endif
   if (!rmt) return;
@@ -56,12 +59,25 @@ static Link linkWifi = Link::Trying, linkAgent = Link::Trying;
 static uint32_t startupMs = 0, bothUpMs = 0;
 static uint32_t lastColor[2] = {1, 1};  // what the lights show (forces the first write)
 
+#if defined(BOARD_EPAPER154)
+static void monoTick(void*);
+#endif
+
 void begin() {
   if (!board::kHasLeds) return;
 #if defined(BOARD_EPAPER154)
-  pinMode(board::kMonoLed, OUTPUT);
-  digitalWrite(board::kMonoLed, HIGH);
+  ledcSetup(kMonoPwm, 5000, 8);
+  ledcWrite(kMonoPwm, 255);
+  ledcAttachPin(board::kMonoLed, kMonoPwm);
   ready = true;
+  // A timer of its own: the loop can stall for seconds (Wi-Fi, the deck's TLS),
+  // and a light that stops breathing looks hung.
+  esp_timer_create_args_t args = {};
+  args.callback = monoTick;
+  args.name = "led";
+  esp_timer_handle_t timer;
+  if (esp_timer_create(&args, &timer) == ESP_OK) esp_timer_start_periodic(timer, 33000);
+  return;
 #else
   int pin = M5.getPin(m5::pin_name_t::rgb_led);
   if (pin >= 0 && (rmt = rmtInit(pin, RMT_TX_MODE, RMT_MEM_64)) != nullptr) rmtSetTick(rmt, 100);
@@ -153,11 +169,70 @@ static void show(uint32_t a, uint32_t b) {
 
 void off() {
   if (!ready) return;
+#if defined(BOARD_EPAPER154)
+  ready = false;  // for good: before sleep, and the timer would light it again
+#endif
   lastColor[0] = lastColor[1] = 1;
   show(0, 0);
 }
 
+#if defined(BOARD_EPAPER154)
+// `count` short blinks at the start of each period.
+static float blips(uint32_t at, uint32_t period, int count) {
+  at %= period;
+  return at < (uint32_t)count * 300 && at % 300 < 120 ? 1.0f : 0.0f;
+}
+
+// One colour, so the rhythm says what colours say on the PaperColor. It's also
+// the one thing on this board that answers at once, and the only way to tell
+// awake from asleep: the panel keeps its picture either way.
+static float monoLevel(uint32_t now) {
+  if (gpio_get_level(board::kTalkPin) == 0 || gpio_get_level(board::kSidePin) == 0) return 1;  // the press landed
+  if ((int32_t)(flashUntil - now) > 0) return ((flashUntil - now) / 100) % 2;
+  if ((int32_t)(alertUntil - now) > 0) return ((alertUntil - now) / 150) % 2;
+  if ((int32_t)(notifyUntil - now) > 0) return ((notifyUntil - now) / 250) % 2;
+  switch (state) {
+    case State::Listening:  // steady, brighter with the voice
+      return 0.6f + 0.4f * level / 100.0f;
+    case State::Working:  // breathing, with a flick per step the deck reports
+      if ((int32_t)(actionUntil - now) > 0) return 1;
+      return 0.15f + 0.55f * (0.5f + 0.5f * sinf(now / 1000.0f * 3.14f));
+    case State::Speaking:  // with the voice
+      return level > 8 ? 0.3f + 0.7f * level / 100.0f : 0.05f;
+    case State::NoWifi:  // offline, its first minute
+      return now % 2000 < 1000;
+    case State::NoAgent:
+      return blips(now, 2000, 2);
+    case State::Updating:
+      return now % 200 < 100;
+    case State::LowBattery:
+      return blips(now, 5000, 3);
+    case State::Startup:  // quick while it tries; both up, steady for its last 6 s
+      if (linkWifi == Link::Up && linkAgent == Link::Up) return 1;
+      if (linkWifi == Link::Down) return now % 2000 < 1000;
+      if (linkAgent == Link::Down) return blips(now, 2000, 2);
+      return now % 400 < 200;
+    case State::Idle: {  // awake: a blink every 10 s; something waits in Flight Deck: two every 5 s
+      const uint32_t idle = idleMs + (now - idleAt);
+      if (waitingOn) return blips(idle, 5000, 2);
+      return idle >= 10000 && idle % 10000 < 150;
+    }
+    default:
+      return 0;
+  }
+}
+
+static void monoTick(void*) {
+  if (!ready) return;
+  const float k = maxBright ? monoLevel(millis()) : 0;
+  show((uint32_t)(k * k * (maxBright >= 200 ? 255 : 128)), 0);  // squared for the eye; Low is half of Bright
+}
+#endif
+
 void tick() {
+#if defined(BOARD_EPAPER154)
+  return;  // monoTick
+#endif
   if (!ready) return;
   const uint32_t now = millis();
   if (now - lastMs < 33) return;

@@ -7,7 +7,8 @@
 //   Side      (StickS3 side, StopWatch the other one, PaperColor A)
 //             click = next page / next row · hold = menu (hold again = close)
 //             double-click on an answer = hear it again (also Menu → Replay answer)
-//   Back      (PaperColor B only)
+//             (Waveshare: double-click anywhere = the home screen)
+//   Back     (PaperColor B only)
 //             click = an answer: the home screen · home: the answer · else back
 //             hold = Wi-Fi & settings (the setup hotspot; hold B again there to leave)
 //   StickS3 and PaperColor: the talk button isn't held — a press starts the
@@ -660,6 +661,7 @@ static const char* const kLedLevels[] = {"off", "low", "bright"};
 
 static String asleepLabel() {
   if (!settings.asleepRefreshMin) return "never";
+  if (settings.asleepRefreshMin == 1) return "every minute";
   return settings.asleepRefreshMin >= 60 ? "every " + String(settings.asleepRefreshMin / 60) + " h"
                                          : "every " + String(settings.asleepRefreshMin) + " min";
 }
@@ -799,7 +801,7 @@ static ui::Item menuItem(int row) {
       it.title = "Redraw asleep";
       it.badge = asleepLabel();
       it.on = settings.asleepRefreshMin > 0;
-      it.note = "date, room and battery on the sleeping paper";
+      it.note = board::kSleepClock ? "the clock, date and room while it sleeps" : "date, room and battery on the sleeping paper";
       break;
     case MPhone:
       it.title = board::kSlowPaper ? "Options" : "Settings on phone";
@@ -1130,12 +1132,15 @@ static void chooseMenuRow() {
       break;
     case MClicks: settings.keyClicks = !settings.keyClicks; break;
     case MSayMenu: settings.speakMenu = !settings.speakMenu; break;
-    case MAsleep:
-      settings.asleepRefreshMin = settings.asleepRefreshMin == 0    ? 30
-                                  : settings.asleepRefreshMin == 30 ? 60
-                                  : settings.asleepRefreshMin == 60 ? 180
-                                                                    : 0;
+    case MAsleep: {  // the next choice, round to the first
+      const int n = sizeof(kAsleepMins);
+      int i = 0;
+      while (i < n && kAsleepMins[i] != settings.asleepRefreshMin) ++i;
+      do i = (i + 1) % n;
+      while (!asleepMinValid(kAsleepMins[i]));
+      settings.asleepRefreshMin = kAsleepMins[i];
       break;
+    }
     case MVolume:
       settings.volume = nextStep(kVolumeSteps, settings.volume);
       audio::setVolume(settings.volume);
@@ -2501,6 +2506,20 @@ static void paperLights(bool on) {
 }
 #endif
 
+#if !defined(PAPER_B)
+// When to redraw the sleeping screen. Minutes apart (the Waveshare's clock): just
+// after the clock reaches the next round time (19:25, 19:30 at every 5), and
+// hourly once the battery is low or there's no time to show.
+static uint64_t asleepWakeInUs() {
+  uint32_t sec = settings.asleepRefreshMin * 60UL;
+  if (settings.asleepRefreshMin <= 10) {
+    const int pct = hw::batteryLevel();
+    sec = !telemetry::clockSet() || (pct >= 0 && pct < 10) ? 3600 : sec + 1 - time(nullptr) % sec;
+  }
+  return sec * 1000000ULL;
+}
+#endif
+
 // Deep sleep. The talk button wakes it (on the paper any button does, and
 // a timer redraws the sleeping screen now and then).
 [[noreturn]] static void sleepNow() {
@@ -2510,6 +2529,7 @@ static void paperLights(bool on) {
 #endif
   ui::brightness(0);
 #if defined(BOARD_EPAPER154)
+  telemetry::beforeSleep();
   ui::panelSleep();
   hw::prepareSleep();
 #endif
@@ -2532,7 +2552,7 @@ static void paperLights(bool on) {
     // Just after the dashboard's next five-minute mark.
     esp_sleep_enable_timer_wakeup(max<uint64_t>(5, ui::dashboardDueInSec() + 8) * 1000000ULL);
 #else
-    if (settings.asleepRefreshMin) esp_sleep_enable_timer_wakeup(settings.asleepRefreshMin * 60ULL * 1000000ULL);
+    if (settings.asleepRefreshMin) esp_sleep_enable_timer_wakeup(asleepWakeInUs());
 #endif
   } else {
     esp_sleep_enable_ext0_wakeup(board::kTalkPin, 0);  // the talk button pulls low
@@ -2622,8 +2642,8 @@ static void noteButtonActivity() {
 
 // ── side button ──────────────────────────────────────────────────────
 
-// An answer on screen: a side double-click there replays it, so a single
-// click waits kDoubleMs to see whether a second follows.
+// An answer on screen: a side double-click there replays it (board::kDoubleHome:
+// goes home), so a single click waits kDoubleMs to see whether a second follows.
 static bool onAnswer() { return mode == Mode::Reply || mode == Mode::Image; }
 
 static void noteSideClick(bool wokeOnly) {
@@ -3612,12 +3632,14 @@ void loop() {
     }
   } else if (sideBtn().wasClicked()) {
     touch();
-    if (sideClickMs && mode == sideClickMode) {  // the second click: hear the answer again
+    if (sideClickMs && (board::kDoubleHome || mode == sideClickMode)) {  // the second click
       sideClickMs = 0;
-      replayAnswer();
+      if (board::kDoubleHome) goHome();  // from wherever the first one led
+      else replayAnswer();               // hear the answer again
     } else if (onAnswer() && !board::kPaperB) {  // (the B paper's options button does one thing: no wait)
       noteSideClick(false);  // it may be the first of two
     } else {
+      if (board::kDoubleHome) noteSideClick(true);  // done at once, and a second may still follow
       sideClick();
     }
   }

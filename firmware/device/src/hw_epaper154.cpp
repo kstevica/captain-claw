@@ -228,9 +228,13 @@ int batteryLevel() {
   return 0;
 }
 
+RTC_DATA_ATTR static bool rtcUsb = false;  // when it went to sleep
+
 // No pin says so. A USB host sends start-of-frame packets, and a charger holds
-// the battery near its 4.2 V (a battery alone falls off that within minutes).
+// the battery near its 4.2 V (4160 mV as this ADC reads it; a battery alone
+// falls off that within minutes). A timer's wake is over before USB is back up.
 bool onUsbPower() {
+  if (esp_sleep_get_wakeup_cause() == ESP_SLEEP_WAKEUP_TIMER && millis() < 3000) return rtcUsb;
   static uint32_t lastFrame = 0, lastMs = 0;
   static bool host = false;
   if (!lastMs || millis() - lastMs >= 250) {
@@ -240,7 +244,7 @@ bool onUsbPower() {
     lastFrame = frame;
   }
   const int mv = batteryMv();
-  return host || mv >= 4180 || mv < 2500;
+  return host || mv >= 4150 || mv < 2500;
 }
 
 bool charging() { return onUsbPower() && batteryMv() >= 2500 && batteryMv() < 4150; }
@@ -248,6 +252,8 @@ bool charging() { return onUsbPower() && batteryMv() >= 2500 && batteryMv() < 41
 // ── power ──────────────────────────────────────────────────────────────
 
 void prepareSleep() {
+  rtcUsb = onUsbPower();
+  gpio_reset_pin(board::kMonoLed);  // off the PWM, so the LED can't stay lit asleep
   digitalWrite(kAmp, LOW);
   digitalWrite(kAudioPower, HIGH);
   digitalWrite(kEpdPower, HIGH);
@@ -256,6 +262,7 @@ void prepareSleep() {
 }
 
 void powerOff() {
+  gpio_reset_pin(board::kMonoLed);
   digitalWrite(kAmp, LOW);
   digitalWrite(kAudioPower, HIGH);
   digitalWrite(kEpdPower, HIGH);
@@ -295,7 +302,7 @@ void clockFromRtc() {
   if (!M5.In_I2C.readRegister(kRtc, 0x04, r, sizeof(r), 400000)) return;
   if (r[0] & 0x80) return;  // the oscillator stopped: the time means nothing
   const int year = 2000 + unbcd(r[6]);
-  if (year < 2025) return;
+  if (year < 2026) return;  // never set by us: the factory demo leaves 2025-08-27 running
   const int64_t days = daysFromCivil(year, unbcd(r[5] & 0x1F), unbcd(r[3] & 0x3F));
   struct timeval tv = {};
   tv.tv_sec = (time_t)(days * 86400 + unbcd(r[2] & 0x3F) * 3600 + unbcd(r[1] & 0x7F) * 60 + unbcd(r[0] & 0x7F));

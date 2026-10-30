@@ -269,8 +269,9 @@ temperature and humidity, PCF85063 clock, microSD, BOOT and PWR buttons, one
 green LED. **Only the V2 board works** ("V2" on the back or top-left of the
 PCB); a V1 has 4 MB flash and 2 MB PSRAM, too small for this firmware.
 
-It's written from Waveshare's schematic and examples and **has not run on the
-hardware yet**. M5Unified doesn't know this board, so `hw_epaper154.cpp` skips
+It's written from Waveshare's schematic and examples. The non-touch board has
+been measured on the bench (below); **the Touch one hasn't run yet**. M5Unified
+doesn't know this board, so `hw_epaper154.cpp` skips
 `M5.begin()` (its detection would probe these pins) and sets up M5Unified's
 speaker, mic, button and I2C classes by hand. `ui_epaper154.cpp` is the screen,
 `epd_ssd1681.cpp` the panel driver.
@@ -278,42 +279,85 @@ speaker, mic, button and I2C classes by hand. `ui_epaper154.cpp` is the screen,
 **The screen.** Far faster than the PaperColor's, so this one behaves like the
 stick: a drawn menu, live status and working screens, answers that page with
 the voice. Screens draw to a canvas at once; a background task sends the latest
-one to the panel, only if it differs, as a partial refresh (no flash; Waveshare
-rates it at 0.4 s). A full refresh (2 s, flashes) clears what those leave behind:
+one to the panel, only if it differs, as a partial refresh (no flash, 0.6 s). A
+full refresh (1.8 s, flashes) clears what those leave behind:
 after power-up, for QR codes, going to sleep after 5 or more partials, on the
 home screen left alone for a minute after 20 or more, and on the next change
 after 60 at the latest. The frame on the panel stays in RTC memory, so a wake
 goes on from it with no flash. The serial log times every refresh
-(`[paper] partial refresh done, 412 ms`).
+(`[paper] partial refresh done, 580 ms`).
 
 **The PaperColor's trick.** Every full refresh starts from a reset pulse and
 the controller's whole set-up. What it doesn't take over is cutting a running
 waveform short for a new screen: the panel is left mid-change, so a full refresh
-has to follow, and at 2 s that's no quicker than letting the first one finish.
+has to follow, and at 1.8 s that's no quicker than letting the first one finish.
 
 | | `epaper154` | `epaper154_touch` |
 |---|---|---|
 | talk | BOOT: press, talk, press again (or 2.5 s of quiet); wakes and records from sleep | the same, or the Talk button on the screen |
 | next | PWR: next row or page · hold = menu | the same, or swipe; in a list, tap the left or right third to move, the middle to choose |
+| home | PWR: double-click, from any screen (not while it records or the agent works) | the same |
+| replay | BOOT: double press, or Menu → *Replay answer* | the same |
 | off | PWR held 4 s (on USB: deep sleep, since USB keeps it powered) | the same |
 | Wi-Fi & settings | Menu → *Wi-Fi & settings* | the same |
 
 Holding the talk button at power-on can't open setup here as it does elsewhere:
 BOOT held at power-on is the chip's download mode. No pin reports USB power or
 charging, so they're inferred from USB traffic and the battery voltage (a plain
-charger shows only once the battery is near full). The LED is on or off, so
-"Low" and "Bright" are the same.
+charger shows only once the battery is near full).
+
+**The lights.** The red one belongs to the charger chip: its STAT pin drives it
+directly, with no GPIO on the way, so it's on while charging and the firmware can
+neither change nor read it. The green one is ours (G3, PWM). With one colour the
+rhythm carries the meaning, and it's the one thing here that answers at once and
+tells awake from asleep, since the panel keeps its picture either way:
+
+| green light | means |
+|---|---|
+| on while a button is down | the press landed |
+| steady, brighter with your voice | recording |
+| breathing, a flick per step | the agent is working |
+| flickering with the voice | speaking |
+| two blinks every 5 s | something waits in Flight Deck |
+| one blink every 10 s | awake, nothing to do |
+| dark | asleep or off |
+| three blinks every 5 s | battery under 15% |
+| slow on and off, 1 s each | no Wi-Fi (its first minute) |
+| two blinks every 2 s | Wi-Fi, but no Flight Deck or agent (its first minute) |
+| quick blinks, then steady for 6 s | starting up, then connected |
+| fast flicker | downloading an update |
+
+"Low" under Status lights is half of "Bright".
+
+**Asleep.** The sleeping screen keeps the clock going: a timer wakes the board
+just after each minute turns, it redraws without Wi-Fi and sleeps again (Menu →
+More → *Redraw asleep*, or the phone page: every minute, 2, 5, 10 or 30 min, 1 h,
+3 h, never; at 2, 5 or 10 the time on screen is the last round one, like 19:25).
+Under 10% battery it goes hourly. The board barely warms this way, so the room
+reading stays good; the correction allows for how far it has cooled since it went
+to sleep.
 
 The picture doesn't depend on power, which is why the sleeping screen stays. On
 battery the board stays on only while G17 is high; it's latched through deep
 sleep, and cleared to switch off.
 
-To check on the first flash: V2 on the silkscreen; which way up the picture
-and the touch are (Menu → More → *Orientation*); speaker and mic levels (the register
-values are the StickS3's); that the battery percentage is believable; refresh
-times and ghosting (`kMaxPartials` and friends in `ui_epaper154.cpp`); current
-in deep sleep. Put the factory image aside first: `esptool.py read_flash 0
-0x800000 factory.bin`.
+Measured on the non-touch board: the codec, clock and sensor all answer; the
+clock keeps time; a full refresh takes 1803 ms, a partial one 580 ms; with one
+tone playing, the mic hears the speaker (4600 against 1 with the amplifier off).
+The mic's quiet peaks at about 450, under the 2400 that counts as a voice.
+
+The board warms its temperature sensor: in a room of about 24 °C, on USB, it read
+28.8 °C after a long sleep and rose to 32.7 °C awake (time constant 260 s).
+`roomFromSensor()` in `telemetry.cpp` takes that off, and works out the humidity
+of the same air at the cooler temperature. Home and the agent get the corrected
+values. It's calibrated on USB against one room reading, and unmeasured on
+battery. After a reset with the board already warm it reads high for a few minutes.
+
+Still to check: which way up the picture and the touch are (Menu → More →
+*Orientation*); a real voice's level; that the battery percentage is believable;
+ghosting (`kMaxPartials` and friends in `ui_epaper154.cpp`); the power latch on
+battery; current in deep sleep. Put the factory image aside first: `esptool.py
+read_flash 0 0x800000 factory.bin`.
 
 Screens on a Mac, both builds:
 

@@ -52,10 +52,9 @@ void Settings::load() {
   keyClicks = p.getBool("clicks", true);
   powerOffMin = p.getUChar("pwroffm", 3);
   if (!powerOffMinValid(powerOffMin)) powerOffMin = 3;
-  asleepRefreshMin = p.getUChar("slpref", 60);
-  if (asleepRefreshMin != 0 && asleepRefreshMin != 30 && asleepRefreshMin != 60 && asleepRefreshMin != 180) {
-    asleepRefreshMin = 60;
-  }
+  // (A key of its own where every minute is the first choice: an older 60 mustn't stick.)
+  asleepRefreshMin = p.getUChar(board::kSleepClock ? "slprefm" : "slpref", board::kSleepClock ? 1 : 60);
+  if (!asleepMinValid(asleepRefreshMin)) asleepRefreshMin = 60;
   speakMenu = p.getBool("saymenu", true);
   if (board::kEpaper) speakMenu = true;  // the paper's menu is never drawn: it's read aloud
   if (board::kEpaper) iconMode = false;  // a character can't move on paper
@@ -65,6 +64,12 @@ void Settings::load() {
 uint32_t Settings::powerOffMs() const {
   if (board::kEpaper) return powerOffMin ? powerOffMin * 60000UL : UINT32_MAX;  // 0: never
   return powerOffS * 1000UL;
+}
+
+bool asleepMinValid(int minutes) {
+  for (uint8_t m : kAsleepMins)
+    if (m == minutes) return m == 0 || m >= 30 || board::kSleepClock;
+  return false;
 }
 
 bool powerOffMinValid(int minutes) {
@@ -122,7 +127,7 @@ void Settings::save() const {
   p.putUChar("leds", ledLevel);
   p.putBool("clicks", keyClicks);
   p.putUChar("pwroffm", powerOffMin);
-  p.putUChar("slpref", asleepRefreshMin);
+  p.putUChar(board::kSleepClock ? "slprefm" : "slpref", asleepRefreshMin);
   p.putBool("saymenu", speakMenu);
   p.end();
 }
