@@ -83,6 +83,7 @@ import { useByokStore } from '../../stores/byokStore'
 import { useQuotaStore } from '../../stores/quotaStore'
 import ConnectionsPage, { type TabId as ConnectionsTab } from '../../pages/ConnectionsPage'
 import { ProfilePage } from '../../pages/ProfilePage'
+import { OPEN_PROFILE_EVENT } from '../../utils/profileSources'
 import { NotificationBell } from '../common/NotificationCenter'
 import { BrandMark } from '../common/BrandMark'
 import { KioskInfoDialog, type InfoAgent } from './KioskInfoDialog'
@@ -776,6 +777,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     try { localStorage.setItem('fd:connections-tab', tab) } catch { /* storage blocked: its last tab */ }
     useChatStore.setState({ chatFullscreen: false }); setLayoutMode('full'); setView('connections')
   }
+
+  // The bell: a finished profile research run opens the Profile dialog here
+  // (the full layout shows its page instead).
+  useEffect(() => {
+    if (!locked) return
+    const open = () => { setSettingsOpen(false); setProfileOpen(true) }
+    window.addEventListener(OPEN_PROFILE_EVENT, open)
+    return () => window.removeEventListener(OPEN_PROFILE_EVENT, open)
+  }, [locked])
 
   // A guide step's button: the guide gives way to that part of the kiosk.
   const guideAction = (action: OnboardingAction) => {

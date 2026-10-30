@@ -13,6 +13,7 @@ import { useChatStore } from '../../stores/chatStore'
 import { useProcessStore } from '../../stores/processStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { useUIStore } from '../../stores/uiStore'
+import { OPEN_PROFILE_EVENT } from '../../utils/profileSources'
 import { AgentSetupDialog } from '../layout/AgentSetupDialog'
 import { OnboardingDialog } from '../layout/OnboardingDialog'
 import { useIsMobile } from '../../hooks/useMediaQuery'
@@ -211,6 +212,14 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
     useTaskboardStore.getState().showTask(ref)
   }
 
+  // The profile researcher finished (or stopped): the Profile, where its
+  // drafts wait — the kiosk's dialog, or the full layout's page.
+  const openProfile = () => {
+    onClose()
+    if (layout === 'full') useUIStore.getState().setView('profile')
+    else window.dispatchEvent(new CustomEvent(OPEN_PROFILE_EVENT))
+  }
+
   const activate = (action: SharedNotificationAction) => {
     if (action.kind === 'none') return
     onClose()
@@ -277,6 +286,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
           shown.map((n) => {
             const setup = (n.refType === 'agent_setup' || n.refType === 'agent_exam' || n.refType === 'agent_lessons')
               && n.refId && onOpenSetup ? n.refId : ''
+            const profile = n.refType === 'profile'
             const task = taskOf(n)
             const exam = n.refType === 'agent_exam'
             const lessons = n.refType === 'agent_lessons'
@@ -285,9 +295,10 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
               key={n.id}
               notification={n}
               large={large}
-              action={setup ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
+              action={setup || profile ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
               hint={setup ? (exam ? 'Click to see the exam.' : lessons ? 'Click to take it, or decline.'
-                : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.') : ''}
+                : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.')
+                : profile ? (n.type === 'error' ? 'Click to open your Profile and try again.' : 'Click to review it in your Profile.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
                 ? (waiting.has(n.refId) ? 'waiting' : 'answered') : undefined}
               step={n.refType === 'autonomy_action' && n.refId && waiting?.get(n.refId)?.taskboard
@@ -295,7 +306,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
               onAnswered={() => { markRead(n.id); loadWaiting() }}
               onOpenTask={task ? () => { markRead(n.id); openTask(task) } : undefined}
               onRead={() => markRead(n.id)}
-              onActivate={setup ? () => onOpenSetup?.(setup, exam ? 'exam' : lessons ? 'lessons' : 'setup') : activate}
+              onActivate={setup ? () => onOpenSetup?.(setup, exam ? 'exam' : lessons ? 'lessons' : 'setup') : profile ? openProfile : activate}
               onRemove={() => remove(n.id)}
             />
             )
