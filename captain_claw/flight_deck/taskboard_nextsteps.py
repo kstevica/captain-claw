@@ -7,7 +7,8 @@ triage's Jev pass asks about a task (taskboard_triage), it also asks
 ``next_move`` — wait, remind, ask_clarifying, reply_with_result, draft_email,
 escalate or close — of an open request someone can be reached on: a verified
 email address among its parties, or a turn whose origin the deck delivers to
-(WhatsApp, a Telegram chat of the deck's own bot, Messenger, a device). When Jev is ≥ 0.8 sure of a move
+(WhatsApp, a Telegram chat of the deck's own bot, the person on Messenger, the
+user's own device). When Jev is ≥ 0.8 sure of a move
 that writes to someone (remind, ask_clarifying, reply_with_result,
 draft_email) and nothing waits on the task already, the agent's own model
 (triage's reader: its REST, its config while it sleeps, the board user's
@@ -21,22 +22,29 @@ Telegram, devices — with the link that opens the task):
   * an email task (and any draft_email) → ``mail.draft``: a draft, never a
     send (email is propose-only);
   * a chat task → ``reply.on_origin``: on Approve, Flight Deck delivers the
-    text to the chat the task came from (delivery_routes.deliver_to_origin),
-    a clarifying question on the same channel as the task.
+    text to the chat the task came from (fd_dispatch._run_fd_action), a
+    clarifying question on the same channel as the task.
 
 Recipients come only from what the board recorded — the task's verified
-email parties, the turn's own origin for a chat — never from a model's text;
-the user may pick another of them (``payload.to_options``) and edit the
-wording before approving (``PATCH /fd/autonomy/actions/{id}``, autonomy_routes),
-and dispatch checks the recipient against them once more. A task flagged
-``contains_instructions`` (someone else's message asks the assistant to act)
-or ``historical`` never gets one, and none is made without Jev's answer (no
-key, an outage, the day's cap spent: none — fails closed). On demand
-(``/propose``) the same rules hold, the question counted in the Jev cap.
+email parties, the turn's own origin for a chat, and that only where it
+reaches the person it is about: never a bus channel others may be on (a
+Messenger reply goes to the PSID that wrote, a device's to the board user's
+own device) — never from a model's text; the user may pick another of them
+(``payload.to_options``) and edit the wording before approving (``PATCH
+/fd/autonomy/actions/{id}``, autonomy_routes), and dispatch checks the
+recipient against them once more. A task flagged ``contains_instructions``
+(someone else's message asks the assistant to act) or ``historical`` never
+gets one — nor does someone else's message Jev hasn't read for that yet (fails
+closed: only Jev's "it doesn't" lets it through) — and none is made without
+Jev's answer (no key, an outage, the day's cap spent: none). On demand
+(``/propose``) the same rules hold: the question counted in the Jev cap, and
+about someone else's message asked again with it.
 
 A next step waits as long as its task does: it expires when the task closes —
-any way —, goes or is merged away (its own task, ``ref_id``, wherever its key
-moved); whenever the board reads its proposals (:func:`waiting_proposals`),
+any way —, goes, is merged away (its own task, ``ref_id``, wherever its key
+moved) or is flagged ``contains_instructions`` (its wording predates the message
+that flagged it, and a flagged task never gets one); whenever the board reads
+its proposals (:func:`waiting_proposals`),
 after each triage decision and on Approve — or after a week (also when the
 bell lists what waits, a channel counts it, the arbiter passes, and on
 Approve), and it counts toward none of the arbiter's caps. Rejected, its task
@@ -96,6 +104,10 @@ _WRITE_TEXT = {
 }
 _MOVE_TITLE = {"remind": "Remind {to}", "ask_clarifying": "Ask {to}", "reply_with_result": "Reply to {to}",
                "draft_email": "Email {to}"}
+_BLANK = {"to": "", "to_options": [], "text": "", "subject": "", "task_title": "", "reply_to_message_id": ""}
+_ASKS_TO_ACT = "The message asks the assistant itself to act, so no next step is suggested from it."
+_NOT_READ = "Someone else's message on it hasn't been read for instructions yet, so no next step is suggested from it."
+_NEW_CAME_IN = "Something new came in on it just now, which Jev hasn't read — try again in a moment."
 _MOVE_SAID = {"remind": "send a reminder", "ask_clarifying": "ask a clarifying question",
               "reply_with_result": "reply with the result", "draft_email": "draft an email",
               "wait": "wait", "escalate": "leave it to you", "close": "close it"}
@@ -103,8 +115,7 @@ _MOVE_SAID = {"remind": "send a reminder", "ask_clarifying": "ask a clarifying q
 # The channels a reply goes back on, as a task names them — and the kind of
 # origin each one's turns carry (origin.py: what delivery_routes reaches).
 _EMAIL_CHANNELS = ("gmail", "email")
-_CHAT_ORIGINS = {"whatsapp": "whatsapp", "telegram": "telegram", "messenger": "channel", "device": "channel",
-                 "glasses": "glasses"}
+_CHAT_ORIGINS = {"whatsapp": "whatsapp", "telegram": "telegram", "messenger": "messenger", "device": "channel"}
 _EMAIL_ROLES = ("requester", "recipient", "cc")
 
 _BUSY: set[tuple[str, str]] = set()   # (board, task) a next step is being made for now
@@ -147,16 +158,33 @@ def _label(channel: str) -> str:
 # ── Who can be reached, from what the board recorded ──────────────────
 
 
-def _turn_origin(turn: dict) -> dict | None:
-    """``{kind, address}`` the deck delivers to for one turn — its own
-    channel's handle as the register sent it (a WhatsApp number, a Telegram
-    chat, the channel a Messenger thread or a device is on: the frame's
-    ``turn_origin``), or the session's stored origin when its kind is that
-    channel's. None for any other."""
+def _own_device(address: str, board_user: str) -> bool:
+    """Whether a bus channel is one of the board user's own devices
+    (``device:<user>:<id>``, device_bridge) — what a turn says of itself
+    never makes another user's device theirs."""
+    head, owner, device = (address.split(":", 2) + ["", ""])[:3]
+    return head == "device" and bool(device) and (owner or "local") == board_user
+
+
+def _turn_origin(turn: dict, board_user: str, *, allowed: bool = True) -> dict | None:
+    """``{kind, address}`` the deck delivers to for one turn on *board_user*'s
+    board — its own channel's handle as the register sent it (a WhatsApp
+    number, a Telegram chat, the person who wrote on Messenger: the frame's
+    ``turn_origin``, a PSID on the deck's allowlist; the board user's own
+    device: the frame's channel, or the session's stored origin when it is
+    that). None for any other: a turn's record is what its agent said, so
+    what isn't provably the asker's alone is no place to write to (a bus
+    channel fans out to everyone on it). Not *allowed*: whether or not the
+    allowlist lets the deck write there now."""
     base = str(turn.get("channel") or "").partition(":")[0]
     ext = _loads(turn.get("ext_refs"), {})
     own = ext.get("turn_origin") if isinstance(ext.get("turn_origin"), dict) else {}
-    origin = own if own.get("kind") in ("channel", "glasses") else (
+    if base == "messenger":
+        from captain_claw.flight_deck.messenger_bridge import psid_allowed
+
+        psid = str(own.get("address") or "").strip() if own.get("kind") == "messenger" else ""
+        return {"kind": "messenger", "address": psid} if psid and (not allowed or psid_allowed(psid)) else None
+    origin = own if own.get("kind") == "channel" else (
         ext.get("origin") if isinstance(ext.get("origin"), dict) else {})
     okind = str(origin.get("kind") or "").strip().lower()
     oaddr = str(origin.get("address") or "").strip()[:128]
@@ -166,10 +194,8 @@ def _turn_origin(turn: dict) -> dict | None:
     if base == "telegram":
         chat = str(ext.get("telegram_chat_id") or "").strip() or (oaddr if okind == "telegram" else "")
         return {"kind": "telegram", "address": chat} if re.fullmatch(r"-?\d{1,20}", chat) else None
-    if base in ("messenger", "device", "glasses") and oaddr and okind in ("channel", "glasses"):
-        if base == "device" and not oaddr.startswith("device:"):
-            return None  # a device's turns go out on its own channel only
-        return {"kind": okind, "address": oaddr}
+    if base == "device" and okind == "channel" and _own_device(oaddr, board_user):
+        return {"kind": "channel", "address": oaddr}
     return None
 
 
@@ -179,10 +205,12 @@ def reply_options(view: dict) -> list[dict]:
     board recorded: its verified email parties (the requester first), and
     each chat its turns came in on (the latest first) that the deck can
     write to — a Telegram chat only when the deck's shared bot holds it for
-    the task's agent (an agent's own bot's token never reaches Flight Deck)."""
+    the task's agent, on this board (an agent's own bot's token never
+    reaches Flight Deck)."""
     from captain_claw.flight_deck.delivery_routes import telegram_relayed
 
     slug = str(view["task"].get("agent_slug") or "")
+    board_user = str(view["task"].get("user_id") or "") or "local"
     out: list[dict] = []
     seen: set[tuple[str, str]] = set()
     parties = sorted(view.get("parties") or [], key=lambda p: _EMAIL_ROLES.index(p["role"])
@@ -195,11 +223,11 @@ def reply_options(view: dict) -> list[dict]:
             out.append({"address": address, "display": _line(p.get("display"), 120) or address, "kind": "email",
                         "role": p["role"]})
     for turn in reversed(view.get("turns") or []):
-        origin = _turn_origin(turn)
+        origin = _turn_origin(turn, board_user)
         base = str(turn.get("channel") or "").partition(":")[0]
         if origin is None or (base, origin["address"]) in seen:
             continue
-        if origin["kind"] == "telegram" and not telegram_relayed(origin["address"], slug):
+        if origin["kind"] == "telegram" and not telegram_relayed(origin["address"], slug, board_user):
             continue
         seen.add((base, origin["address"]))
         who = "You" if turn.get("own_chat") else (_line(turn.get("speaker_label"), 80) or "the chat")
@@ -241,7 +269,7 @@ def plan_for(view: dict, move: str) -> dict | None:
 
 
 def _waiting(uid: str) -> list[dict]:
-    return autonomy_store().list_actions(uid, status="awaiting_approval", limit=500)
+    return autonomy_store().waiting_actions(uid)
 
 
 def _task_of(uid: str, action: dict) -> str:
@@ -288,7 +316,73 @@ def _gone(state: dict | None) -> str:
         return "its task was merged into another"
     if state.get("status") != "open":
         return "its task closed"
+    if (state.get("flags") or {}).get("contains_instructions"):
+        return "a message on its task asks the assistant to act"
     return ""
+
+
+def _outdated(uid: str, task_id: str, action: dict) -> str:
+    """Why this next step, on a task still there, can't wait ('' if it can). A
+    message of someone's landed on a task nothing ever reads for instructions (a
+    send, the user's own chat): its wording predates that — on someone else's
+    task Jev may still say the message asks nothing, so that one waits for its
+    word. Or whom it goes to has left the task (an Unmerge took them out): a
+    recipient no option ever named is for the approve to refuse."""
+    view = _board().triage_view(uid, task_id) if task_id else None
+    if view is None:
+        return ""
+    if blocked(view, judging=True):
+        return "a message on its task hasn't been read for instructions"
+    payload = action.get("payload") or {}
+    to = _handle(payload.get("to"))
+    named = {_handle(o.get("address")) for o in payload.get("to_options") or [] if isinstance(o, dict)}
+    if to in named and to not in _handles_on(view):
+        return "the person it goes to is no longer on its task"
+    return ""
+
+
+def _handle(address: Any) -> str:
+    """An address as compared: a phone number by its digits, anything else lower-cased."""
+    text = str(address or "").strip().lower()
+    digits = re.sub(r"\D", "", text)
+    return digits if digits and re.fullmatch(r"[\d\s()+.-]+", text) else text
+
+
+def _handles_on(view: dict) -> set[str]:
+    """Every address someone on the task goes by: its parties', and what its
+    turns came in on — whether or not the deck can write there now (that is for
+    the approve to say)."""
+    board_user = str(view["task"].get("user_id") or "") or "local"
+    said = {_handle(p.get("address")) for p in view.get("parties") or []}
+    origins = (_turn_origin(turn, board_user, allowed=False) for turn in view.get("turns") or [])
+    return (said | {_handle(o["address"]) for o in origins if o}) - {""}
+
+
+def text_left(left: set[tuple[str, str]]) -> dict[str, list[str]]:
+    """An inbox's text left these ``(user, task)``, switched off or expired:
+    the next steps on them were written from it (on a task merged into one of
+    them too, or gone with it), so what waits expires, and it and those that
+    stopped waiting (rejected, expired) keep nothing of it — whom it went to,
+    what it said. What the user approved stays: the record of a send.
+    ``{user: [the actions told plain]}``."""
+    tasks_of: dict[str, set[str]] = {}
+    for uid, task_id in left:
+        tasks_of.setdefault(uid, set()).add(task_id)
+    store, board = autonomy_store(), _board()
+    told: dict[str, list[str]] = {}
+    for uid, task_ids in tasks_of.items():
+        steps = []
+        for a in store.unsent_taskboard_steps(uid):
+            ref = str(a.get("ref_id") or "")
+            root = board.resolve_id(uid, ref)
+            if ref in task_ids or root in task_ids or not root:
+                steps.append(a)
+        store.expire_actions([str(a["id"]) for a in steps if a.get("status") == "awaiting_approval"],
+                             "expired: a message it was written from left its task")
+        for a in steps:
+            if store.blank_action(str(a["id"]), "A next step", _BLANK):
+                told.setdefault(uid, []).append(str(a["id"]))
+    return told
 
 
 def _cutoff() -> str:
@@ -298,7 +392,8 @@ def _cutoff() -> str:
 
 def expire_closed(uid: str) -> int:
     """The user's next steps whose task is no longer open (closed by
-    anyone, gone, merged away) — or that waited a week — expire. How many."""
+    anyone, gone, merged away) or was flagged — or that waited a week — expire.
+    How many."""
     store = autonomy_store()
     n = store.expire_taskboard_proposals(uid, _cutoff())
     mine = [a for a in _waiting(uid) if a.get("source") == TASKBOARD_SOURCE]
@@ -308,7 +403,8 @@ def expire_closed(uid: str) -> int:
     states = _board().task_states(uid, list(set(tasks.values())))
     by_why: dict[str, list[str]] = {}
     for a in mine:
-        why = _gone(states.get(tasks.get(str(a["id"]), "")))
+        task_id = tasks.get(str(a["id"]), "")
+        why = _gone(states.get(task_id)) or _outdated(uid, task_id, a)
         if why:
             by_why.setdefault(why, []).append(str(a["id"]))
     for why, ids in by_why.items():
@@ -318,7 +414,7 @@ def expire_closed(uid: str) -> int:
 
 async def task_gone(action: dict) -> str:
     """Why a next step can't run now — it waited a week, or its task closed,
-    went or was merged away ('' while it waits): asked on Approve. Never
+    went, was merged away or was flagged ('' while it waits): asked on Approve. Never
     raises (a board that can't be read lets the Approve through to the
     existing guards)."""
     made = str(action.get("created_at") or "")
@@ -328,7 +424,7 @@ async def task_gone(action: dict) -> str:
         uid = _action_user(action)
         task_id = await asyncio.to_thread(_task_of, uid, action)
         states = await asyncio.to_thread(_board().task_states, uid, [task_id] if task_id else [])
-        return _gone(states.get(task_id))
+        return _gone(states.get(task_id)) or await asyncio.to_thread(_outdated, uid, task_id, action)
     except Exception as exc:  # noqa: BLE001
         log.warning("Taskboard next step: task unreadable", action=action.get("id"), error=str(exc))
         return ""
@@ -378,7 +474,7 @@ def proposal_view(action: dict) -> dict:
 def waiting_proposals(uid: str) -> dict[str, dict]:
     """``{task_id: ProposalView}`` — the newest action waiting for approval
     on each of the user's tasks (read live, so the row moves lanes the moment
-    it is answered); next steps whose task closed expire first."""
+    it is answered); next steps whose task closed or was flagged expire first."""
     try:
         expire_closed(uid)
         waiting = _waiting_tasks(uid)
@@ -474,10 +570,17 @@ def dispatch_args(action: dict) -> dict:
 # ── Jev: the next move ────────────────────────────────────────────────
 
 
-def blocked(view: dict) -> str:
+def blocked(view: dict, *, judging: bool = False) -> str:
     """Why this task gets no next step ('' when it may): only an open
     request or sent task, never history, never one whose message asks the
-    assistant itself to act."""
+    assistant itself to act — and someone else's message counts as asking
+    until Jev has said it doesn't (a first pass still to come, a mute that
+    keeps it out of triage, a task whose flag went missing, one that came in
+    since: fails closed), on whatever task it landed: on a send or the user's
+    own chat (a key a merge moved, a reply on its thread) nothing ever asks.
+    *judging*: Jev is being asked that in the same breath, so an unread
+    message on someone else's task doesn't stop the question (what comes of
+    it is looked at again once the answer is written)."""
     task = view["task"]
     flags = _loads(task.get("flags"), {})
     if task.get("merged_into"):
@@ -489,15 +592,18 @@ def blocked(view: dict) -> str:
     if flags.get("historical"):
         return "Its history is shown, never acted on."
     if flags.get("contains_instructions"):
-        return "The message asks the assistant itself to act, so no next step is suggested from it."
-    return ""
+        return _ASKS_TO_ACT
+    f = taskboard_triage.facts(view, str(task.get("user_id") or "") or "local")
+    if f["third_party"]:
+        return _NOT_READ if not judging and (flags.get("contains_instructions") is not False or f["unread"]) else ""
+    return _NOT_READ if f["unread"] else ""
 
 
 def wants_next_move(uid: str, view: dict, waiting: dict[str, dict] | None = None) -> bool:
     """Whether triage's Jev pass asks ``next_move`` of this task: it may get
     a next step, someone on it can be reached, and nothing waits on it yet
     (*waiting*: :func:`_waiting_tasks`, read once for a pass)."""
-    if blocked(view) or not reply_options(view):
+    if blocked(view, judging=True) or not reply_options(view):
         return False
     waiting = _waiting_tasks(uid) if waiting is None else waiting
     return view["task"]["id"] not in waiting
@@ -548,10 +654,11 @@ def add_context(item: dict, view: dict) -> dict:
     return item
 
 
-async def after_decision(uid: str, task_id: str, answers: dict, f: dict) -> None:
-    """Triage's hook, after a decision was written: a task no longer open
-    loses what waited on it; one Jev is ≥ 0.8 sure should get a move that
-    writes to someone gets its next step drafted and proposed. Never raises."""
+async def after_decision(uid: str, task_id: str, answers: dict, f: dict, fingerprint: str | None = None) -> None:
+    """Triage's hook, after a decision was written about the task as it stood
+    at *fingerprint*: a task no longer open loses what waited on it; one Jev
+    is ≥ 0.8 sure should get a move that writes to someone gets its next step
+    drafted and proposed. Never raises."""
     try:
         board = _board()
         state = (await asyncio.to_thread(board.task_states, uid, [task_id])).get(task_id)
@@ -564,7 +671,7 @@ async def after_decision(uid: str, task_id: str, answers: dict, f: dict) -> None
             return
         move, p = _choice(answers, "next_move")
         if move in PROPOSING and p >= MOVE_SURE:
-            await propose(uid, task_id, move, p, notify=True)
+            await propose(uid, task_id, move, p, notify=True, read=fingerprint)
     except Exception as exc:  # noqa: BLE001 — a next step never breaks a triage pass
         log.warning("Taskboard next step failed", user=uid, task=task_id, error=str(exc))
 
@@ -675,11 +782,15 @@ def _reply_to_message(uid: str, task_id: str) -> str:
     return next((k.removeprefix("gmail:msg:") for k in reversed(keys) if k.startswith("gmail:msg:")), "")
 
 
-async def propose(uid: str, task_id: str, move: str, p: float, *, notify: bool) -> tuple[dict | None, str]:
+async def propose(uid: str, task_id: str, move: str, p: float, *, notify: bool,
+                  read: str | None = None) -> tuple[dict | None, str]:
     """Draft a *move* on the task and put it in the ledger for the user's
     Approve: ``(the action, "")``, or ``(None, why not)``. *notify*: tell the
     user where they asked to hear of proposals (triage's; not on demand —
-    they are looking at it)."""
+    they are looking at it). *read*: the fingerprint of the task Jev answered
+    about. Anything on it since (or while the words are written), Jev hasn't
+    read and the draft doesn't answer: no next step, and the pass the new
+    event queues — or the user's next ask — reads it first."""
     key = (uid, task_id)
     if key in _BUSY:
         return None, "A next step for it is being written already."
@@ -689,6 +800,8 @@ async def propose(uid: str, task_id: str, move: str, p: float, *, notify: bool) 
         view = await asyncio.to_thread(board.triage_view, uid, task_id)
         if view is None:
             return None, "Task not found."
+        if read is not None and view["task"]["fingerprint"] != read:
+            return None, _NEW_CAME_IN
         why = blocked(view)
         if why:
             return None, why
@@ -708,6 +821,9 @@ async def propose(uid: str, task_id: str, move: str, p: float, *, notify: bool) 
             log.info("Taskboard next step: draft failed", user=uid, task=task_id, error=str(exc)[:200])
             return None, "The wording couldn't be written this time."
         task = view["task"]
+        latest = await asyncio.to_thread(board.get_task, uid, task_id)
+        if latest is None or latest["fingerprint"] != task["fingerprint"]:
+            return None, _NEW_CAME_IN
         title = _line(task.get("title"), 160)
         payload: dict[str, Any] = {
             "action_id": plan["action_id"], "move": move, "target_agent": str(task.get("agent_slug") or ""),
@@ -743,9 +859,12 @@ async def propose(uid: str, task_id: str, move: str, p: float, *, notify: bool) 
 
 async def _ask(uid: str, view: dict, f: dict, kind: str) -> dict:
     """One Jev ask about this task's next move — which one (``auto``), or
-    whether *kind* fits now — with the board user's key."""
+    whether *kind* fits now — with the board user's key; and, of someone
+    else's message, whether it asks the assistant to act."""
     item = add_context(taskboard_triage.jev_item(view, f), view)
     qs = questions(0) if kind == "auto" else _fits_question(kind)
+    if f["third_party"]:
+        qs = {**qs, **taskboard_triage.act_question(0)}
     out = await asyncio.wait_for(jev_routes.ask_for_owner(
         uid, {"about": taskboard_triage._STATE_NOTE, "items": [item]}, qs, source=taskboard_triage.JEV_SOURCE),
         _JEV_TIMEOUT_S)
@@ -756,8 +875,11 @@ async def suggest(uid: str, task_id: str, kind: str = "auto") -> tuple[dict | No
     """A next step on demand, by the same rules as triage's: Jev picks the
     move (``auto``) or says whether the one asked for fits, ≥ 0.8 either
     way, the question counted in the day's Jev cap — and none without Jev.
-    ``(the action waiting on the task, why)``: the one already waiting is
-    given back as it is."""
+    Of someone else's message Jev is asked again whether it asks the
+    assistant to act (triage may never have read it, or not since the latest
+    message came): at 0.5 or more, or with no answer, none, and the task says
+    so from then on. ``(the action waiting on the task, why)``: the one
+    already waiting is given back as it is."""
     board = _board()
     view = await asyncio.to_thread(board.triage_view, uid, task_id)
     if view is None:
@@ -766,7 +888,7 @@ async def suggest(uid: str, task_id: str, kind: str = "auto") -> tuple[dict | No
     pending = await asyncio.to_thread(waiting_on, uid, task_id)
     if pending is not None:
         return pending, "A next step already waits for your approval."
-    why = blocked(view)
+    why = blocked(view, judging=True)
     if why:
         return None, why
     if not reply_options(view):
@@ -798,18 +920,36 @@ async def suggest(uid: str, task_id: str, kind: str = "auto") -> tuple[dict | No
     else:
         move, p = kind, float((answers.get("fits") or {}).get("p") or 0.0)
     task = view["task"]
-    sure = move in PROPOSING and p >= MOVE_SURE
+    acts = f["third_party"] and taskboard_triage.asks_to_act(f, answers)
+    sure = move in PROPOSING and p >= MOVE_SURE and not acts
     said = (f"Jev is {round(p * 100)}% sure the next move is to {_MOVE_SAID.get(move, move)}" if kind == "auto"
             else f"Jev is {round(p * 100)}% sure it fits to {_MOVE_SAID[move]} now")
-    await asyncio.to_thread(board.triage_write, uid, task_id, task["fingerprint"], decision={
+    verdict = {"flags": {"contains_instructions": acts}} if f["third_party"] else None
+    wrote = await asyncio.to_thread(board.triage_write, uid, task_id, task["fingerprint"], fields=verdict, decision={
         "judge": "jev", "qset": NEXT_QSET, "state_hash": taskboard_triage._hash(f"{task_id}:{task['fingerprint']}"),
         "answers": answers, "applied": "Next step proposed" if sure else "No next step",
-        "why": said + "."})
+        "why": _ASKS_TO_ACT if acts else said + "."})
+    if acts:
+        return None, _ASKS_TO_ACT
     if not sure:
         if move in PROPOSING:
             return None, f"{said} — not sure enough to propose it."
         return None, f"{said}, so nothing is proposed." if move else "Jev didn't pick a next move."
-    return await propose(uid, task_id, move, p, notify=False)
+    if not wrote:
+        return None, _NEW_CAME_IN  # Jev's verdict was dropped: it answered about the task before that
+    return await propose(uid, task_id, move, p, notify=False, read=task["fingerprint"])
+
+
+def offered_kinds(uid: str, task_id: str) -> list[str]:
+    """What "Suggest next step" can ask for on this task now (``KINDS``): the
+    moves with someone to reach, ``auto`` first — none on a task that gets no
+    next step or that nobody on it can be reached from. Read for its detail,
+    so the button isn't offered where it could only say no."""
+    view = _board().triage_view(uid, task_id)
+    if view is None or blocked(view, judging=True):
+        return []
+    moves = [m for m in PROPOSING if plan_for(view, m) is not None]
+    return ["auto", *moves] if moves else []
 
 
 class ProposeBody(BaseModel):

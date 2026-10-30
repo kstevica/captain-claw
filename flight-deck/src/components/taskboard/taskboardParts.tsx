@@ -360,8 +360,14 @@ export function SyncStatus({ status, syncing }: { status: TaskboardStatus | null
 // ── A waiting proposal ──
 
 /** Approve sends the next step to your agent; Reject drops it — the same
- *  answer as in the bell. */
-export function ProposalButtons({ id, onAnswered }: { id: string; onAnswered: () => void | Promise<void> }) {
+ *  answer as in the bell. *onReview*: a next step the board wrote has no
+ *  Approve here (its words are read, and edited, on its card): Review opens
+ *  that instead. */
+export function ProposalButtons({ id, onAnswered, onReview }: {
+  id: string
+  onAnswered: () => void | Promise<void>
+  onReview?: () => void
+}) {
   const [busy, setBusy] = useState<'approve' | 'reject' | null>(null)
   const [error, setError] = useState('')
   const answer = async (approve: boolean) => {
@@ -380,9 +386,16 @@ export function ProposalButtons({ id, onAnswered }: { id: string; onAnswered: ()
   return (
     <div onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center gap-1.5">
-        <button disabled={busy !== null} onClick={() => answer(true)} className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}>
-          {busy === 'approve' && <Loader2 className="h-3 w-3 animate-spin" />}Approve
-        </button>
+        {onReview ? (
+          <button disabled={busy !== null} onClick={onReview} className={`${btn} bg-teal-600 text-white hover:bg-teal-500`}
+            title="Read what it says, change it if you like, and approve it there">
+            Review
+          </button>
+        ) : (
+          <button disabled={busy !== null} onClick={() => answer(true)} className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}>
+            {busy === 'approve' && <Loader2 className="h-3 w-3 animate-spin" />}Approve
+          </button>
+        )}
         <button disabled={busy !== null} onClick={() => answer(false)} className={`${btn} bg-zinc-800 text-zinc-300 hover:bg-zinc-700`}>
           {busy === 'reject' && <Loader2 className="h-3 w-3 animate-spin" />}Reject
         </button>

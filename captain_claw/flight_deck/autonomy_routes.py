@@ -428,8 +428,8 @@ async def approve_action_route(
     if not _owns(action, uid):
         raise HTTPException(status_code=404, detail="Action not found")
     if action.get("source") == TASKBOARD_SOURCE:
-        # A next step whose task closed meanwhile has nothing left to do: it
-        # expires here instead of running (taskboard_nextsteps).
+        # A next step whose task closed or was flagged meanwhile: it expires
+        # here instead of running (taskboard_nextsteps).
         from captain_claw.flight_deck import taskboard_nextsteps
         gone = await taskboard_nextsteps.task_gone(action)
         if gone:
@@ -441,6 +441,9 @@ async def approve_action_route(
             status_code=409,
             detail=f"action is {cur.get('status') or 'unknown'}, not awaiting approval",
         )
+    # What runs is what was last saved: an edit can't land once it is claimed,
+    # and one may have landed since it was read above.
+    action = store.get_action(action_id) or action
     learned = record_human_feedback(uid, action, True)
 
     from captain_claw.flight_deck.fd_dispatch import dispatch_action
@@ -509,14 +512,17 @@ async def edit_action_route(
     action = store.get_action(action_id)
     if not _owns(action, uid):
         raise HTTPException(status_code=404, detail="Action not found")
-    body = await request.json()
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Body must be an object")
     if action.get("source") != TASKBOARD_SOURCE:
         raise HTTPException(status_code=409, detail="only a Taskboard next step is edited before approval")
     if action.get("status") != "awaiting_approval":
         raise HTTPException(status_code=409, detail=f"action is {action.get('status') or 'unknown'}, "
                                                     "not awaiting approval")
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Body must be an object") from None
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="Body must be an object")
     from captain_claw.flight_deck import taskboard_nextsteps
     try:
         title, payload = taskboard_nextsteps.edited(action, body)

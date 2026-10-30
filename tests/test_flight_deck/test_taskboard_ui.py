@@ -36,6 +36,11 @@ _STORE = _SRC / "stores" / "taskboardStore.ts"
 _BELL = _SRC / "components" / "common" / "NotificationCenter.tsx"
 _THREADS = _SRC / "components" / "taskboard" / "TaskThreads.tsx"
 _API = _SRC / "services" / "taskboardApi.ts"
+_PARTS = _SRC / "components" / "taskboard" / "taskboardParts.tsx"
+_NEXT = _SRC / "components" / "taskboard" / "TaskNextStep.tsx"
+_UI = _SRC / "stores" / "uiStore.ts"
+_APP = _SRC / "App.tsx"
+_NOTIFY = _SRC / "services" / "notifications.ts"
 _TS = _FD / "node_modules" / "typescript"
 
 pytestmark = pytest.mark.skipif(
@@ -511,3 +516,100 @@ def test_a_moment_ago_is_just_now_never_in_a_moment():
       out = [agoRelative(now), agoRelative(now + 30), agoRelative(now - 10), agoRelative(now - 600)];
     """, prelude=prelude)
     assert out == ["just now", "just now", "just now", "10 min ago"]
+
+
+def test_a_split_counts_only_what_can_move():
+    """A correction (Done, Snooze, a merge's note) stays where it was made:
+    one message and a correction is nothing to split."""
+    out = _run([(_TEXT, ["movableEvents"])], """
+      const e = (kind) => ({ kind });
+      out = [movableEvents([e('received'), e('correction')], 2), movableEvents([e('received'), e('reply')], 2),
+             movableEvents([e('correction')], 1), movableEvents(undefined), movableEvents([e('received')], 600)];
+    """)
+    assert out == [1, 2, 0, 0, 600]   # past the latest 500 the timeline holds, they count
+    board = _source(_BOARD)
+    assert "{picked && e.kind !== 'correction' && (" in board and "movable > 1 && !merged && !splitting" in board
+    assert "total={movable}" in board
+
+
+def test_a_merge_opens_the_task_the_server_says_it_is_part_of():
+    board = _source(_BOARD)
+    assert "const { task: target } = await taskboardApi.merge(source.id, into)" in board
+    assert "res.id === into" not in board
+
+
+def test_a_board_next_step_is_never_approved_unread_from_the_row_or_the_bell():
+    """Its words are a model's: the row and the bell open them, and an edit in
+    the open card is never passed over."""
+    parts, bell = _source(_PARTS), _source(_BELL)
+    assert "onReview={waiting.source === 'taskboard' ? onClick : undefined}" in _source(_BOARD)
+    assert "{onReview ? (" in parts
+    assert "canApprove={!step || !onOpenTask}" in bell   # where no board opens, the words are shown here instead
+    assert "{step.to && <span" in bell and "waiting?.get(n.refId)?.taskboard" in bell
+    assert "taskboard: a.source === 'taskboard'" in _source(_NOTIFY)
+
+
+def test_a_followed_link_shows_the_board_for_this_visit_and_saves_nothing():
+    prelude = """
+      const saved = [];
+      const LAYOUT_MODE_KEY = 'fd:layout-mode', SIMPLE_LEFT_OPEN_KEY = 'l', SIMPLE_RIGHT_OPEN_KEY = 'r',
+        SIMPLE_QUEUE_OPEN_KEY = 'q';
+      const persist = (k, v) => saved.push([k, v]);
+      const loadLayoutMode = () => 'full', loadBool = () => true;
+      const create = (fn) => {
+        let state;
+        const api = { getState: () => state, setState: (p) => { state = { ...state, ...p }; } };
+        state = fn(api.setState, api.getState);
+        return api;
+      };
+    """
+    out = _run([(_UI, ["layoutChosenSinceHydrate", "layoutVisited", "beginLayoutHydrate", "useUIStore"])], """
+      const ui = useUIStore.getState();
+      ui.visitLayout('simple');
+      const shown = useUIStore.getState().layoutMode;
+      const visited = [saved.length, layoutVisited];
+      beginLayoutHydrate();   // a sign-in's settings load after the link was followed: still on screen
+      const kept = layoutChosenSinceHydrate || layoutVisited;
+      useUIStore.getState().setLayoutMode('full');   // their own choice is saved, and ends the visit
+      out = [shown, visited, kept, saved, layoutVisited];
+    """, prelude=prelude)
+    assert out == ["simple", [0, True], True, [["fd:layout-mode", "full"]], False]
+    assert "layoutChosenSinceHydrate || layoutVisited ? useUIStore.getState().layoutMode" in _source(_UI)
+    app = _source(_APP)
+    assert "visitLayout('simple')" in app and "setLayoutMode('simple')" not in app
+
+
+def test_a_followed_link_opens_the_board_on_any_screen_and_over_an_admins_console():
+    """Most links are tapped on a phone, and an admin's default layout is the
+    console: both get the board for the visit. Only the apps' console and a
+    console address open none (and say so)."""
+    app = _source(_APP)
+    assert "const [boardVisit] = useState(() => !isAppShell() && hasTaskboardLink())" in app
+    # Decided before the console is chosen: a console that mounted would rewrite the address.
+    assert app.index("const [boardVisit]") < app.index("const inConsole = ")
+    assert "&& !PAYMENTS_LINK && !boardVisit))" in app
+    assert "if (isAppShell() || consoleRequested) {" in app
+    # The visit's own branch comes before the phone's and the tablet's, after the console's.
+    console = app.index("if (inConsole) return <ConsoleLayout />")
+    visit = app.index("if (boardVisit && layoutMode === 'simple') {")
+    assert console < visit < app.index("// ── Mobile layout ──")
+    # Signing in to follow a link doesn't land on the console and lose it.
+    land = app[app.index("async function landAdminAfterSignIn"):]
+    assert land.index("if (hasTaskboardLink() || useTaskboardStore.getState().open) return") < land.index("openConsole(")
+
+
+def test_escape_is_for_what_is_on_top_of_the_task():
+    """The task's pickers and a split let the key go while the Sources sheet or
+    a menu is open over them: it closes that, and ticked events stay ticked."""
+    board, threads, nextstep = _source(_BOARD), _source(_THREADS), _source(_NEXT)
+    assert "covered={exportOpen || settingsOpen || sourcesOpen}" in board
+    assert "if (!splitting || covered) return" in board and "if (!snoozeOpen || covered) return" in board
+    assert "if (covered) return" in threads and "if (!open || covered) return" in nextstep
+    assert "covered={covered}" in board
+
+
+def test_suggest_next_step_offers_only_what_the_server_can_make():
+    board, nextstep = _source(_BOARD), _source(_NEXT)
+    assert "suggestKinds.length > 0" in board and "kinds={suggestKinds}" in board
+    assert "KINDS.filter((k) => kinds.includes(k.id)).map(" in nextstep
+    assert "next_step_kinds?: NextStepKind[]" in _source(_API)

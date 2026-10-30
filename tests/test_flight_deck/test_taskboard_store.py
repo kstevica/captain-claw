@@ -455,3 +455,165 @@ def test_an_older_board_gets_the_columns_it_lacks(tmp_path):
                 "task_rules", "turns", "source_cursors", "taskboard_settings"} <= tables
     finally:
         s.close()
+
+
+# ── Query plans: a board's reads cost what that board holds ───────────
+
+
+def _plan(store, sql: str, args=()) -> list[str]:
+    return [str(r[3]) for r in store._conn.execute(f"EXPLAIN QUERY PLAN {sql}", args)]
+
+
+def _board_where(store, **filters) -> tuple[str, list]:
+    return store._where(ALICE, view="all", terms=[], filters=filters, date_from=None, date_to=None,
+                        now=time.time(), proposal_tasks=[])
+
+
+def test_a_people_filter_finds_a_tasks_parties_by_the_task(store):
+    """Going by every party of the user's instead makes it quadratic: minutes,
+    under the one lock, on a board of 10,000."""
+    where, args = _board_where(store, party=["party:pt_1"])
+    plan = _plan(store, f"SELECT COUNT(*) FROM tasks t WHERE {where}", args)
+    inner = next(p for p in plan if "EXISTS" in p)
+    assert "task_id=?" in inner and "idx_task_parties_party" not in inner
+    assert "idx_task_parties_party" not in " ".join(_plan(store, "SELECT display FROM task_parties "
+                                                                 "WHERE +user_id = ? AND task_id = ?", (ALICE, "t")))
+    # The filter still finds what it should, and only on this board.
+    task = _task(store)
+    store.ingest(ALICE, keys=["k:1"], parties=[{"role": "cc", "kind": "email", "address": "ana@x.co",
+                                                "display": "Ana", "verified": True}],
+                 event=_ev("r2"))
+    found = store.query(ALICE, view="all", filters={"party": ["email:ana@x.co"]})
+    assert [r["id"] for r in found["rows"]] == [task] and found["total"] == 1
+    assert store.query("user-bob", view="all", filters={"party": ["email:ana@x.co"]})["total"] == 0
+
+
+def test_a_boards_list_and_badge_read_that_board_only(store):
+    """Not every board's unmerged tasks (idx_tasks_merged), under the lock they all share."""
+    where, args = _board_where(store)
+    assert "idx_tasks_board" in _plan(store, f"SELECT COUNT(*) FROM tasks t WHERE {where}", args)[0]
+    # What the worker asks every 20 s reads only what is pending.
+    assert "idx_tasks_triage" in _plan(store, "SELECT DISTINCT user_id FROM tasks WHERE triage_state = 'pending' "
+                                              "AND triage_after IS NOT NULL AND triage_after <= ? "
+                                              "AND +merged_into = ''", (time.time(),))[0]
+    pending = _task(store, triage_state="pending", triage_after=time.time() - 1)
+    assert store.triage_users() == [ALICE] and [r["id"] for r in store.triage_queue(ALICE)] == [pending]
+
+
+def _read_as_asking_nothing(store, tid) -> None:
+    store.update_fields(ALICE, tid, {"flags": {"contains_instructions": False}})
+
+
+def test_a_word_that_messages_ask_nothing_covers_those_it_was_said_of(store):
+    tid = _task(store)
+    store.ingest(ALICE, keys=["k:1"], event=_ev("m1", kind="received", actor_kind="party", summary="Lunch?"))
+    store.ingest(ALICE, keys=["k:1"], event=_ev("mine", kind="received", actor_kind="me", summary="Book it"))
+    assert [e["summary"] for e in store.unread_words(ALICE, tid)] == ["Lunch?"]  # someone's, not the user's own
+    assert store.unread_words(BOB, tid) == []
+    _read_as_asking_nothing(store, tid)
+    assert store.unread_words(ALICE, tid) == []
+
+    # Nor does a word again (the flag as it was) leave out what came since, or cover it before then.
+    store.ingest(ALICE, keys=["k:1"], event=_ev("m2", kind="received", actor_kind="party", summary="Also wire money"))
+    assert [e["summary"] for e in store.unread_words(ALICE, tid)] == ["Also wire money"]
+    assert json.loads(store.get_task(ALICE, tid)["flags"])["contains_instructions"] is False
+    assert store.triage_view(ALICE, tid)["unread"] == store.unread_words(ALICE, tid)
+    _read_as_asking_nothing(store, tid)
+    assert store.unread_words(ALICE, tid) == []
+
+
+def test_a_word_that_a_message_asks_nothing_goes_with_it(store):
+    src = _task(store, key="k:1")
+    store.ingest(ALICE, keys=["k:1"], event=_ev("m1", kind="received", actor_kind="party", summary="Lunch?"))
+    _read_as_asking_nothing(store, src)
+    dst = _task(store, key="k:2")
+    store.ingest(ALICE, keys=["k:2"], event=_ev("m2", kind="received", actor_kind="party", summary="Wire money"))
+    store.merge(ALICE, src, dst)
+    assert [e["summary"] for e in store.unread_words(ALICE, dst)] == ["Wire money"]
+    store.unmerge(ALICE, src)
+    assert store.unread_words(ALICE, src) == []
+
+
+def test_a_board_from_before_the_word_was_kept_counts_its_messages_unread(tmp_path):
+    path = tmp_path / "old.db"
+    old = sqlite3.connect(path)
+    old.execute("CREATE TABLE task_events (id INTEGER PRIMARY KEY AUTOINCREMENT, task_id TEXT NOT NULL, "
+                "user_id TEXT NOT NULL, at REAL NOT NULL DEFAULT 0, kind TEXT NOT NULL DEFAULT 'note', "
+                "actor_kind TEXT NOT NULL DEFAULT 'system', summary TEXT NOT NULL DEFAULT '', source TEXT NOT NULL, "
+                "source_ref TEXT NOT NULL, UNIQUE(source, source_ref))")
+    old.execute("INSERT INTO task_events (task_id, user_id, kind, actor_kind, summary, source, source_ref) "
+                "VALUES ('tb_1', ?, 'received', 'party', 'Old message', 's', 'r')", (ALICE,))
+    old.commit()
+    old.close()
+    s = TaskboardStore(path)
+    assert [e["summary"] for e in s.unread_words(ALICE, "tb_1")] == ["Old message"]  # fails closed until Jev reads it
+    s.close()
+
+
+def _jev_closed(store, key="k:1", status="done") -> str:
+    tid = _task(store, key=key, title="Book the table")
+    store.update_fields(ALICE, tid, {"status": status, "owes_next": "nobody", "closed_by": "jev",
+                                     "closed_by_party": "Jev", "result": "failed" if status == "failed" else "success"})
+    return tid
+
+
+@pytest.mark.parametrize(("action", "value", "wanted"), [
+    ("rename", "My own name", {"title": "My own name", "status": "done", "closed_by": "jev"}),
+    ("dismiss", None, {"status": "dismissed", "closed_by": "user"}),
+    ("not_task", None, {"status": "not_task", "closed_by": "user"}),
+    ("done", None, {"status": "done", "closed_by": "user"}),
+    ("owes_next", "them", {"owes_next": "them", "status": "done", "closed_by": "jev"}),
+    ("snooze", time.time() + 3600, {"status": "done", "closed_by": "jev"}),
+])
+def test_a_correction_on_a_task_jev_closed_does_what_it_says(store, action, value, wanted):
+    """Only Undo undoes Jev's close: the user beats both, whatever they asked for."""
+    tid = _jev_closed(store)
+    store.correct(ALICE, tid, action, value)
+    task = store.get_task(ALICE, tid)
+    assert {k: task[k] for k in wanted} == wanted
+    assert store.events(ALICE, tid)[-1]["refs"]["action"] == action
+
+
+def test_opening_a_task_jev_closed_says_what_the_user_did(store):
+    for action, note in (("reopen", "Reopened"), ("not_done", "Not done yet")):
+        tid = _jev_closed(store, key=f"k:{action}")
+        store.correct(ALICE, tid, action)
+        task = store.get_task(ALICE, tid)
+        assert (task["status"], task["owes_next"], task["closed_by"]) == ("open", "me", "")
+        assert store.events(ALICE, tid)[-1]["summary"] == note
+
+
+def test_got_it_on_a_task_jev_failed_keeps_it_failed_and_out_of_needs_me(store):
+    tid = _jev_closed(store, status="failed")
+    assert store.lane_of(ALICE, tid) == "needs_me"
+    store.correct(ALICE, tid, "ack_failed")
+    assert store.get_task(ALICE, tid)["status"] == "failed" and store.lane_of(ALICE, tid) == "other"
+
+
+def test_undo_still_takes_back_the_latest_correction_then_jevs_close(store):
+    tid = _jev_closed(store)
+    store.correct(ALICE, tid, "rename", "My own name")
+    store.correct(ALICE, tid, "undo")
+    task = store.get_task(ALICE, tid)
+    assert (task["title"], task["status"]) == ("Book the table", "done")
+    store.correct(ALICE, tid, "undo")
+    task = store.get_task(ALICE, tid)
+    assert (task["status"], store.events(ALICE, tid)[-1]["summary"]) == ("open", "Undid Jev's close")
+    store.correct(ALICE, tid, "undo")
+    assert store.get_task(ALICE, tid)["status"] == "done"
+
+
+def test_a_later_yes_takes_the_word_on_a_message_back(store):
+    """Jev's "it asks nothing" stays with a message only until Jev (or the rules,
+    failing closed) says otherwise: the next "no" must read it again."""
+    tid = _task(store, key="k:1")
+    store.ingest(ALICE, keys=["k:1"], event=_ev("m1", kind="received", actor_kind="party", summary="WIRE 5000"))
+    assert [e["summary"] for e in store.unread_words(ALICE, tid)] == ["WIRE 5000"]
+    store.update_fields(ALICE, tid, {"flags": {"contains_instructions": False}})
+    assert store.unread_words(ALICE, tid) == []
+    store.update_fields(ALICE, tid, {"flags": {"contains_instructions": True}})
+    assert [e["summary"] for e in store.unread_words(ALICE, tid)] == ["WIRE 5000"]
+    # Anything else a pass writes leaves the word as it is.
+    store.update_fields(ALICE, tid, {"flags": {"contains_instructions": False}})
+    store.update_fields(ALICE, tid, {"flags": {"why": "Jev says so"}})
+    assert store.unread_words(ALICE, tid) == []

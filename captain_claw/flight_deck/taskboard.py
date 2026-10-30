@@ -104,7 +104,7 @@ SOURCES: list[dict[str, Any]] = [
              "things (one task); payment approvals; delegations between agents; a Messenger chat as your own. "
              "Next steps are suggested for requests and sent messages only, and a reply in a chat goes only "
              "where Captain can write: WhatsApp numbers on the deck's allowlist, Telegram chats of the deck's "
-             "own bot, devices and Messenger chats while connected."},
+             "own bot, your own devices while they are on, and the person on Messenger."},
 ]
 
 _HIDDEN = ("user_id", "agent_owner_id", "search_text", "fingerprint", "extracted_fp", "decided_fp")
@@ -504,9 +504,10 @@ async def taskboard_task(task_id: str, user: dict = Depends(get_current_user)) -
     """One of the caller's tasks, whole: its timeline across channels (the
     latest 500 events, and how many there are), the keys that link it back,
     every party, the decisions about it and the Autonomous Work actions on it
-    (their status now) — and (v2) the tasks merged into it. A task merged
-    into another reads as itself (``merged_into`` says where it went)."""
-    from captain_claw.flight_deck import taskboard_threads
+    (their status now) — and (v2) the tasks merged into it and what "Suggest
+    next step" can ask for on it. A task merged into another reads as itself
+    (``merged_into`` says where it went)."""
+    from captain_claw.flight_deck import taskboard_nextsteps, taskboard_threads
 
     uid = _uid(user)
 
@@ -523,6 +524,7 @@ async def taskboard_task(task_id: str, user: dict = Depends(get_current_user)) -
             "parties": _shown_parties(uid, store().parties_for(uid, [task_id]).get(task_id, [])),
             "decisions": [{k: v for k, v in d.items() if k != "user_id"} for d in store().decisions(uid, task_id)],
             "proposals": _proposals(uid, links),
+            "next_step_kinds": taskboard_nextsteps.offered_kinds(uid, task_id),
         }
 
     return await asyncio.to_thread(detail)
@@ -589,7 +591,8 @@ async def taskboard_why(task_id: str, user: dict = Depends(get_current_user)) ->
                               "why": "You undid this later." if undone
                               else "You did this yourself, so no machine pass changes it."})
         items.sort(key=lambda i: -float(i["at"] or 0))
-        return {"items": items[:_WHY_MAX], "summary": taskboard_triage.why_summary(row, decisions)}
+        summary = taskboard_triage.why_summary(row, decisions, unread=bool(store().unread_words(uid, task_id)))
+        return {"items": items[:_WHY_MAX], "summary": summary}
 
     return await asyncio.to_thread(read)
 

@@ -43,7 +43,8 @@ import { WhyThisHere } from './TaskWhy'
 import {
   DIRECTION_LABEL, EVENT_LABEL, EVIDENCE_LABEL, KIND_LABEL, NO_DATES, OWES_LABEL, RESULT_LABEL, ROLE_LABEL, STATUS_DOT,
   STATUS_LABEL, agoRelative, answeredInChat, channelLabel, dateBounds, distinctParties, foldText, handleChannel,
-  isSnoozed, partyFacetLabel, partyName, peopleRows, proposalLabel, taskNotes, type BoardUser, type DateRange,
+  isSnoozed, movableEvents, partyFacetLabel, partyName, peopleRows, proposalLabel, taskNotes, type BoardUser,
+  type DateRange,
 } from './taskboardText'
 
 // ── Taskboard ───────────────────────────────────────────────────────
@@ -420,9 +421,10 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
     }
   }
   const unmerge = async (id: string, back: boolean) => {
-    const { task: freed } = await taskboardApi.unmerge(id)
+    const { task: freed, into } = await taskboardApi.unmerge(id)
     const here = selectedRef.current
-    if (back || !here || here.id === freed.id) setSelected(freed)
+    // No `into`: the task it was in went with it (an inbox's, with nothing of it left).
+    if (back || !here || here.id === freed.id || !into) setSelected(freed)
     else {
       setRev((n) => n + 1)
       void reloadTask(here.id)
@@ -432,8 +434,8 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
     refreshAfter()
   }
   const merge = async (source: TaskItem, into: string) => {
-    const { task: res } = await taskboardApi.merge(source.id, into)
-    const target = res.id === into ? res : (await taskboardApi.task(into)).task
+    // The task it is part of now: not `into` when that was merged on since.
+    const { task: target } = await taskboardApi.merge(source.id, into)
     setSelected(target)
     setNotice({ taskId: target.id, text: `“${untitled(source)}” was merged into this task.`,
       action: { label: 'Undo', run: () => unmerge(source.id, true) } })
@@ -469,7 +471,8 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   // Sources sheet, then the filters (phone), then the open task (phone),
   // then the board. Not while writing (a held reply's text, a next step's
   // words), nor when something inside used it to close itself (the Snooze
-  // picker, "Why is this here?", Merge into…, a split, a switch's question).
+  // picker, "Why is this here?", Merge into…, a split, a switch's question —
+  // those of the open task only while nothing is open over it: `covered`).
   const exportRef = useRef(exportOpen)
   exportRef.current = exportOpen
   const settingsRef = useRef(settingsOpen)
@@ -697,6 +700,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       terms={terms}
       me={me}
       phone={phone}
+      covered={exportOpen || settingsOpen || sourcesOpen}
       notice={notice?.taskId === selected.id ? notice : null}
       onDismissNotice={() => setNotice(null)}
       onClose={() => setSelected(null)}
@@ -1001,7 +1005,8 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
             {waiting.source === 'taskboard' && <span className="font-normal"> · {proposalLabel(waiting)}</span>}
             {waiting.title && <span className="font-normal text-zinc-400"> — {waiting.title}</span>}
           </span>
-          <ProposalButtons id={waiting.id} onAnswered={onAnswered} />
+          {/* The board's own next step: read (and edited) on its card, never approved blind from here. */}
+          <ProposalButtons id={waiting.id} onAnswered={onAnswered} onReview={waiting.source === 'taskboard' ? onClick : undefined} />
         </div>
       )}
       {(maybe || probablyDone) && (
@@ -1020,10 +1025,12 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
 // ── One task ──
 
 function TaskDetailPane({
-  task, rev, terms, me, phone, notice, onDismissNotice, onClose, onAct, onAgent, onAnswered, onNextStep, onOpenTask,
+  task, rev, terms, me, phone, covered, notice, onDismissNotice, onClose, onAct, onAgent, onAnswered, onNextStep, onOpenTask,
   onMerge, onNotSame, onUnmerge, onSplit, onOpenScheduled, onOpenChat, onOpenConnections,
 }: {
   task: TaskItem; rev: number; terms: string[]; me: BoardUser; phone: boolean
+  /** Something opened over the task (the Sources sheet, a menu): Escape is that one's. */
+  covered: boolean
   /** What a merge, an unmerge or a split just did here. */
   notice: ThreadNotice | null
   onDismissNotice: () => void
@@ -1071,19 +1078,19 @@ function TaskDetailPane({
 
   // Escape closes the Snooze picker, not the board (it marks the key used).
   useEffect(() => {
-    if (!snoozeOpen) return
+    if (!snoozeOpen || covered) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); setSnoozeOpen(false) } }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [snoozeOpen])
+  }, [snoozeOpen, covered])
   // …and stops a split, the same way.
   const splitting = splitIds !== null
   useEffect(() => {
-    if (!splitting) return
+    if (!splitting || covered) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); setSplitIds(null) } }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [splitting])
+  }, [splitting, covered])
   const toggleSplit = (id: number) => setSplitIds((cur) => {
     const next = new Set(cur ?? [])
     if (next.has(id)) next.delete(id)
@@ -1145,10 +1152,13 @@ function TaskDetailPane({
   // A next step can be asked for on an open request or sent message that has
   // none waiting (the only kinds the server drafts one for) — never for one
   // with someone else's instructions in it, one filled in from history, or
-  // one with a reply of its own held for you.
+  // one with a reply of its own held for you; and only where someone on it
+  // can be reached (the server says, with the task's detail).
+  const suggestKinds = detail?.next_step_kinds ?? []
   const canSuggest = task.status === 'open' && (task.kind === 'request' || task.kind === 'sent') && !waiting
-    && !held && !merged && !flags.contains_instructions && !flags.historical
-  const eventCount = detail ? Math.max(detail.events_total ?? 0, detail.events?.length ?? 0) : 0
+    && !held && !merged && !flags.contains_instructions && !flags.historical && suggestKinds.length > 0
+  // What a split can move: never a correction, which stays where it was made.
+  const movable = detail ? movableEvents(detail.events, detail.events_total) : 0
 
   const meta: [string, ReactNode][] = []
   // A task no agent handled (a proposal, a follow-up) has no Agent row.
@@ -1299,7 +1309,7 @@ function TaskDetailPane({
             <div className="mt-2"><AnswerButtons choices={DONE_ANSWERS} onAct={(a) => onAct(a)} /></div>
           </div>
         )}
-        {canSuggest && <SuggestNextStep taskId={task.id} phone={phone} onProposed={onNextStep} />}
+        {canSuggest && <SuggestNextStep taskId={task.id} phone={phone} kinds={suggestKinds} covered={covered} onProposed={onNextStep} />}
 
         {task.ask && (
           <section className="mt-4">
@@ -1398,13 +1408,13 @@ function TaskDetailPane({
           </div>
         )}
         {merging && !merged && (
-          <MergePicker task={task} phone={phone} onPick={(target) => onMerge(target.id)} onClose={closeMerge} />
+          <MergePicker task={task} phone={phone} covered={covered} onPick={(target) => onMerge(target.id)} onClose={closeMerge} />
         )}
 
         <section className="mt-5">
           <div className="flex items-center gap-2">
             <h4 className={`${sectionTitle} min-w-0 flex-1`}>What happened</h4>
-            {eventCount > 1 && !merged && !splitting && (
+            {movable > 1 && !merged && !splitting && (
               <button onClick={() => setSplitIds(new Set())} className="flex shrink-0 items-center gap-1 text-[11px] font-medium text-teal-600 hover:underline dark:text-teal-400"
                 title="Part of this belongs to another task: move it to a new one">
                 <Split className="h-3 w-3" />Split…
@@ -1412,7 +1422,7 @@ function TaskDetailPane({
             )}
           </div>
           {splitIds && (
-            <SplitBar picked={splitIds.size} total={eventCount} onCancel={() => setSplitIds(null)}
+            <SplitBar picked={splitIds.size} total={movable} onCancel={() => setSplitIds(null)}
               onSplit={async () => { await onSplit([...splitIds]); setSplitIds(null) }} />
           )}
           {detail ? <Timeline events={detail.events ?? []} total={detail.events_total} terms={terms}
@@ -1522,7 +1532,7 @@ function toolName(e: TaskEvent): string {
 
 function Timeline({ events, total, terms, picked = null, onPick }: {
   events: TaskEvent[]; total?: number; terms: string[]
-  /** Splitting: the events ticked to move to a new task (a box on each). */
+  /** Splitting: the events ticked to move to a new task (a box on each but a correction). */
   picked?: Set<number> | null
   onPick?: (id: number) => void
 }) {
@@ -1552,7 +1562,7 @@ function Timeline({ events, total, terms, picked = null, onPick }: {
                   ? <Wrench className="h-3 w-3 shrink-0 text-zinc-400" />
                   : <ChannelIcon channel={e.channel || 'agent'} className="h-3 w-3" />}
               </span>
-              {picked && (
+              {picked && e.kind !== 'correction' && (
                 <button
                   role="checkbox"
                   aria-checked={ticked}

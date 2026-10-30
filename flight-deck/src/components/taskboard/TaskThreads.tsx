@@ -180,9 +180,11 @@ export function MergedList({ merged, onOpen, onUnmerge }: {
 
 /** "Merge into…": look for the task this one belongs with (any of yours,
  *  by its words), and pick it. */
-export function MergePicker({ task, phone, onPick, onClose }: {
+export function MergePicker({ task, phone, covered, onPick, onClose }: {
   task: TaskItem
   phone: boolean
+  /** Something opened over the task: Escape is that one's. */
+  covered: boolean
   onPick: (target: TaskItem) => Promise<void>
   onClose: () => void
 }) {
@@ -207,10 +209,11 @@ export function MergePicker({ task, phone, onPick, onClose }: {
 
   // Escape closes the picker, not the board (it marks the key used).
   useEffect(() => {
+    if (covered) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); onClose() } }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, covered])
 
   const pick = async (t: TaskItem) => {
     setBusy(t.id)

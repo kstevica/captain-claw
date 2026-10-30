@@ -4359,6 +4359,23 @@ class FlightDeckDB:
         )
         return [dict(r) for r in rows]
 
+    async def tell_notifications_plain(
+        self, user_id: str, ref_type: str, ref_ids: Iterable[str], title: str,
+    ) -> int:
+        """This user's notifications about `ref_ids` keep only `title`, read:
+        what they said is gone. How many."""
+        assert self._db is not None
+        ids = [str(i) for i in ref_ids if i]
+        if not ids:
+            return 0
+        marks = ",".join("?" * len(ids))
+        cur = await self._db.execute(
+            f"UPDATE notifications SET title = ?, body = '', read = 1 WHERE user_id = ? AND ref_type = ? AND ref_id IN ({marks})",
+            (title, user_id, ref_type, *ids),
+        )
+        await self._db.commit()
+        return int(cur.rowcount or 0)
+
     async def count_unread_notifications(self, user_id: str) -> int:
         assert self._db is not None
         async with self._db.execute(

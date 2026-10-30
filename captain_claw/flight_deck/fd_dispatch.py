@@ -418,10 +418,11 @@ async def _execute_and_judge(
             # Also send the nudge to the owner's own channels — the ones they
             # switched on (the agent turn already surfaces it in web chat).
             if output:
-                from captain_claw.flight_deck.owner_notify import notify_owner, nudge_texts
+                from captain_claw.flight_deck.owner_notify import notify_owner, nudge_texts, task_of
                 name = str(agent.get("name") or agent.get("slug") or "").strip()
-                # With the link to its task on the Taskboard, when it is about one.
-                said, bell_body = nudge_texts(action, output)
+                # With the link to its task on the Taskboard, when it is about one
+                # (off this loop: the board's lock can be held for a while).
+                said, bell_body = nudge_texts(await asyncio.to_thread(task_of, action), output)
                 await notify_owner(user_id, "nudge", said, cfg=cfg, action_id=str(aid), device_text=output,
                                    bell=("autonomy_nudge", f"Nudge from {name}" if name else "Nudge", bell_body))
             # If this nudge was reminding about a tracked follow-up, re-arm it
@@ -628,31 +629,55 @@ def _enrich_args_from_event(action_id: str, args: dict[str, Any], event_ref: str
     return out
 
 
-async def _run_fd_action(action_id: str, args: dict[str, Any], agent_slug: str = "") -> dict[str, Any]:
-    """A catalog action Flight Deck carries out itself (``home: fd``), in
-    run_action's ``{ok, content, error}``. Today: reply.on_origin — the text
-    to the task's origin through the deck's own delivery (the WhatsApp
-    allowlist and /mute, the deck's shared Telegram bot for a chat it holds
-    for *agent_slug*'s agent, the channel bus while someone is on it). A
-    chat the deck can't reach now is not sent to: the task records why."""
-    if action_id != "reply.on_origin":
-        return {"ok": False, "error": f"unknown action: {action_id}"}
+async def _deliver_reply(user_id: str, origin: dict[str, Any], text: str, agent_slug: str) -> tuple[bool, str]:
+    """A reply the user approved, to the task's own origin: ``(delivered,
+    note)``, a ValueError when that chat can't be written to now. Only here
+    may Flight Deck write through the shared Telegram bot (a chat it holds
+    for this agent, on this board) or to a Messenger thread (the person who
+    wrote, never the bus channel they were on), and only here does a device
+    show what it isn't waiting for."""
     from captain_claw.flight_deck.delivery_routes import (
         channel_listening,
         deliver_to_origin,
         telegram_relayed,
     )
 
-    origin = args.get("origin") or {}
     kind, address = str(origin.get("kind") or ""), str(origin.get("address") or "")
-    if kind == "telegram" and not telegram_relayed(address, agent_slug):
-        return {"ok": False, "error": "not delivered (that Telegram chat isn't one the deck's bot holds for "
-                                      "this agent)"}
-    if kind in ("channel", "glasses") and not channel_listening(address):
-        return {"ok": False, "error": "not delivered (nobody is on that channel now: the device is off, or "
-                                      "the chat hasn't written since Flight Deck started)"}
+    if kind == "telegram":
+        if not telegram_relayed(address, agent_slug, user_id):
+            raise ValueError("that Telegram chat isn't one the deck's bot holds for this agent")
+        from captain_claw.flight_deck import telegram_shared
+        from captain_claw.flight_deck.meta_webhook_bridge import strip_markdown
+
+        sent = await telegram_shared.send_text(address, strip_markdown(text))
+        return sent, "ok (shared bot)" if sent else "error:telegram-shared-not-delivered"
+    if kind == "messenger":
+        from captain_claw.flight_deck import messenger_bridge
+
+        if not messenger_bridge.psid_allowed(address):
+            raise ValueError("that Messenger chat isn't on this deck's allowed list")
+        sent = await messenger_bridge._send_messenger_text(address, text)
+        return sent, "ok" if sent else "error:messenger-not-delivered"
+    if kind == "channel" and not channel_listening(address):
+        raise ValueError("nobody is on that channel now: the device is off")
+    return await deliver_to_origin(origin, text, proactive=True)
+
+
+async def _run_fd_action(action_id: str, args: dict[str, Any], agent_slug: str = "", user_id: str = "") -> dict[str, Any]:
+    """A catalog action Flight Deck carries out itself (``home: fd``), in
+    run_action's ``{ok, content, error}``. Today: reply.on_origin — the text
+    to the task's origin through the deck's own delivery (the WhatsApp
+    allowlist and /mute, the deck's shared Telegram bot for a chat it holds
+    for *agent_slug*'s agent on *user_id*'s board, the person on Messenger,
+    the user's device while it is on). A chat the deck can't reach now is
+    not sent to: the task records why."""
+    if action_id != "reply.on_origin":
+        return {"ok": False, "error": f"unknown action: {action_id}"}
+    origin = args.get("origin") or {}
     try:
-        delivered, note = await deliver_to_origin(origin, str(args.get("text") or ""))
+        delivered, note = await _deliver_reply(user_id, origin, str(args.get("text") or ""), agent_slug)
+    except ValueError as exc:
+        return {"ok": False, "error": f"not delivered ({exc})"}
     except Exception as exc:  # noqa: BLE001 — a channel's failure is the action's outcome
         return {"ok": False, "error": f"delivery failed: {exc}"}
     if delivered:
@@ -704,7 +729,7 @@ async def _dispatch_tool_action(
     from captain_claw.flight_deck.actions import run_action
 
     if spec and spec.get("home") == "fd":
-        res = await _run_fd_action(action_id, args, str(payload.get("target_agent") or ""))
+        res = await _run_fd_action(action_id, args, str(payload.get("target_agent") or ""), user_id)
     else:
         res = await run_action(user_id, action_id, args, approved_by_human=approved_by_human,
                                agent=_dispatch_agent(user_id, action) if payload.get("target_agent") else None)

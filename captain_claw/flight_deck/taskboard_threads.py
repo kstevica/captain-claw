@@ -148,8 +148,12 @@ def attach_or_create(
 
 
 def _open(store: TaskboardStore, uid: str, task_id: str) -> bool:
+    """Whether a record may go on this task: open, not merged away — and not
+    filled in from history (it is shown, never acted on: what is live would
+    leave the badge and next steps with it)."""
     row = store.get_task(uid, task_id) if task_id else None
-    return row is not None and not row["merged_into"] and row["status"] in ("open", "maybe")
+    return (row is not None and not row["merged_into"] and row["status"] in ("open", "maybe")
+            and not _loads(row["flags"], {}).get("historical"))
 
 
 def _target(store: TaskboardStore, uid: str, attach: list[str] | tuple[str, ...],
@@ -238,8 +242,8 @@ def _answered(store: TaskboardStore, turn: dict, requester: dict) -> str:
     if not asks_back(prev["reply_head"]) or float(turn["started_at"]) - float(prev["ended_at"] or 0) > _CHAIN_S:
         return ""
     task = store.get_task(uid, prev["task_id"])
-    if (task is None or task["kind"] != "request" or task["status"] != "open" or task["owes_next"] != "me"
-            or task["merged_into"] or task["triage_state"] == "skipped"):
+    if (task is None or task["kind"] != "request" or task["owes_next"] != "me" or not _open(store, uid, task["id"])
+            or task["status"] != "open" or task["triage_state"] == "skipped"):
         return ""
     asked_by = {(p["kind"], p["address"]) for p in store.parties_for(uid, [task["id"]])[task["id"]]
                 if p["role"] == "requester" and p["verified"]}
@@ -483,9 +487,10 @@ async def _same_task_pass(user_id: str, task_ids: list[str]) -> int:
     if not pairs:
         return 0
     now = time.time()
-    state = {"about": _SAME_NOTE, "pairs": [{"newer": _side(board, user_id, newer, now),
-                                             "older": _side(board, user_id, older, now)}
-                                            for newer, older, _ in pairs]}
+    sides = await asyncio.to_thread(lambda: [{"newer": _side(board, user_id, newer, now),
+                                              "older": _side(board, user_id, older, now)}
+                                             for newer, older, _ in pairs])
+    state = {"about": _SAME_NOTE, "pairs": sides}
     raw: dict = {}
     try:
         out = await asyncio.wait_for(jev_routes.ask_for_owner(
@@ -585,6 +590,18 @@ async def taskboard_merge(task_id: str, body: MergeBody, user: dict = Depends(ge
     return await asyncio.to_thread(apply)
 
 
+def _inbox_text_left(uid: str, went: dict, task: dict) -> None:
+    """*went*, an opt-in inbox's, just came off *task*: a next step on it was
+    written with that text there, and it must not outlast it (what the inbox's
+    going does for what is on a task: taskboard_nextsteps.text_left)."""
+    from captain_claw.flight_deck import taskboard_passive
+    from captain_claw.flight_deck.taskboard_store import PASSIVE_SOURCES
+
+    if str(went.get("source") or "") in PASSIVE_SOURCES:
+        _store().proposals_told_plain(uid, [str(task["id"])])
+        taskboard_passive.next_steps_left({(uid, str(task["id"]))})
+
+
 @router.post("/tasks/{task_id}/unmerge")
 async def taskboard_unmerge(task_id: str, user: dict = Depends(get_current_user)) -> dict:
     """Take a merged task back out of the task it is in: ``{task}`` (on the
@@ -595,6 +612,8 @@ async def taskboard_unmerge(task_id: str, user: dict = Depends(get_current_user)
 
     def apply() -> dict:
         row, into = _checked(_store().unmerge, uid, task_id, actor=taskboard._actor(user))
+        if into:
+            _inbox_text_left(uid, row, into)
         return {"task": taskboard._task_item(uid, row), "into": taskboard._task_item(uid, into) if into else None}
 
     return await asyncio.to_thread(apply)
@@ -610,6 +629,7 @@ async def taskboard_split(task_id: str, body: SplitBody, user: dict = Depends(ge
 
     def apply() -> dict:
         row, new = _checked(_store().split, uid, task_id, body.event_ids, actor=taskboard._actor(user))
+        _inbox_text_left(uid, new, row)
         return {"task": taskboard._task_item(uid, row), "new_task": taskboard._task_item(uid, new)}
 
     return await asyncio.to_thread(apply)

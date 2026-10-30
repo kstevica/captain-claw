@@ -828,8 +828,7 @@ def _cron_run(store: TaskboardStore, turn: dict, key: str, agents: dict[str, dic
         "channel": "scheduled", "owes_next": "agent", "triage_state": "skipped", "private": int(turn["private"]),
         "source": "agent_turns", "source_ref": key,
     }
-    held = store.task_for_key(uid, key)
-    cur = store.get_task(uid, held) if held else None
+    cur = store.own_row_for_key(uid, key)
     unlock = ("status",) if cur and cur["status"] not in ("dismissed", "not_task") else ()
     task_id, _ = store.ingest(
         uid, keys=[key], create=create, unlock=unlock,
@@ -859,13 +858,14 @@ def _cron_end(turn: dict, agent_name: str) -> dict:
 
 
 def inbound_after_done(store: TaskboardStore, uid: str, task_id: str, keys: list[str] | tuple[str, ...],
-                       now: float | None = None) -> bool:
+                       now: float | None = None, *, ref: str = "") -> bool:
     """Someone wrote on a person's request after it was done (a reply on its
     email thread), found by a strong key: back in the triage queue at once,
     so Jev asks whether it opens the task again — without Jev it stays done —
-    and flagged ``new_since_done`` for the board. A task a mute rule keeps
-    quiet stays out of the queue. True when it was queued (the caller kicks
-    triage)."""
+    and flagged ``new_since_done`` for the board, with the message that says
+    so (*ref*, its ``source_ref``: it may be dated before the close). A task a
+    mute rule keeps quiet stays out of the queue. True when it was queued
+    (the caller kicks triage)."""
     task = store.get_task(uid, task_id)
     if task is None or task["kind"] != "request" or task["status"] != "done":
         return False
@@ -877,7 +877,8 @@ def inbound_after_done(store: TaskboardStore, uid: str, task_id: str, keys: list
         return False
     return store.update_fields(uid, task_id, {"triage_state": "pending",
                                                "triage_after": time.time() if now is None else now,
-                                               "flags": {"new_since_done": True}})
+                                               "flags": {"new_since_done": True,
+                                                         **({"new_since_ref": ref} if ref else {})}})
 
 
 # ── Sweep adapters (taskboard_sources.ADAPTERS) ───────────────────────

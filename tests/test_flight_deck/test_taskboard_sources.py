@@ -190,6 +190,36 @@ async def test_done_on_a_scheduled_task_lasts_until_its_next_run(env):
     assert _lane(env, env.alice, key) == "needs_me"
 
 
+async def test_a_jobs_next_run_doesnt_close_it_over_live_work_merged_in(env):
+    """A merge never hides live work: the run's end waits, the next move the
+    user's — and with the work out, the task stands where that run left it."""
+    job = _job(env, env.alice)
+    key = f"sched:job:{job['id']}"
+    env.sched.finish_run(env.sched.start_run(job, "scheduled"), status="ok", result="r", deliveries=[])
+    run_sweep()
+    assert _one(env, env.alice, key)["status"] == "done"
+    request, _ = env.board.ingest(
+        env.alice, keys=["turn:r"], create={"title": "The digest, please", "kind": "request", "channel": "whatsapp",
+                                            "status": "open", "owes_next": "agent", "triage_state": "ok"},
+        event={"source": "agent_turns", "source_ref": "r:open", "kind": "received", "actor_kind": "party"})
+    tid = env.board.task_for_key(env.alice, key)
+    env.board.merge(env.alice, request, tid)
+    assert _lane(env, env.alice, key) == "needs_me"
+
+    run = env.sched.start_run(job, "scheduled")
+    run_sweep()
+    assert _lane(env, env.alice, key) == "working"
+    env.sched.finish_run(run, status="error:x", result="", deliveries=[])
+    run_sweep()
+    task = _one(env, env.alice, key)
+    assert (task["status"], task["owes_next"], task["result"]) == ("open", "me", "") and task["user_locks"] == "{}"
+    assert _lane(env, env.alice, key) == "needs_me"
+
+    env.board.unmerge(env.alice, request)
+    task = _one(env, env.alice, key)
+    assert (task["status"], task["owes_next"], task["result"], task["closed_by"]) == ("failed", "nobody", "failed", "source")
+
+
 async def test_a_job_switched_off_or_deleted_before_it_ran_leaves_agents_working(env):
     off, gone, busy = _job(env, env.alice), _job(env, env.alice, name="Once"), _job(env, env.alice, name="Busy")
     env.sched.start_run(busy, "manual")
@@ -654,3 +684,131 @@ async def test_without_sign_in_every_row_is_the_local_users(env, monkeypatch):
     env.auto.add_action("", kind="nudge", title="x", status="awaiting_approval")
     run_sweep()
     assert env.board.query("local", view="all")["total"] == 2
+
+
+# ── A job merged into another task speaks for itself ──────────────────
+
+
+def _their_request(env) -> str:
+    """Ana's request, in Needs me."""
+    tid, _ = env.board.ingest(
+        env.alice, keys=["turn:ana"],
+        parties=[{"role": "requester", "kind": "waid", "address": "38591", "display": "Ana", "verified": True}],
+        create={"title": "Ana: book the table", "ask": "Ana: book the table", "kind": "request", "direction": "received",
+                "channel": "whatsapp", "status": "open", "owes_next": "me", "triage_state": "ok",
+                "source": "agent_turns", "source_ref": "ana", "agent_slug": "helper",
+                "flags": {"contains_instructions": False}},
+        event={"source": "agent_turns", "source_ref": "ana:open", "kind": "received", "channel": "whatsapp",
+               "actor_kind": "party", "actor": "Ana", "summary": "Book the table"})
+    return tid
+
+
+async def test_a_jobs_runs_never_move_the_live_request_it_was_merged_into(env):
+    """Its next run goes on the timeline: the request stays where it stood, its
+    title and result its own — and the job comes back out knowing how it ran."""
+    job = _job(env, env.alice)
+    run = env.sched.start_run(job, "scheduled")
+    env.sched.finish_run(run, status="ok", result="Digest 1.", session_id="s-1", deliveries=[])
+    run_sweep()
+    jid = env.board.task_for_key(env.alice, f"sched:job:{job['id']}")
+    tid = _their_request(env)
+    env.board.merge(env.alice, jid, tid)
+
+    def still_itself():
+        t = env.board.get_task(env.alice, tid)
+        assert (t["title"], t["ask"], t["status"], t["owes_next"], t["result_text"]) == (
+            "Ana: book the table", "Ana: book the table", "open", "me", "")
+        assert env.board.lane_of(env.alice, tid) == "needs_me"
+
+    run_sweep()
+    still_itself()
+    run = env.sched.start_run(job, "scheduled")
+    run_sweep()
+    still_itself()
+    env.sched.finish_run(run, status="ok", result="Digest 2.", session_id="s-2", deliveries=[])
+    run_sweep()
+    still_itself()
+    assert any("Digest 2." in e["summary"] or e["source"] == "fd_scheduler" for e in env.board.events(env.alice, tid))
+    assert env.board.get_task(env.alice, jid)["result_text"] == "Digest 2."
+    env.board.unmerge(env.alice, jid)
+    still_itself()
+    back = env.board.get_task(env.alice, jid)
+    assert (back["status"], back["result_text"]) == ("done", "Digest 2.")
+
+
+@pytest.mark.parametrize("kind,key,patch", [
+    ("todo", "todo:helper:1", {"status": "done", "owes_next": "nobody", "evidence": "claimed", "result": "success",
+                               "closed_by": "source"}),
+    ("follow_up", "fu:1", {"status": "dismissed", "owes_next": "nobody", "closed_by": "source"}),
+    ("scheduled", "sched:job:9", {"owes_next": "nobody"}),
+])
+async def test_whatever_else_a_merged_source_says_is_about_itself(env, kind, key, patch):
+    src, _ = env.board.ingest(
+        env.alice, keys=[key],
+        create={"title": kind, "ask": "", "kind": kind, "direction": "internal", "status": "open", "owes_next": "agent",
+                "triage_state": "skipped", "source": kind, "source_ref": key},
+        event={"source": kind, "source_ref": f"{key}:1", "kind": "status", "summary": "was"})
+    tid = _their_request(env)
+    env.board.correct(env.alice, tid, "owes_next", "me")
+    env.board.merge(env.alice, src, tid)
+    locks = json.loads(env.board.get_task(env.alice, tid)["user_locks"])
+    env.board.ingest(env.alice, keys=[key], patch=patch, touch={"title": "Its new name"}, unlock=("owes_next",),
+                     event={"source": kind, "source_ref": f"{key}:2", "kind": "status", "summary": "moved"})
+    t = env.board.get_task(env.alice, tid)
+    assert (t["status"], t["owes_next"], t["title"]) == ("open", "me", "Ana: book the table")
+    assert json.loads(t["user_locks"]) == locks
+    assert "close_waits" not in json.loads(t["flags"])
+    env.board.unmerge(env.alice, src)
+    t = env.board.get_task(env.alice, tid)
+    assert (t["status"], t["owes_next"]) == ("open", "me")
+    freed = env.board.get_task(env.alice, src)
+    assert freed["title"] == "Its new name" and freed["owes_next"] == "nobody"
+
+
+async def test_a_merged_jobs_deletion_and_locks_go_by_its_own_row(env):
+    """Finished and merged into a live request, a deleted job stays done; its Dismiss survives a run."""
+    job = _job(env, env.alice)
+    run = env.sched.start_run(job, "scheduled")
+    env.sched.finish_run(run, status="ok", result="Digest 1.", session_id="s-1", deliveries=[])
+    run_sweep()
+    jid = env.board.task_for_key(env.alice, f"sched:job:{job['id']}")
+    tid = _their_request(env)
+    env.board.merge(env.alice, jid, tid)
+    assert env.board.keyed_tasks("sched:job:", user_id=env.alice, status="open") == []
+    assert [t["task_id"] for t in env.board.keyed_tasks("sched:job:", user_id=env.alice, status="done")] == [tid]
+    env.board.unmerge(env.alice, jid)
+    env.board.correct(env.alice, jid, "dismiss")
+    env.board.merge(env.alice, jid, tid)
+    run = env.sched.start_run(job, "scheduled")
+    env.sched.finish_run(run, status="ok", result="Digest 2.", session_id="s-2", deliveries=[])
+    run_sweep()
+    assert env.board.get_task(env.alice, jid)["status"] == "dismissed"
+    assert env.board.get_task(env.alice, tid)["status"] == "open"
+
+
+async def test_a_merged_sources_recorded_delivery_is_its_own_evidence(env):
+    src, _ = env.board.ingest(
+        env.alice, keys=["todo:helper:1"],
+        create={"title": "To-do", "ask": "", "kind": "todo", "direction": "internal", "status": "open", "owes_next": "agent",
+                "triage_state": "skipped", "source": "todo", "source_ref": "1"},
+        event={"source": "todo", "source_ref": "1:1", "kind": "status", "summary": "was"})
+    tid = _their_request(env)
+    env.board.merge(env.alice, src, tid)
+    env.board.ingest(env.alice, keys=["todo:helper:1"], event={
+        "source": "todo", "source_ref": "1:2", "kind": "sent", "summary": "Delivered", "evidence": "recorded"})
+    assert env.board.get_task(env.alice, tid)["evidence"] == "none"
+    assert env.board.get_task(env.alice, src)["evidence"] == "verified"
+
+
+async def test_a_merged_proposal_hears_from_its_action_and_doesnt_hold_the_task(env):
+    action = env.auto.add_action(env.alice, kind="nudge", title="Remind Ana", rationale="", source="arbiter",
+                                 status="awaiting_approval", target="helper")
+    run_sweep()
+    pid = env.board.task_for_key(env.alice, f"autonomy:{action['id']}")
+    tid = _their_request(env)
+    env.board.merge(env.alice, pid, tid)
+    env.auto.mark_status(action["id"], "rejected") if hasattr(env.auto, "mark_status") else env.auto.update_status(action["id"], "rejected")
+    run_sweep()
+    assert env.board.get_task(env.alice, pid)["status"] != "open"
+    assert env.board.get_task(env.alice, tid)["status"] == "open"
+    assert not env.board.triage_view(env.alice, tid)["live_in"]

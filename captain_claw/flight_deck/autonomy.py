@@ -614,6 +614,20 @@ class AutonomyStore:
             conn.commit()
         return int(cur.rowcount or 0) == 1
 
+    def waiting_actions(self, user_id: str) -> list[dict[str, Any]]:
+        """Every action of this user's waiting for approval, newest first —
+        all of them: what the Taskboard reads for its lanes and expiry, where
+        one past a page would drop out of Needs me and never expire with its
+        task."""
+        uid = _norm_user(user_id)
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT * FROM autonomous_actions WHERE user_id = ? AND status = 'awaiting_approval'"
+                " ORDER BY created_at DESC",
+                (uid,),
+            ).fetchall()
+        return [self._row_to_action(r) for r in rows]
+
     def open_actions(self, user_id: str) -> list[dict[str, Any]]:
         """Unresolved actions — candidate/awaiting/queued/dispatched — used for
         the in-flight and pending-approval caps and for dedup against what's
@@ -708,6 +722,40 @@ class AutonomyStore:
         """Whether an unresolved action (candidate/awaiting/queued/dispatched)
         already covers this email thread (see ``open_thread_action``)."""
         return self.open_thread_action(user_id, thread_key, since_iso) is not None
+
+    def unsent_taskboard_steps(self, user_id: str) -> list[dict[str, Any]]:
+        """This user's Taskboard next steps that never went out: waiting, rejected or expired."""
+        with self._lock:
+            rows = self._c().execute(
+                "SELECT * FROM autonomous_actions WHERE user_id = ? AND source = ?"
+                " AND status IN ('awaiting_approval', 'rejected', 'expired')",
+                (_norm_user(user_id), TASKBOARD_SOURCE),
+            ).fetchall()
+        return [self._row_to_action(r) for r in rows]
+
+    def blank_action(self, action_id: str, title: str, patch: dict[str, Any]) -> bool:
+        """An action that stopped waiting told without what it said: its ``title``
+        and these payload fields replaced (an opt-in inbox's text it was written
+        from has gone). One approved meanwhile stays as it is: False."""
+        with self._lock:
+            conn = self._c()
+            r = conn.execute(
+                "SELECT payload FROM autonomous_actions WHERE id = ? AND status IN ('rejected', 'expired')",
+                (action_id,),
+            ).fetchone()
+            if not r:
+                return False
+            try:
+                payload = json.loads(r["payload"] or "{}")
+            except (ValueError, TypeError):
+                payload = {}
+            payload = {**(payload if isinstance(payload, dict) else {}), **patch}
+            conn.execute(
+                "UPDATE autonomous_actions SET title = ?, payload = ? WHERE id = ? AND status IN ('rejected', 'expired')",
+                (str(title), json.dumps(payload), action_id),
+            )
+            conn.commit()
+        return True
 
     def update_payload(self, action_id: str, patch: dict[str, Any]) -> None:
         """Merge ``patch`` into an action's payload JSON (e.g. attach the reverse

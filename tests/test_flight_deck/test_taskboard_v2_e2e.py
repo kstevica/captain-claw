@@ -181,7 +181,7 @@ async def deck(env, tmp_path, monkeypatch):  # noqa: F811
     # Flight Deck's doors out, recorded: nothing goes anywhere in a test.
     out = SimpleNamespace(delivered=[], ran=[], told=[])
 
-    async def deliver(origin, text):
+    async def deliver(origin, text, **kw):
         out.delivered.append((dict(origin), text))
         return True, "ok"
 

@@ -634,16 +634,20 @@ async def maybe_run_arbiter(
                 f"{r['kind']}={r['weight']:.2f}" for r in reliability[:8]
             )
         dup_hint = ""
-        if dedup_titles:
+        # The Taskboard's next steps aren't this loop's work, and their titles
+        # carry what other people wrote: never in its prompt (dedup_titles,
+        # which no model reads, still knows them).
+        if mine:
             dup_hint = "\n\nAlready proposed (do not repeat): " + "; ".join(
-                a["title"] for a in open_actions[:8]
+                a["title"] for a in mine[:8]
             )
         # Recently COMPLETED actions — so the arbiter doesn't re-propose reworded
         # variants of work it already did (auto-fired actions go straight to done,
         # leaving the "open" list, so they must be surfaced separately).
         done_recent = [
             a["title"] for a in store.list_actions(user_id, limit=40)
-            if a.get("status") in ("done", "dispatched", "undone")
+            if a.get("source") != TASKBOARD_SOURCE
+            and a.get("status") in ("done", "dispatched", "undone")
             and a.get("created_at", "") >= look_cutoff
         ]
         if done_recent:

@@ -5510,6 +5510,27 @@ def _is_wake_frame(text: str) -> bool:
         return False
 
 
+def _client_frame(data: str) -> str:
+    """A frame from a person's chat socket as the agent may read it. Only
+    Flight Deck's own bridges (on their own sockets) say a turn came from a
+    device or a Messenger thread and where a reply to it goes
+    (``turn_origin``): from anyone else that is a forged reply target."""
+    try:
+        frame = json.loads(data)
+    except (TypeError, ValueError):
+        return data
+    if not isinstance(frame, dict):
+        return data
+    bridged = str(frame.get("source") or "").strip().lower().partition(":")[0] in ("device", "messenger")
+    if "turn_origin" not in frame and not bridged:
+        return data
+    frame.pop("turn_origin", None)
+    if bridged:
+        frame.pop("source", None)
+        frame.pop("source_label", None)
+    return json.dumps(frame)
+
+
 def _agent_ws_retryable(exc: BaseException) -> bool:
     """A connect failure that waiting can fix: nothing listening yet, a
     handshake cut short, a 5xx while the agent boots. A 4xx is a real answer."""
@@ -5722,7 +5743,7 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
             if reply is not None:
                 await ws.send_text(json.dumps(reply))
             if ok:
-                await agent_ws.send(data)
+                await agent_ws.send(_client_frame(data))
 
         async def client_to_agent():
             nonlocal from_client

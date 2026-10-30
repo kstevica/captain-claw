@@ -109,9 +109,9 @@ _CURRENT: ContextVar[Turn | None] = ContextVar("claw_turn", default=None)
 # connected system's message, one of this agent's own cron jobs.
 _AUTOMATION_REF: ContextVar[tuple[str, str, str]] = ContextVar("claw_turn_automation_ref", default=("", "", ""))
 # The chat the next turn's frame came from, for a reply to it: ``(kind,
-# address)`` — a channel on Flight Deck's bus (a device, a Messenger thread).
+# address)`` — a device's channel on Flight Deck's bus, a person on Messenger.
 _FRAME_ORIGIN: ContextVar[tuple[str, str]] = ContextVar("claw_turn_frame_origin", default=("", ""))
-_FRAME_ORIGIN_KINDS = ("channel",)
+_FRAME_ORIGIN_KINDS = ("channel", "messenger")
 
 
 def bind_automation(kind: str, ref: Any, name: Any = "") -> contextvars.Token:
@@ -149,9 +149,9 @@ def note_frame_automation(raw: Any) -> None:
 
 
 def note_frame_origin(raw: Any) -> None:
-    """An agent socket's chat frame: the channel its turn came in on as the
-    bridge names it for a reply (``turn_origin`` — a device's or a Messenger
-    thread's channel on Flight Deck's bus), or nothing. The turn's own, kept
+    """An agent socket's chat frame: where its turn came from as the bridge
+    names it for a reply (``turn_origin`` — a device's channel on Flight
+    Deck's bus, the person on Messenger), or nothing. The turn's own, kept
     on its record only — never the session's durable origin, which later
     results (a cron run) follow. Set for each chat frame, as
     :func:`note_frame_automation`. Never raises."""

@@ -227,6 +227,8 @@ export interface TaskDetail {
   proposals: (TaskProposal & Record<string, unknown>)[]
   /** The tasks merged into this one (each can be taken out again). */
   merged?: { id: string; title: string }[]
+  /** What "Suggest next step" can ask for on it: none when nobody on it can be reached. */
+  next_step_kinds?: NextStepKind[]
 }
 
 export interface TaskCounts {
@@ -429,7 +431,7 @@ export const taskboardApi = {
    *  (undone by unmerge). */
   merge: (id: string, into: string) =>
     api<{ task: TaskItem }>(taskPath(id, '/merge'), { method: 'POST', body: JSON.stringify({ into }) }),
-  unmerge: (id: string) => api<{ task: TaskItem }>(taskPath(id, '/unmerge'), { method: 'POST' }),
+  unmerge: (id: string) => api<{ task: TaskItem; into: TaskItem | null }>(taskPath(id, '/unmerge'), { method: 'POST' }),
   /** Jev's "Same as …?" was wrong: the suggestion goes and none comes back
    *  (Undo brings it back). */
   notSame: (id: string) => api<{ task: TaskItem }>(taskPath(id, '/not_same'), { method: 'POST' }),

@@ -245,9 +245,13 @@ const KINDS: { id: NextStepKind; label: string; detail: string }[] = [
 /** "Suggest next step": asks the board for one now (drafted on the agent's
  *  own model) — it then waits for your Approve, like any other; or the
  *  board says why it made none. */
-export function SuggestNextStep({ taskId, phone, onProposed }: {
+export function SuggestNextStep({ taskId, phone, kinds, covered, onProposed }: {
   taskId: string
   phone: boolean
+  /** What the server can make of it: a kind nobody can be reached for isn't offered. */
+  kinds: NextStepKind[]
+  /** Something opened over the task: Escape is that one's. */
+  covered: boolean
   /** One was made: the task reads again (its card shows). */
   onProposed: () => void
 }) {
@@ -258,11 +262,11 @@ export function SuggestNextStep({ taskId, phone, onProposed }: {
 
   // Escape closes the list of kinds, not the board (it marks the key used).
   useEffect(() => {
-    if (!open) return
+    if (!open || covered) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); setOpen(false) } }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [open])
+  }, [open, covered])
 
   const ask = async (kind: NextStepKind) => {
     setBusy(kind)
@@ -303,7 +307,7 @@ export function SuggestNextStep({ taskId, phone, onProposed }: {
       </div>
       {open && (
         <ul role="menu" aria-label="Kinds of next step" className="mt-1.5 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950">
-          {KINDS.map((k) => (
+          {KINDS.filter((k) => kinds.includes(k.id)).map((k) => (
             <li key={k.id}>
               <button role="menuitem" onClick={() => ask(k.id)}
                 className={`flex w-full items-baseline gap-2 px-3 text-left transition-colors hover:bg-zinc-800/60 ${phone ? 'py-3' : 'py-2'}`}>

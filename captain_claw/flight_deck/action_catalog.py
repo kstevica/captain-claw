@@ -115,7 +115,7 @@ CATALOG: dict[str, dict[str, Any]] = {
     },
     # A Taskboard next step (taskboard_nextsteps): the approved text goes to the
     # chat the task came from, through Flight Deck's own delivery
-    # (delivery_routes.deliver_to_origin) — no agent, no tool. The payload
+    # (fd_dispatch._run_fd_action) — no agent, no tool. The payload
     # names the task's origin, never a free address, so nothing but the
     # Taskboard proposes it (not ``proposable``: the arbiter and plans never
     # see it, and the manual exerciser can't run an ``fd`` action).

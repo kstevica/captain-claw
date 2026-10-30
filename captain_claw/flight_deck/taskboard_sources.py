@@ -255,7 +255,8 @@ class _Pass:
                 # Someone writing on a request that was done (a reply on its thread).
                 from captain_claw.flight_deck import taskboard_ingest
 
-                if taskboard_ingest.inbound_after_done(self.store, uid, task_id, kw.get("keys") or []):
+                if taskboard_ingest.inbound_after_done(self.store, uid, task_id, kw.get("keys") or [],
+                                                       ref=str(ev.get("source_ref") or "")):
                     taskboard_ingest._kick(uid)
         return task_id, new
 
@@ -397,8 +398,7 @@ def _scheduler(p: _Pass) -> None:
         # opens it again — over the user's Done or Reopen too, which were
         # about the run before (their Dismiss or Not a task is about the job).
         idle = _skipped(str(run.get("status") or ""))
-        tid = p.store.task_for_key(uid, keys[0])
-        cur = p.store.get_task(uid, tid) if tid else None
+        cur = p.store.own_row_for_key(uid, keys[0])
         unlock = ("status",) if cur and cur["status"] not in ("dismissed", "not_task") and not idle else ()
         _, first_seen = p.ingest(
             "fd_scheduler", uid, keys=keys, create=create, extra_keys=extra, unlock=unlock,
@@ -619,7 +619,9 @@ def _autonomy(p: _Pass) -> None:
             if not host or p.store.get_task(uid, host) is None:
                 continue
             p.store.add_link(uid, key, host)
-        attached = host is not None and (p.store.get_task(uid, host) or {}).get("kind") != "proposal"
+        # Merged into another task, a proposal is still a proposal: its own row hears from its action.
+        own = p.store.own_row_for_key(uid, key) or (p.store.get_task(uid, host) if host else None)
+        attached = host is not None and (own or {}).get("kind") != "proposal"
         create = {"title": _head(row.get("title"), 160) or "Proposal", "ask": _head(row.get("rationale"), 600),
                   **agent, "kind": "proposal", "direction": "internal", "channel": "autonomy",
                   "owes_next": "me", "source": "autonomy", "source_ref": row["id"], "triage_state": "skipped"}

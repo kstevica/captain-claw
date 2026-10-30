@@ -213,6 +213,14 @@ const HANDLE_CHANNEL: Record<string, string> = {
 }
 export const handleChannel = (kind: string): string => HANDLE_CHANNEL[kind] || ''
 
+/** How many of a task's events a split can move: any but a correction (the
+ *  user's own word, and the board's merge and split notes, stay on the task
+ *  they are about) — those past the latest the timeline holds count as such. */
+export function movableEvents(events: { kind: string }[] | undefined, total?: number): number {
+  const held = events ?? []
+  return held.filter((e) => e.kind !== 'correction').length + Math.max(0, (total ?? held.length) - held.length)
+}
+
 // ── Next steps ──
 
 /** What a board proposal does, in two or three words: "Draft email",

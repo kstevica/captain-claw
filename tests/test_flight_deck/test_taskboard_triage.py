@@ -1195,3 +1195,58 @@ def test_why_leaves_out_what_no_longer_holds_and_never_repeats():
     assert summary("open", "agent") == "Your agent is working on it."
     assert summary("maybe", "agent", why="Jev isn't sure this is a task (52%), so it waits in All, under Status → "
                    "Maybe tasks — confirm it, or mark it not a task.").startswith("Jev isn't sure this is a task (52%)")
+
+
+def test_the_users_open_own_chat_is_theirs_once_the_agent_answered():
+    """Kept open by their word (a merge, a Reopen) with the agent still on it:
+    its answer leaves the next move theirs, not "Agents working" for good."""
+    task = {"kind": "request", "status": "open", "owes_next": "agent", "user_locks": json.dumps({"status": 1.0}),
+            "flags": "{}"}
+    f = {"third_party": False, "outcome": "ok", "own_chat": True, "closed": False, "new_inbound": False}
+    assert taskboard_triage.rule_moves(task, f)[0]["owes_next"] == "me"
+    assert "owes_next" not in taskboard_triage.rule_moves({**task, "owes_next": "them"}, f)[0]
+
+
+def _own_ask(answered: str) -> tuple[dict, dict]:
+    task = {"kind": "request", "status": "maybe", "owes_next": "agent", "user_locks": "{}", "flags": "{}"}
+    f = {"third_party": False, "outcome": "ok", "own_chat": True, "closed": False, "new_inbound": False,
+         "running": False, "answered": answered, "blocker": "No booking system", "failed_calls": 0}
+    return task, f
+
+
+@pytest.mark.parametrize("p_task", [0.1, 0.5, 0.7, 0.9])
+@pytest.mark.parametrize(("answered", "flag"), [("no", "agent_declined"), ("partly", "partly_done")])
+def test_what_the_agent_couldnt_do_stays_in_needs_me_whatever_jevs_doubt(p_task, answered, flag):
+    """The user asked their own agent and it couldn't do it (or did only part):
+    not a Maybe, not off the board, in the badge — and it says so with Jev
+    connected as it does without."""
+    task, f = _own_ask(answered)
+    fields, why = taskboard_triage.jev_moves(task, f, {"is_task": {"p": p_task}}, auto_close=True)
+    assert (fields["status"], fields["owes_next"]) == ("open", "me")
+    assert fields["flags"][flag] is True and fields["flags"]["low_confidence"] is False
+    assert why[0].startswith("The agent ")
+
+
+def test_jev_can_still_close_or_redirect_what_the_agent_said_it_couldnt_do():
+    task, f = _own_ask("no")
+    sure = {"is_task": {"p": 0.9}, "fulfilled": {"p": 0.95}, "result": {"choice": "success", "p": 0.8}}
+    closed, _ = taskboard_triage.jev_moves(task, f, sure, auto_close=True)
+    assert closed["status"] == "done" and not closed["flags"].get("agent_declined")
+    told = {"is_task": {"p": 0.9}, "owes_next": {"choice": "them", "p": 0.9}}
+    redirected, _ = taskboard_triage.jev_moves(task, f, told, auto_close=True)
+    assert redirected["owes_next"] == "them" and redirected["flags"]["agent_declined"] is True
+
+
+@pytest.mark.parametrize(("p_task", "status", "low"), [(0.1, "not_task", False), (0.5, "maybe", False), (0.7, "open", True)])
+def test_jevs_doubt_still_decides_the_rest_of_the_users_chat(p_task, status, low):
+    task, f = _own_ask("")
+    fields, _ = taskboard_triage.jev_moves(task, f, {"is_task": {"p": p_task}}, auto_close=True)
+    assert fields["status"] == status and fields["flags"]["low_confidence"] is low
+    assert "agent_declined" not in fields["flags"]
+
+
+def test_a_stranger_the_agent_couldnt_help_is_still_jevs_to_park():
+    task, f = _own_ask("no")
+    f = {**f, "third_party": True, "own_chat": False}
+    fields, _ = taskboard_triage.jev_moves(task, f, {"is_task": {"p": 0.5}}, auto_close=True)
+    assert fields["status"] == "maybe"

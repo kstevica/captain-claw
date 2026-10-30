@@ -219,13 +219,35 @@ def forget(uid: str, key: str, *, store: TaskboardStore | None = None, locked: b
     inbox gone holds the lock already). How many tasks went."""
     store = store or _store()
     _set(store, uid, key, on=False)
+    left: set[tuple[str, str]] = set()
     if locked:
         with taskboard_sources._SWEEP_LOCK:
-            gone = store.passive_forget(uid, SOURCE[key])
+            gone = store.passive_forget(uid, SOURCE[key], left)
     else:
-        gone = store.passive_forget(uid, SOURCE[key])
+        gone = store.passive_forget(uid, SOURCE[key], left)
     store.set_cursor(_cursor_name(key, uid), "")
+    next_steps_left(left)
     return gone
+
+
+def next_steps_left(left: set[tuple[str, str]]) -> None:
+    """The next steps on the tasks an inbox's text just left, and the bell's copy
+    of them (taskboard_nextsteps.text_left). The inbox has gone already: this
+    failing is logged, never the switch-off's answer (what still waits then
+    expires with whom it goes to gone from the task, on the next read)."""
+    from captain_claw.flight_deck import owner_notify, taskboard_nextsteps
+
+    if not left:
+        return
+    try:
+        told = taskboard_nextsteps.text_left(left)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Taskboard next steps not told plain", error=str(exc)[:200])
+        return
+    loop = _main_loop()
+    for uid, action_ids in told.items():
+        if loop is not None:
+            asyncio.run_coroutine_threadsafe(owner_notify.bells_told_plain(uid, action_ids), loop)
 
 
 async def apply(uid: str, changes: Any) -> int:
@@ -420,9 +442,10 @@ def _recent(task: dict, at: float) -> bool:
 
 
 def _live(task: dict, key: str, at: float) -> bool:
-    """Whether a task the inbox made takes someone's next message: still
-    undecided or open (or judged not a task, which the new message may
-    change) — a chat's only while it goes on."""
+    """Whether a task holding a conversation takes someone's next message:
+    still undecided or open (or judged not a task, which the new message may
+    change) — a chat's only while it goes on, whichever task its key is on (a
+    merge moves it: a later message, about anything, is no part of that task)."""
     return task["status"] in ("open", "maybe", "not_task") and (key == "gmail" or _recent(task, at))
 
 
@@ -516,7 +539,7 @@ def _take(p: _Pass, uid: str, key: str, msgs: list[_Msg]) -> None:
         task = store.get_task(uid, held) if held else None
         ours = task is not None and task["source"] == source
         everyone = [m.party, *m.others]
-        if m.outgoing and task is not None and (not ours or key == "gmail" or _recent(task, m.at)):
+        if m.outgoing and task is not None and (key == "gmail" or _recent(task, m.at)):
             # The user answered in the conversation: the next move is theirs to wait for.
             patch = _requeue(task, now)
             if ours and task["kind"] == "message" and task["status"] == "open" and task["owes_next"] == "me":
@@ -530,7 +553,7 @@ def _take(p: _Pass, uid: str, key: str, msgs: list[_Msg]) -> None:
             create, patch = _sent_task(key, m, me)
             _put(p, uid, key, m, event=_event(key, m, me), create=create, patch=patch, parties=everyone,
                  release=task is not None)
-        elif task is not None and (not ours or _live(task, key, m.at)):
+        elif task is not None and ((not ours and key == "gmail") or _live(task, key, m.at)):
             patch = _requeue(task, now)
             _, new = _put(p, uid, key, m, event=_event(key, m, me), patch=patch,
                           parties=_not_on(store, uid, task["id"], everyone))
@@ -552,7 +575,9 @@ def sweep(p: _Pass, key: str) -> None:
     only theirs, only while it is on. A board whose read fails is logged
     and the rest go on; the sweep is told."""
     store, now = p.store, time.time()
-    gone = store.passive_purge(SOURCE[key], now=now, kept_s=KEPT_S, user_id=p.user_id)
+    left: set[tuple[str, str]] = set()
+    gone = store.passive_purge(SOURCE[key], now=now, kept_s=KEPT_S, user_id=p.user_id, left=left)
+    next_steps_left(left)
     if gone:
         log.info("Taskboard inbox text expired", source=key, tasks=gone)
     users = [u for u in store.passive_users(key) if (p.user_id is None or u == p.user_id) and p.board_user(u) == u]
@@ -866,7 +891,9 @@ def _gmail_msg(uid: str, inb: gmail_inbound.Inbound, own_keys: set[str], *, outg
         sender = gmail_inbound.sender_address(inb)
         party = {"role": "requester", "kind": "email", "address": sender, "display": inb.from_name or sender,
                  "verified": gmail_inbound.sender_authenticated(inb)[0]}
-        others = [{**x, "role": "cc"} for x in people("To", "cc") + people("Cc", "cc")
+        # Whoever wrote the email wrote these headers too: named, never verified
+        # (a next step goes to no one an inbound email put on its task).
+        others = [{**x, "role": "cc", "verified": False} for x in people("To", "cc") + people("Cc", "cc")
                   if x["address"] != sender]
     body = gmail_inbound.strip_quoted(inb.text)
     thread = inb.thread_id or mid

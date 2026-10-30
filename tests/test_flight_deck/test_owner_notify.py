@@ -422,3 +422,42 @@ async def test_a_waiting_proposal_stays_in_the_bell_past_its_page(store, tmp_pat
     finally:
         await db.close()
         fd_auth._db = prev
+
+
+def test_quiet_hours_keep_a_proposal_off_whatsapp_and_telegram(store, channels, monkeypatch):
+    """Triage runs at any hour, so a proposal can come at 2 am: the bell has it
+    and the devices' count shows it, silently; no phone rings for it."""
+    _settings(store, ALICE, notify_waid="111", notify_telegram=True)
+    monkeypatch.setattr(arbiter, "_in_quiet_hours", lambda s, e: True)
+    row = store.add_action(ALICE, kind="tool_action", title="Reply to Ana", status="awaiting_approval")
+    out = _run_coro(owner_notify.notify_proposal(ALICE, row))
+    assert channels["whatsapp"] == [] and channels["telegram"] == [] and out["whatsapp"] is None
+    assert len(channels["bell"]) == 1 and channels["devices"][-1]["beep"] is False
+    # What the agent says itself (a nudge) goes as it always did, and by day a proposal does too.
+    _nudge(store, monkeypatch)
+    assert channels["whatsapp"] and channels["telegram"]
+    channels["whatsapp"].clear()
+    monkeypatch.setattr(arbiter, "_in_quiet_hours", lambda s, e: False)
+    _run_coro(owner_notify.notify_proposal(ALICE, row))
+    assert channels["whatsapp"]
+
+
+def test_the_devices_count_follows_a_ledger_change_made_off_the_loop(store, channels, monkeypatch):
+    """The Taskboard writes the ledger from worker threads: a next step it
+    made or expired moves the count on the devices all the same."""
+    from captain_claw.flight_deck import taskboard_passive
+
+    async def go():
+        monkeypatch.setattr(taskboard_passive, "_LOOP", asyncio.get_running_loop())
+        row = await asyncio.to_thread(store.add_action, ALICE, kind="tool_action", title="Reply to Ana",
+                                      status="awaiting_approval")
+        await asyncio.sleep(0.05)
+        assert channels["devices"][-1]["count"] == 1
+        await asyncio.to_thread(store.expire_actions, [row["id"]], "expired: its task closed")
+        await asyncio.sleep(0.05)
+        assert channels["devices"][-1]["count"] == 0
+
+    _run_coro(go())
+    # No loop anywhere (a script): nothing to do, nothing raised.
+    monkeypatch.setattr(taskboard_passive, "_LOOP", None)
+    store.add_action(ALICE, kind="tool_action", title="Later", status="awaiting_approval")

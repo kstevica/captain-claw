@@ -106,7 +106,8 @@ async def test_the_list_and_the_detail(api):
     assert held["parties"][0]["address"] == "ana@x.co"
 
     detail = await _get(api, f"/fd/taskboard/tasks/{proposal['id']}")
-    assert set(detail) == {"task", "events", "events_total", "links", "parties", "decisions", "proposals", "merged"}
+    assert set(detail) == {"task", "events", "events_total", "links", "parties", "decisions", "proposals", "merged",
+                           "next_step_kinds"}
     assert detail["task"]["id"] == proposal["id"] and detail["decisions"] == [] and detail["merged"] == []
     assert detail["events_total"] == len(detail["events"]) > 0
     assert [p["id"] for p in detail["proposals"]] == [proposal["proposal"]["id"]]

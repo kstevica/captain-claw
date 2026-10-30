@@ -4,7 +4,7 @@ import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Bell, X, CheckCheck, Trash2, AlertTriangle, Info, CheckCircle2, AlertCircle, ListChecks, Loader2, Maximize2 } from 'lucide-react'
 import { useNotificationStore, type Notification, type NotificationType } from '../../stores/notificationStore'
-import { fetchWaitingProposalIds, resolveProposal } from '../../services/notifications'
+import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
 import { taskboardApi } from '../../services/taskboardApi'
 import { useTaskboardStore } from '../../stores/taskboardStore'
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
@@ -180,12 +180,12 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
   // Approve / Reject here — the kiosk has no other place to answer them).
   // Asked again when a new one comes in, so it gets its buttons.
   const proposalIds = notifications.filter((n) => n.refType === 'autonomy_action').map((n) => n.refId).join(',')
-  const [waiting, setWaiting] = useState<Set<string> | null>(null)
+  const [waiting, setWaiting] = useState<Map<string, WaitingProposal> | null>(null)
   // Taskboard: the task each waiting proposal is on (a board proposal's own
   // task, else the one the board keeps for the proposal).
   const [proposalTasks, setProposalTasks] = useState<Map<string, string> | null>(null)
   const loadWaiting = () => {
-    fetchWaitingProposalIds().then(setWaiting).catch(() => setWaiting(null))
+    fetchWaitingProposals().then(setWaiting).catch(() => setWaiting(null))
   }
   useEffect(() => {
     if (proposalIds) loadWaiting()
@@ -290,6 +290,8 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
                 : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
                 ? (waiting.has(n.refId) ? 'waiting' : 'answered') : undefined}
+              step={n.refType === 'autonomy_action' && n.refId && waiting?.get(n.refId)?.taskboard
+                ? waiting.get(n.refId) : undefined}
               onAnswered={() => { markRead(n.id); loadWaiting() }}
               onOpenTask={task ? () => { markRead(n.id); openTask(task) } : undefined}
               onRead={() => markRead(n.id)}
@@ -306,7 +308,13 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
 
 // A proposal's answer, from the bell: Approve sends it to your agent, Reject
 // drops it (and teaches Autonomous Work not to suggest its like).
-function ProposalButtons({ id, large, onAnswered }: { id: string; large: boolean; onAnswered: () => void }) {
+function ProposalButtons({ id, large, canApprove, onAnswered }: {
+  id: string
+  large: boolean
+  /** No Approve here: its words are read, and edited, on its task first. */
+  canApprove: boolean
+  onAnswered: () => void
+}) {
   const [busy, setBusy] = useState<'approve' | 'reject' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const answer = async (approve: boolean) => {
@@ -324,10 +332,12 @@ function ProposalButtons({ id, large, onAnswered }: { id: string; large: boolean
   return (
     <div className="mt-1" onClick={(e) => e.stopPropagation()}>
       <div className="flex items-center gap-1.5">
-        <button disabled={busy !== null} onClick={() => answer(true)}
-          className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}>
-          {busy === 'approve' && <Loader2 className="h-3 w-3 animate-spin" />} Approve
-        </button>
+        {canApprove && (
+          <button disabled={busy !== null} onClick={() => answer(true)}
+            className={`${btn} bg-emerald-600 text-white hover:bg-emerald-500`}>
+            {busy === 'approve' && <Loader2 className="h-3 w-3 animate-spin" />} Approve
+          </button>
+        )}
         <button disabled={busy !== null} onClick={() => answer(false)}
           className={`${btn} bg-zinc-800 text-zinc-300 hover:bg-zinc-700`}>
           {busy === 'reject' && <Loader2 className="h-3 w-3 animate-spin" />} Reject
@@ -338,13 +348,16 @@ function ProposalButtons({ id, large, onAnswered }: { id: string; large: boolean
   )
 }
 
-function NotificationItem({ notification: n, large, action, hint, proposal, onAnswered, onOpenTask, onRead, onActivate, onRemove }: {
+function NotificationItem({ notification: n, large, action, hint, proposal, step, onAnswered, onOpenTask, onRead, onActivate, onRemove }: {
   notification: Notification
   large: boolean
   action: SharedNotificationAction
   /** What a click does, when it isn't the shared-agent action's. */
   hint?: string
   proposal?: 'waiting' | 'answered'
+  /** A Taskboard next step waiting: Approve only with its words in sight —
+   *  on its task where the board opens, else here. */
+  step?: WaitingProposal
   onAnswered: () => void
   /** Taskboard: the task this is about, on the board. */
   onOpenTask?: () => void
@@ -388,7 +401,14 @@ function NotificationItem({ notification: n, large, action, hint, proposal, onAn
         ) : (
           <p className={`${large ? 'text-sm' : 'text-[10px]'} text-zinc-500 mt-0.5`}>{message}</p>
         )}
-        {proposal === 'waiting' && n.refId && <ProposalButtons id={n.refId} large={large} onAnswered={onAnswered} />}
+        {proposal === 'waiting' && step && !onOpenTask && (
+          <p className={`mt-1 whitespace-pre-wrap break-words rounded border border-zinc-800 px-2 py-1 text-zinc-300 ${large ? 'text-xs' : 'text-[10px]'}`}>
+            {step.to && <span className="text-zinc-500">To {step.to}: </span>}{step.text}
+          </p>
+        )}
+        {proposal === 'waiting' && n.refId && (
+          <ProposalButtons id={n.refId} large={large} canApprove={!step || !onOpenTask} onAnswered={onAnswered} />
+        )}
         {proposal === 'answered' && <p className={`mt-0.5 ${large ? 'text-xs' : 'text-[10px]'} text-zinc-600`}>No longer waiting.</p>}
         {onOpenTask && (
           <button
@@ -396,7 +416,7 @@ function NotificationItem({ notification: n, large, action, hint, proposal, onAn
             className={`mt-1 flex items-center gap-1 font-medium text-teal-600 hover:underline dark:text-teal-400 ${large ? 'text-xs' : 'text-[10px]'}`}
             title="This task on the Taskboard — its whole story, and the next step to edit before you approve"
           >
-            <ListChecks className="h-3 w-3" />Open task
+            <ListChecks className="h-3 w-3" />{proposal === 'waiting' && step ? 'Read it and approve' : 'Open task'}
           </button>
         )}
         {(hint || action.kind !== 'none') && (
