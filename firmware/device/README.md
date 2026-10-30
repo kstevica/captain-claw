@@ -1,4 +1,4 @@
-# Captain Claw · handheld voice client (M5Stack StickS3, StopWatch and PaperColor)
+# Captain Claw · handheld voice client (M5Stack StickS3, StopWatch, PaperColor; Waveshare ePaper 1.54)
 
 Press the talk button and talk; press it again, or just stop talking for
 2.5 s, to send. Flight Deck transcribes it, sends it to
@@ -7,7 +7,8 @@ any picture the agent made.
 
 Server side: `captain_claw/flight_deck/device_bridge.py` (`/device/ws`).
 
-One source tree builds all three devices (`src/board.h` holds what differs):
+One source tree builds them all (`src/board.h` holds what differs; the Waveshare boards have
+[their own section](#waveshare-esp32-s3-epaper-154-epaper154-epaper154_touch)):
 
 | | StickS3 | StopWatch | PaperColor |
 |---|---|---|---|
@@ -256,6 +257,72 @@ speaking and trouble exactly as above; the voice carries the answers:
 ```bash
 pio run -e papercolor_b -t upload
 pio run -e preview_paper_b && uv run --no-project --with pillow python preview/render.py paper_b   # → preview/out/paper_b/
+```
+
+## Waveshare ESP32-S3-ePaper-1.54 (`epaper154`, `epaper154_touch`)
+
+Two boards, one build each: SKU 32298 (`pio run -e epaper154`) and the Touch
+version, SKU 34212 (`pio run -e epaper154_touch`). Same board otherwise:
+ESP32-S3-PICO-1-N8R8 (the StickS3's module), a 200×200 black-and-white panel
+(SSD1681), ES8311 codec with mic and speaker (the StickS3's too), SHTC3
+temperature and humidity, PCF85063 clock, microSD, BOOT and PWR buttons, one
+green LED. **Only the V2 board works** ("V2" on the back or top-left of the
+PCB); a V1 has 4 MB flash and 2 MB PSRAM, too small for this firmware.
+
+It's written from Waveshare's schematic and examples and **has not run on the
+hardware yet**. M5Unified doesn't know this board, so `hw_epaper154.cpp` skips
+`M5.begin()` (its detection would probe these pins) and sets up M5Unified's
+speaker, mic, button and I2C classes by hand. `ui_epaper154.cpp` is the screen,
+`epd_ssd1681.cpp` the panel driver.
+
+**The screen.** Far faster than the PaperColor's, so this one behaves like the
+stick: a drawn menu, live status and working screens, answers that page with
+the voice. Screens draw to a canvas at once; a background task sends the latest
+one to the panel, only if it differs, as a partial refresh (no flash; Waveshare
+rates it at 0.4 s). A full refresh (2 s, flashes) clears what those leave behind:
+after power-up, for QR codes, going to sleep after 5 or more partials, on the
+home screen left alone for a minute after 20 or more, and on the next change
+after 60 at the latest. The frame on the panel stays in RTC memory, so a wake
+goes on from it with no flash. The serial log times every refresh
+(`[paper] partial refresh done, 412 ms`).
+
+**The PaperColor's trick.** Every full refresh starts from a reset pulse and
+the controller's whole set-up. What it doesn't take over is cutting a running
+waveform short for a new screen: the panel is left mid-change, so a full refresh
+has to follow, and at 2 s that's no quicker than letting the first one finish.
+
+| | `epaper154` | `epaper154_touch` |
+|---|---|---|
+| talk | BOOT: press, talk, press again (or 2.5 s of quiet); wakes and records from sleep | the same, or the Talk button on the screen |
+| next | PWR: next row or page · hold = menu | the same, or swipe; in a list, tap the left or right third to move, the middle to choose |
+| off | PWR held 4 s (on USB: deep sleep, since USB keeps it powered) | the same |
+| Wi-Fi & settings | Menu → *Wi-Fi & settings* | the same |
+
+Holding the talk button at power-on can't open setup here as it does elsewhere:
+BOOT held at power-on is the chip's download mode. No pin reports USB power or
+charging, so they're inferred from USB traffic and the battery voltage (a plain
+charger shows only once the battery is near full). The LED is on or off, so
+"Low" and "Bright" are the same.
+
+The picture doesn't depend on power, which is why the sleeping screen stays. On
+battery the board stays on only while G17 is high; it's latched through deep
+sleep, and cleared to switch off.
+
+To check on the first flash: V2 on the silkscreen; which way up the picture
+and the touch are (Menu → More → *Orientation*); speaker and mic levels (the register
+values are the StickS3's); that the battery percentage is believable; refresh
+times and ghosting (`kMaxPartials` and friends in `ui_epaper154.cpp`); current
+in deep sleep. Put the factory image aside first: `esptool.py read_flash 0
+0x800000 factory.bin`.
+
+Screens on a Mac, both builds:
+
+```bash
+pio run -e preview_epaper154 -e preview_epaper154_touch
+```
+
+```bash
+uv run --no-project --with pillow python preview/render.py epaper154
 ```
 
 ## StopWatch screen

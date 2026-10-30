@@ -39,7 +39,7 @@ void Settings::load() {
   cueFlash = p.getBool("cueflash", true);
   cueBuzz = p.getBool("cuebuzz", true);
   cueLeadS = constrain(p.getUChar("cuelead", 1), 1, 2);
-  tapTalk = board::kHasTouch && p.getBool("taptalk", false);
+  tapTalk = board::kHasTouch && p.getBool("taptalk", board::kTapTalkDefault);
   talks = p.getUShort("talks", 0);
   textSize = min<uint8_t>(p.getUChar("tsize", 0), 2);
   autoUpdate = p.getBool("autoupd", board::kPaperB);  // the B paper: on unless turned off on the phone page

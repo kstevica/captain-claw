@@ -6,6 +6,9 @@
     pio run -e preview_paper
     uv run --no-project --with pillow python preview/render.py paper [out dir]
 
+    pio run -e preview_epaper154 -e preview_epaper154_touch
+    uv run --no-project --with pillow python preview/render.py epaper154
+
 Runs the preview program (the real ui_round.cpp / ui_paper.cpp built for the
 Mac), then shows every frame the way it looks on the device: the StopWatch's
 round screen in its bezel; the PaperColor's six inks in the muted colours an
@@ -138,8 +141,44 @@ def paper_framed(ppm: Path) -> Image.Image:
     return out
 
 
+def mono_framed(ppm: Path, scale: int = 2) -> Image.Image:
+    """The frame as it looks on the Waveshare 1.54": black on the panel's grey
+    paper, every pixel doubled so its pixels can be judged."""
+    screen = Image.open(ppm).convert("L").point(lambda v: 228 if v > 127 else 38)
+    w, h = screen.size
+    screen = screen.resize((w * scale, h * scale), Image.NEAREST).convert("RGB")
+    m = 18
+    out = Image.new("RGB", (screen.width + 2 * m, screen.height + 2 * m), (40, 42, 48))
+    out.paste(screen, (m, m))
+    return out
+
+
+def render_epaper154() -> None:
+    """Both builds' screens, each to its own folder, and a contact sheet."""
+    for name in ("epaper154", "epaper154_touch"):
+        out = ROOT / "preview" / "out" / name
+        out.mkdir(parents=True, exist_ok=True)
+        for old in list(out.glob("*.ppm")) + list(out.glob("*.png")):
+            old.unlink()
+        sample_paper_picture(out / "big.jpg")
+        Image.open(out / "big.jpg").resize((200, 150), Image.LANCZOS).save(out / "sample.jpg", "JPEG", quality=88)
+        (out / "big.jpg").unlink()
+        program = ROOT / ".pio" / "build" / ("preview_" + name) / "program"
+        subprocess.run([str(program), str(out)], check=True, stdout=subprocess.DEVNULL)
+        frames = []
+        for ppm in sorted(out.glob("*.ppm")):
+            img = mono_framed(ppm)
+            img.save(ppm.with_suffix(".png"))
+            ppm.unlink()
+            frames.append((ppm.stem, img))
+        sheet(out, frames, cols=6, cell=(frames[0][1].width, frames[0][1].height))
+
+
 def main() -> None:
     args = sys.argv[1:]
+    if args and args[0] == "epaper154":
+        render_epaper154()
+        return
     mode = args[0] if args and args[0] in ("paper", "paper_b") else ""
     paper = bool(mode)
     if paper:

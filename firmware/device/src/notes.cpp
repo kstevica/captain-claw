@@ -3,7 +3,13 @@
 #include <FS.h>
 #include <LittleFS.h>
 #include <M5Unified.h>
+#if defined(BOARD_EPAPER154)
+#include <SD_MMC.h>  // its slot has its own pins (one data line)
+#define CARD SD_MMC
+#else
 #include <SD.h>
+#define CARD SD
+#endif
 #include <SPI.h>
 
 #include <freertos/stream_buffer.h>
@@ -37,7 +43,7 @@ static adpcm::State readerState;
 
 static uint64_t freeNow() {
   if (!mounted) return 0;
-  return card ? SD.totalBytes() - SD.usedBytes() : LittleFS.totalBytes() - LittleFS.usedBytes();
+  return card ? CARD.totalBytes() - CARD.usedBytes() : LittleFS.totalBytes() - LittleFS.usedBytes();
 }
 
 static String pathOf(const String& id, const char* ext) { return String(kDir) + "/" + id + ext; }
@@ -135,7 +141,7 @@ static void moveToCard() {
   for (auto& name : names) {
     const String path = String(kDir) + "/" + name;
     File in = LittleFS.open(path, FILE_READ);
-    File out = in ? SD.open(path, FILE_WRITE) : File();
+    File out = in ? CARD.open(path, FILE_WRITE) : File();
     bool ok = in && out;
     for (size_t got; ok && (got = in.read(buf, sizeof(buf))) > 0;) ok = out.write(buf, got) == got;
     if (in) in.close();
@@ -144,7 +150,7 @@ static void moveToCard() {
       LittleFS.remove(path);
       ++moved;
     } else {
-      SD.remove(path);
+      CARD.remove(path);
     }
   }
   if (moved) Serial.printf("[claw] offline notes: %d moved from flash to the card\n", moved);
@@ -176,14 +182,20 @@ static void moveOldNotes(fs::FS& fs) {
 // panel's driver set the shared bus up as Arduino's SPI (and locks it for
 // each of its transfers): the card only needs its chip select.
 static bool mountCard() {
+#if defined(BOARD_EPAPER154)
+  CARD.end();  // (after a try that failed, or a card that went)
+  CARD.setPins(39, 41, 40);  // CLK, CMD, D0
+  return CARD.begin("/sd", true, false, SDMMC_FREQ_DEFAULT, 2);
+#else
   const int cs = M5.getPin(m5::pin_name_t::sd_spi_ss);
   if (cs < 0 || cs >= 255) return false;
-  SD.end();  // (after a try that failed, or a card that went)
-  return SD.begin(cs, SPI, 10000000, "/sd", 2);
+  CARD.end();  // (after a try that failed, or a card that went)
+  return CARD.begin(cs, SPI, 10000000, "/sd", 2);
+#endif
 }
 
 static bool cardThere() {
-  File d = SD.open(kDir);
+  File d = CARD.open(kDir);
   const bool there = d && d.isDirectory();
   if (d) d.close();
   return there;
@@ -191,10 +203,10 @@ static bool cardThere() {
 
 // The card is in: notes go there, and those in flash move over.
 static void useCard() {
-  store = &SD;
+  store = &CARD;
   card = mounted = true;
-  moveOldNotes(SD);
-  if (!SD.exists(kDir)) SD.mkdir(kDir);
+  moveOldNotes(CARD);
+  if (!CARD.exists(kDir)) CARD.mkdir(kDir);
   if (flashUp && LittleFS.exists(kDir)) moveToCard();
   recount();
 }
@@ -202,7 +214,7 @@ static void useCard() {
 // The card is gone: back to the flash.
 static void useFlash() {
   closeRead();
-  if (card) SD.end();
+  if (card) CARD.end();
   card = false;
   store = flashUp ? &LittleFS : nullptr;
   mounted = store != nullptr;

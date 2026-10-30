@@ -2,6 +2,8 @@
 
 #include <M5Unified.h>
 
+#include "hw.h"
+
 namespace audio {
 
 // ── microphone: a small ring of blocks; M5Unified fills up to two at once ──
@@ -169,6 +171,7 @@ void micStart() {
   playStop();
   M5.Speaker.end();
   M5.Mic.begin();
+  hw::micStarted();
   fifoLen = 0;
   nextBlock = 0;
   lastLevel = 0;
