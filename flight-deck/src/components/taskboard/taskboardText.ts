@@ -312,7 +312,7 @@ export function answerText(question: string, a: TaskAnswer): string {
  *  snooze, label, move to, reply and undo. Approving a next step has no key. */
 export const TASK_KEYS = {
   done: 'e', reopen: 'U', gotIt: 'I', notTask: '!', yes: 'y', snooze: 'b', rename: 'l', merge: 'v', nextStep: 'r', undo: 'z',
-  agent: 'a',
+  agent: 'a', focus: 'f',
 } as const
 
 /** `g`, then one of these within {@link GO_WAIT_MS}: Gmail's "go to". */
@@ -329,6 +329,7 @@ export const KEY_SHEET: { title: string; rows: { keys: string[]; what: string }[
   { title: 'Move around', rows: [
     { keys: ['j', 'k'], what: 'Next or previous task' },
     { keys: ['o', 'Enter'], what: 'Open the task' },
+    { keys: [TASK_KEYS.focus], what: 'Open the task bigger, or back' },
     { keys: ['u'], what: 'Back to the list' },
     { keys: ['/'], what: 'Search' },
     { keys: ['g n'], what: 'Go to Needs me' },
