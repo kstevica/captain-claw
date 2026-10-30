@@ -245,7 +245,7 @@ static void handleRoot() {
       h += option("180", "Every 3 hours", settings.asleepRefreshMin == 180);
       if (board::kSleepClock) h += option("0", "Never", settings.asleepRefreshMin == 0);
       if (board::kSleepClock) {
-        h += F("</select><small>Asleep, the screen keeps the clock, the date and the room, as of the last redraw."
+        h += F("</select><small>Asleep, the screen keeps the clock and the date, as of the last redraw."
                " Each redraw wakes it for about a second, so the rarer they are, the longer the battery lasts; under"
                " 10% it goes hourly.</small>");
       } else {
