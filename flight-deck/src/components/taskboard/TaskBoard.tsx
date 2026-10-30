@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  AlarmClock, AlertTriangle, ArrowLeft, ArrowRight, Ban, BellOff, Check, Clock, Hand, Layers, ListChecks, Loader2,
-  Lock, MessageSquare, Pencil, RotateCcw, RotateCw, Search, SlidersHorizontal, Undo2, X,
+  AlarmClock, AlertTriangle, ArrowLeft, ArrowRight, Ban, BellOff, Check, Clock, Hand, HelpCircle, Layers, ListChecks,
+  Loader2, Lock, MessageSquare, Pencil, RotateCcw, RotateCw, Search, Settings2, SlidersHorizontal, Undo2, Wrench, X,
 } from 'lucide-react'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { useTaskboardStore } from '../../stores/taskboardStore'
@@ -25,9 +25,11 @@ import {
 } from '../../services/taskboardApi'
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
-  ChannelIcon, DateFacet, EvidenceBadge, FoldHighlight, LaneChip, MultiFacet, OwesChip, ProposalButtons, ResultChip,
-  StatusChip, SyncStatus,
+  AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, FoldHighlight, InstructionsChip, LaneChip, LowConfidenceHint,
+  MultiFacet, OwesChip, ProposalButtons, ResultChip, StatusChip, SyncStatus,
 } from './taskboardParts'
+import { BoardSettings } from './TaskboardSettings'
+import { WhyThisHere } from './TaskWhy'
 import {
   DIRECTION_LABEL, EVENT_LABEL, EVIDENCE_LABEL, KIND_LABEL, NO_DATES, OWES_LABEL, RESULT_LABEL, ROLE_LABEL, STATUS_DOT,
   STATUS_LABEL, agoRelative, channelLabel, dateBounds, foldText, isSnoozed, type DateRange,
@@ -38,12 +40,13 @@ import {
 // Every task your agents were given or sent, on any channel, in one place:
 // whether it was finished, by whom, for whom, with which people and with
 // what result. It opens on what needs you — a next step to approve, a reply
-// held for your OK, something that failed — and the rest is a tab away.
-// Flight Deck builds it from the records it keeps anyway (scheduled runs,
-// proposals, follow-ups, held replies, sent mail, agent links), and opening
-// the board reads them again. What you change here (Done, Snooze, Rename…)
-// holds: nothing automatic changes it back (but a scheduled task's next run
-// opens it again).
+// held for your OK, something that failed or looks finished — and the rest
+// is a tab away. Flight Deck builds it from the records it keeps anyway
+// (scheduled runs, proposals, follow-ups, held replies, sent mail, agent
+// links) and from what you ask your agents in any chat, which Jev sorts
+// ("Why is this here?" says how); opening the board reads them again. What
+// you change here (Done, Snooze, Rename…) holds: nothing automatic changes
+// it back (but a scheduled task's next run opens it again).
 
 const PAGE = 60
 
@@ -66,7 +69,8 @@ type Filters = Record<TaskFacetKey, string[]>
 const NO_FILTERS: Filters = { status: [], channel: [], agent: [], direction: [], kind: [], evidence: [], result: [], party: [] }
 
 const FACETS: { key: TaskFacetKey; title: string; labelOf?: (id: string) => string; dot?: (id: string) => ReactNode }[] = [
-  { key: 'status', title: 'Status', labelOf: (id) => STATUS_LABEL[id] || id,
+  // Where a task the board isn't sure of waits ("Why is this here?" says so).
+  { key: 'status', title: 'Status', labelOf: (id) => (id === 'maybe' ? 'Maybe tasks' : STATUS_LABEL[id] || id),
     dot: (id) => <span className={`h-2 w-2 shrink-0 rounded-full ${STATUS_DOT[id] || 'bg-zinc-500'}`} /> },
   { key: 'channel', title: 'Channel', labelOf: channelLabel, dot: (id) => <ChannelIcon channel={id} className="h-3.5 w-3.5" /> },
   { key: 'agent', title: 'Agent' },
@@ -80,14 +84,14 @@ const FACETS: { key: TaskFacetKey; title: string; labelOf?: (id: string) => stri
 const EMPTY: Record<TaskView, { title: string; text: string }> = {
   needs_me: {
     title: 'Nothing needs you',
-    text: 'When an agent waits for your OK on a next step, a reply is held for you, or something failed, it shows up here.',
+    text: 'When an agent waits for your OK on a next step, a reply is held for you, something failed or looks finished, it shows up here.',
   },
   waiting: { title: 'Nothing waiting on others', text: 'Tasks where someone else owes the next move — a reply, a follow-up — show up here.' },
   working: { title: 'No agent is on anything', text: 'Tasks an agent is still busy with — a scheduled run, an approved step — show up here.' },
   done: { title: 'Nothing done yet', text: 'Finished tasks collect here, with who did them and how it went.' },
   all: {
     title: 'No tasks yet',
-    text: 'Scheduled tasks, proposals, follow-ups, held replies, sent mail and messages between agents collect here.',
+    text: 'What you ask your agents in any chat, scheduled tasks, proposals, follow-ups, held replies, sent mail and messages from linked systems collect here.',
   },
 }
 
@@ -118,7 +122,10 @@ const sameList = (a: string[], b: string[]) => a.length === b.length && a.every(
 /** Why a task in Needs me is there, in a few words. */
 function needsReason(t: TaskItem): string {
   if (t.proposal?.status === 'awaiting_approval') return 'Approve the next step'
-  if (t.kind === 'held_reply' && t.status === 'open') return 'A reply waits for your OK'
+  // A held reply's own task, or one held on the thread a request started.
+  if (t.status === 'open' && (t.kind === 'held_reply' || (t.owes_next === 'me' && t.links?.autoreply_id))) {
+    return 'A reply waits for your OK'
+  }
   if (t.status === 'failed') return 'It failed — take a look'
   if (t.flags?.probably_done) return 'Probably done?'
   if (t.flags?.overdue) return 'Overdue'
@@ -178,6 +185,9 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   const [rev, setRev] = useState(0)
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [sourcesOpen, setSourcesOpen] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  // The gear and its popover (desktop): a click outside both closes it.
+  const settingsBox = useRef<HTMLSpanElement>(null)
   const reqId = useRef(0)
   const shown = useRef(PAGE)
 
@@ -320,10 +330,12 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
     fetchSummary()
   }
 
-  // Escape: the Sources sheet closes first, then the filters (phone), then
-  // the open task (phone), then the board. Not while writing (a held
-  // reply's text), nor when something inside used it to close itself (the
-  // Snooze picker).
+  // Escape: the settings close first, then the Sources sheet, then the
+  // filters (phone), then the open task (phone), then the board. Not while
+  // writing (a held reply's text), nor when something inside used it to
+  // close itself (the Snooze picker, "Why is this here?").
+  const settingsRef = useRef(settingsOpen)
+  settingsRef.current = settingsOpen
   const sourcesRef = useRef(sourcesOpen)
   sourcesRef.current = sourcesOpen
   const filtersRef = useRef(filtersOpen)
@@ -337,6 +349,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       if (el instanceof HTMLTextAreaElement || el?.isContentEditable) return
       setTimeout(() => {
         if (e.defaultPrevented) return
+        if (settingsRef.current) { setSettingsOpen(false); return }
         if (sourcesRef.current) { setSourcesOpen(false); return }
         if (filtersRef.current) { setFiltersOpen(false); return }
         if (phone && selectedRef.current) { setSelected(null); return }
@@ -346,6 +359,17 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose, phone])
+
+  // The settings popover closes on a click anywhere else (the phone's sheet
+  // covers the board, and closes by its own buttons).
+  useEffect(() => {
+    if (!settingsOpen || phone) return
+    const onDown = (e: MouseEvent) => {
+      if (settingsBox.current && !settingsBox.current.contains(e.target as Node)) setSettingsOpen(false)
+    }
+    document.addEventListener('mousedown', onDown)
+    return () => document.removeEventListener('mousedown', onDown)
+  }, [settingsOpen, phone])
 
   const items = page?.items ?? []
   const counts = page?.counts ?? status?.counts
@@ -376,6 +400,22 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       <button onClick={() => setSourcesOpen(true)} className={iconBtn} title="Sources — what the Taskboard reads" aria-label="Sources">
         <Layers className="h-4 w-4" />
       </button>
+      <span ref={settingsBox} className="relative">
+        <button
+          onClick={() => setSettingsOpen((o) => !o)}
+          className={iconBtn}
+          title="Board settings — closing by itself, daily limits, Jev"
+          aria-label="Board settings"
+          aria-expanded={settingsOpen}
+        >
+          <Settings2 className="h-4 w-4" />
+        </button>
+        {settingsOpen && !phone && (
+          <div className="absolute right-0 top-full z-40 mt-2 w-[340px]">
+            <BoardSettings phone={false} onClose={() => setSettingsOpen(false)} />
+          </div>
+        )}
+      </span>
       <FullscreenButton />
       <button onClick={onClose} className={iconBtn} title="Close" aria-label="Close">
         <X className="h-4 w-4" />
@@ -478,6 +518,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       onRetry={() => load()}
       onAll={() => setView('all')}
       onAnswered={answered}
+      onAct={act}
     />
   )
 
@@ -538,6 +579,11 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
             </div>
           </div>
         )}
+        {settingsOpen && (
+          <div className="absolute inset-0 z-20 flex flex-col bg-zinc-950">
+            <BoardSettings phone onClose={() => setSettingsOpen(false)} />
+          </div>
+        )}
         {sources}
       </div>
     )
@@ -595,7 +641,7 @@ function Filters({ facets, failed, filters, dates, onFacet, onDates }: {
 
 function ResultList({
   view, items, total, query, gathering, loading, error, filtered, agentOnly, terms, selectedId, loadingMore,
-  onSelect, onMore, onClear, onRetry, onAll, onAnswered,
+  onSelect, onMore, onClear, onRetry, onAll, onAnswered, onAct,
 }: {
   view: TaskView; items: TaskItem[]; total: number; query: string
   /** The sources are being read: more may come. */
@@ -605,6 +651,8 @@ function ResultList({
   onSelect: (t: TaskItem) => void; onMore: () => void; onClear: () => void; onRetry: () => void
   onAll: () => void
   onAnswered: () => Promise<void>
+  /** A quick answer on a row (Is this a task? Probably done?). */
+  onAct: (task: TaskItem, action: TaskAction) => Promise<void>
 }) {
   if (loading && items.length === 0) {
     return <div className="flex h-full justify-center pt-16 text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>
@@ -650,7 +698,10 @@ function ResultList({
       <ul className="flex flex-col gap-1.5">
         {items.map((t) => (
           <li key={t.id}>
-            <TaskRow task={t} terms={terms} active={t.id === selectedId} onClick={() => onSelect(t)} onAnswered={onAnswered} />
+            <TaskRow
+              task={t} terms={terms} active={t.id === selectedId} onClick={() => onSelect(t)} onAnswered={onAnswered}
+              onAct={(action) => onAct(t, action)}
+            />
           </li>
         ))}
       </ul>
@@ -670,11 +721,33 @@ function ResultList({
   )
 }
 
-function TaskRow({ task, terms, active, onClick, onAnswered }: {
+type Answer = { label: string; action: TaskAction; primary?: boolean; title?: string }
+
+// The two questions the board asks you about a task, and their answers.
+const MAYBE_ANSWERS: Answer[] = [
+  { label: 'Yes', action: 'confirm_task', primary: true, title: 'It is a task — the agent has the next move' },
+  { label: 'No', action: 'not_task', title: 'Not a task — it leaves the board' },
+]
+const DONE_ANSWERS: Answer[] = [
+  { label: 'Done', action: 'done', primary: true, title: 'It is finished' },
+  { label: 'Not yet', action: 'not_done', title: 'Not finished — it stays open' },
+]
+
+/** Jev wasn't sure enough of one: whether it is a task at all, or whether
+ *  an open one is finished. */
+const isMaybe = (t: TaskItem) => t.status === 'maybe'
+const isProbablyDone = (t: TaskItem) => t.status === 'open' && !!t.flags?.probably_done
+
+function TaskRow({ task, terms, active, onClick, onAnswered, onAct }: {
   task: TaskItem; terms: string[]; active: boolean; onClick: () => void; onAnswered: () => Promise<void>
+  onAct: (action: TaskAction) => Promise<void>
 }) {
   const waiting = task.proposal?.status === 'awaiting_approval' ? task.proposal : null
-  const reason = task.lane === 'needs_me' ? needsReason(task) : ''
+  const maybe = !waiting && isMaybe(task)
+  // Its question is the reason line: "Probably done?", with the answers.
+  const probablyDone = !waiting && !maybe && isProbablyDone(task)
+  const reason = task.lane === 'needs_me' && !probablyDone ? needsReason(task) : ''
+  const flags = task.flags ?? {}
   const people = partyLine(task.parties)
   const agentLabel = task.agent_name || task.agent_slug
   return (
@@ -689,13 +762,16 @@ function TaskRow({ task, terms, active, onClick, onAnswered }: {
             <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-100">
               <FoldHighlight text={task.title || 'Untitled task'} terms={terms} />
             </span>
+            {flags.contains_instructions && <InstructionsChip compact />}
             <EvidenceBadge evidence={task.evidence} />
+            {flags.answered_in_chat && <ResultChip result={task.result} answeredInChat />}
             <LaneChip task={task} />
           </span>
           <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
             {agentLabel && <><FoldHighlight text={agentLabel} terms={terms} />{' · '}</>}
             {people ? <><FoldHighlight text={people} terms={terms} />{' · '}</> : null}
             {agoRelative(task.last_event_at ?? task.created_at)}
+            {flags.low_confidence && <span className="italic" title="Jev wasn't sure this is a task, so it isn't counted on the Taskboard button"> · low confidence</span>}
           </span>
           {task.ask && (
             <span className={`mt-1 block text-xs leading-relaxed text-zinc-400 ${task.result_text ? 'line-clamp-1' : 'line-clamp-2'}`}>
@@ -722,6 +798,15 @@ function TaskRow({ task, terms, active, onClick, onAnswered }: {
             {waiting.title && <span className="font-normal text-zinc-400"> — {waiting.title}</span>}
           </span>
           <ProposalButtons id={waiting.id} onAnswered={onAnswered} />
+        </div>
+      )}
+      {(maybe || probablyDone) && (
+        <div className="flex flex-wrap items-center gap-2 border-t border-amber-500/20 bg-amber-500/5 px-3 py-2">
+          <span className="min-w-0 flex-1 text-xs font-medium text-amber-800 dark:text-amber-300">
+            {maybe ? 'Is this a task?' : 'Probably done?'}
+            {maybe && flags.why && <span className="font-normal text-zinc-400"> — {flags.why}</span>}
+          </span>
+          <AnswerButtons choices={maybe ? MAYBE_ANSWERS : DONE_ANSWERS} onAct={onAct} />
         </div>
       )}
     </div>
@@ -796,7 +881,12 @@ function TaskDetailPane({
   const waiting = task.proposal?.status === 'awaiting_approval'
     ? task.proposal
     : detail?.proposals?.find((p) => p.status === 'awaiting_approval') ?? null
-  const held = task.kind === 'held_reply' && task.status === 'open' && task.owes_next === 'me'
+  // A held auto-reply waits for your OK: a held reply's own task, or one on
+  // the thread a request of yours started (the auto-reply's latest state says).
+  const lastReply = [...(detail?.events ?? [])].reverse()
+    .find((e) => e.source === 'gmail_autoreplies' && typeof e.refs?.state === 'string')
+  const held = task.status === 'open' && task.owes_next === 'me'
+    && (task.kind === 'held_reply' || lastReply?.refs.state === 'held')
   const parties = detail?.parties ?? task.parties ?? []
   const jobId = task.links?.scheduled_job_id || ''
   const sessionId = task.links?.session_id || ''
@@ -887,6 +977,7 @@ function TaskDetailPane({
           {!closed && !failed && <OwesChip owes={task.owes_next} />}
           <EvidenceBadge evidence={task.evidence} />
           <ResultChip result={task.result} answeredInChat={!!flags.answered_in_chat} />
+          {flags.contains_instructions && <InstructionsChip />}
           {flags.overdue && <span className="rounded-md bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-700 dark:text-red-300">Overdue</span>}
           {flags.stale && <span className="rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-700 dark:text-amber-300">Gone quiet</span>}
           {snoozed && task.lane !== 'snoozed' && (
@@ -901,7 +992,9 @@ function TaskDetailPane({
               <Lock className="h-2.5 w-2.5" />Changed by you
             </span>
           )}
+          {flags.low_confidence && <LowConfidenceHint />}
         </div>
+        <WhyThisHere task={task} phone={phone} />
 
         {waiting && (
           <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
@@ -919,9 +1012,22 @@ function TaskDetailPane({
             <p className="mt-1 text-xs opacity-80">What happened is below. “Got it” takes it off Needs me; Reopen puts it back to work.</p>
           </div>
         )}
-        {flags.probably_done && !closed && (
-          <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs text-amber-800 dark:text-amber-300">
-            <span className="font-medium">Probably done?</span> Mark it Done if it is.
+        {isMaybe(task) && !waiting && (
+          <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
+            <div className="flex items-center gap-1.5 text-xs font-medium text-amber-800 dark:text-amber-300">
+              <HelpCircle className="h-3.5 w-3.5" />Is this a task?
+            </div>
+            <p className="mt-1 text-xs leading-relaxed text-zinc-400">
+              {flags.why ? `${flags.why} ` : ''}Yes puts it on the board with the agent's move next; No takes it off.
+            </p>
+            <div className="mt-2"><AnswerButtons choices={MAYBE_ANSWERS} onAct={(a) => onAct(a)} /></div>
+          </div>
+        )}
+        {isProbablyDone(task) && !waiting && (
+          <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
+            <div className="text-xs font-medium text-amber-800 dark:text-amber-300">Probably done?</div>
+            <p className="mt-1 text-xs leading-relaxed text-zinc-400">It looks finished. Done closes it; Not yet keeps it open.</p>
+            <div className="mt-2"><AnswerButtons choices={DONE_ANSWERS} onAct={(a) => onAct(a)} /></div>
           </div>
         )}
 
@@ -1088,6 +1194,16 @@ function TaskDetailPane({
  *  what the server sent (its latest 500) on a click. */
 const TIMELINE_SHOWN = 20
 
+/** The tool a tool-call event ran, from its refs (the register's `tool`). */
+function toolName(e: TaskEvent): string {
+  const refs = e.refs ?? {}
+  for (const k of ['tool', 'tool_name', 'name']) {
+    const v = refs[k]
+    if (typeof v === 'string' && v) return v
+  }
+  return ''
+}
+
 function Timeline({ events, total, terms }: { events: TaskEvent[]; total?: number; terms: string[] }) {
   const [all, setAll] = useState(false)
   if (!events.length) return <p className="mt-2 text-xs text-zinc-500">Nothing recorded yet.</p>
@@ -1106,14 +1222,19 @@ function Timeline({ events, total, terms }: { events: TaskEvent[]; total?: numbe
       <ol className="ml-2.5 mt-3 flex flex-col gap-3 border-l border-zinc-800 pl-4">
         {shown.map((e) => {
           const actor = e.actor_kind === 'me' ? 'You' : e.actor_kind === 'jev' ? 'Jev' : e.actor
+          const tool = e.kind === 'tool_call' ? toolName(e) : ''
           return (
             <li key={e.id} className="relative">
               <span className="absolute -left-[27px] top-0 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-900 ring-1 ring-zinc-800">
-                <ChannelIcon channel={e.channel || 'agent'} className="h-3 w-3" />
+                {e.kind === 'tool_call'
+                  ? <Wrench className="h-3 w-3 shrink-0 text-zinc-400" />
+                  : <ChannelIcon channel={e.channel || 'agent'} className="h-3 w-3" />}
               </span>
               <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11px] text-zinc-500">
                 <span className="font-medium text-zinc-200">{EVENT_LABEL[e.kind] || e.kind}</span>
+                {tool && <span className="rounded bg-zinc-800 px-1 font-mono text-[10px] text-zinc-300">{tool}</span>}
                 <span className="min-w-0 truncate" title={fmtWhen(e.at)}>{[actor, agoRelative(e.at)].filter(Boolean).join(' · ')}</span>
+                {e.kind === 'tool_call' && e.outcome === 'ok' && <span className="font-medium text-emerald-700 dark:text-emerald-400">ok</span>}
                 {e.evidence === 'recorded' && (
                   <span className="flex items-center gap-0.5 text-emerald-700 dark:text-emerald-400" title="Flight Deck recorded it">
                     <Check className="h-3 w-3" />recorded

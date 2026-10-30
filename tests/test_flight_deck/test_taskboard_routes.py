@@ -6,6 +6,7 @@ waiting proposal moving the row, with Reject a compare-and-set like Approve
 
 from __future__ import annotations
 
+import secrets
 import time
 from types import SimpleNamespace
 
@@ -69,7 +70,8 @@ async def test_status_lists_the_sources_counts_and_the_sweep(api):
     out = await _get(api, "/fd/taskboard/status")
     assert set(out) == {"sources", "counts", "sweep"}
     tracked = {s["key"] for s in out["sources"] if s["tracked"]}
-    assert tracked == {"fd_scheduler", "autonomy", "follow_ups", "gmail_autoreplies", "gmail_sends", "agent_links"}
+    assert tracked == {"fd_scheduler", "autonomy", "follow_ups", "gmail_autoreplies", "gmail_sends", "agent_links",
+                       "agent_chats"}
     assert all(set(s) == {"key", "label", "tracked", "on", "note"} for s in out["sources"])
     assert out["counts"] == {"needs_me": 0, "waiting": 0, "working": 0, "done": 0, "all": 0}
     assert set(out["sweep"]) == {"running", "last_at", "message"}
@@ -353,6 +355,105 @@ async def test_settings_are_per_user(api):
     assert set(out["passive"]) == {"telegram_inbox", "whatsapp_web", "gmail"}
     r = await api.client.put("/fd/taskboard/settings", json={"auto_close": False, "jev_per_day": 50})
     assert r.status_code == 200 and (r.json()["auto_close"], r.json()["jev_per_day"]) == (False, 50)
-    assert (await api.client.put("/fd/taskboard/settings", json={"extract_per_day": 5000})).status_code == 422
+    assert (await api.client.put("/fd/taskboard/settings", json={"extract_per_day": 5000})).status_code == 400
     api.be(api.bob)
     assert (await _get(api, "/fd/taskboard/settings"))["jev_per_day"] == 200
+
+
+# ── v1: settings, why, confirm / not done, the badge ──────────────────
+
+
+async def test_settings_carry_todays_counts_jev_and_their_bounds(api, monkeypatch):
+    from captain_claw.flight_deck import jev_routes, taskboard_store
+
+    async def status(owner):
+        return {"key_set": owner == api.env.alice, "source": "shared" if owner == api.env.alice else None}
+
+    monkeypatch.setattr(jev_routes, "status_for_owner", status)
+    api.env.board.take_daily(api.env.alice, "jev", 3)
+    out = await _get(api, "/fd/taskboard/settings")
+    assert out["counters"] == {"day": taskboard_store.utc_day(), "jev": 3, "extract": 0}
+    assert out["jev"] == {"connected": True, "source": "team"}
+    for body, code in (({"jev_per_day": 2000}, 200), ({"jev_per_day": 2001}, 400), ({"jev_per_day": -1}, 400),
+                       ({"extract_per_day": 1000}, 200), ({"extract_per_day": 1001}, 400)):
+        assert (await api.client.put("/fd/taskboard/settings", json=body)).status_code == code, body
+    r = await api.client.put("/fd/taskboard/settings", json={"auto_close": False})
+    assert set(r.json()) >= {"auto_close", "jev_per_day", "extract_per_day", "counters", "jev"}
+    assert (r.json()["jev_per_day"], r.json()["extract_per_day"]) == (2000, 1000)
+    api.be(api.bob)
+    out = await _get(api, "/fd/taskboard/settings")
+    assert out["jev"] == {"connected": False, "source": ""} and out["counters"]["jev"] == 0
+
+
+def _maybe(board, uid, status="open", owes="me", **flags):
+    """A turn's task as triage left it: *status*, who owes it, *flags*."""
+    key = secrets.token_hex(8)
+    tid, _ = board.ingest(uid, keys=[f"turn:{key}"], event={"source": "t", "source_ref": key},
+                          create={"title": "Lunch?", "kind": "request", "status": status, "owes_next": owes,
+                                  "flags": flags})
+    return tid
+
+
+async def test_why_lists_the_decisions_latest_first(api):
+    board, uid = api.env.board, api.env.alice
+    tid = _maybe(board, uid, status="maybe")
+    fp = board.get_task(uid, tid)["fingerprint"]
+    board.triage_write(uid, tid, fp, decision={"judge": "rule", "qset": "taskboard.rules.v1", "applied": "No change",
+                                               "why": "The agent is still working on it."})
+    board.triage_write(uid, tid, fp, decided=True, state="ok", decision={
+        "judge": "jev", "qset": "taskboard.v1", "applied": "open → maybe",
+        "why": "Jev isn't sure this is a task (52%), so it waits under Maybe tasks.",
+        "answers": {"is_task": {"p": 0.52}, "owes_next": {"choice": "me", "p": 0.6}, "urgency": {"score": 1.0}}})
+    out = await _get(api, f"/fd/taskboard/tasks/{tid}/why")
+    assert set(out) == {"items", "summary"}
+    assert [i["judge"] for i in out["items"]] == ["jev", "rule"]
+    assert set(out["items"][0]) == {"at", "judge", "qset", "applied", "why", "answers"}
+    assert out["items"][0]["answers"]["is_task"] == {"p": 0.52}
+    assert "Maybe tasks" in out["summary"]
+    # The user's own corrections are there too, as the user's.
+    await _act(api, tid, "rename", "Lunch with Ana")
+    out = await _get(api, f"/fd/taskboard/tasks/{tid}/why")
+    assert (out["items"][0]["judge"], out["items"][0]["applied"]) == ("user", "Renamed to “Lunch with Ana”")
+    assert [i["judge"] for i in out["items"]] == ["user", "jev", "rule"]
+    api.be(api.bob)
+    assert (await api.client.get(f"/fd/taskboard/tasks/{tid}/why")).status_code == 404
+
+
+async def test_confirm_task_and_not_done(api):
+    board, uid = api.env.board, api.env.alice
+    maybe = _maybe(board, uid, status="maybe")
+    task = (await _act(api, maybe, "confirm_task")).json()["task"]
+    assert (task["status"], task["owes_next"], task["flags"]["low_confidence"]) == ("open", "agent", False)
+    assert {"status", "low_confidence"} <= set(task["user_locks"])
+    # Jev's later pass can't move it back.
+    fp = board.get_task(uid, maybe)["fingerprint"]
+    board.triage_write(uid, maybe, fp, fields={"status": "maybe", "flags": {"low_confidence": True}})
+    assert (await _get(api, f"/fd/taskboard/tasks/{maybe}"))["task"]["status"] == "open"
+    task = (await _act(api, maybe, "undo")).json()["task"]
+    assert task["status"] == "maybe"
+    low = _maybe(board, uid, low_confidence=True)
+    task = (await _act(api, low, "confirm_task")).json()["task"]
+    assert (task["status"], task["owes_next"], task["flags"]["low_confidence"]) == ("open", "me", False)
+    assert (await _act(api, low, "confirm_task")).status_code == 400  # sure already
+
+    probably = _maybe(board, uid, probably_done=True)
+    task = (await _act(api, probably, "not_done")).json()["task"]
+    assert (task["status"], task["flags"]["probably_done"]) == ("open", False)
+    assert {"status", "probably_done"} <= set(task["user_locks"])
+    closed = _maybe(board, uid, status="done")
+    task = (await _act(api, closed, "not_done")).json()["task"]
+    assert task["status"] == "open" and task["closed_at"] is None
+    assert (await _act(api, _maybe(board, uid, owes="them"), "not_done")).status_code == 400
+    api.be(api.bob)
+    assert (await _act(api, low, "not_done")).status_code == 404
+
+
+async def test_the_badge_leaves_out_low_confidence_tasks(api):
+    board, uid = api.env.board, api.env.alice
+    _maybe(board, uid)
+    _maybe(board, uid, low_confidence=True)
+    _maybe(board, uid, status="maybe")
+    assert (await _get(api, "/fd/taskboard/summary")) == {"needs_me": 1}
+    assert (await _get(api, "/fd/taskboard/status"))["counts"]["needs_me"] == 2  # the tab still lists it
+    out = await _tasks(api, view="all", status="maybe")
+    assert out["total"] == 1 and {f["id"] for f in out["facets"]["status"]} == {"open", "maybe"}

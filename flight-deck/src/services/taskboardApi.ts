@@ -2,8 +2,9 @@
  * Taskboard — every task an agent received or sent on any channel, whether
  * it was finished, by whom and for whom (`captain_claw/flight_deck/taskboard.py`).
  * Flight Deck builds it from the records it already keeps (scheduled runs,
- * proposals, follow-ups, held auto-replies, sent mail, agent links); every
- * read is the caller's own board.
+ * proposals, follow-ups, held auto-replies, sent mail, agent links) and from
+ * the turns agents report on every channel, which Jev then sorts; every read
+ * is the caller's own board.
  */
 
 import { api, type Facet } from './fileLibraryApi'
@@ -34,12 +35,18 @@ export interface TaskProposal {
 }
 
 export interface TaskFlags {
+  /** Third-party text that asks the agent to act: no next step is ever suggested for it. */
   contains_instructions?: boolean
+  /** Jev thinks it is finished, not sure enough to close it: Needs me asks. */
   probably_done?: boolean
   stale?: boolean
   overdue?: boolean
   historical?: boolean
+  /** Answered in the same turn on your own chat. */
   answered_in_chat?: boolean
+  /** Taken in as a task with less certainty: not counted in the badge. */
+  low_confidence?: boolean
+  /** Why it is here, in a few words. */
   why?: string
 }
 
@@ -51,7 +58,8 @@ export interface TaskItem {
   title: string
   ask: string
   result_text: string
-  kind: string
+  /** request = something asked of an agent in a chat, on any channel. */
+  kind: 'request' | 'sent' | 'scheduled' | 'proposal' | 'follow_up' | 'held_reply' | 'link' | 'todo' | 'message' | string
   direction: 'received' | 'sent' | 'internal' | string
   /** The first channel it came in on; `channels` every one it touched. */
   channel: string
@@ -123,13 +131,28 @@ export interface TaskLinkKey {
   created_at: number
 }
 
+/** One answer of a decision: a yes/no's probability, a choice and how sure,
+ *  or a score. */
+export type TaskAnswer = { p: number } | { choice: string; p: number } | { score: number }
+
+/** A decision about a task: who made it (Jev, a rule, the model, you), what
+ *  it answered, what it changed, and why in plain words. */
 export interface TaskDecision {
-  id: number | string
+  id?: number | string
   at: number
-  judge: string
-  answers: Record<string, unknown>
+  judge: 'jev' | 'rule' | 'model' | 'user' | string
+  /** The question set it answered (e.g. taskboard.v1). */
+  qset?: string
+  answers: Record<string, TaskAnswer>
+  /** The move it made ('' when it left the task as it was). */
   applied: string
   why: string
+}
+
+/** "Why is this here?" — the latest decisions first (at most 20). */
+export interface TaskWhy {
+  items: TaskDecision[]
+  summary: string
 }
 
 export interface TaskDetail {
@@ -177,17 +200,33 @@ export interface TaskboardStatus {
   sweep: { running: boolean; last_at: number | null; message: string }
 }
 
+/** The bounds the server holds the daily limits to (400 outside them). */
+export const JEV_PER_DAY_MAX = 2000
+export const EXTRACT_PER_DAY_MAX = 1000
+
 export interface TaskboardSettings {
-  auto_close?: boolean | number
-  jev_per_day?: number
-  extract_per_day?: number
+  /** Jev may close a task by itself when it is sure (with Undo). */
+  auto_close: boolean
+  /** Daily limits on Jev decisions and on summaries (0 = none). */
+  jev_per_day: number
+  extract_per_day: number
+  /** What today used of them (the day in UTC). */
+  counters?: { day: string; jev: number; extract: number }
+  /** Whether Jev can be asked, and with whose key. */
+  jev?: { connected: boolean; source: 'own' | 'team' | '' }
   passive?: Record<string, { on: boolean; consented_at: number | null }>
-  [key: string]: unknown
+  backfill_done_at?: number | null
+  updated_at?: number | null
 }
 
+/** Only what changed. */
+export type TaskboardSettingsPatch = Partial<Pick<TaskboardSettings, 'auto_close' | 'jev_per_day' | 'extract_per_day'>>
+
+/** confirm_task — a maybe task is one (the agent's move); not_done — not
+ *  finished after all (it stays open). */
 export type TaskAction =
   | 'done' | 'reopen' | 'dismiss' | 'not_task' | 'snooze' | 'unsnooze'
-  | 'rename' | 'owes_next' | 'ack_failed' | 'undo'
+  | 'rename' | 'owes_next' | 'ack_failed' | 'undo' | 'confirm_task' | 'not_done'
 
 /** Multi-value filters as lists (sent comma-separated); `from`/`to` epoch seconds. */
 export interface TaskQuery {
@@ -237,7 +276,9 @@ export const taskboardApi = {
       method: 'POST',
       body: JSON.stringify(value === undefined ? { action } : { action, value }),
     }),
+  /** The decisions that put a task where it is, in plain words. */
+  why: (id: string) => api<TaskWhy>(`${BASE}/tasks/${encodeURIComponent(id)}/why`),
   settings: () => api<TaskboardSettings>(`${BASE}/settings`),
-  saveSettings: (patch: TaskboardSettings) =>
+  saveSettings: (patch: TaskboardSettingsPatch) =>
     api<TaskboardSettings>(`${BASE}/settings`, { method: 'PUT', body: JSON.stringify(patch) }),
 }

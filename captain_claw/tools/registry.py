@@ -847,7 +847,7 @@ class ToolRegistry:
             tool_audit.finish(audit, "error", f"{type(exc).__name__}: {exc}")
             raise
         if getattr(result, "success", True):
-            tool_audit.finish(audit, "ok")
+            tool_audit.finish(audit, "ok", result=result)
         else:
             tool_audit.finish(audit, "error", str(getattr(result, "error", "") or ""))
         return result

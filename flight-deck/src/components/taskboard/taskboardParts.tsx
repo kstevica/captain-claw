@@ -1,16 +1,17 @@
 import { useState, type ReactNode } from 'react'
-import { AlertTriangle, Check, CircleDot, Loader2, Sparkles } from 'lucide-react'
+import { AlertTriangle, Check, CircleDot, Loader2, ShieldAlert, Sparkles } from 'lucide-react'
 import type { Facet } from '../../services/fileLibraryApi'
-import type { TaskItem, TaskboardStatus } from '../../services/taskboardApi'
+import type { TaskAction, TaskItem, TaskboardStatus } from '../../services/taskboardApi'
 import { resolveProposal } from '../../services/notifications'
 import {
-  OWES_LABEL, RESULT_LABEL, STATUS_LABEL, agoRelative, channelInfo, foldChar, type DatePreset, type DateRange,
+  JUDGE_LABEL, OWES_LABEL, RESULT_LABEL, STATUS_LABEL, agoRelative, channelInfo, foldChar, type DatePreset,
+  type DateRange,
 } from './taskboardText'
 
 // Pieces of the Taskboard: search highlighting (the server's folding, so
 // what it finds is what lights up), a multi-select filter list, the date
-// filter, the chips a task wears, and the sync line. Their words and plain
-// helpers are in taskboardText.
+// filter, the chips a task wears, the sync line, quick answers and the
+// board's switch. Their words and plain helpers are in taskboardText.
 
 /** Search terms, folded on both sides: "duric" lights up "Đurić". `terms`
  *  come folded (foldText). */
@@ -118,6 +119,45 @@ export function OwesChip({ owes }: { owes: string }) {
   if (!owes) return null
   const tone = owes === 'me' ? 'bg-amber-500/15 text-amber-700 dark:text-amber-300' : 'bg-zinc-800 text-zinc-400'
   return <span className={`${chip} ${tone}`}>Next: {OWES_LABEL[owes] || owes}</span>
+}
+
+/** Someone else's message asks the agent to do something: the board never
+ *  suggests a next step for it. `compact` is the row's icon alone. */
+export function InstructionsChip({ compact = false }: { compact?: boolean }) {
+  const title = 'Contains instructions — no next steps are suggested for it'
+  if (compact) {
+    return (
+      <span title={title} aria-label="Contains instructions" className="shrink-0 text-amber-700 dark:text-amber-400">
+        <ShieldAlert className="h-3.5 w-3.5" />
+      </span>
+    )
+  }
+  return (
+    <span title={title} className={`${chip} flex items-center gap-0.5 bg-amber-500/10 text-amber-700 dark:text-amber-300`}>
+      <ShieldAlert className="h-3 w-3" />Contains instructions
+    </span>
+  )
+}
+
+/** Taken in as a task with less certainty: it isn't counted in the badge. */
+export function LowConfidenceHint() {
+  return (
+    <span title="Jev wasn't sure this is a task, so it isn't counted on the Taskboard button" className={`${chip} font-normal italic text-zinc-500`}>
+      Low confidence
+    </span>
+  )
+}
+
+const JUDGE_TONE: Record<string, string> = {
+  jev: 'bg-teal-500/10 text-teal-700 dark:text-teal-300',
+  model: 'bg-violet-500/10 text-violet-700 dark:text-violet-300',
+  user: 'bg-amber-500/15 text-amber-700 dark:text-amber-300',
+  rule: 'bg-zinc-800 text-zinc-400',
+}
+
+/** Who decided: Jev, a rule, the model, or you. */
+export function JudgeChip({ judge }: { judge: string }) {
+  return <span className={`${chip} ${JUDGE_TONE[judge] || JUDGE_TONE.rule}`}>{JUDGE_LABEL[judge] || judge}</span>
 }
 
 // ── Filters ──
@@ -303,5 +343,69 @@ export function ProposalButtons({ id, onAnswered }: { id: string; onAnswered: ()
       </div>
       {error && <p className="mt-1 text-[11px] text-red-600 dark:text-red-400">{error}</p>}
     </div>
+  )
+}
+
+// ── A quick answer ──
+
+/** The answers to a question the board asks about a task ("Is this a
+ *  task?" Yes / No, "Probably done?" Done / Not yet): each a correction,
+ *  applied at once; a failure is said under the buttons. */
+export function AnswerButtons({ choices, onAct }: {
+  choices: { label: string; action: TaskAction; primary?: boolean; title?: string }[]
+  onAct: (action: TaskAction) => Promise<void>
+}) {
+  const [busy, setBusy] = useState<TaskAction | null>(null)
+  const [error, setError] = useState('')
+  const answer = async (action: TaskAction) => {
+    setBusy(action)
+    setError('')
+    try {
+      await onAct(action)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+  const btn = 'flex items-center gap-1 rounded-md px-2.5 py-1 text-xs font-medium disabled:opacity-50'
+  return (
+    <div onClick={(e) => e.stopPropagation()}>
+      <div className="flex items-center gap-1.5">
+        {choices.map((c) => (
+          <button
+            key={c.action}
+            disabled={busy !== null}
+            onClick={() => answer(c.action)}
+            title={c.title}
+            className={`${btn} ${c.primary ? 'bg-emerald-600 text-white hover:bg-emerald-500' : 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'}`}
+          >
+            {busy === c.action && <Loader2 className="h-3 w-3 animate-spin" />}{c.label}
+          </button>
+        ))}
+      </div>
+      {error && <p className="mt-1 text-[11px] text-red-600 dark:text-red-400">{error}</p>}
+    </div>
+  )
+}
+
+// ── Switch ──
+
+/** On/off, in the board's teal. The label is the row it sits in. */
+export function BoardSwitch({ on, onChange, disabled = false, label }: {
+  on: boolean; onChange: (on: boolean) => void; disabled?: boolean; label: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={() => onChange(!on)}
+      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-60 ${on ? 'bg-teal-600' : 'bg-zinc-700'}`}
+    >
+      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+    </button>
   )
 }

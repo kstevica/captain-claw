@@ -1,6 +1,8 @@
 import {
-  AlarmClock, Bot, Code2, Glasses, Link2, Mail, MessageCircle, MessagesSquare, Plug, Send, Smartphone, Sparkles, Users,
+  AlarmClock, Bot, Code2, Glasses, Inbox, Link2, Mail, MessageCircle, MessagesSquare, Plug, Send, Smartphone, Sparkles,
+  Users, Watch,
 } from 'lucide-react'
+import type { TaskAnswer } from '../../services/taskboardApi'
 import { fmtRelative } from '../../services/schedulerApi'
 
 // The Taskboard's words and plain helpers (no components, so its parts file
@@ -28,19 +30,21 @@ export function foldText(text: string): string {
 
 // ── Labels ──
 
+// Every turn_source channel key, and the board's own (scheduled, autonomy…).
 const CHANNELS: Record<string, { label: string; Icon: typeof Mail; tone: string }> = {
-  web: { label: 'Web chat', Icon: MessagesSquare, tone: 'text-violet-600 dark:text-violet-400' },
+  web: { label: 'Chat', Icon: MessagesSquare, tone: 'text-violet-600 dark:text-violet-400' },
+  app: { label: 'Captain app', Icon: Smartphone, tone: 'text-violet-600 dark:text-violet-400' },
   whatsapp: { label: 'WhatsApp', Icon: MessageCircle, tone: 'text-emerald-600 dark:text-emerald-400' },
   waweb: { label: 'WhatsApp Web', Icon: MessageCircle, tone: 'text-emerald-600 dark:text-emerald-400' },
   telegram: { label: 'Telegram', Icon: Send, tone: 'text-sky-600 dark:text-sky-400' },
-  tg_inbox: { label: 'Telegram inbox', Icon: Send, tone: 'text-sky-600 dark:text-sky-400' },
+  tg_inbox: { label: 'Telegram inbox', Icon: Inbox, tone: 'text-sky-600 dark:text-sky-400' },
   gmail: { label: 'Gmail', Icon: Mail, tone: 'text-rose-600 dark:text-rose-400' },
   email: { label: 'Email', Icon: Mail, tone: 'text-rose-600 dark:text-rose-400' },
-  device: { label: 'Device', Icon: Smartphone, tone: 'text-orange-600 dark:text-orange-400' },
+  device: { label: 'Device', Icon: Watch, tone: 'text-orange-600 dark:text-orange-400' },
   link: { label: 'Linked system', Icon: Link2, tone: 'text-cyan-600 dark:text-cyan-400' },
   scheduled: { label: 'Scheduled', Icon: AlarmClock, tone: 'text-amber-600 dark:text-amber-400' },
   autonomy: { label: 'Autonomous Work', Icon: Sparkles, tone: 'text-fuchsia-600 dark:text-fuchsia-400' },
-  member: { label: 'Member', Icon: Users, tone: 'text-indigo-600 dark:text-indigo-400' },
+  member: { label: 'Shared chat', Icon: Users, tone: 'text-indigo-600 dark:text-indigo-400' },
   api: { label: 'API', Icon: Code2, tone: 'text-teal-600 dark:text-teal-400' },
   mcp: { label: 'MCP', Icon: Plug, tone: 'text-teal-600 dark:text-teal-400' },
   glasses: { label: 'Glasses', Icon: Glasses, tone: 'text-orange-600 dark:text-orange-400' },
@@ -48,21 +52,24 @@ const CHANNELS: Record<string, { label: string; Icon: typeof Mail; tone: string 
   agent: { label: 'Agent', Icon: Bot, tone: 'text-violet-600 dark:text-violet-400' },
 }
 
+// The devices by their own names (turn_source.KIND_LABELS, without the maker).
+const DEVICE_KINDS: Record<string, string> = { sticks3: 'StickS3', stopwatch: 'StopWatch', papercolor: 'PaperColor' }
+
 /** A channel's name, icon and colour; "device:<kind>" is a device's. */
 export function channelInfo(id: string) {
   return CHANNELS[id] || CHANNELS[id.split(':')[0]] || null
 }
 
-/** "device:stopwatch" → "Device · stopwatch". */
+/** "device:stopwatch" → "Device · StopWatch". */
 export function channelLabel(id: string): string {
   const info = channelInfo(id)
   if (!info) return id || 'Unknown'
   const sub = id.includes(':') ? id.slice(id.indexOf(':') + 1) : ''
-  return sub ? `${info.label} · ${sub}` : info.label
+  return sub ? `${info.label} · ${DEVICE_KINDS[sub] || sub}` : info.label
 }
 
 export const STATUS_LABEL: Record<string, string> = {
-  open: 'Open', done: 'Done', failed: 'Failed', dismissed: 'Dismissed', not_task: 'Not a task', maybe: 'Maybe a task',
+  open: 'Open', done: 'Done', failed: 'Failed', dismissed: 'Dismissed', not_task: 'Not a task', maybe: 'Maybe',
 }
 export const STATUS_DOT: Record<string, string> = {
   open: 'bg-sky-500', done: 'bg-emerald-500', failed: 'bg-red-500', dismissed: 'bg-zinc-500', not_task: 'bg-zinc-600', maybe: 'bg-amber-500',
@@ -86,6 +93,31 @@ export const EVENT_LABEL: Record<string, string> = {
   received: 'Received', reply: 'Reply', sent: 'Sent', tool_call: 'Tool call', delivery: 'Delivered', status: 'Status',
   proposal: 'Proposed', approval: 'Approved', rejection: 'Rejected', decision: 'Decided', correction: 'You changed it',
   note: 'Note',
+}
+
+// ── Decisions ──
+
+export const JUDGE_LABEL: Record<string, string> = { jev: 'Jev', rule: 'Rule', model: 'Model', user: 'You' }
+
+// Jev's questions (taskboard.v1), as a person would ask them.
+const QUESTION_LABEL: Record<string, string> = {
+  is_task: 'A task', owes_next: 'Next move', fulfilled: 'Finished', result: 'Result', urgency: 'Urgency',
+  asks_assistant_to_act: 'Asks the agent to act', reopen: 'Reopen',
+}
+const CHOICE_LABEL: Record<string, string> = {
+  ...OWES_LABEL, success: 'succeeded', partial: 'partly done', failed: 'failed', not_attempted: 'not tried',
+}
+
+/** One answer, short: "A task 92%", "Next move: The agent 71%", "Urgency 2". */
+export function answerText(question: string, a: TaskAnswer): string {
+  const q = QUESTION_LABEL[question] || question.replace(/_/g, ' ')
+  // Stored answers are the server's: anything missing is left out, not NaN.
+  const pct = (p: unknown) => (typeof p === 'number' && Number.isFinite(p)
+    ? ` ${Math.round(Math.max(0, Math.min(1, p)) * 100)}%` : '')
+  if (!a || typeof a !== 'object') return q
+  if ('choice' in a) return `${q}: ${CHOICE_LABEL[a.choice] || a.choice}${pct(a.p)}`
+  if ('score' in a) return typeof a.score === 'number' ? `${q} ${Math.round(a.score * 10) / 10}` : q
+  return `${q}${pct((a as { p?: unknown }).p)}`
 }
 
 // ── Time ──

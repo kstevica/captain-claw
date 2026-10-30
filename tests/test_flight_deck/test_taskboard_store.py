@@ -196,6 +196,60 @@ def test_undo_of_a_seen_failure_puts_back_only_that_flag(store):
     assert '"stale": true' in flags and "failed_ack" not in flags
 
 
+# Jev's close, as triage writes it (taskboard_triage._close: nobody owes it then).
+_JEV_CLOSE = {"status": "done", "closed_by": "jev", "closed_by_party": "Jev", "result": "success",
+              "owes_next": "nobody", "flags": {"probably_done": False}}
+
+
+def _jev_close(store, tid):
+    assert store.triage_write(ALICE, tid, store.get_task(ALICE, tid)["fingerprint"], fields=_JEV_CLOSE)
+
+
+def test_undo_after_jevs_close_opens_it_again(store):
+    """Decision #2: Jev's close comes with Undo — even with no correction of
+    the user's to take back."""
+    tid = _task(store)
+    _jev_close(store, tid)
+    task = store.correct(ALICE, tid, "undo")
+    assert (task["status"], task["closed_by"], task["closed_at"], task["result"]) == ("open", "", None, "")
+    assert task["owes_next"] == "me" and "status" in task["user_locks"]
+    assert store.lane_of(ALICE, tid) == "needs_me"
+    assert [e["summary"] for e in store.events(ALICE, tid) if e["kind"] == "correction"] == ["Undid Jev's close"]
+    # Jev can't close it again; Undo once more puts Jev's close back.
+    _jev_close(store, tid)
+    assert store.get_task(ALICE, tid)["status"] == "open"
+    task = store.correct(ALICE, tid, "undo")
+    assert (task["status"], task["closed_by"], task["user_locks"]) == ("done", "jev", "{}")
+
+
+def test_undo_after_jevs_close_leaves_an_earlier_correction_alone(store):
+    tid = _task(store)
+    store.correct(ALICE, tid, "rename", "Book the flight")
+    _jev_close(store, tid)
+    task = store.correct(ALICE, tid, "undo")
+    assert (task["status"], task["title"]) == ("open", "Book the flight")
+    # A correction after Jev's close is the latest change: Undo takes that back first.
+    other = _task(store, key="k:2")
+    _jev_close(store, other)
+    store.correct(ALICE, other, "rename", "Lunch with Ana")
+    task = store.correct(ALICE, other, "undo")
+    assert (task["status"], task["closed_by"], task["title"]) == ("done", "jev", "A task")
+
+
+@pytest.mark.parametrize("action", ["not_done", "reopen"])
+def test_a_closed_task_opened_again_is_the_users_move(store, action):
+    """A close that left nobody owing a move (Jev's, a source's): opened
+    again by the user, it is in Needs me — never in no lane at all."""
+    tid = _task(store)
+    _jev_close(store, tid)
+    task = store.correct(ALICE, tid, action)
+    assert (task["status"], task["owes_next"], task["closed_by"]) == ("open", "me", "")
+    assert store.lane_of(ALICE, tid) == "needs_me"
+    # Who owes it before the close stays when it wasn't nobody.
+    kept = _task(store, key="k:2", owes_next="them", patch={"status": "done", "closed_by": "source"})
+    assert store.correct(ALICE, kept, action)["owes_next"] == "them"
+
+
 def test_the_timeline_is_the_latest_events_and_their_count(store):
     tid, _ = store.ingest(ALICE, keys=["k:1"], create={"title": "x"}, event=_ev("e-first", at=1000.0))
     for i in range(30):

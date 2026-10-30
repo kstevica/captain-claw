@@ -20,10 +20,15 @@ call is recorded too — and this module ships the records.
   from 1, so Flight Deck can tell a missing record from a quiet agent.
 * **Never in the way.** Recording and shipping never raise into a tool call;
   a record that can't be written is logged and dropped (and shows up as a gap).
+* **Tied to its turn.** A call carries the ``turn_id`` of the turn it was made
+  in (``turn_register.py``), and an ok send, draft or calendar call the ids
+  its result named (:func:`result_refs`: a Gmail message, a WhatsApp Web
+  message, a calendar event …) — ids only, never a body.
 
 Active only in an agent Flight Deck spawned (``FD_URL``, ``FD_AGENT_SLUG`` and
 the agent's own auth token): Flight Deck identifies the caller by that token,
-never by anything in the records.
+never by anything in the records. The spool and the shipper here carry the
+turn register's records too (:func:`open_spool_db`, :func:`ship_loop`).
 
 The agent reads its own calls back (:func:`read_own`, the ``activity`` tool and
 :func:`reflection_digest`) the way ``tool_audit_digest`` shapes them: its
@@ -42,6 +47,7 @@ import sqlite3
 import threading
 import time
 import weakref
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -193,6 +199,67 @@ def mask_tree(params: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+# ── What an ok call made ──────────────────────────────────────────────
+
+# The ids a send, draft or calendar result may name, as Flight Deck stores them.
+REF_KEYS = ("gmail_message_id", "gmail_thread_id", "gmail_draft_id", "wa_id", "waweb_message_id",
+            "calendar_event_id", "telegram_message_id")
+_REF_SCAN = 4000          # a result's head is where its ids are printed
+_REF_ID_RE = re.compile(r"^[A-Za-z0-9_\-.=+@:/<>]{1,256}$")
+
+# Per tool: the actions whose result names what was made ("" when the call
+# gave none), and the lines that name it.
+_REF_ACTIONS: dict[str, frozenset[str]] = {
+    "google_mail": frozenset({"create_draft", "update_draft", "send", "send_draft", "reply", "forward"}),
+    "whatsapp_web": frozenset({"send"}),
+    "whatsapp_send_file": frozenset({"send", ""}),
+    "google_calendar": frozenset({"create_event", "update_event"}),
+    "microsoft_calendar": frozenset({"create_event", "update_event"}),
+}
+_GMAIL_REFS = (
+    ("gmail_draft_id", re.compile(r"^[ \t]*Draft ID:[ \t]*(\S+)", re.M)),
+    ("gmail_message_id", re.compile(r"^[ \t]*Message ID:[ \t]*(\S+)", re.M)),
+    ("gmail_thread_id", re.compile(r"^[ \t]*(?:Thread ID|Threaded under):[ \t]*(\S+)", re.M)),
+)
+_REF_RES: dict[str, tuple[tuple[str, re.Pattern[str]], ...]] = {
+    "google_mail": _GMAIL_REFS,
+    "whatsapp_web": (("waweb_message_id", re.compile(r"\A[^\n]*\(message id ([^)\s]+)\)")),),
+    "whatsapp_send_file": (("wa_id", re.compile(r"\ASent '[^\n]*' to WhatsApp \+?(\d{6,20}) as a")),),
+    "google_calendar": (("calendar_event_id", re.compile(r"^[ \t]*ID:[ \t]*(\S+)", re.M)),),
+    "microsoft_calendar": (("calendar_event_id", re.compile(r"^[ \t]*ID:[ \t]*(\S+)", re.M)),),
+}
+
+
+def clean_refs(refs: Any) -> dict[str, str]:
+    """*refs* with only the known keys and id-shaped values kept."""
+    if not isinstance(refs, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key in REF_KEYS:
+        value = refs.get(key)
+        if isinstance(value, (str, int)) and not isinstance(value, bool):
+            text = str(value).strip()
+            if text and text != "?" and _REF_ID_RE.match(text):
+                out[key] = text
+    return out
+
+
+def result_refs(tool: str, action: str, result: Any) -> dict[str, str]:
+    """The ids an ok *tool* call's result names ({} for any other call).
+    Never raises."""
+    try:
+        if str(action or "") not in _REF_ACTIONS.get(str(tool or ""), frozenset()):
+            return {}
+        content = getattr(result, "content", "")
+        if not isinstance(content, str) or not content:
+            return {}
+        head = content[:_REF_SCAN]
+        found = {key: m.group(1) for key, rx in _REF_RES.get(str(tool), ()) if (m := rx.search(head))}
+        return clean_refs(found)
+    except Exception:
+        return {}
+
+
 # ── What started the call ─────────────────────────────────────────────
 
 
@@ -268,9 +335,24 @@ CREATE TABLE IF NOT EXISTS calls (
     duration_ms INTEGER,
     ended_at    REAL,
     sent_start  INTEGER NOT NULL DEFAULT 0,
+    refs        TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (boot, seq)
 );
 """
+
+
+def open_spool_db(path: Path, ddl: str) -> sqlite3.Connection:
+    """A spool's SQLite file (0600, WAL), its tables made from *ddl*."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), check_same_thread=False, timeout=5.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.executescript(ddl)
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return conn
 
 
 class Spool:
@@ -284,15 +366,12 @@ class Spool:
 
     def _db(self) -> sqlite3.Connection:
         if self._conn is None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=5.0)
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("PRAGMA synchronous=NORMAL")
-            conn.executescript(_SPOOL_DDL)
-            try:
-                os.chmod(self.path, 0o600)
-            except OSError:
-                pass
+            conn = open_spool_db(self.path, _SPOOL_DDL)
+            # A spool an older agent left (records still waiting in it).
+            have = {str(r[1]) for r in conn.execute("PRAGMA table_info(calls)").fetchall()}
+            if "refs" not in have:
+                conn.execute("ALTER TABLE calls ADD COLUMN refs TEXT NOT NULL DEFAULT ''")
+                conn.commit()
             self._conn = conn
         return self._conn
 
@@ -315,11 +394,13 @@ class Spool:
             log.warning("Tool-call register spool full: dropped the oldest records",
                         dropped=n - _SPOOL_CAP)
 
-    def end(self, boot: str, seq: int, outcome: str, reason: str, duration_ms: int, ended_at: float) -> None:
+    def end(self, boot: str, seq: int, outcome: str, reason: str, duration_ms: int, ended_at: float,
+            refs: dict[str, str] | None = None) -> None:
         with self._lock:
             db = self._db()
-            db.execute("UPDATE calls SET ended=1, outcome=?, reason=?, duration_ms=?, ended_at=? "
-                       "WHERE boot=? AND seq=?", (outcome, reason, duration_ms, ended_at, boot, seq))
+            db.execute("UPDATE calls SET ended=1, outcome=?, reason=?, duration_ms=?, ended_at=?, refs=? "
+                       "WHERE boot=? AND seq=?",
+                       (outcome, reason, duration_ms, ended_at, json.dumps(refs) if refs else "", boot, seq))
             db.commit()
 
     def pending(self) -> bool:
@@ -330,14 +411,14 @@ class Spool:
         """``(records to send, keys to delete once sent, keys sent as started)``."""
         with self._lock:
             rows = self._db().execute(
-                "SELECT boot, seq, started_at, body, ended, outcome, reason, duration_ms, ended_at, sent_start "
-                "FROM calls WHERE ended=1 OR boot != ? OR (started_at < ? AND sent_start=0) "
+                "SELECT boot, seq, started_at, body, ended, outcome, reason, duration_ms, ended_at, sent_start, "
+                "refs FROM calls WHERE ended=1 OR boot != ? OR (started_at < ? AND sent_start=0) "
                 "ORDER BY started_at, seq LIMIT ?",
                 (boot, now - _START_GRACE_S, _BATCH)).fetchall()
         records: list[dict[str, Any]] = []
         done: list[tuple[str, int]] = []
         started: list[tuple[str, int]] = []
-        for r_boot, seq, started_at, body, ended, outcome, reason, duration_ms, ended_at, sent_start in rows:
+        for r_boot, seq, started_at, body, ended, outcome, reason, duration_ms, ended_at, sent_start, refs in rows:
             key = (r_boot, int(seq))
             rec: dict[str, Any] = {"boot": r_boot, "seq": int(seq), "started_at": float(started_at)}
             if not ended and r_boot != boot:
@@ -345,6 +426,11 @@ class Spool:
             if ended:
                 rec.update(phase="end" if sent_start else "full", outcome=outcome or "error",
                            reason=reason or "", duration_ms=duration_ms, ended_at=ended_at)
+                if refs:
+                    try:
+                        rec["refs"] = json.loads(refs)
+                    except ValueError:
+                        pass
                 done.append(key)
             else:
                 rec["phase"] = "start"
@@ -374,6 +460,14 @@ class Handle:
     seq: int
     t0: float
     finished: bool = False
+    tool: str = ""
+    action: str = ""
+    turn: Any = None          # the turn_register.Turn it was made in, if any
+
+
+# Outcomes that count as a turn's failed tool call (a refusal is the guards
+# doing their job, not the tool failing).
+_FAILED = frozenset({"error", "timeout", "aborted"})
 
 
 _BOOT = secrets.token_hex(8)
@@ -427,14 +521,22 @@ def start(name: str, arguments: dict[str, Any] | None, *, session_id: str | None
     try:
         if not enabled():
             return None
+        from captain_claw import turn_register
+
+        turn = turn_register.current()
+        if turn is not None:
+            turn.tool_calls += 1
         spool = _spool()
         if spool is None:
             return None
         args = arguments if isinstance(arguments, dict) else {}
         now = time.time()
-        handle = Handle(_BOOT, _next_seq(), time.monotonic())
+        action = args.get("action")
+        handle = Handle(_BOOT, _next_seq(), time.monotonic(), tool=str(name or ""),
+                        action=action.strip().lower() if isinstance(action, str) else "", turn=turn)
         body = {"tool": str(name or "")[:128], "params": mask_params(args),
-                "session_id": str(session_id or "")[:128], **_call_context(args, member)}
+                "session_id": str(session_id or "")[:128], **_call_context(args, member),
+                "turn_id": turn.turn_id if turn is not None else ""}
         spool.add(handle.boot, handle.seq, now, body)
         _ensure_shipper()
         return handle
@@ -443,8 +545,9 @@ def start(name: str, arguments: dict[str, Any] | None, *, session_id: str | None
         return None
 
 
-def finish(handle: Handle | None, outcome: str, reason: str = "") -> None:
-    """Record how a started call ended. Never raises; a second finish is ignored."""
+def finish(handle: Handle | None, outcome: str, reason: str = "", result: Any = None) -> None:
+    """Record how a started call ended (an ok call's *result* gives its
+    :func:`result_refs`). Never raises; a second finish is ignored."""
     if handle is None or handle.finished:
         return
     handle.finished = True
@@ -453,9 +556,12 @@ def finish(handle: Handle | None, outcome: str, reason: str = "") -> None:
         if spool is None:
             return
         outcome = outcome if outcome in OUTCOMES else "error"
+        if handle.turn is not None and outcome in _FAILED:
+            handle.turn.failed_tool_calls += 1
+        refs = result_refs(handle.tool, handle.action, result) if outcome == "ok" and result is not None else {}
         duration_ms = int(max(0.0, time.monotonic() - handle.t0) * 1000)
         spool.end(handle.boot, handle.seq, outcome, mask_text(str(reason or ""))[:_MAX_REASON],
-                  duration_ms, time.time())
+                  duration_ms, time.time(), refs)
         _ensure_shipper()
     except Exception as exc:
         log.warning("Tool call end not recorded", error=str(exc))
@@ -470,14 +576,23 @@ def refused(name: str, arguments: dict[str, Any] | None, reason: str, *,
 # ── Shipping ──────────────────────────────────────────────────────────
 
 
-def _ensure_shipper() -> None:
+Poster = Callable[[Any, list[dict[str, Any]]], Awaitable[int]]
+
+
+def ensure_shipper(shippers: weakref.WeakKeyDictionary, run: Callable[[], Any]) -> None:
+    """Start ``run()`` on the running loop unless it is already shipping
+    there (one shipper per loop, kept in *shippers*)."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         return  # no loop here: the next call made on one ships these
-    task = _SHIPPERS.get(loop)
+    task = shippers.get(loop)
     if task is None or task.done():
-        _SHIPPERS[loop] = loop.create_task(_ship_loop())
+        shippers[loop] = loop.create_task(run())
+
+
+def _ensure_shipper() -> None:
+    ensure_shipper(_SHIPPERS, _ship_loop)
 
 
 async def _post(client: Any, records: list[dict[str, Any]]) -> int:
@@ -485,7 +600,12 @@ async def _post(client: Any, records: list[dict[str, Any]]) -> int:
     return int(resp.status_code)
 
 
-async def _ship_loop() -> None:
+async def ship_loop(name: str, get_spool: Callable[[], Any], post: Poster) -> None:
+    """Send a spool's ready records with *post* until none is left: every
+    ``_FLUSH_S``, backing off while Flight Deck is away or refuses, dropping
+    a batch it can't read. *get_spool()* gives an object with ``batch(boot,
+    now) -> (records, done, started)``, ``settle(done, started)`` and
+    ``pending()``; *name* is what the log lines call the register."""
     from captain_claw.fd_client import FDClient
 
     client = FDClient(timeout=10.0)
@@ -493,13 +613,13 @@ async def _ship_loop() -> None:
     try:
         while True:
             await asyncio.sleep(backoff)
-            spool = _spool()
+            spool = get_spool()
             if spool is None:
                 return
             try:
                 records, done, started = spool.batch(_BOOT, time.time())
             except Exception as exc:
-                log.warning("Tool-call register spool unreadable", error=str(exc))
+                log.warning(f"{name} spool unreadable", error=str(exc))
                 return
             if not records:
                 if not spool.pending():
@@ -507,9 +627,9 @@ async def _ship_loop() -> None:
                 backoff = _FLUSH_S
                 continue
             try:
-                status = await _post(client, records)
+                status = await post(client, records)
             except Exception as exc:
-                log.debug("Tool-call register: Flight Deck unreachable", error=type(exc).__name__)
+                log.debug(f"{name}: Flight Deck unreachable", error=type(exc).__name__)
                 backoff = min(_BACKOFF_MAX_S, backoff * 2)
                 continue
             if status == 200:
@@ -517,11 +637,11 @@ async def _ship_loop() -> None:
                 backoff = _FLUSH_S if len(records) < _BATCH else 0.05
             elif status in (400, 413, 422):
                 # Flight Deck can't read these: drop them (they show as a gap there).
-                log.warning("Tool-call register refused a batch", status=status, records=len(records))
+                log.warning(f"{name} refused a batch", status=status, records=len(records))
                 spool.settle(done + started, [])
                 backoff = _FLUSH_S
             else:
-                log.debug("Tool-call register: report refused", status=status)
+                log.debug(f"{name}: report refused", status=status)
                 backoff = min(_BACKOFF_MAX_S, max(backoff * 2, 30.0))
     finally:
         try:
@@ -530,11 +650,14 @@ async def _ship_loop() -> None:
             pass
 
 
-async def flush_now() -> None:
-    """Ship whatever is ready (tests, shutdown)."""
+async def _ship_loop() -> None:
+    await ship_loop("Tool-call register", _spool, lambda client, records: _post(client, records))
+
+
+async def flush_spool(spool: Any, post: Poster) -> None:
+    """Ship one batch of what *spool* has ready, now (tests, shutdown)."""
     from captain_claw.fd_client import FDClient
 
-    spool = _spool()
     if spool is None:
         return
     records, done, started = spool.batch(_BOOT, time.time())
@@ -542,10 +665,15 @@ async def flush_now() -> None:
         return
     client = FDClient(timeout=10.0)
     try:
-        if await _post(client, records) == 200:
+        if await post(client, records) == 200:
             spool.settle(done, started)
     finally:
         await client.close()
+
+
+async def flush_now() -> None:
+    """Ship whatever is ready (tests, shutdown)."""
+    await flush_spool(_spool(), _post)
 
 
 # ── Reading back ──────────────────────────────────────────────────────

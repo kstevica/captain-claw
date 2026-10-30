@@ -11,8 +11,9 @@ Who sees what:
 * A user sees the calls of their own agents, and the calls made in their own
   turns on someone else's shared agent.
 * A call made in a shared-agent member's turn shows its owner the agent, the
-  time, the tool and the outcome — not its parameters or its error text, which
-  can hold the member's own data. The member and the admins see all of it.
+  time, the tool and the outcome — not its parameters, the ids it made
+  (``refs``) or its error text, which can hold the member's own data. The
+  member and the admins see all of it.
 * Admins see every user's calls.
 * An agent reads only its own calls made in its owner's turns — never another
   agent's, never a member's, never one made while its turn held members'
@@ -134,6 +135,10 @@ class CallRecord(BaseModel):
     duration_ms: int | None = Field(None, ge=0)
     ended_at: float | None = None
     private: bool = False
+    # From agents that tie calls to their turns (turn_register.py); older
+    # agents send neither.
+    turn_id: str = Field("", pattern=r"^(?:[0-9a-f]{32})?$")
+    refs: dict[str, Any] = Field(default_factory=dict)
 
 
 class CallBatch(BaseModel):
@@ -204,7 +209,7 @@ async def _speaker(rec: CallRecord, who: dict[str, str], token: str,
 @router.post("/fd/tool-audit/agent/calls")
 async def agent_calls(body: CallBatch, request: Request) -> dict:
     """An agent reports tool calls it made (or is making)."""
-    from captain_claw.tool_audit import mask_text, mask_tree
+    from captain_claw.tool_audit import clean_refs, mask_text, mask_tree
 
     who = await _identify(request)
     token = request.headers.get("X-Agent-Auth", "") or ""
@@ -225,6 +230,8 @@ async def agent_calls(body: CallBatch, request: Request) -> dict:
             "session_id": rec.session_id, "source": rec.source, "source_label": rec.source_label,
             "outcome": outcome, "reason": mask_text(rec.reason)[:1000],
             "duration_ms": rec.duration_ms, "ended_at": rec.ended_at, "private": 1 if rec.private else 0,
+            "turn_id": rec.turn_id,
+            "refs": json.dumps(clean_refs(rec.refs) if outcome == "ok" else {}, separators=(",", ":")),
         })
     written = await store().record(rows)
     return {"ok": True, "accepted": len(rows), "written": written}
@@ -319,6 +326,10 @@ def _shape(row: dict[str, Any], viewer: str, full: bool, names: dict[str, str]) 
         params = None if hidden else json.loads(row["params"] or "{}")
     except ValueError:
         params = {}
+    try:   # what the call made: hidden with its parameters
+        refs = None if hidden else json.loads(row.get("refs") or "{}")
+    except ValueError:
+        refs = {}
     return {
         "id": row["id"], "at": row["started_at"], "received_at": row["received_at"],
         "agent": {"slug": row["agent_slug"], "name": row["agent_name"] or row["agent_slug"],
@@ -333,6 +344,7 @@ def _shape(row: dict[str, Any], viewer: str, full: bool, names: dict[str, str]) 
         "outcome": row["outcome"], "reason": HIDDEN_NOTE if hidden and row["reason"] else row["reason"],
         "duration_ms": row["duration_ms"], "ended_at": row["ended_at"],
         "seq": row["seq"], "boot": row["boot"], "hash": row["hash"], "private": bool(row.get("private")),
+        "turn_id": row.get("turn_id") or "", "refs": refs,
     }
 
 

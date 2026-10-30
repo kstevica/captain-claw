@@ -21,6 +21,16 @@ What an auto-reply or a link message said is never copied onto the board:
 their ledgers clear it after a while, and the board keeps what it has. A deleted user's
 rows (some ledgers keep them) go on nobody's board.
 
+v1 adds two, over what the agents report (``taskboard_ingest``):
+
+  agent_turns        automation turns waiting for the task above that their
+                     run, action or message makes
+  tool_audit         every tool call made in a turn, on that turn's task
+
+The agents' turns themselves come in as they happen
+(``POST /fd/taskboard/agent/turns``) and are kept 30 days (each full sweep
+forgets older ones).
+
 Rows change after they are first read (a proposal is approved, a follow-up
 done, a run finishes), so no adapter trusts a plain "newer than" cursor: each
 reads what is new since its cursor (``source_cursors``) and also every row not
@@ -57,6 +67,7 @@ SWEEP_EVERY_S = 120.0
 _FIRST_SWEEP_S = 20.0
 _BATCH = 2000          # rows one adapter reads in one pass
 _OVERLAP_S = 5.0       # a time cursor reaches back this far (rows read twice add nothing)
+TURNS_KEPT_S = 30 * 86400
 
 # Labels of the sources, as the Sources sheet names them.
 SOURCE_LABELS = {
@@ -66,6 +77,11 @@ SOURCE_LABELS = {
     "gmail_autoreplies": "Email auto-replies",
     "gmail_sends": "Email your agents sent",
     "agent_links": "Linked systems",
+}
+# And of what the agents report (v1): one row on the sheet, agent_chats.
+AGENT_LABELS = {
+    "agent_turns": "Agent chats on every channel",
+    "tool_audit": "Your agents' tool calls",
 }
 
 _STATE: dict[str, Any] = {"running": False, "last_at": None, "message": ""}
@@ -771,16 +787,40 @@ def _links(p: _Pass) -> None:
 # ── The sweep ─────────────────────────────────────────────────────────
 
 
-# In this order: an action finds the follow-up it is about, a send the thread
-# an auto-reply put on the board.
+def _waiting_turns(p: _Pass) -> None:
+    from captain_claw.flight_deck import taskboard_ingest
+
+    taskboard_ingest.waiting_turns(p)
+
+
+def _tool_calls(p: _Pass) -> None:
+    from captain_claw.flight_deck import taskboard_ingest
+
+    taskboard_ingest.tool_calls(p)
+
+
+# In this order: an action finds the follow-up it is about, an automation turn
+# the task its run or message made, a tool call its turn's task — and a send
+# the thread an auto-reply or a turn's own send put on the board (the agent's
+# email lands on the chat task that asked for it, not on a task of its own).
 ADAPTERS = (
     ("fd_scheduler", _scheduler),
     ("follow_ups", _follow_ups),
     ("autonomy", _autonomy),
     ("gmail_autoreplies", _autoreplies),
-    ("gmail_sends", _gmail_sends),
     ("agent_links", _links),
+    ("agent_turns", _waiting_turns),
+    ("tool_audit", _tool_calls),
+    ("gmail_sends", _gmail_sends),
 )
+
+
+def prune_turns(store: TaskboardStore, now: float | None = None) -> int:
+    """Forget the agents' turns older than 30 days (the tasks they made stay)."""
+    n = store.prune_turns((time.time() if now is None else now) - TURNS_KEPT_S)
+    if n:
+        log.info("Taskboard turns pruned", turns=n)
+    return n
 
 
 def run_sweep(store: TaskboardStore | None = None, user_id: str | None = None) -> dict:
@@ -805,9 +845,15 @@ def run_sweep(store: TaskboardStore | None = None, user_id: str | None = None) -
                 except Exception as exc:
                     problems.append(name)
                     log.warning("Taskboard source failed", source=name, error=str(exc))
+            if user_id is None:
+                try:
+                    prune_turns(store)
+                except Exception as exc:
+                    log.warning("Taskboard turns prune failed", error=str(exc))
         finally:
             now = time.time()
-            message = ("Couldn't read " + ", ".join(SOURCE_LABELS[n] for n in problems)) if problems else ""
+            labels = {**SOURCE_LABELS, **AGENT_LABELS}
+            message = ("Couldn't read " + ", ".join(labels[n] for n in problems)) if problems else ""
             if user_id is None:
                 _STATE.update(running=False, last_at=now, message=message)
             else:

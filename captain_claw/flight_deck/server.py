@@ -1735,7 +1735,7 @@ from captain_claw.flight_deck.delivery_routes import router as delivery_router
 from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.file_library import router as file_library_router
 from captain_claw.flight_deck.data_library import router as data_library_router
-from captain_claw.flight_deck import taskboard
+from captain_claw.flight_deck import taskboard, taskboard_ingest
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
 from captain_claw.flight_deck import (
     agent_exam,
@@ -1845,6 +1845,9 @@ app.include_router(data_library_router)
 # Taskboard: every task the user's agents received or sent (taskboard.py).
 taskboard.configure(data_dir=DATA_DIR)
 app.include_router(taskboard.router)
+# v1: the agents' turns (agent auth, as the tool-call register) and their
+# tool calls reach the board (taskboard_ingest.py).
+app.include_router(taskboard_ingest.router)
 app.include_router(agent_skills_router)
 app.include_router(agent_preset.router)
 app.include_router(agent_knowledge.router)

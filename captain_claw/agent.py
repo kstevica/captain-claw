@@ -175,6 +175,7 @@ class Agent(
         self.plan_mode_level: str = "plain"  # plain | enriched | insightful | complete
         self._is_worker: bool = False  # Set True for orchestrator worker agents
         self._last_complete_success: bool = True  # Updated by finish() in complete()
+        self._last_complete_cancelled: bool = False  # The user's Stop ended the last complete()
         self.monitor_trace_llm: bool = bool(getattr(cfg.ui, "monitor_trace_llm", False))
         self.monitor_trace_pipeline: bool = bool(getattr(cfg.ui, "monitor_trace_pipeline", True))
         self.instructions = InstructionLoader()
@@ -645,16 +646,26 @@ class Agent(
         # PR D: every turn starts untainted (no member data read yet) and
         # marks its first user message as the turn's input. The level it
         # reaches gates tools only while the turn runs (enter/exit_turn).
-        from captain_claw import member_privacy
+        from captain_claw import member_privacy, turn_register
         member_privacy.begin_turn(self)
         member_privacy.enter_turn(self)
+        # The Taskboard's record of the turn (None when nested in one, or off).
+        turn = turn_register.open_turn(self)
+        outcome, reply = "error", ""
         try:
             if self._mrav_enabled():
-                return await self._mrav_complete(user_input)
-            return await super().complete(user_input)
+                reply = await self._mrav_complete(user_input)
+            else:
+                reply = await super().complete(user_input)
+            outcome = turn_register.outcome_of(self, reply)
+            return reply
+        except asyncio.CancelledError:
+            outcome = "cancelled"
+            raise
         finally:
             member_privacy.exit_turn(self)
             self._flush_write_compactions()
+            turn_register.close_turn(turn, outcome, reply, agent=self)
 
     async def stream(
         self,
@@ -678,24 +689,37 @@ class Agent(
             origin_detail,
         )
         self.last_turn_start_idx = None
-        from captain_claw import member_privacy
+        from captain_claw import member_privacy, turn_register
         member_privacy.begin_turn(self)
         member_privacy.enter_turn(self)
+        # The Taskboard's record of the turn, opened here so the complete()
+        # this re-enters is part of it. Its id is a ContextVar the caller
+        # sees between yields; close_turn ends it however the stream ends.
+        turn = turn_register.open_turn(self)
+        outcome, reply = "error", turn_register.ReplyHead()
         try:
             if not self._mrav_enabled():
                 async for chunk in super().stream(user_input):
+                    reply.add(chunk)
                     yield chunk
+                outcome = turn_register.outcome_of(self, reply.text)
                 return
             self._set_runtime_status("thinking")
             content = await self._mrav_complete(user_input)
+            reply.add(content)
             self._set_runtime_status("streaming")
             chunk_size = 24
             for idx in range(0, len(content), chunk_size):
                 yield content[idx : idx + chunk_size]
             self._set_runtime_status("waiting")
+            outcome = turn_register.outcome_of(self, content)
+        except (asyncio.CancelledError, GeneratorExit):
+            outcome = "cancelled"
+            raise
         finally:
             member_privacy.exit_turn(self)
             self._flush_write_compactions()
+            turn_register.close_turn(turn, outcome, reply.text, agent=self)
 
     def _mrav_runtime_instance(self) -> Any:
         cached = getattr(self, "_mrav_runtime_cache", None)

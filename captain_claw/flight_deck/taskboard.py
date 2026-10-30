@@ -4,17 +4,22 @@
   GET  /fd/taskboard/tasks               one view, searched, filtered, faceted and paged
   GET  /fd/taskboard/tasks/{id}          one task: its timeline, links, parties, decisions, proposals
   POST /fd/taskboard/tasks/{id}/action   a correction: done · reopen · dismiss · not_task · snooze ·
-                                         unsnooze · rename · owes_next · ack_failed · undo
+                                         unsnooze · rename · owes_next · ack_failed · undo ·
+                                         confirm_task · not_done
+  GET  /fd/taskboard/tasks/{id}/why      the latest decisions about a task, and why it is where it is
   POST /fd/taskboard/sync                read the sources now, for the caller's board
   GET  /fd/taskboard/summary             {needs_me} — the tile badge's poll
-  GET/PUT /fd/taskboard/settings
+  GET/PUT /fd/taskboard/settings         auto-close, the daily caps (and today's counts), Jev
 
 A task belongs to exactly one board (``user_id``): the caller sees only their
 own, and someone else's task is a 404 — there is no owner or admin view of
 anyone else's board. The kiosk lock is the UI's; this API is the boundary.
 
 What feeds the board is in ``taskboard_sources`` (a sweep every 120 s while
-Flight Deck runs); the store, lanes and search in ``taskboard_store``. A
+Flight Deck runs) and ``taskboard_ingest`` (the agents' turns); what each task
+is, who owes it and whether it is done in ``taskboard_triage`` (extraction on
+the agent's own model, then Jev — rules without it); the store, lanes and
+search in ``taskboard_store``. A
 proposal waiting on a task is approved or rejected through the existing
 ``/fd/autonomy/actions/{id}/approve|reject``, a held Gmail reply through
 ``/fd/google/gmail-autoreply/activity/{id}/send|dismiss``; ``POST /sync``
@@ -31,9 +36,9 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
-from captain_claw.flight_deck import taskboard_sources, taskboard_store
+from captain_claw.flight_deck import taskboard_sources, taskboard_store, taskboard_triage
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.taskboard_store import (
     CHANNEL_LABELS,
@@ -52,10 +57,10 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/fd/taskboard", tags=["taskboard"])
 
 ACTIONS = ("done", "reopen", "dismiss", "not_task", "snooze", "unsnooze", "rename", "owes_next",
-           "ack_failed", "undo")
+           "ack_failed", "undo", "confirm_task", "not_done")
 PASSIVE_SOURCES = ("telegram_inbox", "whatsapp_web", "gmail")
 
-# What the Sources sheet lists: what v0 reads, and what is still to come.
+# What the Sources sheet lists: what the board reads, and what is still to come.
 SOURCES: list[dict[str, Any]] = [
     {"key": "fd_scheduler", "label": "Scheduled tasks", "tracked": True, "on": True,
      "note": "Every scheduled task, each of its runs and how its result was delivered."},
@@ -69,8 +74,9 @@ SOURCES: list[dict[str, Any]] = [
      "note": "Every email sent through Captain's Gmail connection."},
     {"key": "agent_links", "label": "Linked systems", "tracked": True, "on": True,
      "note": "Messages from systems linked to your agents, and what your agents sent them."},
-    {"key": "agent_chats", "label": "Agent chats on every channel", "tracked": False, "on": False,
-     "note": "Coming: web chat, WhatsApp, Telegram, devices and the rest, with what the agents did."},
+    {"key": "agent_chats", "label": "Agent chats on every channel", "tracked": True, "on": True,
+     "note": "Every turn your agents take for you — web chat, WhatsApp, Telegram, devices, linked systems "
+             "and the rest — with the tool calls in it and what they sent."},
     {"key": "telegram_inbox", "label": "Your Telegram inbox", "tracked": False, "on": False,
      "note": "Coming, and only if you switch it on."},
     {"key": "whatsapp_web", "label": "Your WhatsApp chats", "tracked": False, "on": False,
@@ -89,6 +95,9 @@ _FACET_LABELS = {"status": STATUS_LABELS, "direction": DIRECTION_LABELS, "kind":
                  "evidence": EVIDENCE_LABELS, "result": RESULT_LABELS}
 _SWEEP_STOP_S = 5.0
 _SYNC_GAP_S = 2.0
+_WHY_MAX = 20
+JEV_PER_DAY_MAX = 2000
+EXTRACT_PER_DAY_MAX = 1000
 
 _loop_task: asyncio.Task | None = None
 _loop_stop: asyncio.Event | None = None
@@ -106,17 +115,20 @@ def store() -> taskboard_store.TaskboardStore:
 
 
 def start() -> None:
-    """Start the sweep (Flight Deck's lifespan). ``FD_TASKBOARD_DISABLED=true``
-    keeps it off; the board then fills only when someone opens it."""
+    """Start the sweep and the triage worker (Flight Deck's lifespan).
+    ``FD_TASKBOARD_DISABLED=true`` keeps both off; the board then fills only
+    when someone opens it, and nothing is triaged."""
     global _loop_task, _loop_stop
     if os.environ.get("FD_TASKBOARD_DISABLED", "").lower() in ("true", "1", "yes") or _loop_task is not None:
         return
     _loop_stop = asyncio.Event()
     _loop_task = asyncio.create_task(taskboard_sources.sweep_loop(_loop_stop))
+    taskboard_triage.start()
 
 
 async def stop() -> None:
     global _loop_task, _loop_stop
+    await taskboard_triage.stop()
     if _loop_stop is not None:
         _loop_stop.set()
     if _loop_task is not None:
@@ -367,6 +379,32 @@ async def taskboard_action(task_id: str, body: ActionBody, user: dict = Depends(
     return await asyncio.to_thread(apply)
 
 
+@router.get("/tasks/{task_id}/why")
+async def taskboard_why(task_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """"Why is this here?": the latest decisions about one of the caller's
+    tasks (latest first, at most 20) — who judged (Jev, the rules, the
+    agent's model, or the user's own corrections), the question set, the
+    probabilities, the move and why in plain words — and why it stands where
+    it does now."""
+    uid = _uid(user)
+
+    def read() -> dict:
+        row = _owned(uid, task_id)
+        decisions = store().decisions(uid, task_id, limit=_WHY_MAX)
+        items = [{"at": d["at"], "judge": d["judge"], "qset": d["qset"], "applied": d["applied"],
+                  "why": d["why"], "answers": d["answers"]} for d in decisions]
+        for e in store().events(uid, task_id):
+            if e["kind"] == "correction" and e["source"] == "user":
+                undone = bool((e.get("refs") or {}).get("undone"))
+                items.append({"at": e["at"], "judge": "user", "qset": "", "applied": e["summary"], "answers": {},
+                              "why": "You undid this later." if undone
+                              else "You did this yourself, so no machine pass changes it."})
+        items.sort(key=lambda i: -float(i["at"] or 0))
+        return {"items": items[:_WHY_MAX], "summary": taskboard_triage.why_summary(row, decisions)}
+
+    return await asyncio.to_thread(read)
+
+
 async def _user_sync(uid: str) -> dict:
     """The caller's own sweep — one at a time and one per 2 s for each user.
     A call while one waits to start joins it; a call while one reads gets the
@@ -407,9 +445,14 @@ async def taskboard_sync(user: dict = Depends(get_current_user)) -> dict:
 
 @router.get("/summary")
 async def taskboard_summary(user: dict = Depends(get_current_user)) -> dict:
-    """The tile badge: how many tasks need the caller."""
-    counts = await asyncio.to_thread(_counts, _uid(user))
-    return {"needs_me": counts["needs_me"]}
+    """The tile badge: how many tasks need the caller — leaving out those Jev
+    admitted at low confidence (they wait in Needs me, unannounced)."""
+    uid = _uid(user)
+
+    def badge() -> int:
+        return store().badge_count(uid, proposal_tasks=list(_waiting_proposals(uid)))
+
+    return {"needs_me": await asyncio.to_thread(badge)}
 
 
 def _settings(uid: str) -> dict:
@@ -419,6 +462,7 @@ def _settings(uid: str) -> dict:
         "auto_close": bool(s["auto_close"]),
         "jev_per_day": int(s["jev_per_day"]),
         "extract_per_day": int(s["extract_per_day"]),
+        "counters": store().daily_counts(uid),
         "passive": {k: {"on": bool((passive.get(k) or {}).get("on")),
                         "consented_at": (passive.get(k) or {}).get("consented_at")} for k in PASSIVE_SOURCES},
         "backfill_done_at": s.get("backfill_done_at"),
@@ -426,30 +470,39 @@ def _settings(uid: str) -> dict:
     }
 
 
+async def _settings_view(uid: str) -> dict:
+    """The settings, today's counts and whether Jev is connected for the
+    caller (their own key, or the team's)."""
+    out = await asyncio.to_thread(_settings, uid)
+    out["jev"] = await taskboard_triage.jev_connection(uid)
+    return out
+
+
 @router.get("/settings")
 async def taskboard_settings(user: dict = Depends(get_current_user)) -> dict:
-    return await asyncio.to_thread(_settings, _uid(user))
+    return await _settings_view(_uid(user))
 
 
 class SettingsBody(BaseModel):
     auto_close: bool | None = None
-    jev_per_day: int | None = Field(None, ge=0, le=1000)
-    extract_per_day: int | None = Field(None, ge=0, le=1000)
+    jev_per_day: int | None = None
+    extract_per_day: int | None = None
 
 
 @router.put("/settings")
 async def taskboard_save_settings(body: SettingsBody, user: dict = Depends(get_current_user)) -> dict:
-    """Whether Jev may close a task by itself (on by default) and the daily
-    caps on Jev questions and extractions (0 = none). The opt-in inboxes are
-    switched on with their consent, not here."""
+    """Whether Jev may close a task by itself (on by default; off, a task it
+    is sure of is marked "probably done" for the user to confirm) and the
+    daily caps: tasks Jev is asked about (0–2000) and extractions (0–1000);
+    0 = none, rules alone then. The opt-in inboxes are switched on with their
+    consent, not here."""
     uid = _uid(user)
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    for name, top in (("jev_per_day", JEV_PER_DAY_MAX), ("extract_per_day", EXTRACT_PER_DAY_MAX)):
+        if name in fields and not 0 <= fields[name] <= top:
+            raise HTTPException(400, f"{name} is a number from 0 to {top}")
     if "auto_close" in fields:
         fields["auto_close"] = int(fields["auto_close"])
-
-    def save() -> dict:
-        store().save_settings(uid, **fields)
-        return _settings(uid)
-
-    return await asyncio.to_thread(save)
+    await asyncio.to_thread(lambda: store().save_settings(uid, **fields))
+    return await _settings_view(uid)
 

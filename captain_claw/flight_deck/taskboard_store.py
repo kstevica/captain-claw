@@ -205,6 +205,22 @@ _TABLES: dict[str, list[tuple[str, str]]] = {
         ("ended_at", "REAL"),
         ("private", "INTEGER NOT NULL DEFAULT 0"),
         ("task_id", "TEXT NOT NULL DEFAULT ''"),
+        # v1: what the gate read, what it made of the turn, and the record
+        # numbers (``boot:seq``) each phase came under.
+        ("session_name", "TEXT NOT NULL DEFAULT ''"),
+        ("speaker_id", "TEXT NOT NULL DEFAULT ''"),
+        ("member", "INTEGER NOT NULL DEFAULT 0"),
+        ("opener", "INTEGER NOT NULL DEFAULT 0"),
+        ("human", "INTEGER NOT NULL DEFAULT 0"),
+        ("literal", "TEXT NOT NULL DEFAULT ''"),
+        ("automation", "TEXT NOT NULL DEFAULT '{}'"),
+        ("tool_calls", "INTEGER NOT NULL DEFAULT 0"),
+        ("failed_tool_calls", "INTEGER NOT NULL DEFAULT 0"),
+        ("gate", "TEXT NOT NULL DEFAULT ''"),
+        ("task_key", "TEXT NOT NULL DEFAULT ''"),
+        ("open_ref", "TEXT NOT NULL DEFAULT ''"),
+        ("close_ref", "TEXT NOT NULL DEFAULT ''"),
+        ("received_at", "REAL NOT NULL DEFAULT 0"),
     ],
     "source_cursors": [
         ("source", "TEXT PRIMARY KEY"),
@@ -243,9 +259,20 @@ _INDEXES = (
     "CREATE INDEX IF NOT EXISTS idx_rules_user ON task_rules(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_turns_user ON turns(user_id, started_at)",
     "CREATE INDEX IF NOT EXISTS idx_turns_task ON turns(task_id)",
+    "CREATE INDEX IF NOT EXISTS idx_turns_received ON turns(received_at)",
+    "CREATE INDEX IF NOT EXISTS idx_turns_gate ON turns(gate, received_at)",
+    "CREATE INDEX IF NOT EXISTS idx_turns_open_ref ON turns(agent_slug, open_ref)",
+    "CREATE INDEX IF NOT EXISTS idx_turns_close_ref ON turns(agent_slug, close_ref)",
 )
 _TASK_COLUMNS = {name for name, _ in _TABLES["tasks"]}
 _WRITABLE = _TASK_COLUMNS - {"id", "user_id", "search_text", "fingerprint", "user_locks"}
+# A turn record writes these (the gate's verdict and the record numbers are
+# the store's own); JSON and yes/no columns are read back as such.
+_TURN_FIELDS = {name for name, _ in _TABLES["turns"]} - {
+    "turn_id", "gate", "task_id", "task_key", "open_ref", "close_ref", "received_at"}
+_TURN_JSON = {"origin_detail": {}, "ext_refs": {}, "deliverables": [], "automation": {}}
+_TURN_FLAGS = ("member", "opener", "human", "private")
+TURN_DROPPED = "skipped:dropped"
 
 # What a facet counts, by the column it reads.
 _FACET_COLUMNS = {"status": "status", "channel": "channel", "agent": "agent_slug", "direction": "direction",
@@ -278,6 +305,15 @@ def _marks(values: Any) -> str:
 def fold_terms(q: str) -> list[str]:
     """A search box's words, folded as ``search_text`` is (at most 8)."""
     return [t for t in _fold(q or "").split() if t][:8]
+
+
+def _turn_dict(row: sqlite3.Row) -> dict:
+    turn = dict(row)
+    for k, default in _TURN_JSON.items():
+        turn[k] = _loads(turn.get(k), type(default)())
+    for k in _TURN_FLAGS:
+        turn[k] = bool(turn.get(k))
+    return turn
 
 
 class TaskboardStore:
@@ -782,17 +818,27 @@ class TaskboardStore:
         """Apply the user's correction *action* now: it writes the field(s),
         locks them against every later machine pass and leaves a
         ``correction`` event saying what changed (and what it was, for Undo).
-        ``undo`` reverses the latest correction not yet undone. None when the
-        task isn't this user's; ValueError for an action that can't apply."""
+        ``undo`` reverses the latest correction not yet undone — or, when Jev
+        closed the task after it (decision #2: an auto-close comes with
+        Undo), opens the task again. None when the task isn't this user's;
+        ValueError for an action that can't apply."""
         now = time.time()
         with self._lock:
             row = self._owned(user_id, task_id)
             if row is None:
                 return None
-            if action == "undo":
-                self._undo(user_id, row, now, actor)
+            last = self._last_correction(user_id, row) if action == "undo" else None
+            jev_closed = (row["closed_by"] == "jev" and row["status"] in CLOSED and row["closed_at"] is not None
+                          and (last is None or float(row["closed_at"]) > float(last[0]["at"])))
+            if action == "undo" and not jev_closed:
+                self._undo(user_id, row, now, actor, last)
             else:
-                fields, locks, summary = _correction(row, action, value, now, actor)
+                if jev_closed:
+                    # A correction of its own (Undo again closes it as Jev had it).
+                    fields, locks, _ = _correction(row, "reopen", None, now, actor)
+                    action, summary = "undo_close", "Undid Jev's close"
+                else:
+                    fields, locks, summary = _correction(row, action, value, now, actor)
                 old_locks = _loads(row["user_locks"], {})
                 before = {k: row[k] for k in fields}
                 if "flags" in fields:
@@ -815,16 +861,11 @@ class TaskboardStore:
         self._conn.execute(
             f"UPDATE tasks SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?", (*sets.values(), task_id))
 
-    def _undo(self, user_id: str, row: dict, now: float, actor: str) -> None:
-        """Take back the latest correction that still holds a field: what it
-        wrote goes back to what it was, its locks to what they were, and what
-        the sources said meanwhile about a field no lock holds now (``held``
-        on their events) is applied — so the task stands where its source has
-        it today, not where it stood before the correction. A correction whose
-        locks a source has since lifted (a scheduled task's next run) is
-        settled: nothing of it is left to undo."""
+    def _last_correction(self, user_id: str, row: dict) -> tuple[sqlite3.Row, dict, set[str]] | None:
+        """The latest correction that still holds a field: ``(event, refs,
+        the fields it holds)``. A correction whose locks a source has since
+        lifted (a scheduled task's next run) is settled and doesn't count."""
         locks = _loads(row["user_locks"], {})
-        last = None
         for ev in self._conn.execute(
                 "SELECT id, at, refs, summary FROM task_events WHERE user_id = ? AND task_id = ? "
                 "AND kind = 'correction' AND source = 'user' ORDER BY at DESC, id DESC", (user_id, row["id"])):
@@ -833,8 +874,18 @@ class TaskboardStore:
                 continue
             mine = {k for k in refs.get("locks") or {} if locks.get(k) == refs.get("locked_at", ev["at"])}
             if mine:
-                last = (ev, refs, mine)
-                break
+                return ev, refs, mine
+        return None
+
+    def _undo(self, user_id: str, row: dict, now: float, actor: str,
+              last: tuple[sqlite3.Row, dict, set[str]] | None) -> None:
+        """Take back *last* (:meth:`_last_correction`): what it wrote goes
+        back to what it was, its locks to what they were, and what the
+        sources said meanwhile about a field no lock holds now (``held`` on
+        their events) is applied — so the task stands where its source has it
+        today, not where it stood before the correction. With no correction
+        left that holds a field, there is nothing to undo."""
+        locks = _loads(row["user_locks"], {})
         if last is None:
             raise ValueError("there is no correction to undo")
         ev, refs, mine = last
@@ -915,6 +966,234 @@ class TaskboardStore:
             self._conn.commit()
         return self.get_settings(user_id)
 
+    # ── v1 triage (extraction, Jev decisions, daily caps) ─────────────
+
+    def triage_users(self, now: float | None = None) -> list[str]:
+        """The boards with a task waiting to be triaged now."""
+        now = time.time() if now is None else now
+        with self._lock:
+            return [str(r[0]) for r in self._conn.execute(
+                "SELECT DISTINCT user_id FROM tasks WHERE triage_state = 'pending' AND triage_after IS NOT NULL "
+                "AND triage_after <= ? AND merged_into = ''", (now,))]
+
+    def triage_queue(self, user_id: str, *, now: float | None = None, limit: int = 20) -> list[dict]:
+        """The user's tasks waiting to be triaged now, the longest waiting first."""
+        now = time.time() if now is None else now
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(
+                "SELECT * FROM tasks WHERE user_id = ? AND triage_state = 'pending' AND triage_after IS NOT NULL "
+                "AND triage_after <= ? AND merged_into = '' ORDER BY triage_after, created_at, id LIMIT ?",
+                (user_id, now, max(1, int(limit))))]
+
+    def triage_view(self, user_id: str, task_id: str, events: int = 12) -> dict | None:
+        """What triage reads about one task, at one moment: its row, its
+        latest *events* (oldest first), its parties and the turns it came
+        from (the register's rows, by ``turns.task_id`` or a ``turn:`` key,
+        oldest first). None when it isn't this user's."""
+        with self._lock:
+            row = self._owned(user_id, task_id)
+            if row is None:
+                return None
+            keys = [link["key"] for link in self.links(user_id, [task_id]).get(task_id, [])]
+            turn_ids = [k.removeprefix("turn:") for k in keys if k.startswith("turn:")]
+            by_key = f" OR turn_id IN ({_marks(turn_ids)})" if turn_ids else ""
+            turns = [_turn_dict(r) for r in self._conn.execute(
+                f"SELECT * FROM turns WHERE user_id = ? AND (task_id = ?{by_key}) "
+                "ORDER BY COALESCE(started_at, 0), turn_id", (user_id, task_id, *turn_ids))]
+            return {"task": row, "events": self.events(user_id, task_id, limit=events),
+                    "parties": self.parties_for(user_id, [task_id]).get(task_id, []), "turns": turns}
+
+    def triage_write(
+        self, user_id: str, task_id: str, fingerprint: str, *, fields: dict | None = None,
+        parties: tuple[dict, ...] | list[dict] = (), decision: dict | None = None, extracted: bool = False,
+        decided: bool = False, state: str | None = None, error: str = "", after: float | None = None,
+    ) -> bool:
+        """Write what triage made of a task — only while its fingerprint is
+        still *fingerprint* (a new event since the read leaves the task to the
+        next pass, which reads it anew): *fields* as a machine pass writes
+        them (never a field the user locked), *parties* unverified (a model
+        named them: never a recipient), *decision* logged, the fingerprints
+        it settles stamped, and its triage *state* (None leaves it). False
+        when nothing was written."""
+        with self._lock:
+            row = self._owned(user_id, task_id)
+            if row is None or row["fingerprint"] != fingerprint:
+                return False
+            now = time.time()
+            changed = self._machine_write(task_id, fields, now) if fields else False
+            if parties:
+                changed |= self._add_parties(user_id, task_id, [{**p, "verified": False} for p in parties]) > 0
+            if decision:
+                self._conn.execute(
+                    "INSERT INTO task_decisions (task_id, user_id, at, judge, qset, state_hash, answers, applied, why) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (task_id, user_id, now, str(decision.get("judge") or ""), str(decision.get("qset") or ""),
+                     str(decision.get("state_hash") or ""), json.dumps(decision.get("answers") or {}),
+                     str(decision.get("applied") or "")[:300], str(decision.get("why") or "")[:400]))
+            sets: dict[str, Any] = {}
+            if extracted:
+                sets["extracted_fp"] = fingerprint
+            if decided:
+                sets["decided_fp"] = fingerprint
+            if state is not None:
+                sets.update(triage_state=state, triage_error=error[:300],
+                            triage_after=after if state == "pending" else None)
+            if sets:
+                self._write(task_id, sets)
+            if changed:
+                self._refresh(task_id)
+            self._conn.commit()
+        return True
+
+    def daily_counts(self, user_id: str, day: str | None = None) -> dict:
+        """The user's Jev questions and extractions on this UTC *day*:
+        ``{day, jev, extract}`` — zeros once a new day starts."""
+        day = day or utc_day()
+        counters = self.get_settings(user_id)["counters"]
+        out = {"day": day, "jev": 0, "extract": 0}
+        if counters.get("day") == day:
+            for k in ("jev", "extract"):
+                try:
+                    out[k] = max(0, int(counters.get(k) or 0))
+                except (TypeError, ValueError):
+                    pass
+        return out
+
+    def take_daily(self, user_id: str, counter: str, n: int = 1, *, day: str | None = None) -> int:
+        """Take up to *n* of today's *counter* (``jev`` or ``extract``) under
+        the user's cap (``jev_per_day`` / ``extract_per_day``; 0 = none):
+        how many it got. A negative *n* gives back what was not used."""
+        cap_field = {"jev": "jev_per_day", "extract": "extract_per_day"}[counter]
+        day = day or utc_day()
+        with self._lock:
+            cap = int(self.get_settings(user_id)[cap_field] or 0)
+            counts = self.daily_counts(user_id, day)
+            got = max(0, min(n, cap - counts[counter])) if n >= 0 else -min(-n, counts[counter])
+            if got:
+                counts[counter] += got
+                self.save_settings(user_id, counters=counts)
+        return got
+
+    def badge_count(self, user_id: str, *, now: float | None = None,
+                    proposal_tasks: list[str] | None = None) -> int:
+        """The tile badge: Needs me, less the tasks admitted at low
+        confidence (Jev 0.65–0.8) — those wait in the list, unannounced."""
+        needs, args = self._needs_me(time.time() if now is None else now, list(proposal_tasks or []))
+        with self._lock:
+            return int(self._conn.execute(
+                f"SELECT COUNT(*) FROM tasks t WHERE t.user_id = ? AND t.merged_into = '' AND {needs} "
+                "AND COALESCE(json_extract(t.flags, '$.low_confidence'), 0) = 0", (user_id, *args)).fetchone()[0])
+
+    # ── v1 turns (the agents' turn register, taskboard_ingest) ────────
+
+    def save_turn(self, turn_id: str, phase: str, ref: str, fields: dict) -> str:
+        """Keep one record of an agent's turn register, once: its *phase*
+        (``open`` says where the turn came from and whose board it is,
+        ``close`` how it ended — either may come first) under the record
+        number it came with (*ref*, ``boot:seq``). ``new``; ``repeat`` when
+        this phase of the turn, or that number of the agent's, is here
+        already; ``refused`` when the turn is another agent's, or would move
+        to another board."""
+        col = "open_ref" if phase == "open" else "close_ref"
+        slug, owner = str(fields.get("agent_slug") or ""), str(fields.get("agent_owner_id") or "")
+        sets = {k: (json.dumps(v) if k in _TURN_JSON else int(bool(v)) if k in _TURN_FLAGS else v)
+                for k, v in fields.items() if k in _TURN_FIELDS}
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
+            if row is not None and (row["agent_slug"], row["agent_owner_id"]) != (slug, owner):
+                return "refused"
+            if row is not None and (row[col] or row["gate"] == TURN_DROPPED):
+                return "repeat"
+            if self._conn.execute("SELECT 1 FROM turns WHERE agent_slug = ? AND (open_ref = ? OR close_ref = ?)",
+                                  (slug, ref, ref)).fetchone():
+                return "repeat"
+            if row is not None and row["user_id"] and sets.get("user_id") not in (None, "", row["user_id"]):
+                return "refused"
+            sets[col] = ref
+            if row is None:
+                sets.update(turn_id=turn_id, received_at=time.time())
+                sets.setdefault("user_id", "")
+                self._conn.execute(f"INSERT INTO turns ({', '.join(sets)}) VALUES ({_marks(sets)})",
+                                   tuple(sets.values()))
+            else:
+                if not sets.get("user_id"):
+                    sets.pop("user_id", None)  # a close knows no board; the open said it
+                self._conn.execute(f"UPDATE turns SET {', '.join(f'{k} = ?' for k in sets)} WHERE turn_id = ?",
+                                   (*sets.values(), turn_id))
+            self._conn.commit()
+        return "new"
+
+    def drop_turn(self, turn_id: str, agent_slug: str, agent_owner_id: str, ref: str) -> None:
+        """A turn that is nobody's to see (a member's words naming no member):
+        what any record of it said goes, and none said later is kept — the
+        turn stays only as a mark that it was dropped."""
+        with self._lock:
+            row = self._conn.execute("SELECT agent_slug, agent_owner_id, open_ref FROM turns WHERE turn_id = ?",
+                                     (turn_id,)).fetchone()
+            if row is not None and ((row["agent_slug"], row["agent_owner_id"]) != (agent_slug, agent_owner_id)
+                                    or row["open_ref"]):
+                return  # another agent's turn, or one whose open was taken already
+            self._conn.execute("DELETE FROM turns WHERE turn_id = ?", (turn_id,))
+            self._conn.execute(
+                "INSERT INTO turns (turn_id, user_id, agent_slug, agent_owner_id, gate, open_ref, received_at) "
+                "VALUES (?, '', ?, ?, ?, ?, ?)", (turn_id, agent_slug, agent_owner_id, TURN_DROPPED, ref, time.time()))
+            self._conn.commit()
+
+    def get_turn(self, turn_id: str) -> dict | None:
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM turns WHERE turn_id = ?", (turn_id,)).fetchone()
+        return _turn_dict(row) if row else None
+
+    def set_turn(self, turn_id: str, **fields: Any) -> None:
+        """What the gate made of a turn: its ``gate`` verdict, and the task it
+        is on (``task_id``) with the key that finds it (``task_key``)."""
+        sets = {k: v for k, v in fields.items() if k in ("gate", "task_id", "task_key")}
+        if not sets:
+            return
+        with self._lock:
+            self._conn.execute(f"UPDATE turns SET {', '.join(f'{k} = ?' for k in sets)} WHERE turn_id = ?",
+                               (*sets.values(), turn_id))
+            self._conn.commit()
+
+    def waiting_turns(self, *, user_id: str | None = None, limit: int = 500) -> list[dict]:
+        """Automation turns whose task wasn't on the board yet (the run that
+        made it not read yet), the oldest first."""
+        mine, args = (" AND user_id = ?", [user_id]) if user_id is not None else ("", [])
+        with self._lock:
+            rows = self._conn.execute(
+                f"SELECT * FROM turns WHERE gate = 'waiting'{mine} ORDER BY received_at LIMIT ?",
+                (*args, max(1, int(limit)))).fetchall()
+        return [_turn_dict(r) for r in rows]
+
+    def prune_turns(self, before: float) -> int:
+        """Forget the turns first seen before *before*. The tasks they made
+        keep their ``turn:`` key, so a record sent again adds nothing."""
+        with self._lock:
+            n = self._conn.execute("DELETE FROM turns WHERE received_at < ?", (float(before),)).rowcount
+            self._conn.commit()
+        return int(n or 0)
+
+    def rules(self, user_id: str) -> list[dict]:
+        """The user's task rules (``match`` read), the oldest first."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM task_rules WHERE user_id = ? ORDER BY id", (user_id,)).fetchall()
+        return [{**dict(r), "match": _loads(r["match"], {})} for r in rows]
+
+    def add_rule(self, user_id: str, match: dict, effect: str, created_from: str = "") -> int:
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT INTO task_rules (user_id, match, effect, created_from, created_at) VALUES (?,?,?,?,?)",
+                (user_id, json.dumps(match), effect, created_from, time.time()))
+            self._conn.commit()
+        return int(cur.lastrowid or 0)
+
+    def rule_hit(self, user_id: str, rule_id: int) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE task_rules SET hits = hits + 1 WHERE id = ? AND user_id = ?",
+                               (rule_id, user_id))
+            self._conn.commit()
+
     # ── Cleanup ───────────────────────────────────────────────────────
 
     def _drop_tasks(self, task_ids: list[str]) -> None:
@@ -981,8 +1260,7 @@ def _correction(row: dict, action: str, value: Any, now: float, actor: str) -> t
     if action == "not_task":
         return {"status": "not_task", **closing}, ["status"], "Marked not a task"
     if action == "reopen":
-        return ({"status": "open", "closed_at": None, "closed_by": "", "closed_by_party": "", "result": ""},
-                ["status"], "Reopened")
+        return _reopened(row), ["status"], "Reopened"
     if action == "snooze":
         try:
             until = float(value)
@@ -1010,7 +1288,42 @@ def _correction(row: dict, action: str, value: Any, now: float, actor: str) -> t
             raise ValueError("only a failed task is acknowledged")
         flags = {**_loads(row["flags"], {}), "failed_ack": now}
         return {"flags": flags}, ["failed_ack"], "Failure seen"
+    if action == "confirm_task":
+        # A task the board wasn't sure of: a maybe one (it goes to the agent),
+        # or one admitted at low confidence (it counts in the badge now).
+        flags = _loads(row["flags"], {})
+        if row["status"] != "maybe" and not (row["status"] == "open" and flags.get("low_confidence")):
+            raise ValueError("only a task the board wasn't sure of is confirmed")
+        fields: dict[str, Any] = {"status": "open", "flags": {**flags, "low_confidence": False}}
+        if row["status"] == "maybe":
+            fields.update(owes_next="agent", closed_at=None, closed_by="", closed_by_party="", result="")
+        return fields, ["status", "low_confidence"], "Confirmed as a task"
+    if action == "not_done":
+        flags = _loads(row["flags"], {})
+        if not flags.get("probably_done") and row["status"] != "done":
+            raise ValueError("only a task that looks done is marked not done")
+        fields = {**(_reopened(row) if row["status"] != "open" else {"status": "open"}),
+                  "flags": {**flags, "probably_done": False}}
+        return fields, ["status", "probably_done"], "Not done yet"
     raise ValueError(f"unknown action: {action}")
+
+
+def _reopened(row: dict) -> dict:
+    """The fields that open *row* again: who closed it and how cleared, and —
+    when its close left nobody owing a move (a source's or a machine pass's
+    close does) — the next move the user's: they just said it isn't
+    finished, so it comes back in Needs me rather than in no lane at all."""
+    fields: dict[str, Any] = {"status": "open", "closed_at": None, "closed_by": "", "closed_by_party": "",
+                              "result": ""}
+    if row["status"] != "open" and row["owes_next"] == "nobody":
+        fields["owes_next"] = "me"
+    return fields
+
+
+def utc_day(now: float | None = None) -> str:
+    """The UTC day, ``YYYY-MM-DD`` — what the daily caps count under (as the
+    plan's own allowances do)."""
+    return time.strftime("%Y-%m-%d", time.gmtime(time.time() if now is None else now))
 
 
 _STORE: TaskboardStore | None = None
