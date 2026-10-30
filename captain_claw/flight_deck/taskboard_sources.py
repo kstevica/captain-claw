@@ -598,6 +598,8 @@ def _autonomy(p: _Pass) -> None:
         if uid is None:
             continue
         payload = _json(row.get("payload"), {})
+        if payload.get("handover"):
+            continue  # the board's own, and it says so itself (taskboard_handover)
         key = f"autonomy:{row['id']}"
         slug = next((s for s in (str(row.get("ref_id") or ""), str(row.get("target") or "")) if s in p.agents), "")
         agent = p.agent(slug)

@@ -35,7 +35,7 @@ import {
 } from './taskboardParts'
 import { BoardSettings } from './TaskboardSettings'
 import { SourcesSheet } from './TaskboardSources'
-import { NextStepCard, SuggestNextStep } from './TaskNextStep'
+import { HandOverForm, NextStepCard, SuggestNextStep } from './TaskNextStep'
 import {
   MergedIntoBanner, MergedList, MergePicker, SameAsBanner, SplitBar, ThreadNoticeBar, type ThreadNotice,
 } from './TaskThreads'
@@ -382,6 +382,12 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   }
   const act = async (task: TaskItem, action: TaskAction, value?: string | number) => {
     const { task: fresh } = await taskboardApi.action(task.id, action, value)
+    setSelected((cur) => (cur?.id === fresh.id ? fresh : cur))
+    setPage((cur) => cur && { ...cur, items: cur.items.map((i) => (i.id === fresh.id ? fresh : i)) })
+    refreshAfter()
+  }
+  const handOver = async (task: TaskItem, agent: string, words: string) => {
+    const { task: fresh } = await taskboardApi.handOver(task.id, agent, words)
     setSelected((cur) => (cur?.id === fresh.id ? fresh : cur))
     setPage((cur) => cur && { ...cur, items: cur.items.map((i) => (i.id === fresh.id ? fresh : i)) })
     refreshAfter()
@@ -784,6 +790,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       onDismissNotice={() => setNotice(null)}
       onClose={() => setSelected(null)}
       onAct={(action, value) => act(selected, action, value)}
+      onHandOver={(agent, words) => handOver(selected, agent, words)}
       onAgent={() => setFacet('agent', [selected.agent_slug])}
       onAnswered={answered}
       onNextStep={() => nextStepChanged(selected.id)}
@@ -1106,12 +1113,14 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
 // ── One task ──
 
 function TaskDetailPane({
-  task, rev, terms, me, phone, covered, keys, pinned, notice, onDismissNotice, onClose, onAct, onAgent, onAnswered, onNextStep, onOpenTask,
+  task, rev, terms, me, phone, covered, keys, pinned, notice, onDismissNotice, onClose, onAct, onHandOver, onAgent, onAnswered, onNextStep, onOpenTask,
   onMerge, onNotSame, onUnmerge, onSplit, onOpenScheduled, onOpenChat, onOpenConnections,
 }: {
   task: TaskItem; rev: number; terms: string[]; me: BoardUser; phone: boolean
   /** Something opened over the task (the Sources sheet, a menu): Escape is that one's. */
   covered: boolean
+  /** Hand it to an agent with the user's instructions: it starts on them now. */
+  onHandOver: (agent: string, words: string) => Promise<void>
   /** Filled with what this task's buttons answer to (true: the key was used). */
   keys: { current: ((key: string) => boolean) | null }
   /** Filled with whether moving to another task now would lose something. */
@@ -1147,6 +1156,8 @@ function TaskDetailPane({
   const [renaming, setRenaming] = useState(false)
   const [name, setName] = useState(task.title)
   const [snoozeOpen, setSnoozeOpen] = useState(false)
+  const [handing, setHanding] = useState(false)
+  const [handWords, setHandWords] = useState('')
   const [merging, setMerging] = useState(false)
   // Splitting: the events ticked to move to a new task.
   const [splitIds, setSplitIds] = useState<Set<number> | null>(null)
@@ -1168,6 +1179,13 @@ function TaskDetailPane({
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [snoozeOpen, covered])
+  // …and the hand-over form (what was written stays, should it open again)…
+  useEffect(() => {
+    if (!handing || covered) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.preventDefault(); setHanding(false) } }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [handing, covered])
   // …and stops a split, the same way.
   const splitting = splitIds !== null
   useEffect(() => {
@@ -1268,9 +1286,9 @@ function TaskDetailPane({
   const paneRef = useRef<HTMLDivElement>(null)
   const askNextStep = useRef<(() => void) | null>(null)
   useEffect(() => {
-    pinned.current = splitting || snoozeOpen
+    pinned.current = splitting || snoozeOpen || handing
     keys.current = (key) => {
-      if (busy) return false
+      if (busy || handing) return false
       if (snoozeOpen) {
         const pick = SNOOZES[Number(key) - 1]
         if (pick) void run('snooze', snoozeUntil(pick.id))
@@ -1287,6 +1305,7 @@ function TaskDetailPane({
         [TASK_KEYS.rename]: [!renaming, startRename],
         [TASK_KEYS.merge]: [!merged, () => setMerging((m) => !m)],
         [TASK_KEYS.undo]: [canUndo, () => void run('undo')],
+        [TASK_KEYS.agent]: [!closed && !failed, () => setHanding(true)],
         [TASK_KEYS.nextStep]: [!!boardStep || canSuggest, () => {
           // Read and edited on its card: approving it stays a click.
           const card = paneRef.current?.querySelector<HTMLElement>('[data-next-step]')
@@ -1558,7 +1577,21 @@ function TaskDetailPane({
       </div>
 
       <div className="grid grid-cols-2 gap-2 border-t border-zinc-800 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] wide:pb-3">
-        {snoozeOpen ? (
+        {handing ? (
+          <HandOverForm
+            taskAgent={task.agent_slug}
+            phone={phone}
+            words={handWords}
+            onWords={setHandWords}
+            onCancel={() => setHanding(false)}
+            onHandOver={async (agent, words) => {
+              await onHandOver(agent, words)
+              setHanding(false)
+              setHandWords('')
+              notify('success', 'Handed over', 'The agent is on it. Its answer shows on this task.')
+            }}
+          />
+        ) : snoozeOpen ? (
           <>
             <div className="col-span-2 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
               Snooze until{busy === 'snooze' && <Loader2 className="h-3 w-3 animate-spin" />}
@@ -1619,14 +1652,21 @@ function TaskDetailPane({
                 <span className="shrink-0 text-zinc-500">Next move</span>
                 <select
                   value={OWES.includes(task.owes_next) ? task.owes_next : 'unclear'}
-                  onChange={(e) => run('owes_next', e.target.value)}
+                  // The agent's move is one it is told: which agent, and to do what.
+                  onChange={(e) => { if (e.target.value === 'agent') setHanding(true); else void run('owes_next', e.target.value) }}
                   disabled={!!busy}
                   aria-label="Who moves next"
                   className="min-w-0 flex-1 bg-zinc-950 py-0.5 text-zinc-200 focus:outline-none disabled:opacity-50"
                 >
-                  {OWES.map((o) => <option key={o} value={o}>{OWES_LABEL[o]}</option>)}
+                  {OWES.map((o) => <option key={o} value={o}>{OWES_LABEL[o]}{o === 'agent' ? '…' : ''}</option>)}
                 </select>
                 {busy === 'owes_next' && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-zinc-500" />}
+                {task.owes_next === 'agent' && (
+                  <button type="button" onClick={() => setHanding(true)} disabled={!!busy}
+                    className="shrink-0 text-xs font-medium text-teal-600 hover:underline disabled:opacity-50 dark:text-teal-400">
+                    Instruct…<KeyHint k={TASK_KEYS.agent} />
+                  </button>
+                )}
               </label>
             )}
             {canUndo && (

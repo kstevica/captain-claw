@@ -1,7 +1,7 @@
 import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
 import { Bell, Check, ChevronDown, Loader2, Mail, MessageSquare, Sparkles } from 'lucide-react'
 import { resolveProposal } from '../../services/notifications'
-import { taskboardApi, type NextStepKind, type ProposalEdit, type TaskProposal } from '../../services/taskboardApi'
+import { taskboardApi, type HandOverAgent, type NextStepKind, type ProposalEdit, type TaskProposal } from '../../services/taskboardApi'
 import { ChannelIcon, KeyHint } from './taskboardParts'
 import { TASK_KEYS, channelLabel, proposalLabel, recipientText } from './taskboardText'
 
@@ -14,6 +14,7 @@ import { TASK_KEYS, channelLabel, proposalLabel, recipientText } from './taskboa
 // Approve puts it in your drafts, and nothing sends it.
 
 const errText = (e: unknown) => (e instanceof Error ? e.message : String(e))
+const SEND_KEY = /Mac|iPhone|iPad/.test(navigator.userAgent) ? '⌘↵' : 'Ctrl↵'
 
 // What the server takes (taskboard_nextsteps: _TEXT_MAX, _SUBJECT_MAX).
 const TEXT_MAX = 2000
@@ -332,5 +333,90 @@ export function SuggestNextStep({ taskId, phone, kinds, covered, askRef, onPropo
         Nothing leaves without your Approve — and an email only ever becomes a draft, never sent.
       </p>
     </section>
+  )
+}
+
+/** "Next move → Agent": which agent and what it should do. Nothing goes to it
+ *  until Hand over; what was written stays if this is closed and opened again. */
+export function HandOverForm({ taskAgent, phone, words, onWords, onHandOver, onCancel }: {
+  /** The task's agent now: the one picked first, when it can take it. */
+  taskAgent: string
+  phone: boolean
+  words: string
+  onWords: (words: string) => void
+  onHandOver: (agent: string, words: string) => Promise<void>
+  onCancel: () => void
+}) {
+  const [agents, setAgents] = useState<HandOverAgent[] | null>(null)
+  const [agent, setAgent] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let gone = false
+    taskboardApi.agents()
+      .then((res) => {
+        if (gone) return
+        setAgents(res.agents)
+        setAgent(res.agents.some((a) => a.slug === taskAgent) ? taskAgent : res.agents[0]?.slug ?? '')
+      })
+      .catch((e) => { if (!gone) { setAgents([]); setError(errText(e)) } })
+    return () => { gone = true }
+  }, [taskAgent])
+
+  const ready = !!agent && !!words.trim() && !busy
+  const send = async () => {
+    if (!ready) return
+    setBusy(true)
+    setError('')
+    try {
+      await onHandOver(agent, words.trim())
+    } catch (e) {
+      setError(errText(e))
+      setBusy(false)
+    }
+  }
+  const field = `w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-zinc-200 placeholder-zinc-500 focus:border-teal-500/60 focus:outline-none disabled:opacity-50 ${
+    phone ? 'text-base' : 'text-sm'}`
+
+  return (
+    <div className="col-span-2 flex flex-col gap-2">
+      <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Hand to an agent</div>
+      {agents === null ? (
+        <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />
+      ) : agents.length === 0 ? (
+        <p className="text-xs leading-relaxed text-zinc-400">{error || 'None of your agents is on. Power one on, then hand this over.'}</p>
+      ) : (
+        <>
+          <select value={agent} onChange={(e) => setAgent(e.target.value)} disabled={busy} aria-label="Which agent" className={field}>
+            {agents.map((a) => <option key={a.slug} value={a.slug}>{a.name}{a.asleep ? ' (asleep, it will wake)' : ''}</option>)}
+          </select>
+          <textarea
+            autoFocus={!phone}
+            value={words}
+            onChange={(e) => onWords(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); void send() } }}
+            disabled={busy}
+            rows={4}
+            maxLength={4000}
+            aria-label="What the agent should do"
+            placeholder="What should it do? Add anything it needs to know."
+            className={`${field} resize-y`}
+          />
+          <p className="text-[11px] leading-relaxed text-zinc-500">It also gets this task's details. It starts as soon as you hand it over.</p>
+          {error && <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p>}
+        </>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        <button onClick={() => void send()} disabled={!ready}
+          className="flex items-center justify-center gap-1.5 rounded-lg bg-teal-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-teal-500 disabled:opacity-60">
+          {busy && <Loader2 className="h-4 w-4 animate-spin" />}Hand over<KeyHint k={SEND_KEY} onPrimary />
+        </button>
+        <button onClick={onCancel} disabled={busy}
+          className="flex items-center justify-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800/60 disabled:opacity-50">
+          Cancel<KeyHint k="Esc" />
+        </button>
+      </div>
+    </div>
   )
 }

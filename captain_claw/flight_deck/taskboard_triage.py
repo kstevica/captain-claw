@@ -337,6 +337,8 @@ def facts(view: dict, user_id: str) -> dict:
         "deliverables": [str(d) for d in _loads((turn or {}).get("deliverables"), [])][:20],
         "channel": channel,
         "own_chat": own_chat,
+        # The user handed it to an agent, and this is that run (TaskboardStore.triage_view).
+        "handed": bool((turn or {}).get("handed")),
         "third_party": (task.get("direction") == "received" and (base in THIRD_PARTY or source in OUTSIDE_SOURCES)
                         and not own_words),
         "unread": view.get("unread") or [],
@@ -420,9 +422,10 @@ def rule_moves(task: dict, f: dict) -> tuple[dict, list[str]]:
     fields: dict[str, Any] = {}
     why: list[str] = []
     old = _loads(task.get("flags"), {})
-    in_chat = f["outcome"] == "ok" and f["own_chat"] and not f.get("failed_calls") and not f.get("other_work")
+    in_chat = (f["outcome"] == "ok" and f["own_chat"] and not f.get("failed_calls") and not f.get("other_work")
+               and not f.get("handed"))
     if locked:
-        if task["status"] == "open" and f["outcome"] == "ok" and not f["own_chat"]:
+        if task["status"] == "open" and f["outcome"] == "ok" and not f["own_chat"] and not f.get("handed"):
             fields["owes_next"] = "them"
         elif task["status"] == "open" and f["outcome"] and task["owes_next"] == "agent":
             # Kept open by the user's word and the agent's turn is over: their move now.
@@ -445,6 +448,9 @@ def rule_moves(task: dict, f: dict) -> tuple[dict, list[str]]:
         fields, why = {"status": "open", "owes_next": "agent"}, ["The agent is still working on it."]
     elif f["closed"] and not (in_chat and task.get("closed_by") == "rule"):
         pass  # Read again with nothing new (a merge came apart): the turn it was closed over opens nothing.
+    elif f.get("handed") and f["outcome"] == "ok":
+        fields = {"status": "open", "owes_next": "me"}
+        why = ["The agent finished what you handed it: look over what it did."]
     elif in_chat and f["answered"] in ("partly", "no"):
         fields, why = _not_done_move(f)
     elif in_chat:
@@ -518,6 +524,8 @@ def _answered_moves(task: dict, f: dict, ans: dict, *, auto_close: bool) -> tupl
     p_task = _p(ans, "is_task")
     declined = (f["outcome"] == "ok" and f["own_chat"] and not f.get("failed_calls")
                 and f.get("answered") in ("partly", "no"))
+    # The user handed it to an agent: they said it is a task, whatever Jev's doubt.
+    theirs = declined or bool(f.get("handed"))
     if not locked and f["outcome"] in _FAILED and status in ("open", "maybe", "done", "failed"):
         # The evidence first: a failed turn fails the task whatever Jev
         # thinks of it — is_task only says whether it counts in the badge.
@@ -528,16 +536,16 @@ def _answered_moves(task: dict, f: dict, ans: dict, *, auto_close: bool) -> tupl
         # What the user asked their own agent and it couldn't do (or did only part
         # of) waits on them: Jev's doubt doesn't take it out of Needs me or the
         # badge. Anything else it may still call a maybe, or no task.
-        if p_task < TASK_NO and not declined:
+        if p_task < TASK_NO and not theirs:
             return ({**_close("not_task", "jev", "Jev", ""), "flags": {"low_confidence": False}},
                     [f"Jev is {_pct(1 - p_task)} sure this isn't a task, so it is off the board."])
-        if p_task < TASK_YES and not declined:
+        if p_task < TASK_YES and not theirs:
             return ({"status": "maybe", "flags": {"low_confidence": False}},
                     [f"Jev isn't sure this is a task ({_pct(p_task)}), so it waits in All, under Status → Maybe "
                      "tasks — confirm it, or mark it not a task."])
         if status != "open":
             fields["status"] = status = "open"
-        unsure = p_task < TASK_SURE and not declined
+        unsure = p_task < TASK_SURE and not theirs
         flags["low_confidence"] = unsure
         notes.append(f"Jev is {_pct(p_task)} sure this is a task"
                      + (", not sure enough to count it in the badge." if unsure else "."))
