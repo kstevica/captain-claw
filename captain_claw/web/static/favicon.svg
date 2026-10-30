@@ -1,58 +1,81 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <!-- Background -->
-  <rect width="64" height="64" rx="12" fill="#0d1117"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    The Captain icon: the Bot character in a captain's cap, on the navy slab.
+    Flat geometry from build_support/brand/bot/captains-cap.svg (the firmware's
+    drawBot, face.cpp), with gradients, a drop shadow and a little glow so it
+    sits like an app icon. build_support/render_icon.py rasterises this file
+    and writes every icon in the repo; the slab's rx is what it changes for the
+    full-bleed variant.
+  -->
+  <defs>
+    <linearGradient id="slabG" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#1d1d55"/><stop offset="1" stop-color="#050516"/>
+    </linearGradient>
+    <radialGradient id="vig" cx="0.5" cy="0.42" r="0.78">
+      <stop offset="0" stop-color="#4455b0" stop-opacity="0.22"/><stop offset="1" stop-color="#000" stop-opacity="0.38"/>
+    </radialGradient>
+    <linearGradient id="bodyG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#b0b9c6"/><stop offset="1" stop-color="#8590a1"/>
+    </linearGradient>
+    <linearGradient id="earG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#99a3b2"/><stop offset="1" stop-color="#78828f"/>
+    </linearGradient>
+    <linearGradient id="plateG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#262d3d"/><stop offset="1" stop-color="#141924"/>
+    </linearGradient>
+    <linearGradient id="capG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2d3e8c"/><stop offset="1" stop-color="#151e55"/>
+    </linearGradient>
+    <linearGradient id="goldG" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f3cf6a"/><stop offset="0.55" stop-color="#dfa93f"/><stop offset="1" stop-color="#b17c20"/>
+    </linearGradient>
+    <radialGradient id="lampG" cx="0.35" cy="0.3" r="0.8">
+      <stop offset="0" stop-color="#ff8f85"/><stop offset="1" stop-color="#df302a"/>
+    </radialGradient>
+    <filter id="drop" x="-25%" y="-25%" width="150%" height="160%">
+      <feDropShadow dx="0" dy="2.6" stdDeviation="3.2" flood-color="#000" flood-opacity="0.55"/>
+    </filter>
+    <filter id="eyeGlow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="2.2"/></filter>
+    <filter id="lampGlow" x="-120%" y="-120%" width="340%" height="340%"><feGaussianBlur stdDeviation="2.4"/></filter>
+  </defs>
 
-  <!-- Captain's hat (peaked cap) -->
-  <!-- Hat brim - wide flat base -->
-  <ellipse cx="32" cy="36" rx="22" ry="5" fill="#1a2a4a"/>
-  <ellipse cx="32" cy="35.5" rx="22" ry="4.5" fill="#1e3a6e"/>
-  <!-- Hat brim highlight edge -->
-  <ellipse cx="32" cy="35" rx="21" ry="3.5" fill="none" stroke="#58a6ff" stroke-width="0.8" opacity="0.6"/>
+  <rect id="slab" width="1024" height="1024" rx="230" fill="url(#slabG)"/>
+  <rect id="slab-vignette" width="1024" height="1024" rx="230" fill="url(#vig)"/>
 
-  <!-- Hat body -->
-  <path d="M14 35 Q14 18 32 16 Q50 18 50 35 Z" fill="#1a2a4a"/>
-  <!-- Hat body gradient overlay -->
-  <path d="M16 35 Q16 20 32 18 Q48 20 48 35 Z" fill="#1e3a6e"/>
-  <!-- Hat body shading -->
-  <path d="M16 35 Q16 20 32 18 Q40 20 42 30 Q38 27 32 26 Q26 27 22 30 Q18 28 16 35Z" fill="#243d73" opacity="0.5"/>
-
-  <!-- Gold band on hat -->
-  <path d="M15.5 34 Q15.5 30 32 29 Q48.5 30 48.5 34" fill="none" stroke="#d4a017" stroke-width="2.5" stroke-linecap="round"/>
-  <!-- Gold band highlight -->
-  <path d="M16.5 33.5 Q17 31 32 30 Q47 31 47.5 33.5" fill="none" stroke="#f0c040" stroke-width="0.8" stroke-linecap="round" opacity="0.7"/>
-
-  <!-- Hat peak (visor) - front -->
-  <path d="M20 36 Q20 39 32 40 Q44 39 44 36" fill="#162040"/>
-  <path d="M20 36 Q22 38.5 32 39.5 Q42 38.5 44 36" fill="#1a2a5a"/>
-  <!-- Peak edge highlight -->
-  <path d="M20 36 Q22 39 32 40 Q42 39 44 36" fill="none" stroke="#58a6ff" stroke-width="0.6" opacity="0.5"/>
-
-  <!-- Emblem on hat: stylized anchor/badge circle -->
-  <circle cx="32" cy="26" r="5.5" fill="#0d1117" stroke="#d4a017" stroke-width="1.2"/>
-  <circle cx="32" cy="26" r="4.2" fill="none" stroke="#f0c040" stroke-width="0.5" opacity="0.6"/>
-
-  <!-- CLAW marks inside emblem (3 slash marks like a claw strike) -->
-  <!-- Claw slash 1 -->
-  <path d="M29 23.5 Q30.5 25.5 29.5 28.5" fill="none" stroke="#f85149" stroke-width="1.4" stroke-linecap="round"/>
-  <!-- Claw slash 2 -->
-  <path d="M31.5 23 Q33 25 32 28" fill="none" stroke="#f85149" stroke-width="1.4" stroke-linecap="round"/>
-  <!-- Claw slash 3 -->
-  <path d="M34 23.5 Q35.5 25.5 34.5 28.5" fill="none" stroke="#f85149" stroke-width="1.4" stroke-linecap="round"/>
-
-  <!-- Small claw / pincers peeking below the hat brim (like a crab lurking) -->
-  <!-- Left pincer -->
-  <path d="M10 42 Q8 38 11 36 Q13 37 12 39" fill="none" stroke="#58a6ff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M12 39 Q14 37 13 41" fill="none" stroke="#58a6ff" stroke-width="1.4" stroke-linecap="round"/>
-  <!-- Left claw tip -->
-  <circle cx="10.5" cy="42" r="1" fill="#58a6ff" opacity="0.8"/>
-
-  <!-- Right pincer -->
-  <path d="M54 42 Q56 38 53 36 Q51 37 52 39" fill="none" stroke="#58a6ff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M52 39 Q50 37 51 41" fill="none" stroke="#58a6ff" stroke-width="1.4" stroke-linecap="round"/>
-  <!-- Right claw tip -->
-  <circle cx="53.5" cy="42" r="1" fill="#58a6ff" opacity="0.8"/>
-
-  <!-- Tiny star on hat top -->
-  <polygon points="32,10 32.9,12.8 35.9,12.8 33.5,14.5 34.4,17.3 32,15.6 29.6,17.3 30.5,14.5 28.1,12.8 31.1,12.8"
-           fill="#f0c040" opacity="0.85"/>
+  <g transform="translate(512 622) scale(6)">
+    <g filter="url(#drop)">
+      <!-- antenna and lamp -->
+      <line x1="0" y1="-68" x2="0" y2="-78" stroke="#8d97a7" stroke-width="3" stroke-linecap="round"/>
+      <circle cy="-81" r="8" fill="#ff5a4e" opacity="0.55" filter="url(#lampGlow)"/>
+      <circle cy="-81" r="5" fill="url(#lampG)"/>
+      <!-- head -->
+      <rect x="-52" y="-12" width="8" height="24" rx="3" fill="url(#earG)"/>
+      <rect x="44" y="-12" width="8" height="24" rx="3" fill="url(#earG)"/>
+      <rect x="-44" y="-36" width="88" height="76" rx="14" fill="url(#bodyG)"/>
+      <rect x="-36" y="-28" width="72" height="58" rx="9" fill="url(#plateG)"/>
+      <!-- eyes and grille, glow first -->
+      <g fill="#3ce6ff" opacity="0.5" filter="url(#eyeGlow)">
+        <rect x="-26" y="-14" width="16" height="11" rx="3"/>
+        <rect x="10" y="-14" width="16" height="11" rx="3"/>
+      </g>
+      <g fill="#3ce6ff">
+        <rect x="-26" y="-14" width="16" height="11" rx="3"/>
+        <rect x="10" y="-14" width="16" height="11" rx="3"/>
+        <rect x="-24" y="13.5" width="5" height="5" rx="1.5"/>
+        <rect x="-17" y="12.5" width="5" height="7" rx="1.5"/>
+        <rect x="-10" y="11.5" width="5" height="9" rx="1.5"/>
+        <rect x="-3"  y="11"   width="5" height="10" rx="1.5"/>
+        <rect x="4"   y="11.5" width="5" height="9" rx="1.5"/>
+        <rect x="11"  y="12.5" width="5" height="7" rx="1.5"/>
+        <rect x="18"  y="13.5" width="5" height="5" rx="1.5"/>
+      </g>
+      <!-- the cap -->
+      <rect x="-46" y="-68" width="92" height="28" rx="10" fill="url(#capG)"/>
+      <rect x="-46" y="-44" width="92" height="7" rx="2" fill="url(#goldG)"/>
+      <ellipse cy="-34" rx="50" ry="5.5" fill="#0e1640"/>
+      <circle cy="-55" r="7" fill="url(#goldG)"/>
+      <circle cy="-55" r="4" fill="#182357"/>
+      <circle cy="-55" r="1.6" fill="#f3cf6a"/>
+    </g>
+  </g>
 </svg>

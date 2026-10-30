@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240"
+     style="--body:#96a0af; --plate:#1e2430; --eye:#3ce6ff; --gold:#dfa93f; --goldD:#a8741d; --goldS:#dfa93f;
+  --navy:#182357; --navyD:#0e1640; --white:#f1f5f9; --coral:#e8574c; --lamp:#ff4646; --cyan:#22d3ee;
+  --line:none; --sw:0; --wire:#96a0af; --shade:1; --inkonly:0; --ringP:#dfa93f; --ringD:#a8741d; --paper:#ecebe3; --ink:#111;">
+  <!-- Captain Bot, "beacon-buoy" (colour). Drawn from the firmware Bot character (face.cpp drawBot)
+       in its own units; see build_support/brand/bot/README.md. -->
+  <style>
+.body  { fill: var(--body);  stroke: var(--line); stroke-width: var(--sw); }
+.plate { fill: var(--plate); }
+.eye   { fill: var(--eye); }
+.gold  { fill: var(--gold);  stroke: var(--line); stroke-width: var(--sw); }
+.goldD { fill: var(--goldD); }
+.navy  { fill: var(--navy);  stroke: var(--line); stroke-width: var(--sw); }
+.navyD { fill: var(--navyD); }
+.white { fill: var(--white); stroke: var(--line); stroke-width: var(--sw); }
+.coral { fill: var(--coral); stroke: var(--line); stroke-width: var(--sw); }
+.lamp  { fill: var(--lamp); }
+.wire  { stroke: var(--wire); stroke-width: 3; fill: none; stroke-linecap: round; }
+.wave  { stroke: var(--cyan); stroke-width: 4; fill: none; stroke-linecap: round; }
+.ray   { stroke: var(--goldS); stroke-width: 3; fill: none; stroke-linecap: round; }
+.ringD { stroke: var(--ringD); fill: none; }
+.ringP { stroke: var(--ringP); fill: none; }
+.ringI { stroke: var(--goldS); fill: none; }
+.spoke { stroke: var(--navy); stroke-width: 6; fill: none; stroke-linecap: round; }
+.hose  { stroke: var(--navy); stroke-width: 5; fill: none; stroke-linecap: round; }
+.shade { opacity: var(--shade); }
+.inkonly { opacity: var(--inkonly); }
+  </style>
+  <defs>
+    <g id="faceparts">
+      <rect class="eye" x="-26" y="-14" width="16" height="11" rx="3"/>
+      <rect class="eye" x="10" y="-14" width="16" height="11" rx="3"/>
+      <g class="eye">
+        <rect x="-24" y="13.5" width="5" height="5" rx="1.5"/>
+        <rect x="-17" y="12.5" width="5" height="7" rx="1.5"/>
+        <rect x="-10" y="11.5" width="5" height="9" rx="1.5"/>
+        <rect x="-3"  y="11"   width="5" height="10" rx="1.5"/>
+        <rect x="4"   y="11.5" width="5" height="9" rx="1.5"/>
+        <rect x="11"  y="12.5" width="5" height="7" rx="1.5"/>
+        <rect x="18"  y="13.5" width="5" height="5" rx="1.5"/>
+      </g>
+    </g>
+    <g id="face">
+      <rect class="plate" x="-36" y="-28" width="72" height="58" rx="9"/>
+      <use href="#faceparts"/>
+    </g>
+    <g id="head">
+      <rect class="body" x="-52" y="-12" width="8" height="24" rx="3"/>
+      <rect class="body" x="44" y="-12" width="8" height="24" rx="3"/>
+      <rect class="body" x="-44" y="-36" width="88" height="76" rx="14"/>
+      <use href="#face"/>
+    </g>
+    <g id="d-buoy">
+      <clipPath id="buoyClip"><path d="M-28 42H28L36 84H-36Z"/></clipPath>
+      <circle class="shade" cy="-50" r="13" fill="#ff4646" opacity=".22"/>
+      <line class="ray" x1="0" y1="-67" x2="0" y2="-61"/>
+      <line class="ray" x1="-13" y1="-62" x2="-9" y2="-58"/>
+      <line class="ray" x1="13" y1="-62" x2="9" y2="-58"/>
+      <line class="ray" x1="-18" y1="-50" x2="-12" y2="-50"/>
+      <line class="ray" x1="18" y1="-50" x2="12" y2="-50"/>
+      <line class="wire" x1="0" y1="-46" x2="0" y2="-36"/>
+      <circle class="lamp" cy="-50" r="6.5"/>
+      <rect class="plate" x="-9" y="34" width="18" height="12"/>
+      <g clip-path="url(#buoyClip)">
+        <rect class="coral" x="-40" y="42" width="80" height="14"/>
+        <rect class="white" x="-40" y="56" width="80" height="14"/>
+        <rect class="coral" x="-40" y="70" width="80" height="14"/>
+      </g>
+      <path class="inkonly" d="M-28 42H28L36 84H-36Z" fill="none" stroke="var(--ink)" stroke-width="2.4"/>
+      <use href="#head"/>
+      <path class="wave" d="M-80 78q10 -9 20 0t20 0t20 0t20 0t20 0t20 0t20 0t20 0"/>
+      <path class="wave" d="M-70 90q10 -9 20 0t20 0t20 0t20 0t20 0t20 0t20 0"/>
+    </g>
+  </defs>
+  <use href="#d-buoy" transform="translate(120 104) scale(1.3)"/>
+</svg>
