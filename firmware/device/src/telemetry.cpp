@@ -7,6 +7,7 @@
 #include <time.h>
 
 #include "board.h"
+#include "hw.h"
 
 namespace telemetry {
 
@@ -77,13 +78,41 @@ bool lowered() {
   return l;
 }
 
-// ── room climate (PaperColor: SHT40) ─────────────────────────────────
+// ── room climate (PaperColor: SHT40; Waveshare 1.54": SHTC3) ─────────────────────────────────
 
 static constexpr uint8_t kSht40 = 0x44;
 static bool haveClimate = board::kHasClimate;
 static float lastT = NAN, lastRh = NAN;
 static uint32_t climateAt = 0;
 
+#if defined(BOARD_EPAPER154)
+static constexpr uint8_t kShtc3 = 0x70;
+
+static bool shtc3Command(uint16_t command) {
+  const uint8_t bytes[2] = {(uint8_t)(command >> 8), (uint8_t)command};
+  if (!M5.In_I2C.start(kShtc3, false, 400000)) return false;
+  const bool ok = M5.In_I2C.write(bytes, 2);
+  M5.In_I2C.stop();
+  return ok;
+}
+
+static bool readSht40(float* t, float* rh) {
+  if (!shtc3Command(0x3517)) return false;  // wake up
+  delay(1);
+  if (!shtc3Command(0x7866)) return false;  // measure, temperature first (~12 ms)
+  delay(15);
+  uint8_t buf[6];
+  if (!M5.In_I2C.start(kShtc3, true, 400000)) return false;
+  const bool ok = M5.In_I2C.read(buf, 6);
+  M5.In_I2C.stop();
+  shtc3Command(0xB098);  // back to sleep
+  if (!ok) return false;
+  const uint16_t rawT = (buf[0] << 8) | buf[1], rawH = (buf[3] << 8) | buf[4];
+  *t = -45.0f + 175.0f * rawT / 65536.0f;
+  *rh = constrain(100.0f * rawH / 65536.0f, 0.0f, 100.0f);
+  return true;
+}
+#else
 static bool readSht40(float* t, float* rh) {
   uint8_t cmd = 0xFD;  // measure, high precision (~8.3 ms)
   uint8_t buf[6];
@@ -100,6 +129,7 @@ static bool readSht40(float* t, float* rh) {
   *rh = constrain(-6.0f + 125.0f * rawH / 65535.0f, 0.0f, 100.0f);
   return true;
 }
+#endif
 
 bool climate(float* tempC, float* humidity) {
   if (!haveClimate) return false;
@@ -128,15 +158,21 @@ bool clockSet() { return time(nullptr) > kSane; }
 // ── battery ──────────────────────────────────────────────────────────
 
 bool onUsbPower() {
+#if defined(BOARD_EPAPER154)
+  return hw::onUsbPower();
+#endif
   int vbus = M5.Power.getVBUSVoltage();
   if (vbus > 0) return vbus > 4000;
-  return M5.Power.isCharging() == m5::Power_Class::is_charging || M5.Power.getBatteryLevel() >= 99;
+  return hw::charging() || hw::batteryLevel() >= 99;
 }
 
 // ── public ───────────────────────────────────────────────────────────
 
 void begin() {
   haveImu = M5.Imu.isEnabled();
+#if defined(BOARD_EPAPER154)
+  hw::clockFromRtc();
+#else
   if (M5.Rtc.isEnabled()) {
     m5::rtc_datetime_t dt;
     // An RTC that kept time (set from NTP on an earlier boot) gives the clock
@@ -152,6 +188,7 @@ void begin() {
       tzset();
     }
   }
+#endif
   sntp_set_time_sync_notification_cb(onNtpSync);
   if (haveClimate) {
     float t, rh;
@@ -171,22 +208,26 @@ void poll() {
   }
   if (ntpSynced) {  // keep the RTC (UTC) in step, from the main loop's I2C
     ntpSynced = false;
+#if defined(BOARD_EPAPER154)
+    hw::clockToRtc();
+#else
     if (M5.Rtc.isEnabled()) {
       time_t now = time(nullptr);
       struct tm utc;
       gmtime_r(&now, &utc);
       M5.Rtc.setDateTime(&utc);
     }
+#endif
   }
 }
 
 void fill(JsonObject ctx) {
   JsonObject bat = ctx["battery"].to<JsonObject>();
-  int pct = M5.Power.getBatteryLevel();
+  int pct = hw::batteryLevel();
   if (pct >= 0) bat["percent"] = pct;
-  int mv = M5.Power.getBatteryVoltage();
+  int mv = hw::batteryMv();
   if (mv > 0) bat["mv"] = mv;
-  bat["charging"] = M5.Power.isCharging() == m5::Power_Class::is_charging;
+  bat["charging"] = hw::charging();
   bat["usb"] = onUsbPower();
 
   if (WiFi.status() == WL_CONNECTED) {

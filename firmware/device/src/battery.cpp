@@ -3,6 +3,7 @@
 #include <M5Unified.h>
 #include <time.h>
 
+#include "hw.h"
 #include "telemetry.h"
 
 namespace battery {
@@ -17,13 +18,13 @@ RTC_DATA_ATTR static Sample ring[kKeep];
 RTC_DATA_ATTR static uint8_t ringN = 0;
 static uint32_t lastPollMs = 0;
 
-bool charging() { return M5.Power.isCharging() == m5::Power_Class::is_charging; }
+bool charging() { return hw::charging(); }
 
 void begin() { lastPollMs = 0; }
 
 void sample() {
   if (!telemetry::clockSet()) return;  // no clock yet: a sample would have no time
-  const int pct = M5.Power.getBatteryLevel();
+  const int pct = hw::batteryLevel();
   if (pct < 0) return;
   const uint32_t now = (uint32_t)time(nullptr);
   const uint8_t chg = charging() ? 1 : 0;
@@ -58,13 +59,13 @@ int minutesLeft() {
   if (charging()) return -1;
   const float r = ratePerHour();
   if (r >= 0) return -1;
-  const int pct = M5.Power.getBatteryLevel();
+  const int pct = hw::batteryLevel();
   return (int)min(60.0f * 24 * 30, pct / -r * 60);
 }
 
 int minutesToFull() {
   if (!charging()) return -1;
-  const int pct = M5.Power.getBatteryLevel();
+  const int pct = hw::batteryLevel();
   if (pct >= 97) return 0;
   const float r = ratePerHour();
   if (r <= 0) return -1;

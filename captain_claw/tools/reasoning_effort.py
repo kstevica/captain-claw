@@ -182,7 +182,8 @@ class ReasoningEffortTool(Tool):
                                "message came from: 'web' (the chat box), 'default' (every source "
                                "without a level of its own), or a source — whatsapp, telegram, "
                                "messenger, discord, app, glasses, device:sticks3, "
-                               "device:stopwatch, device:papercolor, scheduled, flow, agent, "
+                               "device:stopwatch, device:papercolor, device:epaper154, "
+                               "device:epaper154_touch, scheduled, flow, agent, "
                                "autonomy, api, link, member, public.",
             },
         },

@@ -364,7 +364,8 @@ def voice_name(choice: str) -> str:
 
 
 _DEVICE_MODELS = {"sticks3": "M5Stack StickS3", "stopwatch": "M5Stack StopWatch",
-                  "papercolor": "M5Stack PaperColor"}
+                  "papercolor": "M5Stack PaperColor", "epaper154": "Waveshare ePaper 1.54",
+                  "epaper154_touch": "Waveshare Touch ePaper 1.54"}
 _CTX_TEXT = re.compile(r"[^\w .,:+\-/()'’@#&°%]")
 
 
@@ -454,7 +455,7 @@ def _int_param(value: str, default: int, lo: int, hi: int) -> int:
 
 def _picture_options(q) -> dict:
     """How pictures are made for a device, from its query (sw, sh, round,
-    img, paper); with none of them, the StickS3's 240×135 in one frame."""
+    img, paper, mono); with none of them, the StickS3's 240×135 in one frame."""
     opts = {
         "screen": (_int_param(q.get("sw", ""), 240, 32, 800), _int_param(q.get("sh", ""), 135, 32, 800)),
         "round_screen": q.get("round", "") in ("1", "true", "on"),
@@ -462,6 +463,8 @@ def _picture_options(q) -> dict:
     }
     if q.get("paper", "") in ("1", "true", "on"):
         opts["paper"] = True
+    if q.get("mono", "") in ("1", "true", "on"):
+        opts["mono"] = True
     return opts
 
 
@@ -516,7 +519,8 @@ class _DeviceConn(BusClient):
     def __init__(self, ws: WebSocket, user: dict, device_id: str, *, lang: str,
                  speak: bool, screen: tuple[int, int], voice: str = "",
                  round_screen: bool = False, chunked: bool = False,
-                 paper: bool = False, hw: str = "", fw: str = "", sound_cmds: bool = False) -> None:
+                 paper: bool = False, mono: bool = False, hw: str = "", fw: str = "",
+                 sound_cmds: bool = False) -> None:
         super().__init__(ws, user)
         self.hw = hw  # device kind + firmware version, for over-the-air updates
         self.fw = fw
@@ -529,6 +533,7 @@ class _DeviceConn(BusClient):
         self.round_screen = round_screen  # pictures fit inside the circle
         self.chunked = chunked            # pictures may span several frames
         self.paper = paper                # colour e-paper: pictures at their own shape
+        self.mono = mono                  # small black-and-white e-paper: the same pictures, its own fonts
         self._image_lock = asyncio.Lock()  # one picture's parts at a time
         self.bg_id: str | None = None  # the background it has ("" none); None: it can't show one
         # The answer as the model writes it (agent_delta): shown as it grows
@@ -719,6 +724,8 @@ class _DeviceConn(BusClient):
         if self.paper:
             screen = (f"4-inch colour e-paper ({w}×{h} px; it takes about 20 s to redraw, "
                       "so your reply is heard first and stays readable on it after)")
+        elif self.mono:
+            screen = f"1.54-inch black-and-white e-paper ({w}×{h} px)"
         elif self.round_screen:
             screen = f"small round {min(w, h)} px"
         else:
@@ -894,9 +901,9 @@ class _DeviceConn(BusClient):
             w, h = self.screen
             max_bytes = MAX_CHUNKED_JPEG_BYTES if self.chunked else MAX_JPEG_BYTES
             jpeg = await asyncio.to_thread(fit_jpeg, blob, w, h, max_bytes=max_bytes,
-                                           round_screen=self.round_screen, paper=self.paper)
+                                           round_screen=self.round_screen, paper=self.paper or self.mono)
             frames = jpeg_frames(jpeg) if self.chunked else [(BIN_JPEG, jpeg)]
-            if self.paper or self.round_screen:  # its own shape: say which
+            if self.paper or self.mono or self.round_screen:  # its own shape: say which
                 from PIL import Image
 
                 w, h = Image.open(io.BytesIO(jpeg)).size

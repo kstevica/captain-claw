@@ -3,6 +3,8 @@
 //   ui_round.cpp  StopWatch: 466×466 round AMOLED, smooth Inter fonts
 //   ui_paper.cpp  PaperColor: 400×600 colour e-paper, Inter; slow to redraw, so
 //                 show…() only asks for a screen and tick() draws it once settled
+//   ui_epaper154.cpp  Waveshare 1.54": 200×200 black-and-white e-paper, efont; a
+//                 background task refreshes only what changed
 // All draw into an off-screen canvas and push it whole (no flicker).
 //
 // Colours are RGB565 (uint16_t) throughout — M5GFX reads a uint32_t colour
@@ -201,6 +203,12 @@ void linksChanged();
 void hold(bool recording);
 // Where the notes are kept changed (a microSD card put in or taken out).
 void notesChanged();
+#endif
+
+#if defined(BOARD_EPAPER154)
+// The panel's controller to sleep, before the device's deep sleep (the
+// picture stays; ui_epaper154.cpp keeps it, for the next refresh to start from).
+void panelSleep();
 #endif
 
 // How many proposals wait in Flight Deck, as last heard (0: none): a magenta

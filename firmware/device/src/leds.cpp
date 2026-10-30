@@ -13,9 +13,21 @@ namespace leds {
 // ESP-IDF 5 (its RMT v1 path is empty), so they're driven here with the
 // Arduino core's RMT, the way its neopixelWrite() does it: 100 ns ticks,
 // 24 bits per LED, green-red-blue.
+//
+// The Waveshare 1.54" board has one green LED instead, on or off: whatever the
+// left light would show at a quarter of full strength or more lights it, so it
+// blinks with the recording, the steps of the work and the voice.
 static rmt_obj_t* rmt = nullptr;
+static bool ready = false;
+static uint8_t maxBright = 48;
 
 static void write(uint32_t a, uint32_t b) {
+#if defined(BOARD_EPAPER154)
+  (void)b;
+  const uint8_t strongest = max((a >> 16) & 0xFF, max((a >> 8) & 0xFF, a & 0xFF));
+  digitalWrite(board::kMonoLed, strongest >= max<uint8_t>(1, maxBright / 4) ? LOW : HIGH);
+  return;
+#endif
   if (!rmt) return;
   rmt_data_t bits[48];
   int i = 0;
@@ -35,7 +47,6 @@ static void write(uint32_t a, uint32_t b) {
 static State state = State::Off;
 static int level = 0;
 static uint32_t recMs = 0;  // State::Listening: how long the recording has been going
-static uint8_t maxBright = 48;
 static uint32_t flashUntil = 0, alertUntil = 0, notifyUntil = 0, actionUntil = 0, lastMs = 0;
 static bool waitingOn = false;  // proposals wait in Flight Deck
 static Step lastStep = Step::Narration;
@@ -47,9 +58,16 @@ static uint32_t lastColor[2] = {1, 1};  // what the lights show (forces the firs
 
 void begin() {
   if (!board::kHasLeds) return;
+#if defined(BOARD_EPAPER154)
+  pinMode(board::kMonoLed, OUTPUT);
+  digitalWrite(board::kMonoLed, HIGH);
+  ready = true;
+#else
   int pin = M5.getPin(m5::pin_name_t::rgb_led);
   if (pin >= 0 && (rmt = rmtInit(pin, RMT_TX_MODE, RMT_MEM_64)) != nullptr) rmtSetTick(rmt, 100);
   Serial.printf("[claw] status lights on G%d: %s\n", pin, rmt ? "ready" : "no driver");
+  ready = rmt != nullptr;
+#endif
   off();
 }
 
@@ -134,13 +152,13 @@ static void show(uint32_t a, uint32_t b) {
 }
 
 void off() {
-  if (!rmt) return;
+  if (!ready) return;
   lastColor[0] = lastColor[1] = 1;
   show(0, 0);
 }
 
 void tick() {
-  if (!rmt) return;
+  if (!ready) return;
   const uint32_t now = millis();
   if (now - lastMs < 33) return;
   lastMs = now;
