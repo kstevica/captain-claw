@@ -114,17 +114,17 @@ void talkStart() {
   if (micOn) return;
   playStop();
   if (!M5.Speaker.isEnabled()) M5.Speaker.begin();
-  M5.Speaker.tone(1760, 70, 1, true);  // A6
+  M5.Speaker.tone(1760, board::kTalkStartCueMs, 1, true);  // A6
   // The blip first; the mic (which takes the codec, ending the speaker) only
-  // 0.25 s after it began. A fixed wait: right after tone() the speaker can
-  // still report nothing playing, and waiting on that ended the blip unheard.
-  delay(250);
+  // once it's over. A fixed wait: right after tone() the speaker can still
+  // report nothing playing, and waiting on that ended the blip unheard.
+  delay(board::kTalkMicAfterMs);
 }
 
 void talkEnd() {
   if (micOn || streamOpen) return;
   if (!M5.Speaker.isEnabled()) M5.Speaker.begin();
-  M5.Speaker.tone(880, 80, 1, true);  // A5
+  M5.Speaker.tone(880, board::kTalkEndCueMs, 1, true);  // A5
 }
 
 void click(bool low) {

@@ -53,7 +53,7 @@
 #if defined(PAPER_B)
 #define FW_VERSION "1.0.22"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.19.8"
+#define FW_VERSION "0.19.9"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -235,6 +235,8 @@ static bool prerollEndSounded = false;  // its "let go" blip has played
 // the talk button toggles, by a press of it), so it ends with a second tap
 // or press, not by letting go of a button.
 static volatile bool tapRec = false;
+static volatile uint32_t talkPressMs = 0;  // when the talk button last went down (the sampler)
+static uint32_t endCueAtMs = 0;            // when the end-of-recording blip is due (0 = none)
 static volatile bool talkWasDown = true;  // the button sampler's last look at the talk button
 
 // Voice notes kept offline are asked about once the deck is back (aloud and
@@ -1299,7 +1301,13 @@ static void startTalking() {
   flashing = false;
   quietSpeech = false;
   ui::setQuestion("");
-  if (settings.talkSounds) audio::talkStart();  // the blip, then (0.25 s on) the mic listens
+  const uint32_t cueAt = millis();
+  if (settings.talkSounds) audio::talkStart();  // the blip, then the mic listens
+  // A second press in a wait this long is a double press: the last answer again.
+  if (settings.talkSounds && board::kTalkMicAfterMs >= 500 && (int32_t)(talkPressMs - cueAt) > 100) {
+    if (canReplay()) replayAnswer();
+    return;
+  }
   audio::micStart();  // also stops any playback
   JsonDocument d;
   d["type"] = "rec_start";
@@ -1325,12 +1333,23 @@ static void sendRecEnd() {
   sendJson(d);
 }
 
+// The blip that says a recording ended, as soon as the board can be sure to play it.
+static void talkEndCue() {
+  if (!settings.talkSounds) return;
+  if (board::kTalkEndAfterMs) {
+    endCueAtMs = millis() + board::kTalkEndAfterMs;
+    if (!endCueAtMs) endCueAtMs = 1;
+  } else {
+    audio::talkEnd();
+  }
+}
+
 static void stopTalking(bool send) {
   tapRec = false;
   audio::micStop(send ? micSink : [](const int16_t*, size_t) {});
   if (send) sendRecEnd();
   else sendType("rec_cancel");
-  if (send && settings.talkSounds) audio::talkEnd();  // not for a tap: nothing was sent
+  if (send) talkEndCue();  // not for a tap: nothing was sent
   if (send) {
     heard = "";
     statusLine = "Transcribing…";
@@ -1447,7 +1466,7 @@ static void startNote() {
   }
   flashing = false;
   ui::setQuestion("");
-  if (settings.talkSounds) audio::talkStart();  // the blip, then (0.25 s on) the mic listens
+  if (settings.talkSounds) audio::talkStart();  // the blip, then the mic listens
   audio::micStart();
   noteRec = true;
   recStartMs = millis();
@@ -1466,7 +1485,7 @@ static void finishNote(bool keep) {
     backToMain();
     return;
   }
-  if (settings.talkSounds) audio::talkEnd();
+  talkEndCue();
   notesDeclined = -1;
   if (!board::kPaperB) {
     String waiting = notes::count() > 1 ? String(notes::count()) + " notes waiting" : String("1 note waiting");
@@ -1589,7 +1608,7 @@ static void prerollEndSound() {
   if (prerollEndSounded) return;
   prerollEndSounded = true;
   M5.Mic.end();
-  if (settings.talkSounds) audio::talkEnd();
+  talkEndCue();
 }
 
 // From loop(): once the deck is reached, what was said goes up — and the
@@ -2681,6 +2700,7 @@ static void handleIdlePower() {
 // for Wi-Fi.
 static void sampleButtons(void*) {
   bool talk = gpio_get_level(board::kTalkPin) == 0;
+  if (talk && !talkWasDown) talkPressMs = millis();
   if (talk || gpio_get_level(board::kSidePin) == 0 || (board::kBackPin >= 0 && gpio_get_level(board::kBackPin) == 0)) {
     buttonSeenMs = millis();
   }
@@ -3821,6 +3841,10 @@ void loop() {
     const uint8_t more = buzzMore - 1;
     buzz(buzzOnMs);  // (clears the pattern: set it again)
     buzzMore = more;
+  }
+  if (endCueAtMs && (int32_t)(millis() - endCueAtMs) >= 0) {
+    endCueAtMs = 0;
+    audio::talkEnd();  // (not over a new recording, or an answer already speaking)
   }
   if (pendingTapMs && millis() - pendingTapMs > kDoubleMs + 100) {
     pendingTapMs = 0;
