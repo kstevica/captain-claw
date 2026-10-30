@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { GitMerge, Loader2, Search, Split, Undo2, X } from 'lucide-react'
 import { taskboardApi, type TaskItem } from '../../services/taskboardApi'
-import { FoldHighlight, LaneChip, TaskIcon } from './taskboardParts'
+import { LaneChip, TaskIcon, TaskText } from './taskboardParts'
 import { agoRelative, foldText } from './taskboardText'
 
 // Threads (v2): one piece of work that came in twice — the same request on
@@ -261,7 +261,7 @@ export function MergePicker({ task, phone, covered, onPick, onClose }: {
                 >
                   {busy === t.id ? <Loader2 className="h-4 w-4 shrink-0 animate-spin text-zinc-500" /> : <TaskIcon task={t} />}
                   <span className="min-w-0 flex-1">
-                    <span className="block truncate text-sm text-zinc-200"><FoldHighlight text={untitled(t)} terms={terms} /></span>
+                    <span className="block truncate text-sm text-zinc-200"><TaskText text={untitled(t)} terms={terms} /></span>
                     <span className="block truncate text-[11px] text-zinc-500">
                       {[t.agent_name || t.agent_slug, agoRelative(t.last_event_at ?? t.created_at)].filter(Boolean).join(' · ')}
                     </span>

@@ -389,6 +389,87 @@ export function stepTo(ids: string[], openId: string | null, last: number, step:
   return to >= ids.length || to < 0 ? -1 : to
 }
 
+// ── Markdown in what a task says ──────────────────────────────────────
+
+/** A run of text and how it is marked. */
+export interface TextPiece { text: string; bold?: boolean; italic?: boolean; code?: boolean; strike?: boolean }
+
+const WORD_CHAR = /[\p{L}\p{N}_]/u
+const isSpace = (ch: string | undefined) => !ch || /\s/.test(ch)
+const isWord = (ch: string | undefined) => !!ch && WORD_CHAR.test(ch)
+
+/** One line's own marks gone: a heading's hashes, a quote's bar, a rule; a list
+ *  item's marker reads as a bullet. */
+function cleanMarkdownLine(line: string): string {
+  if (/^\s*([-*_])(\s*\1){2,}\s*$/.test(line)) return ''
+  return line
+    .replace(/^\s{0,3}#{1,6}\s+/, '')
+    .replace(/^\s*>\s?/, '')
+    .replace(/^\s*[-*+]\s+/, '• ')
+    // What the board keeps of a reply has its lines run together, so these come mid-line:
+    .replace(/(^|[:.!?…]\s+)>\s+(?=[*_"“'])/g, '$1')
+    .replace(/(^|\s)#{2,6}\s+/g, '$1')
+}
+
+function inlinePieces(s: string, marks: Omit<TextPiece, 'text'>, out: TextPiece[]): void {
+  let plain = ''
+  const flush = () => { if (plain) { out.push({ text: plain, ...marks }); plain = '' } }
+  const inside = (text: string, more: Omit<TextPiece, 'text'>) => { flush(); inlinePieces(text, { ...marks, ...more }, out) }
+  for (let i = 0; i < s.length;) {
+    const ch = s[i]
+    const before = s[i - 1]
+    if (ch === '`') {
+      const end = s.indexOf('`', i + 1)
+      if (end > i + 1 && !s.slice(i, end).includes('\n')) {
+        flush()
+        out.push({ text: s.slice(i + 1, end), ...marks, code: true })
+        i = end + 1
+        continue
+      }
+    } else if (s.startsWith('**', i) || s.startsWith('~~', i)) {
+      const mark = s.slice(i, i + 2)
+      let end = s.indexOf(mark, i + 2)
+      while (end > 0 && isSpace(s[end - 1])) end = s.indexOf(mark, end + 1)
+      while (end > 0 && s[end + 2] === mark[0]) end += 1  // **a *b***: the last two close it
+      if (end > i + 2 && !isSpace(s[i + 2])) {
+        inside(s.slice(i + 2, end), mark === '**' ? { bold: true } : { strike: true })
+        i = end + 2
+        continue
+      }
+      // Clipped where the board keeps it, its other half is gone: it isn't text. 2**3 is.
+      if (mark === '**' && isSpace(before) !== isSpace(s[i + 2])) { i += 2; continue }
+    } else if ((ch === '*' || ch === '_') && !isWord(before) && before !== ch && !isSpace(s[i + 1]) && s[i + 1] !== ch) {
+      let end = s.indexOf(ch, i + 2)
+      while (end > 0 && (isSpace(s[end - 1]) || isWord(s[end + 1]) || s[end + 1] === ch)) end = s.indexOf(ch, end + 1)
+      if (end > 0 && !s.slice(i, end).includes('\n')) {
+        inside(s.slice(i + 1, end), { italic: true })
+        i = end + 1
+        continue
+      }
+    } else if (ch === '[' || (ch === '!' && s[i + 1] === '[')) {
+      // A link's or a picture's words: nothing here is followed or loaded.
+      const m = /^!?\[([^\]\n]*)\]\([^)\s]+(?:\s+"[^"\n]*")?\)/.exec(s.slice(i))
+      if (m) {
+        inside(m[1], {})
+        i += m[0].length
+        continue
+      }
+    }
+    plain += ch
+    i += 1
+  }
+  flush()
+}
+
+/** What a task says as runs of marked text, its Markdown read rather than shown:
+ *  bold, italic, code and struck through, links as their words, line marks gone.
+ *  Never HTML, and nothing is followed or loaded: it can be anyone's text. */
+export function markdownPieces(text: string): TextPiece[] {
+  const out: TextPiece[] = []
+  inlinePieces(String(text || '').split('\n').map(cleanMarkdownLine).join('\n'), {}, out)
+  return out
+}
+
 export function agoRelative(epoch: number): string {
   // fmtRelative reads the clock again, so a time clamped to "now" can still
   // come out a hair ahead of it ("in a moment"): the last 45 s are "just now".

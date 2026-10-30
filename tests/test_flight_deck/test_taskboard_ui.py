@@ -691,3 +691,73 @@ def test_moving_away_never_loses_a_split_or_the_snooze_picker():
     assert "pinned.current = splitting || snoozeOpen" in board
     assert "if (!detailHeld.current) {" in board
     assert "if (over || keysOpen) return" in board
+
+
+_MD = ["WORD_CHAR", "isSpace", "isWord", "cleanMarkdownLine", "inlinePieces", "markdownPieces"]
+
+
+def _pieces(text: str) -> list[dict]:
+    return _run([(_TEXT, _MD)], f"globalThis.out = markdownPieces({json.dumps(text)})")
+
+
+def _words(text: str) -> str:
+    return "".join(p["text"] for p in _pieces(text))
+
+
+def test_what_the_screenshots_rows_said_reads_as_text():
+    """As a reply on the board really is: its lines run together, cut off where it is kept."""
+    got = _pieces("Pročitao sam thread — **Julien ima konkretnu pritužbu.** Odgovor je: > *\"remove the stupid stars\"* Uz to")
+    assert "".join(p["text"] for p in got) == ("Pročitao sam thread — Julien ima konkretnu pritužbu. Odgovor je: "
+                                               "\"remove the stupid stars\" Uz to")
+    assert next(p for p in got if p.get("bold"))["text"] == "Julien ima konkretnu pritužbu."
+    assert next(p for p in got if p.get("italic"))["text"] == "\"remove the stupid stars\""
+
+
+def test_each_mark_reads_as_itself():
+    assert _pieces("a **b** c") == [{"text": "a "}, {"text": "b", "bold": True}, {"text": " c"}]
+    assert _pieces("*it*")[0] == {"text": "it", "italic": True}
+    assert _pieces("_it_")[0] == {"text": "it", "italic": True}
+    assert _pieces("`x_y`")[0] == {"text": "x_y", "code": True}
+    assert _pieces("~~old~~")[0] == {"text": "old", "strike": True}
+    nested = _pieces("**a *b***")
+    assert {"text": "b", "bold": True, "italic": True} in nested
+
+
+def test_text_that_only_looks_like_markdown_stays_as_it_is():
+    for text in ("snake_case_name and other_one", "2 * 3 * 4", "2**3", "a > b", "issue #12 and C# too",
+                 "__init__", "price: 5*6", "use * as a wildcard", "`not closed"):
+        assert _words(text) == text, text
+
+
+def test_a_mark_clipped_in_half_isnt_shown():
+    assert _words("Doslovno: **Roberto Kut") == "Doslovno: Roberto Kut"
+    assert _words("kraj rečenice** i dalje") == "kraj rečenice i dalje"
+
+
+def test_lines_lose_their_marks():
+    assert _words("# Title\n> quoted\n- item\n* other\n---\n1. one") == "Title\nquoted\n• item\n• other\n\n1. one"
+    assert _words("## Heading in a run of text") == "Heading in a run of text"
+    assert _words("prije ### Naslov poslije") == "prije Naslov poslije"
+
+
+def test_nothing_is_followed_or_loaded_and_html_stays_text():
+    assert _words("see [the report](https://evil.example/x) now") == "see the report now"
+    assert _words("![tracker](https://evil.example/p.gif)") == "tracker"
+    assert _words("[**bold** link](https://x.co \"t\")") == "bold link"
+    assert _words("<img src=x onerror=alert(1)>") == "<img src=x onerror=alert(1)>"
+    assert "dangerouslySetInnerHTML" not in _source(_PARTS)
+
+
+def test_the_rows_and_the_task_read_it_the_same():
+    board = _source(_BOARD)
+    for field in ("task.ask", "task.result_text", "e.summary", "shortOf.detail", "reason.more"):
+        assert f"<TaskText text={{{field}}} terms={{terms}} />" in board, field
+    assert "<FoldHighlight text={task.ask}" not in board and "<FoldHighlight text={task.result_text}" not in board
+
+
+def test_a_rows_lines_are_really_clamped():
+    """``block`` would win over the clamp's own display: a long result ran to eight lines."""
+    board = _source(_BOARD)
+    assert "mt-1 text-xs leading-relaxed text-zinc-400 ${task.result_text ? 'line-clamp-1' : 'line-clamp-2'}" in board
+    assert "mt-0.5 text-xs leading-relaxed text-zinc-500 ${task.ask ? 'line-clamp-2' : 'line-clamp-3'}" in board
+
