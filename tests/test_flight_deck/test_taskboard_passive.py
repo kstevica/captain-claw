@@ -452,9 +452,10 @@ async def test_an_email_on_a_thread_the_board_knows_lands_on_that_task(board, mo
     task = deck.board.get_task(deck.alice, request)
     assert task["title"] == "Ask Ana for the invoice"
     assert [e["kind"] for e in _events(deck, deck.alice, request)] == ["received", "received"]
-    # Someone writing on a done request: triage asks whether it opens it again.
+    # Someone writing on a done request: the same task is back, and triage reads what they wrote.
     flags = taskboard_passive._json(task["flags"], {})
-    assert flags.get("new_since_done") is True and task["triage_state"] == "pending"
+    assert flags.get("came_back") is True and task["triage_state"] == "pending"
+    assert (task["status"], task["owes_next"]) == ("open", "me")
     assert len(_all(deck, deck.alice)) == 1
 
 

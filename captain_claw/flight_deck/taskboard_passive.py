@@ -37,10 +37,13 @@ inbox — and only theirs — from a cursor of its own, never waking an agent:
   own, done (recorded evidence). What an agent sent from the user's account
   is its turn's (the tool call has it), never the user's own words;
 * a conversation is one task while it goes on: a chat's messages within 12
-  hours of each other, an email thread's while its task is open; after
-  that, the next message is a task of its own. An email thread the board
-  already knows from another source (an agent mailed it, an auto-reply held
-  it) gets the message on that task.
+  hours of each other, an email thread's as long as it has one. A reply on
+  a conversation the board closed brings its task back
+  (``taskboard_ingest.reply_brings_back``); after that gap, dismissed, or on
+  what was only sent (the user's or an agent's closed ``sent`` record), the
+  next message is a task of its own. An email thread the board already knows
+  from another source (an agent mailed it from a chat, an auto-reply held it)
+  gets the message on that task.
 
 Text is cut (the ask ≤ 600, an event ≤ 500) and kept no longer than the
 inbox keeps it: every task and event made from an inbox carries
@@ -449,6 +452,18 @@ def _live(task: dict, key: str, at: float) -> bool:
     return task["status"] in ("open", "maybe", "not_task") and (key == "gmail" or _recent(task, at))
 
 
+def _answers_closed(task: dict, key: str, at: float, effect: str) -> bool:
+    """A message that answers a conversation the board closed (not one a mute
+    rule keeps quiet, nor history dated long before the close): it goes on the
+    same task, which comes back (``taskboard_ingest.reply_brings_back``). What
+    the user or an agent only sent has no task to come back to: a reply to it
+    is a message of its own, for Jev to read."""
+    from captain_claw.flight_deck import taskboard_ingest
+
+    return (effect != "mute" and task["kind"] == "message" and task["status"] in ("done", "failed")
+            and (key == "gmail" or _recent(task, at)) and taskboard_ingest.is_news(task, at))
+
+
 def _requeue(task: dict, now: float) -> dict | None:
     """The patch that puts a task back in triage's queue for a new message:
     an inbox's (undecided, open or judged not a task), or a person's request
@@ -500,14 +515,15 @@ def _sent_task(key: str, m: _Msg, me: str) -> tuple[dict, dict]:
 
 
 def _put(p: _Pass, uid: str, key: str, m: _Msg, *, event: dict, create: dict | None = None,
-         patch: dict | None = None, parties: list[dict] | None = None, release: bool = False) -> tuple[str | None, bool]:
+         patch: dict | None = None, parties: list[dict] | None = None, release: bool = False,
+         quiet: bool = False) -> tuple[str | None, bool]:
     """Write one message the way every sweep adapter writes (``_Pass.ingest``),
-    marked as the inbox's."""
+    marked as the inbox's. *quiet*: a mute rule keeps it from bringing its task back."""
     source, keys = SOURCE[key], [m.conv]
 
     def write() -> tuple[str | None, bool]:
         return p.ingest(source, uid, keys=keys, event=event, create=create, patch=patch,
-                        parties=[x for x in parties or [] if x], extra_keys=m.extra_keys)
+                        parties=[x for x in parties or [] if x], extra_keys=m.extra_keys, quiet=quiet)
 
     return p.store.passive_write(uid, source, keys, write, release=release, retention_until=m.until)
 
@@ -542,8 +558,9 @@ def _take(p: _Pass, uid: str, key: str, msgs: list[_Msg]) -> None:
         if m.outgoing and task is not None and (key == "gmail" or _recent(task, m.at)):
             # The user answered in the conversation: the next move is theirs to wait for.
             patch = _requeue(task, now)
-            if ours and task["kind"] == "message" and task["status"] == "open" and task["owes_next"] == "me":
-                patch = {**(patch or {}), "owes_next": "them"}
+            back = bool(_json(task.get("flags"), {}).get("came_back"))
+            if (back or (ours and task["kind"] == "message")) and task["status"] == "open" and task["owes_next"] == "me":
+                patch = {**(patch or {}), "owes_next": "them", **({"flags": {"came_back": False}} if back else {})}
             _, new = _put(p, uid, key, m, event=_event(key, m, me), patch=patch,
                           parties=_not_on(store, uid, task["id"], everyone))
             queued |= bool(new and patch and "triage_state" in patch)
@@ -553,10 +570,11 @@ def _take(p: _Pass, uid: str, key: str, msgs: list[_Msg]) -> None:
             create, patch = _sent_task(key, m, me)
             _put(p, uid, key, m, event=_event(key, m, me), create=create, patch=patch, parties=everyone,
                  release=task is not None)
-        elif task is not None and ((not ours and key == "gmail") or _live(task, key, m.at)):
+        elif task is not None and ((not ours and key == "gmail" and task["kind"] != "sent") or _live(task, key, m.at)
+                                   or _answers_closed(task, key, m.at, effect)):
             patch = _requeue(task, now)
             _, new = _put(p, uid, key, m, event=_event(key, m, me), patch=patch,
-                          parties=_not_on(store, uid, task["id"], everyone))
+                          parties=_not_on(store, uid, task["id"], everyone), quiet=effect == "mute")
             queued |= bool(new and patch)
         else:
             _, new = _put(p, uid, key, m, event=_event(key, m, me), create=_message_task(key, m, effect, now),

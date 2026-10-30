@@ -386,6 +386,13 @@ def _not_done_move(f: dict) -> tuple[dict, list[str]]:
     return fields, [_end(f"The agent {what}" + (f": {f['blocker']}" if f["blocker"] else ""))]
 
 
+def _came_back(task: dict) -> bool:
+    """Someone's reply brought it back to Needs me (``TaskboardStore.reply_came_back``)
+    and the user hasn't seen to it yet: there it stays, whatever is read of it."""
+    return (bool(_loads(task.get("flags"), {}).get("came_back")) and task["status"] == "open"
+            and task["owes_next"] == "me")
+
+
 def rule_moves(task: dict, f: dict) -> tuple[dict, list[str]]:
     """The moves rules make without Jev: an admitted human turn is open; one
     answered on the user's own chat with no failed tool call is done
@@ -408,6 +415,8 @@ def rule_moves(task: dict, f: dict) -> tuple[dict, list[str]]:
     locked = "status" in _locks(task)
     # Rules fail someone's message closed — not one Jev has said asks nothing, with nothing come in since.
     unread = f["third_party"] and (bool(f["unread"]) or _loads(task.get("flags"), {}).get("contains_instructions") is not False)
+    if _came_back(task):
+        return ({"flags": {"contains_instructions": True}} if unread else {}), []
     if task["kind"] == "sent":
         if f["sends"] and task["status"] == "open" and not locked and not f.get("other_work"):
             return _close("done", "evidence", "", "success"), ["A send was recorded, so it is done."]
@@ -514,15 +523,17 @@ def _answered_moves(task: dict, f: dict, ans: dict, *, auto_close: bool) -> tupl
     allows: a failed turn fails it whatever Jev says, a turn still running is
     never closed, a closed task opens again only when something new came in
     that Jev says asks for more, and a status the user set is never moved
-    (Jev may still say who moves next, and that it looks done)."""
-    locked = "status" in _locks(task)
+    (Jev may still say who moves next, and that it looks done). What a reply
+    brought back stays with the user: Jev may only say that it looks done."""
+    back = _came_back(task)
+    locked = back or "status" in _locks(task)
     fields: dict[str, Any] = {}
     flags: dict[str, Any] = {}
     lead: list[str] = []
     notes: list[str] = []
     status = task["status"]
     p_task = _p(ans, "is_task")
-    declined = (f["outcome"] == "ok" and f["own_chat"] and not f.get("failed_calls")
+    declined = (not back and f["outcome"] == "ok" and f["own_chat"] and not f.get("failed_calls")
                 and f.get("answered") in ("partly", "no"))
     # The user handed it to an agent: they said it is a task, whatever Jev's doubt.
     theirs = declined or bool(f.get("handed"))
@@ -576,7 +587,7 @@ def _answered_moves(task: dict, f: dict, ans: dict, *, auto_close: bool) -> tupl
     if status != "open":
         return ({**fields, "flags": flags} if flags else fields), lead + notes
     owes, conf = _choice(ans, "owes_next")
-    if owes in _NEXT and conf >= CONFIDENT:
+    if owes in _NEXT and conf >= CONFIDENT and not back:
         fields["owes_next"] = owes
         notes.append(f"Jev says {_NEXT[owes]} ({_pct(conf)}).")
     elif locked and f["outcome"] and task["owes_next"] == "agent":
@@ -1496,6 +1507,8 @@ def why_summary(task: dict, decisions: list[dict], *, unread: bool = False) -> s
         what = "could not do it" if declined else "did only part of it"
         say(_end(f"It waits on you — the agent {what}" + (f": {blocker}" if blocker else "")),
             "declined" if declined else "partly", "owes:me", plain=False)
+    elif status == "open" and owes == "me" and flags.get("came_back"):
+        say("A new reply came in, so it came back to you.", "came_back", "owes:me", plain=False)
     elif status == "open" and owes in OWES_LABELS:
         say({"me": "It waits on you.", "agent": "Your agent is working on it.",
              "them": "It waits on someone else.", "nobody": "Nothing is left for anyone to do.",

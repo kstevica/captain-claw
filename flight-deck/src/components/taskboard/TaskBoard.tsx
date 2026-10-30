@@ -154,6 +154,7 @@ function needsReason(t: TaskItem): { text: string; more: string } | null {
   const note = taskNotes(t).find((n) => n.id !== 'new_since_done')
   if (note) return say(note.label, note.detail)
   if (t.flags?.probably_done) return say('Probably done?')
+  if (t.flags?.came_back && t.owes_next === 'me') return say('New reply')
   if (t.flags?.overdue) return say('Overdue')
   if (t.owes_next === 'me') return say('Your move')
   return t.due_at && t.due_at <= Date.now() / 1000 ? say('Due now') : null
