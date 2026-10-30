@@ -761,3 +761,21 @@ def test_a_rows_lines_are_really_clamped():
     assert "mt-1 text-xs leading-relaxed text-zinc-400 ${task.result_text ? 'line-clamp-1' : 'line-clamp-2'}" in board
     assert "mt-0.5 text-xs leading-relaxed text-zinc-500 ${task.ask ? 'line-clamp-2' : 'line-clamp-3'}" in board
 
+
+def test_the_bigger_view_is_the_same_pane_with_its_buttons():
+    """It only changes the aside's class: moving a pane to another parent would remount it and lose a form."""
+    board = _source(_BOARD)
+    assert "<aside className={focused ? 'absolute inset-0 z-20 bg-zinc-950' : 'w-[380px]" in board
+    assert "if (focused && !selected) setFocused(false)" in board
+    assert "if (focusedRef.current) { setFocused(false); return }" in board
+    assert "if (key === TASK_KEYS.focus && selected && !phone)" in board
+    assert "focused ? 'mx-auto w-full max-w-3xl' : ''" in board, "the buttons come along, under the text"
+    assert "reading={focused}" in board
+
+
+def test_escape_leaves_the_bigger_view_before_the_board():
+    board = _source(_BOARD)
+    start = board.index("if (keysRef.current) { setKeysOpen(false); return }")
+    chain = board[start:board.index("onClose()", start)]
+    assert chain.index("focusedRef") < chain.index("selectedRef")
+

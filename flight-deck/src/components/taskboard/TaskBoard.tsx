@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   AlarmClock, AlertTriangle, ArrowLeft, ArrowRight, Ban, BellOff, Check, Clock, Download, GitMerge, Hand, HelpCircle,
-  Keyboard, Layers, ListChecks, Loader2, Lock, MessageSquare, Pencil, RotateCcw, RotateCw, Search, Settings2, SlidersHorizontal,
+  Keyboard, Layers, ListChecks, Loader2, Lock, Maximize2, MessageSquare, Minimize2, Pencil, RotateCcw, RotateCw, Search,
+  Settings2, SlidersHorizontal,
   Split, Undo2, Wrench, X,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
@@ -227,6 +228,9 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
   const [keysOpen, setKeysOpen] = useState(false)
+  // The open task over the whole board, bigger, to read it (not on a phone: it fills the screen there).
+  const [focused, setFocused] = useState(false)
+  if (focused && !selected) setFocused(false)
   // What a merge, an unmerge or a split just did to the open task.
   const [notice, setNotice] = useState<ThreadNotice | null>(null)
   // The gear and its popover (desktop), the download button and its menu:
@@ -475,7 +479,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   }
 
   // Escape: the keyboard list, the download menu and the settings close first,
-  // then the Sources sheet, then the filters (phone), then the open task (phone),
+  // then the Sources sheet, then the filters (phone), then the bigger view, then the open task (phone),
   // then the board. Not while writing (a held reply's text, a next step's
   // words), nor when something inside used it to close itself (the Snooze
   // picker, "Why is this here?", Merge into…, a split, a switch's question —
@@ -490,6 +494,8 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   sourcesRef.current = sourcesOpen
   const filtersRef = useRef(filtersOpen)
   filtersRef.current = filtersOpen
+  const focusedRef = useRef(focused)
+  focusedRef.current = focused
   const selectedRef = useRef(selected)
   selectedRef.current = selected
   useEffect(() => {
@@ -504,6 +510,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         if (settingsRef.current) { setSettingsOpen(false); return }
         if (sourcesRef.current) { setSourcesOpen(false); return }
         if (filtersRef.current) { setFiltersOpen(false); return }
+        if (focusedRef.current) { setFocused(false); return }
         if (phone && selectedRef.current) { setSelected(null); return }
         onClose()
       }, 0)
@@ -582,7 +589,13 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
           open(items[Math.min(Math.max(lastRow.current, 0), items.length - 1)])
           return
         }
-        if (key === 'u' && selected) { e.preventDefault(); setSelected(null); return }
+        if (key === 'u' && selected) {
+          e.preventDefault()
+          if (focused) setFocused(false)
+          else setSelected(null)
+          return
+        }
+        if (key === TASK_KEYS.focus && selected && !phone) { e.preventDefault(); setFocused((f) => !f); return }
       }
       if (selected && detailKeys.current?.(key)) e.preventDefault()
     }
@@ -786,6 +799,8 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       covered={exportOpen || settingsOpen || sourcesOpen || keysOpen}
       keys={detailKeys}
       pinned={detailHeld}
+      focused={focused}
+      onFocus={() => setFocused((f) => !f)}
       notice={notice?.taskId === selected.id ? notice : null}
       onDismissNotice={() => setNotice(null)}
       onClose={() => setSelected(null)}
@@ -874,7 +889,12 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
           {tabs}
           <div className="min-h-0 flex-1">{list}</div>
         </section>
-        {selected && <aside className="w-[380px] shrink-0 border-l border-zinc-800 bg-zinc-900/30">{detail}</aside>}
+        {/* The same aside either way: going bigger keeps what is being written on the task. */}
+        {selected && (
+          <aside className={focused ? 'absolute inset-0 z-20 bg-zinc-950' : 'w-[380px] shrink-0 border-l border-zinc-800 bg-zinc-900/30'}>
+            {detail}
+          </aside>
+        )}
       </div>
       {sources}
       {keysOpen && <KeySheet onClose={() => setKeysOpen(false)} />}
@@ -1113,7 +1133,7 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
 // ── One task ──
 
 function TaskDetailPane({
-  task, rev, terms, me, phone, covered, keys, pinned, notice, onDismissNotice, onClose, onAct, onHandOver, onAgent, onAnswered, onNextStep, onOpenTask,
+  task, rev, terms, me, phone, covered, keys, pinned, focused, onFocus, notice, onDismissNotice, onClose, onAct, onHandOver, onAgent, onAnswered, onNextStep, onOpenTask,
   onMerge, onNotSame, onUnmerge, onSplit, onOpenScheduled, onOpenChat, onOpenConnections,
 }: {
   task: TaskItem; rev: number; terms: string[]; me: BoardUser; phone: boolean
@@ -1125,6 +1145,9 @@ function TaskDetailPane({
   keys: { current: ((key: string) => boolean) | null }
   /** Filled with whether moving to another task now would lose something. */
   pinned: { current: boolean }
+  /** Over the whole board, bigger, to read it. */
+  focused: boolean
+  onFocus: () => void
   /** What a merge, an unmerge or a split just did here. */
   notice: ThreadNotice | null
   onDismissNotice: () => void
@@ -1338,11 +1361,19 @@ function TaskDetailPane({
         ) : (
           <>
             <span className="flex-1 text-[11px] font-medium uppercase tracking-wider text-zinc-500">Task</span>
+            <button onClick={onFocus}
+              className="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-800/60"
+              title={focused ? 'Back to the list' : 'Open this task bigger, to read it'}>
+              {focused ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}
+              {focused ? 'Back to the list' : 'Open bigger'}
+              <KeyHint k={focused ? 'Esc' : TASK_KEYS.focus} />
+            </button>
+            {focused && <FullscreenButton />}
             <button onClick={onClose} className={iconBtn} title="Close" aria-label="Close task"><X className="h-4 w-4" /></button>
           </>
         )}
       </div>
-      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+      <div className={`min-h-0 flex-1 overflow-y-auto ${focused ? 'px-6 py-6 [&>*]:mx-auto [&>*]:max-w-3xl' : 'px-4 py-4'}`}>
         {notice && <ThreadNoticeBar notice={notice} onDismiss={onDismissNotice} />}
         <div className="flex items-start gap-3">
           <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-800/80">
@@ -1369,7 +1400,7 @@ function TaskDetailPane({
                 </div>
               </form>
             ) : (
-              <h3 className="break-words text-base font-semibold leading-snug text-zinc-100">
+              <h3 className={`break-words font-semibold leading-snug text-zinc-100 ${focused ? 'text-xl' : 'text-base'}`}>
                 <TaskText text={task.title || 'Untitled task'} terms={terms} />
               </h3>
             )}
@@ -1458,7 +1489,7 @@ function TaskDetailPane({
         {task.ask && (
           <section className="mt-4">
             <h4 className={sectionTitle}>What was asked</h4>
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-300">
+            <p className={`mt-1 whitespace-pre-wrap break-words text-zinc-300 ${focused ? 'text-base leading-7' : 'text-sm leading-relaxed'}`}>
               <TaskText text={task.ask} terms={terms} />
             </p>
           </section>
@@ -1466,7 +1497,7 @@ function TaskDetailPane({
         {task.result_text && (
           <section className="mt-4">
             <h4 className={sectionTitle}>Result</h4>
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-300">
+            <p className={`mt-1 whitespace-pre-wrap break-words text-zinc-300 ${focused ? 'text-base leading-7' : 'text-sm leading-relaxed'}`}>
               <TaskText text={task.result_text} terms={terms} />
             </p>
           </section>
@@ -1474,7 +1505,7 @@ function TaskDetailPane({
         {shortOf && (
           <section className="mt-4">
             <h4 className={sectionTitle}>{shortOf.id === 'agent_declined' ? 'Why the agent couldn\'t do it' : 'What\'s still missing'}</h4>
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-zinc-300">
+            <p className={`mt-1 whitespace-pre-wrap break-words text-zinc-300 ${focused ? 'text-base leading-7' : 'text-sm leading-relaxed'}`}>
               <TaskText text={shortOf.detail} terms={terms} />
             </p>
           </section>
@@ -1569,14 +1600,15 @@ function TaskDetailPane({
             <SplitBar picked={splitIds.size} total={movable} onCancel={() => setSplitIds(null)}
               onSplit={async () => { await onSplit([...splitIds]); setSplitIds(null) }} />
           )}
-          {detail ? <Timeline events={detail.events ?? []} total={detail.events_total} terms={terms}
+          {detail ? <Timeline events={detail.events ?? []} total={detail.events_total} terms={terms} reading={focused}
             picked={splitIds} onPick={toggleSplit} />
             : detailError ? <p className="mt-2 text-xs text-red-600 dark:text-red-400">{detailError}</p>
               : <Loader2 className="mt-3 h-4 w-4 animate-spin text-zinc-500" />}
         </section>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 border-t border-zinc-800 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] wide:pb-3">
+      <div className={`grid grid-cols-2 gap-2 border-t border-zinc-800 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))] wide:pb-3 ${
+        focused ? 'mx-auto w-full max-w-3xl' : ''}`}>
         {handing ? (
           <HandOverForm
             taskAgent={task.agent_slug}
@@ -1695,8 +1727,10 @@ function toolName(e: TaskEvent): string {
   return ''
 }
 
-function Timeline({ events, total, terms, picked = null, onPick }: {
+function Timeline({ events, total, terms, reading = false, picked = null, onPick }: {
   events: TaskEvent[]; total?: number; terms: string[]
+  /** The bigger view: what was said in a size to read it. */
+  reading?: boolean
   /** Splitting: the events ticked to move to a new task (a box on each but a correction). */
   picked?: Set<number> | null
   onPick?: (id: number) => void
@@ -1755,7 +1789,7 @@ function Timeline({ events, total, terms, picked = null, onPick }: {
                   {e.outcome === 'blocked' && <span className="font-medium text-amber-700 dark:text-amber-400">blocked</span>}
                 </div>
                 {e.summary && (
-                  <p className="mt-0.5 whitespace-pre-wrap break-words text-xs leading-relaxed text-zinc-400">
+                  <p className={`mt-0.5 whitespace-pre-wrap break-words ${reading ? 'text-[15px] leading-7 text-zinc-300' : 'text-xs leading-relaxed text-zinc-400'}`}>
                     <TaskText text={e.summary} terms={terms} />
                   </p>
                 )}
