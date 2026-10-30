@@ -393,6 +393,8 @@ async function download(path: string, fallback: string): Promise<void> {
   setTimeout(() => URL.revokeObjectURL(url), 30000)
 }
 
+export interface HandOverAgent { slug: string; name: string; asleep: boolean }
+
 export const taskboardApi = {
   /** What the board reads, each view's count, the sweep and (v2) the history fill. */
   status: () => api<TaskboardStatus>(`${BASE}/status`),
@@ -432,6 +434,11 @@ export const taskboardApi = {
   merge: (id: string, into: string) =>
     api<{ task: TaskItem }>(taskPath(id, '/merge'), { method: 'POST', body: JSON.stringify({ into }) }),
   unmerge: (id: string) => api<{ task: TaskItem; into: TaskItem | null }>(taskPath(id, '/unmerge'), { method: 'POST' }),
+  /** The caller's agents a task can be handed to (asleep: it wakes for it). */
+  agents: () => api<{ agents: HandOverAgent[] }>('/fd/taskboard/agents'),
+  /** Hand the task to an agent: it starts on it now. */
+  handOver: (id: string, agent: string, instructions: string) => api<{ task: TaskItem }>(
+    taskPath(id, '/hand_over'), { method: 'POST', body: JSON.stringify({ agent, instructions }) }),
   /** Jev's "Same as …?" was wrong: the suggestion goes and none comes back
    *  (Undo brings it back). */
   notSame: (id: string) => api<{ task: TaskItem }>(taskPath(id, '/not_same'), { method: 'POST' }),
