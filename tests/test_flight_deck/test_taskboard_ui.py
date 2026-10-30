@@ -779,3 +779,28 @@ def test_escape_leaves_the_bigger_view_before_the_board():
     chain = board[start:board.index("onClose()", start)]
     assert chain.index("focusedRef") < chain.index("selectedRef")
 
+
+def test_an_email_reads_without_its_tracking_links():
+    out = _run([(_TEXT, ["readableEmail"])], """
+        const long = 'https://websummit-dot-yamm-track.appspot.com/2M_MmpSl8t2uY_HNaT7MxBb9KeWTDJRV4A_twifOvQH6VCHWMoQem2KHQgTzeJS'
+        globalThis.out = {
+          bracketed: readableEmail('announced speakers <' + long + '> today'),
+          bare: readableEmail('see ' + long + ' now'),
+          short: readableEmail('see https://bbcc.hr/ai now'),
+          blanks: readableEmail('a\\n\\n\\n\\nb   \\nc'),
+          empty: readableEmail(''),
+        }
+    """)
+    assert out["bracketed"] == "announced speakers [websummit-dot-yamm-track.appspot.com] today"
+    assert out["bare"] == "see websummit-dot-yamm-track.appspot.com/… now"
+    assert out["short"] == "see https://bbcc.hr/ai now"
+    assert out["blanks"] == "a\n\nb\nc"
+    assert out["empty"] == ""
+
+
+def test_the_whole_email_is_only_fetched_in_the_bigger_view_and_shown_as_text():
+    board = _source(_BOARD)
+    assert "{focused && task.links?.gmail_thread_id && <TaskEmail taskId={task.id} terms={terms} />}" in board
+    email = (_SRC / "components" / "taskboard" / "TaskEmail.tsx").read_text()
+    assert "dangerouslySetInnerHTML" not in email and "<a " not in email and "<img" not in email
+
