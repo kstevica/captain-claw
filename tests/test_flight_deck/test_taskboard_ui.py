@@ -602,7 +602,7 @@ def test_escape_is_for_what_is_on_top_of_the_task():
     """The task's pickers and a split let the key go while the Sources sheet or
     a menu is open over them: it closes that, and ticked events stay ticked."""
     board, threads, nextstep = _source(_BOARD), _source(_THREADS), _source(_NEXT)
-    assert "covered={exportOpen || settingsOpen || sourcesOpen}" in board
+    assert "covered={exportOpen || settingsOpen || sourcesOpen || keysOpen}" in board
     assert "if (!splitting || covered) return" in board and "if (!snoozeOpen || covered) return" in board
     assert "if (covered) return" in threads and "if (!open || covered) return" in nextstep
     assert "covered={covered}" in board
@@ -613,3 +613,81 @@ def test_suggest_next_step_offers_only_what_the_server_can_make():
     assert "suggestKinds.length > 0" in board and "kinds={suggestKinds}" in board
     assert "KINDS.filter((k) => kinds.includes(k.id)).map(" in nextstep
     assert "next_step_kinds?: NextStepKind[]" in _source(_API)
+
+
+_KEYS = ["TASK_KEYS", "GO_KEYS", "keyLabel", "boardKey", "stepTo"]
+
+
+def test_a_key_is_the_boards_only_when_nothing_else_wants_it():
+    out = _run([(_TEXT, _KEYS)], """
+        const body = { tagName: 'BODY' }
+        const inside = { tagName: 'BUTTON' }
+        const outside = { tagName: 'BUTTON' }
+        const root = { contains: (el) => el === inside }
+        const k = (key, target = body, more = {}) => boardKey({ key, target, ...more }, root)
+        globalThis.out = {
+          letter: k('e'), capital: k('U'), bang: k('!'), onAButton: k('e', inside),
+          field: [k('e', { tagName: 'INPUT' }), k('e', { tagName: 'TEXTAREA' }), k('e', { tagName: 'SELECT' }),
+                  k('e', { tagName: 'DIV', isContentEditable: true })],
+          held: [k('k', body, { metaKey: true }), k('k', body, { ctrlKey: true }), k('e', body, { altKey: true })],
+          composing: k('e', body, { isComposing: true }),
+          used: k('e', body, { defaultPrevented: true }),
+          outside: k('e', outside),
+          enter: [k('Enter'), k('Enter', inside)],
+          named: [k('Escape'), k('ArrowDown'), k('Tab')],
+        }
+    """)
+    assert (out["letter"], out["capital"], out["bang"], out["onAButton"]) == ("e", "U", "!", "e")
+    assert out["field"] == ["", "", "", ""] and out["held"] == ["", "", ""]
+    assert out["composing"] == "" and out["used"] == "" and out["outside"] == ""
+    assert out["enter"] == ["Enter", ""], "Enter on a button presses that button"
+    assert out["named"] == ["", "", ""]
+
+
+def test_j_and_k_walk_the_list_and_keep_their_place():
+    out = _run([(_TEXT, _KEYS)], """
+        const ids = ['a', 'b', 'c']
+        globalThis.out = {
+          next: stepTo(ids, 'a', 0, 1), previous: stepTo(ids, 'b', 1, -1),
+          ends: [stepTo(ids, 'c', 2, 1), stepTo(ids, 'a', 0, -1)],
+          first: [stepTo(ids, null, -1, 1), stepTo(ids, null, -1, -1)],
+          afterClose: [stepTo(ids, null, 1, 1), stepTo(ids, null, 1, -1)],
+          leftTheList: [stepTo(ids, 'gone', 1, 1), stepTo(ids, 'gone', 1, -1), stepTo(ids, 'gone', 3, 1), stepTo(ids, 'gone', 0, -1)],
+          empty: stepTo([], 'a', 0, 1),
+        }
+    """)
+    assert (out["next"], out["previous"]) == (1, 0)
+    assert out["ends"] == [-1, -1]
+    assert out["first"] == [0, 0]
+    assert out["afterClose"] == [2, 0]
+    assert out["leftTheList"] == [1, 0, 2, 0], "what took a done task's place is next"
+    assert out["empty"] == -1
+
+
+def test_the_keys_are_gmails_and_the_buttons_say_them():
+    out = _run([(_TEXT, _KEYS)], "globalThis.out = { keys: TASK_KEYS, go: GO_KEYS, labels: [keyLabel('e'), keyLabel('U'), keyLabel('!')] }")
+    assert out["keys"]["done"] == "e" and out["keys"]["snooze"] == "b" and out["keys"]["undo"] == "z"
+    assert out["keys"]["notTask"] == "!" and out["keys"]["merge"] == "v" and out["keys"]["nextStep"] == "r"
+    assert out["go"]["i"] == "needs_me" and out["go"]["a"] == "all" and out["go"]["d"] == "done"
+    assert out["labels"] == ["e", "⇧U", "!"]
+    board = _source(_BOARD)
+    for name in ("reopen", "done", "gotIt", "notTask", "snooze", "rename", "undo", "merge"):
+        assert f"<KeyHint k={{TASK_KEYS.{name}}}" in board, name
+    assert "wide:inline-block" in _source(_PARTS), "a phone's buttons show no keys"
+
+
+def test_no_key_approves_a_next_step():
+    """The card's Approve stays a click: `r` only reads it, or asks for one that then waits."""
+    text, board = _source(_TEXT), _source(_BOARD)
+    assert "approve" not in text[text.index("export const TASK_KEYS"):text.index("export const GO_KEYS")].lower()
+    start = board.index("keys.current = (key) =>")
+    handler = board[start:board.index("pinned.current = false", start)]
+    assert "approve" not in handler.lower().replace("approving it stays a click", "")
+    assert "resolveProposal" not in handler
+
+
+def test_moving_away_never_loses_a_split_or_the_snooze_picker():
+    board = _source(_BOARD)
+    assert "pinned.current = splitting || snoozeOpen" in board
+    assert "if (!detailHeld.current) {" in board
+    assert "if (over || keysOpen) return" in board

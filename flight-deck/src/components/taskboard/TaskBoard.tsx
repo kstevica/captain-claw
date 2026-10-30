@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   AlarmClock, AlertTriangle, ArrowLeft, ArrowRight, Ban, BellOff, Check, Clock, Download, GitMerge, Hand, HelpCircle,
-  Layers, ListChecks, Loader2, Lock, MessageSquare, Pencil, RotateCcw, RotateCw, Search, Settings2, SlidersHorizontal,
+  Keyboard, Layers, ListChecks, Loader2, Lock, MessageSquare, Pencil, RotateCcw, RotateCw, Search, Settings2, SlidersHorizontal,
   Split, Undo2, Wrench, X,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
@@ -30,8 +30,8 @@ import {
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
   AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, ExportPanel, FoldHighlight, HistoryChip, InstructionsChip,
-  LaneChip, LowConfidenceHint, MultiFacet, NoteChip, OwesChip, ProposalButtons, ResultChip, StatusChip, SyncStatus,
-  TaskIcon,
+  KeyHint, KeySheet, LaneChip, LowConfidenceHint, MultiFacet, NoteChip, OwesChip, ProposalButtons, ResultChip, StatusChip,
+  SyncStatus, TaskIcon,
 } from './taskboardParts'
 import { BoardSettings } from './TaskboardSettings'
 import { SourcesSheet } from './TaskboardSources'
@@ -42,9 +42,9 @@ import {
 import { WhyThisHere } from './TaskWhy'
 import {
   DIRECTION_LABEL, EVENT_LABEL, EVIDENCE_LABEL, KIND_LABEL, NO_DATES, OWES_LABEL, RESULT_LABEL, ROLE_LABEL, STATUS_DOT,
-  STATUS_LABEL, agoRelative, answeredInChat, channelLabel, dateBounds, distinctParties, foldText, handleChannel,
-  isSnoozed, movableEvents, partyFacetLabel, partyName, peopleRows, proposalLabel, taskNotes, type BoardUser,
-  type DateRange,
+  GO_KEYS, GO_WAIT_MS, STATUS_LABEL, TASK_KEYS, agoRelative, answeredInChat, boardKey, channelLabel, dateBounds,
+  distinctParties, foldText, handleChannel, isSnoozed, movableEvents, partyFacetLabel, partyName, peopleRows,
+  proposalLabel, stepTo, taskNotes, type BoardUser, type DateRange,
 } from './taskboardText'
 
 // ── Taskboard ───────────────────────────────────────────────────────
@@ -226,6 +226,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   const [sourcesOpen, setSourcesOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [exportOpen, setExportOpen] = useState(false)
+  const [keysOpen, setKeysOpen] = useState(false)
   // What a merge, an unmerge or a split just did to the open task.
   const [notice, setNotice] = useState<ThreadNotice | null>(null)
   // The gear and its popover (desktop), the download button and its menu:
@@ -467,12 +468,14 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
     setExportOpen(false)
   }
 
-  // Escape: the download menu and the settings close first, then the
-  // Sources sheet, then the filters (phone), then the open task (phone),
+  // Escape: the keyboard list, the download menu and the settings close first,
+  // then the Sources sheet, then the filters (phone), then the open task (phone),
   // then the board. Not while writing (a held reply's text, a next step's
   // words), nor when something inside used it to close itself (the Snooze
   // picker, "Why is this here?", Merge into…, a split, a switch's question —
   // those of the open task only while nothing is open over it: `covered`).
+  const keysRef = useRef(keysOpen)
+  keysRef.current = keysOpen
   const exportRef = useRef(exportOpen)
   exportRef.current = exportOpen
   const settingsRef = useRef(settingsOpen)
@@ -490,6 +493,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       if (el instanceof HTMLTextAreaElement || el?.isContentEditable) return
       setTimeout(() => {
         if (e.defaultPrevented) return
+        if (keysRef.current) { setKeysOpen(false); return }
         if (exportRef.current) { setExportOpen(false); return }
         if (settingsRef.current) { setSettingsOpen(false); return }
         if (sourcesRef.current) { setSourcesOpen(false); return }
@@ -522,6 +526,67 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   }, [exportOpen])
 
   const items = useMemo(() => page?.items ?? [], [page])
+
+  // Keys (taskboardText: boardKey, KEY_SHEET). Moving around is here; the open
+  // task's buttons are its own (detailKeys), and they say when moving away
+  // would lose something (detailHeld: a split, the Snooze picker).
+  const rootRef = useRef<HTMLDivElement>(null)
+  const searchRef = useRef<HTMLInputElement>(null)
+  const detailKeys = useRef<((key: string) => boolean) | null>(null)
+  const detailHeld = useRef(false)
+  const goUntil = useRef(0)
+  const lastRow = useRef(-1)  // the list's cursor: stays when the task closes or leaves the list
+  useEffect(() => { lastRow.current = -1 }, [view, debounced])
+  useEffect(() => {
+    const at = selected ? items.findIndex((t) => t.id === selected.id) : -1
+    if (at >= 0) lastRow.current = at
+  }, [selected, items])
+  const onBoardKey = useRef<(e: KeyboardEvent) => void>(() => {})
+  useEffect(() => {
+    onBoardKey.current = (e) => {
+      const key = boardKey(e, rootRef.current)
+      if (!key) return
+      const over = exportOpen || settingsOpen || sourcesOpen || filtersOpen
+      if (key === '?') {
+        if (!over) { e.preventDefault(); setKeysOpen((o) => !o) }
+        return
+      }
+      if (over || keysOpen) return
+      if (Date.now() < goUntil.current) {
+        goUntil.current = 0
+        if (GO_KEYS[key]) { e.preventDefault(); setView(GO_KEYS[key]) }
+        return
+      }
+      if (key === '/') { e.preventDefault(); searchRef.current?.focus(); return }
+      const open = (t: TaskItem) => {
+        setSelected(t)
+        rootRef.current?.querySelector(`[data-task-row="${t.id}"]`)?.scrollIntoView({ block: 'nearest' })
+      }
+      if (!detailHeld.current) {
+        if (key === 'g') { e.preventDefault(); goUntil.current = Date.now() + GO_WAIT_MS; return }
+        if (key === 'j' || key === 'k') {
+          e.preventDefault()
+          const at = stepTo(items.map((t) => t.id), selected?.id ?? null, lastRow.current, key === 'j' ? 1 : -1)
+          if (at >= 0) open(items[at])
+          else if (key === 'j' && items.length < (page?.total ?? 0)) void loadMore()
+          return
+        }
+        if ((key === 'o' || key === 'Enter') && !selected && items.length) {
+          e.preventDefault()
+          open(items[Math.min(Math.max(lastRow.current, 0), items.length - 1)])
+          return
+        }
+        if (key === 'u' && selected) { e.preventDefault(); setSelected(null); return }
+      }
+      if (selected && detailKeys.current?.(key)) e.preventDefault()
+    }
+  })
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => onBoardKey.current(e)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   const me = useBoardUser(items)
   const counts = page?.counts ?? status?.counts
   const terms = useMemo(() => foldText(debounced).split(/\s+/).filter(Boolean), [debounced])
@@ -584,6 +649,11 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
           </div>
         )}
       </span>
+      {!phone && (
+        <button onClick={() => setKeysOpen(true)} className={iconBtn} title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+          <Keyboard className="h-4 w-4" />
+        </button>
+      )}
       <FullscreenButton />
       <button onClick={onClose} className={iconBtn} title="Close" aria-label="Close">
         <X className="h-4 w-4" />
@@ -596,8 +666,14 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       <div className="relative min-w-0 flex-1">
         <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
         <input
+          ref={searchRef}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          // Out of the box, the search kept, for the keys: Escape only leaves it.
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') e.preventDefault()
+            if (e.key === 'Escape' || e.key === 'Enter') e.currentTarget.blur()
+          }}
           placeholder={phone ? 'Search tasks…' : 'Search titles, what was asked, results, people and agents…'}
           className="w-full rounded-lg border border-zinc-800 bg-zinc-900 py-2 pl-8 pr-8 text-sm text-zinc-200 placeholder-zinc-500 focus:border-teal-500/60 focus:outline-none"
         />
@@ -606,6 +682,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
             <X className="h-3.5 w-3.5" />
           </button>
         )}
+        {!query && <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2"><KeyHint k="/" /></span>}
       </div>
       {phone ? (
         <button
@@ -700,7 +777,9 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       terms={terms}
       me={me}
       phone={phone}
-      covered={exportOpen || settingsOpen || sourcesOpen}
+      covered={exportOpen || settingsOpen || sourcesOpen || keysOpen}
+      keys={detailKeys}
+      pinned={detailHeld}
       notice={notice?.taskId === selected.id ? notice : null}
       onDismissNotice={() => setNotice(null)}
       onClose={() => setSelected(null)}
@@ -731,7 +810,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
 
   if (phone) {
     return (
-      <div className="relative flex h-full flex-col bg-zinc-950">
+      <div ref={rootRef} className="relative flex h-full flex-col bg-zinc-950">
         {header}
         <div className="border-b border-zinc-800 px-3 py-2"><SyncStatus status={status} syncing={syncing} /></div>
         {toolbar}
@@ -773,12 +852,13 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
           </div>
         )}
         {sources}
+        {keysOpen && <KeySheet onClose={() => setKeysOpen(false)} />}
       </div>
     )
   }
 
   return (
-    <div className="relative flex h-full flex-col bg-zinc-950">
+    <div ref={rootRef} className="relative flex h-full flex-col bg-zinc-950">
       {header}
       {toolbar}
       <div className="flex min-h-0 flex-1">
@@ -790,6 +870,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         {selected && <aside className="w-[380px] shrink-0 border-l border-zinc-800 bg-zinc-900/30">{detail}</aside>}
       </div>
       {sources}
+      {keysOpen && <KeySheet onClose={() => setKeysOpen(false)} />}
     </div>
   )
 }
@@ -944,7 +1025,7 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
   const people = partyLine(task.parties, me)
   const agentLabel = task.agent_name || task.agent_slug
   return (
-    <div className={`overflow-hidden rounded-xl border transition-colors ${
+    <div data-task-row={task.id} className={`overflow-hidden rounded-xl border transition-colors ${
       active ? 'border-teal-500/40 bg-teal-500/5' : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700 hover:bg-zinc-900/80'}`}>
       <button onClick={onClick} className="flex w-full gap-3 px-3 py-2.5 text-left">
         <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-800/80">
@@ -1025,12 +1106,16 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
 // ── One task ──
 
 function TaskDetailPane({
-  task, rev, terms, me, phone, covered, notice, onDismissNotice, onClose, onAct, onAgent, onAnswered, onNextStep, onOpenTask,
+  task, rev, terms, me, phone, covered, keys, pinned, notice, onDismissNotice, onClose, onAct, onAgent, onAnswered, onNextStep, onOpenTask,
   onMerge, onNotSame, onUnmerge, onSplit, onOpenScheduled, onOpenChat, onOpenConnections,
 }: {
   task: TaskItem; rev: number; terms: string[]; me: BoardUser; phone: boolean
   /** Something opened over the task (the Sources sheet, a menu): Escape is that one's. */
   covered: boolean
+  /** Filled with what this task's buttons answer to (true: the key was used). */
+  keys: { current: ((key: string) => boolean) | null }
+  /** Filled with whether moving to another task now would lose something. */
+  pinned: { current: boolean }
   /** What a merge, an unmerge or a split just did here. */
   notice: ThreadNotice | null
   onDismissNotice: () => void
@@ -1179,13 +1264,53 @@ function TaskDetailPane({
   // From one of your own inboxes: kept as long as its source keeps its text.
   if (task.retention_until) meta.push(['Kept until', fmtWhen(task.retention_until)])
 
+  // Each key does what its button does, while that button is there.
+  const paneRef = useRef<HTMLDivElement>(null)
+  const askNextStep = useRef<(() => void) | null>(null)
+  useEffect(() => {
+    pinned.current = splitting || snoozeOpen
+    keys.current = (key) => {
+      if (busy) return false
+      if (snoozeOpen) {
+        const pick = SNOOZES[Number(key) - 1]
+        if (pick) void run('snooze', snoozeUntil(pick.id))
+        else if (key === TASK_KEYS.snooze) setSnoozeOpen(false)
+        return !!pick || key === TASK_KEYS.snooze
+      }
+      const buttons: Record<string, [boolean, () => void]> = {
+        [TASK_KEYS.done]: [!closed, () => void run('done')],
+        [TASK_KEYS.reopen]: [closed || failed, () => void run('reopen')],
+        [TASK_KEYS.gotIt]: [failed && task.lane === 'needs_me', () => void run('ack_failed')],
+        [TASK_KEYS.notTask]: [task.status !== 'not_task', () => void run('not_task')],
+        [TASK_KEYS.yes]: [isMaybe(task), () => void run('confirm_task')],
+        [TASK_KEYS.snooze]: [snoozed || (!closed && !failed), () => { if (snoozed) void run('unsnooze'); else setSnoozeOpen(true) }],
+        [TASK_KEYS.rename]: [!renaming, startRename],
+        [TASK_KEYS.merge]: [!merged, () => setMerging((m) => !m)],
+        [TASK_KEYS.undo]: [canUndo, () => void run('undo')],
+        [TASK_KEYS.nextStep]: [!!boardStep || canSuggest, () => {
+          // Read and edited on its card: approving it stays a click.
+          const card = paneRef.current?.querySelector<HTMLElement>('[data-next-step]')
+          if (card) {
+            card.scrollIntoView({ block: 'nearest' })
+            card.querySelector('textarea')?.focus()
+          } else askNextStep.current?.()
+        }],
+      }
+      const button = buttons[key]
+      if (!button?.[0]) return false
+      button[1]()
+      return true
+    }
+    return () => { keys.current = null; pinned.current = false }
+  })
+
   const btn = 'flex items-center justify-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800/60 disabled:opacity-50'
   const primary = 'flex items-center justify-center gap-1.5 rounded-lg bg-teal-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-teal-500 disabled:opacity-60'
   const linkBtn = 'flex items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-xs font-medium text-teal-600 transition-colors hover:bg-teal-500/10 dark:text-teal-400'
   const icon = (a: TaskAction, el: ReactNode) => (busy === a ? <Loader2 className="h-4 w-4 animate-spin" /> : el)
 
   return (
-    <div className="flex h-full flex-col">
+    <div ref={paneRef} className="flex h-full flex-col">
       <div className="flex items-center gap-2 border-b border-zinc-800 px-4 py-2.5">
         {phone ? (
           <button onClick={onClose} className="flex flex-1 items-center gap-1.5 text-sm text-teal-600 dark:text-teal-400">
@@ -1309,7 +1434,7 @@ function TaskDetailPane({
             <div className="mt-2"><AnswerButtons choices={DONE_ANSWERS} onAct={(a) => onAct(a)} /></div>
           </div>
         )}
-        {canSuggest && <SuggestNextStep taskId={task.id} phone={phone} kinds={suggestKinds} covered={covered} onProposed={onNextStep} />}
+        {canSuggest && <SuggestNextStep taskId={task.id} phone={phone} kinds={suggestKinds} covered={covered} askRef={askNextStep} onProposed={onNextStep} />}
 
         {task.ask && (
           <section className="mt-4">
@@ -1402,7 +1527,7 @@ function TaskDetailPane({
             {!merged && (
               <button onClick={() => setMerging((m) => !m)} aria-expanded={merging} className={linkBtn}
                 title="It is part of another task: put the two together (you can take it out again)">
-                <GitMerge className="h-3.5 w-3.5" />Merge into…
+                <GitMerge className="h-3.5 w-3.5" />Merge into…<KeyHint k={TASK_KEYS.merge} />
               </button>
             )}
           </div>
@@ -1438,18 +1563,18 @@ function TaskDetailPane({
             <div className="col-span-2 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
               Snooze until{busy === 'snooze' && <Loader2 className="h-3 w-3 animate-spin" />}
             </div>
-            {SNOOZES.map((s) => (
+            {SNOOZES.map((s, i) => (
               <button key={s.id} onClick={() => run('snooze', snoozeUntil(s.id))} disabled={!!busy} className={btn}>
-                {s.label}
+                {s.label}<KeyHint k={String(i + 1)} />
               </button>
             ))}
-            <button onClick={() => setSnoozeOpen(false)} disabled={!!busy} className={btn}>Cancel</button>
+            <button onClick={() => setSnoozeOpen(false)} disabled={!!busy} className={btn}>Cancel<KeyHint k="Esc" /></button>
           </>
         ) : (
           <>
             {closed || failed ? (
               <button onClick={() => run('reopen')} disabled={!!busy} className={primary} title="Back to open, for the agent or you to work on">
-                {icon('reopen', <RotateCcw className="h-4 w-4" />)}Reopen
+                {icon('reopen', <RotateCcw className="h-4 w-4" />)}Reopen<KeyHint k={TASK_KEYS.reopen} onPrimary />
               </button>
             ) : (
               <button
@@ -1458,36 +1583,36 @@ function TaskDetailPane({
                 className={primary}
                 title={task.kind === 'scheduled' ? 'Done until its next run, which opens it again' : undefined}
               >
-                {icon('done', <Check className="h-4 w-4" />)}Done
+                {icon('done', <Check className="h-4 w-4" />)}Done<KeyHint k={TASK_KEYS.done} onPrimary />
               </button>
             )}
             {failed && (
               <button onClick={() => run('done')} disabled={!!busy} className={btn}>
-                {icon('done', <Check className="h-4 w-4" />)}Done
+                {icon('done', <Check className="h-4 w-4" />)}Done<KeyHint k={TASK_KEYS.done} />
               </button>
             )}
             {failed && task.lane === 'needs_me' && (
               <button onClick={() => run('ack_failed')} disabled={!!busy} className={btn} title="Seen — take it off Needs me">
-                {icon('ack_failed', <Check className="h-4 w-4" />)}Got it
+                {icon('ack_failed', <Check className="h-4 w-4" />)}Got it<KeyHint k={TASK_KEYS.gotIt} />
               </button>
             )}
             {task.status !== 'not_task' && (
               <button onClick={() => run('not_task')} disabled={!!busy} className={btn} title="Nothing anyone had to do — it leaves the board">
-                {icon('not_task', <Ban className="h-4 w-4" />)}Not a task
+                {icon('not_task', <Ban className="h-4 w-4" />)}Not a task<KeyHint k={TASK_KEYS.notTask} />
               </button>
             )}
             {/* A failure leaves Needs me by "Got it", not by a snooze or a next move. */}
             {snoozed ? (
               <button onClick={() => run('unsnooze')} disabled={!!busy} className={btn}>
-                {icon('unsnooze', <BellOff className="h-4 w-4" />)}Unsnooze
+                {icon('unsnooze', <BellOff className="h-4 w-4" />)}Unsnooze<KeyHint k={TASK_KEYS.snooze} />
               </button>
             ) : !closed && !failed && (
               <button onClick={() => setSnoozeOpen(true)} disabled={!!busy} className={btn} title="Off Needs me for a while">
-                <Clock className="h-4 w-4" />Snooze
+                <Clock className="h-4 w-4" />Snooze<KeyHint k={TASK_KEYS.snooze} />
               </button>
             )}
             <button onClick={startRename} disabled={!!busy || renaming} className={btn}>
-              <Pencil className="h-4 w-4" />Rename
+              <Pencil className="h-4 w-4" />Rename<KeyHint k={TASK_KEYS.rename} />
             </button>
             {!closed && !failed && (
               <label className="col-span-2 flex items-center gap-2 rounded-lg border border-zinc-800 px-3 py-1.5 text-sm">
@@ -1506,7 +1631,7 @@ function TaskDetailPane({
             )}
             {canUndo && (
               <button onClick={() => run('undo')} disabled={!!busy} className={`${btn} col-span-2`} title="Take back the last change to this task">
-                {icon('undo', <Undo2 className="h-4 w-4" />)}Undo last change
+                {icon('undo', <Undo2 className="h-4 w-4" />)}Undo last change<KeyHint k={TASK_KEYS.undo} />
               </button>
             )}
           </>

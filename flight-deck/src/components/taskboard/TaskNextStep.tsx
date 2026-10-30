@@ -2,8 +2,8 @@ import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from 'r
 import { Bell, Check, ChevronDown, Loader2, Mail, MessageSquare, Sparkles } from 'lucide-react'
 import { resolveProposal } from '../../services/notifications'
 import { taskboardApi, type NextStepKind, type ProposalEdit, type TaskProposal } from '../../services/taskboardApi'
-import { ChannelIcon } from './taskboardParts'
-import { channelLabel, proposalLabel, recipientText } from './taskboardText'
+import { ChannelIcon, KeyHint } from './taskboardParts'
+import { TASK_KEYS, channelLabel, proposalLabel, recipientText } from './taskboardText'
 
 // The board's next steps (v2): what it would do next on a task — an email
 // draft, or a reply on the chat the task came in on — waiting for your
@@ -126,7 +126,7 @@ export function NextStepCard({ proposal, phone, onAnswered, onSaved }: {
   const btn = `flex items-center justify-center gap-1 rounded-lg font-medium disabled:opacity-50 ${phone ? 'h-10 px-3.5 text-sm' : 'px-2.5 py-1.5 text-xs'}`
 
   return (
-    <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
+    <div data-next-step className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2.5">
       <div className="flex items-center gap-1.5 text-xs font-medium text-amber-800 dark:text-amber-300">
         {channel && !mail && !reminder ? <ChannelIcon channel={channel} className="h-3.5 w-3.5" /> : <KindIcon className="h-3.5 w-3.5 shrink-0" />}
         <span className="min-w-0 flex-1 truncate">Needs you: next step · {label}</span>
@@ -245,9 +245,11 @@ const KINDS: { id: NextStepKind; label: string; detail: string }[] = [
 /** "Suggest next step": asks the board for one now (drafted on the agent's
  *  own model) — it then waits for your Approve, like any other; or the
  *  board says why it made none. */
-export function SuggestNextStep({ taskId, phone, kinds, covered, onProposed }: {
+export function SuggestNextStep({ taskId, phone, kinds, covered, askRef, onProposed }: {
   taskId: string
   phone: boolean
+  /** Filled with what the button does, for its key. */
+  askRef: { current: (() => void) | null }
   /** What the server can make of it: a kind nobody can be reached for isn't offered. */
   kinds: NextStepKind[]
   /** Something opened over the task: Escape is that one's. */
@@ -284,6 +286,11 @@ export function SuggestNextStep({ taskId, phone, kinds, covered, onProposed }: {
     }
   }
 
+  useEffect(() => {
+    askRef.current = busy === null ? () => { void ask('auto') } : null
+    return () => { askRef.current = null }
+  })
+
   const base = `flex items-center gap-1.5 border border-zinc-800 font-medium text-teal-600 transition-colors hover:bg-teal-500/10 disabled:opacity-60 dark:text-teal-400 ${
     phone ? 'h-11 text-sm' : 'py-1.5 text-xs'}`
   return (
@@ -293,6 +300,7 @@ export function SuggestNextStep({ taskId, phone, kinds, covered, onProposed }: {
           title="Ask for a next step for this task — it waits for your Approve">
           {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Sparkles className="h-3.5 w-3.5" />}
           {busy ? 'Thinking of a next step…' : 'Suggest next step'}
+          {!busy && <KeyHint k={TASK_KEYS.nextStep} />}
         </button>
         <button
           onClick={() => setOpen((o) => !o)}
