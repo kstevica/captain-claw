@@ -3,8 +3,8 @@ import { AlertTriangle, Check, CircleDot, FileDown, History, ListTodo, Loader2, 
 import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskboardStatus } from '../../services/taskboardApi'
 import { resolveProposal } from '../../services/notifications'
 import {
-  JUDGE_LABEL, OWES_LABEL, RESULT_LABEL, STATUS_LABEL, agoRelative, channelInfo, foldChar, type DatePreset,
-  type DateRange, type TaskNote,
+  JUDGE_LABEL, KEY_SHEET, OWES_LABEL, RESULT_LABEL, STATUS_LABEL, agoRelative, channelInfo, foldChar, keyLabel,
+  type DatePreset, type DateRange, type TaskNote,
 } from './taskboardText'
 
 // Pieces of the Taskboard: search highlighting (the server's folding, so
@@ -514,5 +514,59 @@ export function BoardSwitch({ on, onChange, disabled = false, label }: {
     >
       <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
     </button>
+  )
+}
+
+/** The key a button answers to, on the button (not on a phone's). */
+export function KeyHint({ k, onPrimary = false }: { k: string; onPrimary?: boolean }) {
+  return (
+    <kbd className={`ml-0.5 hidden rounded border px-1 font-sans text-[10px] font-normal leading-4 wide:inline-block ${
+      onPrimary ? 'border-white/30 text-white/80' : 'border-zinc-700 text-zinc-500'}`}>
+      {keyLabel(k)}
+    </kbd>
+  )
+}
+
+/** The `?` sheet: every key the board answers to. */
+export function KeySheet({ onClose }: { onClose: () => void }) {
+  const cap = 'rounded border border-zinc-700 bg-zinc-800/60 px-1.5 font-sans text-[11px] leading-5 text-zinc-300'
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/40 p-4" onClick={onClose}>
+      <div role="dialog" aria-label="Keyboard shortcuts" onClick={(e) => e.stopPropagation()}
+        className="max-h-full w-full max-w-2xl overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-900 p-5 shadow-2xl">
+        <div className="flex items-center justify-between">
+          <h3 className="text-base font-semibold text-zinc-100">Keyboard shortcuts</h3>
+          <button onClick={onClose} className="rounded-md px-2 py-1 text-xs text-zinc-400 hover:bg-zinc-800/60">Close</button>
+        </div>
+        <p className="mt-0.5 text-xs text-zinc-500">Gmail's keys, wherever a button means the same. Approving a next step is always a click.</p>
+        <div className="mt-4 grid grid-cols-2 gap-x-8 gap-y-4">
+          {KEY_SHEET.map((group) => (
+            <section key={group.title}>
+              <h4 className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">{group.title}</h4>
+              <dl className="mt-2 flex flex-col gap-1.5">
+                {group.rows.map((row) => (
+                  <div key={row.what} className="flex items-center justify-between gap-3">
+                    <dt className="min-w-0 text-sm text-zinc-300">{row.what}</dt>
+                    <dd className="flex shrink-0 items-center gap-1 text-[11px] text-zinc-500">
+                      {row.keys.map((key, i) => (
+                        <span key={key} className="flex items-center gap-1">
+                          {i > 0 && <span>or</span>}
+                          {key.split(' ').map((part, j) => (
+                            <span key={part} className="flex items-center gap-1">
+                              {j > 0 && <span>then</span>}
+                              <kbd className={cap}>{keyLabel(part)}</kbd>
+                            </span>
+                          ))}
+                        </span>
+                      ))}
+                    </dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ))}
+        </div>
+      </div>
+    </div>
   )
 }

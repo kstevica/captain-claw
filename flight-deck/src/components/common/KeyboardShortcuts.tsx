@@ -13,6 +13,7 @@ const shortcuts = [
   { keys: ['Cmd/Ctrl', '['], action: 'Previous Chat Tab' },
   { keys: ['Cmd/Ctrl', ']'], action: 'Next Chat Tab' },
   { keys: ['Escape'], action: 'Close Modals / Panels' },
+  { keys: ['?'], action: 'On the Taskboard: its own shortcuts' },
 ]
 
 export function useKeyboardShortcuts(

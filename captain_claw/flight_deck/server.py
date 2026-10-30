@@ -1739,6 +1739,7 @@ from captain_claw.flight_deck import (
     taskboard,
     taskboard_backfill,
     taskboard_ingest,
+    taskboard_handover,
     taskboard_nextsteps,
     taskboard_threads,
 )
@@ -1856,6 +1857,7 @@ app.include_router(taskboard.router)
 app.include_router(taskboard_ingest.router)
 # v2: next steps proposed for the user's Approve, merge/split, the 30-day
 # history (the opt-in inboxes go through taskboard.py's settings routes).
+app.include_router(taskboard_handover.router)
 app.include_router(taskboard_nextsteps.router)
 app.include_router(taskboard_threads.router)
 app.include_router(taskboard_backfill.router)

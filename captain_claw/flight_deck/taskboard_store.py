@@ -1207,9 +1207,9 @@ class TaskboardStore:
             # A merged job's runs are its own: no word on how the work on a person's task went
             # (those that came in while it was merged stay here after an Unmerge).
             if row["kind"] in _TRIAGED_KINDS:
-                turns = [t for t in turns if t["automation"].get("kind") != "scheduled"
-                         and not (t["automation"].get("kind") and self._speaks_for(
-                             user_id, task_id, str(t.get("task_key") or "")))]
+                turns = _handed_over([t for t in turns if t["automation"].get("kind") != "scheduled"
+                                      and not (t["automation"].get("kind") and self._speaks_for(
+                                          user_id, task_id, str(t.get("task_key") or "")))], row)
             return {"task": row, "events": self.events(user_id, task_id, limit=events),
                     "parties": self.parties_for(user_id, [task_id]).get(task_id, []), "turns": turns,
                     "unread": self.unread_words(user_id, task_id),
@@ -1473,6 +1473,59 @@ class TaskboardStore:
                 "refs": {"autonomy_id": action_id, "kind": "tool_action"}})
             self._conn.commit()
         return True
+
+    def hand_over_started(self, user_id: str, task_id: str, action_id: str, agent: dict, words: str,
+                          actor: str = "") -> dict | None:
+        """The user handed the task to *agent* (``slug``, ``name``) with their
+        *words*: the next move is the agent's and it is the task's agent now — a
+        maybe is a task now, they said so — and the timeline says what they asked.
+        The turn comes back here by the action's key (``autonomy:<id>``). The
+        move isn't locked: it moves on when the agent is done. The task, or None
+        when it isn't this user's."""
+        key = f"autonomy:{action_id}"
+        with self._lock:
+            if self._owned(user_id, task_id) is None:
+                return None
+            self._link(user_id, key, task_id, "strong")
+            self.ingest(
+                user_id, keys=[key], unlock=("owes_next",),
+                patch={"status": "open", "owes_next": "agent", "agent_slug": agent["slug"], "agent_name": agent["name"],
+                       # What was said of the last try is old news: the agent is on it now.
+                       "flags": {"low_confidence": False, "probably_done": False, "agent_declined": False,
+                                 "partly_done": False, "answered_in_chat": False}},
+                event={"source": "taskboard_handover", "source_ref": f"{action_id}:handed", "at": time.time(),
+                       "kind": "status", "actor_kind": "me", "actor": actor,
+                       "summary": f"Handed to {agent['name']}: {' '.join(str(words).split())}",
+                       "refs": {"autonomy_id": action_id, "agent": agent["slug"]}})
+            return self._owned(user_id, task_id)
+
+    def hand_over_ended(self, user_id: str, action_id: str, *, agent_name: str, text: str | None, why: str = "",
+                        session_key: str = "") -> str | None:
+        """The agent is done with what it was handed: *text* its reply, None when
+        it gave none (*why*). The next move is the user's, to look it over, if it
+        was still the agent's; an open task keeps the reply as its result, and
+        names the session it ran in ("Continue in chat"). The task's id, or None."""
+        key = f"autonomy:{action_id}"
+        with self._lock:
+            task_id = self._key_task(user_id, key)
+            row = self._row(task_id) if task_id else None
+            if row is None:
+                return None
+            if session_key:
+                self._link(user_id, session_key, task_id, "strong")
+            opened = row["status"] in ("open", "maybe")
+            patch: dict[str, Any] = {}
+            if opened and row["owes_next"] == "agent":
+                patch["owes_next"] = "me"
+            if opened and text:
+                patch["result_text"] = " ".join(text.split())[:600]
+            self.ingest(user_id, keys=[key], patch=patch, event={
+                "source": "taskboard_handover", "source_ref": f"{action_id}:ended", "at": time.time(), "kind": "status",
+                "actor_kind": "agent", "actor": agent_name, "outcome": "ok" if text is not None else "error",
+                "summary": f"{agent_name} finished what you handed over" if text is not None
+                           else f"{agent_name} didn't finish what you handed over: {why}",
+                "refs": {"autonomy_id": action_id}})
+        return task_id
 
     def proposal_rejected(self, user_id: str, action_id: str) -> str | None:
         """The user rejected the next step *action_id*: a ``rejection`` event
@@ -2925,6 +2978,26 @@ def _event_keys(ev: dict) -> set[str]:
     if refs.get("link_id") and refs.get("re"):
         keys.add(f"link:{refs['link_id']}:{refs['re']}")
     return keys
+
+
+def _handed_over(turns: list[dict], row: dict) -> list[dict]:
+    """*turns*, oldest first, with a hand-over's (the agent's run of what the user
+    asked on the board: an action's on a person's task) read as the agent's latest
+    on the task, where the task came in: whose it is doesn't change because the
+    user asked an agent to work on it, nor what they asked first. ``handed`` says
+    which it is."""
+    out: list[dict] = []
+    came_in: dict = {}
+    for turn in turns:
+        if turn["automation"].get("kind") != "autonomy":
+            came_in = turn
+            out.append(turn)
+            continue
+        out.append({**turn, "handed": True, "channel": came_in.get("channel") or row.get("channel") or "",
+                    "source": came_in.get("source") or "", "own_chat": bool(came_in.get("own_chat")),
+                    "text_head": came_in.get("text_head") or row.get("ask") or "",
+                    "speaker_label": came_in.get("speaker_label") or "", "source_label": came_in.get("source_label") or ""})
+    return out
 
 
 def _without_text(refs: dict) -> dict:
