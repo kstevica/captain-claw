@@ -149,6 +149,82 @@ def number_of(jid: str) -> str:
     return "+" + user if server == "s.whatsapp.net" and user.isdigit() else ""
 
 
+def pick_chat(all_chats: list[dict[str, Any]], ref: str) -> dict[str, Any]:
+    """A chat by JID, phone number, exact name, or a unique part of its name."""
+    ref = str(ref or "").strip()
+    if not ref:
+        raise ChatNotFound("name a chat")
+    digits = "".join(ch for ch in ref if ch.isdigit())
+    for c in all_chats:
+        if c["jid"] == ref or (digits and len(digits) >= 7 and c["number"] == "+" + digits.lstrip("0")):
+            return c
+    low = ref.casefold().lstrip("@")
+    exact = [c for c in all_chats if c["title"].casefold() == low]
+    if len(exact) == 1:
+        return exact[0]
+    part = exact or [c for c in all_chats if low in c["title"].casefold()]
+    if len(part) == 1:
+        return part[0]
+    if part:
+        raise ChatNotFound(f"several chats match {ref!r} — pick one by its id", part[:10])
+    raise ChatNotFound(f"no chat matches {ref!r}")
+
+
+# Reading several stores as one: the linked account's and what's kept from earlier
+# links (kept_history). Lists come in that order, and the earlier list wins.
+
+
+def merge_chats(lists: list[list[dict[str, Any]]], *, live: bool = True) -> list[dict[str, Any]]:
+    """One list, latest activity first: a chat in several stores is one chat, its
+    counts added up (with *live*, the first list is the linked account's and
+    ``kept_only`` marks chats it doesn't have: nothing can be sent there)."""
+    merged: dict[str, dict[str, Any]] = {}
+    for index, chats in enumerate(lists):
+        for c in chats:
+            have = merged.get(c["jid"])
+            if have is None:
+                merged[c["jid"]] = {**c, "kept_only": not (live and index == 0)}
+                continue
+            have["messages"] += c["messages"]
+            have["last_ts"] = max(have["last_ts"] or 0, c["last_ts"] or 0) or None
+            if have["title"] in (have["jid"], have["number"]):
+                have["title"] = c["title"]  # the first store only had the number
+    return sorted(merged.values(), key=lambda c: c["last_ts"] or 0, reverse=True)
+
+
+def merge_messages(lists: list[list[dict[str, Any]]], limit: int) -> list[dict[str, Any]]:
+    """Newest first; a message in several stores (a group both numbers were in,
+    a number linked again) once."""
+    if len(lists) == 1:
+        return lists[0][:limit]
+    seen: set[tuple[str, str]] = set()
+    out = []
+    for items in lists:
+        for m in items:
+            key = (m["chat_jid"], m["id"])
+            if key not in seen:
+                seen.add(key)
+                out.append(m)
+    out.sort(key=lambda m: m["ts"], reverse=True)
+    return out[:limit]
+
+
+def merge_contacts(lists: list[list[dict[str, Any]]], limit: int) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    for people in lists:
+        for p in people:
+            have = merged.get(p["jid"])
+            if have is None:
+                merged[p["jid"]] = dict(p)
+                continue
+            have["messages"] += p["messages"]
+            have["groups"] = sorted({*have["groups"], *p["groups"]})[:10]
+            for key in ("name", "push_name", "business_name", "number", "lid"):
+                have[key] = have[key] or p[key]
+    out = sorted(merged.values(), key=lambda c: (-c["messages"], c["name"] or c["push_name"] or c["jid"]))
+    return out[: max(1, min(int(limit or 20), 100))]
+
+
 class Store:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -414,24 +490,7 @@ class Store:
 
     def find_chat(self, ref: str) -> dict[str, Any]:
         """A chat by JID, phone number, exact name, or a unique part of its name."""
-        ref = str(ref or "").strip()
-        if not ref:
-            raise ChatNotFound("name a chat")
-        all_chats = self.chats()
-        digits = "".join(ch for ch in ref if ch.isdigit())
-        for c in all_chats:
-            if c["jid"] == ref or (digits and len(digits) >= 7 and c["number"] == "+" + digits.lstrip("0")):
-                return c
-        low = ref.casefold().lstrip("@")
-        exact = [c for c in all_chats if c["title"].casefold() == low]
-        if len(exact) == 1:
-            return exact[0]
-        part = exact or [c for c in all_chats if low in c["title"].casefold()]
-        if len(part) == 1:
-            return part[0]
-        if part:
-            raise ChatNotFound(f"several chats match {ref!r} — pick one by its id", part[:10])
-        raise ChatNotFound(f"no chat matches {ref!r}")
+        return pick_chat(self.chats(), ref)
 
     def messages(self, *, chat_jid: str | None = None, since: int | None = None, until: int | None = None,
                  query: str = "", limit: int = 50) -> list[dict[str, Any]]:

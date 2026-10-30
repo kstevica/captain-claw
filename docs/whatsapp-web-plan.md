@@ -137,8 +137,8 @@ processes: agents in `server.py` (`_processes`), and `vfs_hosting.py`.
 - whatsmeow's session database keeps keys, not message history.
 - FD's main database (`flight_deck/db.py`, one aiosqlite file) is owned by the FD process.
   A full sync is tens of thousands of messages per user.
-- So each user gets their own `store.sqlite3`, written only by the service. Unlinking
-  deletes the whole folder.
+- So each user gets their own `store.sqlite3`, written only by the service. When a link ends
+  the store moves to `.kept/` unless the user said to delete it (see "When a link ends").
 - Text is sealed with `fd_crypto` (Fernet; key in `<FD home>/data_key`), exactly like
   the Telegram inbox (`telegram_inbox.py` `_store`). The service imports `fd_crypto` and
   reads the same key file.
@@ -168,7 +168,7 @@ P1 details worth knowing:
   every 15 min); that is a read, nothing is sent.
 - The news line counts only messages that arrived live; the history sent after linking doesn't
   count as new.
-- An account unlinked from the phone loses its kept messages too, not just its session.
+- An account unlinked from the phone loses its session; its messages are kept (see "When a link ends").
 - The service seals with the key FD resolved (`FD_DATA_KEY_FILE` is passed to it), so a relative
   `FD_DATA_DIR` can't send it to a different key.
 - On a deck without sign-in (or the desktop app) WhatsApp Web is unavailable: agents read
@@ -233,7 +233,7 @@ in `sync_state` and shown on the card. The problem states also ring the owner's 
 | Phone code requested | `PairPhone(number)` | the 8-digit code |
 | `PairStatusEv` | records the linked JID | **the linked number**, so the user can confirm it's the right account |
 | `HistorySyncEv` | ingests the chunk and records `progress` | "Syncing history… 39%" |
-| `LoggedOutEv` | stops the client, deletes the folder | "Unlinked on the phone. Link again?" |
+| `LoggedOutEv` (also how a ban arrives) | stops the client, deletes the session, keeps the messages | "WhatsApp ended this link", what's kept, Link again |
 | `StreamReplacedEv` | stops this client and doesn't reconnect | "Another WhatsApp Web session took over" |
 | `TemporaryBanEv` | pauses everything, including future sends | a ban notice with WhatsApp's end time |
 | `ClientOutdatedEv` | stops | admin notice: "update neonize" |
@@ -243,13 +243,38 @@ in `sync_state` and shown on the card. The problem states also ring the owner's 
   `requireFullSync=True`, `fullSyncDaysLimit` = the retention choice in days (3650 for "keep
   everything"), `os="Captain Claw"`, `platformType=DESKTOP`. *(Check in P1 that 3650 brings
   at least what the PoC's 365 did.)*
-- **Disconnect** = `logout()` (removes the device from the phone's list), then delete
-  `<FD home>/whatsapp_web/<user_id>/`.
+- **Disconnect** = `logout()` (removes the device from the phone's list), then the user's answer
+  to "keep the history?", then delete `<FD home>/whatsapp_web/<user_id>/`.
 - **Consent dialog** before the first link, in the user's words: it's unofficial, it breaks
-  WhatsApp's terms, bans happen, agents will read every chat, and turning it off deletes
-  everything.
+  WhatsApp's terms, bans happen, agents will read every chat, and what happens to the history
+  when the link ends.
 - **Deck admin switch** (a system setting, the way `telegram_shared` keeps its inbox switch
   behind `inbox_allowed()`): off by default. The kill switch `FD_WHATSAPP_WEB=off` overrides it.
+
+### When a link ends
+
+Burner numbers get banned, and a banned number must not take the history with it (asked for
+2026-10-30). Before this, `LoggedOutEv` and "Link again" deleted the messages without asking.
+Now (`whatsapp_web/kept_history.py`):
+
+- **Every path that ends a link moves the store** to `.kept/<user_id>/<entry>/` with a
+  `kept.json` (number, counts, retention), unless the user answered "delete" to Disconnect.
+  `.kept/` is outside the link folder, so whatever deletes a link folder can't reach it. If the
+  move fails, nothing is deleted and Disconnect or Link again says so. A store with no messages
+  isn't kept.
+- **Reads cover both** (`with_kept`): agents' `chats`, `read`, `recent`, `search`, `contact`,
+  `attachment`; a chat in both stores is one chat and a message in both is one message. The
+  counts of a chat add up, so a number linked again can count a message twice.
+- **Sending doesn't.** `Engine.send`, the whitelist and auto-replies use only the linked
+  account's store: an old number's chats are first contacts for a new number, the main ban
+  trigger. The sending rules and the whitelist stay behind with the old store, and the auto-reply
+  log is dropped. A number linked again starts its rules over.
+- **Retention goes on counting** at the choice made for that link, and an entry the purge empties
+  goes. Otherwise only the card's **Delete** removes it.
+- **Deploy:** Flight Deck adopts a running service whatever its code, and an old service would
+  still delete on `LoggedOutEv`, so the service needs a restart too (deck switch off and on). The
+  disconnect is a new path (`POST /links/{id}/disconnect`), so an old service answers 404 and
+  nothing is deleted.
 
 ---
 

@@ -19,8 +19,11 @@ why. Nothing reacts, marks read or shows the owner as online.
   ``saved/downloads/<session>/whatsapp-<chat>/``; a voice note comes back
   transcribed when a Soniox key is usable.
 
-The registry shows the tool only while the owner has WhatsApp linked (metadata
-``requires_whatsapp_web``, :func:`whatsapp_web_client.usable`).
+A number the owner disconnected, or WhatsApp banned, stays readable when its
+history was kept; sending only ever goes from the linked number.
+
+The registry shows the tool only while the owner has WhatsApp linked or history
+kept (metadata ``requires_whatsapp_web``, :func:`whatsapp_web_client.usable`).
 """
 
 from __future__ import annotations
@@ -127,6 +130,7 @@ class WhatsAppWebTool(Tool):
         "only what the user asked you to send (or a task they set up says to), never a reply nobody "
         "asked for, and never to start a conversation. Reactions, read receipts and presence are "
         "never touched. "
+        "History from an earlier number the user had linked stays readable; nothing is sent from it. "
         "action='status': the linked number and how much is kept. "
         "action='chats': list the chats (name, direct/group, id, message count, last activity). "
         "action='read': one chat's messages, oldest first — 'chat' (id, phone number or name). "
@@ -217,17 +221,28 @@ class WhatsAppWebTool(Tool):
     @staticmethod
     async def _status() -> ToolResult:
         data = await client.chats()
-        stats = data.get("stats") or {}
-        n, c = int(stats.get("messages") or 0), int(stats.get("chats") or 0)
-        lines = [f"WhatsApp — {n} message{'' if n == 1 else 's'} kept in {c} chat{'' if c == 1 else 's'}"
-                 + (f", from {_when_iso(stats.get('oldest'))} to {_when_iso(stats.get('newest'))}"
-                    f" (times {_tz_name()})." if n else ".")]
-        state = data.get("state")
-        if state and state != "connected":
-            lines.append(f"The link is {str(state).replace('_', ' ')} right now: nothing new arrives "
-                         "until the user sorts it out in Flight Deck → Connections → WhatsApp Web.")
-        if not n:
-            lines.append(_EMPTY_HINT)
+        kept = data.get("kept") or []
+        if data.get("stats") is None and kept:
+            lines = ["WhatsApp isn't linked right now: nothing new arrives and nothing can be sent until "
+                     "the user links a number in Flight Deck → Connections → WhatsApp Web."]
+        else:
+            stats = data.get("stats") or {}
+            n, c = int(stats.get("messages") or 0), int(stats.get("chats") or 0)
+            lines = [f"WhatsApp — {n} message{'' if n == 1 else 's'} kept in {c} chat{'' if c == 1 else 's'}"
+                     + (f", from {_when_iso(stats.get('oldest'))} to {_when_iso(stats.get('newest'))}"
+                        f" (times {_tz_name()})." if n else ".")]
+            state = data.get("state")
+            if state and state != "connected":
+                lines.append(f"The link is {str(state).replace('_', ' ')} right now: nothing new arrives "
+                             "until the user sorts it out in Flight Deck → Connections → WhatsApp Web.")
+            if not n:
+                lines.append(_EMPTY_HINT)
+        for k in kept:
+            stats = k.get("stats") or {}
+            n, c = int(stats.get("messages") or 0), int(stats.get("chats") or 0)
+            lines.append(f"Kept from {k.get('number') or 'an earlier link'}: {n} message{'' if n == 1 else 's'} "
+                         f"in {c} chat{'' if c == 1 else 's'}, from {_when_iso(stats.get('oldest'))} to "
+                         f"{_when_iso(stats.get('newest'))}. Reading covers it; nothing is sent from it.")
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod
@@ -248,7 +263,8 @@ class WhatsAppWebTool(Tool):
             lines.append(
                 f"- {c.get('title')}{number} — {c.get('kind')}, id {c.get('jid')} — "
                 f"{n} message{'' if n == 1 else 's'}, last {_when_iso(c.get('last_ts'))}"
-                f"{' (' + ', '.join(flags) + ')' if flags else ''}")
+                f"{' (' + ', '.join(flags) + ')' if flags else ''}"
+                f"{' — only in history kept from an earlier number, nothing can be sent there' if c.get('kept_only') else ''}")
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod

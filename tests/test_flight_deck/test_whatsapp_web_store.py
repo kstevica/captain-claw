@@ -9,8 +9,9 @@
   reactions; LID chats folded into their phone-number chat; nothing readable
   at rest but JIDs; names from the address book first; search; the news line
   counts only live arrivals; retention;
-* engine — history and live messages reach the store; the phone unlinking or a
-  disconnect deletes them; retention through the engine;
+* engine — history and live messages reach the store; the phone unlinking takes
+  them from the link (test_whatsapp_web_kept.py: where they go), a disconnect
+  told to deletes them; retention through the engine;
 * the routes — an agent reads only its own owner's WhatsApp, its look moves its
   news cursor, and nothing is readable on a deck without sign-in.
 
@@ -328,7 +329,7 @@ async def test_reading_needs_a_link(tmp_path):
     assert await eng.news(BOB, agent="x") == {"connected": False}
 
 
-async def test_unlinked_on_the_phone_deletes_what_was_kept(tmp_path):
+async def test_unlinked_on_the_phone_takes_the_messages_from_the_link(tmp_path):
     eng, a = await _linked_engine(tmp_path)
     await a.sink("message", _row("L1", "live"))
     store_file = tmp_path / "waw" / ALICE / "store.sqlite3"
@@ -341,11 +342,12 @@ async def test_unlinked_on_the_phone_deletes_what_was_kept(tmp_path):
         await eng.chats(ALICE)
 
 
-async def test_disconnect_deletes_everything(tmp_path):
+async def test_disconnect_told_to_deletes_everything(tmp_path):
     eng, a = await _linked_engine(tmp_path)
     await a.sink("message", _row("L1", "live"))
-    await eng.unlink(ALICE)
+    await eng.unlink(ALICE, keep_history=False)
     assert not (tmp_path / "waw" / ALICE).exists()
+    assert not (tmp_path / "waw" / ".kept" / ALICE).exists()
 
 
 async def test_retention_through_the_engine(tmp_path):
@@ -391,11 +393,14 @@ class Svc:
     def offline_view(self, uid):
         return sup.Supervisor.offline_view(self, uid)
 
+    def has_kept(self, uid):
+        return False
+
     async def request(self, method, path, body=None, **_):
         self.calls.append((method, path, body))
         if path.endswith("/news"):
             return {"connected": True, "chats": [], "total": 0, "first_look": True}
-        if path.endswith("/chats"):
+        if "/chats" in path:
             return {"chats": [{"jid": ANA, "title": "Ana"}], "stats": {}, "state": "connected"}
         return {"chat": None, "messages": []}
 

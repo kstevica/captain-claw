@@ -124,6 +124,33 @@ async def test_errors_come_back_as_failures(fd):
     assert not out.success and "hasn't linked" in out.error
 
 
+async def test_with_only_history_kept_status_says_so(fd):
+    fd.answers["/fd/whatsapp-web/agent/chats"] = (200, {
+        "chats": [{"jid": ANA, "title": "Ana", "kind": "direct", "messages": 3, "last_ts": 1_790_000_000,
+                   "kept_only": True}],
+        "stats": None, "state": "off",
+        "kept": [{"id": "x", "number": "+385911110000",
+                  "stats": {"messages": 3, "chats": 1, "oldest": 1_790_000_000, "newest": 1_790_000_000}}],
+    })
+    tool = WhatsAppWebTool()
+    out = (await tool.execute(action="status")).content
+    assert "isn't linked right now" in out and "nothing can be sent" in out
+    assert "Kept from +385911110000: 3 messages in 1 chat" in out and "0 messages" not in out
+    out = (await tool.execute(action="chats")).content
+    assert "only in history kept from an earlier number" in out
+
+
+async def test_status_with_a_new_number_and_history_kept(fd):
+    fd.answers["/fd/whatsapp-web/agent/chats"] = (200, {
+        "chats": [], "stats": {"messages": 2, "chats": 1, "oldest": 1_790_000_000, "newest": 1_790_000_000},
+        "state": "connected",
+        "kept": [{"id": "x", "number": "", "stats": {"messages": 1, "chats": 1, "oldest": None, "newest": None}}],
+    })
+    out = (await WhatsAppWebTool().execute(action="status")).content
+    assert out.startswith("WhatsApp — 2 messages kept in 1 chat") and "Kept from an earlier link: 1 message" in out
+    assert "isn't linked" not in out
+
+
 async def test_status_chats_and_contacts(fd):
     fd.answers["/fd/whatsapp-web/agent/chats"] = (200, {
         "state": "connected", "stats": {"messages": 47391, "chats": 480, "oldest": 1715700000, "newest": 1793000000},
