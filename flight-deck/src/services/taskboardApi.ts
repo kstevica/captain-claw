@@ -74,6 +74,23 @@ export interface ProposalEdit {
 /** What "Suggest next step" may ask for (auto: whatever fits the task best). */
 export type NextStepKind = 'auto' | 'remind' | 'ask_clarifying' | 'reply_with_result' | 'draft_email'
 
+/** One thing the agent did or tried, from the tool-call register. */
+export interface TaskProofAction {
+  kind: string
+  label: string
+  outcome: string
+  reason?: string
+  /** The source was asked: `gmail` / `calendar` has it, `gone` doesn't; '' not asked. */
+  seen?: string
+}
+
+export interface TaskProof {
+  state: 'proven' | 'recorded' | 'answered' | 'unsure' | 'not_done' | 'failed' | 'no_record'
+  note?: string
+  actions?: TaskProofAction[]
+  more?: number
+}
+
 export interface TaskFlags {
   /** Third-party text that asks the agent to act: no next step is ever suggested for it. */
   contains_instructions?: boolean
@@ -102,6 +119,8 @@ export interface TaskFlags {
   new_since_done?: boolean
   /** Someone's reply brought it back to Needs me, and the user hasn't seen to it yet. */
   came_back?: boolean
+  /** What a run the user handed over was checked to have really done. */
+  proof?: TaskProof | null
   /** Taken in as a task with less certainty: not counted in the badge. */
   low_confidence?: boolean
   /** Why it is here, in a few words. */

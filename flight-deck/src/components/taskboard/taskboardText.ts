@@ -2,7 +2,7 @@ import {
   AlarmClock, Bot, Code2, Glasses, Inbox, Link2, Mail, MessageCircle, MessagesSquare, Plug, Send, Smartphone, Sparkles,
   Users, Watch,
 } from 'lucide-react'
-import type { TaskAnswer, TaskFlags, TaskParty, TaskView } from '../../services/taskboardApi'
+import type { TaskAnswer, TaskFlags, TaskParty, TaskProofAction, TaskView } from '../../services/taskboardApi'
 import { fmtRelative } from '../../services/schedulerApi'
 
 // The Taskboard's words and plain helpers (no components, so its parts file
@@ -255,7 +255,7 @@ export function recipientText(r: { address: string; display: string; kind?: stri
  *  do it (and why), only partly did it, or someone wrote again after it was
  *  done. For the row's reason line and the detail's chips. */
 export interface TaskNote {
-  id: 'agent_declined' | 'partly_done' | 'new_since_done'
+  id: 'agent_declined' | 'partly_done' | 'new_since_done' | 'not_proven'
   label: string
   /** Why not ('' when the summary didn't say). */
   detail: string
@@ -265,6 +265,11 @@ export function taskNotes(t: { status: string; flags?: TaskFlags | null }): Task
   const f = t.flags ?? {}
   const blocker = typeof f.blocker === 'string' ? f.blocker.trim() : ''
   const out: TaskNote[] = []
+  // A hand-over that isn't borne out, in the row's words.
+  const unproven = t.status !== 'open' ? '' : ({
+    not_done: 'Not proven', failed: 'Didn\'t go through', unsure: 'Not sure it\'s done', no_record: 'Can\'t check',
+  } as Record<string, string>)[f.proof?.state ?? ''] ?? ''
+  if (unproven) out.push({ id: 'not_proven', label: unproven, detail: f.proof?.note ?? '' })
   if (f.agent_declined) out.push({ id: 'agent_declined', label: 'Agent couldn\'t do it', detail: blocker })
   else if (f.partly_done) out.push({ id: 'partly_done', label: 'Partly done', detail: blocker })
   if (f.new_since_done && t.status === 'done') out.push({ id: 'new_since_done', label: 'New message since done', detail: '' })
@@ -275,6 +280,22 @@ export function taskNotes(t: { status: string; flags?: TaskFlags | null }): Task
  *  part of it. */
 export function answeredInChat(flags: TaskFlags | null | undefined): boolean {
   return !!flags?.answered_in_chat && !flags.agent_declined && !flags.partly_done
+}
+
+// ── What the agent really did ──
+
+export const PROOF_LABEL: Record<string, string> = {
+  proven: 'Proven', recorded: 'On record', answered: 'Only a reply', unsure: 'Not sure', not_done: 'Not proven',
+  failed: 'Didn\'t go through', no_record: 'Can\'t check',
+}
+
+/** One action of a hand-over's run: whether it stands, and what says so. */
+export function proofRow(a: TaskProofAction): { good: boolean; detail: string } {
+  if (a.outcome !== 'ok') return { good: false, detail: a.reason || 'It didn\'t go through' }
+  if (a.seen === 'gone') return { good: false, detail: 'Recorded, but your Google account doesn\'t have it' }
+  if (a.seen === 'gmail') return { good: true, detail: 'Gmail has it' }
+  if (a.seen === 'calendar') return { good: true, detail: 'Google Calendar has it' }
+  return { good: true, detail: 'Recorded by the tool' }
 }
 
 // ── Decisions ──

@@ -1,12 +1,12 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import {
-  AlertTriangle, Bot, Check, ChevronDown, CircleDot, CircleSlash, FileDown, Hand, HelpCircle, History, ListTodo, Loader2, ShieldAlert, Sparkles, Users,
+  AlertTriangle, Bot, Check, ChevronDown, CircleDot, CircleSlash, FileDown, Hand, HelpCircle, History, ListTodo, Loader2, ShieldAlert, Sparkles, Users, X,
 } from 'lucide-react'
-import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskboardStatus } from '../../services/taskboardApi'
+import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskProof, TaskboardStatus } from '../../services/taskboardApi'
 import { resolveProposal } from '../../services/notifications'
 import {
-  JUDGE_LABEL, KEY_SHEET, OWES_LABEL, RESULT_LABEL, STATUS_LABEL, TASK_KEYS, agoRelative, channelInfo, foldChar, keyLabel,
-  markdownPieces, type DatePreset, type DateRange, type TaskNote,
+  JUDGE_LABEL, KEY_SHEET, OWES_LABEL, PROOF_LABEL, RESULT_LABEL, STATUS_LABEL, TASK_KEYS, agoRelative, channelInfo, foldChar, keyLabel,
+  markdownPieces, proofRow, type DatePreset, type DateRange, type TaskNote,
 } from './taskboardText'
 
 // Pieces of the Taskboard: search highlighting (the server's folding, so
@@ -171,6 +171,44 @@ const NOTE_TONE: Record<TaskNote['id'], string> = {
   agent_declined: 'bg-amber-500/15 text-amber-700 dark:text-amber-300',
   partly_done: 'bg-amber-500/10 text-amber-700 dark:text-amber-300',
   new_since_done: 'bg-sky-500/10 text-sky-700 dark:text-sky-300',
+  not_proven: 'bg-red-500/10 text-red-700 dark:text-red-300',
+}
+
+/** What the agent really did with what it was handed: the check's verdict and
+ *  each thing it did or tried, with what says so. */
+export function ProofSection({ proof, focused }: { proof: TaskProof; focused: boolean }) {
+  const good = proof.state === 'proven' || proof.state === 'recorded'
+  const quiet = proof.state === 'answered'
+  const tone = good ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+    : quiet ? 'bg-zinc-800 text-zinc-400' : 'bg-red-500/10 text-red-700 dark:text-red-300'
+  const actions = proof.actions ?? []
+  return (
+    <section className="mt-4">
+      <div className="flex items-center gap-1.5">
+        <h4 className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">What the agent did</h4>
+        <span className={`${chip} ${tone}`}>{PROOF_LABEL[proof.state] || proof.state}</span>
+      </div>
+      {proof.note && <p className={`mt-1 text-zinc-300 ${focused ? 'text-base leading-7' : 'text-sm'}`}>{proof.note}</p>}
+      {actions.length === 0 && !proof.note && <p className="mt-1 text-xs text-zinc-500">Nothing on record: it only replied.</p>}
+      {actions.length > 0 && (
+        <ul className="mt-1.5 space-y-1">
+          {actions.map((a, i) => {
+            const row = proofRow(a)
+            return (
+              <li key={i} className="flex items-start gap-1.5 text-xs">
+                {row.good ? <Check className="mt-0.5 h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                  : <X className="mt-0.5 h-3 w-3 shrink-0 text-red-600 dark:text-red-400" />}
+                <span className="min-w-0 break-words text-zinc-300">
+                  {a.label}<span className="text-zinc-500"> · {row.detail}</span>
+                </span>
+              </li>
+            )
+          })}
+        </ul>
+      )}
+      {!!proof.more && <p className="mt-1 text-[11px] text-zinc-500">And {proof.more} more, in What happened.</p>}
+    </section>
+  )
 }
 
 /** What a task's flags add (taskNotes): the agent couldn't do it — why, on

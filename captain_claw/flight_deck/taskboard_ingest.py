@@ -734,14 +734,18 @@ def _admit(store: TaskboardStore, turn: dict, requester: dict, effect: str, agen
     return task_id or ""
 
 
-def _requeue(store: TaskboardStore, uid: str, task_id: str, now: float, *, settle: bool = False) -> dict | None:
+def _requeue(store: TaskboardStore, uid: str, task_id: str, now: float, *, settle: bool = False,
+             worked_on: bool = False) -> dict | None:
     """The patch that puts a turn's task back in the triage queue — only a
-    task a turn made (kind request) that is still open, and never one a
-    mute rule keeps quiet (never triaged). *settle* (a close, a tool call):
-    not before :data:`_SETTLE_S` from now, nor before it was due already —
-    so the rest of a burst lands first and triage decides once."""
+    task a turn made (kind request) that is still open, or a message an action
+    worked on (*worked_on*: what it really did is for triage to check,
+    ``taskboard_proof``), and never one a mute rule keeps quiet (never triaged).
+    *settle* (a close, a tool call): not before :data:`_SETTLE_S` from now, nor
+    before it was due already — so the rest of a burst lands first and triage
+    decides once."""
     task = store.get_task(uid, task_id) if task_id else None
-    if task is None or task["kind"] != "request" or task["status"] not in ("open", "maybe"):
+    kinds = ("request", "message") if worked_on else ("request",)
+    if task is None or task["kind"] not in kinds or task["status"] not in ("open", "maybe"):
         return None
     if task["triage_state"] == "skipped" or _json(task.get("flags"), {}).get("rule") == "mute":
         return None
@@ -758,7 +762,8 @@ def _reply(store: TaskboardStore, turn: dict, agents: dict[str, dict], now: floa
     info = agents.get(turn["agent_slug"]) or {}
     name = info.get("name") or turn["agent_slug"]
     cron = turn["task_key"].startswith("cron:")
-    patch = _cron_end(turn, name) if cron else _requeue(store, uid, turn["task_id"], now, settle=True)
+    patch = _cron_end(turn, name) if cron else _requeue(store, uid, turn["task_id"], now, settle=True,
+                                                        worked_on=turn["automation"].get("kind") == "autonomy")
     _, new = store.ingest(
         uid, keys=[turn["task_key"]], patch=patch,
         event={"source": "agent_turns", "source_ref": f"{tid}:close", "at": turn["ended_at"], "kind": "reply",
@@ -1029,7 +1034,8 @@ def _call(p: taskboard_sources._Pass, row: dict, now: float) -> str:
     # task (a scheduled job's one standing task) would gather every thread
     # the job ever mailed, and a reply on one would land there.
     thread = refs.get("gmail_thread_id", "") if turn["gate"] == "task" else ""
-    patch = _requeue(p.store, uid, turn["task_id"], now, settle=True)
+    patch = _requeue(p.store, uid, turn["task_id"], now, settle=True,
+                     worked_on=turn["automation"].get("kind") == "autonomy")
     _, new = p.ingest(
         "tool_audit", uid, keys=[turn["task_key"]], patch=patch,
         extra_keys=[f"gmail:thread:{thread}"] if thread else [],

@@ -62,7 +62,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from captain_claw.flight_deck import jev_routes, taskboard_store, taskboard_triage
+from captain_claw.flight_deck import jev_routes, taskboard_proof, taskboard_store, taskboard_triage
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.autonomy import TASKBOARD_SOURCE, TASKBOARD_TTL_DAYS
 from captain_claw.flight_deck.autonomy import get_store as autonomy_store
@@ -106,6 +106,7 @@ _MOVE_TITLE = {"remind": "Remind {to}", "ask_clarifying": "Ask {to}", "reply_wit
                "draft_email": "Email {to}"}
 _BLANK = {"to": "", "to_options": [], "text": "", "subject": "", "task_title": "", "reply_to_message_id": ""}
 _ASKS_TO_ACT = "The message asks the assistant itself to act, so no next step is suggested from it."
+_NOT_BORNE_OUT = "What the agent says it did isn't borne out, so no next step is suggested from it."
 _NOT_READ = "Someone else's message on it hasn't been read for instructions yet, so no next step is suggested from it."
 _NEW_CAME_IN = "Something new came in on it just now, which Jev hasn't read — try again in a moment."
 _MOVE_SAID = {"remind": "send a reminder", "ask_clarifying": "ask a clarifying question",
@@ -593,6 +594,9 @@ def blocked(view: dict, *, judging: bool = False) -> str:
         return "Its history is shown, never acted on."
     if flags.get("contains_instructions"):
         return _ASKS_TO_ACT
+    proof = flags.get("proof")
+    if isinstance(proof, dict) and proof.get("state") in taskboard_proof.DOUBTS:
+        return _NOT_BORNE_OUT
     f = taskboard_triage.facts(view, str(task.get("user_id") or "") or "local")
     if f["third_party"]:
         return _NOT_READ if not judging and (flags.get("contains_instructions") is not False or f["unread"]) else ""
