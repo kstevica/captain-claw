@@ -64,6 +64,8 @@ export interface TaskMark {
   name: string
   /** The agent session the task's runs live in. */
   session_id?: string
+  /** A task handed over on the Taskboard (its id is the board's), not a scheduled one. */
+  board?: boolean
 }
 
 export interface TopicMark {

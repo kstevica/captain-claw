@@ -403,7 +403,7 @@ export function HandOverForm({ taskAgent, phone, words, onWords, onHandOver, onC
             placeholder="What should it do? Add anything it needs to know."
             className={`${field} resize-y`}
           />
-          <p className="text-[11px] leading-relaxed text-zinc-500">It also gets this task's details. It starts as soon as you hand it over.</p>
+          <p className="text-[11px] leading-relaxed text-zinc-500">This is your own request: it starts now, and it will write email or messages if that is what you ask. It also gets this task's details.</p>
           {error && <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p>}
         </>
       )}
