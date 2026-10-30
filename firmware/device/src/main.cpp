@@ -51,7 +51,7 @@
 #endif
 
 #if defined(PAPER_B)
-#define FW_VERSION "1.0.22"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
+#define FW_VERSION "1.0.23"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
 #define FW_VERSION "0.19.11"
 #endif
@@ -3006,6 +3006,23 @@ static void switchOff() {
 }
 #endif
 
+#if defined(PAPER_B)
+// B held 4 s: the capsized robot on the paper, then off. The panel needs the
+// power for those 20 s, so the white glow says it's still going. (The power
+// button's double press cuts the power at once and leaves the paper as it is.)
+static void switchOff() {
+  audio::playStop();
+  if (settings.keyClicks && !audio::micActive()) audio::cueEnd();  // you can let go
+  ws.disconnect();
+  WiFi.disconnect(true);
+  leds::set(leds::State::Redrawing);
+  ui::showSwitchedOff("Power button to switch on", [] { leds::tick(); });
+  leds::off();
+  paperLights(false);
+  M5.Power.powerOff();
+}
+#endif
+
 // A timer woke the paper: redraw the sleeping screen (date, room, battery)
 // without Wi-Fi and sleep again — unless a button was pressed meanwhile.
 static void asleepRedraw() {
@@ -3719,6 +3736,8 @@ void loop() {
 
 #if defined(BOARD_EPAPER154)
   if (sideBtn().pressedFor(4000)) switchOff();
+#elif defined(PAPER_B)
+  if (backBtn().pressedFor(4000)) switchOff();
 #endif
 
   // Side button: page / next row · hold = menu (hold again = close).
@@ -3772,7 +3791,8 @@ void loop() {
   // Third button (PaperColor B): back · hold = Wi-Fi & settings, the setup
   // hotspot (the paper has no menu row for it; Options needs Wi-Fi already).
   if (board::kBackPin >= 0) {
-    if (backBtn().wasHold()) {
+    // (The B paper's on letting go: held on, it's switching off.)
+    if (board::kPaperB ? backBtn().wasReleaseFor(800) : backBtn().wasHold()) {
       touch();
       if (board::kPaperB) {  // the dashboard, with fresh readings, now
         if (mode != Mode::Listening && !prerollOn) {

@@ -251,8 +251,12 @@ speaking and trouble exactly as above; the voice carries the answers:
 | | A | C (top) | B |
 |---|---|---|---|
 | click | talk, click again to send · while it speaks: stop · on Options: back · in the hotspot: leave | Options (QR code) · on Options: update · no Wi-Fi: the setup hotspot | the last answer · next page · after the last: the dashboard |
-| hold | | Wi-Fi & settings (the setup hotspot) | the dashboard now |
+| hold | | Wi-Fi & settings (the setup hotspot) | the dashboard now (on letting go) |
+| hold 4 s | | | switch off: the capsized robot, about 20 s under a white glow, then off |
 | double-click | hear the last answer again | | |
+
+The power button switches it on again. Pressed twice, it cuts the power at once
+and the paper keeps whatever it shows.
 
 ```bash
 pio run -e papercolor_b -t upload
