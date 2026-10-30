@@ -123,7 +123,7 @@ const SHOTS = {
   },
   settings: {
     dark: settingsDark, light: settingsLight, phoneDark: settingsPhoneDark, phoneLight: settingsPhoneLight,
-    alt: 'Settings: theme, Connections, Profile, Refresh agents, Getting started and Sign out',
+    alt: 'Settings: your agents at work, what they keep, Profile and Connections, the theme, Refresh agents, Getting started and Sign out',
   },
 } satisfies Record<string, Shot>
 

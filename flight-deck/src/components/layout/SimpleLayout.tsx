@@ -87,6 +87,7 @@ import { NotificationBell } from '../common/NotificationCenter'
 import { BrandMark } from '../common/BrandMark'
 import { KioskInfoDialog, type InfoAgent } from './KioskInfoDialog'
 import { KioskOnboardingDialog, type OnboardingAction } from './KioskOnboardingDialog'
+import { MenuSheet, type MenuSection } from './KioskMenuSheet'
 import {
   AgentDialog, AgentMenu, KioskAgentInfoDialog, KioskAgentInstructionsDialog, KioskAgentSettingsDialog, KioskRemoveAgentDialog,
   type AgentMenuItem,
@@ -867,6 +868,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
 
       {locked && settingsOpen && (
         <KioskSettingsDialog
+          phone={isMobile}
           onAdmin={adminSwitch ? () => { setSettingsOpen(false); leaveKioskView() } : undefined}
           onClose={() => setSettingsOpen(false)}
           onRefresh={() => { refresh(); setSettingsOpen(false) }}
@@ -1097,12 +1099,15 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
 
 // ── Kiosk: Settings ──────────────────────────────────────────────────
 //
-// The kiosk keeps its whole footer behind one Settings button: this dialog
-// holds the theme switch, Connections, Profile, a refresh of the agent list,
-// the Getting started guide, and sign-out (how a shared kiosk hands the
-// screen to the next person).
+// The kiosk keeps its whole footer behind one Settings button: this menu (the
+// same MenuSheet as an agent's "⋯") holds what the agents are doing and keep,
+// the user's own things, the quick ones — theme, a refresh of the agent list,
+// the Getting started guide — and sign-out (how a shared kiosk hands the screen
+// to the next person).
 
-function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onTaskboard, onScheduled, onLibrary, onData, onFolders, onActivity, onByok }: {
+function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onTaskboard, onScheduled, onLibrary, onData, onFolders, onActivity, onByok }: {
+  /** The phone layout: two tiles to a row, not three. */
+  phone: boolean
   /** The desktop app's admin in the users' kiosk: back to the Admin console. */
   onAdmin?: () => void
   onClose: () => void
@@ -1124,102 +1129,77 @@ function KioskSettingsDialog({ onAdmin, onClose, onRefresh, onConnections, onPro
   const authEnabled = useAuthStore((s) => s.authEnabled)
   const authUser = useAuthStore((s) => s.user)
   const signingOut = useAuthStore((s) => s.signingOut)
+  const signedIn = authEnabled && authUser
 
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  // Closed without choosing: the focus goes back to the Settings button.
+  const [opener] = useState(() => document.activeElement as HTMLElement | null)
+  const close = useCallback(() => {
+    onClose()
+    opener?.focus()
+  }, [onClose, opener])
 
   const dark = theme === 'dark'
-  const tiles: { icon: typeof Plug; title: string; detail: string; onClick: () => void }[] = [
-    ...(onAdmin ? [{ icon: ShieldCheck, title: 'Switch to admin view', detail: 'Models, archetypes, connections and settings', onClick: onAdmin }] : []),
-    { icon: dark ? Sun : Moon, title: dark ? 'Light theme' : 'Dark theme', detail: `Switch to the ${dark ? 'light' : 'dark'} look`, onClick: toggleTheme },
-    { icon: Plug, title: 'Connections', detail: 'Google, Microsoft, MCP and Jev', onClick: onConnections },
-    ...(quota?.byok_allowed || quota?.byok ? [{
-      icon: KeyRound, title: 'Your own AI keys',
-      detail: quota.byok ? 'On — your agents run on your keys, no daily limits' : 'Run your agents on your own API keys, with no daily limits',
-      onClick: onByok,
-    }] : []),
-    { icon: ListChecks, title: 'Taskboard', detail: 'Every task your agents got or sent — and what needs you', onClick: onTaskboard },
-    { icon: AlarmClock, title: 'Scheduled tasks', detail: 'Your agents on a timer — results by chat or email', onClick: onScheduled },
-    { icon: LibraryBig, title: 'File library', detail: 'Every file your agents made, summarised and searchable', onClick: onLibrary },
-    { icon: Database, title: 'Data library', detail: 'Every table your agents keep, summarised and easy to read', onClick: onData },
-    { icon: Folders, title: 'Shared folders', detail: 'The folders your agents work in together — open, search, add files', onClick: onFolders },
-    { icon: Activity, title: 'Activity', detail: 'Every tool your agents used — when, with what, how it went', onClick: onActivity },
-    { icon: IdCard, title: 'Profile', detail: 'About you, your company, your preferences', onClick: onProfile },
-    // The Android app: back to its start screen — the saved decks and accounts.
-    ...(hasAndroidAppSettings() ? [{ icon: Smartphone, title: 'Switch deck', detail: 'Your Flight Decks and accounts on this phone', onClick: openAndroidAppSettings }] : []),
-    { icon: RefreshCw, title: 'Refresh agents', detail: 'Check every agent again', onClick: onRefresh },
-    { icon: Compass, title: 'Getting started', detail: 'A short tour: agents, connections, Telegram and more', onClick: onGuide },
+  const sections: MenuSection[] = [
+    ...(onAdmin ? [{ items: [{ icon: ShieldCheck, label: 'Switch to admin view', hint: 'Models, archetypes, connections and settings', onSelect: onAdmin, tone: 'amber' as const }] }] : []),
+    {
+      title: 'Your agents at work',
+      items: [
+        { icon: ListChecks, label: 'Taskboard', hint: 'Asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
+        { icon: AlarmClock, label: 'Scheduled tasks', hint: 'On a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
+        { icon: Activity, label: 'Activity', hint: 'Every tool they used, and how it went', onSelect: onActivity, tone: 'emerald' },
+      ],
+    },
+    {
+      title: 'What they keep',
+      items: [
+        { icon: LibraryBig, label: 'File library', hint: 'Every file they made, easy to find', onSelect: onLibrary, tone: 'violet' },
+        { icon: Database, label: 'Data library', hint: 'Every table they keep, easy to read', onSelect: onData, tone: 'cyan' },
+        { icon: Folders, label: 'Shared folders', hint: 'The folders they work in together', onSelect: onFolders, tone: 'sky' },
+      ],
+    },
+    {
+      title: 'You',
+      items: [
+        { icon: IdCard, label: 'Profile', hint: 'You, your company, your preferences', onSelect: onProfile, tone: 'fuchsia' },
+        { icon: Plug, label: 'Connections', hint: 'Google, Microsoft, MCP and Jev', onSelect: onConnections, tone: 'sky' },
+        ...(quota?.byok_allowed || quota?.byok ? [{
+          icon: KeyRound, label: 'Your own AI keys',
+          hint: quota.byok ? 'On: your keys, no daily limits' : 'Your own API keys, no daily limits',
+          onSelect: onByok, tone: 'amber' as const,
+        }] : []),
+      ],
+    },
+    {
+      compact: true,
+      items: [
+        { icon: dark ? Moon : Sun, label: 'Dark theme', hint: `Switch to the ${dark ? 'light' : 'dark'} look`, onSelect: toggleTheme, on: dark },
+        { icon: RefreshCw, label: 'Refresh agents', hint: 'Check every agent again', onSelect: onRefresh },
+        { icon: Compass, label: 'Getting started', hint: 'A short tour: agents, connections, Telegram and more', onSelect: onGuide },
+        // The Android app: back to its start screen — the saved decks and accounts.
+        ...(hasAndroidAppSettings() ? [{ icon: Smartphone, label: 'Switch deck', hint: 'Your Flight Decks and accounts on this phone', onSelect: openAndroidAppSettings }] : []),
+      ],
+    },
   ]
 
-  return createPortal(
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 wide:items-center wide:p-4" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-label="Settings"
-        className="relative max-h-[100dvh] w-full max-w-md overflow-y-auto rounded-t-2xl border border-zinc-800 bg-zinc-950 pb-[env(safe-area-inset-bottom)] shadow-2xl wide:rounded-2xl wide:pb-0"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between border-b border-zinc-800 px-5 py-4">
-          <h2 className="flex items-center gap-2 text-base font-semibold text-zinc-100">
-            <Settings className="h-4 w-4 text-violet-400" />
-            Settings
-          </h2>
-          <button onClick={onClose} title="Close" aria-label="Close" className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 wide:p-1">
-            <X className="h-5 w-5 wide:h-4 wide:w-4" />
-          </button>
-        </div>
-
-        {authEnabled && authUser && (
-          <div className="flex items-center gap-3 px-5 pt-4">
-            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-violet-500/15 text-sm font-semibold text-violet-400">
-              {initials(authUser.display_name || authUser.email)}
-            </span>
-            <div className="min-w-0">
-              <div className="truncate text-sm font-medium text-zinc-200">{authUser.display_name || authUser.email}</div>
-              {authUser.display_name && <div className="truncate text-xs text-zinc-500">{authUser.email}</div>}
-            </div>
-          </div>
-        )}
-
-        <div className="grid grid-cols-2 gap-2.5 p-5">
-          {tiles.map(({ icon: Icon, title, detail, onClick }, i) => (
-            <button
-              key={title}
-              onClick={onClick}
-              // An odd one out at the end takes the whole row.
-              className={`flex flex-col items-start gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 p-4 text-left transition-colors hover:border-violet-500/50 hover:bg-zinc-800/60 ${
-                i === tiles.length - 1 && tiles.length % 2 ? 'col-span-2' : ''
-              }`}
-            >
-              <span className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10 text-violet-400">
-                <Icon className="h-[18px] w-[18px]" />
-              </span>
-              <span>
-                <span className="block text-sm font-medium text-zinc-200">{title}</span>
-                <span className="mt-0.5 block text-[11px] leading-snug text-zinc-500">{detail}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-
-        {authEnabled && authUser && (
-          <div className="border-t border-zinc-800 p-5 pt-4">
-            <button
-              onClick={logoutUser}
-              disabled={signingOut}
-              className="flex w-full items-center justify-center gap-2 rounded-xl border border-zinc-800 px-4 py-2.5 text-sm font-medium text-zinc-300 transition-colors hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-600 disabled:opacity-60 dark:hover:text-red-400"
-            >
-              {signingOut ? <Loader2 className="h-4 w-4 animate-spin" /> : <LogOut className="h-4 w-4" />}
-              {signingOut ? 'Signing out…' : 'Sign out'}
-            </button>
-          </div>
-        )}
-      </div>
-    </div>,
-    document.body,
+  return (
+    <MenuSheet
+      label="Settings"
+      picture={signedIn ? initials(authUser.display_name || authUser.email) : <Settings className="h-6 w-6" />}
+      title={signedIn ? authUser.display_name || authUser.email : 'Settings'}
+      subtitle={signedIn && authUser.display_name ? authUser.email : ''}
+      sections={sections}
+      apart={signedIn ? [{
+        icon: signingOut ? Loader2 : LogOut,
+        label: signingOut ? 'Signing out…' : 'Sign out',
+        hint: 'End your session on this device',
+        onSelect: logoutUser,
+        disabled: signingOut,
+        busy: signingOut,
+        direct: true,
+      }] : []}
+      columns={phone ? 2 : 3}
+      onClose={close}
+    />
   )
 }
 

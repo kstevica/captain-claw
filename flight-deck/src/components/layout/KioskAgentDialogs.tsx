@@ -6,7 +6,6 @@ import {
   Brain,
   BrainCog,
   Check,
-  ChevronRight,
   Cpu,
   Database,
   Eye,
@@ -24,6 +23,7 @@ import {
 } from 'lucide-react'
 import { IntentionsPanel } from '../agents/IntentionsPanel'
 import { KioskInsightsPanel } from './KioskAgentInsights'
+import { MenuSheet, type MenuItem } from './KioskMenuSheet'
 import { KioskSkillsPanel } from './KioskAgentSkills'
 import { TopicsPanel } from '../agents/TopicsPanel'
 import { getAgentConfig, getAgentMode, setAgentMode, setAgentModel, setAgentVision } from '../../services/docker'
@@ -60,39 +60,13 @@ export interface KioskAgent {
   startKey: string
 }
 
-export interface AgentMenuItem {
-  icon: typeof Info
-  label: string
-  /** A word more under the label, or why it's off. */
-  hint?: string
-  onSelect: () => void
-  danger?: boolean
-  disabled?: boolean
-  /** Its icon's colour in the menu. */
-  tone?: MenuTone
-}
+export type AgentMenuItem = MenuItem
 
 // ── The "⋯" menu ──
 //
-// A modal of its own: the agent at the top, what can be done with it as
-// tiles — each with its icon and a word on what it opens — and Remove kept
-// apart at the bottom. A card in the middle of a larger screen, a sheet from
-// the bottom on a phone. Arrow keys move between the tiles; Esc closes it and
-// gives focus back to the "⋯".
-
-export type MenuTone = 'violet' | 'fuchsia' | 'sky' | 'cyan' | 'teal' | 'emerald' | 'amber' | 'zinc'
-
-const TONE: Record<MenuTone, string> = {
-  violet: 'bg-violet-500/15 text-violet-600 ring-violet-500/20 dark:text-violet-300',
-  fuchsia: 'bg-fuchsia-500/15 text-fuchsia-600 ring-fuchsia-500/20 dark:text-fuchsia-300',
-  sky: 'bg-sky-500/15 text-sky-600 ring-sky-500/20 dark:text-sky-300',
-  cyan: 'bg-cyan-500/15 text-cyan-600 ring-cyan-500/20 dark:text-cyan-300',
-  // The Taskboard's own colour (its tile, its header).
-  teal: 'bg-teal-500/15 text-teal-600 ring-teal-500/20 dark:text-teal-300',
-  emerald: 'bg-emerald-500/15 text-emerald-600 ring-emerald-500/20 dark:text-emerald-300',
-  amber: 'bg-amber-500/15 text-amber-600 ring-amber-500/20 dark:text-amber-300',
-  zinc: 'bg-zinc-500/15 text-zinc-600 ring-zinc-500/20 dark:text-zinc-300',
-}
+// A modal of its own (MenuSheet): the agent at the top, what can be done with
+// it as tiles, and Remove kept apart at the bottom. Esc gives focus back to the
+// "⋯".
 
 const initials = (name: string) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || '?'
 
@@ -110,41 +84,17 @@ export function AgentMenu({ agentName, items, subtitle = '', status, phone = fal
 }) {
   const [open, setOpen] = useState(false)
   const triggerRef = useRef<HTMLButtonElement>(null)
-  const panelRef = useRef<HTMLDivElement>(null)
   const close = useCallback(() => {
     setOpen(false)
     triggerRef.current?.focus()
   }, [])
-
-  // The first tile that can be used takes the focus; arrows move it — across a row, and up and down a column.
-  useEffect(() => {
-    if (!open) return
-    const tiles = () => [...(panelRef.current?.querySelectorAll<HTMLButtonElement>('[data-tile]:not(:disabled)') ?? [])]
-    tiles()[0]?.focus()
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation()
-        close()
-        return
-      }
-      const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: phone ? 1 : 2, ArrowUp: phone ? -1 : -2 }[e.key]
-      if (!step) return
-      const all = tiles()
-      const at = all.indexOf(document.activeElement as HTMLButtonElement)
-      if (at < 0) return
-      e.preventDefault()
-      all[Math.max(0, Math.min(all.length - 1, at + step))]?.focus()
-    }
-    window.addEventListener('keydown', onKey, true)
-    return () => window.removeEventListener('keydown', onKey, true)
-  }, [open, phone, close])
-
-  const choose = (onSelect: () => void) => {
-    setOpen(false)
-    onSelect()
-  }
-  const main = items.filter((x) => !x.danger)
-  const danger = items.filter((x) => x.danger)
+  const closing = (item: AgentMenuItem): AgentMenuItem => ({
+    ...item,
+    onSelect: () => {
+      setOpen(false)
+      item.onSelect()
+    },
+  })
 
   return (
     <>
@@ -162,91 +112,18 @@ export function AgentMenu({ agentName, items, subtitle = '', status, phone = fal
       >
         <MoreHorizontal className={phone ? 'h-5 w-5' : 'h-3.5 w-3.5'} />
       </button>
-      {open && createPortal(
-        <div
-          className={`fd-fade fixed inset-0 z-50 flex justify-center bg-black/50 backdrop-blur-[2px] ${phone ? 'items-end' : 'items-end wide:items-center wide:p-4'}`}
-          onClick={close}
-        >
-          <div
-            ref={panelRef}
-            role="dialog"
-            aria-modal="true"
-            aria-label={agentName}
-            onClick={(e) => e.stopPropagation()}
-            className={`${phone ? 'fd-sheet' : 'fd-sheet fd-card-wide'} relative flex max-h-[88dvh] w-full flex-col overflow-hidden border border-zinc-800 bg-zinc-900 pb-[env(safe-area-inset-bottom)] shadow-2xl shadow-black/40 ${
-              phone ? 'rounded-t-3xl' : 'rounded-t-3xl wide:max-w-lg wide:rounded-3xl wide:pb-0'}`}
-          >
-            <div className={`mx-auto mt-2.5 h-1 w-10 shrink-0 rounded-full bg-zinc-700 ${phone ? '' : 'wide:hidden'}`} aria-hidden />
-            <div className="flex shrink-0 items-center gap-3.5 px-5 pb-4 pt-4 wide:pt-5">
-              <span className="relative flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-fuchsia-500 text-sm font-semibold text-white shadow-lg shadow-violet-500/25">
-                {initials(agentName)}
-                {status && <span className="absolute -bottom-1 -right-1 flex rounded-full bg-zinc-900 p-[3px]">{status}</span>}
-              </span>
-              <div className="min-w-0 flex-1">
-                <h2 className="truncate text-base font-semibold text-zinc-100">{agentName}</h2>
-                {subtitle && <p className="truncate text-xs text-zinc-500">{subtitle}</p>}
-              </div>
-              <button onClick={close} aria-label="Close" title="Close"
-                className="-mr-1.5 rounded-full p-2 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200">
-                <X className="h-5 w-5" />
-              </button>
-            </div>
-
-            <div className="min-h-0 overflow-y-auto overscroll-contain px-4 pb-4 wide:px-5 wide:pb-5">
-              <div className="grid grid-cols-2 gap-2.5">
-                {main.map(({ icon: Icon, label, hint, onSelect, disabled, tone = 'violet' }, i) => {
-                  // An odd one out takes the whole last row, laid out across it.
-                  const across = main.length % 2 === 1 && i === main.length - 1
-                  return (
-                    <button
-                      key={label}
-                      data-tile
-                      disabled={disabled}
-                      onClick={() => choose(onSelect)}
-                      title={hint}
-                      className={`group relative flex min-w-0 rounded-2xl border border-zinc-800 bg-zinc-950/40 text-left transition-all hover:-translate-y-px hover:border-zinc-700 hover:bg-zinc-800/60 hover:shadow-lg hover:shadow-black/10 focus-visible:border-violet-500 focus-visible:bg-violet-500/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:translate-y-0 disabled:hover:border-zinc-800 disabled:hover:bg-zinc-950/40 disabled:hover:shadow-none ${
-                        across ? 'col-span-2 items-center gap-3.5 p-3.5' : 'flex-col p-3.5'}`}
-                    >
-                      <span className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ring-1 ${TONE[tone]}`}>
-                        <Icon className="h-5 w-5" />
-                      </span>
-                      <span className={`min-w-0 ${across ? 'flex-1' : 'mt-3'}`}>
-                        <span className="block text-sm font-semibold leading-snug text-zinc-100">{label}</span>
-                        {hint && <span className="mt-0.5 line-clamp-2 text-xs leading-snug text-zinc-500">{hint}</span>}
-                      </span>
-                      <ChevronRight className={`h-4 w-4 shrink-0 text-zinc-600 transition-all group-hover:translate-x-0.5 group-hover:text-zinc-400 group-disabled:opacity-0 ${
-                        across ? '' : 'absolute right-3 top-3.5'}`} />
-                    </button>
-                  )
-                })}
-              </div>
-
-              {danger.length > 0 && (
-                <div className="mt-3 border-t border-zinc-800 pt-3">
-                  {danger.map(({ icon: Icon, label, hint, onSelect, disabled }) => (
-                    <button
-                      key={label}
-                      data-tile
-                      disabled={disabled}
-                      onClick={() => choose(onSelect)}
-                      className="group flex w-full items-center gap-3.5 rounded-2xl p-3 text-left transition-colors hover:bg-red-500/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500/40 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent"
-                    >
-                      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-red-500/10 text-red-600 ring-1 ring-red-500/20 dark:text-red-400">
-                        <Icon className="h-5 w-5" />
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block text-sm font-semibold text-red-600 dark:text-red-400">{label}</span>
-                        {hint && <span className="block truncate text-xs text-zinc-500">{hint}</span>}
-                      </span>
-                      <ChevronRight className="h-4 w-4 shrink-0 text-red-400/50 transition-transform group-hover:translate-x-0.5" />
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
-        </div>,
-        document.body,
+      {open && (
+        <MenuSheet
+          label={agentName}
+          picture={initials(agentName)}
+          status={status}
+          title={agentName}
+          subtitle={subtitle}
+          sections={[{ items: items.filter((x) => !x.danger).map(closing) }]}
+          apart={items.filter((x) => x.danger).map(closing)}
+          phone={phone}
+          onClose={close}
+        />
       )}
     </>
   )
