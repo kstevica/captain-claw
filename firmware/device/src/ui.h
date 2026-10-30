@@ -106,6 +106,7 @@ struct Status {
   bool charging = false, usb = false;
   int minutesLeft = -1, minutesToFull = -1;  // from the level over the clock (-1: not known yet; 0 to full: full)
   String uptime;
+  String wake;  // why it last woke, where the board can tell ("" = not shown)
   int turns = 0, lastAnswerMin = -1;
   bool climate = false;
   float tempC = 0, humidity = 0;
@@ -152,6 +153,7 @@ inline std::vector<Row> statusRows(const Status& s) {
                                (s.lastAnswerMin >= 0 ? "  last " + String(s.lastAnswerMin) + "m ago" : String("")) +
                                "  up " + s.uptime,
                   text});
+  if (s.wake.length()) rows.push_back({"Woke", s.wake, text});
   rows.push_back({"Device", s.deviceId + "  fw " + s.fw + "  " + String(s.freeKb) + "k free", text});
   if (s.notes) {
     rows.push_back({"Offline notes", String(s.notes) + " waiting  " + s.notesLength + "  room " + String(s.notesRoomMin) +

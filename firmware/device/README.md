@@ -265,7 +265,7 @@ Two boards, one build each: SKU 32298 (`pio run -e epaper154`) and the Touch
 version, SKU 34212 (`pio run -e epaper154_touch`). Same board otherwise:
 ESP32-S3-PICO-1-N8R8 (the StickS3's module), a 200×200 black-and-white panel
 (SSD1681), ES8311 codec with mic and speaker (the StickS3's too), SHTC3
-temperature and humidity, PCF85063 clock, microSD, BOOT and PWR buttons, one
+temperature and humidity (not used: see below), PCF85063 clock, microSD, BOOT and PWR buttons, one
 green LED. **Only the V2 board works** ("V2" on the back or top-left of the
 PCB); a V1 has 4 MB flash and 2 MB PSRAM, too small for this firmware.
 
@@ -294,12 +294,17 @@ has to follow, and at 1.8 s that's no quicker than letting the first one finish.
 
 | | `epaper154` | `epaper154_touch` |
 |---|---|---|
-| talk | BOOT: press, talk, press again (or 2.5 s of quiet); wakes and records from sleep | the same, or the Talk button on the screen |
+| talk | BOOT: press, talk, press again; wakes and records from sleep | the same, or the Talk button on the screen |
 | next | PWR: next row or page · hold = menu | the same, or swipe; in a list, tap the left or right third to move, the middle to choose |
 | home | PWR: double-click, from any screen (not while it records or the agent works) | the same |
 | replay | BOOT: double press, or Menu → *Replay answer* | the same |
 | off | PWR held 4 s (on USB: deep sleep, since USB keeps it powered) | the same |
 | Wi-Fi & settings | Menu → *Wi-Fi & settings* | the same |
+
+There's no 2.5 s silence stop on this board: its mic's level ended recordings
+mid-sentence, so only a press ends one, or the length limits (110 s online, 60 s
+as an offline note). The home screen's bottom line, the battery level and the time
+left or to full, follows the text size.
 
 Holding the talk button at power-on can't open setup here as it does elsewhere:
 BOOT held at power-on is the chip's download mode. No pin reports USB power or
@@ -333,9 +338,14 @@ tells awake from asleep, since the panel keeps its picture either way:
 just after each minute turns, it redraws without Wi-Fi and sleeps again (Menu →
 More → *Redraw asleep*, or the phone page: every minute, 2, 5, 10 or 30 min, 1 h,
 3 h, never; at 2, 5 or 10 the time on screen is the last round one, like 19:25).
-Under 10% battery it goes hourly. The board barely warms this way, so the room
-reading stays good; the correction allows for how far it has cooled since it went
-to sleep.
+Under 10% battery it goes hourly.
+
+It draws the sleeping screen, waits 10 s with Wi-Fi still on (a press just goes
+back), and doesn't go down within 5 s of a redraw. Status → *Woke* lists the last
+boots that weren't the clock's usual tick, newest first, with the seconds since it
+went to sleep ("PWR 240s  timer 12s  restart"). From the schematic, holding G17 high feeds
+T2's base through 1K, so about 2.6 mA flows whenever it sleeps on battery,
+whatever the clock does. The current hasn't been measured.
 
 The picture doesn't depend on power, which is why the sleeping screen stays. On
 battery the board stays on only while G17 is high; it's latched through deep
@@ -346,18 +356,16 @@ clock keeps time; a full refresh takes 1803 ms, a partial one 580 ms; with one
 tone playing, the mic hears the speaker (4600 against 1 with the amplifier off).
 The mic's quiet peaks at about 450, under the 2400 that counts as a voice.
 
-The board warms its temperature sensor: in a room of about 24 °C, on USB, it read
-28.8 °C after a long sleep and rose to 32.7 °C awake (time constant 260 s).
-`roomFromSensor()` in `telemetry.cpp` takes that off, and works out the humidity
-of the same air at the cooler temperature. Home and the agent get the corrected
-values. It's calibrated on USB against one room reading, and unmeasured on
-battery. After a reset with the board already warm it reads high for a few minutes.
+The temperature sensor isn't used. The board warms it: in a room of about 24 °C, on
+USB, it read 28.8 °C after a long sleep and 32.7 °C awake, and a correction from
+those numbers still read way off. So neither the screen nor the agent gets a room
+reading (`kHasClimate` in `board.h`).
 
-Still to check: which way up the picture and the touch are (Menu → More →
-*Orientation*); a real voice's level; that the battery percentage is believable;
-ghosting (`kMaxPartials` and friends in `ui_epaper154.cpp`); the power latch on
-battery; current in deep sleep. Put the factory image aside first: `esptool.py
-read_flash 0 0x800000 factory.bin`.
+The power latch holds on battery: the sleeping clock keeps going there, and OTA
+updates install. Still to check: which way up the touch is (Menu → More →
+*Orientation*); ghosting (`kMaxPartials` and friends in `ui_epaper154.cpp`); current
+in deep sleep. Put the factory image aside first: `esptool.py read_flash 0 0x800000
+factory.bin`.
 
 Screens on a Mac, both builds:
 

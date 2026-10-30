@@ -53,7 +53,7 @@
 #if defined(PAPER_B)
 #define FW_VERSION "1.0.22"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.19.2"
+#define FW_VERSION "0.19.5"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -215,7 +215,8 @@ static bool sideClickWoke = false;   // that click only woke the screen
 // Talking from sleep: the talk button woke the device and is still held. The
 // mic records into PSRAM at once (M5Unified fills the buffer by itself) while
 // Wi-Fi and the deck connect; then it all goes up, as if spoken just now.
-static constexpr uint32_t kPrerollMaxMs = 30000;   // a wake-to-talk recording
+// A wake-to-talk recording. (Where only a press ends one, as long as any other.)
+static constexpr uint32_t kPrerollMaxMs = board::kSilenceStop ? 30000 : 110000;
 static constexpr uint32_t kOfflineMaxMs = 60000;   // a voice note kept offline (notes.h)
 static constexpr uint32_t kTalkMaxMs = 110000;     // a recording sent as it's made (the server caps at 120 s)
 static uint32_t prerollMaxMs = kPrerollMaxMs;      // this recording's cap
@@ -500,6 +501,56 @@ static String batteryLine() {
   return m >= 0 ? "≈ " + ui::timeSpan(m) + " left" : String("on battery");
 }
 
+#if defined(BOARD_EPAPER154)
+// The last few boots that weren't the clock's usual tick, newest first, for the
+// status page: why, and how long after it went to sleep. The picture stays through
+// anything, so the screen alone can't say. Kept through resets (not a power loss).
+struct BootNote {
+  char what[10];
+  uint32_t after;
+};
+static constexpr uint32_t kBootsMagic = 0xB0075EE1;
+RTC_NOINIT_ATTR static uint32_t rtcBootsMagic;
+RTC_NOINIT_ATTR static uint32_t rtcBootsN;
+RTC_NOINIT_ATTR static BootNote rtcBoots[5];
+RTC_NOINIT_ATTR static time_t rtcSleptAt;  // when it last went to sleep
+
+static String wakeText() {
+  String text;
+  for (uint32_t i = 0; i < rtcBootsN; ++i) {
+    if (i) text += "  ";
+    text += rtcBoots[i].what;
+    if (rtcBoots[i].after) text += " " + String(rtcBoots[i].after) + "s";
+  }
+  return text;
+}
+
+// (After the clock is set.)
+static void noteBoot() {
+  if (rtcBootsMagic != kBootsMagic || rtcBootsN > 5) {
+    rtcBootsMagic = kBootsMagic;
+    rtcBootsN = 0;
+    rtcSleptAt = 0;
+  }
+  const bool deep = esp_reset_reason() == ESP_RST_DEEPSLEEP;
+  const esp_sleep_wakeup_cause_t cause = esp_sleep_get_wakeup_cause();
+  const uint64_t pins = cause == ESP_SLEEP_WAKEUP_EXT1 ? esp_sleep_get_ext1_wakeup_status() : 0;
+  const char* what = !deep                                ? bootReason()
+                     : cause == ESP_SLEEP_WAKEUP_TIMER    ? "timer"
+                     : pins & (1ULL << board::kTalkPin)   ? "BOOT"
+                     : pins & (1ULL << board::kSidePin)   ? "PWR"
+                                                          : "other";
+  const time_t now = time(nullptr);
+  const uint32_t after = rtcSleptAt && now >= rtcSleptAt ? now - rtcSleptAt : 0;
+  if (deep && cause == ESP_SLEEP_WAKEUP_TIMER && after >= 55) return;  // the clock's tick
+  rtcBootsN = min<uint32_t>(rtcBootsN + 1, 5);
+  for (int i = rtcBootsN - 1; i > 0; --i) rtcBoots[i] = rtcBoots[i - 1];
+  strlcpy(rtcBoots[0].what, what, sizeof(rtcBoots[0].what));
+  rtcBoots[0].after = after;
+  Serial.printf("[claw] woke: %s\n", wakeText().c_str());
+}
+#endif
+
 // What the status screens show now.
 static ui::Status statusNow() {
   ui::Status s;
@@ -523,6 +574,9 @@ static ui::Status statusNow() {
   s.minutesLeft = battery::minutesLeft();
   s.minutesToFull = battery::minutesToFull();
   s.uptime = uptime();
+#if defined(BOARD_EPAPER154)
+  s.wake = wakeText();
+#endif
   s.turns = turns;
   s.lastAnswerMin = lastReplyMs ? (int)((millis() - lastReplyMs) / 60000) : -1;
   s.climate = telemetry::climate(&s.tempC, &s.humidity);
@@ -801,7 +855,7 @@ static ui::Item menuItem(int row) {
       it.title = "Redraw asleep";
       it.badge = asleepLabel();
       it.on = settings.asleepRefreshMin > 0;
-      it.note = board::kSleepClock ? "the clock, date and room while it sleeps" : "date, room and battery on the sleeping paper";
+      it.note = board::kSleepClock ? "the clock and date while it sleeps" : "date, room and battery on the sleeping paper";
       break;
     case MPhone:
       it.title = board::kSlowPaper ? "Options" : "Settings on phone";
@@ -2529,7 +2583,7 @@ static uint64_t asleepWakeInUs() {
 #endif
   ui::brightness(0);
 #if defined(BOARD_EPAPER154)
-  telemetry::beforeSleep();
+  rtcSleptAt = time(nullptr);
   ui::panelSleep();
   hw::prepareSleep();
 #endif
@@ -2567,6 +2621,19 @@ static void goToSleep() {
   if (board::kEpaper) {
     ui::setBar(agentName, "asleep", kText);
     ui::showSleeping(sleepHint(), settings.character);  // waits for the paper (~20 s)
+#if defined(BOARD_EPAPER154)
+    // The picture up for ten seconds first, Wi-Fi still on: a press just goes
+    // back. And not right before a redraw, or it would be up again at once.
+    const uint32_t held = millis();
+    const time_t drawnMinute = time(nullptr) / 60;
+    while (millis() - held < 10000 || (settings.asleepRefreshMin && asleepWakeInUs() < 5000000ULL)) {
+      if ((int32_t)(buttonSeenMs - t0) > 0) break;
+      delay(20);
+    }
+    if ((int32_t)(buttonSeenMs - t0) <= 0 && time(nullptr) / 60 != drawnMinute) {
+      ui::showSleeping(sleepHint(), settings.character);
+    }
+#endif
     if ((int32_t)(buttonSeenMs - t0) > 0) {  // pressed meanwhile: stay awake
       touch();
       backToMain();
@@ -2998,6 +3065,9 @@ void setup() {
   ui::brightness(kBright);
   ui::setTextSize(settings.textSize);
   telemetry::begin();
+#if defined(BOARD_EPAPER154)
+  noteBoot();
+#endif
   battery::begin();
   leds::begin();
   leds::setLevel(settings.ledLevel);
@@ -3135,7 +3205,7 @@ static void stopOnSilence() {
   static uint32_t voiceMs = 0;   // when a voice was last heard in it (0 = not yet)
   static size_t scanned = 0;     // background-recording samples looked at so far
   static int loudRun = 0;        // …and its loud blocks in a row (kVoiceRun = a voice)
-  if (!tapRec) return;
+  if (!board::kSilenceStop || !tapRec) return;
   if (board::kNoteMode && settings.noteMode) return;  // notes have their pauses: the press ends them
   const bool live = !prerollOn && mode == Mode::Listening && audio::micActive();
   if (!live && !(prerollOn && !prerollEndMs)) return;

@@ -78,41 +78,13 @@ bool lowered() {
   return l;
 }
 
-// ── room climate (PaperColor: SHT40; Waveshare 1.54": SHTC3) ─────────────────────────────────
+// ── room climate (PaperColor: SHT40) ─────────────────────────────────
 
 static constexpr uint8_t kSht40 = 0x44;
 static bool haveClimate = board::kHasClimate;
 static float lastT = NAN, lastRh = NAN;
 static uint32_t climateAt = 0;
 
-#if defined(BOARD_EPAPER154)
-static constexpr uint8_t kShtc3 = 0x70;
-
-static bool shtc3Command(uint16_t command) {
-  const uint8_t bytes[2] = {(uint8_t)(command >> 8), (uint8_t)command};
-  if (!M5.In_I2C.start(kShtc3, false, 400000)) return false;
-  const bool ok = M5.In_I2C.write(bytes, 2);
-  M5.In_I2C.stop();
-  return ok;
-}
-
-static bool readSht40(float* t, float* rh) {
-  if (!shtc3Command(0x3517)) return false;  // wake up
-  delay(1);
-  if (!shtc3Command(0x7866)) return false;  // measure, temperature first (~12 ms)
-  delay(15);
-  uint8_t buf[6];
-  if (!M5.In_I2C.start(kShtc3, true, 400000)) return false;
-  const bool ok = M5.In_I2C.read(buf, 6);
-  M5.In_I2C.stop();
-  shtc3Command(0xB098);  // back to sleep
-  if (!ok) return false;
-  const uint16_t rawT = (buf[0] << 8) | buf[1], rawH = (buf[3] << 8) | buf[4];
-  *t = -45.0f + 175.0f * rawT / 65536.0f;
-  *rh = constrain(100.0f * rawH / 65536.0f, 0.0f, 100.0f);
-  return true;
-}
-#else
 static bool readSht40(float* t, float* rh) {
   uint8_t cmd = 0xFD;  // measure, high precision (~8.3 ms)
   uint8_t buf[6];
@@ -129,27 +101,6 @@ static bool readSht40(float* t, float* rh) {
   *rh = constrain(-6.0f + 125.0f * rawH / 65535.0f, 0.0f, 100.0f);
   return true;
 }
-#endif
-
-#if defined(BOARD_EPAPER154)
-// This small board warms its own sensor. In a room of about 24 °C, on USB, it
-// read 28.8 °C straight after a long sleep, then rose to 32.7 °C awake, with a
-// time constant of 260 s. On battery nothing should heat it while it sleeps.
-static constexpr float kUsbHeatC = 4.8f, kAwakeHeatC = 4.0f, kAwakeTauS = 260.0f;
-RTC_DATA_ATTR static float rtcHeat = 0;     // what being awake had added when it went to sleep
-RTC_DATA_ATTR static time_t rtcHeatAt = 0;
-static float bootHeat = 0;                  // what's left of that at this boot (it cools as it warmed)
-
-static float awakeHeat() { return kAwakeHeatC + (bootHeat - kAwakeHeatC) * expf(-(millis() / 1000.0f) / kAwakeTauS); }
-
-static float saturationHpa(float c) { return 6.112f * expf(17.62f * c / (243.12f + c)); }  // Magnus
-
-static void roomFromSensor(float* t, float* rh) {
-  const float room = *t - (hw::onUsbPower() ? kUsbHeatC : 0.0f) - awakeHeat();
-  *rh = constrain(*rh * saturationHpa(*t) / saturationHpa(room), 0.0f, 100.0f);  // the same air, cooler
-  *t = room;
-}
-#endif
 
 bool climate(float* tempC, float* humidity) {
   if (!haveClimate) return false;
@@ -157,9 +108,6 @@ bool climate(float* tempC, float* humidity) {
     climateAt = millis();
     float t, rh;
     if (readSht40(&t, &rh)) {
-#if defined(BOARD_EPAPER154)
-      roomFromSensor(&t, &rh);
-#endif
       lastT = t;
       lastRh = rh;
     }
@@ -191,19 +139,10 @@ bool onUsbPower() {
 
 // ── public ───────────────────────────────────────────────────────────
 
-void beforeSleep() {
-#if defined(BOARD_EPAPER154)
-  rtcHeat = awakeHeat();
-  rtcHeatAt = time(nullptr);
-#endif
-}
-
 void begin() {
   haveImu = M5.Imu.isEnabled();
 #if defined(BOARD_EPAPER154)
   hw::clockFromRtc();
-  const time_t now = time(nullptr);
-  bootHeat = rtcHeatAt && now > rtcHeatAt ? rtcHeat * expf(-(float)(now - rtcHeatAt) / kAwakeTauS) : rtcHeat;
 #else
   if (M5.Rtc.isEnabled()) {
     m5::rtc_datetime_t dt;
@@ -226,9 +165,6 @@ void begin() {
     float t, rh;
     haveClimate = readSht40(&t, &rh);  // not there: never ask again
     if (haveClimate) {
-#if defined(BOARD_EPAPER154)
-      roomFromSensor(&t, &rh);
-#endif
       lastT = t, lastRh = rh;
       climateAt = millis();
     }

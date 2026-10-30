@@ -141,7 +141,7 @@ constexpr bool kRound = false;
 constexpr bool kEpaper = true;
 constexpr bool kHasMotor = false;
 constexpr bool kHasLeds = true;  // the green one (leds.cpp); the red one is the charger's
-constexpr bool kHasClimate = true;  // SHTC3
+constexpr bool kHasClimate = false;  // there's an SHTC3, but the board heats it well past the room
 constexpr bool kOfflineNotes = true;
 constexpr bool kHasSdCard = true;  // microSD on its own SDMMC pins
 constexpr bool kLoudPeakRestarts = false;
@@ -219,6 +219,14 @@ constexpr bool kTapTalkDefault = false;
 constexpr bool kDoubleHome = true;
 #else
 constexpr bool kDoubleHome = false;
+#endif
+
+// A toggled recording also ends after 2.5 s of quiet. Not here: this mic's level
+// stopped it mid-sentence, so only a press ends one (or the length limits).
+#if defined(BOARD_EPAPER154)
+constexpr bool kSilenceStop = false;
+#else
+constexpr bool kSilenceStop = true;
 #endif
 
 // Fast enough to keep a clock going asleep: "Redraw asleep" can be every minute.

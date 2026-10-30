@@ -14,8 +14,6 @@ namespace telemetry {
 
 // Sets the clock from the RTC (devices that have one) and probes the sensors.
 void begin();
-// Before a deep sleep (the Waveshare board: how warm it is, for the next wake's reading).
-void beforeSleep();
 // From loop(): samples motion a few times a second; keeps the RTC in step
 // with NTP.
 void poll();

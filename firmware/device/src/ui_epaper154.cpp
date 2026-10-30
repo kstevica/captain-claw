@@ -416,14 +416,6 @@ static String dateText(const struct tm& t) {
   return String(wday) + " " + String(t.tm_mday) + " " + mon;
 }
 
-static String roomLine() {
-  float t, rh;
-  if (!telemetry::climate(&t, &rh)) return "";
-  char s[24];
-  snprintf(s, sizeof(s), "%.0f°C  %d%%", t, (int)(rh + 0.5f));
-  return s;
-}
-
 // ── notices ────────────────────────────────────────────────────────────
 
 void showMessage(const char* title, const String& body, uint16_t) {
@@ -492,7 +484,7 @@ void showSetup(const char* reason, const char* apName, const char* ip) {
 // The minute it was last drawn with: tick() redraws it when that changes.
 static int homeMinute = -1;
 
-// The big clock, and under it the date and the room: awake and asleep alike.
+// The big clock, and under it the date: awake and asleep alike.
 static void drawClock() {
   struct tm t;
   const bool clock = localNow(&t);
@@ -502,12 +494,8 @@ static void drawClock() {
   else strcpy(buf, "--:--");
   canvas.setFont(&fonts::FreeSansBold24pt7b);
   text(buf, W / 2, 26, top_center);
-  canvas.setFont(&efont::efont14);
-  String under;
-  if (clock) under = dateText(t);
-  const String room = roomLine();
-  if (room.length()) under += (under.length() ? "  ·  " : "") + room;
-  if (under.length()) text(under, W / 2, 68, top_center);
+  canvas.setFont(&efont::efont16);
+  if (clock) text(dateText(t), W / 2, 67, top_center);
   canvas.drawFastHLine(PAD, 88, W - 2 * PAD, kInk);
 }
 
@@ -530,11 +518,28 @@ void showHome(const Home& home) {
   const int hintBottom = H - 2 - kTapReserve;
   const std::vector<String> ls = wrap(home.hint, W - 2 * PAD, &efont::efont14);
   for (int i = 0; i < (int)ls.size() && i < 2; ++i, y += 16) text(ls[i], W / 2, y, top_center);
-  if (home.battery.length() && y + 15 <= hintBottom) {
-    canvas.setFont(kSmall);
+  if (home.battery.length()) {
+    // At the size chosen for reading: the level and the time on one line, or
+    // wrapped, keeping the last lines (the time) if there's no room for them all.
     String battery = home.battery;
     battery.replace("≈ ", "~");  // (not in efont)
-    text(battery, W / 2, hintBottom - 14, top_center);
+    const int pct = hw::batteryLevel();
+    const String level = pct < 0 ? String() : String(pct) + "%";
+    canvas.setFont(ts().body);
+    std::vector<String> ls;
+    const String one = level.length() ? level + "  " + battery : battery;
+    if (tw(one) <= W - 2 * PAD) {
+      ls.push_back(one);
+    } else {
+      if (level.length()) ls.push_back(level);
+      for (const String& l : wrap(battery, W - 2 * PAD, ts().body)) ls.push_back(l);
+    }
+    canvas.setFont(ts().body);
+    const int room = max(0, (hintBottom - y) / ts().line);
+    const int shown = min(room, (int)ls.size());
+    for (int i = 0; i < shown; ++i) {
+      text(ls[ls.size() - shown + i], W / 2, hintBottom - (shown - i) * ts().line, top_center);
+    }
   }
   drawTapButton();
   push();

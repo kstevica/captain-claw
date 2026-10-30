@@ -19,11 +19,6 @@ PreviewM5 M5;
 // ── stand-ins for the device-only parts ─────────────────────────────────
 
 namespace telemetry {
-bool climate(float* t, float* rh) {
-  *t = 22.6f;
-  *rh = 44.0f;
-  return true;
-}
 bool clockSet() { return true; }
 bool onUsbPower() { return false; }
 }  // namespace telemetry
@@ -93,6 +88,13 @@ int main(int argc, char** argv) {
   home.battery = "≈ 2 h 10 min left";
   ui::showHome(home);
   save("01_home");
+  ui::setTextSize(1);
+  ui::showHome(home);
+  save("01b_home_medium");
+  ui::setTextSize(2);
+  ui::showHome(home);
+  save("01c_home_large");
+  ui::setTextSize(0);
 
   ui::setWaiting(3);
   ui::setHealth(ui::Up, ui::Asleep);
@@ -173,11 +175,9 @@ int main(int argc, char** argv) {
   s.batteryMv = 3950;
   s.minutesLeft = 130;
   s.uptime = "1 h 4 min";
+  s.wake = "PWR 240s  timer 12s  restart";
   s.turns = 12;
   s.lastAnswerMin = 3;
-  s.climate = true;
-  s.tempC = 22.6f;
-  s.humidity = 44;
   s.voice = "female";
   s.volumePct = 75;
   s.speak = true;
