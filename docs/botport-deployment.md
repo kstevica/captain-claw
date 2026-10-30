@@ -156,7 +156,7 @@ To start the hub at boot, `crontab -e` and add:
 What the hub prints when it is up:
 
 ```
-BotPort v0.8.3 (protocol 2) listening on http://0.0.0.0:23180
+BotPort v0.8.4 (protocol 2) listening on http://0.0.0.0:23180
   Flight Decks / agents connect to: ws://<this-host>:23180/ws
   Dashboard: http://<this-host>:23180/  (admin token required)
   Health:    http://<this-host>:23180/healthz
@@ -255,7 +255,7 @@ on. Press **Save**. That's all.
    `host:port`, `http(s)://` and `ws(s)://` forms are accepted; `/ws` is added
    when missing.
 2. **Test** — checks the typed address without connecting as the deck.
-   Expected: *BotPort v0.8.3 reachable (protocol 2)*.
+   Expected: *BotPort v0.8.4 reachable (protocol 2)*.
 3. **Deck name** — the key's `instance` (`pi`, `vps1`, …): letters, digits,
    `-`, `_`, `.`, up to 63 characters, no spaces or `@`.
 4. **Key** and **Secret** — from the hub's dialog, or that deck's `gen-key`

@@ -27,7 +27,7 @@ botport                   # Agent-to-agent routing hub
 
 First run starts onboarding automatically. For Ollama, no key needed — set `provider: ollama` in `config.yaml`.
 
-**Optional extras:** `pip install 'captain-claw[cv]'` for local OpenCV vision, `pip install 'captain-claw[whatsapp-web]'` to let users link their own WhatsApp (experimental; see [WhatsApp Web](devices-and-channels.md#whatsapp-web--your-own-whatsapp)).
+**Optional extras:** `pip install 'captain-claw[cv]'` for local OpenCV vision, `pip install 'captain-claw[pdf]'` for PDFs read with their headings and tables (PyMuPDF, AGPL-3.0), `pip install 'captain-claw[whatsapp-web]'` to let users link their own WhatsApp (experimental; see [WhatsApp Web](devices-and-channels.md#whatsapp-web--your-own-whatsapp)).
 
 ## A deck for a team
 
@@ -39,14 +39,16 @@ FD_AUTH_ENABLED=true FD_JWT_SECRET=$(openssl rand -hex 32) FD_PUBLIC_URL=https:/
 
 The first account becomes the admin. The full checklist (sharing, team keys, Gmail sending, inbound MCP for Claude) is in [docs/team-deployment.md](../team-deployment.md).
 
+With sign-in on, agents stay in their own files and non-admins' agents don't run code (0.8.4); see the [checklist](../team-deployment.md#what-the-launch-hardening-changed-08x).
+
 ## A voice device on your desk
 
-Flash an M5Stack StickS3, StopWatch or PaperColor (the deck needs a Soniox key, in Connections → Soniox or as the admin's team key):
+Flash an M5Stack StickS3, StopWatch or PaperColor, or a Waveshare ePaper 1.54 (the deck needs a Soniox key, in Connections → Soniox or as the admin's team key):
 
 ```bash
 uv tool install platformio
 cd firmware/device
-pio run -e stopwatch -t upload     # or: -e sticks3, -e papercolor_b
+pio run -e stopwatch -t upload     # or: -e sticks3, -e papercolor_b, -e epaper154, -e epaper154_touch
 ```
 
 Then join the device's hotspot, open `http://192.168.4.1`, enter your Wi-Fi, the deck address and an access token from Connections → *Agent access for Claude (MCP)*. See [firmware/device/README.md](../../firmware/device/README.md).
@@ -100,4 +102,4 @@ Full reference: [USAGE.md](../../USAGE.md#configuration-reference) (23 config se
 
 - [Flight Deck](flight-deck.md) — what to do once the dashboard is open
 - [BotPort and MCP](botport-and-mcp.md) — connect your decks to each other and to Claude
-- [Inside an agent](agents.md) — every supported model and the 63 built-in tools
+- [Inside an agent](agents.md) — every supported model and the 65 built-in tools

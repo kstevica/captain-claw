@@ -27,7 +27,7 @@ with the fields from [deed-page.json](deed-page.json):
 - Name: `deed-page` (choose a new name if it already exists)
 - Transport: `http`
 - URL: `https://deed.page/mcp`
-- Headers: `{"User-Agent": "captain-claw-flight-deck/0.8.3"}`
+- Headers: `{"User-Agent": "captain-claw-flight-deck/0.8.4"}`
 - Allowed agents: select the agents that should be able to publish
 
 Test and save the connection. The proxy tools include

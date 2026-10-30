@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENCE)
-[![Version](https://img.shields.io/badge/version-0.8.3-purple)](release-notes/RELEASE_NOTES_0.8.3.md)
+[![Version](https://img.shields.io/badge/version-0.8.4-purple)](release-notes/RELEASE_NOTES_0.8.4.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](docs/guide/getting-started.md)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](docs/guide/agents.md#multi-model-support)
 
@@ -12,25 +12,26 @@
   <a href="docs/guide/whats-new.md#whats-new-in-082"><img src="docs/screenshots/hero-0.8.2.webp" width="100%" alt="Captain Claw 0.8.2: the BotPort hub's live network map, the kiosk's Share on network dialog on a phone, a StopWatch speaking an answer and a PaperColor e-paper dashboard"></a>
 </p>
 
-> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**.
+> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**.
 
 **[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://cohort001.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)** · **[🧭 Guides](docs/guide/README.md)** · **[📝 What's new](docs/guide/whats-new.md)**
 
-**New in 0.8.3 — Plugged In, On the Record:** connect any system to an agent, let agents read your own WhatsApp, and see every tool call they make. **[Release notes](release-notes/RELEASE_NOTES_0.8.3.md)**
+**New in 0.8.4 — Onboarded, On the Board:** teach an agent your documents and exam it, see everything your agents were asked and sent in one place, and run a deck for people who don't share a machine. **[Release notes](release-notes/RELEASE_NOTES_0.8.4.md)**
 
-<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>63 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>31 ready-made specialists</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>three M5Stack voice devices</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
+<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>65 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>31 ready-made specialists</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
 
 ## Why Captain Claw
 
 - **🛸 A fleet, not a chatbot.** Spawn specialists from 31 ready-made archetypes, or describe a goal and let **Agent Forge** design the whole team: roles, models, tools and operating procedures.
+- **🎓 Agents you can train.** Give an agent your documents and it keeps them whole at no token cost, reads what you budget for, and learns rules and facts you review. Then exam it, and see exactly where it went wrong.
 - **🧩 The right shape for every problem.** Seven orchestration modes, from blind ensembles merged by learned reliability to a collaborative blackboard, moderated councils, and a finisher that stops only when an independent judge says the work is done.
 - **🛰️ Decks that work together.** Flight Decks on a VPS, a laptop and a Raspberry Pi behind home NAT lend each other their agents over **BotPort**, and you watch every request cross a live map.
 - **💻 An engineering department.** Plan → your approval → build → three independent reviewers → fix, every phase a git commit in your own repo.
-- **👥 Ready for a team.** A kiosk your non-admins live in, an admin console, invitations by email, per-user Google and Microsoft accounts, shared agents and daily plan limits.
+- **👥 Ready for a team.** A kiosk your non-admins live in, an admin console, invitations by email, per-user Google and Microsoft accounts, shared agents, daily plan limits or people's own AI keys, and agents held to their own files.
 - **🔌 Plugs into anything.** Give your CRM, shop or monitoring its own key and it talks to an agent over a WebSocket, HTTP or signed webhooks, or Flight Deck dials out to it. MCP works both ways: Claude drives your fleet, and your agents use any MCP server.
-- **📡 Wherever you are.** Web, WhatsApp (the Cloud API, or your own number), Telegram, a HUD for Meta Ray-Ban Display, three push-to-talk M5Stack devices, and Claude itself over MCP, all one conversation.
+- **📡 Wherever you are.** Web, WhatsApp (the Cloud API, or your own number), Telegram, a HUD for Meta Ray-Ban Display, push-to-talk devices from M5Stack and Waveshare, and Claude itself over MCP, all one conversation.
 - **🧬 Memory that keeps thinking.** Six memory layers shared across sessions and agents, and dream cycles that surface connections you didn't ask for.
-- **🛡️ Agents you can check on.** Every tool call lands in a tamper-evident register you and your admins can read, guards run before, during and after every action, and a fabrication guard catches a claimed send or calendar change no tool made.
+- **🛡️ Agents you can check on.** Every task lands on a **Taskboard** that checks an agent really did what it was handed, every tool call lands in a tamper-evident register you and your admins can read, guards run before, during and after every action, and a fabrication guard catches a claimed send or calendar change no tool made.
 - **🔓 Yours, end to end.** Self-hosted, MIT, bring your own keys or run 100% local with Ollama. No lock-in.
 
 ## Quick start
@@ -42,7 +43,17 @@ flight-deck          # the multi-agent dashboard: http://localhost:25080
 
 First run starts onboarding. For a single agent in the terminal or the browser, Docker, a deck for your team or a voice device, see **[Getting started](docs/guide/getting-started.md)**.
 
-## 🔌 New in 0.8.3 — plugged in, on the record
+## 🎓 New in 0.8.4 — onboarded, on the board
+
+- **Onboarding.** **⋯ → Onboarding** teaches an agent your work. Documents go in whole as a knowledge base that costs no tokens, it reads as much as you budget for, and you review the rules, skills and facts it draws out.
+- **Exams and practice.** Flight Deck writes questions from the documents, asks them through the agent's real chat, grades each answer and says why a wrong one went wrong. Practice on real tasks, and corrections become lessons that reach the agent when they matter.
+- **The Taskboard.** Everything your agents were asked and sent, on every channel: *Needs me*, *Waiting on others*, *Agents working*, *Done*. Gmail's keys, next steps that wait for your approval, and a hand-over that **checks the agent really did it**.
+- **A deck for people who don't share a machine.** With sign-in on, agents stay in their own files, non-admins' agents don't run code, and team keys can't be read or sent anywhere else. **[Read this before you upgrade a team deck](release-notes/RELEASE_NOTES_0.8.4.md#before-you-upgrade-a-team-deck).**
+- **And:** your own AI keys with no daily limits, a Profile with a researcher that drafts your texts, the `knowledge` and `visualize` tools, pictures that reach the chat and the channel, the Waveshare ePaper 1.54 boards, and a new Captain icon.
+
+**→ [Release notes](release-notes/RELEASE_NOTES_0.8.4.md)** · **[Onboarding](docs/guide/flight-deck.md#onboarding)** · **[The Taskboard](docs/guide/flight-deck.md#the-taskboard)** · **[Team deployment](docs/team-deployment.md)**
+
+## 🔌 Plugged in, on the record `since 0.8.3`
 
 - **Agent links.** Connections → **Systems** gives an outside system its own key to one of your agents: a WebSocket, plain HTTP or signed webhooks, files both ways. Or Flight Deck dials out to an orchestrator, so an agent behind a router needs no public address.
 - **Your own WhatsApp** *(experimental, opt-in)*. Link your number as a linked device; agents read your chats, files and voice notes, send only to chats you whitelist, and answer in the chats you pick when someone calls them by name.
@@ -81,7 +92,7 @@ Every Flight Deck used to be an island. Now any number of them join one network 
   <img src="docs/screenshots/kiosk-0.8.2.webp" width="100%" alt="The kiosk: an agent greets you with skill cards, the Share on network dialog, and the kiosk on a phone">
 </p>
 
-The chat-first view your non-admins live in is a complete place to work: one-click **"What can I do?" skill cards**, a **File library** and a **Data library** that summarise everything the agents keep, **Shared folders** with Google Drive and OneDrive beside them, **Scheduled tasks** that deliver to chat, email or Telegram, one **timeline** per agent with named topics, and a **⋯** menu that shares an agent on the network. Admins get an **Admin console**, invitations by email, a waitlist, branding and daily plan limits.
+The chat-first view your non-admins live in is a complete place to work: one-click **"What can I do?" skill cards**, a **File library** and a **Data library** that summarise everything the agents keep, **Shared folders** with Google Drive and OneDrive beside them, **Scheduled tasks** that deliver to chat, email or Telegram, a **Taskboard** of everything the agents were asked and sent, one **timeline** per agent with named topics, and a **⋯** menu with **Onboarding** that also shares an agent on the network. Admins get an **Admin console**, invitations by email, a waitlist, branding and daily plan limits, and people can run on their own AI keys instead.
 
 **→ [The kiosk and simple layout](docs/guide/flight-deck.md#the-kiosk-and-simple-layout)** · **[Running a deck for a team](docs/team-deployment.md)**
 
@@ -91,7 +102,7 @@ The chat-first view your non-admins live in is a complete place to work: one-cli
   <img src="docs/screenshots/devices-0.8.2.webp" width="100%" alt="M5Stack StopWatch speaking an answer and showing its clock face, PaperColor e-paper showing its dashboard and an answer">
 </p>
 
-Push-to-talk clients on three M5Stack devices: the round-AMOLED **StopWatch**, the 4" colour e-paper **PaperColor** and the **StickS3**. Press, talk, and the device **speaks the answer sentence by sentence while the model is still writing it**. Voice notes wait offline until the deck is back, every question carries the room's context, and updates arrive signed, over the air, from your own deck.
+Push-to-talk clients on the round-AMOLED **StopWatch**, the 4" colour e-paper **PaperColor** and the **StickS3** from M5Stack, and since 0.8.4 the 1.54" **Waveshare ePaper** board, with or without touch. Press, talk, and the device **speaks the answer sentence by sentence while the model is still writing it**. Voice notes wait offline until the deck is back, every question carries the room's context, and updates arrive signed, over the air, from your own deck.
 
 [![Every StopWatch screen: the clock face with the agent's character, listening, working, an answer whose spoken sentence is lit, a background picture, and the info page](docs/screenshots/stopwatch-screens.png)](docs/guide/devices-and-channels.md)
 
@@ -147,11 +158,11 @@ The fifth mode is **💻 Code** (above). The sixth is **Flight Deck** itself —
 | Guide | What's inside |
 |---|---|
 | **[Getting started](docs/guide/getting-started.md)** | Install and the launchers, a deck for a team, a voice device on your desk, Docker, configuration |
-| **[Flight Deck](docs/guide/flight-deck.md)** | The command center: seven orchestration modes, Code, Plan and Deep mode, Flows, the kiosk, activity and audit, running a deck for a team |
+| **[Flight Deck](docs/guide/flight-deck.md)** | The command center: seven orchestration modes, Code, Plan and Deep mode, Flows, the kiosk, Onboarding, the Taskboard, activity and audit, running a deck for a team |
 | **[BotPort, MCP and agent links](docs/guide/botport-and-mcp.md)** | Flight Decks that work together, Flight Deck as an MCP server for Claude, MCP servers for your agents, connecting your own systems |
-| **[Devices and channels](docs/guide/devices-and-channels.md)** | StopWatch, PaperColor and StickS3, the smart-glasses HUD, WhatsApp (and your own WhatsApp), Telegram, notifications, agents in your inbox |
+| **[Devices and channels](docs/guide/devices-and-channels.md)** | StopWatch, PaperColor, StickS3 and Waveshare, the smart-glasses HUD, WhatsApp (and your own WhatsApp), Telegram, notifications, agents in your inbox |
 | **[Memory and cognition](docs/guide/memory.md)** | Six memory layers, the context engine, dreaming, the Brain Graph |
-| **[Inside an agent](docs/guide/agents.md)** | Every supported model, the 63 built-in tools, safety guards, the agent web UI |
+| **[Inside an agent](docs/guide/agents.md)** | Every supported model, the 65 built-in tools, safety guards, the agent web UI |
 | **[Architecture](docs/guide/architecture.md)** | Where each component lives in the code |
 | **[What's new](docs/guide/whats-new.md)** | Every release, newest first |
 

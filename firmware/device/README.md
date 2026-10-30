@@ -269,8 +269,8 @@ temperature and humidity (not used: see below), PCF85063 clock, microSD, BOOT an
 green LED. **Only the V2 board works** ("V2" on the back or top-left of the
 PCB); a V1 has 4 MB flash and 2 MB PSRAM, too small for this firmware.
 
-It's written from Waveshare's schematic and examples. The non-touch board has
-been measured on the bench (below); **the Touch one hasn't run yet**. M5Unified
+It's written from Waveshare's schematic and examples. Both boards have run it,
+and the measurements below are the non-touch board's. M5Unified
 doesn't know this board, so `hw_epaper154.cpp` skips
 `M5.begin()` (its detection would probe these pins) and sets up M5Unified's
 speaker, mic, button and I2C classes by hand. `ui_epaper154.cpp` is the screen,

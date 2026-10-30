@@ -45,6 +45,35 @@ These are code changes already in this build; the env vars above turn them on.
 - **Registration is closed by default**, `POST /fd/google/config` is admin-only,
   the refresh cookie is `Secure` behind TLS, and `POST /fd/deliver` requires a
   trusted internal caller (loopback / agent secret) or a logged-in user.
+- **Agents stay in their own files** (0.8.4). On a deck with sign-in, every
+  process agent's file tools are checked by real path against its folder, its
+  workspace, its owner's VFS and the call's shared folders. `.env` is out of
+  reach, control files can't be written, and `glob` and `grep` results are
+  filtered. `FD_AGENT_CONFINE=off` turns this off for a deck whose users all
+  trust each other. A role change applies at the agent's next start.
+- **Non-admins' agents don't run code or drive the host** (0.8.4). `shell`,
+  `terminal`, `scripts`, `app_runner`, `code`, `termux`, `bat`, `desktop_action`,
+  `screen_capture` and `pinchtab` are refused and hidden; skills install no
+  dependencies; `browser`, `direct_api`, `apis` and `web_fetch` take public
+  addresses only. Admins keep those. This is containment, not an OS sandbox: an
+  admin's agent still has a shell that reaches the whole host
+  ([sandbox plan](agent-os-sandbox-plan.md)).
+- **Hosted apps and host folders are admin-only** (0.8.4). Publishing or starting
+  a hosted app runs a command on the server; static sites stay open to everyone.
+  `POST /fd/vfs/links` and `/fd/vfs/browse-fs` are admin-only with sign-in on.
+- **Team keys stay where the team sends them** (0.8.4). `GET /fd/agent-config`
+  shows non-admins a team key or any secret-named value as `····` and its last
+  four; saving a masked value keeps the key. A provider's team key, and a key in
+  Flight Deck's own environment, goes only to the provider's own endpoint or one
+  the published team sets route it through. Spawning or changing an agent so that
+  it would send one elsewhere is re-keyed or refused.
+- **Pinned variables** (0.8.4). The variables that would have a non-admin's agent
+  load code from a path or route its calls elsewhere (`PATH`, `PYTHON*`, `LD_*`,
+  `HTTP_PROXY`, CA bundles and more) keep Flight Deck's values. Adding or changing
+  one in the agent editor answers 400, naming it, and writes nothing.
+- **Callers prove who they are** (0.8.4). Agent routes bind an owner only from a
+  verified bearer or the agent's own token; a `source_port` or `owner_id` in a
+  request counts as identity only with sign-in off.
 
 ## First-run checklist
 
@@ -110,6 +139,17 @@ These are code changes already in this build; the env vars above turn them on.
   OAuth sign-in never reaches everyone. An admin can share a server with the
   whole deck (*deck-wide*) from Connections → MCP Servers or Admin →
   Integrations.
+- **Your own AI keys** (0.8.4). A user can run their agents on their own
+  Anthropic, OpenAI, Gemini, OpenRouter or xAI keys (Settings → Your own AI keys),
+  with no daily limits. On by default; turning it off for the deck moves everyone
+  back to the team's keys.
+- **Onboarding** (0.8.4). What an admin teaches a user's agent, acting for them, is
+  its base: the user adds to it but can't reword or remove it. On a shared agent,
+  members suggest lessons and the owner decides. **Pass it on** turns an onboarded
+  agent into an archetype others can start from.
+- **The Taskboard** (0.8.4). Every user has their own board: a member's tasks go to
+  that member, and owners and admins never see them. Personal inboxes are opt-in.
+  Next steps and Jev's readings use the board user's own or the team's Jev key.
 
 ## Connect Claude to your agents (inbound MCP)
 
