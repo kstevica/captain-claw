@@ -676,7 +676,10 @@ class TaskboardStore:
         flags = _loads(sets.get("flags", row["flags"]), {})
         if (status is not None and flags.get("new_since_done") and "new_since_done" not in locks
                 and "new_since_done" not in (fields.get("flags") or {})):
-            sets["flags"] = json.dumps({**flags, "new_since_done": False})
+            flags = {**flags, "new_since_done": False}
+            sets["flags"] = json.dumps(flags)
+        if status in CLOSED and flags.get("came_back"):
+            sets["flags"] = json.dumps({**flags, "came_back": False})  # What it came back for is answered.
         sets = {k: v for k, v in sets.items() if row.get(k) != v}
         if not sets:
             return False
@@ -1039,6 +1042,10 @@ class TaskboardStore:
                     action, summary = "undo_close", "Undid Jev's close"
                 else:
                     fields, locks, summary = _correction(row, action, value, now, actor)
+                flags_now = _loads(row["flags"], {})
+                if flags_now.get("came_back") and action != "rename":
+                    # They have seen to what brought it back: it goes by the usual rules again.
+                    fields = {**fields, "flags": {**(fields.get("flags") or flags_now), "came_back": False}}
                 old_locks = _loads(row["user_locks"], {})
                 before = {k: row[k] for k in fields}
                 if "flags" in fields:
@@ -1474,6 +1481,30 @@ class TaskboardStore:
             self._conn.commit()
         return True
 
+    def reply_came_back(self, user_id: str, task_id: str, *, read: bool = True, now: float | None = None) -> bool:
+        """Someone wrote on a task that wasn't the user's to look at (closed,
+        on someone else's move, snoozed) and, as a reply brings a thread back
+        to Gmail's inbox, it is in Needs me again with all it had: open, the
+        user's move. What they had set of that was about before the reply, so
+        those locks go, and so does what was said of the last try.
+        ``flags.came_back`` keeps it there until they act or answer, whatever
+        triage reads (``taskboard_triage._came_back``). *read*: in triage's queue
+        at once. False when the task isn't this user's."""
+        now = time.time() if now is None else now
+        with self._lock:
+            row = self._owned(user_id, task_id)
+            if row is None:
+                return False
+            opened = _reopened(row)
+            flags = {**(opened.get("flags") or _loads(row["flags"], {})), **{k: False for k in _OLD_NEWS},
+                     "came_back": True, "why": ""}
+            locks = {k: v for k, v in _loads(row["user_locks"], {}).items() if k not in _REPLY_LIFTS}
+            self._write(task_id, {**opened, "owes_next": "me", "snooze_until": None, "flags": flags, "user_locks": locks,
+                                  "updated_at": now, **({"triage_state": "pending", "triage_after": now} if read else {})})
+            self._refresh(task_id)
+            self._conn.commit()
+        return True
+
     def hand_over_started(self, user_id: str, task_id: str, action_id: str, agent: dict, words: str,
                           actor: str = "") -> dict | None:
         """The user handed the task to *agent* (``slug``, ``name``) with their
@@ -1491,8 +1522,7 @@ class TaskboardStore:
                 user_id, keys=[key], unlock=("owes_next",),
                 patch={"status": "open", "owes_next": "agent", "agent_slug": agent["slug"], "agent_name": agent["name"],
                        # What was said of the last try is old news: the agent is on it now.
-                       "flags": {"low_confidence": False, "probably_done": False, "agent_declined": False,
-                                 "partly_done": False, "answered_in_chat": False}},
+                       "flags": {k: False for k in (*_OLD_NEWS, "came_back")}},
                 event={"source": "taskboard_handover", "source_ref": f"{action_id}:handed", "at": time.time(),
                        "kind": "status", "actor_kind": "me", "actor": actor,
                        "summary": f"Handed to {agent['name']}: {' '.join(str(words).split())}",
@@ -1921,6 +1951,8 @@ class TaskboardStore:
                 unnamed += self._conn.execute("SELECT party_id, display FROM task_parties WHERE task_id = ? "
                                               "AND verified = 0", (task_id,)).fetchall()
                 self._conn.execute("DELETE FROM task_parties WHERE task_id = ? AND verified = 0", (task_id,))
+        if flags.pop("came_back", None):
+            sets["flags"] = flags  # The reply it came back for may be what is going.
         sets.update(self._news_settled(user_id, row, flags))
         channels = list(dict.fromkeys(c for c in (row["channel"], *(e["channel"] for e in left)) if c))
         sets.update(fingerprint=f"{max(int(e['id']) for e in left)}:{len(left)}",
@@ -2879,6 +2911,9 @@ class ThreadConflict(ValueError):  # noqa: N818 — reads as the condition
 
 
 _MERGE_DEPTH = 32         # merges into merged tasks followed this far (a guard against a cycle)
+# What was said of a task's last try, old news once something new is on it.
+_OLD_NEWS = ("low_confidence", "probably_done", "agent_declined", "partly_done", "answered_in_chat")
+_REPLY_LIFTS = ("status", "owes_next", "snooze_until")  # the user's settings a reply takes back (reply_came_back)
 _USER_CLOSES = ("done", "dismiss", "not_task")          # the user's corrections that close a task …
 _USER_OPENS = ("reopen", "not_done", "undo_close")      # … and those that take that back
 _TRIAGED_KINDS = ("request", "sent", "message")  # the kinds triage reads (taskboard_triage._TRIAGED)

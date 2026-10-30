@@ -316,6 +316,10 @@ def test_needs_me_reason_keeps_its_order_around_the_new_notes():
     assert _reason({"flags": {"agent_declined": True, "probably_done": True}})["text"] == "Agent couldn't do it"
     assert _reason({}) == {"text": "Your move", "more": ""}
     assert _reason({"owes_next": "agent"}) is None
+    # A reply brought it back: said once the rest has had its say, and never off the user's move.
+    assert _reason({"flags": {"came_back": True}}) == {"text": "New reply", "more": ""}
+    assert _reason({"flags": {"came_back": True, "probably_done": True}})["text"] == "Probably done?"
+    assert _reason({"owes_next": "them", "flags": {"came_back": True}}) is None
     # New since done is the done row's own line, never a Needs me reason.
     assert _reason({"owes_next": "agent", "status": "done", "flags": {"new_since_done": True}}) is None
 
