@@ -2275,6 +2275,12 @@ class AgentOrchestrationMixin:
                     await payments_client.refresh()
                 except Exception:
                     pass
+                # Crew: is the owner approved for it on their Flight Deck?
+                try:
+                    from captain_claw import crew_client
+                    await crew_client.refresh()
+                except Exception:
+                    pass
                 # Telegram inbox (owner-only): does the owner keep one?
                 try:
                     from captain_claw import telegram_inbox_client
