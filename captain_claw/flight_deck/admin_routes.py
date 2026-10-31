@@ -52,6 +52,8 @@ class UpdateUserRequest(BaseModel):
     sign_out: bool | None = None  # with a reset: end the user's sessions everywhere
     # They pick their own password at their next sign-in (set with a reset).
     must_change_password: bool | None = None
+    # Crew: {approved, harnesses, max_parallel}; approved false withdraws it.
+    crew: dict | None = None
 
 
 # ── Endpoints ──
@@ -164,6 +166,19 @@ async def update_user(
         else:
             meta.pop("kiosk", None)
         changed_meta = True
+    crew_changed = False
+    if body.crew is not None:
+        from captain_claw.flight_deck import crew_access
+
+        try:
+            entry = crew_access.clean_entry(body.crew, admin_id=admin["id"], previous=crew_access.stored(user))
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from None
+        if entry is None:
+            meta.pop("crew", None)
+        else:
+            meta["crew"] = entry
+        changed_meta = crew_changed = True
     if body.plan is not None:
         plan = canonical_plan(body.plan)
         if plan not in PLAN_LIMITS:
@@ -182,6 +197,12 @@ async def update_user(
         return {"ok": True, "message": "No changes"}
 
     await db.update_user(user_id, **updates)
+    # What an approval no longer covers (it was withdrawn, or they stopped being
+    # an admin) stops now, not at the watcher's next look.
+    if crew_changed or "role" in updates:
+        from captain_claw.flight_deck import crew_runner
+
+        await crew_runner.enforce_grant(user_id)
     # Not for the admin's own account: that would sign out the session making
     # the change — they change their own password from their profile.
     if "password_hash" in updates and body.sign_out and user_id != admin["id"]:
@@ -232,6 +253,13 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
         from captain_claw.flight_deck import taskboard
 
         taskboard.forget_user(user_id)
+    except Exception:
+        pass
+    # …and their coding CLIs: the running ones stop, their folder goes.
+    try:
+        from captain_claw.flight_deck import crew_runner
+
+        await crew_runner.forget_user(user_id)
     except Exception:
         pass
     # Their profile went with them: their agents' copies of it go too.

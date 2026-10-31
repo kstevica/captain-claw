@@ -32,10 +32,11 @@ PROVIDER_KEYS_SETTING = "fd:provider-keys"
 # /fd/jev/key (which verify the key and never return it); readable here, any
 # script running as the user would get the raw key. ``byok:*`` is the user's
 # own provider keys (sealed) and the switch that runs their agents on them —
-# written only through /fd/byok, which moves their agents with it.
+# written only through /fd/byok, which moves their agents with it. ``crew:*`` is
+# the logins their coding CLIs run on (sealed), written only through /fd/crew.
 _SERVER_OWNED_PREFIXES = (
     "google_oauth:", "microsoft_oauth:", "fd:tenant-profile", "fd:shared-agent-",
-    "jev:", "soniox:", "byok:",
+    "jev:", "soniox:", "byok:", "crew:",
 )
 
 

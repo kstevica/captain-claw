@@ -1161,6 +1161,8 @@ async def lifespan(app: FastAPI):
     app.state.usage_spend_task = asyncio.create_task(usage_spend.sync_loop(_spend_stop))
     # ── Taskboard: FD's ledgers read into users' boards every 120 s. ──
     taskboard.start()
+    # ── Crew: coding CLIs running for approved users, watched from disk. ──
+    crew_runner.start()
     # ── Payments loop (FD_PAYMENTS): expiry, bank statement syncs (Phase 4). ──
     if payments_routes.enabled():
         from captain_claw.flight_deck.payments_jobs import payments_loop as _pay_loop
@@ -1473,6 +1475,7 @@ async def lifespan(app: FastAPI):
     except Exception:
         pass
     await taskboard.stop()
+    await crew_runner.stop_watcher()  # the workers keep going; the next start picks them up
     # Shutdown: stop all managed process agents
     print("Flight Deck: stopping managed process agents...")
     _stop_all_processes()
@@ -1755,6 +1758,8 @@ from captain_claw.flight_deck import (
     taskboard_nextsteps,
     taskboard_threads,
 )
+from captain_claw.flight_deck import crew_runner
+from captain_claw.flight_deck.crew_routes import router as crew_router
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
 from captain_claw.flight_deck import (
     agent_exam,
@@ -1806,6 +1811,7 @@ app.include_router(vfs_router)
 app.include_router(deep_memory_router)
 app.include_router(hosting_router)
 app.include_router(code_router)
+app.include_router(crew_router)
 app.include_router(queue_router)
 app.include_router(google_oauth_router)
 app.include_router(gmail_send_router)

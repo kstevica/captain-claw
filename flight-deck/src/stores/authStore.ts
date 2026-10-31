@@ -10,6 +10,8 @@ export interface User {
   // Held to the kiosk (simple-chat) layout — resolved by the server from the
   // deck's kiosk mode and this user's flag (Admin page); never an admin.
   kiosk?: boolean
+  // An admin approved them for Crew (coding agents run for them); admins always are.
+  crew?: boolean
   // An admin set this password: the user chooses their own before the app
   // opens (cleared by the server once they change it).
   must_change_password?: boolean

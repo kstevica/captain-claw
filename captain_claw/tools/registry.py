@@ -563,6 +563,7 @@ class ToolRegistry:
                     and not self._tool_metadata.get(t.name, {}).get("requires_microsoft")
                     and not self._tool_metadata.get(t.name, {}).get("requires_jev")
                     and not self._tool_metadata.get(t.name, {}).get("requires_payments")
+                    and not self._tool_metadata.get(t.name, {}).get("requires_crew")
                     and not self._tool_metadata.get(t.name, {}).get("requires_telegram_inbox")
                     and not self._tool_metadata.get(t.name, {}).get("requires_whatsapp_web")
                     and not self._tool_metadata.get(t.name, {}).get("requires_knowledge")
@@ -628,6 +629,17 @@ class ToolRegistry:
                     tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_payments")]
         except Exception:
             tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_payments")]
+
+        # Crew: shown only while the owner is approved for it on their Flight
+        # Deck (refreshed per turn by ``crew_client.refresh()``). Fails closed.
+        try:
+            if any(self._tool_metadata.get(t.name, {}).get("requires_crew") for t in tools):
+                from captain_claw import crew_client
+
+                if not crew_client.crew_usable():
+                    tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_crew")]
+        except Exception:
+            tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_crew")]
 
         # Soniox (the audio tool): shown only while a key is usable — the
         # owner's (or team's) in Flight Deck, refreshed per turn by

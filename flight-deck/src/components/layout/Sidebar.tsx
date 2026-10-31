@@ -25,6 +25,7 @@ import {
   Network,
   Hammer,
   Library,
+  Ship,
   Cpu,
   FolderTree,
   Database,
@@ -37,6 +38,7 @@ import {
   IdCard,
   Receipt,
 } from 'lucide-react'
+import { useCrewAllowed } from '../../stores/crewStore'
 import { usePaymentsEnabled } from '../../services/payments'
 import { useUIStore } from '../../stores/uiStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -49,7 +51,7 @@ import { StatusBadge } from '../common/StatusBadge'
 import { BrandMark } from '../common/BrandMark'
 import type { ViewMode } from '../../types'
 
-type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; needsPayments?: boolean }
+type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; needsPayments?: boolean; needsCrew?: boolean }
 
 const navSections: { title: string; items: NavItem[] }[] = [
   {
@@ -67,6 +69,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
       { id: 'basna', icon: Network, label: 'Basna' },
       { id: 'bat', icon: Hammer, label: 'Bat' },
       { id: 'code', icon: Code2, label: 'Code' },
+      { id: 'crew', icon: Ship, label: 'Crew', needsCrew: true },
     ],
   },
   {
@@ -141,6 +144,7 @@ export function Sidebar() {
   const { instances, wsConnected, selectInstance, selectedInstanceId, fetchInstances, fetchStats, fetchConcerns } = useAgentStore()
   const { authEnabled, user: authUser } = useAuthStore()
   const paymentsOn = usePaymentsEnabled()
+  const crewOn = useCrewAllowed()
   const { botportUrl, setBotportUrl } = useConnectionStore()
   // Narrow, not `useChatStore()` — a whole-store read would re-render this
   // always-mounted sidebar on every streaming event. The chat list only needs
@@ -241,6 +245,7 @@ export function Sidebar() {
           const items = section.items.filter((item) => {
             if (item.adminOnly) return authEnabled && authUser?.role === 'admin'
             if (item.needsPayments) return paymentsOn
+            if (item.needsCrew) return crewOn
             return true
           })
           if (items.length === 0) return null

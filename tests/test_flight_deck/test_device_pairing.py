@@ -168,7 +168,7 @@ async def test_full_approve_flow_gives_the_device_a_normal_session(deck):
         got = r.json()
         assert got["status"] == "approved" and got["token_type"] == "bearer"
         assert got["user"] == {"id": BOB, "email": _email(BOB), "display_name": "Bob",
-                               "role": "user", "kiosk": False, "must_change_password": False}
+                               "role": "user", "kiosk": False, "must_change_password": False, "crew": False}
         cookie = r.headers["set-cookie"]
         assert cookie.startswith(f"{fd_auth.REFRESH_COOKIE}=")
         assert "path=/fd/auth" in cookie.lower() and "httponly" in cookie.lower()
@@ -197,7 +197,7 @@ async def test_login_sets_the_refresh_cookie_and_returns_the_user(deck):
         assert set(body) == {"access_token", "token_type", "user"}
         assert body["token_type"] == "bearer"
         assert body["user"] == {"id": ALICE, "email": _email(ALICE), "display_name": "Alice",
-                                "role": "admin", "kiosk": False, "must_change_password": False}
+                                "role": "admin", "kiosk": False, "must_change_password": False, "crew": True}
         assert fd_auth.decode_access_token(body["access_token"])["sub"] == ALICE
         cookie = r.headers["set-cookie"]
         assert cookie.startswith(f"{fd_auth.REFRESH_COOKIE}=")

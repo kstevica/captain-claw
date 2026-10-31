@@ -52,6 +52,7 @@ HIDDEN_BECAUSE = {
     "requires_jev": "no Jev key (Flight Deck → Connections → Jev)",
     "requires_soniox": "no Soniox key (Flight Deck → Connections → Soniox)",
     "requires_payments": "payments are off on this Flight Deck",
+    "requires_crew": "Crew isn't approved for this account (an admin approves it on the Users page)",
     "requires_telegram_inbox": "no Telegram inbox kept in Flight Deck",
     "requires_whatsapp_web": "WhatsApp not linked in Flight Deck",
     "requires_shared_members": "this agent isn't shared with anyone",
@@ -702,6 +703,8 @@ def connection_probes(agent: Any, deep: bool, clock: dict[str, float]) -> list[_
             "not linked (Flight Deck → Connections → WhatsApp)")),
         _Probe("connections", "Payments", lambda: _flag(
             "Payments", "payments_client", "refresh", "payments_usable", "off on this Flight Deck")),
+        _Probe("connections", "Crew (coding CLIs)", lambda: _flag(
+            "Crew", "crew_client", "refresh", "crew_usable", "not approved for this account")),
         _Probe("connections", "Deep memory", lambda: _deep_memory(agent)),
         _Probe("connections", "MCP servers", _mcp, 40),
         _Probe("connections", "Outgoing mail (send_mail)", _mail, 20),

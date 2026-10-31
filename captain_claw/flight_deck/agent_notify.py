@@ -33,13 +33,14 @@ log = _KwargLogger(logging.getLogger("flight_deck"), {})
 async def notify_source_agent(
     *, source_host: str, source_port: int, origin: dict,
     kind: str, title: str, run_ref: str, ok: bool, summary: str,
-    no_restart_hint: str = "",
+    no_restart_hint: str = "", verb: str = "",
 ) -> None:
     """Send a completion callback to the agent that started a background run.
 
     ``kind``: human label for the run ("Basna", "Vatra", "coding session", …).
     ``run_ref``: identifier the agent can use in follow-up tool calls.
     ``no_restart_hint``: kind-specific "do NOT start another …" directive.
+    ``verb``: how it went, when "finished successfully" / "ran into an error" won't say it.
     """
     import websockets
 
@@ -52,7 +53,7 @@ async def notify_source_agent(
     auth = _resolve_agent_auth(int(source_port), host=host)
     params = f"?token={auth}" if auth else ""
     url = f"ws://{host}:{source_port}/ws{params}"
-    verb = "finished successfully" if ok else "ran into an error"
+    verb = verb or ("finished successfully" if ok else "ran into an error")
     callback_msg = (
         f"[{kind} '{title}' {verb}] This is the RESULT of the autonomous {kind} "
         f"you started ({run_ref}). Relay it to the user now, concisely, in their "

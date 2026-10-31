@@ -4834,6 +4834,29 @@ Every process agent runs as the deck's OS user. On a deck with sign-in, Flight D
 - **Shared agents** (`FD_AGENT_SHARING=1`): one agent, several users — see [Shared agents](#shared-agents-a2-members-own-google-deep-memory-files) below.
 - **Agent options.** A gear on each agent opens a tabbed options dialog (General, Instructions, `config.yaml`, `.env`); name and description are stored by Flight Deck, so they survive a browser wipe. Instructions are stored per agent by Flight Deck, so two tabs can't erase each other's.
 
+### Crew: coding agents working for you
+
+Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to your agent ("have Codex fix the login test and Claude add dark mode"), or use the Crew page. Each task gets one of those CLIs in a git worktree of its own, several at once. Flight Deck watches them without spending tokens and tells you when one finishes or needs a decision, on the channel you asked from.
+
+**An admin approves it, per user.** On Users, open someone's row and tick Crew: which CLIs, and how many at once. It is off for everyone else. Admins, and a deck with sign-in off, can always use it. Withdrawing it stops what is running at once. Flight Deck checks the approval on every call.
+
+> **Approving someone trusts them with the server.** A worker runs commands as the same system user as Flight Deck, so it can reach what that user can, including other people's files and the deck's database. No OS sandbox holds it to its worktree yet (`docs/agent-os-sandbox-plan.md`). Codex runs in its own `workspace-write` sandbox; the others do not.
+
+**Whose account.** Each user's own: Crew → Logins. A `claude setup-token` token or an Anthropic key for Claude Code; an OpenAI key or the contents of `~/.codex/auth.json` for Codex; provider keys for OpenCode and Pi ("Your own AI keys" count too); a GitHub token for repositories and pull requests. A non-admin's worker never falls back to the deck owner's login, and its environment holds none of the deck's secrets. An admin's worker uses this computer's logins unless they saved their own.
+
+**Where it works.** A Code project's folder, a repository address, or (admins only) a folder on the server. Install the CLIs on the deck's host: Crew → Logins shows which are there and the command for those that aren't.
+
+**What lands.** Every task works on its own branch and never pushes. "Ship" tasks leave a branch or open a pull request; "scout" tasks only report. Merging and throwing work away take a person: the Merge button, or Approve in the bell on a merge your agent asked for. Work that hasn't landed is never removed unless you say so.
+
+| Environment variable | What it does |
+|---|---|
+| `FD_CREW=off` | Turns Crew off for the whole deck. |
+| `FD_CREW_CLAUDE_PERMISSION` | Claude Code's permission mode for workers: `auto` (default, Claude's own safety check on each call), `acceptEdits` or `bypassPermissions`. |
+| `FD_CREW_MAX_RUNNING` | Workers running at once on this deck (default 8). |
+| `FD_CREW_STALL_MINUTES` | Silence before you're told a worker seems stuck (default 15). It keeps running. |
+| `FD_CREW_MAX_TURN_HOURS` | The longest one turn may run (default 6). |
+| `FD_CREW_CLAUDE_BIN`, `FD_CREW_CODEX_BIN`, `FD_CREW_OPENCODE_BIN`, `FD_CREW_PI_BIN` | Where a CLI is, if Flight Deck can't find it. |
+
 ### The simple layout and kiosk mode — NEW in 0.8.0
 
 **Simple layout.** A chat-first desktop layout: agents on the left (with a **Busy** pill and an on/off **power switch** per agent, and since 0.8.1 the **Scheduled · Library · Data** tiles), the chat in the middle (queue toggleable), the active agent's files and datastore on the right. Switch in from the top bar's columns icon and out from the left header, or with **Cmd/Ctrl+\\**. Both rails collapse and remember it.

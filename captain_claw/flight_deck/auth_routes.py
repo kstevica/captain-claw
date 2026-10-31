@@ -80,14 +80,16 @@ async def _user_payload(db, user: dict) -> dict:
     """The signed-in user as the frontend sees it. ``kiosk`` = held to the
     simple-chat layout (deck kiosk mode + this user's flag; never an admin).
     ``must_change_password`` = an admin set their password: they choose their
-    own before the app opens."""
+    own before the app opens. ``crew`` = an admin approved them for Crew."""
     from captain_claw.flight_deck.admin_routes import must_change_password, user_kiosk_locked
+    from captain_claw.flight_deck.crew_access import grant_of
 
     return {
         "id": user["id"], "email": user["email"],
         "display_name": user["display_name"], "role": user["role"],
         "kiosk": await user_kiosk_locked(db, user),
         "must_change_password": must_change_password(user),
+        "crew": grant_of(user).allowed,
     }
 
 

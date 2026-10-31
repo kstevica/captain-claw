@@ -2413,6 +2413,12 @@ class AgentContextMixin:
             await payments_client.refresh(force=True)
         except Exception as _exc:
             log.debug("Payments priming failed: %s", _exc)
+        # And Crew: whether the owner is approved for it there.
+        try:
+            from captain_claw import crew_client
+            await crew_client.refresh(force=True)
+        except Exception as _exc:
+            log.debug("Crew priming failed: %s", _exc)
 
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
@@ -2790,6 +2796,11 @@ class AgentContextMixin:
             # registry. Captain never moves money; the user pays in their bank app.
             from captain_claw.tools.payments import PaymentsTool
             self.tools.register(PaymentsTool(), metadata={"requires_payments": True})
+            # Crew — runs Claude Code, Codex, OpenCode and Pi as workers. Hidden
+            # unless an admin approved the owner on their Flight Deck, refreshed
+            # per turn — see the registry. Flight Deck checks it again on every call.
+            from captain_claw.tools.crew import CrewTool
+            self.tools.register(CrewTool(), metadata={"requires_crew": True})
             # Code-app authoring — always registered; calls return a clear error
             # if FD_URL isn't available, so registration cost is negligible.
             from captain_claw.tools.app_runner import AppRunnerTool

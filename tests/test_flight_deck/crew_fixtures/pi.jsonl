@@ -1,0 +1,11 @@
+{"type": "session", "version": 3, "id": "crew-spike-1", "timestamp": "2026-10-31T15:45:08.694Z", "cwd": "/work"}
+{"type": "agent_start"}
+{"type": "turn_start"}
+{"type": "message_end", "message": {"role": "user", "content": [{"type": "text", "text": "Create a file named hello.txt containing the word hi using your tools, then reply with exactly: OK"}], "timestamp": 1793461508726}}
+{"type": "message_end", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "The user wants me to create a file named hello.txt with content \"hi\" and then reply OK."}, {"type": "toolCall", "id": "call_oh9hq7ib", "name": "write", "arguments": {"path": "hello.txt", "content": "hi"}}], "model": "ornith:9b", "usage": {"input": 1812, "output": 62, "cacheRead": 0, "cacheWrite": 0, "reasoning": 0, "totalTokens": 1874, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "stopReason": "toolUse", "timestamp": 1793461508741, "rawStopReason": "tool_calls", "durationMs": 6237, "thinkingLevel": "off"}}
+{"type": "tool_execution_start", "toolCallId": "call_oh9hq7ib", "toolName": "write", "args": {"path": "hello.txt", "content": "hi"}}
+{"type": "tool_execution_end", "toolCallId": "call_oh9hq7ib", "toolName": "write", "result": {"content": [{"type": "text", "text": "Successfully wrote to hello.txt"}]}, "isError": false, "durationMs": 3}
+{"type": "message_end", "message": {"role": "toolResult", "toolCallId": "call_oh9hq7ib", "toolName": "write", "content": [{"type": "text", "text": "Successfully wrote to hello.txt"}], "isError": false, "durationMs": 3, "timestamp": 1793461514986}}
+{"type": "turn_start"}
+{"type": "message_end", "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": "File created successfully. Now I reply with exactly \"OK\"."}, {"type": "text", "text": "OK"}], "model": "ornith:9b", "usage": {"input": 21, "output": 17, "cacheRead": 1873, "cacheWrite": 0, "reasoning": 0, "totalTokens": 1911, "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0, "total": 0}}, "stopReason": "stop", "timestamp": 1793461514989, "rawStopReason": "stop", "durationMs": 1004, "thinkingLevel": "off"}}
+{"type": "agent_settled", "aborted": false}

@@ -12,7 +12,10 @@ import {
   KeyRound,
   Mail,
   RotateCcw,
+  Ship,
+  AlertTriangle,
 } from 'lucide-react'
+import { CREW_AGENTS } from '../../services/crewApi'
 import { useAuthStore } from '../../stores/authStore'
 import { useUIStore } from '../../stores/uiStore'
 import { MIN_PASSWORD_LENGTH } from '../profile/ChangePasswordCard'
@@ -352,6 +355,82 @@ function CreateUserForm({ onCreated, onClose, config }: {
   )
 }
 
+/** What an admin approved this user for: their coding agents, and how many at once. */
+interface CrewChoice { approved: boolean; harnesses: string[]; max_parallel: number }
+
+function userCrew(user: UserInfo): CrewChoice {
+  try {
+    const c = JSON.parse(user.metadata || '{}').crew
+    if (c?.approved === true) {
+      return { approved: true, harnesses: Array.isArray(c.harnesses) ? c.harnesses : [], max_parallel: Number(c.max_parallel) || 2 }
+    }
+  } catch { /* no approval */ }
+  return { approved: false, harnesses: [], max_parallel: 2 }
+}
+
+// A worker has a shell of its own, as the deck's OS user: whoever is approved
+// here is trusted with this server, and the dialog says that in those words.
+function CrewApproval({ isAdmin, value, wasApproved, name, understood, onUnderstood, onChange }: {
+  isAdmin: boolean; value: CrewChoice; wasApproved: boolean; name: string
+  understood: boolean; onUnderstood: (v: boolean) => void; onChange: (v: CrewChoice) => void
+}) {
+  if (isAdmin) return <p className="text-[11px] text-zinc-500">Admins can always use Crew.</p>
+  const toggle = (id: string) => onChange({
+    ...value, harnesses: value.harnesses.includes(id) ? value.harnesses.filter((h) => h !== id) : [...value.harnesses, id],
+  })
+  return (
+    <div className="space-y-2 rounded-md border border-zinc-800 p-2.5">
+      <label className="flex items-center gap-2 text-sm text-zinc-300">
+        <input
+          type="checkbox"
+          checked={value.approved}
+          onChange={(e) => onChange(e.target.checked
+            ? { ...value, approved: true, harnesses: value.harnesses.length ? value.harnesses : CREW_AGENTS.map((a) => a.id) }
+            : { approved: false, harnesses: [], max_parallel: 2 })}
+          className="accent-teal-500"
+        />
+        Crew <span className="text-xs text-zinc-500">— coding agents run for them</span>
+      </label>
+      {value.approved && (
+        <>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {CREW_AGENTS.map((a) => (
+              <label key={a.id} className="flex items-center gap-1.5 text-xs text-zinc-400">
+                <input type="checkbox" checked={value.harnesses.includes(a.id)} onChange={() => toggle(a.id)} className="accent-teal-500" />
+                {a.label}
+              </label>
+            ))}
+          </div>
+          <label className="flex items-center gap-2 text-xs text-zinc-400">
+            At once
+            <input
+              type="number" min={1} max={8} value={value.max_parallel}
+              onChange={(e) => onChange({ ...value, max_parallel: Math.max(1, Math.min(8, Number(e.target.value) || 1)) })}
+              className="w-14 rounded-md border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-xs text-zinc-200"
+            />
+          </label>
+          {!wasApproved && (
+            <div className="space-y-1.5 rounded-md bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-200">
+              <p className="flex items-start gap-1.5">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  Their coding agents run commands on this server, as the same system user as Flight Deck. They can reach
+                  what that user can, including other people's files and the deck's database. Only approve someone you
+                  would trust with this server.
+                </span>
+              </p>
+              <label className="flex items-center gap-1.5 font-medium">
+                <input type="checkbox" checked={understood} onChange={(e) => onUnderstood(e.target.checked)} className="accent-amber-500" />
+                I trust {name} with this server
+              </label>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 function KioskCheckbox({ checked, onChange, note }: {
   checked: boolean
   onChange: (v: boolean) => void
@@ -428,6 +507,8 @@ function UserRow({
   const [plan, setPlan] = useState(() => userPlan(user))
   const [role, setRole] = useState(user.role)
   const [kiosk, setKiosk] = useState(() => userKioskFlag(user))
+  const [crew, setCrew] = useState(() => userCrew(user))
+  const [crewUnderstood, setCrewUnderstood] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState('')
   const [agentsOpen, setAgentsOpen] = useState(false)
@@ -467,7 +548,9 @@ function UserRow({
   const handleSave = async () => {
     setSaving(true); setSaveError('')
     try {
-      await updateUser(user.id, { plan, role, kiosk })
+      const crewSaved = JSON.stringify(userCrew(user))
+      await updateUser(user.id, { plan, role, kiosk, ...(role !== 'admin' && JSON.stringify(crew) !== crewSaved ? { crew } : {}) })
+      setCrewUnderstood(false)
       onUpdate()
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : 'Failed to update user')
@@ -533,6 +616,15 @@ function UserRow({
               kiosk
             </span>
           )}
+          {user.role !== 'admin' && userCrew(user).approved && (
+            <span
+              title="Approved for Crew: their coding agents run on this server"
+              className="flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-teal-500/15 text-teal-700 dark:text-teal-300"
+            >
+              <Ship className="h-3 w-3" />
+              crew
+            </span>
+          )}
           {usage && (usage.messages > 0 || usage.tokens > 0) && (
             <span
               title={spent ? "Today's allowance is spent" : 'Used today'}
@@ -588,6 +680,16 @@ function UserRow({
           ) : (
             <KioskCheckbox checked={kiosk} onChange={setKiosk} note={kioskModeNote(kioskMode)} />
           )}
+
+          <CrewApproval
+            isAdmin={role === 'admin'}
+            value={crew}
+            wasApproved={userCrew(user).approved}
+            name={user.display_name || user.email}
+            understood={crewUnderstood}
+            onUnderstood={setCrewUnderstood}
+            onChange={setCrew}
+          />
 
           {limits && (
             <div className="text-xs text-zinc-500 grid grid-cols-2 gap-1">
@@ -665,7 +767,7 @@ function UserRow({
           <div className="flex items-center gap-2 pt-1">
             <button
               onClick={handleSave}
-              disabled={saving}
+              disabled={saving || (role !== 'admin' && crew.approved && (!crew.harnesses.length || (!userCrew(user).approved && !crewUnderstood)))}
               className="rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
             >
               {saving ? 'Saving...' : 'Save Changes'}
@@ -946,13 +1048,14 @@ function GrantResetsPanel({ selected, everyone, cap, onDone, onClose }: {
 }
 
 type RoleFilter = 'all' | 'admin' | 'user'
-type StatusFilter = 'any' | 'kiosk' | 'not-kiosk' | 'temp-password' | 'used-today' | 'limit-reached' | 'has-resets'
+type StatusFilter = 'any' | 'kiosk' | 'not-kiosk' | 'crew' | 'temp-password' | 'used-today' | 'limit-reached' | 'has-resets'
 type SortKey = 'newest' | 'oldest' | 'name' | 'usage' | 'login-recent' | 'login-longest' | 'tokens-month' | 'tokens-all'
 
 const STATUS_LABEL: Record<StatusFilter, string> = {
   any: 'Any status',
   kiosk: 'Kiosk mode',
   'not-kiosk': 'Not in kiosk mode',
+  crew: 'Approved for Crew',
   'temp-password': 'Temporary password',
   'used-today': 'Active today',
   'limit-reached': 'Daily limit reached',
@@ -1042,6 +1145,7 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
       switch (status) {
         case 'kiosk': return kioskEffective(u.role, userKioskFlag(u), config.kiosk_mode)
         case 'not-kiosk': return !kioskEffective(u.role, userKioskFlag(u), config.kiosk_mode)
+        case 'crew': return u.role !== 'admin' && userCrew(u).approved
         case 'temp-password': return userMustChangePassword(u)
         case 'used-today': return !!usage && (usage.messages > 0 || usage.tokens > 0)
         case 'limit-reached':

@@ -560,6 +560,35 @@ async def _dispatch_track(user_id: str, action: dict[str, Any]) -> dict[str, Any
     return {"ok": True, "target": target, "note": note}
 
 
+async def _dispatch_crew_merge(user_id: str, action: dict[str, Any], *, approved_by_human: bool) -> dict[str, Any]:
+    """A person's Approve on a merge a crew task's agent asked for. Nothing but
+    the Approve path runs it. A refused merge ends the proposal: the work stays
+    on its branch, and the reason goes back to whoever asked."""
+    store = get_store()
+    if not approved_by_human:
+        return {"ok": False, "target": "", "note": "a crew merge waits for a person's Approve"}
+    from fastapi import HTTPException
+
+    from captain_claw.flight_deck import crew_access, crew_runner
+
+    payload = action.get("payload") or {}
+    task_id, head = str(payload.get("task_id") or ""), str(payload.get("head") or "")
+    try:
+        user = await crew_runner._user_of(user_id)
+        grant = crew_access.grant_of(user)
+        if not user or not grant.allowed:
+            raise HTTPException(403, crew_access.NOT_APPROVED)
+        if not head:
+            raise HTTPException(409, "This proposal doesn't say which commits it was for.")
+        task = await crew_runner.merge(user, grant, task_id, expect_head=head)
+    except HTTPException as exc:
+        store.update_status(action["id"], "failed", outcome="fail", outcome_note=str(exc.detail)[:500])
+        return {"ok": True, "target": task_id, "note": str(exc.detail)}
+    store.update_status(action["id"], "done", outcome="success", outcome_note=task.get("note") or "")
+    store.log(user_id, "crew merge", f"{task_id} — {task.get('note') or ''}")
+    return {"ok": True, "target": task_id, "note": task.get("note") or ""}
+
+
 async def _dispatch_stop_run(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
     """Carry out an approved stop_run: hard-stop the targeted run in-process
     (no agent involved). Idempotent — stopping an already-finished run is a
@@ -794,6 +823,8 @@ async def dispatch_action(
         return await _dispatch_tool_action(user_id, action, approved_by_human=approved_by_human)
     if str(action.get("kind")) == "track":
         return await _dispatch_track(user_id, action)
+    if str(action.get("kind")) == "crew_merge":
+        return await _dispatch_crew_merge(user_id, action, approved_by_human=approved_by_human)
     agent = _dispatch_agent(user_id, action)
     if not agent:
         return {"ok": False, "target": "", "note": "no running agent to dispatch to"}

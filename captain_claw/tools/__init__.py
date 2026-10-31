@@ -57,6 +57,7 @@ from captain_claw.tools.bat import BatTool
 from captain_claw.tools.bat_spend import SpendTool
 from captain_claw.tools.bat_ask import AskHumanTool
 from captain_claw.tools.code_session import CodeSessionTool
+from captain_claw.tools.crew import CrewTool
 from captain_claw.tools.hosting import HostingTool
 from captain_claw.tools.public_link import PublicLinkTool
 from captain_claw.tools.linked_system import LinkedSystemTool
@@ -146,6 +147,7 @@ __all__ = [
     "SpendTool",
     "AskHumanTool",
     "CodeSessionTool",
+    "CrewTool",
     "HostingTool",
     "PublicLinkTool",
     "LinkedSystemTool",
