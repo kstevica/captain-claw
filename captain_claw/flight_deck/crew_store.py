@@ -41,12 +41,14 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("tokens_in", "INTEGER DEFAULT 0"), ("tokens_out", "INTEGER DEFAULT 0"), ("cost_usd", "REAL DEFAULT 0"),
     ("deliver", "TEXT DEFAULT 'branch'"),  # branch · pr
     ("delivery", "TEXT DEFAULT '{}'"),
+    ("results", "TEXT DEFAULT '{}'"),  # its files, copied to the owner's VFS (crew_runner._export_results)
     ("agent_slug", "TEXT DEFAULT ''"), ("source_host", "TEXT DEFAULT ''"), ("origin", "TEXT DEFAULT '{}'"),
     ("last_event_at", "REAL DEFAULT 0"), ("turn_started_at", "REAL DEFAULT 0"), ("stalled_at", "REAL DEFAULT 0"),
     ("created_at", "REAL NOT NULL"), ("updated_at", "REAL NOT NULL"), ("closed_at", "REAL DEFAULT 0"),
+    ("archived_at", "REAL DEFAULT 0"),  # tidied off the page; its row and its results stay
 )
 _NAMES = {name for name, _ in _COLUMNS}
-_JSON = {"pending": [], "evidence": {}, "delivery": {}, "origin": {}}
+_JSON = {"pending": [], "evidence": {}, "delivery": {}, "results": {}, "origin": {}}
 
 _ROOT: Path | None = None
 _STORE: "CrewStore | None" = None
@@ -114,6 +116,10 @@ class CrewStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         cols = ", ".join(f"{name} {spec}" for name, spec in _COLUMNS)
         self._conn.execute(f"CREATE TABLE IF NOT EXISTS tasks ({cols})")
+        have = {r["name"] for r in self._conn.execute("PRAGMA table_info(tasks)")}
+        for name, spec in _COLUMNS:
+            if name not in have:
+                self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {spec}")
         self._conn.execute("CREATE INDEX IF NOT EXISTS tasks_user ON tasks (user_id, created_at)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS tasks_status ON tasks (status)")
         self._conn.commit()
@@ -151,8 +157,9 @@ class CrewStore:
 
     def list_for(self, user_id: str, limit: int = 200) -> list[dict[str, Any]]:
         with self._lock:
-            rows = self._conn.execute("SELECT * FROM tasks WHERE user_id = ? ORDER BY created_at DESC LIMIT ?",
-                                      (user_id, limit)).fetchall()
+            rows = self._conn.execute(
+                "SELECT * FROM tasks WHERE user_id = ? AND archived_at = 0 ORDER BY created_at DESC LIMIT ?",
+                (user_id, limit)).fetchall()
         return [_decode(r) for r in rows]
 
     def with_status(self, *statuses: str) -> list[dict[str, Any]]:

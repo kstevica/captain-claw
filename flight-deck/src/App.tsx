@@ -395,7 +395,7 @@ function AppContent() {
       {view === 'bat' && <BatPage />}
       {view === 'payments' && <PaymentsPage />}
       {view === 'code' && <CodePage />}
-      {view === 'crew' && <CrewBoard />}
+      {view === 'crew' && <CrewBoard phone={isMobile} />}
       {view === 'dubina' && <DubinaPage />}
       {view === 'vfs' && <VFSPage />}
       {view === 'deep-memory' && <DeepMemoryPage />}

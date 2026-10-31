@@ -1793,6 +1793,42 @@ _CALENDAR_TURNS = [
 ]
 
 
+class _StubCrewTool(Tool):
+    name = "crew"
+    description = "Run coding CLIs."
+    parameters = {"type": "object", "properties": {"action": {"type": "string"}}, "required": ["action"]}
+
+    async def execute(self, **kwargs: Any) -> ToolResult:
+        return ToolResult(success=True, content="Task crw_1 is working. You'll be called back when it finishes.")
+
+
+_CREW_REPLY = ("The scout is running on SK-Minesweeper now. It's read-only, so it won't change any files. "
+               "I'll send you what it finds when it's done.")
+
+
+@pytest.mark.asyncio
+async def test_a_crew_task_under_way_is_the_whole_answer_not_a_stall(_human_turn):
+    """From a real log: forced to call a tool, the agent polled status and list, twice."""
+    agent, provider, _ = _mail_agent([_call("crew", action="dispatch"), LLMResponse(content=_CREW_REPLY)])
+    agent.tools.register(_StubCrewTool())
+
+    result = await agent.complete("what is in minesweeper?")
+
+    assert result.startswith(_CREW_REPLY)
+    assert len(provider.calls) == 2
+    assert getattr(provider, "_tool_choice_override", None) is None
+
+
+@pytest.mark.asyncio
+async def test_the_same_words_with_no_crew_call_are_still_a_stall(_human_turn):
+    agent, provider, _ = _mail_agent([LLMResponse(content=_CREW_REPLY), LLMResponse(content="Nothing is running.")])
+
+    await agent.complete("what is in minesweeper?")
+
+    assert len(provider.calls) == 2
+    assert any(m["role"] == "user" and "announced intent" in str(m.get("content")) for m in agent.session.messages)
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("request_text, reply", _CALENDAR_TURNS)
 async def test_the_production_false_calendar_changes_get_one_corrective(

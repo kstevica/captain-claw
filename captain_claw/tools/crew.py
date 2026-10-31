@@ -40,10 +40,16 @@ class CrewTool(Tool):
         "decision, so don't poll and don't say you're waiting: tell the user it's on its way. Report outcomes "
         "and decisions, not mechanics. Say what git shows (commits, uncommitted changes) rather than what a "
         "worker claims. "
-        "Actions: options (the CLIs you may use, their logins, and the projects); dispatch; list; status; "
+        "Reading results: a project's folder is in your VFS (options shows its vfs: path) and so is what a finished "
+        "task made (the callback, status and files say where), so read them yourself with read or glob. Never start "
+        "a task to look at or fetch files, and never ask a worker to print files into its message: messages get cut. "
+        "A link to one file is public_link; a page with its css and scripts needs hosting. "
+        "Actions: options (the CLIs you may use, their logins, and the projects); dispatch; list (project narrows "
+        "it); status; files (where a task's files are; whole=true copies the whole project, for a big one); "
         "steer (the next instruction, or the user's answer to a worker's question); stop (keeps the work); "
         "pr (push and open a pull request); request_merge (asks the user to Approve the merge; merging is "
-        "their decision, so only ask when they want it merged). You can't merge or discard work yourself."
+        "their decision, so only ask when they want it merged). You can't merge or discard work yourself, and that "
+        "includes git in a shell: a worker's branch is the user's to land."
     )
     timeout_seconds = 200.0
 
@@ -52,7 +58,7 @@ class CrewTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["options", "dispatch", "list", "status", "steer", "stop", "pr", "request_merge"],
+                "enum": ["options", "dispatch", "list", "status", "files", "steer", "stop", "pr", "request_merge"],
             },
             "harness": {
                 "type": "string",
@@ -77,13 +83,14 @@ class CrewTool(Tool):
                 "enum": ["branch", "pr"],
                 "description": "dispatch, ship: leave the work on a branch (default), or open a pull request when it's done.",
             },
-            "project": {"type": "string", "description": "dispatch: a Code project to work in (created if new)."},
+            "project": {"type": "string", "description": "dispatch: a Code project to work in (created if new). list: only this project's tasks."},
             "folder": {"type": "string", "description": "dispatch: a folder in that project. Omit to use the project's name."},
             "repo_url": {"type": "string", "description": "dispatch: a repository address to clone and work in, instead of a project."},
             "repo_path": {"type": "string", "description": "dispatch: a folder on this computer, instead of a project. Admins only."},
             "model": {"type": "string", "description": "dispatch: a model for the CLI, only if the user asked for one."},
             "effort": {"type": "string", "description": "dispatch: reasoning effort for the CLI, only if the user asked for one."},
-            "task_id": {"type": "string", "description": "status, steer, stop, pr, request_merge: the task."},
+            "task_id": {"type": "string", "description": "status, files, steer, stop, pr, request_merge: the task."},
+            "whole": {"type": "boolean", "description": "files: copy the whole project, not only what the task changed."},
             "text": {"type": "string", "description": "steer: what to tell the worker."},
         },
         "required": ["action"],
@@ -124,9 +131,11 @@ class CrewTool(Tool):
                 f"ready, on {h['login']['how']}" if h["login"].get("ok") else "no login yet (Crew → Logins)")
             lines.append(f"  {h['id']} ({h['label']}): {state}")
         repos = data.get("repos") or {}
-        lines.append("Projects:")
-        lines.extend(f"  {p['project']}: {', '.join(p['folders']) or '(no folders)'}"
-                     for p in repos.get("projects", []))
+        lines.append("Projects (each folder is in your VFS at the path shown: read it yourself, no task needed):")
+        for p in repos.get("projects", []):
+            paths = p.get("paths") or {}
+            lines.append(f"  {p['project']}: " + (", ".join(f"{f} ({paths.get(f) or 'not in your VFS'})"
+                                                            for f in p["folders"]) or "(no folders)"))
         if repos.get("recent"):
             lines.append("Used lately:")
             lines.extend(f"  {r['repo']}" for r in repos["recent"])
@@ -159,18 +168,25 @@ class CrewTool(Tool):
         if (refused := self._refused(status, data)) is not None:
             return refused
         where = "waiting for a free slot" if data.get("status") == "queued" else "working"
+        behind = ""
+        if data.get("unlanded"):
+            behind = (f" It starts from {data.get('base_branch') or 'the base branch'}, so it won't see work that hasn't "
+                      f"landed: {'; '.join(data['unlanded'][:5])}.")
         return ToolResult(success=True, content=(
             f"Task {data.get('id')} is {where}: {data.get('harness_label')} in {data.get('repo_label')}, on branch "
-            f"{data.get('branch')}. It has only started: nothing is done yet, so tell the user it's under way and "
-            f"don't report a result. You'll be called back when it finishes or needs a decision."
+            f"{data.get('branch')}.{behind} It has only started: nothing is done yet, so tell the user it's under way, "
+            f"end your turn and don't report a result. You'll be called back when it finishes or needs a decision."
         ))
 
-    async def _do_list(self, client: Any, **_: Any) -> ToolResult:
+    async def _do_list(self, client: Any, **kwargs: Any) -> ToolResult:
         status, data = await client.call("GET", "tasks")
         if (refused := self._refused(status, data)) is not None:
             return refused
         tasks = data.get("tasks") or []
-        return ToolResult(success=True, content="\n".join(map(_task_line, tasks)) or "No crew tasks yet.")
+        project = str(kwargs.get("project") or "").strip().lower()
+        if project:
+            tasks = [t for t in tasks if str(t.get("project_name") or "").lower() == project]
+        return ToolResult(success=True, content="\n".join(map(_task_line, tasks)) or "No crew tasks here yet.")
 
     async def _with_task(self, client: Any, path: str, kwargs: dict, **extra: Any) -> tuple[ToolResult | None, Any]:
         task_id = str(kwargs.get("task_id") or "").strip()
@@ -191,6 +207,10 @@ class CrewTool(Tool):
             lines.append(f"Uncommitted changes: {evidence['dirty']}")
         if evidence.get("off_branch"):
             lines.append(f"Warning: the worker left its branch; it's on {evidence['off_branch']}")
+        lines.extend(self._where_lines(data.get("results") or {}))
+        if data.get("status") == "ready" and data.get("kind") == "ship" and evidence.get("commits"):
+            lines.append("Merging is the user's call. Only if they ask for it: crew action=request_merge, and they Approve it "
+                         "in the bell. Never run git merge yourself, in a shell or any other way.")
         if data.get("report"):
             lines.append(f"Report:\n{data['report'][:12000]}")
         elif data.get("final"):
@@ -200,6 +220,37 @@ class CrewTool(Tool):
             lines.extend(f"  {e.get('tool') or e.get('kind')}: {str(e.get('text'))[:300]}"
                          for e in data.get("recent", []))
         return ToolResult(success=True, content="\n".join(lines))
+
+    @staticmethod
+    def _where_lines(results: dict) -> list[str]:
+        lines = []
+        if results.get("files_path"):
+            what = "the whole project" if results.get("whole") else "only what it changed"
+            lines.append(f"Files: {results.get('count')} at {results['files_path']} ({what}). Read them there.")
+        if results.get("report"):
+            lines.append(f"Its whole message: {results['report']}")
+        if results.get("publish"):
+            lines.append(f"For a link to this page: hosting action=publish kind=static project={results['publish']['project']} "
+                         f"subdir={results['publish']['subdir']} name=<a short name>")
+        return lines
+
+    async def _do_files(self, client: Any, **kwargs: Any) -> ToolResult:
+        refused, data = await self._with_task(client, "files", kwargs, whole=bool(kwargs.get("whole")))
+        if refused is not None:
+            return refused
+        lines = self._where_lines(data)
+        if data.get("landed") and data.get("project_path"):
+            lines.insert(0, f"Merged. The project itself: {data['project_path']}")
+        names = data.get("files") or []
+        if names:
+            lines.append("In it:\n" + "\n".join(f"  {n}" for n in names[:100]))
+            if len(names) > 100:
+                lines.append(f"  and {len(names) - 100} more")
+        if data.get("skipped"):
+            lines.append(f"{data['skipped']} file(s) were too big to copy.")
+        if data.get("uncommitted"):
+            lines.append(f"{data['uncommitted']} uncommitted change(s) aren't in this copy: only commits are.")
+        return ToolResult(success=True, content="\n".join(lines) or "This task has no files.")
 
     async def _do_steer(self, client: Any, **kwargs: Any) -> ToolResult:
         text = str(kwargs.get("text") or "").strip()
@@ -229,5 +280,5 @@ class CrewTool(Tool):
             return refused
         return ToolResult(success=True, content=(
             "The merge is waiting for the user's Approve in Flight Deck (the bell). It isn't merged until they "
-            "approve it; say so."
+            "approve it; say so. You'll be called back when it lands."
         ))

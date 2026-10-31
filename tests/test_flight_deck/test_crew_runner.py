@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import stat
 import subprocess
 import time
@@ -40,6 +41,7 @@ case "$all" in
   *SCENARIO:dirty*) echo x > left-over.txt ;;
   *SCENARIO:detach*) git checkout -q --detach; echo x > lost.txt; git add lost.txt; git commit -qm "off the branch" ;;
   *SCENARIO:nothing*) ;;
+  *SCENARIO:page*) mkdir -p site/css; echo '<html></html>' > site/index.html; echo 'a{}' > site/css/a.css; git add site; git commit -qm "a page" ;;
   *SCENARIO:clash*) echo mine > shared.txt; git add shared.txt; git commit -qm "mine" ;;
   *) echo "$all" | head -c 40 > work.txt; git add work.txt; git commit -qm "the work" ;;
 esac
@@ -70,6 +72,7 @@ async def deck(monkeypatch, tmp_path):
     fake.write_text(FAKE_CLI)
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("FD_CREW_CLAUDE_BIN", str(fake))
+    monkeypatch.setattr("captain_claw.flight_deck.server.DATA_DIR", tmp_path / "fd-data")
     told: list[dict] = []
 
     async def notify(task, *, stalled=False):
@@ -718,6 +721,198 @@ async def test_linked_folders_follow_the_rules_of_folders(deck, monkeypatch):
     monkeypatch.setattr(code_routes, "_folder_meta", lambda uid, p, f: {"kind": "link", "mode": "ro"})
     with pytest.raises(HTTPException, match="read-only"):
         await crew_runner._resolve_repo(deck["admin"], ADMIN_GRANT, {"project": "linked", "folder": "x"})
+
+
+# ── What a task made, in the VFS ─────────────────────────────────────────
+
+
+def _results_folder(task: dict) -> Path:
+    return crew_runner._vfs_root(task["user_id"]) / "crew" / "repo" / task["branch"].removeprefix("crew/")
+
+
+async def test_what_a_task_made_comes_to_the_vfs(deck):
+    done = await _settle(await _dispatch(deck))
+    folder = _results_folder(done)
+    results = done["results"]
+    assert results["files_path"] == f"vfs:crew/repo/{folder.name}/files/"
+    assert results["report"] == f"vfs:crew/repo/{folder.name}/report.md"
+    assert results["changed"] == ["work.txt"]
+    assert (folder / "files" / "work.txt").exists()
+    # A small project comes whole: a page needs its other files too.
+    assert results["whole"] and (folder / "files" / "shared.txt").read_text() == "base\n"
+    assert not (folder / "files" / ".git").exists()
+    assert (folder / "report.md").read_text() == "All done."
+    told = crew_runner.notice_text(done)
+    assert results["files_path"] in told and "don't start a task to fetch them" in told
+    assert "crew action=request_merge" in told
+
+
+async def test_a_big_project_brings_only_what_changed_until_asked(deck, monkeypatch):
+    monkeypatch.setattr(crew_runner, "_SMALL_FILES", 0)
+    done = await _settle(await _dispatch(deck))
+    folder = _results_folder(done)
+    assert not done["results"]["whole"] and done["results"]["files"] == ["work.txt"]
+    assert not (folder / "files" / "shared.txt").exists()
+    results = await crew_runner.files(done["user_id"], done["id"], whole=True)
+    assert results["whole"] and (folder / "files" / "shared.txt").exists()
+    monkeypatch.setattr(crew_runner, "_MAX_FILES", 1)
+    fresh = crew_store.get_store().get(done["user_id"], done["id"])
+    crew_store.get_store().update(done["id"], results={})
+    with pytest.raises(HTTPException) as err:
+        await crew_runner.files(fresh["user_id"], fresh["id"], whole=True)
+    assert err.value.status_code == 413
+
+
+async def test_a_page_says_how_to_publish_it_from_the_clean_copy(deck):
+    done = await _settle(await _dispatch(deck, "SCENARIO:page"))
+    folder = _results_folder(done)
+    assert done["results"]["publish"] == {"project": "crew", "subdir": f"repo/{folder.name}/files/site"}
+    assert (folder / "files" / "site" / "css" / "a.css").exists()
+    assert "hosting action=publish kind=static project=crew" in crew_runner.notice_text(done)
+
+
+async def test_copying_runs_nothing_from_the_repository_and_follows_no_link(deck):
+    ran = deck["tmp"] / "ran"
+    repo = deck["repo"]
+    (repo / ".gitattributes").write_text("*.txt filter=evil\n")
+    (repo / "out").symlink_to("/etc/hosts")
+    _run(repo, "config", "filter.evil.smudge", f"touch {ran}; cat")
+    _run(repo, "add", ".")
+    _run(repo, "commit", "-qm", "a trap")
+    done = await _settle(await _dispatch(deck))
+    ran.unlink(missing_ok=True)  # making the worktree is a checkout: that runs filters
+    await crew_runner._export_results(done, ref=await crew_runner._result_ref(done), whole=True)
+    files = _results_folder(done) / "files"
+    assert not ran.exists()
+    assert (files / "shared.txt").exists() and (files / ".gitattributes").exists()
+    assert not (files / "out").exists() and not (files / "out").is_symlink()
+
+
+async def test_a_scout_brings_its_report_and_the_project_only_on_request(deck):
+    done = await _settle(await _dispatch(deck, "SCENARIO:nothing", kind="scout"))
+    assert done["results"]["report"] and not done["results"]["files_path"]
+    assert (_results_folder(done) / "report.md").read_text() == "All done."
+    results = await crew_runner.files(done["user_id"], done["id"], whole=True)
+    assert results["files"] == ["shared.txt"]
+
+
+async def test_an_approve_tells_the_agent_where_it_landed_and_a_click_does_not(deck):
+    done = await _settle(await _dispatch(deck))
+    deck["told"].clear()
+    head = done["evidence"]["head"]
+    merged = await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"], expect_head=head)
+    await asyncio.sleep(0.01)
+    assert [t["status"] for t in deck["told"]] == ["delivered"]
+    assert merged["results"]["head"] == merged["delivery"]["sha"]
+    assert merged["results"]["changed"] == ["work.txt"]  # what it changed, not all that's on the base since
+    other = await _settle(await _dispatch(deck, "SCENARIO:clash"))
+    deck["told"].clear()
+    await crew_runner.merge(deck["admin"], ADMIN_GRANT, other["id"])
+    await asyncio.sleep(0.01)
+    assert deck["told"] == []
+
+
+async def test_a_task_merged_before_results_existed_still_answers(deck):
+    done = await _settle(await _dispatch(deck))
+    merged = await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"])
+    crew_store.get_store().update(merged["id"], results={})
+    shutil.rmtree(_results_folder(done))
+    results = await crew_runner.files(done["user_id"], done["id"])
+    assert results["landed"] and "work.txt" in results["files"]
+
+
+async def test_discarding_takes_the_copy_with_it(deck):
+    done = await _settle(await _dispatch(deck))
+    folder = _results_folder(done)
+    assert folder.exists()
+    await crew_runner.close(done["user_id"], done["id"], discard=True)
+    assert not folder.exists()
+    assert not crew_store.get_store().get(done["user_id"], done["id"])["results"]
+
+
+async def test_files_wait_for_the_worker_and_stay_in_their_folder(deck):
+    running = await _dispatch(deck, "SCENARIO:slow")
+    with pytest.raises(HTTPException) as err:
+        await crew_runner.files(running["user_id"], running["id"])
+    assert err.value.status_code == 409
+    await crew_runner.stop(running["user_id"], running["id"])
+    done = await _settle(await _dispatch(deck))
+    assert crew_runner.read_result(done["user_id"], done["id"], "shared.txt")["text"] == "base\n"
+    for path in ("../report.md", "/etc/hosts", "../../../../../../etc/hosts", "nothing.txt"):
+        with pytest.raises(HTTPException) as err:
+            crew_runner.read_result(done["user_id"], done["id"], path)
+        assert err.value.status_code == 404, path
+
+
+def test_the_whole_message_is_where_a_cut_callback_says():
+    task = {"id": "t", "user_id": "u", "kind": "scout", "status": "ready", "final": "x" * 6000, "repo": "/r",
+            "results": {"report": "vfs:crew/p/t/report.md"}}
+    text = crew_runner.notice_text(task)
+    assert "x" * 5000 in text and "x" * 5001 not in text
+    assert "All of it: vfs:crew/p/t/report.md" in text
+    assert "All of it" not in crew_runner.notice_text({**task, "final": "short"})
+
+
+# ── Projects ─────────────────────────────────────────────────────────────
+
+
+def test_a_project_is_a_code_project_with_its_folders_or_the_repository():
+    of = crew_runner.project_of
+    assert of({"repo_kind": "project", "repo_label": "Game/client"}) == ("project:Game", "Game")
+    assert of({"repo_kind": "project", "repo_label": "Game/server"}) == ("project:Game", "Game")
+    assert of({"repo_kind": "url", "repo_label": "lib"}) == ("url:lib", "lib")
+    assert of({"repo_kind": "path", "repo_label": "x", "repo": "/a/x"}) == ("path:/a/x", "x")
+    assert of({"repo_kind": "path", "repo_label": "x", "repo": "/b/x"}) == ("path:/b/x", "x")
+
+
+async def test_tidying_clears_what_is_finished_and_never_what_has_not_landed(deck):
+    uid = deck["admin"]["id"]
+    store = crew_store.get_store()
+    scout = await _settle(await _dispatch(deck, "SCENARIO:nothing", kind="scout"))
+    landed = await _settle(await _dispatch(deck))
+    await crew_runner.merge(deck["admin"], ADMIN_GRANT, landed["id"])
+    unlanded = await _settle(await _dispatch(deck, "SCENARIO:clash"))
+    question = await _settle(await _dispatch(deck, "SCENARIO:ask"))
+    key = crew_runner.project_of(scout)[0]
+    assert await crew_runner.tidy(uid, key) == {"cleared": 2, "kept": 2}
+    left = {t["id"] for t in store.list_for(uid)}
+    assert left == {unlanded["id"], question["id"]}
+    assert not Path(scout["worktree"]).exists()
+    assert Path(unlanded["worktree"]).exists()
+    # Off the page, not gone: nor is its report.
+    assert store.get(uid, scout["id"])["status"] == "closed"
+    assert (_results_folder(scout) / "report.md").exists()
+    assert await crew_runner.tidy(uid, "project:elsewhere") == {"cleared": 0, "kept": 0}
+
+
+async def test_a_new_task_is_warned_of_work_that_has_not_landed(deck):
+    uid = deck["admin"]["id"]
+    done = await _settle(await _dispatch(deck))
+    key = crew_runner.project_of(done)[0]
+    assert crew_runner.unlanded_in(uid, key) == [done["title"]]
+    assert crew_runner.unlanded_in(uid, key, but=done["id"]) == []
+    await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"])
+    assert crew_runner.unlanded_in(uid, key) == []
+
+
+def test_a_store_from_before_gets_the_new_columns(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "crew.db"
+    conn = sqlite3.connect(path)
+    old = ("id TEXT PRIMARY KEY, user_id TEXT NOT NULL, title TEXT NOT NULL, kind TEXT NOT NULL, harness TEXT NOT NULL,"
+           " brief TEXT NOT NULL, status TEXT NOT NULL, repo TEXT NOT NULL, created_at REAL NOT NULL,"
+           " updated_at REAL NOT NULL")
+    conn.execute(f"CREATE TABLE tasks ({old})")
+    conn.execute("INSERT INTO tasks VALUES ('t', 'u', 'old', 'ship', 'claude', 'b', 'ready', '/r', 1, 1)")
+    conn.commit()
+    conn.close()
+    store = crew_store.CrewStore(path)
+    task = store.list_for("u")[0]
+    assert task["id"] == "t" and task["results"] == {} and task["archived_at"] == 0
+    store.update("t", archived_at=5.0)
+    assert store.list_for("u") == []
+    store.close()
 
 
 def test_reading_the_status_line():

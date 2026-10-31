@@ -3522,6 +3522,9 @@ class AgentOrchestrationMixin:
             if not _turn_produced_deliverable and (
                 self._turn_has_successful_tool(turn_start_idx, "write")
                 or self._turn_has_successful_tool(turn_start_idx, "edit")
+                # A crew task runs on its own and calls back: "it's under way"
+                # is the whole answer, and forcing a tool only makes it poll.
+                or self._turn_has_successful_tool(turn_start_idx, "crew")
             ):
                 _turn_produced_deliverable = True
             if (

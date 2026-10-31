@@ -115,12 +115,18 @@ def entry_dir(entry: dict) -> Path | None:
     return base
 
 
+# A folder published whole may be a repository: its history and secrets aren't the site.
+_NEVER_SERVED = frozenset({".git", ".env", ".code", ".captain-claw"})
+
+
 def resolve_static_file(entry: dict, subpath: str) -> Path | None:
     """Resolve a request subpath under a static entry's base dir, sandboxed."""
     base = entry_dir(entry)
     if base is None:
         return None
     parts = [p for p in (subpath or "").replace("\\", "/").split("/") if p not in ("", ".", "..")]
+    if any(p in _NEVER_SERVED for p in parts):
+        return None
     target = base
     for part in parts:
         target = target / part

@@ -118,6 +118,23 @@ html.light .fd-file-markdown td { border-bottom-color: #e4e4e7; }
 html.light .fd-file-markdown tbody tr:nth-child(even) { background: rgba(244,244,245,0.5); }
 html.light .fd-file-markdown tbody tr:hover { background: rgba(228,228,231,0.4); }
 
+/* Crew: what a worker said, at reading size beside its steps. */
+.fd-file-markdown.crew-md { font-size: 0.8125rem; line-height: 1.65; overflow-wrap: anywhere; }
+.crew-md > :first-child { margin-top: 0; }
+.crew-md > :last-child { margin-bottom: 0; }
+.crew-md h1 { font-size: 1.25em; margin: 1.1em 0 0.45em; padding-bottom: 0.25em; }
+.crew-md h2 { font-size: 1.15em; margin: 1em 0 0.4em; padding-bottom: 0.2em; }
+.crew-md h3, .crew-md h4 { font-size: 1.05em; margin: 0.9em 0 0.3em; }
+.crew-md a { color: #2dd4bf; }
+.crew-md a:hover { color: #5eead4; }
+html.light .crew-md a { color: #0f766e; }
+html.light .crew-md a:hover { color: #115e59; }
+.crew-md blockquote { border-left-color: #14b8a6; background: rgba(20,184,166,0.06); }
+html.light .crew-md blockquote { border-left-color: #14b8a6; background: rgba(20,184,166,0.06); }
+.crew-md-table { margin: 0.75em 0; overflow-x: auto; }
+.crew-md-table table { margin: 0; overflow-wrap: normal; }
+.crew-md-table code { white-space: nowrap; }
+
 /* The File library's preview: the same markdown, smaller, starting at the
    top, and a wide table scrolls inside the narrow pane. */
 .fd-file-markdown.fd-md-preview { font-size: 0.75rem; line-height: 1.6; overflow-wrap: anywhere; }
