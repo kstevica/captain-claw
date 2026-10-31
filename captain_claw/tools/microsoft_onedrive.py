@@ -189,6 +189,10 @@ class MicrosoftOneDriveTool(Tool):
 
     async def execute(self, action: str, **kwargs: Any) -> ToolResult:
         runtime = pop_runtime(kwargs)
+        if kwargs.get("local_path"):
+            from captain_claw.tools.google_drive import GoogleDriveTool
+
+            kwargs["local_path"] = GoogleDriveTool._workspace_first(str(kwargs["local_path"]), runtime)
         handlers = {
             "list": self._action_list,
             "search": self._action_search,
