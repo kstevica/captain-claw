@@ -387,7 +387,7 @@ async def test_the_draft_asks_what_was_wanted_and_names_who_can_send_it(deck, mo
     assert r.status_code == 200, r.text
     body = r.json()
     assert body["to"] == "ana@example.com"
-    assert body["subject"] == "How is Captain working for you?"
+    assert body["subject"] == "Ana, how is Captain working for you?"
     assert body["body"].startswith("Hi Ana,")
     assert body["body"].endswith("Boss")
     for question in ("use it for", "worked well", "confuses you", "missing", "make it better"):
@@ -395,6 +395,13 @@ async def test_the_draft_asks_what_was_wanted_and_names_who_can_send_it(deck, mo
     assert body["asked_at"] == ""
     assert body["mail"]["google"] == {"available": True, "from": "boss@gmail.com", "reason": ""}
     assert body["mail"]["microsoft"]["available"] is False
+
+
+def test_a_draft_for_someone_with_no_name_still_reads_well():
+    subject, body = feedback_request_routes.compose_request(
+        instance_name="Captain", admin_name="Boss", user_name="")
+    assert subject == "How is Captain working for you?"
+    assert body.startswith("Hi,\n")
 
 
 async def test_sending_emails_the_user_and_marks_them_asked(deck, monkeypatch):
