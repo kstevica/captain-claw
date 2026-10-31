@@ -141,9 +141,10 @@ newest, so B is published as 1.x). The lights carry listening, working,
 speaking and trouble exactly as above; the voice carries the answers:
 
 - **A dashboard, every five minutes** (1.0.11; in blocks of colour since
-  1.0.24): a black block with what waits in Flight Deck, the agent and the
-  Wi-Fi and agent dots on the right, a big clock as of the drawing and the date.
-  Under it three blocks: the room in blue (temperature, humidity), the power
+  1.0.24): a black block out to the paper's edges, round only at the bottom,
+  with what waits in Flight Deck, the agent and the Wi-Fi and agent dots on the
+  right, a big clock as of the drawing and the date.
+  Under it three blocks of the same width: the room in blue (temperature, humidity), the power
   in green, yellow under 40 %, red under 20 % (percent, and how long it has or
   until it's full, with a bolt while charging), the notes in yellow, red when
   under 2 minutes of room are left (how many, and the room: minutes in flash,
