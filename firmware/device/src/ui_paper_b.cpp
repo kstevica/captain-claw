@@ -1298,7 +1298,7 @@ void showHome(const Home& home) {
 
 // Going to sleep, and the timer wake while asleep: the dashboard when its
 // mark has come (the sleep timer is set to land on the next), else nothing.
-void showSleeping(const String&, uint8_t) {
+void showSleeping(const String&) {
   forceNext = false;
   if (dashDue()) askDashboard(true, true);
   flush();
@@ -1775,8 +1775,7 @@ int showStatus(const Status&, int) { return 1; }
 void showListening(int, uint32_t) {}
 void showWorking(const String&, const std::vector<String>&, const String&, uint32_t, int) {}
 void showSpeaking(int) {}
-void showFace(uint8_t, face::Pose, int) {}
-void showCharPick(uint8_t, face::Pose, int, int) {}
+void showFace(face::Pose, int) {}
 void showPicker(const std::vector<Item>&, int, int, const char*) { forceNext = false; }
 void showStoredImage() {}
 void flashFrame(bool) {}

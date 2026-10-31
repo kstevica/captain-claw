@@ -53,7 +53,7 @@
 #if defined(PAPER_B)
 #define FW_VERSION "1.0.25"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.19.12"
+#define FW_VERSION "0.20.0"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -119,7 +119,7 @@ static void perfReport(uint32_t loopUs) {
 // Link: the "settings on your phone" address.
 // Ask: a yes/no question (send the voice notes kept offline?).
 // Backdrop: the background picture alone (a double tap on the home screen).
-enum class Mode { Idle, Listening, Waiting, Reply, Image, Menu, Agents, CharPick, Status, Notice, Home, Link, Ask,
+enum class Mode { Idle, Listening, Waiting, Reply, Image, Menu, Agents, Status, Notice, Home, Link, Ask,
                   Backdrop, Info };
 
 static WebSocketsClient ws;
@@ -155,7 +155,6 @@ static int menuSel = 0;
 static std::vector<String> agentNames, agentSlugs;
 static int agentSel = 0, agentCur = -1;
 static bool agentsLoading = false;
-static uint8_t charSel = 0;  // character being previewed
 static int statusPage = 0, statusPages = 1;
 static uint32_t flashStartMs = 0;
 static bool flashing = false;
@@ -438,11 +437,6 @@ static void setBarState() {
     st = "speaking", col = kCyan;
   } else if (mode == Mode::Waiting) {
     st = workLabel(), col = kYellow;
-  } else if (mode == Mode::CharPick) {
-    static char buf[24];
-    snprintf(buf, sizeof(buf), "%d/%d  A=pick", charSel + 1, (int)face::KindCount);
-    ui::setBar(face::name(charSel), buf, kCyan);
-    return;
   } else if (mode == Mode::Menu || mode == Mode::Agents) {
     st = "menu", col = kText;
   } else if (mode == Mode::Status) {
@@ -604,7 +598,7 @@ static ui::Home homeNow();
 
 static void showIdle() {
   if (settings.iconMode && !board::kPaperB) {
-    ui::showFace(settings.character, agentReachable() ? face::Pose::Idle : face::Pose::Sad, 0);
+    ui::showFace(agentReachable() ? face::Pose::Idle : face::Pose::Sad, 0);
     return;
   }
   ui::showHome(homeNow());
@@ -651,7 +645,6 @@ static ui::Home homeNow() {
   }
   const bool freshLine = waitingLine.length() && millis() - waitingLineMs < kWaitingLineMs;
   if (ok && (freshLine || waitingCount > 0)) home.hint = freshLine ? waitingLine : waiting;
-  home.character = settings.character;
   home.battery = batteryLine();
   home.noteMode = board::kNoteMode && settings.noteMode;
   home.notes = notes::count();
@@ -662,7 +655,7 @@ static ui::Home homeNow() {
 // ── menu ─────────────────────────────────────────────────────────────
 
 enum MenuRow { MReplay, MPin, MStatus, MNotes, MAgent, MVolume, MBoost, MVoice, MDisplay, MTapTalk, MMore,
-               MTextSize, MCharacter, MBeep, MTalkSnd, MFlash, MBuzz, MLead, MScreenOff, MPowerOff, MRotation,
+               MTextSize, MBeep, MTalkSnd, MFlash, MBuzz, MLead, MScreenOff, MPowerOff, MRotation,
                MLeds, MClicks, MSayMenu, MAsleep, MPhone, MUpdate, MAutoUpdate, MSetup, MBack, MCount };
 
 // Two levels (not the paper's): what you reach for in the moment at the
@@ -700,7 +693,6 @@ static bool rowShown(int row) {
     case MNotes: return board::kOfflineNotes && notes::count() > 0;  // kept offline: send them now
     case MTapTalk: return board::kHasTouch;
     case MDisplay:
-    case MCharacter:  // the paper is text only
     case MScreenOff: return !board::kEpaper;
     case MRotation:
     case MLeds:
@@ -746,12 +738,11 @@ static String menuLabel(int row) {
     case MVolume: return "Volume " + String((settings.volume * 100 + 127) / 255) + "%";
     case MBoost: return settings.boostDb ? "Boost +" + String(settings.boostDb) + " dB" : String("Boost off");
     case MVoice: return String("Voice: ") + (settings.femaleVoice ? "female" : "male");
-    case MDisplay: return String("Display: ") + (settings.iconMode ? "icons" : "text");
+    case MDisplay: return String("Display: ") + (settings.iconMode ? "Captain" : "text");
     case MTextSize: {
       static const char* sizes[] = {"small", "medium", "large"};
       return String("Text size: ") + sizes[settings.textSize];
     }
-    case MCharacter: return String("Character: ") + face::name(settings.character) + " »";
     case MBeep: return String("Beeps around speech: ") + (settings.cueBeep ? "on" : "off");
     case MTalkSnd: return String("Talk sounds: ") + (settings.talkSounds ? "on" : "off");
     case MFlash:
@@ -813,13 +804,12 @@ static ui::Item menuItem(int row) {
       it.on = settings.boostDb > 0;
       break;
     case MVoice: it.title = "Voice"; it.badge = settings.femaleVoice ? "female" : "male"; break;
-    case MDisplay: it.title = "Display"; it.badge = settings.iconMode ? "icons" : "text"; break;
+    case MDisplay: it.title = "Display"; it.badge = settings.iconMode ? "Captain" : "text"; break;
     case MTextSize:
       it.title = "Text size";
       it.badge = String("Aa");
       it.note = String(sizes[settings.textSize]) + " · change";
       break;
-    case MCharacter: it.title = "Character"; it.badge = face::name(settings.character); it.note = "yellow = browse"; break;
     case MBeep:
       it.title = "Beeps around speech";
       it.badge = onOff(settings.cueBeep);
@@ -938,7 +928,6 @@ static void sayRow() {
   if (mode == Mode::Menu) sayLater(menuLabel(menuSel));
   else if (mode == Mode::Agents && !agentsLoading && agentSel < (int)agentNames.size())
     sayLater(agentSel + 1 == (int)agentNames.size() ? String("Back") : agentNames[agentSel] + (agentSel == agentCur ? ", current" : ""));
-  else if (mode == Mode::CharPick) sayLater(face::name(charSel));
 }
 
 static void backToMain();
@@ -986,17 +975,16 @@ static void redraw() {
   ui::setReplayable((mode == Mode::Reply || mode == Mode::Idle) && canReplay() && !audio::playing());
   switch (mode) {
     case Mode::Listening:
-      if (settings.iconMode) ui::showFace(settings.character, face::Pose::Listening, 0);
+      if (settings.iconMode) ui::showFace(face::Pose::Listening, 0);
       else ui::showListening(0, millis() - recStartMs);
       break;
     case Mode::Waiting:
-      if (settings.iconMode) ui::showFace(settings.character, face::Pose::Thinking, 0);
+      if (settings.iconMode) ui::showFace(face::Pose::Thinking, 0);
       else ui::showWorking(heard, activity, statusLine, millis() - workStartMs, toolSteps);
       break;
     case Mode::Reply:
       if (settings.iconMode && audio::playing()) {
-        ui::showFace(settings.character, audio::paused() ? face::Pose::Idle : face::Pose::Speaking,
-                     audio::outputLevel());
+        ui::showFace(audio::paused() ? face::Pose::Idle : face::Pose::Speaking, audio::outputLevel());
       } else {
         ui::showReply();
       }
@@ -1009,17 +997,6 @@ static void redraw() {
       break;
     }
     case Mode::Agents: ui::showPicker(agentItems(), agentSel, agentCur, "Agent"); break;
-    case Mode::CharPick: {
-      // Cycle through the poses so the preview shows everything it does.
-      static const face::Pose poses[] = {face::Pose::Idle, face::Pose::Listening, face::Pose::Thinking,
-                                         face::Pose::Speaking, face::Pose::Sad};
-      uint32_t t = millis();
-      face::Pose pose = poses[(t / 2500) % 5];
-      int lvl = pose == face::Pose::Speaking || pose == face::Pose::Listening
-                    ? 45 + (int)(40 * sinf(t / 90.0f)) : 0;
-      ui::showCharPick(charSel, pose, lvl, charSel);
-      break;
-    }
     case Mode::Status: {
       const ui::Status st = statusNow();
       int n = ui::showStatus(st, statusPage);
@@ -1216,13 +1193,6 @@ static void chooseMenuRow() {
       settings.textSize = (settings.textSize + 1) % 3;
       ui::setTextSize(settings.textSize);
       break;
-    case MCharacter:
-      charSel = settings.character;
-      mode = Mode::CharPick;
-      ui::slide(true);
-      redraw();
-      sayRow();
-      return;
     case MBeep: settings.cueBeep = !settings.cueBeep; break;
     case MTalkSnd: settings.talkSounds = !settings.talkSounds; break;
     case MFlash: settings.cueFlash = !settings.cueFlash; break;
@@ -2156,7 +2126,6 @@ static void onText(const char* payload, size_t len) {
       audio::newClip();  // this answer's sound replaces the last one's
       paperAnswerWaits();
     }
-    face::setText(said);
     deckReplay = quietSpeech = false;
     mode = Mode::Reply;
     paperAnswerWhole();
@@ -2179,7 +2148,6 @@ static void onText(const char* payload, size_t len) {
     } else {
       ui::growReply(said);
     }
-    face::setText(said);
     if (!flashing) redraw();
   } else if (type == "speech_reset") {
     // What the model wrote before a tool call wasn't the answer: back to the
@@ -2655,7 +2623,7 @@ static void goToSleep() {
     }
 #endif
     ui::setBar(agentName, "asleep", kText);
-    ui::showSleeping(sleepHint(), settings.character);  // waits for the paper (~20 s)
+    ui::showSleeping(sleepHint());  // waits for the paper (~20 s)
 #if defined(BOARD_EPAPER154)
     // The picture up for ten seconds first, Wi-Fi still on: a press just goes
     // back. And not right before a redraw, or it would be up again at once.
@@ -2666,7 +2634,7 @@ static void goToSleep() {
       delay(20);
     }
     if ((int32_t)(buttonSeenMs - t0) <= 0 && time(nullptr) / 60 != drawnMinute) {
-      ui::showSleeping(sleepHint(), settings.character);
+      ui::showSleeping(sleepHint());
     }
 #endif
     if ((int32_t)(buttonSeenMs - t0) > 0) {  // pressed meanwhile: stay awake
@@ -2675,7 +2643,7 @@ static void goToSleep() {
       return;
     }
   } else {
-    ui::showSleeping(String("Press the ") + board::kTalkButton + " to wake.", settings.character);
+    ui::showSleeping(String("Press the ") + board::kTalkButton + " to wake.");
     delay(1200);
   }
   ws.disconnect();
@@ -2767,7 +2735,7 @@ static void sideClick() {
     return;
   }
   ui::drawNow();  // a page, the status: asked to see it (the e-paper draws it now)
-  if (mode == Mode::Menu || mode == Mode::CharPick || (mode == Mode::Agents && !agentsLoading) ||
+  if (mode == Mode::Menu || (mode == Mode::Agents && !agentsLoading) ||
       (mode == Mode::Status && statusPage + 1 < statusPages) ||
       (mode == Mode::Reply && !(audio::playing() && settings.iconMode))) {
     ui::slide(true);  // a step on
@@ -2783,10 +2751,6 @@ static void sideClick() {
     menuOpenedMs = millis();
     redraw();
     sayRow();
-  } else if (mode == Mode::CharPick) {
-    charSel = (charSel + 1) % face::KindCount;
-    menuOpenedMs = millis();
-    redraw();
     sayRow();
   } else if (mode == Mode::Agents) {
     if (!agentsLoading) agentSel = (agentSel + 1) % agentNames.size();
@@ -2831,7 +2795,7 @@ static void backClick() {
     return;
   }
   ui::drawNow();  // back, the answer, the home screen: asked to see it
-  if (mode == Mode::Menu || mode == Mode::CharPick || (mode == Mode::Agents && !agentsLoading) ||
+  if (mode == Mode::Menu || (mode == Mode::Agents && !agentsLoading) ||
       (mode == Mode::Status && statusPage > 0)) {
     ui::slide(false);  // a step back
   } else if (mode == Mode::Ask || mode == Mode::Status || mode == Mode::Reply || mode == Mode::Image ||
@@ -2846,10 +2810,6 @@ static void backClick() {
     menuOpenedMs = millis();
     redraw();
     sayRow();
-  } else if (mode == Mode::CharPick) {
-    charSel = (charSel + face::KindCount - 1) % face::KindCount;
-    menuOpenedMs = millis();
-    redraw();
     sayRow();
   } else if (mode == Mode::Agents) {
     if (!agentsLoading) agentSel = (agentSel + agentNames.size() - 1) % agentNames.size();
@@ -3030,7 +2990,7 @@ static void switchOff() {
 static void asleepRedraw() {
   uint32_t t0 = millis();
   ui::setBar(rtcAgent, "asleep", kText);
-  ui::showSleeping(sleepHint(), settings.character);
+  ui::showSleeping(sleepHint());
   if ((int32_t)(buttonSeenMs - t0) > 0 || gpio_get_level(board::kTalkPin) == 0) return;  // awake after all
   sleepNow();
 }
@@ -3375,19 +3335,10 @@ static void stopAgent() {
   workDirty = true;
 }
 
-// The talk button in a picker: this row, agent or character.
-static void pickCharacter() {
-  settings.character = charSel;
-  settings.save();
-  mode = Mode::Menu;
-  menuOpenedMs = millis();
-  ui::slide(false);
-  redraw();
-}
+// The talk button in a picker: this row or agent.
 static void chooseHere() {
   if (mode == Mode::Menu) chooseMenuRow();
   else if (mode == Mode::Agents) chooseAgent();
-  else if (mode == Mode::CharPick) pickCharacter();
 }
 
 // The touch screen (StopWatch). Swipes page an answer: left or up goes on,
@@ -3415,7 +3366,7 @@ static void pollTouch(bool dark) {
   if (!t.wasReleased() || woke) return;
   const int dx = t.distanceX(), dy = t.distanceY();
   const int dist = max(abs(dx), abs(dy));
-  const bool picker = mode == Mode::Menu || mode == Mode::Agents || mode == Mode::CharPick;
+  const bool picker = mode == Mode::Menu || mode == Mode::Agents;
   if (dist >= 45) {
     const bool sideways = abs(dx) > abs(dy);
     const bool onHome = mode == Mode::Home || (mode == Mode::Idle && !ui::hasReply());
@@ -3654,7 +3605,7 @@ void loop() {
     if (mode == Mode::Link) phoneSettingsPoll();
     else phoneSettingsEnd();
   }
-  bool inMenu = mode == Mode::Menu || mode == Mode::Agents || mode == Mode::Status || mode == Mode::CharPick;
+  bool inMenu = mode == Mode::Menu || mode == Mode::Agents || mode == Mode::Status;
   // On a dark screen a press only wakes it — except the front button on the
   // main screen, which starts talking right away where a wake press talks
   // (board::kTalkFromSleep: not the watch or the stick).
@@ -3680,7 +3631,7 @@ void loop() {
     talkHoldArms = false;
     if (dark && (inMenu || !board::kTalkFromSleep)) {
       // woken only (the watch, the stick: the next press talks)
-    } else if (mode == Mode::Menu || mode == Mode::Agents || mode == Mode::CharPick) {
+    } else if (mode == Mode::Menu || mode == Mode::Agents) {
       chooseHere();
     } else if (mode == Mode::Status) {
       openMenu();
@@ -3761,10 +3712,6 @@ void loop() {
       }
     } else if (mode == Mode::Ask) {
       answerAsk(false);
-    } else if (mode == Mode::CharPick) {  // back to the menu, keeping the old character
-      mode = Mode::Menu;
-      menuOpenedMs = millis();
-      redraw();
     } else if (inMenu || (board::kSlowPaper && mode == Mode::Link)) {
       ui::fade();
       backToMain();
@@ -3817,13 +3764,12 @@ void loop() {
   // each step takes a redraw to show.
   const uint32_t menuIdle = board::kSlowPaper ? 180000 : 20000;
   if ((mode == Mode::Menu || mode == Mode::Agents) && millis() - menuOpenedMs > menuIdle) backToMain();
-  if (mode == Mode::CharPick && millis() - menuOpenedMs > menuIdle * 3) backToMain();
   if (mode == Mode::Link && millis() - menuOpenedMs > 600000) backToMain();
 
   // The menu row to read aloud, once the presses have settled.
   if (sayAtMs && (int32_t)(millis() - sayAtMs) >= 0) {
     sayAtMs = 0;
-    bool inList = mode == Mode::Menu || mode == Mode::Agents || mode == Mode::CharPick;
+    bool inList = mode == Mode::Menu || mode == Mode::Agents;
     if (wsUp && inList && !audio::playing()) {
       JsonDocument d;
       d["type"] = "say";
@@ -3855,7 +3801,7 @@ void loop() {
       lastDrawMs = millis();
       setBarState();
       syncTapButton();
-      if (settings.iconMode) ui::showFace(settings.character, face::Pose::Listening, level);
+      if (settings.iconMode) ui::showFace(face::Pose::Listening, level);
       else ui::showListening(level, millis() - recStartMs);
     }
     if (noteRec) {
@@ -3929,7 +3875,7 @@ void loop() {
       static uint32_t lastSecond = 0;
       uint32_t secs = (millis() - workStartMs) / 1000;
       if ((workDirty && since > 150) || secs != lastSecond ||
-          (settings.iconMode && since > frameGap(face::frameMs(settings.character))) ||
+          (settings.iconMode && since > frameGap(face::kFrameMs)) ||
           (ui::animated() && since > frameGap(60))) {
         lastSecond = secs;
         lastDrawMs = millis();
@@ -3937,21 +3883,18 @@ void loop() {
         redraw();
       }
     } else if (settings.iconMode && mode == Mode::Reply && audio::sounding() &&
-               since > frameGap(min<uint32_t>(60, face::frameMs(settings.character)))) {
+               since > frameGap(60)) {
       lastDrawMs = millis();
       setBarState();
       ui::setSpoken(spokenCharAt());  // the subtitle
-      ui::showFace(settings.character, face::Pose::Speaking, audio::outputLevel());
+      ui::showFace(face::Pose::Speaking, audio::outputLevel());
     } else if (!settings.iconMode && mode == Mode::Reply && audio::sounding() && since > 80) {
       lastDrawMs = millis();
       if (ui::setSpoken(spokenCharAt())) redraw();  // the sentence or the page changed: the whole screen
       else if (ui::animated()) ui::showSpeaking(audio::outputLevel());  // the speaking line follows the voice (its strip only)
     } else if ((settings.iconMode || board::kRound) && ((mode == Mode::Idle && !ui::hasReply()) || mode == Mode::Home) &&
-               since > frameGap(face::frameMs(settings.character))) {
-      lastDrawMs = millis();  // blinking, rain, bouncing…
-      redraw();
-    } else if (mode == Mode::CharPick && since > frameGap(face::frameMs(charSel))) {
-      lastDrawMs = millis();
+               since > frameGap(face::kFrameMs)) {
+      lastDrawMs = millis();  // his blinking, the seconds
       redraw();
     } else if ((mode == Mode::Status && since > 1000) || (ui::animated() && mode == Mode::Idle && since > 1000) ||
                since > 30000) {

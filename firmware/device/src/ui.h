@@ -63,7 +63,7 @@ void showAsk(const char* title, const String& body, const char* yes, const char*
 void showLink(const char* title, const String& url, const String& note);
 // What the screen shows while the device sleeps (e-paper keeps it, with the
 // character on it when there's no answer to keep).
-void showSleeping(const String& hint, uint8_t character);
+void showSleeping(const String& hint);
 
 // Status bar: Wi-Fi + agent health, agent name, state, battery (redrawn with every view).
 void setBar(const String& agent, const char* state, uint16_t stateColor);
@@ -185,8 +185,7 @@ struct Home {
   uint16_t color;          // the title's / hint's colour
   String hint;             // "hold the yellow button to talk", "waiting for agent"…
   std::vector<Row> rows;   // device, Wi-Fi, deck, agent
-  uint8_t character = 0;   // e-paper: shown when there's no answer to keep
-  String battery;          // the round screen: "≈ 2 h 10 min left" / "full in ≈ 45 min" under the character
+  String battery;          // the round screen: "≈ 2 h 10 min left" / "full in ≈ 45 min" under Captain
   bool noteMode = false;   // the B paper, the Waveshare e-paper: note-taking mode is on
   int notes = 0;           // the notes waiting to go
   uint32_t notesRoomSec = 0;  // how long a note there's room for, in seconds
@@ -289,10 +288,8 @@ bool hasReply();
 // only that strip redrawn). The others show nothing.
 void showSpeaking(int level);
 
-// Icon mode: the character in a pose.
-void showFace(uint8_t kind, face::Pose pose, int level);
-// Menu → Character: the character being previewed, `index` of KindCount.
-void showCharPick(uint8_t kind, face::Pose pose, int level, int index);
+// Icon mode: Captain in a pose.
+void showFace(face::Pose pose, int level);
 
 // Pictures (full screen, with a small health/battery overlay on the stick).
 // Takes the bytes over (they were ps_malloc'ed) and frees the last picture.

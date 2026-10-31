@@ -35,8 +35,7 @@ struct Settings {
   uint8_t screenOffS = 15;  // screen goes dark after this many idle seconds: 5, 10 or 15
   uint8_t powerOffS = 60;   // deep sleep (front button wakes) after: 15, 30, 60 or 180 s
   bool femaleVoice = false; // spoken replies: male (Adrian) / female (Emma) on the deck
-  bool iconMode = false;    // screen: text stages, or an animated character
-  uint8_t character = 0;    // face::Kind (0 = captain)
+  bool iconMode = false;    // screen: text stages, or Captain himself
   bool cueBeep = true;      // chime before speech starts
   bool talkSounds = true;   // a blip when recording starts, a lower one when it's let go
   bool cueFlash = true;     // flash the screen before speech starts

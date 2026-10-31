@@ -245,7 +245,7 @@ int main(int argc, char** argv) {
   }
 
   ui::setBar("Captain", "asleep", 0);
-  ui::showSleeping("Press BOOT to wake", 0);
+  ui::showSleeping("Press BOOT to wake");
   save("20_asleep");
 
   ui::setBar("Captain", "off", 0);
