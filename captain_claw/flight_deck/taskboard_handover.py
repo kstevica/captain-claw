@@ -19,13 +19,28 @@ agent's latest on the task, where the task came in). This module also waits for
 the reply, so an agent the register can't reach still ends in Needs me. Triage then
 checks what the agent says it did against what is on record (``taskboard_proof``).
 
+Several tasks can go at once, with one set of words ("thank them and politely
+decline"). They are each handed over there and then, so they leave Needs me, and
+line up: the agent takes them one at a time, each in its own session with its own
+details, the next when the last has ended. The line is on disk: a deck restart
+carries on with what hadn't had its turn. A run cut by the restart isn't sent again
+(it may have done it, and nothing here repeats a send): its task says so. A task
+that is no longer the agent's by its turn (closed, merged, or moved by the user), or
+with the agent off or the allowance spent by then, is passed over and comes back to
+the user saying why; so does what they stop. A run that fails stops nothing else.
+
   GET  /fd/taskboard/agents                 the caller's agents a task can go to
   POST /fd/taskboard/tasks/{id}/hand_over   {agent, instructions} → {task}
+  POST /fd/taskboard/hand_over_batch        {tasks, agent, instructions} → {batch, queued, refused}
+  GET  /fd/taskboard/hand_over_batches      {batches}: those going on, and those just ended
+  POST /fd/taskboard/hand_over_batches/{id}/stop   what still waits doesn't run → {stopped, batch}
 """
 
 from __future__ import annotations
 
 import asyncio
+import secrets
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -46,10 +61,20 @@ INSTRUCTIONS_MAX = 4000
 _EVENTS_QUOTED = 12
 _FAILED_NOTE = "it didn't answer in time"
 _CHECK_WAIT_S = 120.0  # how long a run's turn has to reach the board before the task says it can't be checked
+BATCH_MAX = taskboard_store.BATCH_MAX
+_BATCH_SHOWN_S = 900.0     # how long a batch that ended stays on the board's banner
+_LINE_KEPT_S = 7 * 86400.0
+_RESUME_WAIT_S = 30.0      # after a deck start, before a line goes on: its agents are coming up too
+_STOPPED_NOTE = "you stopped the line before it got to this one"
+_CUT_NOTE = "the deck restarted while it was on this; it isn't sent again, so check whether it got done"
 
 # Hand-overs still running, off the request that made them, and those waiting to be checked.
 _RUNNING: dict[tuple[str, str], asyncio.Task] = {}
 _CHECKS: set[asyncio.Task] = set()
+# The lines being worked through, by (user, agent), and those that got more while looking for their next.
+_LINES: dict[tuple[str, str], asyncio.Task] = {}
+_LINE_AGAIN: set[tuple[str, str]] = set()
+_RESUMING: set[asyncio.Task] = set()
 
 
 def _board() -> taskboard_store.TaskboardStore:
@@ -138,9 +163,9 @@ async def _relay(agent: dict, prompt: str, automation: dict) -> tuple[str | None
     return reply, meta
 
 
-async def _run(uid: str, task_id: str, action: dict, agent: dict, prompt: str, automation: dict) -> None:
+async def _run(uid: str, task_id: str, action: dict, agent: dict, prompt: str, automation: dict) -> bool:
     """The hand-over's turn, off the request: its end on the ledger and the task.
-    Never raises."""
+    Whether the agent answered. Never raises."""
     aid, name = str(action["id"]), str(agent.get("name") or agent["slug"])
     try:
         reply, meta = await _relay(agent, prompt, automation)
@@ -164,6 +189,7 @@ async def _run(uid: str, task_id: str, action: dict, agent: dict, prompt: str, a
     check = asyncio.create_task(_say_if_unrecorded(uid, aid))
     _CHECKS.add(check)
     check.add_done_callback(_CHECKS.discard)
+    return reply is not None
 
 
 async def _say_if_unrecorded(uid: str, action_id: str) -> None:
@@ -176,52 +202,85 @@ async def _say_if_unrecorded(uid: str, action_id: str) -> None:
         log.warning("Taskboard hand-over check not recorded", action=action_id, error=str(exc)[:200])
 
 
-async def hand_over(uid: str, task_id: str, slug: str, instructions: str, *, actor: str = "") -> dict:
-    """Give the task to the agent *slug* with the user's *instructions*: the task
-    as it stands now, the agent already working in the background. LookupError
-    when the task isn't this user's; ValueError when it can't be done."""
+def _words_of(instructions: str) -> str:
     words = (instructions or "").strip()
     if not words:
         raise ValueError("Say what the agent should do.")
     if len(words) > INSTRUCTIONS_MAX:
         raise ValueError(f"Keep the instructions under {INSTRUCTIONS_MAX} characters.")
-    board = _board()
-    view = await asyncio.to_thread(board.triage_view, uid, task_id)
-    if view is None:
-        raise LookupError(task_id)
-    task = view["task"]
+    return words
+
+
+def _why_it_cant_go(uid: str, task: dict) -> str:
+    """Why this task can't be handed over now; "" when it can."""
     if task["merged_into"]:
-        raise ValueError("It was merged into another task: hand over that one.")
+        return "It was merged into another task: hand over that one."
     if task["status"] not in ("open", "maybe"):
-        raise ValueError("Only an open task can be handed to an agent.")
-    agents = await asyncio.to_thread(agents_for, uid)
-    agent = next((a for a in agents if a["slug"] == slug), None)
+        return "Only an open task can be handed to an agent."
+    running = _RUNNING.get((uid, task["id"]))
+    if running is not None and not running.done():
+        return "An agent is still working on what you handed over."
+    place = _board().line_of(uid, task["id"])
+    if place is not None:
+        return f"It is already in line for {place['agent_name'] or place['agent_slug']}."
+    return ""
+
+
+async def _agent_for(uid: str, slug: str) -> dict:
+    agent = next((a for a in await asyncio.to_thread(agents_for, uid) if a["slug"] == slug), None)
     if agent is None:
         raise ValueError("That agent isn't available: it is off, or isn't yours.")
-    running = _RUNNING.get((uid, task_id))
-    if running is not None and not running.done():
-        raise ValueError("An agent is still working on what you handed over.")
-    if await taskboard_triage._quota_spent(uid):
-        raise ValueError("Today's token allowance is used up.")
+    return agent
 
+
+async def _handed(uid: str, task: dict, agent: dict, words: str, actor: str, batch_id: str = "") -> tuple[dict, dict]:
+    """The hand-over on the ledger and on the task: ``(its action, the task now)``.
+    LookupError when the task has gone."""
+    task_id = str(task["id"])
     title = " ".join(str(task.get("title") or "").split())
-    prompt = prompt_for(view, words, new_nonce())
     action = await asyncio.to_thread(
         autonomy_store().add_action, uid, kind="run_prompt", title=f"Hand to {agent['name']}: {title}"[:200],
         rationale="You handed this task over on the Taskboard.", source=TASKBOARD_SOURCE, risk="normal",
-        domain="taskboard", status="dispatched", target=slug, ref_id=task_id,
-        payload={"handover": True, "task_id": task_id, "target_agent": slug, "instructions": words})
-    row = await asyncio.to_thread(board.hand_over_started, uid, task_id, str(action["id"]), agent, words, actor)
+        domain="taskboard", status="dispatched", target=agent["slug"], ref_id=task_id,
+        payload={"handover": True, "task_id": task_id, "target_agent": agent["slug"], "instructions": words})
+    row = await asyncio.to_thread(_board().hand_over_started, uid, task_id, str(action["id"]), agent, words, actor,
+                                  batch_id=batch_id)
     if row is None:
         autonomy_store().update_status(str(action["id"]), "done", outcome="fail", outcome_note="its task went")
         raise LookupError(task_id)
-    automation = {
-        "kind": "taskboard", "ref": str(action["id"]),
+    return action, row
+
+
+def _automation(uid: str, task: dict, action_id: str, words: str, slug: str) -> dict:
+    title = " ".join(str(task.get("title") or "").split())
+    return {
+        "kind": "taskboard", "ref": action_id,
         # A human's click, as an approved action's: what the task's text says never gets here.
         "job_text": words, "mail_write": "allow", "fd_delivers": True,
-        "task": {"id": task_id, "name": title or "Taskboard task", "session_id": _session_of(uid, task_id, slug),
+        "task": {"id": task["id"], "name": title or "Taskboard task", "session_id": _session_of(uid, task["id"], slug),
                  "board": True},
     }
+
+
+async def hand_over(uid: str, task_id: str, slug: str, instructions: str, *, actor: str = "") -> dict:
+    """Give the task to the agent *slug* with the user's *instructions*: the task
+    as it stands now, the agent already working in the background. LookupError
+    when the task isn't this user's; ValueError when it can't be done."""
+    words = _words_of(instructions)
+    view = await asyncio.to_thread(_board().triage_view, uid, task_id)
+    if view is None:
+        raise LookupError(task_id)
+    task = view["task"]
+    why = await asyncio.to_thread(_why_it_cant_go, uid, task)
+    if why:
+        raise ValueError(why)
+    agent = await _agent_for(uid, slug)
+    if await taskboard_triage._quota_spent(uid):
+        raise ValueError("Today's token allowance is used up.")
+
+    prompt = prompt_for(view, words, new_nonce())
+    action, row = await _handed(uid, task, agent, words, actor)
+    automation = _automation(uid, task, str(action["id"]), words, slug)
     _RUNNING[(uid, task_id)] = asyncio.create_task(_run(uid, task_id, action, agent, prompt, automation))
     return row
 
@@ -233,9 +292,186 @@ def _session_of(uid: str, task_id: str, slug: str) -> str:
     return next((k.removeprefix(prefix) for k in reversed(keys) if k.startswith(prefix)), "")
 
 
+# ── Several tasks, one set of words, one at a time ────────────────────
+
+
+async def hand_over_many(uid: str, task_ids: list[str], slug: str, instructions: str, *, actor: str = "") -> dict:
+    """Give several tasks to the agent *slug* with one set of *instructions*: each
+    is handed over now and takes its place in the agent's line, in the order given.
+    ``{batch_id, queued: [task rows], refused: [{id, title, why}]}``. ValueError when
+    none of it can be done (the words, the agent, the allowance, no task that can go)."""
+    words = _words_of(instructions)
+    ids = list(dict.fromkeys(str(i) for i in task_ids if i))
+    if not ids:
+        raise ValueError("Pick the tasks to hand over.")
+    if len(ids) > BATCH_MAX:
+        raise ValueError(f"Hand over at most {BATCH_MAX} tasks at a time.")
+    agent = await _agent_for(uid, slug)
+    if await taskboard_triage._quota_spent(uid):
+        raise ValueError("Today's token allowance is used up.")
+    board = _board()
+    batch_id = "hb_" + secrets.token_hex(8)
+    queued: list[dict] = []
+    refused: list[dict] = []
+    for task_id in ids:
+        task = await asyncio.to_thread(board.get_task, uid, task_id)
+        why = "It isn't on your board." if task is None else await asyncio.to_thread(_why_it_cant_go, uid, task)
+        if not why:
+            try:
+                queued.append((await _handed(uid, task, agent, words, actor, batch_id))[1])
+                continue
+            except LookupError:
+                why = "It isn't on your board."
+        refused.append({"id": task_id, "title": str((task or {}).get("title") or ""), "why": why})
+    if not queued:
+        raise ValueError(refused[0]["why"] if refused else "Pick the tasks to hand over.")
+    await asyncio.to_thread(board.line_forget, time.time() - _LINE_KEPT_S)
+    _start_line(uid, slug)
+    return {"batch_id": batch_id, "queued": queued, "refused": refused}
+
+
+def _start_line(uid: str, slug: str) -> None:
+    key = (uid, slug)
+    line = _LINES.get(key)
+    if line is not None and not line.done():
+        _LINE_AGAIN.add(key)  # it may be just past looking for its next
+        return
+    _LINES[key] = asyncio.create_task(_work_line(uid, slug))
+
+
+async def _work_line(uid: str, slug: str) -> None:
+    """This user's line for this agent, one at a time, until nothing waits."""
+    key = (uid, slug)
+    try:
+        while True:
+            _LINE_AGAIN.discard(key)
+            item = await asyncio.to_thread(_board().line_next, uid, slug)
+            if item is None:
+                if key in _LINE_AGAIN:
+                    continue
+                return
+            await _take_turn(uid, item)
+    finally:
+        _LINES.pop(key, None)
+
+
+async def _take_turn(uid: str, item: dict) -> None:
+    """One in line has its turn, to its end. Never raises: the next ones still go."""
+    board = _board()
+    if not await asyncio.to_thread(board.line_claim, item["id"]):
+        return
+    task_id, slug, aid = str(item["task_id"]), str(item["agent_slug"]), str(item["action_id"])
+    agent = {"slug": slug, "name": str(item["agent_name"] or slug)}
+    words = str(item["words"])
+    try:
+        why = await _why_not_now(uid, item)
+        if why:
+            await _not_run(uid, item, "skipped", why)
+            return
+        view = await asyncio.to_thread(board.triage_view, uid, task_id)
+        task = view["task"]
+        prompt = prompt_for(view, words, new_nonce())
+        await asyncio.to_thread(board.hand_over_turn_came, uid, aid, agent["name"])
+        automation = await asyncio.to_thread(_automation, uid, task, aid, words, slug)
+        run = asyncio.create_task(_run(uid, task_id, {"id": aid}, agent, prompt, automation))
+        _RUNNING[(uid, task_id)] = run
+        ok = await run
+        await asyncio.to_thread(board.line_end, item["id"], "done" if ok else "failed")
+    except Exception as exc:  # noqa: BLE001 — a turn that broke is that task's, not the line's
+        log.warning("Taskboard hand-over in line failed", task=task_id, agent=slug, error=str(exc)[:200])
+        await _not_run(uid, item, "failed", "it couldn't be started")
+
+
+async def _why_not_now(uid: str, item: dict) -> str:
+    """Why this one isn't the agent's to run now that its turn came; "" when it is."""
+    task = await asyncio.to_thread(_board().get_task, uid, item["task_id"])
+    if task is None:
+        return "its task went"
+    if task["merged_into"]:
+        return "it was merged into another task before its turn"
+    if task["status"] not in ("open", "maybe"):
+        return "it was closed before its turn"
+    if "owes_next" in taskboard_store._loads(task.get("user_locks"), {}):
+        return "you moved it on before its turn"
+    if not any(a["slug"] == item["agent_slug"] for a in await asyncio.to_thread(agents_for, uid)):
+        return "it was off when its turn came"
+    if await taskboard_triage._quota_spent(uid):
+        return "today's token allowance was used up when its turn came"
+    return ""
+
+
+async def _not_run(uid: str, item: dict, state: str, why: str) -> None:
+    """One in line won't run: its action closes and its task comes back saying why.
+    Never raises."""
+    try:
+        autonomy_store().update_status(str(item["action_id"]), "done", outcome="fail", outcome_note=why)
+        await asyncio.to_thread(_board().hand_over_ended, uid, str(item["action_id"]),
+                                agent_name=str(item["agent_name"] or item["agent_slug"]), text=None, why=why)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Taskboard hand-over in line not closed", task=item["task_id"], error=str(exc)[:200])
+    try:
+        await asyncio.to_thread(_board().line_end, item["id"], state, why)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Taskboard line not updated", task=item["task_id"], error=str(exc)[:200])
+
+
+async def stop_batch(uid: str, batch_id: str) -> int:
+    """What of this batch still waits doesn't run, and comes back to the user. The
+    one its agent is on finishes: a turn can't be taken back. How many stopped."""
+    items = await asyncio.to_thread(_board().line_stop, uid, batch_id)
+    for item in items:
+        await _not_run(uid, item, "stopped", _STOPPED_NOTE)
+    return len(items)
+
+
+def resume_lines() -> None:
+    """A deck start: the lines the last one left (Flight Deck's lifespan)."""
+    task = asyncio.create_task(_resume())
+    _RESUMING.add(task)
+    task.add_done_callback(_RESUMING.discard)
+
+
+async def _resume(wait: float | None = None) -> None:
+    """What was running died with the last deck: not sent again, and its task says
+    so. What waited goes on, once its agents have had time to come up. Never raises."""
+    try:
+        items = await asyncio.to_thread(_board().line_unfinished)
+        for item in items:
+            if item["state"] == "running":
+                await _not_run(str(item["user_id"]), item, "failed", _CUT_NOTE)
+        lines = {(str(i["user_id"]), str(i["agent_slug"])) for i in items if i["state"] == "waiting"}
+        if not lines:
+            return
+        log.info("Taskboard hand-overs in line go on", lines=len(lines))
+        await asyncio.sleep(_RESUME_WAIT_S if wait is None else wait)
+        for uid, slug in lines:
+            _start_line(uid, slug)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Taskboard lines not resumed", error=str(exc)[:200])
+
+
+async def stop_lines() -> None:
+    """The deck is going down: what ran stays marked so, and the next start says so."""
+    tasks = [*_LINES.values(), *_RESUMING]
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
 class HandOverBody(BaseModel):
     agent: str
     instructions: str
+
+
+class HandOverManyBody(BaseModel):
+    tasks: list[str]
+    agent: str
+    instructions: str
+
+
+def _batch(uid: str, batch_id: str) -> dict | None:
+    since = time.time() - _BATCH_SHOWN_S
+    return next((b for b in _board().line_batches(uid, ended_since=since) if b["id"] == batch_id), None)
 
 
 @router.get("/agents")
@@ -260,3 +496,41 @@ async def taskboard_hand_over(task_id: str, body: HandOverBody, user: dict = Dep
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from None
     return {"task": await asyncio.to_thread(_task_item, uid, row)}
+
+
+@router.post("/hand_over_batch")
+async def taskboard_hand_over_batch(body: HandOverManyBody, user: dict = Depends(get_current_user)) -> dict:
+    """Hand several of the caller's tasks to one of their agents with one set of
+    words: ``{batch, queued: [ids], refused: [{id, title, why}]}``, its agent taking
+    them one at a time. 409 when none can go; a task that isn't theirs is refused."""
+    from captain_claw.flight_deck.taskboard import _actor, _uid
+
+    uid = _uid(user)
+    try:
+        res = await hand_over_many(uid, body.tasks, body.agent, body.instructions, actor=_actor(user))
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from None
+    return {"batch": await asyncio.to_thread(_batch, uid, res["batch_id"]),
+            "queued": [str(r["id"]) for r in res["queued"]], "refused": res["refused"]}
+
+
+@router.get("/hand_over_batches")
+async def taskboard_hand_over_batches(user: dict = Depends(get_current_user)) -> dict:
+    """The caller's batches going on, and those that ended a moment ago."""
+    from captain_claw.flight_deck.taskboard import _uid
+
+    since = time.time() - _BATCH_SHOWN_S
+    return {"batches": await asyncio.to_thread(_board().line_batches, _uid(user), ended_since=since)}
+
+
+@router.post("/hand_over_batches/{batch_id}/stop")
+async def taskboard_stop_batch(batch_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """Stop the rest of one of the caller's batches. 404 when it isn't theirs."""
+    from captain_claw.flight_deck.taskboard import _uid
+
+    uid = _uid(user)
+    stopped = await stop_batch(uid, batch_id)
+    batch = await asyncio.to_thread(_batch, uid, batch_id)
+    if batch is None:
+        raise HTTPException(404, "batch not found")
+    return {"stopped": stopped, "batch": batch}

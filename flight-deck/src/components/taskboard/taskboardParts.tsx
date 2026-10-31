@@ -1,12 +1,12 @@
 import { Fragment, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from 'react'
 import {
-  AlertTriangle, Bot, Check, ChevronDown, CircleDot, CircleSlash, FileDown, Hand, HelpCircle, History, ListTodo, Loader2, ShieldAlert, Sparkles, Users, X,
+  AlertTriangle, Bot, Check, ChevronDown, CircleDot, CircleSlash, Clock, FileDown, Hand, HelpCircle, History, ListTodo, Loader2, ShieldAlert, Sparkles, Users, X,
 } from 'lucide-react'
-import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskProof, TaskboardStatus } from '../../services/taskboardApi'
+import type { ExportFormat, TaskAction, TaskFacet, TaskItem, TaskLinePlace, TaskProof, TaskboardStatus } from '../../services/taskboardApi'
 import { resolveProposal } from '../../services/notifications'
 import {
   JUDGE_LABEL, KEY_SHEET, OWES_LABEL, PROOF_LABEL, RESULT_LABEL, STATUS_LABEL, TASK_KEYS, agoRelative, channelInfo, foldChar, keyLabel,
-  markdownPieces, proofRow, type DatePreset, type DateRange, type TaskNote,
+  markdownPieces, placeInLine, proofRow, type DatePreset, type DateRange, type TaskNote,
 } from './taskboardText'
 
 // Pieces of the Taskboard: search highlighting (the server's folding, so
@@ -109,6 +109,15 @@ export function LaneChip({ task }: { task: TaskItem }) {
   const lane = LANE[task.lane]
   if (lane) return <span className={`${chip} ${lane.tone}`}>{lane.label}</span>
   return <StatusChip status={task.status} />
+}
+
+/** Waiting its turn with an agent that has several to get through. */
+export function LineChip({ place }: { place: TaskLinePlace }) {
+  return (
+    <span className={`${chip} flex items-center gap-1 bg-sky-500/10 text-sky-700 dark:text-sky-300`}>
+      <Clock className="h-3 w-3" />{placeInLine(place)}
+    </span>
+  )
 }
 
 export function StatusChip({ status }: { status: string }) {

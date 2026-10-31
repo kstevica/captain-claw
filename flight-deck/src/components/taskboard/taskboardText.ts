@@ -333,7 +333,7 @@ export function answerText(question: string, a: TaskAnswer): string {
  *  snooze, label, move to, reply and undo. Approving a next step has no key. */
 export const TASK_KEYS = {
   done: 'e', reopen: 'U', gotIt: 'I', notTask: '!', yes: 'y', snooze: 'b', rename: 'l', merge: 'v', nextStep: 'r', undo: 'z',
-  agent: 'a', focus: 'f', move: 'm',
+  agent: 'a', focus: 'f', move: 'm', pick: 'x', pickWhich: '*',
 } as const
 
 /** `g`, then one of these within {@link GO_WAIT_MS}: Gmail's "go to". */
@@ -375,6 +375,20 @@ export const KEY_SHEET: { title: string; rows: { keys: string[]; what: string }[
     { keys: [TASK_KEYS.undo], what: 'Undo last change' },
     { keys: ['Esc'], what: 'Close what is on top' },
   ] },
+  { title: 'Several tasks at once', rows: [
+    { keys: [TASK_KEYS.pick], what: 'Pick the task, or unpick it' },
+    { keys: [`${TASK_KEYS.pickWhich} a`], what: 'Pick all shown' },
+    { keys: [`${TASK_KEYS.pickWhich} n`], what: 'Pick none' },
+    { keys: [TASK_KEYS.agent], what: 'Hand the picked ones to an agent' },
+    { keys: [TASK_KEYS.done], what: 'Done' },
+    { keys: [TASK_KEYS.snooze], what: 'Snooze, then 1–3' },
+    { keys: [TASK_KEYS.move], what: 'Next move, then 1–5' },
+    { keys: [TASK_KEYS.notTask], what: 'Not a task' },
+    { keys: [TASK_KEYS.reopen], what: 'Reopen' },
+    { keys: [TASK_KEYS.gotIt], what: 'Got it, on what failed' },
+    { keys: [TASK_KEYS.undo], what: 'Undo what was just done to them' },
+    { keys: ['Esc'], what: 'Pick none' },
+  ] },
 ]
 
 /** The key a press means to the board — '' when it isn't the board's: typed
@@ -410,6 +424,98 @@ export function stepTo(ids: string[], openId: string | null, last: number, step:
   if (from < 0) return 0
   const to = from + step
   return to >= ids.length || to < 0 ? -1 : to
+}
+
+// ── Several tasks at once ─────────────────────────────────────────────
+
+export const SNOOZES = [
+  { id: '1h', label: '1 hour' },
+  { id: 'tomorrow', label: 'Tomorrow 9:00' },
+  { id: 'week', label: 'Next week' },
+] as const
+
+/** When a snooze ends: in an hour, tomorrow at 9, or next Monday at 9. */
+export function snoozeUntil(which: (typeof SNOOZES)[number]['id']): number {
+  const now = new Date()
+  if (which === '1h') return Math.floor(now.getTime() / 1000) + 3600
+  const d = new Date(now)
+  d.setHours(9, 0, 0, 0)
+  d.setDate(d.getDate() + (which === 'tomorrow' ? 1 : (8 - d.getDay()) % 7 || 7))
+  return Math.floor(d.getTime() / 1000)
+}
+
+/** The tasks a batch can reach at most (the server's own limit). */
+export const BATCH_MAX = 200
+
+/** What several picked tasks can take at once. */
+export type BatchMove = 'agent' | 'done' | 'snooze' | 'move' | 'not_task' | 'reopen' | 'got_it'
+
+/** Whether *move* means anything on this task: the same as its own buttons, open.
+ *  One already in an agent's line can't be handed over again. */
+export function fitsBatch(move: BatchMove, t: { status: string; lane?: string; merged_into?: string; in_line?: unknown }): boolean {
+  const closed = t.status === 'done' || t.status === 'dismissed' || t.status === 'not_task'
+  const failed = t.status === 'failed'
+  if (move === 'done') return !closed
+  if (move === 'reopen') return closed || failed
+  if (move === 'got_it') return failed && t.lane === 'needs_me'
+  if (move === 'not_task') return t.status !== 'not_task'
+  if (move === 'agent') return !closed && !failed && !t.merged_into && !t.in_line
+  return !closed && !failed
+}
+
+/** The picked ids after a tick on *id* in the list *ids*: from *from* (Shift held,
+ *  the last one ticked) every row up to it goes the way *id* goes. */
+export function pickedAfter(cur: ReadonlySet<string>, ids: string[], id: string, from: string | null = null): Set<string> {
+  const next = new Set(cur)
+  const on = !cur.has(id)
+  const a = from ? ids.indexOf(from) : -1
+  const b = ids.indexOf(id)
+  const span = a >= 0 && b >= 0 ? ids.slice(Math.min(a, b), Math.max(a, b) + 1) : [id]
+  for (const each of [...span, id]) {
+    if (on) next.add(each)
+    else next.delete(each)
+  }
+  return next
+}
+
+/** The agent most of these tasks are with: the one the hand-over form picks first. */
+export function usualAgent(tasks: { agent_slug: string }[]): string {
+  const counts = new Map<string, number>()
+  for (const t of tasks) if (t.agent_slug) counts.set(t.agent_slug, (counts.get(t.agent_slug) ?? 0) + 1)
+  return [...counts].sort((x, y) => y[1] - x[1])[0]?.[0] ?? ''
+}
+
+const tasksWord = (n: number) => `${n} task${n === 1 ? '' : 's'}`
+
+/** What a correction on several tasks just did, in a line. */
+export function batchSaid(action: string, changed: number, refused: { why: string }[] = []): string {
+  const did: Record<string, string> = {
+    done: 'marked done', not_task: 'marked not a task', reopen: 'reopened', snooze: 'snoozed',
+    owes_next: 'moved on', ack_failed: 'marked seen', undo: 'put back as they were',
+  }
+  const said = `${tasksWord(changed)} ${did[action] ?? 'changed'}.`
+  const n = refused.length
+  return n ? `${said} ${tasksWord(n)} couldn't: ${refused[0].why}` : said
+}
+
+/** A task waiting in an agent's line, in a few words. */
+export function placeInLine(p: { agent: string; ahead: number }): string {
+  return p.ahead > 0 ? `In line for ${p.agent}, ${p.ahead} ahead` : `Next in line for ${p.agent}`
+}
+
+/** How a batch stands, in a line. */
+export function batchLine(b: {
+  agent: string; total: number; done: number; failed: number; skipped: number; stopped: number; waiting: number; ended_at: number | null
+}): string {
+  const parts = [
+    b.done && `${b.done} answered`,
+    b.failed && `${b.failed} didn't finish`,
+    b.skipped && `${b.skipped} passed over`,
+    b.stopped && `${b.stopped} stopped`,
+    b.waiting && `${b.waiting} in line`,
+  ].filter(Boolean).join(', ')
+  const head = b.ended_at ? `${b.agent} is through your ${tasksWord(b.total)}` : `${b.agent} is working through your ${tasksWord(b.total)}`
+  return parts ? `${head}: ${parts}.` : `${head}.`
 }
 
 /** An email's text, its long links down to where they go (a tracking link can

@@ -169,6 +169,8 @@ export interface TaskItem {
   /** Computed: needs_me, waiting, working, done, snoozed — or other (failed
    *  and seen, dismissed, maybe, open with no clear next move). */
   lane: string
+  /** Waiting its turn with an agent that has several to get through. */
+  in_line?: TaskLinePlace | null
   /** The first few. */
   parties: TaskParty[]
   proposal: TaskProposal | null
@@ -416,6 +418,32 @@ async function download(path: string, fallback: string): Promise<void> {
 
 export interface HandOverAgent { slug: string; name: string; asleep: boolean }
 
+/** A task's place in an agent's line: how many are ahead of it. */
+export interface TaskLinePlace { agent: string; ahead: number }
+
+/** Several tasks given to one agent with one set of words, which it takes one at a time. */
+export interface HandOverBatch {
+  id: string
+  agent: string
+  agent_slug: string
+  words: string
+  total: number
+  /** The agent answered. */
+  done: number
+  /** It gave no answer. */
+  failed: number
+  /** Passed over: closed or moved on before its turn, the agent off, the allowance spent. */
+  skipped: number
+  /** Stopped by you before its turn. */
+  stopped: number
+  waiting: number
+  /** The task its agent is on now. */
+  on: { id: string; title: string } | null
+  created_at: number
+  /** Null while it goes on. */
+  ended_at: number | null
+}
+
 /** One email of a task's thread, read from Gmail when asked for. */
 export interface TaskEmailMessage {
   id: string
@@ -475,6 +503,21 @@ export const taskboardApi = {
   /** Hand the task to an agent: it starts on it now. */
   handOver: (id: string, agent: string, instructions: string) => api<{ task: TaskItem }>(
     taskPath(id, '/hand_over'), { method: 'POST', body: JSON.stringify({ agent, instructions }) }),
+  /** One correction on several tasks, each as if made on its own. */
+  batchAction: (ids: string[], action: TaskAction, value?: string | number) =>
+    api<{ changed: string[]; refused: { id: string; why: string }[] }>(`${BASE}/batch_action`, {
+      method: 'POST',
+      body: JSON.stringify(value === undefined ? { ids, action } : { ids, action, value }),
+    }),
+  /** Hand several tasks to one agent with one set of words: it takes them one at a time. */
+  handOverMany: (tasks: string[], agent: string, instructions: string) =>
+    api<{ batch: HandOverBatch | null; queued: string[]; refused: { id: string; title: string; why: string }[] }>(
+      `${BASE}/hand_over_batch`, { method: 'POST', body: JSON.stringify({ tasks, agent, instructions }) }),
+  /** The batches going on, and those that ended a moment ago. */
+  handOverBatches: () => api<{ batches: HandOverBatch[] }>(`${BASE}/hand_over_batches`),
+  /** What of a batch still waits doesn't run; the one its agent is on finishes. */
+  stopBatch: (id: string) => api<{ stopped: number; batch: HandOverBatch }>(
+    `${BASE}/hand_over_batches/${encodeURIComponent(id)}/stop`, { method: 'POST' }),
   /** Jev's "Same as …?" was wrong: the suggestion goes and none comes back
    *  (Undo brings it back). */
   notSame: (id: string) => api<{ task: TaskItem }>(taskPath(id, '/not_same'), { method: 'POST' }),
