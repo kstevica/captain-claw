@@ -700,12 +700,14 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     if deliver not in ("branch", "pr"):
         raise HTTPException(400, "Delivery is either branch or pr.")
     defaults = await crew_logins.read_models(get_db(), user["id"])
-    model = _clean_axis(body.get("model"), _MODEL_RE, "model name") or defaults.get(harness, "")
+    own = await crew_logins.read_own_model(get_db(), user["id"])
+    model = _clean_axis(body.get("model"), _MODEL_RE, "model name") or crew_logins.effective_model(defaults, own, harness)
     effort = _clean_axis(body.get("effort"), _EFFORT_RE, "reasoning effort")
     active = [t for t in _store().with_status(*crew_store.ACTIVE) if t["user_id"] == user["id"]]
     if len(active) >= grant.max_parallel * _ACTIVE_PER_SLOT:
         raise HTTPException(429, f"You already have {len(active)} tasks running or waiting. Let some finish first.")
-    if not await asyncio.to_thread(crew_harness.find_binary, harness):
+    binary = await asyncio.to_thread(crew_harness.find_binary, harness)
+    if not binary:
         raise HTTPException(400, f"{HARNESSES[harness].label} isn't installed on this computer. "
                                  f"An admin can install it with: {HARNESSES[harness].install}")
     state = await crew_logins.login_state(get_db(), user, grant, harness)
@@ -716,6 +718,11 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
         # to whichever it is, so it's chosen by them.
         raise HTTPException(400, f"Choose which of OpenCode's free models to use, for this task or as your default in "
                                  f"Crew → Logins. They differ in what happens to your code: {FREE_TERMS_URL}")
+    if model:
+        # OpenCode answers a model it doesn't know with "Unexpected server error", after a worktree and a turn.
+        known = await models_of(user, grant, harness, binary, get_db(), wanted=model)
+        if known and model not in known:
+            raise HTTPException(400, _unknown_model(model, known, grant))
     title = " ".join(str(body.get("title") or brief).split())[:120]
     where = await _resolve_repo(user, grant, body)
     slug = _slug_for(title)
@@ -1093,13 +1100,22 @@ async def tidy(uid: str, key: str) -> dict[str, int]:
     return {"cleared": cleared, "kept": kept}
 
 
-async def models_of(user: dict, grant: Grant, harness: str, binary: str, db) -> list[str]:
-    """What a CLI can run on, for choosing from. Only OpenCode can say without a run."""
+def _unknown_model(model: str, known: list[str], grant: Grant) -> str:
+    said = f"OpenCode has no model named {model} here. It can use: {', '.join(known[:30])}."
+    if grant.trusted:
+        return said
+    return (f"{said} A provider set up under someone's login on this computer isn't one of these: add a server of your "
+            "own under Your own model, in Crew → Logins.")
+
+
+async def models_of(user: dict, grant: Grant, harness: str, binary: str, db, *, wanted: str = "") -> list[str]:
+    """What a CLI can run on, for choosing from. Only OpenCode can say without a run.
+    A *wanted* model that isn't known asks again, in case it has just been set up."""
     if harness != "opencode" or not binary:
         return []
     uid = user["id"]
     at, known = _MODELS.get(uid, (0.0, []))
-    if known and time.monotonic() - at < _MODELS_TTL_S:
+    if known and time.monotonic() - at < _MODELS_TTL_S and (not wanted or wanted in known):
         return known
     try:
         env = await crew_logins.worker_env(db, user, grant, harness, binary)

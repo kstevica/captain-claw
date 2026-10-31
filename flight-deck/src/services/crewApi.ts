@@ -26,6 +26,15 @@ export interface CrewHarness {
   models: string[]
 }
 
+export interface CrewOwnModel {
+  url: string
+  models: string[]
+  names: string[]
+  context: number
+  has_key: boolean
+  saved_at: string
+}
+
 export interface CrewMe {
   offered: boolean
   allowed: boolean
@@ -34,6 +43,7 @@ export interface CrewMe {
   harnesses?: CrewHarness[]
   logins?: Record<string, { hint: string; saved_at: string }>
   free_terms_url?: string
+  own_model?: CrewOwnModel | null
 }
 
 export interface CrewEvidence {
@@ -188,6 +198,10 @@ export const crewApi = {
   close: (id: string, discard = false) => post<CrewTask>(`/fd/crew/tasks/${id}/close?discard=${discard}`),
   saveModel: (harness: string, model: string) =>
     api<{ harness: string; model: string }>(`/fd/crew/models/${harness}`, { method: 'PUT', body: JSON.stringify({ model }) }),
+  saveOwnModel: (body: { url: string; key: string; models: string; context: string }) =>
+    api<CrewOwnModel>('/fd/crew/own-model', { method: 'PUT', body: JSON.stringify(body) }),
+  deleteOwnModel: () => api<{ ok: boolean }>('/fd/crew/own-model', { method: 'DELETE' }),
+  checkOwnModel: (url: string, key: string) => post<{ ok: boolean; url: string; models: string[]; error: string }>('/fd/crew/own-model/check', { url, key }),
   saveLogin: (name: string, secret: string) =>
     api<{ hint: string }>(`/fd/crew/logins/${name}`, { method: 'PUT', body: JSON.stringify({ secret }) }),
   deleteLogin: (name: string) => api<{ ok: boolean }>(`/fd/crew/logins/${name}`, { method: 'DELETE' }),

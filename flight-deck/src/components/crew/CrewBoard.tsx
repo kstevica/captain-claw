@@ -553,6 +553,73 @@ function LoginRow({ login, saved, onChanged }: {
   )
 }
 
+/** A model server of their own. The key is sealed here, and reaches a worker only while it runs. */
+function OwnModelCard({ own, onChanged }: { own?: CrewMe['own_model']; onChanged: () => void }) {
+  const [url, setUrl] = useState(own?.url ?? '')
+  const [key, setKey] = useState('')
+  const [models, setModels] = useState((own?.models ?? []).join(', '))
+  const [context, setContext] = useState(own?.context ? String(own.context) : '')
+  const [found, setFound] = useState<string[]>([])
+  const [checked, setChecked] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const run = async (fn: () => Promise<void>) => {
+    setBusy(true); setError(''); setChecked('')
+    try { await fn() } catch (e) { setError(errorOf(e)) }
+    setBusy(false)
+  }
+  const check = () => run(async () => {
+    const got = await crewApi.checkOwnModel(url.trim(), key.trim())
+    if (!got.ok) { setFound([]); setError(got.error); return }
+    setUrl(got.url)
+    setFound(got.models)
+    if (!models.trim() && got.models[0]) setModels(got.models[0])
+    setChecked(got.models.length ? 'It answered. Pick what to use below.' : 'It answered, but listed no models.')
+  })
+  const save = () => run(async () => {
+    const saved = await crewApi.saveOwnModel({ url: url.trim(), key: key.trim(), models: models.trim(), context: context.trim() })
+    setUrl(saved.url)
+    setKey('')
+    setChecked(`Saved. OpenCode and Pi can run on ${saved.names.join(', ')}.`)
+    onChanged()
+  })
+  const remove = () => run(async () => {
+    await crewApi.deleteOwnModel()
+    setUrl(''); setKey(''); setModels(''); setContext(''); setFound([])
+    onChanged()
+  })
+  return (
+    <div className="space-y-2 rounded-xl border border-zinc-800 p-3">
+      <div className="flex items-center gap-2">
+        <span className="text-sm font-medium text-zinc-200">Your own model</span>
+        {own && <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-700 dark:text-emerald-300"><Check className="h-3 w-3" /> saved</span>}
+        {own && <button disabled={busy} onClick={remove} className="ml-auto text-xs text-zinc-500 hover:text-red-600 dark:hover:text-red-300">Remove</button>}
+      </div>
+      <p className="text-xs text-zinc-500">
+        A server that speaks the OpenAI API, like llama.cpp or Ollama, for OpenCode and Pi. It has to be reachable from the computer running Flight Deck, and able to call tools.
+      </p>
+      <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://192.168.1.20:8080/v1" aria-label="Its address" autoComplete="off" spellCheck={false} className={fieldClass} />
+      <input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={own?.has_key ? 'Key saved. Type to replace it…' : 'Key, if it needs one'} aria-label="Its key" autoComplete="off" className={fieldClass} />
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_9rem]">
+        <input value={models} onChange={(e) => setModels(e.target.value)} placeholder="Model name, as the server calls it" aria-label="Model name" autoComplete="off" spellCheck={false} className={fieldClass} />
+        <input value={context} onChange={(e) => setContext(e.target.value)} inputMode="numeric" placeholder="Context (optional)" aria-label="Context size in tokens" className={fieldClass} />
+      </div>
+      {found.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {found.map((m) => <button key={m} type="button" onClick={() => setModels(m)} className={`rounded-md border px-2 py-0.5 font-mono text-[11px] transition-colors ${models === m ? 'border-teal-500 bg-teal-500/10 text-teal-700 dark:text-teal-300' : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}>{m}</button>)}
+        </div>
+      )}
+      {checked && <p className="rounded-lg bg-teal-500/10 px-3 py-2 text-xs text-teal-800 dark:text-teal-200">{checked}</p>}
+      <ErrorLine text={error} />
+      <div className="flex flex-wrap gap-1.5">
+        <button disabled={busy || !url.trim()} onClick={check} className={quietBtn}>Check connection</button>
+        <button disabled={busy || !url.trim() || !models.trim()} onClick={save} className={primaryBtn}>Save</button>
+        {busy && <Loader2 className="my-auto h-4 w-4 animate-spin text-zinc-500" />}
+      </div>
+    </div>
+  )
+}
+
 function HarnessLine({ h, termsUrl, onChanged }: { h: CrewHarness; termsUrl?: string; onChanged: () => void }) {
   const [model, setModel] = useState(h.default_model)
   const [error, setError] = useState('')
@@ -610,6 +677,7 @@ function Logins({ me, onBack, onChanged }: { me: CrewMe; onBack: () => void; onC
           : 'Your agents run on your own accounts. Keys from "Your own AI keys" count too.'}
         {' '}What you save here is stored encrypted and never shown again.
       </p>
+      <OwnModelCard own={me.own_model} onChanged={onChanged} />
       {LOGINS.map((l) => <LoginRow key={l.name} login={l} saved={me.logins?.[l.name]} onChanged={onChanged} />)}
     </div>
   )
