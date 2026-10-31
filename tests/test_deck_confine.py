@@ -92,6 +92,7 @@ def deck(tmp_path, monkeypatch):
     outside.mkdir()
     (outside / "ext.md").write_text("EXTERNAL alpha\n")
     (own_vfs / ".vfs-links.json").write_text(json.dumps({"ext": {"path": str(outside), "mode": "rw"}}))
+    monkeypatch.chdir(agent)    # where Flight Deck starts it
 
     reg = ToolRegistry(base_path=ws)
     for tool in (ReadTool(), WriteTool(), GlobTool(), GrepTool(), VfsTool()):
@@ -291,6 +292,127 @@ async def test_admin_agent_hosts_apps(deck):
                                          "project": "saved", "start_cmd": "node server.js"})).success
 
 
+# ── a relative path: ruled from the workspace, looked up from the agent's folder too ──
+
+_BESIDE = ("../agent-b/data/workspace/deal.md", "x/../../agent-b/data/workspace/deal.md", "../flight-deck.db",
+           "../vfs/victim/proj/theirs.md", ".env", "../agent-a/.env")
+
+
+@pytest.mark.parametrize("tier", ["user", "admin"])
+async def test_a_read_stays_in_from_the_agents_folder_too(deck, tier):
+    deck.confine(tier)
+    for path in (*_BESIDE, str(deck.ws / ".env")):
+        await refused(deck, "read", {"path": path})
+
+
+async def test_a_read_beside_the_decks_data_is_refused_too(deck):
+    await refused(deck, "read", {"path": "../../outside/ext.md"})
+
+
+@pytest.mark.parametrize("name,field", [
+    ("public_link", "path"), ("google_mail", "attachments"), ("microsoft_mail", "attachments"),
+    ("send_mail", "attachments"), ("linked_system", "files"), ("watch_background", "path"), ("jev", "state_file"),
+    ("summarize_files", "folder"), ("google_drive", "local_path"), ("microsoft_onedrive", "local_path"),
+])
+def test_every_tool_that_looks_there_is_ruled_the_same(deck, name, field):
+    for value in _BESIDE:
+        assert deck_confine.check_tool_paths(name, {field: value}, deck.ws), value
+
+
+async def test_own_files_are_still_found_from_either_folder(deck):
+    (deck.agent / "only-here.md").write_text("FROM THE AGENTS FOLDER\n")
+    assert "MY NOTES" in (await call(deck, "read", {"path": "notes.md"})).content
+    assert "FROM THE AGENTS FOLDER" in (await call(deck, "read", {"path": "only-here.md"})).content
+    assert "my own session notes" in (await call(deck, "read", {"path": "../sessions/notes.txt"})).content
+    # A repository's own .env, in Code mode, isn't the agent's.
+    (deck.ws / ".env").write_text("REPO=1\n")
+    assert "REPO=1" in (await call(deck, "read", {"path": ".env"})).content
+    # What isn't anywhere is just not found.
+    missing = await call(deck, "read", {"path": "nothing.md"})
+    assert not missing.success and "not found" in missing.error.lower()
+
+
+async def test_a_drive_upload_looks_in_the_workspace_first(deck, monkeypatch):
+    from captain_claw.tools import microsoft_onedrive
+    from captain_claw.tools.google_drive import GoogleDriveTool
+    from captain_claw.tools.microsoft_onedrive import MicrosoftOneDriveTool
+
+    (deck.ws / ".env").write_text("REPO=1\n")
+    runtime = {"_runtime_base_path": str(deck.ws)}
+    assert Path(GoogleDriveTool._workspace_first(".env", runtime)).read_text() == "REPO=1\n"
+    assert GoogleDriveTool._workspace_first("only-here.md", runtime) == "only-here.md"
+    assert GoogleDriveTool._workspace_first(str(deck.ws / "notes.md"), runtime) == str(deck.ws / "notes.md")
+
+    async def tokens(*_a, **_k):
+        return types.SimpleNamespace(access_token="t", scope="")
+
+    async def graph(*_a, **_k):
+        return "t", frozenset()
+
+    monkeypatch.setattr(microsoft_onedrive, "graph_token", graph)
+    for tool in (GoogleDriveTool(), MicrosoftOneDriveTool()):
+        seen = []
+
+        async def upload(token, local_path="", **kwargs):
+            seen.append(local_path)
+            return ToolResult(success=True, content="ok")
+
+        tool._get_tokens = tokens
+        tool._action_upload = upload
+        await tool.execute(action="upload", local_path=".env", _runtime_base_path=str(deck.ws))
+        assert Path(seen[0]).read_text() == "REPO=1\n", tool.name
+
+
+# ── payments: its source is a file on prepare, and how it's paid on purchase ──
+
+
+@pytest.fixture
+def prepared(deck, monkeypatch):
+    """The real payments tool, under a Flight Deck that takes what it is sent.
+    What it was sent."""
+    from captain_claw import payments_client
+    from captain_claw.tools.payments import PaymentsTool
+
+    monkeypatch.setenv("FD_URL", "http://fd.test")
+    sent: list[dict] = []
+
+    async def fake_call(method, path, body=None):
+        sent.append(body or {})
+        return {"intent": {"id": "pay_1"}}, None
+
+    monkeypatch.setattr(payments_client, "call", fake_call)
+    deck.reg.register(PaymentsTool())
+    return sent
+
+
+@pytest.mark.parametrize("tier", ["user", "admin"])
+async def test_an_invoice_file_has_to_be_this_agents(deck, prepared, tier):
+    deck.confine(tier)
+    for source in (str(deck.other / "deal.md"), "../../../agent-b/data/workspace/deal.md",
+                   str(deck.victim_vfs / "proj" / "theirs.md"), "vfs:proj/../../victim/proj/theirs.md", *_BESIDE):
+        await refused(deck, "payments", {"action": "prepare", "source": source})
+    assert prepared == []
+
+
+async def test_this_agents_own_invoice_is_still_read(deck, prepared):
+    import base64
+
+    (deck.ws / "saved" / "invoice.pdf").write_bytes(b"INVOICE")
+    for source, text in (("notes.md", b"MY NOTES"), (str(deck.ws / "notes.md"), b"MY NOTES"),
+                         ("vfs:proj/mine.md", b"MY VFS"), ("invoice.pdf", b"INVOICE")):
+        assert (await call(deck, "payments", {"action": "prepare", "source": source})).success, source
+        assert text in base64.b64decode(prepared[-1]["source_b64"])
+
+
+def test_a_source_is_a_file_only_on_prepare(deck):
+    check = deck_confine.check_tool_paths
+    theirs = str(deck.other / "deal.md")
+    assert check("payments", {"action": " Prepare ", "source": theirs}, deck.ws)
+    for action in ("purchase", "list", ""):
+        assert check("payments", {"action": action, "source": "revolut_card"}, deck.ws) is None
+        assert check("payments", {"action": action, "source": theirs}, deck.ws) is None
+
+
 # ── web tools: a non-admin's agent can't aim them at the server ──────
 
 
@@ -329,17 +451,75 @@ def test_read_or_write_follows_the_action():
     assert kind("datastore", "file_path", "datastore", {"action": "import_file"}) == "read"
 
 
+# ── knowledge add: the file goes to Flight Deck, into the agent's documents ──
+
+
+@pytest.fixture
+def kept(deck, monkeypatch):
+    """The real knowledge tool, under a Flight Deck that keeps whatever it is
+    sent. What it was sent."""
+    import httpx
+
+    from captain_claw.tools.knowledge import KnowledgeTool
+
+    monkeypatch.setenv("FD_URL", "http://fd.test")
+    sent: list[bytes] = []
+    real = httpx.AsyncClient
+
+    def handler(request):
+        sent.append(request.content)
+        return httpx.Response(200, json={"doc": "doc.md", "title": "doc", "chars": 1})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    deck.reg.register(KnowledgeTool())
+    return sent
+
+
+@pytest.mark.parametrize("tier", ["user", "admin"])
+async def test_knowledge_add_refuses_what_isnt_this_agents(deck, kept, tier):
+    deck.confine(tier)
+    (deck.ws / "alias.md").symlink_to(deck.other / "deal.md")
+    for path in (str(deck.other / "deal.md"), "../../../agent-b/data/workspace/deal.md", "alias.md",
+                 str(deck.victim_vfs / "proj" / "theirs.md"), "vfs:proj/../../victim/proj/theirs.md",
+                 str(deck.agent / ".env")):
+        await refused(deck, "knowledge", {"action": "add", "path": path})
+    assert kept == []
+    # Nor does the answer tell which of the server's files exist.
+    there = await refused(deck, "knowledge", {"action": "add", "path": str(deck.fd / "flight-deck.db")})
+    assert there == await refused(deck, "knowledge", {"action": "add", "path": str(deck.fd / "nothing.db")})
+
+
+async def test_knowledge_add_keeps_this_agents_own_files(deck, kept):
+    upload = deck.ws / "saved" / "media" / "s1" / "quote-20261031-101010-abc123.md"
+    upload.parent.mkdir(parents=True)
+    upload.write_text("FROM THE CHAT\n")
+    for path, text in (("notes.md", b"MY NOTES"), (str(upload), b"FROM THE CHAT"), ("vfs:proj/mine.md", b"MY VFS")):
+        assert (await call(deck, "knowledge", {"action": "add", "path": path})).success, path
+        assert text in kept[-1]
+    # What a picture said, with no file to read.
+    assert (await call(deck, "knowledge", {"action": "add", "text": "Total 42", "name": "receipt.md"})).success
+
+
+async def test_knowledge_add_elsewhere_is_for_a_deck_without_tenants(deck, kept):
+    path = str(deck.other / "deal.md")
+    await refused(deck, "knowledge", {"action": "add", "path": path})
+    deck.confine(None)
+    assert (await call(deck, "knowledge", {"action": "add", "path": path})).success
+    assert b"OTHER TENANT" in kept[-1]
+
+
 # ── coverage: every path-like argument of every tool is ruled ────────
 
 _PATHY = re.compile(r"(path|file|dir|folder|root|glob|pattern|dest|output|^out$|"
-                    r"attachment|image|^a$|^b$|template|url)")
+                    r"attachment|image|^a$|^b$|template|url|source)")
 # Not host paths: text to search for, ids, names, recipients, playbook text…
 _NOT_PATHS = {
     "grep": {"pattern"}, "playbooks": {"do_pattern", "dont_pattern"},
     "google_drive": {"file_id", "folder_id"}, "microsoft_onedrive": {"file_id", "folder_id"},
     "google_mail": {"attachment"}, "microsoft_mail": {"attachment"},
     "intentions": {"match"}, "browser": {"api_id", "scroll_direction"},
-    "image_gen": {"prompt"},
+    "image_gen": {"prompt"}, "insights": {"source", "source_section"},
+    "reasoning_effort": {"source"}, "typesense": {"source"},
 }
 
 
