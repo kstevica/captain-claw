@@ -36,7 +36,7 @@ One firmware tree: `cd firmware/device && pio run -e stopwatch -t upload` (or `-
 | | StickS3 | StopWatch | PaperColor | Waveshare ePaper 1.54 |
 |---|---|---|---|---|
 | screen | 240×135 LCD | 466×466 round AMOLED, touch | 4" E Ink Spectra 6, six inks | 200×200 black-and-white e-paper, optional touch |
-| talk | front button | yellow button, or the on-screen record button | A (B build) / C (A build) | BOOT, or the Talk button on the touch board |
+| talk | front button | yellow button, or the on-screen record button | A (B build) / C (A build) | the upper button (the gear), or a tap in the middle of the screen on the touch board |
 | extras | 18 animated characters | clock face, raise to wake, vibration, background picture, info page | two status lights, room sensor, microSD notes, a dashboard every five minutes | a drawn menu, a sleeping clock on a timer you pick, a green status LED, PWR cancels a recording |
 | build | `pio run -e sticks3` | `pio run -e stopwatch` | `pio run -e papercolor_b` (or `papercolor`) | `pio run -e epaper154` (or `epaper154_touch`); V2 boards only |
 

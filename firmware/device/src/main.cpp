@@ -51,9 +51,9 @@
 #endif
 
 #if defined(PAPER_B)
-#define FW_VERSION "1.0.29"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
+#define FW_VERSION "1.0.30"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.20.1"
+#define FW_VERSION "0.20.3"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -177,7 +177,7 @@ static uint32_t buzzOffMs = 0;       // vibration motor runs until then (0 = off
 static uint8_t buzzMore = 0;
 static uint16_t buzzOnMs = 0, buzzGapMs = 0;
 static uint32_t buzzAgainMs = 0;
-static uint32_t pendingTapMs = 0;    // a single tap on a picture acts once it can't become a double tap
+static uint32_t pendingTapMs = 0;    // a single tap on a picture or an answer acts once it can't become a double tap
 // Following the voice through the answer's text: how much of it the deck
 // speaks, how long the text is, and the speaking pace learned from the last
 // answer whose speech had all arrived (characters a second).
@@ -534,7 +534,7 @@ static void noteBoot() {
   const uint64_t pins = cause == ESP_SLEEP_WAKEUP_EXT1 ? esp_sleep_get_ext1_wakeup_status() : 0;
   const char* what = !deep                                ? bootReason()
                      : cause == ESP_SLEEP_WAKEUP_TIMER    ? "timer"
-                     : pins & (1ULL << board::kTalkPin)   ? "BOOT"
+                     : pins & (1ULL << board::kTalkPin)   ? board::kTalkKey
                      : pins & (1ULL << board::kSidePin)   ? "PWR"
                                                           : "other";
   const time_t now = time(nullptr);
@@ -3399,6 +3399,18 @@ static bool secondTap() {
   return second;
 }
 
+// A recording started on the screen.
+static void talkFromTouch() {
+  bool wasSpeaking = audio::playing();
+  tapRec = true;  // before it starts: the button sampler would end an offline recording at once
+  startTalking();
+  if (mode != Mode::Listening) {  // offline with no room, say
+    tapRec = false;
+    return;
+  }
+  if (wasSpeaking) sendType("stop");
+}
+
 static void pollTouch(bool dark) {
   if (!M5.Touch.isEnabled()) return;
   static bool woke = false;  // this touch began on a dark screen
@@ -3429,9 +3441,27 @@ static void pollTouch(bool dark) {
   }
   if (dist > 25) return;
   const int x = t.base_x, y = t.base_y;
+#if defined(BOARD_EPAPER154)
+  if (mode == Mode::Listening && tapRec) {  // its own two buttons; nothing else on it answers
+    const int hit = ui::recordHit(x, y);
+    if (hit == 1) {
+      endTapRecording();
+    } else if (hit == 0) {
+      cancelTapRecording();
+      if (settings.keyClicks) audio::click(true);
+    }
+    return;
+  }
+#endif
   const ui::TapButton button = tapButtonKind();
-  const bool onButton = button != ui::TapButton::Off && ui::tapButtonHit(x, y);  // acts at once: not half of a double tap
-  if (board::kDoubleHome && !onButton && secondTap()) {  // from any screen; the first tap has done its own thing
+  // (On the paper Talk is the middle of the screen, and only where a tap can talk.)
+  const bool talkTap = button == ui::TapButton::Talk;
+  const bool canTalkHere = mode == Mode::Idle || mode == Mode::Home || mode == Mode::Reply;
+  const bool onButton = button != ui::TapButton::Off && (!board::kEpaper || !talkTap || canTalkHere) &&
+                        ui::tapButtonHit(x, y);  // acts at once: not half of a double tap
+  // On an answer that tap waits: a second one makes it the double tap that goes home.
+  const bool talkWaits = board::kDoubleHome && onButton && talkTap && mode == Mode::Reply;
+  if (board::kDoubleHome && (!onButton || talkWaits) && secondTap()) {  // from any screen; the first tap has done its own thing
     pendingTapMs = 0;
     goHome();
     return;
@@ -3468,6 +3498,10 @@ static void pollTouch(bool dark) {
     replayAnswer();
     return;
   }
+  if (talkWaits) {
+    pendingTapMs = millis() ? millis() : 1;
+    return;
+  }
   if (!onButton) {
     if (!board::kDoubleHome && secondTap()) {
       pendingTapMs = 0;
@@ -3497,14 +3531,7 @@ static void pollTouch(bool dark) {
     return;
   }
   if (mode != Mode::Idle && mode != Mode::Home && mode != Mode::Reply) return;
-  bool wasSpeaking = audio::playing();
-  tapRec = true;  // before it starts: the button sampler would end an offline recording at once
-  startTalking();
-  if (mode != Mode::Listening) {  // offline with no room, say
-    tapRec = false;
-    return;
-  }
-  if (wasSpeaking) sendType("stop");
+  talkFromTouch();
 }
 
 // Where the voice is in the answer's text, as a character index (-1: not
@@ -3888,6 +3915,8 @@ void loop() {
       hapticTick();
       ui::fade();
       redraw();
+    } else if (mode == Mode::Reply && tapButtonKind() == ui::TapButton::Talk) {  // no second tap came
+      talkFromTouch();
     }
   }
   // Wi-Fi power saving holds incoming packets until the radio's next wake-up
