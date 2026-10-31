@@ -51,7 +51,7 @@
 #endif
 
 #if defined(PAPER_B)
-#define FW_VERSION "1.0.26"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
+#define FW_VERSION "1.0.27"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
 #define FW_VERSION "0.20.1"
 #endif
@@ -227,6 +227,7 @@ static uint32_t prerollStartMs = 0;
 static volatile uint32_t prerollEndMs = 0;     // when the button was let go (0 = still held)
 static bool prerollOn = false, prerollStreaming = false, prerollChecked = false;
 static bool noteRec = false;  // this recording is a note, written to the card or flash as it comes (B paper)
+static bool recCut = false;   // the link went under a recording to the deck: the rest is kept as a note (loop())
 static bool talkHoldArms = false;  // the talk press began a recording: held on, it toggles note mode
 static bool prerollEndSounded = false;  // its "let go" blip has played
 
@@ -1254,10 +1255,11 @@ static void micSink(const int16_t* samples, size_t count) {
 }
 
 static void startOfflineNote();
-static void startNote();
+static void startNote(bool blip = true);
 
 static void startTalking() {
-  if (board::kNoteMode && (settings.noteMode || !wsUp)) {  // kept as a note, written as it's recorded
+  // Kept as a note, written as it's recorded. (Wi-Fi gone: the link only says so a while later.)
+  if (board::kNoteMode && (settings.noteMode || !wsUp || WiFi.status() != WL_CONNECTED)) {
     startNote();
     return;
   }
@@ -1427,10 +1429,9 @@ static void startOfflineNote() {
 }
 
 // A note written to the card or flash as it's recorded (the B paper, in note
-// mode or offline): no length limit but the room. It ends as any toggled
-// recording does — the next press, or (offline, outside note mode) 2.5 s of
-// quiet — or when the room runs out.
-static void startNote() {
+// mode or offline): no length limit but the room. It needs no link, and has its
+// pauses: it ends with the next press, or when the room runs out.
+static void startNote(bool blip) {
   const time_t when = telemetry::clockSet() ? time(nullptr) : 0;
   if (!notes::beginNote(audio::kMicRate, when)) {
     notice("Not kept", "No room left for a voice note.", kRed);
@@ -1438,7 +1439,7 @@ static void startNote() {
   }
   flashing = false;
   ui::setQuestion("");
-  if (settings.talkSounds) audio::talkStart();  // the blip, then the mic listens
+  if (blip && settings.talkSounds) audio::talkStart();  // the blip, then the mic listens
   audio::micStart();
   noteRec = true;
   recStartMs = millis();
@@ -2371,7 +2372,10 @@ static void onWs(WStype_t type, uint8_t* payload, size_t length) {
         wsUp = false;
         agentLinked = false;
         agentPower = AgentPower::Unknown;
-        if (audio::micActive()) audio::micStop([](const int16_t*, size_t) {});
+        // A note needs no link: it goes on. One going to the deck is cut, what's
+        // still said goes on as a note where the device keeps them.
+        recCut = board::kNoteMode && tapRec && !noteRec && !prerollOn && mode == Mode::Listening;
+        if (audio::micActive() && !noteRec) audio::micStop([](const int16_t*, size_t) {});
         audio::playStop();
         dropImagePart();
         dropBackgroundPart();  // sent again in full on the next link (prefs names the old one)
@@ -2384,13 +2388,13 @@ static void onWs(WStype_t type, uint8_t* payload, size_t length) {
         }
         abortUpload(false);  // the notes go up again next time — asked first
         if (!quietRelinking()) upAllowed = upAsked = false;  // (a renewed link: asked already)
-        if (!prerollOn) tapRec = false;  // a tapped recording that streamed: gone with the mic
+        if (!prerollOn && !noteRec && !recCut) tapRec = false;  // a tapped recording that streamed: gone with the mic
         if (mode == Mode::Waiting) {  // the deck keeps the answer: wait for the link (holdTurn)
           if (!turnDropMs) turnDropMs = max<uint32_t>(millis(), 1);
           turnRelinkMs = 0;
           statusLine = "Connection lost — reconnecting…";
           workDirty = true;
-        } else if (mode == Mode::Listening || mode == Mode::Ask) {
+        } else if ((mode == Mode::Listening && !noteRec && !recCut) || mode == Mode::Ask) {
           mode = ui::hasReply() ? Mode::Reply : Mode::Idle;
         }
         if (!quietRelinking()) redraw();
@@ -2405,6 +2409,41 @@ static void onWs(WStype_t type, uint8_t* payload, size_t length) {
     default:
       break;
   }
+}
+
+// Trying for the deck takes the loop with it: its name can take 15 s to fail with
+// no network behind the Wi-Fi, the connection 5 s more, and offline that's nearly
+// all the time — a mic nobody reads, lights that stop, presses that go unseen. So
+// a task of its own knocks first (it may block all it likes), and the link is
+// worked on only for a while after the deck answered.
+static char knockHost[128] = "";
+static uint16_t knockPort = 0;
+static volatile uint32_t deckAnsweredMs = 0;  // (0: not lately)
+static constexpr uint32_t kLinkTryMs = 15000;  // the time the link gets to come up after that
+
+static void knockLoop(void*) {
+  for (;;) {
+    delay(200);
+    if (wsUp || deckAnsweredMs || WiFi.status() != WL_CONNECTED) continue;
+    WiFiClient knock;
+    const bool answered = knock.connect(knockHost, knockPort, 3000);
+    knock.stop();
+    if (answered) deckAnsweredMs = max<uint32_t>(millis(), 1);
+    else delay(2800);  // (as often as the link itself was tried)
+  }
+}
+
+// The link can be worked on now: it's up, or the deck just answered — not while a
+// note is written, as making the link holds the loop a second or two: a hole in it.
+static bool linkWorkable() {
+  if (wsUp) return true;
+  const uint32_t at = deckAnsweredMs;
+  if (!at) return false;
+  if (millis() - at > kLinkTryMs) {
+    deckAnsweredMs = 0;
+    return false;
+  }
+  return !noteRec;
 }
 
 static void connectServer() {
@@ -2452,6 +2491,10 @@ static void connectServer() {
   // Weak Wi-Fi holds a pong back for seconds (retransmits): three missed
   // 10 s windows, not two of 5 s, before the link counts as gone.
   ws.enableHeartbeat(15000, 10000, 3);
+  strlcpy(knockHost, host.c_str(), sizeof(knockHost));
+  knockPort = port;
+  static TaskHandle_t knocker = nullptr;
+  if (!knocker) xTaskCreatePinnedToCore(knockLoop, "knock", 4096, nullptr, 1, &knocker, 0);
 }
 
 // ── over-the-air updates (docs/device-ota-plan.md) ───────────────────
@@ -3210,7 +3253,8 @@ static void endTapRecording() {
 // A tapped or toggled recording (no button held: StopWatch Tap to talk, the
 // PaperColor) ends by itself after 2.5 s without a voice and goes on as if
 // tapped again; with nothing said at all, it's dropped. A held button ends
-// its own recording.
+// its own recording, and a press ends a note: note mode, or with no deck to send
+// it to. They have their pauses.
 static constexpr uint32_t kSilenceStopMs = 2500;
 
 static void stopOnSilence() {
@@ -3219,7 +3263,7 @@ static void stopOnSilence() {
   static size_t scanned = 0;     // background-recording samples looked at so far
   static int loudRun = 0;        // …and its loud blocks in a row (kVoiceRun = a voice)
   if (!board::kSilenceStop || !tapRec) return;
-  if (board::kNoteMode && settings.noteMode) return;  // notes have their pauses: the press ends them
+  if (board::kNoteMode && (settings.noteMode || noteRec || !wsUp)) return;
   const bool live = !prerollOn && mode == Mode::Listening && audio::micActive();
   if (!live && !(prerollOn && !prerollEndMs)) return;
   const uint32_t start = prerollOn ? prerollStartMs : recStartMs;
@@ -3576,10 +3620,20 @@ void loop() {
   // one 4 KB speech frame per pass is slower than the voice plays.
   for (int i = 0; i < 16; ++i) {
     uint32_t seen = wsEvents;
-    PERF_T(pfWsMax, ws.loop());
+    if (linkWorkable()) {
+      PERF_T(pfWsMax, ws.loop());
+    }
     if (wsEvents == seen) break;
   }
   if (wsUp != wasUp) linkChangeMs = millis();
+  if (recCut) {
+    recCut = false;
+    startNote(false);
+    if (!noteRec) {  // no room for one
+      tapRec = false;
+      backToMain();
+    }
+  }
   holdTurn();
   paperAnswerPoll();
   waitingCuePoll();

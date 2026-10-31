@@ -162,6 +162,7 @@ static void drainDone(size_t inflight, void (*sink)(const int16_t*, size_t)) {
     loudRun = peak >= thr ? loudRun + 1 : 0;
     if (loudRun >= kVoiceRun && settled) voiceMs = millis();
     sink(blk, kBlock);
+    if (!micOn) return;  // the send found the link gone, and that stopped the mic (it took the rest)
     for (int i = 1; i < fifoLen; ++i) fifo[i - 1] = fifo[i];
     --fifoLen;
   }
@@ -187,6 +188,7 @@ void micStart() {
 int micPoll(void (*sink)(const int16_t*, size_t)) {
   if (!micOn) return 0;
   drainDone(M5.Mic.isRecording(), sink);
+  if (!micOn) return lastLevel;
   while (fifoLen < 2) {
     int before = fifoLen;
     submitNext();
