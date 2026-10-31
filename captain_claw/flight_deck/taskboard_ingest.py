@@ -52,9 +52,9 @@ A turn's close brings the calls the register has from it along, so triage
 judges a turn with its calls once. A new event on a turn's open task puts it
 back in the triage queue (``taskboard_triage``) — its close and its tool calls
 settle a while first (a burst of calls is one decision), a new turn at once.
-Someone writing again on a conversation that wasn't waiting on the user (a
-reply on its email thread, after it was done, moved to someone else or
-snoozed) brings the same task back to Needs me at once, as a reply brings a
+Someone writing again on a conversation (a reply on its email thread, after
+it was done, moved to someone else or snoozed, or while it waits on the user)
+puts the same task in Needs me at once and holds it there, as a reply brings a
 thread back to Gmail's inbox (:func:`reply_brings_back`) — unless the source
 moved it with that (an auto-reply held for approval or sent), and that move
 stands. Only a message dated long before the close is history: Jev asks
@@ -887,22 +887,22 @@ def _found_strongly(store: TaskboardStore, uid: str, task: dict, keys: list[str]
 
 def reply_brings_back(store: TaskboardStore, uid: str, task_id: str, keys: list[str] | tuple[str, ...], at: float,
                       now: float | None = None) -> bool:
-    """Someone wrote on a conversation the user wasn't looking at (it was
-    closed, the next move someone else's, or snoozed), found by a strong key:
-    the same task is back in Needs me (``TaskboardStore.reply_came_back``), by
-    their word alone, as a reply brings a thread back to Gmail's inbox. Not
-    "not a task" or dismissed (the user said it isn't one), a merged-in row,
-    what an agent is working on, or history (:func:`is_news`). True when it
-    came back (the caller kicks triage)."""
+    """Someone wrote on a conversation (it was closed, the next move someone
+    else's, snoozed, or already the user's), found by a strong key: the same
+    task is in Needs me (``TaskboardStore.reply_came_back``), by their word
+    alone, as a reply brings a thread back to Gmail's inbox — and stays there,
+    so triage can't close it over what the user hasn't read. Not "not a task"
+    or dismissed (the user said it isn't one), a merged-in row, what an agent
+    is working on, or history (:func:`is_news`). True when it came back (the
+    caller kicks triage)."""
     task = store.get_task(uid, task_id)
     if task is None or task["kind"] not in _ANSWERED_KINDS or task["merged_into"] or not is_news(task, at):
         return False
-    now = time.time() if now is None else now
     status, owes = task["status"], task["owes_next"]
     if status in ("done", "failed"):
         back = task["kind"] not in _LEDGERS_OWN
     else:
-        back = status == "open" and owes != "agent" and (owes != "me" or float(task["snooze_until"] or 0) > now)
+        back = status == "open" and owes != "agent"
     if not back or not _found_strongly(store, uid, task, keys):
         return False
     return store.reply_came_back(uid, task_id, read=task["kind"] not in _LEDGERS_OWN, now=now)
