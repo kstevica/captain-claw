@@ -1127,9 +1127,9 @@ static void drawStatBlock(const StatBlock& b, int y, int h) {
 static void drawTile(int x, int y, int w, int h, bool asleep, int notes, const String& kept, const String& room) {
   canvas.fillRoundRect(x, y, w, h, 16, kInk);
   if (lastHome.noteMode) {
-    const int padH = h - 28, padW = padH * 3 / 4, padX = x + 14;
-    drawNotepad(padX, y + 14, padW, padH);
-    drawNoteCount(padX + padW + 12, y + 14 + padH - 22, notes);
+    const int padH = min(96, h - 28), padW = padH * 3 / 4, padX = x + 14, padY = y + (h - padH) / 2;
+    drawNotepad(padX, padY, padW, padH);
+    drawNoteCount(padX + padW + 12, padY + padH - 22, notes);
     const int tx = padX + padW + 24, right = x + w - 10, top = y + (h - 108) / 2;
     font(vlw::Title);
     textOn("Hold", tx, top, kPaper, kInk);
@@ -1161,15 +1161,13 @@ static void drawTile(int x, int y, int w, int h, bool asleep, int notes, const S
   text("to talk", cx, mid - 4, kInk, middle_left);
 }
 
-// The links, a row each: a dot in the ink of their state, the name, the value.
-// Asleep, that it's redrawn all the same.
-static void drawLinks(int x, int y, int w, int h, bool asleep) {
+// The links, on the options screen, a row each: a dot in the ink of their state,
+// the name, the value.
+static constexpr int kLinkRowH = 28;
+
+static void drawLinks(int x, int y, int w) {
   font(vlw::Small);
-  if (asleep) {
-    text(fit("Redrawn every five minutes", w), x + w / 2, y + h / 2, kInk, middle_center);
-    return;
-  }
-  static constexpr int kRowH = 28;
+  static constexpr int kRowH = kLinkRowH;
   auto row = [&](const String& label, const String& value, uint16_t ink) {
     canvas.fillCircle(x + 7, y + kRowH / 2, 6, ink);
     if (ink == kYellow) canvas.drawCircle(x + 7, y + kRowH / 2, 6, kInk);  // (faint on paper by itself)
@@ -1190,22 +1188,23 @@ static void drawLinks(int x, int y, int w, int h, bool asleep) {
 }
 
 // The dashboard, in blocks of colour: the clock as of this drawing, the room, the
-// battery, the notes, what the talk button does, the links; drawn every five
-// minutes and on request. Note mode shows at a glance: the top block turns red.
+// battery, the notes, what the talk button does; drawn every five minutes and on
+// request. Note mode shows at a glance: the top block turns red.
 static void drawDashboard(bool asleep) {
   static constexpr int M = 6, G = 6, kFullW = 400 - 2 * M;
   int y = M;
   const uint16_t top = lastHome.noteMode ? kRed : kInk;
-  canvas.fillRoundRect(M, y, kFullW, 192, 16, top);
+  static constexpr int kTopH = 224;
+  canvas.fillRoundRect(M, y, kFullW, kTopH, 16, top);
   drawStatusLine(M + 16, kFullW - 32, y + 24, top, asleep);
   char clock[8] = "--:--";
   clockText(clock, sizeof(clock), "%H:%M", time(nullptr));
   font(vlw::Digits);
-  textOn(clock, W / 2, y + 44, kPaper, top, top_center);
+  textOn(clock, W / 2, y + 56, kPaper, top, top_center);
   font(vlw::Title);
   const String date = dateWords(kFullW - 32);
-  if (date.length()) textOn(date, W / 2, y + 146, kPaper, top, top_center);
-  y += 192 + G;
+  if (date.length()) textOn(date, W / 2, y + 168, kPaper, top, top_center);
+  y += kTopH + G;
 
   // The three blocks, each as wide as what it says.
   static constexpr int kStatH = 122, kRoomW = 102, kPowerW = 126, kNotesW = 136;
@@ -1250,10 +1249,14 @@ static void drawDashboard(bool asleep) {
   y += kStatH + G;
 
   const String kept = n == 0 ? String("no notes yet") : String(n) + (n == 1 ? " note · " : " notes · ") + clockLength(notes::seconds());
-  drawTile(M, y, kFullW, 124, asleep, n, kept, room);
-  y += 124 + G;
-
-  drawLinks(M + 14, y, kFullW - 28, H - kFootH - y - 4, asleep);
+  // Asleep, a line under it says that it's redrawn all the same.
+  static constexpr int kAsleepLineH = 32;
+  const int tileBottom = H - kFootH - 4 - (asleep ? kAsleepLineH : 0);
+  drawTile(M, y, kFullW, tileBottom - y, asleep, n, kept, room);
+  if (asleep) {
+    font(vlw::Small);
+    text("Redrawn every five minutes", W / 2, tileBottom + kAsleepLineH / 2, kInk, middle_center);
+  }
   drawFooter({{board::kSideKey, "options"}, {board::kBackKey, "last answer"}});
 }
 
@@ -1728,7 +1731,9 @@ void showLink(const char* title, const String& url, const String& note) {
     drawHeader();
     font(vlw::Title);
     text(fit(t, W - 2 * PAD), W / 2, kHeadH + 18, kInk, top_center);
-    drawQrWithLines(url, 4, kHeadH + 70, H - kFootH - 12, {{url, vlw::Small, kBlue}, {note, vlw::BodyS, kInk}});
+    const int linksY = H - kFootH - 8 - 3 * kLinkRowH;
+    drawQrWithLines(url, 4, kHeadH + 56, linksY - 8, {{url, vlw::Small, kBlue}, {note, vlw::BodyS, kInk}});
+    drawLinks(PAD, linksY, W - 2 * PAD);
     drawFooter({{board::kTalkKey, "back"}, {board::kSideKey, "update"}});
   });
 }

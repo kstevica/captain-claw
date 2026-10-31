@@ -29,7 +29,7 @@ constexpr const char* kTalkButton = "yellow button";
 constexpr const char* kSideButton = "other button";
 constexpr const char* kTalkHint = "Press the yellow button to talk";  // the home screen's call to action
 // Hold to talk, let go to send (false), or press to start and press again to
-// send (true) — or 2.5 s of quiet sends it, as the on-screen button does.
+// send (true), as the on-screen button does.
 constexpr bool kTalkToggles = true;
 constexpr bool kTalkFromSleep = false;  // a press that wakes it (or lights a dark screen) only wakes it
 // Which of M5Unified's buttons (A/B/C) talks, goes next and goes back (0: none).
@@ -222,9 +222,10 @@ constexpr bool kDoubleHome = true;
 constexpr bool kDoubleHome = false;
 #endif
 
-// A toggled recording also ends after 2.5 s of quiet. Not here: this mic's level
-// stopped it mid-sentence, so only a press ends one (or the length limits).
-#if defined(BOARD_EPAPER154)
+// A toggled recording also ends after 2.5 s of quiet. Not on the Waveshare (its
+// mic's level stopped it mid-sentence) or the watch (whoever talks says when
+// they're done): there only a press ends one (or the length limits).
+#if defined(BOARD_EPAPER154) || defined(BOARD_STOPWATCH)
 constexpr bool kSilenceStop = false;
 #else
 constexpr bool kSilenceStop = true;
