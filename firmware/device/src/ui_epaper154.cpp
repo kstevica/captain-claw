@@ -542,18 +542,41 @@ static void drawNoteCount(int right, int cy, int notes) {
   text(n, x + w / 2, cy, middle_center);
 }
 
-// The tile's two big lines, around `mid` (from 20 above it to 18 below).
-static void drawBigWords(const char* first, const char* second, int x, int mid, uint16_t color) {
-  canvas.setFont(&fonts::FreeSansBold12pt7b);
-  text(first, x, mid - 3, baseline_left, color);
-  text(second, x, mid + 18, baseline_left, color);
+// The talk button as it looks, on the black tile: a gear on its cap, in a white circle.
+static void drawGearKey(int cx, int cy, int r) {
+  canvas.fillCircle(cx, cy, r, kPaper);
+  const int g = r - 3;
+  for (int k = 0; k < 8; ++k) {  // (short teeth on a wide middle: long ones make it a wheel)
+    const float a = k * 3.14159f / 4, ca = cosf(a), sa = sinf(a), w = g * 0.19f, in = g * 0.6f;
+    const int x0 = cx + lroundf(ca * in - sa * w), y0 = cy + lroundf(sa * in + ca * w);
+    const int x1 = cx + lroundf(ca * in + sa * w), y1 = cy + lroundf(sa * in - ca * w);
+    const int x2 = cx + lroundf(ca * g + sa * w), y2 = cy + lroundf(sa * g - ca * w);
+    const int x3 = cx + lroundf(ca * g - sa * w), y3 = cy + lroundf(sa * g + ca * w);
+    canvas.fillTriangle(x0, y0, x1, y1, x2, y2, kInk);
+    canvas.fillTriangle(x0, y0, x2, y2, x3, y3, kInk);
+  }
+  canvas.fillCircle(cx, cy, g * 7 / 10, kInk);
+  canvas.fillCircle(cx, cy, g * 3 / 10, kPaper);
 }
 
-static void drawMic(int cx, int cy, int r) {
-  canvas.fillRoundRect(cx - r, cy - r * 2, r * 2, r * 3, r, kInk);
-  canvas.fillArc(cx, cy - r / 2, r + 7, r + 4, 0, 180, kInk);
-  canvas.fillRect(cx - 2, cy + r + 4, 4, r, kInk);
-  canvas.fillRoundRect(cx - r, cy + 2 * r + 2, r * 2, 4, 2, kInk);
+// The tile's two big lines, around `mid` (from 27 above it to 18 below): the button
+// as it looks (its gear as big as the tile's `top` leaves room for), then what it does.
+static void drawBigWords(const char* what, int x, int mid, int top) {
+  const int r = constrain(mid - 13 - top - 1, 8, 14);
+  drawGearKey(x + r, mid - 13, r);
+  canvas.setFont(&fonts::FreeSansBold12pt7b);
+  text(what, x, mid + 18, baseline_left, kPaper);
+}
+
+// A microphone on the black tile, its middle on (cx, cy), `h` px tall.
+static void drawMic(int cx, int cy, int h) {
+  const auto U = [h](int u) { return (int)lroundf(u * h / 79.0f); };  // the drawing is 79 tall
+  const int top = cy - h / 2, r = U(17), mid = top + U(26);
+  canvas.fillRoundRect(cx - r, top, 2 * r, U(51), r, kPaper);
+  canvas.fillArc(cx, mid, U(28), U(23), 0, 180, kPaper);
+  const int stem = max(2, U(6));
+  canvas.fillRect(cx - stem / 2, top + U(59), stem, U(16), kPaper);
+  canvas.fillRoundRect(cx - r, top + h - stem, 2 * r, stem, stem / 2, kPaper);
 }
 
 // What's left for notes, in time: "6 min free", "40 s free", "full".
@@ -562,8 +585,9 @@ static String noteRoomText(uint32_t sec) {
   return (sec < 60 ? String(sec) + " s" : timeSpan(sec / 60)) + " free";
 }
 
-// The clock, and a big tile with what the button does: to talk, or in note mode
-// (black, so it shows at a glance) to send the notes, how many and the room left.
+// The clock, and a big black tile with what the button does, online or not (with
+// no deck a press keeps a note): to talk, or in note mode to send the notes, how
+// many and the room left.
 void showHome(const Home& home) {
   lastHome = home;
   drawing(Screen::Home);
@@ -571,9 +595,9 @@ void showHome(const Home& home) {
   drawBar();
   drawClock(22, 59);
 
-  // Under the tile: the battery's time at the size chosen for reading, and above
-  // it what waits in Flight Deck, as far as the tile keeps room for its big lines.
-  static constexpr int kTileTop = 78, kTileMinH = 56, kWaitingLine = 16;
+  // Under the tile: the battery's time at the size chosen for reading, as far as
+  // the tile keeps room for its big lines.
+  static constexpr int kTileTop = 78, kTileMinH = 56;
   const int linesEnd = kTileTop + kTileMinH + 4;
   int y = H - 2 - kTapReserve;
   if (home.battery.length()) {
@@ -585,38 +609,22 @@ void showHome(const Home& home) {
     canvas.setFont(ts().body);
     for (int i = 0; i < shown; ++i) text(ls[ls.size() - shown + i], W / 2, y + i * ts().line, top_center);
   }
-  if (!home.noteMode && home.ready && home.hint.length() && home.hint != board::kTalkHint) {
-    const std::vector<String> ls = wrap(home.hint, W - 2 * PAD, &efont::efont14);
-    const int shown = min(min((y - linesEnd) / kWaitingLine, 2), (int)ls.size());
-    y -= shown * kWaitingLine;
-    canvas.setFont(&efont::efont14);
-    for (int i = 0; i < shown; ++i) text(ls[i], W / 2, y + i * kWaitingLine, top_center);
-  }
 
   const int tileH = y - 4 - kTileTop, mid = kTileTop + tileH / 2;
   canvas.fillRoundRect(3, kTileTop, W - 6, tileH, 8, kInk);
+  const int iconH = tileH - 14, iconW = iconH * 3 / 4, iconX = 14, iconY = kTileTop + 7, x = iconX + iconW + 17;
   if (home.noteMode) {
-    const int padH = tileH - 14, padW = padH * 3 / 4, padX = 14, padY = kTileTop + 7;
-    drawNotepad(padX, padY, padW, padH);
-    drawNoteCount(padX + padW + 8, padY + padH - 10, home.notes);
-    const int x = padX + padW + 17, words = mid - 7;
-    drawBigWords("Boot", "to send", x, words, kPaper);
+    drawNotepad(iconX, iconY, iconW, iconH);
+    drawNoteCount(iconX + iconW + 8, iconY + iconH - 10, home.notes);
+    const int words = mid - 7;
+    drawBigWords("to send", x, words, kTileTop);
     const String room = noteRoomText(home.notesRoomSec);
     canvas.setFont(&efont::efont16);
     if (tileH < 80 || tw(room) > W - 7 - x) canvas.setFont(&efont::efont14);
     text(fit(room, W - 7 - x), x, words + 23, top_left, kPaper);
   } else {
-    canvas.fillRoundRect(6, kTileTop + 3, W - 12, tileH - 6, 6, kPaper);
-    if (home.ready) {
-      const int iconW = (tileH - 14) * 3 / 4;
-      drawMic(14 + iconW / 2, mid - 2, tileH < 64 ? 9 : 11);
-      drawBigWords("Boot", "to talk", 14 + iconW + 12, mid, kInk);
-    } else {  // nothing to press for yet: what it's waiting for, or that a press keeps a note
-      const std::vector<String> ls = wrap(home.hint, W - 24, &efont::efont16);
-      const int shown = min((tileH - 8) / 18, (int)ls.size());
-      canvas.setFont(&efont::efont16);
-      for (int i = 0; i < shown; ++i) text(ls[i], W / 2, mid - shown * 9 + i * 18, top_center);
-    }
+    drawMic(iconX + iconW / 2, mid, iconH);
+    drawBigWords("to talk", x, mid, kTileTop);
   }
   drawTapButton();
 
@@ -660,7 +668,7 @@ void showListening(int level, uint32_t elapsedMs) {
     text("PWR cancels", W / 2, 156, top_center);
     drawTapButton();
   } else {
-    text(note ? "BOOT keeps it · PWR cancels" : "BOOT sends · PWR cancels", W / 2, 170, top_center);
+    text(String(board::kTalkKey) + (note ? " keeps it · " : " sends · ") + board::kSideKey + " cancels", W / 2, 170, top_center);
   }
   push();
 }
