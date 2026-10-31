@@ -141,8 +141,8 @@ newest, so B is published as 1.x). The lights carry listening, working,
 speaking and trouble exactly as above; the voice carries the answers:
 
 - **A dashboard, every five minutes** (1.0.11; in blocks of colour since
-  1.0.24): a black block with the Wi-Fi and agent dots, the agent, what waits
-  in Flight Deck, a big clock as of the drawing and the date.
+  1.0.24): a black block with what waits in Flight Deck, the agent and the
+  Wi-Fi and agent dots on the right, a big clock as of the drawing and the date.
   Under it three blocks: the room in blue (temperature, humidity), the power
   in green, yellow under 40 %, red under 20 % (percent, and how long it has or
   until it's full, with a bolt while charging), the notes in yellow, red when
@@ -156,8 +156,8 @@ speaking and trouble exactly as above; the voice carries the answers:
   mark, draws it without Wi-Fi and sleeps again), and after an offline voice
   note is kept.
 - **No legend: what a button does is drawn beside it** (1.0.27): on every
-  screen, an icon where the button is — A and B on the left edge, C on top, in
-  the middle. On the dashboard A is the mic, B Captain (the last answer), C a
+  screen, an icon in a white circle with a black ring (1.0.28) where the button
+  is — A and B on the left edge, C on top, in the middle. On the dashboard A is the mic, B Captain (the last answer), C a
   gear (the options). On an answer A is the mic, B an arrow down (the next
   page) or a house (the last page: the dashboard), C the gear. On the options A
   is an arrow back, B Captain, C the update. In the setup hotspot A is the

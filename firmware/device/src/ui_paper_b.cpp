@@ -836,16 +836,13 @@ static bool clockText(char* out, size_t n, const char* fmt, time_t t) {
 // ── what the buttons do, drawn beside them ─────────────────────────────
 //
 // No legend: each button's icon is on the screen where the button is — A and B
-// on the left edge, C on top, in the middle. Not smoothed: a blend of two inks
-// would snap to a third.
+// on the left edge, C on top, in the middle — in a white circle with a black ring,
+// the same on any background. Not smoothed: a blend of two inks would snap to a third.
 
 enum class Key : uint8_t { None, Talk, Answer, Options, Back, Next, Home, Update };
-static constexpr int kKeyX = 34, kKeyAY = 66, kKeyBY = 141, kKeyCY = 28;
-static constexpr int kKeysBottom = 172;  // what's beside A and B ends here: below it, the whole width
-static constexpr int kKeysRight = 68;    // and beside them, this is free
-
-// The other ink for something drawn on `around`.
-static uint16_t inkOn(uint16_t around) { return around == kPaper || around == kYellow ? kInk : kPaper; }
+static constexpr int kKeyX = 34, kKeyAY = 66, kKeyBY = 141, kKeyCY = 28, kKeyR = 20;
+static constexpr int kKeysBottom = 168;  // what's beside A and B ends here: below it, the whole width
+static constexpr int kKeysRight = 64;    // and beside them, this is free
 
 // A microphone, its middle on (cx, cy), `h` px tall.
 static void drawMic(int cx, int cy, int h, uint16_t ink) {
@@ -860,16 +857,15 @@ static void drawMic(int cx, int cy, int h, uint16_t ink) {
 
 // Captain, in the six inks: the app icon's drawing, (cx, cy) the middle of his
 // head, `s` px a unit (he's 108 wide, 86 above that middle and 40 below it).
-// `around`: what he's drawn on. Asleep, his eyes are shut.
-static void drawRobot(int cx, int cy, float s, uint16_t around, bool asleep = false) {
+// Asleep, his eyes are shut.
+static void drawRobot(int cx, int cy, float s, bool asleep = false) {
   const auto X = [&](float u) { return cx + (int)lroundf(u * s); };
   const auto Y = [&](float u) { return cy + (int)lroundf(u * s); };
   const auto L = [&](float u) { return max(1, (int)lroundf(u * s)); };
-  const uint16_t edge = inkOn(around);
-  canvas.fillRect(X(0) - L(1.5f), Y(-78), 2 * L(1.5f), L(12), edge);  // antenna, lamp
-  canvas.fillCircle(X(0), Y(-81), L(6), around == kRed ? kYellow : kRed);
-  canvas.fillRoundRect(X(-52), Y(-12), L(104), L(24), L(3), edge);    // ears
-  canvas.fillRoundRect(X(-44), Y(-36), L(88), L(76), L(14), edge);    // head
+  canvas.fillRect(X(0) - L(1.5f), Y(-78), 2 * L(1.5f), L(12), kInk);  // antenna, lamp
+  canvas.fillCircle(X(0), Y(-81), L(6), kRed);
+  canvas.fillRoundRect(X(-52), Y(-12), L(104), L(24), L(3), kInk);    // ears
+  canvas.fillRoundRect(X(-44), Y(-36), L(88), L(76), L(14), kInk);    // head
   canvas.fillRoundRect(X(-41), Y(-33), L(82), L(70), L(11), kPaper);
   canvas.fillRoundRect(X(-36), Y(-28), L(72), L(58), L(9), kInk);     // face plate
   canvas.fillRoundRect(X(-46), Y(-68), L(92), L(28), L(10), kBlue);   // cap, band, badge
@@ -888,57 +884,60 @@ static void drawRobot(int cx, int cy, float s, uint16_t around, bool asleep = fa
   }
 }
 
-static void drawGear(int cx, int cy, int r, uint16_t ink, uint16_t around) {
+static void drawGear(int cx, int cy, int r) {
   for (int k = 0; k < 8; ++k) {
     const float a = k * 3.14159f / 4, ca = cosf(a), sa = sinf(a), w = r * 0.25f, in = r * 0.6f;
     const int x0 = cx + lroundf(ca * in - sa * w), y0 = cy + lroundf(sa * in + ca * w);
     const int x1 = cx + lroundf(ca * in + sa * w), y1 = cy + lroundf(sa * in - ca * w);
     const int x2 = cx + lroundf(ca * r + sa * w), y2 = cy + lroundf(sa * r - ca * w);
     const int x3 = cx + lroundf(ca * r - sa * w), y3 = cy + lroundf(sa * r + ca * w);
-    canvas.fillTriangle(x0, y0, x1, y1, x2, y2, ink);
-    canvas.fillTriangle(x0, y0, x2, y2, x3, y3, ink);
+    canvas.fillTriangle(x0, y0, x1, y1, x2, y2, kInk);
+    canvas.fillTriangle(x0, y0, x2, y2, x3, y3, kInk);
   }
-  canvas.fillCircle(cx, cy, r * 3 / 4, ink);
-  canvas.fillCircle(cx, cy, r * 3 / 8, around);
+  canvas.fillCircle(cx, cy, r * 3 / 4, kInk);
+  canvas.fillCircle(cx, cy, r * 3 / 8, kPaper);
 }
 
 // An arrow `size` px long down the page, or to the left.
-static void drawArrow(int cx, int cy, int size, bool left, uint16_t ink) {
+static void drawArrow(int cx, int cy, int size, bool left) {
   const int half = size / 2, head = size * 11 / 20, w = size * 3 / 20;
   if (left) {
-    canvas.fillTriangle(cx - half, cy, cx - half + head, cy - head, cx - half + head, cy + head, ink);
-    canvas.fillRect(cx - half + head, cy - w, size - head, 2 * w, ink);
+    canvas.fillTriangle(cx - half, cy, cx - half + head, cy - head, cx - half + head, cy + head, kInk);
+    canvas.fillRect(cx - half + head, cy - w, size - head, 2 * w, kInk);
   } else {
-    canvas.fillTriangle(cx, cy + half, cx - head, cy + half - head, cx + head, cy + half - head, ink);
-    canvas.fillRect(cx - w, cy - half, 2 * w, size - head, ink);
+    canvas.fillTriangle(cx, cy + half, cx - head, cy + half - head, cx + head, cy + half - head, kInk);
+    canvas.fillRect(cx - w, cy - half, 2 * w, size - head, kInk);
   }
 }
 
-static void drawKey(Key key, int cx, int cy, uint16_t around) {
-  const uint16_t ink = inkOn(around);
+static void drawKey(Key key, int cx, int cy, int r = kKeyR) {
+  if (key == Key::None) return;
+  canvas.fillCircle(cx, cy, r, kInk);
+  canvas.fillCircle(cx, cy, r - 2, kPaper);
+  const auto U = [r](int u) { return u * r / kKeyR; };
   switch (key) {
-    case Key::Talk: drawMic(cx, cy, 44, ink); break;
-    case Key::Answer: drawRobot(cx, cy + 9, 0.38f, around); break;
-    case Key::Options: drawGear(cx, cy, 17, ink, around); break;
-    case Key::Back: drawArrow(cx, cy, 40, true, ink); break;
-    case Key::Next: drawArrow(cx, cy, 40, false, ink); break;
+    case Key::Talk: drawMic(cx, cy, U(26), kInk); break;
+    case Key::Answer: drawRobot(cx, cy + U(5), 0.23f * r / kKeyR); break;
+    case Key::Options: drawGear(cx, cy, U(13)); break;
+    case Key::Back: drawArrow(cx, cy, U(22), true); break;
+    case Key::Next: drawArrow(cx, cy, U(22), false); break;
     case Key::Home:
-      canvas.fillTriangle(cx - 22, cy - 2, cx + 22, cy - 2, cx, cy - 22, ink);
-      canvas.fillRect(cx - 15, cy - 2, 30, 22, ink);
-      canvas.fillRect(cx - 5, cy + 7, 10, 13, around);
+      canvas.fillTriangle(cx - U(12), cy - U(1), cx + U(12), cy - U(1), cx, cy - U(12), kInk);
+      canvas.fillRect(cx - U(8), cy - U(1), U(16), U(12), kInk);
+      canvas.fillRect(cx - U(3), cy + U(4), U(6), U(7), kPaper);
       break;
     case Key::Update:
-      drawArrow(cx, cy - 4, 26, false, ink);
-      canvas.fillRect(cx - 14, cy + 12, 28, 4, ink);
+      drawArrow(cx, cy - U(3), U(16), false);
+      canvas.fillRect(cx - U(9), cy + U(8), U(18), U(3), kInk);
       break;
     case Key::None: break;
   }
 }
 
-static void drawKeys(Key a, Key b, Key c, uint16_t around = kPaper) {
-  drawKey(a, kKeyX, kKeyAY, around);
-  drawKey(b, kKeyX, kKeyBY, around);
-  drawKey(c, W / 2, kKeyCY, around);
+static void drawKeys(Key a, Key b, Key c) {
+  drawKey(a, kKeyX, kKeyAY);
+  drawKey(b, kKeyX, kKeyBY);
+  drawKey(c, W / 2, kKeyCY);
 }
 
 // ── public: basics ─────────────────────────────────────────────────────
@@ -1082,28 +1081,29 @@ static void drawNoteCount(int right, int cy, int notes) {
   textOn(n, x + w / 2, cy, kPaper, kRed, middle_center);
 }
 
-// The top block's first line: the links' dots and the agent (asleep: only that
-// it's asleep, nothing is connected then) up to C's icon, what waits after it.
+// The top block's first line: what waits in Flight Deck left of C's icon; right of
+// it the agent and, at the edge, the links' dots (asleep: only that it's asleep,
+// nothing is connected then).
 static void drawStatusLine(int x, int w, int y, uint16_t bg, bool asleep) {
-  int left = x;
+  int right = x + w;
   if (!asleep) {
-    for (const Health h : {hWifi, hAgent}) {  // white around them: a red one still shows on red
-      canvas.fillCircle(left + 8, y, 8, kPaper);
-      canvas.fillCircle(left + 8, y, 6, healthInk(h));
-      left += 20;
+    for (const Health h : {hAgent, hWifi}) {  // white around them: a red one still shows on red
+      canvas.fillCircle(right - 8, y, 8, kPaper);
+      canvas.fillCircle(right - 8, y, 6, healthInk(h));
+      right -= 20;
     }
-    left += 4;
+    right -= 4;
   }
   font(vlw::Small);
   const String name = asleep ? String("Asleep") : barAgent.length() ? barAgent : String("Captain");
-  textOn(fit(name, W / 2 - 26 - left), left, y, kPaper, bg, middle_left);
+  textOn(fit(name, right - W / 2 - kKeyR - 6), right, y, kPaper, bg, middle_right);
   if (waitingCount > 0) {
     font(vlw::Small);
     const String t = String(waitingCount) + " waiting";
-    const int pw = min(tw(t) + 18, x + w - W / 2 - 26), px = x + w - pw;
+    const int pw = min(tw(t) + 18, W / 2 - kKeyR - 6 - x);
     const uint16_t fill = bg == kRed ? kPaper : kRed, fg = bg == kRed ? kRed : kPaper;
-    canvas.fillRoundRect(px, y - 14, pw, 28, 14, fill);
-    textOn(t, px + pw / 2, y, fg, fill, middle_center);
+    canvas.fillRoundRect(x, y - 14, pw, 28, 14, fill);
+    textOn(t, x + pw / 2, y, fg, fill, middle_center);
   }
 }
 
@@ -1144,10 +1144,11 @@ static void drawTile(int x, int y, int w, int h, bool asleep, int notes, const S
     const int tx = padX + padW + 26, right = x + w - 10, top = y + (h - 112) / 2;
     font(vlw::Title);
     textOn("Hold", tx, top, kPaper, kInk);
-    const int micX = tx + tw("Hold") + 19;
-    drawMic(micX, top + 19, 36, kPaper);
+    static constexpr int kMicR = 17;
+    const int micX = tx + tw("Hold") + 5 + kMicR;
+    drawKey(Key::Talk, micX, top + 19, kMicR);
     font(vlw::Title);
-    textOn("to send", micX + 19, top, kPaper, kInk);
+    textOn("to send", micX + kMicR + 5, top, kPaper, kInk);
     font(vlw::BodyS);
     textOn(fit(kept, right - tx), tx, top + 46, kPaper, kInk);
     textOn(fit(room, right - tx), tx, top + 80, kPaper, kInk);
@@ -1157,7 +1158,7 @@ static void drawTile(int x, int y, int w, int h, bool asleep, int notes, const S
   const float s = min(1.4f, (h - 44) / 126.0f);  // Captain's 126 units
   const int mid = y + h / 2;
   drawMic(x + w / 4 + 6, mid, (int)(126 * s * 0.92f), kInk);
-  drawRobot(x + w * 3 / 4 - 6, mid + (int)(23 * s), s, kPaper, asleep);
+  drawRobot(x + w * 3 / 4 - 6, mid + (int)(23 * s), s, asleep);
 }
 
 // The links, on the options screen, a row each: a dot in the ink of their state,
@@ -1196,7 +1197,7 @@ static void drawDashboard(bool asleep) {
   static constexpr int kTopH = 224;
   canvas.fillRoundRect(M, y, kFullW, kTopH, 16, top);
   drawStatusLine(M + 16, kFullW - 32, kKeyCY, top, asleep);
-  drawKeys(Key::Talk, Key::Answer, Key::Options, top);
+  drawKeys(Key::Talk, Key::Answer, Key::Options);
   char clock[8] = "--:--";
   clockText(clock, sizeof(clock), "%H:%M", time(nullptr));
   font(vlw::Digits);
@@ -1415,7 +1416,7 @@ static const Size kSizes[] = {{vlw::BodyL, 49}, {vlw::BodyM, 41}, {vlw::BodyS, 3
 // page only), Captain's row under it, then the answer.
 static constexpr int kBubbleW = 300, kBubblePadX = 14, kBubblePadY = 9, kBubbleLine = 33, kBubbleTail = 12;
 static constexpr int kCaptainRowH = 40;
-static constexpr int kReplyY = 46;  // under C's icon
+static constexpr int kReplyY = 52;  // under C's icon
 
 static std::vector<String> questionLines() {
   if (!question.length()) return {};
@@ -1494,7 +1495,7 @@ static void drawReplyPage() {
     y += bh + kBubbleTail;
   }
   const int rowX = leftAt(y);
-  drawRobot(rowX + 18, y + 26, 0.3f, kPaper);
+  drawRobot(rowX + 18, y + 26, 0.3f);
   char when[16] = "";
   clockText(when, sizeof(when), "%H:%M", replyWhen);
   font(vlw::Small);
