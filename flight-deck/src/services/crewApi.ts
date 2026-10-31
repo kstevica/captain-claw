@@ -43,6 +43,40 @@ export interface CrewEvidence {
   head?: string
 }
 
+/** What a task made, copied to the owner's VFS when it finished. */
+export interface CrewResults {
+  path?: string
+  report?: string
+  head?: string
+  files_path?: string
+  files?: string[]
+  changed?: string[]
+  count?: number
+  whole?: boolean
+  skipped?: number
+  publish?: { project?: string; subdir?: string }
+  link?: CrewLink
+}
+
+export interface CrewLink {
+  name: string
+  url: string
+}
+
+export interface CrewFiles extends CrewResults {
+  uncommitted: number
+  landed: boolean
+  project_path: string
+}
+
+export interface CrewFile {
+  path: string
+  size: number
+  binary: boolean
+  truncated: boolean
+  text: string
+}
+
 export interface CrewTask {
   id: string
   title: string
@@ -55,6 +89,9 @@ export interface CrewTask {
   note: string
   repo_label: string
   repo_kind: string
+  project_key: string
+  project_name: string
+  results: CrewResults
   base_branch: string
   branch: string
   turn: number
@@ -87,7 +124,7 @@ export interface CrewEvent {
 }
 
 export interface CrewRepos {
-  projects: { project: string; folders: string[] }[]
+  projects: { project: string; key: string; folders: string[]; paths: Record<string, string> }[]
   recent: { repo: string; repo_label: string; repo_kind: string }[]
 }
 
@@ -115,6 +152,11 @@ export const crewApi = {
   task: (id: string) => api<CrewTask>(`/fd/crew/tasks/${id}`),
   events: (id: string, after: number) => api<{ events: CrewEvent[] }>(`/fd/crew/tasks/${id}/events?after=${after}`),
   diff: (id: string) => api<{ committed: string; uncommitted: string; note?: string }>(`/fd/crew/tasks/${id}/diff`),
+  files: (id: string, whole = false) => post<CrewFiles>(`/fd/crew/tasks/${id}/files?whole=${whole}`),
+  file: (id: string, path: string) => api<CrewFile>(`/fd/crew/tasks/${id}/file?path=${encodeURIComponent(path)}`),
+  link: (id: string) => post<CrewLink>(`/fd/crew/tasks/${id}/link`),
+  newProject: (name: string) => post<{ project: string; key: string; path: string }>('/fd/crew/projects', { name }),
+  tidy: (key: string) => post<{ cleared: number; kept: number }>('/fd/crew/projects/tidy', { key }),
   dispatch: (body: CrewDispatch) => post<CrewTask>('/fd/crew/tasks', body),
   steer: (id: string, text: string) => post<CrewTask>(`/fd/crew/tasks/${id}/steer`, { text }),
   stop: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/stop`),
