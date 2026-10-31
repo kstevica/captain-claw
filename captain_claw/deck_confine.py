@@ -121,6 +121,7 @@ PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "vatra": (("path", "read"),),
     "watch_background": (("path", "read"),),
     "jev": (("state_file", "read"),),
+    "knowledge": (("path", "read"),),
     "whatsapp_send_file": (("path", "read"),),
     "vfs": (("path", "vfs"), ("to", "vfs")),
     "hosting": (("subdir", "rel"),),

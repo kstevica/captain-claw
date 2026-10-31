@@ -329,6 +329,63 @@ def test_read_or_write_follows_the_action():
     assert kind("datastore", "file_path", "datastore", {"action": "import_file"}) == "read"
 
 
+# ── knowledge add: the file goes to Flight Deck, into the agent's documents ──
+
+
+@pytest.fixture
+def kept(deck, monkeypatch):
+    """The real knowledge tool, under a Flight Deck that keeps whatever it is
+    sent. What it was sent."""
+    import httpx
+
+    from captain_claw.tools.knowledge import KnowledgeTool
+
+    monkeypatch.setenv("FD_URL", "http://fd.test")
+    sent: list[bytes] = []
+    real = httpx.AsyncClient
+
+    def handler(request):
+        sent.append(request.content)
+        return httpx.Response(200, json={"doc": "doc.md", "title": "doc", "chars": 1})
+
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real(transport=httpx.MockTransport(handler), **kw))
+    deck.reg.register(KnowledgeTool())
+    return sent
+
+
+@pytest.mark.parametrize("tier", ["user", "admin"])
+async def test_knowledge_add_refuses_what_isnt_this_agents(deck, kept, tier):
+    deck.confine(tier)
+    (deck.ws / "alias.md").symlink_to(deck.other / "deal.md")
+    for path in (str(deck.other / "deal.md"), "../../../agent-b/data/workspace/deal.md", "alias.md",
+                 str(deck.victim_vfs / "proj" / "theirs.md"), "vfs:proj/../../victim/proj/theirs.md",
+                 str(deck.agent / ".env")):
+        await refused(deck, "knowledge", {"action": "add", "path": path})
+    assert kept == []
+    # Nor does the answer tell which of the server's files exist.
+    there = await refused(deck, "knowledge", {"action": "add", "path": str(deck.fd / "flight-deck.db")})
+    assert there == await refused(deck, "knowledge", {"action": "add", "path": str(deck.fd / "nothing.db")})
+
+
+async def test_knowledge_add_keeps_this_agents_own_files(deck, kept):
+    upload = deck.ws / "saved" / "media" / "s1" / "quote-20261031-101010-abc123.md"
+    upload.parent.mkdir(parents=True)
+    upload.write_text("FROM THE CHAT\n")
+    for path, text in (("notes.md", b"MY NOTES"), (str(upload), b"FROM THE CHAT"), ("vfs:proj/mine.md", b"MY VFS")):
+        assert (await call(deck, "knowledge", {"action": "add", "path": path})).success, path
+        assert text in kept[-1]
+    # What a picture said, with no file to read.
+    assert (await call(deck, "knowledge", {"action": "add", "text": "Total 42", "name": "receipt.md"})).success
+
+
+async def test_knowledge_add_elsewhere_is_for_a_deck_without_tenants(deck, kept):
+    path = str(deck.other / "deal.md")
+    await refused(deck, "knowledge", {"action": "add", "path": path})
+    deck.confine(None)
+    assert (await call(deck, "knowledge", {"action": "add", "path": path})).success
+    assert b"OTHER TENANT" in kept[-1]
+
+
 # ── coverage: every path-like argument of every tool is ruled ────────
 
 _PATHY = re.compile(r"(path|file|dir|folder|root|glob|pattern|dest|output|^out$|"
