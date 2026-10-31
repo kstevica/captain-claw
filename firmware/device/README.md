@@ -337,9 +337,15 @@ There's no 2.5 s silence stop on this board: its mic's level ended recordings
 mid-sentence, so only a press ends one, or the length limits (110 s online, 60 s
 as an offline note).
 
-The home screen is the clock and one big tile saying what BOOT does: a microphone
-and "Boot to talk", or until it's ready, what it's waiting for. Hold BOOT for 1 s
-for note mode: the tile turns black, with a notepad, "Boot to send", how many notes
+Nobody who uses the device knows BOOT by that name: it's the upper of the two buttons,
+with a gear on its cap. The home tile draws that gear in a circle, and the screens'
+lines of text call it **Up**.
+
+The home screen is the clock and one big black tile saying what that button does: a
+microphone and "[the gear] to talk", online or offline (with no deck a press keeps a note),
+with no hints or lines from the agent; what waits in Flight Deck is the count in the
+top bar. Hold BOOT for 1 s
+for note mode: a notepad takes the mic's place, with "[the gear] to send", how many notes
 there are on the notepad's corner and the recording time left under the words. The
 turn in or out of note mode is a full refresh, so the old tile doesn't show through.
 The line under the tile, the battery's time left or to full, follows the text size.

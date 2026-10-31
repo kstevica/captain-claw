@@ -53,7 +53,7 @@
 #if defined(PAPER_B)
 #define FW_VERSION "1.0.29"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.20.1"
+#define FW_VERSION "0.20.2"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -534,7 +534,7 @@ static void noteBoot() {
   const uint64_t pins = cause == ESP_SLEEP_WAKEUP_EXT1 ? esp_sleep_get_ext1_wakeup_status() : 0;
   const char* what = !deep                                ? bootReason()
                      : cause == ESP_SLEEP_WAKEUP_TIMER    ? "timer"
-                     : pins & (1ULL << board::kTalkPin)   ? "BOOT"
+                     : pins & (1ULL << board::kTalkPin)   ? board::kTalkKey
                      : pins & (1ULL << board::kSidePin)   ? "PWR"
                                                           : "other";
   const time_t now = time(nullptr);

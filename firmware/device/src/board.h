@@ -123,13 +123,15 @@ constexpr const char* kIdPrefix = "epaper";
 constexpr bool kHasTouch = false;
 #endif
 constexpr const char* kNoun = "device";
-constexpr const char* kTalkButton = "BOOT button";
+// (BOOT on the board, but nobody who uses it knows that: it's the upper of the two,
+// with a gear on its cap.)
+constexpr const char* kTalkButton = "Up button";
 constexpr const char* kSideButton = "PWR button";
-constexpr const char* kTalkHint = "Press BOOT to talk";
+constexpr const char* kTalkHint = "Press Up to talk";
 constexpr bool kTalkToggles = true;
 constexpr bool kTalkFromSleep = false;  // a press that wakes it only wakes it; the next one talks
 constexpr char kTalkM5 = 'A', kSideM5 = 'B', kBackM5 = 0;  // hw::update() feeds M5.BtnA / M5.BtnB
-constexpr const char* kTalkKey = "BOOT";
+constexpr const char* kTalkKey = "Up";
 constexpr const char* kSideKey = "PWR";
 constexpr const char* kBackKey = "";
 constexpr gpio_num_t kTalkPin = GPIO_NUM_0;   // BOOT: a strapping pin, read only at power-on and reset
