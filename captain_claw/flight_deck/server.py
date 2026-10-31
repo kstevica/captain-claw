@@ -53,7 +53,7 @@ from captain_claw.flight_deck import agent_sharing
 from captain_claw.flight_deck import context_packs
 from captain_claw.flight_deck import speaker_grants
 from captain_claw.flight_deck import shared_workspace
-from captain_claw.flight_deck import usage_quota
+from captain_claw.flight_deck import usage_quota, usage_spend
 from captain_claw.flight_deck import agent_idle
 
 
@@ -1155,6 +1155,10 @@ async def lifespan(app: FastAPI):
     _audit_stop = asyncio.Event()
     app.state.tool_audit_stop = _audit_stop
     app.state.tool_audit_task = asyncio.create_task(tool_audit_routes.retention_loop(_audit_stop))
+    # ── Spend ledger: the agents' LLM calls read in every 15 min (usage_spend). ──
+    _spend_stop = asyncio.Event()
+    app.state.usage_spend_stop = _spend_stop
+    app.state.usage_spend_task = asyncio.create_task(usage_spend.sync_loop(_spend_stop))
     # ── Taskboard: FD's ledgers read into users' boards every 120 s. ──
     taskboard.start()
     # ── Payments loop (FD_PAYMENTS): expiry, bank statement syncs (Phase 4). ──
@@ -1452,6 +1456,12 @@ async def lifespan(app: FastAPI):
         await payments_routes.close()
     except Exception:
         pass
+    if hasattr(app.state, "usage_spend_stop"):
+        app.state.usage_spend_stop.set()
+        try:
+            await asyncio.wait_for(app.state.usage_spend_task, timeout=5.0)
+        except Exception:
+            pass
     if hasattr(app.state, "tool_audit_stop"):
         app.state.tool_audit_stop.set()
         try:
@@ -1705,6 +1715,7 @@ from captain_claw.flight_deck.whatsapp_web_routes import router as whatsapp_web_
 from captain_claw.flight_deck.branding_routes import router as branding_router
 from captain_claw.flight_deck.invite_routes import admin_router as invite_admin_router
 from captain_claw.flight_deck.invite_routes import public_router as invite_public_router
+from captain_claw.flight_deck.feedback_request_routes import router as feedback_request_router
 from captain_claw.flight_deck.info_routes import router as info_router
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
 from captain_claw.flight_deck.antigravity_routes import router as antigravity_router
@@ -1808,6 +1819,7 @@ app.include_router(whatsapp_web_router)
 app.include_router(branding_router)
 app.include_router(invite_admin_router)
 app.include_router(invite_public_router)
+app.include_router(feedback_request_router)
 app.include_router(info_router)
 app.include_router(codex_oauth_router)
 app.include_router(antigravity_router)
@@ -1908,6 +1920,7 @@ app.include_router(mcp_inbound_router)
 app.include_router(mcp_oauth_router)
 app.include_router(costs_router)
 app.include_router(usage_quota_router)
+app.include_router(usage_spend.router)
 app.include_router(byok_router)
 app.include_router(llm_router)
 app.include_router(being_router)

@@ -332,6 +332,31 @@ class FlightDeckDB:
             CREATE INDEX IF NOT EXISTS idx_daily_usage_day
                 ON daily_usage(day);
 
+            -- What each user's agents spent on LLMs (usage_spend), per UTC day
+            -- and model, read from the agents' own llm_usage tables. Unlike
+            -- daily_usage no reset touches it. input_tokens is fresh input;
+            -- byok = the call ran on someone's own key. Dollars are worked out
+            -- when read, so a price added later also prices the past.
+            CREATE TABLE IF NOT EXISTS usage_spend (
+                user_id            TEXT NOT NULL,
+                day                TEXT NOT NULL,
+                model              TEXT NOT NULL,
+                byok               INTEGER NOT NULL DEFAULT 0,
+                input_tokens       INTEGER NOT NULL DEFAULT 0,
+                output_tokens      INTEGER NOT NULL DEFAULT 0,
+                cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+                calls              INTEGER NOT NULL DEFAULT 0,
+                updated_at         TEXT NOT NULL,
+                PRIMARY KEY (user_id, day, model, byok)
+            );
+            -- How far usage_spend has read each agent's llm_usage (its rowid).
+            CREATE TABLE IF NOT EXISTS usage_spend_sync (
+                slug       TEXT PRIMARY KEY,
+                last_rowid INTEGER NOT NULL DEFAULT 0,
+                updated_at TEXT NOT NULL
+            );
+
             -- Free resets an admin gave a user (usage_quota): spending one
             -- zeroes the user's daily_usage for today.
             CREATE TABLE IF NOT EXISTS usage_reset_credits (
@@ -1063,6 +1088,8 @@ class FlightDeckDB:
             ("agent_links", "remote_url", "TEXT NOT NULL DEFAULT ''"),
             ("agent_links", "remote_key", "TEXT NOT NULL DEFAULT ''"),
             ("daily_usage", "byok_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            ("users", "last_login_at", "TEXT NOT NULL DEFAULT ''"),
+            ("users", "feedback_asked_at", "TEXT NOT NULL DEFAULT ''"),
         ]:
             try:
                 await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
@@ -1072,6 +1099,13 @@ class FlightDeckDB:
         await self._db.execute(
             "UPDATE users SET metadata = json_set(metadata, '$.plan', 'premium')"
             " WHERE json_valid(metadata) AND json_extract(metadata, '$.plan') = 'pro'")
+        # Last logins from before they were recorded: the user's newest session,
+        # if one is left (a session is made at sign-in and at every refresh).
+        await self._db.execute(
+            "UPDATE users SET last_login_at ="
+            " (SELECT MAX(s.created_at) FROM user_sessions s WHERE s.user_id = users.id)"
+            " WHERE last_login_at = ''"
+            " AND EXISTS (SELECT 1 FROM user_sessions s WHERE s.user_id = users.id)")
         await self._db.commit()
 
     # ── Users ────────────────────────────────────────────────────────
@@ -1119,7 +1153,8 @@ class FlightDeckDB:
     async def get_user_by_id(self, user_id: str) -> dict | None:
         assert self._db is not None
         async with self._db.execute(
-            "SELECT id, email, display_name, role, created_at, updated_at, metadata"
+            "SELECT id, email, display_name, role, created_at, updated_at, metadata,"
+            " last_login_at, feedback_asked_at"
             " FROM users WHERE id = ?", (user_id,)
         ) as cur:
             row = await cur.fetchone()
@@ -2225,6 +2260,55 @@ class FlightDeckDB:
         await self._db.commit()
         return True
 
+    async def get_usage_spend_marks(self) -> dict[str, int]:
+        """How far usage_spend has read each agent's llm_usage, by slug."""
+        assert self._db is not None
+        async with self._db.execute("SELECT slug, last_rowid FROM usage_spend_sync") as cur:
+            return {r["slug"]: int(r["last_rowid"]) for r in await cur.fetchall()}
+
+    async def add_usage_spend(
+        self, slug: str, user_id: str, rows: list[dict], last_rowid: int,
+    ) -> None:
+        """Add one agent's new calls (*rows*: a day, model and byok flag with
+        their token sums) to *user_id*'s ledger and note how far it was read."""
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.executemany(
+            "INSERT INTO usage_spend (user_id, day, model, byok, input_tokens, output_tokens,"
+            " cache_write_tokens, cache_read_tokens, calls, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+            " ON CONFLICT(user_id, day, model, byok) DO UPDATE SET"
+            " input_tokens = input_tokens + excluded.input_tokens,"
+            " output_tokens = output_tokens + excluded.output_tokens,"
+            " cache_write_tokens = cache_write_tokens + excluded.cache_write_tokens,"
+            " cache_read_tokens = cache_read_tokens + excluded.cache_read_tokens,"
+            " calls = calls + excluded.calls,"
+            " updated_at = excluded.updated_at",
+            [(user_id, r["day"], r["model"], int(r["byok"]), r["input_tokens"], r["output_tokens"],
+              r["cache_write_tokens"], r["cache_read_tokens"], r["calls"], now) for r in rows],
+        )
+        await self._db.execute(
+            "INSERT INTO usage_spend_sync (slug, last_rowid, updated_at) VALUES (?, ?, ?)"
+            " ON CONFLICT(slug) DO UPDATE SET"
+            " last_rowid = excluded.last_rowid, updated_at = excluded.updated_at",
+            (slug, int(last_rowid), now),
+        )
+        await self._db.commit()
+
+    async def list_usage_spend(self, month_start: str) -> list[dict]:
+        """The ledger's token sums per user, model and byok flag, split by
+        whether the day is on or after *month_start*."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT user_id, model, byok, day >= ? AS in_month, MIN(day) AS first_day,"
+            " SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,"
+            " SUM(cache_write_tokens) AS cache_write_tokens,"
+            " SUM(cache_read_tokens) AS cache_read_tokens"
+            " FROM usage_spend GROUP BY user_id, model, byok, in_month",
+            (month_start,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
     async def get_usage_summary(
         self, user_id: str | None = None, since: str | None = None,
     ) -> dict[str, int]:
@@ -2245,10 +2329,27 @@ class FlightDeckDB:
 
     # ── Admin helpers ────────────────────────────────────────────────
 
+    async def touch_last_login(self, user_id: str) -> None:
+        """*user_id* just signed in, or came back on a saved session."""
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE users SET last_login_at = ? WHERE id = ?", (_utcnow(), user_id))
+        await self._db.commit()
+
+    async def set_feedback_asked(self, user_id: str) -> str:
+        """An admin just emailed *user_id* asking for feedback; returns when."""
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.execute(
+            "UPDATE users SET feedback_asked_at = ? WHERE id = ?", (now, user_id))
+        await self._db.commit()
+        return now
+
     async def list_users(self, limit: int = 100, offset: int = 0) -> list[dict]:
         assert self._db is not None
         async with self._db.execute(
-            "SELECT id, email, display_name, role, created_at, updated_at, metadata"
+            "SELECT id, email, display_name, role, created_at, updated_at, metadata,"
+            " last_login_at, feedback_asked_at"
             " FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ) as cur:
