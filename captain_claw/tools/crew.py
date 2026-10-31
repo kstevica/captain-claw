@@ -13,6 +13,9 @@ person's Approve does it. Recursion is refused, as in the `code` tool.
 from __future__ import annotations
 
 import os
+import re
+import time
+from datetime import UTC, datetime
 from typing import Any
 
 from captain_claw.logging import get_logger
@@ -21,6 +24,37 @@ from captain_claw.tools.registry import Tool, ToolResult
 log = get_logger(__name__)
 
 _WORKER_MARKERS = ("CLAW_CODE_AGENT", "CLAW_BASNA_WORKER", "CLAW_VATRA_WORKER")
+_ASKS_TO_DELIVER = re.compile(r"\b(git\s+push|gh\s+(pr|auth|repo)|GH_TOKEN|GITHUB_TOKEN|pull\s+request|push\s+(the|this|it|branch))\b",
+                              re.IGNORECASE)
+_OPENS_A_PR = re.compile(r"\b(open|create|raise|submit|make)\s+(a|an|the|its)?\s*(new\s+)?(pull\s+request|PR)\b|\bgh\s+pr\s+create\b",
+                         re.IGNORECASE)
+_NOT_A_WORKERS_JOB = (" A worker doesn't push or open pull requests, and won't see a GitHub login on this computer: use "
+                      "crew action=pr once it has committed.")
+
+
+_WINDOWS = {"five_hour": "the 5-hour limit", "seven_day": "the weekly limit", "seven_day_opus": "the weekly Opus limit",
+            "seven_day_sonnet": "the weekly Sonnet limit"}
+
+
+def _usage_lines(row: dict | None) -> list[str]:
+    """What a CLI last said about itself. It says so only while working, so its age is part of the fact."""
+    if not row or not (row.get("model") or row.get("limits") or row.get("tasks")):
+        return ["    Model and limits: not reported yet. Only some CLIs report them, and only while working."]
+    lines = []
+    if row.get("model"):
+        lines.append(f"    Last ran on {row['model']}, unless a task names another.")
+    for name, window in (row.get("limits") or {}).items():
+        used = window.get("used")
+        said = f"{round(used * 100)}% used" if used is not None else f"status {window.get('status') or 'unknown'}"
+        resets = window.get("resets_at")
+        when = f", resets {datetime.fromtimestamp(resets, UTC):%a %d %b %H:%M} UTC" if resets else ""
+        lines.append(f"    {(_WINDOWS.get(name) or name.replace('_', ' ')).capitalize()}: {said}{when}.")
+    if row.get("limits") and row.get("seen_at"):
+        lines.append(f"    That's as it reported {round((time.time() - row['seen_at']) / 60)} minutes ago, at its last run: "
+                     "there's no way to ask between runs, so say how old it is.")
+    if row.get("tasks"):
+        lines.append(f"    Its tasks in the last week: {row['tasks']}, {row.get('tokens', 0):,} tokens.")
+    return lines
 
 
 def _task_line(t: dict) -> str:
@@ -44,10 +78,14 @@ class CrewTool(Tool):
         "task made (the callback, status and files say where), so read them yourself with read or glob. Never start "
         "a task to look at or fetch files, and never ask a worker to print files into its message: messages get cut. "
         "A link to one file is public_link; a page with its css and scripts needs hosting. "
-        "Actions: options (the CLIs you may use, their logins, and the projects); dispatch; list (project narrows "
+        "Actions: options (the CLIs you may use, their logins, the model each last ran on and its usage limits, like "
+        "Claude's weekly limit, and the projects: use it when asked about any of those); dispatch; list (project narrows "
         "it); status; files (where a task's files are; whole=true copies the whole project, for a big one); "
         "steer (the next instruction, or the user's answer to a worker's question); stop (keeps the work); "
-        "pr (push and open a pull request); request_merge (asks the user to Approve the merge; merging is "
+        "pr (Captain pushes the branch and opens the pull request, with the user's GitHub token from Crew → Logins: "
+        "that's the only way a task's work gets pushed, so never ask a worker to push or run gh, and never ask the user "
+        "to log in on this computer or to give you a token: a token goes in Crew → Logins, not in a chat); request_merge "
+        "(asks the user to Approve the merge; merging is "
         "their decision, so only ask when they want it merged). You can't merge or discard work yourself, and that "
         "includes git in a shell: a worker's branch is the user's to land."
     )
@@ -69,7 +107,8 @@ class CrewTool(Tool):
                 "type": "string",
                 "description": (
                     "dispatch: the task, complete and self-contained. The worker sees only this, not your "
-                    "conversation: include the goal, what done means, and any decisions already made."
+                    "conversation: include the goal, what done means, and any decisions already made. Don't ask it to "
+                    "push or open a pull request: set deliver=pr for that."
                 ),
             },
             "title": {"type": "string", "description": "dispatch: a short title, optional."},
@@ -126,10 +165,13 @@ class CrewTool(Tool):
         if (refused := self._refused(status, data)) is not None:
             return refused
         lines = ["CLIs:"]
+        used = {u["id"]: u for u in (data.get("usage") or {}).get("harnesses", [])}
         for h in (data.get("me") or {}).get("harnesses", []):
             state = "not installed" if not h.get("installed") else (
                 f"ready, on {h['login']['how']}" if h["login"].get("ok") else "no login yet (Crew → Logins)")
             lines.append(f"  {h['id']} ({h['label']}): {state}")
+            if h.get("installed"):
+                lines.extend(_usage_lines(used.get(h["id"])))
         repos = data.get("repos") or {}
         lines.append("Projects (each folder is in your VFS at the path shown: read it yourself, no task needed):")
         for p in repos.get("projects", []):
@@ -158,6 +200,9 @@ class CrewTool(Tool):
         if found and found["kind"] == "telegram":
             origin_platform, origin_user_id = "telegram", found["address"]
             origin_chat_id = int(found["address"]) if str(found["address"]).isdigit() else 0
+        # Asked for in the words of the brief: it's what they want, and only Captain can do it.
+        if not kwargs.get("deliver") and kwargs.get("kind") != "scout" and _OPENS_A_PR.search(brief):
+            kwargs["deliver"] = "pr"
         payload = {
             "harness": harness, "brief": brief, "source_host": "localhost",
             "origin_platform": origin_platform, "origin_user_id": origin_user_id, "origin_chat_id": origin_chat_id,
@@ -176,6 +221,8 @@ class CrewTool(Tool):
             f"Task {data.get('id')} is {where}: {data.get('harness_label')} in {data.get('repo_label')}, on branch "
             f"{data.get('branch')}.{behind} It has only started: nothing is done yet, so tell the user it's under way, "
             f"end your turn and don't report a result. You'll be called back when it finishes or needs a decision."
+            + (" Captain opens its pull request when it finishes." if kwargs.get("deliver") == "pr"
+               else _NOT_A_WORKERS_JOB if _ASKS_TO_DELIVER.search(brief) else "")
         ))
 
     async def _do_list(self, client: Any, **kwargs: Any) -> ToolResult:
@@ -201,6 +248,8 @@ class CrewTool(Tool):
             return refused
         lines = [_task_line(data)]
         evidence = data.get("evidence") or {}
+        if data.get("model_used") or data.get("model"):
+            lines.append(f"Model: {data.get('model_used') or data.get('model')}")
         if evidence.get("log"):
             lines.append("Commits:\n" + "\n".join(f"  {c}" for c in evidence["log"]))
         if evidence.get("dirty"):
@@ -208,9 +257,7 @@ class CrewTool(Tool):
         if evidence.get("off_branch"):
             lines.append(f"Warning: the worker left its branch; it's on {evidence['off_branch']}")
         lines.extend(self._where_lines(data.get("results") or {}))
-        if data.get("status") == "ready" and data.get("kind") == "ship" and evidence.get("commits"):
-            lines.append("Merging is the user's call. Only if they ask for it: crew action=request_merge, and they Approve it "
-                         "in the bell. Never run git merge yourself, in a shell or any other way.")
+        lines.extend(data.get("next_steps") or [])
         if data.get("report"):
             lines.append(f"Report:\n{data['report'][:12000]}")
         elif data.get("final"):
@@ -260,7 +307,8 @@ class CrewTool(Tool):
         if refused is not None:
             return refused
         when = "next, once its current turn ends" if data.get("pending") else "now"
-        return ToolResult(success=True, content=f"Told task {data.get('id')}; it acts on it {when}.")
+        return ToolResult(success=True, content=f"Told task {data.get('id')}; it acts on it {when}."
+                          + (_NOT_A_WORKERS_JOB if _ASKS_TO_DELIVER.search(text) else ""))
 
     async def _do_stop(self, client: Any, **kwargs: Any) -> ToolResult:
         refused, data = await self._with_task(client, "stop", kwargs)
@@ -272,7 +320,9 @@ class CrewTool(Tool):
         refused, data = await self._with_task(client, "pr", kwargs)
         if refused is not None:
             return refused
-        return ToolResult(success=True, content=str(data.get("note") or "Pull request opened."))
+        return ToolResult(success=True, content=(
+            f"{data.get('note') or 'Pull request opened.'} Give the user that link. Merging it is their call: "
+            "crew action=request_merge only if they ask."))
 
     async def _do_request_merge(self, client: Any, **kwargs: Any) -> ToolResult:
         refused, data = await self._with_task(client, "request_merge", kwargs)

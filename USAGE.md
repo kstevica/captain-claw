@@ -4852,6 +4852,10 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 
 **Where results go.** A worktree is out of an agent's reach, so when a task finishes its work comes to your VFS, under `vfs:crew/<project>/<task>/`: `report.md` is the worker's whole message, and `files/` holds the whole project if it's small (under 300 files and 20 MB), otherwise only what the task changed. Only commits are copied, with no `.git`. Your agent reads them there, and the callback tells it where, so it never needs a worker to print files into a message. In the page, a task's **Files** tab shows them, can copy a big project whole, and **Get a link to this page** publishes one with an `index.html` from that clean copy. Agents do the same with `hosting`. Discarding a task's work removes its copy. A project's own folder also stays readable directly, at the `vfs:` path `crew action=options` shows.
 
+**Models and limits.** The Crew page shows the model each CLI last ran on and its account's limits, like Claude's weekly limit, with what your tasks used in the last week. Your agent can tell you too. It's what the CLI reported at its last run, so it's as old as that run: nothing is asked for it and nothing is spent. Claude Code reports both, and Pi its model. Codex and OpenCode report neither.
+
+**Pushing is Captain's.** A worker never pushes or opens a pull request, and a non-admin's worker can't see a GitHub login on the server, whether that's `gh auth login` or a `GH_TOKEN`. Save a GitHub token in Crew → Logins: Captain uses it to clone, push and open pull requests, when a task asks for that or through **Open a pull request**, or `crew action=pr` from your agent.
+
 > **Merging is enforced at the `crew` tool.** A non-admin's agent has no shell, so for them that is the whole way to a merge. An admin's agent has a shell until agents run in an OS sandbox, so for it the rule is one it is told to follow, not one it can't break.
 
 | Environment variable | What it does |

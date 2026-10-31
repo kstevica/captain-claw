@@ -6,7 +6,8 @@ import {
 } from 'lucide-react'
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
-  crewApi, type CrewDispatch, type CrewEvent, type CrewHarness, type CrewMe, type CrewRepos, type CrewTask,
+  crewApi, type CrewDispatch, type CrewEvent, type CrewHarness, type CrewLimit, type CrewMe, type CrewRepos, type CrewTask,
+  type CrewUsage,
 } from '../../services/crewApi'
 import { CrewActivity } from './CrewActivity'
 import { CrewChanges } from './CrewChanges'
@@ -26,6 +27,7 @@ import {
 
 const POLL_LIST_MS = 4000
 const POLL_EVENTS_MS = 2000
+const POLL_USAGE_MS = 30000
 const COLLAPSED_KEY = 'fd:crew:collapsed'
 
 function readCollapsed(): string[] {
@@ -187,7 +189,7 @@ function TaskView({ taskId, onBack, onChanged }: { taskId: string; onBack?: () =
           <div className="min-w-0 flex-1">
             <h3 className="break-words text-[15px] font-semibold leading-snug text-zinc-100">{task.title}</h3>
             <p className="mt-1 flex flex-wrap items-center gap-x-2.5 gap-y-0.5 text-xs text-zinc-500">
-              <span>{task.harness_label}{task.model ? ` · ${task.model}` : ''}</span>
+              <span title={task.model_used ? 'As the CLI reports it' : undefined}>{task.harness_label}{(task.model_used || task.model) ? ` · ${task.model_used || task.model}` : ''}</span>
               <span>{task.repo_label}</span>
               {task.branch && <span className="inline-flex min-w-0 items-center gap-1"><GitBranch className="h-3 w-3 shrink-0" /><span className="truncate">{task.branch}</span></span>}
               {task.from_agent && <span>from your agent</span>}
@@ -630,6 +632,58 @@ function ProjectGroup({ project, collapsed, selectedTask, selectedProject, onTog
   )
 }
 
+const WINDOWS: Record<string, string> = {
+  five_hour: '5 hours', seven_day: 'This week', seven_day_opus: 'This week, Opus', seven_day_sonnet: 'This week, Sonnet',
+}
+
+function LimitBar({ name, limit }: { name: string; limit: CrewLimit }) {
+  const pct = limit.used === null ? null : Math.round(limit.used * 100)
+  const stopped = !!limit.status && !limit.status.startsWith('allowed')
+  const tone = stopped || (pct ?? 0) >= 90 ? 'bg-red-500' : limit.status === 'allowed_warning' || (pct ?? 0) >= 75 ? 'bg-amber-500' : 'bg-teal-500'
+  const resets = limit.resets_at ? new Date(limit.resets_at * 1000).toLocaleString(undefined, { weekday: 'short', hour: 'numeric', minute: '2-digit' }) : ''
+  return (
+    <div>
+      <div className="flex items-baseline gap-2 text-[11px]">
+        <span className="text-zinc-400">{WINDOWS[name] ?? name.replace(/_/g, ' ')}</span>
+        <span className="ml-auto text-zinc-500">{resets && `resets ${resets}`}</span>
+        <span className="font-medium tabular-nums text-zinc-300">{pct === null ? limit.status : `${pct}%`}</span>
+      </div>
+      {pct !== null && (
+        <div className="mt-1 h-1 overflow-hidden rounded-full bg-zinc-800">
+          <div className={`h-full rounded-full ${tone}`} style={{ width: `${Math.min(100, Math.max(2, pct))}%` }} />
+        </div>
+      )}
+    </div>
+  )
+}
+
+function compactTokens(n: number): string {
+  return n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n)
+}
+
+/** Each CLI's model and limits, as it last reported them while working: there's no
+ *  asking between runs, so the panel says how old they are. */
+function UsagePanel({ rows }: { rows: CrewUsage[] }) {
+  if (!rows.length) return null
+  return (
+    <div className="max-h-52 shrink-0 space-y-2.5 overflow-y-auto border-t border-zinc-800 px-3.5 py-2.5">
+      {rows.map((u) => (
+        <div key={u.id} className="space-y-1.5">
+          <p className="flex items-baseline gap-1.5 text-xs">
+            <span className="shrink-0 font-medium text-zinc-300">{u.label}</span>
+            {u.model && <span className="min-w-0 truncate font-mono text-[11px] text-zinc-500">{u.model}</span>}
+          </p>
+          {Object.entries(u.limits).map(([name, limit]) => <LimitBar key={name} name={name} limit={limit} />)}
+          <p className="text-[11px] text-zinc-500" title={u.cost_usd ? `About $${u.cost_usd.toFixed(2)} at API prices` : undefined}>
+            {u.tasks} task{u.tasks === 1 ? '' : 's'} · {compactTokens(u.tokens)} tokens in the last week
+            {u.seen_at > 0 && Object.keys(u.limits).length > 0 && ` · limits as of ${ago(u.seen_at)} ago`}
+          </p>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function NewProjectLine({ onMade }: { onMade: (key: string) => void }) {
   const [name, setName] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -668,6 +722,7 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
   const [me, setMe] = useState<CrewMe | null>(null)
   const [tasks, setTasks] = useState<CrewTask[] | null>(null)
   const [repos, setRepos] = useState<CrewRepos | null>(null)
+  const [usage, setUsage] = useState<CrewUsage[]>([])
   const [selected, setSelected] = useState('')
   const [projectKey, setProjectKey] = useState('')
   const [pane, setPane] = useState<'task' | 'project' | 'new' | 'logins'>('task')
@@ -695,6 +750,13 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
     const t = setInterval(loadTasks, POLL_LIST_MS)
     return () => clearInterval(t)
   }, [loadTasks, loadRepos, me])
+  useEffect(() => {
+    if (me && !me.allowed) return
+    const load = () => { crewApi.usage().then((u) => setUsage(u.harnesses)).catch(() => {}) }
+    load()
+    const t = setInterval(load, POLL_USAGE_MS)
+    return () => clearInterval(t)
+  }, [me])
 
   const { projects, idle } = useMemo(() => {
     const groups = new Map<string, Project>()
@@ -788,6 +850,7 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
                 </details>
               )}
             </div>
+            <UsagePanel rows={usage} />
           </div>
         )}
         {showPane && (

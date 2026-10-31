@@ -3,6 +3,7 @@ The fixtures are trimmed from real runs of each CLI in a git worktree."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -102,6 +103,36 @@ def test_unknown_and_broken_lines_cost_nothing(harness):
 def _spec(**over) -> RunSpec:
     fields = {"binary": "/bin/x", "prompt": "do it", "cwd": "/w", "git_common_dir": "/r/.git", "task_id": "crw_1"}
     return RunSpec(**{**fields, **over})
+
+
+def test_claude_says_its_model_and_its_limits():
+    state = TurnState()
+    # As a real run printed them.
+    line = {"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed", "resetsAt": 1793811600, "rateLimitType": "seven_day", "overageStatus": "rejected",
+        "unifiedWindows": {"seven_day": {"utilization": 0.44, "resetsAt": 1793811600, "status": "allowed"}}}}
+    assert parse_line("claude", json.dumps(line), state) == []
+    assert state.limits == {"seven_day": {"used": 0.44, "resets_at": 1793811600, "status": "allowed"}}
+    parse_line("claude", json.dumps({"type": "system", "subtype": "init", "model": "claude-sonnet-5-5"}), state)
+    assert state.model == "claude-sonnet-5-5"
+    # It survives a restart, like the rest of a turn.
+    assert TurnState.from_json(state.to_json()).limits == state.limits
+    # With no windows it can still name the one it means.
+    other = TurnState()
+    parse_line("claude", json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+        "status": "allowed_warning", "resetsAt": 5, "rateLimitType": "five_hour"}}), other)
+    assert other.limits == {"five_hour": {"used": None, "resets_at": 5, "status": "allowed_warning"}}
+    # It isn't a documented format: nothing it might say instead may break a turn.
+    for info in ({}, {"unifiedWindows": "soon"}, {"unifiedWindows": {"seven_day": 3}}, "none", None):
+        odd = TurnState()
+        assert parse_line("claude", json.dumps({"type": "rate_limit_event", "rate_limit_info": info}), odd) == []
+        assert odd.limits == {}
+
+
+def test_pi_says_its_model():
+    state = TurnState()
+    parse_line("pi", json.dumps({"type": "message_end", "message": {"role": "assistant", "model": "ornith:9b", "content": []}}), state)
+    assert state.model == "ornith:9b"
 
 
 def test_claude_argv(monkeypatch):

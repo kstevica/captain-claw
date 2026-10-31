@@ -84,6 +84,7 @@ export interface CrewTask {
   harness: string
   harness_label: string
   model: string
+  model_used: string
   effort: string
   status: CrewStatus
   note: string
@@ -123,6 +124,24 @@ export interface CrewEvent {
   status?: string
 }
 
+export interface CrewLimit {
+  used: number | null
+  resets_at: number
+  status: string
+}
+
+/** A CLI's model and limits, as it last reported them while working, and a week's use. */
+export interface CrewUsage {
+  id: string
+  label: string
+  model: string
+  limits: Record<string, CrewLimit>
+  seen_at: number
+  tasks: number
+  tokens: number
+  cost_usd: number
+}
+
 export interface CrewRepos {
   projects: { project: string; key: string; folders: string[]; paths: Record<string, string> }[]
   recent: { repo: string; repo_label: string; repo_kind: string }[]
@@ -148,6 +167,7 @@ const post = <T>(path: string, body?: unknown) =>
 export const crewApi = {
   me: () => api<CrewMe>('/fd/crew/me'),
   repos: () => api<CrewRepos>('/fd/crew/repos'),
+  usage: () => api<{ harnesses: CrewUsage[] }>('/fd/crew/usage'),
   tasks: () => api<{ tasks: CrewTask[] }>('/fd/crew/tasks'),
   task: (id: string) => api<CrewTask>(`/fd/crew/tasks/${id}`),
   events: (id: string, after: number) => api<{ events: CrewEvent[] }>(`/fd/crew/tasks/${id}/events?after=${after}`),

@@ -26,6 +26,7 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("id", "TEXT PRIMARY KEY"), ("user_id", "TEXT NOT NULL"), ("title", "TEXT NOT NULL"),
     ("kind", "TEXT NOT NULL"),  # ship · scout
     ("harness", "TEXT NOT NULL"), ("model", "TEXT DEFAULT ''"), ("effort", "TEXT DEFAULT ''"),
+    ("model_used", "TEXT DEFAULT ''"),  # the one the CLI says it ran on; `model` is only what was asked for
     ("brief", "TEXT NOT NULL"),
     # queued · running · waiting · ready · failed · stopped · pr_open · delivered · closed
     ("status", "TEXT NOT NULL"), ("note", "TEXT DEFAULT ''"),
@@ -120,6 +121,10 @@ class CrewStore:
         for name, spec in _COLUMNS:
             if name not in have:
                 self._conn.execute(f"ALTER TABLE tasks ADD COLUMN {name} {spec}")
+        # What each CLI last said about itself: per user, since each has their own account.
+        self._conn.execute("CREATE TABLE IF NOT EXISTS seen (user_id TEXT NOT NULL, harness TEXT NOT NULL, "
+                           "model TEXT DEFAULT '', limits TEXT DEFAULT '{}', at REAL DEFAULT 0, "
+                           "PRIMARY KEY (user_id, harness))")
         self._conn.execute("CREATE INDEX IF NOT EXISTS tasks_user ON tasks (user_id, created_at)")
         self._conn.execute("CREATE INDEX IF NOT EXISTS tasks_status ON tasks (status)")
         self._conn.commit()
@@ -182,6 +187,35 @@ class CrewStore:
                 " AND repo_kind IN ('url', 'path') GROUP BY repo ORDER BY at DESC LIMIT ?",
                 (user_id, limit)).fetchall()
         return [dict(r) for r in rows]
+
+    def note_seen(self, user_id: str, harness: str, *, model: str = "", limits: dict | None = None) -> None:
+        with self._lock:
+            row = self._conn.execute("SELECT model, limits FROM seen WHERE user_id = ? AND harness = ?",
+                                     (user_id, harness)).fetchone()
+            merged = json.loads(row["limits"] or "{}") if row else {}
+            merged.update(limits or {})
+            self._conn.execute(
+                "INSERT OR REPLACE INTO seen (user_id, harness, model, limits, at) VALUES (?, ?, ?, ?, ?)",
+                (user_id, harness, model or (row["model"] if row else ""), json.dumps(merged), time.time()))
+            self._conn.commit()
+
+    def seen_for(self, user_id: str) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute("SELECT harness, model, limits, at FROM seen WHERE user_id = ?", (user_id,)).fetchall()
+        return {r["harness"]: {"model": r["model"], "limits": json.loads(r["limits"] or "{}"), "at": r["at"]} for r in rows}
+
+    def forget_seen(self, user_id: str, harness: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM seen WHERE user_id = ? AND harness = ?", (user_id, harness))
+            self._conn.commit()
+
+    def usage_since(self, user_id: str, since: float) -> dict[str, dict[str, Any]]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT harness, COUNT(*) AS tasks, SUM(tokens_in + tokens_out) AS tokens, SUM(cost_usd) AS cost FROM tasks"
+                " WHERE user_id = ? AND updated_at >= ? GROUP BY harness", (user_id, since)).fetchall()
+        return {r["harness"]: {"tasks": r["tasks"], "tokens": r["tokens"] or 0, "cost_usd": round(r["cost"] or 0.0, 4)}
+                for r in rows}
 
     def close(self) -> None:
         with self._lock:

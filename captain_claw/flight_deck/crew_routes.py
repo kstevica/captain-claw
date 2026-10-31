@@ -2,6 +2,7 @@
 
   GET    /fd/crew/me                    the caller's approval, and each CLI's state here
   GET    /fd/crew/repos                 where a task can work
+  GET    /fd/crew/usage                 each CLI's model and limits as last reported, and a week's use
   GET    /fd/crew/tasks                 the caller's tasks
   POST   /fd/crew/tasks                 a new task
   GET    /fd/crew/tasks/{id}            one task
@@ -143,6 +144,12 @@ async def repos(user: dict = Depends(get_current_user)) -> dict[str, Any]:
     return {"projects": projects, "recent": crew_store.get_store().recent_repos(row["id"])}
 
 
+@router.get("/usage")
+async def usage(user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return crew_runner.usage(row["id"])
+
+
 @router.post("/projects", status_code=201)
 async def create_project(body: ProjectBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, grant = await _approved(user)
@@ -242,7 +249,9 @@ async def task_close(task_id: str, discard: bool = False, user: dict = Depends(g
 @router.put("/logins/{name}")
 async def put_login(name: str, body: LoginBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, _ = await _approved(user)
-    return await crew_logins.save_login(get_db(), row["id"], name, body.secret)
+    saved = await crew_logins.save_login(get_db(), row["id"], name, body.secret)
+    crew_store.get_store().forget_seen(row["id"], name)  # another account has other limits
+    return saved
 
 
 @router.delete("/logins/{name}")
@@ -251,6 +260,7 @@ async def delete_login(name: str, user: dict = Depends(get_current_user)) -> dic
     if name not in crew_logins.LOGIN_NAMES:
         raise HTTPException(404, "Unknown login")
     await crew_logins.delete_login(get_db(), row["id"], name)
+    crew_store.get_store().forget_seen(row["id"], name)
     return {"ok": True}
 
 
@@ -282,7 +292,7 @@ async def agent_status(request: Request) -> dict[str, Any]:
 @router.get("/agent/options")
 async def agent_options(request: Request) -> dict[str, Any]:
     row, _, _ = await _agent_caller(request)
-    return {"me": await _me(row), "repos": await repos(row)}
+    return {"me": await _me(row), "repos": await repos(row), "usage": crew_runner.usage(row["id"])}
 
 
 @router.post("/agent/dispatch")
@@ -348,6 +358,10 @@ async def agent_request_merge(body: AgentTaskBody, request: Request) -> dict[str
     task = crew_runner._get(row["id"], body.task_id)
     evidence = await crew_runner._evidence(task)
     crew_runner._must_be_landable(task, evidence)
+    if task["repo_kind"] == "url" and not task["delivery"].get("pr"):
+        # Said now, not after the person has pressed Approve.
+        raise HTTPException(409, "This one came from a repository address, so it lands through a pull request. Open it "
+                                 "first with crew action=pr.")
     store = autonomy_store()
     for waiting in store.waiting_actions(row["id"]):
         payload = waiting.get("payload") or {}
