@@ -136,11 +136,12 @@ New in 0.8.4: everything your agents were asked and sent, on every channel, in l
 - **What's on it**: every agent turn, scheduled jobs, Autonomous Work proposals, follow-ups, held Gmail auto-replies and sends, linked systems, agents' to-do lists, and the last 30 days of each agent's chats, marked as history and never acted on.
 - **Your own inboxes** (Telegram inbox, WhatsApp Web, Gmail) are off until you consent, kept 30 days, and deleted when switched off.
 - **It reads the work.** The agent's own model writes the title, the ask, the result and who's involved; Jev decides whether it's a task, who owes the next move and whether it's done; without Jev, rules decide. **Why is this here?** shows every decision.
-- **Keys like Gmail's**: `j`/`k`, `e` Done, `b` Snooze, `r` next step, `m` Next move, `f` Open bigger, `/` search, `g` then a lane, `?` for the list. Nothing approves a next step by key.
+- **Keys like Gmail's**: `j`/`k`, `x` pick, `e` Done, `b` Snooze, `r` next step, `m` Next move, `f` Open bigger, `/` search, `g` then a lane, `?` for the list. Nothing approves a next step by key.
 - **A reply brings the same task back** to Needs me, marked *New reply*, with its history. Your corrections stick against later sweeps, with Undo.
 - **Open bigger** shows one task over the board, and a task with a Gmail thread shows the whole email, fetched with your token when you open it and kept nowhere.
 - **Next steps wait for you.** With Jev, the agent's model drafts a reply, a reminder or a question as a proposal you edit, approve or reject. Email only ever becomes a draft, and recipients come only from verified parties.
 - **Hand it to an agent**: Next move → *The agent…*, say what to do, **Hand over**. It runs as your own request, and your Email sending switch still applies.
+- **Several at once**: tick tasks (or `x`, Shift+click for a run, `*` then `a` for all shown), then **Done**, **Snooze**, **Next move**, **Not a task**, **Reopen** or **Got it**, with Undo for the lot. **Hand to agent** takes one instruction for all ("thank them and politely decline"): the tasks leave Needs me, and the agent works through them one at a time, each with its own details. **Stop the rest** keeps what hasn't started from running. Nothing approves a next step in bulk.
 - **Then it checks**: the reply is compared with the tool-call register, and with Gmail and Google Calendar read with your token, and Jev compares your words with the record. **What the agent did** shows the verdict; in doubt, the task stays open and yours.
 - **Merge, unmerge and split** with Undo, and export as CSV or JSONL. `?taskboard=<id>` links open a task.
 

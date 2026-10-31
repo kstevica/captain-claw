@@ -6,6 +6,7 @@
   POST /fd/taskboard/tasks/{id}/action   a correction: done · reopen · dismiss · not_task · snooze ·
                                          unsnooze · rename · owes_next · ack_failed · undo ·
                                          confirm_task · not_done
+  POST /fd/taskboard/batch_action        one correction on several tasks: {ids, action, value}
   GET  /fd/taskboard/tasks/{id}/why      the latest decisions about a task, and why it is where it is
   POST /fd/taskboard/sync                read the sources now, for the caller's board
   GET  /fd/taskboard/summary             {needs_me} — the tile badge's poll
@@ -68,6 +69,8 @@ router = APIRouter(prefix="/fd/taskboard", tags=["taskboard"])
 
 ACTIONS = ("done", "reopen", "dismiss", "not_task", "snooze", "unsnooze", "rename", "owes_next",
            "ack_failed", "undo", "confirm_task", "not_done")
+# What several tasks can take at once: not a rename, one task's own words.
+BATCH_ACTIONS = tuple(a for a in ACTIONS if a != "rename")
 PASSIVE_SOURCES = ("telegram_inbox", "whatsapp_web", "gmail")
 
 # What the Sources sheet lists: what the board reads, what it reads only once
@@ -134,8 +137,12 @@ def store() -> taskboard_store.TaskboardStore:
 def start() -> None:
     """Start the sweep and the triage worker (Flight Deck's lifespan).
     ``FD_TASKBOARD_DISABLED=true`` keeps both off; the board then fills only
-    when someone opens it, and nothing is triaged."""
+    when someone opens it, and nothing is triaged. Hand-overs still in line go
+    on either way: the user asked for them."""
     global _loop_task, _loop_stop
+    from captain_claw.flight_deck import taskboard_handover
+
+    taskboard_handover.resume_lines()
     if os.environ.get("FD_TASKBOARD_DISABLED", "").lower() in ("true", "1", "yes") or _loop_task is not None:
         return
     _loop_stop = asyncio.Event()
@@ -145,6 +152,9 @@ def start() -> None:
 
 async def stop() -> None:
     global _loop_task, _loop_stop
+    from captain_claw.flight_deck import taskboard_handover
+
+    await taskboard_handover.stop_lines()
     await taskboard_triage.stop()
     # v2 history: a backfill still reading stops (it starts again on the next open).
     from captain_claw.flight_deck import taskboard_backfill
@@ -263,8 +273,10 @@ def _shown_parties(uid: str, parties: list[dict]) -> list[dict]:
             if not (read(p) and name(p) and (name(p) in recorded or best.get(name(p)) != i))]
 
 
-def _item(uid: str, row: dict, parties: list[dict], links: list[dict], proposal: dict | None, lane: str) -> dict:
+def _item(uid: str, row: dict, parties: list[dict], links: list[dict], proposal: dict | None, lane: str,
+          in_line: dict | None = None) -> dict:
     item = {k: v for k, v in row.items() if k not in _HIDDEN}
+    item["in_line"] = in_line
     item["channels"] = _loads(row.get("channels"), [])
     item["user_locks"] = _loads(row.get("user_locks"), {})
     item["flags"] = _loads(row.get("flags"), {})
@@ -281,8 +293,9 @@ def _items(uid: str, rows: list[dict], proposals: dict[str, dict]) -> list[dict]
     ids = [r["id"] for r in rows]
     parties = store().parties_for(uid, ids)
     links = store().links(uid, ids)
+    in_line = store().line_places(uid)
     return [_item(uid, r, parties.get(r["id"], []), links.get(r["id"], []), proposals.get(r["id"]),
-                  str(r.get("lane") or "other")) for r in rows]
+                  str(r.get("lane") or "other"), in_line.get(r["id"])) for r in rows]
 
 
 def _task_item(uid: str, row: dict, proposals: dict[str, dict] | None = None) -> dict:
@@ -566,6 +579,42 @@ async def taskboard_action(task_id: str, body: ActionBody, user: dict = Depends(
         if row is None:
             raise HTTPException(404, "task not found")
         return {"task": _task_item(uid, row)}
+
+    return await asyncio.to_thread(apply)
+
+
+class BatchActionBody(BaseModel):
+    ids: list[str]
+    action: str
+    value: Any = None
+
+
+@router.post("/batch_action")
+async def taskboard_batch_action(body: BatchActionBody, user: dict = Depends(get_current_user)) -> dict:
+    """One correction on several of the caller's tasks, each as if made on its own
+    (its lock, its timeline line, its Undo): ``{changed: [ids], refused: [{id, why}]}``.
+    One it can't apply to, or that isn't theirs, doesn't hold up the rest."""
+    uid = _uid(user)
+    if body.action not in BATCH_ACTIONS:
+        raise HTTPException(400, f"action is one of {', '.join(BATCH_ACTIONS)}")
+    ids = list(dict.fromkeys(str(i) for i in body.ids if i))
+    if len(ids) > taskboard_store.BATCH_MAX:
+        raise HTTPException(400, f"at most {taskboard_store.BATCH_MAX} tasks at a time")
+
+    def apply() -> dict:
+        changed: list[str] = []
+        refused: list[dict] = []
+        for task_id in ids:
+            try:
+                row = store().correct(uid, task_id, body.action, body.value, actor=_actor(user))
+            except ValueError as exc:
+                refused.append({"id": task_id, "why": str(exc)})
+                continue
+            if row is None:
+                refused.append({"id": task_id, "why": "task not found"})
+            else:
+                changed.append(task_id)
+        return {"changed": changed, "refused": refused}
 
     return await asyncio.to_thread(apply)
 

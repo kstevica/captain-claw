@@ -69,6 +69,7 @@ _JSON_FIELDS = {"channels", "user_locks", "flags", "next_steps"}
 _PARTY_ORDER = {"requester": 0, "recipient": 1, "cc": 2, "doer": 3, "mentioned": 4}
 _ROLES = tuple(_PARTY_ORDER)
 _PAGE_MAX = 200
+BATCH_MAX = 200  # the tasks one move or one hand-over reaches at once
 _SNOOZE_MAX_S = 366 * 86400
 
 # Every table and its columns. A column missing from an older taskboard.db is
@@ -287,6 +288,28 @@ _TABLES["passive_marks"] = [
 ]
 _TABLE_TAIL["passive_marks"] = "PRIMARY KEY (user_id, source, task_id, what, ref)"
 _INDEXES = (*_INDEXES, "CREATE INDEX IF NOT EXISTS idx_passive_marks_task ON passive_marks(task_id)")
+# ── Hand-overs in line (taskboard_handover): several tasks given to one agent with
+# one set of words, which it takes one at a time. On disk, so a deck restart doesn't
+# lose what hadn't had its turn. ``state``: waiting, running, done, failed (the run
+# gave no answer), skipped (it was no longer theirs to run) or stopped (by the user).
+_TABLES["handover_line"] = [
+    ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
+    ("batch_id", "TEXT NOT NULL"),
+    ("user_id", "TEXT NOT NULL"),
+    ("task_id", "TEXT NOT NULL"),
+    ("agent_slug", "TEXT NOT NULL"),
+    ("agent_name", "TEXT NOT NULL DEFAULT ''"),
+    ("action_id", "TEXT NOT NULL"),
+    ("words", "TEXT NOT NULL DEFAULT ''"),
+    ("state", "TEXT NOT NULL DEFAULT 'waiting'"),
+    ("note", "TEXT NOT NULL DEFAULT ''"),
+    ("created_at", "REAL NOT NULL DEFAULT 0"),
+    ("ended_at", "REAL"),
+]
+_INDEXES = (*_INDEXES,
+            "CREATE INDEX IF NOT EXISTS idx_line_agent ON handover_line(user_id, agent_slug, state, id)",
+            "CREATE INDEX IF NOT EXISTS idx_line_task ON handover_line(task_id, state)",
+            "CREATE INDEX IF NOT EXISTS idx_line_batch ON handover_line(user_id, batch_id)")
 # Flags that repeat what a task's text said (a model read them from it).
 _PASSIVE_TEXT_FLAGS = ("expected_deliverable", "blocker", "why", "answered", "answered_on", "proof")
 # The fields a correction's ``before`` may hold an inbox's text in.
@@ -1182,16 +1205,18 @@ class TaskboardStore:
         with self._lock:
             return [str(r[0]) for r in self._conn.execute(
                 "SELECT DISTINCT user_id FROM tasks WHERE triage_state = 'pending' AND triage_after IS NOT NULL "
-                "AND triage_after <= ? AND +merged_into = ''", (now,))]  # by idx_tasks_triage: only what is pending
+                f"AND triage_after <= ? AND +merged_into = '' AND {_NOT_IN_LINE}", (now,))]  # by idx_tasks_triage: only what is pending
 
     def triage_queue(self, user_id: str, *, now: float | None = None, limit: int = 20) -> list[dict]:
-        """The user's tasks waiting to be triaged now, the longest waiting first."""
+        """The user's tasks waiting to be triaged now, the longest waiting first.
+        Not one in line for an agent: judged by what it was before the user handed
+        it over, it could close before its turn. It is read once the agent is through."""
         now = time.time() if now is None else now
         with self._lock:
             return [dict(r) for r in self._conn.execute(
                 "SELECT * FROM tasks WHERE user_id = ? AND triage_state = 'pending' AND triage_after IS NOT NULL "
-                "AND triage_after <= ? AND merged_into = '' ORDER BY triage_after, created_at, id LIMIT ?",
-                (user_id, now, max(1, int(limit))))]
+                f"AND triage_after <= ? AND merged_into = '' AND {_NOT_IN_LINE} "
+                "ORDER BY triage_after, created_at, id LIMIT ?", (user_id, now, max(1, int(limit))))]
 
     def triage_view(self, user_id: str, task_id: str, events: int = 12) -> dict | None:
         """What triage reads about one task, at one moment: its row, its
@@ -1506,18 +1531,24 @@ class TaskboardStore:
         return True
 
     def hand_over_started(self, user_id: str, task_id: str, action_id: str, agent: dict, words: str,
-                          actor: str = "") -> dict | None:
+                          actor: str = "", *, batch_id: str = "") -> dict | None:
         """The user handed the task to *agent* (``slug``, ``name``) with their
         *words*: the next move is the agent's and it is the task's agent now — a
         maybe is a task now, they said so — and the timeline says what they asked.
         The turn comes back here by the action's key (``autonomy:<id>``). The
-        move isn't locked: it moves on when the agent is done. The task, or None
+        move isn't locked: it moves on when the agent is done. With *batch_id* it
+        takes its place in that agent's line, in the same step. The task, or None
         when it isn't this user's."""
         key = f"autonomy:{action_id}"
         with self._lock:
             if self._owned(user_id, task_id) is None:
                 return None
             self._link(user_id, key, task_id, "strong")
+            if batch_id:
+                self._conn.execute(
+                    "INSERT INTO handover_line (batch_id, user_id, task_id, agent_slug, agent_name, action_id, words, "
+                    "created_at) VALUES (?,?,?,?,?,?,?,?)",
+                    (batch_id, user_id, task_id, agent["slug"], agent["name"], action_id, str(words), time.time()))
             self.ingest(
                 user_id, keys=[key], unlock=("owes_next",),
                 patch={"status": "open", "owes_next": "agent", "agent_slug": agent["slug"], "agent_name": agent["name"],
@@ -1584,6 +1615,116 @@ class TaskboardStore:
                            else f"{agent_name} didn't finish what you handed over: {why}",
                 "refs": {"autonomy_id": action_id}})
         return task_id
+
+    # ── Hand-overs in line (taskboard_handover) ───────────────────────
+
+    def hand_over_turn_came(self, user_id: str, action_id: str, agent_name: str) -> None:
+        """A hand-over that waited in line: the timeline says when the agent got to it."""
+        self.ingest(user_id, keys=[f"autonomy:{action_id}"], event={
+            "source": "taskboard_handover", "source_ref": f"{action_id}:turn", "at": time.time(), "kind": "status",
+            "actor_kind": "agent", "actor": agent_name, "summary": f"{agent_name} started on what you handed over",
+            "refs": {"autonomy_id": action_id}})
+
+    def line_next(self, user_id: str, slug: str) -> dict | None:
+        """The hand-over next in this agent's line for this user, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM handover_line WHERE user_id = ? AND agent_slug = ? AND state = 'waiting' "
+                "ORDER BY id LIMIT 1", (user_id, slug)).fetchone()
+        return dict(row) if row else None
+
+    def line_claim(self, line_id: int) -> bool:
+        """Its turn came: False when it no longer waits (stopped by then)."""
+        with self._lock:
+            cur = self._conn.execute("UPDATE handover_line SET state = 'running' WHERE id = ? AND state = 'waiting'",
+                                     (line_id,))
+            self._conn.commit()
+        return (cur.rowcount or 0) == 1
+
+    def line_end(self, line_id: int, state: str, note: str = "") -> None:
+        with self._lock:
+            self._conn.execute("UPDATE handover_line SET state = ?, note = ?, ended_at = ? WHERE id = ?",
+                               (state, note[:300], time.time(), line_id))
+            self._conn.commit()
+
+    def line_of(self, user_id: str, task_id: str) -> dict | None:
+        """The task's place in a line, waiting or being worked on, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM handover_line WHERE user_id = ? AND task_id = ? AND state IN ('waiting', 'running') "
+                "ORDER BY id LIMIT 1", (user_id, task_id)).fetchone()
+        return dict(row) if row else None
+
+    def line_places(self, user_id: str) -> dict[str, dict]:
+        """``{task_id: {agent, ahead}}``: what of the user's waits in line, and how
+        many are ahead of it (the one its agent is on counts)."""
+        places: dict[str, dict] = {}
+        ahead: dict[str, int] = {}
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT task_id, agent_slug, agent_name, state FROM handover_line WHERE user_id = ? "
+                "AND state IN ('waiting', 'running') ORDER BY id", (user_id,)).fetchall()
+        for r in rows:
+            if r["state"] == "running":
+                ahead[r["agent_slug"]] = ahead.get(r["agent_slug"], 0) + 1
+        for r in rows:
+            if r["state"] == "waiting":
+                places[r["task_id"]] = {"agent": r["agent_name"], "ahead": ahead.get(r["agent_slug"], 0)}
+                ahead[r["agent_slug"]] = ahead.get(r["agent_slug"], 0) + 1
+        return places
+
+    def line_stop(self, user_id: str, batch_id: str) -> list[dict]:
+        """The user stopped the rest of a batch: what still waited, no longer does."""
+        with self._lock:
+            rows = [dict(r) for r in self._conn.execute(
+                "SELECT * FROM handover_line WHERE user_id = ? AND batch_id = ? AND state = 'waiting' ORDER BY id",
+                (user_id, batch_id))]
+            self._conn.execute("UPDATE handover_line SET state = 'stopped', ended_at = ? WHERE user_id = ? "
+                               "AND batch_id = ? AND state = 'waiting'", (time.time(), user_id, batch_id))
+            self._conn.commit()
+        return rows
+
+    def line_unfinished(self) -> list[dict]:
+        """Every hand-over in line on this deck, any user's (what a restart found)."""
+        with self._lock:
+            return [dict(r) for r in self._conn.execute(
+                "SELECT * FROM handover_line WHERE state IN ('waiting', 'running') ORDER BY id")]
+
+    def line_batches(self, user_id: str, *, ended_since: float) -> list[dict]:
+        """The user's batches still going or ended since *ended_since*, the newest
+        first, each as ``{id, agent, agent_slug, words, total, done, failed, skipped,
+        stopped, waiting, on, created_at, ended_at}``: ``on`` is the task its agent is on
+        now (``{id, title}``), ``ended_at`` None while it goes on."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT l.*, COALESCE(t.title, '') AS title FROM handover_line l LEFT JOIN tasks t ON t.id = l.task_id "
+                "WHERE l.user_id = ? AND l.batch_id IN (SELECT batch_id FROM handover_line WHERE user_id = ? "
+                "AND (state IN ('waiting', 'running') OR ended_at >= ?)) ORDER BY l.id",
+                (user_id, user_id, ended_since)).fetchall()
+        batches: dict[str, dict] = {}
+        for r in rows:
+            b = batches.setdefault(r["batch_id"], {
+                "id": r["batch_id"], "agent": r["agent_name"], "agent_slug": r["agent_slug"], "words": r["words"],
+                "total": 0, "done": 0, "failed": 0, "skipped": 0, "stopped": 0, "waiting": 0, "on": None,
+                "created_at": r["created_at"], "ended_at": None})
+            b["total"] += 1
+            if r["state"] == "running":
+                b["on"] = {"id": r["task_id"], "title": r["title"]}
+            elif r["state"] in b:
+                b[r["state"]] += 1
+            if r["ended_at"] is not None:
+                b["ended_at"] = max(b["ended_at"] or 0.0, float(r["ended_at"]))
+        for b in batches.values():
+            if b["waiting"] or b["on"]:
+                b["ended_at"] = None
+        return sorted(batches.values(), key=lambda b: -float(b["created_at"]))
+
+    def line_forget(self, before: float) -> None:
+        """What ended before *before*: the board's timeline keeps the story."""
+        with self._lock:
+            self._conn.execute("DELETE FROM handover_line WHERE state NOT IN ('waiting', 'running') AND ended_at < ?",
+                               (before,))
+            self._conn.commit()
 
     def proposal_rejected(self, user_id: str, action_id: str) -> str | None:
         """The user rejected the next step *action_id*: a ``rejection`` event
@@ -2796,7 +2937,7 @@ class TaskboardStore:
         for i in range(0, len(task_ids), 500):
             chunk = task_ids[i:i + 500]
             marks = _marks(chunk)
-            for table in ("task_links", "task_events", "task_decisions", "task_parties"):
+            for table in ("task_links", "task_events", "task_decisions", "task_parties", "handover_line"):
                 self._conn.execute(f"DELETE FROM {table} WHERE task_id IN ({marks})", chunk)
             self._conn.execute(f"UPDATE turns SET task_id = '' WHERE task_id IN ({marks})", chunk)
             self._conn.execute(f"DELETE FROM tasks WHERE id IN ({marks})", chunk)
@@ -2834,7 +2975,8 @@ class TaskboardStore:
         with self._lock:
             n = self._conn.execute("SELECT COUNT(*) FROM tasks WHERE user_id = ?", (user_id,)).fetchone()[0]
             for table in ("task_links", "task_events", "task_decisions", "task_parties", "parties",
-                          "party_handles", "task_rules", "turns", "taskboard_settings", "passive_marks", "tasks"):
+                          "party_handles", "task_rules", "turns", "taskboard_settings", "passive_marks", "handover_line",
+                          "tasks"):
                 self._conn.execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
             # v2: their history's counts and their inboxes' read positions.
             self._conn.execute("DELETE FROM source_cursors WHERE source = ? OR (source LIKE 'passive:%' "
@@ -2938,6 +3080,7 @@ class ThreadConflict(ValueError):  # noqa: N818 — reads as the condition
     """A merge, unmerge or split the tasks' state doesn't allow now (a 409)."""
 
 
+_NOT_IN_LINE = "id NOT IN (SELECT task_id FROM handover_line WHERE state IN ('waiting', 'running'))"
 _MERGE_DEPTH = 32         # merges into merged tasks followed this far (a guard against a cycle)
 # What was said of a task's last try, old news once something new is on it.
 _OLD_NEWS = ("low_confidence", "probably_done", "agent_declined", "partly_done", "answered_in_chat")

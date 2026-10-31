@@ -21,7 +21,11 @@ export interface ThreadNotice {
   action?: { label: string; run: () => Promise<void> | void }
 }
 
-export function ThreadNoticeBar({ notice, onDismiss }: { notice: ThreadNotice; onDismiss: () => void }) {
+export function ThreadNoticeBar({ notice, onDismiss, Icon = GitMerge }: {
+  notice: ThreadNotice
+  onDismiss: () => void
+  Icon?: typeof GitMerge
+}) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const run = async () => {
@@ -40,7 +44,7 @@ export function ThreadNoticeBar({ notice, onDismiss }: { notice: ThreadNotice; o
   return (
     <div className="mb-3 rounded-lg border border-teal-500/30 bg-teal-500/5 px-3 py-2 text-xs">
       <div className="flex items-start gap-2">
-        <GitMerge className="mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
+        <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-teal-600 dark:text-teal-400" />
         <span className="min-w-0 flex-1 leading-relaxed text-zinc-300">{notice.text}</span>
         {notice.action && (
           <button onClick={run} disabled={busy} className="flex shrink-0 items-center gap-1 font-medium text-teal-600 hover:underline disabled:opacity-60 dark:text-teal-400">

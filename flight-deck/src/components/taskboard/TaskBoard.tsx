@@ -15,6 +15,7 @@ import { fmtWhen } from '../../services/schedulerApi'
 import {
   taskboardApi,
   type ExportFormat,
+  type HandOverBatch,
   type TaskAction,
   type TaskDetail,
   type TaskEvent,
@@ -31,9 +32,10 @@ import {
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
   AnswerButtons, ChannelIcon, DateFacet, EvidenceBadge, ExportPanel, FoldHighlight, HistoryChip, InstructionsChip,
-  KeyHint, KeySheet, LaneChip, LowConfidenceHint, MultiFacet, NextMoveMenu, NoteChip, OwesChip, ProofSection, ProposalButtons, ResultChip, StatusChip,
+  KeyHint, KeySheet, LaneChip, LineChip, LowConfidenceHint, MultiFacet, NextMoveMenu, NoteChip, OwesChip, ProofSection, ProposalButtons, ResultChip, StatusChip,
   SyncStatus, TaskIcon, TaskText,
 } from './taskboardParts'
+import { BatchBar, BatchProgress, PickBox } from './TaskBatch'
 import { BoardSettings } from './TaskboardSettings'
 import { SourcesSheet } from './TaskboardSources'
 import { TaskEmail } from './TaskEmail'
@@ -43,10 +45,10 @@ import {
 } from './TaskThreads'
 import { WhyThisHere } from './TaskWhy'
 import {
-  DIRECTION_LABEL, EVENT_LABEL, EVIDENCE_LABEL, KIND_LABEL, NO_DATES, OWES_LABEL, RESULT_LABEL, ROLE_LABEL, STATUS_DOT,
-  GO_KEYS, GO_WAIT_MS, STATUS_LABEL, TASK_KEYS, agoRelative, answeredInChat, boardKey, channelLabel, dateBounds,
-  distinctParties, foldText, handleChannel, isSnoozed, movableEvents, partyFacetLabel, partyName, peopleRows,
-  proposalLabel, stepTo, taskNotes, type BoardUser, type DateRange,
+  BATCH_MAX, DIRECTION_LABEL, EVENT_LABEL, EVIDENCE_LABEL, KIND_LABEL, NO_DATES, OWES_LABEL, RESULT_LABEL, ROLE_LABEL, SNOOZES, STATUS_DOT,
+  GO_KEYS, GO_WAIT_MS, STATUS_LABEL, TASK_KEYS, agoRelative, answeredInChat, batchSaid, boardKey, channelLabel, dateBounds,
+  distinctParties, foldText, handleChannel, isSnoozed, movableEvents, partyFacetLabel, partyName, peopleRows, pickedAfter,
+  proposalLabel, snoozeUntil, stepTo, taskNotes, type BoardUser, type DateRange,
 } from './taskboardText'
 
 // ── Taskboard ───────────────────────────────────────────────────────
@@ -69,8 +71,13 @@ import {
 // handles; your own inboxes can be switched on (Sources); the last 30 days
 // are filled in once ("From history"); the agents' to-do lists are on it; and
 // it downloads as CSV or JSONL.
+//
+// Several tasks at once (TaskBatch): tick them, or `x`, as in Gmail, and one move
+// goes for all; handed to an agent, one set of words goes with all of them and it
+// works through them one at a time.
 
 const PAGE = 60
+const BATCHES_EVERY_MS = 4000
 
 const VIEWS: { id: TaskView; label: string }[] = [
   { id: 'needs_me', label: 'Needs me' },
@@ -119,22 +126,6 @@ const EMPTY: Record<TaskView, { title: string; text: string }> = {
 
 const CLOSED = new Set(['done', 'dismissed', 'not_task'])
 const OWES = ['me', 'agent', 'them', 'nobody', 'unclear'] as const
-
-const SNOOZES = [
-  { id: '1h', label: '1 hour' },
-  { id: 'tomorrow', label: 'Tomorrow 9:00' },
-  { id: 'week', label: 'Next week' },
-] as const
-
-/** When a snooze ends: in an hour, tomorrow at 9, or next Monday at 9. */
-function snoozeUntil(which: (typeof SNOOZES)[number]['id']): number {
-  const now = new Date()
-  if (which === '1h') return Math.floor(now.getTime() / 1000) + 3600
-  const d = new Date(now)
-  d.setHours(9, 0, 0, 0)
-  d.setDate(d.getDate() + (which === 'tomorrow' ? 1 : (8 - d.getDay()) % 7 || 7))
-  return Math.floor(d.getTime() / 1000)
-}
 
 const iconBtn = libraryIconBtn
 const sectionTitle = 'text-[11px] font-medium uppercase tracking-wider text-zinc-500'
@@ -235,12 +226,19 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   if (focused && !selected) setFocused(false)
   // What a merge, an unmerge or a split just did to the open task.
   const [notice, setNotice] = useState<ThreadNotice | null>(null)
+  // The tasks ticked for one move on all, what such a move just did, and the
+  // batches an agent is working through (those closed with their X aside).
+  const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set<string>())
+  const [batchNote, setBatchNote] = useState<ThreadNotice | null>(null)
+  const [batches, setBatches] = useState<HandOverBatch[]>([])
+  const [batchesAside, setBatchesAside] = useState<ReadonlySet<string>>(() => new Set<string>())
   // The gear and its popover (desktop), the download button and its menu:
   // a click outside one closes it.
   const settingsBox = useRef<HTMLSpanElement>(null)
   const exportBox = useRef<HTMLSpanElement>(null)
   const reqId = useRef(0)
   const shown = useRef(PAGE)
+  const pickFrom = useRef<string | null>(null)  // the last row ticked: where a Shift+click runs from
   // The read of every source that opening the board starts (a task looked
   // up by its key waits for it when it isn't there yet).
   const firstSync = useRef<Promise<void> | null>(null)
@@ -282,6 +280,13 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   }, [params])
 
   useEffect(() => { load() }, [load])
+
+  // A tick is for what is on screen: another tab, search or filter starts afresh.
+  useEffect(() => {
+    setPicked((cur) => (cur.size ? new Set<string>() : cur))
+    setBatchNote(null)
+    pickFrom.current = null
+  }, [params])
 
   const loadMore = async () => {
     if (!page) return
@@ -474,6 +479,72 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   // A notice is about the task it was given on: opening another lets it go.
   if (notice && notice.taskId !== selected?.id) setNotice(null)
 
+  // One move on several tasks: the list catches up, and so does the open one if it was among them.
+  const afterBatch = (ids: string[]) => {
+    const open = selectedRef.current
+    if (open && ids.includes(open.id)) {
+      setRev((n) => n + 1)
+      void reloadTask(open.id)
+    }
+    refreshAfter()
+  }
+  const pickNone = () => {
+    setPicked(new Set<string>())
+    pickFrom.current = null
+  }
+  const undoBatch = async (ids: string[]) => {
+    const { refused } = await taskboardApi.batchAction(ids, 'undo')
+    if (refused.length) notify('warning', 'Some of it could not be undone', refused[0].why)
+    afterBatch(ids)
+  }
+  const batchAct = async (ids: string[], action: TaskAction, value?: string | number) => {
+    const { changed, refused } = await taskboardApi.batchAction(ids, action, value)
+    pickNone()
+    setBatchNote({ taskId: '', text: batchSaid(action, changed.length, refused),
+      action: changed.length ? { label: 'Undo', run: () => undoBatch(changed) } : undefined })
+    afterBatch(changed)
+  }
+  const readBatches = useCallback(async () => {
+    try {
+      setBatches((await taskboardApi.handOverBatches()).batches)
+    } catch { /* the next read catches up */ }
+  }, [])
+  const handOverMany = async (ids: string[], agent: string, words: string) => {
+    const { queued, refused } = await taskboardApi.handOverMany(ids, agent, words)
+    pickNone()
+    setBatchNote(null)
+    if (refused.length) {
+      const n = refused.length
+      notify('warning', `${n} task${n === 1 ? '' : 's'} couldn't go`, refused[0].why)
+    }
+    void readBatches()
+    afterBatch(queued)
+  }
+  const stopBatch = async (id: string) => {
+    await taskboardApi.stopBatch(id)
+    await readBatches()
+  }
+
+  // While an agent works through a batch: how it stands, and each task as it moves on.
+  useEffect(() => { void readBatches() }, [readBatches])
+  const batchGoing = batches.some((b) => !b.ended_at)
+  useEffect(() => {
+    if (!batchGoing) return
+    const t = setInterval(() => void readBatches(), BATCHES_EVERY_MS)
+    return () => clearInterval(t)
+  }, [batchGoing, readBatches])
+  const batchMoved = batches.map((b) => `${b.id}:${b.waiting}:${b.on?.id ?? ''}:${b.ended_at ? 1 : 0}`).join()
+  const lastBatchMoved = useRef('')
+  useEffect(() => {
+    const moved = lastBatchMoved.current !== batchMoved && lastBatchMoved.current !== ''
+    lastBatchMoved.current = batchMoved
+    if (!moved) return
+    loadRef.current(true)
+    fetchSummary()
+    setRev((n) => n + 1)
+    if (selectedRef.current) void reloadTask(selectedRef.current.id)
+  }, [batchMoved, fetchSummary, reloadTask])
+
   // The tasks this tab shows, under the search and filters, as a file.
   const exportTasks = async (format: ExportFormat) => {
     await taskboardApi.exportTasks(format, params)
@@ -500,6 +571,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   focusedRef.current = focused
   const selectedRef = useRef(selected)
   selectedRef.current = selected
+  const pickedRef = useRef(0)
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
@@ -514,6 +586,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         if (filtersRef.current) { setFiltersOpen(false); return }
         if (focusedRef.current) { setFocused(false); return }
         if (phone && selectedRef.current) { setSelected(null); return }
+        if (pickedRef.current) { setPicked(new Set<string>()); return }
         onClose()
       }, 0)
     }
@@ -541,15 +614,46 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
   }, [exportOpen])
 
   const items = useMemo(() => page?.items ?? [], [page])
+  // What is ticked and still on the list: a move only ever reaches what can be seen.
+  const pickedTasks = useMemo(() => items.filter((t) => picked.has(t.id)), [items, picked])
+  pickedRef.current = pickedTasks.length
+  const togglePick = (id: string, range = false) => {
+    const from = range ? pickFrom.current : null
+    const ids = items.map((t) => t.id)
+    setPicked((cur) => pickedAfter(cur, ids, id, from))
+    setBatchNote(null)
+    pickFrom.current = id
+  }
+  const pickAllShown = () => {
+    setPicked(new Set(items.map((t) => t.id)))
+    setBatchNote(null)
+  }
+  // Past what is on screen ("Show more" would get there): as far as a move can reach.
+  const pickEverything = async () => {
+    const id = reqId.current
+    try {
+      const res = await taskboardApi.tasks({ ...params, limit: BATCH_MAX, offset: 0 })
+      if (id !== reqId.current) return
+      setPage(res)
+      shown.current = res.items.length
+      setPicked(new Set(res.items.map((t) => t.id)))
+    } catch (e) {
+      notify('error', 'Could not load the tasks', errText(e))
+    }
+  }
 
   // Keys (taskboardText: boardKey, KEY_SHEET). Moving around is here; the open
   // task's buttons are its own (detailKeys), and they say when moving away
-  // would lose something (detailHeld: a split, the Snooze picker).
+  // would lose something (detailHeld: a split, the Snooze picker). With tasks
+  // ticked the same keys are for them instead (batchKeys, batchHeld), as in Gmail.
   const rootRef = useRef<HTMLDivElement>(null)
   const searchRef = useRef<HTMLInputElement>(null)
   const detailKeys = useRef<((key: string) => boolean) | null>(null)
   const detailHeld = useRef(false)
+  const batchKeys = useRef<((key: string) => boolean) | null>(null)
+  const batchHeld = useRef(false)
   const goUntil = useRef(0)
+  const pickWhichUntil = useRef(0)
   const lastRow = useRef(-1)  // the list's cursor: stays when the task closes or leaves the list
   useEffect(() => { lastRow.current = -1 }, [view, debounced])
   useEffect(() => {
@@ -572,13 +676,34 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         if (GO_KEYS[key]) { e.preventDefault(); setView(GO_KEYS[key]) }
         return
       }
+      // The list is covered by the open task when it is bigger, and on a phone.
+      const listShows = !focused && !(phone && selected)
+      if (Date.now() < pickWhichUntil.current) {
+        pickWhichUntil.current = 0
+        if (key === 'a' && listShows) { e.preventDefault(); pickAllShown() }
+        if (key === 'n' && listShows) { e.preventDefault(); pickNone() }
+        return
+      }
       if (key === '/') { e.preventDefault(); searchRef.current?.focus(); return }
       const open = (t: TaskItem) => {
         setSelected(t)
         rootRef.current?.querySelector(`[data-task-row="${t.id}"]`)?.scrollIntoView({ block: 'nearest' })
       }
-      if (!detailHeld.current) {
+      if (!detailHeld.current && !batchHeld.current) {
         if (key === 'g') { e.preventDefault(); goUntil.current = Date.now() + GO_WAIT_MS; return }
+        if (key === TASK_KEYS.pickWhich && listShows) { e.preventDefault(); pickWhichUntil.current = Date.now() + GO_WAIT_MS; return }
+        if (key === TASK_KEYS.pick && listShows) {
+          // The open task's row, or where the cursor was.
+          e.preventDefault()
+          const at = selected ? items.findIndex((t) => t.id === selected.id) : -1
+          const row = items[at >= 0 ? at : Math.min(Math.max(lastRow.current, 0), items.length - 1)]
+          if (row) {
+            lastRow.current = items.indexOf(row)
+            togglePick(row.id)
+            rootRef.current?.querySelector(`[data-task-row="${row.id}"]`)?.scrollIntoView({ block: 'nearest' })
+          }
+          return
+        }
         if (key === 'j' || key === 'k') {
           e.preventDefault()
           const at = stepTo(items.map((t) => t.id), selected?.id ?? null, lastRow.current, key === 'j' ? 1 : -1)
@@ -598,6 +723,14 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
           return
         }
         if (key === TASK_KEYS.focus && selected && !phone) { e.preventDefault(); setFocused((f) => !f); return }
+      }
+      if (listShows && batchKeys.current?.(key)) { e.preventDefault(); return }
+      if (batchHeld.current) return
+      if (listShows && key === TASK_KEYS.undo && batchNote?.action) {
+        e.preventDefault()
+        void Promise.resolve(batchNote.action.run()).catch((err) => notify('error', 'Could not undo that', errText(err)))
+        setBatchNote(null)
+        return
       }
       if (selected && detailKeys.current?.(key)) e.preventDefault()
     }
@@ -779,6 +912,11 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       terms={terms}
       me={me}
       selectedId={selected?.id ?? null}
+      picked={picked}
+      onPick={togglePick}
+      onPickAll={pickAllShown}
+      onPickNone={pickNone}
+      onPickEverything={() => void pickEverything()}
       loadingMore={loadingMore}
       onSelect={setSelected}
       onMore={loadMore}
@@ -788,6 +926,36 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
       onAnswered={answered}
       onAct={act}
     />
+  )
+
+  // Above the list, so a move that empties it can still be seen and undone.
+  const batchPane = (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {batches.filter((b) => !batchesAside.has(b.id)).map((b) => (
+        <BatchProgress
+          key={b.id}
+          batch={b}
+          onStop={() => stopBatch(b.id)}
+          onOpen={(id) => void openTask(id)}
+          onDismiss={() => setBatchesAside((cur) => new Set(cur).add(b.id))}
+        />
+      ))}
+      {batchNote && (
+        <div className="px-3 pt-2 wide:px-4"><ThreadNoticeBar notice={batchNote} Icon={ListChecks} onDismiss={() => setBatchNote(null)} /></div>
+      )}
+      {pickedTasks.length > 0 && (
+        <BatchBar
+          tasks={pickedTasks}
+          phone={phone}
+          keysRef={batchKeys}
+          heldRef={batchHeld}
+          onApply={batchAct}
+          onHandOver={handOverMany}
+          onClear={pickNone}
+        />
+      )}
+      <div className="min-h-0 flex-1">{list}</div>
+    </div>
   )
 
   const detail = selected && (
@@ -839,7 +1007,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         <div className="border-b border-zinc-800 px-3 py-2"><SyncStatus status={status} syncing={syncing} /></div>
         {toolbar}
         {tabs}
-        <div className="min-h-0 flex-1">{list}</div>
+        {batchPane}
         {selected && <div className="absolute inset-0 z-10 flex flex-col bg-zinc-950">{detail}</div>}
         {filtersOpen && (
           <div className="absolute inset-0 z-20 flex flex-col bg-zinc-950">
@@ -889,7 +1057,7 @@ export function TaskBoard({ phone = false, initialAgent, initialTask, onClose, o
         <aside className="w-56 shrink-0 overflow-y-auto border-r border-zinc-800 bg-zinc-900/40">{filterList}</aside>
         <section className="flex min-w-0 flex-1 flex-col">
           {tabs}
-          <div className="min-h-0 flex-1">{list}</div>
+          {batchPane}
         </section>
         {/* The same aside either way: going bigger keeps what is being written on the task. */}
         {selected && (
@@ -941,14 +1109,22 @@ function Filters({ facets, failed, filters, dates, me, onFacet, onDates }: {
 // ── Results ──
 
 function ResultList({
-  view, items, total, query, gathering, loading, error, filtered, agentOnly, terms, me, selectedId, loadingMore,
-  onSelect, onMore, onClear, onRetry, onAll, onAnswered, onAct,
+  view, items, total, query, gathering, loading, error, filtered, agentOnly, terms, me, selectedId, picked, onPick,
+  onPickAll, onPickNone, onPickEverything, loadingMore, onSelect, onMore, onClear, onRetry, onAll, onAnswered, onAct,
 }: {
   view: TaskView; items: TaskItem[]; total: number; query: string
   /** The sources are being read: more may come. */
   gathering: boolean
   loading: boolean; error: string; filtered: boolean; agentOnly: boolean; terms: string[]; me: BoardUser
-  selectedId: string | null; loadingMore: boolean
+  selectedId: string | null
+  /** What is ticked, and ticking it (Shift held: everything since the last tick). */
+  picked: ReadonlySet<string>
+  onPick: (id: string, range: boolean) => void
+  onPickAll: () => void
+  onPickNone: () => void
+  /** All of this tab, past what is on screen. */
+  onPickEverything: () => void
+  loadingMore: boolean
   onSelect: (t: TaskItem) => void; onMore: () => void; onClear: () => void; onRetry: () => void
   onAll: () => void
   onAnswered: () => Promise<void>
@@ -991,16 +1167,26 @@ function ResultList({
       </div>
     )
   }
+  const allOn = items.every((t) => picked.has(t.id))
+  const someOn = items.some((t) => picked.has(t.id))
   return (
-    <div className="h-full overflow-y-auto px-3 py-3 wide:px-4">
-      <div className="mb-2 px-1 text-[11px] text-zinc-500">
-        {total} task{total === 1 ? '' : 's'}{query ? <> for “{query}”</> : null}
+    <div className="h-full overflow-y-auto px-3 py-2 wide:px-4">
+      <div className="mb-1 flex items-center gap-1 text-[11px] text-zinc-500">
+        <PickBox head on={allOn} mixed={someOn && !allOn} label={allOn ? 'Pick none' : 'Pick all shown'}
+          onPick={() => (allOn ? onPickNone() : onPickAll())} />
+        <span className="min-w-0 truncate">{total} task{total === 1 ? '' : 's'}{query ? <> for “{query}”</> : null}</span>
+        {allOn && items.length < total && items.length < BATCH_MAX && (
+          <button onClick={onPickEverything} className="shrink-0 font-medium text-teal-600 hover:underline dark:text-teal-400">
+            Pick {total > BATCH_MAX ? `the first ${BATCH_MAX}` : `all ${total}`}
+          </button>
+        )}
       </div>
       <ul className="flex flex-col gap-1.5">
         {items.map((t) => (
           <li key={t.id}>
             <TaskRow
-              task={t} terms={terms} me={me} active={t.id === selectedId} onClick={() => onSelect(t)} onAnswered={onAnswered}
+              task={t} terms={terms} me={me} active={t.id === selectedId} ticked={picked.has(t.id)}
+              onTick={(range) => onPick(t.id, range)} onClick={() => onSelect(t)} onAnswered={onAnswered}
               onAct={(action) => onAct(t, action)}
             />
           </li>
@@ -1039,8 +1225,9 @@ const DONE_ANSWERS: Answer[] = [
 const isMaybe = (t: TaskItem) => t.status === 'maybe'
 const isProbablyDone = (t: TaskItem) => t.status === 'open' && !!t.flags?.probably_done
 
-function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
-  task: TaskItem; terms: string[]; me: BoardUser; active: boolean; onClick: () => void; onAnswered: () => Promise<void>
+function TaskRow({ task, terms, me, active, ticked, onTick, onClick, onAnswered, onAct }: {
+  task: TaskItem; terms: string[]; me: BoardUser; active: boolean; ticked: boolean; onTick: (range: boolean) => void
+  onClick: () => void; onAnswered: () => Promise<void>
   onAct: (action: TaskAction) => Promise<void>
 }) {
   const waiting = task.proposal?.status === 'awaiting_approval' ? task.proposal : null
@@ -1055,59 +1242,64 @@ function TaskRow({ task, terms, me, active, onClick, onAnswered, onAct }: {
   const agentLabel = task.agent_name || task.agent_slug
   return (
     <div data-task-row={task.id} className={`overflow-hidden rounded-xl border transition-colors ${
-      active ? 'border-teal-500/40 bg-teal-500/5' : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700 hover:bg-zinc-900/80'}`}>
-      <button onClick={onClick} className="flex w-full gap-3 px-3 py-2.5 text-left">
-        <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-800/80">
-          <TaskIcon task={task} />
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
-            <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-100">
-              <TaskText text={task.title || 'Untitled task'} terms={terms} />
-            </span>
-            {flags.contains_instructions && <InstructionsChip compact />}
-            <EvidenceBadge evidence={task.evidence} />
-            {answeredInChat(flags) && <ResultChip result={task.result} answeredInChat />}
-            <LaneChip task={task} />
+      ticked ? 'border-teal-500/50 bg-teal-500/10'
+        : active ? 'border-teal-500/40 bg-teal-500/5' : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700 hover:bg-zinc-900/80'}`}>
+      <div className="flex">
+        <PickBox on={ticked} label={`Pick “${task.title || 'Untitled task'}”`} onPick={onTick} />
+        <button onClick={onClick} className="flex min-w-0 flex-1 gap-3 py-2.5 pr-3 text-left">
+          <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-zinc-800/80">
+            <TaskIcon task={task} />
           </span>
-          <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
-            {agentLabel && <><FoldHighlight text={agentLabel} terms={terms} />{' · '}</>}
-            {people ? <><FoldHighlight text={people} terms={terms} />{' · '}</> : null}
-            {agoRelative(task.last_event_at ?? task.created_at)}
-            {flags.low_confidence && <span className="italic" title="Jev wasn't sure this is a task, so it isn't counted on the Taskboard button"> · low confidence</span>}
-            {flags.historical && (
-              <span className="ml-1.5 rounded bg-zinc-800 px-1 py-px text-[10px] font-medium text-zinc-400" title="Filled in from your agents' chats of the last 30 days">
-                From history
+          <span className="min-w-0 flex-1">
+            <span className="flex items-center gap-2">
+              <span className="min-w-0 flex-1 truncate text-sm font-medium text-zinc-100">
+                <TaskText text={task.title || 'Untitled task'} terms={terms} />
+              </span>
+              {flags.contains_instructions && <InstructionsChip compact />}
+              <EvidenceBadge evidence={task.evidence} />
+              {answeredInChat(flags) && <ResultChip result={task.result} answeredInChat />}
+              <LaneChip task={task} />
+            </span>
+            <span className="mt-0.5 block truncate text-[11px] text-zinc-500">
+              {agentLabel && <><FoldHighlight text={agentLabel} terms={terms} />{' · '}</>}
+              {people ? <><FoldHighlight text={people} terms={terms} />{' · '}</> : null}
+              {agoRelative(task.last_event_at ?? task.created_at)}
+              {flags.low_confidence && <span className="italic" title="Jev wasn't sure this is a task, so it isn't counted on the Taskboard button"> · low confidence</span>}
+              {flags.historical && (
+                <span className="ml-1.5 rounded bg-zinc-800 px-1 py-px text-[10px] font-medium text-zinc-400" title="Filled in from your agents' chats of the last 30 days">
+                  From history
+                </span>
+              )}
+            </span>
+            {task.ask && (
+              <span className={`mt-1 text-xs leading-relaxed text-zinc-400 ${task.result_text ? 'line-clamp-1' : 'line-clamp-2'}`}>
+                <TaskText text={task.ask} terms={terms} />
               </span>
             )}
-          </span>
-          {task.ask && (
-            <span className={`mt-1 text-xs leading-relaxed text-zinc-400 ${task.result_text ? 'line-clamp-1' : 'line-clamp-2'}`}>
-              <TaskText text={task.ask} terms={terms} />
-            </span>
-          )}
-          {task.result_text && (
-            <span className={`mt-0.5 text-xs leading-relaxed text-zinc-500 ${task.ask ? 'line-clamp-2' : 'line-clamp-3'}`}>
-              <ArrowRight className="mr-1 inline h-3 w-3 align-[-2px]" />
-              <TaskText text={task.result_text} terms={terms} />
-            </span>
-          )}
-          {reason && !waiting && (
-            <span className="mt-1 flex min-w-0 items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-400">
-              <Hand className="h-3 w-3 shrink-0" />
-              <span className="min-w-0 truncate">
-                {reason.text}
-                {reason.more && <span className="font-normal text-zinc-400"> — <TaskText text={reason.more} terms={terms} /></span>}
+            {task.result_text && (
+              <span className={`mt-0.5 text-xs leading-relaxed text-zinc-500 ${task.ask ? 'line-clamp-2' : 'line-clamp-3'}`}>
+                <ArrowRight className="mr-1 inline h-3 w-3 align-[-2px]" />
+                <TaskText text={task.result_text} terms={terms} />
               </span>
-            </span>
-          )}
-          {since && (
-            <span className="mt-1 flex items-center gap-1 text-[11px] font-medium text-sky-700 dark:text-sky-400">
-              <MessageSquare className="h-3 w-3 shrink-0" />{since.label}
-            </span>
-          )}
-        </span>
-      </button>
+            )}
+            {reason && !waiting && (
+              <span className="mt-1 flex min-w-0 items-center gap-1 text-[11px] font-medium text-amber-700 dark:text-amber-400">
+                <Hand className="h-3 w-3 shrink-0" />
+                <span className="min-w-0 truncate">
+                  {reason.text}
+                  {reason.more && <span className="font-normal text-zinc-400"> — <TaskText text={reason.more} terms={terms} /></span>}
+                </span>
+              </span>
+            )}
+            {since && (
+              <span className="mt-1 flex items-center gap-1 text-[11px] font-medium text-sky-700 dark:text-sky-400">
+                <MessageSquare className="h-3 w-3 shrink-0" />{since.label}
+              </span>
+            )}
+            {task.in_line && <span className="mt-1 flex"><LineChip place={task.in_line} /></span>}
+          </span>
+        </button>
+      </div>
       {waiting && (
         <div className="flex flex-wrap items-center gap-2 border-t border-amber-500/20 bg-amber-500/5 px-3 py-2">
           <span className="min-w-0 flex-1 text-xs font-medium text-amber-800 dark:text-amber-300">
@@ -1331,7 +1523,7 @@ function TaskDetailPane({
         [TASK_KEYS.rename]: [!renaming, startRename],
         [TASK_KEYS.merge]: [!merged, () => setMerging((m) => !m)],
         [TASK_KEYS.undo]: [canUndo, () => void run('undo')],
-        [TASK_KEYS.agent]: [!closed && !failed, () => setHanding(true)],
+        [TASK_KEYS.agent]: [!closed && !failed && !task.in_line, () => setHanding(true)],
         [TASK_KEYS.move]: [!closed && !failed, () => setMoveOpen(true)],
         [TASK_KEYS.nextStep]: [!!boardStep || canSuggest, () => {
           // Read and edited on its card: approving it stays a click.
@@ -1419,6 +1611,7 @@ function TaskDetailPane({
           {/* Out of Needs me (seen), the lane chip says Failed itself. */}
           {failed && task.lane === 'needs_me' && <StatusChip status={task.status} />}
           {!closed && !failed && <OwesChip owes={task.owes_next} />}
+          {task.in_line && <LineChip place={task.in_line} />}
           <EvidenceBadge evidence={task.evidence} />
           {/* "Partly done" once: the note says it when the result would too. */}
           {!(task.result === 'partial' && notes.some((n) => n.id === 'partly_done')) && (
@@ -1697,7 +1890,7 @@ function TaskDetailPane({
                 // The agent's move is one it is told: which agent, and to do what.
                 onPick={(o) => { if (o === 'agent') setHanding(true); else if (o !== task.owes_next) void run('owes_next', o) }}
               >
-                {task.owes_next === 'agent' && (
+                {task.owes_next === 'agent' && !task.in_line && (
                   <button type="button" onClick={() => setHanding(true)} disabled={!!busy}
                     className="shrink-0 text-xs font-medium text-teal-600 hover:underline disabled:opacity-50 dark:text-teal-400">
                     Instruct…<KeyHint k={TASK_KEYS.agent} />

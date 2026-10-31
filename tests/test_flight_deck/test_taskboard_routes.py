@@ -23,7 +23,7 @@ ITEM_FIELDS = {
     "channel", "channels", "status", "owes_next", "evidence", "result", "urgency", "due_at", "snooze_until",
     "created_at", "updated_at", "last_event_at", "closed_at", "closed_by", "closed_by_party", "triage_state",
     "triage_error", "triage_after", "user_locks", "flags", "private", "merged_into", "source", "source_ref",
-    "next_steps", "retention_until", "parties", "lane", "proposal", "links",
+    "next_steps", "retention_until", "parties", "lane", "proposal", "links", "in_line",
 }
 LINK_FIELDS = {"scheduled_job_id", "session_id", "session_agent", "autonomy_id", "followup_id",
                "gmail_thread_id", "autoreply_id", "link_id"}

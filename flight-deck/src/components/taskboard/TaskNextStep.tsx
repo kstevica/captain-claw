@@ -1,4 +1,4 @@
-import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent } from 'react'
+import { useEffect, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { Bell, Check, ChevronDown, Loader2, Mail, MessageSquare, Sparkles } from 'lucide-react'
 import { resolveProposal } from '../../services/notifications'
 import { taskboardApi, type HandOverAgent, type NextStepKind, type ProposalEdit, type TaskProposal } from '../../services/taskboardApi'
@@ -338,7 +338,7 @@ export function SuggestNextStep({ taskId, phone, kinds, covered, askRef, onPropo
 
 /** "Next move → Agent": which agent and what it should do. Nothing goes to it
  *  until Hand over; what was written stays if this is closed and opened again. */
-export function HandOverForm({ taskAgent, phone, words, onWords, onHandOver, onCancel }: {
+export function HandOverForm({ taskAgent, phone, words, onWords, onHandOver, onCancel, count = 1, children }: {
   /** The task's agent now: the one picked first, when it can take it. */
   taskAgent: string
   phone: boolean
@@ -346,7 +346,12 @@ export function HandOverForm({ taskAgent, phone, words, onWords, onHandOver, onC
   onWords: (words: string) => void
   onHandOver: (agent: string, words: string) => Promise<void>
   onCancel: () => void
+  /** Several tasks at once: one set of words for all, one at a time. */
+  count?: number
+  /** What goes along, above the words. */
+  children?: ReactNode
 }) {
+  const many = count > 1
   const [agents, setAgents] = useState<HandOverAgent[] | null>(null)
   const [agent, setAgent] = useState('')
   const [busy, setBusy] = useState(false)
@@ -381,7 +386,7 @@ export function HandOverForm({ taskAgent, phone, words, onWords, onHandOver, onC
 
   return (
     <div className="col-span-2 flex flex-col gap-2">
-      <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Hand to an agent</div>
+      <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">{many ? `Hand ${count} tasks to an agent` : 'Hand to an agent'}</div>
       {agents === null ? (
         <Loader2 className="h-4 w-4 animate-spin text-zinc-500" />
       ) : agents.length === 0 ? (
@@ -391,6 +396,7 @@ export function HandOverForm({ taskAgent, phone, words, onWords, onHandOver, onC
           <select value={agent} onChange={(e) => setAgent(e.target.value)} disabled={busy} aria-label="Which agent" className={field}>
             {agents.map((a) => <option key={a.slug} value={a.slug}>{a.name}{a.asleep ? ' (asleep, it will wake)' : ''}</option>)}
           </select>
+          {children}
           <textarea
             autoFocus={!phone}
             value={words}
@@ -400,17 +406,21 @@ export function HandOverForm({ taskAgent, phone, words, onWords, onHandOver, onC
             rows={4}
             maxLength={4000}
             aria-label="What the agent should do"
-            placeholder="What should it do? Add anything it needs to know."
+            placeholder={many ? 'What should it do on each? For example: thank them and politely decline.' : 'What should it do? Add anything it needs to know.'}
             className={`${field} resize-y`}
           />
-          <p className="text-[11px] leading-relaxed text-zinc-500">This is your own request: it starts now, and it will write email or messages if that is what you ask. It also gets this task's details.</p>
+          <p className="text-[11px] leading-relaxed text-zinc-500">
+            {many
+              ? 'These words go with every task. This is your own request: it starts now, on one task at a time, each with its own details, and it will write email or messages if that is what you ask. You can stop the rest at any point.'
+              : 'This is your own request: it starts now, and it will write email or messages if that is what you ask. It also gets this task\'s details.'}
+          </p>
           {error && <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p>}
         </>
       )}
       <div className="grid grid-cols-2 gap-2">
         <button onClick={() => void send()} disabled={!ready}
           className="flex items-center justify-center gap-1.5 rounded-lg bg-teal-600 px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-teal-500 disabled:opacity-60">
-          {busy && <Loader2 className="h-4 w-4 animate-spin" />}Hand over<KeyHint k={SEND_KEY} onPrimary />
+          {busy && <Loader2 className="h-4 w-4 animate-spin" />}{many ? `Hand over ${count}` : 'Hand over'}<KeyHint k={SEND_KEY} onPrimary />
         </button>
         <button onClick={onCancel} disabled={busy}
           className="flex items-center justify-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-2 text-sm text-zinc-300 transition-colors hover:bg-zinc-800/60 disabled:opacity-50">

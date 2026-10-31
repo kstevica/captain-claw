@@ -721,7 +721,7 @@ def test_no_key_approves_a_next_step():
 def test_moving_away_never_loses_a_split_or_the_snooze_picker():
     board = _source(_BOARD)
     assert "pinned.current = splitting || snoozeOpen" in board
-    assert "if (!detailHeld.current) {" in board
+    assert "if (!detailHeld.current && !batchHeld.current) {" in board
     assert "if (over || keysOpen) return" in board
 
 
@@ -854,3 +854,123 @@ def test_with_the_menu_open_the_tasks_other_keys_wait():
     keys = parts[start:parts.index("const Current =", start)]
     assert "e.stopPropagation()" in keys and "else return" in keys, "a key it doesn't use isn't swallowed"
 
+
+
+# ── Several tasks at once ──
+
+_BATCH = ["BATCH_MAX", "fitsBatch", "pickedAfter", "usualAgent", "tasksWord", "batchSaid", "placeInLine", "batchLine"]
+_TASK_BATCH = _SRC / "components" / "taskboard" / "TaskBatch.tsx"
+
+
+def _picked(body: str):
+    return _run([(_TEXT, _BATCH)], f"const after = (cur, id, from) => [...pickedAfter(new Set(cur), ['a','b','c','d','e'], id, from)].sort(); globalThis.out = {body}")
+
+
+def test_a_tick_goes_on_and_off():
+    assert _picked("after([], 'b', null)") == ["b"]
+    assert _picked("after(['b','c'], 'b', null)") == ["c"]
+
+
+def test_shift_takes_everything_since_the_last_tick_the_same_way():
+    assert _picked("after(['b'], 'd', 'b')") == ["b", "c", "d"]
+    assert _picked("after(['b'], 'a', 'c')") == ["a", "b", "c"], "upwards too"
+    assert _picked("after(['b','c','d','e'], 'c', 'e')") == ["b"], "unticking runs the same way"
+
+
+def test_a_shift_with_nothing_to_run_from_ticks_only_the_one():
+    assert _picked("after([], 'c', 'gone')") == ["c"]
+    assert _picked("after([], 'c', null)") == ["c"]
+
+
+@pytest.mark.parametrize("move,fits", [
+    ("agent", {"open", "maybe"}),
+    ("done", {"open", "maybe", "failed"}),
+    ("reopen", {"done", "dismissed", "not_task", "failed"}),
+    ("not_task", {"open", "maybe", "failed", "done", "dismissed"}),
+    ("snooze", {"open", "maybe"}),
+    ("move", {"open", "maybe"}),
+    ("got_it", {"failed"}),
+])
+def test_a_move_reaches_what_its_own_button_would(move, fits):
+    out = _run([(_TEXT, _BATCH)], f"""globalThis.out = ['open','maybe','failed','done','dismissed','not_task']
+        .filter((status) => fitsBatch('{move}', {{ status, lane: 'needs_me' }}))""")
+    assert set(out) == fits
+
+
+def test_got_it_only_on_what_still_waits_to_be_seen():
+    out = _run([(_TEXT, _BATCH)], "globalThis.out = fitsBatch('got_it', { status: 'failed', lane: 'other' })")
+    assert out is False
+
+
+def test_one_already_in_line_or_merged_cant_be_handed_over_again():
+    out = _run([(_TEXT, _BATCH)], """globalThis.out = [
+        fitsBatch('agent', { status: 'open', in_line: { agent: 'Helper', ahead: 2 } }),
+        fitsBatch('agent', { status: 'open', merged_into: 'tb_1' }),
+        fitsBatch('done', { status: 'open', in_line: { agent: 'Helper', ahead: 2 } })]""")
+    assert out == [False, False, True], "it can still be closed: then its turn never comes"
+
+
+def test_the_form_starts_on_the_agent_most_of_them_are_with():
+    out = _run([(_TEXT, _BATCH)], """globalThis.out = [
+        usualAgent([{ agent_slug: 'a' }, { agent_slug: 'b' }, { agent_slug: 'b' }]),
+        usualAgent([{ agent_slug: '' }]), usualAgent([])]""")
+    assert out == ["b", "", ""]
+
+
+def test_what_a_move_did_and_where_a_task_stands_in_words():
+    out = _run([(_TEXT, _BATCH)], """globalThis.out = {
+        one: batchSaid('done', 1), some: batchSaid('not_task', 3),
+        refused: batchSaid('snooze', 2, [{ why: 'snooze for a year at most' }]),
+        next: placeInLine({ agent: 'Helper', ahead: 0 }), later: placeInLine({ agent: 'Helper', ahead: 3 }) }""")
+    assert out["one"] == "1 task marked done." and out["some"] == "3 tasks marked not a task."
+    assert out["refused"] == "2 tasks snoozed. 1 task couldn't: snooze for a year at most"
+    assert out["next"] == "Next in line for Helper" and out["later"] == "In line for Helper, 3 ahead"
+
+
+def test_how_a_batch_stands_in_words():
+    out = _run([(_TEXT, _BATCH)], """const b = (over) => batchLine({ agent: 'Helper', total: 5, done: 0, failed: 0, skipped: 0,
+        stopped: 0, waiting: 0, ended_at: null, ...over });
+      globalThis.out = [b({ waiting: 4 }), b({ done: 2, failed: 1, waiting: 1 }),
+        b({ done: 3, skipped: 1, stopped: 1, ended_at: 9 })]""")
+    assert out == [
+        "Helper is working through your 5 tasks: 4 in line.",
+        "Helper is working through your 5 tasks: 2 answered, 1 didn't finish, 1 in line.",
+        "Helper is through your 5 tasks: 3 answered, 1 passed over, 1 stopped.",
+    ]
+
+
+def test_x_and_the_rest_are_on_the_key_sheet():
+    out = _run([(_TEXT, _KEYS)], "globalThis.out = TASK_KEYS")
+    assert out["pick"] == "x" and out["pickWhich"] == "*"
+    sheet = _source(_TEXT)
+    assert "title: 'Several tasks at once'" in sheet
+    assert "`${TASK_KEYS.pickWhich} a`" in sheet and "`${TASK_KEYS.pickWhich} n`" in sheet
+
+
+def test_with_tasks_ticked_the_keys_are_for_them_and_a_held_form_keeps_them():
+    board = _source(_BOARD)
+    assert "if (key === TASK_KEYS.pick && listShows)" in board
+    batch_keys = board.index("if (listShows && batchKeys.current?.(key))")
+    held = board.index("if (batchHeld.current) return")
+    detail = board.index("if (selected && detailKeys.current?.(key)) e.preventDefault()")
+    assert batch_keys < held < detail, "the ticked tasks before the open one, as in Gmail"
+    assert "if (!detailHeld.current && !batchHeld.current) {" in board
+
+
+def test_escape_unticks_before_it_closes_the_board():
+    board = _source(_BOARD)
+    assert board.index("if (phone && selectedRef.current) { setSelected(null); return }") \
+        < board.index("if (pickedRef.current) { setPicked(new Set<string>()); return }") \
+        < board.index("onClose()\n      }, 0)")
+
+
+def test_a_move_only_reaches_what_is_ticked_and_on_the_list():
+    board = _source(_BOARD)
+    assert "const pickedTasks = useMemo(() => items.filter((t) => picked.has(t.id)), [items, picked])" in board
+    assert "tasks={pickedTasks}" in board
+    assert "setPicked((cur) => (cur.size ? new Set<string>() : cur))" in board, "another tab or search starts afresh"
+
+
+def test_no_next_step_is_approved_from_the_bar():
+    batch = _source(_TASK_BATCH)
+    assert "ProposalButtons" not in batch and "resolveProposal" not in batch and "autonomy" not in batch
