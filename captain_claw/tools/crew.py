@@ -126,7 +126,7 @@ class CrewTool(Tool):
             "folder": {"type": "string", "description": "dispatch: a folder in that project. Omit to use the project's name."},
             "repo_url": {"type": "string", "description": "dispatch: a repository address to clone and work in, instead of a project."},
             "repo_path": {"type": "string", "description": "dispatch: a folder on this computer, instead of a project. Admins only."},
-            "model": {"type": "string", "description": "dispatch: a model for the CLI, only if the user asked for one; otherwise their default is used."},
+            "model": {"type": "string", "description": "dispatch: a model for the CLI, only if the user asked for one; otherwise their default is used. For OpenCode, exactly a name from 'options': never make one up."},
             "effort": {"type": "string", "description": "dispatch: reasoning effort for the CLI, only if the user asked for one."},
             "task_id": {"type": "string", "description": "status, files, steer, stop, pr, request_merge: the task."},
             "whole": {"type": "boolean", "description": "files: copy the whole project, not only what the task changed."},
@@ -178,7 +178,7 @@ class CrewTool(Tool):
                     lines.append("    No model is chosen, so it needs one named. Its free models differ in what happens to "
                                  "the code, so that's the user's choice: ask them, don't pick for them.")
                 if h.get("models"):
-                    lines.append(f"    It can use: {', '.join(h['models'][:30])}")
+                    lines.append(f"    It can use only these, by exactly these names: {', '.join(h['models'][:30])}")
         repos = data.get("repos") or {}
         lines.append("Projects (each folder is in your VFS at the path shown: read it yourself, no task needed):")
         for p in repos.get("projects", []):

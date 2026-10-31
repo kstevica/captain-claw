@@ -17,7 +17,7 @@ from fastapi import FastAPI, HTTPException
 
 from captain_claw.flight_deck import admin_routes, agent_identity
 from captain_claw.flight_deck import auth as auth_mod
-from captain_claw.flight_deck import autonomy, crew_access, crew_routes, crew_runner, crew_store, fd_crypto, fd_dispatch
+from captain_claw.flight_deck import autonomy, crew_access, crew_logins, crew_routes, crew_runner, crew_store, fd_crypto, fd_dispatch
 from captain_claw.flight_deck import settings_routes
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.db import FlightDeckDB
@@ -686,6 +686,169 @@ async def test_opencode_needs_no_key_but_someones_code_needs_a_chosen_model(deck
         # A task can still name another, and clearing the default brings the question back.
         await client.put("/fd/crew/models/opencode", json={"model": ""})
         assert (await client.post("/fd/crew/tasks", json=brief)).status_code == 400
+
+
+async def test_a_model_opencode_doesnt_know_is_refused_before_it_costs_a_worktree(deck, opencode_too, monkeypatch):
+    # From a real log: a made-up provider, and only "Unexpected server error" four times over.
+    await _approve_opencode(deck, deck.user)
+    brief = {"harness": "opencode", "brief": "Add it.", "project": "Game"}
+    async with _client(deck.user) as client:
+        refused = await client.post("/fd/crew/tasks", json={**brief, "model": "homeserver/qwen"})
+        assert refused.status_code == 400
+        detail = refused.json()["detail"]
+        assert "homeserver/qwen" in detail and "opencode/deepseek-v4.1-flash-free" in detail
+        assert "Your own model" in detail  # why one that works in their terminal isn't here
+        assert (await client.get("/fd/crew/tasks")).json()["tasks"] == []
+        assert not opencode_too.exists()
+        # Just set up: the list is asked again rather than read from the cache.
+        real = crew_runner.crew_harness.list_models
+        monkeypatch.setattr(crew_runner.crew_harness, "list_models", lambda *a: [*real(*a), "home/qwen"])
+        added = await client.post("/fd/crew/tasks", json={**brief, "model": "home/qwen"})
+        assert added.status_code == 201, added.text
+    await _settle(deck.user["id"], added.json()["id"])
+
+
+async def test_opencode_that_cant_list_its_models_isnt_stopped_by_that(deck, opencode_too, monkeypatch):
+    await _approve_opencode(deck, deck.user)
+    monkeypatch.setattr(crew_runner.crew_harness, "list_models", lambda *a: [])
+    async with _client(deck.user) as client:
+        made = await client.post("/fd/crew/tasks", json={"harness": "opencode", "brief": "Add it.", "project": "Game", "model": "home/anything"})
+        assert made.status_code == 201, made.text
+    await _settle(deck.user["id"], made.json()["id"])
+
+
+async def _own_model_server(seen):
+    """A real little OpenAI-style server on a local port: what it serves, and who asked."""
+    async def handle(reader, writer):
+        request = (await reader.read(4096)).decode("latin-1")
+        line = request.split("\r\n")[0]
+        auth = next((h.split(": ", 1)[1] for h in request.split("\r\n") if h.lower().startswith("authorization:")), "")
+        seen.append((line, auth))
+        if "/v1/models" in line and auth == "Bearer the-right-key":
+            body, status = json.dumps({"data": [{"id": "qwen:3"}, {"id": "bad name!"}]}).encode(), "200 OK"
+        elif "/v1/models" in line:
+            body, status = b"{}", "401 Unauthorized"
+        else:
+            body, status = b"{}", "404 Not Found"
+        writer.write(f"HTTP/1.1 {status}\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode() + body)
+        await writer.drain()
+        writer.close()
+
+    server = await asyncio.start_server(handle, "127.0.0.1", 0)
+    return server, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}"
+
+
+async def test_your_own_model_runs_on_a_sealed_key_that_never_comes_back(deck, opencode_too, monkeypatch):
+    await _approve_opencode(deck, deck.user)
+    await _approve_opencode(deck, deck.other)
+    secret = "the-right-key"
+    async with _client(deck.user) as client:
+        saved = await client.put("/fd/crew/own-model", json={"url": "http://192.168.1.20:8080", "key": secret, "models": "qwen:3, other", "context": 240000})
+        assert saved.status_code == 200, saved.text
+        view = saved.json()
+        # No path means the usual one.
+        assert view["url"] == "http://192.168.1.20:8080/v1" and view["names"] == ["own/qwen:3", "own/other"] and view["has_key"] is True
+        me = (await client.get("/fd/crew/me")).json()
+        assert secret not in saved.text and secret not in json.dumps(me)
+        h = me["harnesses"][0]
+        assert h["login"] == {"ok": True, "how": "your own model"} and h["default_model"] == "own/qwen:3"
+        assert h["models"][:2] == ["own/qwen:3", "own/other"]
+    raw = await deck.db.get_setting(deck.user["id"], "crew:own_model")
+    assert raw and secret not in raw
+    # The worker gets it in its environment, and in no file.
+    user = await deck.db.get_user_by_id(deck.user["id"])
+    env = await crew_logins.worker_env(deck.db, user, crew_access.grant_of(user), "opencode", str(deck.tmp / "bin" / "opencode"))
+    assert env["CREW_OWN_MODEL_KEY"] == secret and secret not in env["OPENCODE_CONFIG_CONTENT"]
+    config = json.loads(env["OPENCODE_CONFIG_CONTENT"])["provider"]["own"]
+    assert config["options"] == {"baseURL": "http://192.168.1.20:8080/v1", "apiKey": "{env:CREW_OWN_MODEL_KEY}"}
+    assert config["models"]["qwen:3"]["limit"] == {"context": 240000, "output": 60000}
+    # Someone else's stays theirs.
+    other = await deck.db.get_user_by_id(deck.other["id"])
+    env = await crew_logins.worker_env(deck.db, other, crew_access.grant_of(other), "opencode", str(deck.tmp / "bin" / "opencode"))
+    assert "CREW_OWN_MODEL_KEY" not in env and "OPENCODE_CONFIG_CONTENT" not in env
+    async with _client(deck.other) as client:
+        assert (await client.get("/fd/crew/me")).json()["own_model"] is None
+    real = crew_runner.crew_harness.list_models
+    monkeypatch.setattr(crew_runner.crew_harness, "list_models", lambda *a: [*real(*a), "own/qwen:3", "own/other"])
+    async with _client(deck.user) as client:
+        # Named nowhere, a task runs on it, not on OpenCode's own pick.
+        made = await client.post("/fd/crew/tasks", json={"harness": "opencode", "brief": "Add it.", "project": "Game"})
+        assert made.status_code == 201, made.text
+        assert made.json()["model"] == "own/qwen:3"
+    await _settle(deck.user["id"], made.json()["id"])
+    assert "--model own/qwen:3" in opencode_too.read_text()
+    async with _client(deck.user) as client:
+        # Gone means gone, including from the choices.
+        assert (await client.delete("/fd/crew/own-model")).status_code == 200
+        me = (await client.get("/fd/crew/me")).json()
+        assert me["own_model"] is None and me["harnesses"][0]["default_model"] == ""
+        assert (await client.post("/fd/crew/tasks", json={"harness": "opencode", "brief": "Add it.", "project": "Game"})).status_code == 400
+
+
+@pytest.mark.parametrize(("body", "why"), [
+    ({"url": "ftp://x/v1", "models": "a"}, "address"), ({"url": "file:///etc/passwd", "models": "a"}, "address"),
+    ({"url": "http://user:pw@x/v1", "models": "a"}, "address"), ({"url": "http://x/{file:~/.ssh/id}", "models": "a"}, "characters"),
+    ({"url": "http://x/v1", "models": ""}, "at least one"), ({"url": "http://x/v1", "models": "{env:SECRET}"}, "model names"),
+    ({"url": "http://x/v1", "models": "--flag"}, "model names"), ({"url": "http://x/v1", "models": "a", "context": "lots"}, "context"),
+])
+async def test_your_own_model_is_checked_before_it_is_kept(deck, body, why):
+    await _approve_opencode(deck, deck.user)
+    async with _client(deck.user) as client:
+        refused = await client.put("/fd/crew/own-model", json=body)
+        assert refused.status_code == 400 and why in refused.json()["detail"], refused.text
+        assert (await client.get("/fd/crew/me")).json()["own_model"] is None
+
+
+async def test_a_saved_key_goes_only_to_the_server_it_was_saved_for(deck):
+    await _approve_opencode(deck, deck.user)
+    seen: list = []
+    server, url = await _own_model_server(seen)
+    other_seen: list = []
+    other_server, other_url = await _own_model_server(other_seen)
+    async with server, other_server, _client(deck.user) as client:
+        # No key yet: it's there, and says no.
+        got = (await client.post("/fd/crew/own-model/check", json={"url": url})).json()
+        assert got["ok"] is False and "refused" in got["error"] and got["url"] == f"{url}/v1"
+        got = (await client.post("/fd/crew/own-model/check", json={"url": url, "key": "the-right-key"})).json()
+        assert got["ok"] is True and got["models"] == ["qwen:3"]  # a name that couldn't be used isn't offered
+        await client.put("/fd/crew/own-model", json={"url": url, "key": "the-right-key", "models": "qwen:3"})
+        # Saved: a blank key means that one, for that server.
+        assert (await client.post("/fd/crew/own-model/check", json={"url": url})).json()["ok"] is True
+        # Another server gets nothing of it, whether checked or saved.
+        got = (await client.post("/fd/crew/own-model/check", json={"url": other_url})).json()
+        assert got["ok"] is False and all(auth == "" for _, auth in other_seen)
+        kept = await client.put("/fd/crew/own-model", json={"url": other_url, "models": "qwen:3"})
+        assert kept.json()["has_key"] is False
+        unreachable = (await client.post("/fd/crew/own-model/check", json={"url": "http://127.0.0.1:9/v1"})).json()
+        assert unreachable["ok"] is False and "Can't reach" in unreachable["error"]
+
+
+async def test_pi_runs_on_your_own_model_and_keeps_the_rest_of_its_file(deck):
+    async with _client(deck.admin) as client:
+        await client.put(f"/fd/admin/users/{deck.user['id']}", json={"crew": {"approved": True, "harnesses": ["pi"], "max_parallel": 1}})
+    user = await deck.db.get_user_by_id(deck.user["id"])
+    grant = crew_access.grant_of(user)
+    home = crew_logins.worker_home(user["id"])
+    file = home / ".pi" / "agent" / "models.json"
+    file.parent.mkdir(parents=True)
+    file.write_text(json.dumps({"theirs": 1, "providers": {"mine": {"baseUrl": "x"}}}))
+    async with _client(deck.user) as client:
+        assert (await client.get("/fd/crew/me")).json()["harnesses"][0]["login"]["ok"] is False
+        await client.put("/fd/crew/own-model", json={"url": "http://x:1/v1", "key": "the-right-key", "models": "qwen:3", "context": 8192})
+        h = (await client.get("/fd/crew/me")).json()["harnesses"][0]
+        assert h["login"] == {"ok": True, "how": "your own model"} and h["default_model"] == "own/qwen:3" and h["models"] == ["own/qwen:3"]
+    env = await crew_logins.worker_env(deck.db, user, grant, "pi", "/bin/pi")
+    assert env["CREW_OWN_MODEL_KEY"] == "the-right-key"
+    written = file.read_text()
+    assert "the-right-key" not in written
+    parsed = json.loads(written)
+    assert parsed["theirs"] == 1 and parsed["providers"]["mine"] == {"baseUrl": "x"}
+    assert parsed["providers"]["own"]["apiKey"] == "$CREW_OWN_MODEL_KEY"
+    assert parsed["providers"]["own"]["models"] == [{"id": "qwen:3", "contextWindow": 8192, "maxTokens": 2048}]
+    # Removed from the page, it leaves the file at the next run, and what's theirs stays.
+    crew_logins._sync_pi_models(home, {})
+    parsed = json.loads(file.read_text())
+    assert "own" not in parsed["providers"] and parsed["providers"]["mine"] == {"baseUrl": "x"} and parsed["theirs"] == 1
 
 
 async def test_a_default_model_is_checked_and_each_users_own(deck, opencode_too):

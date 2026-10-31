@@ -16,6 +16,11 @@ Saved logins are sealed in ``user_settings`` as ``crew:logins`` (``fd_crypto``);
 model picked in a CLI's own screen is in that person's home, which their worker
 doesn't share.
 
+``crew:own_model`` is a model server of their own (sealed, for its key): OpenCode
+and Pi run on it as ``own/<model>``. The key reaches a worker only in the environment
+of its turn, so it's in no file: OpenCode's config comes through
+``OPENCODE_CONFIG_CONTENT``, and Pi's ``models.json`` names the variable.
+
 A worker's environment is built from nothing (:data:`_BASE_ENV` is all it takes
 from Flight Deck's), so no deck secret and no deck key reaches it. A non-admin's
 worker gets a home folder of its own, which keeps the deck user's logins out of
@@ -29,9 +34,12 @@ import json
 import os
 import subprocess
 from datetime import UTC, datetime
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
+import httpx
 from fastapi import HTTPException
 
 from captain_claw.flight_deck import byok, crew_harness, crew_store, fd_crypto
@@ -43,6 +51,12 @@ log = get_logger(__name__)
 _K_LOGINS = "crew:logins"
 _K_META = "crew:meta"
 _K_MODELS = "crew:models"
+_K_OWN = "crew:own_model"
+OWN_PROVIDER = "own"
+OWN_KEY_ENV = "CREW_OWN_MODEL_KEY"
+OWN_HARNESSES = ("opencode", "pi")
+_OWN_MODELS_MAX = 20
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
 _CLAUDE_TOKEN_PREFIX = "sk-ant-oat"
 PROVIDER_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -148,6 +162,155 @@ def _codex_login_is_file(secret: str) -> bool:
     return secret.lstrip().startswith("{")
 
 
+def _clean_url(value: str) -> str:
+    """An OpenAI-compatible address. It may well be on a private network: that's the
+    point, and a worker reaches what it likes anyway. No braces: OpenCode expands
+    {env:…} and {file:…} in its config."""
+    url = (value or "").strip().rstrip("/")
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
+        raise HTTPException(400, "Give its address as http://host:port/v1.")
+    if re.search(r"[\s{}\"'\\]", url):
+        raise HTTPException(400, "That address has characters an address can't have.")
+    return url if parsed.path else f"{url}/v1"
+
+
+def _clean_models(value: Any) -> list[str]:
+    names = value if isinstance(value, list) else re.split(r"[,\s]+", str(value or ""))
+    out = list(dict.fromkeys(str(n).strip() for n in names if str(n).strip()))
+    if not out:
+        raise HTTPException(400, "Name at least one model it serves.")
+    if len(out) > _OWN_MODELS_MAX or not all(_MODEL_ID_RE.match(n) for n in out):
+        raise HTTPException(400, f"Give up to {_OWN_MODELS_MAX} model names, as the server calls them.")
+    return out
+
+
+async def read_own_model(db, uid: str) -> dict[str, Any]:
+    token = await db.get_setting(uid, _K_OWN) or ""
+    if not token:
+        return {}
+    try:
+        own = fd_crypto.unseal(token)
+    except fd_crypto.CryptoUnavailable:
+        log.warning("Crew's own model can't be read: encryption unavailable", user_id=uid)
+        return {}
+    return own if isinstance(own, dict) else {}
+
+
+def own_model_names(own: dict[str, Any]) -> list[str]:
+    return [f"{OWN_PROVIDER}/{m}" for m in own.get("models") or []]
+
+
+def own_model_view(own: dict[str, Any]) -> dict[str, Any] | None:
+    """What the page may see of it: never the key."""
+    if not own:
+        return None
+    return {"url": own.get("url") or "", "models": own.get("models") or [], "names": own_model_names(own),
+            "context": own.get("context") or 0, "has_key": bool(own.get("key")), "saved_at": own.get("saved_at") or ""}
+
+
+async def save_own_model(db, uid: str, url: str, key: str, models: Any, context: Any) -> dict[str, Any]:
+    clean = _clean_url(url)
+    names = _clean_models(models)
+    old = await read_own_model(db, uid)
+    # A blank key keeps the saved one, but only for the server it was saved for.
+    secret = (key or "").strip() or (old.get("key", "") if old.get("url") == clean else "")
+    if len(secret) > _MAX_SECRET:
+        raise HTTPException(400, "That is too long to be a key.")
+    try:
+        size = int(context or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Its context size is a number of tokens.") from None
+    if size and not 1024 <= size <= 100_000_000:
+        raise HTTPException(400, "Its context size is a number of tokens.")
+    own = {"url": clean, "key": secret, "models": names, "context": size, "saved_at": datetime.now(UTC).isoformat()}
+    try:
+        sealed = fd_crypto.seal(own)
+    except fd_crypto.CryptoUnavailable as exc:
+        raise HTTPException(503, f"It can't be stored safely on this deck: {exc}") from None
+    await db.set_settings(uid, {_K_OWN: sealed})
+    return own
+
+
+async def delete_own_model(db, uid: str) -> None:
+    await db.delete_setting(uid, _K_OWN)
+
+
+async def check_own_model(db, uid: str, url: str, key: str) -> dict[str, Any]:
+    """Can Flight Deck reach it, and what does it serve? A saved key is only ever sent
+    to the server it was saved for. Only ids and a reason come back, never the reply."""
+    clean = _clean_url(url)
+    secret = (key or "").strip()
+    if not secret:
+        old = await read_own_model(db, uid)
+        secret = old.get("key", "") if old.get("url") == clean else ""
+    headers = {"Authorization": f"Bearer {secret}"} if secret else {}
+    try:
+        async with httpx.AsyncClient(timeout=8, trust_env=False, follow_redirects=False) as client:
+            resp = await client.get(f"{clean}/models", headers=headers)
+    except httpx.HTTPError as exc:
+        return {"ok": False, "url": clean, "models": [], "error": f"Can't reach it from this server: {type(exc).__name__}."}
+    if resp.status_code in (401, 403):
+        return {"ok": False, "url": clean, "models": [], "error": "It's there, but it refused that key."}
+    if resp.status_code >= 300:
+        return {"ok": False, "url": clean, "models": [], "error": f"It answered {resp.status_code}. Is /v1 the right path?"}
+    try:
+        data = resp.json().get("data")
+        ids = [str(m["id"]) for m in data if isinstance(m, dict) and m.get("id")]
+    except (ValueError, TypeError, AttributeError, KeyError):
+        ids = []
+    return {"ok": True, "url": clean, "models": [m for m in ids if _MODEL_ID_RE.match(m)][:_OWN_MODELS_MAX], "error": ""}
+
+
+def opencode_config(own: dict[str, Any]) -> dict[str, Any]:
+    options: dict[str, Any] = {"baseURL": own["url"]}
+    if own.get("key"):
+        options["apiKey"] = "{env:" + OWN_KEY_ENV + "}"
+    models: dict[str, Any] = {}
+    for name in own.get("models") or []:
+        model: dict[str, Any] = {"name": name}
+        if own.get("context"):
+            model["limit"] = {"context": own["context"], "output": min(own["context"] // 4, 65536)}
+        models[name] = model
+    return {"provider": {OWN_PROVIDER: {"npm": "@ai-sdk/openai-compatible", "name": "Your own model", "options": options,
+                                        "models": models}}}
+
+
+def _sync_pi_models(home: Path, own: dict[str, Any]) -> None:
+    """Pi reads its models from a file, which holds only the variable's name. Whatever
+    else is in that file is theirs, and stays."""
+    path = home / ".pi" / "agent" / "models.json"
+    try:
+        current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        return
+    if not isinstance(current, dict):
+        return
+    providers = current.get("providers") if isinstance(current.get("providers"), dict) else {}
+    wanted = dict(providers)
+    wanted.pop(OWN_PROVIDER, None)
+    if own:
+        entries = []
+        for name in own.get("models") or []:
+            entry: dict[str, Any] = {"id": name}
+            if own.get("context"):
+                entry.update(contextWindow=own["context"], maxTokens=min(own["context"] // 4, 65536))
+            entries.append(entry)
+        wanted[OWN_PROVIDER] = {"baseUrl": own["url"], "api": "openai-completions",
+                                "apiKey": f"${OWN_KEY_ENV}" if own.get("key") else "none", "models": entries}
+    if wanted != providers:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({**current, "providers": wanted}, indent=2), encoding="utf-8")
+
+
+def effective_model(defaults: dict[str, str], own: dict[str, Any], harness: str) -> str:
+    """What a task runs on when it names nothing: their choice, else their own server."""
+    if defaults.get(harness):
+        return defaults[harness]
+    names = own_model_names(own) if harness in OWN_HARNESSES else []
+    return names[0] if names else ""
+
+
 async def login_state(db, user: dict, grant: Grant, harness: str) -> dict[str, Any]:
     """Whether a worker on *harness* has an account to run on, and which."""
     uid = user["id"]
@@ -162,6 +325,8 @@ async def login_state(db, user: dict, grant: Grant, harness: str) -> dict[str, A
     if found:
         names = ", ".join(byok.PROVIDERS.get(p, p) for p in found)
         return {"ok": True, "how": f"your {names} key"}
+    if harness in OWN_HARNESSES and await read_own_model(db, uid):
+        return {"ok": True, "how": "your own model"}
     if grant.trusted:
         return {"ok": True, "how": "this computer's login"}
     if harness == "opencode":
@@ -207,6 +372,7 @@ async def worker_env(db, user: dict, grant: Grant, harness: str, binary: str) ->
         raise HTTPException(400, f"Add your {label} login in Crew → Logins first.")
     logins = await read_logins(db, uid)
     keys = await _provider_keys(db, uid, logins)
+    own = await read_own_model(db, uid) if harness in OWN_HARNESSES else {}
     env = _base_env(binary)
     env.update(crew_harness.HARNESSES[harness].env)
     if grant.trusted:
@@ -241,6 +407,12 @@ async def worker_env(db, user: dict, grant: Grant, harness: str, binary: str) ->
             env["CODEX_API_KEY"] = env["OPENAI_API_KEY"] = secret or keys["openai"]
     else:
         env.update({PROVIDER_ENV[p]: k for p, k in keys.items()})
+        if own.get("key"):
+            env[OWN_KEY_ENV] = own["key"]
+        if harness == "opencode" and own:
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config(own))
+        if harness == "pi":
+            _sync_pi_models(Path(env["HOME"]), own)
     return env
 
 

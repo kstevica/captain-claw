@@ -17,6 +17,8 @@
   POST   /fd/crew/tasks/{id}/merge      land the work
   POST   /fd/crew/tasks/{id}/close      tear it down (?discard=true for work that hasn't landed)
   PUT    /fd/crew/models/{harness}      the model a CLI uses when a task names none
+  PUT/DELETE /fd/crew/own-model         a model server of their own, for OpenCode and Pi
+  POST   /fd/crew/own-model/check       can Flight Deck reach it, and what does it serve
   POST   /fd/crew/projects              a new project, ready for tasks
   POST   /fd/crew/projects/tidy         clear a project's finished tasks off the page
   GET/PUT/DELETE /fd/crew/logins[/{name}]   the accounts their workers run on
@@ -88,6 +90,18 @@ class ModelBody(BaseModel):
     model: str = ""
 
 
+class OwnModelBody(BaseModel):
+    url: str
+    key: str = ""
+    models: list[str] | str = ""
+    context: int | str = 0
+
+
+class OwnModelCheck(BaseModel):
+    url: str
+    key: str = ""
+
+
 class ProjectBody(BaseModel):
     name: str
 
@@ -114,6 +128,7 @@ async def _me(user: dict) -> dict[str, Any]:
         return out
     db = get_db()
     defaults = await crew_logins.read_models(db, row["id"])
+    own = await crew_logins.read_own_model(db, row["id"])
 
     async def one(harness: str) -> dict[str, Any]:
         info = crew_harness.HARNESSES[harness]
@@ -121,14 +136,17 @@ async def _me(user: dict) -> dict[str, Any]:
         version = await asyncio.to_thread(crew_harness.version_of, binary) if binary else ""
         return {"id": harness, "label": info.label, "installed": bool(binary), "version": version,
                 "install": info.install, "login": await crew_logins.login_state(db, row, grant, harness),
-                "default_model": defaults.get(harness, ""),
-                "models": await crew_runner.models_of(row, grant, harness, binary, db)}
+                "default_model": crew_logins.effective_model(defaults, own, harness),
+                "models": list(dict.fromkeys([
+                    *(crew_logins.own_model_names(own) if harness in crew_logins.OWN_HARNESSES else []),
+                    *await crew_runner.models_of(row, grant, harness, binary, db)]))}
 
     out.update(
         trusted=grant.trusted, max_parallel=grant.max_parallel,
         harnesses=await asyncio.gather(*(one(h) for h in grant.harnesses)),
         logins=await crew_logins.read_meta(db, row["id"]),
         login_names=list(crew_logins.LOGIN_NAMES), free_terms_url=crew_runner.FREE_TERMS_URL,
+        own_model=crew_logins.own_model_view(own),
     )
     return out
 
@@ -270,6 +288,28 @@ async def put_model(harness: str, body: ModelBody, user: dict = Depends(get_curr
     model = crew_runner._clean_axis(body.model, crew_runner._MODEL_RE, "model name")
     await crew_logins.save_model(get_db(), row["id"], harness, model)
     return {"harness": harness, "model": model}
+
+
+@router.put("/own-model")
+async def put_own_model(body: OwnModelBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    own = await crew_logins.save_own_model(get_db(), row["id"], body.url, body.key, body.models, body.context)
+    crew_runner._MODELS.pop(row["id"], None)
+    return crew_logins.own_model_view(own) or {}
+
+
+@router.delete("/own-model")
+async def delete_own_model(user: dict = Depends(get_current_user)) -> dict[str, bool]:
+    row, _ = await _approved(user)
+    await crew_logins.delete_own_model(get_db(), row["id"])
+    crew_runner._MODELS.pop(row["id"], None)
+    return {"ok": True}
+
+
+@router.post("/own-model/check")
+async def check_own_model(body: OwnModelCheck, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return await crew_logins.check_own_model(get_db(), row["id"], body.url, body.key)
 
 
 @router.delete("/logins/{name}")
