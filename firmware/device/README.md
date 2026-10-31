@@ -324,11 +324,11 @@ has to follow, and at 1.8 s that's no quicker than letting the first one finish.
 
 | | `epaper154` | `epaper154_touch` |
 |---|---|---|
-| talk | BOOT: press, a blip, and 0.5 s later it listens; press again to send, and 0.5 s later a lower blip | the same, or the Talk button on the screen |
+| talk | BOOT: press, a blip, and 0.5 s later it listens; press again to send, and 0.5 s later a lower blip | the same, or a tap on the home screen's tile or the middle of an answer (no Talk button); on the record screen tap stop on the left or cancel on the right |
 | wake | BOOT or PWR: only wakes it; the next BOOT press talks | the same |
 | cancel | PWR while recording: dropped, nothing sent | the same |
 | next | PWR: next row or page · hold = menu | the same, or swipe; in a list, tap the left or right third to move, the middle to choose |
-| home | PWR: double-click, from any screen (not while it records or the agent works) | the same, or a double tap off the Talk button |
+| home | PWR: double-click, from any screen (not while it records or the agent works) | the same, or a double tap (not on the record screen) |
 | replay | BOOT: double press, or Menu → *Replay answer* | the same |
 | off | PWR held 4 s (on USB: deep sleep, since USB keeps it powered) | the same |
 | Wi-Fi & settings | Menu → *Wi-Fi & settings* | the same |

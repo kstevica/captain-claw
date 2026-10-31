@@ -224,6 +224,8 @@ void notesChanged();
 // The panel's controller to sleep, before the device's deep sleep (the
 // picture stays; ui_epaper154.cpp keeps it, for the next refresh to start from).
 void panelSleep();
+// A touch on the record screen: 1 = stop, 0 = cancel, -1 = neither (or not on it).
+int recordHit(int x, int y);
 #endif
 
 #if defined(BOARD_EPAPER154) || defined(PAPER_B)

@@ -172,8 +172,10 @@ static void handleRoot() {
   }
   if (board::kHasTouch) {
     h += F("<label>Tap to talk</label><select name=taptalk>");
-    h += option("1", "On (a record button on the screen)", settings.tapTalk) + option("0", "Off", !settings.tapTalk);
-    h += F("</select><small>Tap the button and talk, tap it again to send. Holding the ");
+    h += option("1", board::kEpaper ? "On (tap the middle of the screen)" : "On (a record button on the screen)", settings.tapTalk) +
+         option("0", "Off", !settings.tapTalk);
+    h += board::kEpaper ? F("</select><small>Tap and talk, then tap the stop icon to send. The ")
+                        : F("</select><small>Tap the button and talk, tap it again to send. Holding the ");
     h += board::kTalkButton;
     h += F(" works either way.</small>");
   }
