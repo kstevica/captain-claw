@@ -38,6 +38,7 @@ import {
   Smartphone,
   Activity,
   KeyRound,
+  Ship,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -63,6 +64,8 @@ import { useActivityStore } from '../../stores/activityStore'
 import { ToolCallRegister } from '../audit/ToolCallRegister'
 import { takeTaskboardLink, useTaskboardStore } from '../../stores/taskboardStore'
 import { TaskBoard } from '../taskboard/TaskBoard'
+import { CrewBoard } from '../crew/CrewBoard'
+import { useCrewAllowed, useCrewStore } from '../../stores/crewStore'
 import { SharedFolders } from '../vfs/SharedFolders'
 import { DialogFullscreen } from '../library/dialogFullscreen'
 import { isManagedAgent } from '../../utils/managedAgents'
@@ -339,6 +342,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const showTaskboardTask = useTaskboardStore((s) => s.showTask)
   const closeTaskboard = useTaskboardStore((s) => s.close)
   const fetchTaskboardSummary = useTaskboardStore((s) => s.fetchSummary)
+  // Crew: coding agents working for this user, when an admin approved it.
+  const crewOpen = useCrewStore((s) => s.open)
+  const closeCrew = useCrewStore((s) => s.close)
   const taskboardCount = useTaskboardStore((s) => s.needsMe)
   // Shared folders: the files the agents keep together (vfs:<folder>/…).
   const [foldersOpen, setFoldersOpen] = useState(false)
@@ -752,7 +758,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     return !!a && a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
-  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || !!filesData
+  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || !!filesData
   const closePhoneOverlays = () => {
     closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null)
   }
@@ -945,6 +951,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             onOpenChat={openTaskChat}
             onOpenConnections={taskboardConnections}
           />
+        </KioskWideDialog>
+      )}
+      {crewOpen && (
+        <KioskWideDialog label="Crew" phone={isMobile} onClose={closeCrew} widest>
+          <CrewBoard phone={isMobile} onClose={closeCrew} />
         </KioskWideDialog>
       )}
       {dataOpen && (
@@ -1140,6 +1151,8 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
   const authUser = useAuthStore((s) => s.user)
   const signingOut = useAuthStore((s) => s.signingOut)
   const signedIn = authEnabled && authUser
+  const crewAllowed = useCrewAllowed()
+  const openCrew = useCrewStore((s) => s.openCrew)
 
   // Closed without choosing: the focus goes back to the Settings button.
   const [opener] = useState(() => document.activeElement as HTMLElement | null)
@@ -1155,6 +1168,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
       title: 'Your agents at work',
       items: [
         { icon: ListChecks, label: 'Taskboard', hint: 'Asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
+        ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: () => { onClose(); openCrew() }, tone: 'teal' as const }] : []),
         { icon: AlarmClock, label: 'Scheduled tasks', hint: 'On a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
         { icon: Activity, label: 'Activity', hint: 'Every tool they used, and how it went', onSelect: onActivity, tone: 'emerald' },
       ],
@@ -1316,6 +1330,7 @@ const TILE_COLS: Record<number, string> = {
   3: 'grid-cols-[repeat(3,minmax(max-content,1fr))]',
   4: 'grid-cols-[repeat(4,minmax(max-content,1fr))]',
   5: 'grid-cols-[repeat(5,minmax(max-content,1fr))]',
+  6: 'grid-cols-[repeat(3,minmax(max-content,1fr))]',
 }
 
 /** The agent column's row of tools — the Taskboard (how many tasks need
@@ -1327,7 +1342,9 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
   onScheduled?: () => void; scheduledCount: number; scheduledRunning: boolean
   onLibrary?: () => void; onData?: () => void; onFolders?: () => void
 }) {
-  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders].filter(Boolean).length
+  const crewAllowed = useCrewAllowed()
+  const openCrew = useCrewStore((s) => s.openCrew)
+  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders, crewAllowed].filter(Boolean).length
   return (
     <div className={`grid gap-0.5 border-t border-zinc-800 p-2 pb-0 ${TILE_COLS[n] ?? 'grid-cols-1'}`}>
       {onTaskboard && (
@@ -1353,6 +1370,12 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
             )}
           </span>
           <span className="max-w-full truncate">Scheduled</span>
+        </button>
+      )}
+      {crewAllowed && (
+        <button onClick={openCrew} className={toolTile} title="Crew — coding agents working for you">
+          <Ship className="h-[18px] w-[18px] text-teal-600 dark:text-teal-400" />
+          <span className="max-w-full truncate">Crew</span>
         </button>
       )}
       {onLibrary && (

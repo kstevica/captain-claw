@@ -27,6 +27,7 @@ import { CouncilPage } from './pages/CouncilPage'
 import { BasnaPage } from './pages/BasnaPage'
 import { BatPage } from './pages/BatPage'
 import { CodePage } from './pages/CodePage'
+import { CrewBoard } from './components/crew/CrewBoard'
 import { DubinaPage } from './pages/DubinaPage'
 import { TodayPage } from './pages/TodayPage'
 import { SkillsPage } from './pages/SkillsPage'
@@ -394,6 +395,7 @@ function AppContent() {
       {view === 'bat' && <BatPage />}
       {view === 'payments' && <PaymentsPage />}
       {view === 'code' && <CodePage />}
+      {view === 'crew' && <CrewBoard />}
       {view === 'dubina' && <DubinaPage />}
       {view === 'vfs' && <VFSPage />}
       {view === 'deep-memory' && <DeepMemoryPage />}

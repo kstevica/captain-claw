@@ -74,6 +74,20 @@ def test_a_cli_saying_it_failed_is_kept(harness, line, text):
     assert events[-1]["kind"] == "error"
 
 
+def test_a_retry_that_worked_is_not_a_failure():
+    state = TurnState()
+    parse_line("codex", '{"type":"error","message":"Reconnecting... 1/5"}', state)
+    assert state.error
+    parse_line("codex", '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}', state)
+    assert state.error == ""
+    state = TurnState()
+    parse_line("pi", '{"type":"message_end","message":{"role":"assistant","content":[],"stopReason":"error",'
+                     '"errorMessage":"overloaded"}}', state)
+    assert state.error
+    parse_line("pi", '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"ok"}]}}', state)
+    assert state.error == "" and state.final == "ok"
+
+
 @pytest.mark.parametrize("harness", HARNESSES)
 def test_unknown_and_broken_lines_cost_nothing(harness):
     state = TurnState()

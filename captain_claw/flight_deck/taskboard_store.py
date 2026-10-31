@@ -59,7 +59,7 @@ CHANNEL_LABELS = {
     "web": "Web chat", "whatsapp": "WhatsApp", "waweb": "WhatsApp Web", "telegram": "Telegram",
     "tg_inbox": "Telegram inbox", "gmail": "Gmail", "email": "Email", "device": "Device", "link": "Linked systems",
     "scheduled": "Scheduled tasks", "autonomy": "Autonomous work", "member": "Shared-agent members",
-    "api": "API", "mcp": "MCP", "glasses": "Smart glasses", "messenger": "Messenger",
+    "api": "API", "mcp": "MCP", "glasses": "Smart glasses", "messenger": "Messenger", "crew": "Crew",
 }
 
 # Writing one of these is writing the status: a lock on "status" covers them.

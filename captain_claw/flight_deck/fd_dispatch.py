@@ -571,13 +571,16 @@ async def _dispatch_crew_merge(user_id: str, action: dict[str, Any], *, approved
 
     from captain_claw.flight_deck import crew_access, crew_runner
 
-    task_id = str((action.get("payload") or {}).get("task_id") or "")
+    payload = action.get("payload") or {}
+    task_id, head = str(payload.get("task_id") or ""), str(payload.get("head") or "")
     try:
         user = await crew_runner._user_of(user_id)
         grant = crew_access.grant_of(user)
         if not user or not grant.allowed:
             raise HTTPException(403, crew_access.NOT_APPROVED)
-        task = await crew_runner.merge(user, grant, task_id)
+        if not head:
+            raise HTTPException(409, "This proposal doesn't say which commits it was for.")
+        task = await crew_runner.merge(user, grant, task_id, expect_head=head)
     except HTTPException as exc:
         store.update_status(action["id"], "failed", outcome="fail", outcome_note=str(exc.detail)[:500])
         return {"ok": True, "target": task_id, "note": str(exc.detail)}

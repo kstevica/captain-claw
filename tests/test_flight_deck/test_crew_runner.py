@@ -11,11 +11,12 @@ import subprocess
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 from fastapi import HTTPException
 
 from captain_claw.flight_deck import auth as auth_mod
-from captain_claw.flight_deck import crew_access, crew_runner, crew_store, fd_crypto
+from captain_claw.flight_deck import crew_access, crew_logins, crew_runner, crew_store, fd_crypto
 from captain_claw.flight_deck.crew_access import Grant
 from captain_claw.flight_deck.db import FlightDeckDB
 
@@ -23,6 +24,10 @@ from captain_claw.flight_deck.db import FlightDeckDB
 FAKE_CLI = r"""#!/bin/sh
 all="$*"
 say() { printf '%s\n' "$1"; }
+printf '%s' "$all" > "$(git rev-parse --git-dir)/seen"
+case "$all" in
+  *SCENARIO:earlyfail*) echo "no such model" >&2; exit 4 ;;
+esac
 sid=$(printf '%s' "$all" | sed -n 's/.*--resume \([^ ]*\).*/\1/p')
 [ -n "$sid" ] || sid="sess-$$"
 say "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
@@ -33,6 +38,7 @@ case "$all" in
   *SCENARIO:envdump*) env > "$PWD/env.txt" ; git add env.txt; git commit -qm "env" ;;
   *SCENARIO:ask*) ;;
   *SCENARIO:dirty*) echo x > left-over.txt ;;
+  *SCENARIO:detach*) git checkout -q --detach; echo x > lost.txt; git add lost.txt; git commit -qm "off the branch" ;;
   *SCENARIO:nothing*) ;;
   *SCENARIO:clash*) echo mine > shared.txt; git add shared.txt; git commit -qm "mine" ;;
   *) echo "$all" | head -c 40 > work.txt; git add work.txt; git commit -qm "the work" ;;
@@ -351,6 +357,9 @@ async def test_a_non_admins_worker_gets_their_login_and_nothing_of_the_decks(dec
     assert env["HOME"].startswith(str(deck["tmp"] / "crew"))
     assert env["GIT_AUTHOR_NAME"] == "Una"
     assert env["CAPTAIN_CREW"] == "1"
+    # OpenSSH ignores $HOME: the deck's keys are out of its reach only through this.
+    assert "IdentityFile=/dev/null" in env["GIT_SSH_COMMAND"]
+    assert "SSH_AUTH_SOCK" not in env
 
 
 async def test_a_non_admin_without_a_login_never_runs_on_the_decks(deck, monkeypatch):
@@ -412,6 +421,305 @@ async def test_someone_elses_task_does_not_exist(deck):
         assert err.value.status_code == 404
 
 
+async def test_too_many_waiting_is_refused(deck):
+    grant = Grant(True, "admin", ("claude",), 1)
+    for _ in range(crew_runner._ACTIVE_PER_SLOT):
+        await _dispatch(deck, "SCENARIO:slow", grant=grant)
+    with pytest.raises(HTTPException) as err:
+        await _dispatch(deck, "SCENARIO:slow", grant=grant)
+    assert err.value.status_code == 429
+
+
+async def test_a_pull_request_pushes_opens_and_merges_on_github(deck, monkeypatch):
+    """GitHub stands in; the token goes in the environment, never on a command line."""
+    _run(deck["repo"], "remote", "add", "origin", "git@github.com:acme/widgets.git")
+    seen: dict = {"git": [], "http": []}
+    real_git = crew_runner._git
+
+    async def git(cwd, *args, env=None, timeout=300.0):
+        if args[:1] == ("push",):
+            seen["git"].append((args, env or {}))
+            return 0, ""
+        return await real_git(cwd, *args, env=env, timeout=timeout)
+
+    monkeypatch.setattr(crew_runner, "_git", git)
+
+    def github(request: httpx.Request) -> httpx.Response:
+        seen["http"].append((request.method, request.url.path, json.loads(request.content), request.headers["authorization"]))
+        if request.method == "POST":
+            return httpx.Response(201, json={"number": 7, "html_url": "https://github.com/acme/widgets/pull/7"})
+        return httpx.Response(200, json={"sha": "abc123"})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(github), **kw))
+
+    async def token(db, user, grant):
+        return "gh-secret-token"
+
+    monkeypatch.setattr(crew_logins, "github_token", token)
+    done = await _settle(await _dispatch(deck, deliver="pr"))
+    assert done["status"] == "pr_open"
+    assert done["delivery"] == {"kind": "pr", "pr": 7, "url": "https://github.com/acme/widgets/pull/7", "repo": "acme/widgets"}
+    args, env = seen["git"][0]
+    assert "https://github.com/acme/widgets.git" in args
+    assert "gh-secret-token" not in " ".join(args)
+    assert env["GIT_CONFIG_KEY_0"] == "http.https://github.com/.extraheader"
+    method, path, body, auth = seen["http"][0]
+    assert (method, path) == ("POST", "/repos/acme/widgets/pulls")
+    assert body["head"] == done["branch"] and body["base"] == "main"
+    assert auth == "Bearer gh-secret-token"
+    # Told more: the same pull request gets what's new.
+    await crew_runner.steer(done["user_id"], done["id"], "one more thing")
+    again = await _settle(done)
+    assert again["status"] == "pr_open" and again["delivery"]["pr"] == 7
+    assert len(seen["git"]) == 2 and len([h for h in seen["http"] if h[0] == "POST"]) == 1
+    merged = await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"])
+    assert merged["status"] == "delivered"
+    assert seen["http"][-1][:2] == ("PUT", "/repos/acme/widgets/pulls/7/merge")
+    assert seen["http"][-1][2]["sha"] == again["evidence"]["head"]
+    assert not Path(done["worktree"]).exists()
+
+
+async def test_a_pull_request_that_fails_leaves_the_task_ready_and_says_why(deck, monkeypatch):
+    async def token(db, user, grant):
+        return ""
+
+    monkeypatch.setattr(crew_logins, "github_token", token)
+    done = await _settle(await _dispatch(deck, deliver="pr"))
+    assert done["status"] == "ready"
+    assert "GitHub token" in done["note"]
+
+
+def _seen(task: dict) -> str:
+    wt = Path(task["worktree"])
+    return (Path(_run(wt, "rev-parse", "--absolute-git-dir")) / "seen").read_text()
+
+
+async def test_what_a_failed_ps_says_is_not_that_the_worker_died(deck, monkeypatch):
+    task = await _dispatch(deck, "SCENARIO:slow")
+    crew_runner._PROCS.clear()
+    monkeypatch.setattr(crew_runner, "_proc_start", lambda pid: "")
+    assert crew_runner._alive(task)
+    await crew_runner.tick()
+    assert crew_store.get_store().get(task["user_id"], task["id"])["status"] == "running"
+    # And it can still be stopped.
+    await crew_runner.stop(task["user_id"], task["id"])
+    monkeypatch.undo()
+    with pytest.raises(ProcessLookupError):
+        os.killpg(task["pid"], 0)
+
+
+async def test_commits_on_a_detached_head_are_not_lost(deck):
+    done = await _settle(await _dispatch(deck, "SCENARIO:detach"))
+    assert done["evidence"]["stray"] == 1
+    assert done["evidence"]["off_branch"] == "a detached HEAD"
+    with pytest.raises(HTTPException, match="off its branch"):
+        await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"])
+    with pytest.raises(HTTPException, match="hasn't landed"):
+        await crew_runner.close(done["user_id"], done["id"])
+    assert Path(done["worktree"]).is_dir()
+
+
+async def test_merge_leaves_a_base_being_rebased_alone(deck):
+    done = await _settle(await _dispatch(deck))
+    repo = deck["repo"]
+    (repo / "shared.txt").write_text("on main\n")
+    _run(repo, "commit", "-qam", "main side")
+    _run(repo, "checkout", "-q", "-b", "side", "HEAD~1")
+    (repo / "shared.txt").write_text("on side\n")
+    _run(repo, "commit", "-qam", "side side")
+    _run(repo, "checkout", "-q", "main")
+    subprocess.run([*GIT, "rebase", "side"], cwd=repo, capture_output=True)
+    before = _run(repo, "rev-parse", "refs/heads/main")
+    with pytest.raises(HTTPException) as err:
+        await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"])
+    assert err.value.status_code == 409
+    assert _run(repo, "rev-parse", "refs/heads/main") == before
+    subprocess.run([*GIT, "rebase", "--abort"], cwd=repo, check=True, capture_output=True)
+    assert _run(repo, "for-each-ref", "refs/crew-merge") == ""
+    assert Path(done["worktree"]).is_dir()
+
+
+async def test_a_stop_after_the_queue_read_its_list_wins(deck, monkeypatch):
+    grant = Grant(True, "admin", ("claude",), 1)
+    first = await _dispatch(deck, "SCENARIO:slow", grant=grant)
+    queued = await _dispatch(deck, "SCENARIO:work")
+    assert queued["status"] in ("queued", "running")
+    await crew_runner.stop(first["user_id"], first["id"])
+    await crew_runner.stop(queued["user_id"], queued["id"])
+    stale = {**crew_store.get_store().get(queued["user_id"], queued["id"]), "status": "queued"}
+    store = crew_store.get_store()
+    monkeypatch.setattr(store, "with_status", lambda *s: [stale])
+    await crew_runner._start_queued()
+    fresh = store.get(queued["user_id"], queued["id"])
+    assert fresh["status"] == "stopped"
+    assert fresh["pid"] == 0
+
+
+async def test_a_steer_before_it_starts_goes_with_the_brief(deck):
+    db = deck["db"]
+    made = await db.create_user("u@example.com", "x", role="user", metadata={
+        "crew": {"approved": True, "harnesses": ["claude"], "max_parallel": 1}})
+    user = await db.get_user_by_id(made["id"])
+    await crew_runner_login(db, user)
+    grant = crew_access.grant_of(user)
+    first = await _project_task(deck, user, grant, "SCENARIO:quiet", None)
+    second = await _project_task(deck, user, grant, "SCENARIO:nothing", None)
+    assert second["status"] == "queued"
+    await crew_runner.steer(user["id"], second["id"], "and mind the tests")
+    done = await _settle(second)
+    assert first["id"] != second["id"]
+    seen = _seen(done)
+    assert "SCENARIO:nothing" in seen and "and mind the tests" in seen and "CREW-STATUS" in seen
+    assert done["pending"] == []
+
+
+async def test_a_turn_that_failed_before_it_had_a_session_starts_over_whole(deck):
+    failed = await _settle(await _dispatch(deck, "SCENARIO:earlyfail"))
+    assert failed["status"] == "failed" and not failed["session"]
+    assert "no such model" in failed["note"]
+    await crew_runner.steer(failed["user_id"], failed["id"], "try another way")
+    again = await _settle(failed)
+    seen = _seen(again)
+    assert "SCENARIO:earlyfail" in seen and "try another way" in seen and "CREW-STATUS: done" in seen
+    assert "--resume" not in seen
+
+
+async def test_a_network_error_opening_a_pull_request_still_tells_them(deck, monkeypatch):
+    _run(deck["repo"], "remote", "add", "origin", "https://github.com/acme/widgets.git")
+    real_git = crew_runner._git
+
+    async def git(cwd, *args, env=None, timeout=300.0):
+        return (0, "") if args[:1] == ("push",) else await real_git(cwd, *args, env=env, timeout=timeout)
+
+    monkeypatch.setattr(crew_runner, "_git", git)
+
+    def down(request):
+        raise httpx.ConnectError("no route to host")
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(down), **kw))
+
+    async def token(db, user, grant):
+        return "t"
+
+    monkeypatch.setattr(crew_logins, "github_token", token)
+    done = await _settle(await _dispatch(deck, deliver="pr"))
+    assert done["status"] == "ready"
+    assert "no route to host" in done["note"]
+    assert deck["told"] and deck["told"][-1]["id"] == done["id"]
+
+
+async def test_merging_a_pull_request_sends_new_commits_and_names_the_exact_one(deck, monkeypatch):
+    """Commits made after the pull request opened, on a task that then stopped: they go
+    up before the merge, and GitHub is told to merge that commit or nothing."""
+    _run(deck["repo"], "remote", "add", "origin", "https://github.com/acme/widgets.git")
+    real_git = crew_runner._git
+    pushed = []
+
+    async def git(cwd, *args, env=None, timeout=300.0):
+        if args[:1] == ("push",):
+            pushed.append(_run(Path(cwd), "rev-parse", "HEAD"))
+            return 0, ""
+        return await real_git(cwd, *args, env=env, timeout=timeout)
+
+    monkeypatch.setattr(crew_runner, "_git", git)
+    calls = []
+
+    def github(request: httpx.Request) -> httpx.Response:
+        calls.append((request.method, json.loads(request.content)))
+        if request.method == "POST":
+            return httpx.Response(201, json={"number": 7, "html_url": "https://github.com/acme/widgets/pull/7"})
+        return httpx.Response(200, json={"sha": "abc"})
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **kw: real_client(transport=httpx.MockTransport(github), **kw))
+
+    async def token(db, user, grant):
+        return "t"
+
+    monkeypatch.setattr(crew_logins, "github_token", token)
+    done = await _settle(await _dispatch(deck, deliver="pr"))
+    assert done["status"] == "pr_open"
+    wt = Path(done["worktree"])
+    (wt / "late.txt").write_text("late")
+    _run(wt, "add", "late.txt")
+    _run(wt, "commit", "-qm", "late work")
+    head = _run(wt, "rev-parse", "HEAD")
+    crew_store.get_store().update(done["id"], status="stopped")
+    merged = await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"])
+    assert merged["status"] == "delivered"
+    assert pushed[-1] == head
+    method, body = calls[-1]
+    assert method == "PUT" and body["sha"] == head
+
+
+async def test_a_merge_is_only_for_the_commit_it_was_asked_for(deck):
+    done = await _settle(await _dispatch(deck))
+    head = done["evidence"]["head"]
+    with pytest.raises(HTTPException, match="changed since"):
+        await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"], expect_head="0" * 40)
+    merged = await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"], expect_head=head)
+    assert merged["status"] == "delivered"
+
+
+async def test_a_replaced_codex_login_is_the_one_used(deck):
+    db = deck["db"]
+    made = await db.create_user("u@example.com", "x", role="user", metadata={
+        "crew": {"approved": True, "harnesses": ["codex"]}})
+    user = await db.get_user_by_id(made["id"])
+    grant = crew_access.grant_of(user)
+    await crew_logins.save_login(db, user["id"], "codex", '{"auth_mode":"chatgpt","who":"first"}')
+    env = await crew_logins.worker_env(db, user, grant, "codex", "/bin/codex")
+    auth = Path(env["CODEX_HOME"]) / "auth.json"
+    assert "first" in auth.read_text()
+    assert stat.S_IMODE(auth.stat().st_mode) == 0o600
+    await crew_logins.save_login(db, user["id"], "codex", '{"auth_mode":"chatgpt","who":"second"}')
+    await crew_logins.worker_env(db, user, grant, "codex", "/bin/codex")
+    assert "second" in auth.read_text()
+
+
+async def test_two_tasks_on_one_new_repository_clone_it_once(deck, monkeypatch):
+    clones = []
+
+    async def git(cwd, *args, env=None, timeout=300.0):
+        if "clone" in args:
+            clones.append(args)
+            await asyncio.sleep(0.05)
+            Path(args[-1]).mkdir(parents=True)
+            return 0, ""
+        if args[:2] == ("remote", "get-url"):
+            return 0, "https://example.com/a/b.git"
+        return 0, ""
+
+    monkeypatch.setattr(crew_runner, "_git", git)
+    body = {"repo_url": "https://example.com/a/b.git"}
+    await asyncio.gather(*(crew_runner._resolve_repo(deck["admin"], ADMIN_GRANT, body) for _ in range(3)))
+    assert len(clones) == 1
+    assert clones[0][clones[0].index("--") + 1] == body["repo_url"]
+
+
+async def test_linked_folders_follow_the_rules_of_folders(deck, monkeypatch):
+    from captain_claw.flight_deck import code_routes
+
+    async def folder(uid, project, name):
+        return name
+
+    monkeypatch.setattr(code_routes, "_ensure_project", lambda uid, name: name)
+    monkeypatch.setattr(code_routes, "_ensure_folder", folder)
+    monkeypatch.setattr(code_routes, "_folder_repo", lambda uid, p, f: deck["repo"])
+    plain = Grant(True, "approved", ("claude",), 1)
+    monkeypatch.setattr(code_routes, "_folder_meta", lambda uid, p, f: {"kind": "link", "mode": "rw"})
+    with pytest.raises(HTTPException) as err:
+        await crew_runner._resolve_repo(deck["admin"], plain, {"project": "linked", "folder": "x"})
+    assert err.value.status_code == 403
+    where = await crew_runner._resolve_repo(deck["admin"], ADMIN_GRANT, {"project": "linked", "folder": "x"})
+    assert where["repo"] == str(deck["repo"])
+    monkeypatch.setattr(code_routes, "_folder_meta", lambda uid, p, f: {"kind": "link", "mode": "ro"})
+    with pytest.raises(HTTPException, match="read-only"):
+        await crew_runner._resolve_repo(deck["admin"], ADMIN_GRANT, {"project": "linked", "folder": "x"})
+
+
 def test_reading_the_status_line():
     read = crew_runner.read_status
     assert read("All good.\n\nCREW-STATUS: done shipped it") == ("done", "shipped it", "All good.")
@@ -434,11 +742,12 @@ def test_which_remotes_are_github(remote, expected):
 def test_repo_addresses(monkeypatch):
     plain = Grant(True, "approved", ("claude",), 1)
     crew_runner._check_url("https://github.com/a/b.git", plain)
-    for bad in ("git@github.com:a/b.git", "file:///etc", "ext::sh -c id", "http://x/y", "/tmp/repo", "ssh://h/r"):
+    for bad in ("git@github.com:a/b.git", "file:///etc", "ext::sh -c id", "http://x/y", "/tmp/repo", "ssh://h/r",
+                "--upload-pack=x"):
         with pytest.raises(HTTPException):
             crew_runner._check_url(bad, plain)
     crew_runner._check_url("git@github.com:a/b.git", ADMIN_GRANT)
-    for bad in ("file:///etc", "ext::sh -c id"):
+    for bad in ("file:///etc", "ext::sh -c id", "--upload-pack=x@host:y", "-x@host:y"):
         with pytest.raises(HTTPException):
             crew_runner._check_url(bad, ADMIN_GRANT)
 

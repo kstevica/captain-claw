@@ -210,6 +210,7 @@ def _codex_parse(obj: dict, state: TurnState) -> list[dict]:
         state.session = str(obj.get("thread_id") or state.session)
         return []
     if kind == "turn.completed":
+        state.error = ""  # what it said on the way (it retries on a dropped stream) is over
         usage = obj.get("usage") or {}
         state.tokens_in += int(usage.get("input_tokens") or 0)
         state.tokens_out += int(usage.get("output_tokens") or 0)
@@ -375,9 +376,12 @@ def parse_line(harness: str, line: str | bytes, state: TurnState) -> list[dict]:
     if not isinstance(obj, dict):
         return []
     try:
-        return HARNESSES[harness].parse(obj, state)
+        events = HARNESSES[harness].parse(obj, state)
     except (AttributeError, TypeError, ValueError, KeyError) as exc:
         return [_ev("note", f"Couldn't read a line from {harness}: {exc}")]
+    if events and events[-1]["kind"] == "text":
+        state.error = ""  # it went on after the error: a retry that worked
+    return events
 
 
 def _search_path() -> str:

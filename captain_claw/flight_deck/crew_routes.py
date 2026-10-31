@@ -291,18 +291,21 @@ async def agent_request_merge(body: AgentTaskBody, request: Request) -> dict[str
     row, _, _ = await _agent_caller(request)
     task = crew_runner._get(row["id"], body.task_id)
     evidence = await crew_runner._evidence(task)
-    if task["status"] != "pr_open":
-        crew_runner._must_be_landable(task, evidence)
+    crew_runner._must_be_landable(task, evidence)
     store = autonomy_store()
     for waiting in store.waiting_actions(row["id"]):
-        if waiting.get("kind") == "crew_merge" and (waiting.get("payload") or {}).get("task_id") == task["id"]:
-            return {"status": "already_waiting", "action_id": waiting["id"]}
+        payload = waiting.get("payload") or {}
+        if waiting.get("kind") == "crew_merge" and payload.get("task_id") == task["id"]:
+            if payload.get("head") == evidence.get("head"):
+                return {"status": "already_waiting", "action_id": waiting["id"]}
+            store.expire_actions([waiting["id"]], "expired: the work changed after this was asked")
     into = task.get("base_branch") or "its base branch"
     action = store.add_action(
         row["id"], kind="crew_merge", source="crew", risk="normal", domain=_MERGE_DOMAIN, status="awaiting_approval",
         title=f"Merge {task['title'][:100]} into {into}",
         rationale=crew_runner.notice_text({**task, "evidence": evidence}), ref_id=task["id"],
-        payload={"task_id": task["id"]},
+        # The Approve covers these commits and no later ones.
+        payload={"task_id": task["id"], "head": evidence.get("head") or ""},
     )
     job = asyncio.create_task(owner_notify.notify_proposal(row["id"], action))
     crew_runner._TASKS.add(job)

@@ -46,6 +46,9 @@ PROVIDER_ENV = {
     "xai": "XAI_API_KEY",
 }
 LOGIN_NAMES = ("claude", "codex", "github", *PROVIDER_ENV)
+# OpenSSH finds keys through the passwd home, not $HOME: without this, a plain
+# `git push` over SSH from someone else's worker would sign in as the deck's user.
+NO_SSH_IDENTITY = "ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile=/dev/null"
 _MAX_SECRET = 64_000
 _BASE_ENV = (
     "PATH", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ", "USER", "LOGNAME", "SHELL",
@@ -96,6 +99,9 @@ async def save_login(db, uid: str, name: str, secret: str) -> dict[str, Any]:
     meta = await read_meta(db, uid)
     meta[name] = {"hint": hint(secret), "saved_at": datetime.now(UTC).isoformat()}
     await db.set_settings(uid, {_K_LOGINS: sealed, _K_META: json.dumps(meta, ensure_ascii=True)})
+    if name == "codex":
+        # The old account's file goes: the next turn writes this one.
+        (_codex_home(uid) / "auth.json").unlink(missing_ok=True)
     return meta[name]
 
 
@@ -187,7 +193,8 @@ async def worker_env(db, user: dict, grant: Grant, harness: str, binary: str) ->
             env[name] = str(home / sub)
         who = (user.get("display_name") or user.get("email") or "Captain Crew").strip()
         mail = (user.get("email") or "crew@captain-claw.local").strip()
-        env.update(GIT_AUTHOR_NAME=who, GIT_AUTHOR_EMAIL=mail, GIT_COMMITTER_NAME=who, GIT_COMMITTER_EMAIL=mail)
+        env.update(GIT_AUTHOR_NAME=who, GIT_AUTHOR_EMAIL=mail, GIT_COMMITTER_NAME=who, GIT_COMMITTER_EMAIL=mail,
+                   GIT_CONFIG_NOSYSTEM="1", GIT_SSH_COMMAND=NO_SSH_IDENTITY)
     if harness == "claude":
         secret = logins.get("claude", "")
         if secret.startswith(_CLAUDE_TOKEN_PREFIX):

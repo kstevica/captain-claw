@@ -395,6 +395,45 @@ async def test_a_merge_an_agent_asks_for_waits_for_the_persons_approve(deck, as_
     assert ledger.get_action(action["id"])["status"] == "done"
 
 
+async def test_an_approve_covers_only_the_commits_it_was_asked_about(deck, as_agent, ledger):
+    made = await _agent_task(deck, as_agent)
+    await _settle(deck.user["id"], made["id"])
+    async with _client(None) as agent:
+        await agent.post("/fd/crew/agent/request_merge", json={"task_id": made["id"]})
+    action = ledger.waiting_actions(deck.user["id"])[0]
+    # The agent has the worker add something after asking.
+    async with _client(None) as agent:
+        await agent.post("/fd/crew/agent/steer", json={"task_id": made["id"], "text": "one more commit"})
+    done = await _settle(deck.user["id"], made["id"])
+    assert done["evidence"]["commits"] > 1
+    out = await fd_dispatch.dispatch_action(deck.user["id"], action, approved_by_human=True)
+    assert "changed since" in out["note"]
+    assert crew_store.get_store().get(deck.user["id"], made["id"])["status"] == "ready"
+    assert ledger.get_action(action["id"])["status"] == "failed"
+    # Asking again asks about what's there now.
+    async with _client(None) as agent:
+        again = await agent.post("/fd/crew/agent/request_merge", json={"task_id": made["id"]})
+    assert again.json()["status"] == "waiting_for_approval"
+    fresh = ledger.get_action(again.json()["action_id"])
+    assert fresh["payload"]["head"] == done["evidence"]["head"]
+    out = await fd_dispatch.dispatch_action(deck.user["id"], fresh, approved_by_human=True)
+    assert crew_store.get_store().get(deck.user["id"], made["id"])["status"] == "delivered", out
+
+
+async def test_asking_again_after_new_commits_replaces_the_old_question(deck, as_agent, ledger):
+    made = await _agent_task(deck, as_agent)
+    await _settle(deck.user["id"], made["id"])
+    async with _client(None) as agent:
+        first = await agent.post("/fd/crew/agent/request_merge", json={"task_id": made["id"]})
+        await agent.post("/fd/crew/agent/steer", json={"task_id": made["id"], "text": "one more commit"})
+    await _settle(deck.user["id"], made["id"])
+    async with _client(None) as agent:
+        second = await agent.post("/fd/crew/agent/request_merge", json={"task_id": made["id"]})
+    assert second.json()["action_id"] != first.json()["action_id"]
+    waiting = ledger.waiting_actions(deck.user["id"])
+    assert [a["id"] for a in waiting] == [second.json()["action_id"]]
+
+
 async def test_an_approve_cannot_merge_for_someone_no_longer_approved(deck, as_agent, ledger):
     made = await _agent_task(deck, as_agent)
     await _settle(deck.user["id"], made["id"])
@@ -444,6 +483,12 @@ async def test_the_registry_shows_the_tool_only_while_approved(monkeypatch):
     # A stale yes is a no.
     monkeypatch.setattr(crew_client, "_USABLE", (True, time.time() - 10_000))
     assert "crew" not in {t["name"] for t in registry.get_definitions()}
+
+
+def test_eco_mode_keeps_the_tool_for_those_the_registry_shows_it_to():
+    from captain_claw.agent_orchestration_mixin import _ECO_CORE_TOOLS
+
+    assert "crew" in _ECO_CORE_TOOLS
 
 
 async def test_the_tool_refuses_a_shared_agents_member_and_workers(monkeypatch):

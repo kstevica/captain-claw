@@ -46,6 +46,7 @@ _ENFORCE_EVERY = 30  # ticks
 _READ_MAX = 4_000_000
 _DIFF_MAX = 400_000
 _REPORT_NAME = "report.md"
+_ACTIVE_PER_SLOT = 5  # how many tasks may wait or run, per parallel run approved
 _TERM_WAIT_S = (5.0, 3.0)
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_\-]{0,19}$")
@@ -139,7 +140,7 @@ def _git_env(*, home: str = "", token: str = "", isolated: bool = False) -> dict
         # Someone else's account: none of the deck user's git config, credential
         # helpers or SSH keys may answer for it.
         env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL="/dev/null",
-                   GIT_SSH_COMMAND="ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile=/dev/null")
+                   GIT_SSH_COMMAND=crew_logins.NO_SSH_IDENTITY)
     if token:
         # In the environment, not on the command line: `ps` shows the latter.
         basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
@@ -179,7 +180,7 @@ def _repo_slug(url: str) -> str:
 
 def _check_url(url: str, grant: Grant) -> None:
     parsed = urlparse(url)
-    scp = re.match(r"^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[^\s]+$", url)
+    scp = re.match(r"^[A-Za-z0-9._][A-Za-z0-9._-]*@[A-Za-z0-9.-]+:[^\s]+$", url)
     if parsed.scheme == "https" and parsed.netloc:
         return
     if grant.trusted and (scp or parsed.scheme == "ssh"):
@@ -210,6 +211,14 @@ async def _resolve_repo(user: dict, grant: Grant, body: dict[str, Any]) -> dict[
 
         pname = code_routes._ensure_project(uid, project)
         folder = await code_routes._ensure_folder(uid, pname, str(body.get("folder") or "").strip() or pname)
+        meta = code_routes._folder_meta(uid, pname, folder) or {}
+        if meta.get("kind") == "link":
+            # A link is a folder on this computer, under the same rule as naming one;
+            # and a worktree writes to its repository, which a read-only link forbids.
+            if not grant.trusted:
+                raise HTTPException(403, "Only an admin can work in a folder linked from this computer.")
+            if meta.get("mode") == "ro":
+                raise HTTPException(403, "That linked folder is read-only, so Crew can't work in it.")
         repo = code_routes._folder_repo(uid, pname, folder)
         await _ensure_commit(repo, user, grant)
         return {"repo": str(repo), "repo_label": f"{pname}/{folder}", "repo_kind": "project", "remote_base": False}
@@ -228,18 +237,20 @@ async def _resolve_repo(user: dict, grant: Grant, body: dict[str, Any]) -> dict[
     clones = crew_store.user_dir(uid) / "repos"
     clones.mkdir(exist_ok=True)
     target = clones / _repo_slug(url)
-    if not target.exists():
-        rc, out = await _git(clones, "clone", "--quiet", url, str(target), env=env, timeout=900)
-        if rc != 0:
-            shutil.rmtree(target, ignore_errors=True)
-            raise HTTPException(400, f"Couldn't clone it: {out[-500:]}")
-    else:
-        rc, remote = await _git(target, "remote", "get-url", "origin", env=env)
-        if rc == 0 and remote != url:
-            raise HTTPException(409, f"A different repository with that name is already here: {remote}")
-        rc, out = await _git(target, "fetch", "--quiet", "--prune", "origin", env=env, timeout=600)
-        if rc != 0:
-            raise HTTPException(400, f"Couldn't fetch it: {out[-500:]}")
+    # Two tasks starting on one new repository: the second waits for the first's clone.
+    async with _lock_for(f"clone:{target}"):
+        if not target.exists():
+            rc, out = await _git(clones, "clone", "--quiet", "--", url, str(target), env=env, timeout=900)
+            if rc != 0:
+                shutil.rmtree(target, ignore_errors=True)
+                raise HTTPException(400, f"Couldn't clone it: {out[-500:]}")
+        else:
+            rc, remote = await _git(target, "remote", "get-url", "origin", env=env)
+            if rc == 0 and remote != url:
+                raise HTTPException(409, f"A different repository with that name is already here: {remote}")
+            rc, out = await _git(target, "fetch", "--quiet", "--prune", "origin", env=env, timeout=600)
+            if rc != 0:
+                raise HTTPException(400, f"Couldn't fetch it: {out[-500:]}")
     return {"repo": str(target), "repo_label": _repo_slug(url), "repo_kind": "url", "remote_base": True}
 
 
@@ -296,12 +307,17 @@ async def _evidence(task: dict) -> dict[str, Any]:
     _, porcelain = await _git(wt, "status", "--porcelain")
     _, stat = await _git(wt, "diff", "--shortstat", f"{base}...{branch}")
     _, log_text = await _git(wt, "log", "--format=%h %s", "-n", "20", f"{base}..{branch}")
-    _, head = await _git(wt, "symbolic-ref", "--short", "HEAD")
+    rc, head = await _git(wt, "symbolic-ref", "--short", "HEAD")
+    _, stray = await _git(wt, "rev-list", "--count", f"{branch}..HEAD")
+    _, tip = await _git(wt, "rev-parse", f"refs/heads/{branch}")
     return {
         "commits": int(count) if count.isdigit() else 0,
         "dirty": len([ln for ln in porcelain.splitlines() if ln.strip()]),
         "stat": stat, "log": log_text.splitlines()[:20],
-        "off_branch": head if head and head != branch else "",
+        "off_branch": ("a detached HEAD" if rc != 0 else head if head != branch else ""),
+        # Commits only HEAD holds: on a detached HEAD, removing the worktree loses them.
+        "stray": int(stray) if stray.isdigit() else 0,
+        "head": tip,
     }
 
 
@@ -309,6 +325,12 @@ async def _evidence(task: dict) -> dict[str, Any]:
 
 
 def _proc_start(pid: int) -> str:
+    """When a process started, to tell it from a later one with its pid: /proc where
+    there is one (a slim image has no ps), else ps. "" when this host can't say."""
+    try:
+        return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        pass
     try:
         probe = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)], capture_output=True, text=True,
                                timeout=5, stdin=subprocess.DEVNULL)
@@ -330,8 +352,10 @@ def _alive(task: dict) -> bool:
         os.kill(pid, 0)
     except (ProcessLookupError, PermissionError):
         return False
-    started = _proc_start(pid)
-    return bool(started) and started == (task.get("pid_start") or "")
+    started, recorded = _proc_start(pid), task.get("pid_start") or ""
+    # Can't tell, and the pid exists: it's alive. Calling it dead would start a
+    # second worker in its worktree, and leave this one unstoppable.
+    return not started or not recorded or started == recorded
 
 
 async def _terminate(task: dict) -> None:
@@ -384,7 +408,7 @@ def _first_prompt(task: dict) -> str:
 
 
 def _next_prompt(messages: list[str]) -> str:
-    return "\n\n".join(messages) + _NEXT_REMINDER
+    return ("\n\n".join(messages) or "Go on with the task.") + _NEXT_REMINDER
 
 
 def _say(task: dict, kind: str, text: str, **extra: Any) -> None:
@@ -420,8 +444,10 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
         await _fail(task, str(exc.detail))
         return
     pending: list[str] = list(task.get("pending") or [])
-    first = not task.get("turn")
-    prompt = _first_prompt(task) if first else _next_prompt(pending)
+    # No session yet (not started, or it failed before it had one): it knows nothing.
+    first = not task.get("session")
+    said = "\n\n".join(pending)
+    prompt = f"{_first_prompt(task)}\n\n{said}".rstrip() if first else _next_prompt(pending)
     turn = int(task.get("turn") or 0) + 1
     out_dir = crew_store.turn_dir(task["user_id"], task["id"], turn)
     spec = RunSpec(binary=binary, prompt=prompt, cwd=task["worktree"], git_common_dir=task.get("git_common_dir") or "",
@@ -438,7 +464,7 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
                     turn_state=TurnState(session=task.get("session") or "").to_json(), pending=[],
                     turn_started_at=now, last_event_at=now, stalled_at=0)
     fresh = _store().get(task["user_id"], task["id"]) or task
-    _say(fresh, "turn", task["brief"] if first else "\n\n".join(pending))
+    _say(fresh, "turn", f"{task['brief']}\n\n{said}".rstrip() if first else said)
     _sync_board(fresh)
 
 
@@ -456,15 +482,19 @@ async def _start_queued() -> None:
             if total >= limit:
                 return
             uid = task["user_id"]
-            user = await _user_of(uid)
-            grant = crew_access.grant_of(user)
-            if not grant.allowed or task["harness"] not in grant.harnesses:
-                _store().update(task["id"], status="stopped", note="Crew approval was withdrawn.")
-                continue
-            if counts.get(uid, 0) >= grant.max_parallel:
-                continue
+            # Read again under its lock: a stop or a steer may have landed since the list.
             async with _lock_for(task["id"]):
-                await _start_turn(task, user, grant)
+                fresh = _store().get(uid, task["id"])
+                if not fresh or fresh["status"] != "queued":
+                    continue
+                user = await _user_of(uid)
+                grant = crew_access.grant_of(user)
+                if not user or not grant.allowed or fresh["harness"] not in grant.harnesses:
+                    _store().update(fresh["id"], status="stopped", note="Crew approval was withdrawn.")
+                    continue
+                if counts.get(uid, 0) >= grant.max_parallel:
+                    continue
+                await _start_turn(fresh, user, grant)
             if (_store().get(uid, task["id"]) or {}).get("status") == "running":
                 counts[uid] = counts.get(uid, 0) + 1
                 total += 1
@@ -538,7 +568,12 @@ async def _advance(task: dict) -> None:
             state = _drain(task, at_end=True)
             await _finish_turn(task, state, None)
             return
-    _PROCS.pop(task["id"], None)
+    proc = _PROCS.pop(task["id"], None)
+    if proc is not None:
+        try:
+            await asyncio.to_thread(proc.wait, 5)  # no zombie left behind
+        except subprocess.TimeoutExpired:
+            pass
     state = _drain(task, at_end=True)
     try:
         code: int | None = int(exit_file.read_text().strip() or "1")
@@ -598,8 +633,9 @@ async def _auto_pr(task: dict) -> None:
         return
     try:
         await _deliver_pr(user, grant, task)
-    except HTTPException as exc:
-        note = f"{task.get('note') or 'Finished.'} The pull request didn't open: {exc.detail}"
+    except Exception as exc:  # noqa: BLE001 — however it failed, the finish still gets told
+        why = exc.detail if isinstance(exc, HTTPException) else exc
+        note = f"{task.get('note') or 'Finished.'} The pull request didn't open: {why}"
         _store().update(task["id"], note=note[:2000])
 
 
@@ -639,6 +675,9 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
         raise HTTPException(400, "Delivery is either branch or pr.")
     model = _clean_axis(body.get("model"), _MODEL_RE, "model name")
     effort = _clean_axis(body.get("effort"), _EFFORT_RE, "reasoning effort")
+    active = [t for t in _store().with_status(*crew_store.ACTIVE) if t["user_id"] == user["id"]]
+    if len(active) >= grant.max_parallel * _ACTIVE_PER_SLOT:
+        raise HTTPException(429, f"You already have {len(active)} tasks running or waiting. Let some finish first.")
     if not await asyncio.to_thread(crew_harness.find_binary, harness):
         raise HTTPException(400, f"{HARNESSES[harness].label} isn't installed on this computer. "
                                  f"An admin can install it with: {HARNESSES[harness].install}")
@@ -735,6 +774,10 @@ def _must_be_landable(task: dict, evidence: dict[str, Any]) -> None:
         raise HTTPException(409, "This task is finished already.")
     if task["kind"] == "scout":
         raise HTTPException(409, "A scout task has a report, not changes to deliver.")
+    if evidence.get("stray"):
+        raise HTTPException(409, f"It left {evidence['stray']} commit(s) off its branch, on "
+                                 f"{evidence.get('off_branch') or 'another line of work'}. Tell it to put them on "
+                                 f"{task.get('branch')}.")
     if not evidence.get("commits"):
         raise HTTPException(409, "It has committed nothing on its branch.")
     if evidence.get("dirty"):
@@ -753,8 +796,7 @@ async def _deliver_pr(user: dict, grant: Grant, task: dict) -> dict[str, Any]:
     from captain_claw.flight_deck.auth import get_db
 
     evidence = await _evidence(task)
-    if task["status"] != "pr_open":
-        _must_be_landable(task, evidence)
+    _must_be_landable(task, evidence)
     token = await crew_logins.github_token(get_db(), user, grant)
     if not token:
         raise HTTPException(400, "Add a GitHub token in Crew → Logins first.")
@@ -773,12 +815,16 @@ async def _deliver_pr(user: dict, grant: Grant, task: dict) -> dict[str, Any]:
             raise HTTPException(400, "The repository wasn't on a branch when this task started.")
         harness = HARNESSES[task["harness"]].label
         body = f"{task.get('final') or task['brief']}\n\nMade by {harness}, run by Captain."
-        async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.post(
-                f"https://api.github.com/repos/{repo}/pulls",
-                headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
-                json={"title": task["title"], "head": task["branch"], "base": task["base_branch"], "body": body[:60_000]},
-            )
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"https://api.github.com/repos/{repo}/pulls",
+                    headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+                    json={"title": task["title"], "head": task["branch"], "base": task["base_branch"],
+                          "body": body[:60_000]},
+                )
+        except httpx.HTTPError as exc:
+            raise HTTPException(502, f"Couldn't reach GitHub: {exc}") from None
         if resp.status_code >= 300:
             raise HTTPException(502, f"GitHub said no: {resp.text[:300]}")
         data = resp.json()
@@ -848,42 +894,58 @@ async def _merge_local(user: dict, grant: Grant, task: dict) -> str:
         if not ok:
             raise HTTPException(409, f"Couldn't merge: {why}")
         _, sha = await _git(scratch, "rev-parse", "HEAD")
-        rc, out = await _git(repo, "update-ref", f"refs/heads/{base}", sha, old)
+        # Fetched, not update-ref'd: git refuses a branch being rebased in some
+        # checkout (which `worktree list` shows as detached), and anything but a
+        # fast-forward, so a base that moved meanwhile stays where it is.
+        temp = f"refs/crew-merge/{task['id']}"
+        await _git(repo, "update-ref", temp, sha)
+        rc, out = await _git(repo, "fetch", "--quiet", ".", f"{temp}:refs/heads/{base}")
+        await _git(repo, "update-ref", "-d", temp)
         if rc != 0:
-            raise HTTPException(409, f"{base} moved during the merge. Try again. ({out[-200:]})")
+            raise HTTPException(409, f"Couldn't move {base}: it moved during the merge, or a rebase is using it. "
+                                     f"Nothing was changed. ({_head(out, 200)})")
         return sha
     finally:
         await _git(repo, "worktree", "remove", "--force", str(scratch))
 
 
-async def _merge_pr(user: dict, grant: Grant, task: dict) -> str:
+async def _merge_pr(user: dict, grant: Grant, task: dict, head: str) -> str:
+    """GitHub merges what it has, so it's sent what the branch has first, and told
+    to merge that commit and no other."""
     from captain_claw.flight_deck.auth import get_db
 
+    task = await _deliver_pr(user, grant, task)
     delivery = task["delivery"]
     token = await crew_logins.github_token(get_db(), user, grant)
     if not token:
         raise HTTPException(400, "Add a GitHub token in Crew → Logins first.")
-    async with httpx.AsyncClient(timeout=30) as client:
-        resp = await client.put(
-            f"https://api.github.com/repos/{delivery['repo']}/pulls/{delivery['pr']}/merge",
-            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
-            json={"commit_title": f"Merge crew: {task['title']}"},
-        )
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.put(
+                f"https://api.github.com/repos/{delivery['repo']}/pulls/{delivery['pr']}/merge",
+                headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+                json={"commit_title": f"Merge crew: {task['title']}", "sha": head},
+            )
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Couldn't reach GitHub: {exc}") from None
     if resp.status_code >= 300:
         raise HTTPException(409, f"GitHub wouldn't merge it: {resp.text[:300]}")
     return str(resp.json().get("sha") or "")
 
 
-async def merge(user: dict, grant: Grant, task_id: str) -> dict[str, Any]:
+async def merge(user: dict, grant: Grant, task_id: str, *, expect_head: str = "") -> dict[str, Any]:
     """Land the work. Reached only by a person's own word: their click on the page,
-    or their Approve on what an agent asked (``request_merge``)."""
+    or their Approve on what an agent asked (``request_merge``). *expect_head* is the
+    commit that Approve was for: anything newer needs asking again."""
     async with _lock_for(task_id):
         task = _get(user["id"], task_id)
         evidence = await _evidence(task)
-        if task["status"] != "pr_open":
-            _must_be_landable(task, evidence)
+        _must_be_landable(task, evidence)
+        if expect_head and evidence.get("head") != expect_head:
+            raise HTTPException(409, "It has changed since this merge was asked for, so this Approve doesn't cover "
+                                     "it. Ask for the merge again.")
         if task["delivery"].get("pr"):
-            sha = await _merge_pr(user, grant, task)
+            sha = await _merge_pr(user, grant, task, evidence.get("head") or "")
             delivery = {**task["delivery"], "kind": "pr_merged", "sha": sha}
             note = f"Pull request merged: {task['delivery'].get('url')}"
         elif task["repo_kind"] == "url":
@@ -892,7 +954,8 @@ async def merge(user: dict, grant: Grant, task_id: str) -> dict[str, Any]:
             sha = await _merge_local(user, grant, task)
             delivery = {"kind": "merge", "sha": sha, "base": task.get("base_branch") or ""}
             note = f"Merged into {task.get('base_branch')}."
-        await _remove_worktree(task, force=False)
+        # A pull request's branch landed on the remote, not in this repository.
+        await _remove_worktree(task, force=bool(task["delivery"].get("pr")))
         _store().update(task_id, status="delivered", note=note, delivery=delivery, evidence=evidence,
                         worktree="", closed_at=time.time())
         fresh = _get(user["id"], task_id)
@@ -920,12 +983,14 @@ async def close(uid: str, task_id: str, *, discard: bool = False) -> dict[str, A
         if task["status"] in crew_store.FINISHED:
             return task
         evidence = await _evidence(task)
-        if (evidence.get("commits") or evidence.get("dirty")) and not discard:
+        unlanded = evidence.get("commits") or evidence.get("dirty") or evidence.get("stray")
+        if unlanded and not discard:
             raise HTTPException(409, f"It holds work that hasn't landed: {evidence.get('commits', 0)} commit(s), "
-                                     f"{evidence.get('dirty', 0)} uncommitted change(s).")
+                                     f"{evidence.get('dirty', 0)} uncommitted change(s)"
+                                     + (f", {evidence['stray']} commit(s) off its branch." if evidence.get("stray")
+                                        else "."))
         await _remove_worktree(task, force=discard)
-        note = "Closed. Its work was discarded." if discard and (evidence.get("commits") or evidence.get("dirty")) \
-            else "Closed."
+        note = "Closed. Its work was discarded." if discard and unlanded else "Closed."
         _store().update(task_id, status="closed", note=note, worktree="", evidence=evidence, closed_at=time.time())
         fresh = _get(uid, task_id)
         _say(fresh, "status", note, status="closed")
@@ -1001,7 +1066,7 @@ def _sync_board(task: dict) -> None:
                     "owes_next": "agent", "status": "open", "summary": task.get("brief", "")[:500]},
             event={"source": "crew", "source_ref": f"{task['id']}:{task.get('turn') or 0}:{status}",
                    "at": time.time(), "kind": "status", "channel": "crew", "actor_kind": "agent", "actor": label,
-                   "summary": task.get("note") or status, "evidence": "recorded"},
+                   "summary": task.get("note") or f"{label} is working on it.", "evidence": "recorded"},
             patch=patch,
         )
     except Exception as exc:  # noqa: BLE001 — the board is a view; the task goes on without it

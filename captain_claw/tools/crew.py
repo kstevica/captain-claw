@@ -161,7 +161,8 @@ class CrewTool(Tool):
         where = "waiting for a free slot" if data.get("status") == "queued" else "working"
         return ToolResult(success=True, content=(
             f"Task {data.get('id')} is {where}: {data.get('harness_label')} in {data.get('repo_label')}, on branch "
-            f"{data.get('branch')}. You'll be called back when it needs saying; tell the user it's under way."
+            f"{data.get('branch')}. It has only started: nothing is done yet, so tell the user it's under way and "
+            f"don't report a result. You'll be called back when it finishes or needs a decision."
         ))
 
     async def _do_list(self, client: Any, **_: Any) -> ToolResult:
