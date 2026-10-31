@@ -1,12 +1,12 @@
 // StopWatch screen: 466×466 round AMOLED.
 //
-// The look follows M5Stack's own StopWatch firmware: black (an AMOLED pixel
-// that is black is off), light type in Inter, a glowing scalloped badge in
-// the middle with a name under it, page dots and chevrons for lists. A ring
-// round the edge shows what the watch is doing: red while it listens (and how
-// much of the 110 s recording is used), amber while the agent works (one
-// tick per tool step), cyan while it speaks. The clock and the Wi-Fi/agent
-// dots sit at the top.
+// The look is Captain's (build_support/brand/bot): black, because an AMOLED
+// pixel that is black is off; gold for what leads; cyan for his eyes and voice;
+// coral for the microphone; navy for the surfaces; light Inter for the words.
+// Captain himself is on the screens that have a state to show, and his face
+// shows it. A ring round the edge says what the watch is doing: coral while it
+// listens (and how much of the 110 s recording is used), gold while the agent
+// works (one tick per tool step). The clock face has a dial of its own.
 //
 // Text is laid out to the circle: every line gets the width of the screen at
 // its height, and lines are centred.
@@ -26,7 +26,7 @@ namespace ui {
 
 static constexpr int W = 466, H = 466, CX = 233, CY = 233, R = 233;
 static constexpr int kMargin = 24;         // text keeps this far from the edge
-static constexpr int kRing = 10;           // the status ring's width
+static constexpr int kRing = 7;            // the status ring's width
 static constexpr int kTop = 78;            // content starts under the clock
 static constexpr int kBottom = 410;        // …and ends above the page dots
 static constexpr int kChromeY = 42;        // clock / health dots
@@ -35,17 +35,30 @@ static constexpr int kTitleY = 322, kNoteY = 360, kDotsY = 402, kBatteryY = 438;
 // Tap to talk's button: under the name (home, listening), or lower and a
 // little smaller under an answer or a character, whose text then ends higher.
 static constexpr int kTapY = 386, kTapR = 30, kTapLowY = 414, kTapLowR = 26, kTapReplyBottom = 372;
-static constexpr int kReplyTop = 96, kReplyDotsY = 70;  // an answer: its page dots under the clock, its text below
-static constexpr uint16_t kGood = rgb(40, 200, 90);
+static constexpr int kReplyTop = 96;       // an answer's text starts here
 static constexpr int kAskY = 396;          // the yes/no pills' middle
+// Captain: on the clock face, above a state or a notice, and alone on the screen.
+static constexpr float kCaptainHome = 0.8f, kCaptainSmall = 0.62f, kCaptainLarge = 1.7f;
 
 static constexpr uint16_t kBlack = 0x0000, kWhite = 0xFFFF;
-static constexpr uint16_t kText = rgb(236, 238, 244), kDim = rgb(140, 146, 160), kFaint = rgb(78, 82, 94);
-static constexpr uint16_t kGreen = rgb(40, 205, 100), kRed = rgb(245, 60, 75), kAmber = rgb(255, 170, 40);
-static constexpr uint16_t kCyan = rgb(60, 210, 245), kBlue = rgb(90, 150, 255);
+static constexpr uint16_t kText = rgb(241, 245, 249), kDim = rgb(148, 156, 172), kFaint = rgb(74, 80, 98);
+static constexpr uint16_t kGold = rgb(223, 169, 63), kGoldHi = rgb(243, 207, 106);
+static constexpr uint16_t kNavy = rgb(24, 35, 87), kNavyHi = rgb(45, 62, 140);
+static constexpr uint16_t kCoral = rgb(232, 87, 76), kCyan = rgb(60, 230, 255);
+static constexpr uint16_t kMint = rgb(52, 211, 153), kBlue = rgb(96, 150, 255);
+static constexpr uint16_t kHairline = rgb(50, 54, 68);
+
+// The screens are handed the shared status colours (main.cpp): here they take
+// the brand's.
+static uint16_t toned(uint16_t c) {
+  const int r = (c >> 11) << 3, g = ((c >> 5) & 63) << 2, b = (c & 31) << 3;
+  if (r > 190 && g < 120) return kCoral;            // red, magenta
+  if (r > 190 && b < 110) return kGold;             // yellow, orange
+  if (g > 150 && r < 110 && b < 150) return kMint;  // green
+  return c;
+}
 
 static M5Canvas canvas(&M5.Display);
-static M5Canvas faceSprite;  // characters draw at the stick's size, then scale up
 static M5Canvas prevFrame;   // the screen before a slide (PSRAM)
 enum class Fx : uint8_t { None, SlideOn, SlideBack, Fade };
 static Fx nextFx = Fx::None;        // how the next push() brings its screen in
@@ -86,9 +99,6 @@ static M5Canvas backdrop;          // the background picture as it is (setBackgr
 static M5Canvas backdropDim;       // the same darkened: what the screens draw on
 static bool hasBackdrop = false;
 static constexpr int kBackdropDim = 108;  // of 256 (0.42): white text stays readable on it
-// The characters' own backdrop while there's a picture: see-through (their
-// eyes and mouths are real black).
-static constexpr uint16_t kSeeThrough = 0x0821;
 static TapButton tapMode = TapButton::Off;
 static int tapX = 0, tapY = 0, tapR = 0;  // the button on the screen now (tapR 0: none)
 
@@ -317,17 +327,15 @@ static void drawLines(const std::vector<String>& lines, int firstTop, int lineH,
   for (int i = 0; i < (int)lines.size(); ++i) text(lines[i], CX, firstTop + i * lineH + lineH / 2, color);
 }
 
-// ── chrome: clock, health dots, battery, page dots, chevrons ─────────
+// ── chrome: clock, health dots, battery, page dots ─────────
 
 // The agent's dot is blue while it's asleep (the next word wakes it).
 static uint16_t healthColor(Health h) {
-  return h == Up ? kGreen : h == Partial ? kAmber : h == Asleep ? kBlue : kRed;
+  return h == Up ? kMint : h == Partial ? kGold : h == Asleep ? kBlue : kCoral;
 }
 
-// Battery: green ≥75 %, blue 40–74 %, amber 20–39 %, red <20 %.
-static uint16_t batteryColor(int pct) {
-  return pct >= 75 ? kGreen : pct >= 40 ? kBlue : pct >= 20 ? kAmber : kRed;
-}
+// Battery: mint from 40 %, gold from 20 %, coral under it.
+static uint16_t batteryColor(int pct) { return pct >= 40 ? kMint : pct >= 20 ? kGold : kCoral; }
 
 // The PMIC is on I2C: read it at most every few seconds, not every frame.
 static int batteryPct(bool* charging) {
@@ -385,9 +393,8 @@ static void drawBatteryAt(int y, bool force) {
 
 // Clock with the Wi-Fi dot left of it and the agent dot right of it; a low
 // battery shows its percentage underneath on every screen.
-// Proposals waiting in Flight Deck (setWaiting): a magenta badge with the count.
+// Proposals waiting in Flight Deck (setWaiting): a coral badge with the count.
 static int waitingCount = 0;
-static constexpr uint16_t kWaitingInk = rgb(235, 40, 170);
 
 void setWaiting(int count) { waitingCount = count; }
 
@@ -396,7 +403,7 @@ static void drawWaiting(int x, int y) {
   font(vlw::Small);
   const String n = waitingCount > 99 ? String("99+") : String(waitingCount);
   const int h = 26, w = max(h, tw(n) + 14);
-  canvas.fillSmoothRoundRect(x, y - h / 2, w, h, h / 2, kWaitingInk);
+  canvas.fillSmoothRoundRect(x, y - h / 2, w, h, h / 2, kCoral);
   text(n, x + w / 2, y, kWhite);
 }
 
@@ -408,8 +415,8 @@ static void drawChrome(bool lowBattery = true, bool withClock = true) {
     text(clock, CX, kChromeY, kText);
     half = tw(clock) / 2 + 14;
   }
-  canvas.fillSmoothCircle(CX - half, kChromeY, 5, healthColor(hWifi));
-  canvas.fillSmoothCircle(CX + half, kChromeY, 5, healthColor(hAgent));
+  canvas.fillSmoothCircle(CX - half, kChromeY, 4, healthColor(hWifi));
+  canvas.fillSmoothCircle(CX + half, kChromeY, 4, healthColor(hAgent));
   drawWaiting(CX + half + 14, kChromeY);
   if (lowBattery) drawBatteryAt(kChromeY + 24, false);
 }
@@ -424,19 +431,9 @@ static void drawPageDots(int count, int current, int y) {
   const int gap = count > 14 ? 13 : 16;
   int x0 = CX - (count - 1) * gap / 2;
   for (int i = 0; i < count; ++i) {
-    if (i == current) canvas.fillSmoothCircle(x0 + i * gap, y, 5, kWhite);
-    else canvas.fillSmoothCircle(x0 + i * gap, y, 3, rgb(96, 100, 112));
+    if (i == current) canvas.fillSmoothCircle(x0 + i * gap, y, 5, kGold);
+    else canvas.fillSmoothCircle(x0 + i * gap, y, 3, rgb(84, 90, 106));
   }
-}
-
-static void drawChevrons(int y) {
-  const uint16_t col = rgb(225, 226, 232);
-  const int arm = 15;
-  int lx = 30, rx = W - 30;
-  canvas.drawWideLine(lx + arm, y - arm, lx, y, 1.6f, col);
-  canvas.drawWideLine(lx, y, lx + arm, y + arm, 1.6f, col);
-  canvas.drawWideLine(rx - arm, y - arm, rx, y, 1.6f, col);
-  canvas.drawWideLine(rx, y, rx - arm, y + arm, 1.6f, col);
 }
 
 // ── the ring ───────────────────────────────────────────────────────────
@@ -466,36 +463,61 @@ static void ringPoint(float deg, int radius, int* x, int* y) {
 
 static void ringTrack(uint16_t color) { ringArc(0, 360, mix(kBlack, color, 0.2f)); }
 
+// The clock face's edge: a dot a minute, the hours larger, and the seconds
+// going round in gold.
+static void drawDial() {
+  static constexpr int kDialR = R - 9;
+  int x, y;
+  for (int i = 0; i < 60; ++i) {
+    ringPoint(i * 6.0f, kDialR, &x, &y);
+    if (i % 5) canvas.fillRect(x - 1, y - 1, 2, 2, kHairline);
+    else canvas.fillSmoothCircle(x, y, i % 15 ? 2 : 3, rgb(120, 126, 142));
+  }
+  const time_t now = time(nullptr);
+  struct tm tm;
+  localtime_r(&now, &tm);
+  ringPoint(tm.tm_sec * 6.0f, kDialR, &x, &y);
+  canvas.fillSmoothCircle(x, y, 5, kGold);
+}
+
+// An answer's pages: a short arc on the right, the page lit in it.
+static void drawPageArc(int count, int current) {
+  if (count < 2) return;
+  const float from = 62, sweep = 56;
+  ringArc(from, sweep, kHairline, 5, R - 6);
+  ringArc(from + sweep * current / count, max(6.0f, sweep / count), kGold, 5, R - 6);
+}
+
 // Listening: the recording so far against the 110 s limit — or, a note
 // (no limit but the room), round once a minute like a seconds hand; the
 // inner edge glows with the mic level.
 static void ringListening(uint32_t elapsedMs, int level, bool note = false) {
-  ringTrack(kRed);
+  ringTrack(kCoral);
   float used = note ? (elapsedMs % 60000) / 60000.0f : min(1.0f, elapsedMs / 110000.0f);
-  ringArc(0, max(4.0f, 360 * used), kRed);
+  ringArc(0, max(4.0f, 360 * used), kCoral);
   int x, y;
   ringPoint(max(4.0f, 360 * used), R - kRing / 2, &x, &y);
   canvas.fillSmoothCircle(x, y, kRing / 2 + 2, kWhite);
-  if (level > 4) ringArc(0, 360, mix(kBlack, kRed, level / 160.0f), 6, R - kRing - 2);
+  if (level > 4) ringArc(0, 360, mix(kBlack, kCoral, level / 160.0f), 6, R - kRing - 2);
 }
 
-// Working: an amber comet circling; tool steps as ticks inside the ring.
+// Working: a gold comet circling; tool steps as ticks inside the ring.
 static void ringWorking(int steps) {
   // The track breathes while the agent works: one breath in 2.4 s.
   const float breath = 0.5f + 0.5f * sinf(millis() * (6.2832f / 2400));
-  ringArc(0, 360, mix(kBlack, kAmber, 0.12f + 0.22f * breath));
+  ringArc(0, 360, mix(kBlack, kGold, 0.12f + 0.22f * breath));
   float head = fmodf(millis() * 0.225f, 360.0f);  // one turn in 1.6 s
   const int segs = 9;
   for (int i = 0; i < segs; ++i) {
-    ringArc(head - (i + 1) * 9.0f, 9.5f, mix(kBlack, kAmber, 1.0f - i / (float)segs));
+    ringArc(head - (i + 1) * 9.0f, 9.5f, mix(kBlack, kGold, 1.0f - i / (float)segs));
   }
   int x, y;
   ringPoint(head, R - kRing / 2, &x, &y);
-  canvas.fillSmoothCircle(x, y, kRing / 2 + 1, rgb(255, 225, 150));
+  canvas.fillSmoothCircle(x, y, kRing / 2 + 1, kGoldHi);
   const int n = min(steps, 30);
   for (int i = 0; i < n; ++i) {  // tool steps: ticks spreading from 6 o'clock
     ringPoint(180.0f + (i - (n - 1) / 2.0f) * 8.0f, R - kRing - 9, &x, &y);
-    canvas.fillSmoothCircle(x, y, 3, kAmber);
+    canvas.fillSmoothCircle(x, y, 3, kGold);
   }
 }
 
@@ -517,24 +539,29 @@ void showSpeaking(int level) {
   strip.pushSprite(&M5.Display, kSpeakX, kSpeakY);
 }
 
-// Tap to talk: a record button (a red dot in a ring), or a stop button (a
-// red square) while a recording that was tapped on listens. An answer's
-// sound: pause (two bars) while it plays, play (a triangle) while it's held.
+// A round button: a navy disc in a gold hairline.
+static void drawDisc(int cx, int cy, int r) {
+  canvas.fillSmoothCircle(cx, cy, r, mix(kBlack, kGold, 0.75f));
+  canvas.fillSmoothCircle(cx, cy, r - 2, kNavy);
+}
+
+// Tap to talk: a record button (a coral dot), or a stop button (a coral
+// square) while a recording that was tapped on listens. An answer's sound:
+// pause (two bars) while it plays, play (a triangle) while it's held.
 static void drawTapButton(int cy, int r) {
-  canvas.fillSmoothCircle(CX, cy, r, mix(kBlack, kText, 0.85f));
-  canvas.fillSmoothCircle(CX, cy, r - 4, kBlack);
+  drawDisc(CX, cy, r);
   if (tapMode == TapButton::Stop) {
     const int side = r * 7 / 10;
-    canvas.fillSmoothRoundRect(CX - side / 2, cy - side / 2, side, side, 5, kRed);
+    canvas.fillSmoothRoundRect(CX - side / 2, cy - side / 2, side, side, 5, kCoral);
   } else if (tapMode == TapButton::Pause) {
     const int h = r * 7 / 10, w = r / 5, gap = r / 5;
-    canvas.fillSmoothRoundRect(CX - gap / 2 - w, cy - h / 2, w, h, 2, kWhite);
-    canvas.fillSmoothRoundRect(CX + gap / 2 + 1, cy - h / 2, w, h, 2, kWhite);
+    canvas.fillSmoothRoundRect(CX - gap / 2 - w, cy - h / 2, w, h, 2, kGoldHi);
+    canvas.fillSmoothRoundRect(CX + gap / 2 + 1, cy - h / 2, w, h, 2, kGoldHi);
   } else if (tapMode == TapButton::Play) {
     const int h = r * 7 / 10, w = r * 6 / 10, x = CX - w / 2 + 2;  // a touch right: it looks centred
-    canvas.fillTriangle(x, cy - h / 2, x, cy + h / 2, x + w, cy, kWhite);
+    canvas.fillTriangle(x, cy - h / 2, x, cy + h / 2, x + w, cy, kGoldHi);
   } else {
-    canvas.fillSmoothCircle(CX, cy, r - 9, kRed);
+    canvas.fillSmoothCircle(CX, cy, r - 10, kCoral);
   }
   tapX = CX, tapY = cy, tapR = r;
 }
@@ -551,26 +578,25 @@ bool tapButtonHit(int x, int y) {
   return tapR && dx * dx + dy * dy <= reach * reach;
 }
 
-// ── the glowing badge ──────────────────────────────────────────────────
+// ── the badge ──────────────────────────────────────────────────────────
 
-enum Tone : uint8_t { TBlue, TGreen, TAmber, TRed, TGrey, TCyan, TToneCount };
+enum Tone : uint8_t { TNavy, TGold, TGrey, TToneCount };
 struct ToneDef {
-  uint8_t a[3], b[3], glow[3];
+  uint8_t a[3], b[3], glow[3], rim[3];
 };
 static const ToneDef kTones[TToneCount] = {
-    {{40, 72, 235}, {58, 170, 250}, {50, 120, 255}},    // blue (M5's)
-    {{20, 140, 90}, {50, 205, 140}, {30, 190, 110}},    // green
-    {{215, 110, 20}, {250, 185, 60}, {255, 150, 30}},   // amber
-    {{200, 30, 60}, {250, 95, 95}, {255, 50, 70}},      // red
-    {{58, 62, 74}, {98, 104, 120}, {50, 54, 66}},       // grey (off)
-    {{20, 120, 190}, {60, 210, 235}, {40, 190, 240}},   // cyan
+    {{45, 62, 140}, {16, 24, 66}, {30, 44, 120}, {223, 169, 63}},     // navy, a gold rim
+    {{243, 207, 106}, {177, 122, 42}, {150, 105, 30}, {255, 235, 170}},  // gold: the one in use
+    {{46, 50, 62}, {24, 26, 34}, {20, 22, 28}, {90, 96, 110}},        // grey: off
 };
-static M5Canvas* badgeCache[TToneCount] = {};
+static M5Canvas* badgeCache[TToneCount * 2] = {};
 
-// A scalloped badge (12 soft lobes) with a diagonal gradient, a highlight
-// at the top left and a glow fading into the black — drawn once per tone.
+// A disc with a diagonal gradient, a hairline rim, a highlight at the top left
+// and, on black, a glow fading into it (over a picture a glow would be a dark
+// halo) — drawn once per tone.
 static M5Canvas* badgeSprite(Tone tone) {
-  if (badgeCache[tone]) return badgeCache[tone];
+  M5Canvas*& cached = badgeCache[tone + (hasBackdrop ? TToneCount : 0)];
+  if (cached) return cached;
   auto* s = new M5Canvas();
   s->setPsram(true);
   s->setColorDepth(16);
@@ -584,13 +610,12 @@ static M5Canvas* badgeSprite(Tone tone) {
     for (int x = 0; x < S; ++x) {
       float dx = x - S / 2 + 0.5f, dy = y - S / 2 + 0.5f;
       float d = sqrtf(dx * dx + dy * dy);
-      float th = atan2f(dy, dx);
-      float edge = kBadgeR + 4.5f * cosf(12 * th);
+      const float edge = kBadgeR;
       float out[3] = {0, 0, 0};
-      if (d > edge - 1) {
+      if (!hasBackdrop && d > edge - 1) {
         float fade = (kGlowR - d) / (kGlowR - kBadgeR - 8.0f);  // to nothing at the sprite's edge
         fade = fade < 0 ? 0 : fade > 1 ? 1 : fade * fade * (3 - 2 * fade);
-        float g = (0.62f * expf(-(d - edge) / 14.0f) + 0.16f * expf(-(d - edge) / 42.0f)) * fade;
+        float g = (0.4f * expf(-(d - edge) / 12.0f) + 0.12f * expf(-(d - edge) / 36.0f)) * fade;
         for (int k = 0; k < 3; ++k) out[k] = t.glow[k] * g;
       }
       float cov = edge - d + 0.5f;
@@ -601,10 +626,13 @@ static M5Canvas* badgeSprite(Tone tone) {
         g = g < 0 ? 0 : g > 1 ? 1 : g;
         float hx = dx + kBadgeR * 0.35f, hy = dy + kBadgeR * 0.45f;
         float hl = 1.0f - sqrtf(hx * hx + hy * hy) / (kBadgeR * 1.15f);
-        hl = hl < 0 ? 0 : hl * 0.32f;
+        hl = hl < 0 ? 0 : hl * 0.16f;
+        float rim = 1.0f - fabsf(d - (edge - 1.5f)) / 1.5f;
+        rim = rim < 0 ? 0 : rim * 0.8f;
         for (int k = 0; k < 3; ++k) {
           float in = t.a[k] + (t.b[k] - t.a[k]) * g;
           in += (255 - in) * hl;
+          in += (t.rim[k] - in) * rim;
           rgbv[k] = out[k] + (in - out[k]) * cov;
         }
       } else {
@@ -614,12 +642,11 @@ static M5Canvas* badgeSprite(Tone tone) {
                              (uint8_t)min(255.0f, rgbv[2])));
     }
   }
-  badgeCache[tone] = s;
+  cached = s;
   return s;
 }
 
-static void drawGlyph(Glyph g, int cx, int cy) {
-  const uint16_t c = kWhite;
+static void drawGlyph(Glyph g, int cx, int cy, uint16_t c = kWhite) {
   switch (g) {
     case Glyph::Wifi:
       for (int i = 0; i < 3; ++i) canvas.fillArc(cx, cy + 22, 16 + i * 14, 23 + i * 14, 225, 315, c);
@@ -699,14 +726,22 @@ static String initials(const String& name) {
   return upper(out);
 }
 
-// The badge with a short value, initials or a glyph in it. Text that's too
-// wide for the badge font drops to the title font, then the small one.
+// The badge with a short value, initials or a glyph in it — or, for the agent
+// called Captain, Captain. Text that's too wide for the badge font drops to the
+// title font, then the small one.
 static void drawBadge(Tone tone, const String& name, Glyph glyph, int cy = kBadgeY) {
   M5Canvas* s = badgeSprite(tone);
   if (s) s->pushSprite(&canvas, CX - kGlowR, cy - kGlowR, kBlack);  // its glow's black: see-through
   else canvas.fillSmoothCircle(CX, cy, kBadgeR, rgb(kTones[tone].a[0], kTones[tone].a[1], kTones[tone].a[2]));
+  const uint16_t ink = tone == TGold ? kNavy : kWhite;
   if (glyph != Glyph::None && glyph != Glyph::Initials) {
-    drawGlyph(glyph, CX, cy);
+    drawGlyph(glyph, CX, cy, ink);
+    return;
+  }
+  if (glyph == Glyph::Initials && name == "Captain") {
+    static constexpr float kInBadge = 0.92f;
+    face::drawCaptain(canvas, face::Pose::Idle, 0, 1000, CX,  // (a time he isn't blinking at)
+                      cy + (int)((face::kTopUnits - face::kBottomUnits) / 2 * kInBadge), kInBadge);
     return;
   }
   String label = glyph == Glyph::Initials ? initials(name) : name;
@@ -720,10 +755,7 @@ static void drawBadge(Tone tone, const String& name, Glyph glyph, int cy = kBadg
     if (k == 0 && !badgeFont) continue;
     font(ids[k]);
     if (tw(label) <= room || k == 2) {
-      String t = k == 2 ? fit(label, room) : label;
-      uint16_t shadow = rgb(kTones[tone].a[0] / 2, kTones[tone].a[1] / 2, kTones[tone].a[2] / 2);
-      text(t, CX + 1, cy + 3, shadow);
-      text(t, CX, cy + 1, kWhite);
+      text(k == 2 ? fit(label, room) : label, CX, cy + 1, ink);
       return;
     }
   }
@@ -762,16 +794,18 @@ void begin() {
   canvas.setColorDepth(16);
   canvas.createSprite(W, H);
   canvas.setTextWrap(false);
-  faceSprite.setPsram(true);
-  faceSprite.setColorDepth(16);
-  faceSprite.createSprite(240, 135);  // the stick's screen: characters are drawn for it
   for (int i = 0; i < vlw::Count; ++i) {
     size_t len = 0;
     const uint8_t* d = vlw::data((vlw::Id)i, &len);
     fontData[i].set(d, len);
     fontSet[i].loadFont(&fontData[i]);
   }
-  badgeSprite(TBlue);  // the common one, ready before the first screen
+  // Ready before the first screen: the common badge, and Captain at the sizes
+  // the watch uses most.
+  badgeSprite(TNavy);
+  for (float size : {kCaptainHome, kCaptainSmall, kCaptainLarge}) {
+    face::drawCaptain(canvas, face::Pose::Idle, 0, 0, CX, CY, size);
+  }
 }
 
 void brightness(uint8_t level) {
@@ -792,7 +826,7 @@ void setRotation(uint8_t) {}
 void setBar(const String& agent, const char* state, uint16_t stateColor) {
   barAgent = agent;
   barState = state ? state : "";
-  barColor = stateColor;
+  barColor = toned(stateColor);
 }
 
 void setHealth(Health wifi, Health agent) {
@@ -803,14 +837,14 @@ void setHealth(Health wifi, Health agent) {
 void showSetup(const char* reason, const char* apName, const char* ip) {
   beginFrame();
   font(vlw::Title);
-  text(reason, CX, 70, kAmber);
+  text(reason, CX, 70, kGold);
   const int q = 200;
   canvas.fillRoundRect(CX - q / 2 - 10, 100, q + 20, q + 20, 14, kWhite);
   String qr = String("WIFI:T:nopass;S:") + apName + ";;";
   canvas.qrcode(qr.c_str(), CX - q / 2, 110, q, 3);
   font(vlw::Small);
   text("Join this Wi-Fi", CX, 344, kDim);
-  text(apName, CX, 372, kCyan);
+  text(apName, CX, 372, kGold);
   text(String("then open http://") + ip, CX, 404, kDim);
   push();
 }
@@ -818,7 +852,7 @@ void showSetup(const char* reason, const char* apName, const char* ip) {
 void showLink(const char* title, const String& url, const String& note) {
   beginFrame();
   font(vlw::Title);
-  text(fit(title, lineRoom(52, 92)), CX, 70, kCyan);
+  text(fit(title, lineRoom(52, 92)), CX, 70, kGold);
   const int q = 190;
   canvas.fillRoundRect(CX - q / 2 - 10, 100, q + 20, q + 20, 14, kWhite);
   canvas.qrcode(url.c_str(), CX - q / 2, 110, q, 4);
@@ -831,42 +865,47 @@ void showLink(const char* title, const String& url, const String& note) {
   push();
 }
 
-void showSleeping(const String& hint, uint8_t) { showMessage("Sleeping", hint, TFT_DARKGREY); }
+void showSleeping(const String& hint) {
+  beginFrame();
+  face::drawCaptain(canvas, face::Pose::Asleep, 0, 0, CX, 186, 1.1f, healthColor(Asleep));
+  font(vlw::Title);
+  text("Sleeping", CX, 276, kText);
+  font(vlw::BodyS);
+  int first = 0;
+  auto lines = wrapCentred(hint, 298, 390, ts().line, 2, &first);
+  drawLines(lines, first, ts().line, kDim);
+  push();
+}
 
-// Notices: a round alert mark, the title, then the text — and for a
-// question, which button says what under it (two short lines: `foot`, `foot2`).
-// With *yes* and *no*: two pills to tap instead of the foot lines (showAsk).
+// Notices: Captain, his face and lamp saying what kind it is, the title, then
+// the text — and for a question, which button says what under it (two short
+// lines: `foot`, `foot2`). With *yes* and *no*: two pills to tap instead of the
+// foot lines (showAsk).
 static void drawNotice(const char* title, const String& body, uint16_t color, const String& foot,
                        const String& foot2 = "", const char* yes = nullptr, const char* no = nullptr) {
   beginFrame();
   drawChrome();
-  // Warnings (red, orange…) get "!", everything else (white, grey, green) "i".
-  const bool warn = !(color == kWhite || color == TFT_DARKGREY || color == rgb(40, 200, 90));
-  uint16_t mark = color == kWhite ? kBlue : color;
-  canvas.fillSmoothCircle(CX, 128, 30, mark);
-  if (foot.length() || yes) {
-    font(vlw::Title);
-    text("?", CX, 130, kBlack);
-  } else if (warn) {
-    canvas.fillSmoothRoundRect(CX - 4, 110, 8, 24, 4, kBlack);
-    canvas.fillSmoothCircle(CX, 143, 4, kBlack);
-  } else {
-    canvas.fillSmoothCircle(CX, 114, 4, kBlack);
-    canvas.fillSmoothRoundRect(CX - 4, 122, 8, 22, 4, kBlack);
-  }
+  const uint16_t ink = toned(color);
+  const bool question = foot.length() || yes;
+  const bool warn = !question && !(ink == kWhite || ink == TFT_DARKGREY || ink == kMint || ink == kText);
+  const face::Pose pose = question ? face::Pose::Thinking : warn ? face::Pose::Sad : face::Pose::Idle;
+  face::drawCaptain(canvas, pose, 0, millis(), CX, 122, kCaptainSmall, ink == kWhite ? kGold : ink);
   font(vlw::Title);
-  text(fit(title, lineRoom(170, 210)), CX, 190, color == kWhite ? kText : color);
+  text(fit(title, lineRoom(170, 210)), CX, 182, ink == kWhite ? kText : ink);
   font(ts().body);
   int first = 0;
-  auto lines = wrapCentred(body, 222, foot.length() || yes ? 362 : kBottom + 20, ts().line, 6, &first);
+  const int bottom = question ? 362 : kBottom + 20;
+  auto lines = wrapCentred(body, 208, bottom, ts().line, 6, &first);
+  // Close under the title, not floating in the room that's left.
+  lines = wrapCentred(body, 208, min(bottom, 208 + (int)lines.size() * ts().line), ts().line, 6, &first);
   drawLines(lines, first, ts().line, kDim);
   if (yes) {
     const int y = kAskY, h = 44, w = 140, gap = 16;
-    canvas.fillSmoothRoundRect(CX - gap / 2 - w, y - h / 2, w, h, h / 2, rgb(40, 200, 90));
-    canvas.fillSmoothRoundRect(CX + gap / 2, y - h / 2, w, h, h / 2, mix(kBlack, kText, 0.85f));
-    canvas.fillSmoothRoundRect(CX + gap / 2 + 2, y - h / 2 + 2, w - 4, h - 4, h / 2 - 2, kBlack);
+    canvas.fillSmoothRoundRect(CX - gap / 2 - w, y - h / 2, w, h, h / 2, kGold);
+    canvas.fillSmoothRoundRect(CX + gap / 2, y - h / 2, w, h, h / 2, mix(kBlack, kGold, 0.75f));
+    canvas.fillSmoothRoundRect(CX + gap / 2 + 2, y - h / 2 + 2, w - 4, h - 4, h / 2 - 2, kNavy);
     font(vlw::BodyS);
-    text(yes, CX - gap / 2 - w / 2, y + 1, kBlack);
+    text(yes, CX - gap / 2 - w / 2, y + 1, kNavy);
     text(no, CX + gap / 2 + w / 2, y + 1, kText);
     askShown = true;
   } else if (foot.length()) {
@@ -933,7 +972,7 @@ int showPanel(const char* title, uint16_t titleColor, const std::vector<Row>& ro
   drawChrome();
   if (page == 0 && title && *title) {
     font(vlw::Title);
-    text(title, CX, kTop + 26, titleColor);
+    text(title, CX, kTop + 26, toned(titleColor));
   }
   for (size_t i = 0; i < laid.size(); ++i) {
     if (laid[i].page != page) continue;
@@ -942,7 +981,7 @@ int showPanel(const char* title, uint16_t titleColor, const std::vector<Row>& ro
     font(ts().body);
     int vy = laid[i].y + labelH;
     for (size_t k = 0; k < laid[i].lines.size(); ++k) {
-      text(laid[i].lines[k], CX, vy + k * line + line / 2, rows[i].color);
+      text(laid[i].lines[k], CX, vy + k * line + line / 2, toned(rows[i].color));
     }
   }
   drawPageDots(pages, page, kBottom + 22);
@@ -950,72 +989,62 @@ int showPanel(const char* title, uint16_t titleColor, const std::vector<Row>& ro
   return pages;
 }
 
-// The agent's badge, small: the glow and all, scaled down, its initials in it.
-static void drawSmallBadge(Tone tone, const String& name, int cy) {
-  M5Canvas* s = badgeSprite(tone);
-  const float z = 0.42f;
-  if (s) s->pushRotateZoomWithAA(&canvas, CX, cy, 0, z, z, kBlack);
-  else canvas.fillSmoothCircle(CX, cy, kBadgeR * z, rgb(kTones[tone].a[0], kTones[tone].a[1], kTones[tone].a[2]));
-  font(vlw::Small);
-  text(initials(name), CX, cy + 1, kWhite);
-}
-
-static void drawCharacter(uint8_t kind, face::Pose pose, int level, int cy, float zoom = 1.6f);
-
-// Idle: a watch first — the date, the time large, the agent's character
-// (small, alive) with its name under it, then the hint (or what's wrong),
-// the battery as an arc at the bottom of the ring and in words. Before the
-// clock is known, the badge takes the middle as it used to.
+// Idle: a watch first, with Captain on it — his face and lamp are the agent's
+// state — then the time large, the date between the Wi-Fi and agent dots, how
+// long the battery has, the hint (or what's wrong) and the battery's level as
+// an arc at the bottom. Before the clock is known, Captain takes the middle.
 void showHome(const Home& home) {
   beginFrame();
-  Tone tone = home.ready ? TBlue : barState == "offline" ? TGrey : TAmber;
-  String name = barAgent.length() ? barAgent : String("Captain");
+  const String name = barAgent.length() ? barAgent : String("Captain");
+  const face::Pose pose = hAgent == Asleep ? face::Pose::Asleep : home.ready ? face::Pose::Idle : face::Pose::Sad;
+  const uint16_t lamp = healthColor(hAgent);
   char clock[8];
   const bool clockFace = clockText(clock, sizeof(clock));
-  drawChrome(false, !clockFace);
   if (clockFace) {
-    font(vlw::Small);
-    text(dateText(), CX, 104, kDim);
+    drawDial();
+    face::drawCaptain(canvas, pose, 0, millis(), CX, 108, kCaptainHome, lamp);
     font(vlw::Digits);
-    text(clock, CX, 180, kText);
-    drawCharacter(home.character, home.ready ? face::Pose::Idle : face::Pose::Sad, 0, 278, 0.7f);
-    // Under it: how long the battery has, or until it's full (the agent's
-    // name only where the board has nothing to say about the battery).
+    text(clock, CX, 204, kWhite);
+    font(vlw::Small);
+    const String date = upper(dateText());
+    const int half = tw(date) / 2 + 16;
+    text(date, CX, 266, kGold);
+    canvas.fillSmoothCircle(CX - half, 266, 4, healthColor(hWifi));
+    canvas.fillSmoothCircle(CX + half, 266, 4, lamp);
+    drawWaiting(CX + half + 14, 266);
     if (home.battery.length()) {
-      font(vlw::BodyS);
-      text(fit(home.battery, lineRoom(336, 364)), CX, 350, kText);
+      text(fit(home.battery, lineRoom(286, 312)), CX, 300, kDim);
     } else {
-      font(vlw::Title);
-      text(fit(name, lineRoom(334, 366)), CX, 350, kText);
+      text(fit(name, lineRoom(286, 312)), CX, 300, kDim);
     }
   } else {
-    drawBadge(tone, name, Glyph::Initials);
+    drawChrome(false, false);
+    face::drawCaptain(canvas, pose, 0, millis(), CX, 196, 1.3f, lamp);
     font(vlw::Title);
     text(fit(name, lineRoom(kTitleY - 20, kTitleY + 20)), CX, kTitleY, kText);
   }
-  if (home.noteMode) ringArc(330, 60, kRed, 6, R - 2);  // note-taking mode: a red arc at the top
+  if (home.noteMode) ringArc(330, 60, kCoral, 6, R - 2);  // note-taking mode: a coral arc at the top
+  const int hintTop = clockFace ? 318 : kNoteY - 16;
   if (tapMode == TapButton::Talk) {
-    drawTapButton(clockFace ? 398 : kTapY, clockFace ? kTapLowR : kTapR);  // in place of "hold the yellow button…"
+    drawTapButton(clockFace ? 358 : kTapY, clockFace ? kTapLowR : kTapR);  // in place of "press the yellow button…"
   } else if (home.noteMode) {
     font(vlw::Small);
     int first = 0;
-    const int top = clockFace ? 370 : kNoteY - 16;
-    auto lines = wrapCentred("Note mode · hold yellow to send", top, top + 56, 28, 2, &first);
-    drawLines(lines, first, 28, kRed);
+    auto lines = wrapCentred("Note mode · hold yellow to send", hintTop, hintTop + 56, 28, 2, &first);
+    drawLines(lines, first, 28, kCoral);
   } else if (home.hint.length()) {
     font(vlw::Small);
     int first = 0;
-    const int top = clockFace ? 370 : kNoteY - 16;
-    auto lines = wrapCentred(home.hint, top, top + 56, 28, 2, &first);
-    drawLines(lines, first, 28, home.ready ? kDim : home.color);
+    auto lines = wrapCentred(home.hint, hintTop, hintTop + 56, 28, 2, &first);
+    drawLines(lines, first, 28, home.ready ? kDim : toned(home.color));
   }
   bool chg = false;
   const int pct = batteryPct(&chg);
-  if (clockFace && pct >= 0) {  // the level as an arc at the bottom of the ring
-    ringArc(150, 60, mix(kBlack, kText, 0.12f), 6, R - 2);
-    ringArc(150, max(2, 60 * pct / 100), batteryColor(pct), 6, R - 2);
+  if (clockFace && pct >= 0) {  // the level as an arc above the dial's bottom
+    ringArc(150, 60, kHairline, 5, R - 20);
+    ringArc(150, max(2, 60 * pct / 100), batteryColor(pct), 5, R - 20);
   }
-  drawBatteryAt(kBatteryY, true);
+  drawBatteryAt(clockFace ? 406 : kBatteryY, true);
   push();
 }
 
@@ -1037,7 +1066,7 @@ static void statusTile(int y, uint16_t dot, const String& line, const String& de
 // Connection: the ring is the Wi-Fi signal; the deck and the agent under it.
 static void statusConnection(const Status& s) {
   const int q = s.wifi ? constrain((s.rssi + 100) * 2, 0, 100) : 0;
-  const uint16_t qc = !s.wifi ? kRed : s.rssi >= -67 ? kGood : s.rssi >= -80 ? kAmber : kRed;
+  const uint16_t qc = !s.wifi ? kCoral : s.rssi >= -67 ? kMint : s.rssi >= -80 ? kGold : kCoral;
   ringTrack(qc);
   if (q) ringArc(0, 360.0f * q / 100, qc);
   drawGlyph(Glyph::Wifi, CX, 112);
@@ -1048,10 +1077,10 @@ static void statusConnection(const Status& s) {
     const char* word = s.rssi >= -67 ? "good" : s.rssi >= -80 ? "fair" : "weak";
     text(String(s.rssi) + " dBm · " + word, CX, 208, qc);
   }
-  statusTile(258, s.deck ? kGood : kRed, s.deck ? s.deckHost : String("Deck offline"),
+  statusTile(258, s.deck ? kMint : kCoral, s.deck ? s.deckHost : String("Deck offline"),
              s.deck ? (s.rttMs >= 0 ? String(s.rttMs) + " ms round trip" : String("connected")) : String("reconnecting…"),
-             s.deck ? kDim : kRed);
-  statusTile(322, s.agentLinked ? kGood : s.agentAsleep ? kBlue : s.agentOff ? kRed : s.deck ? kAmber : kRed,
+             s.deck ? kDim : kCoral);
+  statusTile(322, s.agentLinked ? kMint : s.agentAsleep ? kBlue : s.agentOff ? kCoral : s.deck ? kGold : kCoral,
              s.agent.length() ? s.agent : String("No agent"),
              s.agentLinked  ? String("agent linked")
              : s.agentAsleep ? String("asleep · talk to wake it")
@@ -1105,12 +1134,12 @@ static void statusDevice(const Status& s) {
   text(s.deviceId, CX, 160, kDim);
   if (s.update.length()) text("Update " + s.update + " available", CX, 188, kCyan);
   static const char* sizes[] = {"small", "medium", "large"};
-  statusTile(240, s.speak ? kGood : kAmber, "Voice " + s.voice + " · " + String(s.volumePct) + "%" +
+  statusTile(240, s.speak ? kMint : kGold, "Voice " + s.voice + " · " + String(s.volumePct) + "%" +
                                                  (s.boostDb ? " · +" + String(s.boostDb) + " dB" : String("")),
              s.speak ? String("text ") + sizes[s.textSize % 3] : String("muted · text ") + sizes[s.textSize % 3], kDim);
   statusTile(304, kText, String(s.freeKb) + " KB free", "memory for pictures and sound", kDim);
   if (s.notes) {
-    statusTile(368, kAmber, String(s.notes) + (s.notes == 1 ? " note kept offline" : " notes kept offline"),
+    statusTile(368, kGold, String(s.notes) + (s.notes == 1 ? " note kept offline" : " notes kept offline"),
                s.notesLength + " · room for " + String(s.notesRoomMin) + " min" + (s.notesSending ? " · sending…" : ""),
                kDim);
   }
@@ -1140,25 +1169,23 @@ void showListening(int level, uint32_t elapsedMs) {
   beginFrame();
   ringListening(elapsedMs, level, note);
   drawChrome();
-  const char* label = note ? "Note" : "Listening";
+  face::drawCaptain(canvas, face::Pose::Listening, level, millis(), CX, 124, kCaptainSmall, kCoral);
+  for (int i = 0; i < 15; ++i) {  // the voice, newest on the right, brighter as it comes
+    const int h = 8 + min(levels[i], 100) * 84 / 100;
+    const int x = CX - 7 * 20 + i * 20;
+    const uint16_t col = levels[i] > 85 ? kGold : mix(mix(kBlack, kCoral, 0.55f), kCoral, i / 10.0f);
+    canvas.fillSmoothRoundRect(x - 4, 232 - h / 2, 8, h, 4, col);
+  }
   font(vlw::Title);
-  int labelW = tw(label);
-  canvas.fillSmoothCircle(CX - labelW / 2 - 18, 132, 8, kRed);
-  text(label, CX + 10, 132, kText);
-  font(vlw::Digits);
   char t[12];
   snprintf(t, sizeof(t), "%lu:%02lu", (unsigned long)(elapsedMs / 60000), (unsigned long)(elapsedMs / 1000 % 60));
-  text(t, CX, 228, kWhite);
-  for (int i = 0; i < 15; ++i) {  // a little voice meter
-    int h = 6 + min(levels[i], 100) * 54 / 100;
-    int x = CX - 7 * 18 + i * 18;
-    canvas.fillSmoothRoundRect(x - 4, 322 - h / 2, 8, h, 4, levels[i] > 85 ? kAmber : mix(kRed, kWhite, 0.25f));
-  }
+  text(t, CX, 306, kWhite);
+  font(vlw::Small);
+  text(note ? "Note" : "Listening", CX, 340, kCoral);
   if (tapMode == TapButton::Stop) {
-    drawTapButton(kTapY, kTapR);
+    drawTapButton(390, kTapLowR);
   } else {
-    font(vlw::Small);
-    text(note ? "press again to keep it" : board::kTalkToggles ? "press again to send" : "release to send", CX, 396,
+    text(note ? "press again to keep it" : board::kTalkToggles ? "press again to send" : "release to send", CX, 386,
          kDim);
   }
   push();
@@ -1169,41 +1196,44 @@ void showWorking(const String& heard, const std::vector<String>& activity, const
   beginFrame();
   ringWorking(steps);
   drawChrome();
+  face::drawCaptain(canvas, face::Pose::Thinking, 0, millis(), CX, 124, kCaptainSmall, kGold);
   if (heard.length()) {  // the end of a long sentence matters most: last two lines
     font(vlw::BodyS);
     String q = String("“") + heard + "”";
-    // Only the last two lines show, on the top two rows: wrap to the narrower
-    // (top) row, with room for a leading "…".
-    const int room = lineRoom(84, 118) - tw("…");
+    // Only the last two lines show: wrap to the narrower (top) row, with room
+    // for a leading "…".
+    const int room = lineRoom(160, 192) - tw("…");
     auto ls = wrap(q, [&](int) { return room; });
     int n = min(2, (int)ls.size());
     int first = (int)ls.size() - n;
     for (int i = 0; i < n; ++i) {
       String l = (first > 0 && i == 0) ? String("…") + ls[first + i] : ls[first + i];
-      text(l, CX, 84 + i * 34 + 17, kCyan);
+      text(l, CX, 176 + i * 32, kDim);
     }
   }
-  font(vlw::Digits);
-  char t[12];
-  snprintf(t, sizeof(t), "%lu:%02lu", (unsigned long)(elapsedMs / 60000), (unsigned long)(elapsedMs / 1000 % 60));
-  text(t, CX, 218, kWhite);
-  font(vlw::Small);
-  text(steps ? String(steps) + (steps == 1 ? " step" : " steps") : String("working"), CX, 286, kAmber);
-  // The newest activity in white, the one before it grey above.
+  // The newest activity in white, the one before it faint above.
   int n = activity.size();
   if (n >= 2) {
     font(vlw::Small);
-    text(fit(activity[n - 2], lineRoom(306, 334)), CX, 320, kFaint);
+    text(fit(activity[n - 2], lineRoom(236, 262)), CX, 250, kFaint);
   }
   if (n >= 1) {
     font(vlw::BodyS);
-    text(fit(activity[n - 1], lineRoom(338, 374)), CX, 356, kText);
+    text(fit(activity[n - 1], lineRoom(266, 298)), CX, 282, kText);
   }
   if (status.length()) {
     font(vlw::Small);
-    text(fit(status, lineRoom(374, 398)), CX, 386, kDim);
+    text(fit(status, lineRoom(304, 330)), CX, 316, kDim);
   }
-  if (tapMode == TapButton::Stop) drawTapButton(424, 18);  // stop the agent (above the step ticks)
+  // The time so far and the steps, in a pill.
+  font(vlw::Small);
+  char t[12];
+  snprintf(t, sizeof(t), "%lu:%02lu", (unsigned long)(elapsedMs / 60000), (unsigned long)(elapsedMs / 1000 % 60));
+  const String pill = String(t) + (steps ? " · " + String(steps) + (steps == 1 ? " step" : " steps") : String(""));
+  const int pw = tw(pill) + 32;
+  canvas.fillSmoothRoundRect(CX - pw / 2, 342, pw, 34, 17, kNavy);
+  text(pill, CX, 359, kGoldHi);
+  if (tapMode == TapButton::Stop) drawTapButton(410, 22);  // stop the agent (above the step ticks)
   push();
 }
 
@@ -1323,8 +1353,7 @@ void setReplayable(bool on) { replayable = on; }
 
 // A small circle arrow in a ring, like the tap button's.
 static void drawReplay(int cx, int cy, int r) {
-  canvas.fillSmoothCircle(cx, cy, r, mix(kBlack, kText, 0.85f));
-  canvas.fillSmoothCircle(cx, cy, r - 3, kBlack);
+  drawDisc(cx, cy, r);
   canvas.fillArc(cx, cy, r - 11, r - 8, 270, 360, kText);
   canvas.fillArc(cx, cy, r - 11, r - 8, 0, 200, kText);
   canvas.fillTriangle(cx - 5, cy - (r - 10), cx + 2, cy - (r - 10) - 5, cx + 2, cy - (r - 10) + 5, kText);
@@ -1380,7 +1409,7 @@ void showReply() {
       }
       text(lines[i], CX, top + i * line + line / 2, col);
     }
-    drawPageDots(replyPages.size(), replyPage, kReplyDotsY);
+    drawPageArc(replyPages.size(), replyPage);
   }
   if (answerButton()) drawTapButton(kTapLowY, kTapLowR);
   if (replayable) drawReplay(answerButton() ? CX - 74 : CX, kTapLowY, 20);
@@ -1406,22 +1435,16 @@ bool prevPage() {
 bool onLastPage() { return replyPage + 1 >= (int)replyPages.size(); }
 bool onFirstPage() { return replyPage == 0; }
 
-// Characters are drawn for the stick's 240×135 screen (under its 16 px bar),
-// then scaled up smoothly into the middle of the round one.
-static void drawCharacter(uint8_t kind, face::Pose pose, int level, int cy, float zoom) {
-  faceSprite.fillScreen(hasBackdrop ? kSeeThrough : kBlack);
-  face::draw(faceSprite, kind, pose, level, millis(), 120, 76);
-  faceSprite.setPivot(120, 76);
-  if (hasBackdrop) faceSprite.pushRotateZoomWithAA(&canvas, CX, cy, 0, zoom, zoom, kSeeThrough);
-  else faceSprite.pushRotateZoomWithAA(&canvas, CX, cy, 0, zoom, zoom);
-}
-
-void showFace(uint8_t kind, face::Pose pose, int level) {
+// Captain large: his lamp says what he's doing.
+void showFace(face::Pose pose, int level) {
   beginFrame();
-  drawCharacter(kind, pose, level, 214);  // first: its black corners would cover the ring
   if (pose == face::Pose::Listening) ringListening(0, level);
   else if (pose == face::Pose::Thinking) ringWorking(0);
-
+  const uint16_t lamp = pose == face::Pose::Listening ? kCoral
+                        : pose == face::Pose::Thinking ? kGold
+                        : pose == face::Pose::Speaking ? kCyan
+                                                       : healthColor(hAgent);
+  face::drawCaptain(canvas, pose, level, millis(), CX, 216, kCaptainLarge, lamp);
   drawChrome();
   // The sentence being spoken, as a subtitle in place of the name: the two
   // lines round where the voice is in it; else the name.
@@ -1443,7 +1466,7 @@ void showFace(uint8_t kind, face::Pose pose, int level) {
   } else {
     font(vlw::Title);
     String name = barAgent.length() ? barAgent : String("Captain");
-    text(fit(name, lineRoom(342, 378)), CX, 360, kText);
+    text(fit(name, lineRoom(324, 360)), CX, 342, kText);
   }
   // The tap button takes the state line's place: to talk, or to stop.
   const bool listening = pose == face::Pose::Listening;
@@ -1452,21 +1475,8 @@ void showFace(uint8_t kind, face::Pose pose, int level) {
     drawTapButton(kTapLowY, kTapLowR);
   } else if (!subtitle) {
     font(vlw::Small);
-    text(fit(barState, lineRoom(382, 410)), CX, 396, pose == face::Pose::Idle ? kDim : barColor);
+    text(fit(barState, lineRoom(366, 394)), CX, 380, pose == face::Pose::Idle ? kDim : barColor);
   }
-  push();
-}
-
-void showCharPick(uint8_t kind, face::Pose pose, int level, int index) {
-  beginFrame();
-  drawCharacter(kind, pose, level, 206);
-  drawChrome();
-  drawChevrons(206);
-  font(vlw::Title);
-  text(face::name(kind), CX, 352, kText);
-  font(vlw::Small);
-  text("yellow = pick", CX, 386, kDim);
-  drawPageDots(face::KindCount, index, 420);
   push();
 }
 
@@ -1604,7 +1614,7 @@ void showInfo(const std::vector<Row>& rows) {
   ringArc(0, 360, mix(kBlack, kText, 0.12f));
   drawChrome();
   const int n = min((int)rows.size(), 5);
-  for (int i = 0; i < n; ++i) statusTile(120 + i * 60, rows[i].color, rows[i].value, rows[i].label, kDim);
+  for (int i = 0; i < n; ++i) statusTile(120 + i * 60, toned(rows[i].color), rows[i].value, rows[i].label, kDim);
   drawPageDots(3, 2, 424);  // home's pages: the picture, the clock face, this
   push();
 }
@@ -1620,14 +1630,17 @@ void showPicker(const std::vector<Item>& items, int selected, int current, const
   if (!items.empty()) {
     selected = constrain(selected, 0, (int)items.size() - 1);
     const Item& it = items[selected];
-    Tone tone = selected == current ? TGreen : it.on ? TBlue : TGrey;
+    Tone tone = selected == current ? TGold : it.on ? TNavy : TGrey;
+    // What's next along peeks in from each side.
+    if (items.size() > 1) {
+      for (int side : {-1, 1}) canvas.fillSmoothCircle(CX + side * 176, kBadgeY, 24, mix(kBlack, kNavy, 0.8f));
+    }
     drawBadge(tone, it.badge, it.glyph);
-    drawChevrons(kBadgeY);
     font(vlw::Title);
     text(fit(it.title, lineRoom(kTitleY - 20, kTitleY + 20)), CX, kTitleY, kText);
     if (it.note.length()) {
       font(vlw::Small);
-      text(fit(it.note, lineRoom(kNoteY - 14, kNoteY + 14)), CX, kNoteY, selected == current ? kGreen : kDim);
+      text(fit(it.note, lineRoom(kNoteY - 14, kNoteY + 14)), CX, kNoteY, selected == current ? kGold : kDim);
     }
     drawPageDots(items.size(), selected, kDotsY);
   }

@@ -933,14 +933,13 @@ void showPicker(const std::vector<Item>& items, int selected, int current_, cons
 
 // ── the character (only on the phone page's say-so; not on paper by default) ──
 
-void showFace(uint8_t kind, face::Pose pose, int level) {
+void showFace(face::Pose pose, int level) {
   drawing(Screen::Other);
   canvas.fillScreen(kInk);
-  face::draw(canvas, kind, pose, level, millis(), W / 2, H / 2);
+  face::draw(canvas, pose, level, millis(), W / 2, H / 2);
   push();
 }
 
-void showCharPick(uint8_t kind, face::Pose pose, int level, int) { showFace(kind, pose, level); }
 
 // ── pictures ───────────────────────────────────────────────────────────
 
@@ -1062,7 +1061,7 @@ static void drawSleeper() {
   canvas.drawString("Z", 153, 121);
 }
 
-void showSleeping(const String& hint, uint8_t) {
+void showSleeping(const String& hint) {
   drawing(Screen::Sleeping);
   canvas.fillScreen(kPaper);
   drawBar(false);  // (no links asleep: Wi-Fi is off)

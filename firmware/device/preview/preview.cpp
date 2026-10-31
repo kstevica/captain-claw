@@ -1,4 +1,4 @@
-// Renders the StopWatch screens (the real ui_round.cpp and characters) on a
+// Renders the StopWatch screens (the real ui_round.cpp and Captain) on a
 // Mac, one PPM per screen, so the round UI can be designed before — and
 // without — flashing the watch. preview/render.py turns them into PNGs.
 //
@@ -103,14 +103,13 @@ static std::vector<ui::Item> menu() {
   return {
       card("Replay answer", "", "yellow = hear it again", true, ui::Glyph::Replay),
       card("Status", "", "Wi-Fi, deck, battery…", true, ui::Glyph::Info),
-      card("Agent", "Captain Claw", "Captain Claw · change", true, ui::Glyph::Initials),
+      card("Agent", "Captain", "Captain · change", true, ui::Glyph::Initials),
       card("Volume", "75%", "yellow = change"),
       card("Settings", "", "voice, display, sounds, timers…", true, ui::Glyph::Gear),
       card("Speech boost", "off", "yellow = change", false),
       card("Voice", "female", "yellow = change"),
       card("Display", "text", "yellow = change"),
       card("Text size", "Aa", "medium · change"),
-      card("Character", "Captain", "yellow = browse"),
       card("Beeps around speech", "on", "yellow = change"),
       card("Flash before speech", "on", "yellow = change"),
       card("Buzz before speech", "on", "yellow = change"),
@@ -123,7 +122,7 @@ static std::vector<ui::Item> menu() {
 
 static void bar(const char* state, uint16_t color, ui::Health wifi = ui::Up, ui::Health agent = ui::Up) {
   ui::setHealth(wifi, agent);
-  ui::setBar("Captain Claw", state, color);
+  ui::setBar("Captain", state, color);
 }
 
 int main(int argc, char** argv) {
@@ -152,7 +151,7 @@ int main(int argc, char** argv) {
                 {"memory", "room for 14 min of notes", kGreen},
                 {"Wi-Fi", "Harbour-5G · -58 dBm", kGreen},
                 {"Flight Deck", "deck.example.com", kGreen},
-                {"agent", "Captain Claw", kGreen}});
+                {"agent", "Captain", kGreen}});
   save("01c_info");
 
   bar("ready", kYellow, ui::Up, ui::Partial);
@@ -168,7 +167,7 @@ int main(int argc, char** argv) {
                 {"memory", "room for 14 min of notes", kGreen},
                 {"Wi-Fi", "Harbour-5G · -58 dBm", kGreen},
                 {"Flight Deck", "deck.example.com", kGreen},
-                {"agent", "Captain Claw · asleep", kBlue}});
+                {"agent", "Captain · asleep", kBlue}});
   save("02c_info_agent_asleep");
   bar("stopped", kRed, ui::Up, ui::Off);
   ui::showHome({false, "Getting ready", kRed, "The agent is stopped", {}});
@@ -234,7 +233,7 @@ int main(int argc, char** argv) {
   bar("speaking", kCyan);
   ui::showReply();
   save("07b_reply_lit");
-  ui::showFace(1, face::Pose::Speaking, 70);  // the character: that sentence as a subtitle
+  ui::showFace(face::Pose::Speaking, 70);  // Captain: that sentence as a subtitle
   save("07c_icon_subtitle");
   ui::setSpoken(-1);
   bar("ready", kGreen);
@@ -258,7 +257,7 @@ int main(int argc, char** argv) {
   ui::showPicker(items, 0, -1);
   save("11b_menu_replay");
 
-  std::vector<ui::Item> agents = {card("Captain Claw", "Captain Claw", "current agent", true, ui::Glyph::Initials),
+  std::vector<ui::Item> agents = {card("Captain", "Captain", "current agent", true, ui::Glyph::Initials),
                                   card("Research desk", "Research desk", "yellow = choose", true, ui::Glyph::Initials),
                                   card("Back", "", "to the menu", true, ui::Glyph::Back)};
   ui::showPicker(agents, 0, 0);
@@ -269,7 +268,7 @@ int main(int argc, char** argv) {
   ui::Status st;
   st.wifi = true, st.ssid = "Harbour-5G", st.rssi = -54, st.ip = "192.168.1.48";
   st.deck = true, st.deckHost = "deck.example.com", st.rttMs = 38;
-  st.agent = "Captain Claw", st.agentLinked = true;
+  st.agent = "Captain", st.agentLinked = true;
   st.batteryPct = 82, st.batteryMv = 3980, st.charging = false, st.usb = false;
   st.minutesLeft = 130;
   st.uptime = "1h 12m", st.turns = 7, st.lastAnswerMin = 2;
@@ -293,24 +292,24 @@ int main(int argc, char** argv) {
 
   ui::setReply("");
   bar("ready", kGreen);
-  ui::showFace(0, face::Pose::Idle, 0);
+  ui::showFace(face::Pose::Idle, 0);
   save("17_icon_captain");
   bar("speaking", kCyan);
   gPlaying = true;
   g_previewMillis = 300000;
-  ui::showFace(1, face::Pose::Speaking, 70);
-  save("18_icon_bot_speaking");
+  ui::showFace(face::Pose::Speaking, 70);
+  save("18_icon_speaking");
   gPlaying = false;
   bar("12s · 3 steps", kYellow);
-  ui::showFace(8, face::Pose::Thinking, 0);
-  save("19_icon_c64_thinking");
+  ui::showFace(face::Pose::Thinking, 0);
+  save("19_icon_thinking");
   bar("listening", kRed);
-  ui::showFace(11, face::Pose::Listening, 60);
-  save("20_icon_dog_listening");
+  ui::showFace(face::Pose::Listening, 60);
+  save("20_icon_listening");
 
-  bar("1/18  A=pick", kCyan);
-  ui::showCharPick(17, face::Pose::Idle, 0, 17);
-  save("21_character_pick");
+  bar("asleep", kBlue, ui::Up, ui::Asleep);
+  ui::showSleeping("Press the yellow button to wake.");
+  save("21_sleeping");
 
   ui::showSetup("First-time setup", "Captain-StopWatch-b2c3", "192.168.4.1");
   save("22_setup");
@@ -371,7 +370,7 @@ int main(int argc, char** argv) {
   save("28c_tap_reply_play");
   ui::setTapButton(ui::TapButton::Talk);
   ui::setReply("");
-  ui::showFace(0, face::Pose::Idle, 0);
+  ui::showFace(face::Pose::Idle, 0);
   save("29_tap_icon");
   ui::setTapButton(ui::TapButton::Off);
 
@@ -388,7 +387,7 @@ int main(int argc, char** argv) {
   home.hint = "2 waiting in Flight Deck";
   ui::showHome(home);
   save("30c_waiting_home");
-  ui::showFace(0, face::Pose::Idle, 0);
+  ui::showFace(face::Pose::Idle, 0);
   save("30d_waiting_icon");
   ui::setWaiting(0);
   home.hint = "Press the yellow button to talk";
@@ -418,7 +417,7 @@ int main(int argc, char** argv) {
     save("34_bg_menu");
     ui::setReply("");
     bar("ready", kGreen);
-    ui::showFace(0, face::Pose::Idle, 0);
+    ui::showFace(face::Pose::Idle, 0);
     save("35_bg_icon");
     ui::showMessage("Answer lost", "The connection dropped while the agent was working. Ask again.", kOrange);
     save("36_bg_notice");

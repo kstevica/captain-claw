@@ -105,7 +105,6 @@ static void bar(ui::Health wifi = ui::Up, ui::Health agent = ui::Up) {
 static ui::Home home(bool ready) {
   ui::Home h{ready, ready ? "All good" : "Getting ready", ready ? kGreen : kYellow,
              ready ? "Top button to talk" : "Waiting for the agent", {}};
-  h.character = 0;
   return h;
 }
 
@@ -203,7 +202,7 @@ int main(int argc, char** argv) {
   save("17_setup");
 
   ui::pin(false);
-  ui::showSleeping("Top button to talk", 0);
+  ui::showSleeping("Top button to talk");
   save("19_sleeping");
 
   ui::showMessage("Battery empty", "Charge it over USB-C, then press the power button.", kRed);

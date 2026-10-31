@@ -401,10 +401,10 @@ uv run --no-project --with pillow python preview/render.py epaper154
 
 ## StopWatch screen
 
-The round screen follows M5Stack's own StopWatch look: black, a glowing badge
-in the middle with a name under it, page dots and chevrons for lists. The ring
-round the edge shows what the watch is doing — red while it listens (filling
-toward the 110 s recording limit), amber while the agent works (a tick per
+The round screen is Captain's look (more below): black, a badge in the middle
+with a name under it, page dots for lists. The ring
+round the edge shows what the watch is doing — coral while it listens (filling
+toward the 110 s recording limit), gold while the agent works (a tick per
 tool step). While it speaks, a short cyan line under the text follows the voice
 (only that strip redraws, so it costs next to nothing). The clock sits at the top between the Wi-Fi
 (left) and agent (right) dots; its time zone is set in the setup page.
@@ -417,9 +417,9 @@ swipe there brings the answer back. With a background picture set, a double
 tap on the home screen shows the picture alone, nothing over it; a double tap
 there (or the other button) goes back home, a swipe to the answer.
 
-The menu, the agent and character pickers and the status pages take touch
-too: swipe left for the next row or page, right for the one before, tap a
-chevron for the same, tap the badge between them to choose. The "send voice
+The menu, the agent picker and the status pages take touch too: swipe left
+for the next row or page, right for the one before, tap either side for the
+same, tap the badge between them to choose. The "send voice
 notes?" question has two pills to tap. A picture from the agent fills the
 circle; a single tap shows all of it, scaled down, and another fills again.
 The menu has two levels: what you reach for in the moment at the top (Replay,
@@ -438,8 +438,8 @@ breathes under the moving head.
 
 The text follows the voice (0.14.2). While an answer is spoken, the sentence
 being said is lit and the rest dimmed, the page turns by itself when the
-voice reaches the next one (until you page by hand), and in character mode
-the sentence shows as a subtitle under the face. No word timings are
+voice reaches the next one (until you page by hand), and with Captain on the
+screen the sentence shows as a subtitle under him. No word timings are
 needed: the watch knows how far into the speech the speaker is (the mouth
 uses the same estimate); once the speech has all arrived, that fraction of
 the text is the place, and before that the pace learned from the last answer
@@ -472,8 +472,7 @@ so a busy photo doesn't fight the words; the picture-only screen keeps it
 sharp.
 
 0.16.0: an answer's page dots sit under the clock and its text starts lower,
-clear of the buttons; the clock face shows the agent's character (small,
-alive) over its name instead of an initials badge; the status is three
+clear of the buttons; the status is three
 pages of gauges — the ring as the Wi-Fi signal with the deck and agent under
 it, the ring as the battery with uptime and use, then the firmware, voice,
 memory and notes; a replay, or play after a pause, goes to the page the
@@ -496,13 +495,12 @@ voice's places in UTF-8 bytes, as the firmware does, so letters like č and
 stick keep the level over the clock — through sleeps too, in RTC memory, a
 sample a minute awake and one before sleep — and once the window spans five
 minutes and two per cent, say "≈ 2 h 10 min left" (or "full in ≈ 45 min"
-while charging). The watch shows it under the character on the clock face
+while charging). The watch shows it under the date on the clock face
 in place of the agent's name; the stick in its status, the watch on its
 Power page too. A change of charging state starts the window over.
 
 *Tap to talk* (Menu, or the settings page; off by default) puts a record
-button on the screen: under the name at home, under an answer or the
-character. Tap it and talk; the button turns into a stop square, and a second
+button on the screen: on the clock face, under an answer or under Captain. Tap it and talk; the button turns into a stop square, and a second
 tap sends the recording (offline it's kept as a voice note). Holding the
 yellow button works as before, and its press also ends a tapped recording.
 A tapped recording also ends by itself after 2.5 s of quiet (and is sent);
@@ -530,6 +528,20 @@ names it in `prefs` (`"bg": id`), and Flight Deck sends the owner's
 whenever it's another one; size 0 clears it. 0.13.0 darkens nothing itself, so it
 gets the picture darkened by Flight Deck. Ask the agent to clear it to go back to
 black.
+
+The look (0.20.0) is Captain's, from `build_support/brand/bot`: black, gold for what
+leads, cyan for his eyes and voice, coral for the microphone, navy for the surfaces.
+
+- **Clock face:** Captain above the time, on a dial of minute dots with the seconds going
+  round in gold. His face and lamp are the agent's state: asleep, eyes shut with a blue
+  lamp; not ready, sad; the date sits between the Wi-Fi and agent dots.
+- **Listening:** Captain with wide eyes over the voice as bars, the ring in coral.
+- **Working:** Captain's eyes scanning and his lamp pulsing, what you said, what the agent
+  is doing, and the time and steps in a pill, the ring in gold.
+- **An answer:** the pages are an arc on the right instead of dots.
+- **Menu:** a navy disc with a gold rim, gold for the one in use, the next rows peeking in
+  from the sides. The agent called Captain shows him in place of initials.
+- **Notices and sleep:** Captain over the words, sad for a warning, asleep before sleep.
 
 To see every screen without the watch (Mac, SDL2 from Homebrew):
 
@@ -655,10 +667,8 @@ extra speech gain with a soft limiter) change with each front-button press and
 beep at the new level. Above 75% volume on battery the stick may restart on loud
 peaks (M5Stack's note); on USB power it's fine.
 
-Display → *icons* shows an animated character instead of text: Captain, Bot, Bird, Car,
-Matrix, Orc, Elf, Dwarf, C64, Amiga, Cat, Dog, Dinosaur, Alien, Caveman, HAL 9000, KITT or
-Pac-Man. Menu → *Character »* previews each one cycling through its poses (side button =
-next, front = pick, side hold = back).
+Display → *Captain* shows Captain, the robot from the app icon, instead of text: he blinks,
+listens, thinks and speaks with his grille (`src/face.cpp`).
 
 Menu → *Text size* (small / medium / large) sets the reading text: replies, the working
 screen, notices, the menu and the status page (which then spans pages: B = next page, after

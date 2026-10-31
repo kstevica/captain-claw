@@ -302,7 +302,7 @@ void showLink(const char* title, const String& url, const String& note) {
   push();
 }
 
-void showSleeping(const String& hint, uint8_t) { showMessage("Sleeping", hint, TFT_DARKGREY); }
+void showSleeping(const String& hint) { showMessage("Sleeping", hint, TFT_DARKGREY); }
 
 void showMessage(const char* title, const String& body, uint16_t color) {
   canvas.fillScreen(TFT_BLACK);
@@ -564,15 +564,14 @@ int showPanel(const char* title, uint16_t titleColor, const std::vector<Row>& ro
   return pages;
 }
 
-void showFace(uint8_t kind, face::Pose pose, int level) {
+void showFace(face::Pose pose, int level) {
   canvas.fillScreen(TFT_BLACK);
   drawBar();
-  face::draw(canvas, kind, pose, level, millis(), W / 2, BAR + (H - BAR) / 2 + 1);
+  face::draw(canvas, pose, level, millis(), W / 2, BAR + (H - BAR) / 2 + 1);
   push();
 }
 
 // The bar already says "3/18  A=pick".
-void showCharPick(uint8_t kind, face::Pose pose, int level, int) { showFace(kind, pose, level); }
 
 void showHome(const Home& home) { showPanel(home.title, home.color, home.rows); }
 

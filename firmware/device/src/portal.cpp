@@ -8,7 +8,6 @@
 #include "audio.h"
 #include "board.h"
 #include "hw.h"
-#include "face.h"
 #include "settings.h"
 #include "ui.h"
 
@@ -167,8 +166,8 @@ static void handleRoot() {
     h += F("</select>");
   } else {
     h += F("<label>Show</label><select name=display>");
-    h += settings.iconMode ? F("<option value=text>Text (stages, activity)</option><option value=icons selected>Icons (animated character)</option>")
-                           : F("<option value=text selected>Text (stages, activity)</option><option value=icons>Icons (animated character)</option>");
+    h += settings.iconMode ? F("<option value=text>Text (stages, activity)</option><option value=icons selected>Captain (animated)</option>")
+                           : F("<option value=text selected>Text (stages, activity)</option><option value=icons>Captain (animated)</option>");
     h += F("</select>");
   }
   if (board::kHasTouch) {
@@ -186,13 +185,6 @@ static void handleRoot() {
     }
   }
   h += F("</select>");
-  if (!board::kEpaper) {  // the paper is text only
-    h += F("<label>Character</label><select name=char>");
-    for (int k = 0; k < face::KindCount; ++k) {
-      h += "<option value=" + String(k) + (settings.character == k ? " selected>" : ">") + face::name(k) + "</option>";
-    }
-    h += F("</select>");
-  }
   if (board::kEpaper) {
     h += F("<label>Status lights</label><select name=leds>");
     const char* lv[] = {"Off", "Low", "Bright"};
@@ -335,7 +327,6 @@ static void handleSave() {
     settings.tz = tz.length() ? tz : String(kDefaultTz);
   }
   settings.iconMode = !board::kEpaper && server.arg("display") == "icons";
-  if (!board::kEpaper) settings.character = constrain(server.arg("char").toInt(), 0, face::KindCount - 1);
   settings.textSize = constrain(server.arg("tsize").toInt(), 0, 2);
   settings.save();
 

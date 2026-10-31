@@ -86,7 +86,6 @@ static constexpr int PAD = 22;
 static constexpr int kHeadH = 52;  // the top bar
 static constexpr int kFootH = 48;  // the button legend
 static M5Canvas canvas(&M5.Display);
-static M5Canvas faceSprite;
 static lgfx::VLWfont fontSet[vlw::Count];
 static lgfx::PointerWrapper fontData[vlw::Count];
 static uint8_t rotationNow = 0;
@@ -476,7 +475,7 @@ static void startRefresh() {
 
 // ── the scheduler ──────────────────────────────────────────────────────
 
-enum class Kind : uint8_t { None, Home, Reply, Picture, Working, Notice, Panel, Picker, CharPick, Link, Setup, Sleep };
+enum class Kind : uint8_t { None, Home, Reply, Picture, Working, Notice, Panel, Picker, Link, Setup, Sleep };
 
 // How long a screen must stay asked for before the paper draws it (a few
 // quick presses become one redraw), and how often live readings may redraw
@@ -485,7 +484,6 @@ static uint32_t settleMs(Kind k) {
   switch (k) {
     case Kind::Reply: return 1500;   // a picture often follows the words
     case Kind::Picker:
-    case Kind::CharPick: return 900;
     case Kind::Home: return 1500;
     default: return 600;
   }
@@ -724,18 +722,6 @@ static void drawLabel(const String& s, int x, int y, uint16_t color = kBlue) {
   text(s, x + 12, y, color);
 }
 
-// The characters are drawn for the stick's 240×135 screen on black; on the
-// paper they live in a black rounded window, scaled up.
-static void drawCharacter(uint8_t kind, face::Pose pose, int cx, int cy, float scale) {
-  const int ww = (int)(240 * scale) + 16, wh = (int)(135 * scale) + 16;
-  canvas.fillRoundRect(cx - ww / 2, cy - wh / 2, ww, wh, 18, kInk);
-  faceSprite.fillScreen(0x0000);
-  face::draw(faceSprite, kind, pose, 0, 0, 120, 76);
-  faceSprite.setPivot(120, 76);
-  faceSprite.pushRotateZoomWithAA(&canvas, cx, cy + 4, 0, scale, scale);
-  pictures.push_back({cx - ww / 2 + 8, cy - wh / 2 + 8, ww - 16, wh - 16});
-}
-
 // ── public: basics ─────────────────────────────────────────────────────
 
 static void makeCanvas() {
@@ -760,9 +746,6 @@ void begin() {
   M5.Display.setAutoDisplay(false);
   M5.Display.setEpdMode(epd_mode_t::epd_fastest);  // the frame is already in the six inks
   makeCanvas();
-  faceSprite.setPsram(true);
-  faceSprite.setColorDepth(16);
-  faceSprite.createSprite(240, 135);
   for (int i = 0; i < vlw::Count; ++i) {
     size_t len = 0;
     const uint8_t* d = vlw::data((vlw::Id)i, &len);
@@ -1137,7 +1120,7 @@ void showHome(const Home& home) {
       answer);
 }
 
-void showSleeping(const String& hint, uint8_t) {
+void showSleeping(const String& hint) {
   Card scratch;
   String h = hint;
   const Card* c = homeCard(scratch);
@@ -1398,22 +1381,7 @@ void showPicker(const std::vector<Item>&, int, int, const char*) {
 }
 
 void showSpeaking(int) {}  // the lights carry it (leds.cpp)
-void showFace(uint8_t, face::Pose, int) {}  // icon mode is off on paper (a character can't move)
-
-void showCharPick(uint8_t kind, face::Pose, int, int index) {
-  ask(Kind::CharPick, String(kind), "", [=] {
-    drawHeader("Character");
-    float scale = min(1.5f, (W - 2 * PAD - 16) / 240.0f);
-    int cy = kHeadH + 30 + (int)(135 * scale / 2) + 20;
-    drawCharacter(kind, face::Pose::Idle, W / 2, cy, scale);
-    font(vlw::Title);
-    text(face::name(kind), W / 2, cy + (int)(135 * scale / 2) + 36, kInk, top_center);
-    font(vlw::Small);
-    text("shown on the home screen", W / 2, cy + (int)(135 * scale / 2) + 84, kBlue, top_center);
-    drawPageDots(face::KindCount, index, H - kFootH - 26);
-    drawFooter({{board::kTalkKey, "pick"}, {board::kSideKey, "next"}, {board::kBackKey, "back"}});
-  });
-}
+void showFace(face::Pose, int) {}  // icon mode is off on paper (nothing on it can move)
 
 void flashFrame(bool) {}  // the status lights flash instead
 
