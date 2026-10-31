@@ -4848,6 +4848,12 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 
 **What lands.** Every task works on its own branch and never pushes. "Ship" tasks leave a branch or open a pull request; "scout" tasks only report. Merging and throwing work away take a person: the Merge button, or Approve in the bell on a merge your agent asked for. Work that hasn't landed is never removed unless you say so.
 
+**Projects.** Tasks are grouped by project: a Code project with its folders, or the repository a task was given. The page lists what wants you first and folds what's finished; a project's own page shows its counts and has **Tidy up**, which clears finished tasks off the page. Work that hasn't landed always stays. **New project** makes one before it has any tasks.
+
+**Where results go.** A worktree is out of an agent's reach, so when a task finishes its work comes to your VFS, under `vfs:crew/<project>/<task>/`: `report.md` is the worker's whole message, and `files/` holds the whole project if it's small (under 300 files and 20 MB), otherwise only what the task changed. Only commits are copied, with no `.git`. Your agent reads them there, and the callback tells it where, so it never needs a worker to print files into a message. In the page, a task's **Files** tab shows them, can copy a big project whole, and **Get a link to this page** publishes one with an `index.html` from that clean copy. Agents do the same with `hosting`. Discarding a task's work removes its copy. A project's own folder also stays readable directly, at the `vfs:` path `crew action=options` shows.
+
+> **Merging is enforced at the `crew` tool.** A non-admin's agent has no shell, so for them that is the whole way to a merge. An admin's agent has a shell until agents run in an OS sandbox, so for it the rule is one it is told to follow, not one it can't break.
+
 | Environment variable | What it does |
 |---|---|
 | `FD_CREW=off` | Turns Crew off for the whole deck. |

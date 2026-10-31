@@ -14,6 +14,10 @@ channel it was asked from; the bell).
 Work that hasn't landed is never removed without a person saying so, and merging
 is a person's word too: an agent can only ask (``request_merge``), which puts an
 Approve in the bell. See ``fd_dispatch`` for the other end.
+
+A worktree is out of an agent's reach, so what a task made comes to its owner's VFS
+when it finishes (:func:`_export_results`), under ``vfs:crew/<project>/<task>/``:
+that's where the agent reads it, and the callback says so.
 """
 
 from __future__ import annotations
@@ -25,8 +29,9 @@ import re
 import shutil
 import signal
 import subprocess
+import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.parse import urlparse
 
@@ -47,6 +52,12 @@ _READ_MAX = 4_000_000
 _DIFF_MAX = 400_000
 _REPORT_NAME = "report.md"
 _ACTIVE_PER_SLOT = 5  # how many tasks may wait or run, per parallel run approved
+_SMALL_FILES, _SMALL_BYTES = 300, 20_000_000  # a project this small is copied whole by itself
+_MAX_FILES, _MAX_BYTES = 3_000, 200_000_000  # the most one task's copy may hold
+_LISTED = 500  # paths kept in a task's row, for showing
+_PREVIEW_MAX = 512_000
+# Never copied out of a repository: its history, and what would mean something to the VFS.
+_NOT_COPIED = frozenset({".git", ".vfs-links.json", ".vfs-meta.jsonl", ".drive-manifest.json", ".drive-cache", ".drive"})
 _TERM_WAIT_S = (5.0, 3.0)
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_\-]{0,19}$")
@@ -619,6 +630,8 @@ async def _finish_turn(task: dict, state: TurnState, code: int | None) -> None:
     _say(fresh, "status", note, status=status)
     if status == "queued":
         return
+    if status == "ready":
+        fresh = await _keep_results(fresh)
     if status == "ready" and task["kind"] == "ship" and (fresh.get("deliver") == "pr" or fresh["delivery"].get("pr")):
         await _auto_pr(fresh)
         fresh = store.get(task["user_id"], task["id"]) or fresh
@@ -958,9 +971,12 @@ async def merge(user: dict, grant: Grant, task_id: str, *, expect_head: str = ""
         await _remove_worktree(task, force=bool(task["delivery"].get("pr")))
         _store().update(task_id, status="delivered", note=note, delivery=delivery, evidence=evidence,
                         worktree="", closed_at=time.time())
-        fresh = _get(user["id"], task_id)
+        fresh = await _keep_results(_get(user["id"], task_id))
         _say(fresh, "status", note, status="delivered")
         _sync_board(fresh)
+        # An Approve answers the agent that asked, which is still waiting to hear.
+        if expect_head:
+            _spawn_notify(fresh)
         return fresh
 
 
@@ -990,12 +1006,277 @@ async def close(uid: str, task_id: str, *, discard: bool = False) -> dict[str, A
                                      + (f", {evidence['stray']} commit(s) off its branch." if evidence.get("stray")
                                         else "."))
         await _remove_worktree(task, force=discard)
+        if discard and unlanded:
+            shutil.rmtree(_results_dir(task), ignore_errors=True)
+            _store().update(task_id, results={})
         note = "Closed. Its work was discarded." if discard and unlanded else "Closed."
         _store().update(task_id, status="closed", note=note, worktree="", evidence=evidence, closed_at=time.time())
         fresh = _get(uid, task_id)
         _say(fresh, "status", note, status="closed")
         _sync_board(fresh)
         return fresh
+
+
+# ── Projects ────────────────────────────────────────────────────────────
+
+
+def project_of(task: dict) -> tuple[str, str]:
+    """``(key, name)`` of the project a task belongs to: a Code project with all its
+    folders, or the repository it was given."""
+    label = task.get("repo_label") or task.get("repo") or ""
+    kind = task.get("repo_kind") or ""
+    if kind == "project":
+        name = label.split("/", 1)[0]
+        return f"project:{name}", name
+    return (f"path:{task.get('repo')}" if kind == "path" else f"{kind}:{label}"), label
+
+
+def _unlanded(task: dict) -> bool:
+    evidence = task.get("evidence") or {}
+    return bool(evidence.get("commits") or evidence.get("dirty") or evidence.get("stray"))
+
+
+def unlanded_in(uid: str, key: str, *, but: str = "") -> list[str]:
+    """Titles of the tasks in a project whose work isn't on its base branch yet: a
+    task started now won't see it."""
+    return [t["title"] for t in _store().list_for(uid) if t["id"] != but and project_of(t)[0] == key
+            and t["kind"] == "ship" and t["status"] not in crew_store.FINISHED and _unlanded(t)]
+
+
+async def tidy(uid: str, key: str) -> dict[str, int]:
+    """Clear a project's finished tasks off the page: what landed, what was closed,
+    and what holds nothing to land, whose worktree goes too. Their reports and files
+    stay in the VFS. Work that hasn't landed stays where it is."""
+    cleared = kept = 0
+    for task in _store().list_for(uid, limit=1000):
+        if project_of(task)[0] != key:
+            continue
+        if task["status"] in ("ready", "failed", "stopped"):
+            evidence = await _evidence(task)
+            if not (evidence.get("commits") or evidence.get("dirty") or evidence.get("stray")):
+                task = await close(uid, task["id"])
+        if task["status"] in crew_store.FINISHED:
+            _store().update(task["id"], archived_at=time.time())
+            cleared += 1
+        else:
+            kept += 1
+    return {"cleared": cleared, "kept": kept}
+
+
+# ── Results ─────────────────────────────────────────────────────────────
+
+
+def _vfs_root(uid: str) -> Path:
+    from captain_claw.flight_deck.vfs_routes import _user_root
+
+    return _user_root(uid)
+
+
+def _vfs_path(uid: str, real: Path | str) -> str:
+    """The ``vfs:`` address of a folder of this user's, "" when it isn't in their VFS."""
+    try:
+        rel = Path(real).resolve().relative_to(_vfs_root(uid).resolve())
+    except (OSError, ValueError):
+        return ""
+    return f"vfs:{rel.as_posix()}/"
+
+
+def _results_dir(task: dict) -> Path:
+    project = re.sub(r"[^A-Za-z0-9._-]+", "-", project_of(task)[1]).strip(".-")[:60] or "project"
+    slug = (task.get("branch") or "").removeprefix("crew/") or task["id"]
+    return _vfs_root(task["user_id"]) / "crew" / project / slug
+
+
+async def _result_ref(task: dict) -> str:
+    """The commit a task's results come from: what landed, else its branch."""
+    delivery = task.get("delivery") or {}
+    if delivery.get("kind") == "merge" and delivery.get("sha"):
+        return delivery["sha"]
+    branch = task.get("branch") or ""
+    if branch:
+        rc, sha = await _git(task["repo"], "rev-parse", "--verify", "-q", f"refs/heads/{branch}")
+        if rc == 0:
+            return sha
+    return (task.get("evidence") or {}).get("head") or ""
+
+
+async def _tree_of(repo: str, ref: str) -> list[tuple[str, str, int, str]]:
+    """``(mode, sha, size, path)`` of the files at *ref* that may be copied: a symlink
+    could point anywhere, and a name like these means something it shouldn't here."""
+    rc, listing = await _git(repo, "ls-tree", "-r", "-l", "-z", ref)
+    if rc != 0:
+        return []
+    out = []
+    for item in listing.split("\0"):
+        meta, _, path = item.partition("\t")
+        fields = meta.split()
+        if len(fields) != 4 or fields[1] != "blob" or fields[0] == "120000" or "\n" in path:
+            continue
+        if {"..", *_NOT_COPIED} & set(PurePosixPath(path).parts) or path.startswith("/"):
+            continue
+        out.append((fields[0], fields[2], int(fields[3]), path))
+    return out
+
+
+def _write_blobs(repo: str, entries: list[tuple[str, str, int, str]], dest: Path) -> None:
+    """From git's objects, not a checkout or an archive: nothing the repository
+    configures (a smudge filter, say) runs, and no .git comes along."""
+    with tempfile.TemporaryFile("w+b") as wanted:
+        wanted.write("".join(f"{sha}\n" for _, sha, _, _ in entries).encode())
+        wanted.seek(0)
+        proc = subprocess.Popen(  # noqa: S603 — no shell; the shas come from ls-tree
+            ["git", "-C", repo, *_GIT_FLAGS, "cat-file", "--batch"], stdin=wanted, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, env=_git_env(),
+        )
+        try:
+            for mode, _, _, path in entries:
+                header = (proc.stdout.readline() or b"").split()
+                if len(header) != 3 or header[1] != b"blob":
+                    raise OSError(f"git couldn't read {path}")
+                target = dest / path
+                target.parent.mkdir(parents=True, exist_ok=True)
+                left = int(header[2])
+                with target.open("wb") as out:
+                    while left:
+                        chunk = proc.stdout.read(min(left, 1_048_576))
+                        if not chunk:
+                            raise OSError(f"git stopped partway through {path}")
+                        out.write(chunk)
+                        left -= len(chunk)
+                proc.stdout.read(1)  # the newline after each object
+                if mode == "100755":
+                    target.chmod(0o755)
+        finally:
+            proc.stdout.close()
+            proc.kill()
+            proc.wait()
+
+
+async def _export_results(task: dict, *, ref: str, whole: bool = False) -> dict[str, Any]:
+    """Copy what a task made to its owner's VFS: its whole message, and its files at
+    *ref*, under ``files/``. The whole project when it's small or *whole* asks for it,
+    since a page needs its other files too; else only what the task changed."""
+    uid, repo = task["user_id"], task["repo"]
+    folder = _results_dir(task)
+    folder.mkdir(parents=True, exist_ok=True)
+    where = _vfs_path(uid, folder)
+    final = (task.get("final") or "").strip()
+    if final:
+        (folder / "report.md").write_text(final, encoding="utf-8")
+    old = task.get("results") or {}
+    out: dict[str, Any] = {"path": where, "report": f"{where}report.md" if final else "", "head": ref, "files_path": "",
+                           "files": [], "changed": [], "count": 0, "whole": False, "skipped": 0, "publish": {},
+                           **({"link": old["link"]} if old.get("link") else {})}
+    tree = await _tree_of(repo, ref) if ref else []
+    tip = (task.get("evidence") or {}).get("head") or ref
+    if tree and task.get("base_sha") and task["kind"] == "ship":
+        _, names = await _git(repo, "diff", "--name-only", "--no-renames", "--diff-filter=d", "-z", task["base_sha"], tip)
+        out["changed"] = [n for n in names.split("\0") if n][:_LISTED]
+    size = sum(e[2] for e in tree)
+    if whole and (len(tree) > _MAX_FILES or size > _MAX_BYTES):
+        raise HTTPException(413, f"It's too big to copy whole: {len(tree)} files, {size // 1_000_000} MB.")
+    use_whole = whole or (task["kind"] == "ship" and len(tree) <= _SMALL_FILES and size <= _SMALL_BYTES)
+    changed = set(out["changed"])
+    chosen, used, skipped = [], 0, 0
+    for entry in tree:
+        if not use_whole and entry[3] not in changed:
+            continue
+        if len(chosen) < _MAX_FILES and used + entry[2] <= _MAX_BYTES:
+            chosen.append(entry)
+            used += entry[2]
+        else:
+            skipped += 1
+    if not chosen:
+        shutil.rmtree(folder / "files", ignore_errors=True)
+    else:
+        fresh = folder / f".files-{os.urandom(4).hex()}"
+        try:
+            await asyncio.to_thread(_write_blobs, repo, chosen, fresh)
+            shutil.rmtree(folder / "files", ignore_errors=True)
+            fresh.rename(folder / "files")
+        finally:
+            shutil.rmtree(fresh, ignore_errors=True)
+        paths = sorted(e[3] for e in chosen)
+        out.update(files_path=f"{where}files/", files=paths[:_LISTED], count=len(paths), whole=use_whole, skipped=skipped)
+        pages = [p for p in paths if PurePosixPath(p).name == "index.html"]
+        if use_whole and pages:
+            top = PurePosixPath(min(pages, key=lambda p: (p.count("/"), p))).parent
+            rel = PurePosixPath(*Path(where.removeprefix("vfs:")).parts[1:]) / "files"
+            out["publish"] = {"project": "crew", "subdir": str(rel if str(top) == "." else rel / top)}
+    _store().update(task["id"], results=out)
+    return out
+
+
+async def _keep_results(task: dict) -> dict[str, Any]:
+    """Results at a task's end. A copy that fails doesn't change how the task ended."""
+    try:
+        results = await _export_results(task, ref=await _result_ref(task), whole=bool((task.get("results") or {}).get("whole")))
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Crew: couldn't copy results", task=task.get("id"), error=str(getattr(exc, "detail", exc)))
+        return task
+    return {**task, "results": results}
+
+
+async def files(uid: str, task_id: str, *, whole: bool = False) -> dict[str, Any]:
+    """Where a task's files are, copied now if they aren't yet or have moved on."""
+    async with _lock_for(task_id):
+        task = _get(uid, task_id)
+        if task["status"] in crew_store.ACTIVE:
+            raise HTTPException(409, "It is still working. Its files are copied when it finishes.")
+        results = task.get("results") or {}
+        if task["status"] != "closed":
+            ref = await _result_ref(task)
+            if not results or results.get("head") != ref or (whole and not results.get("whole")):
+                results = await _export_results(task, ref=ref, whole=whole or bool(results.get("whole")))
+        evidence = task.get("evidence") or {}
+        return {**results, "uncommitted": evidence.get("dirty") or 0, "landed": task["status"] == "delivered",
+                "project_path": _vfs_path(uid, task["repo"]) if task["repo_kind"] == "project" else ""}
+
+
+def read_result(uid: str, task_id: str, path: str) -> dict[str, Any]:
+    """One copied file, for the page to show."""
+    task = _get(uid, task_id)
+    folder = (_results_dir(task) / "files").resolve()
+    try:
+        target = (folder / path).resolve()
+        target.relative_to(folder)
+    except (OSError, ValueError):
+        raise HTTPException(404, "No such file") from None
+    if not target.is_file():
+        raise HTTPException(404, "No such file")
+    size = target.stat().st_size
+    with target.open("rb") as raw:
+        data = raw.read(_PREVIEW_MAX)
+    binary = b"\0" in data[:8192]
+    return {"path": path, "size": size, "binary": binary, "truncated": size > _PREVIEW_MAX,
+            "text": "" if binary else data.decode("utf-8", "replace")}
+
+
+async def link(uid: str, task_id: str) -> dict[str, Any]:
+    """A person's way to a page they can open and send on: the clean copy published,
+    so no .git goes with it. Stays current as the copy does."""
+    from captain_claw.flight_deck import hosting_routes, vfs_hosting
+
+    results = await files(uid, task_id, whole=True)
+    registry = vfs_hosting.load_registry()
+    known = results.get("link") or {}
+    if (registry.get(known.get("name")) or {}).get("owner") == uid:
+        return known
+    if not results.get("publish"):
+        raise HTTPException(409, "There's no index.html in it, so there's no page to open.")
+    task = _get(uid, task_id)
+    base = re.sub(r"[^a-z0-9]+", "-", project_of(task)[1].lower()).strip("-")[:50] or "crew"
+    name = f"{base}-{task_id[-4:]}"
+    while name in registry:
+        name = f"{base}-{os.urandom(2).hex()}"
+    entry = {"kind": "static", "owner": uid, "start_cmd": "", **results["publish"]}
+    if vfs_hosting.entry_dir(entry) is None:
+        raise HTTPException(404, "Its files aren't there any more.")
+    registry[name] = entry
+    vfs_hosting.save_registry(registry)
+    made = {"name": name, "url": hosting_routes._view(name, entry)["url"]}
+    _store().update(task_id, results={**(task.get("results") or {}), "link": made})
+    return made
 
 
 async def diff(uid: str, task_id: str) -> dict[str, str]:
@@ -1017,11 +1298,13 @@ def report(uid: str, task_id: str) -> str:
 def view(task: dict, *, grant: Grant | None = None, full: bool = False) -> dict[str, Any]:
     """A task as the page and the tool see it."""
     harness = HARNESSES.get(task["harness"])
+    project_key, project_name = project_of(task)
     out = {
         "id": task["id"], "title": task["title"], "kind": task["kind"], "harness": task["harness"],
         "harness_label": harness.label if harness else task["harness"], "model": task.get("model") or "",
         "effort": task.get("effort") or "", "status": task["status"], "note": task.get("note") or "",
         "repo_label": task.get("repo_label") or "", "repo_kind": task.get("repo_kind") or "",
+        "project_key": project_key, "project_name": project_name, "results": task.get("results") or {},
         "base_branch": task.get("base_branch") or "", "branch": task.get("branch") or "",
         "turn": task.get("turn") or 0, "evidence": task.get("evidence") or {},
         "tokens_in": task.get("tokens_in") or 0, "tokens_out": task.get("tokens_out") or 0,
@@ -1075,8 +1358,33 @@ def _sync_board(task: dict) -> None:
 
 _NOTICE = {
     "ready": "finished", "failed": "ran into an error", "waiting": "needs a decision",
-    "pr_open": "has a pull request ready",
+    "pr_open": "has a pull request ready", "delivered": "landed",
 }
+_NOTICE_FINAL = 5000
+MERGE_HINT = ("Merging is the user's call. Only if they ask for it: crew action=request_merge, and they Approve it in the "
+              "bell. Never run git merge yourself, in a shell or any other way.")
+
+
+def _result_lines(task: dict) -> list[str]:
+    """Where its work is, so the agent reads it rather than asks a worker to print it."""
+    results = task.get("results") or {}
+    lines = []
+    if task["status"] == "delivered" and task.get("repo_kind") == "project":
+        lines.append(f"The project itself, with this merged: {_vfs_path(task['user_id'], task['repo'])}")
+    if results.get("files_path"):
+        what = "the whole project" if results.get("whole") else "only what it changed"
+        lines.append(f"Files: {results['count']} copied to {results['files_path']} ({what}). Read them there with read "
+                     f"or glob; don't start a task to fetch them.")
+    if results.get("changed"):
+        shown = results["changed"][:12]
+        more = len(results["changed"]) - len(shown)
+        lines.append(f"It changed: {', '.join(shown)}" + (f" and {more} more" if more > 0 else ""))
+    if results.get("publish"):
+        lines.append(f"For a link to this page: hosting action=publish kind=static project={results['publish']['project']} "
+                     f"subdir={results['publish']['subdir']} name=<a short name>")
+    if task["status"] == "ready" and task.get("kind") == "ship" and (task.get("evidence") or {}).get("commits"):
+        lines.append(MERGE_HINT)
+    return lines
 
 
 def notice_text(task: dict, *, stalled: bool = False) -> str:
@@ -1084,16 +1392,19 @@ def notice_text(task: dict, *, stalled: bool = False) -> str:
     evidence = task.get("evidence") or {}
     lines = [f"Status: {'stalled, no output for a while' if stalled else task['status']}",
              f"Result: {task.get('note') or '(none)'}"]
-    if task["kind"] == "ship" and not stalled:
+    if task["kind"] == "ship" and not stalled and task["status"] != "delivered":
         lines.append(f"Git: {evidence.get('commits', 0)} commit(s) on {task.get('branch')}, "
                      f"{evidence.get('dirty', 0)} uncommitted")
         if evidence.get("stat"):
             lines.append(f"Changed: {evidence['stat']}")
         if evidence.get("off_branch"):
             lines.append(f"Warning: the worker left its branch; it's on {evidence['off_branch']}")
+    if not stalled:
+        lines.extend(_result_lines(task))
     final = (task.get("final") or "").strip()
-    if final and not stalled:
-        lines.append(f"\nIts last message:\n{final[:5000]}")
+    if final and not stalled and task["status"] != "delivered":
+        cut = f"\n(Cut short. All of it: {(task.get('results') or {}).get('report')})" if len(final) > _NOTICE_FINAL else ""
+        lines.append(f"\nIts last message:\n{final[:_NOTICE_FINAL]}{cut}")
     return "\n".join(lines)
 
 
@@ -1133,13 +1444,14 @@ async def _notify(task: dict, *, stalled: bool = False) -> None:
             await owner_notify.notify_owner(task["user_id"], "nudge", f"{title}\n{task.get('note') or ''}".strip(),
                                             bell=("crew_task", title, text[:1800]))
             return
-        await owner_notify._to_bell(task["user_id"], "crew_task", title, text[:1800])
+        if task["status"] != "delivered":  # they just pressed Approve
+            await owner_notify._to_bell(task["user_id"], "crew_task", title, text[:1800])
         ask = ("It is waiting for the person's decision: put the question to them, then pass their answer on with "
                "crew action='steer'. " if task["status"] == "waiting" else "")
         await agent_notify.notify_source_agent(
             source_host=host, source_port=port, origin=task.get("origin") or {},
             kind="crew task", title=task["title"][:120], run_ref=f"crew task {task['id']}",
-            ok=task["status"] != "failed", summary=text[:8000], verb=state,
+            ok=task["status"] != "failed", summary=text[:_NOTICE_FINAL + 3000], verb=state,
             no_restart_hint=f"{ask}Do NOT start another crew task for this and ",
         )
     except Exception as exc:  # noqa: BLE001 — telling is best-effort; the task's state stands

@@ -7,11 +7,16 @@
   GET    /fd/crew/tasks/{id}            one task
   GET    /fd/crew/tasks/{id}/events     what its worker did, from ?after=
   GET    /fd/crew/tasks/{id}/diff       what it changed
+  POST   /fd/crew/tasks/{id}/files      where its files are, in the VFS (?whole=true for the whole project)
+  GET    /fd/crew/tasks/{id}/file       one copied file, to show (?path=)
+  POST   /fd/crew/tasks/{id}/link       a page to open, published from that copy
   POST   /fd/crew/tasks/{id}/steer      the next instruction
   POST   /fd/crew/tasks/{id}/stop       stop the worker, keep its work
   POST   /fd/crew/tasks/{id}/pr         push and open a pull request
   POST   /fd/crew/tasks/{id}/merge      land the work
   POST   /fd/crew/tasks/{id}/close      tear it down (?discard=true for work that hasn't landed)
+  POST   /fd/crew/projects              a new project, ready for tasks
+  POST   /fd/crew/projects/tidy         clear a project's finished tasks off the page
   GET/PUT/DELETE /fd/crew/logins[/{name}]   the accounts their workers run on
 
   /fd/crew/agent/*                      the same, for the `crew` tool; the agent's
@@ -74,6 +79,15 @@ class AgentDispatchBody(DispatchBody):
 class AgentTaskBody(BaseModel):
     task_id: str
     text: str = ""
+    whole: bool = False
+
+
+class ProjectBody(BaseModel):
+    name: str
+
+
+class ProjectKey(BaseModel):
+    key: str
 
 
 async def _approved(user: dict) -> tuple[dict, Grant]:
@@ -123,8 +137,24 @@ async def repos(user: dict = Depends(get_current_user)) -> dict[str, Any]:
     projects = []
     for name in code_routes._discover_projects(row["id"]):
         tree = code_routes._project_tree(row["id"], name)
-        projects.append({"project": name, "folders": [f.get("name") for f in tree.get("folders", [])]})
+        folders = [f.get("name") for f in tree.get("folders", [])]
+        paths = {f: crew_runner._vfs_path(row["id"], code_routes._folder_repo(row["id"], name, f)) for f in folders}
+        projects.append({"project": name, "key": f"project:{name}", "folders": folders, "paths": paths})
     return {"projects": projects, "recent": crew_store.get_store().recent_repos(row["id"])}
+
+
+@router.post("/projects", status_code=201)
+async def create_project(body: ProjectBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, grant = await _approved(user)
+    where = await crew_runner._resolve_repo(row, grant, {"project": body.name})
+    name = where["repo_label"].split("/", 1)[0]
+    return {"project": name, "key": f"project:{name}", "path": crew_runner._vfs_path(row["id"], where["repo"])}
+
+
+@router.post("/projects/tidy")
+async def tidy_project(body: ProjectKey, user: dict = Depends(get_current_user)) -> dict[str, int]:
+    row, _ = await _approved(user)
+    return await crew_runner.tidy(row["id"], body.key)
 
 
 @router.get("/tasks")
@@ -158,6 +188,24 @@ async def task_events(task_id: str, after: int = 0, user: dict = Depends(get_cur
 async def task_diff(task_id: str, user: dict = Depends(get_current_user)) -> dict[str, str]:
     row, _ = await _approved(user)
     return await crew_runner.diff(row["id"], task_id)
+
+
+@router.post("/tasks/{task_id}/files")
+async def task_files(task_id: str, whole: bool = False, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return await crew_runner.files(row["id"], task_id, whole=whole)
+
+
+@router.get("/tasks/{task_id}/file")
+async def task_file(task_id: str, path: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return crew_runner.read_result(row["id"], task_id, path)
+
+
+@router.post("/tasks/{task_id}/link")
+async def task_link(task_id: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return await crew_runner.link(row["id"], task_id)
 
 
 @router.post("/tasks/{task_id}/steer")
@@ -245,7 +293,15 @@ async def agent_dispatch(body: AgentDispatchBody, request: Request) -> dict[str,
         agent_slug=slug, source_host=body.source_host or "localhost",
         origin={"platform": body.origin_platform, "user_id": body.origin_user_id, "chat_id": body.origin_chat_id},
     )
-    return crew_runner.view(await crew_runner.dispatch(row, grant, fields), full=True)
+    task = await crew_runner.dispatch(row, grant, fields)
+    key = crew_runner.project_of(task)[0]
+    return {**crew_runner.view(task, full=True), "unlanded": crew_runner.unlanded_in(row["id"], key, but=task["id"])}
+
+
+@router.post("/agent/files")
+async def agent_files(body: AgentTaskBody, request: Request) -> dict[str, Any]:
+    row, _, _ = await _agent_caller(request)
+    return await crew_runner.files(row["id"], body.task_id, whole=body.whole)
 
 
 @router.get("/agent/tasks")

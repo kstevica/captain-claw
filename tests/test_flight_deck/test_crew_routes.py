@@ -40,6 +40,8 @@ async def deck(monkeypatch, tmp_path):
     fake.write_text(FAKE_CLI)
     fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
     monkeypatch.setenv("FD_CREW_CLAUDE_BIN", str(fake))
+    monkeypatch.setattr("captain_claw.flight_deck.server.DATA_DIR", tmp_path / "fd-data")
+    monkeypatch.setenv("FD_DATA_DIR", str(tmp_path / "fd-data"))
 
     async def notify(task, *, stalled=False):
         return None
@@ -465,6 +467,129 @@ async def test_a_person_can_merge_from_the_page(deck):
         merged = await client.post(f"/fd/crew/tasks/{made['id']}/merge")
     assert merged.status_code == 200, merged.text
     assert merged.json()["status"] == "delivered"
+
+
+# ── Projects and results ──────────────────────────────────────────────────
+
+
+async def test_a_project_can_be_made_before_any_task_and_shows_its_vfs_path(deck):
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        made = await client.post("/fd/crew/projects", json={"name": "Game"})
+        assert made.status_code == 201, made.text
+        assert made.json() == {"project": "Game", "key": "project:Game", "path": "vfs:Game/Game/"}
+        again = await client.post("/fd/crew/projects", json={"name": "Game"})
+        assert again.status_code == 201
+        repos = (await client.get("/fd/crew/repos")).json()
+    assert repos["projects"] == [{"project": "Game", "key": "project:Game", "folders": ["Game"],
+                                  "paths": {"Game": "vfs:Game/Game/"}}]
+
+
+async def test_a_task_shows_its_project_and_its_files_and_a_link_comes_from_the_clean_copy(deck):
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = (await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:page", "project": "Game"})).json()
+        assert made["project_key"] == "project:Game" and made["project_name"] == "Game"
+    await _settle(deck.user["id"], made["id"])
+    async with _client(deck.user) as client:
+        listed = (await client.get("/fd/crew/tasks")).json()["tasks"][0]
+        assert listed["results"]["publish"]["project"] == "crew"
+        files = (await client.post(f"/fd/crew/tasks/{made['id']}/files")).json()
+        assert "site/index.html" in files["files"] and files["project_path"] == "vfs:Game/Game/"
+        shown = (await client.get(f"/fd/crew/tasks/{made['id']}/file", params={"path": "site/index.html"})).json()
+        assert shown["text"].startswith("<html>") and not shown["binary"]
+        link = await client.post(f"/fd/crew/tasks/{made['id']}/link")
+        assert link.status_code == 200, link.text
+        assert link.json()["name"] == f"game-{made['id'][-4:]}" and link.json()["url"]
+        assert (await client.post(f"/fd/crew/tasks/{made['id']}/link")).json() == link.json()
+    from captain_claw.flight_deck import vfs_hosting
+
+    entry = vfs_hosting.load_registry()[link.json()["name"]]
+    assert entry["owner"] == deck.user["id"] and entry["project"] == "crew"
+    assert vfs_hosting.resolve_static_file(entry, "index.html").read_text().startswith("<html>")
+    # Someone else's task doesn't exist, here as everywhere.
+    await _approve(deck, deck.other)
+    async with _client(deck.other) as client:
+        for call in (client.post(f"/fd/crew/tasks/{made['id']}/files"), client.post(f"/fd/crew/tasks/{made['id']}/link"),
+                     client.get(f"/fd/crew/tasks/{made['id']}/file", params={"path": "site/index.html"})):
+            assert (await call).status_code == 404
+
+
+async def test_no_index_means_no_page_to_link(deck):
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = (await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:work", "project": "Game"})).json()
+    await _settle(deck.user["id"], made["id"])
+    async with _client(deck.user) as client:
+        assert (await client.post(f"/fd/crew/tasks/{made['id']}/link")).status_code == 409
+
+
+def test_a_published_folder_never_serves_a_repository(tmp_path, monkeypatch):
+    from captain_claw.flight_deck import vfs_hosting
+
+    site = tmp_path / "site"
+    (site / ".git").mkdir(parents=True)
+    (site / ".git" / "config").write_text("secret")
+    (site / ".env").write_text("secret")
+    (site / "index.html").write_text("page")
+    monkeypatch.setattr(vfs_hosting, "entry_dir", lambda entry: site)
+    assert vfs_hosting.resolve_static_file({}, "index.html") == (site / "index.html").resolve()
+    for path in (".git/config", ".git", "./.git/config", ".env", "a/../.git/config"):
+        assert vfs_hosting.resolve_static_file({}, path) is None, path
+
+
+async def test_tidying_is_for_the_owner_of_the_tasks(deck):
+    await _approve(deck, deck.user)
+    await _approve(deck, deck.other)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = (await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:nothing", "kind": "scout", "project": "Game"})).json()
+    await _settle(deck.user["id"], made["id"])
+    async with _client(deck.other) as client:
+        assert (await client.post("/fd/crew/projects/tidy", json={"key": "project:Game"})).json() == {"cleared": 0, "kept": 0}
+    async with _client(deck.user) as client:
+        assert (await client.post("/fd/crew/projects/tidy", json={"key": "project:Game"})).json() == {"cleared": 1, "kept": 0}
+        assert (await client.get("/fd/crew/tasks")).json()["tasks"] == []
+
+
+class _FakeClient:
+    """What the tool asks Flight Deck, answered."""
+
+    def __init__(self, **answers):
+        self.answers = answers
+        self.asked: list[tuple[str, dict | None]] = []
+
+    async def call(self, method, path, body=None):
+        self.asked.append((path, body))
+        return 200, self.answers[path]
+
+
+async def test_the_tool_points_at_the_vfs_rather_than_at_a_worker():
+    options = _FakeClient(options={"me": {"harnesses": []}, "repos": {"projects": [
+        {"project": "Game", "folders": ["client"], "paths": {"client": "vfs:Game/client/"}}]}})
+    out = await CrewTool()._do_options(options)
+    assert "client (vfs:Game/client/)" in out.content and "read it yourself" in out.content
+    files = _FakeClient(files={"files_path": "vfs:crew/Game/t/files/", "count": 2, "whole": True, "files": ["a", "b"],
+                               "report": "vfs:crew/Game/t/report.md", "landed": True, "project_path": "vfs:Game/client/",
+                               "publish": {"project": "crew", "subdir": "Game/t/files"}, "uncommitted": 1})
+    out = await CrewTool()._do_files(files, task_id="t", whole=True)
+    assert files.asked == [("files", {"task_id": "t", "whole": True})]
+    for piece in ("vfs:Game/client/", "vfs:crew/Game/t/files/", "vfs:crew/Game/t/report.md", "subdir=Game/t/files",
+                  "1 uncommitted"):
+        assert piece in out.content, piece
+
+
+async def test_the_tool_warns_of_work_a_new_task_will_not_see():
+    client = _FakeClient(dispatch={"id": "t", "status": "running", "harness_label": "Claude Code", "repo_label": "Game/client",
+                                   "branch": "crew/x", "base_branch": "main", "unlanded": ["Add the board"]})
+    out = await CrewTool()._do_dispatch(client, harness="claude", brief="look")
+    assert "starts from main" in out.content and "Add the board" in out.content and "end your turn" in out.content
+    tasks = _FakeClient(tasks={"tasks": [{"id": "a", "project_name": "Game", "title": "one"},
+                                         {"id": "b", "project_name": "Other", "title": "two"}]})
+    out = await CrewTool()._do_list(tasks, project="game")
+    assert "one" in out.content and "two" not in out.content
 
 
 # ── The tool ─────────────────────────────────────────────────────────────
