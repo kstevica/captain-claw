@@ -485,7 +485,7 @@ void showSetup(const char* reason, const char* apName, const char* ip) {
 static int homeMinute = -1;
 
 // The big clock, and under it the date: awake and asleep alike.
-static void drawClock() {
+static void drawClock(int y, int dateY) {
   struct tm t;
   const bool clock = localNow(&t);
   homeMinute = clock ? t.tm_min : -1;
@@ -493,56 +493,139 @@ static void drawClock() {
   if (clock) strftime(buf, sizeof(buf), "%H:%M", &t);
   else strcpy(buf, "--:--");
   canvas.setFont(&fonts::FreeSansBold24pt7b);
-  text(buf, W / 2, 26, top_center);
+  text(buf, W / 2, y, top_center);
   canvas.setFont(&efont::efont16);
-  if (clock) text(dateText(t), W / 2, 67, top_center);
-  canvas.drawFastHLine(PAD, 88, W - 2 * PAD, kInk);
+  if (clock) text(dateText(t), W / 2, dateY, top_center);
 }
 
+// A line of handwriting: a wavering stroke, a gap, a wavering stroke.
+static void scribble(int x, int y, int len, int amp, float weight, int seed) {
+  static constexpr int kWords[] = {24, 14, 30, 18, 12, 26, 20};
+  static constexpr int kStep = 3;
+  for (int done = 0, word = 0; done < len; ++word) {
+    const int n = min(len - done, kWords[(seed + word) % 7] * amp / 2);
+    for (int i = 0; i + kStep <= n; i += kStep) {
+      const float a = (done + i + seed * 3) * 0.95f, b = (done + i + kStep + seed * 3) * 0.95f;
+      canvas.drawWideLine(x + done + i, y + amp * sinf(a), x + done + i + kStep, y + amp * sinf(b), weight, kInk);
+    }
+    done += n + amp * 2 + 2;
+  }
+}
+
+// A notepad on the black tile: rings along the top, handwriting on the sheet.
+static void drawNotepad(int x, int y, int w, int h) {
+  const int ringH = constrain(h / 6, 8, 16), ringW = constrain(w / 18, 3, 6);
+  const int top = y + ringH / 2;
+  canvas.fillRoundRect(x, top, w, h - ringH / 2, 3, kPaper);
+  const int rings = w >= 60 ? 5 : 4, inset = max(7, w / 8);
+  for (int i = 0; i < rings; ++i) {
+    const int rx = x + inset + i * (w - 2 * inset) / (rings - 1);
+    canvas.fillRoundRect(rx - ringW / 2 - 1, y - 1, ringW + 2, ringH + 2, ringW / 2 + 1, kInk);
+    canvas.fillRoundRect(rx - ringW / 2, y, ringW, ringH, ringW / 2, kPaper);
+  }
+  const int margin = max(4, w / 10), rowW = w - 2 * margin;
+  const int first = top + ringH / 2 + max(6, h / 8), last = y + h - max(6, h / 8);
+  const int amp = h >= 70 ? 2 : 1;
+  for (int i = 0; i < 3; ++i) {
+    scribble(x + margin, first + i * (last - first) / 2, i == 2 ? rowW * 55 / 100 : rowW, amp, h >= 70 ? 1.2f : 0.8f, i * 2 + 1);
+  }
+}
+
+// How many notes there are, on the notepad's corner: it grows to the left, over the pad.
+static void drawNoteCount(int right, int cy, int notes) {
+  const String n = notes > 99 ? String("99+") : String(notes);
+  canvas.setFont(&fonts::FreeSansBold12pt7b);
+  static constexpr int kH = 26;
+  const int w = max(kH, tw(n) + 12), x = right - w;
+  canvas.fillRoundRect(x - 2, cy - kH / 2 - 2, w + 4, kH + 4, kH / 2 + 2, kInk);
+  canvas.fillRoundRect(x, cy - kH / 2, w, kH, kH / 2, kPaper);
+  text(n, x + w / 2, cy, middle_center);
+}
+
+// The tile's two big lines, around `mid` (from 20 above it to 18 below).
+static void drawBigWords(const char* first, const char* second, int x, int mid, uint16_t color) {
+  canvas.setFont(&fonts::FreeSansBold12pt7b);
+  text(first, x, mid - 3, baseline_left, color);
+  text(second, x, mid + 18, baseline_left, color);
+}
+
+static void drawMic(int cx, int cy, int r) {
+  canvas.fillRoundRect(cx - r, cy - r * 2, r * 2, r * 3, r, kInk);
+  canvas.fillArc(cx, cy - r / 2, r + 7, r + 4, 0, 180, kInk);
+  canvas.fillRect(cx - 2, cy + r + 4, 4, r, kInk);
+  canvas.fillRoundRect(cx - r, cy + 2 * r + 2, r * 2, 4, 2, kInk);
+}
+
+// What's left for notes, in time: "6 min free", "40 s free", "full".
+static String noteRoomText(uint32_t sec) {
+  if (sec == 0) return "full";
+  return (sec < 60 ? String(sec) + " s" : timeSpan(sec / 60)) + " free";
+}
+
+// The clock, and a big tile with what the button does: to talk, or in note mode
+// (black, so it shows at a glance) to send the notes, how many and the room left.
 void showHome(const Home& home) {
   lastHome = home;
   drawing(Screen::Home);
   canvas.fillScreen(kPaper);
   drawBar();
-  drawClock();
+  drawClock(22, 59);
 
-  int y = 94;
-  if (home.noteMode) {
-    pill("Note mode · hold BOOT to send", 3, y, W - 6, 20);
-    y += 25;
-  } else {
-    canvas.setFont(&efont::efont16);
-    text(home.title, W / 2, y, top_center);
-    y += 20;
-  }
-  const int hintBottom = H - 2 - kTapReserve;
-  const std::vector<String> ls = wrap(home.hint, W - 2 * PAD, &efont::efont14);
-  for (int i = 0; i < (int)ls.size() && i < 2; ++i, y += 16) text(ls[i], W / 2, y, top_center);
+  // Under the tile: the battery's time at the size chosen for reading, and above
+  // it what waits in Flight Deck, as far as the tile keeps room for its big lines.
+  static constexpr int kTileTop = 78, kTileMinH = 56, kWaitingLine = 16;
+  const int linesEnd = kTileTop + kTileMinH + 4;
+  int y = H - 2 - kTapReserve;
   if (home.battery.length()) {
-    // At the size chosen for reading: the level and the time on one line, or
-    // wrapped, keeping the last lines (the time) if there's no room for them all.
     String battery = home.battery;
     battery.replace("≈ ", "~");  // (not in efont)
-    const int pct = hw::batteryLevel();
-    const String level = pct < 0 ? String() : String(pct) + "%";
+    const std::vector<String> ls = wrap(battery, W - 2 * PAD, ts().body);
+    const int shown = min((y - linesEnd) / ts().line, (int)ls.size());  // the last lines: the time
+    y -= shown * ts().line;
     canvas.setFont(ts().body);
-    std::vector<String> ls;
-    const String one = level.length() ? level + "  " + battery : battery;
-    if (tw(one) <= W - 2 * PAD) {
-      ls.push_back(one);
-    } else {
-      if (level.length()) ls.push_back(level);
-      for (const String& l : wrap(battery, W - 2 * PAD, ts().body)) ls.push_back(l);
-    }
-    canvas.setFont(ts().body);
-    const int room = max(0, (hintBottom - y) / ts().line);
-    const int shown = min(room, (int)ls.size());
-    for (int i = 0; i < shown; ++i) {
-      text(ls[ls.size() - shown + i], W / 2, hintBottom - (shown - i) * ts().line, top_center);
+    for (int i = 0; i < shown; ++i) text(ls[ls.size() - shown + i], W / 2, y + i * ts().line, top_center);
+  }
+  if (!home.noteMode && home.ready && home.hint.length() && home.hint != board::kTalkHint) {
+    const std::vector<String> ls = wrap(home.hint, W - 2 * PAD, &efont::efont14);
+    const int shown = min(min((y - linesEnd) / kWaitingLine, 2), (int)ls.size());
+    y -= shown * kWaitingLine;
+    canvas.setFont(&efont::efont14);
+    for (int i = 0; i < shown; ++i) text(ls[i], W / 2, y + i * kWaitingLine, top_center);
+  }
+
+  const int tileH = y - 4 - kTileTop, mid = kTileTop + tileH / 2;
+  canvas.fillRoundRect(3, kTileTop, W - 6, tileH, 8, kInk);
+  if (home.noteMode) {
+    const int padH = tileH - 14, padW = padH * 3 / 4, padX = 14, padY = kTileTop + 7;
+    drawNotepad(padX, padY, padW, padH);
+    drawNoteCount(padX + padW + 8, padY + padH - 10, home.notes);
+    const int x = padX + padW + 17, words = mid - 7;
+    drawBigWords("Boot", "to send", x, words, kPaper);
+    const String room = noteRoomText(home.notesRoomSec);
+    canvas.setFont(&efont::efont16);
+    if (tileH < 80 || tw(room) > W - 7 - x) canvas.setFont(&efont::efont14);
+    text(fit(room, W - 7 - x), x, words + 23, top_left, kPaper);
+  } else {
+    canvas.fillRoundRect(6, kTileTop + 3, W - 12, tileH - 6, 6, kPaper);
+    if (home.ready) {
+      const int iconW = (tileH - 14) * 3 / 4;
+      drawMic(14 + iconW / 2, mid - 2, tileH < 64 ? 9 : 11);
+      drawBigWords("Boot", "to talk", 14 + iconW + 12, mid, kInk);
+    } else {  // nothing to press for yet: what it's waiting for, or that a press keeps a note
+      const std::vector<String> ls = wrap(home.hint, W - 24, &efont::efont16);
+      const int shown = min((tileH - 8) / 18, (int)ls.size());
+      canvas.setFont(&efont::efont16);
+      for (int i = 0; i < shown; ++i) text(ls[i], W / 2, mid - shown * 9 + i * 18, top_center);
     }
   }
   drawTapButton();
-  push();
+
+  // In or out of note mode a whole block of the page turns over: a partial
+  // refresh would leave the old tile showing through.
+  static int shownNoteMode = -1;
+  const bool turned = shownNoteMode >= 0 && shownNoteMode != (int)home.noteMode;
+  shownNoteMode = home.noteMode;
+  push(turned);
 }
 
 // ── recording, working ─────────────────────────────────────────────────
@@ -983,7 +1066,8 @@ void showSleeping(const String& hint, uint8_t) {
   drawing(Screen::Sleeping);
   canvas.fillScreen(kPaper);
   drawBar(false);  // (no links asleep: Wi-Fi is off)
-  drawClock();
+  drawClock(26, 67);
+  canvas.drawFastHLine(PAD, 88, W - 2 * PAD, kInk);
   drawSleeper();
   pill(hint, 3, H - 28, W - 6, 24);
 #ifndef PREVIEW

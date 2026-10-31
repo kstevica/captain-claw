@@ -309,8 +309,14 @@ has to follow, and at 1.8 s that's no quicker than letting the first one finish.
 
 There's no 2.5 s silence stop on this board: its mic's level ended recordings
 mid-sentence, so only a press ends one, or the length limits (110 s online, 60 s
-as an offline note). The home screen's bottom line, the battery level and the time
-left or to full, follows the text size.
+as an offline note).
+
+The home screen is the clock and one big tile saying what BOOT does: a microphone
+and "Boot to talk", or until it's ready, what it's waiting for. Hold BOOT for 1 s
+for note mode: the tile turns black, with a notepad, "Boot to send", how many notes
+there are on the notepad's corner and the recording time left under the words. The
+turn in or out of note mode is a full refresh, so the old tile doesn't show through.
+The line under the tile, the battery's time left or to full, follows the text size.
 
 Holding the talk button at power-on can't open setup here as it does elsewhere:
 BOOT held at power-on is the chip's download mode. No pin reports USB power or

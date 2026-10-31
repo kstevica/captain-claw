@@ -175,7 +175,9 @@ struct Home {
   std::vector<Row> rows;   // device, Wi-Fi, deck, agent
   uint8_t character = 0;   // e-paper: shown when there's no answer to keep
   String battery;          // the round screen: "≈ 2 h 10 min left" / "full in ≈ 45 min" under the character
-  bool noteMode = false;   // the B paper: note-taking mode is on
+  bool noteMode = false;   // the B paper, the Waveshare e-paper: note-taking mode is on
+  int notes = 0;           // the notes waiting to go
+  uint32_t notesRoomSec = 0;  // how long a note there's room for, in seconds
 };
 
 void showHome(const Home& home);
