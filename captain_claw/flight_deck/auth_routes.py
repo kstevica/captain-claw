@@ -177,6 +177,7 @@ async def register(body: RegisterRequest, response: Response):
 
     expires_at = (datetime.now(timezone.utc) + REFRESH_TOKEN_TTL).isoformat()
     await db.create_refresh_session(user["id"], hash_token(refresh_token), expires_at)
+    await db.touch_last_login(user["id"])
     _set_refresh_cookie(response, refresh_token)
 
     return TokenResponse(access_token=access_token, user=await _user_payload(db, user))
@@ -312,6 +313,7 @@ async def _issue_session(db, user: dict, response: Response) -> TokenResponse:
 
     expires_at = (datetime.now(timezone.utc) + REFRESH_TOKEN_TTL).isoformat()
     await db.create_refresh_session(user["id"], hash_token(refresh_token), expires_at)
+    await db.touch_last_login(user["id"])
     _set_refresh_cookie(response, refresh_token)
 
     return TokenResponse(access_token=access_token, user=await _user_payload(db, user))
@@ -358,6 +360,9 @@ async def refresh(request: Request, response: Response):
     new_refresh = create_refresh_token()
     new_expires = (now + REFRESH_TOKEN_TTL).isoformat()
     await db.create_refresh_session(user["id"], hash_token(new_refresh), new_expires)
+    # Sessions last a week and renew themselves, so someone who comes back daily
+    # never signs in again: coming back on a saved session counts as a login.
+    await db.touch_last_login(user["id"])
     _set_refresh_cookie(response, new_refresh)
 
     return {

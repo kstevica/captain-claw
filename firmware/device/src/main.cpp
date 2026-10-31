@@ -53,7 +53,7 @@
 #if defined(PAPER_B)
 #define FW_VERSION "1.0.23"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.19.11"
+#define FW_VERSION "0.19.12"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -654,6 +654,8 @@ static ui::Home homeNow() {
   home.character = settings.character;
   home.battery = batteryLine();
   home.noteMode = board::kNoteMode && settings.noteMode;
+  home.notes = notes::count();
+  home.notesRoomSec = notes::room(audio::kMicRate) / audio::kMicRate;
   return home;
 }
 
