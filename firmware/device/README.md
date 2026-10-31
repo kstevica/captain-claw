@@ -140,12 +140,17 @@ The same paper built as if it had no screen: `src/ui_paper_b.cpp` replaces
 newest, so B is published as 1.x). The lights carry listening, working,
 speaking and trouble exactly as above; the voice carries the answers:
 
-- **A dashboard, every five minutes** (1.0.11): the clock as of the drawing,
-  the Wi-Fi and agent dots in the middle of the top bar, the battery; the
-  date, the room (temperature, humidity), the battery (percent, and how long
-  it has or until it's full), the voice notes waiting offline (how many, how
-  long, how much room is left — minutes in flash, GB on a card), and the
-  links (Wi-Fi, deck, agent). Redrawn in full on every five-minute mark
+- **A dashboard, every five minutes** (1.0.11; in blocks of colour since
+  1.0.24): a black block with the Wi-Fi and agent dots, the agent, what waits
+  in Flight Deck, the battery, a big clock as of the drawing and the date.
+  Under it three blocks: the room in blue (temperature, humidity), the power
+  in green, yellow under 40 %, red under 20 % (percent, and how long it has or
+  until it's full, with a bolt while charging), the notes in yellow, red when
+  under 2 minutes of room are left (how many, and the room: minutes in flash,
+  GB on a card). Then a big tile with what A does ("A to talk"; until it's
+  ready, what it's waiting for), the links (Wi-Fi, deck, agent) and the
+  footer. Text on a colour stays between its two inks, so its edges don't
+  snap to a third. Redrawn in full on every five-minute mark
   (:00, :05 … :55), awake or asleep (the timer wake lands just after the
   mark, draws it without Wi-Fi and sleeps again), and after an offline voice
   note is kept.
@@ -185,8 +190,9 @@ speaking and trouble exactly as above; the voice carries the answers:
 - **A talks** (1.0.11; C before): press, talk, press again — or 2.5 s of
   quiet sends it; a double press plays the last answer again.
 - **Note-taking mode** (1.0.16): hold A (1 s) to turn it on or off — rising
-  tones on, falling off, and the dashboard redraws ("NOTE MODE · HOLD A TO
-  SEND", the A key says "note"). While it's on, every recording is kept as a
+  tones on, falling off, and the dashboard redraws (since 1.0.24 the top block
+  turns red and the tile black, with a yellow notepad, the count on its corner,
+  "Hold A to send", the notes' length and the room left). While it's on, every recording is kept as a
   voice note, online too (press A, talk, press A; no 2.5 s quiet stop — notes
   have their pauses); turning it off sends them all to the agent as one
   turn. The press that holds on begins a recording, which is dropped.
@@ -206,8 +212,8 @@ speaking and trouble exactly as above; the voice carries the answers:
   itself; the five-minute dashboard (or the offline one) waits until the
   recording ends, and after an offline note the dashboard is drawn then.
 - **Offline** (1.0.13): once Wi-Fi, Flight Deck or the agent has been
-  down for 30 s, the paper is redrawn with it — the dashboard's LINKS rows
-  and the top bar's dots in red (an answer being read keeps its page; the
+  down for 30 s, the paper is redrawn with it — the dashboard's link rows
+  and the top block's dots in red (an answer being read keeps its page; the
   options code stays) — and again once they've been back for 10 s. The
   offline blink says which: the left light for Wi-Fi, the right for Flight
   Deck or the agent.

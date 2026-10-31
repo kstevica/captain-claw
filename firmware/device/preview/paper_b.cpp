@@ -18,29 +18,36 @@ PreviewM5 M5;
 
 // ── stand-ins for the device-only parts ─────────────────────────────────
 
+static bool gClimate = true, gUsb = false, gOnCard = false;
+static int gMinutesLeft = 130, gMinutesToFull = -1, gNotes = 3, gRoomMin = 14;
+
 namespace telemetry {
 bool climate(float* t, float* rh) {
   *t = 22.6f;
   *rh = 44.0f;
-  return true;
+  return gClimate;
 }
 bool clockSet() { return true; }
-bool onUsbPower() { return false; }
+bool onUsbPower() { return gUsb; }
 }  // namespace telemetry
 
 namespace battery {
-int minutesLeft() { return 130; }
-int minutesToFull() { return -1; }
+int minutesLeft() { return gMinutesLeft; }
+int minutesToFull() { return gMinutesToFull; }
 }  // namespace battery
 
 namespace notes {
 bool ready() { return true; }
-bool onCard() { return false; }
-uint64_t freeBytes() { return 3400000; }
-int count() { return 3; }
-uint32_t seconds() { return 84; }
-size_t room(uint32_t rate) { return (size_t)rate * 60 * 14; }
+bool onCard() { return gOnCard; }
+uint64_t freeBytes() { return gOnCard ? 12400000000ULL : 3400000; }
+int count() { return gNotes; }
+uint32_t seconds() { return gNotes * 28; }
+size_t room(uint32_t rate) { return (size_t)rate * 60 * gRoomMin; }
 }  // namespace notes
+
+namespace ui {
+void previewAsleep();
+}
 
 static std::string gRoot = ".";
 
@@ -128,7 +135,7 @@ int main(int argc, char** argv) {
 
   static constexpr uint16_t kRed = ui::rgb(230, 50, 50), kYellow = ui::rgb(250, 200, 40);
   ui::Home home{true, "All good", kGreen, "", {}};
-  home.rows = {{"Paper", "ready — press C", kGreen},
+  home.rows = {{"Paper", "ready — press A", kGreen},
                {"Wi-Fi", "Harbour-5G", kGreen},
                {"Deck", "deck.example.com", kGreen},
                {"Agent", "Captain Claw", kGreen}};
@@ -161,6 +168,8 @@ int main(int argc, char** argv) {
   save("08_setup");
 
   ui::setHealth(ui::Down, ui::Down);
+  home.ready = false;
+  home.hint = "Offline · talk to keep a note";
   home.rows = {{"Paper", "not ready", kYellow},
                {"Wi-Fi", "not connected", kRed},
                {"Deck", "connecting…", kRed},
@@ -168,6 +177,8 @@ int main(int argc, char** argv) {
   ui::drawNow();
   ui::showHome(home);  // asked for (B held): the dashboard now
   save("09_dashboard_links_down");
+  home.ready = true;
+  home.hint = "";
 
   ui::setHealth(ui::Up, ui::Up);
   home.rows = {{"Paper", "ready — press A", kGreen},
@@ -203,6 +214,72 @@ int main(int argc, char** argv) {
   ui::drawNow();
   ui::showHome(home);
   save("13_dashboard_agent_stopped");
+
+  // The readings at their edges.
+  ui::setHealth(ui::Up, ui::Up);
+  home.rows.front() = {"Paper", "ready — press A", kGreen};
+  home.rows.back() = {"Agent", "Captain Claw", kGreen};
+  auto again = [&](const char* name) {
+    g_previewMillis += 30000;  // (the battery's read at most every 20 s)
+    ui::drawNow();
+    ui::showHome(home);
+    save(name);
+  };
+  M5.Power.level = 31;
+  gMinutesLeft = 48;
+  again("15_battery_31");
+  M5.Power.level = 12;
+  gMinutesLeft = 19;
+  again("16_battery_12");
+  M5.Power.level = 64;
+  M5.Power.charging = true;
+  gMinutesToFull = 45;
+  again("17_charging");
+  gMinutesToFull = 95;
+  again("18_charging_long");
+  M5.Power.charging = false;
+  gUsb = true;
+  M5.Power.level = 100;
+  again("19_on_usb");
+  gUsb = false;
+  M5.Power.level = 82;
+  gMinutesLeft = 130;
+  gClimate = false;
+  again("20_no_room_reading");
+  gClimate = true;
+  gNotes = 0;
+  again("21_no_notes");
+  gNotes = 128;
+  gRoomMin = 1;
+  again("22_many_notes_nearly_full");
+  home.noteMode = true;
+  gRoomMin = 0;
+  again("23_note_mode_full");
+  gNotes = 1;
+  gRoomMin = 90;
+  gOnCard = true;
+  again("24_note_mode_on_card");
+  gOnCard = false;
+  gNotes = 3;
+  gRoomMin = 14;
+  ui::setHealth(ui::Down, ui::Off);
+  ui::setWaiting(2);
+  again("25_note_mode_links_down_waiting");
+  ui::setHealth(ui::Up, ui::Up);
+  home.noteMode = false;
+  ui::setHealth(ui::Up, ui::Up);
+  ui::setBar("A very long agent name indeed for this one", "ready", kGreen);
+  again("26_long_names");
+  ui::setBar("Captain Claw", "ready", kGreen);
+  ui::setWaiting(0);
+  ui::previewAsleep();
+  save("27_asleep");
+  ui::setWaiting(1);
+  home.noteMode = true;
+  ui::setHome(home);
+  ui::previewAsleep();
+  save("28_asleep_note_mode");
+  ui::setWaiting(0);
 
   ui::showSwitchedOff("Power button to switch on");
   save("14_switched_off");
