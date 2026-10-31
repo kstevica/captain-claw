@@ -87,11 +87,11 @@ static void handleRoot() {
   if (!allowed()) return;
   String h;
   h.reserve(6000);
-  h += F("<!doctype html><html><head><meta charset=utf-8><title>Claw ");
+  h += F("<!doctype html><html><head><meta charset=utf-8><title>Captain ");
   h += board::kModel;
   h += F(" setup</title>");
   h += FPSTR(kStyle);
-  h += F("</head><body><h1>Captain Claw &middot; ");
+  h += F("</head><body><h1>Captain &middot; ");
   h += board::kModel;
   h += F("</h1><form method=post action=/save>");
   if (accessKey.length()) h += "<input type=hidden name=k value=\"" + esc(accessKey) + "\">";

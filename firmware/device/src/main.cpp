@@ -51,7 +51,7 @@
 #endif
 
 #if defined(PAPER_B)
-#define FW_VERSION "1.0.24"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
+#define FW_VERSION "1.0.25"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
 #define FW_VERSION "0.19.12"
 #endif
@@ -2055,7 +2055,7 @@ static void onText(const char* payload, size_t len) {
   String type = doc["type"] | "";
 
   if (type == "bound") {
-    agentName = doc["agent"] | "";
+    agentName = ui::agentShownName(doc["agent"] | "");
     strlcpy(rtcAgent, agentName.c_str(), sizeof(rtcAgent));
     agentSlug = doc["slug"] | "";
     agentLinked = doc["linked"] | true;
@@ -2070,7 +2070,7 @@ static void onText(const char* payload, size_t len) {
     for (JsonObject a : doc["items"].as<JsonArray>()) {
       String slug = a["slug"] | "";
       if (slug == current) agentCur = agentNames.size();
-      agentNames.push_back(a["name"] | slug);
+      agentNames.push_back(ui::agentShownName(a["name"] | slug));
       agentSlugs.push_back(slug);
     }
     agentNames.push_back("« Back");

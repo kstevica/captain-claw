@@ -159,7 +159,7 @@ void drawC64(M5Canvas& c, Pose pose, int level, uint32_t t, int cx, int cy) {
   std::vector<String> lines;
   switch (pose) {
     case Pose::Idle:
-      lines = {"   **** CAPTAIN CLAW 64 ****", "64K RAM SYSTEM  38911 BYTES FREE", "", "READY."};
+      lines = {"      **** CAPTAIN 64 ****", "64K RAM SYSTEM  38911 BYTES FREE", "", "READY."};
       break;
     case Pose::Listening:
       lines = {"READY.", "LOAD\"VOICE\",8,1", "", "SEARCHING FOR VOICE"};

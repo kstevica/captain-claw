@@ -184,7 +184,7 @@ static void drawBar() {
   canvas.setTextColor(barColor);
   canvas.drawString(barState, left - 5, BAR / 2);
   int nameRoom = left - 5 - stateW - 6 - x;
-  String name = barAgent.length() ? barAgent : String("Captain Claw");
+  String name = barAgent.length() ? barAgent : String("Captain");
   while (name.length() > 1 && canvas.textWidth(name) > nameRoom) name.remove(name.length() - 1);
   canvas.setTextDatum(middle_left);
   canvas.setTextColor(TFT_WHITE);

@@ -654,27 +654,26 @@ static constexpr uint32_t kDashEverySec = 5 * 60;  // on the clock's five-minute
 // A white pass before the dashboard (pushToPanel()): six-ink paper that only
 // ever goes from one picture to the next loses colour and keeps faint
 // shadows of the pictures before. Once an hour — the first dashboard drawn
-// on its mark in a new hour, normally :00 — and once after a restart (power,
-// an update, a crash; not the deep-sleep wakes), on its next mark too: a
-// jolted paper still never redraws at once. Never for a dashboard someone
-// asked for (back from the answer, a press): that one stays quick. In RTC
-// memory, which a restart clears.
-RTC_DATA_ATTR static bool rtcCleaned = false;
-RTC_DATA_ATTR static uint32_t rtcCleanAt = 0;           // by the clock
-RTC_DATA_ATTR static uint8_t rtcDashesSinceClean = 0;   // (no clock: every twelfth dashboard)
+// on its mark in a new hour, normally :00 — and when it's powered on, with the
+// first dashboard after that, whatever brought it. Not after any other restart
+// (an update, a crash), and not for a dashboard someone asked for (back from
+// the answer, a press): that one stays quick.
+RTC_DATA_ATTR static bool rtcPowerOnPass = false;  // powered on, the pass still to come
+RTC_DATA_ATTR static uint32_t rtcCleanAt = 0;      // by the clock
 static constexpr uint32_t kCleanEverySec = 60 * 60;
 
+// A new hour by the clock since the last pass. (A restart forgets that one, so it
+// goes by the next new hour; with no clock there are no hours to go by.)
 static bool cleanDue() {
-  if (!rtcCleaned) return true;
   const uint32_t now = (uint32_t)time(nullptr);
-  if (now >= 1700000000 && rtcCleanAt >= 1700000000) return now / kCleanEverySec != rtcCleanAt / kCleanEverySec;
-  return rtcDashesSinceClean >= kCleanEverySec / kDashEverySec;
+  if (now < 1700000000) return false;
+  if (rtcCleanAt < 1700000000) rtcCleanAt = now;
+  return now / kCleanEverySec != rtcCleanAt / kCleanEverySec;
 }
 
 static void markCleaned() {
   rtcCleanAt = (uint32_t)time(nullptr);
-  rtcDashesSinceClean = 0;
-  rtcCleaned = true;
+  rtcPowerOnPass = false;
 }
 
 #ifndef PREVIEW
@@ -748,9 +747,8 @@ static void commit() {
   if (w.kind == Kind::Dash) {
     lastDashMs = millis() ? millis() : 1;
     rtcDashAt = (uint32_t)time(nullptr);
-    if (rtcDashesSinceClean < 255) ++rtcDashesSinceClean;
   }
-  cleanNext = w.kind == Kind::Dash && w.onMark && cleanDue();
+  cleanNext = w.kind == Kind::Dash && (rtcPowerOnPass || (w.onMark && cleanDue()));
   keepShown();
   startRefresh();
 }
@@ -869,7 +867,7 @@ static void drawHeader(const String& title = "", bool dots = true) {
   char clock[16];
   const bool hasClock = !title.length() && clockText(clock, sizeof(clock), "%H:%M", time(nullptr));
   const bool agent = !title.length() && !hasClock && barAgent.length();
-  String name = title.length() ? title : hasClock ? String(clock) : agent ? barAgent : String("Captain Claw");
+  String name = title.length() ? title : hasClock ? String(clock) : agent ? barAgent : String("Captain");
   bool chg = false;
   int pct = batteryPct(&chg);
   drawBattery(W - PAD, y, pct, chg);
@@ -892,30 +890,19 @@ static int drawKey(const char* key, int x, int y) {
   return x + 28;
 }
 
-// The bottom bar: what the buttons do ("C", "talk", …), a note at the left.
-static void drawFooter(std::initializer_list<std::pair<const char*, const char*>> keys, const String& left = "") {
+// The bottom bar: what the buttons do ("C", "talk", …).
+static void drawFooter(std::initializer_list<std::pair<const char*, const char*>> keys) {
   const int y = H - kFootH / 2;
   canvas.fillRect(0, H - kFootH, W, 2, kInk);
   font(vlw::Small);
   int total = 0;
   for (auto& k : keys) total += 28 + 6 + tw(k.second) + 16;
   total -= 16;
-  int x = left.length() ? W - PAD - total : (W - total) / 2;
-  if (left.length()) text(fit(left, x - PAD - 10), PAD, y, kBlue, middle_left);
+  int x = (W - total) / 2;
   for (auto& k : keys) {
     x = drawKey(k.first, x, y) + 6;
     text(k.second, x, y + 1, kInk, middle_left);
     x += tw(k.second) + 16;
-  }
-}
-
-static void drawPageDots(int count, int current, int y) {
-  if (count < 2) return;
-  const int gap = 18;
-  int x0 = W / 2 - (count - 1) * gap / 2;
-  for (int i = 0; i < count && i < 16; ++i) {
-    if (i == current) canvas.fillCircle(x0 + i * gap, y, 6, kInk);
-    else canvas.drawCircle(x0 + i * gap, y, 5, kInk);
   }
 }
 
@@ -934,6 +921,7 @@ static void makeCanvas() {
 
 void begin() {
 #ifndef PREVIEW
+  if (esp_reset_reason() == ESP_RST_POWERON) rtcPowerOnPass = true;
   if (esp_reset_reason() != ESP_RST_DEEPSLEEP || !rtcShown) loadShown();  // any other reset: from flash
   if (rtcShown) {  // the panel kept its picture
     everShown = true;
@@ -1126,8 +1114,8 @@ static void drawStatBlock(const StatBlock& b, int y, int h) {
   textOn(b.big, b.x + 7, y + 28, b.fg, b.fill);
   const int ux = b.x + 7 + tw(b.big) + 2;
   if (b.unit[0] == 'o') {  // (the big font has no ° of its own)
-    canvas.fillCircle(ux + 6, y + 44, 6, b.fg);
-    canvas.fillCircle(ux + 6, y + 44, 3, b.fill);
+    canvas.fillCircle(ux + 5, y + 44, 5, b.fg);
+    canvas.fillCircle(ux + 5, y + 44, 2, b.fill);
   } else if (b.unit[0]) {
     font(vlw::Small);
     if (ux + tw(b.unit) <= b.x + b.w - 3) textOn(b.unit, ux, y + 36, b.fg, b.fill);
@@ -1286,7 +1274,7 @@ static void dashTick() {
 
 // The dashboard on its five-minute mark, or when it was asked for (drawNow).
 static void dashboardIfDue() {
-  // (Back from the robot it's as good as asked for: no white pass first.)
+  // (Back from the robot it's as good as asked for.)
   const bool now = (forceNext && millis() - forceAtMs < 3000) || (everShown && shownKind == Kind::Off);
   forceNext = false;
   if (now || (dashDue() && !held)) askDashboard(false, !now);
@@ -1420,11 +1408,25 @@ struct Size {
 };
 static const Size kSizes[] = {{vlw::BodyL, 49}, {vlw::BodyM, 41}, {vlw::BodyS, 35}, {vlw::Small, 28}};
 
-static int replyTop() { return kHeadH + 18; }
-static int replyBottom() { return H - kFootH - 34; }
+// The page is a conversation: the question in a yellow bubble on the right (first
+// page only), Captain's row under it, then the answer.
+static constexpr int kBubbleW = 300, kBubblePadX = 14, kBubblePadY = 9, kBubbleLine = 33, kBubbleTail = 12;
+static constexpr int kCaptainRowH = 40;
 
-// The question, one line, over the answer on its first page.
-static int questionHeight() { return question.length() ? 27 + 10 : 0; }
+static std::vector<String> questionLines() {
+  if (!question.length()) return {};
+  font(vlw::BodyS);
+  return clamp(wrap(question, kBubbleW - 2 * kBubblePadX), 3, kBubbleW - 2 * kBubblePadX);
+}
+
+static int bubbleHeight(int lines) { return lines * kBubbleLine + 2 * kBubblePadY; }
+
+// Where the answer's words start.
+static int replyTop(bool firstPage) {
+  const int lines = firstPage ? (int)questionLines().size() : 0;
+  return 10 + (lines ? bubbleHeight(lines) + kBubbleTail : 0) + kCaptainRowH + 6;
+}
+static int replyBottom() { return H - kFootH - 22; }
 
 // The largest size whose words fit on one screen (under the question and
 // the picture); none fits → the smallest, over pages.
@@ -1436,14 +1438,13 @@ static void layoutReply() {
   replyPage = 0;
   pictureH = 0;
   if (replyText.isEmpty()) return;
-  const int width = W - 2 * PAD, top = replyTop(), bottom = replyBottom();
-  const int qH = questionHeight();
+  const int width = W - 2 * PAD, top = replyTop(false), firstTop = replyTop(true), bottom = replyBottom();
   int pw = 0, ph = 0;
   if (imgLen && jpegSize(imgBuf, imgLen, &pw, &ph)) {
     const int natural = (int)(ph * min(1.0f, (float)width / pw));
-    pictureH = min(natural, (bottom - top - qH) * 40 / 100) + 14;
+    pictureH = min(natural, (bottom - firstTop) * 40 / 100) + 14;
   }
-  const int avail = bottom - top - qH - pictureH;
+  const int avail = bottom - firstTop - pictureH;
   for (const Size& s : kSizes) {
     font(s.font);
     auto lines = wrap(replyText, width);
@@ -1461,29 +1462,53 @@ static void layoutReply() {
   }
 }
 
+// Captain, in a few strokes: a head with a cap on.
+static void drawCaptainHead(int x, int y) {
+  canvas.fillRoundRect(x, y + 10, 36, 26, 7, kInk);
+  canvas.fillRoundRect(x + 3, y + 13, 30, 20, 5, kPaper);
+  canvas.fillCircle(x + 12, y + 23, 3, kInk);
+  canvas.fillCircle(x + 24, y + 23, 3, kInk);
+  canvas.fillRoundRect(x + 4, y, 28, 10, 4, kInk);
+  canvas.fillRect(x - 2, y + 9, 40, 4, kInk);
+  canvas.fillCircle(x + 18, y + 5, 3, kYellow);
+}
+
 static void drawReplyPage() {
   if (replyPages.empty()) return;
   const int pages = replyPages.size(), page = min(replyPage, pages - 1);
   const int width = W - 2 * PAD;
-  drawHeader("Answer");
-  int y = replyTop();
-  if (page == 0) {
-    if (question.length()) {
-      font(vlw::Small);
-      text(fit(String("“") + question + "”", width), PAD, y, kBlue);
-      y += questionHeight();
-    }
-    if (pictureH) {
-      const int ph = drawPicture(imgBuf, imgLen, PAD, y, width, pictureH - 14);
-      if (ph) y += ph + 14;
-    }
+  int y = 10;
+  if (page == 0 && question.length()) {
+    const std::vector<String> qs = questionLines();
+    font(vlw::BodyS);
+    int bw = 0;
+    for (const String& l : qs) bw = max(bw, tw(l));
+    bw += 2 * kBubblePadX;
+    const int bh = bubbleHeight(qs.size()), bx = W - 10 - bw;
+    canvas.fillRoundRect(bx, y, bw, bh, 16, kYellow);
+    canvas.fillTriangle(W - 44, y + bh - 2, W - 16, y + bh - 2, W - 12, y + bh + kBubbleTail, kYellow);
+    for (int i = 0; i < (int)qs.size(); ++i) textOn(qs[i], bx + kBubblePadX, y + kBubblePadY + i * kBubbleLine, kInk, kYellow);
+    y += bh + kBubbleTail;
+  }
+  drawCaptainHead(PAD, y);
+  char when[16] = "";
+  clockText(when, sizeof(when), "%H:%M", replyWhen);
+  font(vlw::Small);
+  text(fit(barAgent.length() ? barAgent : String("Captain"), width - 130), PAD + 46, y + 22, kInk, middle_left);
+  text(when, W - PAD, y + 22, kInk, middle_right);
+  y += kCaptainRowH + 6;
+  if (page == 0 && pictureH) {
+    const int ph = drawPicture(imgBuf, imgLen, PAD, y, width, pictureH - 14);
+    if (ph) y += ph + 14;
   }
   font(replyFont);
   drawLines(replyPages[page], PAD, y, replyLine, kInk);
-  drawPageDots(pages, page, H - kFootH - 18);
-  char when[16] = "";
-  clockText(when, sizeof(when), "%H:%M", replyWhen);
-  drawFooter({{board::kTalkKey, "talk"}, {board::kBackKey, page + 1 < pages ? "next" : "done"}}, when);
+  if (pages > 1) {  // how far through it is: a thin line, a thick stretch
+    const int barY = H - kFootH - 14;
+    canvas.fillRect(PAD, barY + 2, width, 2, kInk);
+    canvas.fillRoundRect(PAD, barY, width * (page + 1) / pages, 6, 3, kInk);
+  }
+  drawFooter({{board::kTalkKey, "talk"}, {board::kBackKey, page + 1 < pages ? "next" : "done"}});
 }
 
 static bool newTurn = true;  // a turn began (setQuestion): what comes next is a new answer

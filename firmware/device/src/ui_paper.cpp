@@ -661,7 +661,7 @@ static bool clockText(char* out, size_t n, const char* fmt, time_t t) {
 static void drawHeader(const String& title = "", bool dots = true) {
   font(vlw::Small);
   int y = kHeadH / 2;
-  String name = title.length() ? title : (barAgent.length() ? barAgent : String("Captain Claw"));
+  String name = title.length() ? title : (barAgent.length() ? barAgent : String("Captain"));
   // The agent's name: blue while it's asleep, red while it's switched off.
   const uint16_t nameInk = title.length() || !barAgent.length() ? kInk
                            : hAgent == Asleep                   ? kBlue
