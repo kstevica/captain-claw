@@ -27,8 +27,8 @@ import { FilterSelect, FilterSummary, SearchBox } from './ListFilters'
 // Users → Users: every account on the deck — add one, change a plan, role or
 // kiosk lock, set a password, manage their agents, delete them, give free
 // resets of the daily allowances (to one, the selected or every user, up to
-// the deck's cap), see when they last logged in and what they spent, ask them
-// for feedback. Search and filters narrow the list in the browser (the newest
+// the deck's cap), see when they last logged in and the tokens they used, ask
+// them for feedback. Search and filters narrow the list in the browser (the newest
 // USERS_MAX accounts).
 
 interface UserInfo {
@@ -171,38 +171,28 @@ function fmtTok(n: number): string {
   return String(n)
 }
 
-// What a user's agents spent on LLMs (usage_spend.py), at list prices.
-interface SpendTotals {
-  usd: number
-  tokens: number
-  unpriced_tokens: number  // on models with no price, local ones usually
-  own_usd: number  // on their own API keys: the deck doesn't pay these
-  own_tokens: number
+// The tokens a user's agents used on LLMs (usage_spend.py).
+interface TokenTotals {
+  tokens: number  // on the deck's keys
+  own_tokens: number  // on their own API keys
 }
-interface UserSpend { month: SpendTotals; all: SpendTotals; unpriced_models: string[] }
-interface Spend { month: string; since: string; users: Record<string, UserSpend> }
+interface UserTokens { month: TokenTotals; all: TokenTotals }
+interface TokenUse { month: string; since: string; users: Record<string, UserTokens> }
 
-const NO_SPEND: UserSpend = {
-  month: { usd: 0, tokens: 0, unpriced_tokens: 0, own_usd: 0, own_tokens: 0 },
-  all: { usd: 0, tokens: 0, unpriced_tokens: 0, own_usd: 0, own_tokens: 0 },
-  unpriced_models: [],
+const NO_TOKENS: UserTokens = {
+  month: { tokens: 0, own_tokens: 0 },
+  all: { tokens: 0, own_tokens: 0 },
 }
 
-async function fetchSpend(): Promise<Spend> {
+async function fetchTokenUse(): Promise<TokenUse> {
   const res = await fetch('/fd/admin/usage/spend', { headers: adminHeaders(), credentials: 'include' })
-  if (!res.ok) throw new Error('Failed to fetch spend')
+  if (!res.ok) throw new Error('Failed to fetch token use')
   return res.json()
 }
 
-function fmtUsd(n: number): string {
-  if (n > 0 && n < 0.01) return '<$0.01'
-  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
-}
+const tokensUsed = (t: TokenTotals) => t.tokens + t.own_tokens
 
-// Dollars; tokens instead when nothing they used has a price.
-function spentLabel(t: SpendTotals): string {
-  return t.usd === 0 && t.unpriced_tokens > 0 ? `${fmtTok(t.unpriced_tokens)} tok` : fmtUsd(t.usd)
-}
+const TOKENS_NOTE = "What their agents used on AI models. Prompt-cache reads don't count, as in the plan's daily allowance."
 
 function fmtDay(iso: string): string {
   return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
@@ -405,30 +395,26 @@ function MustChangeCheckbox({ checked, onChange, label, note }: {
   )
 }
 
-function SpendLine({ label, totals }: { label: string; totals: SpendTotals }) {
+function TokenLine({ label, totals }: { label: string; totals: TokenTotals }) {
   return (
-    <div>
+    <div title={TOKENS_NOTE}>
       <span className="text-zinc-500">{label}: </span>
-      <span className="text-zinc-300">{fmtUsd(totals.usd)}</span>
-      <span className="text-zinc-500"> · {fmtTok(totals.tokens)} tokens</span>
-      {totals.unpriced_tokens > 0 && (
-        <span className="text-zinc-500"> ({fmtTok(totals.unpriced_tokens)} with no price)</span>
-      )}
+      <span className="text-zinc-300">{fmtTok(tokensUsed(totals))}</span>
       {totals.own_tokens > 0 && (
-        <span className="text-zinc-500"> · on their own keys {fmtUsd(totals.own_usd)}, {fmtTok(totals.own_tokens)} tokens</span>
+        <span className="text-zinc-500"> ({fmtTok(totals.own_tokens)} on their own keys)</span>
       )}
     </div>
   )
 }
 
 function UserRow({
-  user, plans, usage, spend, spendSince, resets, resetCap, selected, onSelect, onUpdate, onDelete, currentUserId, kioskMode,
+  user, plans, usage, tokenUse, tokensSince, resets, resetCap, selected, onSelect, onUpdate, onDelete, currentUserId, kioskMode,
 }: {
   user: UserInfo
   plans: Record<string, PlanLimits>
   usage?: DayUsage
-  spend: UserSpend | null  // null: this deck can't tell yet
-  spendSince: string
+  tokenUse: UserTokens | null  // null: this deck can't tell yet
+  tokensSince: string
   resets: number
   resetCap: number
   selected: boolean
@@ -522,9 +508,9 @@ function UserRow({
               <span title={LOGIN_NOTE}>
                 {user.last_login_at ? `Last login ${timeAgo(user.last_login_at)}` : 'No login on record'}
               </span>
-              {spend && (
-                <span title="What their agents spent on AI models, at list prices">
-                  {spentLabel(spend.month)} this month · {spentLabel(spend.all)} all time
+              {tokenUse && (
+                <span title={TOKENS_NOTE}>
+                  {fmtTok(tokensUsed(tokenUse.month))} tokens this month · {fmtTok(tokensUsed(tokenUse.all))} all time
                 </span>
               )}
             </div>
@@ -660,15 +646,10 @@ function UserRow({
             </div>
           )}
 
-          {spend && (
+          {tokenUse && (
             <div className="space-y-0.5 text-xs">
-              <SpendLine label="Spent this month" totals={spend.month} />
-              <SpendLine label={spendSince ? `Spent since ${fmtDay(spendSince)}` : 'Spent all time'} totals={spend.all} />
-              {spend.unpriced_models.length > 0 && (
-                <div className="text-[11px] text-zinc-600">
-                  No price for: {spend.unpriced_models.join(', ')}
-                </div>
-              )}
+              <TokenLine label="Tokens this month" totals={tokenUse.month} />
+              <TokenLine label={tokensSince ? `Tokens since ${fmtDay(tokensSince)}` : 'Tokens all time'} totals={tokenUse.all} />
             </div>
           )}
 
@@ -966,7 +947,7 @@ function GrantResetsPanel({ selected, everyone, cap, onDone, onClose }: {
 
 type RoleFilter = 'all' | 'admin' | 'user'
 type StatusFilter = 'any' | 'kiosk' | 'not-kiosk' | 'temp-password' | 'used-today' | 'limit-reached' | 'has-resets'
-type SortKey = 'newest' | 'oldest' | 'name' | 'usage' | 'login-recent' | 'login-longest' | 'spend-month' | 'spend-all'
+type SortKey = 'newest' | 'oldest' | 'name' | 'usage' | 'login-recent' | 'login-longest' | 'tokens-month' | 'tokens-all'
 
 const STATUS_LABEL: Record<StatusFilter, string> = {
   any: 'Any status',
@@ -985,8 +966,8 @@ const SORT_LABEL: Record<SortKey, string> = {
   usage: 'Most active today',
   'login-recent': 'Last login: most recent',
   'login-longest': 'Last login: longest ago',
-  'spend-month': 'Most spent this month',
-  'spend-all': 'Most spent all time',
+  'tokens-month': 'Most tokens this month',
+  'tokens-all': 'Most tokens all time',
 }
 
 export function UsersAdmin({ refreshTick, config, onTotal }: {
@@ -1001,7 +982,7 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
   const [usageToday, setUsageToday] = useState<Record<string, DayUsage>>({})
   const [resets, setResetsMap] = useState<Record<string, number>>({})
   const [resetCap, setResetCap] = useState(NO_USAGE.reset_cap)
-  const [spend, setSpend] = useState<Spend | null>(null)
+  const [tokenUse, setTokenUse] = useState<TokenUse | null>(null)
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
   const [granting, setGranting] = useState(false)
   const [notice, setNotice] = useState('')
@@ -1015,8 +996,8 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
 
   const load = useCallback(async () => {
     try {
-      const [data, plansData, today, spendData] = await Promise.all([
-        fetchUsers(USERS_MAX), fetchPlans(), fetchUsageToday().catch(() => NO_USAGE), fetchSpend().catch(() => null),
+      const [data, plansData, today, tokenData] = await Promise.all([
+        fetchUsers(USERS_MAX), fetchPlans(), fetchUsageToday().catch(() => NO_USAGE), fetchTokenUse().catch(() => null),
       ])
       setUsers(data.users)
       setTotal(data.total)
@@ -1025,7 +1006,7 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
       setUsageToday(today.usage)
       setResetsMap(today.resets)
       setResetCap(today.reset_cap)
-      setSpend(spendData)
+      setTokenUse(tokenData)
       // Selections of accounts that are gone (or became admins) drop out.
       const selectable = new Set(data.users.filter((u) => u.role !== 'admin').map((u) => u.id))
       setSelected((prev) => new Set([...prev].filter((id) => selectable.has(id))))
@@ -1071,20 +1052,20 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
     })
     const name = (u: UserInfo) => u.display_name || u.email
     const used = (u: UserInfo) => usageToday[u.id] ?? { messages: 0, tokens: 0 }
-    const spent = (u: UserInfo) => spend?.users[u.id] ?? NO_SPEND
+    const tokensOf = (u: UserInfo) => tokenUse?.users[u.id] ?? NO_TOKENS
     const login = (u: UserInfo) => u.last_login_at ?? ''
     return list.sort((a, b) => {
       // No login on record sorts as the longest ago.
       if (sort === 'login-recent') return login(b).localeCompare(login(a))
       if (sort === 'login-longest') return login(a).localeCompare(login(b))
-      if (sort === 'spend-month') return spent(b).month.usd - spent(a).month.usd
-      if (sort === 'spend-all') return spent(b).all.usd - spent(a).all.usd
+      if (sort === 'tokens-month') return tokensUsed(tokensOf(b).month) - tokensUsed(tokensOf(a).month)
+      if (sort === 'tokens-all') return tokensUsed(tokensOf(b).all) - tokensUsed(tokensOf(a).all)
       if (sort === 'oldest') return a.created_at.localeCompare(b.created_at)
       if (sort === 'name') return name(a).localeCompare(name(b), undefined, { sensitivity: 'base' })
       if (sort === 'usage') return used(b).tokens - used(a).tokens || used(b).messages - used(a).messages
       return b.created_at.localeCompare(a.created_at)
     })
-  }, [users, query, role, plan, status, sort, usageToday, resets, plans, spend, config.kiosk_mode])
+  }, [users, query, role, plan, status, sort, usageToday, resets, plans, tokenUse, config.kiosk_mode])
 
   const filtered = query.trim() !== '' || role !== 'all' || plan !== 'all' || status !== 'any'
   const clearFilters = () => { setQuery(''); setRole('all'); setPlan('all'); setStatus('any') }
@@ -1209,8 +1190,8 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
           user={u}
           plans={plans}
           usage={usageToday[u.id]}
-          spend={spend ? spend.users[u.id] ?? NO_SPEND : null}
-          spendSince={spend?.since ?? ''}
+          tokenUse={tokenUse ? tokenUse.users[u.id] ?? NO_TOKENS : null}
+          tokensSince={tokenUse?.since ?? ''}
           resets={resets[u.id] ?? 0}
           resetCap={resetCap}
           selected={selected.has(u.id)}
