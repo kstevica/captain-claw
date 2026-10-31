@@ -678,7 +678,7 @@ static String upper(const String& s) {
   return out;
 }
 
-// "Captain Claw" → "CC", "Jarvis" → "J".
+// "Ana Marić" → "AM", "Jarvis" → "J".
 static String initials(const String& name) {
   String out;
   bool atWord = true;
@@ -969,7 +969,7 @@ static void drawCharacter(uint8_t kind, face::Pose pose, int level, int cy, floa
 void showHome(const Home& home) {
   beginFrame();
   Tone tone = home.ready ? TBlue : barState == "offline" ? TGrey : TAmber;
-  String name = barAgent.length() ? barAgent : String("Captain Claw");
+  String name = barAgent.length() ? barAgent : String("Captain");
   char clock[8];
   const bool clockFace = clockText(clock, sizeof(clock));
   drawChrome(false, !clockFace);
@@ -1442,7 +1442,7 @@ void showFace(uint8_t kind, face::Pose pose, int level) {
     for (int i = 0; i < n; ++i) text(ls[first + i], CX, 344 + i * 30, kText);
   } else {
     font(vlw::Title);
-    String name = barAgent.length() ? barAgent : String("Captain Claw");
+    String name = barAgent.length() ? barAgent : String("Captain");
     text(fit(name, lineRoom(342, 378)), CX, 360, kText);
   }
   // The tap button takes the state line's place: to talk, or to stop.

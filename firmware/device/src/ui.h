@@ -80,6 +80,18 @@ struct Row {
 int showPanel(const char* title, uint16_t titleColor, const std::vector<Row>& rows, int page = 0);
 
 // "2 h 10 min", "45 min", "3 d 4 h".
+// An agent's name as a device shows it: the brand is Captain now, whatever an
+// older agent is still called ("Captain Claw", "captain-claw").
+inline String agentShownName(const String& name) {
+  String low = name;
+  low.toLowerCase();
+  for (const char* old : {"captain claw", "captain-claw", "captain_claw"}) {
+    const int at = low.indexOf(old);
+    if (at >= 0) return name.substring(0, at) + "Captain" + name.substring(at + strlen(old));
+  }
+  return name;
+}
+
 inline String timeSpan(int minutes) {
   if (minutes < 60) return String(max(1, minutes)) + " min";
   if (minutes < 24 * 60) {

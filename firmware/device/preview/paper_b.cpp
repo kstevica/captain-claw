@@ -121,6 +121,13 @@ static const char* kLong =
     "Utorak i srijeda su za sada prazni, a u četvrtak u 10:00 je sastanak odbora za koji još čekamo dnevni red.";
 
 int main(int argc, char** argv) {
+  for (const char* name : {"Captain Claw", "captain-claw", "CAPTAIN_CLAW", "Captain"}) {
+    if (ui::agentShownName(name) != "Captain") fprintf(stderr, "agentShownName(%s) wrong\n", name), exit(1);
+  }
+  if (ui::agentShownName("Jarvis") != "Jarvis" || ui::agentShownName("Captain Claw 2") != "Captain 2") {
+    fprintf(stderr, "agentShownName changes the wrong names\n");
+    exit(1);
+  }
   gOut = argc > 1 ? argv[1] : "preview/out/paper_b";
   gRoot = argc > 2 ? argv[2] : ".";
   setenv("TZ", "CET-1CEST,M3.5.0,M10.5.0/3", 1);
@@ -131,14 +138,14 @@ int main(int argc, char** argv) {
   ui::begin();
   g_previewMillis = 123456;
   ui::setHealth(ui::Up, ui::Up);
-  ui::setBar("Captain Claw", "ready", kGreen);
+  ui::setBar(ui::agentShownName("Captain Claw"), "ready", kGreen);
 
   static constexpr uint16_t kRed = ui::rgb(230, 50, 50), kYellow = ui::rgb(250, 200, 40);
   ui::Home home{true, "All good", kGreen, "", {}};
   home.rows = {{"Paper", "ready — press A", kGreen},
                {"Wi-Fi", "Harbour-5G", kGreen},
                {"Deck", "deck.example.com", kGreen},
-               {"Agent", "Captain Claw", kGreen}};
+               {"Agent", ui::agentShownName("Captain Claw"), kGreen}};
   ui::showHome(home);
   save("01_dashboard");
 
@@ -160,6 +167,26 @@ int main(int argc, char** argv) {
   save("05_answer_long_p2");
   ui::nextPage();  // past the last page: the dashboard again
   save("06_dashboard_again");
+
+  size_t jpgLen = 0;
+  if (uint8_t* jpg = readFile(gOut + "/sample.jpg", &jpgLen)) {
+    ui::setQuestion("Show me the harbour on Friday");
+    ui::setReply(kShort);
+    ui::storeImage(jpg, jpgLen);
+    ui::nextPage();
+    save("06b_answer_picture");
+    ui::nextPage();
+  }
+  ui::setQuestion("");
+  ui::setReply("Ana replied about the contract and wants to meet on Friday.");
+  ui::nextPage();
+  save("06c_answer_no_question");
+  ui::nextPage();
+  ui::setQuestion("What's on my calendar for the rest of this week and next week, and can you move everything on Friday afternoon to Monday morning, and tell everyone?");
+  ui::setReply("Done.");
+  ui::nextPage();
+  save("06d_answer_long_question");
+  ui::nextPage();
 
   ui::showLink("Options · 1.0.16", "http://192.168.1.48/", "Scan it with your phone (same Wi-Fi): every setting is there.");
   save("07_options");
@@ -184,7 +211,7 @@ int main(int argc, char** argv) {
   home.rows = {{"Paper", "ready — press A", kGreen},
                {"Wi-Fi", "Harbour-5G", kGreen},
                {"Deck", "deck.example.com", kGreen},
-               {"Agent", "Captain Claw", kGreen}};
+               {"Agent", ui::agentShownName("Captain Claw"), kGreen}};
   home.noteMode = true;  // hold A: note-taking mode
   ui::drawNow();
   ui::showHome(home);
@@ -204,13 +231,13 @@ int main(int argc, char** argv) {
   home.rows.erase(home.rows.begin() + 1);
   ui::setWaiting(0);
   ui::setHealth(ui::Up, ui::Asleep);
-  home.rows.back() = {"Agent", "Captain Claw · asleep", kBlue};
+  home.rows.back() = {"Agent", ui::agentShownName("Captain Claw") + " · asleep", kBlue};
   ui::drawNow();
   ui::showHome(home);
   save("12_dashboard_agent_asleep");
   ui::setHealth(ui::Up, ui::Off);
   home.rows.front() = {"Paper", "not ready", kYellow};
-  home.rows.back() = {"Agent", "Captain Claw · stopped", kRed};
+  home.rows.back() = {"Agent", ui::agentShownName("Captain Claw") + " · stopped", kRed};
   ui::drawNow();
   ui::showHome(home);
   save("13_dashboard_agent_stopped");
@@ -218,7 +245,7 @@ int main(int argc, char** argv) {
   // The readings at their edges.
   ui::setHealth(ui::Up, ui::Up);
   home.rows.front() = {"Paper", "ready — press A", kGreen};
-  home.rows.back() = {"Agent", "Captain Claw", kGreen};
+  home.rows.back() = {"Agent", ui::agentShownName("Captain Claw"), kGreen};
   auto again = [&](const char* name) {
     g_previewMillis += 30000;  // (the battery's read at most every 20 s)
     ui::drawNow();
@@ -270,7 +297,7 @@ int main(int argc, char** argv) {
   ui::setHealth(ui::Up, ui::Up);
   ui::setBar("A very long agent name indeed for this one", "ready", kGreen);
   again("26_long_names");
-  ui::setBar("Captain Claw", "ready", kGreen);
+  ui::setBar(ui::agentShownName("Captain Claw"), "ready", kGreen);
   ui::setWaiting(0);
   ui::previewAsleep();
   save("27_asleep");

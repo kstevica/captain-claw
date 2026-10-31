@@ -159,15 +159,15 @@ speaking and trouble exactly as above; the voice carries the answers:
   picture through restarts, M5GFX starts it without one, and refreshes were
   several times slower; the 1.0.5–1.0.9 partial clock refresh (gone in
   1.0.11) also left the controller in its window without it.
-- **A white pass, hourly** (1.0.18): six-ink paper that only ever goes from
-  one picture to the next loses colour and keeps faint shadows of earlier
-  pictures. Once an hour (the first dashboard on its mark in a new hour,
-  normally :00) and once after a restart (power, update, crash; not the
-  deep-sleep wakes) the paper goes all white first, then draws the
-  dashboard. The restart's pass waits for the next five-minute mark, so a
-  jolted paper still doesn't redraw at once; a dashboard someone asked for
-  (back from the answer, a press) never gets one. Another screen asked for
-  during the white pass cuts it short, as above.
+- **A white pass, hourly and at power-on** (1.0.18; only these two since
+  1.0.25): six-ink paper that only ever goes from one picture to the next
+  loses colour and keeps faint shadows of earlier pictures. Once an hour (the
+  first dashboard on its mark in a new hour, normally :00) and when it's
+  powered on (with the first dashboard after that) the paper goes all white
+  first, then draws the dashboard. An update or a crash doesn't get one, nor
+  does a dashboard someone asked for (back from the answer, a press), and with
+  no clock there are no hours to go by. Another screen asked for during the
+  white pass cuts it short, as above, and it's done with the next dashboard.
 - **Quick screen changes** (1.0.12): the refresh is the firmware's own
   (`PaperPanel::refresh()`, the same steps as M5GFX's `display()`), so it
   knows when the panel is in its waveform. Asking for another screen then —
@@ -180,8 +180,11 @@ speaking and trouble exactly as above; the voice carries the answers:
   the answer or the dashboard.
 - **The answer** (1.0.11; 1.0.12 only from the answer page): when the
   answer page is on the paper, a new answer goes there as its voice starts,
-  at the largest of four sizes that fits it on one screen (the question in
-  one line above it, a picture on the first page), and again once it's whole
+  at the largest of four sizes that fits it on one screen. Since 1.0.25 the
+  page reads as a conversation: the question in a yellow bubble (up to three
+  lines, first page only), a row with Captain's head, the agent and the time,
+  a picture if there is one, then the answer, with a line for how far through
+  the pages it is. It's drawn again once it's whole
   and the voice is over (it's spoken sentence by sentence as it's written);
   with speaking off, when it arrives. From the dashboard the paper stays on
   the dashboard: B shows the answer. Longer answers page at the smallest size; B

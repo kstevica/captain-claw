@@ -64,6 +64,7 @@ class String {
   }
   void reserve(unsigned n) { s_.reserve(n); }
   void remove(unsigned index) { if (index < s_.size()) s_.erase(index); }
+  void toLowerCase() { for (char& c : s_) c = (char)tolower((unsigned char)c); }
   void remove(unsigned index, unsigned count) { if (index < s_.size()) s_.erase(index, count); }
   bool startsWith(const String& p) const { return s_.rfind(p.s_, 0) == 0; }
   bool endsWith(const String& p) const {
