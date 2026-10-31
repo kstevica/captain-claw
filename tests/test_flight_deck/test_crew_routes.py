@@ -625,6 +625,98 @@ async def test_usage_is_each_users_own_and_a_new_login_forgets_the_old_account(d
         assert (await client.get("/fd/crew/usage")).json() == {"harnesses": []}
 
 
+@pytest.fixture
+def opencode_too(deck, monkeypatch):
+    """A stand-in OpenCode beside the stand-in Claude: it records how it's run."""
+    fake = deck.tmp / "bin" / "opencode"
+    fake.write_text(r"""#!/bin/sh
+if [ "$1" = "models" ]; then printf 'opencode/deepseek-v4.1-flash-free\nopencode/big-pickle\n'; exit 0; fi
+printf '%s\n' "$*" >> "$OC_LOG"
+echo work > free.txt; git add free.txt; git -c user.name=T -c user.email=t@example.com commit -qm free
+printf '%s\n' '{"type":"text","sessionID":"s1","part":{"type":"text","text":"Done.\n\nCREW-STATUS: done made it"}}'
+""")
+    fake.chmod(0o755)
+    log = deck.tmp / "oc.log"
+    monkeypatch.setenv("FD_CREW_OPENCODE_BIN", str(fake))
+    monkeypatch.setattr(crew_runner, "_MODELS", {})
+    real = crew_runner.crew_logins.worker_env
+
+    async def with_log(*args, **kwargs):
+        return {**await real(*args, **kwargs), "OC_LOG": str(log)}
+
+    monkeypatch.setattr(crew_runner.crew_logins, "worker_env", with_log)
+    return log
+
+
+async def _approve_opencode(deck, user):
+    async with _client(deck.admin) as client:
+        made = await client.put(f"/fd/admin/users/{user['id']}", json={"crew": {"approved": True, "harnesses": ["opencode"], "max_parallel": 2}})
+    assert made.status_code == 200, made.text
+
+
+async def test_opencode_needs_no_key_but_someones_code_needs_a_chosen_model(deck, opencode_too):
+    await _approve_opencode(deck, deck.user)
+    brief = {"harness": "opencode", "brief": "Add it.", "project": "Game"}
+    async with _client(deck.user) as client:
+        h = (await client.get("/fd/crew/me")).json()["harnesses"][0]
+        assert h["login"] == {"ok": True, "how": "OpenCode's free models", "free": True}
+        assert h["models"] == ["opencode/deepseek-v4.1-flash-free", "opencode/big-pickle"] and h["default_model"] == ""
+        # Left to itself it would pick one: not with someone's repository.
+        refused = await client.post("/fd/crew/tasks", json=brief)
+        assert refused.status_code == 400 and "opencode.ai/docs/zen" in refused.text
+        assert not opencode_too.exists()
+        # Named on the task.
+        named = await client.post("/fd/crew/tasks", json={**brief, "model": "opencode/big-pickle"})
+        assert named.status_code == 201, named.text
+    done = await _settle(deck.user["id"], named.json()["id"])
+    assert done["status"] == "ready" and done["evidence"]["commits"] == 1 and done["model_used"] == "opencode/big-pickle"
+    assert "--model opencode/big-pickle" in opencode_too.read_text()
+    async with _client(deck.user) as client:
+        # Chosen as the default: what the person picked, wherever they picked it.
+        assert (await client.put("/fd/crew/models/opencode", json={"model": "opencode/deepseek-v4.1-flash-free"})).status_code == 200
+        assert (await client.get("/fd/crew/me")).json()["harnesses"][0]["default_model"] == "opencode/deepseek-v4.1-flash-free"
+        chosen = await client.post("/fd/crew/tasks", json=brief)
+        assert chosen.status_code == 201, chosen.text
+        assert chosen.json()["model"] == "opencode/deepseek-v4.1-flash-free"
+    await _settle(deck.user["id"], chosen.json()["id"])
+    assert "--model opencode/deepseek-v4.1-flash-free" in opencode_too.read_text()
+    async with _client(deck.user) as client:
+        row = (await client.get("/fd/crew/usage")).json()["harnesses"][0]
+        assert row["model"] == "opencode/deepseek-v4.1-flash-free"
+        # A task can still name another, and clearing the default brings the question back.
+        await client.put("/fd/crew/models/opencode", json={"model": ""})
+        assert (await client.post("/fd/crew/tasks", json=brief)).status_code == 400
+
+
+async def test_a_default_model_is_checked_and_each_users_own(deck, opencode_too):
+    await _approve_opencode(deck, deck.user)
+    await _approve_opencode(deck, deck.other)
+    async with _client(deck.user) as client:
+        assert (await client.put("/fd/crew/models/opencode", json={"model": "--danger"})).status_code == 400
+        assert (await client.put("/fd/crew/models/claude", json={"model": "x"})).status_code == 404  # not approved for it
+        assert (await client.put("/fd/crew/models/opencode", json={"model": "opencode/big-pickle"})).status_code == 200
+    async with _client(deck.other) as client:
+        assert (await client.get("/fd/crew/me")).json()["harnesses"][0]["default_model"] == ""
+
+
+async def test_pi_still_needs_a_key(deck):
+    async with _client(deck.admin) as client:
+        await client.put(f"/fd/admin/users/{deck.user['id']}", json={"crew": {"approved": True, "harnesses": ["pi"], "max_parallel": 1}})
+    async with _client(deck.user) as client:
+        assert (await client.get("/fd/crew/me")).json()["harnesses"][0]["login"]["ok"] is False
+
+
+async def test_the_tool_says_a_free_model_is_the_users_choice():
+    options = _FakeClient(options={"repos": {}, "usage": {"harnesses": []}, "me": {"harnesses": [
+        {"id": "opencode", "label": "OpenCode", "installed": True, "login": {"ok": True, "how": "OpenCode's free models", "free": True},
+         "default_model": "", "models": ["opencode/deepseek-v4.1-flash-free"]}]}})
+    out = (await CrewTool()._do_options(options)).content
+    assert "the user's choice" in out and "opencode/deepseek-v4.1-flash-free" in out
+    options.answers["options"]["me"]["harnesses"][0]["default_model"] = "opencode/deepseek-v4.1-flash-free"
+    out = (await CrewTool()._do_options(options)).content
+    assert "Tasks use opencode/deepseek-v4.1-flash-free" in out and "ask them" not in out
+
+
 async def test_the_tool_answers_which_model_and_how_much_of_the_limit():
     options = _FakeClient(options={"repos": {}, "me": {"harnesses": [
         {"id": "claude", "label": "Claude Code", "installed": True, "login": {"ok": True, "how": "your saved login"}},

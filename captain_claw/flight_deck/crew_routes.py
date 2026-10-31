@@ -16,6 +16,7 @@
   POST   /fd/crew/tasks/{id}/pr         push and open a pull request
   POST   /fd/crew/tasks/{id}/merge      land the work
   POST   /fd/crew/tasks/{id}/close      tear it down (?discard=true for work that hasn't landed)
+  PUT    /fd/crew/models/{harness}      the model a CLI uses when a task names none
   POST   /fd/crew/projects              a new project, ready for tasks
   POST   /fd/crew/projects/tidy         clear a project's finished tasks off the page
   GET/PUT/DELETE /fd/crew/logins[/{name}]   the accounts their workers run on
@@ -83,6 +84,10 @@ class AgentTaskBody(BaseModel):
     whole: bool = False
 
 
+class ModelBody(BaseModel):
+    model: str = ""
+
+
 class ProjectBody(BaseModel):
     name: str
 
@@ -108,19 +113,22 @@ async def _me(user: dict) -> dict[str, Any]:
     if not row or not grant.allowed:
         return out
     db = get_db()
+    defaults = await crew_logins.read_models(db, row["id"])
 
     async def one(harness: str) -> dict[str, Any]:
         info = crew_harness.HARNESSES[harness]
         binary = await asyncio.to_thread(crew_harness.find_binary, harness)
         version = await asyncio.to_thread(crew_harness.version_of, binary) if binary else ""
         return {"id": harness, "label": info.label, "installed": bool(binary), "version": version,
-                "install": info.install, "login": await crew_logins.login_state(db, row, grant, harness)}
+                "install": info.install, "login": await crew_logins.login_state(db, row, grant, harness),
+                "default_model": defaults.get(harness, ""),
+                "models": await crew_runner.models_of(row, grant, harness, binary, db)}
 
     out.update(
         trusted=grant.trusted, max_parallel=grant.max_parallel,
         harnesses=await asyncio.gather(*(one(h) for h in grant.harnesses)),
         logins=await crew_logins.read_meta(db, row["id"]),
-        login_names=list(crew_logins.LOGIN_NAMES),
+        login_names=list(crew_logins.LOGIN_NAMES), free_terms_url=crew_runner.FREE_TERMS_URL,
     )
     return out
 
@@ -252,6 +260,16 @@ async def put_login(name: str, body: LoginBody, user: dict = Depends(get_current
     saved = await crew_logins.save_login(get_db(), row["id"], name, body.secret)
     crew_store.get_store().forget_seen(row["id"], name)  # another account has other limits
     return saved
+
+
+@router.put("/models/{harness}")
+async def put_model(harness: str, body: ModelBody, user: dict = Depends(get_current_user)) -> dict[str, str]:
+    row, grant = await _approved(user)
+    if harness not in grant.harnesses:
+        raise HTTPException(404, "Unknown CLI")
+    model = crew_runner._clean_axis(body.model, crew_runner._MODEL_RE, "model name")
+    await crew_logins.save_model(get_db(), row["id"], harness, model)
+    return {"harness": harness, "model": model}
 
 
 @router.delete("/logins/{name}")

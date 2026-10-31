@@ -126,7 +126,7 @@ class CrewTool(Tool):
             "folder": {"type": "string", "description": "dispatch: a folder in that project. Omit to use the project's name."},
             "repo_url": {"type": "string", "description": "dispatch: a repository address to clone and work in, instead of a project."},
             "repo_path": {"type": "string", "description": "dispatch: a folder on this computer, instead of a project. Admins only."},
-            "model": {"type": "string", "description": "dispatch: a model for the CLI, only if the user asked for one."},
+            "model": {"type": "string", "description": "dispatch: a model for the CLI, only if the user asked for one; otherwise their default is used."},
             "effort": {"type": "string", "description": "dispatch: reasoning effort for the CLI, only if the user asked for one."},
             "task_id": {"type": "string", "description": "status, files, steer, stop, pr, request_merge: the task."},
             "whole": {"type": "boolean", "description": "files: copy the whole project, not only what the task changed."},
@@ -172,6 +172,13 @@ class CrewTool(Tool):
             lines.append(f"  {h['id']} ({h['label']}): {state}")
             if h.get("installed"):
                 lines.extend(_usage_lines(used.get(h["id"])))
+                if h.get("default_model"):
+                    lines.append(f"    Tasks use {h['default_model']} unless one names another (the user's choice).")
+                elif (h.get("login") or {}).get("free"):
+                    lines.append("    No model is chosen, so it needs one named. Its free models differ in what happens to "
+                                 "the code, so that's the user's choice: ask them, don't pick for them.")
+                if h.get("models"):
+                    lines.append(f"    It can use: {', '.join(h['models'][:30])}")
         repos = data.get("repos") or {}
         lines.append("Projects (each folder is in your VFS at the path shown: read it yourself, no task needed):")
         for p in repos.get("projects", []):
