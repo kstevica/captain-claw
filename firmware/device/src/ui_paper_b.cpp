@@ -840,9 +840,9 @@ static bool clockText(char* out, size_t n, const char* fmt, time_t t) {
 // the same on any background. Not smoothed: a blend of two inks would snap to a third.
 
 enum class Key : uint8_t { None, Talk, Answer, Options, Back, Next, Home, Update };
-static constexpr int kKeyX = 34, kKeyAY = 66, kKeyBY = 141, kKeyCY = 28, kKeyR = 20;
+static constexpr int kKeyX = 24, kKeyAY = 66, kKeyBY = 141, kKeyCY = 28, kKeyR = 20;
 static constexpr int kKeysBottom = 168;  // what's beside A and B ends here: below it, the whole width
-static constexpr int kKeysRight = 64;    // and beside them, this is free
+static constexpr int kKeysRight = 54;    // and beside them, this is free
 
 // A microphone, its middle on (cx, cy), `h` px tall.
 static void drawMic(int cx, int cy, int h, uint16_t ink) {
@@ -1204,7 +1204,7 @@ static void drawDashboard(bool asleep) {
   char clock[8] = "--:--";
   clockText(clock, sizeof(clock), "%H:%M", time(nullptr));
   font(vlw::Digits);
-  textOn(clock, W / 2 + 10, y + 56, kPaper, top, top_center);  // (A's and B's icons on its left)
+  textOn(clock, W / 2 + 16, y + 56, kPaper, top, top_center);  // (A's and B's icons on its left)
   font(vlw::Title);
   const String date = dateWords(kFullW - 32);
   if (date.length()) textOn(date, W / 2, y + 168, kPaper, top, top_center);
