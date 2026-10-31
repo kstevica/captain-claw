@@ -10,22 +10,26 @@ import {
   Bot,
   MessageSquare,
   KeyRound,
+  Mail,
   RotateCcw,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { useUIStore } from '../../stores/uiStore'
 import { MIN_PASSWORD_LENGTH } from '../profile/ChangePasswordCard'
 import { UserAgentsDialog } from '../agents/UserAgentsDialog'
+import { timeAgo } from '../console/format'
 import {
   adminHeaders, fetchPlans, kioskModeNote, matchesQuery, type KioskMode, type PlanLimits, type SystemConfig,
 } from './deckConfig'
+import { FeedbackRequestPanel } from './FeedbackRequestPanel'
 import { FilterSelect, FilterSummary, SearchBox } from './ListFilters'
 
 // Users → Users: every account on the deck — add one, change a plan, role or
 // kiosk lock, set a password, manage their agents, delete them, give free
 // resets of the daily allowances (to one, the selected or every user, up to
-// the deck's cap). Search and filters narrow the list in the browser (the
-// newest USERS_MAX accounts).
+// the deck's cap), see when they last logged in and what they spent, ask them
+// for feedback. Search and filters narrow the list in the browser (the newest
+// USERS_MAX accounts).
 
 interface UserInfo {
   id: string
@@ -35,6 +39,8 @@ interface UserInfo {
   created_at: string
   updated_at: string
   metadata: string
+  last_login_at?: string  // blank: no login on record
+  feedback_asked_at?: string
 }
 
 function userKioskFlag(user: UserInfo): boolean {
@@ -164,6 +170,45 @@ function fmtTok(n: number): string {
   if (n >= 1_000) return `${Math.round(n / 1_000)}k`
   return String(n)
 }
+
+// What a user's agents spent on LLMs (usage_spend.py), at list prices.
+interface SpendTotals {
+  usd: number
+  tokens: number
+  unpriced_tokens: number  // on models with no price, local ones usually
+  own_usd: number  // on their own API keys: the deck doesn't pay these
+  own_tokens: number
+}
+interface UserSpend { month: SpendTotals; all: SpendTotals; unpriced_models: string[] }
+interface Spend { month: string; since: string; users: Record<string, UserSpend> }
+
+const NO_SPEND: UserSpend = {
+  month: { usd: 0, tokens: 0, unpriced_tokens: 0, own_usd: 0, own_tokens: 0 },
+  all: { usd: 0, tokens: 0, unpriced_tokens: 0, own_usd: 0, own_tokens: 0 },
+  unpriced_models: [],
+}
+
+async function fetchSpend(): Promise<Spend> {
+  const res = await fetch('/fd/admin/usage/spend', { headers: adminHeaders(), credentials: 'include' })
+  if (!res.ok) throw new Error('Failed to fetch spend')
+  return res.json()
+}
+
+function fmtUsd(n: number): string {
+  if (n > 0 && n < 0.01) return '<$0.01'
+  return n.toLocaleString('en-US', { style: 'currency', currency: 'USD' })
+}
+
+// Dollars; tokens instead when nothing they used has a price.
+function spentLabel(t: SpendTotals): string {
+  return t.usd === 0 && t.unpriced_tokens > 0 ? `${fmtTok(t.unpriced_tokens)} tok` : fmtUsd(t.usd)
+}
+
+function fmtDay(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
+}
+
+const LOGIN_NOTE = 'Their last sign-in, or the last time a saved session let them back in. A tab left open counts.'
 
 const perDay = (n: number | undefined, fmt: (n: number) => string = String) => (n ? fmt(n) : 'unlimited')
 
@@ -360,12 +405,30 @@ function MustChangeCheckbox({ checked, onChange, label, note }: {
   )
 }
 
+function SpendLine({ label, totals }: { label: string; totals: SpendTotals }) {
+  return (
+    <div>
+      <span className="text-zinc-500">{label}: </span>
+      <span className="text-zinc-300">{fmtUsd(totals.usd)}</span>
+      <span className="text-zinc-500"> · {fmtTok(totals.tokens)} tokens</span>
+      {totals.unpriced_tokens > 0 && (
+        <span className="text-zinc-500"> ({fmtTok(totals.unpriced_tokens)} with no price)</span>
+      )}
+      {totals.own_tokens > 0 && (
+        <span className="text-zinc-500"> · on their own keys {fmtUsd(totals.own_usd)}, {fmtTok(totals.own_tokens)} tokens</span>
+      )}
+    </div>
+  )
+}
+
 function UserRow({
-  user, plans, usage, resets, resetCap, selected, onSelect, onUpdate, onDelete, currentUserId, kioskMode,
+  user, plans, usage, spend, spendSince, resets, resetCap, selected, onSelect, onUpdate, onDelete, currentUserId, kioskMode,
 }: {
   user: UserInfo
   plans: Record<string, PlanLimits>
   usage?: DayUsage
+  spend: UserSpend | null  // null: this deck can't tell yet
+  spendSince: string
   resets: number
   resetCap: number
   selected: boolean
@@ -384,6 +447,8 @@ function UserRow({
   const [agentsOpen, setAgentsOpen] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [changingResets, setChangingResets] = useState(false)
+  const [asking, setAsking] = useState(false)
+  const [askedFrom, setAskedFrom] = useState('')
   const isSelf = user.id === currentUserId
   const { limits, custom } = effectiveLimits(plans[plan], user.metadata)
   const mark = (key: string) => (custom.has(key) ? ' (custom)' : '')
@@ -453,6 +518,16 @@ function UserRow({
               {isSelf && <span className="text-xs text-zinc-500">(you)</span>}
             </div>
             <div className="text-xs text-zinc-500">{user.email}</div>
+            <div className="mt-0.5 flex flex-wrap gap-x-2 text-[11px] text-zinc-500">
+              <span title={LOGIN_NOTE}>
+                {user.last_login_at ? `Last login ${timeAgo(user.last_login_at)}` : 'No login on record'}
+              </span>
+              {spend && (
+                <span title="What their agents spent on AI models, at list prices">
+                  {spentLabel(spend.month)} this month · {spentLabel(spend.all)} all time
+                </span>
+              )}
+            </div>
           </div>
           {userMustChangePassword(user) && (
             <span
@@ -585,8 +660,24 @@ function UserRow({
             </div>
           )}
 
-          <div className="text-xs text-zinc-600">
-            Joined: {new Date(user.created_at).toLocaleDateString()}
+          {spend && (
+            <div className="space-y-0.5 text-xs">
+              <SpendLine label="Spent this month" totals={spend.month} />
+              <SpendLine label={spendSince ? `Spent since ${fmtDay(spendSince)}` : 'Spent all time'} totals={spend.all} />
+              {spend.unpriced_models.length > 0 && (
+                <div className="text-[11px] text-zinc-600">
+                  No price for: {spend.unpriced_models.join(', ')}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex flex-wrap gap-x-4 text-xs text-zinc-600">
+            <span>Joined: {new Date(user.created_at).toLocaleDateString()}</span>
+            <span title={LOGIN_NOTE}>
+              Last login: {user.last_login_at ? new Date(user.last_login_at).toLocaleString() : 'none on record'}
+            </span>
+            {user.feedback_asked_at && <span>Asked for feedback: {fmtDay(user.feedback_asked_at)}</span>}
           </div>
           {saveError && <p className="text-xs text-red-400">{saveError}</p>}
 
@@ -608,6 +699,17 @@ function UserRow({
             </button>
             {!isSelf && (
               <button
+                onClick={() => { setAsking(true); setAskedFrom('') }}
+                disabled={asking}
+                title="Email them from your own account and ask how the deck is working for them"
+                className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-300 hover:border-violet-500/40 hover:text-zinc-100 disabled:opacity-50"
+              >
+                <Mail className="h-3 w-3 inline mr-1" />
+                Ask for feedback
+              </button>
+            )}
+            {!isSelf && (
+              <button
                 onClick={() => { if (confirm(`Delete user ${user.email}? This cannot be undone.`)) onDelete(user.id) }}
                 className="rounded-md border border-red-900/50 px-3 py-1.5 text-xs text-red-400 hover:bg-red-950/50"
               >
@@ -616,6 +718,15 @@ function UserRow({
               </button>
             )}
           </div>
+
+          {askedFrom && <p className="text-xs text-emerald-400">Email sent from {askedFrom}. Their reply comes to that mailbox.</p>}
+          {asking && (
+            <FeedbackRequestPanel
+              userId={user.id}
+              onSent={(from) => { setAsking(false); setAskedFrom(from); onUpdate() }}
+              onClose={() => setAsking(false)}
+            />
+          )}
 
           <SetPasswordSection userId={user.id} email={user.email} isSelf={isSelf} onSet={onUpdate} />
         </div>
@@ -855,7 +966,7 @@ function GrantResetsPanel({ selected, everyone, cap, onDone, onClose }: {
 
 type RoleFilter = 'all' | 'admin' | 'user'
 type StatusFilter = 'any' | 'kiosk' | 'not-kiosk' | 'temp-password' | 'used-today' | 'limit-reached' | 'has-resets'
-type SortKey = 'newest' | 'oldest' | 'name' | 'usage'
+type SortKey = 'newest' | 'oldest' | 'name' | 'usage' | 'login-recent' | 'login-longest' | 'spend-month' | 'spend-all'
 
 const STATUS_LABEL: Record<StatusFilter, string> = {
   any: 'Any status',
@@ -872,6 +983,10 @@ const SORT_LABEL: Record<SortKey, string> = {
   oldest: 'Oldest first',
   name: 'Name A–Z',
   usage: 'Most active today',
+  'login-recent': 'Last login: most recent',
+  'login-longest': 'Last login: longest ago',
+  'spend-month': 'Most spent this month',
+  'spend-all': 'Most spent all time',
 }
 
 export function UsersAdmin({ refreshTick, config, onTotal }: {
@@ -886,6 +1001,7 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
   const [usageToday, setUsageToday] = useState<Record<string, DayUsage>>({})
   const [resets, setResetsMap] = useState<Record<string, number>>({})
   const [resetCap, setResetCap] = useState(NO_USAGE.reset_cap)
+  const [spend, setSpend] = useState<Spend | null>(null)
   const [selected, setSelected] = useState<Set<string>>(() => new Set())
   const [granting, setGranting] = useState(false)
   const [notice, setNotice] = useState('')
@@ -899,8 +1015,8 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
 
   const load = useCallback(async () => {
     try {
-      const [data, plansData, today] = await Promise.all([
-        fetchUsers(USERS_MAX), fetchPlans(), fetchUsageToday().catch(() => NO_USAGE),
+      const [data, plansData, today, spendData] = await Promise.all([
+        fetchUsers(USERS_MAX), fetchPlans(), fetchUsageToday().catch(() => NO_USAGE), fetchSpend().catch(() => null),
       ])
       setUsers(data.users)
       setTotal(data.total)
@@ -909,6 +1025,7 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
       setUsageToday(today.usage)
       setResetsMap(today.resets)
       setResetCap(today.reset_cap)
+      setSpend(spendData)
       // Selections of accounts that are gone (or became admins) drop out.
       const selectable = new Set(data.users.filter((u) => u.role !== 'admin').map((u) => u.id))
       setSelected((prev) => new Set([...prev].filter((id) => selectable.has(id))))
@@ -954,13 +1071,20 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
     })
     const name = (u: UserInfo) => u.display_name || u.email
     const used = (u: UserInfo) => usageToday[u.id] ?? { messages: 0, tokens: 0 }
+    const spent = (u: UserInfo) => spend?.users[u.id] ?? NO_SPEND
+    const login = (u: UserInfo) => u.last_login_at ?? ''
     return list.sort((a, b) => {
+      // No login on record sorts as the longest ago.
+      if (sort === 'login-recent') return login(b).localeCompare(login(a))
+      if (sort === 'login-longest') return login(a).localeCompare(login(b))
+      if (sort === 'spend-month') return spent(b).month.usd - spent(a).month.usd
+      if (sort === 'spend-all') return spent(b).all.usd - spent(a).all.usd
       if (sort === 'oldest') return a.created_at.localeCompare(b.created_at)
       if (sort === 'name') return name(a).localeCompare(name(b), undefined, { sensitivity: 'base' })
       if (sort === 'usage') return used(b).tokens - used(a).tokens || used(b).messages - used(a).messages
       return b.created_at.localeCompare(a.created_at)
     })
-  }, [users, query, role, plan, status, sort, usageToday, resets, plans, config.kiosk_mode])
+  }, [users, query, role, plan, status, sort, usageToday, resets, plans, spend, config.kiosk_mode])
 
   const filtered = query.trim() !== '' || role !== 'all' || plan !== 'all' || status !== 'any'
   const clearFilters = () => { setQuery(''); setRole('all'); setPlan('all'); setStatus('any') }
@@ -1085,6 +1209,8 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
           user={u}
           plans={plans}
           usage={usageToday[u.id]}
+          spend={spend ? spend.users[u.id] ?? NO_SPEND : null}
+          spendSince={spend?.since ?? ''}
           resets={resets[u.id] ?? 0}
           resetCap={resetCap}
           selected={selected.has(u.id)}

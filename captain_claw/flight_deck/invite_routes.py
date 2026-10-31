@@ -151,11 +151,11 @@ def _new_token() -> tuple[str, str, str]:
     return token, hash_token(token), (_now() + INVITE_TTL).isoformat()
 
 
-def _clean_note(value: str | None) -> str:
+def _clean_note(value: str | None, cap: int = NOTE_MAX) -> str:
     """The admin's note: plain text, line breaks kept, capped."""
     text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
     text = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ch.isprintable())
-    return text.strip()[:NOTE_MAX]
+    return text.strip()[:cap]
 
 
 def _check_send_via(value: str) -> str:
