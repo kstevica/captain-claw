@@ -51,7 +51,7 @@
 #endif
 
 #if defined(PAPER_B)
-#define FW_VERSION "1.0.23"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
+#define FW_VERSION "1.0.24"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
 #define FW_VERSION "0.19.12"
 #endif

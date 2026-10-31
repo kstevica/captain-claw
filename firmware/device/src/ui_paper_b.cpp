@@ -81,6 +81,11 @@ struct Rect {
   int x, y, w, h;
 };
 static std::vector<Rect> pictures;  // regions to error-diffuse in this frame
+struct Duo {
+  Rect r;
+  uint16_t a, b;
+};
+static std::vector<Duo> duos;  // regions that stay between two inks: text on a colour
 
 static void font(vlw::Id id) { canvas.setFont(&fontSet[id]); }
 static int tw(const String& s) { return canvas.textWidth(s.c_str()); }
@@ -89,6 +94,16 @@ static void text(const String& s, int x, int y, uint16_t color, uint8_t datum = 
   canvas.setTextDatum(datum);
   canvas.setTextColor(color);
   canvas.drawString(s.c_str(), x, y);
+}
+
+// Text on a solid block: its edges stay between the two inks, with no third one
+// (a blend of white and green would snap to yellow).
+static void textOn(const String& s, int x, int y, uint16_t fg, uint16_t bg, uint8_t datum = top_left) {
+  canvas.setTextDatum(datum);
+  canvas.setTextColor(fg, bg);
+  canvas.drawString(s.c_str(), x, y);
+  const int w = tw(s), h = canvas.fontHeight(), across = datum & 3, down = (datum >> 2) & 3;
+  duos.push_back({{x - (across == 1 ? w / 2 : across == 2 ? w : 0) - 1, y - (down == 1 ? h / 2 : down == 2 ? h : 0) - 1, w + 2, h + 2}, fg, bg});
 }
 
 static int utf8Step(uint8_t c) { return c >= 0xF0 ? 4 : c >= 0xE0 ? 3 : c >= 0xC0 ? 2 : 1; }
@@ -374,6 +389,25 @@ static void toInks() {
       if (c.w <= 0 || c.h <= 0) continue;
       diffuse(buf, c);
       for (int y = c.y; y < c.y + c.h; ++y) memset(&inPicture[y * W + c.x], 1, c.w);
+    }
+  }
+  // Text on a colour first: it's an ink after this, and the pass below leaves it.
+  static const auto channels = [](uint16_t c, int* v) {
+    v[0] = ((c >> 11) & 31) * 255 / 31, v[1] = ((c >> 5) & 63) * 255 / 63, v[2] = (c & 31) * 255 / 31;
+  };
+  for (const Duo& d : duos) {
+    int a[3], b[3], v[3];
+    channels(d.a, a);
+    channels(d.b, b);
+    const int x0 = max(0, d.r.x), x1 = min(W, d.r.x + d.r.w), y0 = max(0, d.r.y), y1 = min(H, d.r.y + d.r.h);
+    for (int y = y0; y < y1; ++y) {
+      for (int x = x0; x < x1; ++x) {
+        const int i = y * W + x;
+        channels(px(buf, i), v);
+        int toA = 0, toB = 0;
+        for (int k = 0; k < 3; ++k) toA += (v[k] - a[k]) * (v[k] - a[k]), toB += (v[k] - b[k]) * (v[k] - b[k]);
+        setPx(buf, i, toA <= toB ? d.a : d.b);
+      }
     }
   }
   uint16_t lastIn = 0xFFFF, lastOut = kPaper;
@@ -704,6 +738,7 @@ static void commit() {
   Want w = std::move(want);
   want.active = false;
   pictures.clear();
+  duos.clear();
   canvas.fillScreen(kPaper);
   w.draw();
   shownKind = w.kind;
@@ -796,22 +831,24 @@ static int batteryPct(bool* charging) {
   return pct;
 }
 
-static void drawBattery(int x, int y, int pct, bool chg) {  // x = right edge, y = middle
+static void drawBattery(int x, int y, int pct, bool chg, uint16_t fg = kInk, uint16_t bg = kPaper) {  // x = right edge, y = middle
   font(vlw::Small);
   String t = pct >= 0 ? String(pct) + "%" : String("?");
   int textW = tw(t);
   const int bw = 30, bh = 16;
   int bx = x - textW - 8 - bw;
   uint16_t fill = pct < 20 ? kRed : pct < 40 ? kYellow : kGreen;
-  canvas.drawRoundRect(bx, y - bh / 2, bw - 3, bh, 3, kInk);
-  canvas.drawRoundRect(bx + 1, y - bh / 2 + 1, bw - 5, bh - 2, 2, kInk);
-  canvas.fillRect(bx + bw - 3, y - 4, 3, 8, kInk);
+  if (fill == bg) fill = fg;
+  canvas.drawRoundRect(bx, y - bh / 2, bw - 3, bh, 3, fg);
+  canvas.drawRoundRect(bx + 1, y - bh / 2 + 1, bw - 5, bh - 2, 2, fg);
+  canvas.fillRect(bx + bw - 3, y - 4, 3, 8, fg);
   if (pct > 0) canvas.fillRect(bx + 3, y - bh / 2 + 3, max(2, pct * (bw - 9) / 100), bh - 6, fill);
   if (chg) {
-    canvas.fillTriangle(bx + 15, y - 9, bx + 8, y + 1, bx + 14, y + 1, kInk);
-    canvas.fillTriangle(bx + 12, y - 1, bx + 19, y - 1, bx + 11, y + 9, kInk);
+    canvas.fillTriangle(bx + 15, y - 9, bx + 8, y + 1, bx + 14, y + 1, fg);
+    canvas.fillTriangle(bx + 12, y - 1, bx + 19, y - 1, bx + 11, y + 9, fg);
   }
-  text(t, x, y, pct < 20 ? kRed : kInk, middle_right);
+  if (bg == kPaper) text(t, x, y, pct < 20 ? kRed : kInk, middle_right);
+  else textOn(t, x, y, fg, bg, middle_right);
 }
 
 // `t` formatted in local time; false before the clock was ever set.
@@ -882,13 +919,6 @@ static void drawPageDots(int count, int current, int y) {
   }
 }
 
-// A label in blue with a short rule before it.
-static void drawLabel(const String& s, int x, int y, uint16_t color = kBlue) {
-  canvas.fillRect(x, y + 4, 4, 16, color);
-  font(vlw::Small);
-  text(s, x + 12, y, color);
-}
-
 // ── public: basics ─────────────────────────────────────────────────────
 
 static void makeCanvas() {
@@ -942,75 +972,39 @@ void setHealth(Health wifi, Health agent) {
 
 // ── the dashboard ──────────────────────────────────────────────────────
 
-// "Monday, 19 October"; returns the height it took (0 before the clock is set).
-static int drawDate(int x, int y, int w) {
+// "Monday, 19 October", or "Mon 19 Oct" when that's wider than `w` (the current
+// font); "" before the clock is set.
+static String dateWords(int w) {
   char date[40];
-  if (!clockText(date, sizeof(date), "%A, %e %B", time(nullptr))) return 0;
+  if (!clockText(date, sizeof(date), "%A, %e %B", time(nullptr))) return "";
   String d = date;
   d.replace("  ", " ");
-  font(vlw::Title);
   if (tw(d) > w && clockText(date, sizeof(date), "%a %e %b", time(nullptr))) {
     d = date;
     d.replace("  ", " ");
   }
-  text(fit(d, w), x, y, kInk);
-  return 44;
+  return fit(d, w);
 }
 
-// The room: temperature large, humidity at the right. Returns the height
-// it took (0 on a device without the sensor).
-static int drawClimate(int x, int y, int w) {
-  float t, rh;
-  if (!telemetry::climate(&t, &rh)) return 0;
-  char buf[12];
-  snprintf(buf, sizeof(buf), "%.1f", t);
-  String tt = buf, hum = String((int)lroundf(rh)) + "%";
-  font(vlw::Small);
-  int humW = tw("humidity");
-  font(vlw::Title);
-  humW = max(humW, tw(hum));
-  font(vlw::Digits);
-  const bool big = tw(tt) + 44 + 20 + humW <= w;
-  if (!big) font(vlw::Badge);
-  const int tW = tw(tt);
-  text(tt, x - (big ? 4 : 0), y - (big ? 10 : 2), kInk);
-  const int r = big ? 7 : 5, dx = x + tW + 2;
-  canvas.drawCircle(dx + r, y + r + 4, r, kInk);
-  canvas.drawCircle(dx + r, y + r + 4, r - 1, kInk);
-  font(vlw::Title);
-  text("C", dx + 2 * r + 3, y, kInk);
-  text(hum, x + w, y + (big ? 12 : 0), kBlue, top_right);
-  font(vlw::Small);
-  text("humidity", x + w, y + (big ? 52 : 40), kBlue, top_right);
-  return big ? 96 : 66;
-}
-
-// A block: a label, a large line, a quieter line under it; where it ends.
-static int drawBlock(int x, int y, int w, const String& label, const String& big, const String& small,
-                     uint16_t bigInk = kInk, uint16_t labelInk = kBlue) {
-  drawLabel(label, x, y, labelInk);
-  y += 28;
-  font(vlw::Title);
-  text(fit(big, w), x, y, bigInk);
-  y += 40;
-  if (small.length()) {
-    font(vlw::BodyS);
-    text(fit(small, w), x, y, kInk);
-    y += 32;
-  }
-  return y;
-}
-
-// The battery as words: how long it has, or until it's full.
-static String batteryWords(int pct, bool chg) {
+// The battery as words, in `w` px of the current font: how long it has, or
+// until it's full.
+static String powerWords(bool chg, int w) {
+  String s;
   if (chg) {
     const int m = battery::minutesToFull();
-    return m == 0 ? String("full") : m > 0 ? "charging · full in ≈ " + timeSpan(m) : String("charging");
+    if (m == 0) return "full";
+    if (m < 0) return "charging";
+    s = "full in " + timeSpan(m);
+    if (tw(s) > w) s = timeSpan(m);
+  } else if (telemetry::onUsbPower()) {
+    return "on USB";
+  } else {
+    const int m = battery::minutesLeft();
+    if (m < 0) return "on battery";
+    s = timeSpan(m);
   }
-  if (telemetry::onUsbPower()) return "full · on USB";
-  const int m = battery::minutesLeft();
-  if (m >= 0) return "≈ " + timeSpan(m) + " left";
-  return pct >= 0 ? String("on battery") : String("");
+  if (tw(s) > w) s.replace(" min", "");
+  return fit(s, w);
 }
 
 static String clockLength(uint32_t secs) {
@@ -1023,72 +1017,256 @@ static Home lastHome;  // what the main loop last knew of the links (its rows: W
 static bool haveHome = false;
 static int waitingCount = 0;  // proposals waiting in Flight Deck, as last heard (setWaiting)
 
-// The dashboard's top: the header (the clock as of this drawing, the links'
-// dots, the battery), the date, the room, the battery's block. Returns where
-// it ends.
-static int drawDashTop(bool asleep) {
-  drawHeader("", !asleep);
-  const int x = PAD, w = W - 2 * PAD;
-  int y = kHeadH + 14;
-  y += drawDate(x, y, w);
-  const int ch = drawClimate(x, y, w);
-  y += ch ? ch + 12 : 4;
-  bool chg = false;
-  const int pct = batteryPct(&chg);
-  y = drawBlock(x, y, w, "BATTERY", pct >= 0 ? String(pct) + " %" : String("?"), batteryWords(pct, chg),
-                pct >= 0 && pct < 20 ? kRed : kInk);
-  return y + 8;
+// A key's letter in a rounded square; where it ends.
+static int drawKeyCap(const char* key, int x, int cy, int size, uint16_t fill, uint16_t fg) {
+  canvas.fillRoundRect(x, cy - size / 2, size, size, size / 4, fill);
+  font(size >= 50 ? vlw::Title : vlw::Small);
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(fg);
+  canvas.drawString(key, x + size / 2, cy + 1);
+  duos.push_back({{x + 2, cy - size / 2 + 2, size - 4, size - 4}, fg, fill});
+  return x + size;
 }
 
-// The dashboard: the clock as of this drawing, the date, the room, the
-// battery, the notes kept offline, the links; drawn every five minutes and on
-// request. Asleep: the same, the links replaced by how to wake it.
+static void drawMic(int cx, int cy, int r) {
+  canvas.fillRoundRect(cx - r, cy - r * 2, r * 2, r * 3, r, kInk);
+  canvas.fillArc(cx, cy - r / 2, r + 11, r + 6, 0, 180, kInk);
+  canvas.fillRect(cx - 3, cy + r + 8, 6, r - 1, kInk);
+  canvas.fillRoundRect(cx - r, cy + 2 * r + 5, r * 2, 6, 3, kInk);
+}
+
+// A line of handwriting: a wavering stroke, a gap, a wavering stroke. (Plain
+// lines: a smoothed black on yellow would snap to green.)
+static void scribble(int x, int y, int len, int seed) {
+  static constexpr int kWords[] = {24, 14, 30, 18, 12, 26, 20};
+  for (int done = 0, word = 0; done < len; ++word) {
+    const int n = min(len - done, kWords[(seed + word) % 7]);
+    int was = y + lroundf(2 * sinf((done + seed * 3) * 0.8f));
+    for (int i = 3; i <= n; i += 3) {
+      const int now = y + lroundf(2 * sinf((done + i + seed * 3) * 0.8f));
+      for (int t = 0; t < 2; ++t) canvas.drawLine(x + done + i - 3, was + t, x + done + i, now + t, kInk);
+      was = now;
+    }
+    done += n + 8;
+  }
+}
+
+// A yellow notepad on the black tile: rings along the top, handwriting on the sheet.
+static void drawNotepad(int x, int y, int w, int h) {
+  const int ringH = constrain(h / 6, 10, 22), ringW = constrain(w / 16, 4, 8), top = y + ringH / 2;
+  canvas.fillRoundRect(x, top, w, h - ringH / 2, 6, kYellow);
+  const int margin = max(6, w / 10), rowW = w - 2 * margin;
+  const int first = top + ringH / 2 + max(9, h / 7), last = y + h - max(9, h / 7);
+  for (int i = 0; i < 3; ++i) scribble(x + margin, first + i * (last - first) / 2, i == 2 ? rowW * 55 / 100 : rowW, i * 2 + 1);
+  const int inset = max(9, w / 8);
+  for (int i = 0; i < 5; ++i) {
+    const int rx = x + inset + i * (w - 2 * inset) / 4;
+    canvas.fillRoundRect(rx - ringW / 2 - 2, y - 2, ringW + 4, ringH + 4, ringW / 2 + 2, kInk);
+    canvas.fillRoundRect(rx - ringW / 2, y, ringW, ringH, ringW / 2, kPaper);
+  }
+}
+
+// How many notes there are, on the notepad's corner: it grows to the left, over the pad.
+static void drawNoteCount(int right, int cy, int notes) {
+  const String n = notes > 99 ? String("99+") : String(notes);
+  font(vlw::Title);
+  static constexpr int kH = 46;
+  const int w = max(kH, tw(n) + 22), x = right - w;
+  canvas.fillRoundRect(x - 3, cy - kH / 2 - 3, w + 6, kH + 6, kH / 2 + 3, kInk);
+  canvas.fillRoundRect(x, cy - kH / 2, w, kH, kH / 2, kRed);
+  textOn(n, x + w / 2, cy, kPaper, kRed, middle_center);
+}
+
+// The top block's first line: the links' dots and the agent (asleep: only that
+// it's asleep, nothing is connected then), what waits, the battery.
+static void drawStatusLine(int x, int w, int y, uint16_t bg, bool asleep) {
+  bool chg = false;
+  const int pct = batteryPct(&chg);
+  drawBattery(x + w, y, pct, chg, kPaper, bg);
+  font(vlw::Small);
+  const int right = x + w - tw(pct >= 0 ? String(pct) + "%" : String("?")) - 8 - 30 - 8;  // the battery's left edge
+  int left = x;
+  if (!asleep) {
+    for (const Health h : {hWifi, hAgent}) {  // white around them: a red one still shows on red
+      canvas.fillCircle(left + 8, y, 8, kPaper);
+      canvas.fillCircle(left + 8, y, 6, healthInk(h));
+      left += 20;
+    }
+    left += 4;
+  }
+  int room = right - left;
+  font(vlw::Small);
+  if (waitingCount > 0) {
+    const String t = String(waitingCount) + " waiting";
+    const int pw = tw(t) + 18, px = right - pw;
+    const uint16_t fill = bg == kRed ? kPaper : kRed, fg = bg == kRed ? kRed : kPaper;
+    canvas.fillRoundRect(px, y - 14, pw, 28, 14, fill);
+    textOn(t, px + pw / 2, y, fg, fill, middle_center);
+    room -= pw + 8;
+    font(vlw::Small);
+  }
+  const String name = asleep ? String("Asleep") : barAgent.length() ? barAgent : String("Captain");
+  if (waitingCount == 0 || tw(name) <= room) textOn(fit(name, room), left, y, kPaper, bg, middle_left);  // (the Agent row has it too)
+}
+
+// One of the three blocks: a label, a big number with its unit, a line under it.
+struct StatBlock {
+  int x, w;
+  uint16_t fill, fg;
+  const char* label;
+  String big;
+  const char* unit;  // "o": degrees
+};
+
+static void drawStatBlock(const StatBlock& b, int y, int h) {
+  canvas.fillRoundRect(b.x, y, b.w, h, 14, b.fill);
+  font(vlw::Small);
+  textOn(b.label, b.x + 9, y + 7, b.fg, b.fill);
+  font(vlw::Badge);
+  textOn(b.big, b.x + 7, y + 28, b.fg, b.fill);
+  const int ux = b.x + 7 + tw(b.big) + 2;
+  if (b.unit[0] == 'o') {  // (the big font has no ° of its own)
+    canvas.fillCircle(ux + 6, y + 44, 6, b.fg);
+    canvas.fillCircle(ux + 6, y + 44, 3, b.fill);
+  } else if (b.unit[0]) {
+    font(vlw::Small);
+    if (ux + tw(b.unit) <= b.x + b.w - 3) textOn(b.unit, ux, y + 36, b.fg, b.fill);
+  }
+}
+
+// What the talk button does, in a big tile. Note mode: black, a notepad, how many
+// there are and the room left. Not ready yet: what it's waiting for.
+static void drawTile(int x, int y, int w, int h, bool asleep, int notes, const String& kept, const String& room) {
+  canvas.fillRoundRect(x, y, w, h, 16, kInk);
+  if (lastHome.noteMode) {
+    const int padH = h - 28, padW = padH * 3 / 4, padX = x + 14;
+    drawNotepad(padX, y + 14, padW, padH);
+    drawNoteCount(padX + padW + 12, y + 14 + padH - 22, notes);
+    const int tx = padX + padW + 24, right = x + w - 10, top = y + (h - 108) / 2;
+    font(vlw::Title);
+    textOn("Hold", tx, top, kPaper, kInk);
+    const int after = drawKeyCap(board::kTalkKey, tx + tw("Hold") + 7, top + 20, 34, kPaper, kInk) + 7;
+    font(vlw::Title);
+    textOn("to send", after, top, kPaper, kInk);
+    font(vlw::BodyS);
+    textOn(fit(kept, right - tx), tx, top + 44, kPaper, kInk);
+    textOn(fit(room, right - tx), tx, top + 76, kPaper, kInk);
+    return;
+  }
+  canvas.fillRoundRect(x + 4, y + 4, w - 8, h - 8, 13, kPaper);
+  const int mid = y + h / 2;
+  if (!lastHome.ready && !asleep) {
+    font(vlw::BodyM);
+    String hint = lastHome.hint.length() ? lastHome.hint : String("Getting ready");
+    hint.replace(" · ", "\n");
+    const std::vector<String> ls = clamp(wrap(hint, w - 40), 3, w - 40);
+    const int lineH = 38, top = mid - (int)ls.size() * lineH / 2;
+    for (int i = 0; i < (int)ls.size(); ++i) text(ls[i], W / 2, top + i * lineH, kInk, top_center);
+    return;
+  }
+  font(vlw::Badge);
+  const int wordsW = tw("to talk"), total = 62 + 20 + 58 + 14 + wordsW;
+  int cx = x + (w - total) / 2;
+  drawMic(cx + 31, mid - 8, 17);
+  cx = drawKeyCap(board::kTalkKey, cx + 82, mid, 58, kInk, kPaper) + 14;
+  font(vlw::Badge);
+  text("to talk", cx, mid - 4, kInk, middle_left);
+}
+
+// The links, a row each: a dot in the ink of their state, the name, the value.
+// Asleep, that it's redrawn all the same.
+static void drawLinks(int x, int y, int w, int h, bool asleep) {
+  font(vlw::Small);
+  if (asleep) {
+    text(fit("Redrawn every five minutes", w), x + w / 2, y + h / 2, kInk, middle_center);
+    return;
+  }
+  static constexpr int kRowH = 28;
+  auto row = [&](const String& label, const String& value, uint16_t ink) {
+    canvas.fillCircle(x + 7, y + kRowH / 2, 6, ink);
+    if (ink == kYellow) canvas.drawCircle(x + 7, y + kRowH / 2, 6, kInk);  // (faint on paper by itself)
+    text(label, x + 22, y + kRowH / 2, kInk, middle_left);
+    const int left = 22 + tw(label) + 12;
+    text(fit(value, w - left), x + w, y + kRowH / 2, ink == kRed || ink == kBlue ? ink : kInk, middle_right);
+    y += kRowH;
+  };
+  if (!haveHome || lastHome.rows.size() < 2) {
+    row("Wi-Fi", hWifi == Up ? "up" : hWifi == Partial ? "connecting…" : "not connected", healthInk(hWifi));
+    row("Agent", hAgent == Up ? "linked" : hAgent == Asleep ? "asleep" : hAgent == Off ? "stopped" : "no agent yet", healthInk(hAgent));
+    return;
+  }
+  for (size_t i = 1; i < lastHome.rows.size() && i < 5; ++i) {
+    const Row& r = lastHome.rows[i];
+    if (String(r.label) != "Waiting") row(r.label, r.value, snap(r.color));  // (the pill on top says that)
+  }
+}
+
+// The dashboard, in blocks of colour: the clock as of this drawing, the room, the
+// battery, the notes, what the talk button does, the links; drawn every five
+// minutes and on request. Note mode shows at a glance: the top block turns red.
 static void drawDashboard(bool asleep) {
-  const int x = PAD, w = W - 2 * PAD;
-  int y = drawDashTop(asleep);
+  static constexpr int M = 6, G = 6, kFullW = 400 - 2 * M;
+  int y = M;
+  const uint16_t top = lastHome.noteMode ? kRed : kInk;
+  canvas.fillRoundRect(M, y, kFullW, 192, 16, top);
+  drawStatusLine(M + 16, kFullW - 32, y + 24, top, asleep);
+  char clock[8] = "--:--";
+  clockText(clock, sizeof(clock), "%H:%M", time(nullptr));
+  font(vlw::Digits);
+  textOn(clock, W / 2, y + 44, kPaper, top, top_center);
+  font(vlw::Title);
+  const String date = dateWords(kFullW - 32);
+  if (date.length()) textOn(date, W / 2, y + 146, kPaper, top, top_center);
+  y += 192 + G;
+
+  // The three blocks, each as wide as what it says.
+  static constexpr int kStatH = 122, kRoomW = 102, kPowerW = 126, kNotesW = 136;
+  const int powerX = M + kRoomW + G, notesX = powerX + kPowerW + G;
+  float t, rh;
+  const bool hasRoom = telemetry::climate(&t, &rh);
+  drawStatBlock({M, kRoomW, kBlue, kPaper, "Room", hasRoom ? String((int)lroundf(t)) : String("--"), hasRoom ? "o" : ""}, y, kStatH);
+  if (hasRoom) {  // a water drop, as the word doesn't fit
+    const int cy = y + 105;
+    canvas.fillCircle(M + 16, cy + 2, 7, kPaper);
+    canvas.fillTriangle(M + 16, cy - 11, M + 10, cy - 1, M + 22, cy - 1, kPaper);
+    font(vlw::Small);
+    textOn(String((int)lroundf(rh)) + "%", M + 28, y + 92, kPaper, kBlue);
+  }
+
+  bool chg = false;
+  const int pct = batteryPct(&chg);
+  const uint16_t powerFill = pct < 0 ? kInk : pct < 20 ? kRed : pct < 40 ? kYellow : kGreen;
+  const uint16_t powerFg = powerFill == kYellow ? kInk : kPaper;
+  drawStatBlock({powerX, kPowerW, powerFill, powerFg, "Power", pct >= 0 ? String(pct) : String("?"), pct >= 0 ? "%" : ""}, y, kStatH);
+  if (chg) {  // a bolt, in the label's row
+    const int bx = powerX + kPowerW - 26, by = y + 19;
+    canvas.fillTriangle(bx + 9, by - 10, bx + 1, by + 2, bx + 8, by + 2, powerFg);
+    canvas.fillTriangle(bx + 6, by - 1, bx + 14, by - 1, bx + 5, by + 11, powerFg);
+  }
+  font(vlw::Small);
+  textOn(powerWords(chg, kPowerW - 16), powerX + 8, y + 92, powerFg, powerFill);
+
   const int n = notes::count();
   const int roomMin = (int)(notes::room(kNoteRate) / kNoteRate / 60);
-  String kept = n == 0 ? String("none waiting") : String(n) + (n == 1 ? " note waiting" : " notes waiting");
-  if (n) kept += " · " + clockLength(notes::seconds());
   char gb[24];
-  snprintf(gb, sizeof(gb), "%.1f GB", notes::freeBytes() / 1e9);
-  const String room = !notes::ready() ? String("no room offline (no flash)")
-                      : roomMin < 1    ? String("no room left for more")
-                      : notes::onCard() ? "microSD card · " + String(gb) + " free"
-                                        : "room for " + String(roomMin) + " min more";
-  // Note-taking mode: every recording is kept, and goes to the agent once
-  // the mode is turned off (hold A).
-  if (lastHome.noteMode) y = drawBlock(x, y, w, "NOTE MODE · HOLD A TO SEND", kept, room, kInk, kRed);
-  else y = drawBlock(x, y, w, "VOICE NOTES", kept, room);
-  y += 8;
-  // The links, a row each, in the ink of their state; asleep, how to wake.
-  drawLabel(asleep ? "ASLEEP" : "LINKS", x, y);
-  y += 28;
-  const int bottom = H - kFootH - 8;
-  if (asleep) {
-    font(vlw::BodyS);
-    text(fit(String("Press ") + board::kTalkKey + " to wake it and talk.", w), x, y, kInk);
-    text("Redrawn every five minutes.", x, y + 32, kInk);
-    if (waitingCount > 0) text(fit(String(waitingCount) + " waiting in Flight Deck", w), x, y + 64, kRed);
-  } else {
-    font(vlw::Small);
-    int labelW = 0;
-    for (size_t i = 1; i < lastHome.rows.size(); ++i) labelW = max(labelW, tw(lastHome.rows[i].label));
-    for (size_t i = 1; i < lastHome.rows.size() && y + 26 <= bottom; ++i) {
-      const Row& r = lastHome.rows[i];
-      text(r.label, x, y, kBlue);
-      text(fit(r.value, w - labelW - 14), x + labelW + 14, y, snap(r.color));
-      y += 26;
-    }
-    if (!haveHome || lastHome.rows.size() < 2) {
-      text(hWifi == Up ? "Wi-Fi up" : hWifi == Partial ? "Wi-Fi connecting…" : "no Wi-Fi", x, y,
-           hWifi == Up ? kGreen : hWifi == Partial ? kYellow : kRed);
-      text(hAgent == Up ? "agent linked" : hAgent == Asleep ? "agent asleep" : hAgent == Off ? "agent stopped" : "no agent yet",
-           x, y + 26, hAgent == Up ? kGreen : hAgent == Asleep || hAgent == Off ? agentInk() : kYellow);
-    }
-  }
-  drawFooter({{board::kTalkKey, lastHome.noteMode ? "note" : "talk"}, {board::kSideKey, "options"},
-              {board::kBackKey, "answer"}});
+  const double freeGb = notes::freeBytes() / 1e9;
+  snprintf(gb, sizeof(gb), freeGb < 10 ? "%.1f GB free" : "%.0f GB free", freeGb);
+  const String room = !notes::ready() ? String("no room")
+                      : roomMin < 1    ? String("full")
+                      : notes::onCard() ? String(gb)
+                                        : String(roomMin) + " min free";
+  const uint16_t notesFill = roomMin < 2 ? kRed : kYellow, notesFg = notesFill == kRed ? kPaper : kInk;
+  drawStatBlock({notesX, kNotesW, notesFill, notesFg, "Notes", String(n), ""}, y, kStatH);
+  font(vlw::Small);
+  textOn(fit(room, kNotesW - 16), notesX + 8, y + 92, notesFg, notesFill);
+  y += kStatH + G;
+
+  const String kept = n == 0 ? String("no notes yet") : String(n) + (n == 1 ? " note · " : " notes · ") + clockLength(notes::seconds());
+  drawTile(M, y, kFullW, 124, asleep, n, kept, room);
+  y += 124 + G;
+
+  drawLinks(M + 14, y, kFullW - 28, H - kFootH - y - 4, asleep);
+  drawFooter({{board::kSideKey, "options"}, {board::kBackKey, "last answer"}});
 }
 
 static void askDashboard(bool asleep, bool onMark = false) {
@@ -1115,6 +1293,10 @@ static void dashboardIfDue() {
 }
 
 void setWaiting(int count) { waitingCount = count; }
+
+#ifdef PREVIEW
+void previewAsleep() { askDashboard(true); }  // (asleep it goes by the clock's marks: the Mac's real clock there)
+#endif
 
 void setHome(const Home& home) {
   lastHome = home;
