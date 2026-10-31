@@ -2,7 +2,7 @@
 // screen only because it's there. The lights carry listening, working,
 // speaking and trouble (leds.cpp), the deck's voice carries the answers. The
 // screen is a dashboard — the clock, the room, the battery, the voice notes
-// kept offline, the links — redrawn on every five-minute mark (awake, or on
+// kept offline — redrawn on every five-minute mark (awake, or on
 // the timer wake from sleep) and when asked for. An answer goes on the paper
 // as its voice starts, at the largest size that fits it on one screen
 // (paging only when it must), and again once it's whole; B pages it. A
@@ -68,8 +68,6 @@ static constexpr uint16_t kBlue = rgb(100, 64, 255), kGreen = rgb(67, 138, 28);
 
 static int W = 400, H = 600;
 static constexpr int PAD = 22;
-static constexpr int kHeadH = 52;  // the top bar
-static constexpr int kFootH = 48;  // the button legend
 static M5Canvas canvas(&M5.Display);
 static lgfx::VLWfont fontSet[vlw::Count];
 static lgfx::PointerWrapper fontData[vlw::Count];
@@ -120,9 +118,9 @@ static String fit(const String& s, int width) {
   return out + "…";
 }
 
-// Word-wrap UTF-8 text to `width` px in the current font; words wider than a
-// line break between characters. Paragraph breaks are kept.
-static std::vector<String> wrap(const String& s, int width) {
+// Word-wrap UTF-8 text in the current font, widthAt(n) px for the line of that
+// number; words wider than a line break between characters. Paragraph breaks are kept.
+static std::vector<String> wrap(const String& s, const std::function<int(size_t)>& widthAt) {
   std::vector<String> out;
   int start = 0;
   const int n = s.length();
@@ -137,17 +135,17 @@ static std::vector<String> wrap(const String& s, int width) {
       String word = para.substring(i, sp < 0 ? para.length() : sp);
       i = sp < 0 ? para.length() : sp + 1;
       String trial = line.length() ? line + " " + word : word;
-      if (tw(trial) <= width) {
+      if (tw(trial) <= widthAt(out.size())) {
         line = trial;
         continue;
       }
       if (line.length()) out.push_back(line);
       line = "";
-      while (word.length() && tw(word) > width) {
+      while (word.length() && tw(word) > widthAt(out.size())) {
         int cut = 0, k = 0;
         while (k < (int)word.length()) {
           int step = utf8Step(word[k]);
-          if (tw(word.substring(0, k + step)) > width) break;
+          if (tw(word.substring(0, k + step)) > widthAt(out.size())) break;
           k += step;
           cut = k;
         }
@@ -164,16 +162,16 @@ static std::vector<String> wrap(const String& s, int width) {
   return out;
 }
 
+static std::vector<String> wrap(const String& s, int width) {
+  return wrap(s, [width](size_t) { return width; });
+}
+
 // At most `max` lines; the last one ends in "…" when there was more.
 static std::vector<String> clamp(std::vector<String> lines, int max, int width) {
   if ((int)lines.size() <= max) return lines;
   lines.resize(max);
   lines.back() = fit(lines.back() + "…", width);
   return lines;
-}
-
-static void drawLines(const std::vector<String>& lines, int x, int y, int lineH, uint16_t color) {
-  for (size_t i = 0; i < lines.size(); ++i) text(lines[i], x, y + i * lineH, color);
 }
 
 // ── the last answer, kept in flash ─────────────────────────────────────
@@ -813,9 +811,6 @@ static bool dashDue() {
 
 static uint16_t healthInk(Health h) { return h == Up ? kGreen : h == Partial ? kYellow : h == Asleep ? kBlue : kRed; }
 
-// The agent's name: blue while it's asleep, red while it's switched off.
-static uint16_t agentInk() { return hAgent == Asleep ? kBlue : hAgent == Off ? kRed : kInk; }
-
 static int batteryPct(bool* charging) {
   static int pct = -1;
   static bool chg = false;
@@ -829,26 +824,6 @@ static int batteryPct(bool* charging) {
   return pct;
 }
 
-static void drawBattery(int x, int y, int pct, bool chg, uint16_t fg = kInk, uint16_t bg = kPaper) {  // x = right edge, y = middle
-  font(vlw::Small);
-  String t = pct >= 0 ? String(pct) + "%" : String("?");
-  int textW = tw(t);
-  const int bw = 30, bh = 16;
-  int bx = x - textW - 8 - bw;
-  uint16_t fill = pct < 20 ? kRed : pct < 40 ? kYellow : kGreen;
-  if (fill == bg) fill = fg;
-  canvas.drawRoundRect(bx, y - bh / 2, bw - 3, bh, 3, fg);
-  canvas.drawRoundRect(bx + 1, y - bh / 2 + 1, bw - 5, bh - 2, 2, fg);
-  canvas.fillRect(bx + bw - 3, y - 4, 3, 8, fg);
-  if (pct > 0) canvas.fillRect(bx + 3, y - bh / 2 + 3, max(2, pct * (bw - 9) / 100), bh - 6, fill);
-  if (chg) {
-    canvas.fillTriangle(bx + 15, y - 9, bx + 8, y + 1, bx + 14, y + 1, fg);
-    canvas.fillTriangle(bx + 12, y - 1, bx + 19, y - 1, bx + 11, y + 9, fg);
-  }
-  if (bg == kPaper) text(t, x, y, pct < 20 ? kRed : kInk, middle_right);
-  else textOn(t, x, y, fg, bg, middle_right);
-}
-
 // `t` formatted in local time; false before the clock was ever set.
 static bool clockText(char* out, size_t n, const char* fmt, time_t t) {
   if (t < 1700000000) return false;
@@ -858,52 +833,112 @@ static bool clockText(char* out, size_t n, const char* fmt, time_t t) {
   return true;
 }
 
-// The top bar: a title (the clock when none, else the agent's name), the
-// Wi-Fi and agent dots in the middle (not asleep: nothing is connected then),
-// the battery; a rule under it.
-static void drawHeader(const String& title = "", bool dots = true) {
-  font(vlw::Small);
-  int y = kHeadH / 2;
-  char clock[16];
-  const bool hasClock = !title.length() && clockText(clock, sizeof(clock), "%H:%M", time(nullptr));
-  const bool agent = !title.length() && !hasClock && barAgent.length();
-  String name = title.length() ? title : hasClock ? String(clock) : agent ? barAgent : String("Captain");
-  bool chg = false;
-  int pct = batteryPct(&chg);
-  drawBattery(W - PAD, y, pct, chg);
-  int right = W - PAD - 92;  // the battery's left edge
-  if (dots) {
-    canvas.fillCircle(W / 2 - 9, y, 6, healthInk(hWifi));
-    canvas.fillCircle(W / 2 + 9, y, 6, healthInk(hAgent));
-    right = W / 2 - 24;
-  }
-  font(vlw::Title);
-  text(fit(name, right - PAD), PAD, y + 2, agent ? agentInk() : kInk, middle_left);
-  canvas.fillRect(0, kHeadH - 3, W, 3, kInk);
+// ── what the buttons do, drawn beside them ─────────────────────────────
+//
+// No legend: each button's icon is on the screen where the button is — A and B
+// on the left edge, C on top, in the middle. Not smoothed: a blend of two inks
+// would snap to a third.
+
+enum class Key : uint8_t { None, Talk, Answer, Options, Back, Next, Home, Update };
+static constexpr int kKeyX = 34, kKeyAY = 66, kKeyBY = 141, kKeyCY = 28;
+static constexpr int kKeysBottom = 172;  // what's beside A and B ends here: below it, the whole width
+static constexpr int kKeysRight = 68;    // and beside them, this is free
+
+// The other ink for something drawn on `around`.
+static uint16_t inkOn(uint16_t around) { return around == kPaper || around == kYellow ? kInk : kPaper; }
+
+// A microphone, its middle on (cx, cy), `h` px tall.
+static void drawMic(int cx, int cy, int h, uint16_t ink) {
+  const auto U = [h](int u) { return (int)lroundf(u * h / 79.0f); };  // the drawing is 79 tall
+  const int top = cy - h / 2, r = U(17), mid = top + U(26);
+  canvas.fillRoundRect(cx - r, top, 2 * r, U(51), r, ink);
+  canvas.fillArc(cx, mid, U(28), U(23), 0, 180, ink);
+  const int stem = max(2, U(6));
+  canvas.fillRect(cx - stem / 2, top + U(59), stem, U(16), ink);
+  canvas.fillRoundRect(cx - r, top + h - stem, 2 * r, stem, stem / 2, ink);
 }
 
-// A keycap: the button's letter in a small black rounded square.
-static int drawKey(const char* key, int x, int y) {
-  font(vlw::Small);
-  canvas.fillRoundRect(x, y - 14, 28, 28, 6, kInk);
-  text(key, x + 14, y + 1, kPaper, middle_center);
-  return x + 28;
+// Captain, in the six inks: the app icon's drawing, (cx, cy) the middle of his
+// head, `s` px a unit (he's 108 wide, 86 above that middle and 40 below it).
+// `around`: what he's drawn on. Asleep, his eyes are shut.
+static void drawRobot(int cx, int cy, float s, uint16_t around, bool asleep = false) {
+  const auto X = [&](float u) { return cx + (int)lroundf(u * s); };
+  const auto Y = [&](float u) { return cy + (int)lroundf(u * s); };
+  const auto L = [&](float u) { return max(1, (int)lroundf(u * s)); };
+  const uint16_t edge = inkOn(around);
+  canvas.fillRect(X(0) - L(1.5f), Y(-78), 2 * L(1.5f), L(12), edge);  // antenna, lamp
+  canvas.fillCircle(X(0), Y(-81), L(6), around == kRed ? kYellow : kRed);
+  canvas.fillRoundRect(X(-52), Y(-12), L(104), L(24), L(3), edge);    // ears
+  canvas.fillRoundRect(X(-44), Y(-36), L(88), L(76), L(14), edge);    // head
+  canvas.fillRoundRect(X(-41), Y(-33), L(82), L(70), L(11), kPaper);
+  canvas.fillRoundRect(X(-36), Y(-28), L(72), L(58), L(9), kInk);     // face plate
+  canvas.fillRoundRect(X(-46), Y(-68), L(92), L(28), L(10), kBlue);   // cap, band, badge
+  canvas.fillRect(X(-46), Y(-44), L(92), L(7), kYellow);
+  canvas.fillRoundRect(X(-50), Y(-38), L(100), L(6), L(3), kInk);     // (its peak)
+  canvas.fillCircle(X(0), Y(-56), L(7), kYellow);
+  canvas.fillCircle(X(0), Y(-56), L(3), kBlue);
+  for (float x : {-26.0f, 10.0f}) {                                   // eyes, grille
+    if (asleep) canvas.fillRect(X(x), Y(-10), L(16), L(3), kPaper);
+    else canvas.fillRoundRect(X(x), Y(-16), L(16), L(12), L(3), kPaper);
+  }
+  static constexpr uint8_t kBars[7] = {5, 7, 9, 10, 9, 7, 5};
+  for (int i = 0; i < 7; ++i) {
+    const int h = L(asleep ? 2 : kBars[i]);
+    canvas.fillRect(X(-24 + i * 7), Y(16) - h / 2, L(5), h, kPaper);
+  }
 }
 
-// The bottom bar: what the buttons do ("C", "talk", …).
-static void drawFooter(std::initializer_list<std::pair<const char*, const char*>> keys) {
-  const int y = H - kFootH / 2;
-  canvas.fillRect(0, H - kFootH, W, 2, kInk);
-  font(vlw::Small);
-  int total = 0;
-  for (auto& k : keys) total += 28 + 6 + tw(k.second) + 16;
-  total -= 16;
-  int x = (W - total) / 2;
-  for (auto& k : keys) {
-    x = drawKey(k.first, x, y) + 6;
-    text(k.second, x, y + 1, kInk, middle_left);
-    x += tw(k.second) + 16;
+static void drawGear(int cx, int cy, int r, uint16_t ink, uint16_t around) {
+  for (int k = 0; k < 8; ++k) {
+    const float a = k * 3.14159f / 4, ca = cosf(a), sa = sinf(a), w = r * 0.25f, in = r * 0.6f;
+    const int x0 = cx + lroundf(ca * in - sa * w), y0 = cy + lroundf(sa * in + ca * w);
+    const int x1 = cx + lroundf(ca * in + sa * w), y1 = cy + lroundf(sa * in - ca * w);
+    const int x2 = cx + lroundf(ca * r + sa * w), y2 = cy + lroundf(sa * r - ca * w);
+    const int x3 = cx + lroundf(ca * r - sa * w), y3 = cy + lroundf(sa * r + ca * w);
+    canvas.fillTriangle(x0, y0, x1, y1, x2, y2, ink);
+    canvas.fillTriangle(x0, y0, x2, y2, x3, y3, ink);
   }
+  canvas.fillCircle(cx, cy, r * 3 / 4, ink);
+  canvas.fillCircle(cx, cy, r * 3 / 8, around);
+}
+
+// An arrow `size` px long down the page, or to the left.
+static void drawArrow(int cx, int cy, int size, bool left, uint16_t ink) {
+  const int half = size / 2, head = size * 11 / 20, w = size * 3 / 20;
+  if (left) {
+    canvas.fillTriangle(cx - half, cy, cx - half + head, cy - head, cx - half + head, cy + head, ink);
+    canvas.fillRect(cx - half + head, cy - w, size - head, 2 * w, ink);
+  } else {
+    canvas.fillTriangle(cx, cy + half, cx - head, cy + half - head, cx + head, cy + half - head, ink);
+    canvas.fillRect(cx - w, cy - half, 2 * w, size - head, ink);
+  }
+}
+
+static void drawKey(Key key, int cx, int cy, uint16_t around) {
+  const uint16_t ink = inkOn(around);
+  switch (key) {
+    case Key::Talk: drawMic(cx, cy, 44, ink); break;
+    case Key::Answer: drawRobot(cx, cy + 9, 0.38f, around); break;
+    case Key::Options: drawGear(cx, cy, 17, ink, around); break;
+    case Key::Back: drawArrow(cx, cy, 40, true, ink); break;
+    case Key::Next: drawArrow(cx, cy, 40, false, ink); break;
+    case Key::Home:
+      canvas.fillTriangle(cx - 22, cy - 2, cx + 22, cy - 2, cx, cy - 22, ink);
+      canvas.fillRect(cx - 15, cy - 2, 30, 22, ink);
+      canvas.fillRect(cx - 5, cy + 7, 10, 13, around);
+      break;
+    case Key::Update:
+      drawArrow(cx, cy - 4, 26, false, ink);
+      canvas.fillRect(cx - 14, cy + 12, 28, 4, ink);
+      break;
+    case Key::None: break;
+  }
+}
+
+static void drawKeys(Key a, Key b, Key c, uint16_t around = kPaper) {
+  drawKey(a, kKeyX, kKeyAY, around);
+  drawKey(b, kKeyX, kKeyBY, around);
+  drawKey(c, W / 2, kKeyCY, around);
 }
 
 // ── public: basics ─────────────────────────────────────────────────────
@@ -1005,24 +1040,6 @@ static Home lastHome;  // what the main loop last knew of the links (its rows: W
 static bool haveHome = false;
 static int waitingCount = 0;  // proposals waiting in Flight Deck, as last heard (setWaiting)
 
-// A key's letter in a rounded square; where it ends.
-static int drawKeyCap(const char* key, int x, int cy, int size, uint16_t fill, uint16_t fg) {
-  canvas.fillRoundRect(x, cy - size / 2, size, size, size / 4, fill);
-  font(size >= 50 ? vlw::Title : vlw::Small);
-  canvas.setTextDatum(middle_center);
-  canvas.setTextColor(fg);
-  canvas.drawString(key, x + size / 2, cy + 1);
-  duos.push_back({{x + 2, cy - size / 2 + 2, size - 4, size - 4}, fg, fill});
-  return x + size;
-}
-
-static void drawMic(int cx, int cy, int r) {
-  canvas.fillRoundRect(cx - r, cy - r * 2, r * 2, r * 3, r, kInk);
-  canvas.fillArc(cx, cy - r / 2, r + 11, r + 6, 0, 180, kInk);
-  canvas.fillRect(cx - 3, cy + r + 8, 6, r - 1, kInk);
-  canvas.fillRoundRect(cx - r, cy + 2 * r + 5, r * 2, 6, 3, kInk);
-}
-
 // A line of handwriting: a wavering stroke, a gap, a wavering stroke. (Plain
 // lines: a smoothed black on yellow would snap to green.)
 static void scribble(int x, int y, int len, int seed) {
@@ -1066,13 +1083,8 @@ static void drawNoteCount(int right, int cy, int notes) {
 }
 
 // The top block's first line: the links' dots and the agent (asleep: only that
-// it's asleep, nothing is connected then), what waits, the battery.
+// it's asleep, nothing is connected then) up to C's icon, what waits after it.
 static void drawStatusLine(int x, int w, int y, uint16_t bg, bool asleep) {
-  bool chg = false;
-  const int pct = batteryPct(&chg);
-  drawBattery(x + w, y, pct, chg, kPaper, bg);
-  font(vlw::Small);
-  const int right = x + w - tw(pct >= 0 ? String(pct) + "%" : String("?")) - 8 - 30 - 8;  // the battery's left edge
   int left = x;
   if (!asleep) {
     for (const Health h : {hWifi, hAgent}) {  // white around them: a red one still shows on red
@@ -1082,19 +1094,17 @@ static void drawStatusLine(int x, int w, int y, uint16_t bg, bool asleep) {
     }
     left += 4;
   }
-  int room = right - left;
   font(vlw::Small);
+  const String name = asleep ? String("Asleep") : barAgent.length() ? barAgent : String("Captain");
+  textOn(fit(name, W / 2 - 26 - left), left, y, kPaper, bg, middle_left);
   if (waitingCount > 0) {
+    font(vlw::Small);
     const String t = String(waitingCount) + " waiting";
-    const int pw = tw(t) + 18, px = right - pw;
+    const int pw = min(tw(t) + 18, x + w - W / 2 - 26), px = x + w - pw;
     const uint16_t fill = bg == kRed ? kPaper : kRed, fg = bg == kRed ? kRed : kPaper;
     canvas.fillRoundRect(px, y - 14, pw, 28, 14, fill);
     textOn(t, px + pw / 2, y, fg, fill, middle_center);
-    room -= pw + 8;
-    font(vlw::Small);
   }
-  const String name = asleep ? String("Asleep") : barAgent.length() ? barAgent : String("Captain");
-  if (waitingCount == 0 || tw(name) <= room) textOn(fit(name, room), left, y, kPaper, bg, middle_left);  // (the Agent row has it too)
 }
 
 // One of the three blocks: a label, a big number with its unit, a line under it.
@@ -1122,43 +1132,32 @@ static void drawStatBlock(const StatBlock& b, int y, int h) {
   }
 }
 
-// What the talk button does, in a big tile. Note mode: black, a notepad, how many
-// there are and the room left. Not ready yet: what it's waiting for.
+// What the talk button does, in a big tile: the mic and whom it talks to, offline
+// too, where a note is kept. Note mode: black, a notepad, how many there are and
+// the room left.
 static void drawTile(int x, int y, int w, int h, bool asleep, int notes, const String& kept, const String& room) {
   canvas.fillRoundRect(x, y, w, h, 16, kInk);
   if (lastHome.noteMode) {
-    const int padH = min(96, h - 28), padW = padH * 3 / 4, padX = x + 14, padY = y + (h - padH) / 2;
+    const int padH = min(128, h - 40), padW = padH * 3 / 4, padX = x + 16, padY = y + (h - padH) / 2;
     drawNotepad(padX, padY, padW, padH);
     drawNoteCount(padX + padW + 12, padY + padH - 22, notes);
-    const int tx = padX + padW + 24, right = x + w - 10, top = y + (h - 108) / 2;
+    const int tx = padX + padW + 26, right = x + w - 10, top = y + (h - 112) / 2;
     font(vlw::Title);
     textOn("Hold", tx, top, kPaper, kInk);
-    const int after = drawKeyCap(board::kTalkKey, tx + tw("Hold") + 7, top + 20, 34, kPaper, kInk) + 7;
+    const int micX = tx + tw("Hold") + 19;
+    drawMic(micX, top + 19, 36, kPaper);
     font(vlw::Title);
-    textOn("to send", after, top, kPaper, kInk);
+    textOn("to send", micX + 19, top, kPaper, kInk);
     font(vlw::BodyS);
-    textOn(fit(kept, right - tx), tx, top + 44, kPaper, kInk);
-    textOn(fit(room, right - tx), tx, top + 76, kPaper, kInk);
+    textOn(fit(kept, right - tx), tx, top + 46, kPaper, kInk);
+    textOn(fit(room, right - tx), tx, top + 80, kPaper, kInk);
     return;
   }
   canvas.fillRoundRect(x + 4, y + 4, w - 8, h - 8, 13, kPaper);
+  const float s = min(1.4f, (h - 44) / 126.0f);  // Captain's 126 units
   const int mid = y + h / 2;
-  if (!lastHome.ready && !asleep) {
-    font(vlw::BodyM);
-    String hint = lastHome.hint.length() ? lastHome.hint : String("Getting ready");
-    hint.replace(" · ", "\n");
-    const std::vector<String> ls = clamp(wrap(hint, w - 40), 3, w - 40);
-    const int lineH = 38, top = mid - (int)ls.size() * lineH / 2;
-    for (int i = 0; i < (int)ls.size(); ++i) text(ls[i], W / 2, top + i * lineH, kInk, top_center);
-    return;
-  }
-  font(vlw::Badge);
-  const int wordsW = tw("to talk"), total = 62 + 20 + 58 + 14 + wordsW;
-  int cx = x + (w - total) / 2;
-  drawMic(cx + 31, mid - 8, 17);
-  cx = drawKeyCap(board::kTalkKey, cx + 82, mid, 58, kInk, kPaper) + 14;
-  font(vlw::Badge);
-  text("to talk", cx, mid - 4, kInk, middle_left);
+  drawMic(x + w / 4 + 6, mid, (int)(126 * s * 0.92f), kInk);
+  drawRobot(x + w * 3 / 4 - 6, mid + (int)(23 * s), s, kPaper, asleep);
 }
 
 // The links, on the options screen, a row each: a dot in the ink of their state,
@@ -1196,11 +1195,12 @@ static void drawDashboard(bool asleep) {
   const uint16_t top = lastHome.noteMode ? kRed : kInk;
   static constexpr int kTopH = 224;
   canvas.fillRoundRect(M, y, kFullW, kTopH, 16, top);
-  drawStatusLine(M + 16, kFullW - 32, y + 24, top, asleep);
+  drawStatusLine(M + 16, kFullW - 32, kKeyCY, top, asleep);
+  drawKeys(Key::Talk, Key::Answer, Key::Options, top);
   char clock[8] = "--:--";
   clockText(clock, sizeof(clock), "%H:%M", time(nullptr));
   font(vlw::Digits);
-  textOn(clock, W / 2, y + 56, kPaper, top, top_center);
+  textOn(clock, W / 2 + 10, y + 56, kPaper, top, top_center);  // (A's and B's icons on its left)
   font(vlw::Title);
   const String date = dateWords(kFullW - 32);
   if (date.length()) textOn(date, W / 2, y + 168, kPaper, top, top_center);
@@ -1251,13 +1251,12 @@ static void drawDashboard(bool asleep) {
   const String kept = n == 0 ? String("no notes yet") : String(n) + (n == 1 ? " note · " : " notes · ") + clockLength(notes::seconds());
   // Asleep, a line under it says that it's redrawn all the same.
   static constexpr int kAsleepLineH = 32;
-  const int tileBottom = H - kFootH - 4 - (asleep ? kAsleepLineH : 0);
+  const int tileBottom = H - M - (asleep ? kAsleepLineH : 0);
   drawTile(M, y, kFullW, tileBottom - y, asleep, n, kept, room);
   if (asleep) {
     font(vlw::Small);
     text("Redrawn every five minutes", W / 2, tileBottom + kAsleepLineH / 2, kInk, middle_center);
   }
-  drawFooter({{board::kSideKey, "options"}, {board::kBackKey, "last answer"}});
 }
 
 static void askDashboard(bool asleep, bool onMark = false) {
@@ -1386,7 +1385,8 @@ static void drawCapsized(const String& hint) {
 
 void showSwitchedOff(const String& hint, void (*whileDrawing)()) {
   draw(Kind::Off, [=] {
-    drawHeader("Switched off", false);
+    font(vlw::Title);
+    text("Switched off", PAD, 14, kInk);
     drawCapsized(hint);
   });
   do {  // (tick(): a dashboard on its way is cut short, then this one goes on)
@@ -1415,6 +1415,7 @@ static const Size kSizes[] = {{vlw::BodyL, 49}, {vlw::BodyM, 41}, {vlw::BodyS, 3
 // page only), Captain's row under it, then the answer.
 static constexpr int kBubbleW = 300, kBubblePadX = 14, kBubblePadY = 9, kBubbleLine = 33, kBubbleTail = 12;
 static constexpr int kCaptainRowH = 40;
+static constexpr int kReplyY = 46;  // under C's icon
 
 static std::vector<String> questionLines() {
   if (!question.length()) return {};
@@ -1427,9 +1428,16 @@ static int bubbleHeight(int lines) { return lines * kBubbleLine + 2 * kBubblePad
 // Where the answer's words start.
 static int replyTop(bool firstPage) {
   const int lines = firstPage ? (int)questionLines().size() : 0;
-  return 10 + (lines ? bubbleHeight(lines) + kBubbleTail : 0) + kCaptainRowH + 6;
+  return kReplyY + (lines ? bubbleHeight(lines) + kBubbleTail : 0) + kCaptainRowH + 6;
 }
-static int replyBottom() { return H - kFootH - 22; }
+static int replyBottom() { return H - 22; }
+
+// Where something at height `y` starts: clear of A's and B's icons.
+static int leftAt(int y) { return y < kKeysBottom ? kKeysRight : PAD; }
+
+// Where words after `y` start: one line alone beside the icons would only look
+// indented, so it goes under them.
+static int wordsFrom(int y, int line) { return y < kKeysBottom && y + line >= kKeysBottom ? kKeysBottom : y; }
 
 // The largest size whose words fit on one screen (under the question and
 // the picture); none fits → the smallest, over pages.
@@ -1441,20 +1449,23 @@ static void layoutReply() {
   replyPage = 0;
   pictureH = 0;
   if (replyText.isEmpty()) return;
-  const int width = W - 2 * PAD, top = replyTop(false), firstTop = replyTop(true), bottom = replyBottom();
+  const int top = replyTop(false), firstTop = replyTop(true), bottom = replyBottom();
   int pw = 0, ph = 0;
   if (imgLen && jpegSize(imgBuf, imgLen, &pw, &ph)) {
-    const int natural = (int)(ph * min(1.0f, (float)width / pw));
+    const int natural = (int)(ph * min(1.0f, (float)(W - PAD - leftAt(firstTop)) / pw));
     pictureH = min(natural, (bottom - firstTop) * 40 / 100) + 14;
   }
-  const int avail = bottom - firstTop - pictureH;
   for (const Size& s : kSizes) {
     font(s.font);
-    auto lines = wrap(replyText, width);
+    const int firstY = wordsFrom(firstTop + pictureH, s.line), nextY = wordsFrom(top, s.line);
+    const int avail = bottom - firstY, first = max(1, avail / s.line), per = max(1, (bottom - nextY) / s.line);
+    auto lines = wrap(replyText, [&, first, per](size_t n) {
+      const int y = (int)n < first ? firstY + (int)n * s.line : nextY + ((int)n - first) % per * s.line;
+      return W - PAD - leftAt(y);
+    });
     if ((int)lines.size() * s.line <= avail || &s == &kSizes[3]) {
       replyFont = s.font;
       replyLine = s.line;
-      const int first = max(1, avail / s.line), per = max(1, (bottom - top) / s.line);
       replyPages.emplace_back(lines.begin(), lines.begin() + min(lines.size(), (size_t)first));
       for (size_t i = replyPages[0].size(); i < lines.size(); i += per) {
         replyPages.emplace_back(lines.begin() + i, lines.begin() + min(lines.size(), i + per));
@@ -1465,22 +1476,11 @@ static void layoutReply() {
   }
 }
 
-// Captain, in a few strokes: a head with a cap on.
-static void drawCaptainHead(int x, int y) {
-  canvas.fillRoundRect(x, y + 10, 36, 26, 7, kInk);
-  canvas.fillRoundRect(x + 3, y + 13, 30, 20, 5, kPaper);
-  canvas.fillCircle(x + 12, y + 23, 3, kInk);
-  canvas.fillCircle(x + 24, y + 23, 3, kInk);
-  canvas.fillRoundRect(x + 4, y, 28, 10, 4, kInk);
-  canvas.fillRect(x - 2, y + 9, 40, 4, kInk);
-  canvas.fillCircle(x + 18, y + 5, 3, kYellow);
-}
-
 static void drawReplyPage() {
   if (replyPages.empty()) return;
   const int pages = replyPages.size(), page = min(replyPage, pages - 1);
   const int width = W - 2 * PAD;
-  int y = 10;
+  int y = kReplyY;
   if (page == 0 && question.length()) {
     const std::vector<String> qs = questionLines();
     font(vlw::BodyS);
@@ -1493,25 +1493,30 @@ static void drawReplyPage() {
     for (int i = 0; i < (int)qs.size(); ++i) textOn(qs[i], bx + kBubblePadX, y + kBubblePadY + i * kBubbleLine, kInk, kYellow);
     y += bh + kBubbleTail;
   }
-  drawCaptainHead(PAD, y);
+  const int rowX = leftAt(y);
+  drawRobot(rowX + 18, y + 26, 0.3f, kPaper);
   char when[16] = "";
   clockText(when, sizeof(when), "%H:%M", replyWhen);
   font(vlw::Small);
-  text(fit(barAgent.length() ? barAgent : String("Captain"), width - 130), PAD + 46, y + 22, kInk, middle_left);
+  text(fit(barAgent.length() ? barAgent : String("Captain"), W - PAD - rowX - 124), rowX + 46, y + 22, kInk, middle_left);
   text(when, W - PAD, y + 22, kInk, middle_right);
   y += kCaptainRowH + 6;
   if (page == 0 && pictureH) {
-    const int ph = drawPicture(imgBuf, imgLen, PAD, y, width, pictureH - 14);
+    const int px = leftAt(y), ph = drawPicture(imgBuf, imgLen, px, y, W - PAD - px, pictureH - 14);
     if (ph) y += ph + 14;
   }
   font(replyFont);
-  drawLines(replyPages[page], PAD, y, replyLine, kInk);
+  y = wordsFrom(y, replyLine);
+  for (const String& line : replyPages[page]) {
+    text(line, leftAt(y), y, kInk);
+    y += replyLine;
+  }
   if (pages > 1) {  // how far through it is: a thin line, a thick stretch
-    const int barY = H - kFootH - 14;
+    const int barY = H - 14;
     canvas.fillRect(PAD, barY + 2, width, 2, kInk);
     canvas.fillRoundRect(PAD, barY, width * (page + 1) / pages, 6, 3, kInk);
   }
-  drawFooter({{board::kTalkKey, "talk"}, {board::kBackKey, page + 1 < pages ? "next" : "done"}});
+  drawKeys(Key::Talk, page + 1 < pages ? Key::Next : Key::Home, Key::Options);
 }
 
 static bool newTurn = true;  // a turn began (setQuestion): what comes next is a new answer
@@ -1699,13 +1704,14 @@ void showSetup(const char* reason, const char* apName, const char* ip) {
   draw(Kind::Setup, [=] {
     font(vlw::Title);
     text(fit(r, W - 2 * PAD), W / 2, 28, kRed, top_center);
-    drawQrWithLines(String("WIFI:T:nopass;S:") + ap + ";;", 3, 82, H - 52,
+    drawQrWithLines(String("WIFI:T:nopass;S:") + ap + ";;", 3, 82, H - 42,
                     {{"1. Scan the code, or join this Wi-Fi:", vlw::Small, kInk},
                      {ap, vlw::BodyS, kBlue},
                      {"2. Then open:", vlw::Small, kInk},
                      {String("http://") + addr, vlw::BodyS, kBlue}});
     font(vlw::Small);
-    text(String("Saving restarts it. Press ") + board::kTalkKey + " to leave.", W / 2, H - 38, kInk, top_center);
+    text("Saving restarts it.", W / 2, H - 34, kInk, top_center);
+    drawKeys(Key::Back, Key::None, Key::None);
   });
   flush();  // the portal loop doesn't tick
 }
@@ -1728,13 +1734,12 @@ void showLink(const char* title, const String& url, const String& note) {
   }
   linkShown = key;
   draw(Kind::Link, [=] {
-    drawHeader();
     font(vlw::Title);
-    text(fit(t, W - 2 * PAD), W / 2, kHeadH + 18, kInk, top_center);
-    const int linksY = H - kFootH - 8 - 3 * kLinkRowH;
-    drawQrWithLines(url, 4, kHeadH + 56, linksY - 8, {{url, vlw::Small, kBlue}, {note, vlw::BodyS, kInk}});
+    text(fit(t, W - 2 * kKeysRight), W / 2, 50, kInk, top_center);
+    const int linksY = H - 10 - 3 * kLinkRowH;
+    drawQrWithLines(url, 4, 92, linksY - 8, {{url, vlw::Small, kBlue}, {note, vlw::BodyS, kInk}});
     drawLinks(PAD, linksY, W - 2 * PAD);
-    drawFooter({{board::kTalkKey, "back"}, {board::kSideKey, "update"}});
+    drawKeys(Key::Back, Key::Answer, Key::Update);
   });
 }
 

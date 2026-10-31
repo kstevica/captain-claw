@@ -142,19 +142,27 @@ speaking and trouble exactly as above; the voice carries the answers:
 
 - **A dashboard, every five minutes** (1.0.11; in blocks of colour since
   1.0.24): a black block with the Wi-Fi and agent dots, the agent, what waits
-  in Flight Deck, the battery, a big clock as of the drawing and the date.
+  in Flight Deck, a big clock as of the drawing and the date.
   Under it three blocks: the room in blue (temperature, humidity), the power
   in green, yellow under 40 %, red under 20 % (percent, and how long it has or
   until it's full, with a bolt while charging), the notes in yellow, red when
   under 2 minutes of room are left (how many, and the room: minutes in flash,
-  GB on a card). Then a big tile with what A does ("A to talk"; until it's
-  ready, what it's waiting for) and the footer. The links (Wi-Fi, deck,
+  GB on a card). Then a big tile: the mic and Captain, online or offline
+  (1.0.27). The links (Wi-Fi, deck,
   agent) are on the options screen (1.0.26), under the code; the dots at the
   top still show them at a glance. Text on a colour stays between its two inks, so its edges don't
   snap to a third. Redrawn in full on every five-minute mark
   (:00, :05 … :55), awake or asleep (the timer wake lands just after the
   mark, draws it without Wi-Fi and sleeps again), and after an offline voice
   note is kept.
+- **No legend: what a button does is drawn beside it** (1.0.27): on every
+  screen, an icon where the button is — A and B on the left edge, C on top, in
+  the middle. On the dashboard A is the mic, B Captain (the last answer), C a
+  gear (the options). On an answer A is the mic, B an arrow down (the next
+  page) or a house (the last page: the dashboard), C the gear. On the options A
+  is an arrow back, B Captain, C the update. In the setup hotspot A is the
+  arrow back. Words beside A's and B's icons start clear of them, and take the
+  whole width below.
 - **Fast, whole refreshes** (1.0.10): every refresh starts with a reset pulse
   to the panel's controller (EPD reset is G12). With the paper keeping its
   picture through restarts, M5GFX starts it without one, and refreshes were
@@ -183,7 +191,7 @@ speaking and trouble exactly as above; the voice carries the answers:
   answer page is on the paper, a new answer goes there as its voice starts,
   at the largest of four sizes that fits it on one screen. Since 1.0.25 the
   page reads as a conversation: the question in a yellow bubble (up to three
-  lines, first page only), a row with Captain's head, the agent and the time,
+  lines, first page only), a row with Captain, the agent and the time,
   a picture if there is one, then the answer, with a line for how far through
   the pages it is. It's drawn again once it's whole
   and the voice is over (it's spoken sentence by sentence as it's written);
@@ -192,11 +200,12 @@ speaking and trouble exactly as above; the voice carries the answers:
   pages on, and after the last page B brings the dashboard back. It lives in
   flash: B after a sleep shows it. Hold B for the dashboard now.
 - **A talks** (1.0.11; C before): press, talk, press again — or 2.5 s of
-  quiet sends it; a double press plays the last answer again.
+  quiet sends it; a double press plays the last answer again. With no deck to
+  send it to, it's a note: only a press ends it (1.0.27).
 - **Note-taking mode** (1.0.16): hold A (1 s) to turn it on or off — rising
   tones on, falling off, and the dashboard redraws (since 1.0.24 the top block
   turns red and the tile black, with a yellow notepad, the count on its corner,
-  "Hold A to send", the notes' length and the room left). While it's on, every recording is kept as a
+  "Hold [the mic] to send", the notes' length and the room left). While it's on, every recording is kept as a
   voice note, online too (press A, talk, press A; no 2.5 s quiet stop — notes
   have their pauses); turning it off sends them all to the agent as one
   turn. The press that holds on begins a recording, which is dropped.
@@ -216,11 +225,17 @@ speaking and trouble exactly as above; the voice carries the answers:
   itself; the five-minute dashboard (or the offline one) waits until the
   recording ends, and after an offline note the dashboard is drawn then.
 - **Offline** (1.0.13): once Wi-Fi, Flight Deck or the agent has been
-  down for 30 s, the paper is redrawn with it — the dashboard's link rows
-  and the top block's dots in red (an answer being read keeps its page; the
-  options code stays) — and again once they've been back for 10 s. The
-  offline blink says which: the left light for Wi-Fi, the right for Flight
-  Deck or the agent.
+  down for 30 s, the paper is redrawn with it — the top block's dots in red
+  (an answer being read keeps its page; the options code stays) — and again
+  once they've been back for 10 s. The offline blink says which: the left
+  light for Wi-Fi, the right for Flight Deck or the agent.
+- **Recording with no link** (1.0.27): a note needs no link, so the link going
+  doesn't touch one, and a recording on its way to the deck when the link goes
+  carries on as a note (what went up before that is lost). With Wi-Fi known to
+  be down, A starts a note straight away. Trying for the deck no longer holds
+  the main loop (its name can take 15 s to fail, the connection 5 s more): a
+  task of its own knocks first, and the link is only worked on for 15 s after
+  the deck answered, never while a note is written.
 - **Moving it does nothing** (1.0.1): motion is never read as use, and what
   the paper shows, with when the dashboard was drawn, is kept in flash as
   well as across deep sleep — a restart, a brownout or the battery jolted
