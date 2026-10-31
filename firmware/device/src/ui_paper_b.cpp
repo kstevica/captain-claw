@@ -1121,8 +1121,9 @@ static void drawStatBlock(const StatBlock& b, int y, int h) {
   font(vlw::Small);
   textOn(b.label, b.x + 9, y + 7, b.fg, b.fill);
   font(vlw::Badge);
-  textOn(b.big, b.x + 7, y + 28, b.fg, b.fill);
-  const int ux = b.x + 7 + tw(b.big) + 2;
+  const int bigX = b.x + max(2, min(7, (b.w - tw(b.big)) / 2));  // (three digits take all the width)
+  textOn(b.big, bigX, y + 28, b.fg, b.fill);
+  const int ux = bigX + tw(b.big) + 2;
   if (b.unit[0] == 'o') {  // (the big font has no ° of its own)
     canvas.fillCircle(ux + 5, y + 44, 5, b.fg);
     canvas.fillCircle(ux + 5, y + 44, 2, b.fill);
@@ -1195,7 +1196,9 @@ static void drawDashboard(bool asleep) {
   int y = M;
   const uint16_t top = lastHome.noteMode ? kRed : kInk;
   static constexpr int kTopH = 224;
-  canvas.fillRoundRect(M, y, kFullW, kTopH, 16, top);
+  // Out to the paper's edges and square on top: only its bottom corners are round.
+  canvas.fillRoundRect(0, 0, W, y + kTopH, 16, top);
+  canvas.fillRect(0, 0, W, 16, top);
   drawStatusLine(M + 16, kFullW - 32, kKeyCY, top, asleep);
   drawKeys(Key::Talk, Key::Answer, Key::Options);
   char clock[8] = "--:--";
@@ -1207,12 +1210,12 @@ static void drawDashboard(bool asleep) {
   if (date.length()) textOn(date, W / 2, y + 168, kPaper, top, top_center);
   y += kTopH + G;
 
-  // The three blocks, each as wide as what it says.
-  static constexpr int kStatH = 122, kRoomW = 102, kPowerW = 126, kNotesW = 136;
-  const int powerX = M + kRoomW + G, notesX = powerX + kPowerW + G;
+  // The three blocks, all as wide, the last one's edge under the tile's.
+  static constexpr int kStatH = 122, kStatW = (kFullW - 2 * G) / 3;
+  const int powerX = M + kStatW + G, notesX = M + kFullW - kStatW;
   float t, rh;
   const bool hasRoom = telemetry::climate(&t, &rh);
-  drawStatBlock({M, kRoomW, kBlue, kPaper, "Room", hasRoom ? String((int)lroundf(t)) : String("--"), hasRoom ? "o" : ""}, y, kStatH);
+  drawStatBlock({M, kStatW, kBlue, kPaper, "Room", hasRoom ? String((int)lroundf(t)) : String("--"), hasRoom ? "o" : ""}, y, kStatH);
   if (hasRoom) {  // a water drop, as the word doesn't fit
     const int cy = y + 105;
     canvas.fillCircle(M + 16, cy + 2, 7, kPaper);
@@ -1225,14 +1228,14 @@ static void drawDashboard(bool asleep) {
   const int pct = batteryPct(&chg);
   const uint16_t powerFill = pct < 0 ? kInk : pct < 20 ? kRed : pct < 40 ? kYellow : kGreen;
   const uint16_t powerFg = powerFill == kYellow ? kInk : kPaper;
-  drawStatBlock({powerX, kPowerW, powerFill, powerFg, "Power", pct >= 0 ? String(pct) : String("?"), pct >= 0 ? "%" : ""}, y, kStatH);
+  drawStatBlock({powerX, kStatW, powerFill, powerFg, "Power", pct >= 0 ? String(pct) : String("?"), pct >= 0 ? "%" : ""}, y, kStatH);
   if (chg) {  // a bolt, in the label's row
-    const int bx = powerX + kPowerW - 26, by = y + 19;
+    const int bx = powerX + kStatW - 26, by = y + 19;
     canvas.fillTriangle(bx + 9, by - 10, bx + 1, by + 2, bx + 8, by + 2, powerFg);
     canvas.fillTriangle(bx + 6, by - 1, bx + 14, by - 1, bx + 5, by + 11, powerFg);
   }
   font(vlw::Small);
-  textOn(powerWords(chg, kPowerW - 16), powerX + 8, y + 92, powerFg, powerFill);
+  textOn(powerWords(chg, kStatW - 16), powerX + 8, y + 92, powerFg, powerFill);
 
   const int n = notes::count();
   const int roomMin = (int)(notes::room(kNoteRate) / kNoteRate / 60);
@@ -1244,9 +1247,11 @@ static void drawDashboard(bool asleep) {
                       : notes::onCard() ? String(gb)
                                         : String(roomMin) + " min free";
   const uint16_t notesFill = roomMin < 2 ? kRed : kYellow, notesFg = notesFill == kRed ? kPaper : kInk;
-  drawStatBlock({notesX, kNotesW, notesFill, notesFg, "Notes", String(n), ""}, y, kStatH);
+  drawStatBlock({notesX, kStatW, notesFill, notesFg, "Notes", String(n), ""}, y, kStatH);
   font(vlw::Small);
-  textOn(fit(room, kNotesW - 16), notesX + 8, y + 92, notesFg, notesFill);
+  String roomShort = room;  // (note mode's tile has the width for all of it)
+  roomShort.replace(" min free", "m free");
+  textOn(fit(roomShort, kStatW - 12), notesX + 8, y + 92, notesFg, notesFill);
   y += kStatH + G;
 
   const String kept = n == 0 ? String("no notes yet") : String(n) + (n == 1 ? " note · " : " notes · ") + clockLength(notes::seconds());
