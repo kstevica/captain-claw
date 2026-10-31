@@ -47,6 +47,8 @@ class TurnState:
     tokens_out: int = 0
     cost_usd: float = 0.0
     error: str = ""
+    model: str = ""  # the one it really ran on, when the CLI says
+    limits: dict[str, dict] = field(default_factory=dict)  # the account's, when the CLI says
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -143,12 +145,35 @@ def _claude_argv(spec: RunSpec) -> list[str]:
     return argv
 
 
+def _claude_windows(info: dict) -> dict[str, dict]:
+    """How much of each of the account's limits is used, as Claude Code prints it on
+    every turn: ``{"seven_day": {"used": 0.44, "resets_at": 1793811600, "status": "allowed"}}``.
+    It isn't a documented format, so anything else it might say is simply not read."""
+    windows = info.get("unifiedWindows")
+    if not isinstance(windows, dict) or not windows:
+        windows = {info["rateLimitType"]: info} if info.get("rateLimitType") else {}
+    out = {}
+    for name, window in windows.items():
+        if not isinstance(window, dict):
+            continue
+        used = window.get("utilization")
+        resets = window.get("resetsAt")
+        out[str(name)] = {"used": float(used) if isinstance(used, (int, float)) else None,
+                          "resets_at": int(resets) if isinstance(resets, (int, float)) else 0,
+                          "status": str(window.get("status") or "")}
+    return out
+
+
 def _claude_parse(obj: dict, state: TurnState) -> list[dict]:
     kind = obj.get("type")
     if obj.get("session_id"):
         state.session = str(obj["session_id"])
     out: list[dict] = []
-    if kind == "assistant":
+    if kind == "system" and obj.get("subtype") == "init" and obj.get("model"):
+        state.model = str(obj["model"])
+    elif kind == "rate_limit_event" and isinstance(obj.get("rate_limit_info"), dict):
+        state.limits.update(_claude_windows(obj["rate_limit_info"]))
+    elif kind == "assistant":
         for block in (obj.get("message") or {}).get("content") or []:
             if block.get("type") == "text" and str(block.get("text") or "").strip():
                 state.final = str(block["text"])
@@ -323,6 +348,8 @@ def _pi_parse(obj: dict, state: TurnState) -> list[dict]:
         if message.get("role") != "assistant":
             return []
         usage = message.get("usage") or {}
+        if message.get("model"):
+            state.model = str(message["model"])
         state.tokens_in += (int(usage.get("input") or 0) + int(usage.get("cacheRead") or 0)
                             + int(usage.get("cacheWrite") or 0))
         state.tokens_out += int(usage.get("output") or 0)

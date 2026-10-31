@@ -31,7 +31,8 @@ case "$all" in
 esac
 sid=$(printf '%s' "$all" | sed -n 's/.*--resume \([^ ]*\).*/\1/p')
 [ -n "$sid" ] || sid="sess-$$"
-say "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\"}"
+say "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"$sid\",\"model\":\"claude-test-model\"}"
+say "{\"type\":\"rate_limit_event\",\"rate_limit_info\":{\"status\":\"allowed\",\"resetsAt\":1793811600,\"rateLimitType\":\"seven_day\",\"unifiedWindows\":{\"seven_day\":{\"utilization\":0.44,\"resetsAt\":1793811600,\"status\":\"allowed\"}}}}"
 case "$all" in
   *SCENARIO:slow*) sleep 60 ;;
   *SCENARIO:quiet*) sleep 2; echo q > work.txt; git add work.txt; git commit -qm "quiet work" ;;
@@ -743,8 +744,11 @@ async def test_what_a_task_made_comes_to_the_vfs(deck):
     assert not (folder / "files" / ".git").exists()
     assert (folder / "report.md").read_text() == "All done."
     told = crew_runner.notice_text(done)
-    assert results["files_path"] in told and "don't start a task to fetch them" in told
-    assert "crew action=request_merge" in told
+    assert results["files_path"] in told and "don't start a task to fetch them" not in told
+    assert "crew action" not in told  # that's for the agent, not the person's bell
+    for_agent = crew_runner.notice_text(done, for_agent=True)
+    assert "don't start a task to fetch them" in for_agent
+    assert "crew action=pr" in for_agent and "crew action=request_merge" in for_agent
 
 
 async def test_a_big_project_brings_only_what_changed_until_asked(deck, monkeypatch):
@@ -768,7 +772,7 @@ async def test_a_page_says_how_to_publish_it_from_the_clean_copy(deck):
     folder = _results_folder(done)
     assert done["results"]["publish"] == {"project": "crew", "subdir": f"repo/{folder.name}/files/site"}
     assert (folder / "files" / "site" / "css" / "a.css").exists()
-    assert "hosting action=publish kind=static project=crew" in crew_runner.notice_text(done)
+    assert "hosting action=publish kind=static project=crew" in crew_runner.notice_text(done, for_agent=True)
 
 
 async def test_copying_runs_nothing_from_the_repository_and_follows_no_link(deck):
@@ -844,6 +848,51 @@ async def test_files_wait_for_the_worker_and_stay_in_their_folder(deck):
         assert err.value.status_code == 404, path
 
 
+def _task_for_steps(**over) -> dict:
+    return {"id": "t", "user_id": "u", "kind": "ship", "status": "ready", "repo_kind": "path", "repo": "/r",
+            "evidence": {"commits": 1}, "delivery": {}, "results": {}, **over}
+
+
+def test_an_agent_is_told_captain_delivers_whenever_there_are_commits():
+    steps = crew_runner.next_steps
+    # From a real log: a worker blocked on a push, and an agent that kept asking it to retry.
+    for status in ("ready", "waiting", "stopped", "failed"):
+        assert any("crew action=pr" in s for s in steps(_task_for_steps(status=status))), status
+    assert any("crew action=request_merge" in s for s in steps(_task_for_steps()))
+    # A repository address only lands through its pull request.
+    assert not any("request_merge" in s for s in steps(_task_for_steps(repo_kind="url")))
+    with_pr = steps(_task_for_steps(repo_kind="url", status="pr_open", delivery={"pr": 7}))
+    assert any("pushes anything new" in s for s in with_pr) and any("request_merge" in s for s in with_pr)
+    # Nothing to deliver, or nothing to do yet.
+    assert steps(_task_for_steps(kind="scout")) == []
+    assert steps(_task_for_steps(evidence={})) == []
+    for status in ("running", "queued", "delivered", "closed"):
+        assert steps(_task_for_steps(status=status)) == [], status
+
+
+@pytest.mark.parametrize("out", [
+    "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+    "remote: Invalid username or token.\nfatal: Authentication failed for 'https://github.com/a/b.git/'",
+    "remote: Repository not found.\nfatal: repository 'https://github.com/a/b.git/' not found",
+    "remote: Permission to a/b.git denied to someone.\nfatal: unable to access: The requested URL returned error: 403",
+])
+def test_a_token_github_wont_take_is_called_that(out):
+    said = crew_runner._push_error(out, "a/b")
+    assert "Crew → Logins" in said and "a/b" in said and "doesn't go in a chat" in said
+
+
+def test_any_other_push_failure_is_left_as_git_said_it():
+    said = crew_runner._push_error("! [rejected] x -> x (non-fast-forward)", "a/b")
+    assert said.startswith("Couldn't push:") and "non-fast-forward" in said and "Logins" not in said
+
+
+def test_a_worker_is_told_a_pull_request_is_captains():
+    task = {"kind": "ship", "worktree": "/w", "branch": "crew/x", "brief": "Add it and open a pull request."}
+    prompt = crew_runner._first_prompt(task)
+    assert "that part is Captain's" in prompt and "Don't try git push or gh" in prompt and "isn't a blocker" in prompt
+    assert "commit and finish" in crew_runner._next_prompt(["Try again."])
+
+
 def test_the_whole_message_is_where_a_cut_callback_says():
     task = {"id": "t", "user_id": "u", "kind": "scout", "status": "ready", "final": "x" * 6000, "repo": "/r",
             "results": {"report": "vfs:crew/p/t/report.md"}}
@@ -893,6 +942,31 @@ async def test_a_new_task_is_warned_of_work_that_has_not_landed(deck):
     assert crew_runner.unlanded_in(uid, key, but=done["id"]) == []
     await crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"])
     assert crew_runner.unlanded_in(uid, key) == []
+
+
+async def test_a_worker_says_which_model_it_ran_on_and_how_much_of_its_limit_is_used(deck):
+    done = await _settle(await _dispatch(deck))
+    assert done["model_used"] == "claude-test-model"
+    assert crew_runner.view(done)["model_used"] == "claude-test-model"
+    row = crew_runner.usage(done["user_id"])["harnesses"][0]
+    assert row["id"] == "claude" and row["model"] == "claude-test-model"
+    assert row["limits"]["seven_day"] == {"used": 0.44, "resets_at": 1793811600, "status": "allowed"}
+    assert row["tasks"] == 1 and row["tokens"] > 0 and row["seen_at"] > 0
+    # Each user's own account.
+    assert crew_runner.usage("someone-else") == {"harnesses": []}
+
+
+def test_what_a_cli_said_last_is_kept_and_merged(tmp_path):
+    store = crew_store.CrewStore(tmp_path / "crew.db")
+    store.note_seen("u", "claude", model="a", limits={"seven_day": {"used": 0.1}})
+    store.note_seen("u", "claude", limits={"five_hour": {"used": 0.2}})
+    store.note_seen("u", "claude", model="b", limits={"seven_day": {"used": 0.3}})
+    seen = store.seen_for("u")["claude"]
+    assert seen["model"] == "b" and seen["limits"] == {"seven_day": {"used": 0.3}, "five_hour": {"used": 0.2}}
+    assert store.seen_for("other") == {}
+    store.forget_seen("u", "claude")
+    assert store.seen_for("u") == {}
+    store.close()
 
 
 def test_a_store_from_before_gets_the_new_columns(tmp_path):

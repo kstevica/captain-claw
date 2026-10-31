@@ -13,7 +13,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from captain_claw.flight_deck import admin_routes, agent_identity
 from captain_claw.flight_deck import auth as auth_mod
@@ -579,6 +579,93 @@ async def test_the_tool_points_at_the_vfs_rather_than_at_a_worker():
     for piece in ("vfs:Game/client/", "vfs:crew/Game/t/files/", "vfs:crew/Game/t/report.md", "subdir=Game/t/files",
                   "1 uncommitted"):
         assert piece in out.content, piece
+
+
+async def test_the_tool_says_a_push_is_not_a_workers_job():
+    made = {"id": "t", "status": "running", "harness_label": "Claude Code", "repo_label": "p", "branch": "crew/x"}
+    # A brief that asks for a pull request gets one from Captain.
+    for brief in ("Add it and open a pull request.", "Add it, then create a PR.", "Commit, then run gh pr create."):
+        client = _FakeClient(dispatch=made)
+        out = await CrewTool()._do_dispatch(client, harness="claude", brief=brief)
+        assert client.asked[0][1]["deliver"] == "pr", brief
+        assert "Captain opens its pull request" in out.content
+    # Mentioning one isn't asking for one, and pushing isn't either.
+    for brief in ("Fix what the review of pull request 12 found.", "Add a dark theme."):
+        client = _FakeClient(dispatch=made)
+        await CrewTool()._do_dispatch(client, harness="claude", brief=brief)
+        assert "deliver" not in client.asked[0][1], brief
+    pushing = await CrewTool()._do_dispatch(_FakeClient(dispatch=made), harness="claude", brief="Add it, then git push it.")
+    assert "crew action=pr" in pushing.content
+    # A scout changes nothing, so it has nothing to open one for.
+    client = _FakeClient(dispatch=made)
+    await CrewTool()._do_dispatch(client, harness="claude", kind="scout", brief="How would you open a pull request here?")
+    assert "deliver" not in client.asked[0][1]
+    for text in ("Push branch crew/x, then gh pr create.", "GH_TOKEN is set now, try again", "git push origin crew/x"):
+        out = await CrewTool()._do_steer(_FakeClient(steer={"id": "t"}), task_id="t", text=text)
+        assert "crew action=pr" in out.content, text
+    out = await CrewTool()._do_steer(_FakeClient(steer={"id": "t"}), task_id="t", text="Use the blue one.")
+    assert "crew action=pr" not in out.content
+
+
+async def test_usage_is_each_users_own_and_a_new_login_forgets_the_old_account(deck):
+    await _approve(deck, deck.user)
+    await _approve(deck, deck.other)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = (await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:work", "project": "Game"})).json()
+    await _settle(deck.user["id"], made["id"])
+    async with _client(deck.user) as client:
+        row = (await client.get("/fd/crew/usage")).json()["harnesses"][0]
+        assert row["model"] == "claude-test-model" and row["limits"]["seven_day"]["used"] == 0.44
+        assert (await client.get(f"/fd/crew/tasks/{made['id']}")).json()["model_used"] == "claude-test-model"
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-another-account"})
+        row = (await client.get("/fd/crew/usage")).json()["harnesses"][0]
+        assert row["limits"] == {} and row["model"] == "" and row["tasks"] == 1
+    async with _client(deck.other) as client:
+        assert (await client.get("/fd/crew/usage")).json() == {"harnesses": []}
+
+
+async def test_the_tool_answers_which_model_and_how_much_of_the_limit():
+    options = _FakeClient(options={"repos": {}, "me": {"harnesses": [
+        {"id": "claude", "label": "Claude Code", "installed": True, "login": {"ok": True, "how": "your saved login"}},
+        {"id": "codex", "label": "Codex", "installed": True, "login": {"ok": True, "how": "a key"}},
+        {"id": "pi", "label": "Pi", "installed": False, "login": {"ok": False}},
+    ]}, "usage": {"harnesses": [{"id": "claude", "model": "claude-sonnet-5-5", "tasks": 3, "tokens": 480000, "seen_at": time.time() - 600,
+                                 "limits": {"seven_day": {"used": 0.44, "resets_at": 1793811600, "status": "allowed"}}}]}})
+    out = (await CrewTool()._do_options(options)).content
+    for piece in ("Last ran on claude-sonnet-5-5", "The weekly limit: 44% used, resets", "10 minutes ago", "3, 480,000 tokens"):
+        assert piece in out, piece
+    # A CLI that says nothing is said to say nothing, not guessed at.
+    assert out.count("not reported yet") == 1
+    status = _FakeClient(task={"id": "t", "status": "ready", "title": "x", "model_used": "claude-haiku-5-5", "model": "haiku"})
+    assert "Model: claude-haiku-5-5" in (await CrewTool()._do_status(status, task_id="t")).content
+
+
+async def test_status_gives_the_next_steps_and_pr_gives_the_link():
+    status = _FakeClient(task={"id": "t", "status": "waiting", "title": "x", "evidence": {"commits": 1},
+                               "next_steps": ["To push this and open a pull request: crew action=pr."]})
+    out = await CrewTool()._do_status(status, task_id="t")
+    assert "crew action=pr" in out.content
+    pr = await CrewTool()._do_pr(_FakeClient(pr={"note": "Pull request ready: https://github.com/a/b/pull/7"}), task_id="t")
+    assert "https://github.com/a/b/pull/7" in pr.content and "Give the user that link" in pr.content
+
+
+async def test_a_merge_from_an_address_is_refused_before_the_person_is_asked(deck, monkeypatch):
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = (await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:work", "project": "Game"})).json()
+    done = await _settle(deck.user["id"], made["id"])
+    crew_store.get_store().update(done["id"], repo_kind="url")
+    task = crew_runner.view(crew_store.get_store().get(deck.user["id"], done["id"]), full=True)
+    assert not any("request_merge" in s for s in task["next_steps"]) and any("crew action=pr" in s for s in task["next_steps"])
+    from captain_claw.flight_deck import agent_identity
+
+    caller = types.SimpleNamespace(owner=deck.user["id"], slug="a", is_shared=False)
+    monkeypatch.setattr(agent_identity, "require_agent_caller", lambda request, what="": caller)
+    with pytest.raises(HTTPException) as err:
+        await crew_routes.agent_request_merge(crew_routes.AgentTaskBody(task_id=done["id"]), types.SimpleNamespace())
+    assert err.value.status_code == 409 and "crew action=pr" in err.value.detail
 
 
 async def test_the_tool_warns_of_work_a_new_task_will_not_see():
