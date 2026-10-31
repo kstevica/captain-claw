@@ -9,7 +9,12 @@ Saved logins are sealed in ``user_settings`` as ``crew:logins`` (``fd_crypto``);
 * **github** — a token. Flight Deck uses it to clone, push and open pull
   requests; the worker never sees it, since a worker never pushes.
 * **anthropic, openai, gemini, openrouter, xai** — provider keys for OpenCode and
-  Pi. Keys saved under "Your own AI keys" (``byok``) count as well.
+  Pi. Keys saved under "Your own AI keys" (``byok``) count as well. OpenCode also
+  has free models that need no key; Pi can't run without one.
+
+``crew:models`` holds the model each of their CLIs uses when a task names none: a
+model picked in a CLI's own screen is in that person's home, which their worker
+doesn't share.
 
 A worker's environment is built from nothing (:data:`_BASE_ENV` is all it takes
 from Flight Deck's), so no deck secret and no deck key reaches it. A non-admin's
@@ -37,6 +42,7 @@ log = get_logger(__name__)
 
 _K_LOGINS = "crew:logins"
 _K_META = "crew:meta"
+_K_MODELS = "crew:models"
 _CLAUDE_TOKEN_PREFIX = "sk-ant-oat"
 PROVIDER_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -158,7 +164,27 @@ async def login_state(db, user: dict, grant: Grant, harness: str) -> dict[str, A
         return {"ok": True, "how": f"your {names} key"}
     if grant.trusted:
         return {"ok": True, "how": "this computer's login"}
+    if harness == "opencode":
+        # Nothing of anyone's is spent on these, so there's nothing to log in to.
+        return {"ok": True, "how": "OpenCode's free models", "free": True}
     return {"ok": False, "how": ""}
+
+
+async def read_models(db, uid: str) -> dict[str, str]:
+    try:
+        models = json.loads(await db.get_setting(uid, _K_MODELS) or "{}")
+    except (TypeError, ValueError):
+        models = {}
+    return {str(k): str(v) for k, v in models.items() if v} if isinstance(models, dict) else {}
+
+
+async def save_model(db, uid: str, harness: str, model: str) -> None:
+    models = await read_models(db, uid)
+    if model:
+        models[harness] = model
+    else:
+        models.pop(harness, None)
+    await db.set_settings(uid, {_K_MODELS: json.dumps(models, ensure_ascii=True)})
 
 
 def _base_env(binary: str) -> dict[str, str]:

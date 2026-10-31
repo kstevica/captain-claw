@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass, field
@@ -34,6 +35,8 @@ _EXTRA_BIN_DIRS = ("~/.local/bin", "~/.npm-global/bin", "~/.bun/bin", "~/.openco
 # running after the turn the runner is watching.
 _CLAUDE_DENIED_TOOLS = "EnterWorktree,ExitWorktree,CronCreate,RemoteTrigger,ScheduleWakeup"
 CLAUDE_PERMISSION_MODES = ("auto", "acceptEdits", "bypassPermissions")
+_MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:/@+-]*$")
+_MODELS_LISTED = 200
 
 
 @dataclass
@@ -274,6 +277,18 @@ def _codex_parse(obj: dict, state: TurnState) -> list[dict]:
 
 
 # ── OpenCode ────────────────────────────────────────────────────────────
+
+
+def list_models(binary: str, env: dict[str, str], cwd: str) -> list[str]:
+    """The models OpenCode says this account can use: with no key, only its free ones."""
+    try:
+        probe = subprocess.run([binary, "models"], capture_output=True, text=True, timeout=30, env=env, cwd=cwd,  # noqa: S603
+                               stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if probe.returncode != 0:
+        return []
+    return [ln.strip() for ln in probe.stdout.splitlines() if _MODEL_NAME_RE.match(ln.strip())][:_MODELS_LISTED]
 
 
 def _opencode_argv(spec: RunSpec) -> list[str]:

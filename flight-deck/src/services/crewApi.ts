@@ -21,7 +21,9 @@ export interface CrewHarness {
   installed: boolean
   version: string
   install: string
-  login: { ok: boolean; how: string }
+  login: { ok: boolean; how: string; free?: boolean }
+  default_model: string
+  models: string[]
 }
 
 export interface CrewMe {
@@ -31,6 +33,7 @@ export interface CrewMe {
   max_parallel?: number
   harnesses?: CrewHarness[]
   logins?: Record<string, { hint: string; saved_at: string }>
+  free_terms_url?: string
 }
 
 export interface CrewEvidence {
@@ -183,6 +186,8 @@ export const crewApi = {
   pr: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/pr`),
   merge: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/merge`),
   close: (id: string, discard = false) => post<CrewTask>(`/fd/crew/tasks/${id}/close?discard=${discard}`),
+  saveModel: (harness: string, model: string) =>
+    api<{ harness: string; model: string }>(`/fd/crew/models/${harness}`, { method: 'PUT', body: JSON.stringify({ model }) }),
   saveLogin: (name: string, secret: string) =>
     api<{ hint: string }>(`/fd/crew/logins/${name}`, { method: 'PUT', body: JSON.stringify({ secret }) }),
   deleteLogin: (name: string) => api<{ ok: boolean }>(`/fd/crew/logins/${name}`, { method: 'DELETE' }),

@@ -52,6 +52,8 @@ _READ_MAX = 4_000_000
 _DIFF_MAX = 400_000
 _REPORT_NAME = "report.md"
 _ACTIVE_PER_SLOT = 5  # how many tasks may wait or run, per parallel run approved
+_MODELS_TTL_S = 600
+FREE_TERMS_URL = "https://opencode.ai/docs/zen/"
 _SMALL_FILES, _SMALL_BYTES = 300, 20_000_000  # a project this small is copied whole by itself
 _MAX_FILES, _MAX_BYTES = 3_000, 200_000_000  # the most one task's copy may hold
 _LISTED = 500  # paths kept in a task's row, for showing
@@ -97,6 +99,7 @@ _SCOUT_DUTY = ("This is an investigation: don't change or commit anything in the
 _NEXT_REMINDER = ("\n\nAs before: pushing and pull requests are Captain's, so commit and finish. End your final message "
                   "with the CREW-STATUS line.")
 
+_MODELS: dict[str, tuple[float, list[str]]] = {}  # per user: what OpenCode said it can use, and when
 _PROCS: dict[str, subprocess.Popen] = {}
 _LOCKS: dict[str, asyncio.Lock] = {}
 _QUEUE_LOCK = asyncio.Lock()
@@ -474,9 +477,13 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
         await _fail(task, f"Couldn't start {HARNESSES[harness].label}: {exc}")
         return
     now = time.time()
+    # Not every CLI says which model it ran on: then the one it was told is the best there is.
+    model_used = task.get("model_used") or task.get("model") or ""
     _store().update(task["id"], status="running", note="", turn=turn, pid=pid, pid_start=started, offset=0,
                     turn_state=TurnState(session=task.get("session") or "").to_json(), pending=[],
-                    turn_started_at=now, last_event_at=now, stalled_at=0)
+                    turn_started_at=now, last_event_at=now, stalled_at=0, model_used=model_used)
+    if task.get("model"):
+        _store().note_seen(task["user_id"], harness, model=task["model"])
     fresh = _store().get(task["user_id"], task["id"]) or task
     _say(fresh, "turn", f"{task['brief']}\n\n{said}".rstrip() if first else said)
     _sync_board(fresh)
@@ -692,7 +699,8 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     deliver = str(body.get("deliver") or "branch").strip().lower()
     if deliver not in ("branch", "pr"):
         raise HTTPException(400, "Delivery is either branch or pr.")
-    model = _clean_axis(body.get("model"), _MODEL_RE, "model name")
+    defaults = await crew_logins.read_models(get_db(), user["id"])
+    model = _clean_axis(body.get("model"), _MODEL_RE, "model name") or defaults.get(harness, "")
     effort = _clean_axis(body.get("effort"), _EFFORT_RE, "reasoning effort")
     active = [t for t in _store().with_status(*crew_store.ACTIVE) if t["user_id"] == user["id"]]
     if len(active) >= grant.max_parallel * _ACTIVE_PER_SLOT:
@@ -703,6 +711,11 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     state = await crew_logins.login_state(get_db(), user, grant, harness)
     if not state["ok"]:
         raise HTTPException(400, f"Add your {HARNESSES[harness].label} login in Crew → Logins first.")
+    if state.get("free") and not model:
+        # Left to itself it picks one of them, and they don't all treat code alike. Someone's repository goes
+        # to whichever it is, so it's chosen by them.
+        raise HTTPException(400, f"Choose which of OpenCode's free models to use, for this task or as your default in "
+                                 f"Crew → Logins. They differ in what happens to your code: {FREE_TERMS_URL}")
     title = " ".join(str(body.get("title") or brief).split())[:120]
     where = await _resolve_repo(user, grant, body)
     slug = _slug_for(title)
@@ -1078,6 +1091,24 @@ async def tidy(uid: str, key: str) -> dict[str, int]:
         else:
             kept += 1
     return {"cleared": cleared, "kept": kept}
+
+
+async def models_of(user: dict, grant: Grant, harness: str, binary: str, db) -> list[str]:
+    """What a CLI can run on, for choosing from. Only OpenCode can say without a run."""
+    if harness != "opencode" or not binary:
+        return []
+    uid = user["id"]
+    at, known = _MODELS.get(uid, (0.0, []))
+    if known and time.monotonic() - at < _MODELS_TTL_S:
+        return known
+    try:
+        env = await crew_logins.worker_env(db, user, grant, harness, binary)
+    except HTTPException:
+        return []
+    known = await asyncio.to_thread(crew_harness.list_models, binary, env, str(crew_store.user_dir(uid)))
+    if known:
+        _MODELS[uid] = (time.monotonic(), known)
+    return known
 
 
 def usage(uid: str) -> dict[str, Any]:

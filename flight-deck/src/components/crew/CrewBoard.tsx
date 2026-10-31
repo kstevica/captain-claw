@@ -351,6 +351,16 @@ function ProjectView({ project, onOpen, onNew, onChanged, onBack }: {
 
 // ── A new task ───────────────────────────────────────────────────────────
 
+/** A worker sends the model the code it reads, so whose model it is matters. */
+function FreeModelsNote({ url }: { url?: string }) {
+  return (
+    <span className="block font-normal text-zinc-500">
+      Free models need no key, and your code goes to them. They differ in what happens to it:
+      {' '}<a href={url} target="_blank" rel="noreferrer" className="underline">check each one</a>.
+    </span>
+  )
+}
+
 function NewTask({ me, initialProject, onCancel, onMade, onLogins }: {
   me: CrewMe; initialProject: string; onCancel: () => void; onMade: (id: string) => void; onLogins: () => void
 }) {
@@ -367,6 +377,8 @@ function NewTask({ me, initialProject, onCancel, onMade, onLogins }: {
   const [path, setPath] = useState('')
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('')
+  const chosen = me.harnesses?.find((h) => h.id === harness)
+  const needsModel = !!chosen?.login.free && !chosen.default_model
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -435,6 +447,17 @@ function NewTask({ me, initialProject, onCancel, onMade, onLogins }: {
         </div>
       </fieldset>
 
+      <label className="block space-y-1.5 text-xs font-medium text-zinc-400">
+        <span>Model</span>
+        <input
+          list="crew-models" value={model} onChange={(e) => setModel(e.target.value)} aria-label="Model"
+          placeholder={chosen?.default_model ? `Your default: ${chosen.default_model}` : needsModel ? 'Choose one of its free models' : 'Its default'}
+          className={`${fieldClass} font-normal`}
+        />
+        <datalist id="crew-models">{chosen?.models?.map((m) => <option key={m} value={m} />)}</datalist>
+        {chosen?.login.free && <FreeModelsNote url={me.free_terms_url} />}
+      </label>
+
       <fieldset className="space-y-1.5">
         <legend className="text-xs font-medium text-zinc-400">Where</legend>
         <div className="flex flex-wrap gap-1.5">
@@ -473,15 +496,12 @@ function NewTask({ me, initialProject, onCancel, onMade, onLogins }: {
       )}
 
       <details className="text-xs text-zinc-400">
-        <summary className="cursor-pointer font-medium">Model and effort</summary>
-        <div className="mt-2 grid gap-2 sm:grid-cols-2">
-          <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="Model (its default if empty)" aria-label="Model" className={fieldClass} />
-          <input value={effort} onChange={(e) => setEffort(e.target.value)} placeholder="Effort, e.g. high" aria-label="Effort" className={fieldClass} />
-        </div>
+        <summary className="cursor-pointer font-medium">Effort</summary>
+        <input value={effort} onChange={(e) => setEffort(e.target.value)} placeholder="Effort, e.g. high" aria-label="Effort" className={`${fieldClass} mt-2 sm:w-1/2`} />
       </details>
 
       <ErrorLine text={error} />
-      <button type="submit" disabled={busy || !harness || !brief.trim() || !named} className={primaryBtn}>
+      <button type="submit" disabled={busy || !harness || !brief.trim() || !named || (needsModel && !model.trim())} className={primaryBtn}>
         {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Start
       </button>
     </form>
@@ -494,11 +514,11 @@ const LOGINS: { name: string; label: string; hint: string; placeholder: string; 
   { name: 'claude', label: 'Claude Code', hint: 'Run claude setup-token on your own computer and paste the token (uses your plan), or paste an Anthropic API key.', placeholder: 'sk-ant-…' },
   { name: 'codex', label: 'Codex', hint: 'Paste an OpenAI API key, or the contents of ~/.codex/auth.json after codex login. A login used here shouldn\'t also be used elsewhere: Codex refreshes it in place.', placeholder: 'sk-… or {"auth_mode": …}', multiline: true },
   { name: 'github', label: 'GitHub', hint: 'A token that can read and push your repositories. Only Flight Deck uses it, to clone, push and open pull requests; the agents never see it.', placeholder: 'github_pat_…' },
-  { name: 'anthropic', label: 'Anthropic key', hint: 'For OpenCode and Pi.', placeholder: 'sk-ant-…' },
-  { name: 'openai', label: 'OpenAI key', hint: 'For OpenCode and Pi.', placeholder: 'sk-…' },
-  { name: 'openrouter', label: 'OpenRouter key', hint: 'For OpenCode and Pi.', placeholder: 'sk-or-…' },
-  { name: 'gemini', label: 'Google Gemini key', hint: 'For OpenCode and Pi.', placeholder: 'AI…' },
-  { name: 'xai', label: 'xAI key', hint: 'For OpenCode and Pi.', placeholder: 'xai-…' },
+  { name: 'anthropic', label: 'Anthropic key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'sk-ant-…' },
+  { name: 'openai', label: 'OpenAI key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'sk-…' },
+  { name: 'openrouter', label: 'OpenRouter key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'sk-or-…' },
+  { name: 'gemini', label: 'Google Gemini key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'AI…' },
+  { name: 'xai', label: 'xAI key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'xai-…' },
 ]
 
 function LoginRow({ login, saved, onChanged }: {
@@ -533,16 +553,44 @@ function LoginRow({ login, saved, onChanged }: {
   )
 }
 
-function HarnessLine({ h }: { h: CrewHarness }) {
+function HarnessLine({ h, termsUrl, onChanged }: { h: CrewHarness; termsUrl?: string; onChanged: () => void }) {
+  const [model, setModel] = useState(h.default_model)
+  const [error, setError] = useState('')
+  useEffect(() => setModel(h.default_model), [h.default_model])
+  const save = async () => {
+    if (model.trim() === h.default_model) return
+    setError('')
+    try {
+      await crewApi.saveModel(h.id, model.trim())
+      onChanged()
+    } catch (e) {
+      setError(errorOf(e))
+    }
+  }
   return (
-    <li className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
-      <span className="font-medium text-zinc-200">{h.label}</span>
-      {!h.installed ? (
-        <span className="text-xs text-amber-700 dark:text-amber-300">not installed. An admin can run: <code className="rounded bg-zinc-800 px-1 py-0.5 text-[11px]">{h.install}</code></span>
-      ) : h.login.ok ? (
-        <span className="text-xs text-zinc-500">ready, on {h.login.how}{h.version ? ` · ${h.version}` : ''}</span>
-      ) : (
-        <span className="text-xs text-amber-700 dark:text-amber-300">needs a login</span>
+    <li className="space-y-1.5">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+        <span className="font-medium text-zinc-200">{h.label}</span>
+        {!h.installed ? (
+          <span className="text-xs text-amber-700 dark:text-amber-300">not installed. An admin can run: <code className="rounded bg-zinc-800 px-1 py-0.5 text-[11px]">{h.install}</code></span>
+        ) : h.login.ok ? (
+          <span className="text-xs text-zinc-500">ready, on {h.login.how}{h.version ? ` · ${h.version}` : ''}</span>
+        ) : (
+          <span className="text-xs text-amber-700 dark:text-amber-300">needs a login</span>
+        )}
+      </div>
+      {h.installed && (
+        <div className="text-xs text-zinc-500">
+          <input
+            list={`crew-models-${h.id}`} value={model} onChange={(e) => setModel(e.target.value)} onBlur={save}
+            onKeyDown={(e) => { if (e.key === 'Enter') e.currentTarget.blur() }}
+            placeholder={h.login.free ? 'Default model: choose one of its free models' : 'Default model: its own'} aria-label={`Default model for ${h.label}`}
+            className={`${fieldClass} !py-1 text-xs`}
+          />
+          <datalist id={`crew-models-${h.id}`}>{h.models?.map((m) => <option key={m} value={m} />)}</datalist>
+          {h.login.free && <p className="mt-1"><FreeModelsNote url={termsUrl} /></p>}
+          <ErrorLine text={error} />
+        </div>
       )}
     </li>
   )
@@ -555,7 +603,7 @@ function Logins({ me, onBack, onChanged }: { me: CrewMe; onBack: () => void; onC
         <button onClick={onBack} className={libraryIconBtn} aria-label="Back"><ArrowLeft className="h-4 w-4" /></button>
         <h3 className="text-sm font-semibold text-zinc-100">Logins</h3>
       </div>
-      <ul className="space-y-1 rounded-xl border border-zinc-800 p-3">{(me.harnesses ?? []).map((h) => <HarnessLine key={h.id} h={h} />)}</ul>
+      <ul className="space-y-3 rounded-xl border border-zinc-800 p-3">{(me.harnesses ?? []).map((h) => <HarnessLine key={h.id} h={h} termsUrl={me.free_terms_url} onChanged={onChanged} />)}</ul>
       <p className="text-xs text-zinc-500">
         {me.trusted
           ? 'Without a saved login, your agents use the ones already on this computer.'

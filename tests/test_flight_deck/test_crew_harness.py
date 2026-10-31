@@ -135,6 +135,30 @@ def test_pi_says_its_model():
     assert state.model == "ornith:9b"
 
 
+def test_opencode_lists_only_what_looks_like_a_model(monkeypatch):
+    class Done:
+        returncode = 0
+        stdout = "Performing one time database migration\nopencode/deepseek-v4.1-flash-free\n\nopencode/big-pickle\nnot a model\n"
+
+    seen = {}
+
+    def run(argv, **kwargs):
+        seen.update(kwargs, argv=argv)
+        return Done()
+
+    monkeypatch.setattr(crew_harness.subprocess, "run", run)
+    assert crew_harness.list_models("/bin/opencode", {"HOME": "/h"}, "/c") == ["opencode/deepseek-v4.1-flash-free", "opencode/big-pickle"]
+    assert seen["argv"] == ["/bin/opencode", "models"] and seen["stdin"] == crew_harness.subprocess.DEVNULL and seen["env"] == {"HOME": "/h"}
+    Done.returncode = 1
+    assert crew_harness.list_models("/bin/opencode", {}, "/c") == []
+
+    def broken(argv, **kwargs):
+        raise OSError("gone")
+
+    monkeypatch.setattr(crew_harness.subprocess, "run", broken)
+    assert crew_harness.list_models("/bin/opencode", {}, "/c") == []
+
+
 def test_claude_argv(monkeypatch):
     monkeypatch.delenv("FD_CREW_CLAUDE_PERMISSION", raising=False)
     argv = HARNESSES["claude"].argv(_spec())
