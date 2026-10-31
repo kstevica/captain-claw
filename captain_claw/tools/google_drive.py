@@ -786,6 +786,8 @@ class GoogleDriveTool(Tool):
             )
         }
         kwargs.pop("_abort_event", None)
+        if kwargs.get("local_path"):
+            kwargs["local_path"] = self._workspace_first(str(kwargs["local_path"]), runtime)
 
         # A pasted Drive/Docs URL works wherever an id is expected.
         resource_key = ""
@@ -1603,6 +1605,16 @@ class GoogleDriveTool(Tool):
                 f"{edit_note}"
             ),
         )
+
+    @staticmethod
+    def _workspace_first(local_path: str, runtime: dict[str, Any]) -> str:
+        """A relative local_path is the workspace's file when there is one, as
+        the deck's path check reads it; else it stays the process folder's."""
+        base = runtime.get("_runtime_base_path")
+        raw = Path(local_path).expanduser()
+        if base and not raw.is_absolute() and (Path(base) / raw).exists():
+            return str(Path(base) / raw)
+        return local_path
 
     @staticmethod
     def _download_dest(

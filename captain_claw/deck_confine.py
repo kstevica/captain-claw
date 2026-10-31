@@ -81,8 +81,9 @@ _GLOB_CHARS = ("*", "?", "[")
 # vfs:); "glob": a pattern whose fixed prefix is read; "rel": relative to the
 # tool's own folder, so never absolute and never ".."; "vfs": the vfs tool's
 # vfs-space path; "url": a web address (no file:// and the like). docx and
-# datastore pick read or write by action (:func:`_kind`). Tools in EXEC_TOOLS
-# have none: `user` can't call them, and an admin's shell reaches the host.
+# datastore pick read or write by action, and payments' source is a file only
+# on prepare (:func:`_kind`). Tools in EXEC_TOOLS have none: `user` can't call
+# them, and an admin's shell reaches the host.
 PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "read": (("path", "read"),),
     "write": (("path", "write"),),
@@ -115,6 +116,7 @@ PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "linked_system": (("files", "read"),),
     "pocket_tts": (("output_path", "write"),),
     "public_link": (("path", "read"),),
+    "payments": (("source", "payments"),),
     "summarize_files": (("folder", "read"), ("pattern", "rel")),
     "twitter": (("image_path", "read"),),
     "typesense": (("file_path", "read"),),
@@ -402,10 +404,31 @@ def _kind(name: str, field: str, kind: str, arguments: dict) -> str:
         return "read"
     if kind == "datastore":
         return "write" if action == "export" else "read"
+    if kind == "payments":
+        # prepare's source is the invoice file; purchase's is how it's paid.
+        return "read" if action == "prepare" else "none"
     return kind
 
 
+def _read_elsewhere(value: str, real: Path, base: Path) -> Path | None:
+    """Where a read of *value* goes when nothing is at *real*, which was ruled
+    from the workspace. Flight Deck starts an agent in its own folder, above
+    its workspace, and read and mail_attachments.resolve_path try that folder
+    next: ``../x`` is inside this agent's folder from one and beside it from
+    the other. read also tries what follows the workspace in an absolute path."""
+    from captain_claw import vfs
+
+    if vfs.is_vfs_path(value) or real.exists():
+        return None
+    p = Path(value).expanduser()
+    if not p.is_absolute():
+        return (Path.cwd() / p).resolve()
+    return (Path.cwd() / real.relative_to(base)).resolve() if real.is_relative_to(base) else None
+
+
 def _check_value(field: str, kind: str, value: str, arguments: dict, base: Path) -> str | None:
+    if kind == "none":
+        return None
     if "\x00" in value:
         return PATH_REFUSED + f"{field} must be a plain text path"
     if kind == "url":
@@ -441,6 +464,10 @@ def _check_value(field: str, kind: str, value: str, arguments: dict, base: Path)
     real = _resolve(value, base)
     if real is None:
         return PATH_REFUSED + f"{field} leaves your VFS folders"
+    if kind == "read":
+        other = _read_elsewhere(value, real, base)
+        if other is not None and not allowed(other, "read"):
+            return PATH_REFUSED + field + _OUTSIDE
     if allowed(real, kind):
         return None
     if kind == "write" and allowed(real, "read"):
