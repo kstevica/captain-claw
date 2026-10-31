@@ -1482,10 +1482,10 @@ class TaskboardStore:
         return True
 
     def reply_came_back(self, user_id: str, task_id: str, *, read: bool = True, now: float | None = None) -> bool:
-        """Someone wrote on a task that wasn't the user's to look at (closed,
-        on someone else's move, snoozed) and, as a reply brings a thread back
-        to Gmail's inbox, it is in Needs me again with all it had: open, the
-        user's move. What they had set of that was about before the reply, so
+        """Someone wrote on a task (closed, on someone else's move, snoozed, or
+        the user's already) and, as a reply brings a thread back to Gmail's
+        inbox, it is in Needs me with all it had: open, the user's move. What
+        they had set of that was about before the reply, so
         those locks go, and so does what was said of the last try.
         ``flags.came_back`` keeps it there until they act or answer, whatever
         triage reads (``taskboard_triage._came_back``). *read*: in triage's queue

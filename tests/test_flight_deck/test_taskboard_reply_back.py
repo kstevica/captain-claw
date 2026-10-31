@@ -1,6 +1,6 @@
 """A reply brings the same task back to Needs me, as it brings a thread back to
-Gmail's inbox: after Done, with the next move someone else's, or snoozed. It
-stays there until the user acts or answers, whatever triage reads of it. "Not a
+Gmail's inbox: after Done, with the next move someone else's, or snoozed. There,
+or there already, it stays until the user acts or answers, whatever triage reads of it. "Not a
 task", Dismiss, a mute rule, the user's own mail and old history keep their ways."""
 
 from __future__ import annotations
@@ -173,6 +173,22 @@ async def test_what_jev_reads_of_the_reply_doesnt_take_it_away(inbox):
     assert _at(inbox, tid) == BACK and _flags(inbox, tid)["came_back"] is True
     assert _flags(inbox, tid)["probably_done"] is True    # it may still say so
     assert "contains_instructions" in _flags(inbox, tid)
+
+
+@pytest.mark.parametrize("handed", [True, False], ids=["after_an_agent_answered", "still_unanswered"])
+async def test_a_reply_on_what_already_waits_on_the_user_isnt_closed_over(inbox, handed):
+    tid = await _task(inbox)
+    if handed:
+        inbox.s.hand_over_started(inbox.uid, tid, "a1", {"slug": "helper", "name": "Helper"}, "Propose Monday.")
+        inbox.s.hand_over_ended(inbox.uid, "a1", agent_name="Helper", text="Proposed Monday.")
+    assert _at(inbox, tid) == BACK and not _flags(inbox, tid).get("came_back")
+    _reply(inbox, body="Monday is a lock, send the invite.")
+    assert _at(inbox, tid) == BACK and _flags(inbox, tid)["came_back"] is True
+    # What was asked looks done, but what they just wrote hasn't been seen.
+    inbox.jev.answers.update(fulfilled=.97)
+    await _read(inbox)
+    assert _at(inbox, tid) == BACK and _flags(inbox, tid)["came_back"] is True
+    assert _flags(inbox, tid)["probably_done"] is True
 
 
 async def test_without_jev_the_rules_leave_it_there_too(inbox):
