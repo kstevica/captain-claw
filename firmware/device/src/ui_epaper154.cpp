@@ -374,22 +374,29 @@ static void pill(const String& label, int x, int y, int w, int h) {
   text(label, x + w / 2, y + h / 2, middle_center, kPaper);
 }
 
-// The on-screen button (touch): Talk / Stop / Pause / Play, the bottom row.
+// The on-screen button (touch): Stop / Pause / Play, the bottom row. Talk has none:
+// it's a tap on the home screen's tile, or in the middle of an answer. (Stopping
+// a recording has its own, on the record screen: recordHit().)
 static constexpr int kTapH = 24, kTapW = 96, kTapY = H - kTapH - 2;
 static constexpr int kTapReserve = board::kHasTouch ? kTapH + 4 : 0;  // always kept free: text never reflows
+static constexpr int kTileTop = 78;
+static int tileBottom = 0;  // as last drawn
 
 void setTapButton(TapButton button) { tapButton = button; }
 
+static bool tapPillShown() { return tapButton != TapButton::Off && tapButton != TapButton::Talk; }
+
 bool tapButtonHit(int x, int y) {
-  return tapButton != TapButton::Off && x > (W - kTapW) / 2 - 12 && x < (W + kTapW) / 2 + 12 && y > kTapY - 10;
+  if (tapButton == TapButton::Talk) {
+    if (current == Screen::Home) return y >= kTileTop && y < tileBottom;
+    return x > W / 8 && x < W * 7 / 8 && y > H / 4 && y < H * 7 / 8;
+  }
+  return tapPillShown() && x > (W - kTapW) / 2 - 12 && x < (W + kTapW) / 2 + 12 && y > kTapY - 10;
 }
 
 static void drawTapButton() {
-  if (tapButton == TapButton::Off) return;
-  const char* label = tapButton == TapButton::Talk    ? "Talk"
-                      : tapButton == TapButton::Stop  ? "Stop"
-                      : tapButton == TapButton::Pause ? "Pause"
-                                                      : "Play";
+  if (!tapPillShown()) return;
+  const char* label = tapButton == TapButton::Stop ? "Stop" : tapButton == TapButton::Pause ? "Pause" : "Play";
   pill(label, (W - kTapW) / 2, kTapY, kTapW, kTapH);
 }
 
@@ -597,9 +604,9 @@ void showHome(const Home& home) {
 
   // Under the tile: the battery's time at the size chosen for reading, as far as
   // the tile keeps room for its big lines.
-  static constexpr int kTileTop = 78, kTileMinH = 56;
+  static constexpr int kTileMinH = 56;
   const int linesEnd = kTileTop + kTileMinH + 4;
-  int y = H - 2 - kTapReserve;
+  int y = H - 2 - (tapPillShown() ? kTapReserve : 0);
   if (home.battery.length()) {
     String battery = home.battery;
     battery.replace("≈ ", "~");  // (not in efont)
@@ -611,6 +618,7 @@ void showHome(const Home& home) {
   }
 
   const int tileH = y - 4 - kTileTop, mid = kTileTop + tileH / 2;
+  tileBottom = kTileTop + tileH;
   canvas.fillRoundRect(3, kTileTop, W - 6, tileH, 8, kInk);
   const int iconH = tileH - 14, iconW = iconH * 3 / 4, iconX = 14, iconY = kTileTop + 7, x = iconX + iconW + 17;
   if (home.noteMode) {
@@ -641,33 +649,48 @@ void showHome(const Home& home) {
 // Once a second, however often it's asked: each change is a refresh.
 static int listenSecond = -1;
 
+// With the screen to tap on (Tap to talk): stop on the left, cancel on the right.
+static constexpr int kRecKeyY = 60, kRecKeyR = 28, kRecKeyX = 52;
+
+int recordHit(int x, int y) {
+  if (current != Screen::Listening || tapButton == TapButton::Off || y > kRecKeyY + kRecKeyR + 8) return -1;
+  return x < W / 2 - 6 ? 1 : x > W / 2 + 6 ? 0 : -1;
+}
+
 void showListening(int level, uint32_t elapsedMs) {
   const int second = elapsedMs / 1000;
   if (drawing(Screen::Listening) == Screen::Listening && second == listenSecond) return;
   listenSecond = second;
   canvas.fillScreen(kPaper);
   drawBar();
-  const bool note = barState == "note";
-  canvas.fillCircle(W / 2, 54, 22, kInk);
-  canvas.fillCircle(W / 2, 54, 8, kPaper);
+  const bool note = barState == "note", keys = tapButton != TapButton::Off;
+  if (keys) {
+    canvas.fillCircle(kRecKeyX, kRecKeyY, kRecKeyR, kInk);  // stop: it's what ends a recording well
+    canvas.fillRoundRect(kRecKeyX - 11, kRecKeyY - 11, 22, 22, 3, kPaper);
+    const int cx = W - kRecKeyX;
+    canvas.fillCircle(cx, kRecKeyY, kRecKeyR, kInk);  // cancel, in outline
+    canvas.fillCircle(cx, kRecKeyY, kRecKeyR - 3, kPaper);
+    for (int s : {-1, 1}) canvas.drawWideLine(cx - 10, kRecKeyY - 10 * s, cx + 10, kRecKeyY + 10 * s, 2.5f, kInk);
+  } else {
+    canvas.fillCircle(W / 2, 54, 22, kInk);
+    canvas.fillCircle(W / 2, 54, 8, kPaper);
+  }
+  const int shift = keys ? 12 : 0;
   canvas.setFont(&fonts::FreeSansBold12pt7b);
-  text(note ? "Note" : "Listening", W / 2, 84, top_center);
+  text(note ? "Note" : "Listening", W / 2, 84 + shift, top_center);
   char t[16];
   snprintf(t, sizeof(t), "%d:%02d", second / 60, second % 60);
   canvas.setFont(&efont::efont24);
-  text(t, W / 2, 112, top_center);
+  text(t, W / 2, 112 + shift, top_center);
   // Ten cells for the voice's level: a coarse one, so it doesn't redraw for nothing.
   const int cells = constrain((level + 5) / 10, 0, 10);
   for (int i = 0; i < 10; ++i) {
     const int x = 10 + i * 18;
-    if (i < cells) canvas.fillRect(x, 142, 16, 8, kInk);
-    else canvas.drawRect(x, 142, 16, 8, kInk);
+    if (i < cells) canvas.fillRect(x, 142 + shift, 16, 8, kInk);
+    else canvas.drawRect(x, 142 + shift, 16, 8, kInk);
   }
-  canvas.setFont(kSmall);
-  if (tapButton != TapButton::Off) {
-    text("PWR cancels", W / 2, 156, top_center);
-    drawTapButton();
-  } else {
+  if (!keys) {
+    canvas.setFont(kSmall);
     text(String(board::kTalkKey) + (note ? " keeps it · " : " sends · ") + board::kSideKey + " cancels", W / 2, 170, top_center);
   }
   push();
