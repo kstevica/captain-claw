@@ -1,7 +1,7 @@
 # Captain Claw · handheld voice client (M5Stack StickS3, StopWatch, PaperColor; Waveshare ePaper 1.54)
 
-Press the talk button and talk; press it again, or just stop talking for
-2.5 s, to send. Flight Deck transcribes it, sends it to
+Press the talk button and talk; press it again, or on most devices just stop
+talking for 2.5 s, to send. Flight Deck transcribes it, sends it to
 one of your agents, and the device shows the reply, reads it aloud, and shows
 any picture the agent made.
 
@@ -148,8 +148,9 @@ speaking and trouble exactly as above; the voice carries the answers:
   until it's full, with a bolt while charging), the notes in yellow, red when
   under 2 minutes of room are left (how many, and the room: minutes in flash,
   GB on a card). Then a big tile with what A does ("A to talk"; until it's
-  ready, what it's waiting for), the links (Wi-Fi, deck, agent) and the
-  footer. Text on a colour stays between its two inks, so its edges don't
+  ready, what it's waiting for) and the footer. The links (Wi-Fi, deck,
+  agent) are on the options screen (1.0.26), under the code; the dots at the
+  top still show them at a glance. Text on a colour stays between its two inks, so its edges don't
   snap to a third. Redrawn in full on every five-minute mark
   (:00, :05 … :55), awake or asleep (the timer wake lands just after the
   mark, draws it without Wi-Fi and sleeps again), and after an offline voice
@@ -503,8 +504,8 @@ Power page too. A change of charging state starts the window over.
 button on the screen: on the clock face, under an answer or under Captain. Tap it and talk; the button turns into a stop square, and a second
 tap sends the recording (offline it's kept as a voice note). Holding the
 yellow button works as before, and its press also ends a tapped recording.
-A tapped recording also ends by itself after 2.5 s of quiet (and is sent);
-with nothing said at all it's dropped.
+From 0.20.1 nothing ends a recording by itself but the length limit (110 s):
+you press or tap when you're done, however long you pause.
 
 While an answer is spoken, the button under it is a **pause** (two bars) —
 whether or not Tap to talk is on — and a **play** while it's held; the bar

@@ -51,9 +51,9 @@
 #endif
 
 #if defined(PAPER_B)
-#define FW_VERSION "1.0.25"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
+#define FW_VERSION "1.0.26"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.20.0"
+#define FW_VERSION "0.20.1"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
