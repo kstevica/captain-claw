@@ -42,7 +42,7 @@ _TOOL_RISK: dict[str, str] = {
     "microsoft_calendar": "write", "contacts": "write", "cron": "write", "todo": "write",
     "apis": "write", "typesense": "write", "insights": "write", "playbooks": "write",
     "personality": "write", "facts": "write", "intentions": "write", "project_memory": "write",
-    "vfs": "write", "docx": "write", "topics": "write", "image_gen": "write", "visualize": "write",
+    "vfs": "write", "docx": "write", "xlsx": "write", "topics": "write", "image_gen": "write", "visualize": "write",
     "synthesize_flow": "write", "pocket_tts": "write", "clipboard": "write",
     "reasoning_effort": "write",
     # run

@@ -182,6 +182,8 @@ class AgentCompletionMixin:
             has_write = (
                 self._turn_has_successful_tool(turn_start_idx, "write")
                 or self._turn_has_successful_tool(turn_start_idx, "edit")
+                or self._turn_has_successful_tool(turn_start_idx, "docx")
+                or self._turn_has_successful_tool(turn_start_idx, "xlsx")
             )
             has_script_exec = self._turn_has_successful_script_execution(turn_start_idx)
             # Tools that directly produce file output (screenshots, images)
@@ -205,7 +207,8 @@ class AgentCompletionMixin:
                     "You MUST produce the file using one of these approaches:\n"
                     "1. write(path='<output_path>', content='<content>') — for text, "
                     "markdown, or any non-tabular content.\n"
-                    "2. datastore(action='export') — for tabular data (XLSX/CSV). "
+                    "2. xlsx(action='create') — for a workbook with formulas and formats; "
+                    "datastore(action='export') — for a plain dump of tabular data (XLSX/CSV). "
                     "For JOINs: datastore(action='export', format='xlsx', "
                     "sql_query='SELECT ... FROM t1 JOIN t2 ON ...', table='output_name').\n"
                     "3. write a Python script to scripts/ then execute it via "

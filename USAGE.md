@@ -785,6 +785,63 @@ On a shared agent, members use `docx` on their own files only. They read anythin
 
 `write` and `edit` refuse `.docx` paths and point to this tool. The output was checked against Microsoft Word: Word reads every revision, and its Accept All / Reject All give the same text as `accept` / `reject`.
 
+### xlsx
+
+Make and change Excel workbooks properly, without scripts. Only what a change really touches is rewritten, so charts, pivot tables, sparklines, macros and anything else in the file stay as they are. Formulas stay live and carry their results, and every call lists each cell it changed and each total that moved.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `create`, `read`, `edit`, `check` |
+| `path` | string | yes | The workbook (`.xlsx`, `.xlsm`; for `create`, where to save it) |
+| `sheets` | array | create | `[{name, rows, header}]`: `rows` is a list of rows; `header` makes the first row bold, shaded and frozen |
+| `edits` | array | edit | Changes applied in order, all or nothing (see below). `create` takes them too |
+| `output_path` | string | no | Save an edit to a new file instead |
+| `sheet` | string | no | read: the sheet. edit: the default for edits that name none |
+| `range` / `view` / `limit` | | no | read: the cells; `both` (default), `values` or `formulas`; rows per call (default 100) |
+| `find` | string | no | read: list the cells holding this text, number or formula |
+| `template` | string | no | create: an `.xlsx` or `.xltx` to start from; its sheets and formats stay |
+| `title`, `author`, `overwrite` | | no | create: the file's title; the name on notes; replace an existing file |
+
+**What a value means** is what typing it into a cell means: `=SUM(B2:B9)` is a formula, `1200` a number, `12%` a number shown as a percent, `2026-03-31` a real date, `TRUE` a logical. `007` and `1,200` stay text. `as_text` on a `set` keeps anything as text.
+
+**read** gives one line per row: `A2 "Rent" | B2 1000 (1,000.00) | C2 =B2*12 → 12000 [note: Ana: check]`. Text is quoted, so `"12"` and `12` can't be confused. A number shows what the cell displays in brackets, and a date reads as a date. With no sheet you get what's in the workbook (sizes, formula counts, tables, charts, pivots, hidden rows, names, links, macros) and the first rows. A file saved by a script has formulas with no stored result: `read` calculates them and says so.
+
+**edit**, each item has an `op`. A later edit sees what an earlier one moved.
+
+| op | What it does |
+|---|---|
+| `set` | `cell` + `value`; `cell` + `rows` (a block starting there); or `cells` = `{"B2": 5, "C2": "=B2*2"}`. `like` copies a cell's format; format fields apply to what was written |
+| `fill` | `range` + `formula` as it reads in the first cell, copied with references adjusted; or `value`; or `source` (a cell whose formula and format to copy) |
+| `clear` | `range`: values and formulas; `formats` too if asked |
+| `append_rows` | `rows` under the sheet's last row, or `table`: the table grows, its calculated columns fill in, and ranges that covered a whole column stretch, as in Excel |
+| `insert_rows` / `delete_rows` | `at` (row number, or `5:7`) + `count`. New rows take the format of the row above |
+| `insert_columns` / `delete_columns` | `at` (column letter, or `C:D`) + `count` |
+| `format` | `range` + `number_format`, `bold`, `italic`, `underline`, `strike`, `color`, `fill`, `font`, `font_size`, `border`, `border_top`…, `align`, `valign`, `wrap`, `indent` |
+| `width` / `height` | `columns` + `width` (characters or `auto`); `at` + `height` (points) |
+| `freeze`, `merge`, `unmerge`, `filter` | `cell` (top left of what scrolls, empty to unfreeze); `range` |
+| `add_sheet`, `rename_sheet`, `delete_sheet`, `move_sheet` | `name`, `position` (1 = first). A sheet something still reads can't be deleted |
+| `define_name`, `delete_name` | `name`, `refers_to` (e.g. `Inputs!$B$2`). With `sheet`, the name belongs to that sheet |
+| `add_table` | `range` whose first row names the columns; `name`, `style` |
+| `add_chart` | `type` (`column`, `bar`, `line`, `area`, `pie`, `scatter`), `categories`, `values` or `series`, `title`, `anchor`, `width`, `height` (cm), `stacked`, `x_title`, `y_title`, `legend` |
+| `comment` | `cell` + `text`: a note under your name; empty text removes it |
+| `recalculate` | Recalculate every formula and store the results |
+
+Inserting or deleting rows and columns rewrites what Excel would: formulas on every sheet, names, tables, merged cells, conditional formats, validations, filters, hyperlinks, notes, page breaks, sparklines, chart ranges and anchors, and pivot sources. Renaming a sheet does the same. A formula that read a deleted cell becomes `#REF!` and is reported.
+
+**Results.** After every change the formulas it affects are recalculated and stored, so a preview, a phone or `xlsx_extract` shows numbers, and Excel recalculates on open anyway. About 200 functions are calculated here, among them `SUM`, `SUMIFS`, `XLOOKUP`, `INDEX`/`MATCH`, `IRR`, `XIRR`, `PMT`, `TEXT` and the date functions, with table references (`Sales[Amount]`), names and array formulas. The results were compared with Microsoft Excel. A formula that can't be calculated here, such as one using `LET` or `FILTER`, keeps its stored result until something it reads changes. After that it has no stored result, because an out-of-date number is worse than a blank, and the call says so. Excel fills it in on open. `TEXT` and text joins store the results Excel gives with a period as the decimal mark; a local Excel recalculates them its own way on open.
+
+The call also reports new errors and, for numbers added just past the end of a range, the totals that stop short of them. Appending under a totals row is pointed out too.
+
+**What's refused**, so it can't turn up in front of a client: a function name Excel doesn't have, a sheet, name, table or column that doesn't exist, links to other workbooks, functions that reach outside the file (`WEBSERVICE`, `CALL`), and functions that spill over cells (`FILTER`, `UNIQUE`, `LET`), which this tool doesn't write. Also a write inside a merged area or part of an array formula, a merge that would lose a value, and any change to a protected sheet. A bad edit fails the whole call and nothing is saved. New function names are stored the way Excel needs (`_xlfn.XLOOKUP`), and a formula with an operator over ranges (`=SUM(A1:A3*B1:B3)`) as an array formula, or Excel would read one value from each range.
+
+**check** looks for what a careful reviewer looks for first, with no model involved: error values at their source, broken references, circular references, results that don't match a fresh calculation, a formula that breaks the pattern of its column or row, a typed-in number among formulas, a `SUM` that stops one cell short of more numbers, numbers stored as text, number patterns inside `TEXT` (Excel set to decimal commas reads `0.00` differently), rates typed into formulas, formulas reading empty cells, hidden rows, columns and sheets holding data, and links to other workbooks.
+
+Where the result goes: a file in the agent's own `saved/` area (outside `downloads/`) or in a writable VFS folder is changed in place, with a backup. A user's upload (`saved/downloads/`), a read-only Drive folder or any other file is never changed: the changed copy goes to `saved/output/<session>/` under the same name, where chat bridges send it from. If that copy already exists, the edit is refused until the agent edits the copy (or names a new `output_path`). A macro workbook keeps its `.xlsm` extension and its macros, which are never run.
+
+On a shared agent, members use `xlsx` on their own files only. They read anything they may read. Their changes land in place only on files they created; anything else becomes their own copy in their folder. Notes carry their name ("Ana (via Captain)"), not one they choose. No backup is kept, and results show `saved/…` or `vfs:…` paths, never host paths.
+
+`write` and `edit` refuse workbooks and point to this tool, and refuse `.pptx` too. Files were checked in Microsoft Excel: it opens them without a repair prompt, including files Excel wrote itself and this tool then changed, and its recalculated values match. To put a plain table in a workbook, `datastore` export still works.
+
 ### xlsx_extract
 
 Extract Excel sheets to markdown tables.
@@ -795,7 +852,7 @@ Extract Excel sheets to markdown tables.
 | `max_rows` | number | no | Rows per sheet (default: 200) |
 | `max_chars` | number | no | Max output chars (default: 120000) |
 
-Each sheet becomes a markdown table. Uses standard library XML parsing.
+Each sheet becomes a markdown table. Uses standard library XML parsing. A formula saved with no result (a file from a script) shows as the formula; `xlsx` read calculates it.
 
 ### pptx_extract
 
@@ -2053,7 +2110,7 @@ tools:
     stt_model: ""                   # explicit STT model ID; empty = auto-detect
 ```
 
-**Always-on tools (0.8.1).** Some tools are added to every agent whatever its `enabled` list, archetype or spawn list says. Since 0.8.1 that includes the everyday working set — `shell`, `glob`, `web_fetch` (with `web_get` and `web_fetch_batch`), `web_search`, `pdf_extract`, `docx_extract`, `xlsx_extract`, `pptx_extract`, `insights`, `contacts`, `apis` and `todo` — and now `docx` (Word documents with tracked changes), `self_check` (connection tests and server status), `reasoning_effort` (how hard the agent thinks) and `activity` (its own tool calls, from Flight Deck's register), beside `read`, `write`, `edit`, `datastore`, `image_vision`, `video_vision`, `cv`, `sessions`, `history`, `vfs`, `typesense`, `intentions`, `whatsapp_send_file` and the rest. Before, most archetypes lacked some of them (24 of 31 had no `insights`, so "remember that…" had nowhere to go). Every archetype and the archetype grid now list them too. Account tools (`google_*`, `microsoft_*`, `jev`, `audio`, `telegram_inbox`, `whatsapp_web`) are always registered but stay hidden until their account or key is usable. `require_confirmation` and the shell policy still apply. The `stt` tool is gone; speech is the `audio` tool.
+**Always-on tools (0.8.1).** Some tools are added to every agent whatever its `enabled` list, archetype or spawn list says. Since 0.8.1 that includes the everyday working set — `shell`, `glob`, `web_fetch` (with `web_get` and `web_fetch_batch`), `web_search`, `pdf_extract`, `docx_extract`, `xlsx_extract`, `pptx_extract`, `insights`, `contacts`, `apis` and `todo` — and now `docx` (Word documents with tracked changes), `xlsx` (Excel workbooks with live formulas), `self_check` (connection tests and server status), `reasoning_effort` (how hard the agent thinks) and `activity` (its own tool calls, from Flight Deck's register), beside `read`, `write`, `edit`, `datastore`, `image_vision`, `video_vision`, `cv`, `sessions`, `history`, `vfs`, `typesense`, `intentions`, `whatsapp_send_file` and the rest. Before, most archetypes lacked some of them (24 of 31 had no `insights`, so "remember that…" had nowhere to go). Every archetype and the archetype grid now list them too. Account tools (`google_*`, `microsoft_*`, `jev`, `audio`, `telegram_inbox`, `whatsapp_web`) are always registered but stay hidden until their account or key is usable. `require_confirmation` and the shell policy still apply. The `stt` tool is gone; speech is the `audio` tool.
 
 ### skills
 

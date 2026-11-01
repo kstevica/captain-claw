@@ -263,6 +263,7 @@ def test_every_path_like_schema_property_is_covered():
         assert hits[name] == {"path"}, name
     assert hits["datastore"] == {"file_path"}
     assert hits["docx"] == {"path", "output_path", "to"}
+    assert hits["xlsx"] == {"path", "output_path"}
 
 
 async def test_an_allowlisted_tool_missing_from_the_map_is_refused(world, monkeypatch):
@@ -977,3 +978,84 @@ async def test_member_paths_never_reach_the_owner_tree_through_the_default_proje
     assert (await call(world, "write", {"path": "vfs:/shared-note.md", "content": "hi"})).success
     assert (world.member_root / "shared" / "shared-note.md").exists()
     assert not (world.owner_root / "ownerproj" / "shared-note.md").exists()
+
+
+# ── xlsx: a member's workbooks ───────────────────────────────────────
+
+
+@pytest.fixture
+def xlsx_world(world):
+    from captain_claw.tools.xlsx_tool import XlsxTool
+
+    world.reg.register(XlsxTool())
+    return world
+
+
+def _workbook_file(path: Path, value=1):
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    wb.active.title = "S"
+    wb.active["A1"] = value
+    path.parent.mkdir(parents=True, exist_ok=True)
+    wb.save(path)
+    return path
+
+
+SHEETS = [{"name": "S", "rows": [[1, "=A1+1"]]}]
+
+
+async def test_member_creates_workbooks_in_their_own_folders(xlsx_world):
+    w = xlsx_world
+    result = await call(w, "xlsx", {"action": "create", "path": "Budget", "sheets": SHEETS})
+    assert result.success, result.error
+    assert (w.saved / "tmp" / SLUG / "Budget.xlsx").is_file()
+    assert f"saved/tmp/{SLUG}/Budget.xlsx" in result.content
+    _no_host_paths(result.content, w)
+    result = await call(w, "xlsx", {"action": "create", "path": "vfs:p/Plan.xlsx", "sheets": SHEETS})
+    assert result.success and (w.member_root / "p" / "Plan.xlsx").is_file()
+    assert not (w.owner_root / "p" / "Plan.xlsx").exists()
+    for path in (str(w.ws / "output" / "x.xlsx"), "../x.xlsx"):
+        reason = await refused(w, "xlsx", {"action": "create", "path": path, "sheets": SHEETS})
+        assert reason.startswith(PATH_REFUSED_PREFIX), path
+    assert not (w.ws / "output" / "x.xlsx").exists()
+
+
+async def test_member_cannot_overwrite_or_change_someone_elses_workbook(xlsx_world):
+    w = xlsx_world
+    theirs = _workbook_file(w.saved / "output" / "other-session" / "Theirs.xlsx")
+    before = theirs.read_bytes()
+    read = await call(w, "xlsx", {"action": "read", "path": "saved/output/other-session/Theirs.xlsx"})
+    assert read.success and "A1 1" in read.content
+    result = await call(w, "xlsx", {"action": "edit", "path": "saved/output/other-session/Theirs.xlsx",
+                                    "edits": [{"op": "set", "cell": "A1", "value": 2}]})
+    assert result.success, result.error
+    assert theirs.read_bytes() == before, "their file stays; the member gets a copy"
+    assert "the original Theirs.xlsx is unchanged" in result.content
+    assert (w.saved / "output" / SLUG / "Theirs.xlsx").is_file()
+    _no_host_paths(result.content, w)
+
+
+async def test_member_cannot_reach_outside_with_the_other_paths(xlsx_world):
+    w = xlsx_world
+    edit = {"action": "edit", "edits": [{"op": "set", "cell": "A1", "value": 2}]}
+    await call(w, "xlsx", {"action": "create", "path": "Mine.xlsx", "sheets": SHEETS})
+    reason = await refused(w, "xlsx", {**edit, "path": f"saved/tmp/{SLUG}/Mine.xlsx",
+                                       "output_path": str(w.ws / "output" / "n.xlsx")})
+    assert reason.startswith(PATH_REFUSED_PREFIX)
+    reason = await refused(w, "xlsx", {"action": "create", "path": "x.xlsx", "sheets": SHEETS,
+                                       "template": str(w.ws / "secret.xlsx")})
+    assert reason.startswith(PATH_REFUSED_PREFIX)
+
+
+async def test_a_members_notes_carry_their_own_name(xlsx_world):
+    w = xlsx_world
+    await call(w, "xlsx", {"action": "create", "path": "N.xlsx", "sheets": SHEETS})
+    result = await call(w, "xlsx", {"action": "edit", "path": f"saved/tmp/{SLUG}/N.xlsx", "author": "Someone Else",
+                                    "edits": [{"op": "comment", "cell": "A1", "text": "hi"}]})
+    assert result.success, result.error
+    from captain_claw import xlsx_ops as X
+
+    book = X.Book((w.saved / "tmp" / SLUG / "N.xlsx").read_bytes())
+    notes = X._notes_of(book, book.sheet("S"))
+    assert "via" in notes[(1, 1)] and "Someone Else" not in notes[(1, 1)]

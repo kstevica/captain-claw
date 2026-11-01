@@ -84,6 +84,7 @@ COMMONS_WRITES: dict[str, frozenset[str] | None] = {
     "write": None,
     "edit": None,
     "docx": frozenset({"create", "edit", "accept", "reject"}),
+    "xlsx": frozenset({"create", "edit"}),
     "typesense": frozenset({"index"}),
 }
 DATASTORE_READS = frozenset({"list_tables", "describe", "query", "sql", "list_protections"})
@@ -103,6 +104,7 @@ CONTENT_TURN_TOOLS: dict[str, frozenset[str] | None] = {
     "vfs": frozenset({"info", "list_projects", "ls", "tree", "stat"}),
     "typesense": frozenset({"search"}),
     "docx": frozenset({"read", "changes", "comments"}),
+    "xlsx": frozenset({"read", "check"}),
     # How hard the owner's agent thinks: no member data goes anywhere.
     "reasoning_effort": None,
     # The agent's own calls in its owner's turns: read-only, no member data.

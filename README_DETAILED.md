@@ -304,6 +304,7 @@ Captain Claw ships with 33 built-in tools. The agent picks the right tool for ea
 | `web_search` | Search the web via Brave Search API |
 | `pdf_extract` | Extract PDF content to markdown |
 | `docx_extract` | Extract Word documents to markdown |
+| `xlsx` | Create, read, edit and check Excel workbooks: live formulas, results recalculated, every change reported, nothing else in the file touched |
 | `xlsx_extract` | Extract Excel sheets to markdown tables |
 | `pptx_extract` | Extract PowerPoint slides to markdown |
 | `image_gen` | Generate images from text prompts (DALL-E 3, gpt-image-1) |

@@ -625,6 +625,7 @@ class ToolsConfig(BaseModel):
         "pdf_extract",
         "docx_extract",
         "docx",
+        "xlsx",
         "xlsx_extract",
         "pptx_extract",
         "pocket_tts",
@@ -722,6 +723,9 @@ class ToolsConfig(BaseModel):
         # changes), never with scripts; and every agent can test what it is
         # connected to and report its server (self_check).
         "docx", "self_check",
+        # Workbooks too (xlsx): a load-and-save script loses charts and pivots
+        # and stores no formula results.
+        "xlsx",
         # Every agent can change how hard it thinks, as the user would in
         # Flight Deck (the chat box picker, Settings → Reasoning effort).
         "reasoning_effort",

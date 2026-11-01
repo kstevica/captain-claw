@@ -135,6 +135,19 @@ class EditTool(Tool):
                     error="edit changes text files. For a Word document use the docx "
                           "tool (action=edit) — its changes are tracked in Word.",
                 )
+            suffix = Path(str(path)).suffix.lower()
+            if suffix in (".xlsx", ".xlsm", ".xltx", ".xltm", ".xls", ".xlsb"):
+                return ToolResult(
+                    success=False,
+                    error="edit changes text files. For a workbook use the xlsx tool "
+                          "(action=edit) — it keeps formulas and recalculates them.",
+                )
+            if suffix in (".pptx", ".pptm", ".potx", ".ppt"):
+                return ToolResult(
+                    success=False,
+                    error="edit changes text files. A deck is a zip of XML and a text edit "
+                          "would break it: change it with a python-pptx script.",
+                )
             # Read-only linked folders (e.g. Google Drive mounts) refuse edits
             # up front — before action/param validation — so a ro mount is
             # rejected the same way regardless of what edit was attempted.

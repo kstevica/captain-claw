@@ -49,6 +49,7 @@ EXAM_TOOLS: dict[str, frozenset[str] | None] = {
     "vfs": frozenset({"info", "list_projects", "ls", "tree", "stat"}),
     "typesense": frozenset({"search"}),
     "docx": frozenset({"read", "changes", "comments"}),
+    "xlsx": frozenset({"read", "check"}),
     "reasoning_effort": frozenset({"get"}),
 }
 
