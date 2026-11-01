@@ -1045,3 +1045,91 @@ def test_the_tool_counts_as_running_code():
     assert risk_for("crew", {"action": "dispatch"}) == "exec"
     assert risk_for("crew", {"action": "status"}) == "read"
     assert risk_for("crew", {"action": "list"}) == "read"
+
+
+async def test_an_agent_asks_for_a_deck_update_and_only_its_admin_approves(deck, as_agent, ledger, monkeypatch):
+    from captain_claw.flight_deck import deck_update
+
+    new = {"available": True, "active": False, "behind": 2, "target": "a" * 40, "upstream": "origin/main", "blockers": [],
+           "head": "b" * 40, "head_title": "old", "commits": [{"title": "one"}, {"title": "two"}]}
+    started: list[dict] = []
+
+    async def status(*, fetch=False):
+        assert fetch  # an agent's ask is about what's on the remote now
+        return new
+
+    async def start(**kw):
+        started.append(kw)
+        return {"from": new["head"]}
+
+    monkeypatch.setattr(deck_update, "status", status)
+    monkeypatch.setattr(deck_update, "start", start)
+
+    # Not for an approved non-admin's agent.
+    await _approve(deck, deck.user)
+    as_agent["owner"] = deck.user["id"]
+    async with _client(None) as agent:
+        refused = await agent.post("/fd/crew/agent/update_deck", json={})
+    assert refused.status_code == 403 and "admin" in refused.json()["detail"]
+    assert ledger.waiting_actions(deck.user["id"]) == []
+
+    as_agent["owner"] = deck.admin["id"]
+    async with _client(None) as agent:
+        asked = await agent.post("/fd/crew/agent/update_deck", json={"origin_platform": "telegram", "origin_chat_id": 7})
+        again = await agent.post("/fd/crew/agent/update_deck", json={})
+    assert asked.json()["status"] == "waiting_for_approval" and again.json()["status"] == "already_waiting"
+    action = ledger.waiting_actions(deck.admin["id"])[0]
+    assert action["kind"] == "deck_update" and action["payload"]["target"] == "a" * 40
+    assert "- one" in action["rationale"]
+
+    # A later automatic pass can't start it, and the Approve does, for that commit.
+    assert (await fd_dispatch.dispatch_action(deck.admin["id"], action))["ok"] is False
+    assert started == []
+    out = await fd_dispatch.dispatch_action(deck.admin["id"], action, approved_by_human=True)
+    assert out["ok"] is True and ledger.get_action(action["id"])["status"] == "done"
+    assert started[0]["target"] == "a" * 40 and started[0]["wait"] is True and started[0]["user_id"] == deck.admin["id"]
+    assert started[0]["agent"] == {"slug": "helper", "origin": {"platform": "telegram", "user_id": "", "chat_id": 7}}
+
+
+async def test_a_newer_version_replaces_the_deck_update_waiting(deck, as_agent, ledger, monkeypatch):
+    from captain_claw.flight_deck import deck_update
+
+    new = {"available": True, "active": False, "behind": 1, "target": "a" * 40, "upstream": "origin/main", "blockers": [],
+           "commits": [{"title": "one"}]}
+
+    async def status(*, fetch=False):
+        return new
+
+    monkeypatch.setattr(deck_update, "status", status)
+    as_agent["owner"] = deck.admin["id"]
+    async with _client(None) as agent:
+        first = (await agent.post("/fd/crew/agent/update_deck", json={})).json()
+        new["target"] = "c" * 40
+        second = (await agent.post("/fd/crew/agent/update_deck", json={})).json()
+    assert first["action_id"] != second["action_id"]
+    waiting = ledger.waiting_actions(deck.admin["id"])
+    assert [w["payload"]["target"] for w in waiting] == ["c" * 40]
+
+
+async def test_a_deck_update_an_agent_cant_have_says_why(deck, as_agent, ledger, monkeypatch):
+    from captain_claw.flight_deck import deck_update
+
+    answers = iter([
+        {"available": False, "why": "no checkout"},
+        {"available": True, "active": True},
+        {"available": True, "active": False, "fetch_error": "can't read it"},
+        {"available": True, "active": False, "behind": 1, "blockers": ["files in the way"]},
+        {"available": True, "active": False, "behind": 0, "head": "b" * 40, "head_title": "old"},
+    ])
+
+    async def status(*, fetch=False):
+        return next(answers)
+
+    monkeypatch.setattr(deck_update, "status", status)
+    as_agent["owner"] = deck.admin["id"]
+    async with _client(None) as agent:
+        for expect in ("no checkout", "already under way", "can't read it", "files in the way"):
+            resp = await agent.post("/fd/crew/agent/update_deck", json={})
+            assert resp.status_code == 409 and expect in resp.json()["detail"]
+        assert (await agent.post("/fd/crew/agent/update_deck", json={})).json()["status"] == "up_to_date"
+    assert ledger.waiting_actions(deck.admin["id"]) == []

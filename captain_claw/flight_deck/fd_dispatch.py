@@ -589,6 +589,32 @@ async def _dispatch_crew_merge(user_id: str, action: dict[str, Any], *, approved
     return {"ok": True, "target": task_id, "note": task.get("note") or ""}
 
 
+async def _dispatch_deck_update(user_id: str, action: dict[str, Any], *, approved_by_human: bool) -> dict[str, Any]:
+    """An admin's Approve on a deck update their agent asked for. How it ends reaches
+    them, and the agent, from the deck that comes up."""
+    store = get_store()
+    if not approved_by_human:
+        return {"ok": False, "target": "", "note": "a deck update waits for a person's Approve"}
+    from captain_claw.flight_deck import crew_runner, deck_update
+
+    payload = action.get("payload") or {}
+    target = str(payload.get("target") or "")
+    user = await crew_runner._user_of(user_id)
+    try:
+        if not user or user.get("role") != "admin":
+            raise deck_update.RefusedError("Only an admin can update the deck.")
+        job = await deck_update.start(
+            by=user.get("email") or user.get("display_name") or "an admin", target=target, wait=True, user_id=user_id,
+            agent={"slug": payload.get("slug") or "", "origin": payload.get("origin") or {}},
+        )
+    except deck_update.RefusedError as exc:
+        store.update_status(action["id"], "failed", outcome="fail", outcome_note=str(exc)[:500])
+        return {"ok": True, "target": target, "note": str(exc)}
+    store.update_status(action["id"], "done", outcome="success", outcome_note="The update is under way.")
+    store.log(user_id, "deck update", f"{str(job.get('from'))[:9]} to {target[:9]}")
+    return {"ok": True, "target": target, "note": "The update is under way."}
+
+
 async def _dispatch_stop_run(user_id: str, action: dict[str, Any]) -> dict[str, Any]:
     """Carry out an approved stop_run: hard-stop the targeted run in-process
     (no agent involved). Idempotent — stopping an already-finished run is a
@@ -825,6 +851,8 @@ async def dispatch_action(
         return await _dispatch_track(user_id, action)
     if str(action.get("kind")) == "crew_merge":
         return await _dispatch_crew_merge(user_id, action, approved_by_human=approved_by_human)
+    if str(action.get("kind")) == "deck_update":
+        return await _dispatch_deck_update(user_id, action, approved_by_human=approved_by_human)
     agent = _dispatch_agent(user_id, action)
     if not agent:
         return {"ok": False, "target": "", "note": "no running agent to dispatch to"}

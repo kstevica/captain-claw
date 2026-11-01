@@ -1,4 +1,5 @@
 import { adminHeaders, type PlanLimits } from '../admin/deckConfig'
+import { refreshAccessToken } from '../../stores/authStore'
 
 // The admin endpoints the console's pages read and write. The Admin page
 // (pages/AdminPage.tsx) calls the same ones; these are the console's copies.
@@ -109,3 +110,61 @@ export async function fetchUsageSummary(since?: string): Promise<Record<string, 
 export async function updatePlan(plan: string, limits: Partial<PlanLimits>): Promise<void> {
   await call(`/fd/admin/plans/${plan}`, { method: 'PUT', body: JSON.stringify(limits) })
 }
+
+// ── Updates: this deck's own version (deck_update_routes.py) ──
+
+export type DeckUpdateMode = 'off' | 'notify' | 'install'
+
+export interface DeckUpdateJob {
+  phase?: string
+  from?: string
+  to?: string
+  by?: string
+  started_at?: number
+  finished_at?: number
+  steps?: { at: number; text: string }[]
+  error?: string
+  refused?: string
+  detached_log?: string
+}
+
+export interface DeckUpdateStatus {
+  available: boolean
+  why?: string
+  active?: boolean
+  job: DeckUpdateJob
+  mode?: DeckUpdateMode
+  repo?: string
+  branch?: string
+  upstream?: string
+  remote_url?: string
+  fetch_error?: string
+  head?: string
+  head_title?: string
+  target?: string
+  behind?: number
+  checked_at?: number
+  commits?: { sha: string; title: string; author: string; date: string }[]
+  blockers?: string[]
+  notes?: string[]
+  agents_running?: number
+  agents_busy?: string[]
+  crew_running?: number
+}
+
+// A deck restart can end the access token (no FD_JWT_SECRET): one refresh, then ask again.
+export async function fetchDeckUpdate(): Promise<DeckUpdateStatus> {
+  const ask = () => fetch('/fd/system/update', { headers: adminHeaders(), credentials: 'include' })
+  let res = await ask()
+  if (res.status === 401 && await refreshAccessToken()) res = await ask()
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`)
+  return res.json()
+}
+
+export const checkDeckUpdate = () => call<DeckUpdateStatus>('/fd/system/update/check', { method: 'POST' })
+
+export const startDeckUpdate = (target: string, wait: boolean) =>
+  call<DeckUpdateJob>('/fd/system/update/start', { method: 'POST', body: JSON.stringify({ target, wait }) })
+
+export const setDeckUpdateMode = (mode: DeckUpdateMode) =>
+  call<{ mode: DeckUpdateMode }>('/fd/system/update/mode', { method: 'PUT', body: JSON.stringify({ mode }) })

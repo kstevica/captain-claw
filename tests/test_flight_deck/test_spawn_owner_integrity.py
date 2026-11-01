@@ -613,8 +613,17 @@ class TestSelfUrl:
 
     def test_main_records_the_bound_port_over_an_inherited_one(self, monkeypatch):
         import uvicorn
+        from captain_claw.flight_deck import deck_update
         seen: dict = {}
-        monkeypatch.setattr(uvicorn, "run", lambda app, **kw: seen.update(kw))
+
+        def run(self):
+            seen["port"] = self.config.port
+            self.started = True
+
+        monkeypatch.setattr(uvicorn.Server, "run", run)
+        # main() tells the updater how to restart this deck: not for later tests.
+        monkeypatch.setattr(deck_update, "_exit_server", None)
+        monkeypatch.setattr(deck_update, "_startup_env", {})
         monkeypatch.setattr(sys, "argv", ["fd", "--port", "25181", "--dev"])
         monkeypatch.setenv("FD_PORT", "25080")   # leaked from another deck's shell
         server.main()

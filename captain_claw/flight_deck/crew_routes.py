@@ -459,3 +459,51 @@ async def agent_request_merge(body: AgentTaskBody, request: Request) -> dict[str
     crew_runner._TASKS.add(job)
     job.add_done_callback(crew_runner._TASKS.discard)
     return {"status": "waiting_for_approval", "action_id": action["id"]}
+
+
+class AgentUpdateBody(BaseModel):
+    origin_platform: str = "web"
+    origin_user_id: str = ""
+    origin_chat_id: int = 0
+
+
+@router.post("/agent/update_deck")
+async def agent_update_deck(body: AgentUpdateBody, request: Request) -> dict[str, Any]:
+    """An agent's way to a deck update: a proposal only its admin owner can approve."""
+    from captain_claw.flight_deck import deck_update, owner_notify
+    from captain_claw.flight_deck.autonomy import get_store as autonomy_store
+
+    row, _, slug = await _agent_caller(request)
+    if row.get("role") != "admin":
+        raise HTTPException(403, "Only an admin's agent can ask for this. An admin updates the deck in Console → Updates.")
+    seen = await deck_update.status(fetch=True)
+    if not seen.get("available"):
+        raise HTTPException(409, seen.get("why") or "This deck can't update itself.")
+    if seen.get("active"):
+        raise HTTPException(409, "An update is already under way.")
+    if seen.get("fetch_error"):
+        raise HTTPException(409, seen["fetch_error"])
+    if not seen["behind"]:
+        return {"status": "up_to_date", "head": seen["head"], "head_title": seen["head_title"]}
+    if seen["blockers"]:
+        raise HTTPException(409, " ".join(seen["blockers"]))
+    target = seen["target"]
+    store = autonomy_store()
+    for waiting in store.waiting_actions(row["id"]):
+        if waiting.get("kind") == "deck_update":
+            if (waiting.get("payload") or {}).get("target") == target:
+                return {"status": "already_waiting", "action_id": waiting["id"], "commits": seen["behind"]}
+            store.expire_actions([waiting["id"]], "expired: there's a newer version")
+    titles = "\n".join(f"- {c['title']}" for c in seen["commits"])
+    action = store.add_action(
+        row["id"], kind="deck_update", source="crew", risk="normal", domain=_MERGE_DOMAIN, status="awaiting_approval",
+        title=f"Update this deck to {target[:9]} ({seen['behind']} new commit{'s' if seen['behind'] != 1 else ''})",
+        rationale=f"It stops every agent, pulls {seen['upstream']} and restarts the deck.\n\n{titles}", ref_id=target,
+        # The Approve covers this commit and no later one.
+        payload={"target": target, "slug": slug, "origin": {
+            "platform": body.origin_platform, "user_id": body.origin_user_id, "chat_id": body.origin_chat_id}},
+    )
+    job = asyncio.create_task(owner_notify.notify_proposal(row["id"], action))
+    crew_runner._TASKS.add(job)
+    job.add_done_callback(crew_runner._TASKS.discard)
+    return {"status": "waiting_for_approval", "action_id": action["id"], "commits": seen["behind"]}
