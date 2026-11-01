@@ -32,9 +32,10 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
-from datetime import UTC, datetime
 import re
+import subprocess
+import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -352,13 +353,49 @@ async def save_model(db, uid: str, harness: str, model: str) -> None:
     await db.set_settings(uid, {_K_MODELS: json.dumps(models, ensure_ascii=True)})
 
 
-def _base_env(binary: str) -> dict[str, str]:
+def _deck_bins() -> set[str]:
+    """The folder of Flight Deck's own virtual environment. On a worker's PATH it would
+    be the `python` and `pip` it finds: installing a package would change the deck."""
+    prefixes = [os.environ.get("VIRTUAL_ENV") or ""]
+    if sys.prefix != sys.base_prefix:
+        prefixes.append(sys.prefix)
+    return {str(Path(p) / "bin") for p in prefixes if p}
+
+
+def _base_env(binary: str = "") -> dict[str, str]:
     env = {name: os.environ[name] for name in _BASE_ENV if os.environ.get(name)}
-    folder = str(Path(binary).parent)
-    env["PATH"] = os.pathsep.join(p for p in (folder, env.get("PATH", "")) if p)
+    deck = _deck_bins()
+    folder = str(Path(binary).parent) if binary else ""
+    parts = [folder, *env.get("PATH", "").split(os.pathsep)]
+    env["PATH"] = os.pathsep.join(dict.fromkeys(p for p in parts if p and p.rstrip("/") not in deck))
     env.setdefault("LANG", "en_US.UTF-8")
     env["NO_COLOR"] = "1"
     env["CAPTAIN_CREW"] = "1"
+    return env
+
+
+def _home_env(user: dict, grant: Grant) -> dict[str, str]:
+    """Whose home it runs in, and whose name goes on its commits."""
+    if grant.trusted:
+        return {"HOME": os.environ.get("HOME") or str(Path.home())}
+    home = worker_home(user["id"])
+    env = {"HOME": str(home)}
+    for name, sub in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"),
+                      ("XDG_STATE_HOME", ".local/state"), ("XDG_CACHE_HOME", ".cache")):
+        env[name] = str(home / sub)
+    who = (user.get("display_name") or user.get("email") or "Captain Crew").strip()
+    mail = (user.get("email") or "crew@captain-claw.local").strip()
+    env.update(GIT_AUTHOR_NAME=who, GIT_AUTHOR_EMAIL=mail, GIT_COMMITTER_NAME=who, GIT_COMMITTER_EMAIL=mail,
+               GIT_CONFIG_NOSYSTEM="1", GIT_SSH_COMMAND=NO_SSH_IDENTITY)
+    return env
+
+
+def person_env(user: dict, grant: Grant) -> dict[str, str]:
+    """A person's shell in their own project: the same home and tools as their workers,
+    and none of their saved logins, which they can't otherwise read back."""
+    env = _base_env()
+    env.pop("NO_COLOR", None)
+    env.update(_home_env(user, grant), TERM="xterm-256color", COLORTERM="truecolor")
     return env
 
 
@@ -375,18 +412,7 @@ async def worker_env(db, user: dict, grant: Grant, harness: str, binary: str) ->
     own = await read_own_model(db, uid) if harness in OWN_HARNESSES else {}
     env = _base_env(binary)
     env.update(crew_harness.HARNESSES[harness].env)
-    if grant.trusted:
-        env["HOME"] = os.environ.get("HOME") or str(Path.home())
-    else:
-        home = worker_home(uid)
-        env["HOME"] = str(home)
-        for name, sub in (("XDG_CONFIG_HOME", ".config"), ("XDG_DATA_HOME", ".local/share"),
-                          ("XDG_STATE_HOME", ".local/state"), ("XDG_CACHE_HOME", ".cache")):
-            env[name] = str(home / sub)
-        who = (user.get("display_name") or user.get("email") or "Captain Crew").strip()
-        mail = (user.get("email") or "crew@captain-claw.local").strip()
-        env.update(GIT_AUTHOR_NAME=who, GIT_AUTHOR_EMAIL=mail, GIT_COMMITTER_NAME=who, GIT_COMMITTER_EMAIL=mail,
-                   GIT_CONFIG_NOSYSTEM="1", GIT_SSH_COMMAND=NO_SSH_IDENTITY)
+    env.update(_home_env(user, grant))
     if harness == "claude":
         secret = logins.get("claude", "")
         if secret.startswith(_CLAUDE_TOKEN_PREFIX):

@@ -9,6 +9,7 @@ import os
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
 import types
 from pathlib import Path
@@ -44,11 +45,16 @@ case "$all" in
   *SCENARIO:dirty*) echo x > left-over.txt ;;
   *SCENARIO:detach*) git checkout -q --detach; echo x > lost.txt; git add lost.txt; git commit -qm "off the branch" ;;
   *SCENARIO:nothing*) ;;
+  *SCENARIO:leave*) sleep 300 & echo $! > "$(git rev-parse --git-dir)/left.pid" ;;
+  *SCENARIO:lagsetup*) sleep 2; mkdir -p .venv pkgs/lib; echo 'version = 3.12.1' > .venv/pyvenv.cfg; echo x > pkgs/lib/a ;;
+  *SCENARIO:setup*) mkdir -p .venv/bin pkgs/lib; echo 'version = 3.12.1' > .venv/pyvenv.cfg; echo x > pkgs/lib/a ;;
+  *SCENARIO:touchy*) echo changed >> shared.txt ;;
   *SCENARIO:page*) mkdir -p site/css; echo '<html></html>' > site/index.html; echo 'a{}' > site/css/a.css; git add site; git commit -qm "a page" ;;
   *SCENARIO:clash*) echo mine > shared.txt; git add shared.txt; git commit -qm "mine" ;;
   *) echo "$all" | head -c 40 > work.txt; git add work.txt; git commit -qm "the work" ;;
 esac
 case "$all" in
+  *SCENARIO:setup*) text='Ready.\n\nCREW-ENV-TEST: `make test`\nCREW-ENV-RUN: make run\nCREW-ENV-COPY: pkgs\n\nCREW-STATUS: done it runs' ;;
   *SCENARIO:ask*) text='Which colour?\n\nCREW-STATUS: needs-decision red or blue?' ;;
   *--resume*) echo more >> work.txt; git add work.txt; git commit -qm "more" ; text='Went on.\n\nCREW-STATUS: done went on' ;;
   *) text='All done.\n\nCREW-STATUS: done made the change' ;;
@@ -67,6 +73,7 @@ def _run(cwd: Path, *args: str) -> str:
 @pytest.fixture
 async def deck(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)  # Crew asks a CLI its version from here: never from a real checkout
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))  # a task's temp folder goes with the test
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setenv("FD_DATA_KEY_FILE", str(tmp_path / "data_key"))
     fd_crypto.reset_for_tests()
@@ -970,7 +977,7 @@ async def test_the_same_task_asked_for_again_is_that_task(deck, local_address):
 async def test_what_would_stop_a_pull_request_is_said_before_the_work(deck, monkeypatch):
     with pytest.raises(HTTPException) as err:
         await _dispatch(deck, kind="scout", deliver="pr")
-    assert "scout changes nothing" in err.value.detail
+    assert "Only kind=ship" in err.value.detail
 
     async def none(db, user, grant):
         return ""

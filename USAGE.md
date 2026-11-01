@@ -4966,6 +4966,31 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 
 **Asking twice.** The same brief, for the same CLI in the same place, while the first is still active, is that task rather than a second one.
 
+**The environment a project runs in.** A worker can only run and test a project if what it needs is installed, whatever its language. That's prepared once, in the project's main folder, and every new task on the project gets it. The project's page on Crew has an **Environment** card showing the folder, what's installed, and what it looks like it still needs.
+
+- **By hand:** set it up in that folder the way you would any project. **Open a terminal here** gives you a shell in it from the browser, or reach it over SSH if you have that.
+- **By a coding agent:** **Prepare it with**, or ask your agent (`crew action=prepare_env`). A worker works out what the project needs, installs it in that folder, checks it runs, and reports the commands for its tests and for starting it. It doesn't touch tracked files, and you're told if it did. New tasks on the project wait until it's done. Run it again to bring things up to date.
+
+What each task gets, with no setup on its part:
+
+| | |
+|---|---|
+| Folders of packages (`node_modules`, `vendor` and the like) | Its own copy, made with hard links or clones, so it's nearly instant and uses almost no disk. Installing there leaves everyone else's alone. A file changed in place through a hard link does reach the others, which package managers don't do. |
+| A Python environment (`.venv` or any folder with a `pyvenv.cfg`) | Shared, on `PATH`, because one can't be copied. What a task installs there, other tasks and you will see. `PYTHONPATH` points at the task's own folder, so its tests run its code even with an editable install. |
+| Your home's caches | Shared across your projects, as they'd be for you. |
+| `CREW_PORT` | A port of its own, plus the nine after it, so tasks running at once don't collide. |
+| `TMPDIR` | A temp folder of its own. |
+
+Whatever a worker leaves running ends with its turn. Pip won't install outside a virtual environment, and a worker never gets Flight Deck's own environment.
+
+Under **Settings for this project** you can add what isn't one of the common layouts, for any language: other folders or files each task needs a copy of (`target`, `.env`), variables, the commands for its tests and for starting it (workers are told these), and a script to run before each turn, for a version manager and the like. These stay on the deck, outside the project, as you typed them: they aren't encrypted, and its workers can read them. Captain never runs anything a repository brings with it: only what's in these settings.
+
+If a lockfile changes after the environment was prepared, the card and the next task's worker say so. **It's up to date** clears that once you've dealt with it.
+
+This doesn't isolate anything further: workers still run as the deck's system user, and what needs an administrator (system packages, a database) has to be there already. A setup worker says so if it finds that.
+
+**The terminal.** A shell in a project's folder or a task's own, in the browser, with the same home and tools as your workers, and none of the logins saved for them. It keeps running if you leave the page or lose the connection, and comes back with what it printed; one with nobody attached ends after 30 minutes. Admins always have it. A non-admin needs its own tick under Crew on the Users page, on top of being approved for Crew: it's a shell on the server, as the deck's system user, which is the reach their coding agents already have.
+
 **What lands.** Every task works on its own branch and never pushes. "Ship" tasks leave a branch or open a pull request; "scout" tasks only report. Merging and throwing work away take a person: the Merge button, or Approve in the bell on a merge your agent asked for. Work that hasn't landed is never removed unless you say so.
 
 **Projects.** Tasks are grouped by project: a Code project with its folders, or the repository a task was given. The page lists what wants you first and folds what's finished; a project's own page shows its counts and has **Tidy up**, which clears finished tasks off the page. Work that hasn't landed always stays. **New project** makes one before it has any tasks.
@@ -4991,6 +5016,7 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 | Environment variable | What it does |
 |---|---|
 | `FD_CREW=off` | Turns Crew off for the whole deck. |
+| `FD_CREW_TERMINAL=off` | Takes the browser terminal away from everyone on this deck, admins too. |
 | `FD_CREW_CLAUDE_PERMISSION` | Claude Code's permission mode for workers: `auto` (default, Claude's own safety check on each call), `acceptEdits` or `bypassPermissions`. |
 | `FD_CREW_MAX_RUNNING` | Workers running at once on this deck (default 8). |
 | `FD_CREW_STALL_MINUTES` | Silence before you're told a worker seems stuck (default 15). It keeps running. |

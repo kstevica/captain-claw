@@ -7,6 +7,7 @@ import asyncio
 import json
 import stat
 import subprocess
+import tempfile
 import time
 import types
 from pathlib import Path
@@ -32,6 +33,7 @@ GIT = ["git", "-c", "user.name=T", "-c", "user.email=t@example.com"]
 @pytest.fixture
 async def deck(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)  # Crew asks a CLI its version from here: never from a real checkout
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))  # a task's temp folder goes with the test
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setenv("FD_DATA_KEY_FILE", str(tmp_path / "data_key"))
     fd_crypto.reset_for_tests()
@@ -1258,3 +1260,54 @@ async def test_a_call_that_times_out_says_so_rather_than_nothing(monkeypatch):
 
     monkeypatch.setattr(crew_client, "call", blank)
     assert (await CrewTool().execute(action="list")).error == "Crew request failed: RuntimeError"
+
+
+async def test_each_person_sees_only_their_own_projects_environments(deck):
+    await _approve(deck, deck.user)
+    await _approve(deck, deck.other)
+    async with _client(deck.user) as client:
+        await client.post("/fd/crew/projects", json={"name": "Mine"})
+        envs = (await client.get("/fd/crew/envs")).json()["envs"]
+        assert [e["project_key"] for e in envs] == ["project:Mine"] and envs[0]["ready"] is False
+        mine = envs[0]["id"]
+        saved = await client.put(f"/fd/crew/envs/{mine}", json={"test": "make test", "copy_paths": "target", "vars": "A=1", "activate": "export B=2\n"})
+        assert saved.status_code == 200, saved.text
+        assert saved.json()["test"] == "make test" and saved.json()["copy"] == ["target"] and saved.json()["vars"] == {"A": "1"}
+        assert saved.json()["activate"] == "export B=2\n"
+        bad = await client.put(f"/fd/crew/envs/{mine}", json={"copy_paths": "../other"})
+        assert bad.status_code == 400
+        assert (await client.post(f"/fd/crew/envs/{mine}/current")).status_code == 200
+    async with _client(deck.other) as client:
+        assert (await client.get("/fd/crew/envs")).json()["envs"] == []
+        assert (await client.put(f"/fd/crew/envs/{mine}", json={"test": "x"})).status_code == 404
+        assert (await client.post(f"/fd/crew/envs/{mine}/current")).status_code == 404
+
+
+async def test_an_agent_can_ask_what_is_prepared_and_prepare_it(deck, as_agent):
+    await _agent_task(deck, as_agent)
+    async with _client(None) as agent:
+        got = (await agent.post("/fd/crew/agent/env", json={"project": "p"})).json()["envs"]
+        assert [e["label"] for e in got] == ["p/p"]
+        assert (await agent.post("/fd/crew/agent/env", json={"project": "nope"})).json()["envs"] == []
+        assert (await agent.post("/fd/crew/agent/env", json={})).json()["envs"][0]["label"] == "p/p"
+        made = await agent.post("/fd/crew/agent/dispatch", json={"harness": "claude", "kind": "setup", "project": "p"})
+    assert made.status_code == 200, made.text
+    assert made.json()["kind"] == "setup" and made.json()["title"] == "Prepare the environment"
+
+
+async def test_the_tool_tells_what_is_prepared_and_how_it_goes():
+    entry = {"label": "web-app", "kinds": ["Node", "Python"], "ready": True, "repo": "/deck/repos/web-app",
+             "python": [{"path": ".venv", "version": "3.13.5", "packages": 12}], "folders": [{"path": "web/node_modules", "entries": 3}],
+             "copy": ["target"], "missing": [], "stale": ["uv.lock"], "test": "pytest -q", "run": "make dev"}
+    out = await CrewTool()._do_env(_FakeClient(env={"envs": [entry]}), project="web-app")
+    for piece in ("web-app (Node, Python): prepared", "/deck/repos/web-app", ".venv (Python 3.13.5, 12 packages)", "web/node_modules", "target",
+                  "may be out of date: uv.lock", "Its tests: pytest -q", "To start it: make dev"):
+        assert piece in out.content, piece
+    assert "No project here" in (await CrewTool()._do_env(_FakeClient(env={"envs": []}))).content
+    client = _FakeClient(dispatch={"id": "crw_3", "harness_label": "OpenCode", "repo_label": "web-app"})
+    out = await CrewTool()._do_prepare_env(client, harness="opencode", repo_url="https://example.com/a/web-app")
+    assert client.asked[0][1]["kind"] == "setup" and client.asked[0][1]["repo_url"].endswith("web-app")
+    assert "crw_3" in out.content and "nothing is installed yet" in out.content
+    assert not (await CrewTool()._do_prepare_env(_FakeClient())).success
+    options = _FakeClient(options={"me": {"harnesses": []}, "repos": {"projects": []}, "envs": [entry]})
+    assert "web-app: prepared" in (await CrewTool()._do_options(options)).content

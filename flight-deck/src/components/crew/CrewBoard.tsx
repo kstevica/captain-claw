@@ -1,16 +1,17 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import {
   AlertTriangle, ArrowLeft, Bot, Check, CheckCircle2, ChevronRight, CircleDot, FileDiff, FolderOpen, FolderPlus, GitMerge, GitPullRequest, Globe, KeyRound,
-  LayoutGrid, Loader2, MessageCircleQuestion, MessageSquare, Plus, RefreshCw, ScrollText, Search, Send, Ship, Sparkles, Square, Trash2, Wrench, X, type LucideIcon,
+  LayoutGrid, Loader2, MessageCircleQuestion, MessageSquare, Plus, RefreshCw, ScrollText, Search, Send, Ship, Sparkles, Square, TerminalSquare, Trash2, Wrench, X, type LucideIcon,
 } from 'lucide-react'
 import { Card, EmptyState, Pill, Segmented, StatTile, labelCls } from '../console/parts'
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
-  crewApi, type CrewDispatch, type CrewEvent, type CrewHarness, type CrewMe, type CrewRepos, type CrewTask, type CrewUsage,
+  crewApi, type CrewDispatch, type CrewEnv, type CrewEvent, type CrewHarness, type CrewMe, type CrewRepos, type CrewTask, type CrewTerminalTarget, type CrewUsage,
 } from '../../services/crewApi'
 import { hostingApi, type HostedSite } from '../../services/hostingApi'
 import { CrewActivity } from './CrewActivity'
 import { CrewChanges } from './CrewChanges'
+import { EnvironmentCard } from './CrewEnvironment'
 import { CrewFiles } from './CrewFiles'
 import { CrewOverview, SitesCard, TaskLine } from './CrewOverview'
 import { CrewSites, PublishSheet, isLive } from './CrewSites'
@@ -26,7 +27,10 @@ import {
 // the side; on a phone the overview holds the projects too. An agent's own chat can
 // start and steer the same tasks, so this page polls rather than assuming it made them.
 
+const CrewTerminal = lazy(() => import('./CrewTerminal'))
+
 const POLL_LIST_MS = 4000
+const POLL_ENVS_MS = 20000
 const POLL_EVENTS_MS = 2000
 const POLL_USAGE_MS = 30000
 const COLLAPSED_KEY = 'fd:crew:collapsed'
@@ -111,6 +115,8 @@ function Details({ task }: { task: CrewTask }) {
   const rows: [string, string][] = [
     ['Agent', task.harness_label],
     ...(task.kind === 'clone' ? [] : [['Model', task.model_used || task.model || 'Its default'] as [string, string]]),
+    ...(task.env?.port ? [['Its port', String(task.env.port)] as [string, string]] : []),
+    ...(task.env?.copied?.length ? [['Its own copies', task.env.copied.join(', ')] as [string, string]] : []),
     ...(task.effort ? [['Effort', task.effort] as [string, string]] : []),
     ['Working in', task.repo_label],
     ...(task.branch ? [['Branch', task.branch] as [string, string]] : []),
@@ -138,7 +144,9 @@ function Details({ task }: { task: CrewTask }) {
 
 type TaskTab = 'activity' | 'changes' | 'files' | 'report'
 
-function TaskView({ taskId, onBack, onChanged }: { taskId: string; onBack?: () => void; onChanged: () => void }) {
+function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
+  taskId: string; canTerminal: boolean; onBack?: () => void; onChanged: () => void; onTerminal: (task: CrewTask) => void
+}) {
   const [task, setTask] = useState<CrewTask | null>(null)
   const [events, setEvents] = useState<CrewEvent[]>([])
   const [tab, setTab] = useState<TaskTab>('activity')
@@ -211,7 +219,7 @@ function TaskView({ taskId, onBack, onChanged }: { taskId: string; onBack?: () =
   const tabs: [TaskTab, string, LucideIcon][] = [
     ['activity', 'Activity', MessageSquare],
     ...(ship ? [['changes', 'Changes', FileDiff] as [TaskTab, string, LucideIcon]] : []),
-    ...(cloneOnly ? [] : [['files', 'Files', FolderOpen] as [TaskTab, string, LucideIcon]]),
+    ...(cloneOnly || task.kind === 'setup' ? [] : [['files', 'Files', FolderOpen] as [TaskTab, string, LucideIcon]]),
     ...(task.report ? [['report', 'Report', ScrollText] as [TaskTab, string, LucideIcon]] : []),
   ]
   const about = [task.harness_label, task.project_name || task.repo_label, task.from_agent ? 'from your agent' : '', ago(task.updated_at) === 'now' ? 'just now' : `${ago(task.updated_at)} ago`].filter(Boolean)
@@ -236,6 +244,9 @@ function TaskView({ taskId, onBack, onChanged }: { taskId: string; onBack?: () =
 
         {(live || landable || (!live && !finished)) && (
           <div className="flex flex-wrap gap-2 pt-0.5">
+            {canTerminal && task.has_worktree && !cloneOnly && (
+              <button className={quietBtn} onClick={() => onTerminal(task)}><TerminalSquare className="h-4 w-4" /> Terminal</button>
+            )}
             {live && <button disabled={busy} className={quietBtn} onClick={() => act(() => crewApi.stop(task.id))}><Square className="h-4 w-4" /> Stop</button>}
             {landable && (
               <SureButton
@@ -321,9 +332,9 @@ function ProjectMark({ name, big }: { name: string; big?: boolean }) {
   )
 }
 
-function ProjectView({ project, sites, onOpen, onNew, onChanged, onBack, onSites, onPublish }: {
-  project: Project; sites: HostedSite[]; onOpen: (id: string) => void; onNew: () => void; onChanged: () => void; onBack?: () => void
-  onSites: () => void; onPublish: () => void
+function ProjectView({ project, sites, envs, me, onOpen, onNew, onChanged, onEnvChanged, onTerminal, onBack, onSites, onPublish }: {
+  project: Project; sites: HostedSite[]; envs: CrewEnv[]; me: CrewMe | null; onOpen: (id: string) => void; onNew: () => void; onChanged: () => void
+  onEnvChanged: () => void; onTerminal: (env: CrewEnv) => void; onBack?: () => void; onSites: () => void; onPublish: () => void
 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
@@ -366,6 +377,8 @@ function ProjectView({ project, sites, onOpen, onNew, onChanged, onBack, onSites
 
         {done && <p className="rounded-xl bg-emerald-500/10 px-3 py-2 text-xs text-emerald-800 dark:text-emerald-200">{done}</p>}
         <ErrorLine text={error} />
+
+        {envs.map((env) => <EnvironmentCard key={env.id} env={env} me={me} onChanged={onEnvChanged} onOpenTask={onOpen} onTerminal={onTerminal} />)}
 
         {tasks.length === 0 ? (
           <EmptyState icon={Ship} title="No tasks here yet">Start one, or ask your agent in chat.</EmptyState>
@@ -874,7 +887,7 @@ function NewProjectLine({ onMade }: { onMade: (key: string) => void }) {
 
 // ── The page ─────────────────────────────────────────────────────────────
 
-type Pane = 'home' | 'sites' | 'task' | 'project' | 'new' | 'logins'
+type Pane = 'home' | 'sites' | 'task' | 'project' | 'new' | 'logins' | 'terminal'
 
 export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose?: () => void }) {
   const [me, setMe] = useState<CrewMe | null>(null)
@@ -892,6 +905,8 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
   const [error, setError] = useState('')
   const [meError, setMeError] = useState('')
   const [listed, setListed] = useState<Record<string, string[]>>({})
+  const [envs, setEnvs] = useState<CrewEnv[]>([])
+  const [shell, setShell] = useState<{ target: CrewTerminalTarget; title: string; back: Pane } | null>(null)
 
   // The models come apart: a CLI can take half a minute to say, and the page doesn't wait for it.
   const loadMe = useCallback(() => {
@@ -900,6 +915,7 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
     crewApi.models().then(setListed).catch(() => {})
   }, [])
   const loadRepos = useCallback(() => crewApi.repos().then(setRepos).catch(() => {}), [])
+  const loadEnvs = useCallback(() => crewApi.envs().then((r) => setEnvs(r.envs)).catch(() => {}), [])
   const loadSites = useCallback(() => hostingApi.list().then((r) => setSites(r.entries)).catch(() => setSites((s) => s ?? [])), [])
   const loadTasks = useCallback(async () => {
     try {
@@ -928,6 +944,14 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
     const t = setInterval(load, POLL_USAGE_MS)
     return () => clearInterval(t)
   }, [me])
+  // It takes a look in each project's folder: often enough to see a setup land while someone watches, no more.
+  useEffect(() => {
+    if (me && !me.allowed) return
+    loadEnvs()
+    if (pane !== 'project') return
+    const t = setInterval(loadEnvs, POLL_ENVS_MS)
+    return () => clearInterval(t)
+  }, [loadEnvs, me, pane])
 
   const { projects, idle } = useMemo(() => {
     const groups = new Map<string, Project>()
@@ -944,9 +968,15 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
       if (group) group.paths = paths
       else unused.push({ key: p.key, name: p.project, tasks: [], paths })
     }
+    // A repository that's here with no task on the page is still a project of theirs.
+    for (const e of envs) {
+      if (!groups.has(e.project_key) && !unused.some((p) => p.key === e.project_key)) {
+        unused.push({ key: e.project_key, name: e.project_name, tasks: [], paths: [] })
+      }
+    }
     const latest = (p: Project) => Math.max(...p.tasks.map((t) => t.updated_at ?? 0))
     return { projects: [...groups.values()].sort((a, b) => latest(b) - latest(a)), idle: unused }
-  }, [tasks, repos])
+  }, [tasks, repos, envs])
 
   const meListed = useMemo(() => me && { ...me, harnesses: me.harnesses?.map((h) => ({ ...h, models: listed[h.id] ?? h.models })) }, [me, listed])
   const all = [...projects, ...idle]
@@ -962,6 +992,7 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
   const open = (id: string) => { setSelected(id); setPane('task') }
   const openProject = (key: string) => { setProjectKey(key); setSelected(''); setPane('project') }
   const startIn = (name: string, address = '') => { setNewIn(name); setNewUrl(address); setPane('new') }
+  const openShell = (target: CrewTerminalTarget, title: string) => { setShell({ target, title, back: pane }); setPane('terminal') }
   const goHome = () => { setSelected(''); setPane('home') }
   const goSites = () => { setSelected(''); setPane('sites') }
   const toggle = (key: string) => {
@@ -1059,14 +1090,26 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
           {pane === 'logins' && meListed && <Logins me={meListed} onBack={goHome} onChanged={loadMe} />}
           {pane === 'project' && current && (
             <ProjectView
-              project={current} sites={sites ?? []} onOpen={open} onNew={() => startIn(inProject(current.key, current.name), addressOf(current.tasks))} onChanged={() => { loadTasks(); loadRepos() }}
+              project={current} sites={sites ?? []} envs={envs.filter((e) => e.project_key === current.key)} me={meListed} onOpen={open}
+              onNew={() => startIn(inProject(current.key, current.name), addressOf(current.tasks) || envs.find((e) => e.project_key === current.key)?.repo_url || '')}
+              onChanged={() => { loadTasks(); loadRepos(); loadEnvs() }} onEnvChanged={loadEnvs} onTerminal={(e) => openShell({ env: e.id }, e.label)}
               onBack={backOnPhone} onSites={goSites} onPublish={() => setPublishing(true)}
             />
           )}
           {pane === 'project' && !current && (
             <div className="flex flex-1 items-center justify-center p-6"><EmptyState icon={Ship} title="That project isn't here any more" /></div>
           )}
-          {pane === 'task' && selected && <TaskView key={selected} taskId={selected} onBack={backOnPhone} onChanged={loadTasks} />}
+          {pane === 'task' && selected && (
+            <TaskView
+              key={selected} taskId={selected} canTerminal={!!me?.terminal} onBack={backOnPhone} onChanged={() => { loadTasks(); loadEnvs() }}
+              onTerminal={(t) => openShell({ task: t.id }, t.title)}
+            />
+          )}
+          {pane === 'terminal' && shell && (
+            <Suspense fallback={<div className="flex flex-1 items-center justify-center text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>}>
+              <CrewTerminal key={shell.target.env || shell.target.task} target={shell.target} title={shell.title} onBack={() => setPane(shell.back)} />
+            </Suspense>
+          )}
         </div>
       </div>
       {publishing && (

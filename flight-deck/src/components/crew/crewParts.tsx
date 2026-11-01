@@ -69,6 +69,7 @@ export function statusLabel(t: Pick<CrewTask, 'status' | 'stalled' | 'kind' | 'e
   if (t.stalled) return 'Quiet for a while'
   if (t.status === 'ready' && t.kind === 'scout') return 'Report ready'
   if (t.status === 'ready' && t.kind === 'clone') return 'Ready to use'
+  if (t.status === 'ready' && t.kind === 'setup') return 'Environment ready'
   if (t.status === 'ready' && !(t.evidence?.commits || t.evidence?.dirty)) return 'No changes'
   return (STATUS[t.status] ?? STATUS.stopped).label
 }

@@ -59,6 +59,28 @@ def _usage_lines(row: dict | None) -> list[str]:
     return lines
 
 
+def _env_lines(entry: dict) -> list[str]:
+    """A project's environment, in what it means for the work."""
+    lines = [f"{entry.get('label')} ({', '.join(entry.get('kinds') or []) or 'kind unknown'}): "
+             + ("prepared" if entry.get("ready") else "not prepared")]
+    lines.append(f"  Its folder, where the user can set it up by hand: {entry.get('repo')}")
+    lines.extend(f"  Python environment, shared by its tasks: {p['path']} (Python {p.get('version') or '?'}, {p.get('packages')} packages)"
+                 for p in entry.get("python") or [])
+    if entry.get("folders"):
+        lines.append(f"  Each task gets its own copy of: {', '.join(f['path'] for f in entry['folders'])}")
+    if entry.get("copy"):
+        lines.append(f"  And, by its settings: {', '.join(entry['copy'])}")
+    if entry.get("missing"):
+        lines.append(f"  Not there yet: {', '.join(entry['missing'])}")
+    if entry.get("stale"):
+        lines.append(f"  Changed since it was prepared, so it may be out of date: {', '.join(entry['stale'])}")
+    if entry.get("test"):
+        lines.append(f"  Its tests: {entry['test']}")
+    if entry.get("run"):
+        lines.append(f"  To start it: {entry['run']}")
+    return lines
+
+
 def _task_line(t: dict) -> str:
     evidence = t.get("evidence") or {}
     git = f" · {evidence.get('commits', 0)} commit(s)" if t.get("kind") == "ship" else ""
@@ -85,7 +107,11 @@ class CrewTool(Tool):
         "Actions: options (the CLIs you may use, their logins, the model each last ran on and its usage limits, like "
         "Claude's weekly limit, and the projects: use it when asked about any of those); dispatch; clone (only when they "
         "want a repository here and no work yet: it runs no worker and spends no tokens, and you're called back when it's "
-        "ready. dispatch with repo_url clones by itself, so don't clone first for that); list (project narrows it); status; files (where a task's files are; whole=true copies the whole project, for a big one); "
+        "ready. dispatch with repo_url clones by itself, so don't clone first for that); env (what's installed for a project "
+        "so workers can build, run and test it, its test command, and the folder where the user can set it up by hand); "
+        "prepare_env (a worker on `harness` sets the project up, whatever its language, in that folder, and every later task "
+        "gets it: use it when they ask for that, or before work that has to run when env shows nothing prepared); "
+        "list (project narrows it); status; files (where a task's files are; whole=true copies the whole project, for a big one); "
         "steer (the next instruction, or the user's answer to a worker's question); stop (keeps the work); "
         "pr (Captain pushes the branch and opens the pull request, with the user's GitHub token from Crew → Logins: "
         "that's the only way a task's work gets pushed, so never ask a worker to push or run gh, and never ask the user "
@@ -103,19 +129,20 @@ class CrewTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["options", "dispatch", "clone", "list", "status", "files", "steer", "stop", "pr", "request_merge", "update_deck"],
+                "enum": ["options", "dispatch", "clone", "env", "prepare_env", "list", "status", "files", "steer", "stop", "pr", "request_merge", "update_deck"],
             },
             "harness": {
                 "type": "string",
                 "enum": ["claude", "codex", "opencode", "pi"],
-                "description": "dispatch: which CLI does the work. Use the one the user named; otherwise see 'options'.",
+                "description": "dispatch, prepare_env: which CLI does the work. Use the one the user named; otherwise see 'options'.",
             },
             "brief": {
                 "type": "string",
                 "description": (
                     "dispatch: the task, complete and self-contained. The worker sees only this, not your "
                     "conversation: include the goal, what done means, and any decisions already made. Don't ask it to "
-                    "push or open a pull request: set deliver=pr for that."
+                    "push or open a pull request: set deliver=pr for that. prepare_env: anything particular the user said "
+                    "about setting it up, optional."
                 ),
             },
             "title": {"type": "string", "description": "dispatch: a short title, optional."},
@@ -129,10 +156,10 @@ class CrewTool(Tool):
                 "enum": ["branch", "pr"],
                 "description": "dispatch, ship: leave the work on a branch (default), or open a pull request when it's done, which needs a GitHub repository and the user's token in Crew → Logins.",
             },
-            "project": {"type": "string", "description": "dispatch: a Code project to work in (created if new). Name exactly one of project, repo_url and repo_path. list: only this project's tasks."},
-            "folder": {"type": "string", "description": "dispatch: a folder in that project, only with project. Omit to use the project's name."},
-            "repo_url": {"type": "string", "description": "dispatch, clone: a repository's https:// address, with no login in it. Crew clones it itself, in the background, and the worker starts inside it, so never ask a worker to clone. It makes its own project, named after the repository: send no project with it."},
-            "repo_path": {"type": "string", "description": "dispatch: a git folder on this computer. Admins only."},
+            "project": {"type": "string", "description": "dispatch, prepare_env: a Code project to work in (created if new). Name exactly one of project, repo_url and repo_path. env: which project. list: only this project's tasks."},
+            "folder": {"type": "string", "description": "dispatch, prepare_env, env: a folder in that project, only with project. Omit to use the project's name."},
+            "repo_url": {"type": "string", "description": "dispatch, clone, prepare_env, env: a repository's https:// address, with no login in it. Crew clones it itself, in the background, and the worker starts inside it, so never ask a worker to clone. It makes its own project, named after the repository: send no project with it."},
+            "repo_path": {"type": "string", "description": "dispatch, prepare_env, env: a git folder on this computer. Admins only."},
             "model": {"type": "string", "description": "dispatch: a model for the CLI, only if the user asked for one; otherwise their default is used. For OpenCode, exactly a name from 'options': never make one up."},
             "effort": {"type": "string", "description": "dispatch: reasoning effort for the CLI, only if the user asked for one."},
             "task_id": {"type": "string", "description": "status, files, steer, stop, pr, request_merge: the task."},
@@ -202,6 +229,9 @@ class CrewTool(Tool):
             lines.append("Used lately (repo_url, or repo_path for a folder here, goes back there):")
             lines.extend(f"  {r.get('repo_url') or (r['repo'] if r.get('repo_kind') == 'path' else r.get('repo_label'))}"
                          for r in repos["recent"])
+        if data.get("envs"):
+            lines.append("Environments (crew action=env for what's in one):")
+            lines.extend(f"  {e.get('label')}: {'prepared' if e.get('ready') else 'not prepared'}" for e in data["envs"])
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod
@@ -265,6 +295,33 @@ class CrewTool(Tool):
             f"Task {data.get('id')} is getting {data.get('repo_label')}, with no worker: it shows under that name in Crew, "
             "and a big one can take some minutes. It has only started, so tell the user it's under way and end your turn. "
             f"You'll be called back when it's ready. To work in it then: crew action=dispatch repo_url={url}."
+        ))
+
+    async def _do_env(self, client: Any, **kwargs: Any) -> ToolResult:
+        status, data = await client.call("POST", "env", {k: str(kwargs.get(k) or "") for k in ("project", "folder", "repo_url", "repo_path")})
+        if (refused := self._refused(status, data)) is not None:
+            return refused
+        envs = data.get("envs") or []
+        if not envs:
+            return ToolResult(success=True, content="No project here yet by that name. crew action=clone or dispatch makes one.")
+        return ToolResult(success=True, content="\n".join(line for entry in envs for line in _env_lines(entry)))
+
+    async def _do_prepare_env(self, client: Any, **kwargs: Any) -> ToolResult:
+        harness = str(kwargs.get("harness") or "").strip()
+        if not harness:
+            return ToolResult(success=False, error="Provide `harness`: which CLI does it (see action='options').")
+        origin_platform, origin_user_id, origin_chat_id = self._origin_of(kwargs.get("_agent"))
+        status, data = await client.call("POST", "dispatch", {
+            "harness": harness, "kind": "setup", "source_host": "localhost", "origin_platform": origin_platform,
+            "origin_user_id": origin_user_id, "origin_chat_id": origin_chat_id,
+            **{k: str(kwargs.get(k) or "") for k in ("brief", "title", "project", "folder", "repo_url", "repo_path", "model", "effort") if kwargs.get(k)},
+        })
+        if (refused := self._refused(status, data)) is not None:
+            return refused
+        return ToolResult(success=True, content=(
+            f"Task {data.get('id')}: {data.get('harness_label')} is setting up {data.get('repo_label')}, in the project's main "
+            "folder. It has only started: nothing is installed yet, so tell the user it's under way and end your turn. You'll be "
+            "called back when it's done. New tasks on this project wait for it."
         ))
 
     async def _do_list(self, client: Any, **kwargs: Any) -> ToolResult:

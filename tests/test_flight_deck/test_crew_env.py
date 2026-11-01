@@ -1,0 +1,560 @@
+"""The environment a project's work runs in: real git, real copies, a fake CLI that
+prints what it was given, and real shells. The projects here are deliberately not all
+Python or Node: nothing in Crew may depend on which languages a project uses."""
+
+# ruff: noqa: F811 — pytest fixtures, imported and then asked for by name
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
+
+from captain_claw.flight_deck import (
+    crew_access,
+    crew_env,
+    crew_harness,
+    crew_logins,
+    crew_routes,
+    crew_runner,
+    crew_store,
+    crew_terminal,
+)
+from captain_claw.flight_deck.crew_access import Grant
+from captain_claw.flight_deck.crew_harness import RunSpec
+
+from .test_crew_runner import (  # noqa: F401
+    ADMIN_GRANT,
+    _dispatch,
+    _run,
+    _seen,
+    _settle,
+    deck,
+    local_address,
+)
+
+
+def _env_of(task: dict) -> dict[str, str]:
+    """What the worker's process had: it wrote `env` to a file and committed it."""
+    text = (Path(task["worktree"]) / "env.txt").read_text()
+    return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+
+def _commit(repo: Path, message: str = "more") -> None:
+    _run(repo, "add", "-A")
+    _run(repo, "commit", "-qm", message)
+
+
+def _python_env(repo: Path, rel: str = ".venv") -> Path:
+    venv = repo / rel
+    (venv / "bin").mkdir(parents=True)
+    (venv / "pyvenv.cfg").write_text("home = /usr/bin\nversion = 3.13.5\n")
+    return venv
+
+
+async def test_nothing_prepared_says_so_and_still_runs(deck):
+    done = await _settle(await _dispatch(deck, "SCENARIO:envdump"))
+    assert done["status"] == "ready"
+    prompt = _seen(done)
+    assert "Nothing has been prepared for this project" in prompt and "Never install anything system-wide" in prompt
+    env = _env_of(done)
+    assert env["PIP_REQUIRE_VIRTUALENV"] == "1" and "VIRTUAL_ENV" not in env
+    assert env["CREW_PORT"] == str(crew_env.port_for(done["id"])) and Path(env["TMPDIR"]).name == f"crew-{done['id']}"
+
+
+async def test_folders_of_packages_are_each_tasks_own_and_python_is_shared(deck):
+    repo: Path = deck["repo"]
+    (repo / ".gitignore").write_text("node_modules/\n.venv/\n")
+    (repo / "web").mkdir()
+    (repo / "web" / "package.json").write_text("{}")
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\n")
+    _commit(repo)
+    (repo / "web" / "node_modules" / "left").mkdir(parents=True)
+    (repo / "web" / "node_modules" / "left" / "index.js").write_text("shared")
+    venv = _python_env(repo)
+    (Path(repo) / "src").mkdir()
+    (repo / "src" / "keep.py").write_text("")
+    _commit(repo, "with src")
+    done = await _settle(await _dispatch(deck, "SCENARIO:envdump"))
+    wt = Path(done["worktree"])
+    copy = wt / "web" / "node_modules"
+    assert copy.is_dir() and not copy.is_symlink() and (copy / "left" / "index.js").read_text() == "shared"
+    assert done["env"]["copied"] == ["web/node_modules"] and done["env"]["python"] == [".venv"]
+    # Its own: removing it, as a clean install does, leaves everyone else's.
+    subprocess.run(["rm", "-rf", str(copy)], check=True)
+    assert (repo / "web" / "node_modules" / "left" / "index.js").exists()
+    env = _env_of(done)
+    assert env["VIRTUAL_ENV"] == str(venv) and env["PATH"].split(os.pathsep)[0] == str(venv / "bin")
+    # Its imports are of the code in its own folder, whatever is installed in the shared environment.
+    assert env["PYTHONPATH"].split(os.pathsep) == [str(wt), str(wt / "src")]
+    assert env["UV_PROJECT_ENVIRONMENT"] == str(venv) and env["UV_NO_SYNC"] == "1"
+    prompt = _seen(done)
+    assert "A Python environment is on your PATH" in prompt and "own copy of: web/node_modules" in prompt
+    assert done["evidence"]["dirty"] == 0, "what it was given isn't its work"
+
+
+async def test_any_project_can_name_what_it_needs(deck, monkeypatch):
+    """A Rust-like project on a version manager: nothing Crew knows about by name."""
+    repo: Path = deck["repo"]
+    (repo / ".gitignore").write_text("target/\nsecrets.env\n")
+    (repo / "Cargo.toml").write_text("[package]\nname='x'\n")
+    _commit(repo)
+    (repo / "target" / "debug").mkdir(parents=True)
+    (repo / "target" / "debug" / "app").write_text("built")
+    (repo / "secrets.env").write_text("TOKEN=1\n")
+    uid = deck["admin"]["id"]
+    crew_env.save_settings(uid, str(repo), {
+        "copy": ["target", "secrets.env"], "test": "cargo test", "run": "cargo run",
+        "vars": "# comment\nexport DATABASE_URL='postgres://x'\nFEATURE=on\n",
+        # Everything a real one might do: leave the folder, turn on -e, look at its arguments.
+        "activate": 'export FROM_ACTIVATE="args:$#"\nset -e\ncd /\n',
+    })
+    done = await _settle(await _dispatch(deck, "SCENARIO:envdump"))
+    assert done["status"] == "ready", done["note"]
+    wt = Path(done["worktree"])
+    assert (wt / "target" / "debug" / "app").read_text() == "built"
+    assert (wt / "secrets.env").read_text() == "TOKEN=1\n" and (wt / "secrets.env").stat().st_nlink == 1, "a file is a real copy"
+    env = _env_of(done)
+    assert env["DATABASE_URL"] == "postgres://x" and env["FEATURE"] == "on"
+    assert env["FROM_ACTIVATE"] == "args:0", "it doesn't see the CLI's arguments"
+    assert env["CREW_ENV_DIR"] == str(crew_env.env_dir(uid, str(repo)))
+    prompt = _seen(done)
+    assert "To run its tests: cargo test" in prompt and "To start it: cargo run" in prompt
+    assert (Path(_run(wt, "rev-parse", "--absolute-git-dir")) / "seen").exists(), "and it still ran in its own folder"
+    status = await crew_env.status(uid, {"repo": str(repo)})
+    assert status["kinds"] == ["Rust"] and status["test"] == "cargo test" and status["copy"] == ["target", "secrets.env"]
+
+
+async def test_a_failing_activation_script_is_named_when_the_turn_fails(deck):
+    crew_env.save_settings(deck["admin"]["id"], str(deck["repo"]), {"activate": "echo 'nvm: version not found'\n"})
+    done = await _settle(await _dispatch(deck, "SCENARIO:fail"))
+    assert done["status"] == "failed" and "activation script said: nvm: version not found" in done["note"]
+
+
+async def test_a_folder_the_project_doesnt_ignore_stays_out_of_git(deck):
+    repo: Path = deck["repo"]
+    (repo / "node_modules" / "left").mkdir(parents=True)
+    (repo / "node_modules" / "left" / "index.js").write_text("x")
+    done = await _settle(await _dispatch(deck, "SCENARIO:nothing"))
+    wt = Path(done["worktree"])
+    assert (wt / "node_modules" / "left" / "index.js").exists()
+    assert _run(wt, "status", "--porcelain") == "" and done["evidence"]["dirty"] == 0
+    assert "/node_modules" in (repo / ".git" / "info" / "exclude").read_text()
+    # A second task doesn't add it twice.
+    await _settle(await _dispatch(deck, "SCENARIO:nothing, again"))
+    assert (repo / ".git" / "info" / "exclude").read_text().count("/node_modules") == 1
+
+
+async def test_a_vendored_folder_git_tracks_is_left_alone(deck):
+    repo: Path = deck["repo"]
+    (repo / "vendor").mkdir()
+    (repo / "vendor" / "lib.go").write_text("tracked")
+    _commit(repo)
+    done = await _settle(await _dispatch(deck, "SCENARIO:nothing"))
+    assert done["env"]["copied"] == [] and (Path(done["worktree"]) / "vendor" / "lib.go").read_text() == "tracked"
+
+
+async def test_a_copy_that_cant_be_made_is_told_not_fatal(deck):
+    crew_env.save_settings(deck["admin"]["id"], str(deck["repo"]), {"copy": ["not-there"]})
+    done = await _settle(await _dispatch(deck, "SCENARIO:nothing"))
+    assert done["status"] == "ready"
+    assert "not-there couldn't be set up for you: it isn't in the project folder" in _seen(done)
+
+
+async def test_a_lockfile_that_moved_is_told_and_marking_it_current_clears_it(deck):
+    repo: Path = deck["repo"]
+    uid = deck["admin"]["id"]
+    (repo / "Gemfile.lock").write_text("v1\n")
+    _commit(repo)
+    (repo / "vendor" / "gems").mkdir(parents=True)
+    (repo / "vendor" / "gems" / "a").write_text("x")
+    assert (await crew_env.status(uid, {"repo": str(repo)}))["stale"] == []
+    (repo / "Gemfile.lock").write_text("v2\n")
+    _commit(repo)
+    assert (await crew_env.status(uid, {"repo": str(repo)}))["stale"] == ["Gemfile.lock"]
+    done = await _settle(await _dispatch(deck, "SCENARIO:nothing"))
+    assert "what's installed may not match them: Gemfile.lock" in _seen(done)
+    await crew_env.mark_current(uid, str(repo))
+    assert (await crew_env.status(uid, {"repo": str(repo)}))["stale"] == []
+
+
+def test_the_decks_own_python_is_off_a_workers_path(monkeypatch, tmp_path):
+    deck_venv = tmp_path / "deck-venv"
+    monkeypatch.setenv("VIRTUAL_ENV", str(deck_venv))
+    monkeypatch.setenv("PATH", os.pathsep.join([str(deck_venv / "bin"), "/opt/node/bin", "/usr/bin"]))
+    path = crew_logins._base_env("/opt/tools/opencode")["PATH"].split(os.pathsep)
+    assert str(deck_venv / "bin") not in path and path == ["/opt/tools", "/opt/node/bin", "/usr/bin"]
+    # A CLI installed in the deck's own environment still runs, by its full path: that doesn't put it back.
+    assert str(deck_venv / "bin") not in crew_logins._base_env(str(deck_venv / "bin" / "claude"))["PATH"]
+    # And a deck that isn't in one keeps all of it.
+    monkeypatch.delenv("VIRTUAL_ENV")
+    monkeypatch.setattr(sys, "prefix", sys.base_prefix)
+    monkeypatch.setenv("PATH", "/usr/bin:/bin")
+    assert crew_logins._base_env()["PATH"] == "/usr/bin:/bin"
+
+
+async def test_what_a_worker_leaves_running_ends_with_its_turn(deck):
+    done = await _settle(await _dispatch(deck, "SCENARIO:leave"))
+    pid = int((Path(_run(Path(done["worktree"]), "rev-parse", "--absolute-git-dir")) / "left.pid").read_text())
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        await asyncio.sleep(0.05)
+    os.kill(pid, 9)
+    raise AssertionError("its server outlived its turn")
+
+
+def test_codex_can_write_where_it_installs(tmp_path):
+    home = tmp_path / "home"
+    (home / ".npm").mkdir(parents=True)
+    repo = tmp_path / "repo"
+    venv = _python_env(repo)
+    state = {"python": [".venv"], "tmp": str(tmp_path)}
+    crew_store.set_root(tmp_path / "crew")
+    try:
+        roots = crew_env.writable_roots("u", str(repo), state, {"HOME": str(home)})
+    finally:
+        crew_store.set_root(None)
+    assert str(venv) in roots and str(home / ".npm") in roots and str(home / ".cargo") not in roots
+    argv = crew_harness.HARNESSES["codex"].argv(RunSpec(binary="codex", prompt="x", cwd="/w", git_common_dir="/g", writable=tuple(roots)))
+    allowed = next(a for a in argv if a.startswith("sandbox_workspace_write.writable_roots="))
+    assert json.loads(allowed.split("=", 1)[1]) == ["/g", *roots]
+
+
+async def test_a_setup_task_prepares_the_main_checkout_and_later_tasks_get_it(deck):
+    repo: Path = deck["repo"]
+    uid = deck["admin"]["id"]
+    done = await _settle(await _dispatch(deck, "SCENARIO:setup", kind="setup"))
+    assert done["status"] == "ready" and done["note"] == "it runs"
+    assert done["worktree"] == str(repo) and done["branch"] == ""
+    assert (repo / ".venv" / "pyvenv.cfg").exists(), "installed where everyone gets it"
+    prompt = (repo / ".git" / "seen").read_text()
+    assert "It is the project's main checkout" in prompt and "whatever its language or tools" in prompt
+    saved = crew_env.read_settings(uid, str(repo))
+    assert saved["test"] == "make test" and saved["run"] == "make run" and saved["copy"] == ["pkgs"] and saved["prepared_head"]
+    report = crew_runner.report(uid, done["id"])
+    assert "Ready." in report and "CREW-ENV" not in report
+    assert "Every new task" in crew_runner.notice_text(done, for_agent=True)
+    for refused in (crew_runner.files(uid, done["id"]), crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"])):
+        with pytest.raises(HTTPException) as err:
+            await refused
+        assert err.value.status_code == 409
+    # The next task has what it set up, and the commands it found.
+    work = await _settle(await _dispatch(deck, "SCENARIO:envdump"))
+    assert (Path(work["worktree"]) / "pkgs" / "lib" / "a").exists()
+    assert _env_of(work)["VIRTUAL_ENV"] == str(repo / ".venv")
+    assert "To run its tests: make test" in _seen(work)
+    # Closing it takes nothing away: its "worktree" was the project itself.
+    assert (await crew_runner.close(uid, done["id"]))["status"] == "closed"
+    assert (repo / ".venv").is_dir() and (repo / ".git").is_dir()
+
+
+async def test_a_setup_task_that_touches_tracked_files_is_called_out(deck):
+    repo: Path = deck["repo"]
+    (repo / "already-edited.txt").write_text("mine")
+    _commit(repo, "add")
+    (repo / "already-edited.txt").write_text("mine, uncommitted")
+    done = await _settle(await _dispatch(deck, "SCENARIO:touchy", kind="setup"))
+    assert "changed tracked files" in done["note"] and "shared.txt" in done["note"]
+    assert "already-edited.txt" not in done["note"], "that was the person's own, before it started"
+
+
+async def test_tasks_on_a_project_wait_for_its_setup(deck):
+    uid = deck["admin"]["id"]
+    setup = await _dispatch(deck, "SCENARIO:lagsetup", kind="setup")
+    assert setup["status"] == "running"
+    work = await _dispatch(deck, "SCENARIO:nothing")
+    assert work["status"] == "queued", "it would get half an environment"
+    # Another setup on the same project is the same one, however it's worded.
+    assert (await _dispatch(deck, "Set it up please", kind="setup"))["id"] == setup["id"]
+    finished = await _settle(work)
+    assert crew_store.get_store().get(uid, setup["id"])["status"] == "ready"
+    assert finished["status"] == "ready" and finished["env"]["python"] == [".venv"]
+
+
+async def test_a_setup_on_an_address_gets_the_repository_first(deck, local_address):
+    uid = deck["admin"]["id"]
+    made = await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "SCENARIO:setup", "kind": "setup", "repo_url": local_address})
+    assert made["status"] == "preparing" and made["title"] == crew_env.SETUP_TITLE
+    done = await _settle(made)
+    clone = crew_store.user_dir(uid) / "repos" / "repo"
+    assert done["status"] == "ready" and done["worktree"] == str(clone) and (clone / ".venv").is_dir()
+    assert not (deck["repo"] / ".venv").exists(), "its own clone, not where it came from"
+
+
+def test_settings_stay_inside_the_project_and_refuse_what_crew_sets_itself(tmp_path):
+    crew_store.set_root(tmp_path / "crew")
+    try:
+        for copy in ("../other", "/etc", "a/../../b", ".git/hooks"):
+            with pytest.raises(HTTPException):
+                crew_env.save_settings("u", "/r", {"copy": copy})
+        for variables in ("HOME=/x", "CREW_PORT=1", "9BAD=1", "no-equals-sign", {"a b": "c"}):
+            with pytest.raises(HTTPException):
+                crew_env.save_settings("u", "/r", {"vars": variables})
+        with pytest.raises(HTTPException):
+            crew_env.save_settings("u", "/r", {"activate": "x" * 70_000})
+        saved = crew_env.save_settings("u", "/r", {"copy": "target/ build/out/", "vars": "A=1\nB='two words'"})
+        assert saved["copy"] == ["target", "build/out"] and saved["vars"] == {"A": "1", "B": "two words"}
+        assert crew_env.env_dir("u", "/r").parent.parent.name != "r", "settings are out of the repository"
+        assert oct((crew_env.env_dir("u", "/r") / crew_env.SETTINGS_NAME).stat().st_mode)[-3:] == "600"
+        # A script is only there once it says something, and it isn't left when cleared.
+        assert crew_env.activation("u", "/r") == ""
+        crew_env.save_settings("u", "/r", {"activate": "export A=1\n"})
+        assert crew_env.activation("u", "/r").endswith(crew_env.ACTIVATE_NAME)
+        crew_env.save_settings("u", "/r", {"activate": "  \n"})
+        assert crew_env.activation("u", "/r") == ""
+    finally:
+        crew_store.set_root(None)
+
+
+def test_a_setup_report_is_read_however_it_was_dressed():
+    found, body = crew_env.read_setup_report(
+        "All good.\n\n**CREW-ENV-TEST:** `pytest -q`\n> CREW-ENV-RUN: python -m app\nCREW-ENV-COPY: `build/ dist`\nCREW-ENV-TEST-EXTRA: x\n")
+    assert found == {"test": "pytest -q", "run": "python -m app", "copy": ["build", "dist"]}
+    assert body.startswith("All good.") and "CREW-ENV-TEST:" not in body
+    # A path that leaves the project is dropped, not obeyed.
+    assert "copy" not in crew_env.read_setup_report("CREW-ENV-COPY: ../../etc")[0]
+
+
+async def test_what_kind_of_project_it_is_comes_from_its_own_files(deck):
+    repo: Path = deck["repo"]
+    for rel, text in (("go.mod", "module x"), ("api/composer.json", "{}"), ("web/package.json", "{}"), ("docs/site/package.json", "{}"),
+                      ("tests/fixtures/pom.xml", ""), ("a/b/c/d/Gemfile", "")):
+        (repo / rel).parent.mkdir(parents=True, exist_ok=True)
+        (repo / rel).write_text(text)
+    _commit(repo)
+    found = await crew_env.scan(str(repo))
+    assert found["kinds"] == ["Go", "Node", "PHP"], "not its docs, fixtures or anything buried"
+    assert found["missing"] == ["web/node_modules"] and not crew_env.is_ready(found)
+
+
+# ── The approval ────────────────────────────────────────────────────────
+
+
+def _user(**crew) -> dict:
+    return {"id": "u", "role": "user", "metadata": json.dumps({"crew": {"approved": True, "harnesses": ["claude"], **crew}})}
+
+
+def test_the_terminal_is_its_own_approval(monkeypatch):
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.delenv("FD_CREW_TERMINAL", raising=False)
+    assert crew_access.grant_of(_user()).terminal is False, "approving Crew doesn't hand out a shell"
+    assert crew_access.grant_of(_user(terminal=True)).terminal is True
+    assert crew_access.grant_of({"id": "a", "role": "admin", "metadata": "{}"}).terminal is True
+    monkeypatch.setenv("FD_CREW_TERMINAL", "off")
+    assert crew_access.grant_of(_user(terminal=True)).terminal is False
+    assert crew_access.grant_of({"id": "a", "role": "admin", "metadata": "{}"}).terminal is False
+    kept = crew_access.clean_entry({"approved": True, "harnesses": ["claude"], "terminal": True}, admin_id="a")
+    assert kept["terminal"] is True
+    assert crew_access.clean_entry({"approved": True, "harnesses": ["claude"], "terminal": "yes"}, admin_id="a")["terminal"] is False
+
+
+# ── The shell ───────────────────────────────────────────────────────────
+
+
+class _Browser:
+    """The socket, as the route sees it."""
+
+    def __init__(self) -> None:
+        self.closed: tuple[int, str] | None = None
+        self.output = bytearray()
+        self.json: list[dict] = []
+        self.typed: asyncio.Queue = asyncio.Queue()
+
+    async def accept(self) -> None:
+        return None
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self.closed = self.closed or (code, reason)
+
+    async def send_bytes(self, data: bytes) -> None:
+        self.output.extend(data)
+
+    async def send_json(self, data: dict) -> None:
+        self.json.append(data)
+
+    async def receive(self) -> dict:
+        return await self.typed.get()
+
+    def type(self, **event) -> None:
+        self.typed.put_nowait({"type": "websocket.receive", "text": json.dumps(event)})
+
+    def leave(self) -> None:
+        self.typed.put_nowait({"type": "websocket.disconnect"})
+
+    async def saw(self, text: str, deadline: float = 8.0) -> None:
+        end = time.monotonic() + deadline
+        while time.monotonic() < end:
+            if text.encode() in self.output:
+                return
+            await asyncio.sleep(0.02)
+        raise AssertionError(f"never saw {text!r} in {bytes(self.output)[-500:]!r}")
+
+
+def _open(browser: _Browser, **query) -> asyncio.Task:
+    args = {"env": "", "task": "", "fd_token": "", "cols": 100, "rows": 30, **query}
+    return asyncio.create_task(crew_routes.terminal(browser, **args))
+
+
+@pytest.fixture
+async def shell_deck(deck, monkeypatch):  # noqa: F811
+    """A signed-in admin's deck with a project they can reach by id."""
+    from captain_claw.flight_deck.auth import create_access_token
+
+    monkeypatch.setenv("FD_JWT_SECRET", "test-only")
+    await _settle(await _dispatch(deck, "SCENARIO:nothing"))
+    entry = {"repo": str(deck["repo"]), "label": "repo", "kind": "path", "project_key": f"path:{deck['repo']}", "project_name": "repo",
+             "place": {"repo_path": str(deck["repo"])}}
+    deck.update(entry=entry, env_id=crew_env.env_id(str(deck["repo"])), token=create_access_token(deck["admin"]["id"], "admin"))
+    yield deck
+    crew_terminal.close_all()
+    await asyncio.sleep(0)
+
+
+async def test_a_shell_has_the_projects_environment_and_none_of_the_saved_logins(shell_deck, monkeypatch):
+    deck = shell_deck
+    repo: Path = deck["repo"]
+    venv = _python_env(repo)
+    uid = deck["admin"]["id"]
+    crew_env.save_settings(uid, str(repo), {"vars": "PROJECT_VAR=hello"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "deck-secret")
+    browser = _Browser()
+    job = _open(browser, env=deck["env_id"], fd_token=deck["token"])
+    browser.type(type="input", data="echo got:$PROJECT_VAR:$VIRTUAL_ENV:${ANTHROPIC_API_KEY:-none}:$(pwd)\n")
+    await browser.saw(f"got:hello:{venv}:none:")
+    await browser.saw("This is the project's main folder")
+    browser.leave()
+    await job
+    assert crew_terminal.open_count(uid) == 1, "it outlives the socket"
+
+
+async def test_coming_back_to_a_shell_shows_what_it_printed_and_closing_ends_it(shell_deck):
+    deck = shell_deck
+    uid = deck["admin"]["id"]
+    first = _Browser()
+    job = _open(first, env=deck["env_id"], fd_token=deck["token"])
+    first.type(type="input", data="echo first-$((40+2))\n")
+    await first.saw("first-42")
+    shell = crew_terminal.existing(uid, f"env:{deck['env_id']}")
+    first.leave()
+    await job
+    second = _Browser()
+    job = _open(second, env=deck["env_id"], fd_token=deck["token"])
+    await second.saw("first-42")
+    assert crew_terminal.existing(uid, f"env:{deck['env_id']}") is shell, "the same shell, not a new one"
+    pid = shell.session.pid
+    second.type(type="resize", cols=120, rows=40)
+    second.type(type="close")
+    await asyncio.wait_for(job, 5)
+    assert crew_terminal.open_count(uid) == 0
+    end = time.monotonic() + 8
+    while time.monotonic() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError("its process outlived its closing")
+
+
+async def test_exiting_the_shell_tells_the_browser(shell_deck):
+    browser = _Browser()
+    job = _open(browser, env=shell_deck["env_id"], fd_token=shell_deck["token"])
+    browser.type(type="input", data="exit 3\n")
+    await asyncio.wait_for(job, 8)
+    assert browser.json and browser.json[-1]["type"] == "exit"
+    assert crew_terminal.open_count(shell_deck["admin"]["id"]) == 0
+
+
+async def test_a_shell_can_be_in_a_tasks_own_folder(shell_deck):
+    deck = shell_deck
+    work = await _settle(await _dispatch(deck, "SCENARIO:nothing, a task"))
+    browser = _Browser()
+    job = _open(browser, task=work["id"], fd_token=deck["token"])
+    browser.type(type="input", data="echo here:$(pwd):$CREW_PORT\n")
+    await browser.saw(f"here:{Path(work['worktree']).resolve()}:{crew_env.port_for(work['id'])}")
+    browser.leave()
+    await job
+
+
+async def test_a_shell_is_refused_without_a_token_or_the_approval(shell_deck, monkeypatch):
+    deck = shell_deck
+    browser = _Browser()
+    await _open(browser, env=deck["env_id"])
+    assert browser.closed[0] == 4001
+    browser = _Browser()
+    await _open(browser, env=deck["env_id"], fd_token="not-a-token")
+    assert browser.closed[0] == 4001
+    # Approved for Crew, with no tick for the terminal.
+    user = await deck["db"].create_user("u@example.com", "x", role="user", metadata={"crew": {"approved": True, "harnesses": ["claude"]}})
+    from captain_claw.flight_deck.auth import create_access_token
+
+    browser = _Browser()
+    await _open(browser, env=deck["env_id"], fd_token=create_access_token(user["id"]))
+    assert browser.closed[0] == 4403
+    assert crew_terminal.open_count(user["id"]) == 0
+
+
+async def test_nobody_reaches_someone_elses_project_or_task_by_its_id(shell_deck):
+    deck = shell_deck
+    from captain_claw.flight_deck.auth import create_access_token
+
+    user = await deck["db"].create_user("u@example.com", "x", role="user", metadata={"crew": {"approved": True, "harnesses": ["claude"], "terminal": True}})
+    token = create_access_token(user["id"])
+    work = crew_store.get_store().list_for(deck["admin"]["id"])[0]
+    for query in ({"env": deck["env_id"]}, {"task": work["id"]}):
+        browser = _Browser()
+        await _open(browser, fd_token=token, **query)
+        assert browser.closed[0] == 4404, query
+    assert crew_terminal.open_count(user["id"]) == 0
+
+
+async def test_a_person_can_only_hold_so_many_shells(shell_deck, monkeypatch):
+    deck = shell_deck
+    monkeypatch.setattr(crew_terminal, "_MAX_PER_USER", 1)
+    first = _Browser()
+    job = _open(first, env=deck["env_id"], fd_token=deck["token"])
+    await first.saw("main folder")
+    work = crew_store.get_store().list_for(deck["admin"]["id"])[0]
+    second = _Browser()
+    await _open(second, task=work["id"], fd_token=deck["token"])
+    assert second.closed[0] == 4429 and "Close one" in second.closed[1]
+    first.leave()
+    await job
+
+
+async def test_taking_the_approval_back_ends_their_shells(shell_deck):
+    deck = shell_deck
+    db = deck["db"]
+    user = await db.create_user("u@example.com", "x", role="user", metadata={"crew": {"approved": True, "harnesses": ["claude"], "terminal": True}})
+    uid = user["id"]
+    browser = _Browser()
+    shell = crew_terminal.start(uid, "env:x", str(deck["tmp"]), {"PATH": os.environ["PATH"], "HOME": str(deck["tmp"])}, deck["tmp"] / "rc", "hi", 80, 24)
+    await db.update_user(uid, metadata=json.dumps({"crew": {"approved": True, "harnesses": ["claude"], "terminal": False}}))
+    await crew_runner.enforce_grant(uid)
+    assert crew_terminal.open_count(uid) == 0 and shell.session.alive is False
+    assert browser.closed is None
+
+
+async def test_what_is_typed_in_a_shell_doesnt_reach_the_decks_console(shell_deck, capfd):
+    browser = _Browser()
+    job = _open(browser, env=shell_deck["env_id"], fd_token=shell_deck["token"])
+    browser.type(type="input", data="echo zqxword-$((1+1))\n")
+    await browser.saw("zqxword-2")
+    browser.leave()
+    await job
+    assert "zqxword" not in capfd.readouterr().out
+
+
+def test_a_grant_with_a_terminal_keeps_its_other_fields():
+    grant = Grant(True, "approved", ("claude",), 2, True)
+    assert grant.allowed and not grant.trusted and grant.terminal

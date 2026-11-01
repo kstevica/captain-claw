@@ -35,6 +35,11 @@ def offered() -> bool:
             and os.name == "posix")
 
 
+def terminal_offered() -> bool:
+    """``FD_CREW_TERMINAL=off`` takes the browser terminal away from everyone on this deck."""
+    return offered() and os.environ.get("FD_CREW_TERMINAL", "").strip().lower() not in ("off", "0", "false", "no")
+
+
 def deck_max_running() -> int:
     try:
         return max(1, int(os.environ.get("FD_CREW_MAX_RUNNING", _DECK_MAX_RUNNING)))
@@ -48,6 +53,7 @@ class Grant:
     why: str = ""  # "local" · "admin" · "approved"
     harnesses: tuple[str, ...] = ()
     max_parallel: int = 0
+    terminal: bool = False  # may open a shell in their projects from the browser
 
     @property
     def trusted(self) -> bool:
@@ -81,9 +87,9 @@ def grant_of(user: dict | None) -> Grant:
     if not offered() or not user:
         return Grant(False)
     if not _auth_enabled():
-        return Grant(True, "local", HARNESS_IDS, _TRUSTED_PARALLEL)
+        return Grant(True, "local", HARNESS_IDS, _TRUSTED_PARALLEL, terminal_offered())
     if user.get("role") == "admin":
-        return Grant(True, "admin", HARNESS_IDS, _TRUSTED_PARALLEL)
+        return Grant(True, "admin", HARNESS_IDS, _TRUSTED_PARALLEL, terminal_offered())
     entry = stored(user)
     if entry.get("approved") is not True:
         return Grant(False)
@@ -94,7 +100,8 @@ def grant_of(user: dict | None) -> Grant:
         parallel = int(entry.get("max_parallel") or DEFAULT_PARALLEL)
     except (TypeError, ValueError):
         parallel = DEFAULT_PARALLEL
-    return Grant(True, "approved", harnesses, max(1, min(parallel, MAX_PARALLEL)))
+    return Grant(True, "approved", harnesses, max(1, min(parallel, MAX_PARALLEL)),
+                 entry.get("terminal") is True and terminal_offered())
 
 
 def clean_entry(body: dict, *, admin_id: str, previous: dict | None = None) -> dict | None:
@@ -113,6 +120,7 @@ def clean_entry(body: dict, *, admin_id: str, previous: dict | None = None) -> d
     first = previous.get("approved") is not True
     return {
         "approved": True, "harnesses": harnesses, "max_parallel": max(1, min(parallel, MAX_PARALLEL)),
+        "terminal": body.get("terminal") is True,
         "by": admin_id if first else previous.get("by", admin_id),
         "at": datetime.now(UTC).isoformat() if first else previous.get("at", ""),
     }

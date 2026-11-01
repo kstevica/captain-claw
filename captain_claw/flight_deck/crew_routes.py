@@ -22,6 +22,10 @@
   POST   /fd/crew/own-model/check       can Flight Deck reach it, and what does it serve
   POST   /fd/crew/projects              a new project, ready for tasks
   POST   /fd/crew/projects/tidy         clear a project's finished tasks off the page
+  GET    /fd/crew/envs                  each project's environment: what's installed, its settings
+  PUT    /fd/crew/envs/{id}             its settings: test, run, copy, vars, activate
+  POST   /fd/crew/envs/{id}/current     what's installed is up to date
+  WS     /fd/crew/terminal              a shell in a project (?env=) or a task's worktree (?task=)
   GET/PUT/DELETE /fd/crew/logins[/{name}]   the accounts their workers run on
 
   /fd/crew/agent/*                      the same, for the `crew` tool; the agent's
@@ -35,12 +39,21 @@ is a 404. Admins approve on the Users page (``PUT /fd/admin/users/{id}``).
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from pydantic import BaseModel
 
-from captain_claw.flight_deck import crew_access, crew_harness, crew_logins, crew_runner, crew_store
+from captain_claw.flight_deck import (
+    crew_access,
+    crew_env,
+    crew_harness,
+    crew_logins,
+    crew_runner,
+    crew_store,
+    crew_terminal,
+)
 from captain_claw.flight_deck.auth import _fd_auth_enabled, get_current_user, get_db
 from captain_claw.flight_deck.crew_access import Grant
 from captain_claw.logging import get_logger
@@ -54,7 +67,7 @@ _MERGE_DOMAIN = "coding"
 
 class DispatchBody(BaseModel):
     harness: str
-    brief: str
+    brief: str = ""
     title: str = ""
     kind: str = "ship"
     deliver: str = "branch"
@@ -91,6 +104,21 @@ class AgentCloneBody(BaseModel):
     origin_platform: str = "web"
     origin_user_id: str = ""
     origin_chat_id: int = 0
+
+
+class AgentPlaceBody(BaseModel):
+    project: str = ""
+    folder: str = ""
+    repo_url: str = ""
+    repo_path: str = ""
+
+
+class EnvBody(BaseModel):
+    test: str | None = None
+    run: str | None = None
+    copy_paths: list[str] | str | None = None
+    vars: dict[str, str] | str | None = None
+    activate: str | None = None
 
 
 class AgentTaskBody(BaseModel):
@@ -161,7 +189,7 @@ async def _me(user: dict, *, ask_for_models: bool = True) -> dict[str, Any]:
                 "models": _with_own(own, harness, listed)}
 
     out.update(
-        trusted=grant.trusted, max_parallel=grant.max_parallel,
+        trusted=grant.trusted, max_parallel=grant.max_parallel, terminal=grant.terminal,
         harnesses=await asyncio.gather(*(one(h) for h in grant.harnesses)),
         logins=await crew_logins.read_meta(db, row["id"]),
         login_names=list(crew_logins.LOGIN_NAMES), free_terms_url=crew_runner.FREE_TERMS_URL,
@@ -200,6 +228,143 @@ async def repos(user: dict = Depends(get_current_user)) -> dict[str, Any]:
         paths = {f: crew_runner._vfs_path(row["id"], code_routes._folder_repo(row["id"], name, f)) for f in folders}
         projects.append({"project": name, "key": f"project:{name}", "folders": folders, "paths": paths})
     return {"projects": projects, "recent": crew_store.get_store().recent_repos(row["id"])}
+
+
+async def _known_repos(row: dict, grant: Grant) -> list[dict[str, Any]]:
+    """Every repository this person has here. Environments and shells are only ever
+    reached through this list, so nobody can name a folder of someone else's."""
+    from captain_claw.flight_deck import code_routes
+
+    uid = row["id"]
+    known: list[dict[str, Any]] = []
+    for name in code_routes._discover_projects(uid):
+        for item in code_routes._project_tree(uid, name).get("folders", []):
+            folder = item.get("name")
+            # A link is a folder on this computer: an admin's to work in, as for a task.
+            if not grant.trusted and (code_routes._folder_meta(uid, name, folder) or {}).get("kind") == "link":
+                continue
+            known.append({"repo": str(code_routes._folder_repo(uid, name, folder)), "label": f"{name}/{folder}", "kind": "project",
+                          "project_key": f"project:{name}", "project_name": name, "place": {"project": name, "folder": folder}})
+    clones = crew_store.user_dir(uid) / "repos"
+    if clones.is_dir():
+        for path in sorted(clones.iterdir()):
+            if path.is_dir() and not path.name.startswith("."):
+                rc, remote = await crew_runner._git(path, "remote", "get-url", "origin")
+                url = remote if rc == 0 else ""
+                known.append({"repo": str(path), "label": path.name, "kind": "url", "project_key": f"url:{path.name}",
+                              "project_name": path.name, "repo_url": url, "place": {"repo_url": url}})
+    if grant.trusted:
+        for item in crew_store.get_store().recent_repos(uid):
+            if item.get("repo_kind") == "path":
+                known.append({"repo": item["repo"], "label": item.get("repo_label") or item["repo"], "kind": "path",
+                              "project_key": f"path:{item['repo']}", "project_name": item.get("repo_label") or item["repo"],
+                              "place": {"repo_path": item["repo"]}})
+    return list({entry["repo"]: entry for entry in known}.values())
+
+
+async def _env_list(row: dict, grant: Grant) -> list[dict[str, Any]]:
+    known = await _known_repos(row, grant)
+    return list(await asyncio.gather(*(crew_env.status(row["id"], entry) for entry in known)))
+
+
+async def _known_repo(row: dict, grant: Grant, env_id: str) -> dict[str, Any]:
+    for entry in await _known_repos(row, grant):
+        if crew_env.env_id(entry["repo"]) == env_id:
+            return entry
+    raise HTTPException(404, "No such project")
+
+
+@router.get("/envs")
+async def list_envs(user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, grant = await _approved(user)
+    return {"envs": await _env_list(row, grant)}
+
+
+@router.put("/envs/{env_id}")
+async def save_env(env_id: str, body: EnvBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, grant = await _approved(user)
+    entry = await _known_repo(row, grant, env_id)
+    sent = {k: v for k, v in {"test": body.test, "run": body.run, "copy": body.copy_paths, "vars": body.vars,
+                              "activate": body.activate}.items() if v is not None}
+    crew_env.save_settings(row["id"], entry["repo"], sent)
+    return await crew_env.status(row["id"], entry)
+
+
+@router.post("/envs/{env_id}/current")
+async def env_current(env_id: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, grant = await _approved(user)
+    entry = await _known_repo(row, grant, env_id)
+    await crew_env.mark_current(row["id"], entry["repo"])
+    return await crew_env.status(row["id"], entry)
+
+
+async def _terminal_user(fd_token: str) -> dict | None:
+    """Who's asking: this deck's JWT, the way the agent chat's socket has it."""
+    from captain_claw.flight_deck.auth import decode_access_token
+
+    if not _fd_auth_enabled():
+        return await crew_runner._user_of("")
+    try:
+        payload = decode_access_token(fd_token) if fd_token else None
+    except HTTPException:
+        payload = None
+    return await crew_runner._user_of(str(payload.get("sub") or "")) if payload else None
+
+
+async def _shell_for(row: dict, grant: Grant, env: str, task: str, cols: int, rows: int) -> Any:
+    """The shell for a project or a task: the one already open, or a new one."""
+    uid = row["id"]
+    target = f"task:{task}" if task else f"env:{env}"
+    shell = crew_terminal.existing(uid, target)
+    if shell is not None:
+        return shell
+    if crew_terminal.at_limit(uid):
+        raise HTTPException(429, "You have as many terminals open as you can. Close one first.")
+    if task:
+        found = crew_runner._get(uid, task)
+        cwd, repo = found.get("worktree") or "", found["repo"]
+        state = found.get("env") or {}
+        banner = f"This is the folder of the task \"{found['title'][:60]}\", with its environment."
+    else:
+        entry = await _known_repo(row, grant, env)
+        cwd = repo = entry["repo"]
+        state = {"python": [p["path"] for p in (await crew_env.scan(repo))["python"]]}
+        banner = "This is the project's main folder. What you install here, new tasks on this project get."
+    if not cwd or not Path(cwd).is_dir():
+        raise HTTPException(404, "That folder isn't there any more.")
+    environment = crew_logins.person_env(row, grant)
+    environment.update(crew_env.variables(uid, repo, cwd, state, environment.get("PATH", "")))
+    rc_file = crew_env.env_dir(uid, repo) / f"shell-{crew_env.env_id(target)}.rc"
+    return crew_terminal.start(uid, target, cwd, environment, rc_file, banner, cols, rows)
+
+
+@router.websocket("/terminal")
+async def terminal(ws: WebSocket, env: str = "", task: str = "", fd_token: str = "",
+                   cols: int = Query(100), rows: int = Query(30)) -> None:
+    """The browser guard has already turned away other sites' pages (HTTP middleware
+    doesn't run here, that guard does). Accepted first, so a refusal has words."""
+    await ws.accept()
+    row = await _terminal_user(fd_token)
+    if not row:
+        await ws.close(code=4001, reason="Missing or invalid token")
+        return
+    grant = crew_access.grant_of(row)
+    if not grant.allowed or not grant.terminal:
+        await ws.close(code=4403, reason="The terminal isn't approved for this account.")
+        return
+    if bool(env) == bool(task):
+        await ws.close(code=4400, reason="Say which project or task.")
+        return
+    try:
+        shell = await _shell_for(row, grant, env, task, cols, rows)
+    except HTTPException as exc:
+        await ws.close(code=4429 if exc.status_code == 429 else 4404, reason=str(exc.detail)[:120])
+        return
+    await crew_terminal.serve(ws, shell)
+    try:
+        await ws.close()
+    except RuntimeError:
+        pass
 
 
 @router.get("/usage")
@@ -381,8 +546,28 @@ async def agent_status(request: Request) -> dict[str, Any]:
 
 @router.get("/agent/options")
 async def agent_options(request: Request) -> dict[str, Any]:
-    row, _, _ = await _agent_caller(request)
-    return {"me": await _me(row), "repos": await repos(row), "usage": crew_runner.usage(row["id"])}
+    row, grant, _ = await _agent_caller(request)
+    return {"me": await _me(row), "repos": await repos(row), "usage": crew_runner.usage(row["id"]),
+            "envs": await _env_list(row, grant)}
+
+
+@router.post("/agent/env")
+async def agent_env(body: AgentPlaceBody, request: Request) -> dict[str, Any]:
+    """What's prepared for a project, or for all of them when none is named."""
+    row, grant, _ = await _agent_caller(request)
+    envs = await _env_list(row, grant)
+    if not (body.project or body.repo_url or body.repo_path):
+        return {"envs": envs}
+
+    def matches(entry: dict) -> bool:
+        place = entry["place"]
+        if body.repo_url:
+            return crew_runner._same_repo(place.get("repo_url") or "", body.repo_url)
+        if body.repo_path:
+            return place.get("repo_path") == body.repo_path
+        return place.get("project") == body.project and (not body.folder or place.get("folder") == body.folder)
+
+    return {"envs": [entry for entry in envs if matches(entry)]}
 
 
 @router.post("/agent/dispatch")
