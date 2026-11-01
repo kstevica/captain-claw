@@ -918,9 +918,9 @@ async def test_write_and_edit_refuse_workbooks_and_decks(workspace):
         result = await EditTool().execute(path=name, old_string="a", new_string="b", **kw)
         assert not result.success and "xlsx tool" in result.error
     result = await WriteTool().execute(path="x.pptx", content="not a deck", **kw)
-    assert not result.success and result.error == "pptx_needs_script"
+    assert not result.success and result.error == "pptx_needs_pptx_tool"
     result = await EditTool().execute(path="x.pptx", old_string="a", new_string="b", **kw)
-    assert not result.success and "python-pptx" in result.error
+    assert not result.success and "pptx tool" in result.error
     assert not list(root.rglob("x.*"))
 
 

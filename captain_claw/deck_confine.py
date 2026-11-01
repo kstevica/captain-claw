@@ -80,8 +80,8 @@ _GLOB_CHARS = ("*", "?", "[")
 # kind — "read" / "write": a host path (absolute, ~, workspace-relative or
 # vfs:); "glob": a pattern whose fixed prefix is read; "rel": relative to the
 # tool's own folder, so never absolute and never ".."; "vfs": the vfs tool's
-# vfs-space path; "url": a web address (no file:// and the like). docx (xlsx
-# goes the same way) and datastore pick read or write by action, and payments' source is a file only
+# vfs-space path; "url": a web address (no file:// and the like). docx (xlsx and
+# pptx go the same way) and datastore pick read or write by action, and payments' source is a file only
 # on prepare (:func:`_kind`). Tools in EXEC_TOOLS have none: `user` can't call
 # them, and an admin's shell reaches the host.
 PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
@@ -96,6 +96,7 @@ PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "pptx_extract": (("path", "read"),),
     "docx": (("path", "docx"), ("output_path", "write"), ("template", "read")),
     "xlsx": (("path", "docx"), ("output_path", "write"), ("template", "read")),
+    "pptx": (("path", "docx"), ("output_path", "write"), ("template", "read")),
     "audio": (("path", "read"), ("output_path", "write")),
     "clipboard": (("path", "read"),),
     "codemap": (("path", "rel"),),

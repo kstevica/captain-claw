@@ -449,6 +449,8 @@ def test_read_or_write_follows_the_action():
     assert kind("docx", "path", "docx", {"action": "edit", "output_path": "x.docx"}) == "read"
     assert deck_confine.PATH_RULES["xlsx"][0] == ("path", "docx"), "a workbook goes the way a Word file goes"
     assert kind("xlsx", "path", "docx", {"action": "check"}) == "read"
+    assert deck_confine.PATH_RULES["pptx"][0] == ("path", "docx"), "and so does a deck"
+    assert kind("pptx", "path", "docx", {"action": "render"}) == "read"
     assert kind("datastore", "file_path", "datastore", {"action": "export"}) == "write"
     assert kind("datastore", "file_path", "datastore", {"action": "import_file"}) == "read"
 

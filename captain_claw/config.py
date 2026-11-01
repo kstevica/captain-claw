@@ -626,6 +626,7 @@ class ToolsConfig(BaseModel):
         "docx_extract",
         "docx",
         "xlsx",
+        "pptx",
         "xlsx_extract",
         "pptx_extract",
         "pocket_tts",
@@ -724,8 +725,9 @@ class ToolsConfig(BaseModel):
         # connected to and report its server (self_check).
         "docx", "self_check",
         # Workbooks too (xlsx): a load-and-save script loses charts and pivots
-        # and stores no formula results.
-        "xlsx",
+        # and stores no formula results. Decks (pptx): a script can't see what
+        # overflows, and its shapes ignore the template.
+        "xlsx", "pptx",
         # Every agent can change how hard it thinks, as the user would in
         # Flight Deck (the chat box picker, Settings → Reasoning effort).
         "reasoning_effort",

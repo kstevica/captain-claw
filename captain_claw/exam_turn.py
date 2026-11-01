@@ -50,6 +50,7 @@ EXAM_TOOLS: dict[str, frozenset[str] | None] = {
     "typesense": frozenset({"search"}),
     "docx": frozenset({"read", "changes", "comments"}),
     "xlsx": frozenset({"read", "check"}),
+    "pptx": frozenset({"read", "check"}),
     "reasoning_effort": frozenset({"get"}),
 }
 

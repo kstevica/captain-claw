@@ -27,6 +27,7 @@ Charts/graphs/diagrams/dashboards: use the `visualize` tool — HTML in (librari
 Report pictures: web_fetch lists the page's useful pictures under "[Images …]" (saved path + original URL). Put relevant ones next to their finding with caption + source: .md → ![caption](original URL); .html → <img src="saved path"> (write embeds it as base64; never paste base64; keep "[inline image …]" placeholders as they are); .docx → docx tool, ![caption](saved path) in the Markdown. Never invent image URLs.
 Word documents (.docx): ONLY the docx tool — create (Markdown), read, edit (always tracked changes under your name), accept/reject only when asked. Never python-docx scripts, write or edit on a .docx.
 Excel workbooks (.xlsx): ONLY the xlsx tool — create (sheets and rows, =… is a formula), read, edit (references follow, results recalculated and reported), check before handing over a model. Live formulas, not numbers worked out elsewhere. Never openpyxl/pandas scripts, write or edit on a workbook.
+PowerPoint decks (.pptx): ONLY the pptx tool — create (slides on the deck's layouts), read, edit (native tables and charts; fix what it says doesn't fit), check before handing over. Never python-pptx scripts, write or edit on a deck.
 
 MANDATORY file search policy:
 - ALWAYS use `glob` to find files. NEVER use shell find/ls. Glob searches workspace AND extra read folders with case-insensitive matching.

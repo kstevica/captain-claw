@@ -264,6 +264,7 @@ def test_every_path_like_schema_property_is_covered():
     assert hits["datastore"] == {"file_path"}
     assert hits["docx"] == {"path", "output_path", "to"}
     assert hits["xlsx"] == {"path", "output_path"}
+    assert hits["pptx"] == {"path", "output_path"}
 
 
 async def test_an_allowlisted_tool_missing_from_the_map_is_refused(world, monkeypatch):
@@ -1059,3 +1060,81 @@ async def test_a_members_notes_carry_their_own_name(xlsx_world):
     book = X.Book((w.saved / "tmp" / SLUG / "N.xlsx").read_bytes())
     notes = X._notes_of(book, book.sheet("S"))
     assert "via" in notes[(1, 1)] and "Someone Else" not in notes[(1, 1)]
+
+
+# ── pptx: a member's decks ───────────────────────────────────────────
+
+
+@pytest.fixture
+def pptx_world(world):
+    from captain_claw.tools.pptx_tool import PptxTool
+
+    world.reg.register(PptxTool())
+    return world
+
+
+def _deck_file(path: Path, title="Theirs"):
+    from captain_claw import pptx_ops
+
+    prs, _ = pptx_ops.build_deck([{"title": title}])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(pptx_ops.deck_bytes(prs))
+    return path
+
+
+SLIDES = [{"title": "Mine", "body": "text"}]
+
+
+async def test_member_creates_decks_in_their_own_folders(pptx_world):
+    w = pptx_world
+    result = await call(w, "pptx", {"action": "create", "path": "Pitch", "slides": SLIDES})
+    assert result.success, result.error
+    assert (w.saved / "tmp" / SLUG / "Pitch.pptx").is_file()
+    assert f"saved/tmp/{SLUG}/Pitch.pptx" in result.content
+    _no_host_paths(result.content, w)
+    result = await call(w, "pptx", {"action": "create", "path": "vfs:p/Plan.pptx", "slides": SLIDES})
+    assert result.success and (w.member_root / "p" / "Plan.pptx").is_file()
+    assert not (w.owner_root / "p" / "Plan.pptx").exists()
+    for path in (str(w.ws / "output" / "x.pptx"), "../x.pptx"):
+        reason = await refused(w, "pptx", {"action": "create", "path": path, "slides": SLIDES})
+        assert reason.startswith(PATH_REFUSED_PREFIX), path
+    assert not (w.ws / "output" / "x.pptx").exists()
+
+
+async def test_member_cannot_change_someone_elses_deck(pptx_world):
+    w = pptx_world
+    theirs = _deck_file(w.saved / "output" / "other-session" / "Theirs.pptx")
+    before = theirs.read_bytes()
+    read = await call(w, "pptx", {"action": "read", "path": "saved/output/other-session/Theirs.pptx"})
+    assert read.success and "Theirs" in read.content
+    result = await call(w, "pptx", {"action": "edit", "path": "saved/output/other-session/Theirs.pptx",
+                                    "edits": [{"op": "set_text", "slide": 1, "shape": "title", "text": "Mine"}]})
+    assert result.success, result.error
+    assert theirs.read_bytes() == before, "their file stays; the member gets a copy"
+    assert "the original Theirs.pptx is unchanged" in result.content
+    assert (w.saved / "output" / SLUG / "Theirs.pptx").is_file()
+    _no_host_paths(result.content, w)
+
+
+async def test_member_cannot_reach_outside_with_the_other_paths(pptx_world):
+    w = pptx_world
+    await call(w, "pptx", {"action": "create", "path": "Mine.pptx", "slides": SLIDES})
+    edit = {"action": "edit", "path": f"saved/tmp/{SLUG}/Mine.pptx",
+            "edits": [{"op": "set_text", "slide": 1, "shape": "title", "text": "x"}]}
+    reason = await refused(w, "pptx", {**edit, "output_path": str(w.ws / "output" / "n.pptx")})
+    assert reason.startswith(PATH_REFUSED_PREFIX)
+    reason = await refused(w, "pptx", {"action": "create", "path": "x.pptx", "slides": SLIDES,
+                                       "template": str(w.ws / "secret.pptx")})
+    assert reason.startswith(PATH_REFUSED_PREFIX)
+
+
+async def test_a_member_can_only_put_in_pictures_they_may_read(pptx_world):
+    from PIL import Image
+
+    w = pptx_world
+    secret = w.ws / "secret.png"
+    Image.new("RGB", (10, 10)).save(secret)
+    result = await call(w, "pptx", {"action": "create", "path": "P.pptx",
+                                    "slides": [{"title": "x", "image": str(secret)}]})
+    assert not result.success and "Can't read the picture" in result.error
+    _no_host_paths(result.error, w)

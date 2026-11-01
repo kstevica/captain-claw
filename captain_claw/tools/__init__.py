@@ -85,6 +85,7 @@ from captain_claw.tools.terminal import TerminalTool
 from captain_claw.tools.vfs import VfsTool
 from captain_claw.tools.cv import CvTool
 from captain_claw.tools.docx_tool import DocxTool
+from captain_claw.tools.pptx_tool import PptxTool
 from captain_claw.tools.xlsx_tool import XlsxTool
 from captain_claw.tools.self_check import SelfCheckTool
 from captain_claw.tools.reasoning_effort import ReasoningEffortTool
@@ -114,6 +115,7 @@ __all__ = [
     "DocxExtractTool",
     "DocxTool",
     "XlsxTool",
+    "PptxTool",
     "XlsxExtractTool",
     "PptxExtractTool",
     "PocketTTSTool",
