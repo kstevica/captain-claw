@@ -154,6 +154,8 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
   const [steer, setSteer] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  // Why the last look at it failed: only until a look works. An action's error stays until the next action.
+  const [unseen, setUnseen] = useState('')
   const after = useRef(0)
 
   const load = useCallback(async () => {
@@ -167,11 +169,16 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
 
   useEffect(() => {
     after.current = 0
-    setEvents([]); setTask(null); setTab('activity'); setDiff(null); setError(''); setSteer('')
+    setEvents([]); setTask(null); setTab('activity'); setDiff(null); setError(''); setUnseen(''); setSteer('')
     let stopped = false
     let timer: ReturnType<typeof setTimeout>
     const tick = async () => {
-      try { await load() } catch (e) { if (!stopped) setError(errorOf(e)) }
+      try {
+        await load()
+        if (!stopped) setUnseen('')
+      } catch (e) {
+        if (!stopped) setUnseen(errorOf(e))
+      }
       if (!stopped) timer = setTimeout(tick, POLL_EVENTS_MS)
     }
     tick()
@@ -196,7 +203,7 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
   }
 
   if (!task) {
-    return <div className="flex flex-1 items-center justify-center text-zinc-500">{error ? <ErrorLine text={error} /> : <Loader2 className="h-5 w-5 animate-spin" />}</div>
+    return <div className="flex flex-1 items-center justify-center text-zinc-500">{error || unseen ? <ErrorLine text={error || unseen} /> : <Loader2 className="h-5 w-5 animate-spin" />}</div>
   }
 
   const live = LIVE.includes(task.status)
@@ -267,7 +274,7 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
             )}
           </div>
         )}
-        <ErrorLine text={error} />
+        <ErrorLine text={error || unseen} />
       </div>
 
       <div className="shrink-0 px-4 pt-3 wide:px-5">
