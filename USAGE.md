@@ -6274,11 +6274,13 @@ What happens, in order:
 
 1. **It tries the new version first.** The new commit is unpacked to a temp folder and started on a spare port, with an empty data folder and none of the deck's keys. Its page must have all its files, and its agents' code must import. If any of that fails, it stops here, and nothing has been touched.
 2. **It stops the agents**, because they read their code from the checkout. If some are mid-turn, you choose: wait for them (up to 5 minutes) or stop them now. Crew's workers keep going.
-3. **It pulls.** New packages are installed before step 1. A venv holding a copy rather than an editable install gets the new version installed too.
-4. **It restarts in place**: the same process, the same terminal or tmux pane, Ctrl-C still works, and `.env` is read afresh. Agents come back as on any start, and the ones you stopped stay stopped.
+3. **It pulls.** New packages are installed before step 1, so you don't run `pip` yourself. After the pull, a venv holding a copy gets the new version installed, and an editable install gets `pip install -e` when `pyproject.toml` changed, so new commands appear. If that fails, the checkout goes back and the agents restart.
+4. **It restarts in place**: the same process, the same command line, the same terminal or tmux pane, and Ctrl-C still works. You don't retype anything, and it can't lose the environment you started it with. Agents come back as on any start, and the ones you stopped stay stopped.
 5. **It checks the new version came up.** If it doesn't, the old commit goes back and the deck starts on that, by itself. That deck is no longer in its terminal: it logs to `<data>/update/deck.log`, and the page says so. Restart it by hand when it suits you to get it back there.
 
 You're told how it went on the page and in the bell. It refuses before touching anything when the checkout has commits the branch doesn't, or when files here would be overwritten. Changes in files the update doesn't touch stay as they are.
+
+**Changing `.env`.** The new version reads `.env` as any start does, and what's already in the environment wins. A deck started plainly picks up your edits. A deck started by exporting the file first (`set -a && source .env && set +a`) picks up a key you added but keeps the old value of one you changed, so restart it by hand the same way after that.
 
 **Letting it run by itself.** Under **Automatically**: **Off** (it looks only when you press Check now), **Tell me** (it looks every 15 minutes, and tells admins in the bell), or **Install by itself** (it installs a new version when no agent is mid-turn, and doesn't retry one that failed). With Install by itself, whatever is merged to the branch goes live once it passes step 1.
 

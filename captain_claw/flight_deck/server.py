@@ -35,8 +35,8 @@ from pydantic import BaseModel, Field, PrivateAttr
 # the real environment — shell exports win over the file, which is the
 # behaviour everyone expects.
 from dotenv import load_dotenv
-# What this process was started with: a self-update restarts it with this and
-# reads .env afresh, like a start from the same shell.
+# What this process was started with: a self-update restarts it with this, so
+# .env is read as on a start from the same shell, and what that exported wins.
 _ENV_AT_START = dict(os.environ)
 load_dotenv()
 
