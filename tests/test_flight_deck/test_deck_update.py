@@ -310,6 +310,55 @@ async def test_a_copy_in_the_venv_is_installed_again_and_undone_if_that_fails(wo
     assert git(world.deck, "rev-parse", "HEAD") == old
 
 
+async def test_an_editable_install_is_refreshed_after_the_pull_when_pyproject_changed(world, steps, monkeypatch):
+    target = push(world, "pyproject.toml", '[project]\nname = "x"\ndependencies = ["a"]\nscripts = {new-command = "m:f"}\n')
+    old = git(world.deck, "rev-parse", "HEAD")
+    await deck_update.status(fetch=True)
+    ran: list[tuple[tuple, str]] = []
+
+    async def pip(*args):
+        # After the pull, or it would read the old pyproject.toml. And nothing needs installing first.
+        ran.append((args, git(world.deck, "rev-parse", "HEAD")))
+        return 0, ""
+
+    monkeypatch.setattr(deck_update, "_pip", pip)
+    await deck_update.start(by="a", target=target)
+    await deck_update._task
+    assert ran == [(("--no-deps", "-e", str(world.deck)), target)]
+    assert steps == ["rehearse", f"stop on {old[:7]}", "guard", f"relaunch on {target[:7]}"]
+    assert deck_update.read_state()["phase"] == "restarting"
+
+
+async def test_an_editable_install_is_left_alone_when_pyproject_didnt_change(world, steps, monkeypatch):
+    target = push(world)
+    await deck_update.status(fetch=True)
+
+    async def must_not(*args):
+        raise AssertionError(f"pip ran: {args}")
+
+    monkeypatch.setattr(deck_update, "_pip", must_not)
+    await deck_update.start(by="a", target=target)
+    await deck_update._task
+    assert deck_update.read_state()["phase"] == "restarting"
+
+
+async def test_a_refresh_that_fails_puts_it_all_back(world, steps, monkeypatch):
+    target = push(world, "pyproject.toml", '[project]\nname = "x"\ndependencies = ["a"]\nversion = "9"\n')
+    old = git(world.deck, "rev-parse", "HEAD")
+    await deck_update.status(fetch=True)
+
+    async def pip(*args):
+        return 1, "no build backend"
+
+    monkeypatch.setattr(deck_update, "_pip", pip)
+    await deck_update.start(by="a", target=target)
+    await deck_update._task
+    state = deck_update.read_state()
+    assert state["phase"] == "failed" and "no build backend" in state["error"] and state["refused"] == target
+    assert git(world.deck, "rev-parse", "HEAD") == old
+    assert steps == ["rehearse", f"stop on {old[:7]}", "guard", "start", "bell Deck update failed"]
+
+
 async def test_new_requirements_go_in_before_the_rehearsal_and_can_stop_it(world, steps, monkeypatch):
     target = push(world, "pyproject.toml", '[project]\nname = "x"\ndependencies = ["a", "b>=2"]\n')
     await deck_update.status(fetch=True)
@@ -323,7 +372,7 @@ async def test_new_requirements_go_in_before_the_rehearsal_and_can_stop_it(world
     monkeypatch.setattr(deck_update, "_pip", pip)
     await deck_update.start(by="a", target=target)
     await deck_update._task
-    assert calls == [("b>=2",)]
+    assert calls == [("b>=2",), ("--no-deps", "-e", str(world.deck))]
     assert steps[0] == "rehearse"
 
     # And with an install that fails.
