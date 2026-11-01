@@ -40,7 +40,8 @@ _VISIT_COUNTS: dict[str, int] = {}
 
 
 def valid_name(name: str) -> bool:
-    return bool(_NAME_RE.match(name or ""))
+    # "agent" would be /fd/hosting/agent/…, the routes agents call.
+    return bool(_NAME_RE.match(name or "")) and name != "agent"
 
 
 def _data_dir() -> Path:
@@ -166,8 +167,13 @@ def app_port(name: str) -> int | None:
 def start_app(name: str) -> tuple[bool, str]:
     reg = load_registry()
     ent = reg.get(name)
-    if not ent or ent.get("kind") != "app":
-        return False, "not an app"
+    if not ent:
+        return False, "not found"
+    if ent.get("kind") != "app":
+        # A static site has no process: starting it only puts it back online.
+        ent.pop("stopped", None)
+        save_registry(reg)
+        return True, "back online"
     if app_is_alive(name):
         return True, "already running"
     cmd = (ent.get("start_cmd") or "").strip()
@@ -261,8 +267,10 @@ def get_visits(name: str) -> dict:
 
 
 def reconcile(name: str, entry: dict) -> dict:
-    """Return the entry with a live ``running`` flag, clearing stale pid/port."""
+    """Return the entry with a live ``running`` flag, clearing stale pid/port. A
+    static site is running until it's stopped."""
     out = dict(entry)
+    out["running"] = not entry.get("stopped")
     if entry.get("kind") == "app":
         alive = app_is_alive(name)
         out["running"] = alive

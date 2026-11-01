@@ -87,7 +87,7 @@ function summary(steps: Step[]): string {
 function Line({ icon: Icon, tone, children }: { icon: LucideIcon; tone: string; children: ReactNode }) {
   return (
     <li className="relative pl-7">
-      <span className={`absolute left-0 top-0.5 flex h-5 w-5 items-center justify-center rounded-full ring-4 ring-zinc-900 ${tone}`}>
+      <span className={`absolute left-0 top-0.5 flex h-5 w-5 items-center justify-center rounded-full ring-4 ring-zinc-950 ${tone}`}>
         <Icon className="h-3 w-3" />
       </span>
       {children}
@@ -132,7 +132,7 @@ function Steps({ steps, live }: { steps: Step[]; live: boolean }) {
         <ChevronRight className={`h-3 w-3 shrink-0 transition-transform ${open ? 'rotate-90' : ''}`} />
         <span className="min-w-0 truncate">{summary(steps)}</span>
       </button>
-      {open && <div className="mt-1.5 space-y-0.5 rounded-lg border border-zinc-800 p-1">{steps.map((s) => <StepRow key={s.n} step={s} />)}</div>}
+      {open && <div className="mt-1.5 space-y-0.5 rounded-xl border border-zinc-800 bg-zinc-900/40 p-1">{steps.map((s) => <StepRow key={s.n} step={s} />)}</div>}
     </Line>
   )
 }
@@ -141,11 +141,11 @@ function Brief({ event }: { event: CrewEvent }) {
   const [more, setMore] = useState(false)
   const long = event.text.length > 420
   return (
-    <Line icon={Flag} tone="bg-teal-500/15 text-teal-700 dark:text-teal-300">
-      <div className="rounded-xl border border-zinc-800 bg-zinc-800/30 px-3 py-2">
+    <Line icon={Flag} tone="bg-violet-500/15 text-violet-700 dark:text-violet-300">
+      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 px-4 py-3">
         <p className="mb-0.5 text-[11px] font-medium uppercase tracking-wide text-zinc-500">{event.turn <= 1 ? 'The task' : 'You told it'}</p>
         <p className="whitespace-pre-wrap break-words text-[13px] text-zinc-200">{long && !more ? `${event.text.slice(0, 420)}…` : event.text}</p>
-        {long && <button type="button" onClick={() => setMore((v) => !v)} className="mt-1 text-xs text-teal-700 hover:underline dark:text-teal-300">{more ? 'Show less' : 'Show all of it'}</button>}
+        {long && <button type="button" onClick={() => setMore((v) => !v)} className="mt-1 text-xs text-violet-700 hover:underline dark:text-violet-300">{more ? 'Show less' : 'Show all of it'}</button>}
       </div>
     </Line>
   )
@@ -184,7 +184,7 @@ export function CrewActivity({ events, live }: { events: CrewEvent[]; live: bool
   }, [events.length])
   if (!blocks.length) return <p className="p-5 text-sm text-zinc-500">Nothing yet.</p>
   return (
-    <div ref={box} className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+    <div ref={box} className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
       <ul className="relative space-y-4 before:absolute before:bottom-2 before:left-[9.5px] before:top-2 before:w-px before:bg-zinc-800">
         {blocks.map((b, i) => (b.type === 'steps'
           ? <Steps key={b.n} steps={b.steps} live={live && i === blocks.length - 1} />

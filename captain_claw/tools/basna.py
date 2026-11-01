@@ -599,7 +599,8 @@ class BasnaTool(Tool):
         import httpx
         body = {**self._identity(fd_url), "session_id": sid, "name": name}
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{fd_url}/fd/basna/agent/file", json=body)
+            resp = await client.post(f"{fd_url}/fd/basna/agent/file", json=body,
+                                     headers=_agent_secret_headers(fd_url))
         if resp.status_code == 404:
             return ToolResult(success=False, error="file not found")
         if resp.status_code == 403:

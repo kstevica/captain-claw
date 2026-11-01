@@ -41,8 +41,8 @@ function lineTone(line: string): string {
 function FileCard({ file, startOpen }: { file: FileDiff; startOpen: boolean }) {
   const [open, setOpen] = useState(startOpen)
   return (
-    <div className="overflow-hidden rounded-xl border border-zinc-800">
-      <button type="button" onClick={() => setOpen((v) => !v)} className="flex w-full items-center gap-2 bg-zinc-800/40 px-3 py-2 text-left transition-colors hover:bg-zinc-800/70">
+    <div className="overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/40">
+      <button type="button" onClick={() => setOpen((v) => !v)} className="flex w-full items-center gap-2 px-3.5 py-2.5 text-left transition-colors hover:bg-zinc-800/70">
         <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-500 transition-transform ${open ? 'rotate-90' : ''}`} />
         <span className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-200">{file.name}</span>
         {file.added > 0 && <span className="font-mono text-[11px] text-emerald-700 dark:text-emerald-400">+{file.added}</span>}
@@ -70,9 +70,9 @@ export function CrewChanges({ diff, evidence }: {
 }) {
   const log = evidence.log ?? []
   return (
-    <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-4">
+    <div className="min-h-0 flex-1 space-y-2.5 overflow-y-auto p-5">
       {log.length > 0 && (
-        <ul className="space-y-1 rounded-xl border border-zinc-800 p-2.5">
+        <ul className="space-y-1 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-3">
           {log.map((entry) => {
             const [sha, ...words] = entry.split(' ')
             return (
