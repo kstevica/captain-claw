@@ -1523,3 +1523,59 @@ async def test_only_an_approved_owners_agent_can_send_files_and_only_their_own_g
         assert made.status_code == 400 and "Attach it again" in made.json()["detail"]
         await agent.delete(f"/fd/crew/agent/uploads/{theirs['id']}")
     assert crew_attach.staged(deck.other["id"], [theirs["id"]]), "not this agent's to drop"
+
+
+# ── Folders of their VFS ─────────────────────────────────────────────────
+
+
+async def test_folders_over_the_routes_for_the_person_and_only_them(deck):
+    from captain_claw.flight_deck import vfs_routes
+
+    root = vfs_routes._user_root(deck.user["id"])
+    (root / "Research" / "2026").mkdir(parents=True)
+    (root / "Research" / "2026" / "a.txt").write_text("a")
+    (root / "Reports").mkdir()
+    async with _client(deck.user) as client:
+        assert (await client.get("/fd/crew/vfs")).status_code == 403, "the same approval as the rest of Crew"
+    await _approve(deck, deck.user)
+    await _approve(deck, deck.other)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        offered = (await client.get("/fd/crew/vfs")).json()["folders"]
+        assert [(f["project"], f["kind"], f["can_write"]) for f in offered] == [("Reports", "own", True), ("Research", "own", True)]
+        made = await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:work", "project": "p", "vfs_folders": [
+            {"project": "Research", "path": "2026"}, {"project": "Reports", "write": True}]})
+        assert made.status_code == 201, made.text
+        task = made.json()
+        assert [(f["project"], f["path"], f["write"], f["as"]) for f in task["vfs"]] == [("Research", "2026", False, "2026"), ("Reports", "", True, "Reports")]
+        changed = await client.put(f"/fd/crew/tasks/{task['id']}/folders", json={"folders": [{"project": "Reports"}]})
+        assert changed.status_code == 200 and [f["write"] for f in changed.json()["vfs"]] == [False]
+        refused = await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "x", "project": "p", "vfs_folders": [{"project": "Nope"}]})
+        assert refused.status_code == 404
+    async with _client(deck.other) as other:
+        assert (await other.get("/fd/crew/vfs")).json()["folders"] == [], "nobody else's"
+        assert (await other.put(f"/fd/crew/tasks/{task['id']}/folders", json={"folders": []})).status_code == 404
+        taken = await other.post("/fd/crew/tasks", json={"harness": "claude", "brief": "x", "project": "p", "vfs_folders": [{"project": "Research", "owner": deck.user["id"]}]})
+        assert taken.status_code == 404
+
+
+async def test_an_agent_gives_a_worker_its_owners_folders_over_the_routes(tool_files, deck):
+    from captain_claw.flight_deck import vfs_routes
+
+    t = tool_files
+    root = vfs_routes._user_root(t.uid)
+    (root / "Research").mkdir(parents=True)
+    (root / "Research" / "a.txt").write_text("a")
+    (root / "Reports").mkdir()
+    out = await CrewTool()._do_dispatch(t.client, harness="claude", brief="SCENARIO:work", project="p", kind="scout",
+                                        vfs_read=["vfs:Research/"], vfs_write=["vfs:Reports"], **t.where)
+    assert out.success, out.error
+    task = crew_store.get_store().list_for(t.uid)[0]
+    assert [(f["project"], f["write"]) for f in task["vfs"]] == [("Research", False), ("Reports", True)]
+    await _settle(t.uid, task["id"])
+    status = await CrewTool()._do_status(t.client, task_id=task["id"])
+    assert "vfs:Research/ (read)" in status.content and "vfs:Reports/ (read and write)" in status.content
+    changed = await CrewTool()._do_folders(t.client, task_id=task["id"], vfs_read=["vfs:Reports"])
+    assert changed.success and "vfs:Reports/ (read)" in changed.content
+    missing = await CrewTool()._do_dispatch(t.client, harness="claude", brief="again", project="p", vfs_read=["vfs:Nope"], **t.where)
+    assert not missing.success and "no folder called Nope" in missing.error

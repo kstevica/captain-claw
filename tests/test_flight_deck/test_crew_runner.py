@@ -880,7 +880,7 @@ async def test_a_clone_that_goes_quiet_fails_and_a_cancelled_one_dies(deck, monk
     monkeypatch.setattr(crew_runner, "_CLONE_SILENT_S", 30.0)
     job = asyncio.create_task(crew_runner._clone(deck["tmp"], "https://example.com/a/b", deck["tmp"] / "x", env=env))
     pidfile = deck["tmp"] / "git.pid"
-    pidfile.unlink()
+    pidfile.unlink(missing_ok=True)  # under load the first clone can be killed before it wrote one
     while not (pidfile.exists() and pidfile.read_text().strip()):
         await asyncio.sleep(0.01)
     pid = int(pidfile.read_text())

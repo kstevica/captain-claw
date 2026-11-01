@@ -52,6 +52,7 @@ from captain_claw.flight_deck import (
     crew_harness,
     crew_logins,
     crew_store,
+    crew_vfs,
 )
 from captain_claw.flight_deck.crew_access import Grant
 from captain_claw.flight_deck.crew_harness import HARNESSES, RunSpec, TurnState
@@ -719,20 +720,30 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
         _store().update(task["id"], env=state)
         task = {**task, "env": state}
     await crew_attach.place(task)
+    folders = await crew_vfs.place(task, grant)
+    for why in folders.lost:
+        _say(task, "note", f"It doesn't have this folder this turn. {why}")
+    folders_changed = folders.told != str(state.get("vfs_told") or "")
+    if folders_changed:
+        state = {**state, "vfs_told": folders.told}
+        _store().update(task["id"], env=state)
+        task = {**task, "env": state}
     pending: list[str] = list(task.get("pending") or [])
     # No session yet (not started, or it failed before it had one): it knows nothing.
     first = not task.get("session")
     said = "\n\n".join(pending)
     if first:
-        prompt = f"{_first_prompt(task)}\n\n{said}".rstrip()
+        prompt = f"{_first_prompt(task)}{folders.told}\n\n{said}".rstrip()
     else:
-        prompt = (_INTERRUPTED if interrupted else "") + _next_prompt(pending, setup=task["kind"] == "setup")
+        news = f"{(folders.told or crew_vfs.NONE_LEFT).strip()}\n\n" if folders_changed else ""
+        prompt = (_INTERRUPTED if interrupted else "") + news + _next_prompt(pending, setup=task["kind"] == "setup")
     turn = int(task.get("turn") or 0) + 1
     out_dir = crew_store.turn_dir(task["user_id"], task["id"], turn)
     spec = RunSpec(binary=binary, prompt=prompt, cwd=task["worktree"], git_common_dir=task.get("git_common_dir") or "",
                    session=task.get("session") or "", model=task.get("model") or "",
                    effort=task.get("effort") or "", task_id=task["id"],
-                   writable=tuple(crew_env.writable_roots(task["user_id"], task["repo"], state, env)))
+                   writable=(*crew_env.writable_roots(task["user_id"], task["repo"], state, env), *folders.live),
+                   add_dirs=tuple(folders.live))
     try:
         argv = await asyncio.to_thread(HARNESSES[harness].argv, spec)
         pid, started = await asyncio.to_thread(_spawn, task["id"], argv, task["worktree"], env, out_dir)
@@ -1108,11 +1119,12 @@ async def clone(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, Any
                             origin=origin)
 
 
-def _asked_again(uid: str, task: dict[str, Any], attached: list[dict[str, Any]], told: str) -> dict[str, Any]:
+def _asked_again(uid: str, task: dict[str, Any], attached: list[dict[str, Any]], told: str, folders: list[dict[str, Any]]) -> dict[str, Any]:
     """The task already doing this. A retry's files are with it already. A setup under way in other
     words hasn't got these, and they'd go nowhere unsaid."""
-    if attached and task["brief"] != told:
-        raise HTTPException(409, f"This project is already being set up: send the files in a message to that task, {task['id']}.")
+    if (attached or folders) and (task["brief"] != told or (task.get("vfs") or []) != folders):
+        raise HTTPException(409, f"This project is already being set up: give that task, {task['id']}, the files in a message "
+                                 "and the folders on its page.")
     for item in attached:
         crew_attach.drop_upload(uid, item["id"])
     return task
@@ -1146,6 +1158,7 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     if len(attached) > crew_attach.MAX_TASK_FILES or sum(i["size"] for i in attached) > crew_attach.MAX_TASK_BYTES:
         raise HTTPException(413, f"A task can have {crew_attach.MAX_TASK_FILES} attached files, up to "
                                  f"{crew_attach.MAX_TASK_BYTES // 1_000_000} MB in all.")
+    folders = await crew_vfs.choose(user["id"], grant, body.get("vfs_folders"))
     defaults = await crew_logins.read_models(get_db(), user["id"])
     own = await crew_logins.read_own_model(get_db(), user["id"])
     model = _clean_axis(body.get("model"), _MODEL_RE, "model name") or crew_logins.effective_model(defaults, own, harness)
@@ -1154,10 +1167,11 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     told = (brief[:100_000] + crew_attach.note(crew_attach.named(attached))).strip()
     # One setup at a time for a project, whoever does it and however it was put. Any other task
     # is the same one in the same words with the same files, as a retry sends it.
-    twins = [t for t in active if t["kind"] == kind and (kind == "setup" or (t["harness"] == harness and t["brief"] == told))]
+    twins = [t for t in active if t["kind"] == kind and (kind == "setup" or (
+        t["harness"] == harness and t["brief"] == told and (t.get("vfs") or []) == folders))]
     for task in twins:
         if url and _same_repo(task.get("repo_url") or "", url):
-            return _asked_again(user["id"], task, attached, told)
+            return _asked_again(user["id"], task, attached, told, folders)
     if len(active) >= grant.max_parallel * _ACTIVE_PER_SLOT:
         raise HTTPException(429, f"You already have {len(active)} tasks running or waiting. Let some finish first.")
     binary = await asyncio.to_thread(crew_harness.find_binary, harness)
@@ -1181,7 +1195,7 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     slug = _slug_for(title)
     origin = body.get("origin") if isinstance(body.get("origin"), dict) else {}
     fields: dict[str, Any] = dict(
-        title=title, kind=kind, harness=harness, model=model, effort=effort, brief=told, deliver=deliver,
+        title=title, kind=kind, harness=harness, model=model, effort=effort, brief=told, deliver=deliver, vfs=folders,
         agent_slug=str(body.get("agent_slug") or ""), source_host=str(body.get("source_host") or ""), origin=origin,
     )
     if url:
@@ -1194,7 +1208,7 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     where = await _resolve_repo(user, grant, body)
     for task in twins:
         if task["repo"] == where["repo"]:
-            return _asked_again(user["id"], task, attached, told)
+            return _asked_again(user["id"], task, attached, told, folders)
     if deliver == "pr":
         await _must_reach_github(user, grant, repo=where["repo"])
     tree = await _setup_place(where["repo"]) if kind == "setup" else await _make_worktree(user, grant, where, slug)
@@ -1266,6 +1280,19 @@ async def steer(uid: str, task_id: str, text: str, *, now: bool = False, attachm
         if now and task["status"] == "running":
             await _interrupt(_get(uid, task_id))
     await _start_queued()
+    return _get(uid, task_id)
+
+
+async def set_folders(uid: str, grant: Grant, task_id: str, items: Any) -> dict[str, Any]:
+    """Which of their folders it has, from its next turn."""
+    folders = await crew_vfs.choose(uid, grant, items)
+    async with _lock_for(task_id):
+        task = _get(uid, task_id)
+        if task["status"] in crew_store.FINISHED:
+            raise HTTPException(409, "This task is finished: its worktree is gone. Start a new one.")
+        if task["kind"] == "clone":
+            raise HTTPException(409, "This one only gets a repository ready, so there's no worker to give folders to.")
+        _store().update(task_id, vfs=folders)
     return _get(uid, task_id)
 
 
@@ -1538,6 +1565,7 @@ async def merge(user: dict, grant: Grant, task_id: str, *, expect_head: str = ""
 async def _remove_worktree(task: dict, *, force: bool) -> None:
     crew_env.drop_tmp(task)
     crew_attach.drop(task)
+    crew_vfs.drop(task)
     if task.get("kind") == "setup":
         return  # its "worktree" is the main checkout
     wt, repo, branch = task.get("worktree") or "", task["repo"], task.get("branch") or ""
@@ -1940,6 +1968,7 @@ def view(task: dict, *, grant: Grant | None = None, full: bool = False) -> dict[
         "model_used": task.get("model_used") or "",
         "effort": task.get("effort") or "", "status": task["status"], "note": task.get("note") or "",
         "repo_label": task.get("repo_label") or "", "repo_kind": task.get("repo_kind") or "",
+        "vfs": task.get("vfs") or [],
         "repo_url": task.get("repo_url") or "", "has_worktree": bool(task.get("worktree")), "env_id": crew_env.env_id(task["repo"]),
         "env": {k: (task.get("env") or {}).get(k) for k in ("python", "copied", "failed", "stale", "test", "run", "port")},
         "project_key": project_key, "project_name": project_name, "results": task.get("results") or {},
