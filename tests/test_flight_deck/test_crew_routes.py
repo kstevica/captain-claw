@@ -18,7 +18,7 @@ from fastapi import FastAPI, HTTPException
 
 from captain_claw.flight_deck import admin_routes, agent_identity
 from captain_claw.flight_deck import auth as auth_mod
-from captain_claw.flight_deck import autonomy, crew_access, crew_logins, crew_routes, crew_runner, crew_store, fd_crypto, fd_dispatch
+from captain_claw.flight_deck import autonomy, crew_access, crew_attach, crew_logins, crew_routes, crew_runner, crew_store, fd_crypto, fd_dispatch
 from captain_claw.flight_deck import settings_routes
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.db import FlightDeckDB
@@ -1342,3 +1342,43 @@ async def test_the_tool_and_the_routes_can_send_a_message_now(deck, as_agent):
     async with _client(deck.other) as other:
         await _approve(deck, deck.other)
         assert (await other.post(f"/fd/crew/tasks/{made['id']}/interrupt")).status_code == 404
+
+
+async def test_files_go_up_and_with_a_task_over_the_routes(deck):
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        up = await client.post("/fd/crew/uploads", files={"file": ("../shot one.png", b"bytes", "image/png")})
+        assert up.status_code == 201, up.text
+        got = up.json()
+        assert got["name"] == "shot one.png" and got["size"] == 5 and got["type"] == "image/png"
+        spare = (await client.post("/fd/crew/uploads", files={"file": ("spare.txt", b"x", "text/plain")})).json()
+        assert (await client.delete(f"/fd/crew/uploads/{spare['id']}")).json() == {"ok": True}
+        gone = await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "x", "project": "p", "attachments": [spare["id"]]})
+        assert gone.status_code == 400 and "Attach it again" in gone.json()["detail"]
+        made = await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:work", "project": "p", "attachments": [got["id"]]})
+        assert made.status_code == 201, made.text
+    held = crew_store.task_dir(deck.user["id"], made.json()["id"]) / "attachments" / "shot one.png"
+    assert held.read_bytes() == b"bytes"
+    done = await _settle(deck.user["id"], made.json()["id"])
+    assert done["status"] == "ready"
+    async with _client(deck.user) as client:
+        second = (await client.post("/fd/crew/uploads", files={"file": ("more.txt", b"more", "text/plain")})).json()
+        told = await client.post(f"/fd/crew/tasks/{done['id']}/steer", json={"text": "", "attachments": [second["id"]]})
+        assert told.status_code == 200, told.text
+
+
+async def test_uploading_takes_the_same_approval_and_another_persons_task_is_still_refused(deck):
+    async with _client(deck.user) as client:
+        refused = await client.post("/fd/crew/uploads", files={"file": ("a.txt", b"a", "text/plain")})
+        assert refused.status_code == 403 and "approved" in refused.json()["detail"]
+        assert (await client.delete("/fd/crew/uploads/0123456789abcdef0123")).status_code == 403
+    await _approve(deck, deck.user)
+    await _approve(deck, deck.other)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = (await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:slow", "project": "p"})).json()
+    async with _client(deck.other) as other:
+        theirs = (await other.post("/fd/crew/uploads", files={"file": ("a.txt", b"a", "text/plain")})).json()
+        assert (await other.post(f"/fd/crew/tasks/{made['id']}/steer", json={"text": "x", "attachments": [theirs["id"]]})).status_code == 404
+    assert crew_attach.staged(deck.other["id"], [theirs["id"]]), "it's still theirs, and went nowhere"

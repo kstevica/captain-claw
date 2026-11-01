@@ -21,6 +21,7 @@
   PUT    /fd/crew/models/{harness}      the model a CLI uses when a task names none
   PUT/DELETE /fd/crew/own-model         a model server of their own, for OpenCode and Pi
   POST   /fd/crew/own-model/check       can Flight Deck reach it, and what does it serve
+  POST/DELETE /fd/crew/uploads[/{id}]   a file for a task or a message that's still being written
   POST   /fd/crew/projects              a new project, ready for tasks
   POST   /fd/crew/projects/tidy         clear a project's finished tasks off the page
   GET    /fd/crew/envs                  each project's environment: what's installed, its settings
@@ -43,11 +44,12 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, WebSocket
 from pydantic import BaseModel
 
 from captain_claw.flight_deck import (
     crew_access,
+    crew_attach,
     crew_env,
     crew_harness,
     crew_logins,
@@ -78,6 +80,7 @@ class DispatchBody(BaseModel):
     repo_path: str = ""
     model: str = ""
     effort: str = ""
+    attachments: list[str] = []
 
 
 class LinkBody(BaseModel):
@@ -85,8 +88,9 @@ class LinkBody(BaseModel):
 
 
 class SteerBody(BaseModel):
-    text: str
+    text: str = ""
     now: bool = False
+    attachments: list[str] = []
 
 
 class LoginBody(BaseModel):
@@ -396,6 +400,19 @@ async def list_tasks(user: dict = Depends(get_current_user)) -> dict[str, Any]:
     return {"tasks": [crew_runner.view(t, grant=grant) for t in crew_store.get_store().list_for(row["id"])]}
 
 
+@router.post("/uploads", status_code=201)
+async def upload(file: UploadFile = File(...), user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, _ = await _approved(user)
+    return await crew_attach.save_upload(row["id"], file)
+
+
+@router.delete("/uploads/{upload_id}")
+async def drop_upload(upload_id: str, user: dict = Depends(get_current_user)) -> dict[str, bool]:
+    row, _ = await _approved(user)
+    crew_attach.drop_upload(row["id"], upload_id)
+    return {"ok": True}
+
+
 @router.post("/tasks", status_code=201)
 async def create_task(body: DispatchBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, grant = await _approved(user)
@@ -444,7 +461,8 @@ async def task_link(task_id: str, body: LinkBody | None = None, user: dict = Dep
 @router.post("/tasks/{task_id}/steer")
 async def task_steer(task_id: str, body: SteerBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, grant = await _approved(user)
-    return crew_runner.view(await crew_runner.steer(row["id"], task_id, body.text, now=body.now), grant=grant, full=True)
+    return crew_runner.view(await crew_runner.steer(row["id"], task_id, body.text, now=body.now, attachments=body.attachments),
+                            grant=grant, full=True)
 
 
 @router.post("/tasks/{task_id}/interrupt")
