@@ -311,6 +311,27 @@ class WriteTool(Tool):
                         "document as Markdown (or action=edit to change an existing one)."
                     ),
                 )
+            # The same goes for workbooks and decks, which are zips of XML too.
+            suffix = Path(str(path)).suffix.lower()
+            if suffix in (".xlsx", ".xlsm", ".xltx", ".xltm", ".xls", ".xlsb"):
+                return ToolResult(
+                    success=False,
+                    error="xlsx_needs_xlsx_tool",
+                    content=(
+                        "❌ Refused: write makes text files — a workbook written this way won't "
+                        "open in Excel. Use the xlsx tool: action=create with `sheets` (or "
+                        "action=edit to change an existing one)."
+                    ),
+                )
+            if suffix in (".pptx", ".pptm", ".potx", ".ppt"):
+                return ToolResult(
+                    success=False,
+                    error="pptx_needs_script",
+                    content=(
+                        "❌ Refused: write makes text files — a deck written this way won't open "
+                        "in PowerPoint. Write a Python script with python-pptx and run it with shell."
+                    ),
+                )
             _guard = write_guard.guard_config()
 
             # ── Tier 1 (default-on) — refuse junk content at the boundary ──

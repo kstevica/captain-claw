@@ -62,7 +62,7 @@ _DB_MODULES = ("nervous_system", "sister_session", "intentions", "cognitive_metr
 STUBS = ("insights", "playbooks", "datastore", "write", "edit", "typesense", "send_mail",
          "web_fetch", "shell", "google_mail", "cron", "consult_peer", "flight_deck",
          "mcp_github_create_issue", "vfs", "read", "glob", "grep", "history", "knowledge", "topics",
-         "web_search", "todo", "contacts", "docx", "reasoning_effort", "activity", TOOL_NAME)
+         "web_search", "todo", "contacts", "docx", "xlsx", "reasoning_effort", "activity", TOOL_NAME)
 
 
 # ── isolation and fakes ──────────────────────────────────────────────
@@ -298,7 +298,8 @@ def _level(agent, level):
 COMMONS = ["insights add", "insights update", "playbooks add", "playbooks update",
            "playbooks rate", "datastore insert", "datastore update", "datastore delete",
            "datastore create_table", "datastore export", "datastore import_file", "write",
-           "edit", "typesense index", "docx create", "docx edit", "docx accept", "docx reject"]
+           "edit", "typesense index", "docx create", "docx edit", "docx accept", "docx reject",
+           "xlsx create", "xlsx edit"]
 
 
 # ── 1. no level: everything runs ─────────────────────────────────────
@@ -347,7 +348,8 @@ async def test_content_turn_pauses_everything_else(agent, ran):
     assert {n for n, _a in ran} == set(CONTENT_TURN_TOOLS)
     paused = ["web_fetch", "send_mail", "google_mail", "shell", "cron", "consult_peer",
               "flight_deck", "mcp_github_create_issue", "vfs mkdir", "insights add",
-              "datastore insert", "write", "playbooks rate", "typesense index", "docx edit"]
+              "datastore insert", "write", "playbooks rate", "typesense index", "docx edit",
+              "xlsx edit"]
     for call in paused:
         assert await _run(agent, call, ran) == CONTENT_PAUSED_MESSAGE.format(tool=call), call
     assert CONTENT_PAUSED_MESSAGE.format(tool="web_fetch") == (

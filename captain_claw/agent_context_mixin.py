@@ -110,6 +110,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "pdf_extract": "Extract a single .pdf file into markdown. ONLY for .pdf files. For multiple files in a folder use summarize_files instead.",
     "docx_extract": "Extract a single .docx file into markdown. ONLY for .docx files — never use on .pdf/.xlsx/.pptx. For multiple files in a folder use summarize_files instead.",
     "docx": "Word documents: create a .docx from Markdown (optional template), read it as numbered paragraphs with tracked changes and comments, edit it as Word tracked changes (replace/delete/insert/insert_paragraphs/format/set_style/comment), list changes and comments, accept/reject only when asked. NEVER make or change a .docx with a script, write or edit.",
+    "xlsx": "Excel workbooks: create from sheets and rows (=… is a formula; optional template), read cells with formulas and results, edit them (set/fill/clear/append_rows/insert and delete rows and columns/format/width/freeze/merge/sheets/names/tables/charts/notes; references follow, every affected formula is recalculated and each changed cell reported), check a model for errors, stale results, broken patterns and SUMs that stop short. NEVER make or change a workbook with a script, write or edit.",
     "self_check": "Self-assessment and status: live tests of your models, Flight Deck, Google, Microsoft 365, Jev, Soniox, deep memory, MCP, mail, web search and inboxes, plus server details (host, load, memory, disk, process) and why any tool is hidden. Read-only.",
     "activity": "Your own tool calls as Flight Deck recorded them (read-only): list = what you did and how each call ended (overnight, in scheduled tasks, in this conversation) — check it before saying an action happened; summary = tools that keep failing, calls you repeat, what the guard blocked.",
     "reasoning_effort": "Read or change how hard you think (off…max, auto = model default). Works from EVERY channel — web chat, WhatsApp, Telegram, the app, glasses, devices: when the user asks to set, raise or lower it (or to think harder/less), call set from wherever they asked; never say only Flight Deck can change it. Applies at once and to later messages from that channel. On your own, for a task needing much more or less thinking, use scope 'turn' and say so.",
@@ -153,6 +154,7 @@ _TOOL_PROMPT_DESCRIPTIONS_NANO: dict[str, str] = {
     "pdf_extract": "pdf→md",
     "docx_extract": "docx→md",
     "docx": "word docs",
+    "xlsx": "excel workbooks",
     "self_check": "status",
     "reasoning_effort": "think harder/less (any channel)",
     "activity": "your own tool calls",
@@ -178,6 +180,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "pdf_extract": "single .pdf → markdown (for multiple files use summarize_files)",
     "docx_extract": "single .docx → markdown (ONLY .docx, never .pdf; for multiple files use summarize_files)",
     "docx": "Word .docx: create from Markdown, read numbered paragraphs, edit as tracked changes, accept/reject when asked; never via scripts",
+    "xlsx": "Excel .xlsx: create from rows, read cells + formulas, edit (references follow; results recalculated and reported), check a model; never via scripts",
     "self_check": "test your connections (models, Flight Deck, Google, Microsoft, mail, search, MCP…) + server status; read-only",
     "activity": "your own recorded tool calls: list (what you did, did it really happen) / summary (what keeps failing); read-only",
     "reasoning_effort": "get/set how hard you think (off…max, auto) from any channel — user asks → set, never 'only Flight Deck'; scope 'turn' = this turn only",
@@ -2436,6 +2439,7 @@ class AgentContextMixin:
         "pdf_extract": ["pdf_extract"],
         "docx_extract": ["docx_extract"],
         "docx": ["docx"],
+        "xlsx": ["xlsx"],
         "self_check": ["self_check"],
         "reasoning_effort": ["reasoning_effort"],
         "activity": ["activity"],
@@ -2587,6 +2591,9 @@ class AgentContextMixin:
             elif tool_name == "docx":
                 from captain_claw.tools.docx_tool import DocxTool
                 self.tools.register(DocxTool())
+            elif tool_name == "xlsx":
+                from captain_claw.tools.xlsx_tool import XlsxTool
+                self.tools.register(XlsxTool())
             elif tool_name == "self_check":
                 from captain_claw.tools.self_check import SelfCheckTool
                 self.tools.register(SelfCheckTool())

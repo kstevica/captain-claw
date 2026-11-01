@@ -347,6 +347,12 @@ def _extract_xlsx_markdown(path: Path, max_rows: int) -> str:
                     else:
                         node = cell.find("./x:v", ns_main)
                         raw = node.text.strip() if node is not None and node.text else ""
+                        if not raw and cell_type != "str":
+                            # A file from a script stores formulas with no result:
+                            # show the formula rather than lose the cell (or its row).
+                            formula = cell.find("./x:f", ns_main)
+                            if formula is not None:
+                                raw = "=" + formula.text if formula.text else "(formula)"
                         if cell_type == "s" and raw.isdigit():
                             idx = int(raw)
                             value = shared_strings[idx] if 0 <= idx < len(shared_strings) else raw
