@@ -93,8 +93,31 @@ export interface CrewFile {
   text: string
 }
 
+/** A folder of their VFS a worker can use: its own copy to read, or the real folder to change. */
+export interface CrewFolderChoice {
+  project: string
+  owner?: string
+  path?: string
+  write: boolean
+  /** Its name in the worker's .crew-vfs folder. */
+  as?: string
+}
+
+/** A folder they could give a worker, as Flight Deck offers it. */
+export interface CrewVfsFolder {
+  project: string
+  owner: string
+  owner_name: string
+  kind: 'own' | 'link' | 'shared'
+  can_write: boolean
+  files: number
+  bytes: number
+  title: string
+}
+
 export interface CrewTask {
   id: string
+  vfs?: CrewFolderChoice[]
   title: string
   kind: 'ship' | 'scout' | 'clone' | 'setup'
   harness: string
@@ -181,6 +204,7 @@ export interface CrewDispatch {
   model?: string
   effort?: string
   attachments?: string[]
+  vfs_folders?: CrewFolderChoice[]
 }
 
 const post = <T>(path: string, body?: unknown) =>
@@ -247,6 +271,9 @@ async function uploadFile(file: File): Promise<{ id: string; name: string; size:
 }
 
 export const crewApi = {
+  vfsFolders: () => api<{ folders: CrewVfsFolder[] }>('/fd/crew/vfs').then((r) => r.folders),
+  setFolders: (id: string, folders: CrewFolderChoice[]) =>
+    api<CrewTask>(`/fd/crew/tasks/${id}/folders`, { method: 'PUT', body: JSON.stringify({ folders }) }),
   upload: uploadFile,
   dropUpload: (id: string) => api<{ ok: boolean }>(`/fd/crew/uploads/${id}`, { method: 'DELETE' }),
   envs: () => api<{ envs: CrewEnv[] }>('/fd/crew/envs'),

@@ -22,6 +22,8 @@
   PUT/DELETE /fd/crew/own-model         a model server of their own, for OpenCode and Pi
   POST   /fd/crew/own-model/check       can Flight Deck reach it, and what does it serve
   POST/DELETE /fd/crew/uploads[/{id}]   a file for a task or a message that's still being written
+  GET    /fd/crew/vfs                   folders of their VFS a worker can use
+  PUT    /fd/crew/tasks/{id}/folders    which of them a task has, from its next turn
   POST   /fd/crew/projects              a new project, ready for tasks
   POST   /fd/crew/projects/tidy         clear a project's finished tasks off the page
   GET    /fd/crew/envs                  each project's environment: what's installed, its settings
@@ -56,6 +58,7 @@ from captain_claw.flight_deck import (
     crew_runner,
     crew_store,
     crew_terminal,
+    crew_vfs,
 )
 from captain_claw.flight_deck.auth import _fd_auth_enabled, get_current_user, get_db
 from captain_claw.flight_deck.crew_access import Grant
@@ -66,6 +69,17 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/fd/crew", tags=["crew"])
 
 _MERGE_DOMAIN = "coding"
+
+
+class FolderChoice(BaseModel):
+    project: str
+    owner: str = ""
+    path: str = ""
+    write: bool = False
+
+
+class FoldersBody(BaseModel):
+    folders: list[FolderChoice] = []
 
 
 class DispatchBody(BaseModel):
@@ -81,6 +95,7 @@ class DispatchBody(BaseModel):
     model: str = ""
     effort: str = ""
     attachments: list[str] = []
+    vfs_folders: list[FolderChoice] = []
 
 
 class LinkBody(BaseModel):
@@ -133,6 +148,7 @@ class AgentTaskBody(BaseModel):
     now: bool = False
     whole: bool = False
     attachments: list[str] = []
+    vfs_folders: list[FolderChoice] = []
 
 
 class ModelBody(BaseModel):
@@ -414,6 +430,19 @@ async def drop_upload(upload_id: str, user: dict = Depends(get_current_user)) ->
     return {"ok": True}
 
 
+@router.get("/vfs")
+async def vfs_folders(user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, grant = await _approved(user)
+    return {"folders": await crew_vfs.choices(row["id"], grant)}
+
+
+@router.put("/tasks/{task_id}/folders")
+async def task_folders(task_id: str, body: FoldersBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, grant = await _approved(user)
+    chosen = [folder.model_dump() for folder in body.folders]
+    return crew_runner.view(await crew_runner.set_folders(row["id"], grant, task_id, chosen), grant=grant, full=True)
+
+
 @router.post("/tasks", status_code=201)
 async def create_task(body: DispatchBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, grant = await _approved(user)
@@ -662,6 +691,13 @@ async def agent_steer(body: AgentTaskBody, request: Request) -> dict[str, Any]:
     row, _, _ = await _agent_caller(request)
     return crew_runner.view(await crew_runner.steer(row["id"], body.task_id, body.text, now=body.now, attachments=body.attachments),
                             full=True)
+
+
+@router.post("/agent/folders")
+async def agent_folders(body: AgentTaskBody, request: Request) -> dict[str, Any]:
+    row, grant, _ = await _agent_caller(request)
+    chosen = [folder.model_dump() for folder in body.vfs_folders]
+    return crew_runner.view(await crew_runner.set_folders(row["id"], grant, body.task_id, chosen), full=True)
 
 
 @router.post("/agent/stop")

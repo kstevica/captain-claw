@@ -105,6 +105,9 @@ class CrewTool(Tool):
         "A link to one file is public_link; a page with its css and scripts needs hosting. "
         "Giving a worker files: put them in attachments on dispatch, prepare_env or steer, like a screenshot the user sent "
         "you, a log or a design. It can't see your files any other way, so never paste them into a brief or give it your paths. "
+        "Giving a worker folders of the user's VFS: vfs_read and vfs_write on dispatch or prepare_env, or folders for a task under "
+        "way. With vfs_read it gets its own copy; with vfs_write it works in the real folder, at once and with no undo, so give "
+        "that only when the task has to change their files there. Google Drive and OneDrive folders can't be given. "
         "A task exists once a crew result here gives its id, and not before: never say one started, or that a repository "
         "is cloned, from anything else. If a call fails, tell the user what it said. "
         "Actions: options (the CLIs you may use, their logins, the model each last ran on and its usage limits, like "
@@ -116,7 +119,7 @@ class CrewTool(Tool):
         "gets it: use it when they ask for that, or before work that has to run when env shows nothing prepared); "
         "list (project narrows it); status; files (where a task's files are; whole=true copies the whole project, for a big one); "
         "steer (the next instruction, or the user's answer to a worker's question; it waits for the worker's turn to end, "
-        "unless now=true); stop (keeps the work); "
+        "unless now=true); folders (sets which VFS folders a task has, replacing what it had, from its next turn); stop (keeps the work); "
         "pr (Captain pushes the branch and opens the pull request, with the user's GitHub token from Crew → Logins: "
         "that's the only way a task's work gets pushed, so never ask a worker to push or run gh, and never ask the user "
         "to log in on this computer or to give you a token: a token goes in Crew → Logins, not in a chat); request_merge "
@@ -133,7 +136,7 @@ class CrewTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["options", "dispatch", "clone", "env", "prepare_env", "list", "status", "files", "steer", "stop", "pr", "request_merge", "update_deck"],
+                "enum": ["options", "dispatch", "clone", "env", "prepare_env", "list", "status", "files", "steer", "folders", "stop", "pr", "request_merge", "update_deck"],
             },
             "harness": {
                 "type": "string",
@@ -170,6 +173,16 @@ class CrewTool(Tool):
             "whole": {"type": "boolean", "description": "files: copy the whole project, not only what the task changed."},
             "text": {"type": "string", "description": "steer: what to tell the worker, and what any attachments are for."},
             "now": {"type": "boolean", "description": "steer: stop what the worker is doing so it hears this at once, when the user wants it to stop or change course now. What it's running stops; its files stay."},
+            "vfs_read": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "dispatch, prepare_env, folders: folders of the user's VFS it can read, as vfs:<folder>/<path>. It gets its own copy, made the same as the real folder before each turn.",
+            },
+            "vfs_write": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "dispatch, prepare_env, folders: folders of the user's VFS it can change, as vfs:<folder>/<path>. It works in the real folder: its changes happen at once, outside git. Only when the task has to change their files there.",
+            },
             "attachments": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -290,6 +303,30 @@ class CrewTool(Tool):
         return held, None
 
     @staticmethod
+    def _folders_of(kwargs: dict) -> tuple[list[dict], str]:
+        """`vfs_read` and `vfs_write` as Flight Deck names folders, or why not. What the owner
+        may give is its decision; a process walled to some of the VFS stays walled here."""
+        from captain_claw import vfs
+
+        scope = vfs.scope_projects()
+        out = []
+        for key, write in (("vfs_read", False), ("vfs_write", True)):
+            raw = kwargs.get(key) or []
+            for value in [raw] if isinstance(raw, str) else raw:
+                project, _, path = str(value).strip().removeprefix("vfs:").strip("/").partition("/")
+                if not project:
+                    return [], f"{key} takes folders, as vfs:<folder>/<path>."
+                if scope is not None and project not in scope:
+                    return [], f"This agent can't reach {project}."
+                out.append({"project": project, "path": path, "write": write})
+        return out, ""
+
+    @staticmethod
+    def _folder_line(folders: list[dict]) -> str:
+        return ", ".join(f"vfs:{f['project']}/{f['path'] + '/' if f.get('path') else ''} ({'read and write' if f.get('write') else 'read'})"
+                         for f in folders)
+
+    @staticmethod
     async def _let_go(client: Any, held: list[dict]) -> None:
         """What was sent ahead for a call that was refused. Flight Deck clears it in a day anyway."""
         for item in held:
@@ -329,6 +366,9 @@ class CrewTool(Tool):
         # Asked for in the words of the brief: it's what they want, and only Captain can do it.
         if not kwargs.get("deliver") and kwargs.get("kind") != "scout" and _OPENS_A_PR.search(brief):
             kwargs["deliver"] = "pr"
+        folders, why = self._folders_of(kwargs)
+        if why:
+            return ToolResult(success=False, error=why)
         held, refused = await self._attach(client, kwargs)
         if refused is not None:
             return refused
@@ -338,6 +378,7 @@ class CrewTool(Tool):
             **{k: str(kwargs.get(k) or "") for k in ("title", "kind", "deliver", "project", "folder", "repo_url",
                                                      "repo_path", "model", "effort") if kwargs.get(k)},
             **({"attachments": [i["id"] for i in held]} if held else {}),
+            **({"vfs_folders": folders} if folders else {}),
         }
         status, data = await client.call("POST", "dispatch", payload)
         if (refused := self._refused(status, data)) is not None:
@@ -351,7 +392,7 @@ class CrewTool(Tool):
                       f"landed: {'; '.join(data['unlanded'][:5])}.")
         return ToolResult(success=True, content=(
             f"Task {data.get('id')} is {where}: {data.get('harness_label')} in {data.get('repo_label')}, on branch "
-            f"{data.get('branch')}.{self._sent_line(held)}{behind} It has only started: nothing is done yet, so tell the user it's under way, "
+            f"{data.get('branch')}.{self._sent_line(held)}{f' Its folders: {self._folder_line(folders)}.' if folders else ''}{behind} It has only started: nothing is done yet, so tell the user it's under way, "
             f"end your turn and don't report a result. You'll be called back when it finishes or needs a decision."
             + (" Captain opens its pull request when it finishes." if kwargs.get("deliver") == "pr"
                else _NOT_A_WORKERS_JOB if _ASKS_TO_DELIVER.search(brief) else "")
@@ -388,6 +429,9 @@ class CrewTool(Tool):
         if not harness:
             return ToolResult(success=False, error="Provide `harness`: which CLI does it (see action='options').")
         origin_platform, origin_user_id, origin_chat_id = self._origin_of(kwargs.get("_agent"))
+        folders, why = self._folders_of(kwargs)
+        if why:
+            return ToolResult(success=False, error=why)
         held, refused = await self._attach(client, kwargs)
         if refused is not None:
             return refused
@@ -396,6 +440,7 @@ class CrewTool(Tool):
             "origin_user_id": origin_user_id, "origin_chat_id": origin_chat_id,
             **{k: str(kwargs.get(k) or "") for k in ("brief", "title", "project", "folder", "repo_url", "repo_path", "model", "effort") if kwargs.get(k)},
             **({"attachments": [i["id"] for i in held]} if held else {}),
+            **({"vfs_folders": folders} if folders else {}),
         })
         if (refused := self._refused(status, data)) is not None:
             await self._let_go(client, held)
@@ -437,6 +482,8 @@ class CrewTool(Tool):
             lines.append(f"Uncommitted changes: {evidence['dirty']}")
         if evidence.get("off_branch"):
             lines.append(f"Warning: the worker left its branch; it's on {evidence['off_branch']}")
+        if data.get("vfs"):
+            lines.append(f"Its folders: {self._folder_line(data['vfs'])}")
         lines.extend(self._where_lines(data.get("results") or {}))
         lines.extend(data.get("next_steps") or [])
         if data.get("report"):
@@ -497,6 +544,18 @@ class CrewTool(Tool):
         when = "next, once its current turn ends" if data.get("pending") else "now"
         return ToolResult(success=True, content=f"Told task {data.get('id')}; it acts on it {when}.{self._sent_line(held)}"
                           + (_NOT_A_WORKERS_JOB if _ASKS_TO_DELIVER.search(text) else ""))
+
+    async def _do_folders(self, client: Any, **kwargs: Any) -> ToolResult:
+        folders, why = self._folders_of(kwargs)
+        if why:
+            return ToolResult(success=False, error=why)
+        refused, data = await self._with_task(client, "folders", kwargs, vfs_folders=folders)
+        if refused is not None:
+            return refused
+        has = self._folder_line(data.get("vfs") or []) or "none of the user's folders"
+        return ToolResult(success=True, content=(
+            f"From its next turn, task {data.get('id')} has {has}. A turn already running doesn't get them: "
+            "use steer with now=true if it needs them at once, or steer if it's waiting."))
 
     async def _do_stop(self, client: Any, **kwargs: Any) -> ToolResult:
         refused, data = await self._with_task(client, "stop", kwargs)

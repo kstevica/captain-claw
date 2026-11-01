@@ -88,7 +88,7 @@ def test_a_browser_that_only_lists_items_still_works():
 
 
 def test_both_boxes_take_paste_drop_and_the_paperclip():
-    """Reading the source: the task's message box and the new task's, and only Crew's modal is 80%."""
+    """Reading the source: the task's message box and the new task's, and only Crew's modal is 90%."""
     text = _BOARD.read_text(encoding="utf-8")
     assert text.count("onPaste={attachments.onPaste}") == 2
     assert text.count("<AttachButton onPick={attachments.onPick}") == 2
@@ -97,5 +97,5 @@ def test_both_boxes_take_paste_drop_and_the_paperclip():
     assert "crewApi.steer(task.id, text, running && !later, attachments.ids)" in text
     assert "attachments: attachments.ids" in text
     layout = _LAYOUT.read_text(encoding="utf-8")
-    assert layout.count(" eighty>") == 1 and '<KioskWideDialog label="Crew" phone={isMobile} onClose={closeCrew} eighty>' in layout
-    assert "wide:h-[80vh] wide:w-[80vw]" in layout
+    assert layout.count(" roomy>") == 1 and '<KioskWideDialog label="Crew" phone={isMobile} onClose={closeCrew} roomy>' in layout
+    assert "wide:h-[90vh] wide:w-[90vw]" in layout

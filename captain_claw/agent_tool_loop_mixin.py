@@ -1143,7 +1143,7 @@ class AgentToolLoopMixin:
                 "microsoft_onedrive": {"upload", "create", "create_folder", "update"},
                 # A repeated dispatch is a second worker. Crew's reads below aren't
                 # listed: a task moves on between them, so a repeat isn't a loop.
-                "crew": {"dispatch", "clone", "steer", "stop", "pr", "request_merge", "update_deck"},
+                "crew": {"dispatch", "clone", "steer", "folders", "stop", "pr", "request_merge", "update_deck"},
             }
             _tool_lower = str(tc.name or "").strip().lower()
             _call_action = (

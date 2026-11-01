@@ -142,8 +142,8 @@ NON_PATH_PARAMS: dict[str, frozenset[str]] = {
     "microsoft_onedrive": frozenset({"path"}),       # a path inside OneDrive
     "whatsapp_send_file": frozenset({"filename"}),   # a name it looks up in saved/
     "payments": frozenset({"merchant_url"}),
-    # Where a crew task works: Flight Deck resolves them for the owner's approval.
-    "crew": frozenset({"folder", "repo_url", "repo_path"}),
+    # Where a crew task works, and what it can use: Flight Deck resolves them for the owner's approval.
+    "crew": frozenset({"folder", "repo_url", "repo_path", "vfs_read", "vfs_write"}),
     "app_runner": frozenset({"path"}),               # an HTTP route of the app
     "web_fetch": frozenset({"url"}), "web_get": frozenset({"url"}),
     "web_fetch_batch": frozenset({"urls"}),           # httpx: web schemes only

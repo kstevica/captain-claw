@@ -80,6 +80,7 @@ class RunSpec:
     effort: str = ""
     task_id: str = ""
     writable: tuple[str, ...] = ()  # what a sandboxed CLI must also be able to write: its environment, its caches
+    add_dirs: tuple[str, ...] = ()  # folders outside its worktree it can change: Claude refuses those it isn't given
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,8 @@ def _claude_argv(spec: RunSpec) -> list[str]:
         argv += ["--model", spec.model]
     if spec.effort:
         argv += ["--effort", spec.effort]
+    for folder in spec.add_dirs:
+        argv += ["--add-dir", folder]
     return argv
 
 

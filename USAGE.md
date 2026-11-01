@@ -4972,6 +4972,15 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 
 Your agent can do the same. Send it a screenshot in chat and say "have OpenCode fix this": the `crew` tool's `attachments` takes the files it has, on `dispatch`, `prepare_env` and `steer`, as a `saved/` path, a path a tool printed, or `vfs:<project>/<path>`. It refuses what mail attachments refuse, like keys, `.env` files and databases, and a user-tier agent stays inside its own folders. Agents need a restart to get this.
 
+**Giving a worker your folders.** A worker can also use folders from your files, as many as you like. On **New task**, under **Folders from your files**, tick them, a whole folder or one inside it, and choose for each:
+
+- **Read:** the worker gets its own copy, made the same as the real folder before each of its turns. Nothing it does reaches your files. Its copies can come to 1 GB and 50,000 files, leaving out things like `.git` and `node_modules`.
+- **Read and write:** it works in your real folder. What it changes happens at once, with no branch and no undo, and git doesn't track it.
+
+They sit in a `.crew-vfs` folder in the worker's own folder, which git ignores, and it's told what's there. A task's page shows its folders, and **Change** sets them from its next turn. Your agent can do this too: `crew` takes `vfs_read` and `vfs_write`, and `action=folders` for a task under way.
+
+Google Drive and OneDrive folders aren't offered. A folder someone shared with you to view can only be read, and one they stop sharing is gone by the worker's next turn. A folder linked from the computer needs an admin's worker. This keeps your files apart for a well-behaved worker, not a hostile one: a worker runs as the same system user as Flight Deck, with no operating-system sandbox apart from Codex's own.
+
 **The environment a project runs in.** A worker can only run and test a project if what it needs is installed, whatever its language. That's prepared once, in the project's main folder, and every new task on the project gets it. The project's page on Crew has an **Environment** card showing the folder, what's installed, and what it looks like it still needs.
 
 - **By hand:** set it up in that folder the way you would any project. **Open a terminal here** gives you a shell in it from the browser, or reach it over SSH if you have that.

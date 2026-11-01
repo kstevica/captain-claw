@@ -6,7 +6,7 @@ import {
 import { Card, EmptyState, Pill, Segmented, StatTile, labelCls } from '../console/parts'
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
-  crewApi, type CrewDispatch, type CrewEnv, type CrewEvent, type CrewHarness, type CrewMe, type CrewRepos, type CrewTask, type CrewTerminalTarget, type CrewUsage,
+  crewApi, type CrewDispatch, type CrewFolderChoice, type CrewEnv, type CrewEvent, type CrewHarness, type CrewMe, type CrewRepos, type CrewTask, type CrewTerminalTarget, type CrewUsage,
 } from '../../services/crewApi'
 import { hostingApi, type HostedSite } from '../../services/hostingApi'
 import { CrewActivity } from './CrewActivity'
@@ -14,6 +14,7 @@ import { AttachButton, AttachmentList, useAttachments } from './CrewAttachments'
 import { CrewChanges } from './CrewChanges'
 import { EnvironmentCard } from './CrewEnvironment'
 import { CrewFiles } from './CrewFiles'
+import { FolderPicker, TaskFolders } from './CrewFolders'
 import { CrewOverview, SitesCard, TaskLine } from './CrewOverview'
 import { CrewSites, PublishSheet, isLive } from './CrewSites'
 import {
@@ -266,6 +267,7 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
         <Outcome task={task} />
         {ship && (task.turn > 0 || finished) && <WhatChanged task={task} />}
         <Details task={task} />
+        {task.kind !== 'clone' && <TaskFolders task={task} canChange={canTell} onChanged={() => { load().catch(() => {}); onChanged() }} />}
 
         {(live || landable || (!live && !finished)) && (
           <div className="flex flex-wrap gap-2 pt-0.5">
@@ -494,6 +496,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
   const chosen = me.harnesses?.find((h) => h.id === harness)
   const needsModel = !!chosen?.login.free && !chosen.default_model
   const attachments = useAttachments()
+  const [vfsFolders, setVfsFolders] = useState<CrewFolderChoice[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -510,7 +513,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
   const submit = async (ev: FormEvent) => {
     ev.preventDefault()
     setBusy(true); setError('')
-    const body: CrewDispatch = { harness, brief: brief.trim(), kind, deliver: kind === 'ship' ? deliver : 'branch', model: model.trim(), effort: effort.trim(), attachments: attachments.ids }
+    const body: CrewDispatch = { harness, brief: brief.trim(), kind, deliver: kind === 'ship' ? deliver : 'branch', model: model.trim(), effort: effort.trim(), attachments: attachments.ids, vfs_folders: vfsFolders }
     if (where === 'project') { body.project = project.trim(); body.folder = folder.trim() }
     if (where === 'url') body.repo_url = url.trim()
     if (where === 'path') body.repo_path = path.trim()
@@ -606,6 +609,12 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
               <ChoiceTile icon={Wrench} title="Change the code" hint="It makes the change. You decide if it lands." on={kind === 'ship'} onClick={() => setKind('ship')} />
               <ChoiceTile icon={Search} title="Only look, and report" hint="It reads the project and changes nothing." on={kind === 'scout'} onClick={() => setKind('scout')} />
             </div>
+          </fieldset>
+
+          <fieldset className="min-w-0">
+            <legend className={labelCls}>Folders from your files</legend>
+            <p className="mb-2 text-xs text-zinc-500">Optional. Besides the project, it can use these.</p>
+            <FolderPicker value={vfsFolders} onChange={setVfsFolders} />
           </fieldset>
 
           {kind === 'ship' && (
