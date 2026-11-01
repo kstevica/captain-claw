@@ -1,5 +1,7 @@
-"""Console → Updates: admins only. The engine and its order are in ``deck_update.py``.
+"""Console → Updates: admins only, but for the notice everyone gets. The engine and its order are in
+``deck_update.py``.
 
+``GET  /fd/system/update/notice`` anyone signed in: is an update coming, and how long until the restart
 ``GET  /fd/system/update``        where the deck is, what the last fetch brought, the update under way
 ``POST /fd/system/update/check``  ask the remote
 ``POST /fd/system/update/start``  ``{target, wait}``: update to that commit
@@ -15,7 +17,7 @@ from pydantic import BaseModel
 
 from captain_claw.flight_deck import deck_update
 from captain_claw.flight_deck.admin_routes import require_admin
-from captain_claw.flight_deck.auth import get_db
+from captain_claw.flight_deck.auth import get_current_user, get_db
 
 router = APIRouter(prefix="/fd/system/update", tags=["system"])
 
@@ -31,6 +33,11 @@ class ModeBody(BaseModel):
 
 async def _status(*, fetch: bool = False) -> dict[str, Any]:
     return {**await deck_update.status(fetch=fetch), "mode": await deck_update.get_mode(get_db())}
+
+
+@router.get("/notice")
+async def update_notice(_: dict = Depends(get_current_user)) -> dict[str, Any]:
+    return deck_update.notice()
 
 
 @router.get("")

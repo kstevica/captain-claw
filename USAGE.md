@@ -6273,16 +6273,19 @@ A deck running from a git checkout can update itself: **Console → Updates → 
 What happens, in order:
 
 1. **It tries the new version first.** The new commit is unpacked to a temp folder and started on a spare port, with an empty data folder and none of the deck's keys. Its page must have all its files, and its agents' code must import. If any of that fails, it stops here, and nothing has been touched.
-2. **It stops the agents**, because they read their code from the checkout. If some are mid-turn, you choose: wait for them (up to 5 minutes) or stop them now. Crew's workers keep going.
-3. **It pulls.** New packages are installed before step 1, so you don't run `pip` yourself. After the pull, a venv holding a copy gets the new version installed, and an editable install gets `pip install -e` when `pyproject.toml` changed, so new commands appear. If that fails, the checkout goes back and the agents restart.
-4. **It restarts in place**: the same process, the same command line, the same terminal or tmux pane, and Ctrl-C still works. You don't retype anything, and it can't lose the environment you started it with. Agents come back as on any start, and the ones you stopped stay stopped.
-5. **It checks the new version came up.** If it doesn't, the old commit goes back and the deck starts on that, by itself. That deck is no longer in its terminal: it logs to `<data>/update/deck.log`, and the page says so. Restart it by hand when it suits you to get it back there.
+2. **It warns everyone, then counts down.** Everyone signed in gets a toast that an update is coming, as soon as the test start begins, for at least 20 seconds. Once it passes, they get a toast at the top right that they can't close, counting down 2 minutes, and nothing is stopped until it ends. There's no cancelling it from the page. People's pages keep working all through it, and when the deck is back they're offered a reload to get the new version.
+3. **It stops the agents**, because they read their code from the checkout. If some are mid-turn, you choose: wait for them after the countdown (up to 5 more minutes) or stop them when it ends. Crew's workers keep going.
+4. **It pulls.** New packages are installed before step 1, so you don't run `pip` yourself. After the pull, a venv holding a copy gets the new version installed, and an editable install gets `pip install -e` when `pyproject.toml` changed, so new commands appear. If that fails, the checkout goes back and the agents restart.
+5. **It restarts in place**: the same process, the same command line, the same terminal or tmux pane, and Ctrl-C still works. You don't retype anything, and it can't lose the environment you started it with. Agents come back as on any start, and the ones you stopped stay stopped.
+6. **It checks the new version came up.** If it doesn't, the old commit goes back and the deck starts on that, by itself. That deck is no longer in its terminal: it logs to `<data>/update/deck.log`, and the page says so. Restart it by hand when it suits you to get it back there.
 
-You're told how it went on the page and in the bell. It refuses before touching anything when the checkout has commits the branch doesn't, or when files here would be overwritten. Changes in files the update doesn't touch stay as they are.
+You're told how it went on the page and in the bell, and **every admin gets an email**, with the date and time in the subject, whether it worked, failed or was undone. A deck has no mailbox of its own, so it goes from the Gmail or Outlook connected by the admin who started it, or else the first admin who has one. If none has, no email goes out and the page says so.
+
+It refuses before touching anything when the checkout has commits the branch doesn't, or when files here would be overwritten. Changes in files the update doesn't touch stay as they are.
 
 **Changing `.env`.** The new version reads `.env` as any start does, and what's already in the environment wins. A deck started plainly picks up your edits. A deck started by exporting the file first (`set -a && source .env && set +a`) picks up a key you added but keeps the old value of one you changed, so restart it by hand the same way after that.
 
-**Letting it run by itself.** Under **Automatically**: **Off** (it looks only when you press Check now), **Tell me** (it looks every 15 minutes, and tells admins in the bell), or **Install by itself** (it installs a new version when no agent is mid-turn, and doesn't retry one that failed). With Install by itself, whatever is merged to the branch goes live once it passes step 1.
+**Letting it run by itself.** Under **Automatically**: **Off** (it looks only when you press Check now), **Tell me** (it looks every 15 minutes, and tells admins in the bell), or **Install by itself** (it starts when no agent is mid-turn, still gives everyone the countdown, waits for any turn begun during it, and doesn't retry a version that failed). With Install by itself, whatever is merged to the branch goes live once it passes step 1.
 
 **An agent can ask.** An admin's agent with Crew can run `crew action=update_deck`, which puts an Approve in the bell. The Approve covers that commit and no later one, waits for turns to finish, and the agent is called back when it's over. Only admins, and their agents, can get near this.
 
@@ -6292,6 +6295,7 @@ You're told how it went on the page and in the bell. It refuses before touching 
 |---|---|
 | `FD_UPDATE_REPO` | The checkout, when the deck can't work it out. |
 | `FD_UPDATE_POLL_S` | How often **Tell me** and **Install by itself** look, in seconds (default 900). |
+| `FD_UPDATE_COUNTDOWN_S` | How long everyone gets before the restart, in seconds (default 120). |
 | `FD_UPDATE_BOOT_TIMEOUT_S` | How long the new version gets to come up before it's taken back, in seconds (default 300). A process that ends is taken back at once. |
 
 ### Users, invitations and the waitlist

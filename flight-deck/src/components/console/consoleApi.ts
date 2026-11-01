@@ -126,6 +126,8 @@ export interface DeckUpdateJob {
   error?: string
   refused?: string
   detached_log?: string
+  seconds_left?: number
+  mail?: { sent: number; of: number; from: string; error: string }
 }
 
 export interface DeckUpdateStatus {

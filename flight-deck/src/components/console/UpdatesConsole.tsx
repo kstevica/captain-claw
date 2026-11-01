@@ -10,10 +10,11 @@ import { Page, PageHeader, Card, Button, Notice, Pill, Dialog, Segmented, EmptyS
 // stops the agents, pulls and restarts (deck_update.py). While one runs the page
 // follows it, through the restart too, and opens the new version's page at the end.
 
-const ACTIVE = ['rehearsing', 'waiting', 'stopping', 'pulling', 'restarting', 'booted', 'rolling_back']
+const ACTIVE = ['rehearsing', 'countdown', 'waiting', 'stopping', 'pulling', 'restarting', 'booted', 'rolling_back']
 
 const PHASE_LABEL: Record<string, string> = {
   rehearsing: 'Trying the new version on a spare port',
+  countdown: 'Giving everyone notice before the restart',
   waiting: 'Waiting for agents to finish',
   stopping: 'Stopping the agents',
   pulling: 'Pulling the new version',
@@ -32,6 +33,18 @@ const short = (sha?: string) => (sha || '').slice(0, 9)
 
 function when(ts?: number): string {
   return ts ? new Date(ts * 1000).toLocaleString() : ''
+}
+
+function MailNote({ job }: { job: DeckUpdateJob }) {
+  const mail = job.mail
+  if (!mail) return null
+  if (mail.error && !mail.sent) return <Notice tone="amber">{mail.error}</Notice>
+  return (
+    <Notice tone={mail.error ? 'amber' : 'zinc'}>
+      Emailed {mail.sent} of {mail.of} admin{mail.of === 1 ? '' : 's'} from {mail.from}.
+      {mail.error ? ` ${mail.error}` : ''}
+    </Notice>
+  )
 }
 
 function Result({ job }: { job: DeckUpdateJob }) {
@@ -71,6 +84,7 @@ function Progress({ job, gone }: { job: DeckUpdateJob; gone: boolean }) {
         <li className="flex items-center gap-2 font-medium text-zinc-200">
           <Loader2 className="h-4 w-4 shrink-0 animate-spin text-violet-500" />
           {gone ? 'The deck is restarting. This page comes back by itself.' : PHASE_LABEL[job.phase || ''] || 'Working'}
+          {!gone && job.phase === 'countdown' && <span className="tabular-nums text-zinc-400">{Math.floor((job.seconds_left ?? 0) / 60)}:{String((job.seconds_left ?? 0) % 60).padStart(2, '0')}</span>}
         </li>
       </ul>
     </Card>
@@ -165,7 +179,7 @@ export function UpdatesConsole() {
       <PageHeader
         icon={RefreshCw}
         title="Updates"
-        description="Bring this deck up to the newest version on its branch. It tries the new version first, stops the agents, pulls and restarts. If the new version doesn't come up, it goes back by itself."
+        description="Bring this deck up to the newest version on its branch. It tries the new version first, gives everyone a 2-minute countdown, stops the agents, pulls and restarts. If the new version doesn't come up, it goes back by itself. Admins get an email either way."
         actions={status?.available && !active
           ? <Button icon={RefreshCw} busy={checking} onClick={() => { void check() }}>Check now</Button>
           : undefined}
@@ -183,6 +197,7 @@ export function UpdatesConsole() {
 
       {job && active && <Progress job={job} gone={gone} />}
       {job && !active && <Result job={job} />}
+      {job && !active && <MailNote job={job} />}
 
       {status?.available && !active && (
         <>
@@ -248,17 +263,18 @@ export function UpdatesConsole() {
           footer={(
             <>
               <Button variant="ghost" onClick={() => setConfirm(false)}>Cancel</Button>
-              {busy.length > 0 && <Button variant="danger" disabled={starting} onClick={() => { void begin(false) }}>Stop them now</Button>}
+              {busy.length > 0 && <Button variant="danger" disabled={starting} onClick={() => { void begin(false) }}>Stop them after the countdown</Button>}
               <Button variant="primary" busy={starting} onClick={() => { void begin(busy.length > 0) }}>
-                {busy.length > 0 ? 'Wait for them, then update' : 'Update now'}
+                {busy.length > 0 ? 'Wait for them too' : 'Update now'}
               </Button>
             </>
           )}
         >
           <div className="space-y-3 text-sm leading-relaxed text-zinc-400">
             <p>
+              Everyone signed in gets a 2-minute countdown first, and this can't be cancelled once it starts.{' '}
               {status.agents_running
-                ? `The ${status.agents_running} running agent${status.agents_running === 1 ? '' : 's'} stop and come back when the deck is up. `
+                ? `The ${status.agents_running} running agent${status.agents_running === 1 ? '' : 's'} then stop and come back when the deck is up. `
                 : ''}
               Everyone's page loses the deck for a moment.
               {status.crew_running ? ` ${status.crew_running} Crew task${status.crew_running === 1 ? '' : 's'} keep going through it.` : ''}
@@ -268,7 +284,7 @@ export function UpdatesConsole() {
                 <span className="flex flex-wrap items-center gap-1.5">
                   Working right now: {busy.map((name) => <Pill key={name} tone="amber">{name}</Pill>)}
                 </span>
-                <span className="mt-1 block">Waiting gives them up to 5 minutes. After that they're stopped anyway.</span>
+                <span className="mt-1 block">Waiting gives them up to 5 more minutes after the countdown. After that they're stopped anyway.</span>
               </Notice>
             )}
           </div>
