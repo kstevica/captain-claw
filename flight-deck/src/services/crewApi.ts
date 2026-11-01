@@ -196,6 +196,7 @@ export const crewApi = {
   pr: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/pr`),
   merge: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/merge`),
   close: (id: string, discard = false) => post<CrewTask>(`/fd/crew/tasks/${id}/close?discard=${discard}`),
+  models: () => api<Record<string, string[]>>('/fd/crew/models'),
   saveModel: (harness: string, model: string) =>
     api<{ harness: string; model: string }>(`/fd/crew/models/${harness}`, { method: 'PUT', body: JSON.stringify({ model }) }),
   saveOwnModel: (body: { url: string; key: string; models: string; context: string }) =>

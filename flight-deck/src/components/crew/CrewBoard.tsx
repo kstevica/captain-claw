@@ -845,8 +845,15 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
   const [newIn, setNewIn] = useState('')
   const [collapsed, setCollapsed] = useState<string[]>(readCollapsed)
   const [error, setError] = useState('')
+  const [meError, setMeError] = useState('')
+  const [listed, setListed] = useState<Record<string, string[]>>({})
 
-  const loadMe = useCallback(() => crewApi.me().then(setMe).catch((e) => setError(errorOf(e))), [])
+  // The models come apart: a CLI can take half a minute to say, and the page doesn't wait for it.
+  const loadMe = useCallback(() => {
+    setMeError('')
+    crewApi.me().then(setMe).catch((e) => setMeError(errorOf(e)))
+    crewApi.models().then(setListed).catch(() => {})
+  }, [])
   const loadRepos = useCallback(() => crewApi.repos().then(setRepos).catch(() => {}), [])
   const loadTasks = useCallback(async () => {
     try {
@@ -893,6 +900,7 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
     return { projects: [...groups.values()].sort((a, b) => latest(b) - latest(a)), idle: unused }
   }, [tasks, repos])
 
+  const meListed = useMemo(() => me && { ...me, harnesses: me.harnesses?.map((h) => ({ ...h, models: listed[h.id] ?? h.models })) }, [me, listed])
   const all = [...projects, ...idle]
   const current = all.find((p) => p.key === projectKey)
   const working = (tasks ?? []).filter((t) => t.status === 'running').length
@@ -942,7 +950,7 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
         onNew={() => startIn(selectedTask ? inProject(selectedTask.project_key, selectedTask.project_name) : inProject(current?.key, current?.name))}
         summary={[working ? `${working} working` : '', wanting ? `${wanting} need${wanting === 1 ? 's' : ''} you` : ''].filter(Boolean).join(' · ')}
       />
-      {error && <div className="p-2"><ErrorLine text={error} /></div>}
+      {(error || (me && meError)) && <div className="p-2"><ErrorLine text={error || meError} /></div>}
       <div className="flex min-h-0 flex-1">
         {showList && (
           <div className={`relative flex min-h-0 flex-col ${phone ? 'flex-1' : 'w-80 shrink-0 border-r border-zinc-800'}`}>
@@ -971,8 +979,15 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
         )}
         {showPane && (
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {pane === 'new' && me && <NewTask key={newIn} me={me} initialProject={newIn} onCancel={back} onLogins={() => setPane('logins')} onMade={(id) => { loadTasks(); loadRepos(); open(id) }} />}
-            {pane === 'logins' && me && <Logins me={me} onBack={back} onChanged={loadMe} />}
+            {(pane === 'new' || pane === 'logins') && !meListed && (
+              <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center text-sm text-zinc-500">
+                {meError
+                  ? <><ErrorLine text={meError} /><button onClick={loadMe} className={quietBtn}>Try again</button></>
+                  : <><Loader2 className="h-5 w-5 animate-spin" /> Loading…</>}
+              </div>
+            )}
+            {pane === 'new' && meListed && <NewTask key={newIn} me={meListed} initialProject={newIn} onCancel={back} onLogins={() => setPane('logins')} onMade={(id) => { loadTasks(); loadRepos(); open(id) }} />}
+            {pane === 'logins' && meListed && <Logins me={meListed} onBack={back} onChanged={loadMe} />}
             {pane === 'project' && current && (
               <ProjectView project={current} onOpen={open} onNew={() => startIn(inProject(current.key, current.name))} onChanged={() => { loadTasks(); loadRepos() }} onBack={phone ? back : undefined} />
             )}
