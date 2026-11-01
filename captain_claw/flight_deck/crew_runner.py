@@ -1314,8 +1314,21 @@ async def files(uid: str, task_id: str, *, whole: bool = False) -> dict[str, Any
             if not results or results.get("head") != ref or (whole and not results.get("whole")):
                 results = await _export_results(task, ref=ref, whole=whole or bool(results.get("whole")))
         evidence = task.get("evidence") or {}
-        return {**results, "uncommitted": evidence.get("dirty") or 0, "landed": task["status"] == "delivered",
+        return {**_with_live_link(uid, results), "uncommitted": evidence.get("dirty") or 0, "landed": task["status"] == "delivered",
                 "project_path": _vfs_path(uid, task["repo"]) if task["repo_kind"] == "project" else ""}
+
+
+def _with_live_link(uid: str, results: dict[str, Any]) -> dict[str, Any]:
+    """A task's link as it stands now: a site can be stopped or removed after it's made."""
+    from captain_claw.flight_deck import vfs_hosting
+
+    known = results.get("link")
+    if not known:
+        return results
+    entry = vfs_hosting.load_registry().get(known.get("name")) or {}
+    if entry.get("owner") != uid:
+        return {k: v for k, v in results.items() if k != "link"}
+    return {**results, "link": {**known, "stopped": bool(entry.get("stopped"))}}
 
 
 def read_result(uid: str, task_id: str, path: str) -> dict[str, Any]:
@@ -1337,21 +1350,26 @@ def read_result(uid: str, task_id: str, path: str) -> dict[str, Any]:
             "text": "" if binary else data.decode("utf-8", "replace")}
 
 
-async def link(uid: str, task_id: str) -> dict[str, Any]:
+async def link(uid: str, task_id: str, wanted: str = "") -> dict[str, Any]:
     """A person's way to a page they can open and send on: the clean copy published,
-    so no .git goes with it. Stays current as the copy does."""
+    so no .git goes with it. Stays current as the copy does. *wanted* names its address."""
     from captain_claw.flight_deck import hosting_routes, vfs_hosting
 
     results = await files(uid, task_id, whole=True)
     registry = vfs_hosting.load_registry()
     known = results.get("link") or {}
-    if (registry.get(known.get("name")) or {}).get("owner") == uid:
+    if known:
         return known
     if not results.get("publish"):
         raise HTTPException(409, "There's no index.html in it, so there's no page to open.")
     task = _get(uid, task_id)
     base = re.sub(r"[^a-z0-9]+", "-", project_of(task)[1].lower()).strip("-")[:50] or "crew"
-    name = f"{base}-{task_id[-4:]}"
+    name = wanted.strip().lower() or f"{base}-{task_id[-4:]}"
+    if wanted:
+        if not vfs_hosting.valid_name(name):
+            raise HTTPException(400, "A name is lowercase letters, digits and dashes, up to 63 of them.")
+        if name in registry:
+            raise HTTPException(409, f"The name '{name}' is already taken.")
     while name in registry:
         name = f"{base}-{os.urandom(2).hex()}"
     entry = {"kind": "static", "owner": uid, "start_cmd": "", **results["publish"]}
@@ -1361,7 +1379,7 @@ async def link(uid: str, task_id: str) -> dict[str, Any]:
     vfs_hosting.save_registry(registry)
     made = {"name": name, "url": hosting_routes._view(name, entry)["url"]}
     _store().update(task_id, results={**(task.get("results") or {}), "link": made})
-    return made
+    return {**made, "stopped": False}
 
 
 async def diff(uid: str, task_id: str) -> dict[str, str]:

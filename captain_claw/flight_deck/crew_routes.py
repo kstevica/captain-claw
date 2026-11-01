@@ -66,6 +66,10 @@ class DispatchBody(BaseModel):
     effort: str = ""
 
 
+class LinkBody(BaseModel):
+    name: str = ""
+
+
 class SteerBody(BaseModel):
     text: str
 
@@ -256,9 +260,9 @@ async def task_file(task_id: str, path: str, user: dict = Depends(get_current_us
 
 
 @router.post("/tasks/{task_id}/link")
-async def task_link(task_id: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+async def task_link(task_id: str, body: LinkBody | None = None, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, _ = await _approved(user)
-    return await crew_runner.link(row["id"], task_id)
+    return await crew_runner.link(row["id"], task_id, body.name if body else "")
 
 
 @router.post("/tasks/{task_id}/steer")

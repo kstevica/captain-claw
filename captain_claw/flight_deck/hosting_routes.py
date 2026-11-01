@@ -76,6 +76,8 @@ def _view(name: str, entry: dict) -> dict:
         "running": bool(e.get("running")),
         "port": e.get("port"),
         "url": _public_url(name, e.get("kind", "static")),
+        # Its folder is gone (a discarded task's copy, say): nothing to serve.
+        "missing": vh.entry_dir(e) is None,
     }
 
 
@@ -92,7 +94,8 @@ class PublishBody(BaseModel):
 @router.get("/fd/hosting")
 async def list_hosting(user: dict = Depends(get_current_user)):
     reg = vh.load_registry()
-    mine = [_view(n, e) for n, e in reg.items() if e.get("owner") == user["id"]]
+    mine = [{**_view(n, e), "visit_count": vh.get_visits(n)["count"]}
+            for n, e in reg.items() if e.get("owner") == user["id"]]
     mine.sort(key=lambda x: x["name"])
     return {"entries": mine}
 
@@ -210,24 +213,6 @@ async def unpublish(name: str, user: dict = Depends(get_current_user)):
     reg.pop(name, None)
     vh.save_registry(reg)
     return {"ok": True}
-
-
-@router.post("/fd/hosting/{name}/start")
-async def start(name: str, user: dict = Depends(get_current_user)):
-    _owned_entry(name, user)
-    if _app_hosting_restricted() and user.get("role") != "admin":
-        raise HTTPException(403, _APP_ADMIN_ONLY)
-    ok, msg = vh.start_app(name)
-    if not ok:
-        raise HTTPException(400, msg)
-    return {"ok": True, "message": msg}
-
-
-@router.post("/fd/hosting/{name}/stop")
-async def stop(name: str, user: dict = Depends(get_current_user)):
-    _owned_entry(name, user)
-    ok, msg = vh.stop_app(name)
-    return {"ok": ok, "message": msg}
 
 
 @router.get("/fd/hosting/{name}/logs")
@@ -373,9 +358,7 @@ async def agent_start(body: AgentNameReq, request: Request,
                       auth_user: dict | None = Depends(get_optional_user)):
     owner = _agent_owner(body, auth_user)
     ent = _agent_owned(body.name, owner)
-    if ent.get("kind") != "app":
-        raise HTTPException(400, f"'{body.name}' is a static site — nothing to start.")
-    if _app_hosting_restricted() and not await _owner_is_admin(owner):
+    if ent.get("kind") == "app" and _app_hosting_restricted() and not await _owner_is_admin(owner):
         raise HTTPException(403, _APP_ADMIN_ONLY)
     ok, msg = vh.start_app(body.name)
     view = _view(body.name, vh.load_registry().get(body.name, ent))
@@ -421,6 +404,26 @@ async def agent_status(body: AgentNameReq, request: Request,
     return view
 
 
+# After the agent surface: first match wins, and /fd/hosting/agent/stop would be
+# site "agent" here, asking for a login an agent doesn't have.
+@router.post("/fd/hosting/{name}/start")
+async def start(name: str, user: dict = Depends(get_current_user)):
+    ent = _owned_entry(name, user)
+    if ent.get("kind") == "app" and _app_hosting_restricted() and user.get("role") != "admin":
+        raise HTTPException(403, _APP_ADMIN_ONLY)
+    ok, msg = vh.start_app(name)
+    if not ok:
+        raise HTTPException(400, msg)
+    return {"ok": True, "message": msg}
+
+
+@router.post("/fd/hosting/{name}/stop")
+async def stop(name: str, user: dict = Depends(get_current_user)):
+    _owned_entry(name, user)
+    ok, msg = vh.stop_app(name)
+    return {"ok": ok, "message": msg}
+
+
 # ── Public static serving ─────────────────────────────────────────────────
 
 def _dir_listing(name: str, rel_path: str, directory) -> HTMLResponse:
@@ -452,7 +455,7 @@ def _dir_listing(name: str, rel_path: str, directory) -> HTMLResponse:
 
 def _serve_static(name: str, path: str, request: Request) -> Response:
     ent = vh.load_registry().get(name)
-    if not ent or ent.get("kind") != "static":
+    if not ent or ent.get("kind") != "static" or ent.get("stopped"):
         raise HTTPException(404, "not found")
     # Record the visit (IP honoring a proxy's X-Forwarded-For, path, user-agent).
     xff = request.headers.get("x-forwarded-for", "")

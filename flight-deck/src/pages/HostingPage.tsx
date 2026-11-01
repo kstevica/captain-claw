@@ -264,7 +264,7 @@ export function HostingPage() {
               <div className="min-w-0 flex-1">
                 <div className="flex items-center gap-2">
                   <a href={e.url} target="_blank" rel="noreferrer" className="truncate font-mono text-sm font-medium text-zinc-100 hover:text-violet-300">{e.url}</a>
-                  {e.kind === 'app' && (
+                  {(e.kind === 'app' || !e.running) && (
                     <span className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px] font-medium ${e.running ? 'border border-emerald-500/25 bg-emerald-600/15 text-emerald-400' : 'border border-zinc-700 text-zinc-500'}`}>
                       <span className={`h-1.5 w-1.5 rounded-full ${e.running ? 'bg-emerald-400' : 'bg-zinc-600'}`} />
                       {e.running ? `running · :${e.port}` : 'stopped'}
@@ -281,17 +281,15 @@ export function HostingPage() {
                   className={`rounded-lg border p-1.5 ${expanded === e.name ? 'border-violet-500/40 text-violet-300' : 'border-zinc-700 text-zinc-400 hover:border-zinc-600 hover:text-zinc-200'}`}>
                   {e.kind === 'app' ? <Terminal className="h-4 w-4" /> : <Activity className="h-4 w-4" />}
                 </button>
-                {e.kind === 'app' && (
-                  e.running
-                    ? <button onClick={() => act(e.name, 'stop')} disabled={busy === e.name}
-                        className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-red-500/40 hover:text-red-400 disabled:opacity-50">
-                        {busy === e.name ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />} Stop
-                      </button>
-                    : <button onClick={() => act(e.name, 'start')} disabled={busy === e.name}
-                        className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300 disabled:opacity-50">
-                        {busy === e.name ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />} Start
-                      </button>
-                )}
+                {e.running
+                  ? <button onClick={() => act(e.name, 'stop')} disabled={busy === e.name}
+                      className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs text-zinc-300 hover:border-red-500/40 hover:text-red-400 disabled:opacity-50">
+                      {busy === e.name ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Square className="h-3.5 w-3.5" />} Stop
+                    </button>
+                  : <button onClick={() => act(e.name, 'start')} disabled={busy === e.name}
+                      className="flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1.5 text-xs font-medium text-emerald-700 hover:bg-emerald-500/20 dark:text-emerald-300 disabled:opacity-50">
+                      {busy === e.name ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />} Start
+                    </button>}
                 <button onClick={() => openEdit(e)} title="Edit"
                   className="rounded-lg border border-zinc-700 p-1.5 text-zinc-400 hover:border-zinc-600 hover:text-violet-300">
                   <Pencil className="h-4 w-4" />
@@ -324,7 +322,7 @@ function fmtTime(epoch: number): string {
 }
 
 // Live tail of a hosting app's captured stdout/stderr.
-function AppLogs({ name }: { name: string }) {
+export function AppLogs({ name }: { name: string }) {
   const [log, setLog] = useState('')
   const [loading, setLoading] = useState(true)
   const preRef = useRef<HTMLPreElement>(null)
@@ -359,7 +357,7 @@ function AppLogs({ name }: { name: string }) {
 interface Visit { ip: string; path: string; ua: string; at: number }
 
 // Recent visits + running total for a published static site.
-function SiteVisits({ name }: { name: string }) {
+export function SiteVisits({ name }: { name: string }) {
   const [data, setData] = useState<{ count: number; visits: Visit[] }>({ count: 0, visits: [] })
   const [loading, setLoading] = useState(true)
 
