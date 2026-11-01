@@ -13,6 +13,7 @@ import sys
 import textwrap
 import time
 import types
+from datetime import datetime
 from pathlib import Path
 
 import httpx
@@ -59,6 +60,8 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setattr(deck_update, "_task", None)
     monkeypatch.setattr(deck_update, "_checked_at", 0.0)
     monkeypatch.setattr(deck_update, "_crew_running", lambda: 0)
+    monkeypatch.setenv("FD_UPDATE_COUNTDOWN_S", "0")
+    monkeypatch.setattr(deck_update, "_SOON_S", 0.0)
     return types.SimpleNamespace(remote=remote, deck=deck, dev=dev, data=data, tmp=tmp_path)
 
 
@@ -202,8 +205,12 @@ def steps(world, monkeypatch):
     async def admins():
         return ["admin"]
 
+    async def mail(state):
+        return None
+
     monkeypatch.setattr(deck_update, "_bell", bell)
     monkeypatch.setattr(deck_update, "_admins", admins)
+    monkeypatch.setattr(deck_update, "_email_admins", mail)
     return done
 
 
@@ -764,11 +771,15 @@ async def test_the_result_is_told_once_and_the_secrets_leave_the_disk(world, mon
     async def bell(user_ids, title, body):
         told.append((user_ids, title))
 
+    async def mail(state):
+        told.append(("mail", state["phase"]))
+
     monkeypatch.setattr(deck_update, "_bell", bell)
+    monkeypatch.setattr(deck_update, "_email_admins", mail)
     deck_update._write_state(phase="done", user_id="u1", env={"KEY": "secret"}, argv=["x"], reported=False)
     await deck_update._report()
     await deck_update._report()
-    assert told == [(["u1"], "Deck updated")]
+    assert told == [("mail", "done"), (["u1"], "Deck updated")]
     assert "secret" not in deck_update._state_path().read_text()
 
 
@@ -940,3 +951,251 @@ def test_an_agent_that_wont_stop_is_killed(tmp_path, monkeypatch):
     time.sleep(0.3)
     with pytest.raises((ProcessLookupError, ChildProcessError)):
         os.waitpid(child.pid, os.WNOHANG) if child.poll() is None else os.kill(child.pid, 0)
+
+
+# ── Telling everyone ────────────────────────────────────────────────
+
+
+async def test_nothing_stops_until_the_countdown_ends(world, steps, monkeypatch):
+    monkeypatch.setenv("FD_UPDATE_COUNTDOWN_S", "120")
+    target = push(world)
+    old = git(world.deck, "rev-parse", "HEAD")
+    await deck_update.status(fetch=True)
+    released = asyncio.Event()
+    seen: list[dict] = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(seconds):
+        if seconds == 120:
+            seen.append(deck_update.notice())
+            await released.wait()
+        else:
+            await real_sleep(seconds)
+
+    monkeypatch.setattr(deck_update.asyncio, "sleep", sleep)
+    await deck_update.start(by="a", target=target)
+    while not seen:
+        await real_sleep(0.01)
+    # Everyone's been told, and nothing has been touched.
+    assert seen[0]["level"] == "restart" and 118 <= seen[0]["seconds_left"] <= 120
+    assert steps == ["rehearse"]
+    assert git(world.deck, "rev-parse", "HEAD") == old
+    assert deck_update.in_progress()
+    assert 118 <= deck_update._view(deck_update.read_state())["seconds_left"] <= 120
+    released.set()
+    await deck_update._task
+    assert steps == ["rehearse", f"stop on {old[:7]}", "guard", f"relaunch on {target[:7]}"]
+    assert git(world.deck, "rev-parse", "HEAD") == target
+
+
+async def test_soon_lasts_long_enough_for_every_page_to_see_it(world, steps, monkeypatch):
+    """Pages look every 15 seconds, and a test start can be over in 6."""
+    monkeypatch.setenv("FD_UPDATE_COUNTDOWN_S", "120")
+    monkeypatch.setattr(deck_update, "_SOON_S", 20.0)
+    target = push(world)
+    await deck_update.status(fetch=True)
+    slept: list[tuple[float, str]] = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(seconds):
+        slept.append((seconds, deck_update.notice()["level"]))
+        await real_sleep(0)
+
+    monkeypatch.setattr(deck_update.asyncio, "sleep", sleep)
+    await deck_update.start(by="a", target=target)
+    await deck_update._task
+    assert slept[0][1] == "soon" and 19 <= slept[0][0] <= 20
+    assert slept[1] == (120.0, "restart")
+
+
+async def test_waiting_for_turns_comes_after_the_countdown(world, steps, monkeypatch):
+    target = push(world)
+    await deck_update.status(fetch=True)
+    order: list[str] = []
+    real_count = deck_update._count_down
+
+    async def count():
+        order.append("countdown")
+        await real_count()
+
+    async def turns():
+        order.append("turns")
+
+    monkeypatch.setattr(deck_update, "_count_down", count)
+    monkeypatch.setattr(deck_update, "_wait_for_turns", turns)
+    await deck_update.start(by="a", target=target, wait=True)
+    await deck_update._task
+    assert order == ["countdown", "turns"]
+
+
+def test_what_everyone_is_told_at_each_stage(world):
+    assert deck_update.notice() == {"level": "none", "last": None}
+    deck_update._write_state(phase="rehearsing", started_at=5.0, to="s3cret", by="admin@x.y", repo="/where")
+    assert deck_update.notice() == {"level": "soon", "id": 5.0}
+    deck_update._write_state(phase="countdown", restart_at=time.time() + 90)
+    told = deck_update.notice()
+    assert told["level"] == "restart" and 88 <= told["seconds_left"] <= 90
+    # Past zero, and through the restart: still the one they can't close.
+    for phase in ("waiting", "stopping", "pulling", "restarting", "booted", "rolling_back"):
+        deck_update._write_state(phase=phase)
+        assert deck_update.notice() == {"level": "restart", "id": 5.0, "seconds_left": 0}
+    for phase in ("done", "failed", "rolled_back"):
+        deck_update._write_state(phase=phase)
+        told = deck_update.notice()
+        assert told == {"level": "none", "last": {"id": 5.0, "phase": phase}}
+    # Nobody who isn't an admin hears what, by whom or where.
+    assert "s3cret" not in json.dumps(deck_update.notice()) and "admin@x.y" not in json.dumps(deck_update.notice())
+
+
+def test_a_restart_during_the_countdown_ends_it(world):
+    deck_update._write_state(phase="countdown", restart_at=time.time() + 60)
+    deck_update.on_boot()
+    assert deck_update.read_state()["phase"] == "failed"
+
+
+async def test_everyone_signed_in_can_read_the_notice_and_nothing_else(world, monkeypatch):
+    monkeypatch.setattr(deck_update_routes, "get_db", lambda: _FakeDb())
+    deck_update._write_state(phase="rehearsing", started_at=5.0)
+    async with _routes({"id": "u", "role": "user"}) as client:
+        assert (await client.get("/fd/system/update/notice")).json() == {"level": "soon", "id": 5.0}
+        assert (await client.get("/fd/system/update")).status_code == 403
+    # And nobody who isn't.
+    app = FastAPI()
+    app.include_router(deck_update_routes.router)
+
+    def refuse():
+        from fastapi import HTTPException
+
+        raise HTTPException(401, "Sign in")
+
+    app.dependency_overrides[get_current_user] = refuse
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://deck.test") as client:
+        assert (await client.get("/fd/system/update/notice")).status_code == 401
+
+
+async def test_install_by_itself_waits_for_turns_begun_during_the_countdown(world, steps, monkeypatch):
+    push(world)
+    asked: list[dict] = []
+    real_start = deck_update.start
+
+    async def start(**kw):
+        asked.append(kw)
+        return await real_start(**kw)
+
+    async def quiet():
+        return []
+
+    monkeypatch.setattr(deck_update, "start", start)
+    monkeypatch.setattr(deck_update, "busy_agents", quiet)
+    await deck_update.tick(_FakeDb("install"))
+    await deck_update._task
+    assert asked[0]["wait"] is True
+
+
+# ── The email ───────────────────────────────────────────────────────
+
+
+DATE_TIME = r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}"
+
+
+def test_the_subject_has_the_date_and_time_and_says_how_it_went():
+    import re
+
+    at = 1793512000.0
+    state = {"from": "a" * 40, "to": "b" * 40, "by": "admin@x.y", "started_at": at - 20, "finished_at": at}
+    expected = datetime.fromtimestamp(at).astimezone().strftime("%Y-%m-%d %H:%M")
+    for phase, words in (("done", "Captain updated to bbbbbbbbb"), ("rolled_back", "Captain update undone, back on aaaaaaaaa"),
+                         ("failed", "Captain update failed")):
+        subject, text, body = deck_update.compose_mail("Captain", {**state, "phase": phase}, [])
+        assert subject.startswith(words), subject
+        assert expected in subject and re.search(DATE_TIME, subject)
+        assert "admin@x.y" in text and "20 seconds" in text
+
+
+def test_the_email_lists_the_commits_and_says_what_went_wrong_safely():
+    commits = [{"sha": "c" * 40, "title": "Fix <script>alert(1)</script> & more"}]
+    state = {"phase": "failed", "from": "a" * 40, "to": "b" * 40, "error": "Traceback <boom>", "started_at": 1.0, "finished_at": 2.0}
+    _, text, body = deck_update.compose_mail("Captain", state, commits)
+    assert "Fix <script>alert(1)</script> & more" in text and "Traceback <boom>" in text
+    assert "<script>" not in body and "&lt;script&gt;" in body and "&lt;boom&gt;" in body
+
+
+@pytest.fixture
+def mailer(world, monkeypatch):
+    from captain_claw.flight_deck import auth as auth_mod
+    from captain_claw.flight_deck import invite_routes
+
+    admins = [{"id": "a1", "role": "admin", "email": "one@x.y"}, {"id": "a2", "role": "admin", "email": "two@x.y"},
+              {"id": "u1", "role": "user", "email": "user@x.y"}]
+    can_send = {"a2": "google"}
+    sent: list[tuple] = []
+    failing: set[str] = set()
+
+    class Db:
+        async def list_users(self, limit=100, offset=0):
+            return admins
+
+    async def options(db, uid):
+        via = can_send.get(uid)
+        return {v: {"available": v == via, "from": f"{uid}@mail.y", "reason": "no"} for v in ("google", "microsoft")}
+
+    async def send(db, admin, via, to, subject, text, body):
+        if to in failing:
+            return {"sent": False, "via": via, "from": "", "error": "quota"}
+        sent.append((admin["id"], via, to, subject))
+        return {"sent": True, "via": via, "from": f"{admin['id']}@mail.y", "error": ""}
+
+    async def branding(db):
+        return "Skyclaw", ""
+
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.setattr(auth_mod, "get_db", lambda: Db())
+    monkeypatch.setattr(invite_routes, "mail_options", options)
+    monkeypatch.setattr(invite_routes, "send_from_admin", send)
+    monkeypatch.setattr(invite_routes, "_branding", branding)
+    state = {"phase": "done", "from": git(world.deck, "rev-parse", "HEAD"), "to": git(world.deck, "rev-parse", "HEAD"),
+             "started_at": time.time() - 9, "finished_at": time.time()}
+    deck_update._write_state(**state)
+    return types.SimpleNamespace(sent=sent, can_send=can_send, failing=failing, state=state)
+
+
+async def test_every_admin_gets_it_from_the_first_who_can_send(mailer):
+    import re
+
+    await deck_update._email_admins(mailer.state)
+    assert [(s[0], s[2]) for s in mailer.sent] == [("a2", "one@x.y"), ("a2", "two@x.y")]  # never the non-admin
+    assert re.search(DATE_TIME, mailer.sent[0][3]) and mailer.sent[0][3].startswith("Skyclaw updated")
+    assert deck_update.read_state()["mail"] == {"sent": 2, "of": 2, "from": "a2@mail.y", "error": ""}
+
+
+async def test_it_goes_from_whoever_started_it_when_they_can_send(mailer):
+    mailer.can_send["a1"] = "microsoft"
+    await deck_update._email_admins({**mailer.state, "user_id": "a2"})
+    assert {s[0] for s in mailer.sent} == {"a2"} and mailer.sent[0][1] == "google"
+
+
+async def test_the_page_is_told_when_no_admin_can_send(mailer):
+    mailer.can_send.clear()
+    await deck_update._email_admins(mailer.state)
+    mail = deck_update.read_state()["mail"]
+    assert mailer.sent == [] and mail["sent"] == 0 and mail["of"] == 2 and "connected" in mail["error"]
+    assert deck_update._view(deck_update.read_state())["mail"] == mail
+
+
+async def test_one_failed_address_doesnt_stop_the_others(mailer):
+    mailer.failing.add("one@x.y")
+    await deck_update._email_admins(mailer.state)
+    assert [s[2] for s in mailer.sent] == ["two@x.y"]
+    mail = deck_update.read_state()["mail"]
+    assert mail["sent"] == 1 and mail["of"] == 2 and "one@x.y" in mail["error"]
+
+
+async def test_a_mail_that_blows_up_still_leaves_the_bell_and_the_page(world, steps, monkeypatch):
+    async def boom(state):
+        raise RuntimeError("no network")
+
+    monkeypatch.setattr(deck_update, "_email_admins", boom)
+    deck_update._write_state(phase="done", user_id="u1", reported=False)
+    await deck_update._report()
+    assert steps == ["bell Deck updated"]
+    assert "no network" in deck_update.read_state()["mail"]["error"]

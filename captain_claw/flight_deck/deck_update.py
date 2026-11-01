@@ -11,27 +11,34 @@ The order, and what each step is there for:
 1. **Rehearse.** The new commit is unpacked to a temp folder and started on a spare
    port, with an empty data folder and none of the deck's secrets, and its agents'
    code is imported. A version that can't start ends here, with nothing changed.
-2. **Stop the agents**, because they read their code from the checkout. Optionally
+2. **Count down.** Everyone signed in has been told an update is coming since step 1
+   began (a toast, :func:`notice`). Now they get a toast they can't close with a
+   countdown, 2 minutes by default, and nothing is stopped until it ends.
+3. **Stop the agents**, because they read their code from the checkout. Optionally
    after waiting for the ones mid-turn. Crew's workers keep going through this.
-3. **Pull**, with ``deck_update_guard.py`` already running outside the deck, then
+4. **Pull**, with ``deck_update_guard.py`` already running outside the deck, then
    ``pip install`` if the venv needs it (:func:`_install_args`).
-4. **Restart in place**: uvicorn shuts down, then the process execs itself with what
+5. **Restart in place**: uvicorn shuts down, then the process execs itself with what
    it was started with. Same pid, same terminal, same tmux pane. ``.env`` is read as on
    any start, so what the shell exported wins over an edit to the file. The agents come
    back the way they do on any deck start.
-5. **Verdict.** The new version writes ``booted``; the guard checks it answers. If it
+6. **Verdict.** The new version writes ``booted``; the guard checks it answers. If it
    doesn't, the guard puts the old commit back and starts that (see its docstring).
+   Whoever started it hears in the bell, and every admin gets an email, from the first
+   admin's connected Gmail or Outlook that can send it.
 
 ``<data>/update/state.json`` is the one record, and it outlives the restart.
 
 ``FD_UPDATE_REPO`` names the checkout when it can't be worked out, ``FD_UPDATE_POLL_S``
 is how often the switch's check runs (default 15 minutes), ``FD_UPDATE_BOOT_TIMEOUT_S``
-how long the new version gets to come up (default 5 minutes).
+how long the new version gets to come up (default 5 minutes), ``FD_UPDATE_COUNTDOWN_S``
+how long the countdown is (default 2 minutes).
 """
 
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import os
 import re
@@ -45,6 +52,7 @@ import threading
 import time
 import tomllib
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -63,11 +71,13 @@ _exit_server: Callable[[], None] | None = None
 _startup_env: dict[str, str] = {}
 
 _GIT_FLAGS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never")
-_ACTIVE = ("rehearsing", "waiting", "stopping", "pulling", "restarting", "booted", "rolling_back")
+_ACTIVE = ("rehearsing", "countdown", "waiting", "stopping", "pulling", "restarting", "booted", "rolling_back")
 _MODES = ("off", "notify", "install")
 _SETTING = "fd:deck-update"
 _WAIT_FOR_TURNS_S = 300.0
 _REHEARSAL_TIMEOUT_S = 240.0
+# Pages look every 15 seconds, and a test start can take 6: long enough that each sees "soon".
+_SOON_S = 20.0
 _SHUTDOWN_TIMEOUT_S = 60.0
 _MAX_COMMITS = 30
 STARTUP_FAILURE = 3  # uvicorn's exit code for a start that failed
@@ -83,6 +93,10 @@ class RefusedError(Exception):
 
 def _boot_timeout() -> float:
     return float(os.environ.get("FD_UPDATE_BOOT_TIMEOUT_S", "300") or 300)
+
+
+def _countdown_s() -> float:
+    return float(os.environ.get("FD_UPDATE_COUNTDOWN_S", "120") or 0)
 
 
 def _poll_s() -> float:
@@ -136,8 +150,29 @@ def _step(text: str, **changes: Any) -> None:
 
 def _view(state: dict[str, Any]) -> dict[str, Any]:
     """What the page gets. The environment, the command line and the paths stay here."""
-    keep = ("phase", "from", "to", "by", "started_at", "finished_at", "steps", "error", "refused", "detached_log")
-    return {k: state[k] for k in keep if k in state}
+    keep = ("phase", "from", "to", "by", "started_at", "finished_at", "steps", "error", "refused", "detached_log", "mail")
+    view = {k: state[k] for k in keep if k in state}
+    if state.get("phase") == "countdown":
+        view["seconds_left"] = _seconds_left(state)
+    return view
+
+
+def _seconds_left(state: dict[str, Any]) -> int:
+    return max(0, round(float(state.get("restart_at") or 0) - time.time()))
+
+
+def notice() -> dict[str, Any]:
+    """What everyone signed in is told, whoever they are: no versions, no names. *level* is ``soon``
+    (it's being tried, a toast they can close) or ``restart`` (the countdown and after, a toast they
+    can't). Seconds rather than a time, because a browser's clock isn't the deck's. *last* is how the
+    last one ended, for a page that was following it. *id* tells one update from the next."""
+    state = read_state()
+    phase, update_id = state.get("phase"), state.get("started_at")
+    if phase == "rehearsing":
+        return {"level": "soon", "id": update_id}
+    if phase in _ACTIVE:
+        return {"level": "restart", "id": update_id, "seconds_left": _seconds_left(state) if phase == "countdown" else 0}
+    return {"level": "none", "last": {"id": update_id, "phase": phase} if update_id else None}
 
 
 # ── The checkout ────────────────────────────────────────────────────
@@ -521,6 +556,7 @@ async def start(*, by: str, target: str, wait: bool = False, user_id: str = "", 
 
 async def _run(repo: Path, editable: bool, head: str, target: str, wait: bool) -> None:
     stopped = False
+    soon_until = time.monotonic() + min(_SOON_S, _countdown_s())
     try:
         needs = await _new_requirements(repo, head, target)
         if needs:
@@ -532,6 +568,8 @@ async def _run(repo: Path, editable: bool, head: str, target: str, wait: bool) -
         await rehearse(repo, target)
         _step("The new version starts")
 
+        await asyncio.sleep(max(0.0, soon_until - time.monotonic()))
+        await _count_down()
         if wait:
             await _wait_for_turns()
         _step(f"Stopping {len(_running_agents())} agent(s)", phase="stopping")
@@ -578,6 +616,12 @@ async def _fail(why: str, target: str, stopped: bool) -> None:
         # They were only stopped for the update.
         await asyncio.to_thread(start_agents)
     await _report()
+
+
+async def _count_down() -> None:
+    seconds = _countdown_s()
+    _step(f"Telling everyone it restarts in {int(seconds)} seconds", phase="countdown", restart_at=time.time() + seconds)
+    await asyncio.sleep(seconds)
 
 
 async def _wait_for_turns() -> None:
@@ -719,7 +763,7 @@ def on_boot() -> None:
         children = _children_of_this_pid()
         if children:
             threading.Thread(target=_reap, args=(children,), daemon=True).start()
-    elif phase in ("rehearsing", "waiting", "stopping", "pulling"):
+    elif phase in ("rehearsing", "countdown", "waiting", "stopping", "pulling"):
         _write_state(phase="failed", finished_at=time.time(),
                      error="The deck was restarted while the update was under way, so it stopped there.")
 
@@ -752,6 +796,77 @@ async def _admins() -> list[str]:
     return [u["id"] for u in await get_db().list_users(limit=500) if u.get("role") == "admin"]
 
 
+def _when(ts: float) -> str:
+    """The date and time on this computer's clock, saying which clock."""
+    return datetime.fromtimestamp(ts).astimezone().strftime("%Y-%m-%d %H:%M %Z").strip()
+
+
+def compose_mail(name: str, state: dict[str, Any], commits: list[dict[str, str]]) -> tuple[str, str, str]:
+    """Subject, text and HTML of the email about one update."""
+    was, to = str(state.get("from") or "")[:9], str(state.get("to") or "")[:9]
+    phase = state.get("phase")
+    when = _when(float(state.get("finished_at") or time.time()))
+    took = int(float(state.get("finished_at") or 0) - float(state.get("started_at") or 0))
+    if phase == "done":
+        subject, lead = f"{name} updated to {to}: {when}", f"{name} went from {was} to {to}, and its agents are back or on their way."
+    elif phase == "rolled_back":
+        subject = f"{name} update undone, back on {was}: {when}"
+        lead = (f"The update to {to} didn't come up, so {name} went back to {was} and is running again. It now logs to "
+                f"{state.get('detached_log') or 'a file'}, not to the terminal it was started in, until it's restarted by hand.")
+    else:
+        subject, lead = f"{name} update failed: {when}", f"The update to {to} didn't go through."
+    facts = [f"Started by: {state.get('by') or 'an admin'}", f"Finished: {when}, after {took} seconds"]
+    why = str(state.get("error") or "").strip()
+    titles = [f"{c['sha'][:9]} {c['title']}" for c in commits]
+    text = "\n\n".join(filter(None, [lead, "\n".join(facts), f"What went wrong:\n{why}" if why else "",
+                                      "Commits:\n" + "\n".join(titles) if titles else ""]))
+    parts = [f"<p>{html.escape(lead)}</p>", "<p>" + "<br>".join(html.escape(f) for f in facts) + "</p>"]
+    if why:
+        parts.append(f"<p>What went wrong:</p><pre>{html.escape(why)}</pre>")
+    if titles:
+        parts.append("<p>Commits:</p><ul>" + "".join(f"<li>{html.escape(t)}</li>" for t in titles) + "</ul>")
+    return subject, text, "".join(parts)
+
+
+async def _email_admins(state: dict[str, Any]) -> None:
+    """To every admin, from whoever started it if they can send, else the first admin who can: a deck
+    has no mailbox of its own. What became of it goes on the record, for the page to say."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled, get_db
+    from captain_claw.flight_deck.invite_routes import _branding, mail_options, send_from_admin
+
+    if not _fd_auth_enabled():
+        _write_state(mail={"sent": 0, "of": 0, "from": "", "error": "This deck has no accounts, so there's nobody to email."})
+        return
+    db = get_db()
+    admins = [u for u in await db.list_users(limit=500) if u.get("role") == "admin" and u.get("email")]
+    admins.sort(key=lambda u: u["id"] != state.get("user_id"))
+    sender, via, sender_address = None, "", ""
+    for admin in admins:
+        options = await mail_options(db, admin["id"])
+        via = next((v for v in ("google", "microsoft") if options[v]["available"]), "")
+        if via:
+            sender, sender_address = admin, options[via]["from"]
+            break
+    if sender is None:
+        _write_state(mail={"sent": 0, "of": len(admins), "from": "", "error": (
+            "No admin has a Gmail or Outlook connected that can send, so no email went out.")})
+        return
+    repo, _ = find_repo()
+    commits = await _commits(repo, f"{state['from']}..{state['to']}") if repo and state.get("from") and state.get("to") else []
+    name, _ = await _branding(db)
+    subject, text, body = compose_mail(name, state, commits)
+    sent, errors = 0, []
+    for admin in admins:
+        out = await send_from_admin(db, sender, via, admin["email"], subject, text, body)
+        if out["sent"]:
+            sent += 1
+        else:
+            errors.append(f"{admin['email']}: {out['error'][:200]}")
+    if errors:
+        log.warning("Deck update: an admin's email failed", errors=errors)
+    _write_state(mail={"sent": sent, "of": len(admins), "from": sender_address, "error": "; ".join(errors)[:600]})
+
+
 async def _bell(user_ids: list[str], title: str, body: str) -> None:
     from captain_claw.flight_deck import owner_notify
 
@@ -768,6 +883,11 @@ async def _report() -> None:
     # What the guard needed to restart the deck has no reason to stay on disk.
     _write_state(reported=True, env={}, argv=[])
     ok, title, body = _result_text(state)
+    try:
+        await _email_admins(state)
+    except Exception as exc:  # noqa: BLE001 — it says so on the page, and the rest still goes out
+        log.warning("Deck update: couldn't email the admins", error=str(exc))
+        _write_state(mail={"sent": 0, "of": 0, "from": "", "error": f"The email failed: {exc}"[:300]})
     try:
         await _bell([state["user_id"]] if state.get("user_id") else await _admins(), title, body)
         agent = state.get("agent") or {}
@@ -810,7 +930,8 @@ async def tick(db: Any) -> None:
         return
     target, state = seen["target"], read_state()
     if mode == "install" and not seen["blockers"] and target != state.get("refused") and not seen["agents_busy"]:
-        await start(by="this deck, by itself", target=target)
+        # A turn can start during the countdown, and nobody chose to cut it short.
+        await start(by="this deck, by itself", target=target, wait=True)
         return
     if state.get("told") != target:
         _write_state(told=target)
