@@ -326,10 +326,11 @@ class WriteTool(Tool):
             if suffix in (".pptx", ".pptm", ".potx", ".ppt"):
                 return ToolResult(
                     success=False,
-                    error="pptx_needs_script",
+                    error="pptx_needs_pptx_tool",
                     content=(
                         "❌ Refused: write makes text files — a deck written this way won't open "
-                        "in PowerPoint. Write a Python script with python-pptx and run it with shell."
+                        "in PowerPoint. Use the pptx tool: action=create with `slides` (or "
+                        "action=edit to change an existing one)."
                     ),
                 )
             _guard = write_guard.guard_config()

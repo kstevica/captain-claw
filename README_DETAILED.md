@@ -306,6 +306,7 @@ Captain Claw ships with 33 built-in tools. The agent picks the right tool for ea
 | `docx_extract` | Extract Word documents to markdown |
 | `xlsx` | Create, read, edit and check Excel workbooks: live formulas, results recalculated, every change reported, nothing else in the file touched |
 | `xlsx_extract` | Extract Excel sheets to markdown tables |
+| `pptx` | Create, read, edit and check PowerPoint decks on the deck's own layouts: native tables and charts, and every result says what doesn't fit |
 | `pptx_extract` | Extract PowerPoint slides to markdown |
 | `image_gen` | Generate images from text prompts (DALL-E 3, gpt-image-1) |
 | `image_ocr` | Extract text from images via vision-capable LLMs |

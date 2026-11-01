@@ -86,7 +86,7 @@ SPEAKER_GOOGLE_TOOLS = frozenset({"google_mail", "google_drive", "google_calenda
 SPEAKER_DEEP_MEMORY_TOOLS = frozenset({"typesense"})
 SPEAKER_FILE_TOOLS = frozenset({"read", "write", "edit", "glob", "grep", "vfs",
                                 "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
-                                "docx", "xlsx"})
+                                "docx", "xlsx", "pptx"})
 # PR C: the agent's datastore is a commons (members add rows anywhere, change
 # only their own). Not a file tool: it needs no roots unless it names a file.
 SPEAKER_DATASTORE_TOOLS = frozenset({"datastore"})
@@ -908,7 +908,7 @@ def apply_tool_rules(name: str, arguments: dict, agent: Any) -> tuple[dict, str 
                 return args, MEMBER_DELETE_MESSAGE
         return args, None
 
-    if name in ("docx", "xlsx"):
+    if name in ("docx", "xlsx", "pptx"):
         # Tracked changes and comments carry the member's own name, never one
         # they pick (tools/docx_tool.py names them).
         args.pop("author", None)
@@ -1018,6 +1018,9 @@ SPEAKER_PATH_MAP: dict[str, tuple[PathRule, ...]] = {
              PathRule("/template", "read_abs")),
     # xlsx: the same, under its own file name (tools/xlsx_tool.py decides).
     "xlsx": (PathRule("/path", "xlsx_path", True), PathRule("/output_path", "xlsx_write"),
+             PathRule("/template", "read_abs")),
+    # pptx: and again. Pictures named inside an edit are checked by the tool.
+    "pptx": (PathRule("/path", "pptx_path", True), PathRule("/output_path", "pptx_write"),
              PathRule("/template", "read_abs")),
     "xlsx_extract": (PathRule("/path", "read", True),),
     "pptx_extract": (PathRule("/path", "read", True),),
@@ -1361,15 +1364,20 @@ def _check_one(
     if _packs.is_pack_value(value):
         return _check_pack_value(rule, value, arguments)
 
-    if kind in ("docx_path", "docx_write", "xlsx_path", "xlsx_write"):
-        # Checked under the name the tool will save (it adds .docx or .xlsx), so
-        # the file checked is the file written.
+    if kind in ("docx_path", "docx_write", "xlsx_path", "xlsx_write", "pptx_path", "pptx_write"):
+        # Checked under the name the tool will save (it adds .docx, .xlsx or
+        # .pptx), so the file checked is the file written.
         if kind.endswith("_path") and str(arguments.get("action") or "").strip().lower() != "create":
             kind = "read_abs"
         elif kind.startswith("xlsx"):
             from captain_claw.tools.xlsx_tool import xlsx_file_name
 
             value = xlsx_file_name(value)
+            kind = "write"
+        elif kind.startswith("pptx"):
+            from captain_claw.tools.pptx_tool import pptx_file_name
+
+            value = pptx_file_name(value)
             kind = "write"
         else:
             from captain_claw.tools.docx_tool import docx_file_name

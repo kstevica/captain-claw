@@ -242,8 +242,10 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
     (_re.compile(r"\.xls[xmb]?\b|spreadsheet|excel|workbook|financial\s+model"
                  r"|\btablic\w*|\bprora[čc]un\w*", _re.I),
      frozenset({"xlsx", "xlsx_extract", "summarize_files"})),
-    (_re.compile(r"\.pptx?\b|presentation|powerpoint|slides", _re.I),
-     frozenset({"pptx_extract", "summarize_files"})),
+    # Decks to read, make or change (EN / HR).
+    (_re.compile(r"\.p[po]t[xm]?\b|presentation|powerpoint|slides?\b|\bdeck\b|pitch"
+                 r"|\bprezentacij\w*|\bslajd\w*", _re.I),
+     frozenset({"pptx", "pptx_extract", "summarize_files"})),
     (_re.compile(r"summar\w+\s+files|review\s+(?:all|the|these)\s+(?:files|documents|docs|folder)", _re.I),
      frozenset({"summarize_files", "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract"})),
     # Images
@@ -261,7 +263,7 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
     # saved file — the extract tools and image_vision must be in the schema.
     (_re.compile(r"\battach\w*|\bprilo[gzž]\w*|\bprivi[tc]\w*", _re.I),
      frozenset({"google_mail", "microsoft_mail", "pdf_extract", "docx_extract",
-                "xlsx_extract", "xlsx", "pptx_extract", "image_vision"})),
+                "xlsx_extract", "xlsx", "pptx_extract", "pptx", "image_vision"})),
     # Calendar
     (_re.compile(r"\bcalendar\b|\bschedule\b|\bmeeting\b|\bagenda\b|\bevent\b", _re.I),
      frozenset({"google_calendar", "microsoft_calendar"})),

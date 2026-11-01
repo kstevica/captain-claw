@@ -840,7 +840,7 @@ Where the result goes: a file in the agent's own `saved/` area (outside `downloa
 
 On a shared agent, members use `xlsx` on their own files only. They read anything they may read. Their changes land in place only on files they created; anything else becomes their own copy in their folder. Notes carry their name ("Ana (via Captain)"), not one they choose. No backup is kept, and results show `saved/…` or `vfs:…` paths, never host paths.
 
-`write` and `edit` refuse workbooks and point to this tool, and refuse `.pptx` too. Files were checked in Microsoft Excel: it opens them without a repair prompt, including files Excel wrote itself and this tool then changed, and its recalculated values match. To put a plain table in a workbook, `datastore` export still works.
+`write` and `edit` refuse workbooks and point to this tool. Files were checked in Microsoft Excel: it opens them without a repair prompt, including files Excel wrote itself and this tool then changed, and its recalculated values match. To put a plain table in a workbook, `datastore` export still works.
 
 ### xlsx_extract
 
@@ -853,6 +853,65 @@ Extract Excel sheets to markdown tables.
 | `max_chars` | number | no | Max output chars (default: 120000) |
 
 Each sheet becomes a markdown table. Uses standard library XML parsing. A formula saved with no result (a file from a script) shows as the formula; `xlsx` read calculates it.
+
+### pptx
+
+Make and change PowerPoint decks properly, without scripts. Slides come from the deck's own layouts and fill their placeholders, so a firm's template keeps doing the design. There's no layout engine in a `.pptx` file, so text is measured here and every result says what doesn't fit.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `create`, `read`, `edit`, `check`, `render` |
+| `path` | string | yes | The deck (`.pptx`, `.pptm`; for `create`, where to save it). `read`, `check` and `render` also open `.potx` and `.ppsx` |
+| `slides` | array | create | The slides, in order: `layout`, `title`, `subtitle`, `body`, `placeholders`, `table`, `chart`, `image`, `notes`, `keep_empty` |
+| `edits` | array | edit | Changes applied in order, all or nothing (see below). `create` takes them too |
+| `output_path` | string | no | Save an edit to a new file instead |
+| `slide` | string | no | read, render: a number, `2-5` or `all` |
+| `find` | string | no | read: list where this text appears, notes and tables included |
+| `template` | string | no | create: a `.pptx` or `.potx` whose layouts and design to use. Its own slides are dropped unless `keep_slides` |
+| `font`, `heading_font`, `heading_color`, `accent_color` | string | no | create: change the theme |
+| `title`, `page_numbers`, `overwrite` | | no | create: the file's title; a slide number on each slide; replace an existing file |
+
+**create.** With no `template` the deck is a plain 16:9 set of layouts. With no `layout` on a slide, one is chosen for what the slide holds: title only, title and content, or two content when it has text and a table, say. A table, chart or image takes the empty placeholder that suits it. Placeholders left unfilled are removed, because they read "Click to add text" to everyone who opens the file; `keep_empty` keeps them. New slides carry the deck's slide numbers and footer.
+
+**Text.** A line starting `- ` is a bullet and `1. ` is numbered, two spaces of indent per level, and `**bold**`, `*italic*` and `[link](https://…)` work inline. In a placeholder bullets follow the layout, and `bullets: false` on `set_text` turns them off. New text keeps the formatting already at each level.
+
+**read** gives the slide size, fonts and layouts, then each slide's shapes with the id edits use: `[3] content:1 at 0.92, 1.8 size 11.5 × 4.95 in, 24pt:` followed by its lines. Tables list their rows as `r2 North | 100`, and charts give their categories and numbers. It shows speaker notes, hidden slides, sections and SmartArt text.
+
+**edit**, each item has an `op`. Slide numbers are as they stand after earlier edits. Aim at a shape with `shape`: its id from `read`, or `title`, `subtitle`, `body`, `ph:<number>` or its name.
+
+| op | What it does |
+|---|---|
+| `set_text` | `slide`, `shape`, `text` |
+| `replace` | `find` → `replace_with` on `slide` (a number, `2-5` or `all`), across runs, keeping the formatting where each match starts. Reaches tables and chart titles, and speaker notes with `notes`. Finding nothing fails the call |
+| `format` | `slide` (or a range), `shape`, then `bold`, `italic`, `underline`, `color`, `font`, `font_size`, `align`, `valign`, `fill`. Narrow it with `find`, `paragraph`, or `row` and `column` on a table |
+| `add_slide` | as a slide in `slides`, plus `at` for its position |
+| `duplicate_slide`, `delete_slide`, `move_slide` | `slide`, `at`. A copy gets its own charts and shares pictures. Sections, custom shows and links from other slides are kept right. SmartArt slides can't be duplicated here |
+| `hide_slide` | `slide` (or a range); `hidden: false` shows it again |
+| `set_notes` | `slide`, `text` |
+| `add_text` | `slide`, `text`, `x`, `y`, `width` in inches; the box is as tall as its text |
+| `add_image` | `slide`, `image` (a saved picture's path), `alt`, `fit` (`contain` or `cover`) |
+| `add_table` | `slide`, `rows`. Columns are sized to what they hold, the font drops until the table fits, and numbers line up on the right |
+| `set_table` | `slide`, `shape`, then `cells` (`{"r2c3": "new"}`) or `rows` (the whole table, adding or removing rows and columns) |
+| `add_chart` | `slide`, `type` (`column`, `bar`, `line`, `area`, `pie`, `doughnut`, `scatter`), `categories`, `series` (`[{name, values}]`, or `{name, x, y}` for scatter), `title`, `stacked`, `legend`, `labels`, `number_format`, `alt`. A native chart, editable in PowerPoint |
+| `set_chart` | `slide`, `shape`, `categories`, `series`, `title`: new numbers, same look |
+| `place` | `slide`, `shape`, `x`, `y`, `width`, `height` in inches, `z` (`front` or `back`) |
+| `delete_shape` | `slide`, `shape`, and any animation on it |
+| `set_alt` | `slide`, `shape`, `text` |
+| `set_theme` | `font`, `heading_font`, `heading_color`, `accent_color` |
+
+With no `x`, `y`, `width` and `height`, a table, chart or image takes an empty placeholder, or else the open space on the slide. A bad edit fails the whole call and nothing is saved.
+
+**What fits.** Text is measured from font metrics, what the shape inherits from its layout and master, and wrapping. The estimate was compared with PowerPoint's own measurements; treat close calls as close. Where a placeholder shrinks text on overflow, the shrink is stored in the file, because PowerPoint only works it out itself when someone edits the text, and the result says so. A text box grows to its text. Text too long even after shrinking comes back as a warning, in the result of the edit that caused it.
+
+**check** looks for what a careful reviewer looks for first, with no model involved: text that overflows, shapes off the slide, overlaps, empty placeholders, missing titles, small text, stretched or low-resolution pictures, leftover text such as "lorem ipsum" or "TBD", wordy slides, repeated titles, hidden slides, many fonts, missing alt text, reviewers' comments still in the file, and files linked from outside.
+
+**render** saves each slide as a PNG to look at with `image_vision`, where LibreOffice is installed; without it the call says so and `check` is the way to go. It runs on a copy with outside links removed, so a stranger's deck can't make the server fetch anything. LibreOffice draws fonts and effects a little differently from PowerPoint.
+
+Where the result goes: a file in the agent's own `saved/` area (outside `downloads/`) or in a writable VFS folder is changed in place, with a backup. A user's upload (`saved/downloads/`), a read-only Drive folder or any other file is never changed: the changed copy goes to `saved/output/<session>/` under the same name, where chat bridges send it from. If that copy already exists, the edit is refused until the agent edits the copy (or names a new `output_path`). A macro deck keeps its `.pptm` extension and its macros, which are never run.
+
+On a shared agent, members use `pptx` on their own files only. They read anything they may read. Their changes land in place only on files they created; anything else becomes their own copy in their folder. Pictures named in an edit must be files they can read. No backup is kept, and results show `saved/…` or `vfs:…` paths, never host paths.
+
+`write` and `edit` refuse decks and point to this tool.
 
 ### pptx_extract
 
@@ -2110,7 +2169,7 @@ tools:
     stt_model: ""                   # explicit STT model ID; empty = auto-detect
 ```
 
-**Always-on tools (0.8.1).** Some tools are added to every agent whatever its `enabled` list, archetype or spawn list says. Since 0.8.1 that includes the everyday working set — `shell`, `glob`, `web_fetch` (with `web_get` and `web_fetch_batch`), `web_search`, `pdf_extract`, `docx_extract`, `xlsx_extract`, `pptx_extract`, `insights`, `contacts`, `apis` and `todo` — and now `docx` (Word documents with tracked changes), `xlsx` (Excel workbooks with live formulas), `self_check` (connection tests and server status), `reasoning_effort` (how hard the agent thinks) and `activity` (its own tool calls, from Flight Deck's register), beside `read`, `write`, `edit`, `datastore`, `image_vision`, `video_vision`, `cv`, `sessions`, `history`, `vfs`, `typesense`, `intentions`, `whatsapp_send_file` and the rest. Before, most archetypes lacked some of them (24 of 31 had no `insights`, so "remember that…" had nowhere to go). Every archetype and the archetype grid now list them too. Account tools (`google_*`, `microsoft_*`, `jev`, `audio`, `telegram_inbox`, `whatsapp_web`) are always registered but stay hidden until their account or key is usable. `require_confirmation` and the shell policy still apply. The `stt` tool is gone; speech is the `audio` tool.
+**Always-on tools (0.8.1).** Some tools are added to every agent whatever its `enabled` list, archetype or spawn list says. Since 0.8.1 that includes the everyday working set — `shell`, `glob`, `web_fetch` (with `web_get` and `web_fetch_batch`), `web_search`, `pdf_extract`, `docx_extract`, `xlsx_extract`, `pptx_extract`, `insights`, `contacts`, `apis` and `todo` — and now `docx` (Word documents with tracked changes), `xlsx` (Excel workbooks with live formulas), `pptx` (PowerPoint decks that fit), `self_check` (connection tests and server status), `reasoning_effort` (how hard the agent thinks) and `activity` (its own tool calls, from Flight Deck's register), beside `read`, `write`, `edit`, `datastore`, `image_vision`, `video_vision`, `cv`, `sessions`, `history`, `vfs`, `typesense`, `intentions`, `whatsapp_send_file` and the rest. Before, most archetypes lacked some of them (24 of 31 had no `insights`, so "remember that…" had nowhere to go). Every archetype and the archetype grid now list them too. Account tools (`google_*`, `microsoft_*`, `jev`, `audio`, `telegram_inbox`, `whatsapp_web`) are always registered but stay hidden until their account or key is usable. `require_confirmation` and the shell policy still apply. The `stt` tool is gone; speech is the `audio` tool.
 
 ### skills
 

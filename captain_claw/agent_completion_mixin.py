@@ -184,6 +184,7 @@ class AgentCompletionMixin:
                 or self._turn_has_successful_tool(turn_start_idx, "edit")
                 or self._turn_has_successful_tool(turn_start_idx, "docx")
                 or self._turn_has_successful_tool(turn_start_idx, "xlsx")
+                or self._turn_has_successful_tool(turn_start_idx, "pptx")
             )
             has_script_exec = self._turn_has_successful_script_execution(turn_start_idx)
             # Tools that directly produce file output (screenshots, images)
@@ -208,6 +209,7 @@ class AgentCompletionMixin:
                     "1. write(path='<output_path>', content='<content>') — for text, "
                     "markdown, or any non-tabular content.\n"
                     "2. xlsx(action='create') — for a workbook with formulas and formats; "
+                    "pptx(action='create') — for a deck; "
                     "datastore(action='export') — for a plain dump of tabular data (XLSX/CSV). "
                     "For JOINs: datastore(action='export', format='xlsx', "
                     "sql_query='SELECT ... FROM t1 JOIN t2 ON ...', table='output_name').\n"

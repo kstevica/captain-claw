@@ -145,8 +145,8 @@ class EditTool(Tool):
             if suffix in (".pptx", ".pptm", ".potx", ".ppt"):
                 return ToolResult(
                     success=False,
-                    error="edit changes text files. A deck is a zip of XML and a text edit "
-                          "would break it: change it with a python-pptx script.",
+                    error="edit changes text files. For a deck use the pptx tool "
+                          "(action=edit) — it says what doesn't fit.",
                 )
             # Read-only linked folders (e.g. Google Drive mounts) refuse edits
             # up front — before action/param validation — so a ro mount is
