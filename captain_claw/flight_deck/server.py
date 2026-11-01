@@ -35,6 +35,9 @@ from pydantic import BaseModel, Field, PrivateAttr
 # the real environment — shell exports win over the file, which is the
 # behaviour everyone expects.
 from dotenv import load_dotenv
+# What this process was started with: a self-update restarts it with this and
+# reads .env afresh, like a start from the same shell.
+_ENV_AT_START = dict(os.environ)
 load_dotenv()
 
 import logging
@@ -46,6 +49,7 @@ from captain_claw.flight_deck.auth import (
 )
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.flight_deck.endpoints import same_endpoint as _same_endpoint
+from captain_claw.flight_deck import deck_update
 from captain_claw.flight_deck import origin_guard
 from captain_claw.flight_deck import agent_ws_quiet
 from captain_claw.flight_deck import tenant_profile
@@ -483,14 +487,20 @@ def _stop_all_processes():
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 try:
+                    # A child of ours stays "alive" as a zombie until it's reaped.
+                    if os.waitpid(pid, os.WNOHANG)[0]:
+                        return
+                except ChildProcessError:
+                    pass  # not ours: an agent from before a deck restart
+                try:
                     os.kill(pid, 0)
                     time.sleep(0.2)
                 except (OSError, ProcessLookupError):
                     return
-                try:
-                    os.kill(pid, signal.SIGKILL)
-                except (OSError, ProcessLookupError):
-                    pass
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except (OSError, ProcessLookupError):
+                pass
 
         threads = [threading.Thread(target=_wait_and_kill, args=(pid,)) for pid in pids_to_kill]
         for t in threads:
@@ -1010,6 +1020,9 @@ async def _start_botport_link(db: Any) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
+    deck_update.on_boot()
+    deck_update.stop_agents = _stop_all_processes
+    deck_update.start_agents = _reattach_processes
     # Own API keys move agents through THIS module's process table (it runs
     # as __main__; an import of `server` elsewhere is a second copy).
     from captain_claw.flight_deck import byok as _byok
@@ -1369,7 +1382,15 @@ async def lifespan(app: FastAPI):
         await _start_botport_link(_fd_db)
     except Exception as _exc:
         print(f"Flight Deck: BotPort link not started: {_exc}")
+    app.state.deck_update_stop = asyncio.Event()
+    app.state.deck_update_task = asyncio.create_task(deck_update.loop(_fd_db, app.state.deck_update_stop))
+    deck_update.say_booted()
     yield
+    app.state.deck_update_stop.set()
+    try:
+        await asyncio.wait_for(app.state.deck_update_task, timeout=5.0)
+    except (TimeoutError, asyncio.CancelledError, Exception):
+        pass
     try:
         from captain_claw.flight_deck import agent_link_out as _link_out
 
@@ -1770,6 +1791,7 @@ from captain_claw.flight_deck import (
     agent_practice,
     agent_preset,
 )
+from captain_claw.flight_deck.deck_update_routes import router as deck_update_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
 from captain_claw.flight_deck import public_file_shares
@@ -1889,6 +1911,7 @@ app.include_router(agent_onboarding.router)
 app.include_router(agent_package.router)
 app.include_router(agent_practice.router)
 app.include_router(system_router)
+app.include_router(deck_update_router)
 app.include_router(share_router)
 # Public file links: owner API (port-addressed → the ownership guard above
 # covers it) + the account-free /s/{token} viewer. Before spa_catch_all.
@@ -10870,13 +10893,20 @@ def main():
     # phase on Ctrl+C. Without this, in-flight StreamingResponse handlers
     # (consult SSE, ndjson event streams) keep uvicorn waiting indefinitely
     # — the user then has to hit Ctrl+C several times to force-exit.
-    uvicorn.run(
+    server = deck_update.make_server(uvicorn.Config(
         app,
         host=args.host,
         port=args.port,
         log_config=None,
         timeout_graceful_shutdown=3,
-    )
+    ))
+    deck_update.can_restart(lambda: setattr(server, "should_exit", True), _ENV_AT_START)
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
+    if not server.started:
+        sys.exit(deck_update.STARTUP_FAILURE)
 
 
 if __name__ == "__main__":

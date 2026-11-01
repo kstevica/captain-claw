@@ -4862,6 +4862,8 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 
 **Models and limits.** The Crew page shows the model each CLI last ran on and its account's limits, like Claude's weekly limit, with what your tasks used in the last week. Your agent can tell you too. It's what the CLI reported at its last run, so it's as old as that run: nothing is asked for it and nothing is spent. Claude Code reports both, and Pi its model. Codex and OpenCode report neither.
 
+**Working on Captain itself.** Point a task at this deck's repository or your fork, and land it through a pull request as usual. Once it's merged, **Console → Updates** installs it, or your agent asks you to Approve that with `crew action=update_deck`. See [Updating the deck](#updating-the-deck).
+
 **Pushing is Captain's.** A worker never pushes or opens a pull request, and a non-admin's worker can't see a GitHub login on the server, whether that's `gh auth login` or a `GH_TOKEN`. Save a GitHub token in Crew → Logins: Captain uses it to clone, push and open pull requests, when a task asks for that or through **Open a pull request**, or `crew action=pr` from your agent.
 
 > **Merging is enforced at the `crew` tool.** A non-admin's agent has no shell, so for them that is the whole way to a merge. An admin's agent has a shell until agents run in an OS sandbox, so for it the rule is one it is told to follow, not one it can't break.
@@ -6143,9 +6145,36 @@ A layout of its own for admins, with no chat and no agent desktop — just setti
 - **Connections** — each service with its status. The deck-wide part (the Google and Microsoft OAuth clients, the team Telegram bot, the Jev and Soniox team keys, MCP servers shared with everyone) sits above the admin's own connection.
 - **Users** — Users · Invitations · Waitlist, as on the Users page.
 - **Usage & limits** — today per person against the plan, spend by person and run kind, the plan limits in one table, recent activity.
+- **Updates** — this deck's version, what's new on its branch, and the button that installs it. See [Updating the deck](#updating-the-deck).
 - **Settings** — branding, sign-up and the waitlist, kiosk mode, Docker, and the profile defaults.
 
 **Admins start there.** Signing in from a form (sign in, sign up, an accepted invitation) takes an admin to the console's Overview; an admin who never picked a layout starts there, and a reload keeps the layout they chose last. Other ways in: `/console`, a button in the top bar and one in the simple layout. The full layout's Admin, Users, Library and Connections pages are still there. Non-admins never see the console.
+
+### Updating the deck
+
+A deck running from a git checkout can update itself: **Console → Updates → Check now**, then **Update now**. It follows the branch it's on, so a fork follows the fork. It only moves forward, and only to the commit you saw.
+
+What happens, in order:
+
+1. **It tries the new version first.** The new commit is unpacked to a temp folder and started on a spare port, with an empty data folder and none of the deck's keys. Its page must have all its files, and its agents' code must import. If any of that fails, it stops here, and nothing has been touched.
+2. **It stops the agents**, because they read their code from the checkout. If some are mid-turn, you choose: wait for them (up to 5 minutes) or stop them now. Crew's workers keep going.
+3. **It pulls.** New packages are installed before step 1. A venv holding a copy rather than an editable install gets the new version installed too.
+4. **It restarts in place**: the same process, the same terminal or tmux pane, Ctrl-C still works, and `.env` is read afresh. Agents come back as on any start, and the ones you stopped stay stopped.
+5. **It checks the new version came up.** If it doesn't, the old commit goes back and the deck starts on that, by itself. That deck is no longer in its terminal: it logs to `<data>/update/deck.log`, and the page says so. Restart it by hand when it suits you to get it back there.
+
+You're told how it went on the page and in the bell. It refuses before touching anything when the checkout has commits the branch doesn't, or when files here would be overwritten. Changes in files the update doesn't touch stay as they are.
+
+**Letting it run by itself.** Under **Automatically**: **Off** (it looks only when you press Check now), **Tell me** (it looks every 15 minutes, and tells admins in the bell), or **Install by itself** (it installs a new version when no agent is mid-turn, and doesn't retry one that failed). With Install by itself, whatever is merged to the branch goes live once it passes step 1.
+
+**An agent can ask.** An admin's agent with Crew can run `crew action=update_deck`, which puts an Approve in the bell. The Approve covers that commit and no later one, waits for turns to finish, and the agent is called back when it's over. Only admins, and their agents, can get near this.
+
+**What it can't do.** A desktop build or a container has no checkout, so the page says to update it the way it was installed. A deck started some other way than the `flight-deck` command (say, by running uvicorn yourself) can't restart itself. It fetches with the git login of the computer it runs on, without a prompt, so a private repository needs a credential helper or an SSH key that doesn't ask. WhatsApp Web's service outlives a restart and stays on the old version until it's restarted. Test start or not, a version can still fail in ways only your real data shows after the deck is up: going back covers it not coming up, not a feature misbehaving later.
+
+| Environment variable | What it does |
+|---|---|
+| `FD_UPDATE_REPO` | The checkout, when the deck can't work it out. |
+| `FD_UPDATE_POLL_S` | How often **Tell me** and **Install by itself** look, in seconds (default 900). |
+| `FD_UPDATE_BOOT_TIMEOUT_S` | How long the new version gets to come up before it's taken back, in seconds (default 300). A process that ends is taken back at once. |
 
 ### Users, invitations and the waitlist
 
