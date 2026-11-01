@@ -14,9 +14,9 @@ import { isManagedAgent } from '../utils/managedAgents'
 // <deck>/console/<page>, so a link (or a desktop app) can open it straight
 // away, and Back / Forward move between pages.
 
-export type ConsolePage = 'overview' | 'models' | 'archetypes' | 'connections' | 'network' | 'users' | 'usage' | 'audit' | 'settings'
+export type ConsolePage = 'overview' | 'models' | 'archetypes' | 'connections' | 'network' | 'users' | 'usage' | 'audit' | 'updates' | 'settings'
 
-export const CONSOLE_PAGES: ConsolePage[] = ['overview', 'models', 'archetypes', 'connections', 'network', 'users', 'usage', 'audit', 'settings']
+export const CONSOLE_PAGES: ConsolePage[] = ['overview', 'models', 'archetypes', 'connections', 'network', 'users', 'usage', 'audit', 'updates', 'settings']
 
 export const CONSOLE_PATH = '/console'
 

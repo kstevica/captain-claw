@@ -86,8 +86,10 @@ class CrewTool(Tool):
         "that's the only way a task's work gets pushed, so never ask a worker to push or run gh, and never ask the user "
         "to log in on this computer or to give you a token: a token goes in Crew → Logins, not in a chat); request_merge "
         "(asks the user to Approve the merge; merging is "
-        "their decision, so only ask when they want it merged). You can't merge or discard work yourself, and that "
-        "includes git in a shell: a worker's branch is the user's to land."
+        "their decision, so only ask when they want it merged); update_deck (for an admin's agent: asks them to Approve "
+        "updating this Flight Deck to what's new on its branch. It stops every agent, you included, pulls and restarts; "
+        "you're called back when it's over. Only ask when they want the new version running). You can't merge or discard "
+        "work yourself, and that includes git in a shell: a worker's branch is the user's to land."
     )
     timeout_seconds = 200.0
 
@@ -96,7 +98,7 @@ class CrewTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["options", "dispatch", "list", "status", "files", "steer", "stop", "pr", "request_merge"],
+                "enum": ["options", "dispatch", "list", "status", "files", "steer", "stop", "pr", "request_merge", "update_deck"],
             },
             "harness": {
                 "type": "string",
@@ -190,23 +192,26 @@ class CrewTool(Tool):
             lines.extend(f"  {r['repo']}" for r in repos["recent"])
         return ToolResult(success=True, content="\n".join(lines))
 
-    async def _do_dispatch(self, client: Any, **kwargs: Any) -> ToolResult:
-        harness = str(kwargs.get("harness") or "").strip()
-        brief = str(kwargs.get("brief") or "").strip()
-        if not harness or not brief:
-            return ToolResult(success=False, error="Provide `harness` and `brief` (see action='options').")
-        origin_platform, origin_user_id, origin_chat_id = "web", "", 0
-        agent = kwargs.get("_agent")
+    @staticmethod
+    def _origin_of(agent: Any) -> tuple[str, str, int]:
+        """Where a callback goes. Only Telegram needs saying: for other channels the
+        agent's session remembers where it was asked."""
         try:
             from captain_claw.origin import get_session_origin
 
             found = get_session_origin(getattr(agent, "session", None)) if agent else None
         except Exception:  # noqa: BLE001
             found = None
-        # Other channels need nothing here: the agent's session remembers where it was asked.
         if found and found["kind"] == "telegram":
-            origin_platform, origin_user_id = "telegram", found["address"]
-            origin_chat_id = int(found["address"]) if str(found["address"]).isdigit() else 0
+            return "telegram", found["address"], int(found["address"]) if str(found["address"]).isdigit() else 0
+        return "web", "", 0
+
+    async def _do_dispatch(self, client: Any, **kwargs: Any) -> ToolResult:
+        harness = str(kwargs.get("harness") or "").strip()
+        brief = str(kwargs.get("brief") or "").strip()
+        if not harness or not brief:
+            return ToolResult(success=False, error="Provide `harness` and `brief` (see action='options').")
+        origin_platform, origin_user_id, origin_chat_id = self._origin_of(kwargs.get("_agent"))
         # Asked for in the words of the brief: it's what they want, and only Captain can do it.
         if not kwargs.get("deliver") and kwargs.get("kind") != "scout" and _OPENS_A_PR.search(brief):
             kwargs["deliver"] = "pr"
@@ -338,4 +343,19 @@ class CrewTool(Tool):
         return ToolResult(success=True, content=(
             "The merge is waiting for the user's Approve in Flight Deck (the bell). It isn't merged until they "
             "approve it; say so. You'll be called back when it lands."
+        ))
+
+    async def _do_update_deck(self, client: Any, **kwargs: Any) -> ToolResult:
+        origin_platform, origin_user_id, origin_chat_id = self._origin_of(kwargs.get("_agent"))
+        status, data = await client.call("POST", "update_deck", {
+            "origin_platform": origin_platform, "origin_user_id": origin_user_id, "origin_chat_id": origin_chat_id,
+        })
+        if (refused := self._refused(status, data)) is not None:
+            return refused
+        if data.get("status") == "up_to_date":
+            return ToolResult(success=True, content=f"This deck is already on the newest version: {data.get('head_title')}.")
+        return ToolResult(success=True, content=(
+            f"The update ({data.get('commits')} new commit(s)) is waiting for the user's Approve in Flight Deck (the bell). "
+            "Nothing changes until they approve it; say so. When they do, every agent stops, you included, and you'll be "
+            "called back when the deck is up again."
         ))
