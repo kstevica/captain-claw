@@ -122,6 +122,7 @@ export interface CrewTask {
   deliver: string
   delivery: { kind?: string; pr?: number; url?: string; sha?: string; base?: string }
   pending: number
+  waiting?: string[]
   stalled: boolean
   env?: { python?: string[]; copied?: string[]; failed?: { path: string; why: string }[]; stale?: string[]; test?: string; run?: string; port?: number }
   from_agent: string
@@ -250,7 +251,8 @@ export const crewApi = {
   newProject: (name: string) => post<{ project: string; key: string; path: string }>('/fd/crew/projects', { name }),
   tidy: (key: string) => post<{ cleared: number; kept: number }>('/fd/crew/projects/tidy', { key }),
   dispatch: (body: CrewDispatch) => post<CrewTask>('/fd/crew/tasks', body),
-  steer: (id: string, text: string) => post<CrewTask>(`/fd/crew/tasks/${id}/steer`, { text }),
+  steer: (id: string, text: string, now = false) => post<CrewTask>(`/fd/crew/tasks/${id}/steer`, { text, now }),
+  interrupt: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/interrupt`),
   stop: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/stop`),
   pr: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/pr`),
   merge: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/merge`),

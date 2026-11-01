@@ -112,7 +112,8 @@ class CrewTool(Tool):
         "prepare_env (a worker on `harness` sets the project up, whatever its language, in that folder, and every later task "
         "gets it: use it when they ask for that, or before work that has to run when env shows nothing prepared); "
         "list (project narrows it); status; files (where a task's files are; whole=true copies the whole project, for a big one); "
-        "steer (the next instruction, or the user's answer to a worker's question); stop (keeps the work); "
+        "steer (the next instruction, or the user's answer to a worker's question; it waits for the worker's turn to end, "
+        "unless now=true); stop (keeps the work); "
         "pr (Captain pushes the branch and opens the pull request, with the user's GitHub token from Crew → Logins: "
         "that's the only way a task's work gets pushed, so never ask a worker to push or run gh, and never ask the user "
         "to log in on this computer or to give you a token: a token goes in Crew → Logins, not in a chat); request_merge "
@@ -165,6 +166,7 @@ class CrewTool(Tool):
             "task_id": {"type": "string", "description": "status, files, steer, stop, pr, request_merge: the task."},
             "whole": {"type": "boolean", "description": "files: copy the whole project, not only what the task changed."},
             "text": {"type": "string", "description": "steer: what to tell the worker."},
+            "now": {"type": "boolean", "description": "steer: stop what the worker is doing so it hears this at once, when the user wants it to stop or change course now. What it's running stops; its files stay."},
         },
         "required": ["action"],
     }
@@ -402,7 +404,7 @@ class CrewTool(Tool):
         text = str(kwargs.get("text") or "").strip()
         if not text:
             return ToolResult(success=False, error="Provide `text`: what to tell the worker.")
-        refused, data = await self._with_task(client, "steer", kwargs, text=text)
+        refused, data = await self._with_task(client, "steer", kwargs, text=text, now=bool(kwargs.get("now")))
         if refused is not None:
             return refused
         when = "next, once its current turn ends" if data.get("pending") else "now"

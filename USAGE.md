@@ -4966,6 +4966,8 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 
 **Asking twice.** The same brief, for the same CLI in the same place, while the first is still active, is that task rather than a second one.
 
+**Telling a worker something while it works.** A task's page has a box at the bottom. **Send now** (Enter) stops what the worker is doing, including any command it had running, and it goes on from there with your message: its files stay as they are, and it's told what happened. **After this turn** (⌘/Ctrl+Enter) leaves it alone and it hears you when its current turn ends; a message waiting like that shows above the box, with its own **Send now**. Your agent can do both, with `crew action=steer`, and `now=true` for the first. None of the four CLIs can take a message in the middle of a turn, so sending one now is always a stop and a resume of the same session.
+
 **The environment a project runs in.** A worker can only run and test a project if what it needs is installed, whatever its language. That's prepared once, in the project's main folder, and every new task on the project gets it. The project's page on Crew has an **Environment** card showing the folder, what's installed, and what it looks like it still needs.
 
 - **By hand:** set it up in that folder the way you would any project. **Open a terminal here** gives you a shell in it from the browser, or reach it over SSH if you have that.

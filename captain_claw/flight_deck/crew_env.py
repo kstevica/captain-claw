@@ -85,6 +85,7 @@ It is the project's main checkout. What you install here is what the person and 
 - Find out what this project needs, whatever its language or tools, and install it with the project's own tools, lockfiles and documented steps.
 - Keep what you install in places git ignores in this folder, the usual place for this kind of project (a virtual environment, a folder of packages), or in your home folder's caches. Never install system-wide.
 - If it needs something only an administrator can install, like a system package or a database, don't try: say exactly what's missing in your final message.
+- Other things run on this computer as the same user, Captain among them. Only ever stop a process by the pid of something you started yourself: never by name or pattern, with pkill, killall or a loop over pgrep.
 - Don't change or commit tracked files, and don't push, open pull requests, merge or switch branches.
 - Check it works: run the project's tests, or the smallest thing that proves it builds and runs. A test that already fails isn't yours to fix: say so.
 - If it only works with a version manager, or with variables set, write the shell lines that do that to {activate}. They run before every turn of every task on this project. No secrets in that file unless the person asked you to.
@@ -497,6 +498,8 @@ def contract_block(state: dict[str, Any], repo: str) -> str:
     if state.get("port"):
         lines.append("- If you start a server, use port $CREW_PORT or one of the nine after it. Whatever you leave running is "
                      "stopped when your turn ends.")
+    lines.append("- Other things run on this computer as the same user, Captain among them. Only ever stop a process by the pid of "
+                 "something you started yourself: never by name or pattern, with pkill, killall or a loop over pgrep.")
     lines.append("- Never install anything system-wide.")
     return "\n".join(lines)
 
@@ -530,8 +533,8 @@ def read_setup_report(body: str) -> tuple[dict[str, Any], str]:
 
 
 async def finish_setup(task: dict[str, Any], report: dict[str, Any]) -> dict[str, Any]:
-    """A setup task ended well: what it reported is the project's, on top of what's
-    there, and what's installed counts as current."""
+    """A setup task's turn ended well: what it reported is the project's, on top of
+    what's there, and what's installed counts as current."""
     uid, repo = task["user_id"], task["repo"]
     settings = read_settings(uid, repo)
     changes: dict[str, Any] = {"prepared_head": await _head(repo), "prepared_at": time.time()}
