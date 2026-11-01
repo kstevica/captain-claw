@@ -516,6 +516,38 @@ async def test_a_task_shows_its_project_and_its_files_and_a_link_comes_from_the_
             assert (await call).status_code == 404
 
 
+async def test_a_task_link_can_be_named_and_follows_the_site(deck):
+    from captain_claw.flight_deck import vfs_hosting
+
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = (await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:page", "project": "Game"})).json()
+    await _settle(deck.user["id"], made["id"])
+    url = f"/fd/crew/tasks/{made['id']}"
+    registry = vfs_hosting.load_registry()
+    registry["taken"] = {"kind": "static", "owner": deck.other["id"], "project": "x"}
+    vfs_hosting.save_registry(registry)
+    async with _client(deck.user) as client:
+        assert (await client.post(f"{url}/link", json={"name": "Not A Name!"})).status_code == 400
+        assert (await client.post(f"{url}/link", json={"name": "taken"})).status_code == 409
+        named = (await client.post(f"{url}/link", json={"name": "my-game"})).json()
+        assert named == {"name": "my-game", "url": "/vfs/my-game/", "stopped": False}
+        assert (await client.post(f"{url}/files")).json()["link"]["stopped"] is False
+
+        # Stopped from Live sites: the task says so, and keeps the address.
+        vfs_hosting.stop_app("my-game")
+        assert (await client.post(f"{url}/files")).json()["link"] == {"name": "my-game", "url": "/vfs/my-game/", "stopped": True}
+        assert (await client.post(f"{url}/link")).json()["stopped"] is True
+
+        # Removed: the task no longer claims a link, and can make a new one.
+        registry = vfs_hosting.load_registry()
+        del registry["my-game"]
+        vfs_hosting.save_registry(registry)
+        assert "link" not in (await client.post(f"{url}/files")).json()
+        assert (await client.post(f"{url}/link", json={"name": "again"})).json()["name"] == "again"
+
+
 async def test_no_index_means_no_page_to_link(deck):
     await _approve(deck, deck.user)
     async with _client(deck.user) as client:

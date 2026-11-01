@@ -47,9 +47,9 @@ class HostingTool(Tool):
         "these: for `saved/showcase/abc123/index.html` pass project='saved', "
         "subdir='showcase/abc123' (point at the folder that CONTAINS index.html, never the "
         "index.html file itself). Re-publishing a name you own updates it (and restarts the app). "
-        "Other actions: 'list' your published sites, 'start'/'stop' an app, 'status' (URL, running "
-        "state, recent logs, visit count), 'unpublish' to remove. Returns the public URL — relay it "
-        "to the user."
+        "Other actions: 'list' your published sites, 'stop' a site or app (it goes offline and keeps "
+        "its address), 'start' it again, 'status' (URL, running state, recent logs, visit count), "
+        "'unpublish' to remove. Returns the public URL — relay it to the user."
     )
     timeout_seconds = 60.0
 
@@ -61,7 +61,8 @@ class HostingTool(Tool):
                 "enum": ["publish", "list", "start", "stop", "status", "unpublish"],
                 "description": (
                     "publish — put a VFS folder online (create or, if you own the name, update); "
-                    "list — your published sites/apps; start/stop — an app's process; "
+                    "list — your published sites/apps; stop — take a site or app offline, keeping its "
+                    "address; start — bring it back; "
                     "status — URL + running state + recent logs + visits; unpublish — remove."
                 ),
             },
@@ -228,9 +229,7 @@ class HostingTool(Tool):
             return ToolResult(success=True, content="Nothing published yet.")
         lines = []
         for e in entries:
-            state = ""
-            if e.get("kind") == "app":
-                state = " · running" if e.get("running") else " · stopped"
+            state = " · stopped" if not e.get("running") else " · running" if e.get("kind") == "app" else ""
             lines.append(f"• {e['name']} ({e.get('kind')}){state} — {self._pub_url(e)}")
         return ToolResult(success=True, content="\n".join(lines))
 
@@ -255,8 +254,10 @@ class HostingTool(Tool):
                 + (f"\nRecent output:\n{logtail}" if logtail else "")))
         # status
         parts = [f"**{name}** ({d.get('kind')}) — {self._pub_url(d)}"]
-        if d.get("kind") == "app":
-            parts.append("running" if d.get("running") else "stopped")
+        if not d.get("running"):
+            parts.append("stopped")
+        elif d.get("kind") == "app":
+            parts.append("running")
         v = d.get("visits") or {}
         if v.get("count"):
             parts.append(f"{v['count']} visit(s)")

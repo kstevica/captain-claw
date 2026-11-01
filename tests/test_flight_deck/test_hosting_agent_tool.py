@@ -156,6 +156,21 @@ class TestLinks:
             assert res.success, res.error
             assert f"{PUBLIC}/vfs/demo/" in res.content, action
 
+    async def test_an_agent_can_stop_and_start_a_page(self, network):
+        tool = HostingTool()
+        assert (await tool.execute(**PUBLISH)).success
+        assert (await tool.execute(action="stop", name="demo")).success
+        listed = await tool.execute(action="list")
+        assert "stopped" in listed.content
+        assert "stopped" in (await tool.execute(action="status", name="demo")).content
+        async with httpx.AsyncClient() as client:
+            assert (await client.get(f"{DECK}/vfs/demo/")).status_code == 404
+            started = await tool.execute(action="start", name="demo")
+            assert started.success, started.error
+            assert f"{PUBLIC}/vfs/demo/" in started.content
+            assert (await client.get(f"{DECK}/vfs/demo/")).status_code == 200
+        assert "stopped" not in (await tool.execute(action="list")).content
+
     async def test_a_browser_origin_stands_in_for_a_missing_public_url(self, network, monkeypatch):
         monkeypatch.delenv("FD_PUBLIC_URL")
         await get_db().set_public_link_origin(OWNER, PUBLIC)
