@@ -1141,6 +1141,9 @@ class AgentToolLoopMixin:
                     "create_event", "update_event", "delete_event", "respond_event",
                 },
                 "microsoft_onedrive": {"upload", "create", "create_folder", "update"},
+                # A repeated dispatch is a second worker. Crew's reads below aren't
+                # listed: a task moves on between them, so a repeat isn't a loop.
+                "crew": {"dispatch", "clone", "steer", "stop", "pr", "request_merge", "update_deck"},
             }
             _tool_lower = str(tc.name or "").strip().lower()
             _call_action = (
@@ -1155,7 +1158,7 @@ class AgentToolLoopMixin:
                 "typesense", "todo", "contacts", "scripts", "apis", "send_mail",
                 "browser", "google_drive", "google_calendar", "google_mail",
                 "microsoft_onedrive", "microsoft_calendar", "microsoft_mail",
-                "datastore",
+                "datastore", "crew",
             }
             # During scale-progress tasks, give extra headroom so the LLM
             # can recover from a failed first attempt or a write-before-read

@@ -31,6 +31,7 @@ GIT = ["git", "-c", "user.name=T", "-c", "user.email=t@example.com"]
 
 @pytest.fixture
 async def deck(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # Crew asks a CLI its version from here: never from a real checkout
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setenv("FD_DATA_KEY_FILE", str(tmp_path / "data_key"))
     fd_crypto.reset_for_tests()
@@ -48,6 +49,8 @@ async def deck(monkeypatch, tmp_path):
 
     monkeypatch.setattr(crew_runner, "_notify", notify)
     monkeypatch.setattr(crew_runner, "_sync_board", lambda task: None)
+    # A lock belongs to the loop it was first waited on in, and each test has its own.
+    monkeypatch.setattr(crew_runner, "_QUEUE_LOCK", asyncio.Lock())
     db = FlightDeckDB(tmp_path / "fd.db")
     await db.init()
     monkeypatch.setattr(auth_mod, "_db", db)
@@ -55,6 +58,11 @@ async def deck(monkeypatch, tmp_path):
     user = await db.create_user("u@example.com", "x", role="user")
     other = await db.create_user("o@example.com", "x", role="user")
     yield types.SimpleNamespace(db=db, admin=admin, user=user, other=other, tmp=tmp_path)
+    jobs = list(crew_runner._PREPARING.values())
+    for job in jobs:
+        job.cancel()
+    await asyncio.gather(*jobs, return_exceptions=True)
+    crew_runner._PREPARING.clear()
     for task in crew_store.get_store().with_status(*crew_store.ACTIVE):
         await crew_runner._terminate(task)
     crew_store.get_store().close()
@@ -662,6 +670,7 @@ def opencode_too(deck, monkeypatch):
     """A stand-in OpenCode beside the stand-in Claude: it records how it's run."""
     fake = deck.tmp / "bin" / "opencode"
     fake.write_text(r"""#!/bin/sh
+case "$1" in --version) echo "stand-in 1.0"; exit 0;; esac
 case "$*" in *--help*) exit 0;; esac
 if [ "$1" = "models" ]; then printf 'opencode/deepseek-v4.1-flash-free\nopencode/big-pickle\n'; exit 0; fi
 printf '%s\n' "$*" >> "$OC_LOG"
@@ -1165,3 +1174,87 @@ async def test_a_deck_update_an_agent_cant_have_says_why(deck, as_agent, ledger,
             assert resp.status_code == 409 and expect in resp.json()["detail"]
         assert (await agent.post("/fd/crew/agent/update_deck", json={})).json()["status"] == "up_to_date"
     assert ledger.waiting_actions(deck.admin["id"]) == []
+
+
+def _a_repository(deck, name: str = "theirs") -> str:
+    repo = deck.tmp / name
+    repo.mkdir()
+    for args in (("init", "-q", "-b", "main", "."), ("commit", "-q", "--allow-empty", "-m", "base")):
+        subprocess.run([*GIT, *args], cwd=repo, check=True, capture_output=True)
+    return str(repo)
+
+
+async def test_an_agent_gets_a_repository_with_no_worker(deck, as_agent, monkeypatch):
+    monkeypatch.setattr(crew_runner, "_check_url", lambda url, grant: None)
+    url = _a_repository(deck)
+    await _approve(deck, deck.user)
+    as_agent["owner"] = deck.user["id"]
+    async with _client(None) as agent:
+        made = await agent.post("/fd/crew/agent/clone", json={"repo_url": url, "origin_platform": "telegram", "origin_user_id": "7", "origin_chat_id": 7})
+    assert made.status_code == 200, made.text
+    task = made.json()
+    assert task["status"] == "preparing" and task["kind"] == "clone" and task["from_agent"] == "helper"
+    assert task["harness_label"] == "Captain" and task["project_name"] == "theirs" and task["repo_url"] == url
+    done = await _settle(deck.user["id"], task["id"])
+    assert done["status"] == "ready" and done["origin"]["chat_id"] == 7
+    async with _client(deck.user) as client:
+        assert [t["id"] for t in (await client.get("/fd/crew/tasks")).json()["tasks"]] == [task["id"]]
+        recent = (await client.get("/fd/crew/repos")).json()["recent"]
+        assert [r["repo_url"] for r in recent] == [url]
+    async with _client(deck.other) as client:
+        await _approve(deck, deck.other)
+        assert (await client.get("/fd/crew/tasks")).json()["tasks"] == []
+
+
+async def test_the_page_opens_a_task_on_an_address_straight_away(deck, monkeypatch):
+    monkeypatch.setattr(crew_runner, "_check_url", lambda url, grant: None)
+    url = _a_repository(deck)
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:work", "repo_url": url})
+        assert made.status_code == 201, made.text
+        assert made.json()["status"] == "preparing"
+        both = await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "x", "repo_url": url, "project": "other"})
+        assert both.status_code == 400 and "not project and repo_url" in both.json()["detail"]
+    done = await _settle(deck.user["id"], made.json()["id"])
+    assert done["status"] == "ready" and done["evidence"]["commits"] == 1
+
+
+async def test_the_tool_says_a_repository_is_on_its_way_and_what_comes_next():
+    url = "https://github.com/k/captain-claw"
+    made = {"id": "crw_1", "status": "preparing", "harness_label": "OpenCode", "repo_label": "captain-claw", "branch": "crew/x-abc123"}
+    out = await CrewTool()._do_dispatch(_FakeClient(dispatch=made), harness="opencode", brief="b", repo_url=url)
+    assert "getting its repository first" in out.content and "nothing is done yet" in out.content and "crw_1" in out.content
+    client = _FakeClient(clone={"id": "crw_2", "status": "preparing", "repo_label": "captain-claw"})
+    out = await CrewTool()._do_clone(client, repo_url=url)
+    assert client.asked[0][0] == "clone" and client.asked[0][1]["repo_url"] == url
+    assert "crw_2" in out.content and "with no worker" in out.content and f"crew action=dispatch repo_url={url}" in out.content
+    assert not (await CrewTool()._do_clone(_FakeClient())).success
+    options = _FakeClient(options={"me": {"harnesses": []}, "repos": {"projects": [], "recent": [
+        {"repo": "/deck/crew/u/repos/a", "repo_label": "a", "repo_kind": "url", "repo_url": url},
+        {"repo": "/deck/crew/u/repos/b", "repo_label": "b", "repo_kind": "url", "repo_url": ""},
+        {"repo": "/home/me/c", "repo_label": "c", "repo_kind": "path", "repo_url": ""}]}})
+    shown = (await CrewTool()._do_options(options)).content
+    assert url in shown and "/home/me/c" in shown and "/deck/crew" not in shown
+
+
+async def test_a_call_that_times_out_says_so_rather_than_nothing(monkeypatch):
+    """httpx's timeout has empty text: the agent got "Crew request failed: " and guessed the rest."""
+    from captain_claw import crew_client
+
+    monkeypatch.setattr(crew_client, "under_flight_deck", lambda: True)
+    monkeypatch.setattr(crew_client, "member_call", lambda: False)
+
+    async def slow(*args, **kwargs):
+        raise httpx.ReadTimeout("")
+
+    monkeypatch.setattr(crew_client, "call", slow)
+    out = await CrewTool().execute(action="list")
+    assert not out.success and "may still be going" in out.error and "crew action=list" in out.error
+
+    async def blank(*args, **kwargs):
+        raise RuntimeError
+
+    monkeypatch.setattr(crew_client, "call", blank)
+    assert (await CrewTool().execute(action="list")).error == "Crew request failed: RuntimeError"

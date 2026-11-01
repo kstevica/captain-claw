@@ -18,6 +18,11 @@ Approve in the bell. See ``fd_dispatch`` for the other end.
 A worktree is out of an agent's reach, so what a task made comes to its owner's VFS
 when it finishes (:func:`_export_results`), under ``vfs:crew/<project>/<task>/``:
 that's where the agent reads it, and the callback says so.
+
+A repository from an address can take minutes to arrive, longer than anyone should
+wait on a call. Its task exists from the start, as ``preparing``, and goes on to its
+first turn when the clone is there (:func:`_prepare`), so nobody is left wondering
+whether it started.
 """
 
 from __future__ import annotations
@@ -61,6 +66,9 @@ _PREVIEW_MAX = 512_000
 # Never copied out of a repository: its history, and what would mean something to the VFS.
 _NOT_COPIED = frozenset({".git", ".vfs-links.json", ".vfs-meta.jsonl", ".drive-manifest.json", ".drive-cache", ".drive"})
 _TERM_WAIT_S = (5.0, 3.0)
+_REACH_S = 30.0  # how long an address has to answer before a task is made for it
+_CLONE_SILENT_S, _CLONE_MAX_S = 300.0, 3600.0  # a clone that says nothing for this long, or runs this long, has failed
+_GETTING = "Getting the repository"
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_\-]{0,19}$")
 _STATUS_RE = re.compile(r"^[\s*_`>]*CREW-STATUS:[*_`]*\s*(done|needs-decision|blocked)\b[\s:*_`\-–—]*(.*)$",
@@ -68,6 +76,10 @@ _STATUS_RE = re.compile(r"^[\s*_`>]*CREW-STATUS:[*_`]*\s*(done|needs-decision|bl
 # A hook in a repo a worker has written to is the worker's code; it doesn't run
 # as Flight Deck, with Flight Deck's environment.
 _GIT_FLAGS = ("-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "protocol.ext.allow=never")
+_CLONE_STAGES = {b"Receiving objects": "downloading", b"Resolving deltas": "unpacking", b"Updating files": "unpacking"}
+_CLONE_PROGRESS_RE = re.compile(rb"(Receiving objects|Resolving deltas|Updating files):\s+(\d+)%")
+_NOT_AUTHORISED_RE = re.compile(r"could not read Username|Authentication failed|Invalid username|Repository not found|"
+                                r"returned error: 40[134]|terminal prompts disabled", re.IGNORECASE)
 _GIT_ENV_KEEP = ("PATH", "LANG", "LC_ALL", "TMPDIR", "USER", "LOGNAME", "SSL_CERT_FILE", "SSL_CERT_DIR",
                  "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 _WRAPPER = ('out="$1"; shift; "$@" >"$out/raw.jsonl" 2>"$out/stderr.log" </dev/null; code=$?; '
@@ -101,6 +113,7 @@ _NEXT_REMINDER = ("\n\nAs before: pushing and pull requests are Captain's, so co
 
 _MODELS: dict[str, tuple[float, list[str]]] = {}  # per user: what OpenCode said it can use, and when
 _PROCS: dict[str, subprocess.Popen] = {}
+_PREPARING: dict[str, asyncio.Task] = {}  # tasks still getting their repository
 _LOCKS: dict[str, asyncio.Lock] = {}
 _QUEUE_LOCK = asyncio.Lock()
 _TASKS: set[asyncio.Task] = set()
@@ -178,6 +191,9 @@ async def _git(cwd: Path | str, *args: str, env: dict[str, str] | None = None,
         proc.kill()
         await proc.wait()
         return 124, f"git {args[0]} took too long"
+    except asyncio.CancelledError:
+        proc.kill()  # a task stopped mid-fetch: nobody is left to hear how it ends
+        raise
     return proc.returncode or 0, (out or b"").decode("utf-8", "replace").strip()
 
 
@@ -199,11 +215,92 @@ def _check_url(url: str, grant: Grant) -> None:
     parsed = urlparse(url)
     scp = re.match(r"^[A-Za-z0-9._][A-Za-z0-9._-]*@[A-Za-z0-9.-]+:[^\s]+$", url)
     if parsed.scheme == "https" and parsed.netloc:
+        # It would be kept in .git/config, shown to the worker and printed by git.
+        if parsed.username or parsed.password:
+            raise HTTPException(400, "Leave the login out of the address. A GitHub token goes in Crew → Logins, not in a "
+                                     "chat or a URL.")
         return
     if grant.trusted and (scp or parsed.scheme == "ssh"):
         return
     raise HTTPException(400, "Give the repository as an https:// address." if not grant.trusted
                         else "Give the repository as an https:// or SSH address.")
+
+
+def _same_repo(one: str, other: str) -> bool:
+    """One repository, whichever way its address was written."""
+    def key(url: str) -> str:
+        bare = url.strip().rstrip("/")
+        return (bare[:-4] if bare.endswith(".git") else bare).lower()
+
+    return key(one) == key(other)
+
+
+def _clone_error(out: str, url: str, token: str) -> str:
+    """Why a repository couldn't be read, in words that say what to do. Git asking for
+    a username is how a private repository, a wrong address and a bad token all look."""
+    if _NOT_AUTHORISED_RE.search(out):
+        if token:
+            return (f"Couldn't read {url}. Check the address. If it's right, the GitHub token in Crew → Logins doesn't "
+                    f"reach it: the user has to replace it there, not in a chat. ({_head(out, 160)})")
+        return (f"Couldn't read {url}. Check the address. If the repository is private, the user has to save a GitHub "
+                f"token in Crew → Logins, not in a chat. ({_head(out, 160)})")
+    return f"Couldn't get {url}: {out[-500:]}"
+
+
+def _place_of(body: dict[str, Any]) -> tuple[str, str, str]:
+    """``(project, url, path)``, exactly one of them set: where a task was told to work."""
+    project = str(body.get("project") or "").strip()
+    url = str(body.get("repo_url") or "").strip()
+    path = str(body.get("repo_path") or "").strip()
+    folder = str(body.get("folder") or "").strip()
+    # An address makes its own project, named after it, so these two say the same thing.
+    if url and project.lower() == _repo_slug(url).lower() and not folder:
+        project = ""
+    named = [word for word, value in (("project", project), ("repo_url", url), ("repo_path", path)) if value]
+    if len(named) > 1:
+        raise HTTPException(400, f"Name one place to work, not {' and '.join(named)}. A repo_url makes its own project, "
+                                 "named after the repository, so send it alone.")
+    if not named:
+        raise HTTPException(400, "Say where to work: project (a Code project, made if new), repo_url (a repository "
+                                 "address, which Crew clones itself) or repo_path (a folder here, admins only).")
+    if folder and not project:
+        raise HTTPException(400, "A folder goes with a project: it's a folder in that project.")
+    return project, url, path
+
+
+def _kill_clone(proc: asyncio.subprocess.Process) -> None:
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+async def _clone(cwd: Path, url: str, dest: Path, *, env: dict[str, str], progress: Any = None) -> tuple[int, str]:
+    """``git clone``, saying how far it has got. Gone quiet or gone on too long is a
+    failure; what it printed is the reason, without the progress lines."""
+    proc = await asyncio.create_subprocess_exec(
+        "git", "-C", str(cwd), *_GIT_FLAGS, "clone", "--progress", "--", url, str(dest), env=env,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE, start_new_session=True,
+    )
+    said = b""
+    deadline = time.monotonic() + _CLONE_MAX_S
+    try:
+        while chunk := await asyncio.wait_for(proc.stderr.read(8192),
+                                              min(_CLONE_SILENT_S, max(0.0, deadline - time.monotonic()))):
+            said = (said + chunk)[-8000:]
+            found = _CLONE_PROGRESS_RE.findall(chunk)
+            if found and progress is not None:
+                progress(_CLONE_STAGES[found[-1][0]], int(found[-1][1]))
+        await proc.wait()
+    except TimeoutError:
+        _kill_clone(proc)
+        await proc.wait()
+        return 124, "git clone went quiet for too long, or took too long in all."
+    except asyncio.CancelledError:
+        _kill_clone(proc)
+        raise
+    lines = re.split(r"[\r\n]+", said.decode("utf-8", "replace"))
+    return proc.returncode or 0, "\n".join(ln for ln in lines if ln.strip() and "%" not in ln and not ln.startswith("Cloning into"))
 
 
 async def _ensure_commit(repo: Path, user: dict, grant: Grant) -> None:
@@ -214,15 +311,11 @@ async def _ensure_commit(repo: Path, user: dict, grant: Grant) -> None:
         await _git(repo, *flags, "commit", "--allow-empty", "-m", "Start")
 
 
-async def _resolve_repo(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, Any]:
+async def _resolve_repo(user: dict, grant: Grant, body: dict[str, Any], *, progress: Any = None) -> dict[str, Any]:
     """Where a task works, from what the caller named: a Code project's folder,
     a repository address, or (for those with a shell here) a path on this computer."""
     uid = user["id"]
-    project = str(body.get("project") or "").strip()
-    url = str(body.get("repo_url") or "").strip()
-    path = str(body.get("repo_path") or "").strip()
-    if sum(map(bool, (project, url, path))) != 1:
-        raise HTTPException(400, "Name one place to work: a project, a repository address or a folder.")
+    project, url, path = _place_of(body)
     if project:
         from captain_claw.flight_deck import code_routes
 
@@ -251,24 +344,54 @@ async def _resolve_repo(user: dict, grant: Grant, body: dict[str, Any]) -> dict[
     _check_url(url, grant)
     token = await _github_token_for_url(user, grant, url)
     env = _repo_env(user, grant, token)
-    clones = crew_store.user_dir(uid) / "repos"
+    target = _clone_path(uid, url)
+    clones = target.parent
     clones.mkdir(exist_ok=True)
-    target = clones / _repo_slug(url)
     # Two tasks starting on one new repository: the second waits for the first's clone.
     async with _lock_for(f"clone:{target}"):
+        if target.exists():
+            # A clone a restart cut short (they used to be made in place) has no refs: it can't be fetched into shape.
+            rc, refs = await _git(target, "for-each-ref", "--count=1", env=env)
+            if rc != 0 or not refs:
+                await asyncio.to_thread(shutil.rmtree, target, True)
         if not target.exists():
-            rc, out = await _git(clones, "clone", "--quiet", "--", url, str(target), env=env, timeout=900)
-            if rc != 0:
-                shutil.rmtree(target, ignore_errors=True)
-                raise HTTPException(400, f"Couldn't clone it: {out[-500:]}")
+            # Made aside and moved in whole, so that what's there is always a finished clone.
+            aside = clones / f".{target.name}.cloning"
+            await asyncio.to_thread(shutil.rmtree, aside, True)
+            try:
+                rc, out = await _clone(clones, url, aside, env=env, progress=progress)
+                if rc != 0:
+                    raise HTTPException(400, _clone_error(out, url, token))
+                aside.rename(target)
+            finally:
+                shutil.rmtree(aside, ignore_errors=True)
         else:
             rc, remote = await _git(target, "remote", "get-url", "origin", env=env)
-            if rc == 0 and remote != url:
+            if rc == 0 and not _same_repo(remote, url):
                 raise HTTPException(409, f"A different repository with that name is already here: {remote}")
             rc, out = await _git(target, "fetch", "--quiet", "--prune", "origin", env=env, timeout=600)
             if rc != 0:
-                raise HTTPException(400, f"Couldn't fetch it: {out[-500:]}")
+                raise HTTPException(400, _clone_error(out, url, token))
     return {"repo": str(target), "repo_label": _repo_slug(url), "repo_kind": "url", "remote_base": True}
+
+
+def _clone_path(uid: str, url: str) -> Path:
+    return crew_store.user_dir(uid) / "repos" / _repo_slug(url)
+
+
+async def _check_address(user: dict, grant: Grant, url: str) -> None:
+    """Does it answer, for them? Asked before a task is made for it, so a wrong address
+    or a private repository fails here, to the one asking. Getting it comes later."""
+    _check_url(url, grant)
+    token = await _github_token_for_url(user, grant, url)
+    rc, out = await _git(crew_store.user_dir(user["id"]), "ls-remote", "--", url, "HEAD",
+                         env=_repo_env(user, grant, token), timeout=_REACH_S)
+    if rc == 124:
+        raise HTTPException(504, f"{url} didn't answer within {round(_REACH_S)} seconds. Try again in a moment.")
+    if rc != 0:
+        raise HTTPException(400, _clone_error(out, url, token))
+    if not out.strip():
+        raise HTTPException(400, "That repository has no commits yet.")
 
 
 def _repo_env(user: dict, grant: Grant, token: str = "") -> dict[str, str]:
@@ -680,9 +803,124 @@ def _slug_for(title: str) -> str:
     return f"{words[:32].rstrip('-') or 'task'}-{os.urandom(3).hex()}"
 
 
+def _begin_preparing(user: dict, url: str, **fields: Any) -> dict[str, Any]:
+    """A task whose repository is on its way: on the page and in the list from now on."""
+    uid = user["id"]
+    task = _store().create(uid, status="preparing", note=_GETTING, repo=str(_clone_path(uid, url)), repo_label=_repo_slug(url),
+                           repo_kind="url", repo_url=url, last_event_at=time.time(), **fields)
+    _say(task, "note", f"{_GETTING} from {url}.")
+    _spawn_prepare(task)
+    return _store().get(uid, task["id"]) or task
+
+
+def _spawn_prepare(task: dict) -> None:
+    if task["id"] in _PREPARING:
+        return
+    try:
+        _PREPARING[task["id"]] = asyncio.create_task(_prepare(task["user_id"], task["id"]))
+    except RuntimeError:
+        pass
+
+
+async def _repo_summary(repo: str) -> str:
+    rc, base = await _git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+    if rc != 0:
+        return "The repository is ready."
+    _, sha = await _git(repo, "rev-parse", "--short=7", base)
+    _, names = await _git(repo, "ls-tree", "-r", "--name-only", base)
+    return f"The repository is ready: {base.split('/', 1)[-1]} at {sha}, {len(names.splitlines()):,} files."
+
+
+async def _prepare(uid: str, task_id: str) -> None:
+    """Get a task's repository and make its worktree, however long that takes; then it
+    takes its turn in the queue. A restart does this over, from the address."""
+    store = _store()
+    said = ["", -100]
+
+    def progress(stage: str, percent: int) -> None:
+        if stage != said[0] or percent >= said[1] + 5:
+            said[:] = [stage, percent]
+            store.update(task_id, note=f"{_GETTING}: {stage}, {percent}%", last_event_at=time.time())
+
+    try:
+        task = store.get(uid, task_id)
+        if not task or task["status"] != "preparing":
+            return
+        user = await _user_of(uid)
+        grant = crew_access.grant_of(user)
+        if not user or not grant.allowed:
+            store.update(task_id, status="stopped", note="Crew approval was withdrawn.")
+            return
+        where = await _resolve_repo(user, grant, {"repo_url": task["repo_url"]}, progress=progress)
+        # Under its lock: a stop can't land between the worktree and saying it's there.
+        async with _lock_for(task_id):
+            task = store.get(uid, task_id)
+            if not task or task["status"] != "preparing":
+                return
+            if task["kind"] == "clone":
+                note = await _repo_summary(where["repo"])
+                store.update(task_id, status="ready", note=note)
+                fresh = store.get(uid, task_id) or task
+                _say(fresh, "status", note, status="ready")
+                _sync_board(fresh)
+                _spawn_notify(fresh)
+                return
+            slug = task["branch"].removeprefix("crew/")
+            tree = await _make_worktree(user, grant, where, slug)
+            store.update(task_id, status="queued", note="", **tree)
+        await _start_queued()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — however it failed, it's told, and to whoever asked
+        why = str(exc.detail if isinstance(exc, HTTPException) else exc) or type(exc).__name__
+        fresh = store.get(uid, task_id)
+        if fresh and fresh["status"] == "preparing":
+            await _fail(fresh, why)
+    finally:
+        if _PREPARING.get(task_id) is asyncio.current_task():
+            _PREPARING.pop(task_id, None)
+
+
+async def _must_reach_github(user: dict, grant: Grant, *, url: str = "", repo: str = "") -> None:
+    """A pull request is asked for now and opened after the work, however long that takes.
+    What would stop it is said now."""
+    from captain_claw.flight_deck.auth import get_db
+
+    if not await crew_logins.github_token(get_db(), user, grant):
+        raise HTTPException(400, "A pull request needs a GitHub token: add it in Crew → Logins first. It doesn't go in a chat.")
+    remote = url
+    if repo:
+        rc, remote = await _git(repo, "remote", "get-url", "origin", env=_repo_env(user, grant))
+        remote = remote if rc == 0 else ""
+    if not _github_repo(remote):
+        raise HTTPException(400, "Pull requests work for repositories on GitHub. This one has no GitHub origin, so leave "
+                                 "the work on its branch.")
+
+
+async def clone(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, Any]:
+    """A repository got ready with no worker, for "clone it, we'll change it later".
+    A task like any other to the page and the agent, but nobody is run and nothing spent."""
+    url = str(body.get("repo_url") or "").strip()
+    if not url:
+        raise HTTPException(400, "Give the repository's address: repo_url.")
+    active = [t for t in _store().with_status(*crew_store.ACTIVE) if t["user_id"] == user["id"]]
+    for task in active:
+        if task["kind"] == "clone" and _same_repo(task["repo_url"], url):
+            return task
+    if len(active) >= grant.max_parallel * _ACTIVE_PER_SLOT:
+        raise HTTPException(429, f"You already have {len(active)} tasks running or waiting. Let some finish first.")
+    await _check_address(user, grant, url)
+    origin = body.get("origin") if isinstance(body.get("origin"), dict) else {}
+    return _begin_preparing(user, url, title=f"Get {_repo_slug(url)}", kind="clone", harness="", brief=f"Get {url} ready to work in.",
+                            agent_slug=str(body.get("agent_slug") or ""), source_host=str(body.get("source_host") or ""),
+                            origin=origin)
+
+
 async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, Any]:
-    """A new task: its worktree now (so a bad repository fails here, to the one
-    asking), its first turn as soon as there's room."""
+    """A new task: its worktree now, so a bad place fails here, to the one asking, and
+    its first turn as soon as there's room. A repository address only has to answer now:
+    what's there comes in the background, with the task already on the page. The same
+    task asked for again while it's active is that task: an agent retries."""
     from captain_claw.flight_deck.auth import get_db
 
     harness = str(body.get("harness") or "").strip().lower()
@@ -699,11 +937,18 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     deliver = str(body.get("deliver") or "branch").strip().lower()
     if deliver not in ("branch", "pr"):
         raise HTTPException(400, "Delivery is either branch or pr.")
+    if kind == "scout" and deliver == "pr":
+        raise HTTPException(400, "A scout changes nothing, so there's no pull request to open. Use kind=ship for that.")
+    _, url, _ = _place_of(body)
     defaults = await crew_logins.read_models(get_db(), user["id"])
     own = await crew_logins.read_own_model(get_db(), user["id"])
     model = _clean_axis(body.get("model"), _MODEL_RE, "model name") or crew_logins.effective_model(defaults, own, harness)
     effort = _clean_axis(body.get("effort"), _EFFORT_RE, "reasoning effort")
     active = [t for t in _store().with_status(*crew_store.ACTIVE) if t["user_id"] == user["id"]]
+    twins = [t for t in active if t["harness"] == harness and t["kind"] == kind and t["brief"] == brief[:100_000]]
+    for task in twins:
+        if url and _same_repo(task.get("repo_url") or "", url):
+            return task
     if len(active) >= grant.max_parallel * _ACTIVE_PER_SLOT:
         raise HTTPException(429, f"You already have {len(active)} tasks running or waiting. Let some finish first.")
     binary = await asyncio.to_thread(crew_harness.find_binary, harness)
@@ -724,17 +969,26 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
         if known and model not in known:
             raise HTTPException(400, _unknown_model(model, known, grant))
     title = " ".join(str(body.get("title") or brief).split())[:120]
-    where = await _resolve_repo(user, grant, body)
     slug = _slug_for(title)
+    origin = body.get("origin") if isinstance(body.get("origin"), dict) else {}
+    fields: dict[str, Any] = dict(
+        title=title, kind=kind, harness=harness, model=model, effort=effort, brief=brief[:100_000], deliver=deliver,
+        agent_slug=str(body.get("agent_slug") or ""), source_host=str(body.get("source_host") or ""), origin=origin,
+    )
+    if url:
+        if deliver == "pr":
+            await _must_reach_github(user, grant, url=url)
+        await _check_address(user, grant, url)
+        return _begin_preparing(user, url, branch=f"crew/{slug}", **fields)
+    where = await _resolve_repo(user, grant, body)
+    for task in twins:
+        if task["repo"] == where["repo"]:
+            return task
+    if deliver == "pr":
+        await _must_reach_github(user, grant, repo=where["repo"])
     tree = await _make_worktree(user, grant, where, slug)
     where.pop("remote_base", None)
-    origin = body.get("origin") if isinstance(body.get("origin"), dict) else {}
-    task = _store().create(
-        user["id"], title=title, kind=kind, harness=harness, model=model, effort=effort, brief=brief[:100_000],
-        status="queued", deliver=deliver, agent_slug=str(body.get("agent_slug") or ""),
-        source_host=str(body.get("source_host") or ""), origin=origin, last_event_at=time.time(),
-        **where, **tree,
-    )
+    task = _store().create(user["id"], status="queued", last_event_at=time.time(), **fields, **where, **tree)
     await _start_queued()
     return _store().get(user["id"], task["id"]) or task
 
@@ -756,9 +1010,16 @@ async def steer(uid: str, task_id: str, text: str) -> dict[str, Any]:
         task = _get(uid, task_id)
         if task["status"] in crew_store.FINISHED:
             raise HTTPException(409, "This task is finished: its worktree is gone. Start a new one.")
+        if task["kind"] == "clone":
+            raise HTTPException(409, "This one only gets a repository ready, so there's no worker to tell. Start a task "
+                                     "in it, with the same repository address.")
         fields: dict[str, Any] = {"pending": [*task["pending"], message[:100_000]]}
-        if task["status"] != "running":
-            fields["status"] = "queued"
+        if task["status"] not in ("running", "preparing"):
+            # Stopped, or failed, before it had a worktree: it still has to get one.
+            if task.get("repo_url") and not task.get("worktree"):
+                fields.update(status="preparing", note=_GETTING)
+            else:
+                fields["status"] = "queued"
         _store().update(task_id, **fields)
     await _start_queued()
     return _get(uid, task_id)
@@ -776,7 +1037,10 @@ async def stop(uid: str, task_id: str, note: str = "Stopped.") -> dict[str, Any]
                             session=state.session or task.get("session") or "",
                             tokens_in=int(task.get("tokens_in") or 0) + state.tokens_in,
                             tokens_out=int(task.get("tokens_out") or 0) + state.tokens_out)
-        elif task["status"] == "queued":
+        elif task["status"] in ("queued", "preparing"):
+            job = _PREPARING.pop(task_id, None)
+            if job is not None:
+                job.cancel()  # and with it the clone: what it had got so far goes too
             _store().update(task_id, status="stopped", note=note, pending=[])
         else:
             return task
@@ -792,7 +1056,9 @@ async def enforce_grant(uid: str) -> int:
     grant = crew_access.grant_of(user)
     stopped = 0
     for task in _store().with_status(*crew_store.ACTIVE):
-        if task["user_id"] == uid and (not grant.allowed or task["harness"] not in grant.harnesses):
+        # A repository being got has no harness, and needs only the approval.
+        covered = grant.allowed and (not task["harness"] or task["harness"] in grant.harnesses)
+        if task["user_id"] == uid and not covered:
             await stop(uid, task["id"], "Stopped: Crew approval was withdrawn.")
             stopped += 1
     return stopped
@@ -813,6 +1079,8 @@ def _must_be_landable(task: dict, evidence: dict[str, Any]) -> None:
         raise HTTPException(409, "This task is finished already.")
     if task["kind"] == "scout":
         raise HTTPException(409, "A scout task has a report, not changes to deliver.")
+    if task["kind"] == "clone":
+        raise HTTPException(409, "This one only got a repository ready: it has no changes to deliver.")
     if evidence.get("stray"):
         raise HTTPException(409, f"It left {evidence['stray']} commit(s) off its branch, on "
                                  f"{evidence.get('off_branch') or 'another line of work'}. Tell it to put them on "
@@ -1308,6 +1576,9 @@ async def files(uid: str, task_id: str, *, whole: bool = False) -> dict[str, Any
         task = _get(uid, task_id)
         if task["status"] in crew_store.ACTIVE:
             raise HTTPException(409, "It is still working. Its files are copied when it finishes.")
+        if task["kind"] == "clone":
+            raise HTTPException(409, "This one only got a repository ready, so it has no files of its own. To read the "
+                                     "repository, start a scout task in it.")
         results = task.get("results") or {}
         if task["status"] != "closed":
             ref = await _result_ref(task)
@@ -1386,7 +1657,8 @@ async def diff(uid: str, task_id: str) -> dict[str, str]:
     task = _get(uid, task_id)
     wt = task.get("worktree") or ""
     if not wt or not Path(wt).is_dir():
-        return {"committed": "", "uncommitted": "", "note": "Its worktree is gone."}
+        coming = task["status"] == "preparing" or (not wt and not task.get("base_sha"))
+        return {"committed": "", "uncommitted": "", "note": "It has no worktree yet." if coming else "Its worktree is gone."}
     _, committed = await _git(wt, "diff", f"{task['base_sha']}...{task['branch']}")
     _, uncommitted = await _git(wt, "diff", "HEAD")
     return {"committed": committed[:_DIFF_MAX], "uncommitted": uncommitted[:_DIFF_MAX],
@@ -1404,11 +1676,11 @@ def view(task: dict, *, grant: Grant | None = None, full: bool = False) -> dict[
     project_key, project_name = project_of(task)
     out = {
         "id": task["id"], "title": task["title"], "kind": task["kind"], "harness": task["harness"],
-        "harness_label": harness.label if harness else task["harness"], "model": task.get("model") or "",
+        "harness_label": harness.label if harness else task["harness"] or "Captain", "model": task.get("model") or "",
         "model_used": task.get("model_used") or "",
         "effort": task.get("effort") or "", "status": task["status"], "note": task.get("note") or "",
         "repo_label": task.get("repo_label") or "", "repo_kind": task.get("repo_kind") or "",
-        "project_key": project_key, "project_name": project_name, "results": task.get("results") or {},
+        "repo_url": task.get("repo_url") or "", "project_key": project_key, "project_name": project_name, "results": task.get("results") or {},
         "base_branch": task.get("base_branch") or "", "branch": task.get("branch") or "",
         "turn": task.get("turn") or 0, "evidence": task.get("evidence") or {},
         "tokens_in": task.get("tokens_in") or 0, "tokens_out": task.get("tokens_out") or 0,
@@ -1437,7 +1709,7 @@ def _sync_board(task: dict) -> None:
         if board is None:
             return
         status = task["status"]
-        label = HARNESSES[task["harness"]].label if task["harness"] in HARNESSES else task["harness"]
+        label = HARNESSES[task["harness"]].label if task["harness"] in HARNESSES else task["harness"] or "Captain"
         patch: dict[str, Any] = {"status": "open", "owes_next": "agent"}
         if status in ("ready", "waiting", "pr_open", "stopped"):
             patch = {"status": "open", "owes_next": "me"}
@@ -1509,6 +1781,8 @@ def _result_lines(task: dict, *, for_agent: bool) -> list[str]:
                      f"subdir={results['publish']['subdir']} name=<a short name>")
     if for_agent:
         lines.extend(next_steps(task))
+        if task.get("kind") == "clone" and task["status"] == "ready":
+            lines.append(f"To work in it: crew action=dispatch repo_url={task.get('repo_url')}. Nothing has read or changed it yet.")
     return lines
 
 
@@ -1588,6 +1862,8 @@ async def _notify(task: dict, *, stalled: bool = False) -> None:
 
 
 async def tick(*, enforce: bool = False) -> None:
+    for task in _store().with_status("preparing"):
+        _spawn_prepare(task)  # started by a request, or left by a restart
     for task in _store().with_status("running"):
         lock = _lock_for(task["id"])
         if lock.locked():
@@ -1626,8 +1902,12 @@ def start() -> None:
 
 
 async def stop_watcher() -> None:
-    """The watcher, not the workers: they keep going through a restart."""
+    """The watcher, not the workers: they keep going through a restart. A clone doesn't:
+    the next start begins it again, from the address."""
     global _loop_task, _loop_stop
+    for job in _PREPARING.values():
+        job.cancel()
+    _PREPARING.clear()
     if _loop_stop is not None:
         _loop_stop.set()
     if _loop_task is not None:

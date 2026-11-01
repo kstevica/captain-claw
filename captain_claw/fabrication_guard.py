@@ -1035,6 +1035,9 @@ _ID_SHAPES: tuple[tuple[str, re.Pattern[str]], ...] = (
         _TOKEN_EDGE_L + r"(01[A-Z0-9]{32}|[0-9A-Fa-f]{16}!\d{1,9})" + _TOKEN_EDGE_R)),
     # A payment Flight Deck prepared: pay_ + 12 hex.
     ("payment", re.compile(_TOKEN_EDGE_L + r"(pay_[0-9a-f]{12})" + _TOKEN_EDGE_R)),
+    # A Crew task and its branch: crw_ + 12 hex, crew/<words>-<6 hex>.
+    ("crew_task", re.compile(_TOKEN_EDGE_L + r"(crw_[0-9a-f]{12})" + _TOKEN_EDGE_R)),
+    ("crew_branch", re.compile(_TOKEN_EDGE_L + r"(crew/[a-z0-9][a-z0-9-]*-[0-9a-f]{6})" + _TOKEN_EDGE_R)),
 )
 
 

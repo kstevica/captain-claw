@@ -263,3 +263,26 @@ async def test_a_jev_error_keeps_the_usual_message(jev, tmp_path):
 def test_review_is_off_by_config(monkeypatch):
     monkeypatch.setattr(get_config().tools.jev, "review_blocks", False)
     assert jb.enabled() is False
+
+
+class _Crew(_Cron):
+    name = "crew"
+    description = "workers"
+
+
+@pytest.mark.asyncio
+async def test_crew_can_be_asked_again_but_not_told_twice(jev, tmp_path):
+    """A task moves on between reads: a blocked `list` once left an agent reporting a
+    task that had started as one that never had. A repeated dispatch is a second worker."""
+    agent, _ = _agent(tmp_path)
+    crew = _Crew()
+    agent.tools.register(crew)
+    for cid in ("c1", "c2", "c3"):
+        results = await agent._handle_tool_calls([ToolCall(id=cid, name="crew", arguments={"action": "list"})])
+        assert "BLOCKED" not in results[0]["content"]
+    assert crew.ran == ["list", "list", "list"]
+    made = {"action": "dispatch", "harness": "opencode", "brief": "b"}
+    await agent._handle_tool_calls([ToolCall(id="d1", name="crew", arguments=made)])
+    results = await agent._handle_tool_calls([ToolCall(id="d2", name="crew", arguments=made)])
+    assert results[0]["content"].startswith("DUPLICATE CALL BLOCKED")
+    assert crew.ran.count("dispatch") == 1

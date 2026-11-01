@@ -18,6 +18,8 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+import httpx
+
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
@@ -78,9 +80,12 @@ class CrewTool(Tool):
         "task made (the callback, status and files say where), so read them yourself with read or glob. Never start "
         "a task to look at or fetch files, and never ask a worker to print files into its message: messages get cut. "
         "A link to one file is public_link; a page with its css and scripts needs hosting. "
+        "A task exists once a crew result here gives its id, and not before: never say one started, or that a repository "
+        "is cloned, from anything else. If a call fails, tell the user what it said. "
         "Actions: options (the CLIs you may use, their logins, the model each last ran on and its usage limits, like "
-        "Claude's weekly limit, and the projects: use it when asked about any of those); dispatch; list (project narrows "
-        "it); status; files (where a task's files are; whole=true copies the whole project, for a big one); "
+        "Claude's weekly limit, and the projects: use it when asked about any of those); dispatch; clone (only when they "
+        "want a repository here and no work yet: it runs no worker and spends no tokens, and you're called back when it's "
+        "ready. dispatch with repo_url clones by itself, so don't clone first for that); list (project narrows it); status; files (where a task's files are; whole=true copies the whole project, for a big one); "
         "steer (the next instruction, or the user's answer to a worker's question); stop (keeps the work); "
         "pr (Captain pushes the branch and opens the pull request, with the user's GitHub token from Crew → Logins: "
         "that's the only way a task's work gets pushed, so never ask a worker to push or run gh, and never ask the user "
@@ -98,7 +103,7 @@ class CrewTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["options", "dispatch", "list", "status", "files", "steer", "stop", "pr", "request_merge", "update_deck"],
+                "enum": ["options", "dispatch", "clone", "list", "status", "files", "steer", "stop", "pr", "request_merge", "update_deck"],
             },
             "harness": {
                 "type": "string",
@@ -122,12 +127,12 @@ class CrewTool(Tool):
             "deliver": {
                 "type": "string",
                 "enum": ["branch", "pr"],
-                "description": "dispatch, ship: leave the work on a branch (default), or open a pull request when it's done.",
+                "description": "dispatch, ship: leave the work on a branch (default), or open a pull request when it's done, which needs a GitHub repository and the user's token in Crew → Logins.",
             },
-            "project": {"type": "string", "description": "dispatch: a Code project to work in (created if new). list: only this project's tasks."},
-            "folder": {"type": "string", "description": "dispatch: a folder in that project. Omit to use the project's name."},
-            "repo_url": {"type": "string", "description": "dispatch: a repository address to clone and work in, instead of a project."},
-            "repo_path": {"type": "string", "description": "dispatch: a folder on this computer, instead of a project. Admins only."},
+            "project": {"type": "string", "description": "dispatch: a Code project to work in (created if new). Name exactly one of project, repo_url and repo_path. list: only this project's tasks."},
+            "folder": {"type": "string", "description": "dispatch: a folder in that project, only with project. Omit to use the project's name."},
+            "repo_url": {"type": "string", "description": "dispatch, clone: a repository's https:// address, with no login in it. Crew clones it itself, in the background, and the worker starts inside it, so never ask a worker to clone. It makes its own project, named after the repository: send no project with it."},
+            "repo_path": {"type": "string", "description": "dispatch: a git folder on this computer. Admins only."},
             "model": {"type": "string", "description": "dispatch: a model for the CLI, only if the user asked for one; otherwise their default is used. For OpenCode, exactly a name from 'options': never make one up."},
             "effort": {"type": "string", "description": "dispatch: reasoning effort for the CLI, only if the user asked for one."},
             "task_id": {"type": "string", "description": "status, files, steer, stop, pr, request_merge: the task."},
@@ -151,9 +156,15 @@ class CrewTool(Tool):
             if handler is None:
                 return ToolResult(success=False, error=f"Unknown action '{action}'.")
             return await handler(crew_client, **kwargs)
+        except httpx.TimeoutException:
+            log.warning("crew tool timed out", action=action)
+            return ToolResult(success=False, error=(
+                "Flight Deck didn't answer in time, so this may still be going through: it hasn't failed as far as anyone "
+                "knows. Check crew action=list before you try again or tell the user what happened."))
         except Exception as exc:  # noqa: BLE001
-            log.warning("crew tool error", action=action, error=str(exc))
-            return ToolResult(success=False, error=f"Crew request failed: {exc}")
+            why = str(exc) or type(exc).__name__  # a timeout's own text is empty
+            log.warning("crew tool error", action=action, error=why)
+            return ToolResult(success=False, error=f"Crew request failed: {why}")
 
     @staticmethod
     def _refused(status: int, data: Any) -> ToolResult | None:
@@ -188,8 +199,9 @@ class CrewTool(Tool):
             lines.append(f"  {p['project']}: " + (", ".join(f"{f} ({paths.get(f) or 'not in your VFS'})"
                                                             for f in p["folders"]) or "(no folders)"))
         if repos.get("recent"):
-            lines.append("Used lately:")
-            lines.extend(f"  {r['repo']}" for r in repos["recent"])
+            lines.append("Used lately (repo_url, or repo_path for a folder here, goes back there):")
+            lines.extend(f"  {r.get('repo_url') or (r['repo'] if r.get('repo_kind') == 'path' else r.get('repo_label'))}"
+                         for r in repos["recent"])
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod
@@ -224,7 +236,8 @@ class CrewTool(Tool):
         status, data = await client.call("POST", "dispatch", payload)
         if (refused := self._refused(status, data)) is not None:
             return refused
-        where = "waiting for a free slot" if data.get("status") == "queued" else "working"
+        where = {"preparing": "getting its repository first, which can take some minutes for a big one, and then it starts",
+                 "queued": "waiting for a free slot"}.get(data.get("status"), "working")
         behind = ""
         if data.get("unlanded"):
             behind = (f" It starts from {data.get('base_branch') or 'the base branch'}, so it won't see work that hasn't "
@@ -235,6 +248,23 @@ class CrewTool(Tool):
             f"end your turn and don't report a result. You'll be called back when it finishes or needs a decision."
             + (" Captain opens its pull request when it finishes." if kwargs.get("deliver") == "pr"
                else _NOT_A_WORKERS_JOB if _ASKS_TO_DELIVER.search(brief) else "")
+        ))
+
+    async def _do_clone(self, client: Any, **kwargs: Any) -> ToolResult:
+        url = str(kwargs.get("repo_url") or "").strip()
+        if not url:
+            return ToolResult(success=False, error="Provide `repo_url`: the repository's https:// address.")
+        origin_platform, origin_user_id, origin_chat_id = self._origin_of(kwargs.get("_agent"))
+        status, data = await client.call("POST", "clone", {
+            "repo_url": url, "source_host": "localhost", "origin_platform": origin_platform,
+            "origin_user_id": origin_user_id, "origin_chat_id": origin_chat_id,
+        })
+        if (refused := self._refused(status, data)) is not None:
+            return refused
+        return ToolResult(success=True, content=(
+            f"Task {data.get('id')} is getting {data.get('repo_label')}, with no worker: it shows under that name in Crew, "
+            "and a big one can take some minutes. It has only started, so tell the user it's under way and end your turn. "
+            f"You'll be called back when it's ready. To work in it then: crew action=dispatch repo_url={url}."
         ))
 
     async def _do_list(self, client: Any, **kwargs: Any) -> ToolResult:
