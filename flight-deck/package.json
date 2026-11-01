@@ -13,6 +13,8 @@
     "@mlc-ai/web-llm": "0.2.84",
     "@tailwindcss/vite": "^4.2.2",
     "@types/prismjs": "^1.26.6",
+    "@xterm/addon-fit": "0.10.0",
+    "@xterm/xterm": "5.5.0",
     "@xyflow/react": "^12.10.1",
     "katex": "^0.16.45",
     "lucide-react": "^1.7.0",

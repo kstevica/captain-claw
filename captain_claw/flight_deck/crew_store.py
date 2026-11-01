@@ -24,7 +24,7 @@ FINISHED = ("delivered", "closed")
 
 _COLUMNS: tuple[tuple[str, str], ...] = (
     ("id", "TEXT PRIMARY KEY"), ("user_id", "TEXT NOT NULL"), ("title", "TEXT NOT NULL"),
-    ("kind", "TEXT NOT NULL"),  # ship · scout · clone (a repository got ready, with no worker)
+    ("kind", "TEXT NOT NULL"),  # ship · scout · clone (a repository got ready, with no worker) · setup (its environment)
     ("harness", "TEXT NOT NULL"), ("model", "TEXT DEFAULT ''"), ("effort", "TEXT DEFAULT ''"),
     ("model_used", "TEXT DEFAULT ''"),  # the one the CLI says it ran on; `model` is only what was asked for
     ("brief", "TEXT NOT NULL"),
@@ -44,13 +44,14 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("deliver", "TEXT DEFAULT 'branch'"),  # branch · pr
     ("delivery", "TEXT DEFAULT '{}'"),
     ("results", "TEXT DEFAULT '{}'"),  # its files, copied to the owner's VFS (crew_runner._export_results)
+    ("env", "TEXT DEFAULT '{}'"),  # what it was given to run and test in (crew_env.give_to_task)
     ("agent_slug", "TEXT DEFAULT ''"), ("source_host", "TEXT DEFAULT ''"), ("origin", "TEXT DEFAULT '{}'"),
     ("last_event_at", "REAL DEFAULT 0"), ("turn_started_at", "REAL DEFAULT 0"), ("stalled_at", "REAL DEFAULT 0"),
     ("created_at", "REAL NOT NULL"), ("updated_at", "REAL NOT NULL"), ("closed_at", "REAL DEFAULT 0"),
     ("archived_at", "REAL DEFAULT 0"),  # tidied off the page; its row and its results stay
 )
 _NAMES = {name for name, _ in _COLUMNS}
-_JSON = {"pending": [], "evidence": {}, "delivery": {}, "results": {}, "origin": {}}
+_JSON = {"pending": [], "evidence": {}, "delivery": {}, "results": {}, "origin": {}, "env": {}}
 
 _ROOT: Path | None = None
 _STORE: "CrewStore | None" = None

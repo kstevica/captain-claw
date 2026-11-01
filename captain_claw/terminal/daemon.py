@@ -126,8 +126,11 @@ def _looks_like_prompt(tail: str) -> bool:
 class PtySession:
     """One pseudo-terminal running a child process."""
 
-    def __init__(self, cmd: list[str], cwd: str, env: dict[str, str], cols: int, rows: int):
+    def __init__(self, cmd: list[str], cwd: str, env: dict[str, str], cols: int, rows: int, *, mirror: bool = True):
         self.id = uuid.uuid4().hex[:12]
+        # This daemon's own console may watch. Off for a shell held inside something
+        # else, whose console isn't that person's to read.
+        self.mirror = mirror
         self.cmd = cmd
         self.cwd = cwd
         self.cols = cols
@@ -203,7 +206,8 @@ class PtySession:
             self._reap()
 
     def _append(self, chunk: bytes) -> None:
-        _mirror(chunk)
+        if self.mirror:
+            _mirror(chunk)
         self._buffer.extend(chunk)
         self._total += len(chunk)
         self._last_output = time.time()
@@ -237,6 +241,12 @@ class PtySession:
         start = max(cursor, self._base)
         data = bytes(self._buffer[start - self._base:])
         return data.decode("utf-8", errors="replace"), self._total
+
+    def since(self, cursor: int) -> tuple[bytes, int]:
+        """What came after *cursor*, raw: a browser's terminal decodes it itself, so a
+        character cut in two by a read still comes out whole."""
+        start = max(cursor, self._base)
+        return bytes(self._buffer[start - self._base:]), self._total
 
     @property
     def total(self) -> int:
@@ -277,7 +287,8 @@ class PtySession:
             except Exception:
                 pass
             self.master_fd = None
-        _mirror(f"\n\x1b[2m── session {self.id} ended (exit {self.exit_code}) ──\x1b[0m\n".encode())
+        if self.mirror:
+            _mirror(f"\n\x1b[2m── session {self.id} ended (exit {self.exit_code}) ──\x1b[0m\n".encode())
 
     def kill(self) -> None:
         if self.pid is not None and self.alive:

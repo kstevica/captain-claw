@@ -4,6 +4,7 @@
  * (`captain_claw/flight_deck/crew_routes.py`). Every read is the caller's own.
  */
 
+import { useAuthStore } from '../stores/authStore'
 import { api } from './fileLibraryApi'
 
 export const CREW_AGENTS = [
@@ -39,6 +40,7 @@ export interface CrewMe {
   offered: boolean
   allowed: boolean
   trusted?: boolean
+  terminal?: boolean
   max_parallel?: number
   harnesses?: CrewHarness[]
   logins?: Record<string, { hint: string; saved_at: string }>
@@ -94,7 +96,7 @@ export interface CrewFile {
 export interface CrewTask {
   id: string
   title: string
-  kind: 'ship' | 'scout' | 'clone'
+  kind: 'ship' | 'scout' | 'clone' | 'setup'
   harness: string
   harness_label: string
   model: string
@@ -105,6 +107,8 @@ export interface CrewTask {
   repo_label: string
   repo_kind: string
   repo_url?: string
+  has_worktree?: boolean
+  env_id?: string
   project_key: string
   project_name: string
   results: CrewResults
@@ -119,6 +123,7 @@ export interface CrewTask {
   delivery: { kind?: string; pr?: number; url?: string; sha?: string; base?: string }
   pending: number
   stalled: boolean
+  env?: { python?: string[]; copied?: string[]; failed?: { path: string; why: string }[]; stale?: string[]; test?: string; run?: string; port?: number }
   from_agent: string
   created_at: number
   updated_at: number
@@ -179,7 +184,59 @@ export interface CrewDispatch {
 const post = <T>(path: string, body?: unknown) =>
   api<T>(path, { method: 'POST', ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
 
+/** A project's environment: what's installed for its work, and its settings. */
+export interface CrewEnv {
+  id: string
+  repo: string
+  label: string
+  kind: 'project' | 'url' | 'path'
+  project_key: string
+  project_name: string
+  repo_url?: string
+  place: { project?: string; folder?: string; repo_url?: string; repo_path?: string }
+  exists: boolean
+  ready: boolean
+  python: { path: string; version: string; packages: number }[]
+  folders: { path: string; entries: number }[]
+  kinds: string[]
+  missing: string[]
+  stale: string[]
+  prepared_at: number
+  test: string
+  run: string
+  copy: string[]
+  vars: Record<string, string>
+  activate: string
+  activate_path: string
+}
+
+export interface CrewEnvSettings {
+  test?: string
+  run?: string
+  copy_paths?: string
+  vars?: string
+  activate?: string
+}
+
+export interface CrewTerminalTarget {
+  env?: string
+  task?: string
+}
+
 export const crewApi = {
+  envs: () => api<{ envs: CrewEnv[] }>('/fd/crew/envs'),
+  saveEnv: (id: string, body: CrewEnvSettings) => api<CrewEnv>(`/fd/crew/envs/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
+  envCurrent: (id: string) => post<CrewEnv>(`/fd/crew/envs/${id}/current`),
+  /** The socket of a shell: the deck's guard keeps other sites off it, the token says who. */
+  terminalUrl: (target: CrewTerminalTarget, cols: number, rows: number) => {
+    const { token, authEnabled } = useAuthStore.getState()
+    const query = new URLSearchParams({ cols: String(cols), rows: String(rows) })
+    if (target.env) query.set('env', target.env)
+    if (target.task) query.set('task', target.task)
+    if (authEnabled && token) query.set('fd_token', token)
+    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+    return `${proto}://${window.location.host}/fd/crew/terminal?${query}`
+  },
   me: () => api<CrewMe>('/fd/crew/me'),
   repos: () => api<CrewRepos>('/fd/crew/repos'),
   usage: () => api<{ harnesses: CrewUsage[] }>('/fd/crew/usage'),

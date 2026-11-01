@@ -356,16 +356,16 @@ function CreateUserForm({ onCreated, onClose, config }: {
 }
 
 /** What an admin approved this user for: their coding agents, and how many at once. */
-interface CrewChoice { approved: boolean; harnesses: string[]; max_parallel: number }
+interface CrewChoice { approved: boolean; harnesses: string[]; max_parallel: number; terminal: boolean }
 
 function userCrew(user: UserInfo): CrewChoice {
   try {
     const c = JSON.parse(user.metadata || '{}').crew
     if (c?.approved === true) {
-      return { approved: true, harnesses: Array.isArray(c.harnesses) ? c.harnesses : [], max_parallel: Number(c.max_parallel) || 2 }
+      return { approved: true, harnesses: Array.isArray(c.harnesses) ? c.harnesses : [], max_parallel: Number(c.max_parallel) || 2, terminal: c.terminal === true }
     }
   } catch { /* no approval */ }
-  return { approved: false, harnesses: [], max_parallel: 2 }
+  return { approved: false, harnesses: [], max_parallel: 2, terminal: false }
 }
 
 // A worker has a shell of its own, as the deck's OS user: whoever is approved
@@ -386,7 +386,7 @@ function CrewApproval({ isAdmin, value, wasApproved, name, understood, onUnderst
           checked={value.approved}
           onChange={(e) => onChange(e.target.checked
             ? { ...value, approved: true, harnesses: value.harnesses.length ? value.harnesses : CREW_AGENTS.map((a) => a.id) }
-            : { approved: false, harnesses: [], max_parallel: 2 })}
+            : { approved: false, harnesses: [], max_parallel: 2, terminal: false })}
           className="accent-teal-500"
         />
         Crew <span className="text-xs text-zinc-500">— coding agents run for them</span>
@@ -408,6 +408,10 @@ function CrewApproval({ isAdmin, value, wasApproved, name, understood, onUnderst
               onChange={(e) => onChange({ ...value, max_parallel: Math.max(1, Math.min(8, Number(e.target.value) || 1)) })}
               className="w-14 rounded-md border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-xs text-zinc-200"
             />
+          </label>
+          <label className="flex items-start gap-2 text-xs text-zinc-400">
+            <input type="checkbox" checked={value.terminal} onChange={(e) => onChange({ ...value, terminal: e.target.checked })} className="mt-0.5 accent-teal-500" />
+            <span>Terminal <span className="text-zinc-500">— they can open a shell on this server from the browser, in their own projects, to set them up by hand. It runs as the same system user as their coding agents.</span></span>
           </label>
           {!wasApproved && (
             <div className="space-y-1.5 rounded-md bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-200">

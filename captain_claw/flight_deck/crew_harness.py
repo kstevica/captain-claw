@@ -79,6 +79,7 @@ class RunSpec:
     model: str = ""
     effort: str = ""
     task_id: str = ""
+    writable: tuple[str, ...] = ()  # what a sandboxed CLI must also be able to write: its environment, its caches
 
 
 @dataclass(frozen=True)
@@ -215,7 +216,7 @@ def _codex_argv(spec: RunSpec) -> list[str]:
     # All through -c: `exec resume` takes neither -s nor --add-dir. A worktree's
     # git data lives in its repo's .git, outside the workspace, so a worker can
     # commit only with that folder writable too.
-    roots = [spec.git_common_dir] if spec.git_common_dir else []
+    roots = [*([spec.git_common_dir] if spec.git_common_dir else []), *spec.writable]
     argv += ["--json", "--skip-git-repo-check",
              "-c", 'sandbox_mode="workspace-write"',
              "-c", 'approval_policy="never"',
