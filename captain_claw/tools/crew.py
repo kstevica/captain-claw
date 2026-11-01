@@ -20,6 +20,7 @@ from typing import Any
 
 import httpx
 
+from captain_claw import crew_client
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
@@ -102,6 +103,8 @@ class CrewTool(Tool):
         "task made (the callback, status and files say where), so read them yourself with read or glob. Never start "
         "a task to look at or fetch files, and never ask a worker to print files into its message: messages get cut. "
         "A link to one file is public_link; a page with its css and scripts needs hosting. "
+        "Giving a worker files: put them in attachments on dispatch, prepare_env or steer, like a screenshot the user sent "
+        "you, a log or a design. It can't see your files any other way, so never paste them into a brief or give it your paths. "
         "A task exists once a crew result here gives its id, and not before: never say one started, or that a repository "
         "is cloned, from anything else. If a call fails, tell the user what it said. "
         "Actions: options (the CLIs you may use, their logins, the model each last ran on and its usage limits, like "
@@ -165,15 +168,23 @@ class CrewTool(Tool):
             "effort": {"type": "string", "description": "dispatch: reasoning effort for the CLI, only if the user asked for one."},
             "task_id": {"type": "string", "description": "status, files, steer, stop, pr, request_merge: the task."},
             "whole": {"type": "boolean", "description": "files: copy the whole project, not only what the task changed."},
-            "text": {"type": "string", "description": "steer: what to tell the worker."},
+            "text": {"type": "string", "description": "steer: what to tell the worker, and what any attachments are for."},
             "now": {"type": "boolean", "description": "steer: stop what the worker is doing so it hears this at once, when the user wants it to stop or change course now. What it's running stops; its files stay."},
+            "attachments": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "dispatch, prepare_env, steer: files for the worker, of any kind, as the file tools take them: a saved/ path, "
+                    "the path a tool printed (its 'Saved to:' line), or vfs:<project>/<path>. They reach its folder and it's told "
+                    f"where, so say in the brief or text what they're for. Up to {crew_client.MAX_FILE_BYTES // 1_000_000} MB each, and "
+                    f"{crew_client.MAX_TASK_FILES} files or {crew_client.MAX_TASK_BYTES // 1_000_000} MB for a task."
+                ),
+            },
         },
         "required": ["action"],
     }
 
     async def execute(self, action: str = "", **kwargs: Any) -> ToolResult:
-        from captain_claw import crew_client
-
         if any(str(os.environ.get(m, "")).strip().lower() in ("1", "true", "yes") for m in _WORKER_MARKERS):
             return ToolResult(success=False, error="Crew can't be used from inside a coding run or an ensemble.")
         if not crew_client.under_flight_deck():
@@ -236,6 +247,65 @@ class CrewTool(Tool):
             lines.extend(f"  {e.get('label')}: {'prepared' if e.get('ready') else 'not prepared'}" for e in data["envs"])
         return ToolResult(success=True, content="\n".join(lines))
 
+    async def _attach(self, client: Any, kwargs: dict) -> tuple[list[dict], ToolResult | None]:
+        """`attachments` sent ahead to Flight Deck: what it now holds, or why not. Every file is checked
+        before the first goes, as for an email: one that can't go refuses the call."""
+        from captain_claw import mail_attachments
+
+        if not kwargs.get("attachments"):
+            return [], None
+
+        def no(why: str) -> tuple[list[dict], ToolResult]:
+            return [], ToolResult(success=False, error=why)
+
+        try:
+            values = list(dict.fromkeys(mail_attachments.parse_list(kwargs.get("attachments"))))
+        except mail_attachments.AttachmentError as exc:
+            return no(str(exc))
+        if len(values) > client.MAX_TASK_FILES:
+            return no(f"That's {len(values)} files, and a task can have {client.MAX_TASK_FILES}.")
+        files = []
+        for value in values:
+            path = mail_attachments.resolve_path(value, kwargs) if "\x00" not in value else None
+            if path is None:
+                return no(f"File not found: {value}. Name a file, not a folder: the path a tool printed (its 'Saved to:' line), "
+                          "a saved/ path, or vfs:<project>/<path>.")
+            if why := mail_attachments.credential_reason(path, kwargs):
+                return no(f"'{path.name}' can't go to a worker: {why}.")
+            size = path.stat().st_size
+            if not size:
+                return no(f"'{path.name}' is empty, so there's nothing to send.")
+            if size > client.MAX_FILE_BYTES:
+                return no(f"'{path.name}' is {mail_attachments.human_size(size)}, and a file can be {client.MAX_FILE_BYTES // 1_000_000} MB.")
+            files.append((path, size))
+        if sum(size for _, size in files) > client.MAX_TASK_BYTES:
+            return no(f"Together they're too big: a task's files can come to {client.MAX_TASK_BYTES // 1_000_000} MB.")
+        held: list[dict] = []
+        for path, _ in files:
+            status, data = await client.upload(path, path.name, mail_attachments.guess_mime(path.name))
+            if status >= 300:
+                await self._let_go(client, held)
+                return [], self._refused(status, data)
+            held.append(data)
+        return held, None
+
+    @staticmethod
+    async def _let_go(client: Any, held: list[dict]) -> None:
+        """What was sent ahead for a call that was refused. Flight Deck clears it in a day anyway."""
+        for item in held:
+            try:
+                await client.call("DELETE", f"uploads/{item['id']}")
+            except Exception as exc:  # noqa: BLE001
+                log.debug("crew: couldn't let go of an upload", error=str(exc))
+
+    @staticmethod
+    def _sent_line(held: list[dict]) -> str:
+        """By the names the worker sees: never paths, which a chat bridge would send as files."""
+        from captain_claw.mail_attachments import human_size
+
+        names = [f"{item['name']} ({human_size(item['size'])})" for item in held]
+        return f" With it: {', '.join(names)}." if names else ""
+
     @staticmethod
     def _origin_of(agent: Any) -> tuple[str, str, int]:
         """Where a callback goes. Only Telegram needs saying: for other channels the
@@ -259,14 +329,19 @@ class CrewTool(Tool):
         # Asked for in the words of the brief: it's what they want, and only Captain can do it.
         if not kwargs.get("deliver") and kwargs.get("kind") != "scout" and _OPENS_A_PR.search(brief):
             kwargs["deliver"] = "pr"
+        held, refused = await self._attach(client, kwargs)
+        if refused is not None:
+            return refused
         payload = {
             "harness": harness, "brief": brief, "source_host": "localhost",
             "origin_platform": origin_platform, "origin_user_id": origin_user_id, "origin_chat_id": origin_chat_id,
             **{k: str(kwargs.get(k) or "") for k in ("title", "kind", "deliver", "project", "folder", "repo_url",
                                                      "repo_path", "model", "effort") if kwargs.get(k)},
+            **({"attachments": [i["id"] for i in held]} if held else {}),
         }
         status, data = await client.call("POST", "dispatch", payload)
         if (refused := self._refused(status, data)) is not None:
+            await self._let_go(client, held)
             return refused
         where = {"preparing": "getting its repository first, which can take some minutes for a big one, and then it starts",
                  "queued": "waiting for a free slot"}.get(data.get("status"), "working")
@@ -276,7 +351,7 @@ class CrewTool(Tool):
                       f"landed: {'; '.join(data['unlanded'][:5])}.")
         return ToolResult(success=True, content=(
             f"Task {data.get('id')} is {where}: {data.get('harness_label')} in {data.get('repo_label')}, on branch "
-            f"{data.get('branch')}.{behind} It has only started: nothing is done yet, so tell the user it's under way, "
+            f"{data.get('branch')}.{self._sent_line(held)}{behind} It has only started: nothing is done yet, so tell the user it's under way, "
             f"end your turn and don't report a result. You'll be called back when it finishes or needs a decision."
             + (" Captain opens its pull request when it finishes." if kwargs.get("deliver") == "pr"
                else _NOT_A_WORKERS_JOB if _ASKS_TO_DELIVER.search(brief) else "")
@@ -313,16 +388,21 @@ class CrewTool(Tool):
         if not harness:
             return ToolResult(success=False, error="Provide `harness`: which CLI does it (see action='options').")
         origin_platform, origin_user_id, origin_chat_id = self._origin_of(kwargs.get("_agent"))
+        held, refused = await self._attach(client, kwargs)
+        if refused is not None:
+            return refused
         status, data = await client.call("POST", "dispatch", {
             "harness": harness, "kind": "setup", "source_host": "localhost", "origin_platform": origin_platform,
             "origin_user_id": origin_user_id, "origin_chat_id": origin_chat_id,
             **{k: str(kwargs.get(k) or "") for k in ("brief", "title", "project", "folder", "repo_url", "repo_path", "model", "effort") if kwargs.get(k)},
+            **({"attachments": [i["id"] for i in held]} if held else {}),
         })
         if (refused := self._refused(status, data)) is not None:
+            await self._let_go(client, held)
             return refused
         return ToolResult(success=True, content=(
             f"Task {data.get('id')}: {data.get('harness_label')} is setting up {data.get('repo_label')}, in the project's main "
-            "folder. It has only started: nothing is installed yet, so tell the user it's under way and end your turn. You'll be "
+            f"folder.{self._sent_line(held)} It has only started: nothing is installed yet, so tell the user it's under way and end your turn. You'll be "
             "called back when it's done. New tasks on this project wait for it."
         ))
 
@@ -402,13 +482,20 @@ class CrewTool(Tool):
 
     async def _do_steer(self, client: Any, **kwargs: Any) -> ToolResult:
         text = str(kwargs.get("text") or "").strip()
-        if not text:
+        if not text and not kwargs.get("attachments"):
             return ToolResult(success=False, error="Provide `text`: what to tell the worker.")
-        refused, data = await self._with_task(client, "steer", kwargs, text=text, now=bool(kwargs.get("now")))
+        if not str(kwargs.get("task_id") or "").strip():
+            return ToolResult(success=False, error="Provide `task_id` (see action='list').")
+        held, refused = await self._attach(client, kwargs)
         if refused is not None:
             return refused
+        refused, data = await self._with_task(client, "steer", kwargs, text=text, now=bool(kwargs.get("now")),
+                                              **({"attachments": [i["id"] for i in held]} if held else {}))
+        if refused is not None:
+            await self._let_go(client, held)
+            return refused
         when = "next, once its current turn ends" if data.get("pending") else "now"
-        return ToolResult(success=True, content=f"Told task {data.get('id')}; it acts on it {when}."
+        return ToolResult(success=True, content=f"Told task {data.get('id')}; it acts on it {when}.{self._sent_line(held)}"
                           + (_NOT_A_WORKERS_JOB if _ASKS_TO_DELIVER.search(text) else ""))
 
     async def _do_stop(self, client: Any, **kwargs: Any) -> ToolResult:

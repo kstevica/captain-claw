@@ -105,6 +105,7 @@ PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
            ("image", "read"), ("template", "read"), ("out", "write")),
     "datastore": (("file_path", "datastore"),),
     "flight_deck": (("file", "read"),),
+    "crew": (("attachments", "read"),),
     "google_drive": (("local_path", "read"), ("output_path", "write")),
     "google_mail": (("attachments", "read"),),
     "microsoft_mail": (("attachments", "read"),),

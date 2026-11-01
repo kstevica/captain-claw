@@ -873,11 +873,36 @@ async def test_a_file_on_a_task_from_an_address_waits_for_its_clone(deck, local_
     assert (_attached_in(done) / "design.png").exists() and f"{crew_attach.FOLDER}/design.png" in _seen(done)
 
 
-async def test_the_same_words_with_a_file_are_a_new_task(deck):
+async def test_the_same_words_with_another_file_are_a_new_task(deck):
+    uid = deck["admin"]["id"]
     first = await _dispatch(deck, "SCENARIO:slow")
-    shot = await crew_attach.save_upload(deck["admin"]["id"], _Upload("a.png"))
+    shot = await crew_attach.save_upload(uid, _Upload("a.png"))
     second = await _dispatch(deck, "SCENARIO:slow", attachments=[shot["id"]])
     assert second["id"] != first["id"]
+    other = await crew_attach.save_upload(uid, _Upload("b.png"))
+    assert (await _dispatch(deck, "SCENARIO:slow", attachments=[other["id"]]))["id"] != second["id"]
+
+
+async def test_a_retry_with_the_same_files_is_the_same_task(deck):
+    uid = deck["admin"]["id"]
+    shot = await crew_attach.save_upload(uid, _Upload("a.png"))
+    first = await _dispatch(deck, "SCENARIO:slow", attachments=[shot["id"]])
+    again = await crew_attach.save_upload(uid, _Upload("a.png"))
+    assert (await _dispatch(deck, "SCENARIO:slow", attachments=[again["id"]]))["id"] == first["id"]
+    assert not list((crew_store.user_dir(uid) / "uploads").iterdir()), "the retry's copy isn't left behind"
+
+
+async def test_files_for_a_setup_already_under_way_are_not_lost_or_a_second_setup(deck):
+    uid = deck["admin"]["id"]
+    first = await _dispatch(deck, "SCENARIO:lagsetup", kind="setup")
+    notes = await crew_attach.save_upload(uid, _Upload("notes.md", b"x", "text/markdown"))
+    with pytest.raises(HTTPException) as err:
+        await _dispatch(deck, "SCENARIO:lagsetup", kind="setup", attachments=[notes["id"]])
+    assert err.value.status_code == 409 and first["id"] in err.value.detail
+    assert crew_attach.staged(uid, [notes["id"]]), "still there to send in a message"
+    told = await crew_runner.steer(uid, first["id"], "and these", attachments=[notes["id"]])
+    assert told["id"] == first["id"] and f"{crew_attach.FOLDER}/notes.md" in told["pending"][0]
+    assert (await _dispatch(deck, "SCENARIO:lagsetup", kind="setup"))["id"] == first["id"], "without files it's the one under way"
 
 
 async def test_two_files_with_one_name_both_stay(deck):
@@ -890,6 +915,20 @@ async def test_two_files_with_one_name_both_stay(deck):
     assert f"{crew_attach.FOLDER}/shot-2.png" in fresh["pending"][1]
     folder = crew_store.task_dir(uid, task["id"]) / "attachments"
     assert (folder / "shot.png").read_bytes() == b"one" and (folder / "shot-2.png").read_bytes() == b"two"
+
+
+async def test_two_files_with_one_name_in_one_task_are_both_told(deck):
+    uid = deck["admin"]["id"]
+    a = await crew_attach.save_upload(uid, _Upload("shot.png", b"one"))
+    b = await crew_attach.save_upload(uid, _Upload("Shot.png", b"two"))  # one file, on a Mac's disk
+    c = await crew_attach.save_upload(uid, _Upload("shot.png", b"three"))
+    done = await _settle(await _dispatch(deck, "SCENARIO:work", attachments=[a["id"], b["id"], c["id"]]))
+    prompt = _seen(done)
+    for name, body in (("shot.png", b"one"), ("Shot-2.png", b"two"), ("shot-3.png", b"three")):
+        assert f"{crew_attach.FOLDER}/{name} " in prompt, name
+        assert crew_attach.named([{"name": name}])[0]["as"] == name
+    held = {path.name: path.read_bytes() for path in _attached_in(done).iterdir()}
+    assert sorted(held.values()) == [b"one", b"three", b"two"] and len(held) == 3
 
 
 @pytest.mark.parametrize(("given", "kept"), [

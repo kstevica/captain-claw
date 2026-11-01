@@ -4970,6 +4970,8 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 
 **Giving a worker files.** On **New task**, and in the message box on a task's page, whether it's working or waiting, paste a screenshot, drop files, or use the paperclip. Any kind of file works, up to 50 MB each and 30 files or 200 MB for a task. They go into a `.crew-attachments` folder in the worker's own folder, which git ignores, and it's told what's there. Whether it can actually see a picture depends on the model it runs on: on a model without vision, it can only read the file's text or details. Attachments are removed when the task is closed or landed.
 
+Your agent can do the same. Send it a screenshot in chat and say "have OpenCode fix this": the `crew` tool's `attachments` takes the files it has, on `dispatch`, `prepare_env` and `steer`, as a `saved/` path, a path a tool printed, or `vfs:<project>/<path>`. It refuses what mail attachments refuse, like keys, `.env` files and databases, and a user-tier agent stays inside its own folders. Agents need a restart to get this.
+
 **The environment a project runs in.** A worker can only run and test a project if what it needs is installed, whatever its language. That's prepared once, in the project's main folder, and every new task on the project gets it. The project's page on Crew has an **Environment** card showing the folder, what's installed, and what it looks like it still needs.
 
 - **By hand:** set it up in that folder the way you would any project. **Open a terminal here** gives you a shell in it from the browser, or reach it over SSH if you have that.

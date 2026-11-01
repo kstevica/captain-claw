@@ -1108,6 +1108,16 @@ async def clone(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, Any
                             origin=origin)
 
 
+def _asked_again(uid: str, task: dict[str, Any], attached: list[dict[str, Any]], told: str) -> dict[str, Any]:
+    """The task already doing this. A retry's files are with it already. A setup under way in other
+    words hasn't got these, and they'd go nowhere unsaid."""
+    if attached and task["brief"] != told:
+        raise HTTPException(409, f"This project is already being set up: send the files in a message to that task, {task['id']}.")
+    for item in attached:
+        crew_attach.drop_upload(uid, item["id"])
+    return task
+
+
 async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, Any]:
     """A new task: its worktree now, so a bad place fails here, to the one asking, and
     its first turn as soon as there's room. A repository address only has to answer now:
@@ -1141,13 +1151,13 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     model = _clean_axis(body.get("model"), _MODEL_RE, "model name") or crew_logins.effective_model(defaults, own, harness)
     effort = _clean_axis(body.get("effort"), _EFFORT_RE, "reasoning effort")
     active = [t for t in _store().with_status(*crew_store.ACTIVE) if t["user_id"] == user["id"]]
-    # One setup at a time for a project, whoever does it and however it was put.
-    twins = [t for t in active if t["kind"] == kind and (kind == "setup" or (t["harness"] == harness and t["brief"] == brief[:100_000]))]
-    if attached:
-        twins = []  # with files, it's something new to say even in the same words
+    told = (brief[:100_000] + crew_attach.note(crew_attach.named(attached))).strip()
+    # One setup at a time for a project, whoever does it and however it was put. Any other task
+    # is the same one in the same words with the same files, as a retry sends it.
+    twins = [t for t in active if t["kind"] == kind and (kind == "setup" or (t["harness"] == harness and t["brief"] == told))]
     for task in twins:
         if url and _same_repo(task.get("repo_url") or "", url):
-            return task
+            return _asked_again(user["id"], task, attached, told)
     if len(active) >= grant.max_parallel * _ACTIVE_PER_SLOT:
         raise HTTPException(429, f"You already have {len(active)} tasks running or waiting. Let some finish first.")
     binary = await asyncio.to_thread(crew_harness.find_binary, harness)
@@ -1169,10 +1179,9 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
             raise HTTPException(400, _unknown_model(model, known, grant))
     title = " ".join(str(body.get("title") or (crew_env.SETUP_TITLE if kind == "setup" else brief)).split())[:120]
     slug = _slug_for(title)
-    brief = (brief[:100_000] + crew_attach.note(attached)).strip()
     origin = body.get("origin") if isinstance(body.get("origin"), dict) else {}
     fields: dict[str, Any] = dict(
-        title=title, kind=kind, harness=harness, model=model, effort=effort, brief=brief, deliver=deliver,
+        title=title, kind=kind, harness=harness, model=model, effort=effort, brief=told, deliver=deliver,
         agent_slug=str(body.get("agent_slug") or ""), source_host=str(body.get("source_host") or ""), origin=origin,
     )
     if url:
@@ -1185,7 +1194,7 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     where = await _resolve_repo(user, grant, body)
     for task in twins:
         if task["repo"] == where["repo"]:
-            return task
+            return _asked_again(user["id"], task, attached, told)
     if deliver == "pr":
         await _must_reach_github(user, grant, repo=where["repo"])
     tree = await _setup_place(where["repo"]) if kind == "setup" else await _make_worktree(user, grant, where, slug)

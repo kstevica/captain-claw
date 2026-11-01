@@ -132,6 +132,7 @@ class AgentTaskBody(BaseModel):
     text: str = ""
     now: bool = False
     whole: bool = False
+    attachments: list[str] = []
 
 
 class ModelBody(BaseModel):
@@ -597,6 +598,19 @@ async def agent_env(body: AgentPlaceBody, request: Request) -> dict[str, Any]:
     return {"envs": [entry for entry in envs if matches(entry)]}
 
 
+@router.post("/agent/uploads", status_code=201)
+async def agent_upload(request: Request, file: UploadFile = File(...)) -> dict[str, Any]:
+    row, _, _ = await _agent_caller(request)
+    return await crew_attach.save_upload(row["id"], file)
+
+
+@router.delete("/agent/uploads/{upload_id}")
+async def agent_drop_upload(upload_id: str, request: Request) -> dict[str, bool]:
+    row, _, _ = await _agent_caller(request)
+    crew_attach.drop_upload(row["id"], upload_id)
+    return {"ok": True}
+
+
 @router.post("/agent/dispatch")
 async def agent_dispatch(body: AgentDispatchBody, request: Request) -> dict[str, Any]:
     row, grant, slug = await _agent_caller(request)
@@ -646,7 +660,8 @@ async def agent_task(body: AgentTaskBody, request: Request) -> dict[str, Any]:
 @router.post("/agent/steer")
 async def agent_steer(body: AgentTaskBody, request: Request) -> dict[str, Any]:
     row, _, _ = await _agent_caller(request)
-    return crew_runner.view(await crew_runner.steer(row["id"], body.task_id, body.text, now=body.now), full=True)
+    return crew_runner.view(await crew_runner.steer(row["id"], body.task_id, body.text, now=body.now, attachments=body.attachments),
+                            full=True)
 
 
 @router.post("/agent/stop")
