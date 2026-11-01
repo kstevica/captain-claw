@@ -110,7 +110,7 @@ function Details({ task }: { task: CrewTask }) {
   const { added, removed } = statParts(task.evidence?.stat)
   const rows: [string, string][] = [
     ['Agent', task.harness_label],
-    ['Model', task.model_used || task.model || 'Its default'],
+    ...(task.kind === 'clone' ? [] : [['Model', task.model_used || task.model || 'Its default'] as [string, string]]),
     ...(task.effort ? [['Effort', task.effort] as [string, string]] : []),
     ['Working in', task.repo_label],
     ...(task.branch ? [['Branch', task.branch] as [string, string]] : []),
@@ -195,6 +195,7 @@ function TaskView({ taskId, onBack, onChanged }: { taskId: string; onBack?: () =
   const finished = DONE.includes(task.status)
   const e = task.evidence || {}
   const ship = task.kind === 'ship'
+  const cloneOnly = task.kind === 'clone'
   const landable = ship && !live && !finished && !!e.commits && !e.dirty && !e.stray
   const unlanded = !!e.commits || !!e.dirty || !!e.stray
   const hasPr = !!task.delivery?.pr
@@ -210,7 +211,7 @@ function TaskView({ taskId, onBack, onChanged }: { taskId: string; onBack?: () =
   const tabs: [TaskTab, string, LucideIcon][] = [
     ['activity', 'Activity', MessageSquare],
     ...(ship ? [['changes', 'Changes', FileDiff] as [TaskTab, string, LucideIcon]] : []),
-    ['files', 'Files', FolderOpen],
+    ...(cloneOnly ? [] : [['files', 'Files', FolderOpen] as [TaskTab, string, LucideIcon]]),
     ...(task.report ? [['report', 'Report', ScrollText] as [TaskTab, string, LucideIcon]] : []),
   ]
   const about = [task.harness_label, task.project_name || task.repo_label, task.from_agent ? 'from your agent' : '', ago(task.updated_at) === 'now' ? 'just now' : `${ago(task.updated_at)} ago`].filter(Boolean)
@@ -272,7 +273,7 @@ function TaskView({ taskId, onBack, onChanged }: { taskId: string; onBack?: () =
         {tab === 'report' && <div className="min-h-0 flex-1 overflow-y-auto p-5"><CrewMarkdown text={task.report ?? ''} /></div>}
       </div>
 
-      {!finished && (
+      {!finished && !cloneOnly && (
         <form onSubmit={send} className="shrink-0 border-t border-zinc-800 p-3">
           <div className="flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-1.5 transition-colors focus-within:border-violet-500/60 focus-within:ring-2 focus-within:ring-violet-500/15">
             <textarea
@@ -280,7 +281,7 @@ function TaskView({ taskId, onBack, onChanged }: { taskId: string; onBack?: () =
               onChange={(ev) => setSteer(ev.target.value)}
               onKeyDown={(ev) => { if (ev.key === 'Enter' && !ev.shiftKey) send(ev) }}
               rows={Math.min(5, steer.split('\n').length)}
-              placeholder={task.status === 'waiting' ? 'Your answer…' : live ? 'Tell it something, for when this turn ends…' : 'Tell it to go on…'}
+              placeholder={task.status === 'waiting' ? 'Your answer…' : task.status === 'preparing' ? 'Tell it something, for when it starts…' : live ? 'Tell it something, for when this turn ends…' : 'Tell it to go on…'}
               aria-label="Tell the agent"
               className="min-w-0 flex-1 resize-none bg-transparent px-2.5 py-1.5 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none"
             />
@@ -408,19 +409,19 @@ function harnessHint(h: CrewHarness): string {
   return h.login.how ? `Ready, on ${h.login.how}` : 'Ready'
 }
 
-function NewTask({ me, initialProject, onCancel, onMade, onLogins }: {
-  me: CrewMe; initialProject: string; onCancel: () => void; onMade: (id: string) => void; onLogins: () => void
+function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }: {
+  me: CrewMe; initialProject: string; initialUrl: string; onCancel: () => void; onMade: (id: string) => void; onLogins: () => void
 }) {
   const usable = useMemo(() => (me.harnesses ?? []).filter((h) => h.installed && h.login.ok), [me.harnesses])
   const [harness, setHarness] = useState(usable[0]?.id ?? '')
   const [brief, setBrief] = useState('')
   const [kind, setKind] = useState<'ship' | 'scout'>('ship')
   const [deliver, setDeliver] = useState('branch')
-  const [where, setWhere] = useState<'project' | 'url' | 'path'>('project')
+  const [where, setWhere] = useState<'project' | 'url' | 'path'>(initialUrl ? 'url' : 'project')
   const [repos, setRepos] = useState<CrewRepos | null>(null)
   const [project, setProject] = useState(initialProject)
   const [folder, setFolder] = useState('')
-  const [url, setUrl] = useState('')
+  const [url, setUrl] = useState(initialUrl)
   const [path, setPath] = useState('')
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('')
@@ -886,6 +887,7 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
   const [pane, setPane] = useState<Pane>('home')
   const [publishing, setPublishing] = useState(false)
   const [newIn, setNewIn] = useState('')
+  const [newUrl, setNewUrl] = useState('')
   const [collapsed, setCollapsed] = useState<string[]>(readCollapsed)
   const [error, setError] = useState('')
   const [meError, setMeError] = useState('')
@@ -953,12 +955,13 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
   const wanting = (tasks ?? []).filter(needsYou).length
   const live = (sites ?? []).filter(isLive).length
 
-  // A new task can only be aimed at a Code project by name: the rest came with an address.
+  // A new task is aimed at a Code project by name, and at a repository by the address it came from.
   const inProject = (key?: string, name?: string) => (key?.startsWith('project:') ? name ?? '' : '')
+  const addressOf = (list?: CrewTask[]) => list?.find((t) => t.repo_url)?.repo_url ?? ''
   const selectedTask = tasks?.find((t) => t.id === selected)
   const open = (id: string) => { setSelected(id); setPane('task') }
   const openProject = (key: string) => { setProjectKey(key); setSelected(''); setPane('project') }
-  const startIn = (name: string) => { setNewIn(name); setPane('new') }
+  const startIn = (name: string, address = '') => { setNewIn(name); setNewUrl(address); setPane('new') }
   const goHome = () => { setSelected(''); setPane('home') }
   const goSites = () => { setSelected(''); setPane('sites') }
   const toggle = (key: string) => {
@@ -986,7 +989,7 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
     <ProjectGroup
       key={p.key} project={p} collapsed={collapsed.includes(p.key)} selectedTask={pane === 'task' ? selected : ''}
       selectedProject={pane === 'project' && projectKey === p.key} onToggle={() => toggle(p.key)} onProject={() => openProject(p.key)}
-      onTask={open} onNew={() => startIn(inProject(p.key, p.name))}
+      onTask={open} onNew={() => startIn(inProject(p.key, p.name), addressOf(p.tasks))}
     />
   )
   const projectList = (
@@ -1007,7 +1010,9 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
     <div className="flex h-full min-h-0 flex-col bg-zinc-950">
       <Header
         onClose={onClose} onRefresh={() => { loadTasks(); loadSites(); loadMe(); loadRepos() }} onLogins={() => setPane('logins')}
-        onNew={() => startIn(selectedTask ? inProject(selectedTask.project_key, selectedTask.project_name) : inProject(current?.key, current?.name))}
+        onNew={() => (selectedTask
+          ? startIn(inProject(selectedTask.project_key, selectedTask.project_name), selectedTask.repo_url ?? '')
+          : startIn(inProject(current?.key, current?.name), addressOf(current?.tasks)))}
         summary={[working ? `${working} working` : '', wanting ? `${wanting} need${wanting === 1 ? 's' : ''} you` : '', live ? `${live} live` : ''].filter(Boolean).join(' · ')}
       />
       {(error || (me && meError)) && <div className="p-2"><ErrorLine text={error || meError} /></div>}
@@ -1050,11 +1055,11 @@ export function CrewBoard({ phone = false, onClose }: { phone?: boolean; onClose
                 : <><Loader2 className="h-5 w-5 animate-spin" /> Loading…</>}
             </div>
           )}
-          {pane === 'new' && meListed && <NewTask key={newIn} me={meListed} initialProject={newIn} onCancel={goHome} onLogins={() => setPane('logins')} onMade={(id) => { loadTasks(); loadRepos(); open(id) }} />}
+          {pane === 'new' && meListed && <NewTask key={`${newIn}|${newUrl}`} me={meListed} initialProject={newIn} initialUrl={newUrl} onCancel={goHome} onLogins={() => setPane('logins')} onMade={(id) => { loadTasks(); loadRepos(); open(id) }} />}
           {pane === 'logins' && meListed && <Logins me={meListed} onBack={goHome} onChanged={loadMe} />}
           {pane === 'project' && current && (
             <ProjectView
-              project={current} sites={sites ?? []} onOpen={open} onNew={() => startIn(inProject(current.key, current.name))} onChanged={() => { loadTasks(); loadRepos() }}
+              project={current} sites={sites ?? []} onOpen={open} onNew={() => startIn(inProject(current.key, current.name), addressOf(current.tasks))} onChanged={() => { loadTasks(); loadRepos() }}
               onBack={backOnPhone} onSites={goSites} onPublish={() => setPublishing(true)}
             />
           )}

@@ -85,6 +85,14 @@ class AgentDispatchBody(DispatchBody):
     origin_chat_id: int = 0
 
 
+class AgentCloneBody(BaseModel):
+    repo_url: str
+    source_host: str = "localhost"
+    origin_platform: str = "web"
+    origin_user_id: str = ""
+    origin_chat_id: int = 0
+
+
 class AgentTaskBody(BaseModel):
     task_id: str
     text: str = ""
@@ -388,6 +396,17 @@ async def agent_dispatch(body: AgentDispatchBody, request: Request) -> dict[str,
     task = await crew_runner.dispatch(row, grant, fields)
     key = crew_runner.project_of(task)[0]
     return {**crew_runner.view(task, full=True), "unlanded": crew_runner.unlanded_in(row["id"], key, but=task["id"])}
+
+
+@router.post("/agent/clone")
+async def agent_clone(body: AgentCloneBody, request: Request) -> dict[str, Any]:
+    """A repository got ready with no worker. It's a task to the page and the callback."""
+    row, grant, slug = await _agent_caller(request)
+    task = await crew_runner.clone(row, grant, {
+        "repo_url": body.repo_url, "agent_slug": slug, "source_host": body.source_host or "localhost",
+        "origin": {"platform": body.origin_platform, "user_id": body.origin_user_id, "chat_id": body.origin_chat_id},
+    })
+    return crew_runner.view(task, full=True)
 
 
 @router.post("/agent/files")

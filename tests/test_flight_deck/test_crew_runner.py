@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 import time
+import types
 from pathlib import Path
 
 import httpx
@@ -23,6 +24,7 @@ from captain_claw.flight_deck.db import FlightDeckDB
 
 # The scenario comes from the prompt; the worker's environment is built from nothing.
 FAKE_CLI = r"""#!/bin/sh
+case "$1" in --version) echo "stand-in 1.0"; exit 0;; esac
 all="$*"
 say() { printf '%s\n' "$1"; }
 printf '%s' "$all" > "$(git rev-parse --git-dir)/seen"
@@ -64,6 +66,7 @@ def _run(cwd: Path, *args: str) -> str:
 
 @pytest.fixture
 async def deck(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)  # Crew asks a CLI its version from here: never from a real checkout
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setenv("FD_DATA_KEY_FILE", str(tmp_path / "data_key"))
     fd_crypto.reset_for_tests()
@@ -81,6 +84,8 @@ async def deck(monkeypatch, tmp_path):
 
     monkeypatch.setattr(crew_runner, "_notify", notify)
     monkeypatch.setattr(crew_runner, "_sync_board", lambda task: None)
+    # A lock belongs to the loop it was first waited on in, and each test has its own.
+    monkeypatch.setattr(crew_runner, "_QUEUE_LOCK", asyncio.Lock())
     db = FlightDeckDB(tmp_path / "fd.db")
     await db.init()
     monkeypatch.setattr(auth_mod, "_db", db)
@@ -92,6 +97,11 @@ async def deck(monkeypatch, tmp_path):
     _run(repo, "add", ".")
     _run(repo, "commit", "-qm", "base")
     yield {"db": db, "admin": admin, "repo": repo, "told": told, "tmp": tmp_path}
+    jobs = list(crew_runner._PREPARING.values())
+    for job in jobs:
+        job.cancel()
+    await asyncio.gather(*jobs, return_exceptions=True)
+    crew_runner._PREPARING.clear()
     for task in crew_store.get_store().with_status(*crew_store.ACTIVE):
         await crew_runner._terminate(task)
     crew_store.get_store().close()
@@ -427,10 +437,10 @@ async def test_someone_elses_task_does_not_exist(deck):
 
 async def test_too_many_waiting_is_refused(deck):
     grant = Grant(True, "admin", ("claude",), 1)
-    for _ in range(crew_runner._ACTIVE_PER_SLOT):
-        await _dispatch(deck, "SCENARIO:slow", grant=grant)
+    for n in range(crew_runner._ACTIVE_PER_SLOT):
+        await _dispatch(deck, f"SCENARIO:slow {n}", grant=grant)
     with pytest.raises(HTTPException) as err:
-        await _dispatch(deck, "SCENARIO:slow", grant=grant)
+        await _dispatch(deck, "SCENARIO:slow, one too many", grant=grant)
     assert err.value.status_code == 429
 
 
@@ -485,11 +495,18 @@ async def test_a_pull_request_pushes_opens_and_merges_on_github(deck, monkeypatc
 
 
 async def test_a_pull_request_that_fails_leaves_the_task_ready_and_says_why(deck, monkeypatch):
+    _run(deck["repo"], "remote", "add", "origin", "https://github.com/acme/widgets.git")
+
     async def token(db, user, grant):
+        return "t"
+
+    async def gone(db, user, grant):
         return ""
 
     monkeypatch.setattr(crew_logins, "github_token", token)
-    done = await _settle(await _dispatch(deck, deliver="pr"))
+    made = await _dispatch(deck, deliver="pr")
+    monkeypatch.setattr(crew_logins, "github_token", gone)  # taken away while it worked
+    done = await _settle(made)
     assert done["status"] == "ready"
     assert "GitHub token" in done["note"]
 
@@ -686,21 +703,294 @@ async def test_a_replaced_codex_login_is_the_one_used(deck):
 async def test_two_tasks_on_one_new_repository_clone_it_once(deck, monkeypatch):
     clones = []
 
-    async def git(cwd, *args, env=None, timeout=300.0):
-        if "clone" in args:
-            clones.append(args)
-            await asyncio.sleep(0.05)
-            Path(args[-1]).mkdir(parents=True)
-            return 0, ""
-        if args[:2] == ("remote", "get-url"):
-            return 0, "https://example.com/a/b.git"
+    async def clone(cwd, url, dest, *, env, progress=None):
+        clones.append(url)
+        await asyncio.sleep(0.05)
+        Path(dest).mkdir(parents=True)
         return 0, ""
 
+    async def git(cwd, *args, env=None, timeout=300.0):
+        if args[:1] == ("for-each-ref",):
+            return 0, "abc commit refs/heads/main"
+        if args[:2] == ("remote", "get-url"):
+            return 0, "https://example.com/a/b"  # however it was written the first time
+        return 0, ""
+
+    monkeypatch.setattr(crew_runner, "_clone", clone)
     monkeypatch.setattr(crew_runner, "_git", git)
     body = {"repo_url": "https://example.com/a/b.git"}
     await asyncio.gather(*(crew_runner._resolve_repo(deck["admin"], ADMIN_GRANT, body) for _ in range(3)))
-    assert len(clones) == 1
-    assert clones[0][clones[0].index("--") + 1] == body["repo_url"]
+    assert clones == [body["repo_url"]]
+
+
+@pytest.fixture
+def local_address(deck, monkeypatch) -> str:
+    """A local repository stands in for an address: no network here, and git clones a path the same."""
+    monkeypatch.setattr(crew_runner, "_check_url", lambda url, grant: None)
+    return str(deck["repo"])
+
+
+def _hold_the_clone(monkeypatch) -> types.SimpleNamespace:
+    """A clone that waits for ``gate``; ``reached`` says it began, ``cancelled`` that it was cut short."""
+    hold = types.SimpleNamespace(gate=asyncio.Event(), reached=asyncio.Event(), cancelled=[])
+    real = crew_runner._clone
+
+    async def held(cwd, url, dest, *, env, progress=None):
+        progress("downloading", 40)
+        hold.reached.set()
+        try:
+            await hold.gate.wait()
+        except asyncio.CancelledError:
+            hold.cancelled.append(True)
+            raise
+        return await real(cwd, url, dest, env=env, progress=progress)
+
+    monkeypatch.setattr(crew_runner, "_clone", held)
+    return hold
+
+
+async def test_an_address_is_a_task_at_once_and_its_clone_comes_after(deck, local_address, monkeypatch):
+    """On a Pi a big repository takes longer than the agent's call. It was blocked until the
+    call timed out with no error, and then the task appeared anyway, unknown to the agent."""
+    hold = _hold_the_clone(monkeypatch)
+    made = await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "SCENARIO:work", "repo_url": local_address})
+    assert made["status"] == "preparing" and made["repo_url"] == local_address and made["branch"].startswith("crew/")
+    assert made["repo_label"] == "repo" and not made["worktree"]
+    await asyncio.wait_for(hold.reached.wait(), 10)
+    uid = deck["admin"]["id"]
+    listed = crew_store.get_store().list_for(uid)
+    assert [t["id"] for t in listed] == [made["id"]] and listed[0]["note"] == "Getting the repository: downloading, 40%"
+    assert crew_runner.view(listed[0])["project_name"] == "repo"
+    hold.gate.set()
+    done = await _settle(made)
+    assert done["status"] == "ready" and done["evidence"]["commits"] == 1 and Path(done["worktree"]).is_dir()
+    assert done["branch"] == made["branch"]
+    clones = crew_store.user_dir(uid) / "repos"
+    assert [p.name for p in clones.iterdir()] == ["repo"]
+
+
+async def test_a_clone_that_fails_tells_whoever_asked(deck, local_address, monkeypatch):
+    async def clone(cwd, url, dest, *, env, progress=None):
+        Path(dest).mkdir(parents=True)
+        return 128, "fatal: the disk is full"
+
+    monkeypatch.setattr(crew_runner, "_clone", clone)
+    done = await _settle(await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "x", "repo_url": local_address}))
+    assert done["status"] == "failed" and "the disk is full" in done["note"]
+    assert deck["told"][-1]["id"] == done["id"]
+    assert not list((crew_store.user_dir(deck["admin"]["id"]) / "repos").iterdir())
+
+
+async def test_an_address_that_does_not_answer_is_refused_with_no_task(deck, local_address, monkeypatch):
+    uid = deck["admin"]["id"]
+    with pytest.raises(HTTPException) as err:
+        await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "x", "repo_url": str(deck["tmp"] / "nothing-here")})
+    assert err.value.status_code == 400
+    assert crew_store.get_store().list_for(uid) == []
+
+    real_git = crew_runner._git
+
+    async def private(cwd, *args, env=None, timeout=300.0):
+        if args[:1] == ("ls-remote",):
+            return 128, "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+        return await real_git(cwd, *args, env=env, timeout=timeout)
+
+    monkeypatch.setattr(crew_runner, "_git", private)
+    with pytest.raises(HTTPException) as err:
+        await crew_runner.clone(deck["admin"], ADMIN_GRANT, {"repo_url": "https://example.com/a/secret"})
+    assert "Crew → Logins" in err.value.detail and "private" in err.value.detail
+    assert crew_store.get_store().list_for(uid) == []
+
+
+async def test_stopping_mid_clone_ends_it_and_a_steer_gets_it_again(deck, local_address, monkeypatch):
+    hold = _hold_the_clone(monkeypatch)
+    made = await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "SCENARIO:work", "repo_url": local_address})
+    await asyncio.wait_for(hold.reached.wait(), 10)
+    uid = deck["admin"]["id"]
+    assert (await crew_runner.stop(uid, made["id"]))["status"] == "stopped"
+    await asyncio.sleep(0.02)
+    assert hold.cancelled == [True] and made["id"] not in crew_runner._PREPARING
+    await crew_runner.tick()
+    assert made["id"] not in crew_runner._PREPARING  # stopped stays stopped
+    hold.gate.set()
+    again = await crew_runner.steer(uid, made["id"], "and the docs")
+    assert again["status"] == "preparing" and again["note"] == "Getting the repository"
+    done = await _settle(again)
+    assert done["status"] == "ready" and "and the docs" in _seen(done)
+
+
+async def test_a_restart_mid_clone_starts_it_again_from_the_address(deck, local_address, monkeypatch):
+    hold = _hold_the_clone(monkeypatch)
+    made = await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "SCENARIO:work", "repo_url": local_address})
+    await asyncio.wait_for(hold.reached.wait(), 10)
+    await crew_runner.stop_watcher()
+    await asyncio.sleep(0.02)
+    assert hold.cancelled == [True]
+    assert crew_store.get_store().get(deck["admin"]["id"], made["id"])["status"] == "preparing"
+    hold.gate.set()
+    assert (await _settle(made))["status"] == "ready"
+
+
+async def test_a_clone_a_restart_cut_short_is_not_mistaken_for_one(deck, local_address):
+    uid = deck["admin"]["id"]
+    clones = crew_store.user_dir(uid) / "repos"
+    clones.mkdir()
+    subprocess.run(["git", "init", "-q", str(clones / "repo")], check=True)  # what's left: a config, and no refs
+    (clones / ".repo.cloning").mkdir()
+    where = await crew_runner._resolve_repo(deck["admin"], ADMIN_GRANT, {"repo_url": local_address})
+    assert _run(Path(where["repo"]), "rev-parse", "HEAD") == _run(deck["repo"], "rev-parse", "HEAD")
+    assert [p.name for p in clones.iterdir()] == ["repo"]
+
+
+def _fake_git(deck, body: str) -> dict[str, str]:
+    fake = deck["tmp"] / "fake-git"
+    fake.mkdir()
+    script = fake / "git"
+    script.write_text(f"#!/bin/sh\necho $$ > {deck['tmp']}/git.pid\n{body}\n")
+    script.chmod(0o755)
+    return {"PATH": f"{fake}:{os.environ['PATH']}"}
+
+
+async def test_clone_says_how_far_it_got_and_why_it_failed(deck):
+    env = _fake_git(deck, """printf 'Cloning into x...\\nReceiving objects:  40%% (4/10)\\r' >&2
+printf 'Receiving objects: 100%% (10/10), done.\\nResolving deltas:  50%% (1/2)\\r' >&2
+echo 'fatal: early EOF' >&2; exit 128""")
+    seen: list[tuple[str, int]] = []
+    rc, out = await crew_runner._clone(deck["tmp"], "https://example.com/a/b", deck["tmp"] / "x", env=env,
+                                       progress=lambda stage, percent: seen.append((stage, percent)))
+    assert rc == 128 and out == "fatal: early EOF"
+    assert seen and seen[-1] == ("unpacking", 50)
+
+
+async def test_a_clone_that_goes_quiet_fails_and_a_cancelled_one_dies(deck, monkeypatch):
+    env = _fake_git(deck, "sleep 30")
+    monkeypatch.setattr(crew_runner, "_CLONE_SILENT_S", 0.2)
+    rc, out = await crew_runner._clone(deck["tmp"], "https://example.com/a/b", deck["tmp"] / "x", env=env)
+    assert rc == 124 and "quiet" in out
+
+    monkeypatch.setattr(crew_runner, "_CLONE_SILENT_S", 30.0)
+    job = asyncio.create_task(crew_runner._clone(deck["tmp"], "https://example.com/a/b", deck["tmp"] / "x", env=env))
+    pidfile = deck["tmp"] / "git.pid"
+    pidfile.unlink()
+    while not (pidfile.exists() and pidfile.read_text().strip()):
+        await asyncio.sleep(0.01)
+    pid = int(pidfile.read_text())
+    job.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await job
+    end = time.monotonic() + 3
+    while time.monotonic() < end:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        await asyncio.sleep(0.02)
+    raise AssertionError("the clone outlived its task")
+
+
+async def test_clone_alone_gets_a_repository_ready_with_no_worker(deck, local_address):
+    uid = deck["admin"]["id"]
+    made = await crew_runner.clone(deck["admin"], ADMIN_GRANT, {"repo_url": local_address, "agent_slug": "helper"})
+    assert made["kind"] == "clone" and made["status"] == "preparing" and made["title"] == "Get repo"
+    assert (await crew_runner.clone(deck["admin"], ADMIN_GRANT, {"repo_url": local_address + "/"}))["id"] == made["id"]
+    done = await _settle(made)
+    sha = _run(deck["repo"], "rev-parse", "--short=7", "HEAD")
+    assert done["status"] == "ready" and done["turn"] == 0 and not done["worktree"]
+    assert f"main at {sha}, 1 files" in done["note"]
+    assert crew_runner.view(done, full=True)["harness_label"] == "Captain"
+    assert deck["told"][-1]["id"] == done["id"]
+    assert f"crew action=dispatch repo_url={local_address}" in crew_runner.notice_text(done, for_agent=True)
+    for refused in (crew_runner.steer(uid, done["id"], "go on"), crew_runner.files(uid, done["id"]),
+                    crew_runner.merge(deck["admin"], ADMIN_GRANT, done["id"]), crew_runner.open_pr(deck["admin"], ADMIN_GRANT, done["id"])):
+        with pytest.raises(HTTPException) as err:
+            await refused
+        assert err.value.status_code == 409
+    # The work comes after, in the same clone.
+    worked = await _settle(await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "SCENARIO:work", "repo_url": local_address}))
+    assert worked["status"] == "ready" and worked["evidence"]["commits"] == 1 and worked["repo"] == done["repo"]
+    assert crew_runner.project_of(worked) == crew_runner.project_of(done)
+    assert (await crew_runner.close(uid, done["id"]))["status"] == "closed"
+
+
+async def test_narrowing_an_approval_leaves_a_clone_alone(deck, local_address, monkeypatch):
+    _hold_the_clone(monkeypatch)
+    made = await crew_runner.clone(deck["admin"], ADMIN_GRANT, {"repo_url": local_address})
+    assert await crew_runner.enforce_grant(deck["admin"]["id"]) == 0
+    assert crew_store.get_store().get(deck["admin"]["id"], made["id"])["status"] == "preparing"
+
+
+@pytest.mark.parametrize(("body", "said"), [
+    ({}, "Say where to work"),
+    ({"project": "p", "repo_url": "https://example.com/a/b"}, "not project and repo_url"),
+    ({"project": "p", "repo_path": "/x"}, "not project and repo_path"),
+    ({"repo_url": "https://example.com/a/b", "folder": "f"}, "A folder goes with a project"),
+    ({"project": "b", "folder": "f", "repo_url": "https://example.com/a/b"}, "not project and repo_url"),
+])
+def test_one_place_to_work_says_what_was_wrong(body, said):
+    with pytest.raises(HTTPException) as err:
+        crew_runner._place_of(body)
+    assert err.value.status_code == 400 and said in err.value.detail
+
+
+def test_a_project_named_after_the_address_says_the_same_thing():
+    assert crew_runner._place_of({"project": "Captain-Claw", "repo_url": "https://github.com/k/captain-claw.git"}) == (
+        "", "https://github.com/k/captain-claw.git", "")
+
+
+def test_a_login_in_an_address_is_refused():
+    for url in ("https://x-access-token:ghp_abc@github.com/a/b", "https://me@github.com/a/b"):
+        with pytest.raises(HTTPException) as err:
+            crew_runner._check_url(url, ADMIN_GRANT)
+        assert "Crew → Logins" in err.value.detail and "ghp_abc" not in err.value.detail
+    crew_runner._check_url("https://github.com/a/b", ADMIN_GRANT)
+    crew_runner._check_url("git@github.com:a/b.git", ADMIN_GRANT)
+
+
+def test_one_repository_however_its_address_is_written():
+    assert crew_runner._same_repo("https://github.com/a/b.git", "https://github.com/a/b/")
+    assert crew_runner._same_repo("https://GitHub.com/a/b", "https://github.com/a/b")
+    assert not crew_runner._same_repo("https://github.com/a/b", "https://github.com/c/b")
+
+
+async def test_the_same_task_asked_for_again_is_that_task(deck, local_address):
+    first = await _dispatch(deck, "SCENARIO:slow")
+    assert (await _dispatch(deck, "SCENARIO:slow"))["id"] == first["id"]
+    assert (await _dispatch(deck, "SCENARIO:slow, another"))["id"] != first["id"]
+    other_cli_same_words = await _dispatch(deck, "SCENARIO:slow", kind="scout")
+    assert other_cli_same_words["id"] != first["id"]
+    by_address = await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "SCENARIO:slow", "repo_url": local_address})
+    assert by_address["id"] != first["id"]
+    again = await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "SCENARIO:slow", "repo_url": local_address + "/"})
+    assert again["id"] == by_address["id"]
+    # Once it has finished, it's new work.
+    done = await _settle(await _dispatch(deck, "SCENARIO:work"))
+    assert (await _dispatch(deck, "SCENARIO:work"))["id"] != done["id"]
+
+
+async def test_what_would_stop_a_pull_request_is_said_before_the_work(deck, monkeypatch):
+    with pytest.raises(HTTPException) as err:
+        await _dispatch(deck, kind="scout", deliver="pr")
+    assert "scout changes nothing" in err.value.detail
+
+    async def none(db, user, grant):
+        return ""
+
+    async def some(db, user, grant):
+        return "t"
+
+    monkeypatch.setattr(crew_logins, "github_token", none)
+    with pytest.raises(HTTPException) as err:
+        await _dispatch(deck, deliver="pr")
+    assert "GitHub token" in err.value.detail
+
+    monkeypatch.setattr(crew_logins, "github_token", some)
+    with pytest.raises(HTTPException) as err:
+        await _dispatch(deck, deliver="pr")  # the fixture's repository has no origin
+    assert "no GitHub origin" in err.value.detail
+    with pytest.raises(HTTPException) as err:
+        await crew_runner.dispatch(deck["admin"], ADMIN_GRANT, {"harness": "claude", "brief": "x", "deliver": "pr", "repo_url": "https://example.com/a/b"})
+    assert "no GitHub origin" in err.value.detail
+    assert crew_store.get_store().list_for(deck["admin"]["id"]) == []
 
 
 async def test_linked_folders_follow_the_rules_of_folders(deck, monkeypatch):

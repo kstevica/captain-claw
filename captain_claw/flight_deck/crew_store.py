@@ -18,20 +18,21 @@ import time
 from pathlib import Path
 from typing import Any
 
-ACTIVE = ("queued", "running")
+ACTIVE = ("preparing", "queued", "running")
 # Can't take another turn: its worktree is gone.
 FINISHED = ("delivered", "closed")
 
 _COLUMNS: tuple[tuple[str, str], ...] = (
     ("id", "TEXT PRIMARY KEY"), ("user_id", "TEXT NOT NULL"), ("title", "TEXT NOT NULL"),
-    ("kind", "TEXT NOT NULL"),  # ship · scout
+    ("kind", "TEXT NOT NULL"),  # ship · scout · clone (a repository got ready, with no worker)
     ("harness", "TEXT NOT NULL"), ("model", "TEXT DEFAULT ''"), ("effort", "TEXT DEFAULT ''"),
     ("model_used", "TEXT DEFAULT ''"),  # the one the CLI says it ran on; `model` is only what was asked for
     ("brief", "TEXT NOT NULL"),
-    # queued · running · waiting · ready · failed · stopped · pr_open · delivered · closed
+    # preparing · queued · running · waiting · ready · failed · stopped · pr_open · delivered · closed
     ("status", "TEXT NOT NULL"), ("note", "TEXT DEFAULT ''"),
     ("repo", "TEXT NOT NULL"), ("repo_label", "TEXT DEFAULT ''"),
     ("repo_kind", "TEXT DEFAULT ''"),  # project · url · path
+    ("repo_url", "TEXT DEFAULT ''"),  # the address, when it came from one: a restart mid-clone starts from it
     ("base_branch", "TEXT DEFAULT ''"), ("base_sha", "TEXT DEFAULT ''"),
     ("branch", "TEXT DEFAULT ''"), ("worktree", "TEXT DEFAULT ''"), ("git_common_dir", "TEXT DEFAULT ''"),
     ("session", "TEXT DEFAULT ''"), ("turn", "INTEGER DEFAULT 0"),
@@ -183,7 +184,7 @@ class CrewStore:
     def recent_repos(self, user_id: str, limit: int = 30) -> list[dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
-                "SELECT repo, repo_label, repo_kind, MAX(created_at) AS at FROM tasks WHERE user_id = ?"
+                "SELECT repo, repo_label, repo_kind, repo_url, MAX(created_at) AS at FROM tasks WHERE user_id = ?"
                 " AND repo_kind IN ('url', 'path') GROUP BY repo ORDER BY at DESC LIMIT ?",
                 (user_id, limit)).fetchall()
         return [dict(r) for r in rows]

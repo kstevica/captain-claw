@@ -4960,7 +4960,11 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 
 **Whose account.** Each user's own: Crew → Logins. A `claude setup-token` token or an Anthropic key for Claude Code; an OpenAI key or the contents of `~/.codex/auth.json` for Codex; provider keys for OpenCode and Pi ("Your own AI keys" count too); a GitHub token for repositories and pull requests. A non-admin's worker never falls back to the deck owner's login, and its environment holds none of the deck's secrets. An admin's worker uses this computer's logins unless they saved their own.
 
-**Where it works.** A Code project's folder, a repository address, or (admins only) a folder on the server. Install the CLIs on the deck's host: Crew → Logins shows which are there and the command for those that aren't.
+**Where it works.** A Code project's folder, a repository address, or (admins only) a folder on the server: name one of them. A repository address needs no login in it (a GitHub token goes in Crew → Logins). Install the CLIs on the deck's host: Crew → Logins shows which are there and the command for those that aren't.
+
+**A repository from an address.** Crew clones it itself, so a worker starts inside it. A wrong address or a private repository with no token is refused straight away. After that the task is on the page at once, as **Getting the repository** with how far it has got, and a big one can take minutes without anything waiting on it. If the clone fails you're told why; stopping the task stops the clone, and a deck restart starts it again. To have a repository here with no work yet, ask your agent to clone it (`crew action=clone`): no worker runs and no tokens go, it shows as its own project, and your agent tells you when it's ready. **New task here** then starts in the same repository.
+
+**Asking twice.** The same brief, for the same CLI in the same place, while the first is still active, is that task rather than a second one.
 
 **What lands.** Every task works on its own branch and never pushes. "Ship" tasks leave a branch or open a pull request; "scout" tasks only report. Merging and throwing work away take a person: the Merge button, or Approve in the bell on a merge your agent asked for. Work that hasn't landed is never removed unless you say so.
 

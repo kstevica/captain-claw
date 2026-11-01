@@ -1794,3 +1794,17 @@ def test_a_confirmed_purchase_doesnt_make_a_bill_paid_by_captain_true_elsewhere(
     assert fg.judge_reply("I paid it.", "I paid it.", _pay_facts(_PURCHASED)).kinds == ()
     assert fg.judge_reply("Once you approve, I'll place the order.", "Once you approve, I'll place the order.",
                           _pay_facts(_PURCHASE_PENDING)).kinds == ()
+
+
+def test_a_crew_task_or_branch_nothing_showed_is_made_up():
+    # What a model wrote in a turn with no tool call, about a task that didn't exist.
+    reply = ("Repo cloned and mapped. The scout task left everything on branch "
+             "**`crew/clone-captain-claw-repository-234e91`** (task crw_0123456789ab).")
+    assert fg.fabricated_ids(reply, ["nothing here"]) == ("crw_0123456789ab", "crew/clone-captain-claw-repository-234e91")
+    shown = "Task crw_0123456789ab is working: OpenCode in repo, on branch crew/clone-captain-claw-repository-234e91."
+    assert fg.fabricated_ids(reply, [shown]) == ()
+    # A callback holds them too, and they outlast compaction in the ledger.
+    assert set(fg.ledger_ids(shown)) >= {"crw_0123456789ab", "crew/clone-captain-claw-repository-234e91"}
+    # Words and paths that only look a bit like one, and taking one back.
+    assert fg.fabricated_ids("See vfs:crew/simple-webpage/report.md and crew/feature-branch.", ["nothing"]) == ()
+    assert fg.fabricated_ids("I made up crew/clone-captain-claw-repository-234e91, sorry.", ["nothing"]) == ()

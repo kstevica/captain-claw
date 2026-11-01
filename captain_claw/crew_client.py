@@ -17,7 +17,7 @@ log = get_logger(__name__)
 
 MEMBER_REFUSED = "Crew isn't available during a shared-agent member's turn: only the agent's owner can use it."
 NO_FLIGHT_DECK = "Crew needs Flight Deck: this agent wasn't started by one."
-_TIMEOUT = 180.0  # a dispatch may clone a repository first
+_TIMEOUT = 180.0  # a pull request pushes first; a clone happens in the background
 
 _USABLE: tuple[bool, float] = (False, 0.0)
 _CACHE_MAX_AGE = 120.0

@@ -13,7 +13,7 @@ export const CREW_AGENTS = [
   { id: 'pi', label: 'Pi' },
 ] as const
 
-export type CrewStatus = 'queued' | 'running' | 'waiting' | 'ready' | 'failed' | 'stopped' | 'pr_open' | 'delivered' | 'closed'
+export type CrewStatus = 'preparing' | 'queued' | 'running' | 'waiting' | 'ready' | 'failed' | 'stopped' | 'pr_open' | 'delivered' | 'closed'
 
 export interface CrewHarness {
   id: string
@@ -94,7 +94,7 @@ export interface CrewFile {
 export interface CrewTask {
   id: string
   title: string
-  kind: 'ship' | 'scout'
+  kind: 'ship' | 'scout' | 'clone'
   harness: string
   harness_label: string
   model: string
@@ -104,6 +104,7 @@ export interface CrewTask {
   note: string
   repo_label: string
   repo_kind: string
+  repo_url?: string
   project_key: string
   project_name: string
   results: CrewResults

@@ -15,6 +15,7 @@ import type { HostedSite } from '../../services/hostingApi'
 // deck's violet, with what a person wants up front and git's words behind a click.
 
 export const STATUS: Record<CrewStatus, { label: string; tone: string; dot: string; icon: LucideIcon }> = {
+  preparing: { label: 'Getting the repository', tone: 'bg-sky-500/15 text-sky-600 dark:text-sky-300', dot: 'bg-sky-500', icon: Loader2 },
   queued: { label: 'Waiting for a slot', tone: 'bg-zinc-500/15 text-zinc-400', dot: 'bg-zinc-500', icon: Clock },
   running: { label: 'Working', tone: 'bg-sky-500/15 text-sky-600 dark:text-sky-300', dot: 'bg-sky-500', icon: Loader2 },
   waiting: { label: 'Needs you', tone: 'bg-amber-500/15 text-amber-700 dark:text-amber-300', dot: 'bg-amber-500', icon: MessageCircleQuestion },
@@ -25,7 +26,8 @@ export const STATUS: Record<CrewStatus, { label: string; tone: string; dot: stri
   delivered: { label: 'Landed', tone: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300', dot: 'bg-emerald-500', icon: GitMerge },
   closed: { label: 'Closed', tone: 'bg-zinc-500/15 text-zinc-500', dot: 'bg-zinc-600', icon: CircleDashed },
 }
-export const LIVE: CrewStatus[] = ['queued', 'running']
+export const LIVE: CrewStatus[] = ['preparing', 'queued', 'running']
+const SPINS: CrewStatus[] = ['preparing', 'running']
 export const DONE: CrewStatus[] = ['delivered', 'closed']
 
 export const fieldClass = inputCls
@@ -66,11 +68,12 @@ export const isWorking = (t: CrewTask) => LIVE.includes(t.status) && !t.stalled
 export function statusLabel(t: Pick<CrewTask, 'status' | 'stalled' | 'kind' | 'evidence'>): string {
   if (t.stalled) return 'Quiet for a while'
   if (t.status === 'ready' && t.kind === 'scout') return 'Report ready'
+  if (t.status === 'ready' && t.kind === 'clone') return 'Ready to use'
   if (t.status === 'ready' && !(t.evidence?.commits || t.evidence?.dirty)) return 'No changes'
   return (STATUS[t.status] ?? STATUS.stopped).label
 }
 
-const URGENCY: CrewStatus[] = ['waiting', 'failed', 'ready', 'pr_open', 'running', 'queued', 'stopped', 'delivered', 'closed']
+const URGENCY: CrewStatus[] = ['waiting', 'failed', 'ready', 'pr_open', 'running', 'preparing', 'queued', 'stopped', 'delivered', 'closed']
 
 /** What wants the person first, then the latest. */
 export function byUrgency(a: CrewTask, b: CrewTask): number {
@@ -93,7 +96,7 @@ export function statParts(stat?: string): { files: number; added: number; remove
 
 export function StatusDot({ task }: { task: Pick<CrewTask, 'status' | 'stalled'> }) {
   const s = STATUS[task.status] ?? STATUS.stopped
-  const running = task.status === 'running' && !task.stalled
+  const running = SPINS.includes(task.status) && !task.stalled
   return (
     <span className="relative mt-[5px] flex h-2 w-2 shrink-0">
       {running && <span className={`absolute inline-flex h-full w-full animate-ping rounded-full opacity-60 ${s.dot}`} />}
@@ -106,7 +109,7 @@ export function StatusPill({ task }: { task: Pick<CrewTask, 'status' | 'stalled'
   const s = STATUS[task.status] ?? STATUS.stopped
   return (
     <span className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-0.5 text-[11px] font-medium ${task.stalled ? STATUS.waiting.tone : s.tone}`}>
-      {task.status === 'running' && !task.stalled && <Loader2 className="h-3 w-3 animate-spin" />}
+      {SPINS.includes(task.status) && !task.stalled && <Loader2 className="h-3 w-3 animate-spin" />}
       {statusLabel(task)}
     </span>
   )
@@ -118,7 +121,7 @@ export function StatusChip({ task, size = 'md' }: { task: Pick<CrewTask, 'status
   const Icon = s.icon
   return (
     <span className={`flex shrink-0 items-center justify-center ${s.tone} ${size === 'lg' ? 'h-11 w-11 rounded-2xl' : 'h-9 w-9 rounded-xl'}`}>
-      <Icon className={`${size === 'lg' ? 'h-5 w-5' : 'h-[18px] w-[18px]'} ${task.status === 'running' && !task.stalled ? 'animate-spin' : ''}`} />
+      <Icon className={`${size === 'lg' ? 'h-5 w-5' : 'h-[18px] w-[18px]'} ${SPINS.includes(task.status) && !task.stalled ? 'animate-spin' : ''}`} />
     </span>
   )
 }
