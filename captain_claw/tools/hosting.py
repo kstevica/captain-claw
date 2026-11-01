@@ -113,31 +113,40 @@ class HostingTool(Tool):
     # ── identity / transport (same pattern as the code + basna tools) ─────────
 
     def _get_fd_url(self, **kwargs: Any) -> str:
+        """As the flight_deck tool resolves it (``fd_client.
+        resolve_flight_deck_url``): the deck FD pinned at spawn. A session's
+        ``fd_url`` is the browser's origin; a call sent there leaves through the
+        deck's public proxy and comes back looking remote, so FD refuses it."""
+        from captain_claw.fd_client import resolve_flight_deck_url
+
         session = kwargs.get("_session")
         agent = kwargs.get("_agent")
         metadata = getattr(session, "metadata", {}) or {} if session else {}
         fd_url = metadata.get("fd_url", "")
         if not fd_url and agent:
             fd_url = getattr(agent, "_fd_url", "") or ""
-        if not fd_url:
-            fd_url = os.environ.get("FD_URL", "") or os.environ.get("FD_INTERNAL_URL", "")
-        return fd_url
+        return resolve_flight_deck_url(fd_url)
 
-    def _identity(self) -> dict:
+    def _identity(self, fd_url: str) -> dict:
+        """The web_auth — the agent's own credential — only for a pinned FD URL."""
         from captain_claw.config import get_config
+        from captain_claw.fd_client import is_pinned_flight_deck_url
         try:
             cfg = get_config()
             port, auth = int(cfg.web.port or 0), cfg.web.auth_token or ""
         except Exception:  # noqa: BLE001
             port, auth = 0, ""
-        return {"web_auth": auth, "source_port": port,
+        return {"web_auth": auth if is_pinned_flight_deck_url(fd_url) else "", "source_port": port,
                 "owner_id": os.environ.get("FD_OWNER_ID", "")}
 
     async def _post(self, fd_url: str, path: str, payload: dict) -> Any:
         import httpx
-        body = {**self._identity(), **payload}
+
+        from captain_claw.fd_client import agent_identity_headers
+        body = {**self._identity(fd_url), **payload}
         async with httpx.AsyncClient(timeout=45.0) as client:
-            resp = await client.post(f"{fd_url}{path}", json=body)
+            resp = await client.post(f"{fd_url}{path}", json=body,
+                                     headers=agent_identity_headers(fd_url))
         if resp.status_code in (400, 403, 404, 409):
             detail = ""
             try:
@@ -170,6 +179,13 @@ class HostingTool(Tool):
     def _pub_url(view: dict) -> str:
         return view.get("url_abs") or view.get("url") or ""
 
+    @staticmethod
+    def _local_note(view: dict) -> str:
+        if not view.get("local_only"):
+            return ""
+        return ("\nAlso tell the user: this deck has no public address (FD_PUBLIC_URL), so the "
+                "link only works on this computer or network.")
+
     async def _publish(self, fd_url: str, **kwargs: Any) -> ToolResult:
         name = (kwargs.get("name") or "").strip().lower()
         project = (kwargs.get("project") or "").strip()
@@ -192,7 +208,7 @@ class HostingTool(Tool):
         if kind == "app":
             if d.get("started"):
                 return ToolResult(success=True, content=(
-                    f"{verb} app **{name}** — running and live at {url}"))
+                    f"{verb} app **{name}** — running and live at {url}" + self._local_note(d)))
             # Published but the process didn't come up — surface the log so the
             # agent can fix and re-publish (don't claim success it can't see).
             logtail = (d.get("log") or "").strip()
@@ -200,7 +216,8 @@ class HostingTool(Tool):
                 f"{verb} app **{name}** at {url}, but it did not start: {d.get('message', '')}.\n"
                 + (f"Recent output:\n{logtail}" if logtail else "")
                 + "\nFix the start command / code and re-publish, or check status later."))
-        return ToolResult(success=True, content=f"{verb} static site **{name}** — live at {url}")
+        return ToolResult(success=True, content=(
+            f"{verb} static site **{name}** — live at {url}" + self._local_note(d)))
 
     async def _list(self, fd_url: str) -> ToolResult:
         d = await self._post(fd_url, "/fd/hosting/agent/list", {})
@@ -230,7 +247,8 @@ class HostingTool(Tool):
             return ToolResult(success=True, content=f"Stopped **{name}** — {d.get('message', 'ok')}.")
         if action == "start":
             if d.get("started"):
-                return ToolResult(success=True, content=f"Started **{name}** — live at {self._pub_url(d)}")
+                return ToolResult(success=True, content=(
+                    f"Started **{name}** — live at {self._pub_url(d)}" + self._local_note(d)))
             logtail = (d.get("log") or "").strip()
             return ToolResult(success=False, error=(
                 f"Could not start **{name}**: {d.get('message', '')}."
@@ -242,7 +260,7 @@ class HostingTool(Tool):
         v = d.get("visits") or {}
         if v.get("count"):
             parts.append(f"{v['count']} visit(s)")
-        content = " · ".join(parts)
+        content = " · ".join(parts) + self._local_note(d)
         logtail = (d.get("log") or "").strip()
         if d.get("kind") == "app" and logtail:
             content += f"\n\nRecent output:\n{logtail}"

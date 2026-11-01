@@ -101,31 +101,40 @@ class CodeSessionTool(Tool):
     # ── identity / transport (same pattern as the basna tool) ─────────────
 
     def _get_fd_url(self, **kwargs: Any) -> str:
+        """As the flight_deck tool resolves it (``fd_client.
+        resolve_flight_deck_url``): the deck FD pinned at spawn. A session's
+        ``fd_url`` is the browser's origin; a call sent there leaves through the
+        deck's public proxy and comes back looking remote, so FD refuses it."""
+        from captain_claw.fd_client import resolve_flight_deck_url
+
         session = kwargs.get("_session")
         agent = kwargs.get("_agent")
         metadata = getattr(session, "metadata", {}) or {} if session else {}
         fd_url = metadata.get("fd_url", "")
         if not fd_url and agent:
             fd_url = getattr(agent, "_fd_url", "") or ""
-        if not fd_url:
-            fd_url = os.environ.get("FD_URL", "") or os.environ.get("FD_INTERNAL_URL", "")
-        return fd_url
+        return resolve_flight_deck_url(fd_url)
 
-    def _identity(self) -> dict:
+    def _identity(self, fd_url: str) -> dict:
+        """The web_auth — the agent's own credential — only for a pinned FD URL."""
         from captain_claw.config import get_config
+        from captain_claw.fd_client import is_pinned_flight_deck_url
         try:
             cfg = get_config()
             port, auth = int(cfg.web.port or 0), cfg.web.auth_token or ""
         except Exception:  # noqa: BLE001
             port, auth = 0, ""
-        return {"web_auth": auth, "source_port": port,
+        return {"web_auth": auth if is_pinned_flight_deck_url(fd_url) else "", "source_port": port,
                 "owner_id": os.environ.get("FD_OWNER_ID", "")}
 
     async def _post(self, fd_url: str, path: str, payload: dict) -> Any:
         import httpx
-        body = {**self._identity(), **payload}
+
+        from captain_claw.fd_client import agent_identity_headers
+        body = {**self._identity(fd_url), **payload}
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(f"{fd_url}{path}", json=body)
+            resp = await client.post(f"{fd_url}{path}", json=body,
+                                     headers=agent_identity_headers(fd_url))
         if resp.status_code == 404:
             return {"_error": "not found"}
         if resp.status_code == 403:

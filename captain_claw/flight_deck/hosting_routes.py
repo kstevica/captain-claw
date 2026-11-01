@@ -286,10 +286,18 @@ def _agent_owned(name: str, owner: str) -> dict:
     return ent
 
 
-def _abs_url(request: Request, path: str) -> str:
-    """Best-effort absolute public URL (honors a reverse proxy's forwarded host)."""
-    base = str(request.base_url).rstrip("/")
-    return f"{base}{path}"
+async def _add_public_url(view: dict, request: Request, owner: str) -> None:
+    """The address a person can open, as public links resolve it
+    (``public_file_shares._agent_link_base``). An agent calls FD on its internal
+    URL, so this request's own host is only the last resort; ``local_only`` says
+    that's all there was."""
+    import urllib.parse
+
+    from captain_claw.flight_deck import public_file_shares
+
+    base = await public_file_shares._agent_link_base(request, owner)
+    view["url_abs"] = f"{base}{view['url']}"
+    view["local_only"] = public_file_shares._private_host(urllib.parse.urlsplit(base).hostname or "")
 
 
 @router.post("/fd/hosting/agent/publish")
@@ -342,19 +350,21 @@ async def agent_publish(body: AgentPublishReq, request: Request,
     view["updated"] = bool(existing)
     view["started"] = started
     view["message"] = start_msg
-    view["url_abs"] = _abs_url(request, view["url"])
+    await _add_public_url(view, request, owner)
     if body.kind == "app" and body.auto_start and not started:
         view["log"] = vh.read_app_log(name, tail=40)
     return view
 
 
 @router.post("/fd/hosting/agent/list")
-async def agent_list(body: _AgentReq,
+async def agent_list(body: _AgentReq, request: Request,
                      auth_user: dict | None = Depends(get_optional_user)):
     owner = _agent_owner(body, auth_user)
     reg = vh.load_registry()
     mine = [_view(n, e) for n, e in reg.items() if e.get("owner") == owner]
     mine.sort(key=lambda x: x["name"])
+    for view in mine:
+        await _add_public_url(view, request, owner)
     return {"entries": mine}
 
 
@@ -369,7 +379,8 @@ async def agent_start(body: AgentNameReq, request: Request,
         raise HTTPException(403, _APP_ADMIN_ONLY)
     ok, msg = vh.start_app(body.name)
     view = _view(body.name, vh.load_registry().get(body.name, ent))
-    view.update({"started": ok, "message": msg, "url_abs": _abs_url(request, view["url"])})
+    view.update({"started": ok, "message": msg})
+    await _add_public_url(view, request, owner)
     if not ok:
         view["log"] = vh.read_app_log(body.name, tail=40)
     return view
@@ -403,7 +414,7 @@ async def agent_status(body: AgentNameReq, request: Request,
     owner = _agent_owner(body, auth_user)
     ent = _agent_owned(body.name, owner)
     view = _view(body.name, ent)
-    view["url_abs"] = _abs_url(request, view["url"])
+    await _add_public_url(view, request, owner)
     if ent.get("kind") == "app":
         view["log"] = vh.read_app_log(body.name, tail=40)
     view["visits"] = vh.get_visits(body.name)
