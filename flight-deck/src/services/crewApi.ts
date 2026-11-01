@@ -4,7 +4,7 @@
  * (`captain_claw/flight_deck/crew_routes.py`). Every read is the caller's own.
  */
 
-import { useAuthStore } from '../stores/authStore'
+import { refreshAccessToken, useAuthStore } from '../stores/authStore'
 import { api } from './fileLibraryApi'
 
 export const CREW_AGENTS = [
@@ -180,6 +180,7 @@ export interface CrewDispatch {
   repo_path?: string
   model?: string
   effort?: string
+  attachments?: string[]
 }
 
 const post = <T>(path: string, body?: unknown) =>
@@ -224,7 +225,30 @@ export interface CrewTerminalTarget {
   task?: string
 }
 
+/** A multipart body, so not through api(), which says it's JSON. Renews a token that ran out, as that does. */
+async function uploadFile(file: File): Promise<{ id: string; name: string; size: number; type: string }> {
+  const send = () => {
+    const { token } = useAuthStore.getState()
+    const form = new FormData()
+    form.append('file', file)
+    return fetch('/fd/crew/uploads', { method: 'POST', body: form, credentials: 'include', headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  }
+  let r = await send()
+  if (r.status === 401 && useAuthStore.getState().authEnabled && (await refreshAccessToken())) r = await send()
+  if (!r.ok) {
+    let detail = ''
+    try {
+      const body = await r.json()
+      detail = typeof body?.detail === 'string' ? body.detail : ''
+    } catch { /* not JSON: a proxy's own refusal, say */ }
+    throw new Error(detail || (r.status === 413 ? 'That file is too big.' : `${r.status} ${r.statusText}`))
+  }
+  return r.json()
+}
+
 export const crewApi = {
+  upload: uploadFile,
+  dropUpload: (id: string) => api<{ ok: boolean }>(`/fd/crew/uploads/${id}`, { method: 'DELETE' }),
   envs: () => api<{ envs: CrewEnv[] }>('/fd/crew/envs'),
   saveEnv: (id: string, body: CrewEnvSettings) => api<CrewEnv>(`/fd/crew/envs/${id}`, { method: 'PUT', body: JSON.stringify(body) }),
   envCurrent: (id: string) => post<CrewEnv>(`/fd/crew/envs/${id}/current`),
@@ -251,7 +275,7 @@ export const crewApi = {
   newProject: (name: string) => post<{ project: string; key: string; path: string }>('/fd/crew/projects', { name }),
   tidy: (key: string) => post<{ cleared: number; kept: number }>('/fd/crew/projects/tidy', { key }),
   dispatch: (body: CrewDispatch) => post<CrewTask>('/fd/crew/tasks', body),
-  steer: (id: string, text: string, now = false) => post<CrewTask>(`/fd/crew/tasks/${id}/steer`, { text, now }),
+  steer: (id: string, text: string, now = false, attachments: string[] = []) => post<CrewTask>(`/fd/crew/tasks/${id}/steer`, { text, now, attachments }),
   interrupt: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/interrupt`),
   stop: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/stop`),
   pr: (id: string) => post<CrewTask>(`/fd/crew/tasks/${id}/pr`),

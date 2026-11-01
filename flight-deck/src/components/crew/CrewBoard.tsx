@@ -10,6 +10,7 @@ import {
 } from '../../services/crewApi'
 import { hostingApi, type HostedSite } from '../../services/hostingApi'
 import { CrewActivity } from './CrewActivity'
+import { AttachButton, AttachmentList, useAttachments } from './CrewAttachments'
 import { CrewChanges } from './CrewChanges'
 import { EnvironmentCard } from './CrewEnvironment'
 import { CrewFiles } from './CrewFiles'
@@ -157,6 +158,9 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
   const [error, setError] = useState('')
   // Why the last look at it failed: only until a look works. An action's error stays until the next action.
   const [unseen, setUnseen] = useState('')
+  const canTell = !!task && !DONE.includes(task.status) && task.kind !== 'clone'
+  const attachments = useAttachments(canTell)
+  const { clear: clearAttachments } = attachments
   const after = useRef(0)
 
   const load = useCallback(async () => {
@@ -171,6 +175,7 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
   useEffect(() => {
     after.current = 0
     setEvents([]); setTask(null); setTab('activity'); setDiff(null); setError(''); setUnseen(''); setSteer('')
+    clearAttachments()  // what was picked for one task never goes to the next
     let stopped = false
     let timer: ReturnType<typeof setTimeout>
     const tick = async () => {
@@ -184,7 +189,7 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
     }
     tick()
     return () => { stopped = true; clearTimeout(timer) }
-  }, [load])
+  }, [load, clearAttachments])
 
   useEffect(() => {
     if (tab !== 'changes') return
@@ -218,12 +223,21 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
 
   // While it's working, a message either stops it and goes now, or waits for this turn to end.
   const running = task.status === 'running'
+  const nothingToSend = busy || !attachments.ready || (!steer.trim() && !attachments.ids.length)
   const send = (ev: FormEvent | KeyboardEvent<HTMLTextAreaElement>, later = false) => {
     ev.preventDefault()
+    if (nothingToSend) return
     const text = steer.trim()
-    if (!text) return
     setSteer('')
-    act(() => crewApi.steer(task.id, text, running && !later))
+    act(async () => {
+      try {
+        await crewApi.steer(task.id, text, running && !later, attachments.ids)
+      } catch (e) {
+        setSteer(text)  // said again, not typed again
+        throw e
+      }
+      attachments.clear()
+    })
   }
   const waiting = task.waiting ?? []
 
@@ -236,7 +250,7 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
   const about = [task.harness_label, task.project_name || task.repo_label, task.from_agent ? 'from your agent' : '', ago(task.updated_at) === 'now' ? 'just now' : `${ago(task.updated_at)} ago`].filter(Boolean)
 
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+    <div {...(canTell ? { onDragOver: attachments.onDragOver, onDrop: attachments.onDrop } : {})} className="flex min-h-0 min-w-0 flex-1 flex-col">
       <div className="max-h-[45dvh] shrink-0 space-y-3 overflow-y-auto border-b border-zinc-800 p-4 wide:max-h-none wide:p-5">
         <div className="flex items-start gap-3">
           {onBack && <button onClick={onBack} className={libraryIconBtn} aria-label="Back"><ArrowLeft className="h-4 w-4" /></button>}
@@ -310,10 +324,13 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
               )}
             </div>
           )}
+          <AttachmentList files={attachments.files} onRemove={attachments.remove} />
           <div className="flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-1.5 transition-colors focus-within:border-violet-500/60 focus-within:ring-2 focus-within:ring-violet-500/15">
+            <AttachButton onPick={attachments.onPick} compact />
             <textarea
               value={steer}
               onChange={(ev) => setSteer(ev.target.value)}
+              onPaste={attachments.onPaste}
               onKeyDown={(ev) => { if (ev.key === 'Enter' && !ev.shiftKey) send(ev, ev.metaKey || ev.ctrlKey) }}
               rows={Math.min(5, steer.split('\n').length)}
               placeholder={task.status === 'waiting' ? 'Your answer…' : running ? 'Tell it something…' : live ? 'Tell it something, for when it starts…' : 'Tell it to go on…'}
@@ -321,11 +338,11 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
               className="min-w-0 flex-1 resize-none bg-transparent px-2.5 py-1.5 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none"
             />
             {running && (
-              <button type="button" disabled={busy || !steer.trim()} onClick={(ev) => send(ev, true)} title="Sends it when this turn ends, and leaves what it's doing alone" aria-label="Send after this turn" className={`${quietBtn} h-9 shrink-0 !px-2.5`}>
+              <button type="button" disabled={nothingToSend} onClick={(ev) => send(ev, true)} title="Sends it when this turn ends, and leaves what it's doing alone" aria-label="Send after this turn" className={`${quietBtn} h-9 shrink-0 !px-2.5`}>
                 <Clock className="h-4 w-4" /><span className="hidden sm:inline">After this turn</span>
               </button>
             )}
-            <button type="submit" disabled={busy || !steer.trim()} title={running ? 'Stops what it\'s doing, and it goes on with this' : 'Send'} aria-label={running ? 'Send now' : 'Send'} className={`${primaryBtn} h-9 shrink-0 ${running ? '!px-3' : 'w-9 !p-0'}`}>
+            <button type="submit" disabled={nothingToSend} title={running ? 'Stops what it\'s doing, and it goes on with this' : 'Send'} aria-label={running ? 'Send now' : 'Send'} className={`${primaryBtn} h-9 shrink-0 ${running ? '!px-3' : 'w-9 !p-0'}`}>
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}{running && <span className="hidden sm:inline">Send now</span>}
             </button>
           </div>
@@ -476,6 +493,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
   const [effort, setEffort] = useState('')
   const chosen = me.harnesses?.find((h) => h.id === harness)
   const needsModel = !!chosen?.login.free && !chosen.default_model
+  const attachments = useAttachments()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
@@ -492,7 +510,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
   const submit = async (ev: FormEvent) => {
     ev.preventDefault()
     setBusy(true); setError('')
-    const body: CrewDispatch = { harness, brief: brief.trim(), kind, deliver: kind === 'ship' ? deliver : 'branch', model: model.trim(), effort: effort.trim() }
+    const body: CrewDispatch = { harness, brief: brief.trim(), kind, deliver: kind === 'ship' ? deliver : 'branch', model: model.trim(), effort: effort.trim(), attachments: attachments.ids }
     if (where === 'project') { body.project = project.trim(); body.folder = folder.trim() }
     if (where === 'url') body.repo_url = url.trim()
     if (where === 'path') body.repo_path = path.trim()
@@ -519,7 +537,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
   )
 
   return (
-    <form onSubmit={submit} className="flex min-h-0 flex-1 flex-col">
+    <form onSubmit={submit} onDragOver={attachments.onDragOver} onDrop={attachments.onDrop} className="flex min-h-0 flex-1 flex-col">
       <div className="min-h-0 flex-1 overflow-y-auto">
         <div className="mx-auto w-full max-w-2xl space-y-6 p-4 wide:p-6">
           <div className="flex items-start gap-3">
@@ -540,11 +558,15 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
           <label className={labelCls}>
             What to do
             <textarea
-              value={brief} onChange={(e) => setBrief(e.target.value)} rows={5} required autoFocus
-              placeholder="The whole task. It sees only this: the goal, what done means, anything already decided."
+              value={brief} onChange={(e) => setBrief(e.target.value)} onPaste={attachments.onPaste} rows={5} required autoFocus
+              placeholder="The whole task. It sees only this: the goal, what done means, anything already decided. Paste or drop screenshots and files here too."
               className={`${fieldClass} mt-1.5 resize-y font-normal`}
             />
           </label>
+          <div className="-mt-3 space-y-2">
+            <AttachButton onPick={attachments.onPick} />
+            <AttachmentList files={attachments.files} onRemove={attachments.remove} />
+          </div>
 
           <fieldset>
             <legend className={labelCls}>Who does it</legend>
@@ -613,7 +635,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
       </div>
       <div className="flex shrink-0 justify-end gap-2 border-t border-zinc-800 bg-zinc-900/40 px-4 py-3">
         <button type="button" onClick={onCancel} className={quietBtn}>Cancel</button>
-        <button type="submit" disabled={busy || !harness || !brief.trim() || !named || (needsModel && !model.trim())} className={primaryBtn}>
+        <button type="submit" disabled={busy || !harness || !brief.trim() || !named || !attachments.ready || (needsModel && !model.trim())} className={primaryBtn}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Start
         </button>
       </div>

@@ -45,7 +45,14 @@ from urllib.parse import urlparse
 import httpx
 from fastapi import HTTPException
 
-from captain_claw.flight_deck import crew_access, crew_env, crew_harness, crew_logins, crew_store
+from captain_claw.flight_deck import (
+    crew_access,
+    crew_attach,
+    crew_env,
+    crew_harness,
+    crew_logins,
+    crew_store,
+)
 from captain_claw.flight_deck.crew_access import Grant
 from captain_claw.flight_deck.crew_harness import HARNESSES, RunSpec, TurnState
 from captain_claw.flight_deck.crew_store import CrewStore
@@ -711,6 +718,7 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
         state = {k: v for k, v in state.items() if k != "interrupted"}
         _store().update(task["id"], env=state)
         task = {**task, "env": state}
+    await crew_attach.place(task)
     pending: list[str] = list(task.get("pending") or [])
     # No session yet (not started, or it failed before it had one): it knows nothing.
     first = not task.get("session")
@@ -1100,6 +1108,16 @@ async def clone(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, Any
                             origin=origin)
 
 
+def _asked_again(uid: str, task: dict[str, Any], attached: list[dict[str, Any]], told: str) -> dict[str, Any]:
+    """The task already doing this. A retry's files are with it already. A setup under way in other
+    words hasn't got these, and they'd go nowhere unsaid."""
+    if attached and task["brief"] != told:
+        raise HTTPException(409, f"This project is already being set up: send the files in a message to that task, {task['id']}.")
+    for item in attached:
+        crew_attach.drop_upload(uid, item["id"])
+    return task
+
+
 async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, Any]:
     """A new task: its worktree now, so a bad place fails here, to the one asking, and
     its first turn as soon as there's room. A repository address only has to answer now:
@@ -1124,16 +1142,22 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     if kind != "ship" and deliver == "pr":
         raise HTTPException(400, "Only kind=ship changes code, so only that has a pull request to open.")
     _, url, _ = _place_of(body)
+    attached = crew_attach.staged(user["id"], body.get("attachments"))
+    if len(attached) > crew_attach.MAX_TASK_FILES or sum(i["size"] for i in attached) > crew_attach.MAX_TASK_BYTES:
+        raise HTTPException(413, f"A task can have {crew_attach.MAX_TASK_FILES} attached files, up to "
+                                 f"{crew_attach.MAX_TASK_BYTES // 1_000_000} MB in all.")
     defaults = await crew_logins.read_models(get_db(), user["id"])
     own = await crew_logins.read_own_model(get_db(), user["id"])
     model = _clean_axis(body.get("model"), _MODEL_RE, "model name") or crew_logins.effective_model(defaults, own, harness)
     effort = _clean_axis(body.get("effort"), _EFFORT_RE, "reasoning effort")
     active = [t for t in _store().with_status(*crew_store.ACTIVE) if t["user_id"] == user["id"]]
-    # One setup at a time for a project, whoever does it and however it was put.
-    twins = [t for t in active if t["kind"] == kind and (kind == "setup" or (t["harness"] == harness and t["brief"] == brief[:100_000]))]
+    told = (brief[:100_000] + crew_attach.note(crew_attach.named(attached))).strip()
+    # One setup at a time for a project, whoever does it and however it was put. Any other task
+    # is the same one in the same words with the same files, as a retry sends it.
+    twins = [t for t in active if t["kind"] == kind and (kind == "setup" or (t["harness"] == harness and t["brief"] == told))]
     for task in twins:
         if url and _same_repo(task.get("repo_url") or "", url):
-            return task
+            return _asked_again(user["id"], task, attached, told)
     if len(active) >= grant.max_parallel * _ACTIVE_PER_SLOT:
         raise HTTPException(429, f"You already have {len(active)} tasks running or waiting. Let some finish first.")
     binary = await asyncio.to_thread(crew_harness.find_binary, harness)
@@ -1157,23 +1181,26 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     slug = _slug_for(title)
     origin = body.get("origin") if isinstance(body.get("origin"), dict) else {}
     fields: dict[str, Any] = dict(
-        title=title, kind=kind, harness=harness, model=model, effort=effort, brief=brief[:100_000], deliver=deliver,
+        title=title, kind=kind, harness=harness, model=model, effort=effort, brief=told, deliver=deliver,
         agent_slug=str(body.get("agent_slug") or ""), source_host=str(body.get("source_host") or ""), origin=origin,
     )
     if url:
         if deliver == "pr":
             await _must_reach_github(user, grant, url=url)
         await _check_address(user, grant, url)
-        return _begin_preparing(user, url, branch="" if kind == "setup" else f"crew/{slug}", **fields)
+        task = _begin_preparing(user, url, branch="" if kind == "setup" else f"crew/{slug}", **fields)
+        crew_attach.take(user["id"], task["id"], attached)  # before its job first runs: nothing has awaited yet
+        return task
     where = await _resolve_repo(user, grant, body)
     for task in twins:
         if task["repo"] == where["repo"]:
-            return task
+            return _asked_again(user["id"], task, attached, told)
     if deliver == "pr":
         await _must_reach_github(user, grant, repo=where["repo"])
     tree = await _setup_place(where["repo"]) if kind == "setup" else await _make_worktree(user, grant, where, slug)
     where.pop("remote_base", None)
     task = _store().create(user["id"], status="queued", last_event_at=time.time(), **fields, **where, **tree)
+    crew_attach.take(user["id"], task["id"], attached)
     await _start_queued()
     return _store().get(user["id"], task["id"]) or task
 
@@ -1211,11 +1238,12 @@ async def interrupt(uid: str, task_id: str) -> dict[str, Any]:
     return _get(uid, task_id)
 
 
-async def steer(uid: str, task_id: str, text: str, *, now: bool = False) -> dict[str, Any]:
+async def steer(uid: str, task_id: str, text: str, *, now: bool = False, attachments: list[str] | None = None) -> dict[str, Any]:
     """The next instruction. It waits for a running turn to end, unless it's sent *now*,
     which cuts that turn short (:func:`_interrupt`)."""
     message = str(text or "").strip()
-    if not message:
+    attached = crew_attach.staged(uid, attachments)
+    if not message and not attached:
         raise HTTPException(400, "Say what to tell it.")
     async with _lock_for(task_id):
         task = _get(uid, task_id)
@@ -1224,7 +1252,10 @@ async def steer(uid: str, task_id: str, text: str, *, now: bool = False) -> dict
         if task["kind"] == "clone":
             raise HTTPException(409, "This one only gets a repository ready, so there's no worker to tell. Start a task "
                                      "in it, with the same repository address.")
-        fields: dict[str, Any] = {"pending": [*task["pending"], message[:100_000]]}
+        crew_attach.check_room(uid, task_id, attached)
+        taken = crew_attach.take(uid, task_id, attached)
+        said = (message[:100_000] or "Look at what's attached.") + crew_attach.note(taken)
+        fields: dict[str, Any] = {"pending": [*task["pending"], said]}
         if task["status"] not in ("running", "preparing"):
             # Stopped, or failed, before it had a worktree: it still has to get one.
             if task.get("repo_url") and not task.get("worktree"):
@@ -1506,6 +1537,7 @@ async def merge(user: dict, grant: Grant, task_id: str, *, expect_head: str = ""
 
 async def _remove_worktree(task: dict, *, force: bool) -> None:
     crew_env.drop_tmp(task)
+    crew_attach.drop(task)
     if task.get("kind") == "setup":
         return  # its "worktree" is the main checkout
     wt, repo, branch = task.get("worktree") or "", task["repo"], task.get("branch") or ""

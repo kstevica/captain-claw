@@ -370,7 +370,7 @@ def _copy(src: Path, dst: Path) -> str:
     return why
 
 
-async def _keep_out_of_git(cwd: str, copied: list[str]) -> None:
+async def keep_out_of_git(cwd: str, copied: list[str]) -> None:
     """A copied folder the project doesn't ignore must not get committed by a `git add -A`.
     Shared by the repository's worktrees, and local: it's never pushed."""
     rc, common = await _git(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir")
@@ -421,7 +421,7 @@ async def give_to_task(task: dict[str, Any]) -> dict[str, Any]:
                 state["failed"].append({"path": rel, "why": why})
             else:
                 state["copied"].append(rel)
-    await _keep_out_of_git(cwd, state["copied"])
+    await keep_out_of_git(cwd, state["copied"])
     state["missing"] = [m for m in state["missing"] if m not in state["copied"]]
     return state
 

@@ -18,7 +18,8 @@ from fastapi import FastAPI, HTTPException
 
 from captain_claw.flight_deck import admin_routes, agent_identity
 from captain_claw.flight_deck import auth as auth_mod
-from captain_claw.flight_deck import autonomy, crew_access, crew_logins, crew_routes, crew_runner, crew_store, fd_crypto, fd_dispatch
+from captain_claw import crew_client
+from captain_claw.flight_deck import autonomy, crew_access, crew_attach, crew_logins, crew_routes, crew_runner, crew_store, fd_crypto, fd_dispatch
 from captain_claw.flight_deck import settings_routes
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.db import FlightDeckDB
@@ -1342,3 +1343,183 @@ async def test_the_tool_and_the_routes_can_send_a_message_now(deck, as_agent):
     async with _client(deck.other) as other:
         await _approve(deck, deck.other)
         assert (await other.post(f"/fd/crew/tasks/{made['id']}/interrupt")).status_code == 404
+
+
+async def test_files_go_up_and_with_a_task_over_the_routes(deck):
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        up = await client.post("/fd/crew/uploads", files={"file": ("../shot one.png", b"bytes", "image/png")})
+        assert up.status_code == 201, up.text
+        got = up.json()
+        assert got["name"] == "shot one.png" and got["size"] == 5 and got["type"] == "image/png"
+        spare = (await client.post("/fd/crew/uploads", files={"file": ("spare.txt", b"x", "text/plain")})).json()
+        assert (await client.delete(f"/fd/crew/uploads/{spare['id']}")).json() == {"ok": True}
+        gone = await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "x", "project": "p", "attachments": [spare["id"]]})
+        assert gone.status_code == 400 and "Attach it again" in gone.json()["detail"]
+        made = await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:work", "project": "p", "attachments": [got["id"]]})
+        assert made.status_code == 201, made.text
+    held = crew_store.task_dir(deck.user["id"], made.json()["id"]) / "attachments" / "shot one.png"
+    assert held.read_bytes() == b"bytes"
+    done = await _settle(deck.user["id"], made.json()["id"])
+    assert done["status"] == "ready"
+    async with _client(deck.user) as client:
+        second = (await client.post("/fd/crew/uploads", files={"file": ("more.txt", b"more", "text/plain")})).json()
+        told = await client.post(f"/fd/crew/tasks/{done['id']}/steer", json={"text": "", "attachments": [second["id"]]})
+        assert told.status_code == 200, told.text
+
+
+async def test_uploading_takes_the_same_approval_and_another_persons_task_is_still_refused(deck):
+    async with _client(deck.user) as client:
+        refused = await client.post("/fd/crew/uploads", files={"file": ("a.txt", b"a", "text/plain")})
+        assert refused.status_code == 403 and "approved" in refused.json()["detail"]
+        assert (await client.delete("/fd/crew/uploads/0123456789abcdef0123")).status_code == 403
+    await _approve(deck, deck.user)
+    await _approve(deck, deck.other)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+        made = (await client.post("/fd/crew/tasks", json={"harness": "claude", "brief": "SCENARIO:slow", "project": "p"})).json()
+    async with _client(deck.other) as other:
+        theirs = (await other.post("/fd/crew/uploads", files={"file": ("a.txt", b"a", "text/plain")})).json()
+        assert (await other.post(f"/fd/crew/tasks/{made['id']}/steer", json={"text": "x", "attachments": [theirs["id"]]})).status_code == 404
+    assert crew_attach.staged(deck.other["id"], [theirs["id"]]), "it's still theirs, and went nowhere"
+
+
+# ── The tool's files ─────────────────────────────────────────────────────
+
+
+class _OverRoutes:
+    """The tool's client, on the real routes: what crew_client does, in this process."""
+
+    MAX_FILE_BYTES = crew_client.MAX_FILE_BYTES
+    MAX_TASK_BYTES = crew_client.MAX_TASK_BYTES
+    MAX_TASK_FILES = crew_client.MAX_TASK_FILES
+
+    def __init__(self, agent: httpx.AsyncClient) -> None:
+        self.agent = agent
+        self.asked: list[str] = []
+
+    async def call(self, method, path, body=None):
+        self.asked.append(path)
+        resp = await self.agent.request(method, f"/fd/crew/agent/{path}", json=body)
+        return resp.status_code, resp.json()
+
+    async def upload(self, path, name, media_type):
+        self.asked.append(f"upload {name}")
+        resp = await self.agent.post("/fd/crew/agent/uploads", files={"file": (name, path.read_bytes(), media_type)})
+        return resp.status_code, resp.json()
+
+
+@pytest.fixture
+async def tool_files(deck, as_agent):
+    """An approved owner's agent, with files of its own."""
+    await _approve(deck, deck.user)
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+    as_agent["owner"] = deck.user["id"]
+    saved = deck.tmp / "agent" / "saved"
+    (saved / "media").mkdir(parents=True)
+    (saved / "media" / "shot.png").write_bytes(b"\x89PNG pixels")
+    (saved / "build.log").write_text("it broke\n")
+    async with _client(None) as agent:
+        yield types.SimpleNamespace(
+            client=_OverRoutes(agent), saved=saved, uid=deck.user["id"],
+            where={"_saved_base_path": str(saved), "_runtime_base_path": str(saved.parent)},
+        )
+
+
+def _uploads_left(uid: str) -> list[Path]:
+    return list((crew_store.user_dir(uid) / "uploads").glob("*"))
+
+
+async def test_an_agent_can_give_a_worker_files_with_a_task_and_a_message(tool_files):
+    t = tool_files
+    log_path = t.saved / "build.log"
+    out = await CrewTool()._do_dispatch(
+        t.client, harness="claude", brief="SCENARIO:work", project="p", kind="scout",
+        attachments=["saved/media/shot.png", str(log_path), "saved/media/shot.png"], **t.where)
+    assert out.success, out.error
+    assert "shot.png" in out.content and "build.log" in out.content and str(t.saved) not in out.content, "names, never paths"
+    assert t.client.asked == ["upload shot.png", "upload build.log", "dispatch"], "once each, and first"
+    task = crew_store.get_store().list_for(t.uid)[0]
+    held = crew_store.task_dir(t.uid, task["id"]) / "attachments"
+    assert (held / "shot.png").read_bytes() == b"\x89PNG pixels" and (held / "build.log").read_text() == "it broke\n"
+    assert f"{crew_attach.FOLDER}/shot.png (image/png" in task["brief"] and f"{crew_attach.FOLDER}/build.log (text/" in task["brief"]
+    assert task["title"] == "SCENARIO:work"
+    await _settle(t.uid, task["id"])
+    (t.saved / "more.txt").write_text("more")
+    told = await CrewTool()._do_steer(t.client, task_id=task["id"], attachments=["more.txt"], **t.where)
+    assert told.success, told.error
+    assert "more.txt" in told.content and (held / "more.txt").read_text() == "more"
+    assert not _uploads_left(t.uid)
+
+
+async def test_prepare_env_takes_files_too(tool_files):
+    t = tool_files
+    out = await CrewTool()._do_prepare_env(t.client, harness="claude", project="p", attachments=["build.log"], **t.where)
+    assert out.success and "build.log" in out.content, out.error
+    task = crew_store.get_store().list_for(t.uid)[0]
+    assert task["kind"] == "setup" and (crew_store.task_dir(t.uid, task["id"]) / "attachments" / "build.log").exists()
+
+
+async def test_a_file_that_cant_go_refuses_the_call_before_anything_goes(tool_files, monkeypatch):
+    t = tool_files
+    (t.saved / ".env").write_text("KEY=secret")
+    (t.saved / "agent.db").write_bytes(b"SQLite format 3\x00 and tokens")
+    (t.saved / "empty.txt").write_text("")
+    (t.saved / "big.bin").write_bytes(b"x" * 40)
+    monkeypatch.setattr(_OverRoutes, "MAX_FILE_BYTES", 30)
+    for name, said in ((".env", "key or a secrets file"), ("agent.db", "database"), ("empty.txt", "empty"),
+                       ("big.bin", "a file can be"), ("missing.png", "File not found"), ("media", "File not found")):
+        out = await CrewTool()._do_dispatch(t.client, harness="claude", brief="x", project="p", attachments=["build.log", name], **t.where)
+        assert not out.success and said in out.error, (name, out.error)
+    monkeypatch.setattr(_OverRoutes, "MAX_FILE_BYTES", 1000)
+    monkeypatch.setattr(_OverRoutes, "MAX_TASK_BYTES", 10)
+    out = await CrewTool()._do_dispatch(t.client, harness="claude", brief="x", project="p", attachments=["build.log", "big.bin"], **t.where)
+    assert not out.success and "too big" in out.error
+    monkeypatch.setattr(_OverRoutes, "MAX_TASK_FILES", 1)
+    out = await CrewTool()._do_steer(t.client, task_id="t", attachments=["build.log", "big.bin"], **t.where)
+    assert not out.success and "a task can have 1" in out.error
+    assert t.client.asked == [] and not _uploads_left(t.uid), "nothing was sent"
+    assert crew_store.get_store().list_for(t.uid) == []
+    assert not (await CrewTool()._do_steer(t.client, attachments=["build.log"], **t.where)).success
+    assert not (await CrewTool()._do_steer(t.client, task_id="t", **t.where)).success
+    assert t.client.asked == []
+
+
+async def test_a_call_flight_deck_refuses_leaves_no_files_behind(tool_files):
+    t = tool_files
+    out = await CrewTool()._do_dispatch(t.client, harness="codex", brief="x", project="p", attachments=["build.log"], **t.where)
+    assert not out.success and "approved" in out.error
+    assert "upload build.log" in t.client.asked and not _uploads_left(t.uid)
+    out = await CrewTool()._do_steer(t.client, task_id="crw_nope", text="x", attachments=["build.log"], **t.where)
+    assert not out.success and not _uploads_left(t.uid)
+
+
+async def test_a_retried_dispatch_with_files_is_one_worker(tool_files):
+    t = tool_files
+    made = [await CrewTool()._do_dispatch(t.client, harness="claude", brief="SCENARIO:slow", project="p", attachments=["build.log"], **t.where)
+            for _ in range(2)]
+    assert all(out.success for out in made)
+    assert len(crew_store.get_store().list_for(t.uid)) == 1 and not _uploads_left(t.uid)
+
+
+async def test_only_an_approved_owners_agent_can_send_files_and_only_their_own_go(deck, as_agent):
+    as_agent["owner"] = deck.user["id"]
+    file = {"file": ("a.txt", b"a", "text/plain")}
+    async with _client(None) as agent:
+        refused = await agent.post("/fd/crew/agent/uploads", files=file)
+        assert refused.status_code == 403
+        assert (await agent.delete("/fd/crew/agent/uploads/0123456789abcdef0123")).status_code == 403
+    await _approve(deck, deck.user)
+    await _approve(deck, deck.other)
+    async with _client(deck.other) as other:
+        theirs = (await other.post("/fd/crew/uploads", files=file)).json()
+        await other.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+    async with _client(deck.user) as client:
+        await client.put("/fd/crew/logins/claude", json={"secret": "sk-ant-oat01-abc"})
+    async with _client(None) as agent:
+        made = await agent.post("/fd/crew/agent/dispatch", json={"harness": "claude", "brief": "x", "project": "p", "attachments": [theirs["id"]]})
+        assert made.status_code == 400 and "Attach it again" in made.json()["detail"]
+        await agent.delete(f"/fd/crew/agent/uploads/{theirs['id']}")
+    assert crew_attach.staged(deck.other["id"], [theirs["id"]]), "not this agent's to drop"

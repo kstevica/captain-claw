@@ -313,6 +313,7 @@ async def test_a_read_beside_the_decks_data_is_refused_too(deck):
     ("public_link", "path"), ("google_mail", "attachments"), ("microsoft_mail", "attachments"),
     ("send_mail", "attachments"), ("linked_system", "files"), ("watch_background", "path"), ("jev", "state_file"),
     ("summarize_files", "folder"), ("google_drive", "local_path"), ("microsoft_onedrive", "local_path"),
+    ("crew", "attachments"),
 ])
 def test_every_tool_that_looks_there_is_ruled_the_same(deck, name, field):
     for value in _BESIDE:
