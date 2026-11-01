@@ -6,7 +6,7 @@
  * summary, tags and text.
  */
 
-import { useAuthStore } from '../stores/authStore'
+import { refreshAccessToken, useAuthStore } from '../stores/authStore'
 
 export type LibraryStatus = 'pending' | 'done' | 'error' | 'skipped'
 
@@ -79,19 +79,24 @@ export interface LibraryQuery {
   offset?: number
 }
 
-/** JSON from a Flight Deck route, with the FD token; a refusal's `detail` as the error. */
+/** JSON from a Flight Deck route, with the FD token; a refusal's `detail` as the error.
+ *  A token only lasts minutes, so one that ran out is renewed and the request sent once more. */
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const jwt = useAuthStore.getState().token
-  const r = await fetch(path, {
-    ...init,
-    cache: 'no-store',
-    credentials: 'include',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
-      ...(init?.headers || {}),
-    },
-  })
+  const send = () => {
+    const jwt = useAuthStore.getState().token
+    return fetch(path, {
+      ...init,
+      cache: 'no-store',
+      credentials: 'include',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(jwt ? { Authorization: `Bearer ${jwt}` } : {}),
+        ...(init?.headers || {}),
+      },
+    })
+  }
+  let r = await send()
+  if (r.status === 401 && useAuthStore.getState().authEnabled && (await refreshAccessToken())) r = await send()
   if (!r.ok) {
     let detail = ''
     try {
