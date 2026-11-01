@@ -13,10 +13,12 @@ The order, and what each step is there for:
    code is imported. A version that can't start ends here, with nothing changed.
 2. **Stop the agents**, because they read their code from the checkout. Optionally
    after waiting for the ones mid-turn. Crew's workers keep going through this.
-3. **Pull**, with ``deck_update_guard.py`` already running outside the deck.
+3. **Pull**, with ``deck_update_guard.py`` already running outside the deck, then
+   ``pip install`` if the venv needs it (:func:`_install_args`).
 4. **Restart in place**: uvicorn shuts down, then the process execs itself with what
-   it was started with. Same pid, same terminal, same tmux pane, and ``.env`` is read
-   afresh. The agents come back the way they do on any deck start.
+   it was started with. Same pid, same terminal, same tmux pane. ``.env`` is read as on
+   any start, so what the shell exported wins over an edit to the file. The agents come
+   back the way they do on any deck start.
 5. **Verdict.** The new version writes ``booted``; the guard checks it answers. If it
    doesn't, the guard puts the old commit back and starts that (see its docstring).
 
@@ -542,11 +544,14 @@ async def _run(repo: Path, editable: bool, head: str, target: str, wait: bool) -
         rc, said = await _git(repo, "merge", "--ff-only", "--quiet", target)
         if rc:
             raise RefusedError(f"git wouldn't move forward: {said[-400:]}")
-        if not editable:
-            rc, said = await _pip("--no-deps", str(repo))
+        install = await _install_args(repo, editable, head, target)
+        if install:
+            _step("Installing the new version into the venv")
+            rc, said = await _pip(*install)
             if rc:
                 await _git(repo, "reset", "--keep", head)
-                raise RefusedError(f"Couldn't install the new version: {said[-400:]}")
+                # From the start of a line: pip's last lines say what went wrong.
+                raise RefusedError(f"Couldn't install the new version: {said[-600:].partition(chr(10))[2] or said}")
         _step("Restarting", phase="restarting")
         _request_relaunch()
     except RefusedError as exc:
@@ -554,6 +559,16 @@ async def _run(repo: Path, editable: bool, head: str, target: str, wait: bool) -
     except Exception as exc:  # noqa: BLE001 — whatever it was, the deck stays up and says so
         log.warning("Deck update failed", error=str(exc), exc_info=True)
         await _fail(f"The update stopped: {exc}", target, stopped)
+
+
+async def _install_args(repo: Path, editable: bool, head: str, target: str) -> tuple[str, ...]:
+    """What ``pip install`` has to do after the pull. A copy in the venv needs the new code. An editable
+    install already runs it, so only what pyproject.toml declares can be behind, like new commands.
+    Packages went in before the rehearsal, hence ``--no-deps``."""
+    if not editable:
+        return "--no-deps", str(repo)
+    _, changed = await _git(repo, "diff", "--name-only", head, target, "--", "pyproject.toml")
+    return ("--no-deps", "-e", str(repo)) if changed else ()
 
 
 async def _fail(why: str, target: str, stopped: bool) -> None:
