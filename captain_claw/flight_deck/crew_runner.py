@@ -71,6 +71,7 @@ _TERM_WAIT_S = (5.0, 3.0)
 _REACH_S = 30.0  # how long an address has to answer before a task is made for it
 _CLONE_SILENT_S, _CLONE_MAX_S = 300.0, 3600.0  # a clone that says nothing for this long, or runs this long, has failed
 _GETTING = "Getting the repository"
+TASK_MARK = "CREW_TASK"  # in every worker's environment, and so in everything it starts
 _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
 _EFFORT_RE = re.compile(r"^[a-z][a-z0-9_\-]{0,19}$")
 _STATUS_RE = re.compile(r"^[\s*_`>]*CREW-STATUS:[*_`]*\s*(done|needs-decision|blocked)\b[\s:*_`\-–—]*(.*)$",
@@ -119,6 +120,10 @@ _SCOUT_DUTY = ("This is an investigation: don't change or commit anything in the
                "Your final message is the report, so make it complete.")
 _NEXT_REMINDER = ("\n\nAs before: pushing and pull requests are Captain's, so commit and finish. End your final message "
                   "with the CREW-STATUS line.")
+_SETUP_REMINDER = ("\n\nAs before: this is the project's main folder, so don't change or commit tracked files. If its test or start "
+                   "command changed, say so with the CREW-ENV lines. End your final message with the CREW-STATUS line.")
+_INTERRUPTED = ("The person stopped your last turn to tell you this. Whatever you were running then was stopped and may not have "
+                "finished, so check it before relying on it. Your files are as you left them.\n\n")
 
 _MODELS: dict[str, tuple[float, list[str]]] = {}  # per user: what OpenCode said it can use, and when
 _PROCS: dict[str, subprocess.Popen] = {}
@@ -513,8 +518,98 @@ def _alive(task: dict) -> bool:
     return not started or not recorded or started == recorded
 
 
+def _marked_pids(task_id: str) -> list[int]:
+    """Every process of a task, wherever it has got to. A CLI can run a command in a
+    session of its own, out of reach of the turn's process group, and it outlives the CLI;
+    but it keeps the environment it was started with, which carries the task's id. Where
+    there's no /proc, as on macOS, nothing shows that: there, the process tree
+    (:func:`_descendants`) finds these while the CLI is still alive."""
+    if not Path("/proc/self/environ").exists():
+        return []
+    wanted = f"{TASK_MARK}={task_id}".encode()
+    found: list[int] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if wanted in (entry / "environ").read_bytes().split(b"\0"):
+                found.append(int(entry.name))
+        except OSError:
+            continue  # gone already, or someone else's
+    return [pid for pid in found if pid != os.getpid()]
+
+
+def _descendants(root: int) -> set[int]:
+    """What *root* started, and what those started, however they've detached since."""
+    parents: dict[int, int] = {}
+    if Path("/proc/self/stat").exists():
+        for entry in Path("/proc").iterdir():
+            if entry.name.isdigit():
+                try:
+                    parents[int(entry.name)] = int((entry / "stat").read_text().rsplit(")", 1)[1].split()[1])
+                except (OSError, IndexError, ValueError):
+                    continue
+    else:
+        try:
+            listing = subprocess.run(["ps", "-axo", "pid=,ppid="], capture_output=True, text=True, timeout=10,
+                                     stdin=subprocess.DEVNULL).stdout
+        except (OSError, subprocess.SubprocessError):
+            return set()
+        for line in listing.splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[0].isdigit() and fields[1].isdigit():
+                parents[int(fields[0])] = int(fields[1])
+    family: set[int] = set()
+    frontier = {root}
+    while frontier:
+        frontier = {pid for pid, parent in parents.items() if parent in frontier} - family
+        family |= frontier
+    return family
+
+
+def _still_running(pids: set[int] | list[int]) -> list[int]:
+    out = []
+    for pid in pids:
+        try:
+            os.kill(pid, 0)
+            out.append(pid)
+        except (ProcessLookupError, PermissionError):
+            continue
+    return out
+
+
+async def _end_pids(pids: set[int] | list[int]) -> None:
+    """Asks these to end, then insists. Nobody waits when nobody's left."""
+    left = _still_running(pids)
+    for sig, wait in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 0.0)):
+        for pid in left:
+            try:
+                os.kill(pid, sig)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if not left or not wait:
+            return
+        await asyncio.sleep(wait)
+        left = _still_running(left)
+
+
+async def _end_marked(task_id: str) -> None:
+    await _end_pids(await asyncio.to_thread(_marked_pids, task_id))
+
+
 async def _terminate(task: dict) -> None:
-    """Ask, then insist. Only ever the group we started."""
+    """Ask, then insist: the group we started, then what it started outside that group.
+    The tree is read first: once the CLI is gone, nothing links them to it."""
+    pid = int(task.get("pid") or 0)
+    family = await asyncio.to_thread(_descendants, pid) if pid and _alive(task) else set()
+    try:
+        await _terminate_group(task)
+    finally:
+        await _end_pids(family)
+        await _end_marked(task["id"])
+
+
+async def _terminate_group(task: dict) -> None:
     pid = int(task.get("pid") or 0)
     if not pid or not _alive(task):
         return
@@ -568,8 +663,8 @@ def _first_prompt(task: dict) -> str:
     return contract + task["brief"]
 
 
-def _next_prompt(messages: list[str]) -> str:
-    return ("\n\n".join(messages) or "Go on with the task.") + _NEXT_REMINDER
+def _next_prompt(messages: list[str], *, setup: bool = False) -> str:
+    return ("\n\n".join(messages) or "Go on with the task.") + (_SETUP_REMINDER if setup else _NEXT_REMINDER)
 
 
 def _say(task: dict, kind: str, text: str, **extra: Any) -> None:
@@ -610,11 +705,20 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
         _store().update(task["id"], env=state)
         task = {**task, "env": state}
     env.update(crew_env.variables(task["user_id"], task["repo"], task["worktree"], state, env.get("PATH", "")))
+    env[TASK_MARK] = task["id"]
+    interrupted = bool(state.get("interrupted"))
+    if interrupted:
+        state = {k: v for k, v in state.items() if k != "interrupted"}
+        _store().update(task["id"], env=state)
+        task = {**task, "env": state}
     pending: list[str] = list(task.get("pending") or [])
     # No session yet (not started, or it failed before it had one): it knows nothing.
     first = not task.get("session")
     said = "\n\n".join(pending)
-    prompt = f"{_first_prompt(task)}\n\n{said}".rstrip() if first else _next_prompt(pending)
+    if first:
+        prompt = f"{_first_prompt(task)}\n\n{said}".rstrip()
+    else:
+        prompt = (_INTERRUPTED if interrupted else "") + _next_prompt(pending, setup=task["kind"] == "setup")
     turn = int(task.get("turn") or 0) + 1
     out_dir = crew_store.turn_dir(task["user_id"], task["id"], turn)
     spec = RunSpec(binary=binary, prompt=prompt, cwd=task["worktree"], git_common_dir=task.get("git_common_dir") or "",
@@ -744,6 +848,7 @@ async def _advance(task: dict) -> None:
                 _spawn_notify(task, stalled=True)
             return
         if not exit_file.exists():
+            await _end_marked(task["id"])
             state = _drain(task, at_end=True)
             await _finish_turn(task, state, None)
             return
@@ -751,9 +856,10 @@ async def _advance(task: dict) -> None:
     if proc is not None:
         try:
             await asyncio.to_thread(proc.wait, 5)  # no zombie left behind
-            await _end_what_it_left(proc.pid)
+            await _end_group(proc.pid)
         except subprocess.TimeoutExpired:
             pass
+    await _end_marked(task["id"])  # also for a turn a restarted deck picked up
     state = _drain(task, at_end=True)
     try:
         code: int | None = int(exit_file.read_text().strip() or "1")
@@ -762,7 +868,7 @@ async def _advance(task: dict) -> None:
     await _finish_turn(task, state, code)
 
 
-async def _end_what_it_left(pid: int) -> None:
+async def _end_group(pid: int) -> None:
     """A server a worker started keeps its turn's process group going. Only for a turn
     this deck started: its pid can't have become someone else's."""
     for sig, wait in ((signal.SIGTERM, 0.5), (signal.SIGKILL, 0.0)):
@@ -819,7 +925,8 @@ async def _finish_turn(task: dict, state: TurnState, code: int | None) -> None:
         status = "queued"
     if task["kind"] in ("scout", "setup") and body and status != "queued":
         (crew_store.task_dir(task["user_id"], task["id"]) / _REPORT_NAME).write_text(body, encoding="utf-8")
-    if setup and status == "ready":
+    # "queued" is a turn that ended well with a message waiting: what it reported still counts.
+    if setup and status in ("ready", "queued"):
         await crew_env.finish_setup(task, report)
         before = set((task.get("env") or {}).get("tracked_before") or [])
         touched = [p for p in await crew_env.tracked_changes(task["repo"]) if p not in before]
@@ -1078,9 +1185,35 @@ def _get(uid: str, task_id: str) -> dict[str, Any]:
     return task
 
 
-async def steer(uid: str, task_id: str, text: str) -> dict[str, Any]:
-    """The next instruction. A running turn isn't cut short: it goes next, unless
-    someone stops the turn first."""
+async def _interrupt(task: dict) -> None:
+    """A CLI in the middle of a turn can't be told anything: none of them reads its input
+    then. So the turn ends here and the next one resumes its session with what's waiting.
+    Its files stay as they are. What it was running stops, and it's told so."""
+    await _terminate(task)
+    state = _drain(task, at_end=True)
+    _store().update(task["id"], status="queued", note="", pid=0, pid_start="", evidence=await _evidence(task),
+                    session=state.session or task.get("session") or "",
+                    tokens_in=int(task.get("tokens_in") or 0) + state.tokens_in,
+                    tokens_out=int(task.get("tokens_out") or 0) + state.tokens_out,
+                    cost_usd=float(task.get("cost_usd") or 0.0) + state.cost_usd,
+                    env={**(task.get("env") or {}), "interrupted": True})
+    fresh = _store().get(task["user_id"], task["id"]) or task
+    _say(fresh, "note", "Stopped what it was doing, to hear this.")
+
+
+async def interrupt(uid: str, task_id: str) -> dict[str, Any]:
+    """What's waiting for the end of this turn goes now."""
+    async with _lock_for(task_id):
+        task = _get(uid, task_id)
+        if task["status"] == "running" and task["pending"]:
+            await _interrupt(task)
+    await _start_queued()
+    return _get(uid, task_id)
+
+
+async def steer(uid: str, task_id: str, text: str, *, now: bool = False) -> dict[str, Any]:
+    """The next instruction. It waits for a running turn to end, unless it's sent *now*,
+    which cuts that turn short (:func:`_interrupt`)."""
     message = str(text or "").strip()
     if not message:
         raise HTTPException(400, "Say what to tell it.")
@@ -1099,6 +1232,8 @@ async def steer(uid: str, task_id: str, text: str) -> dict[str, Any]:
             else:
                 fields["status"] = "queued"
         _store().update(task_id, **fields)
+        if now and task["status"] == "running":
+            await _interrupt(_get(uid, task_id))
     await _start_queued()
     return _get(uid, task_id)
 
@@ -1786,7 +1921,7 @@ def view(task: dict, *, grant: Grant | None = None, full: bool = False) -> dict[
     }
     if full:
         out.update(brief=task.get("brief") or "", final=task.get("final") or "", events=task.get("events") or 0,
-                   next_steps=next_steps(task))
+                   next_steps=next_steps(task), waiting=list(task.get("pending") or []))
         if grant is not None and grant.trusted:
             out["worktree"] = task.get("worktree") or ""
     return out

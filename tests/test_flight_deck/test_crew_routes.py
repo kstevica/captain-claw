@@ -1311,3 +1311,34 @@ async def test_the_tool_tells_what_is_prepared_and_how_it_goes():
     assert not (await CrewTool()._do_prepare_env(_FakeClient())).success
     options = _FakeClient(options={"me": {"harnesses": []}, "repos": {"projects": []}, "envs": [entry]})
     assert "web-app: prepared" in (await CrewTool()._do_options(options)).content
+
+
+async def test_the_tool_and_the_routes_can_send_a_message_now(deck, as_agent):
+    made = await _agent_task(deck, as_agent, "SCENARIO:slow")
+    uid = deck.user["id"]
+    for _ in range(100):
+        await crew_runner.tick()
+        task = crew_store.get_store().get(uid, made["id"])
+        if task["session"]:
+            break
+        await asyncio.sleep(0.05)
+    pid = task["pid"]
+    async with _client(deck.user) as client:
+        later = (await client.post(f"/fd/crew/tasks/{made['id']}/steer", json={"text": "after"})).json()
+        assert later["waiting"] == ["after"] and later["status"] == "running"
+        now = await client.post(f"/fd/crew/tasks/{made['id']}/interrupt")
+        assert now.status_code == 200 and now.json()["waiting"] == []
+    assert crew_store.get_store().get(uid, made["id"])["pid"] != pid
+    pid = crew_store.get_store().get(uid, made["id"])["pid"]
+    async with _client(None) as agent:
+        told = await agent.post("/fd/crew/agent/steer", json={"task_id": made["id"], "text": "stop that", "now": True})
+    assert told.status_code == 200 and crew_store.get_store().get(uid, made["id"])["pid"] != pid
+    client = _FakeClient(steer={"id": "t", "pending": 0})
+    out = await CrewTool()._do_steer(client, task_id="t", text="change course", now=True)
+    assert client.asked[0][1]["now"] is True and "acts on it now" in out.content
+    client = _FakeClient(steer={"id": "t", "pending": 1})
+    out = await CrewTool()._do_steer(client, task_id="t", text="later")
+    assert client.asked[0][1]["now"] is False and "once its current turn ends" in out.content
+    async with _client(deck.other) as other:
+        await _approve(deck, deck.other)
+        assert (await other.post(f"/fd/crew/tasks/{made['id']}/interrupt")).status_code == 404

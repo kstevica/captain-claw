@@ -11,7 +11,8 @@
   POST   /fd/crew/tasks/{id}/files      where its files are, in the VFS (?whole=true for the whole project)
   GET    /fd/crew/tasks/{id}/file       one copied file, to show (?path=)
   POST   /fd/crew/tasks/{id}/link       a page to open, published from that copy
-  POST   /fd/crew/tasks/{id}/steer      the next instruction
+  POST   /fd/crew/tasks/{id}/steer      the next instruction (now: cut the running turn short for it)
+  POST   /fd/crew/tasks/{id}/interrupt  what's waiting for this turn to end goes now
   POST   /fd/crew/tasks/{id}/stop       stop the worker, keep its work
   POST   /fd/crew/tasks/{id}/pr         push and open a pull request
   POST   /fd/crew/tasks/{id}/merge      land the work
@@ -85,6 +86,7 @@ class LinkBody(BaseModel):
 
 class SteerBody(BaseModel):
     text: str
+    now: bool = False
 
 
 class LoginBody(BaseModel):
@@ -124,6 +126,7 @@ class EnvBody(BaseModel):
 class AgentTaskBody(BaseModel):
     task_id: str
     text: str = ""
+    now: bool = False
     whole: bool = False
 
 
@@ -441,7 +444,13 @@ async def task_link(task_id: str, body: LinkBody | None = None, user: dict = Dep
 @router.post("/tasks/{task_id}/steer")
 async def task_steer(task_id: str, body: SteerBody, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row, grant = await _approved(user)
-    return crew_runner.view(await crew_runner.steer(row["id"], task_id, body.text), grant=grant, full=True)
+    return crew_runner.view(await crew_runner.steer(row["id"], task_id, body.text, now=body.now), grant=grant, full=True)
+
+
+@router.post("/tasks/{task_id}/interrupt")
+async def task_interrupt(task_id: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, grant = await _approved(user)
+    return crew_runner.view(await crew_runner.interrupt(row["id"], task_id), grant=grant, full=True)
 
 
 @router.post("/tasks/{task_id}/stop")
@@ -619,7 +628,7 @@ async def agent_task(body: AgentTaskBody, request: Request) -> dict[str, Any]:
 @router.post("/agent/steer")
 async def agent_steer(body: AgentTaskBody, request: Request) -> dict[str, Any]:
     row, _, _ = await _agent_caller(request)
-    return crew_runner.view(await crew_runner.steer(row["id"], body.task_id, body.text), full=True)
+    return crew_runner.view(await crew_runner.steer(row["id"], body.task_id, body.text, now=body.now), full=True)
 
 
 @router.post("/agent/stop")

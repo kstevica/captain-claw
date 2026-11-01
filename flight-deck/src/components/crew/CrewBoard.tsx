@@ -1,6 +1,6 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from 'react'
 import {
-  AlertTriangle, ArrowLeft, Bot, Check, CheckCircle2, ChevronRight, CircleDot, FileDiff, FolderOpen, FolderPlus, GitMerge, GitPullRequest, Globe, KeyRound,
+  AlertTriangle, ArrowLeft, Bot, Check, CheckCircle2, ChevronRight, CircleDot, Clock, FileDiff, FolderOpen, FolderPlus, GitMerge, GitPullRequest, Globe, KeyRound,
   LayoutGrid, Loader2, MessageCircleQuestion, MessageSquare, Plus, RefreshCw, ScrollText, Search, Send, Ship, Sparkles, Square, TerminalSquare, Trash2, Wrench, X, type LucideIcon,
 } from 'lucide-react'
 import { Card, EmptyState, Pill, Segmented, StatTile, labelCls } from '../console/parts'
@@ -29,6 +29,7 @@ import {
 
 const CrewTerminal = lazy(() => import('./CrewTerminal'))
 
+const COMMAND_KEY = /mac/i.test(navigator.platform) ? '⌘' : 'Ctrl'
 const POLL_LIST_MS = 4000
 const POLL_ENVS_MS = 20000
 const POLL_EVENTS_MS = 2000
@@ -215,13 +216,16 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
   const unlanded = !!e.commits || !!e.dirty || !!e.stray
   const hasPr = !!task.delivery?.pr
 
-  const send = (ev: FormEvent) => {
+  // While it's working, a message either stops it and goes now, or waits for this turn to end.
+  const running = task.status === 'running'
+  const send = (ev: FormEvent | KeyboardEvent<HTMLTextAreaElement>, later = false) => {
     ev.preventDefault()
     const text = steer.trim()
     if (!text) return
     setSteer('')
-    act(() => crewApi.steer(task.id, text))
+    act(() => crewApi.steer(task.id, text, running && !later))
   }
+  const waiting = task.waiting ?? []
 
   const tabs: [TaskTab, string, LucideIcon][] = [
     ['activity', 'Activity', MessageSquare],
@@ -292,19 +296,44 @@ function TaskView({ taskId, canTerminal, onBack, onChanged, onTerminal }: {
       </div>
 
       {!finished && !cloneOnly && (
-        <form onSubmit={send} className="shrink-0 border-t border-zinc-800 p-3">
+        <form onSubmit={send} className="shrink-0 space-y-2 border-t border-zinc-800 p-3">
+          {waiting.length > 0 && (
+            <div className="flex items-center gap-2 rounded-xl bg-zinc-800/60 px-3 py-2 text-xs text-zinc-300">
+              <Clock className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
+              <span className="min-w-0 flex-1 truncate" title={waiting.join('\n\n')}>
+                {waiting.length === 1 ? `Waiting for this turn to end: ${waiting[0]}` : `${waiting.length} messages waiting for this turn to end`}
+              </span>
+              {running && (
+                <button type="button" disabled={busy} onClick={() => act(() => crewApi.interrupt(task.id))} className="shrink-0 font-medium text-violet-700 hover:underline disabled:opacity-50 dark:text-violet-300">
+                  Send now
+                </button>
+              )}
+            </div>
+          )}
           <div className="flex items-end gap-2 rounded-2xl border border-zinc-800 bg-zinc-900/60 p-1.5 transition-colors focus-within:border-violet-500/60 focus-within:ring-2 focus-within:ring-violet-500/15">
             <textarea
               value={steer}
               onChange={(ev) => setSteer(ev.target.value)}
-              onKeyDown={(ev) => { if (ev.key === 'Enter' && !ev.shiftKey) send(ev) }}
+              onKeyDown={(ev) => { if (ev.key === 'Enter' && !ev.shiftKey) send(ev, ev.metaKey || ev.ctrlKey) }}
               rows={Math.min(5, steer.split('\n').length)}
-              placeholder={task.status === 'waiting' ? 'Your answer…' : task.status === 'preparing' ? 'Tell it something, for when it starts…' : live ? 'Tell it something, for when this turn ends…' : 'Tell it to go on…'}
+              placeholder={task.status === 'waiting' ? 'Your answer…' : running ? 'Tell it something…' : live ? 'Tell it something, for when it starts…' : 'Tell it to go on…'}
               aria-label="Tell the agent"
               className="min-w-0 flex-1 resize-none bg-transparent px-2.5 py-1.5 text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none"
             />
-            <button type="submit" disabled={busy || !steer.trim()} className={`${primaryBtn} h-9 w-9 shrink-0 !p-0`} aria-label="Send"><Send className="h-4 w-4" /></button>
+            {running && (
+              <button type="button" disabled={busy || !steer.trim()} onClick={(ev) => send(ev, true)} title="Sends it when this turn ends, and leaves what it's doing alone" aria-label="Send after this turn" className={`${quietBtn} h-9 shrink-0 !px-2.5`}>
+                <Clock className="h-4 w-4" /><span className="hidden sm:inline">After this turn</span>
+              </button>
+            )}
+            <button type="submit" disabled={busy || !steer.trim()} title={running ? 'Stops what it\'s doing, and it goes on with this' : 'Send'} aria-label={running ? 'Send now' : 'Send'} className={`${primaryBtn} h-9 shrink-0 ${running ? '!px-3' : 'w-9 !p-0'}`}>
+              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}{running && <span className="hidden sm:inline">Send now</span>}
+            </button>
           </div>
+          {running && (
+            <p className="hidden px-1 text-[11px] leading-relaxed text-zinc-500 wide:block">
+              Send now stops what it's doing and it goes on with your message: what it was running stops, its files stay. {COMMAND_KEY}+Enter sends it after this turn instead.
+            </p>
+          )}
         </form>
       )}
     </div>

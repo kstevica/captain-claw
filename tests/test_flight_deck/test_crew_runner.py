@@ -31,6 +31,7 @@ say() { printf '%s\n' "$1"; }
 printf '%s' "$all" > "$(git rev-parse --git-dir)/seen"
 case "$all" in
   *SCENARIO:earlyfail*) echo "no such model" >&2; exit 4 ;;
+  *SCENARIO:silent*) sleep 60; exit 0 ;;
 esac
 sid=$(printf '%s' "$all" | sed -n 's/.*--resume \([^ ]*\).*/\1/p')
 [ -n "$sid" ] || sid="sess-$$"
@@ -46,6 +47,7 @@ case "$all" in
   *SCENARIO:detach*) git checkout -q --detach; echo x > lost.txt; git add lost.txt; git commit -qm "off the branch" ;;
   *SCENARIO:nothing*) ;;
   *SCENARIO:leave*) sleep 300 & echo $! > "$(git rev-parse --git-dir)/left.pid" ;;
+  *SCENARIO:escape*) perl -MPOSIX -e 'POSIX::setsid(); exec "sleep", "300"' </dev/null >/dev/null 2>&1 & echo $! > "$(git rev-parse --git-dir)/left.pid"; case "$all" in *SCENARIO:escape-and-wait*) sleep 60 ;; esac ;;
   *SCENARIO:lagsetup*) sleep 2; mkdir -p .venv pkgs/lib; echo 'version = 3.12.1' > .venv/pyvenv.cfg; echo x > pkgs/lib/a ;;
   *SCENARIO:setup*) mkdir -p .venv/bin pkgs/lib; echo 'version = 3.12.1' > .venv/pyvenv.cfg; echo x > pkgs/lib/a ;;
   *SCENARIO:touchy*) echo changed >> shared.txt ;;

@@ -558,3 +558,251 @@ async def test_what_is_typed_in_a_shell_doesnt_reach_the_decks_console(shell_dec
 def test_a_grant_with_a_terminal_keeps_its_other_fields():
     grant = Grant(True, "approved", ("claude",), 2, True)
     assert grant.allowed and not grant.trusted and grant.terminal
+
+
+# ── Telling a worker something while it works ───────────────────────────
+
+
+async def _running_with_a_session(deck, brief="SCENARIO:slow") -> dict:
+    task = await _dispatch(deck, brief)
+    uid = task["user_id"]
+    for _ in range(100):
+        await crew_runner.tick()
+        fresh = crew_store.get_store().get(uid, task["id"])
+        if fresh["session"]:
+            return fresh
+        await asyncio.sleep(0.05)
+    raise AssertionError("it never said its session")
+
+
+async def test_a_message_sent_now_stops_the_turn_and_resumes_its_session(deck):
+    task = await _running_with_a_session(deck)
+    uid, pid, session = task["user_id"], task["pid"], task["session"]
+    wt = Path(task["worktree"])
+    (wt / "half-done.txt").write_text("kept")
+    sent = await crew_runner.steer(uid, task["id"], "change course", now=True)
+    assert sent["status"] == "running" and sent["turn"] == 2 and sent["pending"] == [], "it's on it, not waiting for a slot"
+    assert sent["pid"] != pid and sent["session"] == session
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        try:
+            os.killpg(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            break
+        await asyncio.sleep(0.05)
+    else:
+        raise AssertionError("the first turn is still running")
+    done = await _settle(sent)
+    prompt = _seen(done)
+    assert f"--resume {session}" in prompt and "change course" in prompt
+    assert "stopped your last turn" in prompt and "may not have finished" in prompt
+    assert (wt / "half-done.txt").read_text() == "kept", "its files stay"
+    told = [e for e in crew_store.read_events(uid, task["id"]) if e["kind"] == "note"]
+    assert any("Stopped what it was doing" in e["text"] for e in told)
+    assert "interrupted" not in done["env"], "only the turn after it is told"
+    assert done["status"] == "ready"
+
+
+async def test_a_message_after_this_turn_leaves_it_alone_until_sent_now(deck):
+    task = await _running_with_a_session(deck)
+    uid, pid = task["user_id"], task["pid"]
+    later = await crew_runner.steer(uid, task["id"], "when you're done")
+    assert later["status"] == "running" and later["pid"] == pid and later["pending"] == ["when you're done"]
+    assert crew_runner.view(later, full=True)["waiting"] == ["when you're done"]
+    now = await crew_runner.interrupt(uid, task["id"])
+    assert now["status"] == "running" and now["pid"] != pid and now["pending"] == []
+    done = await _settle(now)
+    assert "when you're done" in _seen(done)
+
+
+async def test_sending_now_with_nothing_to_stop_is_just_sending(deck):
+    done = await _settle(await _dispatch(deck, "SCENARIO:work"))
+    went = await crew_runner.steer(done["user_id"], done["id"], "and a bit more", now=True)
+    final = await _settle(went)
+    prompt = _seen(final)
+    assert "and a bit more" in prompt and "stopped your last turn" not in prompt
+    # Nothing waiting: nothing to cut short.
+    other = await _running_with_a_session(deck, "SCENARIO:slow, another")
+    same = await crew_runner.interrupt(other["user_id"], other["id"])
+    assert same["pid"] == other["pid"] and same["turn"] == other["turn"]
+
+
+async def test_a_message_before_it_has_a_session_starts_it_whole(deck):
+    # Before its first line of output: there's no session to resume, so it starts over knowing everything.
+    task = await _dispatch(deck, "SCENARIO:silent")
+    await asyncio.sleep(0.2)
+    await crew_runner.tick()
+    assert not crew_store.get_store().get(task["user_id"], task["id"])["session"]
+    sent = await crew_runner.steer(task["user_id"], task["id"], "listen", now=True)
+    assert sent["turn"] == 2
+    prompt = ""
+    end = time.monotonic() + 5
+    while time.monotonic() < end and "listen" not in prompt:
+        try:
+            prompt = _seen(sent)
+        except OSError:
+            pass  # not written yet
+        await asyncio.sleep(0.05)
+    assert "listen" in prompt and "Your task:" in prompt and "--resume" not in prompt
+
+
+async def test_someone_else_cant_interrupt_it(deck):
+    task = await _running_with_a_session(deck)
+    with pytest.raises(HTTPException) as err:
+        await crew_runner.interrupt("someone-else", task["id"])
+    assert err.value.status_code == 404
+    with pytest.raises(HTTPException):
+        await crew_runner.steer("someone-else", task["id"], "x", now=True)
+    assert crew_store.get_store().get(task["user_id"], task["id"])["pid"] == task["pid"]
+
+
+async def test_a_setup_report_counts_even_with_a_message_waiting(deck):
+    """Seen live: a question sent during a setup turn lost the commands it reported."""
+    repo: Path = deck["repo"]
+    uid = deck["admin"]["id"]
+    setup = await _dispatch(deck, "SCENARIO:setup, with a pause", kind="setup")
+    await crew_runner.steer(uid, setup["id"], "is it ready?")
+    done = await _settle(setup)
+    assert done["status"] == "ready" and done["turn"] == 2
+    saved = crew_env.read_settings(uid, str(repo))
+    assert saved["test"] == "make test" and saved["run"] == "make run" and saved["copy"] == ["pkgs"]
+    second = (repo / ".git" / "seen").read_text()
+    assert "is it ready?" in second and "CREW-ENV lines" in second and "pull requests" not in second
+
+
+async def test_a_worker_is_told_not_to_kill_by_name(deck):
+    """Seen live: a worker looped kill over everything matching Flight Deck's module."""
+    done = await _settle(await _dispatch(deck, "SCENARIO:nothing"))
+    assert "never by name or pattern" in _seen(done)
+    setup = await _settle(await _dispatch(deck, "SCENARIO:setup", kind="setup"))
+    assert setup["status"] == "ready"
+    assert "never by name or pattern" in (deck["repo"] / ".git" / "seen").read_text()
+
+
+# ── What a worker started, wherever it went ─────────────────────────────
+
+
+def _gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+async def _until_gone(pid: int, deadline: float = 6.0) -> bool:
+    end = time.monotonic() + deadline
+    while time.monotonic() < end:
+        if _gone(pid):
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+def _left_pid(task: dict) -> int:
+    return int((Path(_run(Path(task["worktree"]), "rev-parse", "--absolute-git-dir")) / "left.pid").read_text())
+
+
+proc_only = pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="a process's environment can only be read through /proc")
+
+
+@proc_only
+async def test_a_command_in_a_session_of_its_own_ends_with_the_turn(deck):
+    """Seen live: OpenCode runs its commands out of the turn's process group, so one kept
+    going after the turn, and wrote into the worktree afterwards."""
+    done = await _settle(await _dispatch(deck, "SCENARIO:escape"))
+    pid = _left_pid(done)
+    assert await _until_gone(pid), "it outlived its turn"
+
+
+async def test_a_command_in_a_session_of_its_own_ends_when_a_message_is_sent_now(deck):
+    task = await _running_with_a_session(deck, "SCENARIO:escape-and-wait")
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        try:
+            pid = _left_pid(task)
+            break
+        except (OSError, ValueError):
+            await asyncio.sleep(0.05)
+    assert not _gone(pid) and pid in crew_runner._descendants(task["pid"])
+    await crew_runner.steer(task["user_id"], task["id"], "change course", now=True)
+    assert await _until_gone(pid), "it outlived the interrupt"
+
+
+async def test_a_command_in_a_session_of_its_own_ends_when_the_task_is_stopped(deck):
+    task = await _running_with_a_session(deck, "SCENARIO:escape-and-wait")
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        try:
+            pid = _left_pid(task)
+            break
+        except (OSError, ValueError):
+            await asyncio.sleep(0.05)
+    await crew_runner.stop(task["user_id"], task["id"])
+    assert await _until_gone(pid), "it outlived Stop"
+
+
+@proc_only
+async def test_only_this_tasks_processes_are_ended(deck):
+    """Another task's, and anything not of a task, are left alone."""
+    other = subprocess.Popen(["sleep", "30"], env={**os.environ, crew_runner.TASK_MARK: "crw_other"})
+    plain = subprocess.Popen(["sleep", "30"], env={k: v for k, v in os.environ.items() if k != crew_runner.TASK_MARK})
+    mine = subprocess.Popen(["sleep", "30"], env={**os.environ, crew_runner.TASK_MARK: "crw_mine"})
+    similar = subprocess.Popen(["sleep", "30"], env={**os.environ, crew_runner.TASK_MARK: "crw_mine2"})
+    try:
+        assert crew_runner._marked_pids("crw_mine") == [mine.pid]
+        await crew_runner._end_marked("crw_mine")
+        assert mine.wait(5) is not None
+        for still in (other, plain, similar):
+            assert still.poll() is None
+    finally:
+        for proc in (other, plain, mine, similar):
+            proc.kill()
+            proc.wait()
+
+
+@proc_only
+async def test_a_turn_picked_up_after_a_deck_restart_also_cleans_up(deck):
+    task = await _running_with_a_session(deck, "SCENARIO:escape-and-wait")
+    end = time.monotonic() + 5
+    while time.monotonic() < end:
+        try:
+            pid = _left_pid(task)
+            break
+        except (OSError, ValueError):
+            await asyncio.sleep(0.05)
+    proc = crew_runner._PROCS.pop(task["id"])  # what a restart forgets
+    os.killpg(task["pid"], 9)  # its CLI dies; the command it set off doesn't
+    proc.wait()  # a deck that restarted isn't its parent any more, so it's no zombie either
+    assert not _gone(pid)
+    await _settle(task)
+    assert await _until_gone(pid)
+
+
+def test_a_process_tree_is_followed_past_a_detached_child(tmp_path):
+    """Three levels down, the middle one in a session of its own."""
+    pidfile = tmp_path / "pids"
+    inner = f"sleep 20 & echo $! >> {pidfile}; echo $$ >> {pidfile}; wait"
+    script = tmp_path / "tree.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        f"perl -MPOSIX -e 'POSIX::setsid(); exec \"/bin/sh\", \"-c\", $ARGV[0]' '{inner}' </dev/null >/dev/null 2>&1 &\n"
+        "sleep 20\n")
+    script.chmod(0o755)
+    top = subprocess.Popen([str(script)], start_new_session=True)
+    try:
+        end = time.monotonic() + 5
+        while time.monotonic() < end and not (pidfile.exists() and len(pidfile.read_text().split()) >= 2):
+            time.sleep(0.05)
+        family = crew_runner._descendants(top.pid)
+        wanted = {int(p) for p in pidfile.read_text().split()}
+        assert len(wanted) == 2 and wanted <= family
+        assert top.pid not in family and os.getpid() not in family
+    finally:
+        for pid in crew_runner._descendants(top.pid):
+            try:
+                os.kill(pid, 9)
+            except ProcessLookupError:
+                pass
+        top.kill()
+        top.wait()
