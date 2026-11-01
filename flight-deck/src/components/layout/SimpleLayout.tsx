@@ -954,7 +954,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         </KioskWideDialog>
       )}
       {crewOpen && (
-        <KioskWideDialog label="Crew" phone={isMobile} onClose={closeCrew} eighty>
+        <KioskWideDialog label="Crew" phone={isMobile} onClose={closeCrew} roomy>
           <CrewBoard phone={isMobile} onClose={closeCrew} />
         </KioskWideDialog>
       )}
@@ -1300,8 +1300,8 @@ function KioskDialog({ label, onClose, children }: { label: string; onClose: () 
 // first). Off a phone it can fill the window — the libraries and shared
 // folders put the switch in their header (FullscreenButton).
 
-function KioskWideDialog({ label, phone, widest = false, eighty = false, onClose, children }: {
-  label: string; phone: boolean; widest?: boolean; eighty?: boolean; onClose: () => void; children: ReactNode
+function KioskWideDialog({ label, phone, widest = false, roomy = false, onClose, children }: {
+  label: string; phone: boolean; widest?: boolean; roomy?: boolean; onClose: () => void; children: ReactNode
 }) {
   const [fullscreen, setFullscreen] = useState(false)
   const host = useMemo(() => (phone ? null : { fullscreen, toggle: () => setFullscreen((v) => !v) }), [phone, fullscreen])
@@ -1312,7 +1312,7 @@ function KioskWideDialog({ label, phone, widest = false, eighty = false, onClose
         role="dialog"
         aria-label={label}
         className={`relative flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 pb-[env(safe-area-inset-bottom)] shadow-2xl wide:pb-0 ${big ? ''
-          : `wide:rounded-xl wide:border wide:border-zinc-800 ${eighty ? 'wide:h-[80vh] wide:w-[80vw]' : `wide:h-[88vh] ${widest ? 'wide:max-w-6xl' : 'wide:max-w-5xl'}`}`}`}
+          : `wide:rounded-xl wide:border wide:border-zinc-800 ${roomy ? 'wide:h-[90vh] wide:w-[90vw]' : `wide:h-[88vh] ${widest ? 'wide:max-w-6xl' : 'wide:max-w-5xl'}`}`}`}
         onClick={(e) => e.stopPropagation()}
       >
         <DialogFullscreen.Provider value={host}>{children}</DialogFullscreen.Provider>
