@@ -630,6 +630,7 @@ def opencode_too(deck, monkeypatch):
     """A stand-in OpenCode beside the stand-in Claude: it records how it's run."""
     fake = deck.tmp / "bin" / "opencode"
     fake.write_text(r"""#!/bin/sh
+case "$*" in *--help*) exit 0;; esac
 if [ "$1" = "models" ]; then printf 'opencode/deepseek-v4.1-flash-free\nopencode/big-pickle\n'; exit 0; fi
 printf '%s\n' "$*" >> "$OC_LOG"
 echo work > free.txt; git add free.txt; git -c user.name=T -c user.email=t@example.com commit -qm free
@@ -660,7 +661,8 @@ async def test_opencode_needs_no_key_but_someones_code_needs_a_chosen_model(deck
     async with _client(deck.user) as client:
         h = (await client.get("/fd/crew/me")).json()["harnesses"][0]
         assert h["login"] == {"ok": True, "how": "OpenCode's free models", "free": True}
-        assert h["models"] == ["opencode/deepseek-v4.1-flash-free", "opencode/big-pickle"] and h["default_model"] == ""
+        assert h["default_model"] == ""
+        assert (await client.get("/fd/crew/models")).json()["opencode"] == ["opencode/deepseek-v4.1-flash-free", "opencode/big-pickle"]
         # Left to itself it would pick one: not with someone's repository.
         refused = await client.post("/fd/crew/tasks", json=brief)
         assert refused.status_code == 400 and "opencode.ai/docs/zen" in refused.text
@@ -706,6 +708,52 @@ async def test_a_model_opencode_doesnt_know_is_refused_before_it_costs_a_worktre
         added = await client.post("/fd/crew/tasks", json={**brief, "model": "home/qwen"})
         assert added.status_code == 201, added.text
     await _settle(deck.user["id"], added.json()["id"])
+
+
+async def test_the_page_doesnt_wait_for_a_cli_to_list_its_models(deck, opencode_too, monkeypatch):
+    await _approve_opencode(deck, deck.user)
+    asked = []
+    monkeypatch.setattr(crew_runner.crew_harness, "list_models", lambda *a: asked.append(a) or ["opencode/a-free"])
+    async with _client(deck.user) as client:
+        me = (await client.get("/fd/crew/me")).json()
+        assert not asked and me["harnesses"][0]["models"] == []
+        assert (await client.get("/fd/crew/models")).json() == {"opencode": ["opencode/a-free"]}
+        assert len(asked) == 1
+        # Known now, so it's on the page straight away, with nobody asked again.
+        assert (await client.get("/fd/crew/me")).json()["harnesses"][0]["models"] == ["opencode/a-free"]
+        assert len(asked) == 1
+    async with _client(deck.other) as client:
+        assert (await client.get("/fd/crew/models")).status_code == 403
+
+
+async def test_a_task_runs_on_opencode_2_while_someone_elses_service_holds_its_port(deck, opencode_too, monkeypatch):
+    """OpenCode 2 as it is on a computer where someone already uses it: no --dir, one port for its
+    background service, and a worker's own home can't use the service that's running."""
+    fake = deck.tmp / "bin" / "opencode"
+    fake.write_text(r"""#!/bin/sh
+case "$*" in *--help*) printf 'FLAGS\n  --auto\nGLOBAL FLAGS\n  --standalone  Run with a private server\n'; exit 0;; esac
+case "$*" in
+  *--standalone*) ;;
+  *) echo 'Error: Managed service port 49374 on 127.0.0.1 is already in use' >&2; exit 1;;
+esac
+if [ "$1" = "models" ]; then printf 'opencode/deepseek-v4.1-flash-free\n'; exit 0; fi
+case "$*" in *--dir*|*--variant*) echo USAGE >&2; exit 1;; esac
+printf '%s\n' "$*" >> "$OC_LOG"
+pwd >> "$OC_LOG"
+echo work > free.txt; git add free.txt; git -c user.name=T -c user.email=t@example.com commit -qm free
+printf '%s\n' '{"type":"text","sessionID":"s1","part":{"type":"text","text":"Done.\n\nCREW-STATUS: done made it"}}'
+""")
+    await _approve_opencode(deck, deck.user)
+    model = "opencode/deepseek-v4.1-flash-free"
+    async with _client(deck.user) as client:
+        assert (await client.get("/fd/crew/models")).json() == {"opencode": [model]}
+        made = await client.post("/fd/crew/tasks", json={"harness": "opencode", "brief": "Add it.", "project": "Game", "model": model, "effort": "high"})
+        assert made.status_code == 201, made.text
+    done = await _settle(deck.user["id"], made.json()["id"])
+    assert done["status"] == "ready", done.get("note")
+    said = opencode_too.read_text()
+    assert "--standalone" in said and f"--model {model}#high" in said
+    assert Path(said.splitlines()[-1]).resolve() == Path(done["worktree"]).resolve()  # where it worked, with no --dir
 
 
 async def test_opencode_that_cant_list_its_models_isnt_stopped_by_that(deck, opencode_too, monkeypatch):

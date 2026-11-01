@@ -9,9 +9,9 @@ An event is ``{"kind", "text", "tool"?}``: ``text`` (what the worker said),
 ``tool`` (a call it made), ``result`` (what the call returned), ``error``.
 
 Checked by hand on 2026-10-31 against Claude Code 2.1.316, codex-cli 0.149.1,
-OpenCode 1.19.5 and Pi 1.4.0, each run for real in a git worktree. The parsers
-ignore what they don't know, so a new event type costs a line in the log view,
-not a crash.
+OpenCode 1.19.5 and Pi 1.4.0, each run for real in a git worktree, and on
+2026-11-01 against OpenCode 2.2.5. The parsers ignore what they don't know, so
+a new event type costs a line in the log view, not a crash.
 """
 
 from __future__ import annotations
@@ -37,6 +37,7 @@ _CLAUDE_DENIED_TOOLS = "EnterWorktree,ExitWorktree,CronCreate,RemoteTrigger,Sche
 CLAUDE_PERMISSION_MODES = ("auto", "acceptEdits", "bypassPermissions")
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:/@+-]*$")
 _MODELS_LISTED = 200
+_OPENCODE_HELP: dict[tuple[str, float], str] = {}
 
 
 @dataclass
@@ -279,10 +280,34 @@ def _codex_parse(obj: dict, state: TurnState) -> list[dict]:
 # ── OpenCode ────────────────────────────────────────────────────────────
 
 
+def _opencode_run_help(binary: str) -> str:
+    """What this install's `opencode run` says it takes, asked once per install."""
+    try:
+        key = (binary, os.stat(binary).st_mtime)
+    except OSError:
+        return ""
+    if key not in _OPENCODE_HELP:
+        try:
+            probe = subprocess.run([binary, "run", "--help"], capture_output=True, text=True, timeout=15,  # noqa: S603
+                                   stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError):
+            return ""
+        _OPENCODE_HELP[key] = f"{probe.stdout}{probe.stderr}"
+    return _OPENCODE_HELP[key]
+
+
+def _opencode_private_server(binary: str) -> bool:
+    """2.x keeps one background server per computer, on one port, started by whoever came first.
+    A worker has its own home and its own environment, so it can neither share that server nor
+    start another: it gets a private one, gone when the turn ends."""
+    return "--standalone" in _opencode_run_help(binary)
+
+
 def list_models(binary: str, env: dict[str, str], cwd: str) -> list[str]:
     """The models OpenCode says this account can use: with no key, only its free ones."""
+    argv = [binary, "models", *(["--standalone"] if _opencode_private_server(binary) else [])]
     try:
-        probe = subprocess.run([binary, "models"], capture_output=True, text=True, timeout=30, env=env, cwd=cwd,  # noqa: S603
+        probe = subprocess.run(argv, capture_output=True, text=True, timeout=30, env=env, cwd=cwd,  # noqa: S603
                                stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return []
@@ -292,12 +317,15 @@ def list_models(binary: str, env: dict[str, str], cwd: str) -> list[str]:
 
 
 def _opencode_argv(spec: RunSpec) -> list[str]:
-    argv = [spec.binary, "run", "--format", "json", "--auto", "--dir", spec.cwd]
+    argv = [spec.binary, "run", "--format", "json", "--auto"]
+    private = _opencode_private_server(spec.binary)
+    # 2.x has no --dir or --variant: it works where it's started, and the effort is part of the model's name.
+    argv += ["--standalone"] if private else ["--dir", spec.cwd]
     if spec.session:
         argv += ["--session", spec.session]
     if spec.model:
-        argv += ["--model", spec.model]
-    if spec.effort:
+        argv += ["--model", f"{spec.model}#{spec.effort}" if private and spec.effort else spec.model]
+    if spec.effort and not private:
         argv += ["--variant", spec.effort]
     argv.append(_safe_prompt(spec.prompt))
     return argv

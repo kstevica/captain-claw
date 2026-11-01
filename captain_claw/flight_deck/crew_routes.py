@@ -16,6 +16,7 @@
   POST   /fd/crew/tasks/{id}/pr         push and open a pull request
   POST   /fd/crew/tasks/{id}/merge      land the work
   POST   /fd/crew/tasks/{id}/close      tear it down (?discard=true for work that hasn't landed)
+  GET    /fd/crew/models                what each CLI can run on, which can take a while to ask
   PUT    /fd/crew/models/{harness}      the model a CLI uses when a task names none
   PUT/DELETE /fd/crew/own-model         a model server of their own, for OpenCode and Pi
   POST   /fd/crew/own-model/check       can Flight Deck reach it, and what does it serve
@@ -120,7 +121,13 @@ async def _approved(user: dict) -> tuple[dict, Grant]:
     return row, grant
 
 
-async def _me(user: dict) -> dict[str, Any]:
+def _with_own(own: dict | None, harness: str, listed: list[str]) -> list[str]:
+    return list(dict.fromkeys([*(crew_logins.own_model_names(own) if harness in crew_logins.OWN_HARNESSES else []), *listed]))
+
+
+async def _me(user: dict, *, ask_for_models: bool = True) -> dict[str, Any]:
+    """*ask_for_models* off gives what's already known: the page opens on this, and a CLI
+    can take half a minute to answer, so the page asks for them apart, at /models."""
     row = await crew_runner._user_of(user.get("id") or "")
     grant = crew_access.grant_of(row)
     out: dict[str, Any] = {"offered": crew_access.offered(), "allowed": grant.allowed}
@@ -134,12 +141,12 @@ async def _me(user: dict) -> dict[str, Any]:
         info = crew_harness.HARNESSES[harness]
         binary = await asyncio.to_thread(crew_harness.find_binary, harness)
         version = await asyncio.to_thread(crew_harness.version_of, binary) if binary else ""
+        listed = (await crew_runner.models_of(row, grant, harness, binary, db) if ask_for_models
+                  else crew_runner.models_known(row["id"], harness))
         return {"id": harness, "label": info.label, "installed": bool(binary), "version": version,
                 "install": info.install, "login": await crew_logins.login_state(db, row, grant, harness),
                 "default_model": crew_logins.effective_model(defaults, own, harness),
-                "models": list(dict.fromkeys([
-                    *(crew_logins.own_model_names(own) if harness in crew_logins.OWN_HARNESSES else []),
-                    *await crew_runner.models_of(row, grant, harness, binary, db)]))}
+                "models": _with_own(own, harness, listed)}
 
     out.update(
         trusted=grant.trusted, max_parallel=grant.max_parallel,
@@ -153,7 +160,20 @@ async def _me(user: dict) -> dict[str, Any]:
 
 @router.get("/me")
 async def me(user: dict = Depends(get_current_user)) -> dict[str, Any]:
-    return await _me(user)
+    return await _me(user, ask_for_models=False)
+
+
+@router.get("/models")
+async def models(user: dict = Depends(get_current_user)) -> dict[str, list[str]]:
+    row, grant = await _approved(user)
+    db = get_db()
+    own = await crew_logins.read_own_model(db, row["id"])
+
+    async def one(harness: str) -> tuple[str, list[str]]:
+        binary = await asyncio.to_thread(crew_harness.find_binary, harness)
+        return harness, _with_own(own, harness, await crew_runner.models_of(row, grant, harness, binary, db))
+
+    return dict(await asyncio.gather(*(one(h) for h in grant.harnesses)))
 
 
 @router.get("/repos")

@@ -471,8 +471,8 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
                    session=task.get("session") or "", model=task.get("model") or "",
                    effort=task.get("effort") or "", task_id=task["id"])
     try:
-        pid, started = await asyncio.to_thread(_spawn, task["id"], HARNESSES[harness].argv(spec),
-                                               task["worktree"], env, out_dir)
+        argv = await asyncio.to_thread(HARNESSES[harness].argv, spec)
+        pid, started = await asyncio.to_thread(_spawn, task["id"], argv, task["worktree"], env, out_dir)
     except OSError as exc:
         await _fail(task, f"Couldn't start {HARNESSES[harness].label}: {exc}")
         return
@@ -1125,6 +1125,11 @@ async def models_of(user: dict, grant: Grant, harness: str, binary: str, db, *, 
     if known:
         _MODELS[uid] = (time.monotonic(), known)
     return known
+
+
+def models_known(uid: str, harness: str) -> list[str]:
+    """What OpenCode last said, without asking it again."""
+    return _MODELS.get(uid, (0.0, []))[1] if harness == "opencode" else []
 
 
 def usage(uid: str) -> dict[str, Any]:

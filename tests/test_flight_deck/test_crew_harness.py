@@ -4,6 +4,7 @@ The fixtures are trimmed from real runs of each CLI in a git worktree."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -202,6 +203,44 @@ def test_opencode_argv():
     assert argv[argv.index("--dir") + 1] == "/w"
     assert argv[argv.index("--session") + 1] == "ses_1"
     assert argv[argv.index("--variant") + 1] == "high"
+
+
+_OPENCODE_2_HELP = "FLAGS\n  --auto\nGLOBAL FLAGS\n  --standalone    Run with a private server instead of the background service\n"
+
+
+def test_opencode_2_runs_on_a_private_server(monkeypatch):
+    monkeypatch.setattr(crew_harness, "_opencode_run_help", lambda binary: _OPENCODE_2_HELP)
+    argv = HARNESSES["opencode"].argv(_spec(session="ses_1", model="a/b", effort="high"))
+    assert "--standalone" in argv
+    assert not {"--dir", "--variant"} & set(argv)  # it prints its usage and does nothing
+    assert argv[argv.index("--model") + 1] == "a/b#high"
+    assert argv[argv.index("--session") + 1] == "ses_1"
+    assert "--model" not in HARNESSES["opencode"].argv(_spec(effort="high"))  # nothing to hang it on
+
+    seen = {}
+
+    class Done:
+        returncode, stdout = 0, "opencode/big-pickle\n"
+
+    monkeypatch.setattr(crew_harness.subprocess, "run", lambda argv, **kw: seen.update(argv=argv) or Done())
+    assert crew_harness.list_models("/bin/opencode", {}, "/c") == ["opencode/big-pickle"]
+    assert seen["argv"] == ["/bin/opencode", "models", "--standalone"]
+
+
+def test_opencode_is_asked_what_it_takes_once_per_install(tmp_path):
+    asked = tmp_path / "asked"
+    cli = tmp_path / "opencode"
+    cli.write_text(f'#!/bin/sh\necho "$*" >> {asked}\necho --standalone\n')
+    cli.chmod(0o755)
+    assert crew_harness._opencode_private_server(str(cli))
+    assert crew_harness._opencode_private_server(str(cli))
+    assert asked.read_text().splitlines() == ["run --help"]
+    # Upgraded to one that doesn't have it.
+    cli.write_text(f'#!/bin/sh\necho "$*" >> {asked}\n')
+    os.utime(cli, (1, 1))
+    assert not crew_harness._opencode_private_server(str(cli))
+    assert len(asked.read_text().splitlines()) == 2
+    assert not crew_harness._opencode_private_server(str(tmp_path / "gone"))
 
 
 def test_pi_argv_names_its_session_up_front():
