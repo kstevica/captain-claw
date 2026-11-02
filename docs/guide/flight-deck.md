@@ -12,7 +12,7 @@ A full management dashboard for running teams of AI agents. Spawn, monitor, conf
 flight-deck        # http://0.0.0.0:25080   (alias: captain-claw-fd; add --simple-chat for a kiosk)
 ```
 
-**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Onboarding](#onboarding) · [The Taskboard](#the-taskboard) · [Your own AI keys and Profile](#your-own-ai-keys-and-profile) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Idle agents sleep](#idle-agents-sleep)
+**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Crew](#crew) · [Forge agents](#forge-agents) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Onboarding](#onboarding) · [The Taskboard](#the-taskboard) · [Your own AI keys and Profile](#your-own-ai-keys-and-profile) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Updating the deck](#updating-the-deck) · [Idle agents sleep](#idle-agents-sleep)
 
 ## Seven orchestration modes
 
@@ -27,7 +27,7 @@ One agent isn't always the answer — and one orchestration strategy never is. C
 
 The fifth mode is **💻 Code** (below) — a plan-gated, independently-reviewed engineering pipeline. The sixth is **Flight Deck** itself — spawn, monitor, and coordinate the whole crew from one dashboard. The seventh, new in 0.8.0, is **🦇 Bat** — the stubborn finisher: checkpointed steps with retries, survives restarts, and stops only when an independent, fail-closed judge says the task is done.
 
-- **Agent Forge** — Describe a business goal in plain text. An LLM designs a specialized team with roles, tools, operating procedures, and a lead coordinator. Review, customize, and spawn the entire team in one click.
+- **Agent Forge** — Describe a business goal in plain text. An LLM designs a specialized team with roles, tools, operating procedures, and a lead coordinator. Review, customize, and spawn the entire team in one click. Since 0.8.5 the kiosk's **[Forge agents](#forge-agents)** goes further, to a standing team with its schedules and its software.
 - **Agent Council** — Structured multi-agent deliberation. Run brainstorms, debates, reviews, or planning sessions with 2-N agents. Each agent self-scores suitability, chooses actions (answer, challenge, refine, broaden), and responds in moderated rounds. A moderator synthesizes conclusions; all agents vote. Export as markdown minutes.
 - **Basna** — A network-source ensemble. Describe a task and a router picks the smallest set of specialist archetypes, spawns them fresh, runs them blind and in parallel, and merges their answers weighted by each archetype's learned reliability (synthesizing only on disagreement). Attach files/images, edit each agent before the run, watch a live progress log, and download generated files. Reliability is learned per-archetype so routing improves over time.
 - **Vatra** — A collaborative team on a shared blackboard: a lead splits the work, each agent owns sections, reads what the others wrote, and improves it over review rounds; a reporter assembles the deliverable. Since 0.8.0 workers run until they're done, under an in-turn context governor, reading a rule-built run map.
@@ -39,6 +39,51 @@ The fifth mode is **💻 Code** (below) — a plan-gated, independently-reviewed
 Describe what you want built. A router sizes the job; big work runs **plan → your approval → build → three independent reviewers in parallel → triage → capped fix loop**, every phase a git commit in the folder's own repo. Agents query a persistent **Code Map** (symbols + architecture, git-hash-fresh) instead of re-reading your tree; per-turn **token costs are shown in chat**; the whole process **exports as one auditable Markdown transcript**. Works on fresh folders or **your existing local repos linked in** — on any models you configure, including a cheap implementer with a premium reviewer.
 
 Cursor and Claude Code give you one very good agent that plans, writes, reviews, and tests in a single context. Code splits those roles across **independent agents** — the reviewer never grades its own homework, QA actually runs the tests — and puts **you at the approval gate** before anything is built. Self-hosted, model-agnostic, no lock-in. A complete real run (an RTS game with 185 tests, ~$2.50 on DeepSeek) ships in [`examples/code/`](../../examples/code/). Details in [RELEASE_NOTES_0.7.0.md](../../release-notes/RELEASE_NOTES_0.7.0.md) and [USAGE.md](../../USAGE.md#code--the-agentic-coding-studio-new-in-070).
+
+## Crew
+
+New in 0.8.5: Crew lets Captain run **Claude Code, Codex, OpenCode and Pi** for you. Code above is Captain's own pipeline, with its own agents. Crew is the other way round: your agent is the first mate, and those CLIs do the work. Talk to your agent ("have Codex fix the login test and Claude add dark mode") or open **Crew** from the sidebar, or in the kiosk from the agent column or **Settings**.
+
+<p align="center">
+  <img src="../screenshots/crew-0.8.5.webp" width="100%" alt="Crew's Overview: 1 task needs you, a Codex task waiting on a decision, a Claude Code task ready to look at, OpenCode and Pi tasks working, and two projects in the side rail">
+</p>
+
+**How a task flows.**
+
+1. **Ask.** Pick a CLI and say what's wanted. **Change the code** (a `ship` task) works on a branch; **Only look, and report** (a `scout` task) changes nothing. Asking twice while the first is active is the same task.
+2. **Say where.** **A project**, **a repository address** or, for admins, **a folder here**. Crew clones an address itself in the background, and `crew action=clone` gets one here with no work and no tokens.
+3. **Say what it runs on.** *Its own* login or OpenCode's free models, *an agent's model*, *a deck tier*, or *enter one*: an address, a model, a context size and a key, for this task only. Through the deck, the CLI needs no login: it gets a key good for its current turn, and the real one stays on the deck. Those tokens count like an agent's: only what missed the prompt cache, plus output.
+4. **Give it what it needs.** Paste or attach any file, on New task and in any later message (50 MB each, 30 files or 200 MB a task). Tick **folders of your files**: **Read** is its own copy, remade each turn; **Read and write** is your real folder, at once, with no undo. Drive and OneDrive aren't offered.
+5. **It works.** Flight Deck watches without spending tokens, and a worker outlives a deck restart. **Send now** (Enter) stops what it's doing and it goes on with your message; **After this turn** (⌘/Ctrl+Enter) waits. A dropped connection shows as a grey note while the CLI retries, and if it gives up Captain starts it again from where it stopped, up to three times. After a quiet minute a line says what it's waiting on.
+6. **It finishes.** Your agent is called back on the channel you asked from. Results reach your VFS at `vfs:crew/<project>/<task>/` (`report.md` and `files/`), and the **Files** tab shows them.
+7. **A person lands it.** Every task works on its own branch and never pushes. **Merge**, or Approve in the bell on a merge your agent asked for. Captain pushes, opens and merges pull requests with the GitHub token in **Crew → Logins**, which no worker sees. Work that hasn't landed is never removed unless you say so.
+
+**The environment.** A worker can only run and test what's installed, so a project's page has an **Environment** card. Prepare it once in the main folder: by hand, in a **terminal in the browser**, or with **Prepare it with**, where a worker works it out, checks it runs and reports the test and start commands. Each task then gets its own instant copy of package folders, the shared Python environment with `PYTHONPATH` on its own code, its own `CREW_PORT` and temp folder. Captain never runs anything a repository brings with it.
+
+**Projects and Live sites.** Tasks group by project, what wants you first and what's finished folded. **Live sites** lists everything you've put online: **Stop** keeps the address, **Start** brings it back, **Publish** puts up what a task made or one of your folders.
+
+**Who and whose.** An admin ticks Crew per user on **Users**: which CLIs, how many at once. Admins, and a deck with sign-in off, can always use it. Each person saves their own logins in **Crew → Logins**, and a non-admin's worker never falls back to the deck owner's. OpenCode's free models need no login; **Your own model** runs OpenCode and Pi on your llama.cpp or Ollama.
+
+> **Approving someone trusts them with the server.** A worker runs as the same system user as Flight Deck, and no OS sandbox holds it to its worktree yet, apart from Codex's own. Merging is enforced at the `crew` tool: a non-admin's agent has no shell, so that's the whole way to a merge, while an admin's agent is told the rule rather than held to it.
+
+Install the CLIs on the deck's host; Crew → Logins shows which are there. Every setting, and the `crew` tool's actions, are in [USAGE.md](../../USAGE.md#crew-coding-agents-working-for-you--new-in-085). The tool itself is [here](../../USAGE.md#crew--new-in-085).
+
+## Forge agents
+
+New in 0.8.5, in the kiosk and the simple layout: **New agent → Forge agents**, for someone who knows what they need but not which agents would do it. Close the dialog at any point: it carries on, and the bell opens it again.
+
+<p align="center">
+  <img src="../screenshots/forge-0.8.5.webp" width="100%" alt="Forge agents: the plan to review, with the agents Captain proposes, their jobs and its questions">
+</p>
+
+1. **Describe.** Your request in your own words, and up to 10 files of 25 MB each. **Plan my team** starts it.
+2. **Review.** Vatra's planner opens your files, picks the fewest standing agents that cover the request, writes each one's job and may ask you questions. Rename, rewrite or leave out an agent; **Update the plan** starts from your edits. Nothing exists until you press **Create N agents**.
+3. **Create.** Each agent gets its archetype's way of working, its job and its teammates. The team shares a folder (`vfs:<team>/`) and one set of data tables, and reaches each other with `consult_peer`.
+4. **Finish.** Captain recommends what should run by itself and what software is worth building, with why. Only what you keep gets made. **What runs by itself** becomes scheduled tasks, under Scheduled tasks. **Software to build** goes to [Crew](#crew) as ordinary tasks, built to a [fixed contract](../../captain_claw/instructions/forge/app_contract.md): an HTTP API under `/api/agent/` with a bearer key and a manifest, a WebSocket at `/agent/ws`, or both. **Connect your agents** then reads the app's manifest, registers its API on the agents you choose and links them to its socket; the key is never in the plan or their instructions.
+
+An agent now knows its job with no one in its chat: Flight Deck tells it before each scheduled turn and before a linked system's first turn after it starts, on a deck with accounts.
+
+Known gaps: a team's tables aren't in the Data library, a non-admin can't host a runnable app (so Connect needs an admin or another host), and it isn't in an admin's dialog for a user's agents. Details in [USAGE.md](../../USAGE.md#forge-agents-say-what-you-need-and-get-a-team--new-in-085).
 
 ## Plan and Deep mode
 
@@ -142,9 +187,13 @@ New in 0.8.4: everything your agents were asked and sent, on every channel, in l
 - **Open bigger** shows one task over the board, and a task with a Gmail thread shows the whole email, fetched with your token when you open it and kept nowhere.
 - **Next steps wait for you.** With Jev, the agent's model drafts a reply, a reminder or a question as a proposal you edit, approve or reject. Email only ever becomes a draft, and recipients come only from verified parties.
 - **Hand it to an agent**: Next move → *The agent…*, say what to do, **Hand over**. It runs as your own request, and your Email sending switch still applies.
-- **Several at once**: tick tasks (or `x`, Shift+click for a run, `*` then `a` for all shown), then **Done**, **Snooze**, **Next move**, **Not a task**, **Reopen** or **Got it**, with Undo for the lot. **Hand to agent** takes one instruction for all ("thank them and politely decline"): the tasks leave Needs me, and the agent works through them one at a time, each with its own details. **Stop the rest** keeps what hasn't started from running. Nothing approves a next step in bulk.
+- **Several at once** (0.8.5): tick tasks (or `x`, Shift+click for a run, `*` then `a` for all shown), then **Done**, **Snooze**, **Next move**, **Not a task**, **Reopen** or **Got it**, with Undo for the lot. **Hand to agent** takes one instruction for all ("thank them and politely decline"): the tasks leave Needs me, and the agent works through them one at a time, each with its own details. A line over the board says how far it has got, and **Stop the rest** sends what still waits back to you. A task you closed or moved on before its turn is passed over and says why, and a run a deck restart cut isn't sent again. Nothing approves a next step in bulk.
 - **Then it checks**: the reply is compared with the tool-call register, and with Gmail and Google Calendar read with your token, and Jev compares your words with the record. **What the agent did** shows the verdict; in doubt, the task stays open and yours.
 - **Merge, unmerge and split** with Undo, and export as CSV or JSONL. `?taskboard=<id>` links open a task.
+
+<p align="center">
+  <img src="../screenshots/taskboard-batch-0.8.5.webp" width="100%" alt="The Taskboard handing over four tasks: the four titles, an agent picked, one instruction for all of them, and Hand over 4">
+</p>
 
 Plan and known gaps: [docs/taskboard-plan.md](../taskboard-plan.md). `FD_TASKBOARD_DISABLED=true` stops the sweep and triage; `CLAW_TURN_REGISTER=off` stops an agent reporting its turns.
 
@@ -171,10 +220,24 @@ New in 0.8.3: the **tool-call register** records every tool call every agent on 
 - **Multi-user Auth & teams** — JWT authentication, admin dashboard, rate limiting, and quotas; owner-scoped routes, per-user Google/Microsoft, team tier sets, shared agents, and a kiosk mode (0.8.0); invitations by email, a waitlist, password changes, branding and daily plan limits per user (0.8.1).
 - **Connections** — One tab per service: Google, Microsoft, ChatGPT, Antigravity, MCP Servers, WhatsApp, Telegram, Deep memory, Jev — each person connects their own accounts, and an agent only ever gets its owner's token. *Agent access for Claude (MCP)* issues the personal access tokens the HUD and the devices use too.
 - **MCP Connections** — Add Model Context Protocol servers (HTTP or stdio) once and every entitled agent in the fleet picks up their tools — no per-agent config. Phase 2 adds stdio transport for `npx`/`uvx`-shipped servers, per-agent allowlists, hot tool-list reload over SSE, and streaming tool calls.
+- **Users page** (0.8.5) — last login with sorting, tokens used this month and all time, and **Ask for feedback**, an editable email from your own Gmail or Outlook.
 - **Branding** — the deck's name and logo on the sign-in page and, since 0.8.3, in the browser tab.
 - **Confinement** (0.8.4) — with sign-in on, agents stay in their own files, non-admins' agents don't run code or drive the host, hosted apps and host folders are admin-only, and team keys are masked for non-admins and go only to the team's endpoints. See the [checklist](../team-deployment.md#what-the-launch-hardening-changed-08x).
 
 The step-by-step checklist is [docs/team-deployment.md](../team-deployment.md).
+
+## Updating the deck
+
+New in 0.8.5: **Console → Updates → Check now**, then **Update now**, on a deck running from a git checkout. It follows the branch it's on, so a fork follows the fork, and it only moves forward, to the commit you saw.
+
+1. **Test start.** The new commit runs from a temp folder on a spare port, with an empty data folder and none of the deck's keys. If that fails, nothing has been touched.
+2. **Warning.** Everyone signed in gets a toast, then one they can't close, counting down two minutes.
+3. **Stop the agents.** Mid-turn ones can be waited for, up to 5 more minutes. Crew's workers keep going.
+4. **Pull**, with any new packages already installed.
+5. **Restart in place**: the same process, command line and tmux pane.
+6. **Check.** If it doesn't come up, the old commit goes back and the deck starts on that, by itself.
+
+Every admin gets an email saying how it went. **Automatically** is **Off** by default, or **Tell me**, or **Install by itself**, where whatever is merged to the branch goes live once it passes the test start. An admin's agent can ask with `crew action=update_deck`, which puts an Approve in the bell. A desktop build or a container has no checkout, so it's updated the way it was installed. See [USAGE.md](../../USAGE.md#updating-the-deck--new-in-085).
 
 ## Idle agents sleep
 

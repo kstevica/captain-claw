@@ -1,2 +1,2 @@
-export const APP_VERSION = '0.8.4'
-export const BUILD_DATE = '2026-10-30'
+export const APP_VERSION = '0.8.5'
+export const BUILD_DATE = '2026-11-02'

@@ -74,6 +74,14 @@ These are code changes already in this build; the env vars above turn them on.
 - **Callers prove who they are** (0.8.4). Agent routes bind an owner only from a
   verified bearer or the agent's own token; a `source_port` or `owner_id` in a
   request counts as identity only with sign-in off.
+- **Crew is off until an admin ticks it** (0.8.5). **Approving someone trusts them
+  with the server:** a Crew worker runs commands as Flight Deck's system user, so it
+  can reach what that user can, including other people's files and the deck's
+  database. That is the reach the two points above took from non-admins' agents,
+  handed back on purpose to someone you name. No OS sandbox holds a worker yet,
+  apart from Codex's own ([sandbox plan](agent-os-sandbox-plan.md)). The browser
+  terminal needs its own tick. `FD_CREW=off` turns Crew off for the deck, and
+  `FD_CREW_TERMINAL=off` takes the terminal from everyone.
 
 ## First-run checklist
 
@@ -102,6 +110,10 @@ These are code changes already in this build; the env vars above turn them on.
 8. Ask each teammate to connect their **own** Google or Microsoft account
    (Connections). For the M5Stack devices and voice notes, share a **Soniox**
    team key (Admin → Integrations) or let each person add their own.
+9. Decide how the deck gets **updates** (Console → Updates): Off, Tell me, or
+   Install by itself. With Install by itself, whatever is merged to the branch
+   goes live once it passes the test start, after a two-minute warning to
+   everyone.
 
 ## Collaboration features (0.8.x)
 
@@ -150,6 +162,16 @@ These are code changes already in this build; the env vars above turn them on.
 - **The Taskboard** (0.8.4). Every user has their own board: a member's tasks go to
   that member, and owners and admins never see them. Personal inboxes are opt-in.
   Next steps and Jev's readings use the board user's own or the team's Jev key.
+- **Forge agents** (0.8.5). Anyone can say what they need under **New agent → Forge
+  agents** and approve a standing team, within their agent limit. Apps it recommends
+  go through Crew, so they need Crew's approval, and a non-admin can't host a runnable
+  app: Connect then needs an admin or another host.
+- **Crew** (0.8.5). On **Users**, open someone's row and tick Crew: which CLIs and how
+  many at once. Each person saves their own logins in **Crew → Logins**, and a
+  non-admin's worker never falls back to the deck owner's. A worker can run on a team
+  tier without seeing its key, and those tokens count toward that person's daily limit.
+- **Users page** (0.8.5). Last login, tokens used this month and all time, and **Ask
+  for feedback**, an email from your own connected Gmail or Outlook.
 
 ## Connect Claude to your agents (inbound MCP)
 

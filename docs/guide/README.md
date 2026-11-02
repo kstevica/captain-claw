@@ -5,11 +5,11 @@
 | Guide | What's inside |
 |---|---|
 | **[Getting started](getting-started.md)** | Install and the launchers, a deck for a team, a voice device on your desk, Docker, configuration |
-| **[Flight Deck](flight-deck.md)** | The command center: seven orchestration modes, Code, Plan and Deep mode, Flows, the kiosk, Onboarding, the Taskboard, activity and audit, running a deck for a team |
+| **[Flight Deck](flight-deck.md)** | The command center: seven orchestration modes, Code, Crew, Forge agents, Plan and Deep mode, Flows, the kiosk, Onboarding, the Taskboard, activity and audit, running and updating a deck for a team |
 | **[BotPort, MCP and agent links](botport-and-mcp.md)** | Flight Decks that work together, Flight Deck as an MCP server for Claude, MCP servers for your agents, connecting your own systems |
 | **[Devices and channels](devices-and-channels.md)** | StopWatch, PaperColor, StickS3 and Waveshare, the smart-glasses HUD, WhatsApp (and your own WhatsApp), Telegram, notifications, agents in your inbox |
 | **[Memory and cognition](memory.md)** | Six memory layers, the context engine, dreaming, the Brain Graph |
-| **[Inside an agent](agents.md)** | Every supported model, the 65 built-in tools, safety guards, the agent web UI |
+| **[Inside an agent](agents.md)** | Every supported model, the 68 built-in tools, safety guards, the agent web UI |
 | **[Architecture](architecture.md)** | Where each component lives in the code |
 | **[What's new](whats-new.md)** | Every release, newest first |
 

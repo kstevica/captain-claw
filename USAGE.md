@@ -99,7 +99,10 @@ For a quick overview and installation guide, see [README.md](README.md).
 - [Flight Deck](#flight-deck)
   - [Public file links](#public-file-links--new-in-081)
   - [Confinement on a multi-user deck](#confinement-on-a-multi-user-deck--new-in-084)
+  - [Forge agents](#forge-agents-say-what-you-need-and-get-a-team--new-in-085)
+  - [Crew](#crew-coding-agents-working-for-you--new-in-085)
 - [Kiosk (Simple Layout)](#kiosk-simple-layout)
+  - [Agent groups](#agent-groups--new-in-085)
   - [The agent menu](#the-agent-menu--new-in-081)
   - [The chat timeline](#the-chat-timeline-topics-and-other-channels--new-in-081)
   - [File library](#file-library--new-in-081)
@@ -112,6 +115,7 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Desktop app mode](#desktop-app-mode--new-in-081)
 - [Deck Administration — NEW in 0.8.1](#deck-administration--new-in-081)
   - [Admin console](#admin-console)
+  - [Updating the deck](#updating-the-deck--new-in-085)
   - [Daily plan limits and free resets](#daily-plan-limits-and-free-resets)
 - [Remote Integrations](#remote-integrations)
   - [Telegram: Per-User Sessions](#telegram-per-user-sessions)
@@ -785,7 +789,7 @@ On a shared agent, members use `docx` on their own files only. They read anythin
 
 `write` and `edit` refuse `.docx` paths and point to this tool. The output was checked against Microsoft Word: Word reads every revision, and its Accept All / Reject All give the same text as `accept` / `reject`.
 
-### xlsx
+### xlsx — NEW in 0.8.5
 
 Make and change Excel workbooks properly, without scripts. Only what a change really touches is rewritten, so charts, pivot tables, sparklines, macros and anything else in the file stay as they are. Formulas stay live and carry their results, and every call lists each cell it changed and each total that moved.
 
@@ -854,7 +858,7 @@ Extract Excel sheets to markdown tables.
 
 Each sheet becomes a markdown table. Uses standard library XML parsing. A formula saved with no result (a file from a script) shows as the formula; `xlsx` read calculates it.
 
-### pptx
+### pptx — NEW in 0.8.5
 
 Make and change PowerPoint decks properly, without scripts. Slides come from the deck's own layouts and fill their placeholders, so a firm's template keeps doing the design. There's no layout engine in a `.pptx` file, so text is measured here and every result says what doesn't fit.
 
@@ -1494,6 +1498,51 @@ HTML in, the page and a PNG of it out, for charts, diagrams and dashboards inste
 | `output_path` | string | no | An `.html` path (default `saved/showcase/<session>/`); the PNG goes next to it |
 
 The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a `.docx` or `.md` as `![caption](path)`. Script errors, failed loads, empty canvases and a blank picture come back for the agent to fix. The page never touches the host: it's served from an address that doesn't exist, every request goes through the public-only client, and WebSockets are closed.
+
+### crew — NEW in 0.8.5
+
+Run coding CLIs as your crew: Claude Code, Codex, OpenCode or Pi, each in its own git worktree on Flight Deck, several at once. The agent supervises and the CLI does the work. `dispatch` returns at once and the agent is called back when a task finishes or needs a decision, so it doesn't poll. How it all works is under [Crew](#crew-coding-agents-working-for-you--new-in-085).
+
+Shown only to an owner an admin approved, and Flight Deck checks that again on every call. Refused from inside a coding run or an ensemble, and for a shared agent's members.
+
+| Action | What it does |
+|---|---|
+| `options` | The CLIs you may use, their logins, the model each last ran on and its limits, what `runs_on` can name and which CLIs can use each, and the projects |
+| `dispatch` | Start a task. Name exactly one of `project`, `repo_url` and `repo_path` |
+| `clone` | A repository here and no work yet: no worker, no tokens, and a callback when it's ready. `dispatch` with `repo_url` clones by itself |
+| `env` | What's installed for a project, its test command, and the folder where you can set it up by hand |
+| `prepare_env` | A worker on `harness` sets the project up in that folder, and every later task gets it |
+| `list` | Tasks, narrowed by `project` |
+| `status` | One task, with what git shows and what to do next |
+| `files` | Where a task's files are; `whole=true` copies a big project whole |
+| `steer` | The next instruction, or your answer to a worker's question. It waits for the turn to end, unless `now=true` |
+| `folders` | Which VFS folders a task has, replacing what it had, from its next turn |
+| `stop` | Stop a task and keep its work |
+| `pr` | Captain pushes the branch and opens the pull request, with the token in Crew → Logins |
+| `request_merge` | Ask you to Approve the merge |
+| `update_deck` | An admin's agent asks them to Approve updating this deck. It's called back when that's over |
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | One of the above |
+| `harness` | string | dispatch, prepare_env | `claude`, `codex`, `opencode` or `pi` |
+| `brief` | string | dispatch | The task, complete: a worker sees only this. On `prepare_env`, anything particular about setting it up |
+| `title` | string | no | A short title |
+| `kind` | string | no | `ship` changes code on a branch (default); `scout` only investigates and reports |
+| `deliver` | string | no | `branch` (default), or `pr` to open a pull request when it's done |
+| `project`, `folder` | string | one of | A Code project (created if new), and a folder in it |
+| `repo_url` | string | one of | A repository's `https://` address with no login in it. Crew clones it in the background |
+| `repo_path` | string | one of | A git folder on this computer. Admins only |
+| `model` | string | no | A model for the CLI. For OpenCode, exactly a name `options` lists. Not with `runs_on` |
+| `runs_on` | string | no | `me`, `agent:<name>` or `tier:<name>`: run on that instead of the CLI's own model. The key stays on the deck. A model with its own key is entered on the page, never in a chat |
+| `effort` | string | no | Reasoning effort for the CLI |
+| `task_id` | string | most | The task |
+| `text`, `now` | string, boolean | steer | What to tell it; stop it to hear this at once |
+| `whole` | boolean | no | `files`: copy the whole project |
+| `vfs_read`, `vfs_write` | array | no | Folders of your VFS as `vfs:<folder>/<path>`. Read is its own copy each turn; write is the real folder, at once |
+| `attachments` | array | no | Files for the worker: a `saved/` path, a path a tool printed, or `vfs:<project>/<path>`. 50 MB each, 30 files or 200 MB a task. It refuses what mail attachments refuse, like keys and `.env` files |
+
+The agent reads results itself, from the `vfs:` paths `options`, the callback, `status` and `files` give, and never starts a task to fetch files. It's told to report what git shows rather than what a worker claims, that a task exists only once a result gives its id, and that it can't merge or discard work, including through `git` in a shell.
 
 ### basna
 
@@ -4969,23 +5018,25 @@ Every process agent runs as the deck's OS user. On a deck with sign-in, Flight D
 - **Shared agents** (`FD_AGENT_SHARING=1`): one agent, several users — see [Shared agents](#shared-agents-a2-members-own-google-deep-memory-files) below.
 - **Agent options.** A gear on each agent opens a tabbed options dialog (General, Instructions, `config.yaml`, `.env`); name and description are stored by Flight Deck, so they survive a browser wipe. Instructions are stored per agent by Flight Deck, so two tabs can't erase each other's.
 
-### Forge agents: say what you need and get a team
+### Forge agents: say what you need and get a team — NEW in 0.8.5
 
-For someone who knows what they need but not which agents would do it. In the kiosk's **New agent** dialog, **Forge agents** takes your request in your own words and your files (up to 10, 25 MB each), and works in four steps. You can close the dialog at any point: it carries on, and the bell opens it again.
+For someone who knows what they need but not which agents would do it. In the **New agent** dialog of the kiosk and the simple layout, **Forge agents** takes your request in your own words and your files (up to 10, 25 MB each), and works in four steps, named across the top: Describe, Review, Create, Finish. You can close the dialog at any point: it carries on, and the bell opens it again.
 
-1. **Plan.** Vatra's planner does this: an agent opens your files, the Lead picks the fewest standing agents that cover the request, and the Long Horizon Planner writes each one's job and may ask you questions. A plan never exceeds the room your account's agent limit leaves.
-2. **Approve.** Rename an agent, change what it's based on, rewrite its job, or leave it out. Answer the questions or say what you want different, then **Update the plan**, which starts from your edits. Nothing exists until you approve.
+1. **Describe.** **Plan my team** starts it. Vatra's planner does the work: an agent opens your files, the Lead picks the fewest standing agents that cover the request, and the Long Horizon Planner writes each one's job and may ask you questions. A plan never exceeds the room your account's agent limit leaves.
+2. **Review.** Rename an agent, change what it's based on, rewrite its job, or leave it out. Answer the questions or say what you want different, then **Update the plan**, which starts from your edits. Nothing exists until you press **Create N agents** (**Create as it is** once you've answered or typed something).
 3. **Create.** Each agent gets its archetype's way of working plus its job and its teammates. The team shares a folder (`vfs:<team>/`, with your files under `inputs/`) and one set of data tables, and teammates reach each other with `consult_peer`.
-4. **Schedule and build.** Captain recommends what should run by itself and what software is worth building, with why and how you'd use each. You can change anything, and only what you keep gets made.
-   - **Scheduled tasks** appear under Scheduled tasks like any other.
-   - **Apps** go to Crew as ordinary tasks, so Crew's approval and limits apply, and you land the work there. Every app is built to a fixed contract (`captain_claw/instructions/forge/app_contract.md`): an HTTP API under `/api/agent/` with a bearer key and a manifest, a WebSocket at `/agent/ws` that speaks the agent link protocol, or both.
-   - **Connect** works once the app is running: give its address and key. Flight Deck reads the manifest, registers the API as `direct_api` calls on each agent you choose, and makes an outbound agent link to the socket. The key stays in the sealed link and the agents' stored calls, never in the plan or the agents' instructions. An app on a private address needs `FD_LINK_PRIVATE_ADDRESSES=1`.
+4. **Finish.** Captain recommends what should run by itself and what software is worth building, with why and how you'd use each. You can change anything, and only what you keep gets made.
+   - **What runs by itself** becomes scheduled tasks, under Scheduled tasks like any other.
+   - **Software to build** goes to Crew as ordinary tasks (**Build it with Crew**), so Crew's approval and limits apply, and you land the work there. Every app is built to a fixed contract (`captain_claw/instructions/forge/app_contract.md`): an HTTP API under `/api/agent/` with a bearer key and a manifest, a WebSocket at `/agent/ws` that speaks the agent link protocol, or both.
+   - **Connect your agents** works once the app is running: give its address and key. Flight Deck reads the manifest, registers the API as `direct_api` calls on each agent you choose, and makes an outbound agent link to the socket. The key stays in the sealed link and the agents' stored calls, never in the plan or the agents' instructions. An app on a private address needs `FD_LINK_PRIVATE_ADDRESSES=1`.
 
 An agent now knows its job even if nobody has opened its chat: Flight Deck tells it before each scheduled turn and before a linked system's first turn after it starts. A link also follows its agent when a restart moves it to another port. Both need accounts on the deck, since with sign-in off instructions live in the browser.
 
 Plans are under `/fd/agent-forge/plans`.
 
-### Crew: coding agents working for you
+**Known gaps.** It has run end to end with a stand-in model, CLI and app; a real model's plan and a real worker building to the contract have yet to be tried together. A team's tables live in `vfs:<team>/.datastore/store.db`, which the Data library doesn't list. A non-admin can't host a runnable app, so Connect needs an admin or another host for it. Agents come from the archetype catalog, and it isn't in an admin's dialog for a user's agents. The desktop app embeds its own bundle, so it gets this with a new build.
+
+### Crew: coding agents working for you — NEW in 0.8.5
 
 Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to your agent ("have Codex fix the login test and Claude add dark mode"), or use the Crew page. Each task gets one of those CLIs in a git worktree of its own, several at once. Flight Deck watches them without spending tokens and tells you when one finishes or needs a decision, on the channel you asked from.
 
@@ -4995,7 +5046,7 @@ Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to y
 
 **Whose account.** Each user's own: Crew → Logins. A `claude setup-token` token or an Anthropic key for Claude Code; an OpenAI key or the contents of `~/.codex/auth.json` for Codex; provider keys for OpenCode and Pi ("Your own AI keys" count too); a GitHub token for repositories and pull requests. A non-admin's worker never falls back to the deck owner's login, and its environment holds none of the deck's secrets. An admin's worker uses this computer's logins unless they saved their own.
 
-**Where it works.** A Code project's folder, a repository address, or (admins only) a folder on the server: name one of them. A repository address needs no login in it (a GitHub token goes in Crew → Logins). Install the CLIs on the deck's host: Crew → Logins shows which are there and the command for those that aren't.
+**Where it works.** **A project** (a Code project's folder), **a repository address**, or, for admins, **a folder here**, on the server: name one of them. A repository address needs no login in it (a GitHub token goes in Crew → Logins). Install the CLIs on the deck's host: Crew → Logins shows which are there and the command for those that aren't.
 
 **A repository from an address.** Crew clones it itself, so a worker starts inside it. A wrong address or a private repository with no token is refused straight away. After that the task is on the page at once, as **Getting the repository** with how far it has got, and a big one can take minutes without anything waiting on it. If the clone fails you're told why; stopping the task stops the clone, and a deck restart starts it again. To have a repository here with no work yet, ask your agent to clone it (`crew action=clone`): no worker runs and no tokens go, it shows as its own project, and your agent tells you when it's ready. **New task here** then starts in the same repository.
 
@@ -5012,7 +5063,7 @@ Your agent can do the same. Send it a screenshot in chat and say "have OpenCode 
 - **Read:** the worker gets its own copy, made the same as the real folder before each of its turns. Nothing it does reaches your files. Its copies can come to 1 GB and 50,000 files, leaving out things like `.git` and `node_modules`.
 - **Read and write:** it works in your real folder. What it changes happens at once, with no branch and no undo, and git doesn't track it.
 
-They sit in a `.crew-vfs` folder in the worker's own folder, which git ignores, and it's told what's there. A task's page shows its folders, and **Change** sets them from its next turn. Your agent can do this too: `crew` takes `vfs_read` and `vfs_write`, and `action=folders` for a task under way.
+They sit in a `.crew-vfs` folder in the worker's own folder, which git ignores, and it's told what's there. A task's page shows its folders, and **Change** (**Give it folders** when it has none) sets them from its next turn. Your agent can do this too: `crew` takes `vfs_read` and `vfs_write`, and `action=folders` for a task under way.
 
 Google Drive and OneDrive folders aren't offered. A folder someone shared with you to view can only be read, and one they stop sharing is gone by the worker's next turn. A folder linked from the computer needs an admin's worker. This keeps your files apart for a well-behaved worker, not a hostile one: a worker runs as the same system user as Flight Deck, with no operating-system sandbox apart from Codex's own.
 
@@ -5038,7 +5089,7 @@ Settings on the deck: `FD_CREW_MODEL_SILENCE_SECONDS` (300) is how long a server
 **The environment a project runs in.** A worker can only run and test a project if what it needs is installed, whatever its language. That's prepared once, in the project's main folder, and every new task on the project gets it. The project's page on Crew has an **Environment** card showing the folder, what's installed, and what it looks like it still needs.
 
 - **By hand:** set it up in that folder the way you would any project. **Open a terminal here** gives you a shell in it from the browser, or reach it over SSH if you have that.
-- **By a coding agent:** **Prepare it with**, or ask your agent (`crew action=prepare_env`). A worker works out what the project needs, installs it in that folder, checks it runs, and reports the commands for its tests and for starting it. It doesn't touch tracked files, and you're told if it did. New tasks on the project wait until it's done. Run it again to bring things up to date.
+- **By a coding agent:** **Prepare it with** (**Update it with** once it's prepared), or ask your agent (`crew action=prepare_env`). A worker works out what the project needs, installs it in that folder, checks it runs, and reports the commands for its tests and for starting it. It doesn't touch tracked files, and you're told if it did. New tasks on the project wait until it's done. Run it again to bring things up to date.
 
 What each task gets, with no setup on its part:
 
@@ -5050,7 +5101,7 @@ What each task gets, with no setup on its part:
 | `CREW_PORT` | A port of its own, plus the nine after it, so tasks running at once don't collide. |
 | `TMPDIR` | A temp folder of its own. |
 
-Whatever a worker leaves running ends with its turn. Pip won't install outside a virtual environment, and a worker never gets Flight Deck's own environment.
+Whatever a worker leaves running ends with its turn. On macOS, which doesn't show a process's environment, a command a worker detached and left running at the natural end of a turn isn't caught; **Stop** and **Send now** catch it everywhere. Pip won't install outside a virtual environment, and a worker never gets Flight Deck's own environment.
 
 Under **Settings for this project** you can add what isn't one of the common layouts, for any language: other folders or files each task needs a copy of (`target`, `.env`), variables, the commands for its tests and for starting it (workers are told these), and a script to run before each turn, for a version manager and the like. These stay on the deck, outside the project, as you typed them: they aren't encrypted, and its workers can read them. Captain never runs anything a repository brings with it: only what's in these settings.
 
@@ -5076,7 +5127,7 @@ This doesn't isolate anything further: workers still run as the deck's system us
 
 **Models and limits.** The Crew page shows the model each CLI last ran on and its account's limits, like Claude's weekly limit, with what your tasks used in the last week. Your agent can tell you too. It's what the CLI reported at its last run, so it's as old as that run: nothing is asked for it and nothing is spent. Claude Code reports both, and Pi its model. Codex and OpenCode report neither.
 
-**Working on Captain itself.** Point a task at this deck's repository or your fork, and land it through a pull request as usual. Once it's merged, **Console → Updates** installs it, or your agent asks you to Approve that with `crew action=update_deck`. See [Updating the deck](#updating-the-deck).
+**Working on Captain itself.** Point a task at this deck's repository or your fork, and land it through a pull request as usual. Once it's merged, **Console → Updates** installs it, or your agent asks you to Approve that with `crew action=update_deck`. See [Updating the deck](#updating-the-deck--new-in-085).
 
 **Pushing is Captain's.** A worker never pushes or opens a pull request, and a non-admin's worker can't see a GitHub login on the server, whether that's `gh auth login` or a `GH_TOKEN`. Save a GitHub token in Crew → Logins: Captain uses it to clone, push and open pull requests, when a task asks for that or through **Open a pull request**, or `crew action=pr` from your agent.
 
@@ -6120,6 +6171,12 @@ Flight Deck uses environment variables:
 | `FD_TASKBOARD_DISABLED` | (unset) | **NEW in 0.8.4.** `true` stops the [Taskboard](#taskboard--new-in-084)'s sweep and triage; it then fills only when opened |
 | `FD_SETUP_TOKENS_PER_MIN` / `FD_SETUP_REASONING` | `40000` / `off` | **NEW in 0.8.4.** Pace and thinking level of a [setup read](#onboarding--new-in-084); `0` is unpaced, `auto` leaves the model's own level |
 | `FD_PROFILE_REASONING` | `low` | **NEW in 0.8.4.** Thinking level for the [Profile](#profile--new-in-084) researcher |
+| `FD_CREW` / `FD_CREW_TERMINAL` | on / on | **NEW in 0.8.5.** `off` turns [Crew](#crew-coding-agents-working-for-you--new-in-085), or its browser terminal, off for the whole deck |
+| `FD_CREW_CLAUDE_PERMISSION` | `auto` | **NEW in 0.8.5.** Claude Code's permission mode for workers: `auto`, `acceptEdits` or `bypassPermissions` |
+| `FD_CREW_MAX_RUNNING` / `FD_CREW_MAX_TURN_HOURS` / `FD_CREW_STALL_MINUTES` | `8` / `6` / `15` | **NEW in 0.8.5.** Workers at once on this deck; the longest one turn may run; silence before you're told a worker seems stuck |
+| `FD_CREW_WORKING_SECONDS` / `FD_CREW_MODEL_SILENCE_SECONDS` / `FD_CREW_ERROR_WAIT_SECONDS` / `FD_CREW_RETRY_WAIT_SECONDS` | `60` / `300` / `300` / `20` | **NEW in 0.8.5.** How often the still-working line refreshes; how long a model server through the deck can say nothing; how long a CLI gets to show it's past a failed call; the first wait between tries |
+| `FD_CREW_CLAUDE_BIN`, `FD_CREW_CODEX_BIN`, `FD_CREW_OPENCODE_BIN`, `FD_CREW_PI_BIN` | found on `PATH` | **NEW in 0.8.5.** Where a CLI is, if Flight Deck can't find it |
+| `FD_UPDATE_REPO` / `FD_UPDATE_POLL_S` / `FD_UPDATE_COUNTDOWN_S` / `FD_UPDATE_BOOT_TIMEOUT_S` | worked out / `900` / `120` / `300` | **NEW in 0.8.5.** [Updating the deck](#updating-the-deck--new-in-085): the checkout; how often it looks; how long everyone gets before the restart; how long the new version gets to come up |
 
 A deck on more than one person's network: see [docs/team-deployment.md](docs/team-deployment.md) for the full checklist (`FD_AUTH_ENABLED`, `FD_JWT_SECRET`, `FD_LOCKDOWN`, `FD_AGENT_SHARED_SECRET`, `FD_GLASSES_BRIDGE_TOKEN`, …).
 
@@ -6156,6 +6213,10 @@ An admin decides in **Admin → Settings → Kiosk mode** (or the [Admin console
 **New users start in kiosk mode** pre-ticks the mark for accounts created from then on (Add user or self sign-up). `captain-claw-fd --simple-chat` (or `FD_SIMPLE_CHAT=1`) only sets the starting value (Everyone) until an admin picks a mode. The server resolves the lock per user and returns it with the user on sign-in, token refresh, `/me`, registration and device pairing; a signed-in user picks up a change on the next token refresh (within about 15 minutes) or a reload. Admins are never locked. A deck without sign-in goes by the deck-wide flag.
 
 Locked users have no full layout and no agent options beyond what this section describes. They create agents from archetypes (models and keys come from their own tier set or the team default), manage their own connections, edit their profile, and sign out cleanly (per-browser queues and plans are purged). It is a UI lock, not an API boundary. A kiosk deck needs a published team tier set (or users with tier sets of their own) and enough agent slots.
+
+### Agent groups — NEW in 0.8.5
+
+Folders in the agent list, with a name and a colour. A group folds away and still shows an agent at work or a new reply. Drag an agent onto a group, or use its **⋯ → Group**; a group's own **⋯** ticks its agents, renames, recolours and orders it. **Pin** one group to the top of the list, and as many agents as you like to the top of their group. Each person has their own, on all their devices.
 
 ### Getting started guide — NEW in 0.8.1
 
@@ -6317,6 +6378,8 @@ Everything a user's agents were asked and sent, on every channel, in `taskboard.
 
 **Proof.** Triage checks each run (`taskboard_proof.py`) with no model: the tool-call register says what the tools answered in that turn, and Gmail and Google Calendar are read with the user's token. Jev then compares the user's words with the record; without Jev the result is never "proven". **What the agent did** shows the verdict. In doubt the task stays open and the user's, and gets no next step.
 
+**Several at once** (0.8.5). Tick tasks (or `x`, Shift+click for a run, `*` then `a` for all shown), then **Done**, **Snooze**, **Next move**, **Not a task**, **Reopen** or **Got it**, with Undo for the lot. **Hand to agent** takes one instruction for all ("thank them and politely decline"): the tasks leave Needs me, and the agent works through them one at a time, each in a session of its own with only that task's details, read when its turn comes. A line over the board says how far it has got and which task it's on; **Stop the rest** sends what still waits back to you, and the run under way finishes. A task in line isn't triaged until the agent is through. By its turn, one you closed, merged or moved on, or with the agent off or the allowance spent, is passed over and comes back saying why. A run that fails stops nothing else. A deck restart goes on with what waited after 30 s; the run it cut isn't sent again, since it may have sent its email, and its task says so. There's one line per person and agent. Nothing approves or rejects a next step in bulk, and there's no bulk merge.
+
 Plan and known gaps: [docs/taskboard-plan.md](docs/taskboard-plan.md).
 
 ### Your own AI keys — NEW in 0.8.4
@@ -6360,12 +6423,12 @@ A layout of its own for admins, with no chat and no agent desktop — just setti
 - **Connections** — each service with its status. The deck-wide part (the Google and Microsoft OAuth clients, the team Telegram bot, the Jev and Soniox team keys, MCP servers shared with everyone) sits above the admin's own connection.
 - **Users** — Users · Invitations · Waitlist, as on the Users page.
 - **Usage & limits** — today per person against the plan, spend by person and run kind, the plan limits in one table, recent activity.
-- **Updates** — this deck's version, what's new on its branch, and the button that installs it. See [Updating the deck](#updating-the-deck).
+- **Updates** — this deck's version, what's new on its branch, and the button that installs it. See [Updating the deck](#updating-the-deck--new-in-085).
 - **Settings** — branding, sign-up and the waitlist, kiosk mode, Docker, and the profile defaults.
 
 **Admins start there.** Signing in from a form (sign in, sign up, an accepted invitation) takes an admin to the console's Overview; an admin who never picked a layout starts there, and a reload keeps the layout they chose last. Other ways in: `/console`, a button in the top bar and one in the simple layout. The full layout's Admin, Users, Library and Connections pages are still there. Non-admins never see the console.
 
-### Updating the deck
+### Updating the deck — NEW in 0.8.5
 
 A deck running from a git checkout can update itself: **Console → Updates → Check now**, then **Update now**. It follows the branch it's on, so a fork follows the fork. It only moves forward, and only to the commit you saw.
 
@@ -6403,6 +6466,7 @@ User management is its own **Users** page (admin only, in the sidebar and the ph
 
 - **Users** — search by name or email; filter by role, plan and status (kiosk, temporary password, active today, daily limit reached); sort by newest, oldest, name or today's use. **Add user** sits by the search box. Each user has **Set password**, the **Kiosk mode** mark, today's usage with **Reset today**, their free resets and their **Agents**.
 - **Invitations** — **Invite by email**: email, name, role, kiosk and an optional note, sent from the admin's own connected Gmail or Outlook (or no email: copy the link). The invitation carries a one-time link to `<deck>/invite#<token>` (only the token's hash is stored; it expires after 7 days). The invitee chooses their own password there and is signed in — no password travels by email. A failed email keeps the invitation and hands the admin the link; accepting rings the inviter's bell and settles a pending waitlist application. The tab lists Pending / Expired / Accepted / All with counts, searchable by email, name, inviter and note; **Resend** makes a new link. Gmail needs a send-capable scope (and honours `FD_GMAIL_SEND`); Outlook needs `Mail.Send`.
+- **On each row** (0.8.5) — **last login**, which you can sort by, and **tokens** used this month and all time: deck keys and own keys, with no prompt-cache reads, as the daily allowance counts them. A shared agent's member turns count against its owner. **Ask for feedback** opens an editable email, sent from your own connected Gmail or Outlook, with the user's name first in its subject. **Crew** (0.8.5) sets which CLIs they may use, how many at once, and the terminal: see [Crew](#crew-coding-agents-working-for-you--new-in-085).
 - **Waitlist** — while self-registration is closed, "No account?" on the sign-in page leads to a waitlist form: name, email, password, and the name and email of whoever recommended them. Applicants join under the deck's instance name (**Admin → Settings → Waitlist** can set a separate **Waitlist name**). An applicant who signs in before approval is told it's pending. **Approve** creates the account with the password the applicant chose; with the "when I approve someone, email them" picker set, **Approve & email** also tells them their account is ready, with the deck's sign-in link (from `FD_PUBLIC_URL`, else the admin's browser address), sent from the admin's own Gmail or Outlook. A warning shows when that link would point at localhost, and a failed email never undoes the approval (a banner gives a copyable sign-in address instead). The tab lists Waiting / Approved / Rejected / All with counts. Settings can turn the waitlist off. The form is rate-limited per network and capped at 1,000 pending applications.
 
 ### Passwords
@@ -6657,9 +6721,9 @@ A press that wakes the stick only wakes it; the next press talks.
 
 **StopWatch**
 
-- **Yellow button:** press, talk, press again — or 2.5 s of quiet sends it. A press while it speaks stops the speech, a double press plays the last answer again, and a press that wakes the watch (from sleep or a dark screen) only wakes it. **Hold it (1 s) for note-taking mode** (see below).
+- **Yellow button:** press, talk, press again. Since firmware 0.20.1 a pause doesn't end a recording here, however long; only the 110 s limit does. A press while it speaks stops the speech, a double press plays the last answer again, and a press that wakes the watch (from sleep or a dark screen) only wakes it. **Hold it (1 s) for note-taking mode** (see below).
 - **The other button** works like the StickS3's side button: next page or back, hold for the menu, double-click on an answer to hear it again.
-- **Touch.** Idle, the screen is a clock face (the date, the time, the agent's character, the battery as an arc and its time left), the middle of three pages: swipe right for the background picture alone, left for the info page (voice notes waiting and room for more, the Wi-Fi network and its signal, the Flight Deck address, the agent), up or down for the last answer. Swipes page an answer, a double tap goes home, and the menu, the agent and character pickers and the status pages take swipes and taps. *Tap to talk* (Menu, off by default) adds an on-screen record button. While the agent works, the button under the timer is a **stop** (the agent stops after its current step); while an answer is spoken it is **pause / play**; afterwards a **replay** button sits under the text. A tap on a picture shows all of it, another fills the circle again.
+- **Touch.** Idle, the screen is a clock face (Captain above the time on a dial of minute dots, the date, the battery and its time left), the middle of three pages: swipe right for the background picture alone, left for the info page (voice notes waiting and room for more, the Wi-Fi network and its signal, the Flight Deck address, the agent), up or down for the last answer. Swipes page an answer, a double tap goes home, and the menu, the agent picker and the status pages take swipes and taps. *Tap to talk* (Menu, off by default) adds an on-screen record button. While the agent works, the button under the timer is a **stop** (the agent stops after its current step); while an answer is spoken it is **pause / play**; afterwards a **replay** button sits under the text. A tap on a picture shows all of it, another fills the circle again.
 - **Raise to wake.** A wrist raise lights a dark or dimmed screen; lowering the wrist on an idle screen puts it out. The watch still sleeps on its *Power off* timer (up to 3 minutes); only the buttons wake it from sleep.
 
 **PaperColor, A build** (`papercolor`): voice-first; the paper redraws about 30 s after you put it down.
@@ -6684,14 +6748,14 @@ On the B build, voice notes kept offline go to the agent by themselves (no quest
 
 ### Screens and settings
 
-- **The menu** (hold the side button; on the StopWatch it has two levels, with the rest under *Settings*): *Replay answer*, *Status*, *Send voice notes*, *Agent »* (which of your agents the device talks to), *Volume* (25–100 %) and speech *Boost* (+6 / +10 dB with a soft limiter), *Voice* (male / female), *Display* (text, or icons: an animated character), *Character »*, *Text size* (small / medium / large), screen-off and power-off timeouts, *Talk sounds*, *Beeps around speech*, *Tap to talk* (StopWatch), *Software update*, *Auto update*, *Settings on phone* and *Wi-Fi & settings*. The PaperColor has no menu: its Options code opens every setting on the phone.
-- **Characters.** In icon mode the screen shows one of 18 animated characters — Captain, Bot, Bird, Car, Matrix, Orc, Elf, Dwarf, C64, Amiga, Cat, Dog, Dinosaur, Alien, Caveman, HAL 9000, KITT or Pac-Man — with idle, listening, thinking, speaking (driven by the voice) and agent-down poses. *Character »* previews each one.
+- **The menu** (hold the side button; on the StopWatch it has two levels, with the rest under *Settings*): *Replay answer*, *Status*, *Send voice notes*, *Agent »* (which of your agents the device talks to), *Volume* (25–100 %) and speech *Boost* (+6 / +10 dB with a soft limiter), *Voice* (male / female), *Display* (text, or icons: Captain, animated), *Text size* (small / medium / large), screen-off and power-off timeouts, *Talk sounds*, *Beeps around speech*, *Tap to talk* (StopWatch), *Software update*, *Auto update*, *Settings on phone* and *Wi-Fi & settings*. The PaperColor has no menu: its Options code opens every setting on the phone.
+- **Captain.** Since firmware 0.20.0 the screen's character is Captain, the robot from the app icon, on every board; the 18-character choice is gone. In icon mode it has idle, listening, thinking, speaking (driven by the voice) and agent-down poses, and its face and lamp show the agent's state.
 - **Status.** Wi-Fi network and signal, IP, the deck and its round trip, the agent link, battery (level, volts, charging, time left), uptime, answers, the room's climate (PaperColor), firmware and any update on offer, voice and text size, free memory and voice notes waiting. The StickS3 shows it in pages at the chosen text size; the StopWatch as three pages of gauges round its ring. The StickS3's top bar always shows Wi-Fi and agent colour blocks and the battery percentage.
 - **The StopWatch's look.** A ring round the edge shows state — red while it listens, amber while the agent works (a tick per tool step), a short cyan line under the text following the voice. Screens slide or fade between each other, the watch answers touch with short vibrations, and pictures fill the circle.
 
 ### Talking
 
-- **Press to talk.** Every device toggles: press, talk, press again. A recording with no button held ends by itself after **2.5 s of quiet**, measured against the recording's own quietest and loudest moments so the mic's floor doesn't matter; a click, a tap on the case or room hum doesn't count as a voice. With nothing said, the recording is dropped.
+- **Press to talk.** Every device toggles: press, talk, press again. On the StickS3 and the PaperColor a recording with no button held ends by itself after **2.5 s of quiet** (on the StopWatch since 0.20.1 and the Waveshare board only a press ends one), measured against the recording's own quietest and loudest moments so the mic's floor doesn't matter; a click, a tap on the case or room hum doesn't count as a voice. With nothing said, the recording is dropped.
 - **Talk sounds and chimes.** A short high blip when you press (recording starts a quarter second later, so the blip isn't recorded) and a lower one when it is sent or kept offline (*Talk sounds*, on by default). A rising two-tone chime before the answer is spoken and the same tones falling once it has played to its end (*Beeps around speech*); a stopped answer or a replay gets neither. The PaperColor also beeps on its key presses.
 - **Sound by voice.** A recording that is only "volume up" / "volume down" (or "louder", "quieter", "pojačaj", "tiše" …) or "beep on" / "beep off", in English or Croatian, with a "please" either side, never reaches the agent. Flight Deck spots it, the device moves the volume a quarter at a time (25–100 %) or turns every beep on or off, keeps the setting, and says the result back at the new volume. Anything longer ("turn up the volume on the kitchen speaker") goes to the agent.
 - **"New topic."** A recording that opens with a new-topic cue ("New topic, how warm is it?") starts a new conversation and goes straight to the answer. Said alone, the device answers "New topic — go ahead."
@@ -6701,7 +6765,7 @@ On the B build, voice notes kept offline go to the agent by themselves (no quest
 ### Answers
 
 - **Streamed and spoken by the sentence.** Flight Deck follows the model's text as it is written and, each time a sentence completes, shows the answer so far and speaks that sentence, so the first words are heard while the rest is still being written. The full answer then replaces the text in place and only what wasn't spoken yet is read. Only the answer streams to the device — the agent's own calls (titles, rephrasing) never do — and text the model writes before a tool call isn't treated as the answer.
-- **The text follows the voice.** On the StopWatch the sentence being spoken is lit and the rest dimmed (in character mode it shows as a subtitle under the face); on the StopWatch and the StickS3 the page turns by itself when the voice reaches it, until you page by hand. Each sound tells the device which characters it covers, so the place stays exact through a long answer.
+- **The text follows the voice.** On the StopWatch the sentence being spoken is lit and the rest dimmed (in icon mode it shows as a subtitle under Captain's face); on the StopWatch and the StickS3 the page turns by itself when the voice reaches it, until you page by hand. Each sound tells the device which characters it covers, so the place stays exact through a long answer.
 - **Replay and pause.** The device keeps the whole answer in memory (its speech, then any sound the agent made, up to about 66 s) and replays it at once, offline. If part of it never arrived, the device asks Flight Deck to send the answer again. On the StopWatch, pause and play sit under a spoken answer.
 - **A dropped link.** On weak Wi-Fi the device keeps the working screen ("Connection lost — reconnecting…") and retries for up to 2 minutes. Flight Deck keeps each device's open turn and its last answer for 10 minutes, so after a reconnect the answer arrives (or "Thinking…" shows again while the agent is still at it). If the link stays away, or the deck restarted meanwhile, the device says "Answer lost — ask again".
 - **Battery time.** The StopWatch (on the clock face and its Power page), the StickS3 (its Battery status row) and the PaperColor B dashboard say "≈ 2 h 10 min left" or "full in ≈ 45 min", learned from the battery level over time (through sleeps too) once there are five minutes and two per cent to go on.
