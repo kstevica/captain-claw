@@ -22,7 +22,7 @@
 
 ## Why Captain Claw
 
-- **🛸 A fleet, not a chatbot.** Spawn specialists from 31 ready-made archetypes, describe a goal and let **Agent Forge** design the whole team, or say what you need in your own words and **Forge agents** plans a standing team with its schedules and its software.
+- **🛸 A fleet, not a chatbot.** Spawn specialists from 131 ready-made archetypes (generalists, specialists for your industry, and personal ones for your own life), describe a goal and let **Agent Forge** design the whole team, or say what you need in your own words and **Forge agents** plans a standing team with its schedules and its software.
 - **🎓 Agents you can train.** Give an agent your documents and it keeps them whole at no token cost, reads what you budget for, and learns rules and facts you review. Then exam it, and see exactly where it went wrong.
 - **🧩 The right shape for every problem.** Seven orchestration modes, from blind ensembles merged by learned reliability to a collaborative blackboard, moderated councils, and a finisher that stops only when an independent judge says the work is done.
 - **🛰️ Decks that work together.** Flight Decks on a VPS, a laptop and a Raspberry Pi behind home NAT lend each other their agents over **BotPort**, and you watch every request cross a live map.

@@ -9,6 +9,8 @@ export interface ArchetypeInput {
   archetype_id: string
   role: string
   family: string
+  category?: string
+  disclaimer?: string
   description: string
   cognitive_mode: string
   tier: string
@@ -53,8 +55,9 @@ async function jsonOrThrow(res: Response) {
 // tier-set machinery of useTierConfig — for read-only pickers. `asUser`: an
 // admin creating an agent for that user sees THEIR gallery, the one the spawn
 // resolves the archetype against.
-export async function listArchetypes(asUser?: string): Promise<ArchetypeRegistry> {
-  return jsonOrThrow(await authFetch('/fd/archetypes', { method: 'GET' }, asUser))
+/** `light` leaves out the instructions, for a gallery that only shows cards. */
+export async function listArchetypes(asUser?: string, light = false): Promise<ArchetypeRegistry> {
+  return jsonOrThrow(await authFetch(`/fd/archetypes${light ? '?light=true' : ''}`, { method: 'GET' }, asUser))
 }
 
 export async function createArchetype(body: ArchetypeInput) {

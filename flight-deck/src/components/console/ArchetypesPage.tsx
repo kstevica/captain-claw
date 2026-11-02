@@ -4,7 +4,8 @@ import {
   Check, Wrench, Gauge, Lock,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
-import { useTierConfig, TIER_ORDER, type Archetype, type ArchetypeRegistry } from '../../services/tierConfig'
+import { useTierConfig, TIER_ORDER, type Archetype, type ArchetypeCategory, type ArchetypeRegistry } from '../../services/tierConfig'
+import { CATEGORIES, archetypeCategory } from '../layout/archetypeLook'
 import {
   createArchetype, updateArchetype, deleteArchetype, generateArchetype, type ArchetypeInput,
 } from '../../services/archetypes'
@@ -30,7 +31,7 @@ function slugify(s: string): string {
 
 function toInput(a: Archetype): ArchetypeInput {
   return {
-    archetype_id: a.id, role: a.role, family: a.family || 'Custom', description: a.description || '',
+    archetype_id: a.id, role: a.role, family: a.family || 'Custom', category: archetypeCategory(a), disclaimer: a.disclaimer || '', description: a.description || '',
     cognitive_mode: a.cognitive_mode || 'neutra', tier: a.tier || 'balanced', tools: a.tools || [],
     fleet_instructions: a.fleet_instructions || '', keywords: a.keywords || [], lead: !!a.lead,
     reliability_seed: a.reliability_seed ?? 0.7, runtime: a.runtime || '',
@@ -51,6 +52,7 @@ export function ArchetypesPage() {
   const [query, setQuery] = useState('')
   const [source, setSource] = useState<Source>('all')
   const [family, setFamily] = useState('')
+  const [category, setCategory] = useState<ArchetypeCategory | 'all'>('all')
   // The editor: a draft plus the id it saves over (null = a new archetype).
   const [draft, setDraft] = useState<{ input: ArchetypeInput; id: string | null } | null>(null)
   const [viewing, setViewing] = useState<Archetype | null>(null)
@@ -67,10 +69,13 @@ export function ArchetypesPage() {
     base: all.filter((a) => (a.source || 'base') === 'base').length,
     shared: all.filter((a) => a.source === 'shared').length,
   }), [all])
-  const families = useMemo(() => [...new Set(all.map((a) => a.family || 'Custom'))].sort(), [all])
+  const families = useMemo(() => [...new Set(all
+    .filter((a) => category === 'all' || archetypeCategory(a) === category)
+    .map((a) => a.family || 'Custom'))].sort(), [all, category])
 
   const shown = all.filter((a) =>
     (source === 'all' || (a.source || 'base') === source)
+    && (category === 'all' || archetypeCategory(a) === category)
     && (!family || (a.family || 'Custom') === family)
     && matchesQuery(query, a.role, a.id, a.description, a.family, (a.keywords || []).join(' ')),
   )
@@ -83,7 +88,7 @@ export function ArchetypesPage() {
   }, [registry, all])
 
   const blank = (): ArchetypeInput => ({
-    archetype_id: '', role: '', family: 'Custom', description: '', cognitive_mode: 'neutra', tier: 'balanced',
+    archetype_id: '', role: '', family: 'Custom', category: 'focused', description: '', cognitive_mode: 'neutra', tier: 'balanced',
     runtime: '', tools: registry?.base_tools ? [...registry.base_tools] : [], fleet_instructions: '',
     keywords: [], lead: false, reliability_seed: 0.7,
   })
@@ -145,6 +150,16 @@ export function ArchetypesPage() {
         />
       </div>
 
+      <Segmented
+        label="Kind of agent"
+        value={category}
+        onChange={(next) => { setCategory(next); setFamily('') }}
+        options={[
+          { value: 'all' as const, label: 'All', count: all.length },
+          ...CATEGORIES.map((c) => ({ value: c.id, label: c.label, count: all.filter((a) => archetypeCategory(a) === c.id).length })),
+        ]}
+      />
+
       {families.length > 1 && (
         <div className="-mt-2 flex flex-wrap gap-1.5">
           {['', ...families].map((f) => (
@@ -205,6 +220,7 @@ export function ArchetypesPage() {
         <ArchetypeView
           a={viewing}
           tierLabel={registry?.tiers[viewing.tier]?.label || viewing.tier}
+          disclaimers={registry?.disclaimers}
           onClose={() => setViewing(null)}
           onCopy={() => { setDraft({ input: copyOf(viewing), id: null }); setViewing(null) }}
         />
@@ -285,7 +301,7 @@ function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onDelete }: {
 
 // ── Read-only: a built-in or shared archetype ──
 
-function ArchetypeView({ a, tierLabel, onClose, onCopy }: { a: Archetype; tierLabel: string; onClose: () => void; onCopy: () => void }) {
+function ArchetypeView({ a, tierLabel, disclaimers, onClose, onCopy }: { a: Archetype; tierLabel: string; disclaimers?: Record<string, string>; onClose: () => void; onCopy: () => void }) {
   const mode = MODES.find((m) => m.id === a.cognitive_mode)
   return (
     <Sheet
@@ -301,6 +317,7 @@ function ArchetypeView({ a, tierLabel, onClose, onCopy }: { a: Archetype; tierLa
     >
       <div className="space-y-5">
         <p className="text-sm leading-relaxed text-zinc-300">{a.description}</p>
+        {a.disclaimer && <Notice tone="amber">{disclaimers?.[a.disclaimer] || a.disclaimer}</Notice>}
         <dl className="grid grid-cols-2 gap-4 text-sm">
           <div><dt className="text-xs text-zinc-500">Model tier</dt><dd className="mt-0.5 text-zinc-200">{tierLabel}</dd></div>
           <div><dt className="text-xs text-zinc-500">Thinking style</dt><dd className="mt-0.5 text-zinc-200">{mode ? `${mode.label} — ${mode.character}` : a.cognitive_mode}</dd></div>
@@ -436,6 +453,19 @@ function ArchetypeSheet({ initial, editingId, registry, toolPalette, canDraft, g
           </div>
           <Field label="Description" hint="One sentence on what it does — shown in the picker.">
             <input value={d.description} onChange={(e) => set({ description: e.target.value })} className={inputCls} />
+          </Field>
+          <Field label="Kind" hint="The shelf it sits on in the picker.">
+            <select value={archetypeCategory(d)} onChange={(e) => set({ category: e.target.value })} className={inputCls}>
+              {CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+            </select>
+          </Field>
+          <Field label="Disclaimer" hint="For legal or health work: the agent says it, and the deck shows it in the picker and under the chat.">
+            <select value={d.disclaimer || ''} onChange={(e) => set({ disclaimer: e.target.value })} className={inputCls}>
+              <option value="">None</option>
+              <option value="legal">Legal</option>
+              <option value="health">Health, for people's own use</option>
+              <option value="clinical">Clinical, for professionals</option>
+            </select>
           </Field>
           <Field label="Family" hint="Groups archetypes in the picker.">
             <input value={d.family} onChange={(e) => set({ family: e.target.value })} placeholder="Custom" className={inputCls} list="fd-console-families" />

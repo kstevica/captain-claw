@@ -18,7 +18,13 @@ from pydantic import BaseModel, Field
 
 from captain_claw.config import without_retired_tools
 from captain_claw.flight_deck import auth as _auth
-from captain_claw.flight_deck.archetypes import load_base_registry, merged_registry
+from captain_claw.flight_deck.archetypes import (
+    DEFAULT_CATEGORY,
+    archetype_category,
+    disclaimer_text,
+    load_base_registry,
+    merged_registry,
+)
 from captain_claw.flight_deck.auth import get_current_user, get_db, get_optional_user
 from captain_claw.logging import get_logger
 
@@ -27,7 +33,7 @@ log = get_logger(__name__)
 router = APIRouter(prefix="/fd/archetypes", tags=["archetypes"])
 
 _INSTRUCTIONS_DIR = Path(__file__).parent.parent / "instructions"
-_VALID_TIERS = {"reason", "balanced", "fast", "longctx", "micro"}
+_VALID_TIERS = {"reason", "balanced", "fast", "longctx", "coding", "vision", "micro"}
 _VALID_MODES = {"ionian", "dorian", "phrygian", "lydian", "mixolydian",
                 "aeolian", "locrian", "neutra"}
 
@@ -50,6 +56,10 @@ class ArchetypeBody(BaseModel):
     archetype_id: str = ""
     role: str = ""
     family: str = "Custom"
+    # The shelf above the family: generalist, focused or personal.
+    category: str = DEFAULT_CATEGORY
+    # legal, health or clinical: says so in chat and on the deck. See `disclaimers`.
+    disclaimer: str = ""
     description: str = ""
     cognitive_mode: str = "neutra"
     tier: str = "balanced"
@@ -95,6 +105,8 @@ def _validate(body: ArchetypeBody) -> dict:
         "id": aid,
         "role": body.role.strip(),
         "family": (body.family or "Custom").strip(),
+        "category": archetype_category({"category": body.category}),
+        "disclaimer": body.disclaimer if disclaimer_text(body.disclaimer) else "",
         "description": body.description.strip(),
         "cognitive_mode": mode,
         "tier": body.tier,
@@ -138,8 +150,9 @@ async def _registry_user(request: Request, user: dict | None = Depends(_optional
 
 
 @router.get("")
-async def list_archetypes(user: dict | None = Depends(_registry_user)):
-    """Merged archetype registry (base + the caller's own)."""
+async def list_archetypes(light: bool = False, user: dict | None = Depends(_registry_user)):
+    """Merged archetype registry (base + the caller's own). ``light`` leaves out the
+    instructions: the gallery shows a hundred-odd cards and needs none of them."""
     # Tolerate a not-yet-initialized DB (e.g. auth-disabled standalone): fall
     # back to the base set, matching the pre-merge behavior of this endpoint.
     try:
@@ -158,6 +171,8 @@ async def list_archetypes(user: dict | None = Depends(_registry_user)):
     except json.JSONDecodeError as e:
         raise HTTPException(500, f"Archetype registry is invalid JSON: {e}")
     reg["archetypes"] = [_read_back(a) for a in reg.get("archetypes", [])]
+    if light:
+        reg["archetypes"] = [{k: v for k, v in a.items() if k != "fleet_instructions"} for a in reg["archetypes"]]
     return reg
 
 
@@ -275,6 +290,7 @@ async def generate_archetype(body: GenerateRequest, user: dict = Depends(get_cur
         archetype_id=result.get("id") or result.get("archetype_id") or result.get("role", ""),
         role=result.get("role", ""),
         family=result.get("family", "Custom"),
+        category=result.get("category", DEFAULT_CATEGORY),
         description=result.get("description", ""),
         cognitive_mode=mode if mode in _VALID_MODES else "neutra",
         tier=tier if tier in _VALID_TIERS else "balanced",
@@ -439,6 +455,7 @@ async def forge_archetypes(
                 archetype_id=item.get("id") or item.get("archetype_id") or item.get("role", ""),
                 role=item.get("role", ""),
                 family=item.get("family", "Custom"),
+                category=item.get("category", DEFAULT_CATEGORY),
                 description=item.get("description", ""),
                 cognitive_mode=mode if mode in _VALID_MODES else "neutra",
                 tier=tier if tier in _VALID_TIERS else "balanced",

@@ -65,9 +65,15 @@ export interface TierDef {
 
 // Archetype registry served by GET /fd/archetypes — base set merged with the
 // caller's own custom archetypes (the latter tagged source: 'user').
+// The shelf above the family. A person's own archetype may not have one yet.
+export type ArchetypeCategory = 'generalist' | 'focused' | 'personal'
+
 export interface Archetype {
   id: string
   family: string
+  category?: ArchetypeCategory
+  // A key into the registry's `disclaimers`: legal, health or clinical.
+  disclaimer?: string
   role: string
   lead?: boolean
   cognitive_mode: string
@@ -89,9 +95,16 @@ export interface Archetype {
   shared_permission?: string
 }
 
+/** A person looking for an archetype by role, family, what it does or a keyword. */
+export function archetypeMatches(a: Archetype, query: string): boolean {
+  const q = query.trim().toLowerCase()
+  return !q || [a.role, a.id, a.family, a.description, ...(a.keywords || [])].some((t) => (t || '').toLowerCase().includes(q))
+}
+
 export interface ArchetypeRegistry {
   tiers: Record<string, TierDef>
   base_tools?: string[]
+  disclaimers?: Record<string, string>
   archetypes: Archetype[]
 }
 

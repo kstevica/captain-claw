@@ -15,7 +15,7 @@ import { BasnaWizardModal } from '../components/agents/BasnaWizardModal'
 import { KnowledgePicker } from '../components/agents/KnowledgePicker'
 import { ReferenceFolderPicker } from '../components/agents/ReferenceFolderPicker'
 import { deriveCost } from '../components/CostCard'
-import { useTierConfig, TIER_ORDER } from '../services/tierConfig'
+import { archetypeMatches, useTierConfig, TIER_ORDER } from '../services/tierConfig'
 import {
   buildLiveAgents, FileModal, isVatra, parentIdOf, runVfsProject, type ViewMode,
 } from '../components/basna/shared'
@@ -303,6 +303,7 @@ export function BasnaPage() {
   )
   // Optional user-fixed team: archetype ids the route/plan MUST use (empty = auto).
   const [team, setTeam] = useState<string[]>([])
+  const [teamQuery, setTeamQuery] = useState('')
   const [teamOpen, setTeamOpen] = useState(false)
   const [tuning, setTuning] = useState(false)  // router tier + max agents disclosure
   const toggleTeam = (id: string) =>
@@ -1311,8 +1312,15 @@ export function BasnaPage() {
                     <button onClick={() => setTeam([])} disabled={teamLocked} className="ml-auto shrink-0 text-[11px] text-zinc-500 hover:text-zinc-300 disabled:opacity-40">Clear</button>
                   )}
                 </div>
+<input
+                  value={teamQuery}
+                  onChange={(e) => setTeamQuery(e.target.value)}
+                  placeholder="Filter by role, family or skill…"
+                  aria-label="Filter archetypes"
+                  className="mb-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+                />
                 <div className={`grid max-h-64 grid-cols-1 gap-1 overflow-auto sm:grid-cols-2 ${teamLocked ? 'pointer-events-none opacity-50' : ''}`}>
-                  {(registry?.archetypes || []).map((a) => {
+                  {(registry?.archetypes || []).filter((a) => team.includes(a.id) || archetypeMatches(a, teamQuery)).map((a) => {
                     const on = team.includes(a.id)
                     return (
                       <button

@@ -12,6 +12,7 @@ import {
   INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS, fmtCtxTokens, type Archetype,
   REASONING_EFFORTS, REASONING_EFFORT_PROVIDERS, splitReasoningEffort, withReasoningEffort,
 } from '../services/tierConfig'
+import { CATEGORIES, archetypeCategory } from '../components/layout/archetypeLook'
 import { CtxSelect } from '../components/common/CtxSelect'
 import {
   createArchetype, updateArchetype, deleteArchetype, generateArchetype,
@@ -107,7 +108,7 @@ export function LibraryPage() {
   }
 
   const blankDraft = (): ArchetypeInput => ({
-    archetype_id: '', role: '', family: 'Custom', description: '',
+    archetype_id: '', role: '', family: 'Custom', category: 'focused', description: '',
     cognitive_mode: 'neutra', tier: 'balanced', runtime: '',
     tools: registry?.base_tools ? [...registry.base_tools] : [],
     fleet_instructions: '', keywords: [], lead: false, reliability_seed: 0.7,
@@ -117,7 +118,7 @@ export function LibraryPage() {
   const openEdit = (a: Archetype) => {
     setEditingId(a.id); setEditorErr(''); setGenPrompt('')
     setEditor({
-      archetype_id: a.id, role: a.role, family: a.family || 'Custom',
+      archetype_id: a.id, role: a.role, family: a.family || 'Custom', category: archetypeCategory(a), disclaimer: a.disclaimer || '',
       description: a.description || '', cognitive_mode: a.cognitive_mode || 'neutra',
       tier: a.tier || 'balanced', tools: a.tools || [],
       fleet_instructions: a.fleet_instructions || '', keywords: a.keywords || [],
@@ -205,6 +206,8 @@ export function LibraryPage() {
       archetype_id: newId,
       role: `${a.role} (copy)`,
       family: a.family || 'Custom',
+      category: archetypeCategory(a),
+      disclaimer: a.disclaimer || '',
       description: a.description || '',
       cognitive_mode: a.cognitive_mode || 'neutra',
       tier: a.tier || '',
@@ -935,6 +938,29 @@ export function LibraryPage() {
               </div>
 
               <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Kind</label>
+                  <select
+                    value={archetypeCategory(editor)}
+                    onChange={(e) => setEditor({ ...editor, category: e.target.value })}
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                  >
+                    {CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-[10px] font-medium text-zinc-500 mb-1">Disclaimer</label>
+                  <select
+                    value={editor.disclaimer || ''}
+                    onChange={(e) => setEditor({ ...editor, disclaimer: e.target.value })}
+                    className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
+                  >
+                    <option value="">None</option>
+                    <option value="legal">Legal</option>
+                    <option value="health">Health, for people's own use</option>
+                    <option value="clinical">Clinical, for professionals</option>
+                  </select>
+                </div>
                 <div>
                   <label className="block text-[10px] font-medium text-zinc-500 mb-1">Family</label>
                   <input
