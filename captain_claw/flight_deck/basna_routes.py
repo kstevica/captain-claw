@@ -493,10 +493,19 @@ async def _resolve_basna(db, session_id: str, user_id: str, *, need_write: bool 
     return row, access, row["user_id"]
 
 
+def _is_forge_plan(sess: dict) -> bool:
+    """A Forge agents plan (agent_forge.py): kept in this table for its plan, files
+    and progress feed, but it isn't a run, so the run lists leave it out."""
+    try:
+        return json.loads(sess.get("config") or "{}").get("mode") == "forge"
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return False
+
+
 @router.get("/sessions")
 async def list_sessions(user: dict = Depends(get_current_user)):
     db = get_db()
-    own = await db.list_basna_sessions(user["id"])
+    own = [s for s in await db.list_basna_sessions(user["id"]) if not _is_forge_plan(s)]
     shared_meta = await db.list_shares_for_grantee(user["id"], "basna")
     out = list(own)
     for s in shared_meta:
@@ -727,7 +736,7 @@ async def agent_list_sessions(body: _AgentReq):
     """List the calling agent's owner's Basna sessions (filtered, summarized)."""
     owner = _resolve_owner(body)
     db = get_db()
-    rows = await db.list_basna_sessions(owner)
+    rows = [r for r in await db.list_basna_sessions(owner) if not _is_forge_plan(r)]
     if body.status:
         rows = [r for r in rows if r.get("status") == body.status]
     if body.query:

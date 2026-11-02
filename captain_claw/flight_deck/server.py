@@ -1782,6 +1782,7 @@ from captain_claw.flight_deck import (
     taskboard_threads,
 )
 from captain_claw.flight_deck import crew_runner
+from captain_claw.flight_deck.agent_forge import router as agent_forge_router
 from captain_claw.flight_deck.crew_routes import router as crew_router
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
 from captain_claw.flight_deck import (
@@ -1836,6 +1837,7 @@ app.include_router(deep_memory_router)
 app.include_router(hosting_router)
 app.include_router(code_router)
 app.include_router(crew_router)
+app.include_router(agent_forge_router)
 app.include_router(queue_router)
 app.include_router(google_oauth_router)
 app.include_router(gmail_send_router)

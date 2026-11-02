@@ -15,6 +15,7 @@ import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { useUIStore } from '../../stores/uiStore'
 import { OPEN_PROFILE_EVENT } from '../../utils/profileSources'
 import { AgentSetupDialog } from '../layout/AgentSetupDialog'
+import { ForgeAgentsDialog } from '../layout/ForgeAgentsDialog'
 import { OnboardingDialog } from '../layout/OnboardingDialog'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import {
@@ -71,7 +72,14 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
   const [setupFor, setSetupFor] = useState<{ slug: string; name: string; readDocs?: string[] } | null>(null)
   // An agent whose onboarding exam ended, or a member suggested a lesson for: its onboarding, on that tab.
   const [examFor, setExamFor] = useState<{ slug: string; name: string; tab: 'exams' | 'lessons' } | null>(null)
+  // A Forge agents plan that's ready for its next step, or stopped.
+  const [forgeFor, setForgeFor] = useState('')
   const { isMobile: phone } = useIsMobile()
+  const openForge = (planId: string) => {
+    setOpen(false)
+    setBig(false)
+    setForgeFor(planId)
+  }
   const openSetup = (slug: string, kind: SetupKind = 'setup') => {
     setOpen(false)
     setBig(false)
@@ -101,12 +109,13 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
         <>
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div className={`fixed left-2 right-2 top-14 z-50 sm:absolute sm:top-full sm:mt-1 sm:w-[360px] rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl ${align === 'left' ? 'sm:right-auto sm:left-0' : 'sm:left-auto sm:right-0'}`}>
-            <NotificationDropdown onClose={() => setOpen(false)} onEnlarge={() => { setOpen(false); setBig(true) }} onOpenSetup={openSetup} />
+            <NotificationDropdown onClose={() => setOpen(false)} onEnlarge={() => { setOpen(false); setBig(true) }} onOpenSetup={openSetup} onOpenForge={openForge} />
           </div>
         </>
       )}
-      {big && <NotificationDialog onClose={() => setBig(false)} onOpenSetup={openSetup} />}
+      {big && <NotificationDialog onClose={() => setBig(false)} onOpenSetup={openSetup} onOpenForge={openForge} />}
       {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
+      {forgeFor && <ForgeAgentsDialog key={forgeFor} initialPlanId={forgeFor} onClose={() => setForgeFor('')} />}
       {examFor && (
         <OnboardingDialog agent={examFor} initialTab={examFor.tab} phone={phone} onClose={() => setExamFor(null)}
           onSetup={(readDocs) => { setSetupFor({ ...examFor, readDocs }); setExamFor(null) }} />
@@ -116,8 +125,8 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
 }
 
 // The bell's list in a dialog: wide, tall, every text whole.
-function NotificationDialog({ onClose, onOpenSetup }: {
-  onClose: () => void; onOpenSetup: (slug: string, kind?: SetupKind) => void
+function NotificationDialog({ onClose, onOpenSetup, onOpenForge }: {
+  onClose: () => void; onOpenSetup: (slug: string, kind?: SetupKind) => void; onOpenForge: (planId: string) => void
 }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
@@ -132,7 +141,7 @@ function NotificationDialog({ onClose, onOpenSetup }: {
         className="flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 shadow-2xl sm:h-[85vh] sm:max-w-3xl sm:rounded-xl sm:border sm:border-zinc-800"
         onClick={(e) => e.stopPropagation()}
       >
-        <NotificationDropdown large onClose={onClose} onOpenSetup={onOpenSetup} />
+        <NotificationDropdown large onClose={onClose} onOpenSetup={onOpenSetup} onOpenForge={onOpenForge} />
       </div>
     </div>,
     document.body,
@@ -153,11 +162,12 @@ function revealSharedSection(tries = 20): void {
   if (tries > 0) setTimeout(() => revealSharedSection(tries - 1), 50)
 }
 
-function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }: {
+function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, large = false }: {
   onClose: () => void
   onEnlarge?: () => void
   /** A notice that an agent's way-of-working read ended opens its setup. */
   onOpenSetup?: (slug: string, kind?: SetupKind) => void
+  onOpenForge?: (planId: string) => void
   /** In the big dialog: larger text, every text whole, a close button. */
   large?: boolean
 }) {
@@ -286,6 +296,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
           shown.map((n) => {
             const setup = (n.refType === 'agent_setup' || n.refType === 'agent_exam' || n.refType === 'agent_lessons')
               && n.refId && onOpenSetup ? n.refId : ''
+            const forge = n.refType === 'agent_forge' && n.refId && onOpenForge ? n.refId : ''
             const profile = n.refType === 'profile'
             const task = taskOf(n)
             const exam = n.refType === 'agent_exam'
@@ -295,8 +306,8 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
               key={n.id}
               notification={n}
               large={large}
-              action={setup || profile ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
-              hint={setup ? (exam ? 'Click to see the exam.' : lessons ? 'Click to take it, or decline.'
+              action={setup || profile || forge ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
+              hint={forge ? 'Click to open the plan.' : setup ? (exam ? 'Click to see the exam.' : lessons ? 'Click to take it, or decline.'
                 : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.')
                 : profile ? (n.type === 'error' ? 'Click to open your Profile and try again.' : 'Click to review it in your Profile.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
@@ -306,7 +317,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, large = false }
               onAnswered={() => { markRead(n.id); loadWaiting() }}
               onOpenTask={task ? () => { markRead(n.id); openTask(task) } : undefined}
               onRead={() => markRead(n.id)}
-              onActivate={setup ? () => onOpenSetup?.(setup, exam ? 'exam' : lessons ? 'lessons' : 'setup') : profile ? openProfile : activate}
+              onActivate={forge ? () => onOpenForge?.(forge) : setup ? () => onOpenSetup?.(setup, exam ? 'exam' : lessons ? 'lessons' : 'setup') : profile ? openProfile : activate}
               onRemove={() => remove(n.id)}
             />
             )

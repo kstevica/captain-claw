@@ -336,6 +336,7 @@ class _LinkConn(BusClient):
         self.via = "ws"        # where that message came from: "ws", or "http" (its answer goes there)
         self.streamed = False  # some of this answer went out as it came
         self._last_state: tuple = ()
+        self._told: Any = None  # the agent socket last told who it is
 
     @property
     def channel_id(self) -> str:
@@ -351,6 +352,27 @@ class _LinkConn(BusClient):
         slug = str(self.link.get("agent_slug") or "")
         return (f'Agent "{slug}" isn\'t running. Start it in Flight Deck.' if slug
                 else "No running agent. Start one in Flight Deck.")
+
+    async def before_send(self) -> None:
+        """An agent restarted can come back on another port. A device reconnects and binds
+        afresh; a link's socket to its system stays up, and would keep waiting on the old one."""
+        agent = self.pick_agent("")
+        if agent and self.ch is not None and int(agent["port"]) != int((self.agent or {}).get("port") or 0):
+            await self.bind("")
+
+    async def first_frame(self, ch: Any) -> dict | None:
+        """A link's turn can be the first thing an agent hears since it started, with no chat
+        open to tell it its job (agent_handshake). Once per connection to the agent."""
+        if ch.agent_ws is self._told:
+            return None
+        self._told = ch.agent_ws
+        from captain_claw.flight_deck.agent_handshake import identity_frame
+
+        try:
+            return await identity_frame(self.user_id, str((self.agent or {}).get("slug") or ""))
+        except Exception:
+            log.debug("agent link: no identity to send", exc_info=True)
+            return None
 
     def chat_fields(self, ch: Any, text: str, ctx: Any, extra_notes: list[str] | None) -> dict:
         """*ctx*: the message's files on the agent (upload_files)."""
