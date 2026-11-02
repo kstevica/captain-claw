@@ -11,6 +11,14 @@ A task keeps what was chosen (``model_source``), and that's looked up again for 
 an admin changes or an agent given another model is what its next call runs on, and a person who
 loses their approval or their agent loses this with it.
 
+What counts is what an agent's call would count (``llm.uncached_tokens``): input that missed the
+prompt cache, and output. A long session re-reads its whole history on every call, and those reads
+would swallow the day.
+
+A server failing before it has said anything is asked again here, and the worker never hears of it.
+A reply cut off part way can't be picked up: it's ended, and the CLI asks again itself, as all four
+do. A server that goes quiet is hung up on. The runner watches for a worker that doesn't get past it.
+
 A CLI can only talk the way it was built to: Claude Code in Anthropic's API, Codex in OpenAI's
 Responses API, OpenCode and Pi in those and OpenAI's chat API. Which one a model's server has is
 known for the big providers and not for anything else, so a server of someone's own is given the
@@ -23,6 +31,7 @@ import asyncio
 import json
 import os
 import secrets
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -57,9 +66,14 @@ _OUTPUT_MAX = 65536
 _BODY_MAX = 64_000_000
 _FORWARDED = ("content-type", "accept", "anthropic-version", "anthropic-beta", "openai-beta", "user-agent")
 _PATHS = ("messages", "messages/count_tokens", "chat/completions", "responses", "responses/compact", "models")
-_READ_SECONDS = 900.0
 _SCAN_MAX = 8_000_000
 _CLOSING: set[asyncio.Future] = set()
+_CALL_TRIES = 3
+_TRY_AGAIN_AFTER = 1.0
+_LONGEST_WAIT = 15.0  # a server asking for longer gets that from the CLI, not from a call held open here
+_BUSY = (408, 429, 500, 502, 503, 504, 520, 522, 524, 529)
+_CALLS: dict[str, dict[str, float]] = {}  # per task: its calls under way, what's come back, and how big its last call was
+_CALLS_KEPT = 1000
 
 
 @dataclass(frozen=True)
@@ -379,12 +393,23 @@ def new_token() -> str:
 # ── The calls ───────────────────────────────────────────────────────────
 
 
+def _missed_input(usage: dict) -> int:
+    """The input that missed the prompt cache. Anthropic's API keeps cache reads apart from its input,
+    and cache writes are new input. The others fold what they read into theirs and say how much."""
+    if "prompt_tokens" not in usage and ("cache_read_input_tokens" in usage or "cache_creation_input_tokens" in usage):
+        return _whole(usage.get("input_tokens")) + _whole(usage.get("cache_creation_input_tokens"))
+    details = next((d for d in (usage.get("prompt_tokens_details"), usage.get("input_tokens_details")) if isinstance(d, dict)), {})
+    read = _whole(details.get("cached_tokens")) or _whole(usage.get("prompt_cache_hit_tokens")) or _whole(usage.get("cache_read_input_tokens"))
+    return max(0, (_whole(usage.get("prompt_tokens")) or _whole(usage.get("input_tokens"))) - read)
+
+
 class _Count:
     """The tokens a reply says it used: in one of a stream's events, or in the whole body."""
 
     def __init__(self, *, stream: bool, asked: int = 0) -> None:
         self.stream = stream
-        self.asked = asked
+        self.asked = asked  # what's new in this call since its last, in bytes
+        self.final = False
         self.tail = b""
         self.taken = 0
         self.body = bytearray()
@@ -402,10 +427,10 @@ class _Count:
         usage = next((u for u in inner if isinstance(u, dict)), None)
         if usage is None:
             return
-        given = (_whole(usage.get("prompt_tokens")) or _whole(usage.get("input_tokens"))) + _whole(
-            usage.get("cache_read_input_tokens")) + _whole(usage.get("cache_creation_input_tokens"))
-        self.input = max(self.input, given)
+        self.input = max(self.input, _missed_input(usage))
         self.output = max(self.output, _whole(usage.get("completion_tokens")) or _whole(usage.get("output_tokens")))
+        # Anthropic's first event says what went in, with a stand-in for what comes out. Its last says the rest.
+        self.final = self.final or obj.get("type") != "message_start"
 
     def feed(self, chunk: bytes) -> None:
         self.taken += len(chunk)
@@ -419,15 +444,56 @@ class _Count:
             if line.startswith(b"data:") and b"usage" in line:
                 self._read(line[5:].strip())
 
-    def finish(self, *, whole: bool = True) -> int:
+    def finish(self) -> int:
         """What it used. A reply cut off before the event that says, or a server that never does: roughly
-        what went through, or hanging up early would be a way to use a model without it counting."""
+        what went through, or hanging up early would be a way to use a model without it counting. A CLI
+        hanging up after that event is only being quick, and it's taken at its word."""
         if not self.stream and self.taken <= _SCAN_MAX:
             self._read(bytes(self.body))
         said = self.input + self.output
-        if whole and said:
-            return said
-        return max(said, (self.asked + self.taken // 8) // 4)
+        return said if self.final else max(said, (self.asked + self.taken // 8) // 4)
+
+
+def _silence_seconds() -> float:
+    """How long a server can say nothing, first byte or next, before it's taken for gone. A slow local
+    model reading a long prompt can take minutes over its first word."""
+    try:
+        return max(5.0, float(os.environ.get("FD_CREW_MODEL_SILENCE_SECONDS", 300)))
+    except ValueError:
+        return 300.0
+
+
+def last_heard(task_id: str) -> float:
+    """When a call of this task's last went out or a reply last moved (0: not since this deck started).
+    Crew's watcher reads it: a CLI can say nothing for minutes while its model writes a long reply."""
+    return float((_CALLS.get(task_id) or {}).get("heard") or 0.0)
+
+
+def call_under_way(task_id: str) -> dict[str, float]:
+    """What a task's model is doing now: ``open`` calls, ``since`` when, ``got`` bytes of reply, last ``heard`` when."""
+    return dict(_CALLS.get(task_id) or {})
+
+
+def _call_of(task_id: str) -> dict[str, float]:
+    if task_id not in _CALLS and len(_CALLS) >= _CALLS_KEPT:
+        _CALLS.clear()
+    return _CALLS.setdefault(task_id, {"asked": 0.0, "open": 0.0, "got": 0.0})
+
+
+def _began(task_id: str, asked: int) -> None:
+    now = time.time()
+    call = _call_of(task_id)
+    call.update(asked=float(asked), since=now, heard=now, got=0.0, open=call["open"] + 1)
+
+
+def _heard(task_id: str, size: int = 0) -> None:
+    call = _call_of(task_id)
+    call.update(heard=time.time(), got=call["got"] + size)
+
+
+def _ended(task_id: str) -> None:
+    call = _call_of(task_id)
+    call["open"] = max(0.0, call["open"] - 1)
 
 
 def _refusal(status: int, message: str) -> JSONResponse:
@@ -457,6 +523,30 @@ def _from_this_computer(request: Request) -> bool:
     return host in ("127.0.0.1", "::1") and not any(h.startswith("x-forwarded") or h == "forwarded" for h in request.headers)
 
 
+async def _call(client: httpx.AsyncClient, url: str, headers: dict[str, str], sent: dict) -> httpx.Response:
+    """The server's first answer to a call. One that fails before saying anything gets asked again, so
+    the worker needn't hear about a blip. One that said nothing for this long has had its chance."""
+    for left in range(_CALL_TRIES - 1, -1, -1):
+        wait = _TRY_AGAIN_AFTER * (_CALL_TRIES - left)
+        try:
+            reply = await client.send(client.build_request("POST", url, headers=headers, json=sent), stream=True)
+        except httpx.ReadTimeout:
+            raise
+        except httpx.TransportError:
+            if not left:
+                raise
+        else:
+            if reply.status_code not in _BUSY or not left:
+                return reply
+            asked_for = reply.headers.get("retry-after", "")
+            if asked_for.isdigit() and int(asked_for) > _LONGEST_WAIT:
+                return reply
+            wait = float(asked_for) if asked_for.isdigit() else wait
+            await reply.aclose()
+        await asyncio.sleep(wait)
+    raise httpx.TransportError("no tries left")  # the last one returned or raised
+
+
 def _scrubbed(body: bytes, key: str) -> bytes:
     return body.replace(key.encode(), b"[its key]") if key else body
 
@@ -483,9 +573,12 @@ async def forward(request: Request, path: str) -> Response:
         return _refusal(403, "Crew approval was withdrawn.")
     try:
         upstream = await resolve(db, user, grant, task.get("model_source") or {})
-        await must_have_tokens(task["user_id"], upstream)
     except HTTPException as exc:
         return _refusal(403, str(exc.detail))
+    try:
+        await must_have_tokens(task["user_id"], upstream)
+    except HTTPException as exc:
+        return _refusal(402, str(exc.detail))  # and not a 403: Claude Code calls that failing to authenticate
     if rest == "models":
         return JSONResponse({"object": "list", "data": [{"id": upstream.model, "object": "model", "type": "model",
                                                          "display_name": upstream.model, "owned_by": "captain"}]})
@@ -514,37 +607,47 @@ async def forward(request: Request, path: str) -> Response:
         if not upstream.native_key:
             headers["authorization"] = f"Bearer {upstream.key}"
     url = f"{upstream.url}/{rest}" + (f"?{request.url.query}" if request.url.query else "")
-    client = httpx.AsyncClient(timeout=httpx.Timeout(_READ_SECONDS, connect=15.0), follow_redirects=False)
+    grew = max(0, len(body) - int((_CALLS.get(task["id"]) or {}).get("asked") or 0))
+    _began(task["id"], len(body))
+    client = httpx.AsyncClient(timeout=httpx.Timeout(_silence_seconds(), connect=15.0), follow_redirects=False)
     try:
-        reply = await client.send(client.build_request("POST", url, headers=headers, json=sent), stream=True)
+        reply = await _call(client, url, headers, sent)
+    except httpx.ReadTimeout:
+        _ended(task["id"])
+        await client.aclose()
+        return _refusal(504, f"The model's server said nothing for {_silence_seconds():.0f} seconds.")
     except (httpx.HTTPError, httpx.InvalidURL) as exc:
+        _ended(task["id"])
         await client.aclose()
         return _refusal(502, f"Captain couldn't reach the model's server: {type(exc).__name__}.")
     media = reply.headers.get("content-type") or "application/json"
     if reply.status_code >= 300:
+        _ended(task["id"])
         said = await reply.aread()
         await reply.aclose()
         await client.aclose()
         wait = {name: reply.headers[name] for name in ("retry-after", "x-should-retry") if name in reply.headers}
         return Response(_scrubbed(said, upstream.key), status_code=reply.status_code, media_type=media, headers=wait)
-    count = _Count(stream="event-stream" in media, asked=len(body))
-    whole = False
+    count = _Count(stream="event-stream" in media, asked=grew)
 
     async def finish() -> None:
+        _ended(task["id"])
         try:
             await reply.aclose()
             await client.aclose()
-            await usage_quota.record_tokens(db, task["user_id"], count.finish(whole=whole), byok=upstream.own_keys)
+            await usage_quota.record_tokens(db, task["user_id"], count.finish(), byok=upstream.own_keys)
         except Exception as exc:  # noqa: BLE001 - the call is over; its count is all that's lost
             log.warning("A worker's tokens weren't counted", task=task["id"], error=str(exc))
 
     async def relay():
-        nonlocal whole
         try:
             async for chunk in reply.aiter_raw():
                 count.feed(chunk)
+                _heard(task["id"], len(chunk))
                 yield chunk
-            whole = True
+        except httpx.HTTPError as exc:
+            # All a client can be told now is that the reply stopped short. It asks again.
+            log.warning("A model's reply was cut off", task=task["id"], error=type(exc).__name__)
         finally:
             # Not awaited here: a worker that hangs up cancels this, and anything it's waiting for.
             job = asyncio.ensure_future(finish())

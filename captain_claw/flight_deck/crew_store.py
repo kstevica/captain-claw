@@ -48,6 +48,7 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("vfs", "TEXT DEFAULT '[]'"),  # folders of the person's VFS it can use (crew_vfs)
     ("model_source", "TEXT DEFAULT '{}'"),  # a model that isn't its CLI's own (crew_model); a key in it is sealed
     ("model_token", "TEXT DEFAULT ''"),  # what this turn's worker calls that model with
+    ("retries", "INTEGER DEFAULT 0"), ("retry_at", "REAL DEFAULT 0"),  # turns lost to the model since the last good one, and when it goes again
     ("agent_slug", "TEXT DEFAULT ''"), ("source_host", "TEXT DEFAULT ''"), ("origin", "TEXT DEFAULT '{}'"),
     ("last_event_at", "REAL DEFAULT 0"), ("turn_started_at", "REAL DEFAULT 0"), ("stalled_at", "REAL DEFAULT 0"),
     ("created_at", "REAL NOT NULL"), ("updated_at", "REAL NOT NULL"), ("closed_at", "REAL DEFAULT 0"),

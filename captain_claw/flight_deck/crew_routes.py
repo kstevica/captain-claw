@@ -716,7 +716,7 @@ async def agent_tasks(request: Request) -> dict[str, Any]:
 async def agent_task(body: AgentTaskBody, request: Request) -> dict[str, Any]:
     row, _, _ = await _agent_caller(request)
     task = crew_runner._get(row["id"], body.task_id)
-    recent = crew_store.read_events(row["id"], body.task_id, after=max(0, int(task.get("events") or 0) - 12))
+    recent = crew_runner.recent_activity(task)
     return {**crew_runner.view(task, full=True), "report": crew_runner.report(row["id"], body.task_id),
             "recent": [{"kind": e.get("kind"), "tool": e.get("tool", ""), "text": str(e.get("text") or "")[:600]}
                        for e in recent]}

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
-  AlertTriangle, Bot, CheckCircle2, ChevronRight, FilePen, FilePlus2, FileText, Flag, Globe, ListChecks, MessageSquare,
+  AlertTriangle, Bot, CheckCircle2, ChevronRight, FilePen, FilePlus2, FileText, Flag, Globe, ListChecks, Loader2, MessageSquare,
   Search, Terminal, Wrench, type LucideIcon,
 } from 'lucide-react'
 import type { CrewEvent } from '../../services/crewApi'
@@ -35,7 +35,7 @@ type Block =
   | { type: 'steps'; n: number; steps: Step[] }
   | { type: 'event'; n: number; event: CrewEvent }
 
-function toBlocks(events: CrewEvent[]): Block[] {
+function toBlocks(events: CrewEvent[], live: boolean): Block[] {
   const blocks: Block[] = []
   let group: Extract<Block, { type: 'steps' }> | null = null
   let waiting: Step[] = []
@@ -47,6 +47,8 @@ function toBlocks(events: CrewEvent[]): Block[] {
     return group
   }
   for (const e of events) {
+    // Only ever about right now: it doesn't split up what the worker did, or stay behind.
+    if (e.kind === 'working') continue
     if (e.kind === 'tool') {
       const step: Step = { n: e.n, tool: e.tool, text: shortPaths(e.text), output: '' }
       open(e.n).steps.push(step)
@@ -69,6 +71,8 @@ function toBlocks(events: CrewEvent[]): Block[] {
       blocks.push({ type: 'event', n: e.n, event: { ...e, text } })
     }
   }
+  const newest = events[events.length - 1]
+  if (live && newest?.kind === 'working') blocks.push({ type: 'event', n: newest.n, event: newest })
   return blocks
 }
 
@@ -153,6 +157,16 @@ function Brief({ event }: { event: CrewEvent }) {
 
 function EventLine({ event: e }: { event: CrewEvent }) {
   if (e.kind === 'turn') return <Brief event={e} />
+  if (e.kind === 'working') {
+    return (
+      <li className="relative pl-7">
+        <span className="absolute left-0 top-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-sky-500/15 text-sky-600 ring-4 ring-zinc-950 dark:text-sky-300">
+          <Loader2 className="h-3 w-3 animate-spin" />
+        </span>
+        <p role="status" className="break-words pt-0.5 text-xs text-zinc-400">{e.text}</p>
+      </li>
+    )
+  }
   if (e.kind === 'text') {
     return <Line icon={MessageSquare} tone="bg-sky-500/15 text-sky-600 dark:text-sky-300"><CrewMarkdown text={e.text} /></Line>
   }
@@ -177,7 +191,7 @@ function EventLine({ event: e }: { event: CrewEvent }) {
 export function CrewActivity({ events, live }: { events: CrewEvent[]; live: boolean }) {
   const end = useRef<HTMLDivElement>(null)
   const box = useRef<HTMLDivElement>(null)
-  const blocks = useMemo(() => toBlocks(events), [events])
+  const blocks = useMemo(() => toBlocks(events, live), [events, live])
   useEffect(() => {
     const el = box.current
     if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 240) end.current?.scrollIntoView({ block: 'end' })

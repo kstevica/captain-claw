@@ -42,6 +42,16 @@ _OPENCODE_HELP: dict[tuple[str, float], str] = {}
 ROUTE_PROVIDER = "crew"
 ROUTE_PROVIDER_ANTHROPIC = "crew-anthropic"
 ROUTE_TOKEN_ENV = "CREW_MODEL_TOKEN"
+# A failure that's likely gone if it's tried again: the connection, or the server having a bad moment.
+_PASSING = re.compile(
+    r"econn(?:reset|refused|aborted)|etimedout|ehostunreach|enetunreach|eai_again|epipe|socket hang up|socket connection was closed"
+    r"|connection (?:was )?(?:reset|closed|refused|aborted|error|lost)|stream (?:ended|disconnected|closed)|fetch failed|network error"
+    r"|timed? ?out|overloaded|temporarily unavailable|service unavailable|bad gateway|gateway time-?out|internal server error"
+    r"|too many requests|rate.?limit|upstream|\b(?:408|429|500|502|503|504|520|522|524|529)\b", re.IGNORECASE)
+# ...and what trying again won't change, even when it's said in the same breath.
+_LASTING = re.compile(
+    r"usage limit|limit reached|hit your .*limit|today's .*tokens|quota|billing|credit|payment|api.?key|invalid.*key|unauthori[sz]ed"
+    r"|authenticat|forbidden|permission|context.*(?:length|too long|exceed)|\b(?:400|401|402|403|404)\b", re.IGNORECASE)
 
 
 @dataclass
@@ -120,6 +130,16 @@ def _ev(kind: str, text: Any, tool: str = "") -> dict:
     if tool:
         event["tool"] = tool
     return event
+
+
+def _model_error(text: Any) -> dict:
+    """An error from the CLI's talk with its model, not from a command it ran."""
+    return {**_ev("error", text), "about": "model"}
+
+
+def passing(text: str) -> bool:
+    """Is this a failure that trying again could get past?"""
+    return bool(_PASSING.search(text or "")) and not _LASTING.search(text or "")
 
 
 def _brief_input(payload: Any) -> str:
@@ -228,7 +248,7 @@ def _claude_parse(obj: dict, state: TurnState) -> list[dict]:
         state.cost_usd += float(obj.get("total_cost_usd") or 0.0)
         if obj.get("is_error"):
             state.error = _clip(obj.get("result") or obj.get("subtype") or "the turn failed", 2000)
-            out.append(_ev("error", state.error))
+            out.append(_model_error(state.error))
         elif str(obj.get("result") or "").strip():
             state.final = str(obj["result"])
     return out
@@ -285,7 +305,7 @@ def _codex_parse(obj: dict, state: TurnState) -> list[dict]:
         err = obj.get("error") if kind == "turn.failed" else obj
         message = (err.get("message") if isinstance(err, dict) else err) or "the turn failed"
         state.error = _clip(message, 2000)
-        return [_ev("error", state.error)]
+        return [_model_error(state.error)]
     item = obj.get("item") or {}
     item_type = item.get("type")
     if kind == "item.started":
@@ -312,7 +332,7 @@ def _codex_parse(obj: dict, state: TurnState) -> list[dict]:
     elif item_type == "error":
         message = str(item.get("message") or "error")
         # It knows only OpenAI's models by name: nothing is wrong with one it doesn't.
-        return [_ev("note" if message.startswith("Model metadata for") else "error", message)]
+        return [_ev("note", message) if message.startswith("Model metadata for") else _model_error(message)]
     return []
 
 
@@ -399,7 +419,7 @@ def _opencode_parse(obj: dict, state: TurnState) -> list[dict]:
         data = err.get("data") if isinstance(err, dict) else None
         message = (data or {}).get("message") if isinstance(data, dict) else None
         state.error = _clip(message or (err.get("message") if isinstance(err, dict) else err) or "error", 2000)
-        return [_ev("error", state.error)]
+        return [_model_error(state.error)]
     return []
 
 
@@ -443,7 +463,7 @@ def _pi_parse(obj: dict, state: TurnState) -> list[dict]:
                 out.append(_ev("text", state.final))
         if message.get("stopReason") == "error" or message.get("errorMessage"):
             state.error = _clip(message.get("errorMessage") or "the turn failed", 2000)
-            out.append(_ev("error", state.error))
+            out.append(_model_error(state.error))
         return out
     elif kind == "tool_execution_start":
         return [_ev("tool", _brief_input(obj.get("args")), str(obj.get("toolName") or "tool"))]
@@ -488,7 +508,7 @@ def parse_line(harness: str, line: str | bytes, state: TurnState) -> list[dict]:
         events = HARNESSES[harness].parse(obj, state)
     except (AttributeError, TypeError, ValueError, KeyError) as exc:
         return [_ev("note", f"Couldn't read a line from {harness}: {exc}")]
-    if events and events[-1]["kind"] == "text":
+    if events and events[-1]["kind"] in ("text", "tool", "result"):
         state.error = ""  # it went on after the error: a retry that worked
     return events
 
