@@ -14,10 +14,10 @@ import {
   ScanSearch, ScanText, Scissors, ScrollText, SearchCheck, Send, ShieldAlert, ShieldCheck, ShieldHalf, Ship,
   ShoppingBag, ShoppingCart, Sigma, Signpost, Siren, Smile, Sparkles, Speech, Sprout, Stamp, Stethoscope, Store, Table2,
   Tags, Target, Telescope, Timer, TrendingUp, Truck, Umbrella, UserCheck, UserPlus, UserSearch, Users, UtensilsCrossed,
-  Wallet, Workflow,
+  Wallet, Workflow, Wrench,
   type LucideIcon,
 } from 'lucide-react'
-import type { ArchetypeCategory } from '../../services/tierConfig'
+import type { ArchetypeCategory, ArchetypeRegistry } from '../../services/tierConfig'
 
 // How an archetype looks: the New agent gallery and Forge agents. The family
 // gives the colour, the archetype its own icon; one an admin added, which isn't
@@ -32,9 +32,55 @@ export const CATEGORIES: { id: ArchetypeCategory; label: string; hint: string }[
   { id: 'personal', label: 'Personal', hint: 'For your own life: home, health, money, learning and fun.' },
 ]
 
+// What an admin's group or family may look like: team_archetypes.py offers a model
+// exactly these. A colour needs its classes written out for Tailwind to find them.
+const COLOR_LOOKS: Record<string, Omit<FamilyLook, 'icon'>> = {
+  blue: { text: 'text-blue-600 dark:text-blue-300', bg: 'bg-blue-500/15', ring: 'ring-blue-500/20', wash: 'from-blue-500/[0.12]' },
+  teal: { text: 'text-teal-600 dark:text-teal-300', bg: 'bg-teal-500/15', ring: 'ring-teal-500/20', wash: 'from-teal-500/[0.12]' },
+  cyan: { text: 'text-cyan-600 dark:text-cyan-300', bg: 'bg-cyan-500/15', ring: 'ring-cyan-500/20', wash: 'from-cyan-500/[0.12]' },
+  amber: { text: 'text-amber-600 dark:text-amber-300', bg: 'bg-amber-500/15', ring: 'ring-amber-500/20', wash: 'from-amber-500/[0.12]' },
+  violet: { text: 'text-violet-600 dark:text-violet-300', bg: 'bg-violet-500/15', ring: 'ring-violet-500/20', wash: 'from-violet-500/[0.12]' },
+  sky: { text: 'text-sky-600 dark:text-sky-300', bg: 'bg-sky-500/15', ring: 'ring-sky-500/20', wash: 'from-sky-500/[0.12]' },
+  rose: { text: 'text-rose-600 dark:text-rose-300', bg: 'bg-rose-500/15', ring: 'ring-rose-500/20', wash: 'from-rose-500/[0.12]' },
+  red: { text: 'text-red-600 dark:text-red-300', bg: 'bg-red-500/15', ring: 'ring-red-500/20', wash: 'from-red-500/[0.12]' },
+  indigo: { text: 'text-indigo-600 dark:text-indigo-300', bg: 'bg-indigo-500/15', ring: 'ring-indigo-500/20', wash: 'from-indigo-500/[0.12]' },
+  pink: { text: 'text-pink-600 dark:text-pink-300', bg: 'bg-pink-500/15', ring: 'ring-pink-500/20', wash: 'from-pink-500/[0.12]' },
+  purple: { text: 'text-purple-600 dark:text-purple-300', bg: 'bg-purple-500/15', ring: 'ring-purple-500/20', wash: 'from-purple-500/[0.12]' },
+  orange: { text: 'text-orange-600 dark:text-orange-300', bg: 'bg-orange-500/15', ring: 'ring-orange-500/20', wash: 'from-orange-500/[0.12]' },
+  emerald: { text: 'text-emerald-600 dark:text-emerald-300', bg: 'bg-emerald-500/15', ring: 'ring-emerald-500/20', wash: 'from-emerald-500/[0.12]' },
+  green: { text: 'text-green-600 dark:text-green-300', bg: 'bg-green-500/15', ring: 'ring-green-500/20', wash: 'from-green-500/[0.12]' },
+  lime: { text: 'text-lime-600 dark:text-lime-300', bg: 'bg-lime-500/15', ring: 'ring-lime-500/20', wash: 'from-lime-500/[0.12]' },
+  yellow: { text: 'text-yellow-600 dark:text-yellow-300', bg: 'bg-yellow-500/15', ring: 'ring-yellow-500/20', wash: 'from-yellow-500/[0.12]' },
+  slate: { text: 'text-slate-600 dark:text-slate-300', bg: 'bg-slate-500/15', ring: 'ring-slate-500/20', wash: 'from-slate-500/[0.12]' },
+  fuchsia: { text: 'text-fuchsia-600 dark:text-fuchsia-300', bg: 'bg-fuchsia-500/15', ring: 'ring-fuchsia-500/20', wash: 'from-fuchsia-500/[0.12]' },
+}
+export const TEAM_COLORS = Object.keys(COLOR_LOOKS)
+export const TEAM_ICONS: Record<string, LucideIcon> = { Scale, Calculator, Briefcase, Landmark, HeartPulse, Building2, Megaphone, Handshake, Compass, GraduationCap, Users, Package, HandHeart, ShieldCheck, Truck, Radio, Construction, Sparkles, Sprout, Heart, BookOpen, House, PiggyBank, Bot, Telescope, PenLine, Code2, BarChart3, ClipboardList, Eye, Target, Microscope, Stethoscope, Leaf, Ship, Store, Globe, Database, FileText, Wrench, Rocket, Palette }
+
+export function lookFor(icon: string, color: string): FamilyLook {
+  return { ...(COLOR_LOOKS[color] || COLOR_LOOKS.violet), icon: TEAM_ICONS[icon] || Sparkles }
+}
+
+// What the deck's admin published: read from the registry wherever it loads.
+let teamGroups: { id: ArchetypeCategory; label: string; hint: string }[] = []
+let teamFamilies: Record<string, FamilyLook> = {}
+let teamIcons: Record<string, LucideIcon> = {}
+
+export function rememberTeamLooks(registry: ArchetypeRegistry | null | undefined): void {
+  if (!registry) return
+  teamGroups = (registry.groups || []).map((g) => ({ id: g.id, label: g.label, hint: g.hint }))
+  teamFamilies = Object.fromEntries((registry.family_looks || []).map((f) => [f.name, lookFor(f.icon, f.color)]))
+  teamIcons = Object.fromEntries(registry.archetypes.filter((a) => a.icon && TEAM_ICONS[a.icon]).map((a) => [a.id, TEAM_ICONS[a.icon as string]]))
+}
+
+/** Every shelf, in the order the gallery shows them: this deck's own come first. */
+export function shelves(): { id: ArchetypeCategory; label: string; hint: string }[] {
+  return [...teamGroups, ...CATEGORIES]
+}
+
 /** A person's own archetype has no shelf until they pick one: it was made for a job. */
 export function archetypeCategory(a: { category?: string }): ArchetypeCategory {
-  return CATEGORIES.find((c) => c.id === a.category)?.id ?? 'focused'
+  return shelves().find((c) => c.id === a.category)?.id ?? 'focused'
 }
 
 const FAMILY_LOOKS: Record<string, FamilyLook> = {
@@ -210,10 +256,10 @@ const ARCHETYPE_ICONS: Record<string, LucideIcon> = {
 }
 
 export function familyLook(family: string): FamilyLook {
-  return FAMILY_LOOKS[family] || DEFAULT_LOOK
+  return teamFamilies[family] || FAMILY_LOOKS[family] || DEFAULT_LOOK
 }
 
 export function archetypeLook(id: string, family: string): FamilyLook {
   const look = familyLook(family)
-  return { ...look, icon: ARCHETYPE_ICONS[id] ?? look.icon }
+  return { ...look, icon: teamIcons[id] ?? ARCHETYPE_ICONS[id] ?? look.icon }
 }

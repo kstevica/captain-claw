@@ -32,6 +32,17 @@ _REGISTRY_FILE = Path(__file__).parent.parent / "instructions" / "archetypes.jso
 # made for a job.
 CATEGORIES = ("generalist", "focused", "personal")
 DEFAULT_CATEGORY = "focused"
+# An admin's own shelves, published for the whole deck (team_archetypes.py), carry
+# this prefix, so a mistyped category can never pass for one.
+TEAM_GROUP_PREFIX = "group-"
+TEAM_SETTING = "fd:team-archetypes"
+
+CRISIS_RULE = (
+    "If someone says they may hurt themselves or someone else, or that they are not safe: stop the current "
+    "task, respond with care, urge them to contact local emergency services now (112 in the EU, 999 or 112 in "
+    "the UK, 911 in the US) or a crisis line (988 in the US, 116 123 Samaritans in the UK and Ireland, "
+    "findahelpline.com elsewhere), and to reach a person they trust. Do not try to handle it yourself."
+)
 
 # What an agent on legal or health work says about itself, in chat and in its
 # own words: the text lives in the registry's `disclaimers`, under these keys.
@@ -47,6 +58,7 @@ _disclaimers_seen: tuple[float, dict] = (0.0, {})
 # How many specialists a planner's prompt may carry on top of the generalists.
 _SHORTLIST_SPECIALISTS = 15
 _WORD = re.compile(r"[^\W\d_]{4,}")
+_SHORTLISTED_SOURCES = (None, "base", "team")
 # Words in a role's name that say nothing about what it's for.
 _ROLE_NOISE = {
     "analyst", "assistant", "coach", "helper", "manager", "officer", "partner", "planner",
@@ -83,10 +95,30 @@ def with_disclaimer_rule(instructions: str, key: str) -> str:
     return f"{disclaimer_rule(text)}\n\n{instructions}".strip()
 
 
+def place_safety_rules(instructions: str, disclaimer: str) -> str:
+    """Generated instructions with the rules a model doesn't get to word: first under
+    Hard limits, as in the built-in catalog, the crisis rule before the disclaimer."""
+    rules = []
+    if disclaimer == "health" and CRISIS_RULE not in instructions:
+        rules.append(CRISIS_RULE)
+    text = disclaimer_text(disclaimer)
+    if text and text not in instructions:
+        rules.append(disclaimer_rule(text))
+    if not rules:
+        return instructions
+    bullets = "".join(f"- {rule}\n" for rule in rules)
+    head = "## Hard limits\n"
+    at = instructions.find(head)
+    if at < 0:
+        return f"{bullets}\n{instructions}".strip()
+    at += len(head)
+    return instructions[:at] + bullets + instructions[at:]
+
+
 def archetype_category(archetype: dict) -> str:
     """The shelf an archetype sits on."""
     category = str((archetype or {}).get("category") or "")
-    return category if category in CATEGORIES else DEFAULT_CATEGORY
+    return category if category in CATEGORIES or category.startswith(TEAM_GROUP_PREFIX) else DEFAULT_CATEGORY
 
 
 def _stems(text: str) -> set[str]:
@@ -116,7 +148,8 @@ def shortlist_archetypes(intent: str, archetypes: list[dict], keep: Iterable[str
     Planners paste the catalog into their prompt, so a hundred specialists would
     cost thousands of tokens on every plan and bury the few that matter. They get
     every generalist, everything the person made or was given, whatever ``keep``
-    names, and only the specialists this request is about. A request with no
+    names, and only the specialists this request is about, which includes what an
+    admin published for the deck. A request with no
     match (another language, say) falls back to the generalists alone, and any
     id stays valid for a route: this narrows what's shown, not what's allowed.
     """
@@ -125,7 +158,7 @@ def shortlist_archetypes(intent: str, archetypes: list[dict], keep: Iterable[str
     stems = _stems(low)
     scored: dict[str, int] = {}
     for a in archetypes:
-        if a.get("source") in (None, "base") and archetype_category(a) != "generalist" and a.get("id") not in keep_ids:
+        if a.get("source") in _SHORTLISTED_SOURCES and archetype_category(a) != "generalist" and a.get("id") not in keep_ids:
             score = _relevance(low, stems, a)
             if score >= 2:
                 scored[a["id"]] = score
@@ -133,7 +166,7 @@ def shortlist_archetypes(intent: str, archetypes: list[dict], keep: Iterable[str
     return [
         a for a in archetypes
         if a.get("id") in chosen or a.get("id") in keep_ids
-        or a.get("source") not in (None, "base") or archetype_category(a) == "generalist"
+        or a.get("source") not in _SHORTLISTED_SOURCES or archetype_category(a) == "generalist"
     ]
 
 
@@ -147,13 +180,30 @@ def load_base_registry() -> dict:
     return json.loads(_REGISTRY_FILE.read_text())
 
 
+async def team_catalog(db) -> dict:
+    """What an admin published for the whole deck: its groups, families and archetypes."""
+    empty: dict = {"groups": [], "families": [], "archetypes": []}
+    reader = getattr(db, "get_system_setting", None)
+    if reader is None:
+        return empty
+    try:
+        stored = json.loads(await reader(TEAM_SETTING) or "{}")
+    except (json.JSONDecodeError, TypeError):
+        log.warning("Team archetypes are unreadable; carrying on without them")
+        return empty
+    return {**empty, **stored} if isinstance(stored, dict) else empty
+
+
 def merge_archetypes(
     base: list[dict], user_rows: list[dict],
     shared_rows: list[dict] | None = None,
+    team: list[dict] | None = None,
 ) -> list[dict]:
-    """Overlay a user's archetypes (and ones shared to them) on the base list.
+    """Overlay what the deck published, a user's archetypes and ones shared to them on the
+    base list.
 
-    Each base entry is tagged ``source="base"``. Each owned user row is tagged
+    Each base entry is tagged ``source="base"``, and each deck-wide one ``source="team"``,
+    which a person's own archetype of the same id replaces for them. Each owned user row is tagged
     ``source="user"`` and replaces a base entry in place when ids match, else is
     appended. Rows shared *to* the user are then overlaid tagged
     ``source="shared"`` (carrying the owner's id/email + permission) — but never
@@ -166,6 +216,14 @@ def merge_archetypes(
         entry = {**a, "source": "base"}
         index[entry.get("id", "")] = len(merged)
         merged.append(entry)
+
+    for a in team or []:
+        entry = {**a, "source": "team"}
+        if entry.get("id", "") in index:
+            merged[index[entry["id"]]] = entry
+        else:
+            index[entry.get("id", "")] = len(merged)
+            merged.append(entry)
 
     def _data(row: dict) -> dict | None:
         try:
@@ -230,10 +288,11 @@ async def _owned_and_shared(db, user_id: str) -> tuple[list[dict], list[dict]]:
 async def merged_archetypes(db, user_id: str | None) -> list[dict]:
     """Return the merged archetype list for ``user_id`` (base only if None)."""
     base = load_base_registry().get("archetypes", [])
+    team = (await team_catalog(db))["archetypes"]
     if not user_id:
-        return [{**a, "source": "base"} for a in base]
+        return merge_archetypes(base, [], None, team)
     rows, shared = await _owned_and_shared(db, user_id)
-    return merge_archetypes(base, rows, shared)
+    return merge_archetypes(base, rows, shared, team)
 
 
 async def merged_registry(db, user_id: str | None) -> dict:
@@ -243,9 +302,12 @@ async def merged_registry(db, user_id: str | None) -> dict:
     """
     registry = load_base_registry()
     base = registry.get("archetypes", [])
+    team = await team_catalog(db)
+    registry["groups"] = team["groups"]
+    registry["family_looks"] = team["families"]
     if not user_id:
-        registry["archetypes"] = [{**a, "source": "base"} for a in base]
+        registry["archetypes"] = merge_archetypes(base, [], None, team["archetypes"])
         return registry
     rows, shared = await _owned_and_shared(db, user_id)
-    registry["archetypes"] = merge_archetypes(base, rows, shared)
+    registry["archetypes"] = merge_archetypes(base, rows, shared, team["archetypes"])
     return registry

@@ -60,6 +60,8 @@ class ArchetypeBody(BaseModel):
     category: str = DEFAULT_CATEGORY
     # legal, health or clinical: says so in chat and on the deck. See `disclaimers`.
     disclaimer: str = ""
+    # A team archetype's own icon: one of team_archetypes.ICONS.
+    icon: str = ""
     description: str = ""
     cognitive_mode: str = "neutra"
     tier: str = "balanced"
@@ -304,29 +306,8 @@ async def generate_archetype(body: GenerateRequest, user: dict = Depends(get_cur
     return draft
 
 
-@router.post("/forge")
-async def forge_archetypes(
-    instructions: str = Form(""),
-    provider: str = Form(""),
-    model: str = Form(""),
-    api_key: str = Form(""),
-    base_url: str = Form(""),
-    max_tokens: int = Form(0),
-    count: int = Form(0),
-    files: list[UploadFile] = File(default=[]),
-    user: dict = Depends(get_current_user),
-):
-    """Forge MULTIPLE archetype drafts from instructions + optional documents.
-
-    Uploaded documents (pdf/docx/xlsx/pptx/txt/md/…) are extracted to text
-    server-side and folded into the prompt as reference context. Returns a list
-    of drafts (NOT persisted); the UI reviews and saves the selected ones via
-    ``POST /fd/archetypes``. Mirrors the single ``/generate`` route but returns a
-    batch and accepts reference material.
-    """
-    instructions = (instructions or "").strip()
-
-    # ── Extract text from any uploaded documents (best-effort per file) ──
+async def read_documents(files: list[UploadFile]) -> list[str]:
+    """Uploaded documents as text sections, best-effort per file (pdf/docx/xlsx/pptx/txt/md/…)."""
     _MAX_PER_FILE = 40000
     _MAX_TOTAL = 160000
     doc_sections: list[str] = []
@@ -371,6 +352,32 @@ async def forge_archetypes(
             text = text[:min(_MAX_PER_FILE, remaining)]
             total += len(text)
             doc_sections.append(f"### {uf.filename}\n{text}")
+    return doc_sections
+
+
+@router.post("/forge")
+async def forge_archetypes(
+    instructions: str = Form(""),
+    provider: str = Form(""),
+    model: str = Form(""),
+    api_key: str = Form(""),
+    base_url: str = Form(""),
+    max_tokens: int = Form(0),
+    count: int = Form(0),
+    files: list[UploadFile] = File(default=[]),
+    user: dict = Depends(get_current_user),
+):
+    """Forge MULTIPLE archetype drafts from instructions + optional documents.
+
+    Uploaded documents (pdf/docx/xlsx/pptx/txt/md/…) are extracted to text
+    server-side and folded into the prompt as reference context. Returns a list
+    of drafts (NOT persisted); the UI reviews and saves the selected ones via
+    ``POST /fd/archetypes``. Mirrors the single ``/generate`` route but returns a
+    batch and accepts reference material.
+    """
+    instructions = (instructions or "").strip()
+
+    doc_sections = await read_documents(files)
 
     if not instructions and not doc_sections:
         raise HTTPException(400, "instructions or at least one document is required")

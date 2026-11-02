@@ -8,7 +8,7 @@ import {
   TerminalSquare, Wand2, X, Zap,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { CATEGORIES, archetypeCategory, archetypeLook, familyLook, type FamilyLook } from './archetypeLook'
+import { archetypeCategory, archetypeLook, familyLook, rememberTeamLooks, shelves, type FamilyLook } from './archetypeLook'
 import { tileInNextRow } from './tileNav'
 import { Button, EmptyState, Segmented, Switch, inputCls, labelCls } from '../console/parts'
 import { ErrorNote } from '../forge/forgeParts'
@@ -186,7 +186,11 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
 
   useEffect(() => {
     listArchetypes(asUser, true)
-      .then((reg) => setRegistry({ ...reg, archetypes: reg.archetypes || [] }))
+      .then((reg) => {
+        const registry = { ...reg, archetypes: reg.archetypes || [] }
+        rememberTeamLooks(registry)
+        setRegistry(registry)
+      })
       .catch((e) => setLoadErr(e instanceof Error ? e.message : String(e)))
   }, [asUser])
 
@@ -202,7 +206,7 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
   }, [busy, onClose, isMobile, picked])
 
   // Each shelf with its families and how many each holds, whatever the search says.
-  const shelves = useMemo(() => CATEGORIES.map((c) => {
+  const onDeck = useMemo(() => shelves().map((c) => {
     const counts = new Map<string, number>()
     for (const a of archetypes || []) {
       if (archetypeCategory(a) !== c.id) continue
@@ -211,7 +215,7 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
     }
     return { ...c, total: [...counts.values()].reduce((n, v) => n + v, 0), families: [...counts.entries()].sort(([x], [y]) => x.localeCompare(y)) }
   }).filter((s) => s.total > 0), [archetypes])
-  const onShelf = shelves.filter((s) => category === 'all' || s.id === category)
+  const onShelf = onDeck.filter((s) => category === 'all' || s.id === category)
   const familiesOnShelf = onShelf.flatMap((s) => s.families)
 
   const q = query.trim().toLowerCase()
@@ -223,7 +227,7 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
   // A search that finds nothing here may still find something on another shelf.
   const elsewhere = useMemo(() => (q && !shown.length ? (archetypes || []).filter((a) => matchesQuery(a, q)).length : 0), [archetypes, q, shown])
 
-  const groups = useMemo(() => CATEGORIES.map((c) => {
+  const groups = useMemo(() => shelves().map((c) => {
     const byFamily = new Map<string, Archetype[]>()
     for (const a of shown) {
       if (archetypeCategory(a) !== c.id) continue
@@ -423,14 +427,14 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
             {!phoneDetail && (
               <div className="flex min-h-0 min-w-0 flex-1 flex-col">
                 <div className="shrink-0 space-y-2.5 px-4 pt-3 wide:px-5 wide:pt-4">
-                  {shelves.length > 1 && (
+                  {onDeck.length > 1 && (
                     <Segmented
                       label="Kind of agent"
                       value={category}
                       onChange={chooseCategory}
                       options={[
                         { value: 'all' as const, label: 'All', count: isMobile ? undefined : total },
-                        ...shelves.map((s) => ({ value: s.id, label: s.label, count: isMobile ? undefined : s.total })),
+                        ...onDeck.map((s) => ({ value: s.id, label: s.label, count: isMobile ? undefined : s.total })),
                       ]}
                     />
                   )}

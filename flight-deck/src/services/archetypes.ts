@@ -4,6 +4,14 @@ import { useAuthStore, refreshAccessToken } from '../stores/authStore'
 import type { ArchetypeRegistry } from './tierConfig'
 import { ACT_AS_HEADER } from './docker'
 
+// What an archetype can carry, wherever an admin chooses it.
+export const DISCLAIMER_CHOICES = [
+  ['', 'None'],
+  ['legal', 'Legal'],
+  ['health', "Health, for people's own use"],
+  ['clinical', 'Clinical, for professionals'],
+] as const
+
 // The editable shape of a user archetype, matching the backend ArchetypeBody.
 export interface ArchetypeInput {
   archetype_id: string
@@ -11,6 +19,7 @@ export interface ArchetypeInput {
   family: string
   category?: string
   disclaimer?: string
+  icon?: string
   description: string
   cognitive_mode: string
   tier: string
@@ -157,4 +166,70 @@ export async function generateArchetype(
     lead: !!draft.lead,
     reliability_seed: typeof draft.reliability_seed === 'number' ? draft.reliability_seed : 0.7,
   }
+}
+
+// ── Team archetypes: what an admin publishes for the whole deck ──
+
+export interface PackFamily { name: string; icon: string; color: string }
+export interface PackArchetype {
+  role: string
+  description: string
+  tier: string
+  cognitive_mode: string
+  icon: string
+  keywords: string[]
+  tools: string[]
+  disclaimer: string
+}
+export interface PackOutline {
+  group: { label: string; hint: string }
+  family: PackFamily
+  archetypes: PackArchetype[]
+  /** The admin's documents as text, sent back with each write. */
+  reference: string
+}
+
+export async function outlineTeamPack(instructions: string, count: number, files: File[]): Promise<PackOutline> {
+  const send = () => {
+    const { token, authEnabled } = useAuthStore.getState()
+    const form = new FormData()
+    form.append('instructions', instructions)
+    form.append('count', String(count))
+    for (const f of files) form.append('files', f)
+    return fetch('/fd/archetypes/team/outline', {
+      method: 'POST', body: form, credentials: 'include',
+      headers: authEnabled && token ? { Authorization: `Bearer ${token}` } : {},
+    })
+  }
+  let res = await send()
+  if (res.status === 401 && useAuthStore.getState().authEnabled && (await refreshAccessToken())) res = await send()
+  return jsonOrThrow(res)
+}
+
+export async function writeTeamInstructions(body: {
+  brief: string; reference: string; group: string; family: string; role: string; description: string
+  keywords: string[]; tools: string[]; disclaimer: string; others: { role: string; description: string }[]
+}): Promise<string> {
+  const out = await jsonOrThrow(await authFetch('/fd/archetypes/team/write', { method: 'POST', body: JSON.stringify(body) }))
+  return out.fleet_instructions
+}
+
+export async function publishTeamPack(body: {
+  group: { id?: string; label?: string; hint?: string }
+  family: PackFamily
+  archetypes: (Omit<ArchetypeInput, 'family'> & { family: string })[]
+}): Promise<{ published: number; group: string; family: string; ids: string[] }> {
+  return jsonOrThrow(await authFetch('/fd/archetypes/team', { method: 'POST', body: JSON.stringify(body) }))
+}
+
+export async function updateTeamArchetype(id: string, body: ArchetypeInput) {
+  return jsonOrThrow(await authFetch(`/fd/archetypes/team/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(body) }))
+}
+
+export async function deleteTeamArchetype(id: string) {
+  return jsonOrThrow(await authFetch(`/fd/archetypes/team/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+}
+
+export async function deleteTeamGroup(id: string): Promise<{ removed: number }> {
+  return jsonOrThrow(await authFetch(`/fd/archetypes/team/groups/${encodeURIComponent(id)}`, { method: 'DELETE' }))
 }
