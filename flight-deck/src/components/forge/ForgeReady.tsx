@@ -464,7 +464,7 @@ function AppCard({ plan, agents, app, archetypes, me, choices, choicesErr, onCha
   return (
     <div className="rounded-2xl border border-zinc-800 bg-zinc-950/40 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-1 items-start gap-3">
+        <div className="flex w-full min-w-0 items-start gap-3 wide:w-auto wide:flex-1">
           <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-violet-500/10 text-violet-600 dark:text-violet-400"><FileCode2 className="h-[18px] w-[18px]" /></span>
           <div className="min-w-0">
             <h4 className="text-sm font-semibold text-zinc-100">{app.name}</h4>
