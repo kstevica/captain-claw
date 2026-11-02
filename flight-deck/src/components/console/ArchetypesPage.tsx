@@ -1,13 +1,16 @@
 import { useMemo, useState } from 'react'
 import {
   Library, Plus, Wand2, Search, Crown, Pencil, Trash2, Copy, Share2, Users, Sparkles,
-  Check, Wrench, Gauge, Lock,
+  Check, Wrench, Gauge, Layers, Lock,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { useTierConfig, TIER_ORDER, type Archetype, type ArchetypeCategory, type ArchetypeRegistry } from '../../services/tierConfig'
-import { CATEGORIES, archetypeCategory } from '../layout/archetypeLook'
+import { archetypeCategory, rememberTeamLooks, shelves } from '../layout/archetypeLook'
+import { TeamPackDialog } from './TeamPackDialog'
 import {
-  createArchetype, updateArchetype, deleteArchetype, generateArchetype, type ArchetypeInput,
+  DISCLAIMER_CHOICES,
+  createArchetype, updateArchetype, deleteArchetype, deleteTeamArchetype, deleteTeamGroup, generateArchetype, updateTeamArchetype,
+  type ArchetypeInput,
 } from '../../services/archetypes'
 import { MODES } from '../../services/cognitiveModes'
 import { ForgeArchetypesModal } from '../library/ForgeArchetypesModal'
@@ -23,7 +26,7 @@ import {
 // yours can be edited, shared with other users, or forged in bulk from
 // documents. A built-in or shared one is copied before it's changed.
 
-type Source = 'all' | 'user' | 'base' | 'shared'
+type Source = 'all' | 'user' | 'base' | 'shared' | 'team'
 
 function slugify(s: string): string {
   return s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
@@ -31,7 +34,7 @@ function slugify(s: string): string {
 
 function toInput(a: Archetype): ArchetypeInput {
   return {
-    archetype_id: a.id, role: a.role, family: a.family || 'Custom', category: archetypeCategory(a), disclaimer: a.disclaimer || '', description: a.description || '',
+    archetype_id: a.id, role: a.role, family: a.family || 'Custom', category: archetypeCategory(a), disclaimer: a.disclaimer || '', icon: a.icon || '', description: a.description || '',
     cognitive_mode: a.cognitive_mode || 'neutra', tier: a.tier || 'balanced', tools: a.tools || [],
     fleet_instructions: a.fleet_instructions || '', keywords: a.keywords || [], lead: !!a.lead,
     reliability_seed: a.reliability_seed ?? 0.7, runtime: a.runtime || '',
@@ -54,20 +57,23 @@ export function ArchetypesPage() {
   const [family, setFamily] = useState('')
   const [category, setCategory] = useState<ArchetypeCategory | 'all'>('all')
   // The editor: a draft plus the id it saves over (null = a new archetype).
-  const [draft, setDraft] = useState<{ input: ArchetypeInput; id: string | null } | null>(null)
+  const [draft, setDraft] = useState<{ input: ArchetypeInput; id: string | null; team?: boolean } | null>(null)
   const [viewing, setViewing] = useState<Archetype | null>(null)
   const [forgeOpen, setForgeOpen] = useState(false)
+  const [packOpen, setPackOpen] = useState(false)
   const [shareTarget, setShareTarget] = useState<Archetype | null>(null)
   const [error, setError] = useState('')
   // Sharing needs other users — none on a deck without sign-in.
   const accounts = useAuthStore((s) => s.authEnabled !== false)
 
+  rememberTeamLooks(registry)
   const all = useMemo(() => registry?.archetypes || [], [registry])
   const counts = useMemo(() => ({
     all: all.length,
     user: all.filter((a) => a.source === 'user').length,
     base: all.filter((a) => (a.source || 'base') === 'base').length,
     shared: all.filter((a) => a.source === 'shared').length,
+    team: all.filter((a) => a.source === 'team').length,
   }), [all])
   const families = useMemo(() => [...new Set(all
     .filter((a) => category === 'all' || archetypeCategory(a) === category)
@@ -98,10 +104,28 @@ export function ArchetypesPage() {
   })
 
   const remove = async (a: Archetype) => {
-    if (!confirm(`Delete the archetype "${a.role}"?${a.overrides ? ' The built-in version comes back.' : ''}`)) return
+    const team = a.source === 'team'
+    if (!confirm(team
+      ? `Remove "${a.role}" for everyone on this deck? Agents already made from it keep working.`
+      : `Delete the archetype "${a.role}"?${a.overrides ? ' The built-in version comes back.' : ''}`)) return
     setError('')
     try {
-      await deleteArchetype(a.id)
+      await (team ? deleteTeamArchetype(a.id) : deleteArchetype(a.id))
+      refreshRegistry()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const removeGroup = async () => {
+    const group = shelves().find((c) => c.id === category)
+    const inIt = all.filter((a) => a.source === 'team' && a.category === category).length
+    if (!group || !confirm(`Remove "${group.label}" and its ${inIt} archetype${inIt === 1 ? '' : 's'} for everyone on this deck? Agents already made from them keep working.`)) return
+    setError('')
+    try {
+      await deleteTeamGroup(group.id)
+      setCategory('all')
+      setFamily('')
       refreshRegistry()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -109,7 +133,7 @@ export function ArchetypesPage() {
   }
 
   const open = (a: Archetype) => {
-    if (a.source === 'user') setDraft({ input: toInput(a), id: a.id })
+    if (a.source === 'user' || a.source === 'team') setDraft({ input: toInput(a), id: a.id, team: a.source === 'team' })
     else setViewing(a)
   }
 
@@ -120,6 +144,7 @@ export function ArchetypesPage() {
         title="Archetypes"
         description="Ready-made agents: a role, instructions, tools and a model tier. People pick one to start a new agent, so these are what your team can create."
         actions={<>
+          <Button icon={Layers} onClick={() => setPackOpen(true)} disabled={noModels} title={noModels ? 'Create a tier set on Models first.' : 'A new group and family of archetypes, for everyone on this deck'}>Generate a group</Button>
           <Button icon={Wand2} onClick={() => setForgeOpen(true)} disabled={noModels} title={noModels ? 'Create a tier set on Models first — forging uses its model' : 'Draft several archetypes from instructions and documents'}>Forge from documents</Button>
           <Button variant="primary" icon={Plus} onClick={() => setDraft({ input: blank(), id: null })}>New archetype</Button>
         </>}
@@ -145,6 +170,7 @@ export function ArchetypesPage() {
             { value: 'all', label: 'All', count: counts.all },
             { value: 'user', label: 'Yours', count: counts.user },
             { value: 'base', label: 'Built-in', count: counts.base },
+            ...(counts.team ? [{ value: 'team' as const, label: 'Your team', count: counts.team }] : []),
             ...(counts.shared ? [{ value: 'shared' as const, label: 'Shared with you', count: counts.shared }] : []),
           ]}
         />
@@ -156,9 +182,15 @@ export function ArchetypesPage() {
         onChange={(next) => { setCategory(next); setFamily('') }}
         options={[
           { value: 'all' as const, label: 'All', count: all.length },
-          ...CATEGORIES.map((c) => ({ value: c.id, label: c.label, count: all.filter((a) => archetypeCategory(a) === c.id).length })),
+          ...shelves().map((c) => ({ value: c.id, label: c.label, count: all.filter((a) => archetypeCategory(a) === c.id).length })),
         ]}
       />
+      {category.startsWith('group-') && (
+        <div className="-mt-2 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
+          <span>{shelves().find((c) => c.id === category)?.hint}</span>
+          <Button variant="danger" icon={Trash2} className="!px-2 !py-1 !text-xs" onClick={removeGroup}>Remove this group for everyone</Button>
+        </div>
+      )}
 
       {families.length > 1 && (
         <div className="-mt-2 flex flex-wrap gap-1.5">
@@ -204,6 +236,7 @@ export function ArchetypesPage() {
         <ArchetypeSheet
           initial={draft.input}
           editingId={draft.id}
+          team={!!draft.team}
           registry={registry}
           toolPalette={toolPalette}
           canDraft={!noModels}
@@ -223,6 +256,14 @@ export function ArchetypesPage() {
           disclaimers={registry?.disclaimers}
           onClose={() => setViewing(null)}
           onCopy={() => { setDraft({ input: copyOf(viewing), id: null }); setViewing(null) }}
+        />
+      )}
+
+      {packOpen && (
+        <TeamPackDialog
+          existingFamilies={[...new Set(all.map((a) => a.family).filter(Boolean))].sort()}
+          onClose={() => setPackOpen(false)}
+          onPublished={() => refreshRegistry()}
         />
       )}
 
@@ -258,7 +299,7 @@ function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onDelete }: {
   onShare?: () => void
   onDelete: () => void
 }) {
-  const mine = a.source === 'user'
+  const mine = a.source === 'user' || a.source === 'team'
   const iconBtn = 'rounded-lg p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200'
   return (
     <div className="group flex flex-col rounded-2xl border border-zinc-800 bg-zinc-900/40 transition-colors hover:border-zinc-700">
@@ -268,7 +309,9 @@ function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onDelete }: {
             {a.lead && <Crown className="h-3.5 w-3.5 shrink-0 text-amber-500" />}
             <span className="truncate">{a.role}</span>
           </span>
-          {mine
+          {a.source === 'team'
+            ? <Pill tone="emerald" icon={Users} title="Published for everyone on this deck">your team</Pill>
+            : mine
             ? <Pill tone="violet">{a.overrides ? 'yours · replaces built-in' : 'yours'}</Pill>
             : a.source === 'shared'
               ? <Pill tone="sky" icon={Users} title={`Shared by ${a.shared_owner_name || a.shared_owner_email || 'another user'}`}>shared</Pill>
@@ -278,14 +321,14 @@ function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onDelete }: {
         <div className="mt-auto flex flex-wrap gap-1 pt-3">
           <Pill tone="cyan" icon={Gauge}>{tierLabel}</Pill>
           <Pill>{a.family || 'Custom'}</Pill>
-          <Pill icon={Wrench}>{a.tools.length} tools</Pill>
+          <Pill icon={Wrench}>{a.tools.length} tool{a.tools.length === 1 ? '' : 's'}</Pill>
           {a.runtime === 'mrav' && <Pill tone="amber">micro</Pill>}
         </div>
       </button>
       <div className="flex items-center justify-end gap-0.5 px-3 pb-2.5">
         {mine ? (
           <>
-            {onShare && <button onClick={onShare} className={iconBtn} title="Share with other users"><Share2 className="h-4 w-4" /></button>}
+            {onShare && a.source === 'user' && <button onClick={onShare} className={iconBtn} title="Share with other users"><Share2 className="h-4 w-4" /></button>}
             <button onClick={onOpen} className={iconBtn} title="Edit"><Pencil className="h-4 w-4" /></button>
             <button onClick={onDelete} className={`${iconBtn} hover:text-red-500`} title={a.overrides ? 'Delete (the built-in comes back)' : 'Delete'}><Trash2 className="h-4 w-4" /></button>
           </>
@@ -341,9 +384,11 @@ function ArchetypeView({ a, tierLabel, disclaimers, onClose, onCopy }: { a: Arch
 
 // ── The editor ──
 
-function ArchetypeSheet({ initial, editingId, registry, toolPalette, canDraft, generate, onClose, onSaved }: {
+function ArchetypeSheet({ initial, editingId, team, registry, toolPalette, canDraft, generate, onClose, onSaved }: {
   initial: ArchetypeInput
   editingId: string | null
+  // A team archetype: saving changes it for everyone on the deck.
+  team: boolean
   registry: ArchetypeRegistry | null
   toolPalette: string[]
   // A tier set exists to draft with.
@@ -390,7 +435,8 @@ function ArchetypeSheet({ initial, editingId, registry, toolPalette, canDraft, g
     if (!body.archetype_id) { setError('An id (or a role) is needed.'); return }
     setSaving(true); setError('')
     try {
-      if (editingId) await updateArchetype(editingId, body)
+      if (editingId && team) await updateTeamArchetype(editingId, body)
+      else if (editingId) await updateArchetype(editingId, body)
       else await createArchetype(body)
       onSaved()
     } catch (e) {
@@ -403,7 +449,7 @@ function ArchetypeSheet({ initial, editingId, registry, toolPalette, canDraft, g
   return (
     <Sheet
       title={editingId ? `Edit ${initial.role || 'archetype'}` : 'New archetype'}
-      subtitle={editingId ? `id: ${editingId}` : 'Describe it and let the model draft it, or fill it in.'}
+      subtitle={team ? `Changes reach everyone on this deck. id: ${editingId}` : editingId ? `id: ${editingId}` : 'Describe it and let the model draft it, or fill it in.'}
       icon={Library}
       onClose={onClose}
       wide
@@ -456,15 +502,12 @@ function ArchetypeSheet({ initial, editingId, registry, toolPalette, canDraft, g
           </Field>
           <Field label="Kind" hint="The shelf it sits on in the picker.">
             <select value={archetypeCategory(d)} onChange={(e) => set({ category: e.target.value })} className={inputCls}>
-              {CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+              {shelves().map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
             </select>
           </Field>
           <Field label="Disclaimer" hint="For legal or health work: the agent says it, and the deck shows it in the picker and under the chat.">
             <select value={d.disclaimer || ''} onChange={(e) => set({ disclaimer: e.target.value })} className={inputCls}>
-              <option value="">None</option>
-              <option value="legal">Legal</option>
-              <option value="health">Health, for people's own use</option>
-              <option value="clinical">Clinical, for professionals</option>
+              {DISCLAIMER_CHOICES.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
             </select>
           </Field>
           <Field label="Family" hint="Groups archetypes in the picker.">

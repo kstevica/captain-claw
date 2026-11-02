@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { createPortal } from 'react-dom'
 import { Check, Hammer, Loader2, Plus, X } from 'lucide-react'
 import { listArchetypes } from '../../services/archetypes'
+import { rememberTeamLooks } from '../layout/archetypeLook'
 import { forgeApi, type ForgePlan } from '../../services/agentForge'
 import type { Archetype } from '../../services/tierConfig'
 import { useProcessStore } from '../../stores/processStore'
@@ -74,7 +75,9 @@ export function ForgeAgentsDialog({ initialPlanId, onClose, onCreated }: {
   const told = useRef(new Set<string>())
   const self = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { listArchetypes(undefined, true).then((r) => setArchetypes(r.archetypes || [])).catch(() => {}) }, [])
+  useEffect(() => {
+    listArchetypes(undefined, true).then((r) => { rememberTeamLooks(r); setArchetypes(r.archetypes || []) }).catch(() => {})
+  }, [])
 
   const reload = useCallback(async () => {
     if (!planId) return

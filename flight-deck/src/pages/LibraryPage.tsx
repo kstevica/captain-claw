@@ -12,7 +12,7 @@ import {
   INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS, fmtCtxTokens, type Archetype,
   REASONING_EFFORTS, REASONING_EFFORT_PROVIDERS, splitReasoningEffort, withReasoningEffort,
 } from '../services/tierConfig'
-import { CATEGORIES, archetypeCategory } from '../components/layout/archetypeLook'
+import { archetypeCategory, rememberTeamLooks, shelves } from '../components/layout/archetypeLook'
 import { CtxSelect } from '../components/common/CtxSelect'
 import {
   createArchetype, updateArchetype, deleteArchetype, generateArchetype,
@@ -303,6 +303,7 @@ export function LibraryPage() {
     }
   }
 
+  rememberTeamLooks(registry)
   const families = registry ? [...new Set(registry.archetypes.map((a) => a.family))] : []
 
   return (
@@ -945,7 +946,7 @@ export function LibraryPage() {
                     onChange={(e) => setEditor({ ...editor, category: e.target.value })}
                     className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
                   >
-                    {CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                    {shelves().map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
                   </select>
                 </div>
                 <div>

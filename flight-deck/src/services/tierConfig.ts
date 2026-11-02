@@ -65,8 +65,9 @@ export interface TierDef {
 
 // Archetype registry served by GET /fd/archetypes — base set merged with the
 // caller's own custom archetypes (the latter tagged source: 'user').
-// The shelf above the family. A person's own archetype may not have one yet.
-export type ArchetypeCategory = 'generalist' | 'focused' | 'personal'
+// The shelf above the family: a built-in one, or one an admin published for the deck.
+// A person's own archetype may not have one yet.
+export type ArchetypeCategory = 'generalist' | 'focused' | 'personal' | `group-${string}`
 
 export interface Archetype {
   id: string
@@ -74,6 +75,8 @@ export interface Archetype {
   category?: ArchetypeCategory
   // A key into the registry's `disclaimers`: legal, health or clinical.
   disclaimer?: string
+  // A team archetype's own icon, by name.
+  icon?: string
   role: string
   lead?: boolean
   cognitive_mode: string
@@ -86,8 +89,9 @@ export interface Archetype {
   keywords?: string[]
   reliability_seed?: number
   // 'user' archetypes are editable/deletable; 'base' come from the JSON file;
+  // 'team' an admin published for the whole deck;
   // 'shared' were shared to you by another user (use-only, tagged with owner).
-  source?: 'base' | 'user' | 'shared'
+  source?: 'base' | 'user' | 'shared' | 'team'
   overrides?: boolean
   shared_owner?: string
   shared_owner_email?: string
@@ -105,6 +109,9 @@ export interface ArchetypeRegistry {
   tiers: Record<string, TierDef>
   base_tools?: string[]
   disclaimers?: Record<string, string>
+  // What this deck's admin added: shelves, and how its new families look.
+  groups?: { id: `group-${string}`; label: string; hint: string }[]
+  family_looks?: { name: string; icon: string; color: string }[]
   archetypes: Archetype[]
 }
 
