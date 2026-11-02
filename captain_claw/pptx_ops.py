@@ -14,6 +14,10 @@ The promise is slides that fit, in the firm's own template:
   Deleting, moving and duplicating slides, which it has no calls for, are done on
   the XML here, along with what else points at a slide: sections, custom shows and
   links from other slides.
+* **A picture lands somewhere that works.** Whatever format it came in, it's stored
+  as what PowerPoint shows everywhere, upright and at a size a deck can carry. With
+  no coordinates it takes a free placeholder or the open part of the slide, makes
+  room beside text, or shares the space with the pictures already there.
 
 Nothing here decides where files live; ``tools/pptx_tool.py`` owns paths, backups
 and saving.
@@ -23,6 +27,7 @@ from __future__ import annotations
 
 import copy
 import io
+import math
 import re
 import shutil
 import subprocess
@@ -33,6 +38,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
 from lxml import etree
+from PIL import Image, ImageOps
 from pptx import Presentation
 from pptx.chart.data import CategoryChartData, XyChartData
 from pptx.chart.plot import XyPlot
@@ -69,6 +75,8 @@ A_P, A_R, A_T, A_BR, A_FLD = qn("a:p"), qn("a:r"), qn("a:t"), qn("a:br"), qn("a:
 A_RPR, A_PPR, A_END = qn("a:rPr"), qn("a:pPr"), qn("a:endParaRPr")
 _BULLET_TAGS = tuple(qn(f"a:{t}") for t in ("buNone", "buAutoNum", "buChar", "buBlip"))
 _FOOTER_TYPES = (PP_PLACEHOLDER.DATE, PP_PLACEHOLDER.FOOTER, PP_PLACEHOLDER.SLIDE_NUMBER)
+_PICTURE_TYPES = (PP_PLACEHOLDER.PICTURE, PP_PLACEHOLDER.BITMAP)
+Box = tuple[int, int, int, int]
 
 
 class PptxError(ValueError):
@@ -197,14 +205,35 @@ def _content_placeholders(layout: Any) -> list[Any]:
         PP_PLACEHOLDER.OBJECT, PP_PLACEHOLDER.BODY)]
 
 
+def _picture_items(spec: dict[str, Any]) -> list[dict[str, Any]]:
+    """The pictures a slide or an edit names: `image` and `images`, as paths or objects."""
+    items: list[dict[str, Any]] = []
+    for key in ("image", "images"):
+        raw = spec.get(key)
+        if raw in (None, "", []):
+            continue
+        for item in raw if isinstance(raw, list) else [raw]:
+            items.append(item if isinstance(item, dict) else {"image": item})
+    return items
+
+
 def _default_layout(prs: DeckClass, spec: dict[str, Any]) -> Any:
     """The layout a slide's content asks for when it names none."""
-    visuals = sum(1 for key in ("table", "chart", "image") if spec.get(key))
-    text = 1 if spec.get("body") else 0
-    wanted = visuals + text
+    pictures = len(_picture_items(spec))
+    # Several pictures share one space, so they ask for one place between them.
+    others = sum(1 for key in ("table", "chart") if spec.get(key)) + (1 if spec.get("body") else 0)
+    wanted = others + (1 if pictures else 0)
     layouts = all_layouts(prs)
     titled = [la for la in layouts if any(
         ph.placeholder_format.type in (PP_PLACEHOLDER.TITLE, PP_PLACEHOLDER.CENTER_TITLE) for ph in la.placeholders)]
+    if pictures:
+        # A template's own picture layout, where it has one that holds exactly this.
+        for layout in titled:
+            slots = [ph for ph in layout.placeholders if ph.placeholder_format.type in _PICTURE_TYPES]
+            name = layout.name.casefold()
+            if len(slots) == pictures and len(_content_placeholders(layout)) == others \
+                    and "caption" not in name and "vertical" not in name:
+                return layout
     if wanted == 0 and spec.get("title") and not spec.get("subtitle"):
         for layout in titled:
             if not [ph for ph in layout.placeholders if ph.placeholder_format.type not in _FOOTER_TYPES
@@ -691,7 +720,8 @@ def describe_shape(shape: Any, slide: Any, prs: DeckClass, *, indent: str = "  "
         return [f"{head}SmartArt {where} (change it in PowerPoint): {_smartart_text(shape)[:400]}"]
     if shape.shape_type == MSO_SHAPE_TYPE.PICTURE or shape._element.tag == qn("p:pic"):
         alt = _alt_text(shape)
-        return [f"{head}{label or 'picture'} picture {shape.name!r} {where}" + (f', alt: "{alt}"' if alt else ", no alt text")]
+        return [f"{head}{label or 'picture'} picture {shape.name!r} {where}{_picture_details(shape)}"
+                + (f', alt: "{alt}"' if alt else ", no alt text")]
     if not shape.has_text_frame:
         return [f"{head}{str(shape.shape_type).split(' ')[0].lower()} {shape.name!r} {where}"]
     ctx = TextContext(shape, slide, prs)
@@ -720,6 +750,15 @@ def describe_shape(shape: Any, slide: Any, prs: DeckClass, *, indent: str = "  "
     if len(lines_out) > 60:
         out.append(f"{indent}    … and {len(lines_out) - 60} more lines")
     return out
+
+
+def _picture_details(shape: Any) -> str:
+    try:
+        px_w, px_h = shape.image.size
+    except Exception:  # a picture linked from outside the deck has no pixels here
+        return ""
+    cropped = any((shape.crop_left, shape.crop_right, shape.crop_top, shape.crop_bottom))
+    return f", {px_w}×{px_h} px" + (", cropped" if cropped else "")
 
 
 def notes_text(slide: Any) -> str:
@@ -1177,7 +1216,7 @@ def _duplicate_slide(prs: DeckClass, slide: Any) -> Any:
 # ── Editing ──────────────────────────────────────────────────────────
 
 OPS = ("set_text", "replace", "format", "add_slide", "duplicate_slide", "delete_slide", "move_slide", "hide_slide",
-       "set_notes", "add_text", "add_image", "add_table", "set_table", "add_chart", "set_chart", "place",
+       "set_notes", "add_text", "add_image", "set_image", "add_table", "set_table", "add_chart", "set_chart", "place",
        "delete_shape", "set_alt", "set_theme")
 _CHART_TYPES = {
     ("column", False): XL_CHART_TYPE.COLUMN_CLUSTERED, ("column", True): XL_CHART_TYPE.COLUMN_STACKED,
@@ -1227,12 +1266,209 @@ _ALIGN = {"left": PP_ALIGN.LEFT, "center": PP_ALIGN.CENTER, "right": PP_ALIGN.RI
 _ANCHOR = {"top": MSO_ANCHOR.TOP, "center": MSO_ANCHOR.MIDDLE, "middle": MSO_ANCHOR.MIDDLE, "bottom": MSO_ANCHOR.BOTTOM}
 
 
+# ── Pictures ─────────────────────────────────────────────────────────
+
+_PICTURE_EDGE = 3000  # pixels: 220 an inch across a wide slide, what PowerPoint itself compresses to
+_PICTURE_BYTES = 4 * 1024 * 1024
+_MIN_PPI = 72  # a picture looks soft below this (the low_resolution note), so it isn't blown up past it
+_PHOTO_FORMATS = {"JPEG", "MPO", "WEBP", "AVIF", "HEIF"}
+_POSITIONS = ("full", "left", "right", "top", "bottom", "center",
+              "top-left", "top-right", "bottom-left", "bottom-right")
+_CORNERS = _POSITIONS[-4:]
+_SLIDE_KEYS = {"op", "at", "slide", "layout", "title", "subtitle", "body", "placeholders", "table", "chart",
+               "image", "images", "notes", "keep_empty"}
+
+
+@dataclass
+class _Picture:
+    data: bytes
+    width: int
+    height: int
+    alt: str = ""
+
+    @property
+    def ratio(self) -> float:
+        return self.width / self.height if self.height else 1.0
+
+
+@dataclass
+class _Spot:
+    """Where a picture goes, and how it fills that."""
+
+    box: Box
+    fit: str = "contain"
+    grow: bool = False  # may be drawn larger than its pixels hold
+    anchor: tuple[float, float] = (0.5, 0.5)  # where in the box, when it doesn't fill it
+    back: bool = False  # behind everything else on the slide
+    caption_inside: bool = True  # a caption comes out of the box, not below it
+    ph_idx: int | None = None  # the placeholder it took over
+    ph_type: str = ""
+
+
+def load_picture(data: bytes, name: str) -> tuple[_Picture, str]:
+    """A picture as a deck should hold it, and a note when it had to shrink.
+
+    A JPEG, PNG or GIF of a sensible size goes in byte for byte. Anything else
+    PowerPoint can't show (WebP, AVIF, HEIC) or shows differently from one viewer to
+    the next (a phone photo that's turned only by its EXIF tag, CMYK) is rewritten.
+    """
+    try:
+        image = Image.open(io.BytesIO(data))
+    except Exception:
+        # HEIC needs pillow-heif or macOS's own converter (the WhatsApp bridge's route).
+        from captain_claw.flight_deck.whatsapp_inbound import to_jpeg
+
+        converted = to_jpeg(data)
+        if not converted:
+            raise PptxError(f"{name} isn't a picture this server can read. Save it as a PNG or JPEG.") from None
+        data = converted
+        image = Image.open(io.BytesIO(data))
+    try:
+        kind = image.format or ""
+        if kind in ("GIF", "WMF"):  # A GIF may move; a WMF is drawn, not pixels.
+            return _Picture(data, *image.size), ""
+        heavy = len(data) > _PICTURE_BYTES
+        turned = image.getexif().get(0x0112, 1) not in (0, 1)
+        if kind in ("JPEG", "PNG") and image.mode != "CMYK" and not turned and not heavy:
+            return _Picture(data, *image.size), ""
+        stored, width, height = _rewrite_picture(image, kind)
+    except PptxError:
+        raise
+    except Exception as exc:
+        raise PptxError(f"{name} isn't a picture PowerPoint can show ({type(exc).__name__}).") from None
+    note = ""
+    if heavy and len(stored) < len(data):
+        note = (f"{name} was {len(data) / 1e6:.1f} MB, so the deck holds it at {width}×{height} pixels "
+                f"({len(stored) / 1e6:.1f} MB).")
+    return _Picture(stored, width, height), note
+
+
+def _rewrite_picture(image: Any, kind: str) -> tuple[bytes, int, int]:
+    profile = None if image.mode == "CMYK" else image.info.get("icc_profile")
+    upright = ImageOps.exif_transpose(image)
+    upright.thumbnail((_PICTURE_EDGE, _PICTURE_EDGE))
+    alpha = upright.mode in ("RGBA", "LA", "PA") or (upright.mode == "P" and "transparency" in upright.info)
+    extra = {"icc_profile": profile} if profile else {}
+
+    def jpeg() -> bytes:
+        out = io.BytesIO()
+        upright.convert("RGB").save(out, "JPEG", quality=88, optimize=True, **extra)
+        return out.getvalue()
+
+    def png() -> bytes:
+        out = io.BytesIO()
+        upright.convert("RGBA" if alpha else "RGB").save(out, "PNG", optimize=True, **extra)
+        return out.getvalue()
+
+    if alpha:
+        stored = png()
+    elif kind in _PHOTO_FORMATS:
+        stored = jpeg()
+    else:
+        # A screenshot or a drawing stays crisp as PNG, unless that's as heavy as what it replaces.
+        stored = png()
+        if len(stored) > _PICTURE_BYTES:
+            stored = jpeg()
+    return stored, upright.size[0], upright.size[1]
+
+
+def _shown_ratio(shape: Any) -> float:
+    """Width over height of the part of a picture that shows."""
+    try:
+        px_w, px_h = shape.image.size
+        shown_h = px_h * (1 - shape.crop_top - shape.crop_bottom)
+        return px_w * (1 - shape.crop_left - shape.crop_right) / shown_h
+    except Exception:
+        return shape.width / shape.height if shape.height else 1.0
+
+
+def _drawn_area(width: int, height: int, ratio: float) -> float:
+    """How much a picture of this shape covers of a room this size."""
+    drawn = min(width, height * ratio)
+    return drawn * drawn / ratio
+
+
+def _overlap(a: Box, b: Box) -> int:
+    x = min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0])
+    y = min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1])
+    return x * y if x > 0 and y > 0 else 0
+
+
+def _open_rooms(area: Box, obstacles: Iterable[Box]) -> list[Box]:
+    """The largest clear rectangles in an area: each obstacle splits what it touches."""
+    rooms = [(area[0], area[1], area[0] + area[2], area[1] + area[3])]
+    for box in obstacles:
+        o_left, o_top, o_right, o_bottom = box[0], box[1], box[0] + box[2], box[1] + box[3]
+        split: set[tuple[int, int, int, int]] = set()
+        for room in rooms:
+            left, top, right, bottom = room
+            if o_right <= left or o_left >= right or o_bottom <= top or o_top >= bottom:
+                split.add(room)
+                continue
+            if o_left > left:
+                split.add((left, top, o_left, bottom))
+            if o_right < right:
+                split.add((o_right, top, right, bottom))
+            if o_top > top:
+                split.add((left, top, right, o_top))
+            if o_bottom < bottom:
+                split.add((left, o_bottom, right, bottom))
+        rooms = [r for r in split if not any(
+            s != r and s[0] <= r[0] and s[1] <= r[1] and s[2] >= r[2] and s[3] >= r[3] for s in split)]
+    return sorted((r[0], r[1], r[2] - r[0], r[3] - r[1]) for r in rooms)
+
+
+def _grid(frame: Box, ratios: list[float], gap: int) -> list[Box]:
+    """A cell for each picture: the rows and columns that show them largest."""
+    count = len(ratios)
+    best: tuple[float, int, int, int, int] | None = None
+    for rows in range(1, count + 1):
+        columns = math.ceil(count / rows)
+        if columns * (rows - 1) >= count:  # a row would stay empty
+            continue
+        width = (frame[2] - gap * (columns - 1)) // columns
+        height = (frame[3] - gap * (rows - 1)) // rows
+        if width <= 0 or height <= 0:
+            continue
+        shown = sum(_drawn_area(width, height, ratio) for ratio in ratios)
+        if best is None or shown > best[0]:
+            best = (shown, rows, columns, width, height)
+    if best is None:
+        return [frame] * count
+    _, rows, columns, width, height = best
+    cells: list[Box] = []
+    for row in range(rows):
+        held = min(columns, count - len(cells))
+        # A short last row sits in the middle.
+        start = frame[0] + (frame[2] - held * width - (held - 1) * gap) // 2
+        for column in range(held):
+            cells.append((start + column * (width + gap), frame[1] + row * (height + gap), width, height))
+    return cells
+
+
+def _release_rel(part: Any, rel_id: str) -> None:
+    """Let go of a relationship nothing in the part still uses. python-pptx's drop_rel
+    counts only r:id, so it would cut a picture off a second one showing the same file
+    (both hold it as r:embed)."""
+    if rel_id not in part.rels:
+        return
+    prefix = f"{{{R_NS}}}"
+    for element in part._element.iter():
+        if isinstance(element.tag, str) and any(k.startswith(prefix) and v == rel_id for k, v in element.attrib.items()):
+            return
+    part.rels.pop(rel_id)
+
+
 class Editor:
     """Applies a list of changes to a deck in memory: all of them, or none."""
 
-    def __init__(self, prs: DeckClass, *, image_root: Callable[[str], Path | None] | None = None) -> None:
+    def __init__(self, prs: DeckClass, *, image_root: Callable[[str], Path | None] | None = None,
+                 image_alt: Callable[[Path], str] | None = None) -> None:
         self.prs = prs
         self.image_root = image_root
+        self.image_alt = image_alt
+        self.pictures: dict[str, _Picture] = {}
+        self.covered: set[tuple[int, int]] = set()
         self.report = Report()
         self.touched: dict[int, Any] = {}
         self.touched_shapes: set[tuple[int, int]] = set()
@@ -1339,6 +1575,8 @@ class Editor:
             raise PptxError("needs `text`.")
         if not shape.has_text_frame:
             raise PptxError(f"[{shape.shape_id}] holds no text. For a table use set_table, for a chart set_chart.")
+        if placeholder_kind(shape) == "picture":
+            raise PptxError(f"[{shape.shape_id}] is a place for a picture. Use set_image.")
         bullets = op.get("bullets")
         self._write(slide, shape, str(op["text"]), bullets=bullets if isinstance(bullets, bool) else None)
         self._count("texts set")
@@ -1499,6 +1737,10 @@ class Editor:
 
     def add_slide(self, spec: dict[str, Any]) -> Any:
         prs = self.prs
+        unknown = sorted(set(spec) - _SLIDE_KEYS)
+        if unknown:
+            # Left alone it would be a slide that quietly lacks what was asked for.
+            raise PptxError(f"a slide has no `{unknown[0]}`. It takes: {', '.join(sorted(_SLIDE_KEYS - {'op', 'at', 'slide'}))}.")
         layout = find_layout(prs, spec["layout"]) if spec.get("layout") not in (None, "") \
             else _default_layout(prs, spec)
         slide = prs.slides.add_slide(layout)
@@ -1540,6 +1782,10 @@ class Editor:
         if isinstance(placeholders, dict):
             for ref, value in placeholders.items():
                 shape = self._find_shape(slide, f"ph:{ref}" if str(ref).isdigit() else ref)
+                if shape is not None and placeholder_kind(shape) == "picture":
+                    item = value if isinstance(value, dict) else {"image": value}
+                    self.add_image(slide, {**item, "shape": shape.shape_id})
+                    continue
                 if shape is None or not shape.has_text_frame:
                     raise PptxError(f'Layout "{slide.slide_layout.name}" has no text placeholder {ref!r}: '
                                     f"{_layout_description(slide.slide_layout)}.")
@@ -1549,9 +1795,8 @@ class Editor:
             self.add_table(slide, table if isinstance(table, dict) else {"rows": table})
         if spec.get("chart"):
             self.add_chart(slide, spec["chart"])
-        if spec.get("image"):
-            image = spec["image"]
-            self.add_image(slide, image if isinstance(image, dict) else {"image": image})
+        for item in _picture_items(spec):
+            self.add_image(slide, item)
         if spec.get("notes") not in (None, ""):
             self._set_notes(slide, str(spec["notes"]))
 
@@ -1702,13 +1947,13 @@ class Editor:
         return self._free_area(slide), None
 
     @staticmethod
-    def _link_placeholder(shape: Any, idx: int | None) -> None:
+    def _link_placeholder(shape: Any, idx: int | None, kind: str = "") -> None:
         """What PowerPoint writes when content sits in a placeholder, so a change of
         layout carries it along."""
         if idx is None:
             return
         props = shape._element.xpath(".//p:nvPr")[0]
-        ph = etree.Element(qn("p:ph"), idx=str(idx))
+        ph = etree.Element(qn("p:ph"), {"type": kind, "idx": str(idx)} if kind else {"idx": str(idx)})
         props.insert(0, ph)
 
     @staticmethod
@@ -1733,47 +1978,392 @@ class Editor:
         self._count("text boxes added")
 
     def _op_add_image(self, op: dict[str, Any]) -> None:
+        if isinstance(op.get("image"), str) and not op.get("images"):
+            items = [op]
+        else:
+            items = [{"fit": op.get("fit"), **item} for item in _picture_items(op)]
+        if not items:
+            raise PptxError("needs `image`: a saved picture's path or a link to one.")
+        for slide in self._slide_range(op):
+            for item in items:
+                self.add_image(slide, item)
+                self._count("images added")
+
+    def _op_set_image(self, op: dict[str, Any]) -> None:
         slide = self._one_slide(op)
-        self.add_image(slide, op)
-        self._count("images added")
+        if op.get("shape") in (None, ""):
+            raise PptxError("needs `shape`: the picture or the empty placeholder it goes in.")
+        self._set_image(slide, op)
+        self._count("images changed")
 
     def add_image(self, slide: Any, op: dict[str, Any]) -> Any:
+        if op.get("shape") not in (None, ""):
+            return self._set_image(slide, op)
+        picture = self._picture(op)
+        return self._place_picture(slide, op, picture, self._picture_spot(slide, op, picture.ratio))
+
+    def _picture(self, op: dict[str, Any]) -> _Picture:
         src = str(op.get("image") or "").strip()
         if not src:
-            raise PptxError("needs `image`: a saved picture's path.")
+            raise PptxError("needs `image`: a saved picture's path or a link to one.")
         found = self.image_root(src) if self.image_root is not None else None
         if found is None:
-            raise PptxError(f"Can't read the picture {src!r}. Use a path from this workspace.")
-        box, idx = self._place_visual(slide, op, ("picture", "content", "body"))
+            raise PptxError(f"Can't read the picture {src!r}. Use the path a tool gave you, vfs:<project>/…, "
+                            "or an https:// link.")
+        picture = self.pictures.get(str(found))
+        if picture is None:
+            picture, note = load_picture(found.read_bytes(), Path(src.split("?")[0]).name or "The picture")
+            if note:
+                self.report.notes.append(note)
+            if self.image_alt is not None:
+                picture.alt = self.image_alt(found)
+            self.pictures[str(found)] = picture
+        return picture
+
+    # Where it goes
+
+    def _picture_spot(self, slide: Any, op: dict[str, Any], ratio: float) -> _Spot:
+        x, y = _number(op, "x"), _number(op, "y")
+        width, height = _number(op, "width"), _number(op, "height")
+        if (width is not None and width <= 0) or (height is not None and height <= 0):
+            raise PptxError("width and height must be above zero.")
+        if x is not None or y is not None:
+            return self._spot_at(x, y, width, height, ratio)
+        position = str(op.get("position") or "").strip().lower().replace(" ", "-").replace("_", "-")
+        if position in _CORNERS and width is None and height is None:
+            width = 1.5  # A corner is for a logo.
+        spot = self._named_spot(slide, position, ratio) if position else self._open_spot(slide, ratio)
+        if (width or height) and position != "full":
+            drawn_w = Inches(width) if width else int(Inches(height) * ratio)
+            drawn_h = Inches(height) if height else int(Inches(width) / ratio)
+            spot.box = (spot.box[0] + int((spot.box[2] - drawn_w) * spot.anchor[0]),
+                        spot.box[1] + int((spot.box[3] - drawn_h) * spot.anchor[1]), drawn_w, drawn_h)
+            spot.grow = True
+        return spot
+
+    def _spot_at(self, x: float | None, y: float | None, width: float | None, height: float | None, ratio: float) -> _Spot:
+        """Where it was told: a corner and a size, one side of which is enough."""
+        if x is None or y is None:
+            raise PptxError("say both x and y in inches, or neither.")
+        left, top = Inches(x), Inches(y)
+        if width is None and height is None:
+            margin = Inches(0.3)
+            room = (self.prs.slide_width - left - margin, self.prs.slide_height - top - margin)
+            if min(room) <= 0:
+                raise PptxError(f"x {x}, y {y} is off the slide ({inches(self.prs.slide_width)} × "
+                                f"{inches(self.prs.slide_height)} in).")
+            return _Spot((left, top, room[0], room[1]), anchor=(0, 0))
+        drawn_w = Inches(width) if width else int(Inches(height) * ratio)
+        drawn_h = Inches(height) if height else int(Inches(width) / ratio)
+        return _Spot((left, top, drawn_w, drawn_h), grow=True, caption_inside=False)
+
+    def _named_spot(self, slide: Any, position: str, ratio: float) -> _Spot:
+        prs = self.prs
+        if position == "full":
+            return _Spot((0, 0, prs.slide_width, prs.slide_height), fit="cover", grow=True, back=True,
+                         caption_inside=False)
+        if position in _CORNERS:
+            margin = Inches(0.3)
+            vertical, horizontal = position.split("-")
+            return _Spot((margin, margin, prs.slide_width - 2 * margin, prs.slide_height - 2 * margin),
+                         anchor=(1 if horizontal == "right" else 0, 1 if vertical == "bottom" else 0),
+                         caption_inside=False)
+        if position not in _POSITIONS:
+            raise PptxError(f"position {position!r}: use {', '.join(_POSITIONS)}.")
+        area = self._content_area(slide)
+        left, top, width, height = area
+        gap = Inches(0.25)
+        half_w, half_h = (width - gap) // 2, (height - gap) // 2
+        frame = {
+            "left": (left, top, half_w, height),
+            "right": (left + width - half_w, top, half_w, height),
+            "top": (left, top, width, half_h),
+            "bottom": (left, top + height - half_h, width, half_h),
+        }.get(position, area)
+        for ph in slide.placeholders:
+            if placeholder_kind(ph) in ("picture", "content", "body") and ph.has_text_frame and not _shape_text(ph) \
+                    and (id(slide.part), ph.shape_id) not in self.touched_shapes \
+                    and frame[0] <= ph.left + ph.width // 2 <= frame[0] + frame[2] \
+                    and frame[1] <= ph.top + ph.height // 2 <= frame[1] + frame[3]:
+                return self._placeholder_spot(ph)
+        if position != "center":
+            self._make_room(slide, frame, position)
+        return _Spot(frame)
+
+    def _open_spot(self, slide: Any, ratio: float) -> _Spot:
+        """Told nothing: a free placeholder, else the open part of the slide, else
+        room made beside the text or shared with the pictures already there."""
+        ph = self._empty_placeholder(slide, ("picture",))
+        if ph is None:
+            ph = self._empty_placeholder(slide, ("content", "body"))
+            if ph is not None and ph.height < Inches(1.5):
+                ph = None
+        if ph is not None:
+            return self._placeholder_spot(ph)
+        area = self._content_area(slide)
+        sharing = self._sharing_pictures(slide, area)
+        if sharing:
+            return self._shared_spot(slide, area, sharing, ratio)
+        rooms = _open_rooms(area, self._obstacles(slide, area))
+        best = max(rooms, key=lambda r: _drawn_area(r[2], r[3], ratio), default=None)
+        if best is not None and _drawn_area(best[2], best[3], ratio) >= area[2] * area[3] * 0.2:
+            return _Spot(best)
+        beside = self._beside_text(slide, area, ratio)
+        if beside is not None:
+            return _Spot(beside)
+        if best is not None and best[2] >= Inches(1.5) and best[3] >= Inches(1):
+            return _Spot(best)
+        raise PptxError(f"Slide {_position_of(self.prs, slide)} has no room for a picture. Give it a `position`, or "
+                        "x, y and width, or move what's there with place.")
+
+    def _placeholder_spot(self, ph: Any) -> _Spot:
+        """The placeholder's frame; the picture replaces it. A place meant for a picture
+        is filled, the way PowerPoint does it; a place for anything shows it whole."""
+        for_picture = placeholder_kind(ph) == "picture"
+        spot = _Spot((ph.left, ph.top, ph.width, ph.height), fit="cover" if for_picture else "contain",
+                     grow=for_picture, ph_idx=ph.placeholder_format.idx,
+                     ph_type=ph._element.xpath(".//p:nvPr/p:ph")[0].get("type", "") if for_picture else "")
+        ph._element.getparent().remove(ph._element)
+        return spot
+
+    def _content_area(self, slide: Any) -> Box:
+        """Under the title and above the footers, in line with the title."""
+        prs = self.prs
+        margin = Inches(0.5)
+        left, right, top = margin, prs.slide_width - margin, margin
+        title = self._find_shape(slide, "title")
+        box = _box_of(title) if title is not None else None
+        # A title in a side column doesn't say where the content goes; it's in the way like the rest.
+        if box is not None and box[2] > prs.slide_width * 0.6:
+            left, right = max(box[0], margin), min(box[0] + box[2], right)
+            top = box[1] + box[3]
+        bottom = prs.slide_height - Inches(0.45)
+        for ph in slide.placeholders:
+            if ph.placeholder_format.type in _FOOTER_TYPES:
+                bottom = min(bottom, ph.top)
+        if bottom - top < Inches(1.0):
+            top = max(bottom - Inches(1.0), 0)
+        return left, top, right - left, bottom - top
+
+    def _obstacles(self, slide: Any, area: Box, ignore: Iterable[int] = ()) -> list[Box]:
+        """What a picture must stay clear of: what shows, at the size it shows."""
+        gap = Inches(0.1)
+        out: list[Box] = []
+        slide_area = self.prs.slide_width * self.prs.slide_height
+        for shape in slide.shapes:
+            if shape.shape_id in ignore or placeholder_kind(shape) in ("date", "footer", "slide number"):
+                continue
+            box = _box_of(shape)
+            if box is None:
+                continue
+            content = _visible_content(shape)
+            if content is None:
+                # An empty placeholder doesn't show; a large plain shape is what the design sits on.
+                if shape.is_placeholder or box[2] * box[3] > area[2] * area[3] * 0.5:
+                    continue
+            elif content == "picture" and box[2] * box[3] > slide_area * 0.7:
+                continue
+            elif content == "text":
+                box = _visible_box(shape, slide, self.prs) or box
+            out.append((box[0] - gap, box[1] - gap, box[2] + 2 * gap, box[3] + 2 * gap))
+        return out
+
+    def _sharing_pictures(self, slide: Any, area: Box) -> list[Any]:
+        """Pictures a new one divides the space with: not a logo or a background."""
+        slide_area = self.prs.slide_width * self.prs.slide_height
+        found = []
+        for shape in slide.shapes:
+            box = _box_of(shape)
+            if shape._element.tag != qn("p:pic") or box is None:
+                continue
+            middle_x, middle_y = box[0] + box[2] // 2, box[1] + box[3] // 2
+            if slide_area * 0.05 <= box[2] * box[3] <= slide_area * 0.7 \
+                    and area[0] <= middle_x <= area[0] + area[2] and area[1] <= middle_y <= area[1] + area[3]:
+                found.append(shape)
+        return found
+
+    def _shared_spot(self, slide: Any, area: Box, sharing: list[Any], ratio: float) -> _Spot:
+        """Lay the pictures already there and the new one out together, in the room they're in."""
+        ignore = {shape.shape_id for shape in sharing}
+        for shape in sharing:
+            caption = self._caption_of(slide, shape)
+            if caption is not None:
+                ignore.add(caption.shape_id)
+        rooms = _open_rooms(area, self._obstacles(slide, area, ignore)) or [area]
+        frame = max(rooms, key=lambda room: (sum(_overlap(room, _box_of(s)) for s in sharing), room[2] * room[3]))
+        cells = _grid(frame, [_shown_ratio(shape) for shape in sharing] + [ratio], Inches(0.15))
+        moved = []
+        for shape, cell in zip(sharing, cells):
+            if (id(slide.part), shape.shape_id) not in self.touched_shapes:
+                moved.append(shape.shape_id)
+            fit = "cover" if (id(slide.part), shape.shape_id) in self.covered else "contain"
+            self._seat(slide, shape, cell, fit)
+            self._touch(slide, shape)
+        if moved:
+            self.report.notes.append(f"Slide {_position_of(self.prs, slide)}: picture(s) "
+                                     f"{', '.join(f'[{m}]' for m in moved)} moved to share the space.")
+        return _Spot(cells[-1])
+
+    def _beside_text(self, slide: Any, area: Box, ratio: float) -> Box | None:
+        """A column on the right, when text runs the width of the slide and only that's in the way."""
+        left, top, width, height = area
+        texts = [s for s in slide.shapes if _visible_content(s) == "text"
+                 and placeholder_kind(s) not in ("title", "date", "footer", "slide number")]
+        if not any((_box_of(s) or (0, 0, 0, 0))[2] > width * 0.6 for s in texts):
+            return None
+        column = max(int(width * 0.3), min(int(width * 0.45), int(height * ratio)))
+        frame = (left + width - column, top, column, height)
+        solid = self._obstacles(slide, area, {s.shape_id for s in texts})
+        if any(_overlap(frame, box) for box in solid):
+            return None
+        self._make_room(slide, frame, "right")
+        return frame
+
+    def _make_room(self, slide: Any, frame: Box, side: str) -> None:
+        """Text in a picture's way gives up that side of its box. The result then says if it no longer fits."""
+        gap = Inches(0.2)
+        moved = []
+        for shape in slide.shapes:
+            shown = _visible_box(shape, slide, self.prs) if _visible_content(shape) == "text" else None
+            if shown is None or not _overlap(frame, shown) or placeholder_kind(shape) in ("title", "date", "footer", "slide number"):
+                continue
+            left, top, width, height = _box_of(shape)
+            new = {
+                "right": (left, top, frame[0] - gap - left, height),
+                "left": (frame[0] + frame[2] + gap, top, left + width - frame[0] - frame[2] - gap, height),
+                "top": (left, frame[1] + frame[3] + gap, width, top + height - frame[1] - frame[3] - gap),
+                "bottom": (left, top, width, frame[1] - gap - top),
+            }[side]
+            if new[2] < Inches(1.5) or new[3] < Inches(0.5):
+                continue  # Too little left to be text: the overlap gets reported instead.
+            shape.left, shape.top, shape.width, shape.height = (Emu(value) for value in new)
+            self._touch(slide, shape)
+            moved.append(shape.shape_id)
+        if moved:
+            self.report.notes.append(f"Slide {_position_of(self.prs, slide)}: text "
+                                     f"{', '.join(f'[{m}]' for m in moved)} moved over to make room for the picture.")
+
+    # Putting it there
+
+    def _place_picture(self, slide: Any, op: dict[str, Any], picture: _Picture, spot: _Spot) -> Any:
         try:
-            shape = slide.shapes.add_picture(str(found), box[0], box[1])
+            shape = slide.shapes.add_picture(io.BytesIO(picture.data), spot.box[0], spot.box[1])
         except Exception as exc:
-            raise PptxError(f"{Path(src).name} isn't a picture PowerPoint can show ({type(exc).__name__}).") from None
-        px_w, px_h = shape.image.size
-        ratio = px_w / px_h if px_h else 1.0
-        if str(op.get("fit") or "contain").lower() == "cover":
-            frame_ratio = box[2] / box[3]
-            if ratio > frame_ratio:
-                crop = (1 - frame_ratio / ratio) / 2
-                shape.crop_left = shape.crop_right = crop
-            else:
-                crop = (1 - ratio / frame_ratio) / 2
-                shape.crop_top = shape.crop_bottom = crop
-            shape.left, shape.top, shape.width, shape.height = box
-        else:
-            width = box[2]
-            height = int(width / ratio)
-            if height > box[3]:
-                height = box[3]
-                width = int(height * ratio)
-            shape.left = Emu(box[0] + (box[2] - width) // 2)
-            shape.top = Emu(box[1] + (box[3] - height) // 2)
-            shape.width, shape.height = Emu(width), Emu(height)
-        self._link_placeholder(shape, idx)
-        # python-pptx files the picture's name as its alt text, which helps nobody.
-        self._set_alt(shape, str(op.get("alt") or ""))
-        self._touch(slide, shape)
+            raise PptxError(f"{op.get('image')} isn't a picture PowerPoint can show ({type(exc).__name__}).") from None
+        self._link_placeholder(shape, spot.ph_idx, spot.ph_type)
+        if spot.back:
+            tree = shape._element.getparent()
+            tree.remove(shape._element)
+            tree.insert(2, shape._element)  # After the tree's own two header elements.
+        self._finish_picture(slide, shape, op, picture, spot)
         return shape
+
+    def _finish_picture(self, slide: Any, shape: Any, op: dict[str, Any], picture: _Picture, spot: _Spot) -> None:
+        fit = str(op.get("fit") or spot.fit).lower()
+        if fit not in ("contain", "cover"):
+            raise PptxError(f"fit {fit!r}: use contain or cover.")
+        if str(op.get("caption") or "").strip():
+            self._write_caption(slide, shape, str(op["caption"]).strip())
+        self._seat(slide, shape, spot.box, fit, grow=spot.grow, anchor=spot.anchor, inside=spot.caption_inside)
+        # python-pptx files the picture's name as its alt text, which helps nobody.
+        self._set_alt(shape, str(op.get("alt") or picture.alt))
+        shown = picture.width * (1 - shape.crop_left - shape.crop_right)
+        if shape.width and shown / (shape.width / EMU_PER_INCH) < _MIN_PPI:
+            self.report.notes.append(f"Slide {_position_of(self.prs, slide)} [{shape.shape_id}]: the picture is only "
+                                     f"{picture.width}×{picture.height} pixels, so it looks soft at this size.")
+        self._touch(slide, shape)
+
+    def _seat(self, slide: Any, shape: Any, box: Box, fit: str, *, grow: bool = False,
+              anchor: tuple[float, float] = (0.5, 0.5), inside: bool = True) -> None:
+        """A picture in a box, with its caption under it."""
+        caption = self._caption_of(slide, shape)
+        if caption is not None:
+            caption.width = Emu(max(box[2], Inches(2)))
+            caption.height = Emu(int(measure_text(TextContext(caption, slide, self.prs), caption.width).height * EMU_PER_PT))
+            if inside:
+                box = (box[0], box[1], box[2], max(box[3] - caption.height - Inches(0.05), Inches(0.5)))
+        self._fit_picture(slide, shape, box, fit, grow=grow, anchor=anchor)
+        self._seat_caption(slide, shape)
+
+    def _fit_picture(self, slide: Any, shape: Any, box: Box, fit: str, *, grow: bool,
+                     anchor: tuple[float, float]) -> None:
+        key = (id(slide.part), shape.shape_id)
+        if fit == "cover":
+            px_w, px_h = shape.image.size
+            ratio = px_w / px_h if px_h else 1.0
+            frame_ratio = box[2] / box[3]
+            shape.crop_left = shape.crop_right = shape.crop_top = shape.crop_bottom = 0
+            if ratio > frame_ratio:
+                shape.crop_left = shape.crop_right = (1 - frame_ratio / ratio) / 2
+            else:
+                shape.crop_top = shape.crop_bottom = (1 - ratio / frame_ratio) / 2
+            shape.left, shape.top, shape.width, shape.height = (Emu(value) for value in box)
+            self.covered.add(key)
+            return
+        ratio = _shown_ratio(shape)
+        width = min(box[2], int(box[3] * ratio))
+        if not grow:
+            width = min(width, int(shape.image.size[0] * (1 - shape.crop_left - shape.crop_right) / _MIN_PPI * EMU_PER_INCH))
+        height = int(width / ratio)
+        shape.left = Emu(box[0] + int((box[2] - width) * anchor[0]))
+        shape.top = Emu(box[1] + int((box[3] - height) * anchor[1]))
+        shape.width, shape.height = Emu(width), Emu(height)
+        self.covered.discard(key)
+
+    @staticmethod
+    def _caption_of(slide: Any, shape: Any) -> Any | None:
+        name = f"Caption {shape.shape_id}"
+        return next((other for other in slide.shapes if other.name == name), None)
+
+    def _write_caption(self, slide: Any, shape: Any, text: str) -> None:
+        caption = self._caption_of(slide, shape)
+        if caption is None:
+            caption = slide.shapes.add_textbox(shape.left, shape.top, shape.width, Inches(0.3))
+            caption.name = f"Caption {shape.shape_id}"
+            frame = caption.text_frame
+            frame.word_wrap = True
+            frame.auto_size = MSO_AUTO_SIZE.SHAPE_TO_FIT_TEXT
+        self._write(slide, caption, text)
+        self._format_shape(slide, caption, {"font_size": 12, "align": "center"})
+
+    def _seat_caption(self, slide: Any, shape: Any) -> None:
+        caption = self._caption_of(slide, shape)
+        if caption is not None:
+            # Under the picture, or on its bottom edge when it reaches the foot of the slide.
+            left = shape.left + (shape.width - caption.width) // 2
+            caption.left = Emu(max(0, min(left, self.prs.slide_width - caption.width)))
+            caption.top = Emu(min(shape.top + shape.height + Inches(0.05), self.prs.slide_height - caption.height))
+            self._touch(slide, caption)
+
+    def _set_image(self, slide: Any, op: dict[str, Any]) -> Any:
+        """A new picture in the same place: over a picture, or in an empty placeholder."""
+        target = self._shape(slide, op.get("shape"))
+        picture = self._picture(op)
+        kind = placeholder_kind(target)
+        if target._element.tag != qn("p:pic"):
+            if kind in ("picture", "content", "body") and target.has_text_frame and not _shape_text(target):
+                return self._place_picture(slide, op, picture, self._placeholder_spot(target))
+            raise PptxError(f"[{target.shape_id}] is neither a picture nor an empty placeholder. "
+                            "To add one beside it use add_image.")
+        blip = target._element.blipFill.find(qn("a:blip"))
+        old = [v for el in blip.iter() for k, v in el.attrib.items() if k.startswith(f"{{{R_NS}}}")]
+        # Its vector twin, if it has one, would keep showing in PowerPoint.
+        for extras in blip.findall(qn("a:extLst")):
+            blip.remove(extras)
+        try:
+            _, rel_id = slide.part.get_or_add_image_part(io.BytesIO(picture.data))
+        except Exception as exc:
+            raise PptxError(f"{op.get('image')} isn't a picture PowerPoint can show ({type(exc).__name__}).") from None
+        blip.attrib.pop(qn("r:link"), None)
+        blip.set(qn("r:embed"), rel_id)
+        for old_id in set(old):
+            _release_rel(slide.part, old_id)
+        was_cropped = any((target.crop_left, target.crop_right, target.crop_top, target.crop_bottom))
+        target.crop_left = target.crop_right = target.crop_top = target.crop_bottom = 0
+        spot = _Spot(_box_of(target), fit="cover" if was_cropped or kind == "picture" else "contain",
+                     grow=True, caption_inside=False)
+        self._finish_picture(slide, target, op, picture, spot)
+        return target
 
     def _op_add_table(self, op: dict[str, Any]) -> None:
         slide = self._one_slide(op)
@@ -1945,8 +2535,17 @@ class Editor:
     def _op_place(self, op: dict[str, Any]) -> None:
         slide = self._one_slide(op)
         shape = self._shape(slide, op.get("shape"))
+        is_picture = shape._element.tag == qn("p:pic")
+        given = {key: _number(op, key) for key in ("x", "y", "width", "height")}
+        if is_picture and (given["width"] is None) != (given["height"] is None):
+            # One side named: the other follows, so a picture keeps its shape.
+            ratio = shape.width / shape.height if shape.height else 1.0
+            if given["width"] is not None:
+                given["height"] = given["width"] / ratio
+            else:
+                given["width"] = given["height"] * ratio
         for key, attribute in (("x", "left"), ("y", "top"), ("width", "width"), ("height", "height")):
-            value = _number(op, key)
+            value = given[key]
             if value is not None:
                 # A placeholder takes all four, or it would keep nothing from its layout.
                 current = [shape.left, shape.top, shape.width, shape.height]
@@ -1964,6 +2563,8 @@ class Editor:
                 tree.insert(2, shape._element)
             else:
                 raise PptxError(f"z {op['z']!r}: use front or back.")
+        if is_picture:
+            self._seat_caption(slide, shape)
         self._touch(slide, shape)
         self._count("shapes placed")
 
@@ -1971,12 +2572,14 @@ class Editor:
         slide = self._one_slide(op)
         shape = self._shape(slide, op.get("shape"))
         shape_id = shape.shape_id
+        caption = self._caption_of(slide, shape) if shape._element.tag == qn("p:pic") else None
+        if caption is not None:
+            caption._element.getparent().remove(caption._element)
         rel_ids = [v for el in shape._element.iter() if isinstance(el.tag, str)
                    for k, v in el.attrib.items() if k.startswith(f"{{{R_NS}}}")]
         shape._element.getparent().remove(shape._element)
         for rel_id in set(rel_ids):
-            if rel_id in slide.part.rels:
-                slide.part.drop_rel(rel_id)
+            _release_rel(slide.part, rel_id)
         if _drop_animations_of(slide, shape_id):
             self.report.notes.append(f"Slide {_position_of(self.prs, slide)}: animations on that shape went with it.")
         self._touch(slide)
@@ -2275,7 +2878,8 @@ def _widen_blank_deck(prs: DeckClass) -> None:
 def build_deck(slides: list[dict[str, Any]] | None, *, edits: list[dict[str, Any]] | None = None,
                template: bytes | None = None, keep_slides: bool = False, title: str = "", author: str = "Captain",
                page_numbers: bool = False, look: dict[str, Any] | None = None,
-               image_root: Callable[[str], Path | None] | None = None) -> tuple[DeckClass, Report]:
+               image_root: Callable[[str], Path | None] | None = None,
+               image_alt: Callable[[Path], str] | None = None) -> tuple[DeckClass, Report]:
     """A new deck: the template's layouts (or a plain 16:9 set) filled from ``slides``."""
     if template is not None:
         prs = open_deck(template)
@@ -2290,7 +2894,7 @@ def build_deck(slides: list[dict[str, Any]] | None, *, edits: list[dict[str, Any
     specs = list(slides or [])
     if template is None and not specs:
         raise PptxError("create needs `slides`: a list of {layout, title, body, …}.")
-    editor = Editor(prs, image_root=image_root)
+    editor = Editor(prs, image_root=image_root, image_alt=image_alt)
     editor.page_numbers = page_numbers
     for index, spec in enumerate(specs, 1):
         if not isinstance(spec, dict):
@@ -2338,6 +2942,41 @@ def _visible_box(shape: Any, slide: Any, prs: DeckClass) -> tuple[int, int, int,
     elif anchor == "b":
         top += box[3] - used
     return box[0], top, box[2], used
+
+
+def _text_reach(shape: Any, slide: Any, prs: DeckClass, box: Box) -> Box:
+    """How far across its box a text reaches: a logo beside a short title isn't on it."""
+    ctx = TextContext(shape, slide, prs)
+    scale = ctx.autofit()[1]
+    left_inset, right_inset = ctx.inset("lIns", 91440), ctx.inset("rIns", 91440)
+    room = box[2] - left_inset - right_inset
+    start, end = box[0] + box[2], box[0]
+    for para in ctx.tx_body.findall(A_P) if ctx.tx_body is not None else []:
+        p_pr = para.find(A_PPR)
+        level = int(p_pr.get("lvl", "0")) if p_pr is not None else 0
+        widest = line = 0.0
+        for child in para:
+            if child.tag in (A_R, A_FLD):
+                r_pr = child.find(A_RPR)
+                t = child.find(A_T)
+                line += text_width(t.text if t is not None and t.text else "", ctx.size(level, r_pr) * scale,
+                                   ctx.font(level, r_pr), ctx.is_bold(level, r_pr))
+            elif child.tag == A_BR:
+                widest, line = max(widest, line), 0.0
+        widest = max(widest, line)
+        if not widest:
+            continue
+        reach = min(int(widest * EMU_PER_PT) + ctx.para_attr(p_pr, level, "marL"), room)
+        align = p_pr.get("algn") if p_pr is not None else None
+        if align is None:
+            align = next((props.get("algn") for props in ctx._levels(level) if props.get("algn")), "l")
+        first = box[0] + left_inset
+        if align == "ctr":
+            first += (room - reach) // 2
+        elif align == "r":
+            first += room - reach
+        start, end = min(start, first), max(end, first + reach)
+    return (start, box[1], end - start, box[3]) if end > start else box
 
 
 def _visible_content(shape: Any) -> str | None:
@@ -2389,6 +3028,7 @@ def fit_issues(prs: DeckClass, slide: Any, number: int) -> list[Issue]:
     slide_w, slide_h = prs.slide_width, prs.slide_height
     where = f"Slide {number}"
     contents: list[tuple[Any, str, tuple[int, int, int, int]]] = []
+    reach: dict[int, Box] = {}
     for shape in slide.shapes:
         box = _box_of(shape)
         ref = f"{where} [{shape.shape_id}]"
@@ -2432,7 +3072,9 @@ def fit_issues(prs: DeckClass, slide: Any, number: int) -> list[Issue]:
                 shown = (shown[0], shown[1], _table_width(shape), _table_height(shape, slide))
             if shown is not None:
                 contents.append((shape, content, shown))
-    issues += _overlaps(contents, where, slide_w, slide_h)
+                if content == "text":
+                    reach[shape.shape_id] = _text_reach(shape, slide, prs, shown)
+    issues += _overlaps(contents, where, slide_w, slide_h, reach)
     if shape_has_no_title(slide):
         issues.append(Issue("warn", "no_title", where,
                             "no title: outline view, screen readers and navigation show it as a blank."))
@@ -2471,13 +3113,16 @@ def _text_issues(shape: Any, slide: Any, prs: DeckClass, ref: str, box: tuple[in
 
 
 def _overlaps(contents: list[tuple[Any, str, tuple[int, int, int, int]]], where: str,
-              slide_w: int, slide_h: int) -> list[Issue]:
+              slide_w: int, slide_h: int, reach: dict[int, Box]) -> list[Issue]:
     issues: list[Issue] = []
     slide_area = slide_w * slide_h
     for i, (a, kind_a, box_a) in enumerate(contents):
         for b, kind_b, box_b in contents[i + 1:]:
-            x = min(box_a[0] + box_a[2], box_b[0] + box_b[2]) - max(box_a[0], box_b[0])
-            y = min(box_a[1] + box_a[3], box_b[1] + box_b[3]) - max(box_a[1], box_b[1])
+            seen_a, seen_b = box_a, box_b
+            if {kind_a, kind_b} == {"text", "picture"}:
+                seen_a, seen_b = reach.get(a.shape_id, box_a), reach.get(b.shape_id, box_b)
+            x = min(seen_a[0] + seen_a[2], seen_b[0] + seen_b[2]) - max(seen_a[0], seen_b[0])
+            y = min(seen_a[1] + seen_a[3], seen_b[1] + seen_b[3]) - max(seen_a[1], seen_b[1])
             if x <= 45720 or y <= 45720:
                 continue
             area_a, area_b = box_a[2] * box_a[3], box_b[2] * box_b[3]
@@ -2487,7 +3132,8 @@ def _overlaps(contents: list[tuple[Any, str, tuple[int, int, int, int]]], where:
             # A picture filling most of the slide is a background.
             if (kind_a == "picture" and area_a > slide_area * 0.7) or (kind_b == "picture" and area_b > slide_area * 0.7):
                 continue
-            level = "info" if "picture" in (kind_a, kind_b) else "warn"
+            # Later means nearer the front: text on a picture is a choice, a picture on text hides it.
+            level = "info" if kind_a == "picture" else "warn"
             issues.append(Issue(level, "overlap", f"{where} [{a.shape_id}] and [{b.shape_id}]",
                                 f"{kind_a} and {kind_b} overlap by about {inches(x)} × {inches(y)} in."))
     return issues
