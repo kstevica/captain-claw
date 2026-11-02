@@ -4981,6 +4981,17 @@ They sit in a `.crew-vfs` folder in the worker's own folder, which git ignores, 
 
 Google Drive and OneDrive folders aren't offered. A folder someone shared with you to view can only be read, and one they stop sharing is gone by the worker's next turn. A folder linked from the computer needs an admin's worker. This keeps your files apart for a well-behaved worker, not a hostile one: a worker runs as the same system user as Flight Deck, with no operating-system sandbox apart from Codex's own.
 
+**What a worker runs on.** On **New task**, under **Model**, choose one:
+
+- **Its own:** the CLI's own login or, for OpenCode, its free models.
+- **An agent's model:** the model one of your agents is set to, on that agent's endpoint and key.
+- **A deck tier:** a tier from your models in Library, or from the team's if you have none of your own.
+- **Enter one:** an API address, a model name, a context size and a key, for this task only. **Check it** shows whether the deck can reach the address and what it serves. If you saved **Your own model** in Logins, it's filled in, and a blank key means the one you saved, on that server only.
+
+With the last three, the CLI needs no login, and gets none. The key stays on the deck: the worker gets the deck's address and a key that works only during its current turn, and only from the deck's computer. So a team's key is safe to use this way, because a worker told to print its environment has nothing to print. The deck asks for the chosen model whatever the CLI asks for, so its background calls run on that model too. An agent's model or a tier that changes applies from the next call. Tokens count toward your daily limit, unless they're on your own key.
+
+A CLI can only talk to a server the way it was built to: Claude Code needs Anthropic's API, Codex needs OpenAI's Responses API, and OpenCode and Pi use OpenAI's chat API or Anthropic's. Ollama and OpenRouter have all three. The lists mark what a CLI can't use, like a Gemini tier for Claude Code. A server you enter yourself gets the benefit of the doubt: if it hasn't got the API, the worker's first call fails with that server's error. The model has to be able to call tools. The context size tells the CLI when to compact, and doesn't change the server's own setting: on Ollama, that's `OLLAMA_CONTEXT_LENGTH`.
+
 **The environment a project runs in.** A worker can only run and test a project if what it needs is installed, whatever its language. That's prepared once, in the project's main folder, and every new task on the project gets it. The project's page on Crew has an **Environment** card showing the folder, what's installed, and what it looks like it still needs.
 
 - **By hand:** set it up in that folder the way you would any project. **Open a terminal here** gives you a shell in it from the browser, or reach it over SSH if you have that.

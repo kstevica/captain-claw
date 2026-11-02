@@ -21,6 +21,8 @@
   PUT    /fd/crew/models/{harness}      the model a CLI uses when a task names none
   PUT/DELETE /fd/crew/own-model         a model server of their own, for OpenCode and Pi
   POST   /fd/crew/own-model/check       can Flight Deck reach it, and what does it serve
+  GET    /fd/crew/model-choices         what a worker can run on besides its CLI's own: agents' models, tiers
+  GET/POST /fd/crew/llm/*               a worker's calls to that model, on its turn's key (crew_model)
   POST/DELETE /fd/crew/uploads[/{id}]   a file for a task or a message that's still being written
   GET    /fd/crew/vfs                   folders of their VFS a worker can use
   PUT    /fd/crew/tasks/{id}/folders    which of them a task has, from its next turn
@@ -46,7 +48,17 @@ import asyncio
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, UploadFile, WebSocket
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    WebSocket,
+)
 from pydantic import BaseModel
 
 from captain_claw.flight_deck import (
@@ -55,6 +67,7 @@ from captain_claw.flight_deck import (
     crew_env,
     crew_harness,
     crew_logins,
+    crew_model,
     crew_runner,
     crew_store,
     crew_terminal,
@@ -82,6 +95,16 @@ class FoldersBody(BaseModel):
     folders: list[FolderChoice] = []
 
 
+class ModelSource(BaseModel):
+    kind: str
+    tier: str = ""
+    agent: str = ""
+    url: str = ""
+    model: str = ""
+    context: int | str = 0
+    key: str = ""
+
+
 class DispatchBody(BaseModel):
     harness: str
     brief: str = ""
@@ -96,6 +119,7 @@ class DispatchBody(BaseModel):
     effort: str = ""
     attachments: list[str] = []
     vfs_folders: list[FolderChoice] = []
+    model_source: ModelSource | None = None
 
 
 class LinkBody(BaseModel):
@@ -238,6 +262,18 @@ async def models(user: dict = Depends(get_current_user)) -> dict[str, list[str]]
         return harness, _with_own(own, harness, await crew_runner.models_of(row, grant, harness, binary, db))
 
     return dict(await asyncio.gather(*(one(h) for h in grant.harnesses)))
+
+
+@router.get("/model-choices")
+async def model_choices(user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    row, grant = await _approved(user)
+    return await crew_model.choices(get_db(), row, grant)
+
+
+@router.api_route("/llm/{path:path}", methods=["GET", "POST"], include_in_schema=False)
+async def llm(path: str, request: Request) -> Response:
+    """A worker's calls to its task's model: its turn's key is all the login there is (crew_model)."""
+    return await crew_model.forward(request, path)
 
 
 @router.get("/repos")

@@ -38,6 +38,10 @@ CLAUDE_PERMISSION_MODES = ("auto", "acceptEdits", "bypassPermissions")
 _MODEL_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._:/@+-]*$")
 _MODELS_LISTED = 200
 _OPENCODE_HELP: dict[tuple[str, float], str] = {}
+# What a CLI calls a model that comes through Flight Deck, and the variable its key is in.
+ROUTE_PROVIDER = "crew"
+ROUTE_PROVIDER_ANTHROPIC = "crew-anthropic"
+ROUTE_TOKEN_ENV = "CREW_MODEL_TOKEN"
 
 
 @dataclass
@@ -68,6 +72,17 @@ class TurnState:
 
 
 @dataclass(frozen=True)
+class Route:
+    """A model a worker reaches through Flight Deck, not through its CLI's own account (crew_model)."""
+
+    url: str  # Flight Deck's address for it, ending in /v1
+    model: str
+    api: str  # how the CLI talks to it: anthropic · openai · responses
+    context: int = 0
+    output: int = 0
+
+
+@dataclass(frozen=True)
 class RunSpec:
     """One turn of a worker."""
 
@@ -81,6 +96,7 @@ class RunSpec:
     task_id: str = ""
     writable: tuple[str, ...] = ()  # what a sandboxed CLI must also be able to write: its environment, its caches
     add_dirs: tuple[str, ...] = ()  # folders outside its worktree it can change: Claude refuses those it isn't given
+    route: Route | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +140,15 @@ def _safe_prompt(prompt: str) -> str:
 
 def _toml_str(value: str) -> str:
     return json.dumps(value)
+
+
+def route_model(harness: str, route: Route) -> str:
+    """The name a CLI runs a routed model under."""
+    if harness == "opencode":
+        return f"{ROUTE_PROVIDER}/{route.model}"
+    if harness == "pi":
+        return f"{ROUTE_PROVIDER_ANTHROPIC if route.api == 'anthropic' else ROUTE_PROVIDER}/{route.model}"
+    return route.model
 
 
 # ── Claude Code ─────────────────────────────────────────────────────────
@@ -227,6 +252,14 @@ def _codex_argv(spec: RunSpec) -> list[str]:
              "-c", f"sandbox_workspace_write.writable_roots={json.dumps(roots)}",
              # The deck user's hooks would stop the turn at a trust question.
              "-c", "features.hooks=false"]
+    if spec.route:
+        argv += ["-c", f'model_provider="{ROUTE_PROVIDER}"',
+                 "-c", f'model_providers.{ROUTE_PROVIDER}.name="Captain"',
+                 "-c", f"model_providers.{ROUTE_PROVIDER}.base_url={_toml_str(spec.route.url)}",
+                 "-c", f'model_providers.{ROUTE_PROVIDER}.env_key="{ROUTE_TOKEN_ENV}"',
+                 "-c", f'model_providers.{ROUTE_PROVIDER}.wire_api="responses"']
+        if spec.route.context:
+            argv += ["-c", f"model_context_window={spec.route.context}"]
     if spec.model:
         argv += ["-m", spec.model]
     if spec.effort:
@@ -277,7 +310,9 @@ def _codex_parse(obj: dict, state: TurnState) -> list[dict]:
     elif item_type == "web_search":
         return [_ev("tool", item.get("query") or "", "web_search")]
     elif item_type == "error":
-        return [_ev("error", item.get("message") or "error")]
+        message = str(item.get("message") or "error")
+        # It knows only OpenAI's models by name: nothing is wrong with one it doesn't.
+        return [_ev("note" if message.startswith("Model metadata for") else "error", message)]
     return []
 
 

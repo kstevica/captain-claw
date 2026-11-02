@@ -21,6 +21,9 @@ and Pi run on it as ``own/<model>``. The key reaches a worker only in the enviro
 of its turn, so it's in no file: OpenCode's config comes through
 ``OPENCODE_CONFIG_CONTENT``, and Pi's ``models.json`` names the variable.
 
+A task can also run on a model that isn't any of these (``crew_model``): then its CLI needs
+no login, and gets none. All it holds is Flight Deck's address and a key for that one turn.
+
 A worker's environment is built from nothing (:data:`_BASE_ENV` is all it takes
 from Flight Deck's), so no deck secret and no deck key reaches it. A non-admin's
 worker gets a home folder of its own, which keeps the deck user's logins out of
@@ -57,7 +60,7 @@ OWN_PROVIDER = "own"
 OWN_KEY_ENV = "CREW_OWN_MODEL_KEY"
 OWN_HARNESSES = ("opencode", "pi")
 _OWN_MODELS_MAX = 20
-_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
 _CLAUDE_TOKEN_PREFIX = "sk-ant-oat"
 PROVIDER_ENV = {
     "anthropic": "ANTHROPIC_API_KEY",
@@ -70,7 +73,7 @@ LOGIN_NAMES = ("claude", "codex", "github", *PROVIDER_ENV)
 # OpenSSH finds keys through the passwd home, not $HOME: without this, a plain
 # `git push` over SSH from someone else's worker would sign in as the deck's user.
 NO_SSH_IDENTITY = "ssh -F /dev/null -o BatchMode=yes -o IdentitiesOnly=yes -o IdentityFile=/dev/null"
-_MAX_SECRET = 64_000
+MAX_SECRET = 64_000
 _BASE_ENV = (
     "PATH", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR", "TZ", "USER", "LOGNAME", "SHELL",
     "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE",
@@ -109,7 +112,7 @@ async def save_login(db, uid: str, name: str, secret: str) -> dict[str, Any]:
     secret = (secret or "").strip()
     if not secret:
         raise HTTPException(400, "Paste the token or key to save.")
-    if len(secret) > _MAX_SECRET:
+    if len(secret) > MAX_SECRET:
         raise HTTPException(400, "That is too long to be a token or key.")
     logins = await read_logins(db, uid)
     logins[name] = secret
@@ -163,7 +166,7 @@ def _codex_login_is_file(secret: str) -> bool:
     return secret.lstrip().startswith("{")
 
 
-def _clean_url(value: str) -> str:
+def clean_url(value: str) -> str:
     """An OpenAI-compatible address. It may well be on a private network: that's the
     point, and a worker reaches what it likes anyway. No braces: OpenCode expands
     {env:…} and {file:…} in its config."""
@@ -181,7 +184,7 @@ def _clean_models(value: Any) -> list[str]:
     out = list(dict.fromkeys(str(n).strip() for n in names if str(n).strip()))
     if not out:
         raise HTTPException(400, "Name at least one model it serves.")
-    if len(out) > _OWN_MODELS_MAX or not all(_MODEL_ID_RE.match(n) for n in out):
+    if len(out) > _OWN_MODELS_MAX or not all(MODEL_ID_RE.match(n) for n in out):
         raise HTTPException(400, f"Give up to {_OWN_MODELS_MAX} model names, as the server calls them.")
     return out
 
@@ -211,12 +214,12 @@ def own_model_view(own: dict[str, Any]) -> dict[str, Any] | None:
 
 
 async def save_own_model(db, uid: str, url: str, key: str, models: Any, context: Any) -> dict[str, Any]:
-    clean = _clean_url(url)
+    clean = clean_url(url)
     names = _clean_models(models)
     old = await read_own_model(db, uid)
     # A blank key keeps the saved one, but only for the server it was saved for.
     secret = (key or "").strip() or (old.get("key", "") if old.get("url") == clean else "")
-    if len(secret) > _MAX_SECRET:
+    if len(secret) > MAX_SECRET:
         raise HTTPException(400, "That is too long to be a key.")
     try:
         size = int(context or 0)
@@ -240,7 +243,7 @@ async def delete_own_model(db, uid: str) -> None:
 async def check_own_model(db, uid: str, url: str, key: str) -> dict[str, Any]:
     """Can Flight Deck reach it, and what does it serve? A saved key is only ever sent
     to the server it was saved for. Only ids and a reason come back, never the reply."""
-    clean = _clean_url(url)
+    clean = clean_url(url)
     secret = (key or "").strip()
     if not secret:
         old = await read_own_model(db, uid)
@@ -260,7 +263,7 @@ async def check_own_model(db, uid: str, url: str, key: str) -> dict[str, Any]:
         ids = [str(m["id"]) for m in data if isinstance(m, dict) and m.get("id")]
     except (ValueError, TypeError, AttributeError, KeyError):
         ids = []
-    return {"ok": True, "url": clean, "models": [m for m in ids if _MODEL_ID_RE.match(m)][:_OWN_MODELS_MAX], "error": ""}
+    return {"ok": True, "url": clean, "models": [m for m in ids if MODEL_ID_RE.match(m)][:_OWN_MODELS_MAX], "error": ""}
 
 
 def opencode_config(own: dict[str, Any]) -> dict[str, Any]:
@@ -302,6 +305,63 @@ def _sync_pi_models(home: Path, own: dict[str, Any]) -> None:
     if wanted != providers:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({**current, "providers": wanted}, indent=2), encoding="utf-8")
+
+
+def _sync_pi_route(home: Path, route: crew_harness.Route) -> None:
+    """Pi reads a routed model from the same file. Its address and the name of its key's variable
+    are all that's there, so the tasks of one home can share it, and nothing has to be cleaned up."""
+    path = home / ".pi" / "agent" / "models.json"
+    try:
+        current = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        return
+    if not isinstance(current, dict):
+        return
+    providers = current.get("providers") if isinstance(current.get("providers"), dict) else {}
+    native = route.api == "anthropic"
+    name = crew_harness.ROUTE_PROVIDER_ANTHROPIC if native else crew_harness.ROUTE_PROVIDER
+    entry: dict[str, Any] = {"id": route.model}
+    if route.context:
+        entry.update(contextWindow=route.context, maxTokens=route.output or min(route.context // 4, 65536))
+    old = providers.get(name) if isinstance(providers.get(name), dict) else {}
+    others = [m for m in old.get("models") or [] if isinstance(m, dict) and m.get("id") != route.model]
+    wanted = {"baseUrl": route.url.removesuffix("/v1") if native else route.url,
+              "api": "anthropic-messages" if native else "openai-completions",
+              "apiKey": f"${crew_harness.ROUTE_TOKEN_ENV}", "models": [*others[-(_OWN_MODELS_MAX - 1):], entry]}
+    if wanted != old:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({**current, "providers": {**providers, name: wanted}}, indent=2), encoding="utf-8")
+
+
+def opencode_route_config(route: crew_harness.Route) -> dict[str, Any]:
+    model: dict[str, Any] = {"name": route.model}
+    if route.context:
+        model["limit"] = {"context": route.context, "output": route.output or min(route.context // 4, 65536)}
+    native = route.api == "anthropic"
+    name = f"{crew_harness.ROUTE_PROVIDER}/{route.model}"
+    return {"model": name, "small_model": name, "provider": {crew_harness.ROUTE_PROVIDER: {
+        "npm": "@ai-sdk/anthropic" if native else "@ai-sdk/openai-compatible", "name": "Captain",
+        "options": {"baseURL": route.url, "apiKey": "{env:" + crew_harness.ROUTE_TOKEN_ENV + "}"},
+        "models": {route.model: model}}}}
+
+
+def _route_env(harness: str, route: crew_harness.Route, token: str, home: Path) -> dict[str, str]:
+    """What points a CLI at Flight Deck for this turn. *token* is all it holds of the model's account."""
+    env = {crew_harness.ROUTE_TOKEN_ENV: token}
+    # A proxy the deck goes through is no way to reach the deck.
+    env["NO_PROXY"] = env["no_proxy"] = ",".join(filter(None, ["127.0.0.1", "localhost", os.environ.get("NO_PROXY", "")]))
+    if harness == "claude":
+        env.update(ANTHROPIC_BASE_URL=route.url.removesuffix("/v1"), ANTHROPIC_API_KEY=token,
+                   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC="1")
+        if route.context:
+            env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = str(route.context)
+        if route.output:
+            env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(route.output)
+    elif harness == "opencode":
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_route_config(route))
+    elif harness == "pi":
+        _sync_pi_route(home, route)
+    return env
 
 
 def effective_model(defaults: dict[str, str], own: dict[str, Any], harness: str) -> str:
@@ -399,10 +459,19 @@ def person_env(user: dict, grant: Grant) -> dict[str, str]:
     return env
 
 
-async def worker_env(db, user: dict, grant: Grant, harness: str, binary: str) -> dict[str, str]:
+async def worker_env(db, user: dict, grant: Grant, harness: str, binary: str, *,
+                     route: crew_harness.Route | None = None, token: str = "") -> dict[str, str]:
     """The whole environment of a worker's turn. Raises when it has no account
     to run on: never falls through to the deck owner's."""
     uid = user["id"]
+    if route:
+        env = _base_env(binary)
+        env.update(crew_harness.HARNESSES[harness].env)
+        env.update(_home_env(user, grant))
+        if harness == "codex" and not grant.trusted:
+            env["CODEX_HOME"] = str(_codex_home(uid))
+        env.update(_route_env(harness, route, token, Path(env["HOME"])))
+        return env
     state = await login_state(db, user, grant, harness)
     if not state["ok"]:
         label = crew_harness.HARNESSES[harness].label

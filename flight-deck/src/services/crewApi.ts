@@ -36,6 +36,27 @@ export interface CrewOwnModel {
   saved_at: string
 }
 
+export type CrewModelSource =
+  | { kind: 'tier'; tier: string }
+  | { kind: 'agent'; agent: string }
+  | { kind: 'typed'; url: string; model: string; context: string; key: string }
+
+/** One thing a worker can run on: never its key. */
+export interface CrewModelOption {
+  id: string
+  label: string
+  model: string
+  context: number
+  works_with: string[]
+  why_not: string
+}
+
+export interface CrewModelChoices {
+  tiers: CrewModelOption[]
+  agents: CrewModelOption[]
+  tier_set: string
+}
+
 export interface CrewMe {
   offered: boolean
   allowed: boolean
@@ -118,6 +139,7 @@ export interface CrewVfsFolder {
 export interface CrewTask {
   id: string
   vfs?: CrewFolderChoice[]
+  model_source?: { kind?: string; label?: string }
   title: string
   kind: 'ship' | 'scout' | 'clone' | 'setup'
   harness: string
@@ -205,6 +227,7 @@ export interface CrewDispatch {
   effort?: string
   attachments?: string[]
   vfs_folders?: CrewFolderChoice[]
+  model_source?: CrewModelSource
 }
 
 const post = <T>(path: string, body?: unknown) =>
@@ -314,6 +337,7 @@ export const crewApi = {
   saveOwnModel: (body: { url: string; key: string; models: string; context: string }) =>
     api<CrewOwnModel>('/fd/crew/own-model', { method: 'PUT', body: JSON.stringify(body) }),
   deleteOwnModel: () => api<{ ok: boolean }>('/fd/crew/own-model', { method: 'DELETE' }),
+  modelChoices: () => api<CrewModelChoices>('/fd/crew/model-choices'),
   checkOwnModel: (url: string, key: string) => post<{ ok: boolean; url: string; models: string[]; error: string }>('/fd/crew/own-model/check', { url, key }),
   saveLogin: (name: string, secret: string) =>
     api<{ hint: string }>(`/fd/crew/logins/${name}`, { method: 'PUT', body: JSON.stringify({ secret }) }),
