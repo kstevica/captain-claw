@@ -8,7 +8,7 @@ Every release from the newest back to 0.4.29. The full notes for each, with upgr
 
 ## What's New in 0.8.5
 
-**All Hands on Deck.** Coding CLIs working for you, a team forged from a plain request, a Taskboard that hands over many tasks at once, and a deck that updates itself. 48 merged PRs in the three days after 0.8.4. **Restart Flight Deck, then every agent. [Approving someone for Crew trusts them with the server](../../release-notes/RELEASE_NOTES_0.8.5.md#before-you-approve-anyone-for-crew).**
+**All Hands on Deck.** Coding CLIs working for you, a team forged from a plain request, a Taskboard that hands over many tasks at once, and a deck that updates itself. 49 merged PRs in the three days after 0.8.4. **Restart Flight Deck, then every agent. [Approving someone for Crew trusts them with the server](../../release-notes/RELEASE_NOTES_0.8.5.md#before-you-approve-anyone-for-crew).**
 
 - **[Crew](flight-deck.md#crew)**: Claude Code, Codex, OpenCode and Pi as workers, each in its own git worktree, from a chat or the Crew page.
   - **The flow:** ask → say where and on what model → it works, watched at no token cost → your agent is called back → results in `vfs:crew/<project>/<task>/` → a person lands it.
@@ -23,7 +23,7 @@ Every release from the newest back to 0.4.29. The full notes for each, with upgr
 - **An agent knows its job with no one in its chat**: scheduled and linked turns now carry its instructions, on a deck with accounts, and a link follows its agent to a new port.
 - **The kiosk**: agent groups with pins, and a page left open keeps its sign-in.
 - **Running a deck**: last login, tokens and Ask for feedback on Users; `hosting` from an agent works behind a proxy and under lockdown, with a public link; a static site really stops.
-- **Devices**: Captain is the only character; a new StopWatch look (0.20.0) with no automatic stop on a pause (0.20.1); PaperColor B in blocks of colour; a new Waveshare home screen; firmware **0.20.3** / PaperColor B **1.0.30**.
+- **Devices**: Captain is the only character; a new StopWatch look (0.20.0) with no automatic stop on a pause (0.20.1); PaperColor B in blocks of colour; a new Waveshare home screen; a weak Wi-Fi link no longer clogs the device; firmware **0.20.4** / PaperColor B **1.0.31**.
 
 See [RELEASE_NOTES_0.8.5.md](../../release-notes/RELEASE_NOTES_0.8.5.md).
 
