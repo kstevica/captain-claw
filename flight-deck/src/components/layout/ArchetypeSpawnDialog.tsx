@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  ArrowLeft, BarChart3, Bot, Brain, Briefcase, Calendar, Check, ClipboardList, Clock, Code2, Contact,
+  ArrowLeft, Bot, Brain, Calendar, Check, Clock, Code2, Contact,
   Database, Eye, FileSpreadsheet, FileText, Gauge, Globe, Hammer, Image as ImageIcon, Library, Lightbulb, ListTodo,
-  Loader2, Mail, Map as MapIcon, Mic, Monitor, PenLine, Presentation, Search, ScanText, Sparkles, Star,
-  Telescope, TerminalSquare, Wand2, X, Zap,
+  Loader2, Mail, Map as MapIcon, Mic, Monitor, Presentation, Search, ScanText, Sparkles, Star,
+  TerminalSquare, Wand2, X, Zap,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+import { familyLook, type FamilyLook } from './archetypeLook'
 import { listArchetypes } from '../../services/archetypes'
 import { MODES } from '../../services/cognitiveModes'
 import { spawnArchetypeProcess } from '../../services/docker'
@@ -51,23 +52,6 @@ function uniqueName(base: string, taken: Set<string>): string {
 }
 
 // ── Presentation metadata ────────────────────────────────────────────
-
-interface FamilyLook { icon: LucideIcon; text: string; bg: string; ring: string }
-
-const FAMILY_LOOKS: Record<string, FamilyLook> = {
-  'Research & Intelligence': { icon: Telescope, text: 'text-sky-400', bg: 'bg-sky-500/10', ring: 'ring-sky-500/30' },
-  'Writing & Comms': { icon: PenLine, text: 'text-rose-400', bg: 'bg-rose-500/10', ring: 'ring-rose-500/30' },
-  'Engineering': { icon: Code2, text: 'text-emerald-400', bg: 'bg-emerald-500/10', ring: 'ring-emerald-500/30' },
-  'Data & Analysis': { icon: BarChart3, text: 'text-amber-400', bg: 'bg-amber-500/10', ring: 'ring-amber-500/30' },
-  'Ops & Coordination': { icon: ClipboardList, text: 'text-orange-400', bg: 'bg-orange-500/10', ring: 'ring-orange-500/30' },
-  'Investment & VC': { icon: Briefcase, text: 'text-indigo-400', bg: 'bg-indigo-500/10', ring: 'ring-indigo-500/30' },
-  'Vision & Multimodal': { icon: Eye, text: 'text-fuchsia-400', bg: 'bg-fuchsia-500/10', ring: 'ring-fuchsia-500/30' },
-}
-const DEFAULT_LOOK: FamilyLook = { icon: Bot, text: 'text-violet-400', bg: 'bg-violet-500/10', ring: 'ring-violet-500/30' }
-
-function familyLook(family: string): FamilyLook {
-  return FAMILY_LOOKS[family] || DEFAULT_LOOK
-}
 
 /** The model class an archetype runs on, said for people. The registry's own
  *  tier label is the fallback for tiers this map doesn't know. */

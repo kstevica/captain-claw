@@ -251,6 +251,22 @@ export function ChipPicker<T extends string | number>({ value, options, onChange
   )
 }
 
+export function Switch({ on, busy, label, onChange }: { on: boolean; busy?: boolean; label?: string; onChange: (on: boolean) => void }) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={busy}
+      onClick={() => onChange(!on)}
+      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-60 ${on ? 'bg-violet-600' : 'bg-zinc-700'}`}
+    >
+      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
+    </button>
+  )
+}
+
 // ── Messages ──
 
 export function Notice({ tone = 'zinc', children }: { tone?: 'zinc' | 'emerald' | 'amber' | 'red'; children: ReactNode }) {

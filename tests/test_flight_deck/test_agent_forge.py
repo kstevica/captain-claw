@@ -311,6 +311,25 @@ async def test_replan_folds_in_answers_and_the_note(forge):
     assert "Outlook" in forge.planner_calls[1]["clarifications"]
 
 
+async def test_planning_again_starts_from_the_persons_edits(forge):
+    async with _client(forge) as c:
+        sid = await _at_gate(c, forge)
+        edited = [{"name": "Fund analyst", "mandate": "Only the listed funds"}]
+        await c.post(f"/fd/agent-forge/plans/{sid}/replan", json={"note": "Fewer agents.", "agents": edited})
+        await _settle(sid)
+    second = forge.lead_calls[1]["intent"]
+    assert "Fund analyst: Only the listed funds" in second and "AIF analyst" not in second
+
+
+async def test_the_feed_says_which_step_it_is_and_who_was_chosen(forge):
+    async with _client(forge) as c:
+        sid = await _at_gate(c, forge, files=[("files", ("a.txt", b"x", "text/plain"))])
+    events = br._PROGRESS[sid]["events"]
+    assert [e["step"] for e in events if e.get("step")] == ["read", "lead", "plan"]
+    chosen = next(e["agents"] for e in events if e.get("agents"))
+    assert chosen == [{"name": "AIF analyst", "archetype": "data-analyst"}, {"name": "Drafter", "archetype": "editor-writer"}]
+
+
 async def test_a_plan_is_its_owners_only(forge):
     async with _client(forge) as c:
         sid = await _at_gate(c, forge)
@@ -340,6 +359,7 @@ async def test_approval_makes_what_was_left_in_the_plan(forge):
         await _settle(sid)
         plan = (await c.get(f"/fd/agent-forge/plans/{sid}")).json()
     assert [a.name for a in forge.spawned] == ["Fund analyst"]
+    assert plan["approved"] == [{"id": "s1", "name": "Fund analyst", "archetype": "data-analyst"}]
     config = forge.spawned[0]
     assert config.archetype == "data-analyst"
     assert config.fleet_instructions.startswith("BASE-ANALYST")

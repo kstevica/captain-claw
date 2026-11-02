@@ -67,6 +67,9 @@ export interface ForgeAppTask {
   id: string
   status: CrewStatus | 'gone'
   note: string
+  kind?: string
+  stalled?: boolean
+  evidence?: { commits?: number; dirty?: number }
   branch?: string
   project_name?: string
 }
@@ -119,6 +122,8 @@ export interface ForgePlan {
   overview: string
   agents: ForgeDraftAgent[]
   questions: ForgeQuestion[]
+  /** The team as it was approved, before and while it's created. */
+  approved: { id: string; name: string; archetype: string }[]
   created: ForgeCreated[]
   recommendations: ForgeRecommendations | null
 }
@@ -127,6 +132,7 @@ export interface ForgePlanRow {
   id: string
   title: string
   status: ForgeStatus
+  stalled: boolean
   updated_at: string
   created: number
 }
@@ -136,7 +142,13 @@ export interface ForgeFeedEvent {
   stage: string
   message: string
   ok?: boolean
+  /** On a phase: which step of the work it is. */
+  step?: ForgeWorkStep
+  /** The agents the Lead just chose. */
+  agents?: { name: string; archetype: string }[]
 }
+
+export type ForgeWorkStep = 'read' | 'lead' | 'plan' | 'create' | 'recommend'
 
 export interface ForgeConnectResult {
   slug: string
@@ -178,7 +190,8 @@ export const forgeApi = {
   list: () => api<{ plans: ForgePlanRow[] }>(plans).then((r) => r.plans),
   get: (id: string) => api<ForgePlan>(`${plans}/${id}`),
   feed: (id: string) => api<{ events: ForgeFeedEvent[]; active: boolean }>(`/fd/basna/sessions/${id}/progress`),
-  replan: (id: string, note: string, questions: ForgeQuestion[]) => post<{ status: ForgeStatus }>(`${plans}/${id}/replan`, { note, questions }),
+  replan: (id: string, note: string, questions: ForgeQuestion[], agents: ForgeDraftAgent[] = []) =>
+    post<{ status: ForgeStatus }>(`${plans}/${id}/replan`, { note, questions, agents }),
   approve: (id: string, agents: ForgeDraftAgent[], overview: string) => post<{ status: ForgeStatus }>(`${plans}/${id}/approve`, { agents, overview }),
   recommend: (id: string) => post<{ status: ForgeStatus }>(`${plans}/${id}/recommend`),
   schedules: (id: string, items: ForgeSchedule[], tz: string) =>
