@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo, memo } from 'react'
 import {
   AlarmClock,
+  Info,
   X,
   Send,
   Loader2,
@@ -889,6 +890,10 @@ function ChatContent({
     const p = s.processes.find((x) => `proc-${x.slug}` === session.containerId)
     return p && !isManagedAgent(p.slug, p.description) ? p.slug : undefined
   })
+  // Legal and health agents carry a line under the chat, whatever they say themselves.
+  const processDisclaimer = useProcessStore((s) => s.processes.find((x) => `proc-${x.slug}` === session.containerId)?.disclaimer || '')
+  const sharedDisclaimer = useSharedAgentStore((s) => (shared ? s.agents.find((a) => session.containerId === `shared:${a.agent_ref}`)?.disclaimer || '' : ''))
+  const disclaimer = processDisclaimer || sharedDisclaimer
   const [skillsDialog, setSkillsDialog] = useState(false)
   const [skillAsking, setSkillAsking] = useState<AgentSkill | null>(null)
   const canPick = session.connected && !closed && !quotaSpent && !session.busy
@@ -1091,6 +1096,12 @@ function ChatContent({
           onSend={(content) => { setSkillAsking(null); onSend(content) }}
           onClose={() => setSkillAsking(null)}
         />
+      )}
+      {disclaimer && (
+        <p role="note" data-fd-agent-disclaimer className="mx-auto w-full max-w-4xl px-3 pt-2 text-center text-[11px] leading-snug text-zinc-500 wide:px-6">
+          <Info className="mr-1 inline h-3 w-3 -translate-y-px" />
+          {disclaimer}
+        </p>
       )}
       {simple ? (
         /* The simple layout's composer: the box, and under the text its row

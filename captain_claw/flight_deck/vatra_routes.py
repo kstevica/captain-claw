@@ -696,7 +696,8 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
     if not system_file.is_file():
         raise HTTPException(500, "Vatra lead prompt not found")
     arch_by_id = {a["id"]: a for a in archetypes}
-    system_prompt = system_file.read_text() + "\n\n## Catalog\n" + _build_catalog(archetypes, reliability)
+    system_prompt = system_file.read_text() + "\n\n## Catalog\n" + _build_catalog(
+        archetypes, reliability, intent, force_ids)
     if shared_datastore:
         # The team shares one relational datastore this run — plan for it, or the
         # Lead defaults "datastore" to a JSON file and the whole team follows suit.

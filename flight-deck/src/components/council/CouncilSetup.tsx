@@ -2,7 +2,7 @@ import { useState, useRef } from 'react'
 import { Swords, Lightbulb, ClipboardCheck, Map, Play, Paperclip, X, MessageCircleQuestion, Bug, ShieldAlert, MessagesSquare, Sparkles, MousePointerClick, Loader2, Check } from 'lucide-react'
 import { AgentPicker, isOldManName } from './AgentPicker'
 import { formatSize } from '../../services/fileTransfer'
-import { useTierConfig } from '../../services/tierConfig'
+import { archetypeMatches, useTierConfig } from '../../services/tierConfig'
 import type {
   CouncilAgentDef, CreateSessionConfig, SessionType, Verbosity,
 } from '../../stores/councilStore'
@@ -47,6 +47,7 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
   const [maxAgents, setMaxAgents] = useState(4)
   // Optional hand-picked panel. Empty => the router auto-picks the specialists.
   const [selectedArchetypes, setSelectedArchetypes] = useState<string[]>([])
+  const [teamQuery, setTeamQuery] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -276,8 +277,15 @@ export function CouncilSetup({ onStart, onCancel }: CouncilSetupProps) {
                     </button>
                   )}
                 </div>
+<input
+                  value={teamQuery}
+                  onChange={(e) => setTeamQuery(e.target.value)}
+                  placeholder="Filter by role, family or skill…"
+                  aria-label="Filter archetypes"
+                  className="mb-2 w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-xs text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none"
+                />
                 <div className="max-h-48 space-y-1 overflow-auto pr-1">
-                  {archetypes.map(a => {
+                  {archetypes.filter((a) => selectedArchetypes.includes(a.id) || archetypeMatches(a, teamQuery)).map(a => {
                     const on = selectedArchetypes.includes(a.id)
                     return (
                       <button

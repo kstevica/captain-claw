@@ -726,7 +726,7 @@ class TestSharedAgentsList:
         helper = rows[REF]
         assert helper == {
             "agent_ref": REF, "runtime": "process", "slug": "helper", "name": "Helper",
-            "description": "Answers questions", "status": "running", "owner_id": OWNER,
+            "description": "Answers questions", "disclaimer": "", "status": "running", "owner_id": OWNER,
             "owner_name": "Olga Owner", "owner_email": f"{OWNER}@x.co",
             "shared_at": helper["shared_at"],
             # A2 (test_agent_sharing_grants.py covers these in depth); PR C datastore
@@ -740,6 +740,16 @@ class TestSharedAgentsList:
         for secret in (HELPER_TOK, "dock-tok", "sleepy-tok", "24987", "24990"):
             assert secret not in r.text
         assert mine.json()["agents"] == []
+
+    async def test_a_legal_agents_disclaimer_reaches_the_member(self, deck):
+        registry = server._load_process_registry()
+        registry["helper"]["disclaimer"] = "legal"
+        server.PROCESS_REGISTRY_FILE.write_text(json.dumps(registry))
+        await deck.db.create_share("agent", REF, OWNER, MEMBER, "view")
+        async with _client() as c:
+            r = await c.get("/fd/shared-agents", headers=_hdr(MEMBER))
+        row = next(a for a in r.json()["agents"] if a["agent_ref"] == REF)
+        assert row["disclaimer"].startswith("Not legal advice")
 
 
 class TestRevocationRoutes:

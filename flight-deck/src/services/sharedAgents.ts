@@ -53,6 +53,8 @@ export interface SharedAgent {
   slug: string
   name: string
   description: string
+  /** The line to show under its chat: set on legal and health archetypes. */
+  disclaimer?: string
   status: 'running' | 'stopped'
   owner_id: string
   owner_name: string

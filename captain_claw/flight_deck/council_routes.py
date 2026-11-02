@@ -226,7 +226,8 @@ async def _route_panel(body: AssembleRequest, arch_by_id: dict,
     system_file = _INSTRUCTIONS_DIR / "council" / "router.md"
     if not system_file.is_file():
         raise HTTPException(500, "Council router prompt not found")
-    system_prompt = system_file.read_text() + "\n\n" + _build_catalog(archetypes, reliability)
+    system_prompt = system_file.read_text() + "\n\n" + _build_catalog(
+        archetypes, reliability, intent, body.archetype_ids)
 
     forced_ids = [a for a in (body.archetype_ids or []) if a in arch_by_id]
     if forced_ids:

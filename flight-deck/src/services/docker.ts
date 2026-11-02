@@ -204,6 +204,8 @@ export const healthCheck = () =>
 // ── Process agent types ──
 
 export interface ProcessInfo {
+  // The line to show under its chat: set on legal and health archetypes.
+  disclaimer?: string
   slug: string
   name: string
   description: string

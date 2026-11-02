@@ -41,6 +41,7 @@ from fastapi import APIRouter, Depends, HTTPException, WebSocket
 from pydantic import BaseModel
 
 from captain_claw.flight_deck import agent_sharing as sharing
+from captain_claw.flight_deck.archetypes import disclaimer_text
 from captain_claw.flight_deck import agent_idle, speaker_grants, tenant_profile, usage_quota
 from captain_claw.flight_deck.auth import decode_access_token, get_current_user, get_db
 from captain_claw.logging import get_logger
@@ -103,6 +104,9 @@ async def list_shared_agents(user: dict = Depends(get_current_user)):
     rows = await db.list_shares_for_grantee(uid, sharing.AGENT_RESOURCE)
     google_connected = await _google_connected(uid)
     agents = []
+    from captain_claw.flight_deck import server as _srv
+
+    process_registry = _srv._load_process_registry() if rows else {}
     for row in rows:
         ref = str(row.get("resource_id") or "")
         owner_id = str(row.get("owner_id") or "")
@@ -117,6 +121,9 @@ async def list_shared_agents(user: dict = Depends(get_current_user)):
             "slug": rec.slug,
             "name": rec.name,
             "description": rec.description,
+            # What the deck shows under this agent's chat (legal and health archetypes).
+            "disclaimer": disclaimer_text(str((process_registry.get(rec.slug) or {}).get("disclaimer") or ""))
+            if process else "",
             "status": "running" if rec.running else "stopped",
             "owner_id": owner_id,
             "owner_name": str(row.get("owner_name") or "") or _email_local(email),

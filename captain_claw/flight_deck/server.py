@@ -54,6 +54,7 @@ from captain_claw.flight_deck import origin_guard
 from captain_claw.flight_deck import agent_ws_quiet
 from captain_claw.flight_deck import tenant_profile
 from captain_claw.flight_deck import agent_sharing
+from captain_claw.flight_deck import archetypes as _archetypes
 from captain_claw.flight_deck import context_packs
 from captain_claw.flight_deck import speaker_grants
 from captain_claw.flight_deck import shared_workspace
@@ -1993,6 +1994,8 @@ class AgentConfig(BaseModel):
     # came from, and whether it is on the owner's own API key (byok.py).
     _model_tier: str = PrivateAttr(default="")
     _byok: bool = PrivateAttr(default=False)
+    # The archetype's disclaimer key: what the deck shows under this agent's chat.
+    _disclaimer: str = PrivateAttr(default="")
     # An archetype passed on from an onboarded agent: its package and whose it is (agent_package).
     _onboarding: dict = PrivateAttr(default_factory=dict)
     # Identity
@@ -2232,6 +2235,11 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
         config.runtime = str(arch["runtime"])
     if not config.fleet_instructions and arch.get("fleet_instructions"):
         config.fleet_instructions = str(arch["fleet_instructions"])
+    if arch.get("disclaimer"):
+        from captain_claw.flight_deck.archetypes import with_disclaimer_rule
+
+        config._disclaimer = str(arch["disclaimer"])
+        config.fleet_instructions = with_disclaimer_rule(config.fleet_instructions, config._disclaimer)
     # Composed function×domain leaves carry deep-memory grid config; base/user
     # archetypes don't, so these stay empty (today's behaviour) for them.
     if arch.get("memory_tags"):
@@ -9430,6 +9438,8 @@ class ProcessInfo(BaseModel):
     # The owner's standing instructions for this agent (their settings) — the
     # SPA syncs its copy from here, so a change made elsewhere (an archetype
     # spawn, an admin) reaches an already-open Flight Deck.
+    # The line the deck shows under its chat (legal, health and clinical archetypes).
+    disclaimer: str = ""
     fleet_instructions: str = ""
     # Stable id of this agent for sharing (agent_sharing): "process:<slug>:<instance>".
     agent_ref: str = ""
@@ -9478,6 +9488,7 @@ async def list_processes(request: Request, user: dict | None = _agent_manager_de
             web_port=entry.get("web_port", 0),
             web_auth=entry.get("web_auth", "") if expose_auth else "",
             fleet_instructions=instructions.get(slug, ""),
+            disclaimer=_archetypes.disclaimer_text(str(entry.get("disclaimer") or "")),
             pid=entry.get("pid") if alive else None,
             provider=entry.get("provider", ""),
             model=entry.get("model", ""),
@@ -9666,6 +9677,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
         # The archetype it was made from (id, no `@tier`): the kiosk's skill
         # cards start from what the agent is for.
         "archetype": config.archetype.strip().partition("@")[0],
+        **({"disclaimer": config._disclaimer} if config._disclaimer else {}),
         # The tier its model came from, and — on its owner's own API key — that
         # it is (byok.py): its tokens never count against the plan.
         **({"model_tier": config._model_tier} if config._model_tier else {}),
@@ -10294,7 +10306,7 @@ async def forge_decompose(
     # captured for post-parse validation (drop hallucinated references).
     valid_archetype_ids: set[str] = set()
     try:
-        from captain_claw.flight_deck.archetypes import merged_registry
+        from captain_claw.flight_deck.archetypes import merged_registry, shortlist_archetypes
         from captain_claw.flight_deck.auth import get_db
         reg = await merged_registry(get_db(), user["id"] if user else None)
         if reg:
@@ -10308,9 +10320,10 @@ async def forge_decompose(
                 "",
             ]
             for a in reg.get("archetypes", []):
+                if a.get("id"):
+                    valid_archetype_ids.add(a["id"])
+            for a in shortlist_archetypes(body.prompt, reg.get("archetypes", [])):
                 aid = a.get("id", "")
-                if aid:
-                    valid_archetype_ids.add(aid)
                 # A stored archetype may predate a tool's retirement (gws);
                 # never show the model one as a tool a proven archetype uses.
                 cat_lines.append(

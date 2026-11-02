@@ -74,7 +74,7 @@ export function ForgeAgentsDialog({ initialPlanId, onClose, onCreated }: {
   const told = useRef(new Set<string>())
   const self = useRef<HTMLDivElement>(null)
 
-  useEffect(() => { listArchetypes().then((r) => setArchetypes(r.archetypes || [])).catch(() => {}) }, [])
+  useEffect(() => { listArchetypes(undefined, true).then((r) => setArchetypes(r.archetypes || [])).catch(() => {}) }, [])
 
   const reload = useCallback(async () => {
     if (!planId) return

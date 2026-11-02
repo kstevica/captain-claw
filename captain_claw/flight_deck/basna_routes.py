@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from captain_claw.flight_deck.archetypes import merged_archetypes
+from captain_claw.flight_deck.archetypes import merged_archetypes, shortlist_archetypes
 from captain_claw.flight_deck.auth import get_current_user, get_db
 from captain_claw.flight_deck.horizon_plan import (
     PlanConfig,
@@ -223,10 +223,12 @@ def _fallback_difficulty(intent: str, breadth: int) -> str:
     return "moderate"
 
 
-def _build_catalog(archetypes: list[dict], reliability: dict[str, list[dict]]) -> str:
-    """Render the archetype catalog (with learned-reliability hints) for the prompt."""
+def _build_catalog(archetypes: list[dict], reliability: dict[str, list[dict]],
+                   intent: str = "", keep: list[str] | None = None) -> str:
+    """Render the archetype catalog (with learned-reliability hints) for the prompt:
+    the generalists and the specialists ``intent`` is about (see shortlist_archetypes)."""
     lines = ["## Archetype Catalog", ""]
-    for a in archetypes:
+    for a in shortlist_archetypes(intent, archetypes, keep or ()):
         rel = reliability.get(a["id"]) or []
         if rel:
             hint = "; ".join(
@@ -1847,7 +1849,8 @@ async def route_intent(body: RouteRequest, user: dict = Depends(get_current_user
     system_prompt_file = _INSTRUCTIONS_DIR / "basna" / "router.md"
     if not system_prompt_file.is_file():
         raise HTTPException(500, "Basna router prompt not found")
-    system_prompt = system_prompt_file.read_text() + "\n\n" + _build_catalog(archetypes, reliability)
+    system_prompt = system_prompt_file.read_text() + "\n\n" + _build_catalog(
+        archetypes, reliability, intent, body.archetype_ids)
     forced_ids = [a for a in (body.archetype_ids or []) if a in archetypes_by_id]
     if forced_ids:
         forced_list = "\n".join(

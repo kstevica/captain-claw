@@ -822,7 +822,7 @@ async def _classify(intent: str, context: str, archetypes: list[dict],
     sys_file = _INSTRUCTIONS_DIR / "code" / "router.md"
     # Learned per-archetype weights (C2) steer the pick toward what has worked;
     # empty (the default) → seed hints only, i.e. today's routing.
-    system_prompt = sys_file.read_text() + "\n\n" + _build_catalog(archetypes, reliability or {})
+    system_prompt = sys_file.read_text() + "\n\n" + _build_catalog(archetypes, reliability or {}, intent)
     fast = _resolve_tcfg(tiers_map, "fast") or registry.get("tiers", {}).get("fast", {})
     raw: dict | None = None
     try:
