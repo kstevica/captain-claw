@@ -78,23 +78,25 @@ export function DeckProfileDefaults({ onSaved }: { onSaved?: () => void }) {
         </div>
       ) : saved ? (
         <>
-          <p className="text-[11px] text-zinc-500">{ECO_SHORTENED_HINT}</p>
-          <CappedTextarea
-            label="Company"
-            value={company}
-            onChange={(v) => { setCompany(v); setNotice(null) }}
-            cap={caps.company}
-            rows={6}
-            placeholder="What the company does, its products and customers, the voice it writes in…"
-          />
-          <CappedTextarea
-            label="Instructions for everyone"
-            value={instructions}
-            onChange={(v) => { setInstructions(v); setNotice(null) }}
-            cap={caps.instructions}
-            rows={4}
-            placeholder="e.g. Write in British English. Never share pricing outside the company."
-          />
+          <div className="grid gap-4 @4xl:grid-cols-2">
+            <p className="col-span-full text-[11px] text-zinc-500">{ECO_SHORTENED_HINT}</p>
+            <CappedTextarea
+              label="Company"
+              value={company}
+              onChange={(v) => { setCompany(v); setNotice(null) }}
+              cap={caps.company}
+              rows={8}
+              placeholder="What the company does, its products and customers, the voice it writes in…"
+            />
+            <CappedTextarea
+              label="Instructions for everyone"
+              value={instructions}
+              onChange={(v) => { setInstructions(v); setNotice(null) }}
+              cap={caps.instructions}
+              rows={8}
+              placeholder="e.g. Write in British English. Never share pricing outside the company."
+            />
+          </div>
           <div className="flex items-center gap-2">
             <button
               onClick={save}

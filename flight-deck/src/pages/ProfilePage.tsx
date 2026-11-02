@@ -61,6 +61,10 @@ const TEXTS_ID = 'profile-texts'
 //   an admin here, read-only for everyone else and in the kiosk);
 // * Password — on a deck with accounts.
 //
+// The panels follow the room they get (container queries, the same in the
+// full layout's page and the kiosk's dialog): with enough of it the details
+// split in two and the texts sit beside what the agents receive.
+//
 // `kiosk` — shown in the locked Simple layout's dialog; the deck-wide defaults
 // are read-only there even on an auth-off deck. `onDirtyChange` lets that
 // dialog ask before throwing away unsaved text.
@@ -264,8 +268,8 @@ export function ProfilePage({ kiosk = false, onDirtyChange, initialTab = 'person
   const shownTab: ProfileTab = tabs.some((t) => t.id === tab) ? tab : 'personal'
 
   return (
-    <div className="h-full overflow-y-auto bg-zinc-950 text-zinc-200">
-      <div className="max-w-3xl mx-auto px-6 py-8 pb-16">
+    <div className="@container h-full overflow-y-auto bg-zinc-950 text-zinc-200">
+      <div className="max-w-6xl mx-auto px-6 py-8 pb-16">
         <div className="flex items-center gap-3 mb-6">
           <div className="h-10 w-10 shrink-0 rounded-md bg-zinc-900 border border-zinc-800 flex items-center justify-center">
             <IdCard className="h-5 w-5 text-violet-500" />
@@ -338,128 +342,131 @@ export function ProfilePage({ kiosk = false, onDirtyChange, initialTab = 'person
               />
             )}
 
-            {/* The three texts */}
-            <div id={TEXTS_ID} className={card}>
-              <div className="flex items-start gap-2">
-                <MessageSquareText className="mt-0.5 h-4 w-4 shrink-0 text-violet-500" />
-                <div>
-                  <h3 className="text-sm font-semibold text-zinc-200">What your agents are told</h3>
-                  <p className="mt-0.5 text-xs text-zinc-500">Three short texts, in your words. Every agent of yours gets them.</p>
+            <div className="grid gap-4 @5xl:grid-cols-5">
+              {/* The three texts */}
+              <div id={TEXTS_ID} className={`${card} min-w-0 @5xl:col-span-3`}>
+                <div className="flex items-start gap-2">
+                  <MessageSquareText className="mt-0.5 h-4 w-4 shrink-0 text-violet-500" />
+                  <div>
+                    <h3 className="text-sm font-semibold text-zinc-200">What your agents are told</h3>
+                    <p className="mt-0.5 text-xs text-zinc-500">Three short texts, in your words. Every agent of yours gets them.</p>
+                  </div>
                 </div>
-              </div>
-              <p className="text-[11px] text-zinc-500">{ECO_SHORTENED_HINT}</p>
-              {sharedNote && (
-                <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-800 dark:text-amber-200">
-                  {sharedNote}{' '}
-                  <button
-                    type="button"
-                    onClick={showMyPacks}
-                    className="font-medium underline underline-offset-2 hover:no-underline"
-                  >
-                    {`See “${MY_PACKS_HEADING}”`}
-                  </button>
-                </div>
-              )}
-              <CappedTextarea
-                label="About me"
-                value={draft.about_me}
-                onChange={set('about_me')}
-                cap={caps.about_me}
-                rows={4}
-                placeholder="Your role, what you work on, your expertise, how you like to work…"
-                hint="Who you are, so your agents can pitch their work at the right level."
-              />
-              <CappedTextarea
-                label="My company"
-                value={draft.company}
-                onChange={set('company')}
-                cap={caps.company}
-                rows={6}
-                placeholder="What your company does, its products and customers, the voice it writes in…"
-                hint={usingDeckCompany
-                  ? "Empty — your agents get the deck's company description (see Deck-wide). Anything you write here replaces it."
-                  : "Replaces the deck's company description for your agents."}
-              />
-              <CappedTextarea
-                label="My standing preferences"
-                value={draft.instructions}
-                onChange={set('instructions')}
-                cap={caps.instructions}
-                rows={5}
-                placeholder="e.g. Answer in Croatian. Prefer short bullet points. Always cite your sources."
-                hint="Your agents apply these unless a task, role or output format says otherwise."
-              />
-
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={save}
-                  disabled={saving || !profileDirty || tooLong}
-                  className="flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
-                >
-                  {saving && <Loader2 className="h-3 w-3 animate-spin" />}
-                  {saving ? 'Saving…' : 'Save'}
-                </button>
-                {profileDirty && (
-                  <button
-                    onClick={() => { setDraft(data.profile); setError(null) }}
-                    disabled={saving}
-                    className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800"
-                  >
-                    Revert
-                  </button>
-                )}
-                <span className="text-[11px] text-zinc-600">Agents pick it up on their next turn — no restart.</span>
-              </div>
-
-              {notice && (
-                <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
-                  {notice}
-                </div>
-              )}
-              {error && (
-                <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
-                  {error}
-                </div>
-              )}
-            </div>
-
-            {/* Preview: what the server composes from the SAVED profile */}
-            <div className={card}>
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h3 className="text-sm font-semibold text-zinc-200">What your agents receive</h3>
-                  <p className="text-xs text-zinc-500 mt-0.5">
-                    Added to the system prompt of {PREVIEW_AUDIENCE[previewMode]}.
-                  </p>
-                </div>
-                <div className="flex shrink-0 rounded-md border border-zinc-700 p-0.5 text-[11px]">
-                  {PREVIEW_MODES.map((m) => (
+                <p className="text-[11px] text-zinc-500">{ECO_SHORTENED_HINT}</p>
+                {sharedNote && (
+                  <div className="rounded-md border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-800 dark:text-amber-200">
+                    {sharedNote}{' '}
                     <button
-                      key={m}
-                      onClick={() => setPreviewMode(m)}
-                      className={`rounded px-2 py-0.5 capitalize transition-colors ${
-                        previewMode === m ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
-                      }`}
+                      type="button"
+                      onClick={showMyPacks}
+                      className="font-medium underline underline-offset-2 hover:no-underline"
                     >
-                      {m}
+                      {`See “${MY_PACKS_HEADING}”`}
                     </button>
-                  ))}
+                  </div>
+                )}
+                <CappedTextarea
+                  label="About me"
+                  value={draft.about_me}
+                  onChange={set('about_me')}
+                  cap={caps.about_me}
+                  rows={4}
+                  placeholder="Your role, what you work on, your expertise, how you like to work…"
+                  hint="Who you are, so your agents can pitch their work at the right level."
+                />
+                <CappedTextarea
+                  label="My company"
+                  value={draft.company}
+                  onChange={set('company')}
+                  cap={caps.company}
+                  rows={6}
+                  placeholder="What your company does, its products and customers, the voice it writes in…"
+                  hint={usingDeckCompany
+                    ? "Empty — your agents get the deck's company description (see Deck-wide). Anything you write here replaces it."
+                    : "Replaces the deck's company description for your agents."}
+                />
+                <CappedTextarea
+                  label="My standing preferences"
+                  value={draft.instructions}
+                  onChange={set('instructions')}
+                  cap={caps.instructions}
+                  rows={5}
+                  placeholder="e.g. Answer in Croatian. Prefer short bullet points. Always cite your sources."
+                  hint="Your agents apply these unless a task, role or output format says otherwise."
+                />
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={save}
+                    disabled={saving || !profileDirty || tooLong}
+                    className="flex items-center gap-1.5 rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
+                  >
+                    {saving && <Loader2 className="h-3 w-3 animate-spin" />}
+                    {saving ? 'Saving…' : 'Save'}
+                  </button>
+                  {profileDirty && (
+                    <button
+                      onClick={() => { setDraft(data.profile); setError(null) }}
+                      disabled={saving}
+                      className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800"
+                    >
+                      Revert
+                    </button>
+                  )}
+                  <span className="text-[11px] text-zinc-600">Agents pick it up on their next turn — no restart.</span>
                 </div>
+
+                {notice && (
+                  <div className="rounded-md border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs text-emerald-700 dark:text-emerald-300">
+                    {notice}
+                  </div>
+                )}
+                {error && (
+                  <div className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+                    {error}
+                  </div>
+                )}
               </div>
-              {profileDirty && (
-                <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                  Showing the saved profile — save to see your changes here.
-                </p>
-              )}
-              {preview.trim() ? (
-                <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed text-zinc-300">
-                  {preview}
-                </pre>
-              ) : (
-                <p className="rounded-md border border-dashed border-zinc-800 px-3 py-4 text-center text-xs text-zinc-600">
-                  Nothing yet — your agents get no owner background until you or your admin fill something in.
-                </p>
-              )}
+
+              {/* Preview: what the server composes from the SAVED profile. Beside
+                  the texts it takes their height and scrolls inside it. */}
+              <div className={`${card} flex min-w-0 flex-col @5xl:col-span-2`}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-zinc-200">What your agents receive</h3>
+                    <p className="text-xs text-zinc-500 mt-0.5">
+                      Added to the system prompt of {PREVIEW_AUDIENCE[previewMode]}.
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 rounded-md border border-zinc-700 p-0.5 text-[11px]">
+                    {PREVIEW_MODES.map((m) => (
+                      <button
+                        key={m}
+                        onClick={() => setPreviewMode(m)}
+                        className={`rounded px-2 py-0.5 capitalize transition-colors ${
+                          previewMode === m ? 'bg-zinc-800 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'
+                        }`}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+                {profileDirty && (
+                  <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                    Showing the saved profile — save to see your changes here.
+                  </p>
+                )}
+                {preview.trim() ? (
+                  <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-zinc-800 bg-zinc-950 p-3 font-mono text-[11px] leading-relaxed text-zinc-300 @5xl:h-0 @5xl:max-h-none @5xl:grow">
+                    {preview}
+                  </pre>
+                ) : (
+                  <p className="flex items-center justify-center rounded-md border border-dashed border-zinc-800 px-3 py-4 text-center text-xs text-zinc-600 @5xl:grow">
+                    Nothing yet — your agents get no owner background until you or your admin fill something in.
+                  </p>
+                )}
+              </div>
             </div>
 
             {/* What I share with agents' people (context packs), on every
@@ -496,7 +503,7 @@ export function ProfilePage({ kiosk = false, onDirtyChange, initialTab = 'person
                 {deckEmpty ? (
                   <p className="text-xs text-zinc-600">No deck-wide defaults are set.</p>
                 ) : (
-                  <div className="space-y-3">
+                  <div className="grid gap-3 @4xl:grid-cols-2">
                     {deck?.company.trim() && (
                       <ReadOnlyBlock label="Company" text={deck.company} muted={!usingDeckCompany} />
                     )}
@@ -528,13 +535,13 @@ export function ProfilePage({ kiosk = false, onDirtyChange, initialTab = 'person
 
 function ReadOnlyBlock({ label, text, muted = false }: { label: string; text: string; muted?: boolean }) {
   return (
-    <div>
+    <div className="min-w-0 only:col-span-full">
       <div className="mb-1 flex items-center gap-2 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
         {label}
         {muted && <span className="normal-case tracking-normal text-zinc-600">(replaced by yours)</span>}
       </div>
       <div
-        className={`max-h-48 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs leading-relaxed ${
+        className={`max-h-80 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs leading-relaxed ${
           muted ? 'text-zinc-600' : 'text-zinc-300'
         }`}
       >
