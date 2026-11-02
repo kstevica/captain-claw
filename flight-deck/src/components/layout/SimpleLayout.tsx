@@ -41,6 +41,8 @@ import {
   Ship,
   FolderInput,
   FolderPlus,
+  Pin,
+  PinOff,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -101,7 +103,7 @@ import {
   AgentDialog, AgentMenu, KioskAgentInfoDialog, KioskAgentInstructionsDialog, KioskAgentSettingsDialog, KioskRemoveAgentDialog,
   type AgentMenuItem,
 } from './KioskAgentDialogs'
-import { AgentGroupDialog, AgentGroupPicker, AgentSections, RailGroupMark, type RowDrag } from './KioskAgentGroups'
+import { AgentGroupDialog, AgentGroupPicker, AgentSections, RailGroupMark, type RowParts } from './KioskAgentGroups'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import { NetworkBadge, networkShareAction } from '../agents/NetworkShare'
 import { dockerShareKey, processShareKey, useNetworkShareStore } from '../../stores/networkShareStore'
@@ -305,6 +307,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Agent groups: a group being made or edited, and the agent whose "⋯" → Group is open.
   const groups = useGroupStore((s) => s.groups)
   const forgetAgent = useGroupStore((s) => s.forgetAgent)
+  const toggleAgentPin = useGroupStore((s) => s.toggleAgentPin)
   const [groupDialog, setGroupDialog] = useState<GroupRequest | null>(null)
   const [groupPickerId, setGroupPickerId] = useState<string | null>(null)
   // Kiosk Getting started guide. It opens by itself once per page load (so
@@ -665,6 +668,17 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       onSelect: () => setGroupPickerId(a.id),
     }
   }
+  // In a group its "⋯" also pins it to the top of that group (all a phone has).
+  const pinMenuItems = (a: SimpleAgent): AgentMenuItem[] => {
+    const g = groups.find((x) => isFolder(x) && x.agentIds.includes(a.id))
+    if (!g) return []
+    const pinned = !!g.pinnedAgentIds?.includes(a.id)
+    return [{
+      icon: pinned ? PinOff : Pin, label: pinned ? 'Unpin' : 'Pin', tone: 'violet', direct: true,
+      hint: pinned ? `Back among the others in ${g.name}` : `To the top of ${g.name}`,
+      onSelect: () => toggleAgentPin(g.id, a.id),
+    }]
+  }
   const agentMenuItems = (a: SimpleAgent): AgentMenuItem[] => {
     if (a.kind === 'shared') {
       return [
@@ -672,6 +686,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           ? [{ icon: FolderOpen, label: 'Files & data', hint: 'What everyone who uses it can open', tone: 'amber' as const, onSelect: () => setFilesDataId(a.id) }]
           : []),
         groupMenuItem(a),
+        ...pinMenuItems(a),
       ]
     }
     const up = a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
@@ -720,7 +735,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       })
       if (net.show) items.push({ icon: Globe, label: net.label, hint: net.hint, tone: 'cyan', onSelect: net.onClick, disabled: net.disabled })
     }
-    items.push(groupMenuItem(a))
+    items.push(groupMenuItem(a), ...pinMenuItems(a))
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
         { icon: Trash2, label: 'Remove agent', hint: 'Delete it and its folder', danger: true,
@@ -729,8 +744,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     }
     return items
   }
-  // Off the kiosk its "⋯" holds only the agent's group (the gear has the rest).
-  const menuFor = locked ? agentMenuItems : (a: SimpleAgent) => [groupMenuItem(a)]
+  // Off the kiosk its "⋯" holds only the agent's group and pin (the gear has the rest).
+  const menuFor = locked ? agentMenuItems : (a: SimpleAgent) => [groupMenuItem(a), ...pinMenuItems(a)]
   const groupPickerAgent = groupPickerId ? agents.find((a) => a.id === groupPickerId) : undefined
   const agentInfo = agentInfoId ? agents.find((a) => a.id === agentInfoId) : undefined
   const agentInstructions = agentInstructionsId ? agents.find((a) => a.id === agentInstructionsId) : undefined
@@ -1764,7 +1779,7 @@ function AgentsColumn({
           sessionInfo={sessionInfo}
           onEdit={(id) => onGroup({ id })}
           onNew={(agentIds) => onGroup({ agentIds })}
-          renderRow={(a: SimpleAgent, drag: RowDrag) => {
+          renderRow={(a: SimpleAgent, { drag, pin }: RowParts) => {
             const info = sessionInfo.get(a.id)
             const active = a.id === activeAgentId
             const busy = !!info?.busy
@@ -1782,6 +1797,7 @@ function AgentsColumn({
             const menu = menuFor?.(a) ?? []
             return (
               <li key={a.id} {...drag} className="group flex items-center gap-0.5">
+                <div className="relative flex min-w-0 flex-1">
                 <button
                   onClick={() => onOpen(a)}
                   disabled={!openable}
@@ -1830,8 +1846,24 @@ function AgentsColumn({
                           : a.state === 'running' && a.reachable && a.description ? a.description : stateLabel(a)}
                     </div>
                   </div>
-                  <KindIcon className="h-3.5 w-3.5 shrink-0 text-zinc-600" />
+                  {/* In a group its pin takes this spot: on hover, and for good once pinned. */}
+                  <KindIcon className={`h-3.5 w-3.5 shrink-0 text-zinc-600 ${
+                    pin ? (pin.pinned ? 'opacity-0' : 'group-focus-within:opacity-0 group-hover:opacity-0 pointer-coarse:opacity-0') : ''}`} />
                 </button>
+                {pin && (
+                  <button
+                    onClick={pin.onToggle}
+                    aria-pressed={pin.pinned}
+                    aria-label={`${pin.pinned ? 'Unpin' : 'Pin'} ${a.name}`}
+                    title={pin.pinned ? `Back among the others in ${pin.groupName}` : `Pin to the top of ${pin.groupName}`}
+                    className={`absolute right-1 top-1/2 -translate-y-1/2 rounded p-1.5 transition-colors hover:bg-zinc-700/60 ${pin.pinned
+                      ? 'text-violet-600 dark:text-violet-400'
+                      : 'text-zinc-500 opacity-0 hover:text-zinc-200 focus:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100'}`}
+                  >
+                    <Pin className={`h-3.5 w-3.5 ${pin.pinned ? 'fill-current' : ''}`} />
+                  </button>
+                )}
+                </div>
                 {!locked && !shared && (
                   <button
                     onClick={() => onOptions(a)}
@@ -2485,7 +2517,7 @@ function PhoneLayout({
           sessionInfo={sessionInfo}
           onEdit={(id) => onGroup({ id })}
           onNew={(agentIds) => onGroup({ agentIds })}
-          renderRow={(a: SimpleAgent) => {
+          renderRow={(a: SimpleAgent, { pin }: RowParts) => {
             const info = sessionInfo.get(a.id)
             const busy = !!info?.busy
             const shared = a.kind === 'shared'
@@ -2515,6 +2547,7 @@ function PhoneLayout({
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
                       <span className="truncate text-[15px] font-medium text-zinc-100">{a.name}</span>
+                      {pin?.pinned && <Pin className="h-3 w-3 shrink-0 fill-current text-violet-600 dark:text-violet-400" aria-label="Pinned" />}
                       {busy && <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-amber-500 dark:bg-amber-400" title="Working" />}
                       {info?.unread && !busy && <span className="h-2 w-2 shrink-0 rounded-full bg-sky-400" title="New reply" />}
                       {shareKeyOf(a) && <NetworkBadge shareKey={shareKeyOf(a)} />}

@@ -91,7 +91,7 @@ The chat-first view your team's non-admins live in is a complete place to work:
 - **Scheduled tasks** that deliver to chat, email or Telegram;
 - a **[Taskboard](#the-taskboard)** of everything the agents were asked and sent, and what needs you (0.8.4);
 - one **timeline** per agent with named topics, and a **reasoning-effort** picker;
-- **agent groups**: folders in the agent list, with a name and a colour, that fold away and still show an agent at work or a new reply. Drag an agent onto a group, or use its **⋯ → Group**; a group's own **⋯** ticks its agents, renames, recolours and orders it. Each person has their own, on all their devices;
+- **agent groups**: folders in the agent list, with a name and a colour, that fold away and still show an agent at work or a new reply. Drag an agent onto a group, or use its **⋯ → Group**; a group's own **⋯** ticks its agents, renames, recolours and orders it. **Pin** one group to the top of the list, and as many agents as you like to the top of their group. Each person has their own, on all their devices;
 - a **⋯** menu per agent, a card of tiles since 0.8.4, for its model, its instructions, insights and skills, and its **[Onboarding](#onboarding)**, which also **shares it on the network** and shows its **Activity** and **Tasks**;
 - a **Files** menu in the composer with the last five files the agent made in this chat, with **Open** and **Show in library** (0.8.4);
 - pictures the reply hands over, in the chat and the channel, and **compact cards** for automated results and the agent's rephrasing of your request (0.8.4);

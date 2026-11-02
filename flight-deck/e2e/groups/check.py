@@ -425,6 +425,251 @@ def phone(browser):
     ctx.close()
 
 
+def put_groups(page, groups):
+    page.evaluate(
+        """async (groups) => {
+            const token = await fetch('/fd/auth/refresh', {method:'POST', credentials:'include'}).then(r => r.json()).then(d => d.access_token)
+            const h = {Authorization:'Bearer '+token, 'Content-Type':'application/json'}
+            await fetch('/fd/settings', {method:'PUT', headers:h, credentials:'include', body: JSON.stringify({settings:{'fd:agent-groups': JSON.stringify(groups)}})})
+            localStorage.removeItem('fd:agent-groups-collapsed')
+        }""",
+        groups,
+    )
+
+
+def pressed(page, name):
+    return page.get_by_role("button", name=name, exact=True).get_attribute("aria-pressed") == "true"
+
+
+def pins(browser):
+    ctx = browser.new_context(viewport={"width": 1280, "height": 860})
+    ctx.add_init_script("try{localStorage.setItem('fd:theme','dark')}catch{}")
+    page = ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    sign_in(page, "maya@example.com")
+    page.wait_for_selector("aside li")
+    close_guide(page)
+    put_groups(page, [
+        {"id": "g-a", "name": "Alpha", "color": "violet", "type": "group", "agentIds": ["proc-research-assistant", "proc-market-watch", "proc-report-writer"]},
+        {"id": "g-b", "name": "Bravo", "color": "blue", "type": "group", "agentIds": ["proc-inbox-helper", "proc-grant-scout"]},
+        {"id": "g-c", "name": "Charlie", "color": "emerald", "type": "group", "agentIds": ["proc-legal-reader"]},
+    ])
+    page.reload()
+    page.wait_for_selector('section[data-section="Alpha"]')
+    close_guide(page)
+    head = lambda name: section(page, name).locator(".group\\/head")
+    check("pins: start in their order", order(page)[:3] == ["Alpha", "Bravo", "Charlie"], str(order(page)))
+
+    # ── One group to the top ──
+    head("Charlie").hover()
+    page.get_by_role("button", name="Pin group Charlie", exact=True).click()
+    page.wait_for_timeout(150)
+    shot(page, "40-group-pinned")
+    check("pin group: goes first", order(page)[:3] == ["Charlie", "Alpha", "Bravo"], str(order(page)))
+    check("pin group: says so", pressed(page, "Unpin group Charlie"))
+    page.wait_for_timeout(500)
+    stored = server_groups(page)
+    check("pin group: saved, the list keeps its order", [g["name"] for g in stored] == ["Alpha", "Bravo", "Charlie"] and [g["name"] for g in stored if g.get("pinned")] == ["Charlie"], json.dumps(stored)[:200])
+
+    head("Bravo").hover()
+    check("pin group: offers to take the place", "in place of Charlie" in page.get_by_role("button", name="Pin group Bravo", exact=True).get_attribute("title"))
+    page.get_by_role("button", name="Pin group Bravo", exact=True).click()
+    page.wait_for_timeout(600)
+    check("pin group: only one at a time", order(page)[:3] == ["Bravo", "Alpha", "Charlie"] and [g["name"] for g in server_groups(page) if g.get("pinned")] == ["Bravo"], str(order(page)))
+
+    # ── Nothing above it ──
+    check("pinned group can't be dragged", head("Bravo").get_attribute("draggable") is None)
+    drag_to(page, head("Charlie").locator("button[aria-expanded]"), head("Bravo").locator("button[aria-expanded]"), y_frac=0.1)
+    shot(page, "41-nothing-above-the-pin")
+    page.mouse.up()
+    page.wait_for_timeout(600)
+    check("drop above the pin lands below it", order(page)[:3] == ["Bravo", "Charlie", "Alpha"], str(order(page)))
+
+    page.reload()
+    page.wait_for_selector('section[data-section="Bravo"]')
+    close_guide(page)
+    check("pin group: survives a reload", order(page)[0] == "Bravo" and pressed(page, "Unpin group Bravo"))
+
+    # ── Unpinned: back in its place ──
+    page.get_by_role("button", name="Unpin group Bravo", exact=True).click()
+    page.wait_for_timeout(600)
+    check("unpin group: back in its place", order(page)[:3] == ["Charlie", "Alpha", "Bravo"] and not [g for g in server_groups(page) if g.get("pinned")], str(order(page)))
+
+    # ── Many agents in a group ──
+    alpha = names_in(page, "Alpha")
+    check("agents: running ones first to begin with", alpha[-1] == "Report Writer", str(alpha))
+    row(page, "Report Writer").hover()
+    shot(page, "42-row-pin-on-hover")
+    page.get_by_role("button", name="Pin Report Writer", exact=True).click()
+    page.wait_for_timeout(150)
+    check("pin agent: goes first", names_in(page, "Alpha")[0] == "Report Writer", str(names_in(page, "Alpha")))
+    row(page, "Research Assistant").hover()
+    page.get_by_role("button", name="Pin Research Assistant", exact=True).click()
+    page.wait_for_timeout(150)
+    check("pin agent: many, in the order pinned", names_in(page, "Alpha")[:2] == ["Report Writer", "Research Assistant"], str(names_in(page, "Alpha")))
+    row(page, "Grant Scout").hover()
+    page.get_by_role("button", name="Pin Grant Scout", exact=True).click()
+    page.mouse.move(800, 400)
+    page.wait_for_timeout(600)
+    shot(page, "43-agents-pinned")
+    check("pin agent: each group its own", names_in(page, "Bravo")[0] == "Grant Scout", str(names_in(page, "Bravo")))
+    stored = {g["name"]: g for g in server_groups(page)}
+    check("pin agent: saved", stored["Alpha"]["pinnedAgentIds"] == ["proc-report-writer", "proc-research-assistant"] and stored["Bravo"]["pinnedAgentIds"] == ["proc-grant-scout"], json.dumps(stored["Alpha"])[:200])
+    check("pin agent: stays shown without a hover", page.get_by_role("button", name="Unpin Report Writer", exact=True).evaluate("e => getComputedStyle(e).opacity") == "1")
+    check("Other agents has no pins", page.get_by_role("button", name="Pin Home Admin", exact=True).count() == 0)
+
+    page.reload()
+    page.wait_for_selector('section[data-section="Alpha"]')
+    close_guide(page)
+    check("pin agent: survives a reload", names_in(page, "Alpha")[:2] == ["Report Writer", "Research Assistant"])
+
+    # ── From the agent's menu ──
+    row(page, "Market Watch").hover()
+    page.get_by_role("button", name="More for Market Watch").click()
+    menu = page.get_by_role("dialog", name="Market Watch")
+    page.wait_for_timeout(350)
+    shot(page, "44-menu-pin")
+    menu.get_by_role("button", name="To the top of Alpha").click()
+    page.wait_for_timeout(150)
+    check("menu: pins", names_in(page, "Alpha")[2] == "Market Watch" and pressed(page, "Unpin Market Watch"), str(names_in(page, "Alpha")))
+    row(page, "Market Watch").hover()
+    page.get_by_role("button", name="More for Market Watch").click()
+    page.get_by_role("dialog", name="Market Watch").get_by_role("button", name="Back among the others").click()
+    page.wait_for_timeout(150)
+    check("menu: unpins", pressed(page, "Pin Market Watch") is False and page.get_by_role("button", name="Unpin Market Watch", exact=True).count() == 0)
+
+    # ── Leaving a group drops its pin ──
+    page.get_by_role("button", name="Unpin Research Assistant", exact=True).click()
+    page.wait_for_timeout(150)
+    check("unpin agent: back among the others", names_in(page, "Alpha")[0] == "Report Writer" and page.get_by_role("button", name="Unpin Research Assistant", exact=True).count() == 0, str(names_in(page, "Alpha")))
+    drag_to(page, row(page, "Report Writer"), head("Bravo").locator("button[aria-expanded]"))
+    page.mouse.up()
+    page.mouse.move(800, 400)
+    page.wait_for_timeout(600)
+    stored = {g["name"]: g for g in server_groups(page)}
+    check("moved to another group: pin stays behind", "Report Writer" in names_in(page, "Bravo") and stored["Alpha"].get("pinnedAgentIds") == [] and "proc-report-writer" not in stored["Bravo"].get("pinnedAgentIds", []), json.dumps(stored)[:260])
+
+    # ── The group's sheet ──
+    head("Alpha").hover()
+    page.get_by_role("button", name="Edit group Alpha").click()
+    dialog = page.get_by_role("dialog", name="Edit group Alpha")
+    page.wait_for_timeout(350)
+    switch = dialog.get_by_role("switch", name="Pin to the top")
+    check("sheet: switch off to begin with", switch.get_attribute("aria-checked") == "false")
+    switch.click()
+    page.wait_for_timeout(200)
+    shot(page, "45-sheet-pinned")
+    check("sheet: pins at once", switch.get_attribute("aria-checked") == "true" and order(page)[0] == "Alpha", str(order(page)))
+    check("sheet: no order arrows while pinned", dialog.get_by_role("button", name="Higher in the list").count() == 0)
+    dialog.get_by_role("button", name="Cancel").click()
+
+    head("Bravo").hover()
+    page.get_by_role("button", name="Edit group Bravo").click()
+    dialog = page.get_by_role("dialog", name="Edit group Bravo")
+    page.wait_for_timeout(350)
+    check("sheet: says whose place it takes", dialog.get_by_text("Takes the place of Alpha").count() == 1)
+    shot(page, "46-sheet-takes-the-place")
+    dialog.get_by_role("checkbox", name="Grant Scout").click()
+    dialog.get_by_role("button", name="Save").click()
+    page.wait_for_timeout(600)
+    stored = {g["name"]: g for g in server_groups(page)}
+    check("sheet: an untick drops the pin", "proc-grant-scout" not in stored["Bravo"].get("pinnedAgentIds", []), json.dumps(stored["Bravo"])[:200])
+
+    # ── A new group, pinned from the start ──
+    page.get_by_title("New group").click()
+    dialog = page.get_by_role("dialog", name="New group")
+    page.wait_for_timeout(350)
+    dialog.get_by_label("Group name").fill("Delta")
+    dialog.get_by_role("switch", name="Pin to the top").click()
+    check("new group: nothing pinned until it's created", order(page)[0] == "Alpha")
+    dialog.get_by_role("button", name="Create group").click()
+    page.wait_for_timeout(600)
+    check("new group: pinned", order(page)[0] == "Delta" and [g["name"] for g in server_groups(page) if g.get("pinned")] == ["Delta"], str(order(page)))
+
+    # ── Deleted: the next one doesn't inherit it ──
+    head("Delta").hover()
+    page.get_by_role("button", name="Edit group Delta").click()
+    page.get_by_role("dialog", name="Edit group Delta").get_by_role("button", name="Delete").click()
+    page.wait_for_timeout(600)
+    check("delete the pinned group: nothing else pinned", not [g for g in server_groups(page) if g.get("pinned")])
+
+    # ── Two devices each pinned one ──
+    put_groups(page, [
+        {"id": "g-a", "name": "Alpha", "color": "violet", "type": "group", "agentIds": ["proc-research-assistant"], "pinned": True},
+        {"id": "g-b", "name": "Bravo", "color": "blue", "type": "group", "agentIds": ["proc-inbox-helper"], "pinned": True, "pinnedAgentIds": ["proc-inbox-helper", "proc-not-in-it"]},
+    ])
+    page.reload()
+    page.wait_for_selector('section[data-section="Alpha"]')
+    close_guide(page)
+    check("two pinned in the saved data: the first holds it", page.get_by_role("button", name="Unpin group Alpha", exact=True).count() == 1 and page.get_by_role("button", name="Unpin group Bravo", exact=True).count() == 0)
+
+    # ── A pinned agent on the rail ──
+    put_groups(page, [
+        {"id": "g-a", "name": "Alpha", "color": "violet", "type": "group", "agentIds": ["proc-research-assistant", "proc-report-writer"], "pinnedAgentIds": ["proc-report-writer"]},
+        {"id": "g-b", "name": "Bravo", "color": "blue", "type": "group", "agentIds": ["proc-inbox-helper", "proc-grant-scout"], "pinned": True, "pinnedAgentIds": ["proc-grant-scout"]},
+    ])
+    page.reload()
+    page.wait_for_selector('section[data-section="Alpha"]')
+    close_guide(page)
+    page.get_by_title("Hide agents").click()
+    page.wait_for_timeout(250)
+    shot(page, "47-rail-pins")
+    titles = page.locator("aside button[aria-disabled], aside button[title^='Chat with']").evaluate_all("els => els.map(e => e.title)")
+    check("rail: follows the pins", "Grant Scout" in titles[0] and "Report Writer" in titles[2], str(titles))
+    page.get_by_title("Show agents").click()
+    page.wait_for_timeout(200)
+
+    # ── Light ──
+    page.get_by_role("button", name="Settings").click()
+    page.wait_for_timeout(300)
+    page.get_by_role("switch", name="Dark theme").click()
+    page.keyboard.press("Escape")
+    page.mouse.move(800, 400)
+    page.wait_for_timeout(400)
+    shot(page, "48-light-pins")
+    page.get_by_role("button", name="Settings").click()
+    page.wait_for_timeout(300)
+    page.get_by_role("switch", name="Dark theme").click()
+    page.keyboard.press("Escape")
+    page.wait_for_timeout(500)
+    check("pins: no page errors", not errors, "; ".join(errors)[:300])
+    ctx.close()
+
+    # ── A phone: the menu and the sheet ──
+    ctx = browser.new_context(viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True)
+    ctx.add_init_script("try{localStorage.setItem('fd:theme','dark')}catch{}")
+    page = ctx.new_page()
+    errors = []
+    page.on("pageerror", lambda e: errors.append(str(e)))
+    sign_in(page, "maya@example.com")
+    page.wait_for_selector('section[data-section="Alpha"]')
+    close_guide(page)
+    check("phone: order from the server", order(page)[:2] == ["Bravo", "Alpha"], str(order(page)))
+    check("phone: the pinned group is marked", section(page, "Bravo").locator(".group\\/head svg.lucide-pin").count() == 1)
+    check("phone: a pinned agent is marked", section(page, "Bravo").locator("li", has_text="Grant Scout").first.locator("svg.lucide-pin").count() == 1)
+    shot(page, "49-phone-pins")
+    page.get_by_role("button", name="More for Research Assistant").tap()
+    menu = page.get_by_role("dialog", name="Research Assistant")
+    page.wait_for_timeout(350)
+    menu.get_by_role("button", name="To the top of Alpha").scroll_into_view_if_needed()
+    menu.get_by_role("button", name="To the top of Alpha").tap()
+    page.wait_for_timeout(600)
+    stored = {g["name"]: g for g in server_groups(page)}
+    check("phone: pins an agent from its menu", stored["Alpha"]["pinnedAgentIds"] == ["proc-report-writer", "proc-research-assistant"], json.dumps(stored["Alpha"])[:200])
+    page.get_by_role("button", name="Edit group Alpha").tap()
+    dialog = page.get_by_role("dialog", name="Edit group Alpha")
+    page.wait_for_timeout(350)
+    shot(page, "50-phone-sheet")
+    dialog.get_by_role("switch", name="Pin to the top").tap()
+    page.wait_for_timeout(150)
+    dialog.get_by_role("button", name="Cancel").tap()
+    page.wait_for_timeout(600)
+    check("phone: pins a group from its sheet", order(page)[0] == "Alpha" and [g["name"] for g in server_groups(page) if g.get("pinned")] == ["Alpha"], str(order(page)))
+    check("phone: pins, no page errors", not errors, "; ".join(errors)[:300])
+    ctx.close()
+
+
 def admin(browser):
     # The desktop app's "user view": the same locked kiosk a user gets.
     ctx = browser.new_context(viewport={"width": 1280, "height": 860})
@@ -539,12 +784,14 @@ def no_sign_in(browser):
 
 with sync_playwright() as p:
     browser = p.chromium.launch()
-    which = sys.argv[1:] or ["kiosk", "phone", "admin", "no-sign-in"]
+    which = sys.argv[1:] or ["kiosk", "phone", "pins", "admin", "no-sign-in"]
     try:
         if "kiosk" in which:
             kiosk_user(browser)
         if "phone" in which:
             phone(browser)
+        if "pins" in which:
+            pins(browser)
         if "admin" in which:
             admin(browser)
         if "no-sign-in" in which:

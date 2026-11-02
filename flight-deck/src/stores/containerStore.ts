@@ -189,13 +189,7 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
       }
 
       // Migrate group memberships from old ID to new ID
-      const groupStore = useGroupStore.getState()
-      for (const group of groupStore.groups) {
-        if (group.agentIds.includes(oldId)) {
-          groupStore.removeFromGroup(group.id, oldId)
-          groupStore.addToGroup(group.id, newId)
-        }
-      }
+      useGroupStore.getState().replaceAgent(oldId, newId)
 
       // Migrate agent card positions
       try {

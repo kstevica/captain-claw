@@ -11,6 +11,10 @@ export interface AgentGroup {
   color: string
   type: GroupType
   agentIds: string[]
+  /** First in the agent list, whatever its place among the groups. One group at most. */
+  pinned?: boolean
+  /** Agents at the top of this group, in the order they were pinned. */
+  pinnedAgentIds?: string[]
 }
 
 const STORAGE_KEY = 'fd:agent-groups'
@@ -23,7 +27,24 @@ const REFRESH_MS = 10000
 
 function normalise(raw: AgentGroup[]): AgentGroup[] {
   // Migrate: default type to 'group' for existing entries
-  return raw.map(g => ({ ...g, type: g.type || 'group', agentIds: g.agentIds || [] }))
+  const groups = raw.map(g => ({ ...g, type: g.type || 'group', agentIds: g.agentIds || [] }))
+  // Only one group holds the pin, whatever was saved.
+  const top = groups.find(g => g.pinned && isFolder(g))
+  return groups.map(g => {
+    const out: AgentGroup = { ...g }
+    if (g.pinned && g !== top) delete out.pinned
+    if (g.pinnedAgentIds) out.pinnedAgentIds = g.pinnedAgentIds.filter(id => g.agentIds.includes(id))
+    return out
+  })
+}
+
+// Agents leave a group: their pins there go with them.
+function without(g: AgentGroup, gone: (id: string) => boolean): AgentGroup {
+  return {
+    ...g,
+    agentIds: g.agentIds.filter((id) => !gone(id)),
+    ...(g.pinnedAgentIds ? { pinnedAgentIds: g.pinnedAgentIds.filter((id) => !gone(id)) } : {}),
+  }
 }
 
 function load(): AgentGroup[] {
@@ -61,6 +82,10 @@ interface GroupStore {
   updateGroup: (id: string, patch: { name?: string; color?: string }) => void
   /** A group's place among the others: before `beforeId`, or last. */
   moveGroup: (id: string, beforeId: string | null) => void
+  /** This group to the top of the list and no other (null: none). It keeps its place for when it's unpinned. */
+  pinGroup: (id: string | null) => void
+  /** An agent to the top of this group, or back among the others. Any number of them. */
+  toggleAgentPin: (groupId: string, agentId: string) => void
   addToGroup: (groupId: string, agentId: string) => void
   removeFromGroup: (groupId: string, agentId: string) => void
   /** Into this group and out of any other (null: out of them all). Roles stay. */
@@ -69,6 +94,8 @@ interface GroupStore {
   setGroupMembers: (groupId: string, agentIds: string[]) => void
   /** An agent removed for good: a new one under its name starts in no group. */
   forgetAgent: (agentId: string) => void
+  /** The same agent under a new id (a rebuilt container): it keeps its groups and pins. */
+  replaceAgent: (oldId: string, newId: string) => void
   toggleCollapsed: (id: string) => void
   expand: (id: string) => void
   getGroupsForAgent: (agentId: string) => AgentGroup[]
@@ -117,6 +144,21 @@ export const useGroupStore = create<GroupStore>((set, get) => {
       commit(rest)
     },
 
+    pinGroup: (id) => {
+      commit(get().groups.map((g) => {
+        if (g.id === id) return { ...g, pinned: true }
+        return g.pinned ? { ...g, pinned: false } : g
+      }))
+    },
+
+    toggleAgentPin: (groupId, agentId) => {
+      commit(get().groups.map((g) => {
+        if (g.id !== groupId || !g.agentIds.includes(agentId)) return g
+        const pins = g.pinnedAgentIds ?? []
+        return { ...g, pinnedAgentIds: pins.includes(agentId) ? pins.filter((id) => id !== agentId) : [...pins, agentId] }
+      }))
+    },
+
     addToGroup: (groupId, agentId) => {
       commit(get().groups.map((g) => {
         if (g.id !== groupId || g.agentIds.includes(agentId)) return g
@@ -126,8 +168,7 @@ export const useGroupStore = create<GroupStore>((set, get) => {
 
     removeFromGroup: (groupId, agentId) => {
       commit(get().groups.map((g) => {
-        if (g.id !== groupId) return g
-        return { ...g, agentIds: g.agentIds.filter((id) => id !== agentId) }
+        return g.id === groupId ? without(g, (id) => id === agentId) : g
       }))
     },
 
@@ -136,22 +177,32 @@ export const useGroupStore = create<GroupStore>((set, get) => {
         if (!isFolder(g)) return g
         const inIt = g.agentIds.includes(agentId)
         if (g.id === groupId) return inIt ? g : { ...g, agentIds: [...g.agentIds, agentId] }
-        return inIt ? { ...g, agentIds: g.agentIds.filter((id) => id !== agentId) } : g
+        return inIt ? without(g, (id) => id === agentId) : g
       }))
     },
 
     setGroupMembers: (groupId, agentIds) => {
       const members = new Set(agentIds)
       commit(get().groups.map((g) => {
-        if (g.id === groupId) return { ...g, agentIds }
+        if (g.id === groupId) return { ...without(g, (id) => !members.has(id)), agentIds }
         if (!isFolder(g) || !g.agentIds.some((id) => members.has(id))) return g
-        return { ...g, agentIds: g.agentIds.filter((id) => !members.has(id)) }
+        return without(g, (id) => members.has(id))
       }))
     },
 
     forgetAgent: (agentId) => {
       if (!get().groups.some((g) => g.agentIds.includes(agentId))) return
-      commit(get().groups.map((g) => ({ ...g, agentIds: g.agentIds.filter((id) => id !== agentId) })))
+      commit(get().groups.map((g) => without(g, (id) => id === agentId)))
+    },
+
+    replaceAgent: (oldId, newId) => {
+      if (!get().groups.some((g) => g.agentIds.includes(oldId))) return
+      const swap = (id: string) => (id === oldId ? newId : id)
+      commit(get().groups.map((g) => ({
+        ...g,
+        agentIds: g.agentIds.map(swap),
+        ...(g.pinnedAgentIds ? { pinnedAgentIds: g.pinnedAgentIds.map(swap) } : {}),
+      })))
     },
 
     toggleCollapsed: (id) => {
