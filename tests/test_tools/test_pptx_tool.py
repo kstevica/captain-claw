@@ -6,10 +6,13 @@ own measurements; these tests pin that behaviour without PowerPoint.
 
 from __future__ import annotations
 
+import base64
 import io
 import json
+import os
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from lxml import etree
@@ -1071,3 +1074,735 @@ def test_the_schema_suits_every_provider():
 
     walk(PptxTool.parameters, "pptx")
     json.dumps(PptxTool.parameters)
+
+
+# ── Pictures: what goes in ───────────────────────────────────────────
+
+
+def _pictures(slide) -> list:
+    return [s for s in slide.shapes if s._element.tag == qn("p:pic")]
+
+
+def _image_kind(shape) -> str:
+    return shape.image.content_type
+
+
+@pytest.mark.parametrize("name,kind", [("p.webp", "image/jpeg"), ("p.avif", "image/jpeg"), ("p.tiff", "image/png"), ("p.bmp", "image/png")])
+def test_formats_powerpoint_cant_show_are_rewritten(tmp_path, name, kind):
+    Image.new("RGB", (800, 400), (10, 120, 200)).save(tmp_path / name)
+    prs = _deck({"title": "x", "image": name}, image_root=_finder(tmp_path))
+    picture = _pictures(prs.slides[0])[0]
+    assert _image_kind(picture) == kind and picture.image.size == (800, 400)
+    assert "stretched_picture" not in _issues(prs)
+
+
+def test_a_webp_keeps_its_transparency(tmp_path):
+    Image.new("RGBA", (400, 200), (0, 0, 0, 0)).save(tmp_path / "logo.webp")
+    prs = _deck({"title": "x", "image": "logo.webp"}, image_root=_finder(tmp_path))
+    picture = _pictures(prs.slides[0])[0]
+    assert _image_kind(picture) == "image/png"
+    assert Image.open(io.BytesIO(picture.image.blob)).mode == "RGBA"
+
+
+def test_a_phone_photo_stands_upright_and_loses_its_tag(tmp_path):
+    photo = Image.new("RGB", (1600, 900), (200, 30, 30))
+    tags = photo.getexif()
+    tags[0x0112] = 6  # stored on its side, shown a quarter turn round
+    photo.save(tmp_path / "phone.jpg", exif=tags)
+    prs = _deck({"title": "x", "image": "phone.jpg"}, image_root=_finder(tmp_path))
+    picture = _pictures(prs.slides[0])[0]
+    assert picture.image.size == (900, 1600) and picture.height > picture.width
+    assert not Image.open(io.BytesIO(picture.image.blob)).getexif().get(0x0112)
+
+
+def test_an_ordinary_picture_goes_in_byte_for_byte_and_once(tmp_path):
+    _picture(tmp_path / "p.jpg", (800, 400))
+    prs = _deck({"title": "a", "image": "p.jpg"}, {"title": "b", "image": "p.jpg"}, image_root=_finder(tmp_path))
+    assert _pictures(prs.slides[0])[0].image.blob == (tmp_path / "p.jpg").read_bytes()
+    assert sum("/media/" in name for name in _parts(prs)) == 1
+
+
+def test_a_gif_stays_a_gif(tmp_path):
+    frames = [Image.new("P", (300, 200), i) for i in range(2)]
+    frames[0].save(tmp_path / "a.gif", save_all=True, append_images=frames[1:])
+    prs = _deck({"title": "x", "image": "a.gif"}, image_root=_finder(tmp_path))
+    assert _pictures(prs.slides[0])[0].image.blob == (tmp_path / "a.gif").read_bytes()
+
+
+def test_a_huge_photo_is_stored_smaller_and_the_result_says_so(tmp_path):
+    noise = Image.frombytes("RGB", (3600, 2400), os.urandom(3600 * 2400 * 3))
+    noise.save(tmp_path / "huge.jpg", quality=95)
+    prs, report = P.build_deck([{"title": "x", "image": "huge.jpg"}], image_root=_finder(tmp_path))
+    picture = _pictures(prs.slides[0])[0]
+    assert picture.image.size == (3000, 2000)
+    assert len(picture.image.blob) < (tmp_path / "huge.jpg").stat().st_size
+    assert any("huge.jpg" in note and "3000×2000" in note for note in report.notes)
+
+
+def test_a_cmyk_jpeg_becomes_rgb(tmp_path):
+    Image.new("CMYK", (400, 200), (0, 80, 80, 0)).save(tmp_path / "print.jpg")
+    prs = _deck({"title": "x", "image": "print.jpg"}, image_root=_finder(tmp_path))
+    assert Image.open(io.BytesIO(_pictures(prs.slides[0])[0].image.blob)).mode == "RGB"
+
+
+def test_heic_goes_through_the_converter_or_says_what_to_do(tmp_path, monkeypatch):
+    (tmp_path / "p.heic").write_bytes(b"not something Pillow reads")
+    converted = io.BytesIO()
+    Image.new("RGB", (400, 200), (1, 2, 3)).save(converted, "JPEG")
+    monkeypatch.setattr("captain_claw.flight_deck.whatsapp_inbound.to_jpeg", lambda data: converted.getvalue())
+    prs = _deck({"title": "x", "image": "p.heic"}, image_root=_finder(tmp_path))
+    assert _pictures(prs.slides[0])[0].image.size == (400, 200)
+    monkeypatch.setattr("captain_claw.flight_deck.whatsapp_inbound.to_jpeg", lambda data: None)
+    with pytest.raises(P.PptxError, match="PNG or JPEG"):
+        P.build_deck([{"title": "x", "image": "p.heic"}], image_root=_finder(tmp_path))
+
+
+# ── Pictures: where they go ──────────────────────────────────────────
+
+
+def _clear(a, b) -> bool:
+    return (a.left + a.width <= b.left or b.left + b.width <= a.left
+            or a.top + a.height <= b.top or b.top + b.height <= a.top)
+
+
+def _on_slide(prs, shape) -> bool:
+    return (shape.left >= 0 and shape.top >= 0 and shape.left + shape.width <= prs.slide_width
+            and shape.top + shape.height <= prs.slide_height)
+
+
+def _inches2(shape) -> float:
+    return P.inches(shape.width) * P.inches(shape.height)
+
+
+def _body_of(slide):
+    return next(s for s in slide.placeholders if P.placeholder_kind(s) in ("content", "body") and s.has_text_frame)
+
+
+@pytest.mark.parametrize("key", ["images", "image"])
+def test_several_pictures_share_a_slide(tmp_path, key):
+    _picture(tmp_path / "a.png", (1600, 900))
+    _picture(tmp_path / "b.png", (1600, 900))
+    prs = _deck({"title": "x", key: ["a.png", {"image": "b.png", "alt": "Second"}]}, image_root=_finder(tmp_path))
+    slide = prs.slides[0]
+    assert slide.slide_layout.name == "Title and Content"
+    a, b = _pictures(slide)
+    assert _clear(a, b) and _on_slide(prs, a) and _on_slide(prs, b)
+    assert _inches2(a) > 10 and _inches2(a) == pytest.approx(_inches2(b), rel=0.02)
+    assert P._alt_text(b) == "Second"
+    assert "overlap" not in _issues(prs)
+
+
+def test_many_pictures_make_a_grid_with_a_centred_last_row(tmp_path):
+    for name in "abcde":
+        _picture(tmp_path / f"{name}.png", (800, 800))
+    prs = _deck({"title": "x", "images": [f"{name}.png" for name in "abcde"]}, image_root=_finder(tmp_path))
+    pictures = _pictures(prs.slides[0])
+    assert len(pictures) == 5
+    assert all(_on_slide(prs, p) for p in pictures)
+    assert all(_clear(a, b) for i, a in enumerate(pictures) for b in pictures[i + 1:])
+
+
+def test_pictures_added_one_call_at_a_time_share_too(tmp_path):
+    _picture(tmp_path / "a.png", (1600, 900))
+    _picture(tmp_path / "b.png", (900, 1600))
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "a.png"}, image_root=_finder(tmp_path))
+    edited, report = _edit(edited, {"op": "add_image", "slide": 1, "image": "b.png"}, image_root=_finder(tmp_path))
+    a, b = _pictures(edited.slides[0])
+    assert _clear(a, b) and _inches2(b) > 5
+    assert any("moved to share" in note for note in report.notes)
+    assert "stretched_picture" not in _issues(edited)
+
+
+def test_a_logo_isnt_moved_to_make_room(tmp_path):
+    _picture(tmp_path / "logo.png", (400, 200))
+    _picture(tmp_path / "a.png", (1600, 900))
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "logo.png", "position": "top-right"},
+                      {"op": "add_image", "slide": 1, "image": "a.png"}, image_root=_finder(tmp_path))
+    logo, photo = _pictures(edited.slides[0])
+    assert P.inches(logo.width) == 1.5 and logo.left + logo.width == edited.slide_width - P.Inches(0.3)
+    assert _inches2(photo) > 25 and _clear(logo, photo)
+
+
+def test_a_wide_picture_goes_under_short_text(tmp_path):
+    _picture(tmp_path / "wide.png", (1600, 900))
+    prs = _deck({"layout": "Title and Content", "title": "x", "body": "One line"})
+    edited, report = _edit(prs, {"op": "add_image", "slide": 1, "image": "wide.png"}, image_root=_finder(tmp_path))
+    slide = edited.slides[0]
+    picture = _pictures(slide)[0]
+    assert _inches2(picture) > 20
+    assert "overlap" not in _issues(edited) and not report.notes
+
+
+def test_a_tall_picture_makes_room_beside_the_text(tmp_path):
+    _picture(tmp_path / "tall.png", (900, 1600))
+    prs = _deck({"layout": "Title and Content", "title": "x", "body": BODY})
+    full_width = _body_of(prs.slides[0]).width
+    edited, report = _edit(prs, {"op": "add_image", "slide": 1, "image": "tall.png"}, image_root=_finder(tmp_path))
+    slide = edited.slides[0]
+    picture, body = _pictures(slide)[0], _body_of(slide)
+    assert body.width < full_width and body.left + body.width <= picture.left
+    assert P.inches(picture.height) > 4
+    assert any("make room" in note for note in report.notes)
+    assert "overlap" not in _issues(edited)
+    assert all(not s.is_placeholder or s.left is not None for s in slide.shapes)
+
+
+def test_a_slide_of_text_says_if_narrowing_it_makes_it_overflow(tmp_path):
+    _picture(tmp_path / "tall.png", (900, 1600))
+    text = "\n".join(f"- Point number {n} that runs on for quite a while across the slide" for n in range(12))
+    prs = _deck({"layout": "Title and Content", "title": "x", "body": text})
+    edited = P.open_deck(P.deck_bytes(prs))
+    report = P.Editor(edited, image_root=_finder(tmp_path)).apply([{"op": "add_image", "slide": 1, "image": "tall.png"}])
+    assert any("shrunk" in note for note in report.notes) or any(i.kind == "overflow" for i in report.fit)
+
+
+@pytest.mark.parametrize("position", ["left", "right"])
+def test_position_takes_a_side_and_moves_the_text_over(tmp_path, position):
+    _picture(tmp_path / "wide.png", (1600, 900))
+    prs = _deck({"layout": "Title and Content", "title": "x", "body": BODY})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "wide.png", "position": position},
+                      image_root=_finder(tmp_path))
+    picture, body = _pictures(edited.slides[0])[0], _body_of(edited.slides[0])
+    assert _clear(picture, body)
+    assert (picture.left < body.left) == (position == "left")
+    assert "overlap" not in _issues(edited)
+
+
+def test_position_uses_the_free_placeholder_on_that_side(tmp_path):
+    _picture(tmp_path / "wide.png", (1600, 900))
+    prs = _deck({"layout": "Two Content", "title": "x", "body": BODY, "keep_empty": True})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "wide.png", "position": "right"},
+                      image_root=_finder(tmp_path))
+    slide = edited.slides[0]
+    assert "empty_placeholder" not in _issues(edited)
+    assert _pictures(slide)[0].is_placeholder
+
+
+def test_full_fills_the_slide_behind_the_title(tmp_path):
+    _picture(tmp_path / "p.png", (1000, 1000))
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "p.png", "position": "full"}, image_root=_finder(tmp_path))
+    slide = edited.slides[0]
+    picture = _pictures(slide)[0]
+    assert (picture.left, picture.top, picture.width, picture.height) == (0, 0, edited.slide_width, edited.slide_height)
+    assert picture.crop_top > 0 and list(slide.shapes)[0].shape_id == picture.shape_id
+    found = _issues(edited)
+    assert "overlap" not in found and "stretched_picture" not in found
+
+
+def test_an_unknown_position_lists_the_real_ones(tmp_path):
+    _picture(tmp_path / "p.png")
+    with pytest.raises(P.PptxError, match="top-right"):
+        P.build_deck([{"title": "x", "images": [{"image": "p.png", "position": "somewhere"}]}], image_root=_finder(tmp_path))
+
+
+def test_one_side_is_enough_and_the_other_follows(tmp_path):
+    _picture(tmp_path / "wide.png", (800, 400))
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "wide.png", "x": 1, "y": 2, "width": 3},
+                      {"op": "add_image", "slide": 1, "image": "wide.png", "x": 5, "y": 2, "height": 1},
+                      {"op": "add_image", "slide": 1, "image": "wide.png", "x": 1, "y": 5},
+                      image_root=_finder(tmp_path))
+    by_width, by_height, natural = _pictures(edited.slides[0])
+    assert (P.inches(by_width.width), P.inches(by_width.height)) == (3, 1.5)
+    assert (P.inches(by_height.width), P.inches(by_height.height)) == (2, 1)
+    assert natural.left == P.Inches(1) and natural.top == P.Inches(5)
+    with pytest.raises(P.PptxError, match="both x and y"):
+        _edit(prs, {"op": "add_image", "slide": 1, "image": "wide.png", "x": 1}, image_root=_finder(tmp_path))
+
+
+def test_a_small_picture_isnt_blown_up_unless_asked(tmp_path):
+    _picture(tmp_path / "icon.png", (144, 144))
+    prs = _deck({"title": "x", "image": "icon.png"}, image_root=_finder(tmp_path))
+    picture = _pictures(prs.slides[0])[0]
+    assert P.inches(picture.width) == 2 and _on_slide(prs, picture)
+    edited = P.open_deck(P.deck_bytes(prs))
+    report = P.Editor(edited, image_root=_finder(tmp_path)).apply(
+        [{"op": "add_image", "slide": 1, "image": "icon.png", "x": 1, "y": 1, "width": 6}])
+    assert any("looks soft" in note for note in report.notes)
+
+
+def test_a_logo_goes_on_every_slide_from_one_file(tmp_path):
+    _picture(tmp_path / "logo.png", (400, 200))
+    prs = _deck({"title": "a"}, {"title": "b"}, {"title": "c"})
+    edited, report = _edit(prs, {"op": "add_image", "slide": "all", "image": "logo.png", "position": "bottom-right", "width": 1},
+                           image_root=_finder(tmp_path))
+    assert all(len(_pictures(s)) == 1 for s in edited.slides)
+    assert sum("/media/" in name for name in _parts(edited)) == 1
+    assert report.counts["images added"] == 3
+
+
+def test_placing_a_picture_by_one_side_keeps_its_shape(tmp_path):
+    _picture(tmp_path / "wide.png", (800, 400))
+    prs = _deck({"title": "x", "image": "wide.png"}, image_root=_finder(tmp_path))
+    picture = _pictures(prs.slides[0])[0]
+    edited, _ = _edit(prs, {"op": "place", "slide": 1, "shape": picture.shape_id, "width": 2})
+    picture = _pictures(edited.slides[0])[0]
+    assert (P.inches(picture.width), P.inches(picture.height)) == (2, 1)
+    assert "stretched_picture" not in _issues(edited)
+
+
+# ── Pictures: placeholders and swapping ──────────────────────────────
+
+
+def _picture_slot_template() -> bytes:
+    """A deck whose second layout has one picture place and one for text, as firms' do."""
+    prs = Presentation()
+    layout = prs.slide_layouts[1]
+    layout.name = "Text and Photo"
+    body = next(ph for ph in layout.placeholders if ph.placeholder_format.idx == 1)
+    body.left, body.top, body.width, body.height = Inches(0.5), Inches(1.5), Inches(4), Inches(5)
+    tree = layout.shapes._spTree
+    photo = etree.fromstring(
+        '<p:sp xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" '
+        'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">'
+        '<p:nvSpPr><p:cNvPr id="77" name="Photo"/><p:cNvSpPr><a:spLocks noGrp="1"/></p:cNvSpPr>'
+        '<p:nvPr><p:ph type="pic" idx="13"/></p:nvPr></p:nvSpPr>'
+        '<p:spPr><a:xfrm><a:off x="4572000" y="1371600"/><a:ext cx="4114800" cy="4572000"/></a:xfrm></p:spPr>'
+        '<p:txBody><a:bodyPr/><a:lstStyle/><a:p><a:endParaRPr lang="en-US"/></a:p></p:txBody></p:sp>')
+    tree.append(photo)
+    buffer = io.BytesIO()
+    prs.save(buffer)
+    return buffer.getvalue()
+
+
+def test_a_templates_picture_layout_is_chosen_and_filled_like_powerpoint_does(tmp_path):
+    _picture(tmp_path / "wide.png", (1600, 900))
+    prs = _deck({"title": "x", "body": "Words", "image": {"image": "wide.png", "alt": "Team"}},
+                template=_picture_slot_template(), image_root=_finder(tmp_path))
+    slide = prs.slides[0]
+    assert slide.slide_layout.name == "Text and Photo"
+    picture = _pictures(slide)[0]
+    ph = picture._element.xpath(".//p:nvPr/p:ph")[0]
+    assert ph.get("type") == "pic" and ph.get("idx") == "13"
+    assert P.placeholder_kind(picture) == "picture"
+    assert (picture.left, picture.top, picture.width, picture.height) == (4572000, 1371600, 4114800, 4572000)
+    assert picture.crop_left > 0
+    assert "stretched_picture" not in _issues(prs)
+
+
+def test_a_fit_said_out_loud_beats_the_placeholders_habit(tmp_path):
+    _picture(tmp_path / "wide.png", (1600, 900))
+    prs = _deck({"title": "x", "layout": "Text and Photo", "images": [{"image": "wide.png", "fit": "contain"}]},
+                template=_picture_slot_template(), image_root=_finder(tmp_path))
+    picture = _pictures(prs.slides[0])[0]
+    assert picture.crop_left == 0 and picture.width == 4114800
+
+
+def test_a_picture_can_be_named_by_placeholder_number(tmp_path):
+    _picture(tmp_path / "wide.png", (1600, 900))
+    prs = _deck({"title": "x", "layout": "Text and Photo", "placeholders": {"13": "wide.png", "1": "Words"}},
+                template=_picture_slot_template(), image_root=_finder(tmp_path))
+    assert _pictures(prs.slides[0])[0].placeholder_format.idx == 13
+    assert _body_of(prs.slides[0]).text_frame.text == "Words"
+
+
+def test_text_cant_go_in_a_place_for_a_picture():
+    prs = _deck({"title": "x", "layout": "Text and Photo", "keep_empty": True}, template=_picture_slot_template())
+    with pytest.raises(P.PptxError, match="set_image"):
+        _edit(prs, {"op": "set_text", "slide": 1, "shape": "ph:13", "text": "words"})
+
+
+def test_set_image_fills_an_empty_placeholder(tmp_path):
+    _picture(tmp_path / "wide.png", (1600, 900))
+    prs = _deck({"title": "x", "layout": "Text and Photo", "keep_empty": True}, template=_picture_slot_template())
+    edited, report = _edit(prs, {"op": "set_image", "slide": 1, "shape": "ph:13", "image": "wide.png"},
+                           image_root=_finder(tmp_path))
+    assert _pictures(edited.slides[0])[0].placeholder_format.idx == 13
+    assert report.counts["images changed"] == 1
+
+
+def test_set_image_swaps_the_picture_and_keeps_its_place(tmp_path):
+    _picture(tmp_path / "old.png", (800, 400))
+    Image.new("RGB", (800, 400), (0, 200, 0)).save(tmp_path / "new.png")
+    prs = _deck({"title": "x", "images": [{"image": "old.png", "alt": "The old one"}]}, image_root=_finder(tmp_path))
+    before = _pictures(prs.slides[0])[0]
+    place = (before.left, before.top, before.width, before.height)
+    edited, _ = _edit(prs, {"op": "set_image", "slide": 1, "shape": before.shape_id, "image": "new.png"},
+                      image_root=_finder(tmp_path))
+    after = _pictures(edited.slides[0])[0]
+    assert (after.left, after.top, after.width, after.height) == place
+    assert after.image.blob == (tmp_path / "new.png").read_bytes()
+    assert P._alt_text(after) == ""  # the old words described the old picture
+    assert sum("/media/" in name for name in _parts(edited)) == 1
+
+
+def test_set_image_shows_a_different_shape_whole_inside_the_old_frame(tmp_path):
+    _picture(tmp_path / "wide.png", (800, 400))
+    _picture(tmp_path / "tall.png", (400, 800))
+    prs = _deck({"title": "x", "image": "wide.png"}, image_root=_finder(tmp_path))
+    before = _pictures(prs.slides[0])[0]
+    old_width, old_height = before.width, before.height
+    edited, _ = _edit(prs, {"op": "set_image", "slide": 1, "shape": before.shape_id, "image": "tall.png", "alt": "Tall"},
+                      image_root=_finder(tmp_path))
+    after = _pictures(edited.slides[0])[0]
+    assert abs(after.height - old_height) < 2 and after.width < old_width
+    assert P._alt_text(after) == "Tall"
+    assert "stretched_picture" not in _issues(edited)
+
+
+def test_set_image_keeps_a_cropped_picture_cropped(tmp_path):
+    _picture(tmp_path / "wide.png", (800, 400))
+    _picture(tmp_path / "other.png", (1000, 1000))
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "wide.png", "fit": "cover", "x": 1, "y": 2, "width": 2, "height": 2},
+                      image_root=_finder(tmp_path))
+    picture = _pictures(edited.slides[0])[0]
+    edited, _ = _edit(edited, {"op": "set_image", "slide": 1, "shape": picture.shape_id, "image": "other.png"}, image_root=_finder(tmp_path))
+    picture = _pictures(edited.slides[0])[0]
+    assert picture.crop_left == 0 and picture.width == picture.height == P.Inches(2)
+
+
+def test_set_image_refuses_what_it_cant_replace(tmp_path):
+    _picture(tmp_path / "p.png")
+    prs = _deck({"title": "x", "body": "Words"})
+    with pytest.raises(P.PptxError, match="neither a picture"):
+        _edit(prs, {"op": "set_image", "slide": 1, "shape": "title", "image": "p.png"}, image_root=_finder(tmp_path))
+    with pytest.raises(P.PptxError, match="needs `shape`"):
+        _edit(prs, {"op": "set_image", "slide": 1, "image": "p.png"}, image_root=_finder(tmp_path))
+
+
+@pytest.mark.parametrize("op", ["delete_shape", "set_image"])
+def test_a_second_picture_of_the_same_file_survives(tmp_path, op):
+    _picture(tmp_path / "p.png", (800, 400))
+    _picture(tmp_path / "other.png", (800, 401))
+    prs = _deck({"title": "x", "images": ["p.png", "p.png"]}, image_root=_finder(tmp_path))
+    first, second = _pictures(prs.slides[0])
+    assert first._element.blip_rId == second._element.blip_rId
+    change = {"op": op, "slide": 1, "shape": first.shape_id}
+    if op == "set_image":
+        change["image"] = "other.png"
+    edited, _ = _edit(prs, change, image_root=_finder(tmp_path))
+    survivor = next(p for p in _pictures(edited.slides[0]) if p.shape_id == second.shape_id)
+    assert survivor.image.size == (800, 400)
+
+
+# ── Pictures: captions, alt text, read and check ─────────────────────
+
+
+def _caption(slide, picture):
+    return next(s for s in slide.shapes if s.name == f"Caption {picture.shape_id}")
+
+
+def test_a_caption_sits_under_its_picture_and_stays_on_the_slide(tmp_path):
+    _picture(tmp_path / "wide.png", (1600, 900))
+    prs = _deck({"title": "x", "images": [{"image": "wide.png", "caption": "Source: NASA"}]}, image_root=_finder(tmp_path))
+    slide = prs.slides[0]
+    picture = _pictures(slide)[0]
+    caption = _caption(slide, picture)
+    assert caption.text_frame.text == "Source: NASA"
+    assert caption.top >= picture.top + picture.height
+    assert caption.top + caption.height <= prs.slide_height
+    assert caption.text_frame.paragraphs[0].runs[0].font.size == Pt(12)
+    assert "overlap" not in _issues(prs) and "stretched_picture" not in _issues(prs)
+
+
+def test_captions_keep_up_when_pictures_share_or_move_or_go(tmp_path):
+    _picture(tmp_path / "a.png", (1600, 900))
+    _picture(tmp_path / "b.png", (1600, 900))
+    prs = _deck({"title": "x", "images": [{"image": "a.png", "caption": "First"}, {"image": "b.png", "caption": "Second"}]},
+                image_root=_finder(tmp_path))
+    slide = prs.slides[0]
+    a, b = _pictures(slide)
+    for picture in (a, b):
+        caption = _caption(slide, picture)
+        assert caption.top == picture.top + picture.height + P.Inches(0.05)
+        assert abs((caption.left + caption.width // 2) - (picture.left + picture.width // 2)) < 2
+    assert "overlap" not in _issues(prs)
+    edited, _ = _edit(prs, {"op": "place", "slide": 1, "shape": a.shape_id, "y": 2})
+    moved = next(p for p in _pictures(edited.slides[0]) if p.shape_id == a.shape_id)
+    assert _caption(edited.slides[0], moved).top == moved.top + moved.height + P.Inches(0.05)
+    edited, _ = _edit(edited, {"op": "delete_shape", "slide": 1, "shape": a.shape_id})
+    assert not [s for s in edited.slides[0].shapes if s.name == f"Caption {a.shape_id}"]
+
+
+def test_a_caption_on_a_full_slide_picture_stays_on_the_slide(tmp_path):
+    _picture(tmp_path / "p.png", (1600, 900))
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "p.png", "position": "full", "caption": "Credit"},
+                      image_root=_finder(tmp_path))
+    caption = _caption(edited.slides[0], _pictures(edited.slides[0])[0])
+    assert caption.top + caption.height <= edited.slide_height
+    assert "off_slide" not in _issues(edited)
+
+
+def test_read_shows_a_pictures_pixels_and_crop(tmp_path):
+    _picture(tmp_path / "wide.png", (800, 400))
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "wide.png", "fit": "cover", "x": 1, "y": 2, "width": 2, "height": 2, "alt": "A"},
+                      image_root=_finder(tmp_path))
+    line = next(line for line in P.describe_slide(edited, edited.slides[0], 1) if "picture" in line)
+    assert "800×400 px" in line and "cropped" in line and 'alt: "A"' in line
+
+
+def test_a_picture_over_text_is_a_warning_and_text_over_a_picture_isnt(tmp_path):
+    _picture(tmp_path / "p.png", (800, 800))
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_text", "slide": 1, "text": "Words", "x": 1, "y": 3, "width": 4},
+                      {"op": "add_image", "slide": 1, "image": "p.png", "x": 1, "y": 2.8, "width": 2},
+                      image_root=_finder(tmp_path))
+    assert _issues(edited)["overlap"][0].level == "warn"
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_image", "slide": 1, "image": "p.png", "x": 1, "y": 2.8, "width": 2},
+                      {"op": "add_text", "slide": 1, "text": "Words", "x": 1, "y": 3, "width": 4},
+                      image_root=_finder(tmp_path))
+    assert _issues(edited)["overlap"][0].level == "info"
+
+
+def test_a_corner_logo_beside_a_short_title_isnt_a_warning_but_over_a_long_one_is(tmp_path):
+    _picture(tmp_path / "logo.png", (400, 200))
+    logo = {"op": "add_image", "slide": 1, "image": "logo.png", "position": "top-right", "alt": "Logo"}
+    short, _ = _edit(_deck({"title": "Short"}), logo, image_root=_finder(tmp_path))
+    assert "overlap" not in _issues(short)
+    long, _ = _edit(_deck({"title": "A title that runs right the way across this slide to the far corner of it"}),
+                    logo, image_root=_finder(tmp_path))
+    assert _issues(long)["overlap"][0].level == "warn"
+
+
+def test_centred_and_right_aligned_text_is_measured_where_it_sits(tmp_path):
+    _picture(tmp_path / "logo.png", (400, 200))
+    prs = _deck({"title": "x"})
+    edited, _ = _edit(prs, {"op": "add_text", "slide": 1, "text": "Short", "x": 1, "y": 3, "width": 8, "align": "right"},
+                      {"op": "add_image", "slide": 1, "image": "logo.png", "x": 1.2, "y": 3, "width": 1},
+                      image_root=_finder(tmp_path))
+    assert "overlap" not in _issues(edited)
+    edited, _ = _edit(_deck({"title": "x"}), {"op": "add_text", "slide": 1, "text": "Short", "x": 1, "y": 3, "width": 8, "align": "right"},
+                      {"op": "add_image", "slide": 1, "image": "logo.png", "x": 8, "y": 3, "width": 1},
+                      image_root=_finder(tmp_path))
+    assert _issues(edited)["overlap"][0].level == "warn"
+
+
+def test_a_slide_with_an_unknown_key_is_refused_not_quietly_short(tmp_path):
+    with pytest.raises(P.PptxError, match="`pictures`"):
+        P.build_deck([{"title": "x", "pictures": ["a.png"]}], image_root=_finder(tmp_path))
+
+
+def test_a_duplicated_slide_keeps_its_captions_and_pictures(tmp_path):
+    _picture(tmp_path / "wide.png", (1600, 900))
+    prs = _deck({"title": "x", "images": [{"image": "wide.png", "caption": "Credit"}]}, image_root=_finder(tmp_path))
+    edited, _ = _edit(prs, {"op": "duplicate_slide", "slide": 1})
+    copy_of = edited.slides[1]
+    assert _caption(copy_of, _pictures(copy_of)[0]).text_frame.text == "Credit"
+
+
+# ── Pictures: through the tool ───────────────────────────────────────
+
+
+def _png_bytes(size=(400, 200)) -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", size, (9, 9, 9)).save(out, "PNG")
+    return out.getvalue()
+
+
+def _deck_at(root, name):
+    return P.open_deck(next(root.rglob(name)).read_bytes())
+
+
+class _NoClient:
+    async def aclose(self):
+        pass
+
+
+async def test_a_picture_can_come_from_a_link(workspace, monkeypatch):
+    from captain_claw import research_images as R
+
+    root, kw = workspace
+    asked = []
+
+    async def fake(client, url, referer="", *, allow_svg=False):
+        asked.append((url, allow_svg))
+        return _png_bytes()
+
+    monkeypatch.setattr(R, "make_client", lambda: _NoClient())
+    monkeypatch.setattr(R, "download_image", fake)
+    result = await PptxTool().execute(action="create", path="L.pptx", **kw, slides=[
+        {"title": "x", "images": [{"image": "https://example.com/a/photo.png?w=1", "alt": "A photo"}]}])
+    assert result.success, result.error
+    picture = _pictures(_deck_at(root, "L.pptx").slides[0])[0]
+    assert picture.image.size == (400, 200) and P._alt_text(picture) == "A photo"
+    assert asked == [("https://example.com/a/photo.png?w=1", True)]
+    # It's held by the deck alone: nothing stays behind in the agent's folders.
+    assert not [p for p in root.rglob("photo.png*")]
+
+
+async def test_a_link_that_wont_come_fails_the_call_and_says_why(workspace, monkeypatch):
+    from captain_claw import research_images as R
+
+    root, kw = workspace
+
+    async def fake(client, url, referer="", *, allow_svg=False):
+        return None
+
+    monkeypatch.setattr(R, "make_client", lambda: _NoClient())
+    monkeypatch.setattr(R, "download_image", fake)
+    result = await PptxTool().execute(action="create", path="L.pptx", slides=[{"title": "x", "image": "https://example.com/gone.png"}], **kw)
+    assert not result.success and "Couldn't download" in result.error
+    assert not list(root.rglob("L.pptx"))
+
+
+async def test_a_link_to_a_private_address_is_refused_by_the_real_client(workspace):
+    _, kw = workspace
+    result = await PptxTool().execute(action="create", path="L.pptx", slides=[{"title": "x", "image": "http://127.0.0.1:9/a.png"}], **kw)
+    assert not result.success and "Couldn't download" in result.error
+
+
+async def test_a_picture_web_fetch_kept_is_used_with_its_description(workspace):
+    from captain_claw import research_images as R
+
+    root, kw = workspace
+    store = R.ImageStore.session_store(root / "saved", root, "s1")
+    kept = store.save(_png_bytes(), "image/png", 400, 200, url="https://example.com/moon.png", alt="The Moon over water")
+    tool = PptxTool()
+    # By the link it came from, with no download, and by the path web_fetch showed.
+    result = await tool.execute(action="create", path="K.pptx", **kw, slides=[
+        {"title": "a", "image": "https://example.com/moon.png"}, {"title": "b", "image": kept.shown}])
+    assert result.success, result.error
+    prs = _deck_at(root, "K.pptx")
+    for slide in prs.slides:
+        assert P._alt_text(_pictures(slide)[0]) == "The Moon over water"
+    edited = await tool.execute(action="edit", path=str(next(root.rglob("K.pptx"))), edits=[
+        {"op": "set_alt", "slide": 1, "shape": _pictures(prs.slides[0])[0].shape_id, "text": "Mine"}], **kw)
+    assert edited.success
+
+
+async def test_an_svg_is_drawn_and_can_arrive_by_link(workspace, monkeypatch):
+    from captain_claw import research_images as R
+    from captain_claw.tools import pptx_tool as T
+
+    root, kw = workspace
+    drawn = []
+
+    async def draw(data, name):
+        drawn.append(name)
+        return _png_bytes((600, 300))
+
+    async def fake(client, url, referer="", *, allow_svg=False):
+        return b'<svg xmlns="http://www.w3.org/2000/svg" width="2" height="1"/>'
+
+    monkeypatch.setattr(T, "_draw_svg", draw)
+    monkeypatch.setattr(R, "make_client", lambda: _NoClient())
+    monkeypatch.setattr(R, "download_image", fake)
+    (root / "saved" / "logo.svg").write_text('<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"/>')
+    result = await PptxTool().execute(action="create", path="S.pptx", **kw, slides=[
+        {"title": "a", "image": "saved/logo.svg"}, {"title": "b", "image": "https://example.com/mark.svg"}])
+    assert result.success, result.error
+    prs = _deck_at(root, "S.pptx")
+    assert all(_pictures(s)[0].image.size == (600, 300) for s in prs.slides)
+    assert drawn == ["logo.svg", "mark.svg"]
+
+
+async def test_two_svgs_of_one_name_stay_two_and_a_repeat_is_drawn_once(workspace, monkeypatch):
+    from captain_claw.tools import pptx_tool as T
+
+    root, kw = workspace
+    drawn = []
+
+    async def draw(data, name):
+        drawn.append(data)
+        return _png_bytes((100 + len(drawn) * 100, 100))
+
+    monkeypatch.setattr(T, "_draw_svg", draw)
+    for folder, width in (("a", 1), ("b", 2)):
+        (root / "saved" / folder).mkdir()
+        (root / "saved" / folder / "logo.svg").write_text(f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}"/>')
+    result = await PptxTool().execute(action="create", path="T.pptx", **kw, slides=[
+        {"title": "1", "image": "saved/a/logo.svg"}, {"title": "2", "image": "saved/b/logo.svg"}, {"title": "3", "image": "saved/a/logo.svg"}])
+    assert result.success, result.error
+    sizes = [_pictures(s)[0].image.size for s in _deck_at(root, "T.pptx").slides]
+    assert sizes == [(200, 100), (300, 100), (200, 100)] and len(drawn) == 2
+
+
+async def test_a_picture_from_a_shared_folder_goes_in(workspace, monkeypatch):
+    from captain_claw import vfs
+
+    root, kw = workspace
+    shared = root / "shared-photo.png"
+    _picture(shared)
+    monkeypatch.setattr(vfs, "resolve_vfs_path", lambda path, **_: shared)
+    monkeypatch.setattr("captain_claw.tools.docx_tool.resolve_vfs_path", lambda path, **_: shared)
+    result = await PptxTool().execute(action="create", path="V.pptx", slides=[{"title": "x", "image": "vfs:team/shared-photo.png"}], **kw)
+    assert result.success, result.error
+    assert _pictures(_deck_at(root, "V.pptx").slides[0])
+
+
+async def test_an_svg_that_cant_be_drawn_says_what_to_do(workspace, monkeypatch):
+    from captain_claw.tools import pptx_tool as T
+
+    root, kw = workspace
+
+    async def draw(data, name):
+        raise ImportError("no playwright")
+
+    monkeypatch.setattr(T, "_draw_svg", draw)
+    (root / "saved" / "logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"/>')
+    result = await PptxTool().execute(action="create", path="S.pptx", slides=[{"title": "a", "image": "saved/logo.svg"}], **kw)
+    assert not result.success and "visualize" in result.error
+
+
+def test_svg_page_sizes_up_and_sets_a_viewbox():
+    from captain_claw.tools.pptx_tool import _svg_page
+
+    def inner(html):
+        return base64.b64decode(html.split("base64,")[1].split('"')[0])
+
+    html, width, height = _svg_page(b'<svg xmlns="http://www.w3.org/2000/svg" width="100px" height="50"/>', "a.svg")
+    assert (width, height) == (2400, 1200)
+    root = etree.fromstring(inner(html))
+    assert root.get("viewBox") == "0 0 100.0 50.0" and root.get("width") == "2400"
+    html, width, height = _svg_page(b'<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 10 20"/>', "b.svg")
+    assert (width, height) == (1200, 2400)
+    with pytest.raises(P.PptxError, match="isn't an SVG"):
+        _svg_page(b"<svg", "c.svg")
+
+
+async def test_a_picture_is_found_where_the_deck_itself_would_be(workspace):
+    root, kw = workspace
+    run = root / "run"
+    run.mkdir()
+    _picture(run / "chart.png")
+    kw = {**kw, "_workflow_run_dir": run}
+    result = await PptxTool().execute(action="create", path="R.pptx", slides=[{"title": "x", "image": "chart.png"}], **kw)
+    assert result.success, result.error
+
+
+async def test_a_picture_a_tool_registered_is_found_by_its_short_name(workspace):
+    root, kw = workspace
+    media = root / "saved" / "media" / "s1"
+    media.mkdir(parents=True)
+    _picture(media / "drawn.png")
+
+    class Registry:
+        def resolve(self, path):
+            return str(media / "drawn.png") if path == "drawn.png" else None
+
+    result = await PptxTool().execute(action="create", path="G.pptx", slides=[{"title": "x", "image": "drawn.png"}],
+                                      **kw, _file_registry=Registry())
+    assert result.success, result.error
+
+
+async def test_a_member_cant_put_in_a_picture_they_may_not_read(workspace, monkeypatch):
+    from captain_claw import speaker
+    from captain_claw.tools import docx_tool, pptx_tool as T
+
+    root, kw = workspace
+    _picture(root / "saved" / "secret.png")
+    member = SimpleNamespace(display_name="A member")
+    monkeypatch.setattr(docx_tool, "_member", lambda: member)
+    monkeypatch.setattr(T, "_member", lambda: member)
+    monkeypatch.setattr(speaker, "path_allowed", lambda path: False)
+    monkeypatch.setattr(speaker, "member_may_write", lambda path: True)
+    result = await PptxTool().execute(action="create", path="M.pptx", slides=[{"title": "x", "image": str(root / "saved" / "secret.png")}], **kw)
+    assert not result.success and "Can't read the picture" in result.error
+
+
+async def test_a_confined_agent_cant_put_in_a_picture_outside_its_folders(workspace, monkeypatch):
+    from captain_claw import deck_confine
+
+    root, kw = workspace
+    _picture(root / "saved" / "outside.png")
+    monkeypatch.setattr(deck_confine, "active", lambda: True)
+    monkeypatch.setattr(deck_confine, "allowed", lambda path, how: False)
+    result = await PptxTool().execute(action="create", path="C.pptx", slides=[{"title": "x", "image": str(root / "saved" / "outside.png")}], **kw)
+    assert not result.success and "Can't read the picture" in result.error
