@@ -559,6 +559,7 @@ function buildSteps({ name, phone, authEnabled, sharingEnabled, info }: {
     <><B>Info</B> (the ⓘ {phone ? 'at the top' : 'next to Settings'}) shows your plan and limits, the models your agents run on, and what they know about you.</>,
     <><B>Settings</B> holds the light and dark theme, Connections, Profile{authEnabled ? ' and Sign out' : ''}.</>,
     <><B>The bell</B> tells you when an agent finishes something or needs you.</>,
+    <><B>Groups</B> keep your agents tidy: {phone ? <>press an agent's <B>⋯</B> → <B>Group</B></> : <>drag an agent onto a group, or press its <B>⋯</B> → <B>Group</B></>}. <B>New group</B> starts one.</>,
   ]
   if (authEnabled) tips.push(<><B>Daily limits:</B> your plan allows a number of messages and some AI usage each day. The line above the message box shows what's left; it starts over every day at midnight UTC.</>)
   if (sharingEnabled) tips.push(<><B>Shared with you:</B> agents a colleague shares show “Shared by …” in your list. You can leave one any time.</>)
