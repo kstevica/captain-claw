@@ -1314,7 +1314,8 @@ function KioskConnectionsDialog({ initialTab, onClose }: { initialTab?: Connecti
 //
 // About me / my company / my standing preferences — what every agent working
 // for this user receives. Long-form text, so closing asks before it drops an
-// unsaved edit.
+// unsaved edit. As wide as the widest dialogs: the page puts its panels side by
+// side when it has the room.
 
 function KioskProfileDialog({ onClose }: { onClose: () => void }) {
   const dirty = useRef(false)
@@ -1323,13 +1324,15 @@ function KioskProfileDialog({ onClose }: { onClose: () => void }) {
     onClose()
   }, [onClose])
   return (
-    <KioskDialog label="Profile" onClose={close}>
+    <KioskDialog label="Profile" widest onClose={close}>
       <ProfilePage kiosk onDirtyChange={(d) => { dirty.current = d }} />
     </KioskDialog>
   )
 }
 
-function KioskDialog({ label, onClose, children }: { label: string; onClose: () => void; children: ReactNode }) {
+function KioskDialog({ label, widest = false, onClose, children }: {
+  label: string; widest?: boolean; onClose: () => void; children: ReactNode
+}) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
@@ -1341,7 +1344,7 @@ function KioskDialog({ label, onClose, children }: { label: string; onClose: () 
       <div
         role="dialog"
         aria-label={label}
-        className="relative flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 shadow-2xl wide:h-[85vh] wide:max-w-3xl wide:rounded-xl wide:border wide:border-zinc-800"
+        className={`relative flex h-[100dvh] w-full flex-col overflow-hidden bg-zinc-950 shadow-2xl wide:rounded-xl wide:border wide:border-zinc-800 ${widest ? 'wide:h-[88vh] wide:max-w-6xl' : 'wide:h-[85vh] wide:max-w-3xl'}`}
         onClick={(e) => e.stopPropagation()}
       >
         <button
