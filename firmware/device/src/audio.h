@@ -32,8 +32,9 @@ void click(bool low = false);
 
 // ── microphone ──
 void micStart();
-// Each finished block of 16 kHz mono samples goes to `sink` (called from loop()).
-// Returns the last block's peak level 0..100 (for the on-screen meter).
+// Each finished block of 16 kHz mono samples goes to `sink` (called from loop();
+// a task keeps the mic recording meanwhile, so a loop held up for up to 4 s
+// loses nothing). Returns the last block's peak level 0..100 (for the on-screen meter).
 int micPoll(void (*sink)(const int16_t* samples, size_t count));
 // Stops recording and flushes the blocks still in flight to `sink`.
 void micStop(void (*sink)(const int16_t* samples, size_t count));
@@ -41,6 +42,7 @@ bool micActive();
 // When the mic last heard a voice (kVoiceRun loud blocks in a row, past its
 // first 0.3 s), in millis(); 0 = not since micStart().
 uint32_t micVoiceMs();
+bool micBehind();  // the loop has blocks still to take: micVoiceMs() isn't up to date
 
 // ── speaker (one stream at a time, PCM s16le mono) ──
 // The streams of one answer (its speech, then any sound the agent made) are
@@ -61,6 +63,7 @@ bool holdWanted();
 void playPoll();                           // keep the speaker fed; call from loop()
 bool playing();                            // a stream is buffered or sounding (or held by pause())
 bool sounding();                           // the speaker is actually outputting it
+int speechDryRuns();                       // how many times this clip ran out before its end: the link fell behind
 // The answer's speech (its sounds up to markSpeechEnd(), which the deck's
 // speech_end asks for): the sample in it the speaker is at now (the gapless
 // estimate the mouth uses), how many it has (so far, or in all once it has

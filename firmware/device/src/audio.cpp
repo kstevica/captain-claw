@@ -6,16 +6,23 @@
 
 namespace audio {
 
-// ── microphone: a small ring of blocks; M5Unified fills up to two at once ──
-static constexpr size_t kBlock = 512;  // 32 ms at 16 kHz
-static constexpr int kRing = 6;
-static int16_t* micBuf = nullptr;      // kRing * kBlock samples
-static int fifo[kRing];                // submitted block indices, oldest first
-static int fifoLen = 0;
-static int nextBlock = 0;
+// ── microphone: a ring of blocks in PSRAM ──
+// M5Unified fills up to two blocks at once, so whoever hands it the next can't be
+// away for more than about 64 ms, and the main loop often is: a frame on the round
+// screen, or the socket on a weak link. What it misses is a hole in what was said.
+// So a small task keeps the mic supplied, and the loop takes the blocks as it gets
+// to them, a few seconds late if it must.
+static constexpr size_t kBlock = 512;      // 32 ms at 16 kHz
+static constexpr uint32_t kRing = 125;     // blocks: 4 s
+static constexpr uint32_t kCatchUp = 8;    // blocks a pass of the loop takes at most (it has other work)
+static constexpr uint32_t kSettle = 10;    // blocks: the mic's start-up, 0.3 s
+static int16_t* micBuf = nullptr;          // kRing * kBlock samples
+// Blocks since micStart(), counted up: given to the mic, filled by it, taken by the loop.
+static volatile uint32_t blocksAsked = 0, blocksDone = 0, blocksTaken = 0;
+static volatile bool feedOn = false, feeding = false;
 static bool micOn = false;
 static int lastLevel = 0;
-static uint32_t micStartMs = 0, voiceMs = 0;
+static uint32_t voiceMs = 0;
 static int floorPeak = 0, maxPeak = 0;  // this recording's quietest and loudest block so far
 static int loudRun = 0;  // loud blocks in a row (kVoiceRun of them = a voice)
 
@@ -45,6 +52,8 @@ static bool onHold = false;               // pause(): the stream stays open, not
 static size_t firstEnd = 0;               // where the clip's speech ended (markSpeechEnd)…
 static bool firstEnded = false;           // …once it has
 static bool finished = false;             // it played to its end by itself (takeFinished())
+static bool refilling = false;            // it ran dry: waiting for more before going on
+static int dryRuns = 0;                   // how many times, in this clip
 
 // ── a line spoken aside: its own small buffer and speaker channel ──
 static constexpr size_t kAsideCap = 6 * 24000;  // samples (6 s at 24 kHz)
@@ -71,7 +80,7 @@ static inline int16_t shape(int16_t s) {
 void setBoost(uint8_t db) { boostGain = powf(10.0f, db / 20.0f); }
 
 void begin(uint8_t volume, uint8_t boostDb) {
-  micBuf = (int16_t*)heap_caps_malloc(kRing * kBlock * sizeof(int16_t), MALLOC_CAP_8BIT);
+  micBuf = (int16_t*)heap_caps_malloc(kRing * kBlock * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   playBuf = (int16_t*)heap_caps_malloc(kPlayCap * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
   M5.Speaker.setVolume(volume);
   setBoost(boostDb);
@@ -135,17 +144,35 @@ void click(bool low) {
   M5.Speaker.tone(low ? 1047 : 1319, 60, 1);  // C6 / E6
 }
 
-static void submitNext() {
-  int16_t* dst = micBuf + nextBlock * kBlock;
-  if (M5.Mic.record(dst, kBlock, kMicRate)) {
-    fifo[fifoLen++] = nextBlock;
-    nextBlock = (nextBlock + 1) % kRing;
+// The mic's next blocks, while it has room for them and the ring holds no more
+// than the loop can still take.
+static void feedMic() {
+  size_t inflight = M5.Mic.isRecording();
+  blocksDone = blocksAsked - inflight;
+  while (inflight < 2 && blocksAsked - blocksTaken < kRing &&
+         M5.Mic.record(micBuf + blocksAsked % kRing * kBlock, kBlock, kMicRate)) {
+    blocksAsked = blocksAsked + 1;
+    ++inflight;
   }
 }
 
-static void drainDone(size_t inflight, void (*sink)(const int16_t*, size_t)) {
-  while (fifoLen > (int)inflight) {
-    const int16_t* blk = micBuf + fifo[0] * kBlock;
+static void micFeedLoop(void*) {
+  while (feedOn) {
+    feedMic();
+    vTaskDelay(pdMS_TO_TICKS(8));  // a quarter of a block
+  }
+  feeding = false;
+  vTaskDelete(nullptr);
+}
+
+static void stopFeeding() {
+  feedOn = false;
+  for (uint32_t t0 = millis(); feeding && millis() - t0 < 200;) delay(1);
+}
+
+static void drainDone(void (*sink)(const int16_t*, size_t), uint32_t most) {
+  while (blocksTaken != blocksDone && most--) {
+    const int16_t* blk = micBuf + blocksTaken % kRing * kBlock;
     int peak = 0;
     for (size_t i = 0; i < kBlock; ++i) peak = max(peak, abs((int)blk[i]));
     lastLevel = min(100, peak * 100 / 12000);
@@ -153,7 +180,7 @@ static void drainDone(size_t inflight, void (*sink)(const int16_t*, size_t)) {
     // than kVoicePeak and, once something loud has been heard, a third of
     // the way from the quietest block to the loudest — a mic whose floor sits
     // above kVoicePeak (the StickS3's) would otherwise never go quiet.
-    const bool settled = millis() - micStartMs > 300;  // (not the mic's start-up)
+    const bool settled = blocksTaken >= kSettle;  // (not the mic's start-up)
     if (settled) {
       floorPeak = floorPeak ? min(floorPeak, peak) : peak;
       maxPeak = max(maxPeak, peak);
@@ -163,45 +190,44 @@ static void drainDone(size_t inflight, void (*sink)(const int16_t*, size_t)) {
     if (loudRun >= kVoiceRun && settled) voiceMs = millis();
     sink(blk, kBlock);
     if (!micOn) return;  // the send found the link gone, and that stopped the mic (it took the rest)
-    for (int i = 1; i < fifoLen; ++i) fifo[i - 1] = fifo[i];
-    --fifoLen;
+    blocksTaken = blocksTaken + 1;
   }
 }
 
 void micStart() {
+  stopFeeding();
   playStop();
   M5.Speaker.end();
   M5.Mic.begin();
   hw::micStarted();
-  fifoLen = 0;
-  nextBlock = 0;
+  blocksAsked = blocksDone = blocksTaken = 0;
   lastLevel = 0;
-  micStartMs = millis();
   voiceMs = 0;
   loudRun = 0;
   floorPeak = maxPeak = 0;
   micOn = true;
-  submitNext();
-  submitNext();
+  feedMic();
+  // Above the loop, on its core: a loop busy with a frame or a TLS record gives way.
+  feedOn = feeding = true;
+  if (xTaskCreatePinnedToCore(micFeedLoop, "micfeed", 4096, nullptr, 3, nullptr, 1) != pdPASS) {
+    feedOn = feeding = false;  // (micPoll feeds it, as well as it can)
+  }
 }
 
 int micPoll(void (*sink)(const int16_t*, size_t)) {
   if (!micOn) return 0;
-  drainDone(M5.Mic.isRecording(), sink);
-  if (!micOn) return lastLevel;
-  while (fifoLen < 2) {
-    int before = fifoLen;
-    submitNext();
-    if (fifoLen == before) break;
-  }
+  if (!feeding) feedMic();
+  drainDone(sink, kCatchUp);
   return lastLevel;
 }
 
 void micStop(void (*sink)(const int16_t*, size_t)) {
   if (!micOn) return;
+  stopFeeding();
   uint32_t t0 = millis();
   while (M5.Mic.isRecording() && millis() - t0 < 200) delay(1);
-  drainDone(0, sink);
+  blocksDone = blocksAsked - M5.Mic.isRecording();
+  drainDone(sink, UINT32_MAX);
   M5.Mic.end();
   micOn = false;
 }
@@ -209,6 +235,8 @@ void micStop(void (*sink)(const int16_t*, size_t)) {
 bool micActive() { return micOn; }
 
 uint32_t micVoiceMs() { return voiceMs; }
+
+bool micBehind() { return micOn && blocksDone - blocksTaken > 2; }
 
 // The codec does one thing at a time: the speaker takes over from the mic.
 static void speakerOn() {
@@ -235,7 +263,9 @@ bool playBegin(uint32_t rate, uint32_t holdMs) {
     freshClip = false;
     firstEnded = false;
     firstEnd = 0;
+    dryRuns = 0;
   }
+  refilling = false;
   playRate = rate;
   playPos = writePos;
   carry = -1;
@@ -344,6 +374,16 @@ void playPoll() {
     if (queued == 0 && avail > 0) ++g_perfUnderruns;
   }
 #endif
+  // Run dry with more to come: the link fell behind the voice. A good second of it
+  // first, not the next tenth: one gap, not a stutter until the link catches up.
+  if (queued == 0 && avail < playRate / 10 && !streamEnded && !refilling) {
+    refilling = true;
+    ++dryRuns;
+  }
+  if (refilling) {
+    if (avail < playRate && !streamEnded) return;
+    refilling = false;
+  }
   if (queued < 2 && avail > 0 && (avail >= playRate / 10 || streamEnded)) {
     // Up to 2 s a piece, two pieces queued: a main loop held up by the
     // network for a second or two still finds the speaker busy. A piece
@@ -366,6 +406,8 @@ void playPoll() {
 }
 
 bool playing() { return streamOpen; }
+
+int speechDryRuns() { return dryRuns; }
 
 bool sounding() { return streamOpen && started && !onHold; }
 
@@ -457,6 +499,7 @@ void replay() {
   speakerOn();
   pieces = 0;
   playPos = 0;
+  refilling = false;
   replaying = true;
   onHold = false;
   if (!arriving) carry = -1;
