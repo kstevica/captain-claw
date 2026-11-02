@@ -1,17 +1,19 @@
-"""Crew — the coding CLIs Flight Deck can run: Claude Code, Codex, OpenCode, Pi.
+"""Crew — the coding CLIs Flight Deck can run: Claude Code, Codex, OpenCode, Crush, Pi.
 
 Each adapter says how to start one turn of the CLI headless, and how to read
 the JSON lines it prints into one shape (:class:`TurnState` and the events
 below). Nothing here reads a terminal screen: every CLI has a JSON mode and a
-session it can resume, which is all the runner needs.
+session it can resume, which is all the runner needs. Crush has no such mode for
+a turn, only for its sessions: ``crew_crush_turn.py`` makes one of those.
 
 An event is ``{"kind", "text", "tool"?}``: ``text`` (what the worker said),
 ``tool`` (a call it made), ``result`` (what the call returned), ``error``.
 
 Checked by hand on 2026-10-31 against Claude Code 2.1.316, codex-cli 0.149.1,
 OpenCode 1.19.5 and Pi 1.4.0, each run for real in a git worktree, and on
-2026-11-01 against OpenCode 2.2.5. The parsers ignore what they don't know, so
-a new event type costs a line in the log view, not a crash.
+2026-11-01 against OpenCode 2.2.5, and on 2026-11-02 against Crush 0.99.0. The
+parsers ignore what they don't know, so a new event type costs a line in the log
+view, not a crash.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -29,7 +32,7 @@ _EVENT_TEXT_MAX = 8000
 _INPUT_FIELDS = ("command", "cmd", "file_path", "filePath", "path", "pattern", "query", "url",
                  "description", "prompt")
 # Where these CLIs land when a deck's PATH doesn't name them.
-_EXTRA_BIN_DIRS = ("~/.local/bin", "~/.npm-global/bin", "~/.bun/bin", "~/.opencode/bin",
+_EXTRA_BIN_DIRS = ("~/.local/bin", "~/.npm-global/bin", "~/.bun/bin", "~/.opencode/bin", "~/go/bin",
                    "/opt/homebrew/bin", "/usr/local/bin")
 # Claude's tools that would take a worker out of its worktree, or leave work
 # running after the turn the runner is watching.
@@ -42,6 +45,8 @@ _OPENCODE_HELP: dict[tuple[str, float], str] = {}
 ROUTE_PROVIDER = "crew"
 ROUTE_PROVIDER_ANTHROPIC = "crew-anthropic"
 ROUTE_TOKEN_ENV = "CREW_MODEL_TOKEN"
+OWN_PROVIDER = "own"
+_CRUSH_TURN = Path(__file__).with_name("crew_crush_turn.py")
 # A failure that's likely gone if it's tried again: the connection, or the server having a bad moment.
 _PASSING = re.compile(
     r"econn(?:reset|refused|aborted)|etimedout|ehostunreach|enetunreach|eai_again|epipe|socket hang up|socket connection was closed"
@@ -106,6 +111,7 @@ class RunSpec:
     task_id: str = ""
     writable: tuple[str, ...] = ()  # what a sandboxed CLI must also be able to write: its environment, its caches
     add_dirs: tuple[str, ...] = ()  # folders outside its worktree it can change: Claude refuses those it isn't given
+    state_dir: str = ""  # where a CLI that would otherwise keep its sessions in the worktree keeps them
     route: Route | None = None
 
 
@@ -164,7 +170,7 @@ def _toml_str(value: str) -> str:
 
 def route_model(harness: str, route: Route) -> str:
     """The name a CLI runs a routed model under."""
-    if harness == "opencode":
+    if harness in ("opencode", "crush"):
         return f"{ROUTE_PROVIDER}/{route.model}"
     if harness == "pi":
         return f"{ROUTE_PROVIDER_ANTHROPIC if route.api == 'anthropic' else ROUTE_PROVIDER}/{route.model}"
@@ -423,6 +429,58 @@ def _opencode_parse(obj: dict, state: TurnState) -> list[dict]:
     return []
 
 
+# ── Crush ───────────────────────────────────────────────────────────────
+
+
+def _python() -> str:
+    """What runs Crush's turn. The desktop app's own executable isn't a Python to give a script to."""
+    if not getattr(sys, "_MEIPASS", None):
+        return sys.executable
+    found = shutil.which("python3", path=_search_path())
+    if not found:
+        raise OSError("A Crush turn needs Python 3 on this computer.")
+    return found
+
+
+def _crush_argv(spec: RunSpec) -> list[str]:
+    run = ["run", "--quiet"]
+    if spec.session:
+        run += ["--session", spec.session]
+    if spec.model:
+        run += ["--model", spec.model]
+    # Crush refuses to start on an effort a model doesn't list, and a model it was told about lists none.
+    # Listing some would send one on every call, chosen or not.
+    if spec.effort and not spec.route and not spec.model.startswith(f"{OWN_PROVIDER}/"):
+        run += ["--reasoning-effort", spec.effort]
+    run.append(_safe_prompt(spec.prompt))
+    return [_python(), "-I", str(_CRUSH_TURN), "crew-turn", spec.binary, spec.state_dir, spec.session, *run]
+
+
+def _crush_parse(obj: dict, state: TurnState) -> list[dict]:
+    kind = obj.get("type")
+    if kind == "session":
+        state.session = str(obj.get("uuid") or state.session)
+        state.model = str(obj.get("model") or state.model)
+        state.tokens_in = int(obj.get("prompt_tokens") or 0)
+        state.tokens_out = int(obj.get("completion_tokens") or 0)
+        state.cost_usd = float(obj.get("cost") or 0.0)
+    elif kind == "text":
+        state.final = str(obj.get("text") or "")
+        return [_ev("text", state.final)]
+    elif kind == "tool_call":
+        try:
+            payload: Any = json.loads(obj.get("input") or "{}")
+        except ValueError:
+            payload = obj.get("input")
+        return [_ev("tool", _brief_input(payload), str(obj.get("name") or "tool"))]
+    elif kind == "tool_result":
+        return [_ev("error" if obj.get("is_error") else "result", obj.get("content") or "")]
+    elif kind == "error":
+        state.error = _clip(obj.get("text") or "the turn failed", 2000)
+        return [_model_error(state.error)]
+    return []
+
+
 # ── Pi ──────────────────────────────────────────────────────────────────
 
 
@@ -485,6 +543,10 @@ HARNESSES: dict[str, Harness] = {
     "opencode": Harness(
         "opencode", "OpenCode", "opencode", "npm install -g opencode-ai",
         _opencode_argv, _opencode_parse, {"OPENCODE_DISABLE_AUTOUPDATE": "1"},
+    ),
+    "crush": Harness(
+        "crush", "Crush", "crush", "npm install -g @charmland/crush",
+        _crush_argv, _crush_parse, {"CRUSH_DISABLE_METRICS": "1", "DO_NOT_TRACK": "1"},
     ),
     "pi": Harness("pi", "Pi", "pi", "npm install -g @earendil-works/pi-coding-agent", _pi_argv, _pi_parse),
 }

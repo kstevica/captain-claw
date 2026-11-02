@@ -641,7 +641,7 @@ def _running_a_command(task: dict) -> bool:
         if len(fields) < 2 or not fields[0].isdigit() or int(fields[0]) not in family:
             continue
         words = fields[1:]
-        # A subshell of the wrapper, the CLI itself, or the CLI as an interpreter's script.
+        # A subshell of the wrapper or Crush's turn, the CLI itself, or the CLI as an interpreter's script.
         if "crew-turn" not in words and not any(Path(w).stem == own for w in words[:2]):
             return True
     return False
@@ -819,7 +819,8 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
                    model=crew_harness.route_model(harness, route) if route else task.get("model") or "",
                    effort=task.get("effort") or "", task_id=task["id"],
                    writable=(*crew_env.writable_roots(task["user_id"], task["repo"], state, env), *folders.live),
-                   add_dirs=tuple(folders.live), route=route)
+                   add_dirs=tuple(folders.live), route=route,
+                   state_dir=str(crew_store.task_dir(task["user_id"], task["id"]) / "cli"))
     try:
         argv = await asyncio.to_thread(HARNESSES[harness].argv, spec)
         pid, started = await asyncio.to_thread(_spawn, task["id"], argv, task["worktree"], env, out_dir)

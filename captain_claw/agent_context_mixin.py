@@ -2810,7 +2810,7 @@ class AgentContextMixin:
             # registry. Captain never moves money; the user pays in their bank app.
             from captain_claw.tools.payments import PaymentsTool
             self.tools.register(PaymentsTool(), metadata={"requires_payments": True})
-            # Crew — runs Claude Code, Codex, OpenCode and Pi as workers. Hidden
+            # Crew — runs Claude Code, Codex, OpenCode, Crush and Pi as workers. Hidden
             # unless an admin approved the owner on their Flight Deck, refreshed
             # per turn — see the registry. Flight Deck checks it again on every call.
             from captain_claw.tools.crew import CrewTool

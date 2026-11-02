@@ -1,4 +1,4 @@
-"""`crew` tool — hand coding work to Claude Code, Codex, OpenCode or Pi and supervise it.
+"""`crew` tool — hand coding work to Claude Code, Codex, OpenCode, Crush or Pi and supervise it.
 
 The agent is the first mate: the person talks to it, and it runs the crew. Each
 task gets one of those CLIs in a git worktree of its own on Flight Deck, which
@@ -120,7 +120,7 @@ def _task_line(t: dict) -> str:
 class CrewTool(Tool):
     name = "crew"
     description = (
-        "Run coding CLIs as your crew: Claude Code, Codex, OpenCode or Pi, each in its own git worktree, "
+        "Run coding CLIs as your crew: Claude Code, Codex, OpenCode, Crush or Pi, each in its own git worktree, "
         "several at once. Use this when the user asks you to have one of them do something, or to get coding "
         "work done in parallel: fixes, features, audits, investigations. You supervise; you don't do the work "
         "yourself. 'dispatch' returns at once, and you'll be called back when a task finishes or needs a "
@@ -172,7 +172,7 @@ class CrewTool(Tool):
             },
             "harness": {
                 "type": "string",
-                "enum": ["claude", "codex", "opencode", "pi"],
+                "enum": ["claude", "codex", "opencode", "crush", "pi"],
                 "description": "dispatch, prepare_env: which CLI does the work. Use the one the user named; otherwise see 'options'.",
             },
             "brief": {

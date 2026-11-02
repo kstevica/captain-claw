@@ -36,6 +36,7 @@ datas = [
     (STATIC_DIR, os.path.join("captain_claw", "web", "static")),
     (FD_STATIC_DIR, os.path.join("captain_claw", "flight_deck", "static")),
     (INSTRUCTIONS_DIR, os.path.join("captain_claw", "instructions")),
+    (os.path.join(PKG_DIR, "flight_deck", "crew_crush_turn.py"), os.path.join("captain_claw", "flight_deck")),
 ] + collect_data_files("litellm") + collect_data_files("playwright")
 
 # NOTE: Playwright Chromium browser binaries are NOT bundled here.

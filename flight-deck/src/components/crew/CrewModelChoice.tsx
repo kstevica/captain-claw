@@ -64,7 +64,7 @@ function Options({ noun, options, id, harness, onPick }: {
         ))}
       </select>
       {!chosen && why && <p className="text-xs text-zinc-500">{why}</p>}
-      {!chosen && !why && <p className="text-xs text-zinc-500">OpenCode and Pi can talk to any of them. Claude Code talks only to servers with Anthropic's API, and Codex only to those with OpenAI's Responses API.</p>}
+      {!chosen && !why && <p className="text-xs text-zinc-500">OpenCode, Crush and Pi can talk to any of them. Claude Code talks only to servers with Anthropic's API, and Codex only to those with OpenAI's Responses API.</p>}
       {chosen && (
         <p className="text-xs text-zinc-500">
           {harness.label} calls it through Captain, and never sees its key. Its tokens count toward your daily limit, unless they're on your own key.

@@ -19,7 +19,7 @@
   POST   /fd/crew/tasks/{id}/close      tear it down (?discard=true for work that hasn't landed)
   GET    /fd/crew/models                what each CLI can run on, which can take a while to ask
   PUT    /fd/crew/models/{harness}      the model a CLI uses when a task names none
-  PUT/DELETE /fd/crew/own-model         a model server of their own, for OpenCode and Pi
+  PUT/DELETE /fd/crew/own-model         a model server of their own, for OpenCode, Crush and Pi
   POST   /fd/crew/own-model/check       can Flight Deck reach it, and what does it serve
   GET    /fd/crew/model-choices         what a worker can run on besides its CLI's own: agents' models, tiers
   GET/POST /fd/crew/llm/*               a worker's calls to that model, on its turn's key (crew_model)

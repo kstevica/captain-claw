@@ -120,7 +120,7 @@ async def test_options_list_them_with_no_key_in_sight(ready):
     assert "me: Helper's model, its-own-model, for claude" in out.content
     assert "agent:sokol: Sokol's model, sokols-model" in out.content
     assert "tier:balanced: Balanced tier, claude-test, for claude" in out.content
-    assert "tier:vision: Vision tier, gemini-test, for opencode, pi" in out.content
+    assert "tier:vision: Vision tier, gemini-test, for opencode, crush, pi" in out.content
     assert "elsewhere" not in out.content, "only the person's own agents"
     assert TEAM_KEY not in out.content and "sk-of-" not in out.content
     assert "no login yet: it needs one in Crew → Logins, or runs_on" in out.content
@@ -152,7 +152,7 @@ async def test_a_tier_of_theirs(ready):
 
 async def test_a_tier_its_cli_cant_talk_to_says_who_can(ready):
     out = await CrewTool()._do_dispatch(_Deck(), harness="claude", brief="SCENARIO:work", project="p", runs_on="tier:vision")
-    assert not out.success and "Claude Code can't talk to" in out.error and "OpenCode or Pi can" in out.error
+    assert not out.success and "Claude Code can't talk to" in out.error and "OpenCode, Crush or Pi can" in out.error
 
 
 async def test_a_tier_that_isnt_there(ready):

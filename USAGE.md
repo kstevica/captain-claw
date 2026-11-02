@@ -1501,7 +1501,7 @@ The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a
 
 ### crew — NEW in 0.8.5
 
-Run coding CLIs as your crew: Claude Code, Codex, OpenCode or Pi, each in its own git worktree on Flight Deck, several at once. The agent supervises and the CLI does the work. `dispatch` returns at once and the agent is called back when a task finishes or needs a decision, so it doesn't poll. How it all works is under [Crew](#crew-coding-agents-working-for-you--new-in-085).
+Run coding CLIs as your crew: Claude Code, Codex, OpenCode, Crush or Pi, each in its own git worktree on Flight Deck, several at once. The agent supervises and the CLI does the work. `dispatch` returns at once and the agent is called back when a task finishes or needs a decision, so it doesn't poll. How it all works is under [Crew](#crew-coding-agents-working-for-you--new-in-085).
 
 Shown only to an owner an admin approved, and Flight Deck checks that again on every call. Refused from inside a coding run or an ensemble, and for a shared agent's members.
 
@@ -1525,7 +1525,7 @@ Shown only to an owner an admin approved, and Flight Deck checks that again on e
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `action` | string | yes | One of the above |
-| `harness` | string | dispatch, prepare_env | `claude`, `codex`, `opencode` or `pi` |
+| `harness` | string | dispatch, prepare_env | `claude`, `codex`, `opencode`, `crush` or `pi` |
 | `brief` | string | dispatch | The task, complete: a worker sees only this. On `prepare_env`, anything particular about setting it up |
 | `title` | string | no | A short title |
 | `kind` | string | no | `ship` changes code on a branch (default); `scout` only investigates and reports |
@@ -5038,13 +5038,13 @@ Plans are under `/fd/agent-forge/plans`.
 
 ### Crew: coding agents working for you — NEW in 0.8.5
 
-Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to your agent ("have Codex fix the login test and Claude add dark mode"), or use the Crew page. Each task gets one of those CLIs in a git worktree of its own, several at once. Flight Deck watches them without spending tokens and tells you when one finishes or needs a decision, on the channel you asked from.
+Crew lets Captain run Claude Code, Codex, OpenCode, Crush and Pi for you. You talk to your agent ("have Codex fix the login test and Claude add dark mode"), or use the Crew page. Each task gets one of those CLIs in a git worktree of its own, several at once. Flight Deck watches them without spending tokens and tells you when one finishes or needs a decision, on the channel you asked from.
 
 **An admin approves it, per user.** On Users, open someone's row and tick Crew: which CLIs, and how many at once. It is off for everyone else. Admins, and a deck with sign-in off, can always use it. Withdrawing it stops what is running at once. Flight Deck checks the approval on every call.
 
 > **Approving someone trusts them with the server.** A worker runs commands as the same system user as Flight Deck, so it can reach what that user can, including other people's files and the deck's database. No OS sandbox holds it to its worktree yet (`docs/agent-os-sandbox-plan.md`). Codex runs in its own `workspace-write` sandbox; the others do not.
 
-**Whose account.** Each user's own: Crew → Logins. A `claude setup-token` token or an Anthropic key for Claude Code; an OpenAI key or the contents of `~/.codex/auth.json` for Codex; provider keys for OpenCode and Pi ("Your own AI keys" count too); a GitHub token for repositories and pull requests. A non-admin's worker never falls back to the deck owner's login, and its environment holds none of the deck's secrets. An admin's worker uses this computer's logins unless they saved their own.
+**Whose account.** Each user's own: Crew → Logins. A `claude setup-token` token or an Anthropic key for Claude Code; an OpenAI key or the contents of `~/.codex/auth.json` for Codex; provider keys for OpenCode, Crush and Pi ("Your own AI keys" count too); a GitHub token for repositories and pull requests. A non-admin's worker never falls back to the deck owner's login, and its environment holds none of the deck's secrets. An admin's worker uses this computer's logins unless they saved their own.
 
 **Where it works.** **A project** (a Code project's folder), **a repository address**, or, for admins, **a folder here**, on the server: name one of them. A repository address needs no login in it (a GitHub token goes in Crew → Logins). Install the CLIs on the deck's host: Crew → Logins shows which are there and the command for those that aren't.
 
@@ -5078,7 +5078,7 @@ With the last three, the CLI needs no login, and gets none. The key stays on the
 
 Your agent can do the same, when you ask it to. Say "use your own model" or "run it on the Balanced tier": the `crew` tool's `runs_on` takes `me`, `agent:<name>` or `tier:<name>`, on `dispatch` and `prepare_env`, and `options` lists them with the CLIs each works with. Entering one by hand stays on the page, so a key never goes through a chat. Your agent needs a restart to get this.
 
-A CLI can only talk to a server the way it was built to: Claude Code needs Anthropic's API, Codex needs OpenAI's Responses API, and OpenCode and Pi use OpenAI's chat API or Anthropic's. Ollama and OpenRouter have all three. The lists mark what a CLI can't use, like a Gemini tier for Claude Code. A server you enter yourself gets the benefit of the doubt: if it hasn't got the API, the worker's first call fails with that server's error. The model has to be able to call tools. The context size tells the CLI when to compact, and doesn't change the server's own setting: on Ollama, that's `OLLAMA_CONTEXT_LENGTH`.
+A CLI can only talk to a server the way it was built to: Claude Code needs Anthropic's API, Codex needs OpenAI's Responses API, and OpenCode, Crush and Pi use OpenAI's chat API or Anthropic's. Ollama and OpenRouter have all three. The lists mark what a CLI can't use, like a Gemini tier for Claude Code. A server you enter yourself gets the benefit of the doubt: if it hasn't got the API, the worker's first call fails with that server's error. The model has to be able to call tools. The context size tells the CLI when to compact, and doesn't change the server's own setting: on Ollama, that's `OLLAMA_CONTEXT_LENGTH`.
 
 **While it's quiet.** A CLI can say nothing for minutes while its model writes one long reply. After a minute with nothing new, the task's page shows one line saying what it's waiting on, and refreshes it every minute: the model writing its reply, with how long and how much has come in, a command running, or a failed call being tried again. The line goes as soon as the worker says something. `FD_CREW_WORKING_SECONDS` (60) sets how often. How much has come in is only known for a model that goes through the deck.
 
@@ -5121,11 +5121,13 @@ This doesn't isolate anything further: workers still run as the deck's system us
 
 **Free models.** OpenCode has free models that need no key, so an approved person can use it with no login at all. A model picked in OpenCode's own screen stays in that person's home, which a non-admin's worker doesn't share, so choose a default in Crew → Logins or name one on a task. With no key and no model chosen, a task is refused rather than left to OpenCode's own pick: your code goes to whichever model runs, and [they differ in what happens to it](https://opencode.ai/docs/zen/).
 
-**Your own model.** To run OpenCode or Pi on a server of your own, like llama.cpp or Ollama, fill in **Your own model** in Crew → Logins: its OpenAI-compatible address, its key if it needs one, and the model name. **Check connection** shows whether Flight Deck can reach it and what it serves. Your tasks then run on it as `own/<model>`, unless your default or the task names another. The server has to be reachable from the computer running Flight Deck, and able to call tools. The key is stored encrypted and reaches a worker only in the environment of its run, so it's in no file. A task naming a model OpenCode doesn't list is refused, and told which ones it can use.
+**Your own model.** To run OpenCode, Crush or Pi on a server of your own, like llama.cpp or Ollama, fill in **Your own model** in Crew → Logins: its OpenAI-compatible address, its key if it needs one, and the model name. **Check connection** shows whether Flight Deck can reach it and what it serves. Your tasks then run on it as `own/<model>`, unless your default or the task names another. The server has to be reachable from the computer running Flight Deck, and able to call tools. The key is stored encrypted and reaches a worker only in the environment of its run, so it's in no file. A task naming a model OpenCode doesn't list is refused, and told which ones it can use.
 
 **OpenCode 2.** OpenCode 1 and 2 both work. OpenCode 2 keeps one background service per computer, on one port. A Crew task doesn't use it: each turn runs on a private server of its own, gone when the turn ends, so a service you started yourself neither gets in the way nor sees the task.
 
-**Models and limits.** The Crew page shows the model each CLI last ran on and its account's limits, like Claude's weekly limit, with what your tasks used in the last week. Your agent can tell you too. It's what the CLI reported at its last run, so it's as old as that run: nothing is asked for it and nothing is spent. Claude Code reports both, and Pi its model. Codex and OpenCode report neither.
+**Crush.** [Crush](https://github.com/charmbracelet/crush) is an admin's to install, like the others (`brew install charmbracelet/tap/crush` or `npm install -g @charmland/crush`), and its license is Charm's own, the [FSL](https://github.com/charmbracelet/crush/blob/main/LICENSE.md), so check it if you offer your deck to customers. Someone already approved for Crew needs it ticked in their approval before they can use it. It runs on your provider keys, on your own model or on a model through Flight Deck; an admin's tasks can also use this computer's `crush login`. Name a model as `provider/model`, like `anthropic/claude-sonnet-4-5`, or leave it to Crush, which then picks a default for the first provider you have a key for. A name it doesn't know ends the turn with that error. Crush only reports what's happening through its saved session, so the page shows each step a few seconds after it happens, and a message once it's complete. Its token count is the size of its last call, not everything the task used, so it reads low. The cost is right when Crush knows the model's price. An effort level does nothing on your own model, or on one through Flight Deck.
+
+**Models and limits.** The Crew page shows the model each CLI last ran on and its account's limits, like Claude's weekly limit, with what your tasks used in the last week. Your agent can tell you too. It's what the CLI reported at its last run, so it's as old as that run: nothing is asked for it and nothing is spent. Claude Code reports both, and Crush and Pi their model. Codex and OpenCode report neither.
 
 **Working on Captain itself.** Point a task at this deck's repository or your fork, and land it through a pull request as usual. Once it's merged, **Console → Updates** installs it, or your agent asks you to Approve that with `crew action=update_deck`. See [Updating the deck](#updating-the-deck--new-in-085).
 
@@ -5141,7 +5143,7 @@ This doesn't isolate anything further: workers still run as the deck's system us
 | `FD_CREW_MAX_RUNNING` | Workers running at once on this deck (default 8). |
 | `FD_CREW_STALL_MINUTES` | Silence before you're told a worker seems stuck (default 15). It keeps running. |
 | `FD_CREW_MAX_TURN_HOURS` | The longest one turn may run (default 6). |
-| `FD_CREW_CLAUDE_BIN`, `FD_CREW_CODEX_BIN`, `FD_CREW_OPENCODE_BIN`, `FD_CREW_PI_BIN` | Where a CLI is, if Flight Deck can't find it. |
+| `FD_CREW_CLAUDE_BIN`, `FD_CREW_CODEX_BIN`, `FD_CREW_OPENCODE_BIN`, `FD_CREW_CRUSH_BIN`, `FD_CREW_PI_BIN` | Where a CLI is, if Flight Deck can't find it. |
 
 ### The simple layout and kiosk mode — NEW in 0.8.0
 
@@ -6175,7 +6177,7 @@ Flight Deck uses environment variables:
 | `FD_CREW_CLAUDE_PERMISSION` | `auto` | **NEW in 0.8.5.** Claude Code's permission mode for workers: `auto`, `acceptEdits` or `bypassPermissions` |
 | `FD_CREW_MAX_RUNNING` / `FD_CREW_MAX_TURN_HOURS` / `FD_CREW_STALL_MINUTES` | `8` / `6` / `15` | **NEW in 0.8.5.** Workers at once on this deck; the longest one turn may run; silence before you're told a worker seems stuck |
 | `FD_CREW_WORKING_SECONDS` / `FD_CREW_MODEL_SILENCE_SECONDS` / `FD_CREW_ERROR_WAIT_SECONDS` / `FD_CREW_RETRY_WAIT_SECONDS` | `60` / `300` / `300` / `20` | **NEW in 0.8.5.** How often the still-working line refreshes; how long a model server through the deck can say nothing; how long a CLI gets to show it's past a failed call; the first wait between tries |
-| `FD_CREW_CLAUDE_BIN`, `FD_CREW_CODEX_BIN`, `FD_CREW_OPENCODE_BIN`, `FD_CREW_PI_BIN` | found on `PATH` | **NEW in 0.8.5.** Where a CLI is, if Flight Deck can't find it |
+| `FD_CREW_CLAUDE_BIN`, `FD_CREW_CODEX_BIN`, `FD_CREW_OPENCODE_BIN`, `FD_CREW_CRUSH_BIN`, `FD_CREW_PI_BIN` | found on `PATH` | **NEW in 0.8.5.** Where a CLI is, if Flight Deck can't find it |
 | `FD_UPDATE_REPO` / `FD_UPDATE_POLL_S` / `FD_UPDATE_COUNTDOWN_S` / `FD_UPDATE_BOOT_TIMEOUT_S` | worked out / `900` / `120` / `300` | **NEW in 0.8.5.** [Updating the deck](#updating-the-deck--new-in-085): the checkout; how often it looks; how long everyone gets before the restart; how long the new version gets to come up |
 
 A deck on more than one person's network: see [docs/team-deployment.md](docs/team-deployment.md) for the full checklist (`FD_AUTH_ENABLED`, `FD_JWT_SECRET`, `FD_LOCKDOWN`, `FD_AGENT_SHARED_SECRET`, `FD_GLASSES_BRIDGE_TOKEN`, …).

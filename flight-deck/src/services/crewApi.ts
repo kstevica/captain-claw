@@ -1,5 +1,5 @@
 /**
- * Crew — coding agents (Claude Code, Codex, OpenCode, Pi) run for a user, each in
+ * Crew — coding agents (Claude Code, Codex, OpenCode, Crush, Pi) run for a user, each in
  * a git worktree of its own, on an admin's approval
  * (`captain_claw/flight_deck/crew_routes.py`). Every read is the caller's own.
  */
@@ -11,6 +11,7 @@ export const CREW_AGENTS = [
   { id: 'claude', label: 'Claude Code' },
   { id: 'codex', label: 'Codex' },
   { id: 'opencode', label: 'OpenCode' },
+  { id: 'crush', label: 'Crush' },
   { id: 'pi', label: 'Pi' },
 ] as const
 
