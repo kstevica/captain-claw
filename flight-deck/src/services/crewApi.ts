@@ -184,7 +184,7 @@ export interface CrewEvent {
   n: number
   at: number
   turn: number
-  kind: 'text' | 'tool' | 'result' | 'error' | 'note' | 'turn' | 'status'
+  kind: 'text' | 'tool' | 'result' | 'error' | 'note' | 'turn' | 'status' | 'working'
   text: string
   tool?: string
   status?: string

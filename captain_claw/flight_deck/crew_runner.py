@@ -134,6 +134,11 @@ _SETUP_REMINDER = ("\n\nAs before: this is the project's main folder, so don't c
 _INTERRUPTED = ("The person stopped your last turn to tell you this. Whatever you were running then was stopped and may not have "
                 "finished, so check it before relying on it. Your files are as you left them.\n\n")
 
+_RETRYING = ("Your last turn was cut off because the connection to the model failed or it stopped answering. Whatever you were "
+             "running then may not have finished, so check it before relying on it. Your files are as you left them.\n\n")
+_RETRIES = 3
+_SAID_WORKING: dict[str, float] = {}  # per task: when it was last said to be still working
+
 _MODELS: dict[str, tuple[float, list[str]]] = {}  # per user: what OpenCode said it can use, and when
 _PROCS: dict[str, subprocess.Popen] = {}
 _PREPARING: dict[str, asyncio.Task] = {}  # tasks still getting their repository
@@ -157,6 +162,37 @@ def _stall_seconds() -> float:
         return max(60.0, float(os.environ.get("FD_CREW_STALL_MINUTES", 15)) * 60)
     except ValueError:
         return 900.0
+
+
+def _error_wait_seconds() -> float:
+    """How long a CLI gets to show it's past a failed model call: long enough for its own retries."""
+    try:
+        return max(5.0, float(os.environ.get("FD_CREW_ERROR_WAIT_SECONDS", 300)))
+    except ValueError:
+        return 300.0
+
+
+def _working_every_seconds() -> float:
+    """A CLI can say nothing for minutes while its model writes one long reply. How often a person hears it's alive."""
+    try:
+        return max(5.0, float(os.environ.get("FD_CREW_WORKING_SECONDS", 60)))
+    except ValueError:
+        return 60.0
+
+
+def _retry_wait_seconds(done: int) -> float:
+    """Before a turn goes again: 20 seconds, a minute, three."""
+    try:
+        first = max(0.0, float(os.environ.get("FD_CREW_RETRY_WAIT_SECONDS", 20)))
+    except ValueError:
+        first = 20.0
+    return first * 3 ** done
+
+
+def _hung_seconds(task: dict) -> float:
+    """How long it can say nothing, with no command running, before it's taken for hung. Through Flight
+    Deck its model's replies are seen moving. Without, it may be a slow local model on one long reply."""
+    return _stall_seconds() * (1 if task.get("model_source") else 3)
 
 
 def _max_turn_seconds() -> float:
@@ -587,6 +623,30 @@ def _still_running(pids: set[int] | list[int]) -> list[int]:
     return out
 
 
+def _running_a_command(task: dict) -> bool:
+    """Is anything running under it besides the CLI? Then its silence is that command's. Not sure means yes:
+    this only decides whether a worker can be taken for hung."""
+    pid = int(task.get("pid") or 0)
+    family = _descendants(pid) if pid else set()
+    if not family:
+        return False
+    try:
+        listing = subprocess.run(["ps", "-axo", "pid=,args="], capture_output=True, text=True, timeout=10,
+                                 stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return True
+    own = HARNESSES[task["harness"]].binary if task["harness"] in HARNESSES else ""
+    for line in listing.splitlines():
+        fields = line.split()
+        if len(fields) < 2 or not fields[0].isdigit() or int(fields[0]) not in family:
+            continue
+        words = fields[1:]
+        # A subshell of the wrapper, the CLI itself, or the CLI as an interpreter's script.
+        if "crew-turn" not in words and not any(Path(w).stem == own for w in words[:2]):
+            return True
+    return False
+
+
 async def _end_pids(pids: set[int] | list[int]) -> None:
     """Asks these to end, then insists. Nobody waits when nobody's left."""
     left = _still_running(pids)
@@ -729,8 +789,9 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
     env.update(crew_env.variables(task["user_id"], task["repo"], task["worktree"], state, env.get("PATH", "")))
     env[TASK_MARK] = task["id"]
     interrupted = bool(state.get("interrupted"))
-    if interrupted:
-        state = {k: v for k, v in state.items() if k != "interrupted"}
+    retrying = bool(state.get("retrying"))
+    if interrupted or retrying:
+        state = {k: v for k, v in state.items() if k not in ("interrupted", "retrying")}
         _store().update(task["id"], env=state)
         task = {**task, "env": state}
     await crew_attach.place(task)
@@ -750,7 +811,7 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
         prompt = f"{_first_prompt(task)}{folders.told}\n\n{said}".rstrip()
     else:
         news = f"{(folders.told or crew_vfs.NONE_LEFT).strip()}\n\n" if folders_changed else ""
-        prompt = (_INTERRUPTED if interrupted else "") + news + _next_prompt(pending, setup=task["kind"] == "setup")
+        prompt = (_INTERRUPTED if interrupted else _RETRYING if retrying else "") + news + _next_prompt(pending, setup=task["kind"] == "setup")
     turn = int(task.get("turn") or 0) + 1
     out_dir = crew_store.turn_dir(task["user_id"], task["id"], turn)
     spec = RunSpec(binary=binary, prompt=prompt, cwd=task["worktree"], git_common_dir=task.get("git_common_dir") or "",
@@ -774,7 +835,8 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
     if task.get("model") and not route:
         _store().note_seen(task["user_id"], harness, model=task["model"])
     fresh = _store().get(task["user_id"], task["id"]) or task
-    _say(fresh, "turn", f"{task['brief']}\n\n{said}".rstrip() if first else said)
+    if said or not retrying:  # going again on its own, nobody has said anything new
+        _say(fresh, "turn", f"{task['brief']}\n\n{said}".rstrip() if first else said)
     _sync_board(fresh)
 
 
@@ -795,6 +857,8 @@ async def _start_queued() -> None:
                 return
             if task["kind"] != "setup" and task["repo"] in setting_up and not (task.get("env") or {}).get("given"):
                 continue
+            if float(task.get("retry_at") or 0) > time.time():
+                continue
             uid = task["user_id"]
             # Read again under its lock: a stop or a steer may have landed since the list.
             async with _lock_for(task["id"]):
@@ -814,8 +878,10 @@ async def _start_queued() -> None:
                 total += 1
 
 
-def _drain(task: dict, *, at_end: bool = False) -> TurnState:
-    """Read what the CLI printed since last time; save the events and the offset."""
+def _drain(task: dict, *, at_end: bool = False, stopped: bool = False) -> TurnState:
+    """Read what the CLI printed since last time; save the events and the offset. A failed model call
+    it's getting past isn't shown as an error: either it does, or the watcher starts it again. And
+    what it says as it's *stopped* is about being stopped."""
     state = TurnState.from_json(task.get("turn_state"))
     path = crew_store.turn_dir(task["user_id"], task["id"], int(task.get("turn") or 1)) / "raw.jsonl"
     offset = int(task.get("offset") or 0)
@@ -837,6 +903,11 @@ def _drain(task: dict, *, at_end: bool = False) -> TurnState:
             now = time.time()
             for line in chunk[:cut + 1].split(b"\n"):
                 for event in crew_harness.parse_line(task["harness"], line, state):
+                    if event.pop("about", "") == "model":
+                        if stopped:
+                            continue
+                        if crew_harness.passing(event["text"]):
+                            event = {**event, "kind": "note", "text": f"The model's connection failed, so it's trying again: {event['text']}"}
                     events.append({"at": now, "turn": task.get("turn") or 0, **event})
             offset += cut + 1
             moved += cut + 1
@@ -871,15 +942,23 @@ async def _advance(task: dict) -> None:
     if not exit_file.exists():
         if await asyncio.to_thread(_alive, task):
             now = time.time()
+            quiet = now - max(float(task.get("last_event_at") or now), crew_model.last_heard(task["id"]))
             if now - float(task.get("turn_started_at") or now) > _max_turn_seconds():
                 await _terminate(task)
                 await _fail(task, "Stopped: this turn ran longer than the deck allows (FD_CREW_MAX_TURN_HOURS). "
                                   "Its work is still in the worktree.")
-            elif not task.get("stalled_at") and now - float(task.get("last_event_at") or now) > _stall_seconds():
+            elif quiet > _error_wait_seconds() and crew_harness.passing(state.error):
+                await _start_stuck_again(task, f"A model call failed and it hasn't got past it: {state.error}")
+            elif quiet > _hung_seconds(task) and not await asyncio.to_thread(_running_a_command, task):
+                await _start_stuck_again(task, "It has said nothing for a long time, and it isn't running anything.")
+            elif not task.get("stalled_at") and quiet > _stall_seconds():
                 _store().update(task["id"], stalled_at=now)
                 task["stalled_at"] = now
                 _say(task, "note", "No output for a while. It may be stuck, or in one long command.")
                 _spawn_notify(task, stalled=True)
+            elif now - max(float(task.get("last_event_at") or now), _SAID_WORKING.get(task["id"], 0.0)) >= _working_every_seconds():
+                _SAID_WORKING[task["id"]] = now
+                _say(task, "working", await _still_working(task, state, now))
             return
         if not exit_file.exists():
             await _end_marked(task["id"])
@@ -911,6 +990,77 @@ async def _end_group(pid: int) -> None:
         except (ProcessLookupError, PermissionError):
             return
         await asyncio.sleep(wait)
+
+
+def recent_activity(task: dict, keep: int = 12) -> list[dict]:
+    """What it's been doing lately, for an agent asking. Of the lines saying it's still working, only the newest:
+    an hour of them would push everything it did out of view."""
+    events = crew_store.read_events(task["user_id"], task["id"], after=max(0, int(task.get("events") or 0) - keep * 8))
+    return [e for i, e in enumerate(events) if e.get("kind") != "working" or i == len(events) - 1][-keep:]
+
+
+def _how_long(seconds: float) -> str:
+    if seconds < 90:
+        return f"{seconds:.0f} seconds"
+    minutes = round(seconds / 60)
+    return f"{minutes} min" if minutes < 60 else f"{minutes // 60} h {minutes % 60} min"
+
+
+async def _still_working(task: dict, state: TurnState, now: float) -> str:
+    """What a quiet worker is up to, as far as can be told from here."""
+    quiet = _how_long(now - float(task.get("last_event_at") or now))
+    call = crew_model.call_under_way(task["id"])
+    if call.get("open"):
+        took = _how_long(now - call["since"])
+        if not call["got"]:
+            what = f"waiting for the model to start answering ({took} so far)"
+        elif now - call["heard"] < _working_every_seconds():
+            what = f"the model is writing its reply ({took} so far, {max(1, round(call['got'] / 1000))} KB received)"
+        else:
+            what = f"waiting for the model, which has paused for {_how_long(now - call['heard'])}"
+    elif crew_harness.passing(state.error):
+        what = f"it's trying the model again after a failed connection ({quiet} since it last said anything)"
+    elif await asyncio.to_thread(_running_a_command, task):
+        what = f"a command or tool is running ({quiet} since it last said anything)"
+    elif task.get("model_source"):
+        what = f"nothing new to show for {quiet}"
+    else:
+        what = f"it's waiting on its model ({quiet} since it last said anything)"
+    return f"Still working on it: {what}."
+
+
+def _another_try(task: dict, why: str) -> dict[str, Any] | None:
+    """What sets it going again by itself, if it has any tries left since its last good turn."""
+    done = int(task.get("retries") or 0)
+    if done >= _RETRIES:
+        return None
+    wait = _retry_wait_seconds(done)
+    note = f"{why} Trying again in {wait:.0f} seconds ({done + 1} of {_RETRIES})."
+    return {"status": "queued", "note": note[:2000], "retries": done + 1, "retry_at": time.time() + wait,
+            "env": {**(task.get("env") or {}), "retrying": True}}
+
+
+def _out_of_tries(why: str) -> str:
+    return f"{why} Tried again {_RETRIES} times. Its work is still here: send it a message to try once more."
+
+
+async def _start_stuck_again(task: dict, why: str) -> None:
+    """A worker that isn't getting anywhere and isn't going to say so."""
+    await _terminate(task)
+    state = _drain(task, at_end=True, stopped=True)
+    fields: dict[str, Any] = {
+        "pid": 0, "pid_start": "", "evidence": await _evidence(task), "session": state.session or task.get("session") or "",
+        "tokens_in": int(task.get("tokens_in") or 0) + state.tokens_in,
+        "tokens_out": int(task.get("tokens_out") or 0) + state.tokens_out,
+        "cost_usd": float(task.get("cost_usd") or 0.0) + state.cost_usd,
+    }
+    again = _another_try(task, why)
+    if again is None:
+        _store().update(task["id"], **fields)
+        await _fail(task, _out_of_tries(why))
+        return
+    _store().update(task["id"], **fields, **again)
+    _say(_store().get(task["user_id"], task["id"]) or task, "note", again["note"])
 
 
 def _activation_said(task: dict) -> str:
@@ -955,6 +1105,15 @@ async def _finish_turn(task: dict, state: TurnState, code: int | None) -> None:
     else:
         status = "ready"
         note = note or _head(body) or "Finished."
+    if status == "failed" and code is not None and crew_harness.passing(note):
+        again = _another_try(task, note)
+        if again is not None:
+            store.update(task["id"], **fields, **again)
+            _say(store.get(task["user_id"], task["id"]) or task, "note", again["note"])
+            return
+        note = _out_of_tries(note)
+    if status != "failed":
+        fields.update(retries=0, retry_at=0)
     if pending and status != "failed":
         status = "queued"
     if task["kind"] in ("scout", "setup") and body and status != "queued":
@@ -1251,7 +1410,7 @@ async def _interrupt(task: dict) -> None:
     then. So the turn ends here and the next one resumes its session with what's waiting.
     Its files stay as they are. What it was running stops, and it's told so."""
     await _terminate(task)
-    state = _drain(task, at_end=True)
+    state = _drain(task, at_end=True, stopped=True)
     _store().update(task["id"], status="queued", note="", pid=0, pid_start="", evidence=await _evidence(task),
                     session=state.session or task.get("session") or "",
                     tokens_in=int(task.get("tokens_in") or 0) + state.tokens_in,
@@ -1289,7 +1448,7 @@ async def steer(uid: str, task_id: str, text: str, *, now: bool = False, attachm
         crew_attach.check_room(uid, task_id, attached)
         taken = crew_attach.take(uid, task_id, attached)
         said = (message[:100_000] or "Look at what's attached.") + crew_attach.note(taken)
-        fields: dict[str, Any] = {"pending": [*task["pending"], said]}
+        fields: dict[str, Any] = {"pending": [*task["pending"], said], "retries": 0, "retry_at": 0}
         if task["status"] not in ("running", "preparing"):
             # Stopped, or failed, before it had a worktree: it still has to get one.
             if task.get("repo_url") and not task.get("worktree"):
@@ -1322,7 +1481,7 @@ async def stop(uid: str, task_id: str, note: str = "Stopped.") -> dict[str, Any]
         task = _get(uid, task_id)
         if task["status"] == "running":
             await _terminate(task)
-            state = _drain(task, at_end=True)
+            state = _drain(task, at_end=True, stopped=True)
             evidence = await _evidence(task)
             _store().update(task_id, status="stopped", note=note, pid=0, pid_start="", pending=[], evidence=evidence,
                             session=state.session or task.get("session") or "",

@@ -39,6 +39,8 @@ TYPED = {"kind": "typed", "url": "http://10.0.0.9:8000/v1", "model": "local-mode
 @pytest.fixture(autouse=True)
 def _their_files_and_approval(deck, monkeypatch):
     monkeypatch.setenv("FD_DATA_DIR", str(deck["tmp"] / "fd-data"))
+    monkeypatch.setattr(crew_model, "_TRY_AGAIN_AFTER", 0.0)
+    crew_model._CALLS.clear()
     monkeypatch.setattr(crew_access, "grant_of", lambda row: ADMIN_GRANT if row and row.get("role") == "admin" else NOT_ADMIN)
 
 
@@ -484,12 +486,127 @@ async def test_a_servers_error_comes_back_without_the_key_in_it(deck, upstream):
 async def test_a_server_saying_wait_is_passed_on_so_a_cli_can(deck, upstream):
     _, replies = upstream
     busy = _reply(429, b'{"error":{"message":"slow down"}}')
-    busy.headers["retry-after"] = "7"
+    busy.headers["retry-after"] = "60"
     replies.append(busy)
     task = await _running_on(deck, TYPED)
     async with _worker(token=task["model_token"]) as worker:
         got = await worker.post("/fd/crew/llm/v1/chat/completions", json={})
-    assert got.status_code == 429 and got.headers["retry-after"] == "7"
+    assert got.status_code == 429 and got.headers["retry-after"] == "60", "that long isn't a call to hold open here"
+
+
+@pytest.mark.parametrize("status", [429, 500, 502, 503, 504, 529])
+async def test_a_server_failing_before_it_says_anything_is_asked_again(deck, upstream, status):
+    calls, replies = upstream
+    replies.append(_reply(status, b'{"error":{"message":"busy"}}'))
+    task = await _running_on(deck, TYPED)
+    async with _worker(token=task["model_token"]) as worker:
+        got = await worker.post("/fd/crew/llm/v1/chat/completions", json={})
+    assert got.status_code == 200 and len(calls) == 2, "and the worker never hears of it"
+
+
+async def test_it_stops_asking_and_says_what_the_server_said(deck, upstream):
+    calls, replies = upstream
+    replies.extend(_reply(503, b'{"error":{"message":"down for now"}}') for _ in range(5))
+    task = await _running_on(deck, TYPED)
+    async with _worker(token=task["model_token"]) as worker:
+        got = await worker.post("/fd/crew/llm/v1/chat/completions", json={})
+    assert got.status_code == 503 and "down for now" in got.text and len(calls) == crew_model._CALL_TRIES
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+async def test_asking_again_wont_change_a_refusal(deck, upstream, status):
+    calls, replies = upstream
+    replies.append(_reply(status, b'{"error":{"message":"no"}}'))
+    task = await _running_on(deck, TYPED)
+    async with _worker(token=task["model_token"]) as worker:
+        assert (await worker.post("/fd/crew/llm/v1/chat/completions", json={})).status_code == status
+    assert len(calls) == 1
+
+
+async def test_a_dropped_connection_is_asked_again(deck, monkeypatch):
+    seen = []
+
+    def flaky(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if len(seen) == 1:
+            raise httpx.ReadError("the connection went", request=request)
+        return _reply(200, b'{"id":"r"}')
+
+    monkeypatch.setattr(crew_model.httpx, "AsyncClient", lambda **kw: _REAL_CLIENT(**{**kw, "transport": httpx.MockTransport(flaky)}))
+    task = await _running_on(deck, TYPED)
+    async with _worker(token=task["model_token"]) as worker:
+        assert (await worker.post("/fd/crew/llm/v1/chat/completions", json={})).status_code == 200
+    assert len(seen) == 2
+
+
+async def test_a_server_that_says_nothing_is_hung_up_on_and_not_asked_again(deck, monkeypatch):
+    seen = []
+
+    def silent(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        raise httpx.ReadTimeout("nothing", request=request)
+
+    monkeypatch.setattr(crew_model.httpx, "AsyncClient", lambda **kw: _REAL_CLIENT(**{**kw, "transport": httpx.MockTransport(silent)}))
+    monkeypatch.setenv("FD_CREW_MODEL_SILENCE_SECONDS", "45")
+    task = await _running_on(deck, TYPED)
+    async with _worker(token=task["model_token"]) as worker:
+        got = await worker.post("/fd/crew/llm/v1/chat/completions", json={})
+    assert got.status_code == 504 and "said nothing for 45 seconds" in got.json()["error"]["message"]
+    assert len(seen) == 1, "that's already been a long wait"
+
+
+async def test_a_reply_cut_off_part_way_ends_there_for_the_cli_to_ask_again(deck, upstream, monkeypatch):
+    """What happened on a real deck: DeepSeek dropped the connection 52 seconds into a reply."""
+    _, replies = upstream
+
+    class _CutOff(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            raise httpx.ReadError("the connection went")
+
+    replies.append(httpx.Response(200, headers={"content-type": "text/event-stream"}, stream=_CutOff()))
+    warned = []
+    monkeypatch.setattr(crew_model.log, "warning", lambda *a, **k: warned.append(k))
+    person = await _a_person(deck)
+    task = await _running_on(deck, TYPED, user=person)
+    async with _worker(token=task["model_token"]) as worker:
+        got = await worker.post("/fd/crew/llm/v1/chat/completions", json={"stream": True, "messages": ["x" * 4000]})
+    assert got.status_code == 200 and got.content.startswith(b"data:") and b"[DONE]" not in got.content, "no crash, and no pretending it finished"
+    assert warned and warned[0]["error"] == "ReadError" and warned[0]["task"] == task["id"]
+    spent = await _spent_today(deck, person["id"])
+    assert spent["byok_tokens"] >= 1000, "it was never told what it used, and that isn't free"
+
+
+async def test_its_model_being_heard_from_is_seen_by_the_watcher(deck, upstream):
+    task = await _running_on(deck, TYPED)
+    assert crew_model.last_heard(task["id"]) == 0.0 and crew_model.call_under_way(task["id"]) == {}
+    async with _worker(token=task["model_token"]) as worker:
+        await worker.post("/fd/crew/llm/v1/chat/completions", json={})
+    assert crew_model.last_heard(task["id"]) > 0
+    await crew_model.asyncio.sleep(0.05)
+    call = crew_model.call_under_way(task["id"])
+    assert call["open"] == 0 and call["got"] > 0, "it knows how much came back, and that it's over"
+
+
+@pytest.mark.parametrize("status", [401, 503])
+async def test_a_call_that_failed_isnt_still_under_way(deck, upstream, status):
+    _, replies = upstream
+    replies.extend(_reply(status, b'{"error":{"message":"no"}}') for _ in range(5))
+    task = await _running_on(deck, TYPED)
+    async with _worker(token=task["model_token"]) as worker:
+        await worker.post("/fd/crew/llm/v1/chat/completions", json={})
+    assert crew_model.call_under_way(task["id"])["open"] == 0
+
+
+async def test_a_call_it_couldnt_make_isnt_either(deck, monkeypatch):
+    def down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("no", request=request)
+
+    monkeypatch.setattr(crew_model.httpx, "AsyncClient", lambda **kw: _REAL_CLIENT(**{**kw, "transport": httpx.MockTransport(down)}))
+    task = await _running_on(deck, TYPED)
+    async with _worker(token=task["model_token"]) as worker:
+        await worker.post("/fd/crew/llm/v1/chat/completions", json={})
+    assert crew_model.call_under_way(task["id"])["open"] == 0
 
 
 async def test_a_server_it_cant_reach_is_said_plainly(deck, monkeypatch):
@@ -529,9 +646,9 @@ async def test_it_says_what_a_stream_used(deck, upstream):
 
 
 @pytest.mark.parametrize("events, total", [
-    # Anthropic's: what went in with the first event, what came out with the last.
+    # Anthropic's: what went in with the first event, what came out with the last. Its cache reads don't count.
     (b'event: message_start\ndata: {"type":"message_start","message":{"usage":{"input_tokens":10,"cache_read_input_tokens":90,"cache_creation_input_tokens":5,"output_tokens":1}}}\n\n'
-     b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":30}}\n\n', 135),
+     b'event: message_delta\ndata: {"type":"message_delta","usage":{"output_tokens":30}}\n\n', 45),
     # OpenAI's Responses.
     (b'data: {"type":"response.created","response":{"usage":null}}\n\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":40,"output_tokens":2}}}\n\n', 42),
 ])
@@ -546,14 +663,71 @@ def test_a_reply_cut_off_before_it_says_is_counted_by_what_went_through():
     events = b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n' * 100
     count = crew_model._Count(stream=True, asked=8000)
     count.feed(events)
-    used = count.finish(whole=False)
+    used = count.finish()
     assert used >= 2000 and used < 8000, "not nothing: hanging up early isn't a way round the count"
     anthropic = crew_model._Count(stream=True, asked=8000)
     anthropic.feed(b'data: {"type":"message_start","message":{"usage":{"input_tokens":5,"output_tokens":1}}}\n\n')
-    assert anthropic.finish(whole=False) >= 2000, "what it says so far doesn't let it off either"
+    assert anthropic.finish() >= 2000, "what it says so far doesn't let it off either"
     said = crew_model._Count(stream=True, asked=8000)
     said.feed(b'data: {"usage":{"prompt_tokens":70,"completion_tokens":7}}\n\n')
-    assert said.finish() == 77, "and a whole reply is taken at its word"
+    assert said.finish() == 77, "and one that said is taken at its word, however quickly it hung up: Codex does"
+
+
+@pytest.mark.parametrize("usage, missed", [
+    ({"prompt_tokens": 100, "completion_tokens": 5}, 105),
+    # What a real task was charged for, on DeepSeek: a 100k history read back from its cache on every call.
+    ({"prompt_tokens": 100000, "prompt_cache_hit_tokens": 99500, "prompt_cache_miss_tokens": 500, "completion_tokens": 100}, 600),
+    ({"prompt_tokens": 100000, "prompt_tokens_details": {"cached_tokens": 99000}, "completion_tokens": 100}, 1100),
+    ({"input_tokens": 100000, "input_tokens_details": {"cached_tokens": 90000}, "output_tokens": 100}, 10100),
+    ({"input_tokens": 500, "cache_read_input_tokens": 99000, "cache_creation_input_tokens": 200, "output_tokens": 100}, 800),
+    ({"input_tokens": 500, "output_tokens": 100}, 600),
+    ({"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": None}, "completion_tokens": None}, 10),
+    ({"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 50}}, 0),
+])
+def test_only_what_missed_the_prompt_cache_counts(usage, missed):
+    """The same as an agent's call: llm.uncached_tokens."""
+    count = crew_model._Count(stream=False)
+    count.feed(json.dumps({"usage": usage}).encode())
+    assert count.finish() == missed
+
+
+def test_it_agrees_with_what_an_agent_counts():
+    from captain_claw.llm import _extract_usage, uncached_tokens
+
+    for usage in ({"prompt_tokens": 100000, "prompt_tokens_details": {"cached_tokens": 99000}, "completion_tokens": 100}, {"prompt_tokens": 70, "completion_tokens": 7}):
+        count = crew_model._Count(stream=False)
+        count.feed(json.dumps({"usage": usage}).encode())
+        assert count.finish() == uncached_tokens("openai", _extract_usage(usage))
+    count = crew_model._Count(stream=False)
+    count.feed(json.dumps({"usage": {"input_tokens": 500, "cache_read_input_tokens": 99000, "cache_creation_input_tokens": 200, "output_tokens": 100}}).encode())
+    assert count.finish() == uncached_tokens("anthropic", {"prompt_tokens": 99700, "cache_read_input_tokens": 99000, "cache_creation_input_tokens": 200, "completion_tokens": 100})
+
+
+async def test_a_cut_off_call_counts_what_it_added_not_its_whole_history(deck, upstream):
+    """Or one dropped connection late in a long session would cost a whole context."""
+    _, replies = upstream
+    person = await _a_person(deck)
+    task = await _running_on(deck, TYPED, user=person)
+    history = "x" * 400_000
+    async with _worker(token=task["model_token"]) as worker:
+        await worker.post("/fd/crew/llm/v1/chat/completions", json={"messages": [history]})
+        before = (await _spent_today(deck, person["id"]))["byok_tokens"]
+        replies.append(_reply(200, b'data: {"choices":[]}\n\n', "text/event-stream"))
+        await worker.post("/fd/crew/llm/v1/chat/completions", json={"stream": True, "messages": [history, "y" * 4000]})
+    grew = (await _spent_today(deck, person["id"]))["byok_tokens"] - before
+    assert 1000 <= grew <= 2000
+
+
+async def test_tokens_spent_stop_it_whether_or_not_the_messages_are_too(deck):
+    person = await _a_person(deck)
+    db = deck["db"]
+    assert await usage_quota.automation_blocked(person["id"]) is None
+    await db.add_daily_usage(person["id"], usage_quota.today(), messages=30)
+    assert await usage_quota.automation_blocked(person["id"]) is None, "out of messages isn't out of tokens"
+    await db.add_daily_usage(person["id"], usage_quota.today(), tokens=300_000)
+    spent = await usage_quota.automation_blocked(person["id"])
+    assert spent and spent["blocked"] == "tokens" and "AI tokens" in usage_quota.limit_text(spent)
+    assert await usage_quota.automation_blocked(deck["admin"]["id"]) is None, "an admin has no limit"
 
 
 def test_the_tokens_of_a_whole_reply():
@@ -628,7 +802,7 @@ async def test_a_day_of_tokens_spent_stops_the_teams_but_not_their_own(deck, ups
     monkeypatch.setattr(usage_quota, "automation_blocked", spent)
     async with _worker(token=team["model_token"]) as worker:
         got = await worker.post("/fd/crew/llm/v1/chat/completions", json={})
-    assert got.status_code == 403 and "tokens" in got.json()["error"]["message"], "not a 429: it would only keep trying"
+    assert got.status_code == 402 and "tokens" in got.json()["error"]["message"], "not a 429: it would only keep trying. Not a 403: Claude Code calls that failing to authenticate"
     assert not calls
     async with _worker(token=own["model_token"]) as worker:
         assert (await worker.post("/fd/crew/llm/v1/chat/completions", json={})).status_code == 200

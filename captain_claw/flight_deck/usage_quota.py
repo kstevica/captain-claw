@@ -316,7 +316,11 @@ async def automation_blocked(owner_id: str) -> dict | None:
         st = await status(get_db(), owner_id)
     except Exception:
         return None
-    return st if st["blocked"] == "tokens" else None
+    # Not by ``blocked``: it names the messages first, when both are spent.
+    tokens = st["tokens"]
+    if st["exempt"] or not tokens["limit"] or tokens["used"] < tokens["limit"]:
+        return None
+    return {**st, "blocked": "tokens"}
 
 
 async def record_tokens(db, user_id: str, tokens: int, *, byok: bool = False) -> None:
