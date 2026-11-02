@@ -51,9 +51,9 @@
 #endif
 
 #if defined(PAPER_B)
-#define FW_VERSION "1.0.30"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
+#define FW_VERSION "1.0.31"  // the PaperColor the "B" way (ui_paper_b.cpp): its own line of versions
 #else
-#define FW_VERSION "0.20.3"
+#define FW_VERSION "0.20.4"
 #endif
 
 // The loop task's stack (Arduino's default is 8 KB). The smooth fonts on the
@@ -548,6 +548,30 @@ static void noteBoot() {
 }
 #endif
 
+// The slowest pass of the main loop over the last minute or two. Everything waits
+// for it (buttons, the screen, the speaker's next piece), so when the device feels
+// stuck this is how long it was; Status and the deck's log show it.
+static uint32_t slowPassNow = 0, slowPassLast = 0, slowPassAt = 0;
+
+static void notePass(uint32_t ms) {
+  if (millis() - slowPassAt > 60000) {
+    slowPassAt = millis();
+    slowPassLast = slowPassNow;
+    slowPassNow = 0;
+  }
+  slowPassNow = max(slowPassNow, ms);
+}
+
+static uint32_t slowestPassMs() { return max(slowPassNow, slowPassLast); }
+
+// What goes with every turn: the readings, and how the loop and the link have been.
+static void fillContext(JsonObject ctx) {
+  telemetry::fill(ctx);
+  JsonObject health = ctx["loop"].to<JsonObject>();
+  health["slowest_ms"] = slowestPassMs();
+  health["speech_dry"] = audio::speechDryRuns();
+}
+
 // What the status screens show now.
 static ui::Status statusNow() {
   ui::Status s;
@@ -556,6 +580,8 @@ static ui::Status statusNow() {
     s.ssid = WiFi.SSID();
     s.rssi = WiFi.RSSI();
     s.ip = WiFi.localIP().toString();
+    s.channel = WiFi.channel();
+    s.ap = WiFi.BSSIDstr().substring(9);  // its last three: enough to tell a mesh's apart
   }
   s.deck = wsUp;
   s.deckHost = serverHost();
@@ -585,6 +611,8 @@ static ui::Status statusNow() {
   s.deviceId = deviceId();
   s.fw = FW_VERSION;
   s.freeKb = ESP.getFreePsram() / 1024;
+  s.slowestMs = slowestPassMs();
+  s.speechDry = audio::speechDryRuns();
   if (board::kOfflineNotes) {
     s.notes = notes::count();
     if (s.notes) s.notesLength = clockLength(notes::seconds());
@@ -1303,7 +1331,7 @@ static void sendRecEnd() {
     settings.save();
   }
   d["type"] = "rec_end";
-  telemetry::fill(d["ctx"].to<JsonObject>());
+  fillContext(d["ctx"].to<JsonObject>());
   sendJson(d);
 }
 
@@ -1718,7 +1746,7 @@ static void finishBatch(uint32_t now) {
   }
   JsonDocument e;
   e["type"] = "notes_end";
-  telemetry::fill(e["ctx"].to<JsonObject>());
+  fillContext(e["ctx"].to<JsonObject>());
   sendJson(e);
   if (!wsUp) return;  // dropped: abortUpload has reset everything
   upAwaitAck = true;
@@ -3038,26 +3066,58 @@ static void asleepRedraw() {
   sleepNow();
 }
 
+// The strongest access point of the saved networks in a finished scan (net:
+// its index in settings.nets, -1 when none is in reach). A mesh has several
+// under one name, and WiFi.begin() with the name alone takes the first it hears,
+// however far away, and stays there until the next start: everything then waits
+// on a weak link, the loop with it. So the access point is named too. (If it goes
+// away the driver keeps asking for it, and keepWifi() looks for another.)
+struct Reach {
+  int net = -1;
+  int rssi = -1000;
+  int channel = 0;
+  uint8_t bssid[6] = {};
+};
+
+static Reach strongestInScan(int found) {
+  Reach best;
+  for (int i = 0; i < found; ++i) {
+    for (int k = 0; k < settings.netCount; ++k) {
+      if (WiFi.SSID(i) == settings.nets[k].ssid && WiFi.RSSI(i) > best.rssi) {
+        best.net = k;
+        best.rssi = WiFi.RSSI(i);
+        best.channel = WiFi.channel(i);
+        memcpy(best.bssid, WiFi.BSSID(i), sizeof(best.bssid));
+      }
+    }
+  }
+  WiFi.scanDelete();
+  return best;
+}
+
+static void joinStrongest(const Reach& r) {
+  WiFi.begin(settings.nets[r.net].ssid.c_str(), settings.nets[r.net].pass.c_str(), r.channel, r.bssid);
+}
+
 // Back onto Wi-Fi without stalling the loop: WiFiMulti scans synchronously
 // (2–3 s a call, every pass while offline). Instead an async scan every
 // 15 s, then the strongest saved network in reach.
 static void keepWifi() {
-  if (WiFi.status() == WL_CONNECTED) return;
+  static bool byName = false;  // every other try: a mesh may turn it away from the strongest, to steer it elsewhere
+  if (WiFi.status() == WL_CONNECTED) {
+    byName = false;
+    return;
+  }
   static uint32_t lastScanMs = 0;
   int found = WiFi.scanComplete();
   if (found == WIFI_SCAN_RUNNING) return;
   if (found >= 0) {
-    int best = -1, bestRssi = -1000;
-    for (int i = 0; i < found; ++i) {
-      for (int k = 0; k < settings.netCount; ++k) {
-        if (WiFi.SSID(i) == settings.nets[k].ssid && WiFi.RSSI(i) > bestRssi) {
-          best = k;
-          bestRssi = WiFi.RSSI(i);
-        }
-      }
+    const Reach best = strongestInScan(found);
+    if (best.net >= 0) {
+      if (byName) WiFi.begin(settings.nets[best.net].ssid.c_str(), settings.nets[best.net].pass.c_str());
+      else joinStrongest(best);
+      byName = !byName;
     }
-    WiFi.scanDelete();
-    if (best >= 0) WiFi.begin(settings.nets[best].ssid.c_str(), settings.nets[best].pass.c_str());
     return;
   }
   if (!lastScanMs || millis() - lastScanMs > 15000) {
@@ -3075,22 +3135,14 @@ static void keepWifi() {
 
 // At start-up, one scan (~2 s): the strongest saved network in reach (its
 // index in settings.nets), -1 when none is, -2 when the scan failed.
-static int strongestSavedNetwork() {
+static int strongestSavedNetwork(Reach* best) {
   const int n = WiFi.scanNetworks();
   if (n < 0) return -2;
-  int best = -1, bestRssi = -1000;
-  for (int i = 0; i < n; ++i) {
-    for (int k = 0; k < settings.netCount; ++k) {
-      if (WiFi.SSID(i) == settings.nets[k].ssid && WiFi.RSSI(i) > bestRssi) {
-        best = k;
-        bestRssi = WiFi.RSSI(i);
-      }
-    }
-  }
-  WiFi.scanDelete();
-  Serial.printf("[claw] wi-fi scan: %d networks, %s\n", n,
-                best >= 0 ? settings.nets[best].ssid.c_str() : "none of the saved ones");
-  return best;
+  *best = strongestInScan(n);
+  Serial.printf("[claw] wi-fi scan: %d networks, %s %d dBm, channel %d\n", n,
+                best->net >= 0 ? settings.nets[best->net].ssid.c_str() : "none of the saved ones", best->rssi,
+                best->channel);
+  return best->net;
 }
 
 void setup() {
@@ -3181,11 +3233,12 @@ void setup() {
   // of trying for 30 s; with one, it joins the strongest straight away. (A
   // fresh update on probation takes the slow way: it may need to roll back.)
   if (!probation) {
-    const int net = strongestSavedNetwork();
+    Reach best;
+    const int net = strongestSavedNetwork(&best);
     if (net == -1 && goesOffline) {
       offline = true;
     } else if (net >= 0) {
-      WiFi.begin(settings.nets[net].ssid.c_str(), settings.nets[net].pass.c_str());
+      joinStrongest(best);
       while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) {
         hw::update();
         delay(50);
@@ -3266,6 +3319,7 @@ static void stopOnSilence() {
   if (board::kNoteMode && (settings.noteMode || noteRec || !wsUp)) return;
   const bool live = !prerollOn && mode == Mode::Listening && audio::micActive();
   if (!live && !(prerollOn && !prerollEndMs)) return;
+  if (live && audio::micBehind()) return;  // the loop was held up: what was said since isn't heard yet
   const uint32_t start = prerollOn ? prerollStartMs : recStartMs;
   if (start != watching) {
     watching = start;
@@ -3636,6 +3690,7 @@ static void holdTurn() {
 }
 
 void loop() {
+  const uint32_t passStartMs = millis();
 #ifdef CLAW_PERF
   uint32_t loopT0 = micros();
 #endif
@@ -4018,6 +4073,7 @@ void loop() {
   updateLeds();
   noteButtonActivity();
   handleIdlePower();
+  notePass(millis() - passStartMs);
 #ifdef CLAW_PERF
   perfReport(micros() - loopT0);
 #endif

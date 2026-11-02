@@ -746,11 +746,24 @@ class _DeviceConn(BusClient):
             # session's durable origin, which a cron result follows.
             "turn_origin": {"kind": "channel", "address": self.channel_id},
         }
+        self._log_link(ctx)
         readings = device_context_line(ctx, self.hw)
         notes = ([readings] if readings else []) + list(extra_notes or [])
         if notes:
             fields["context_notes"] = notes
         return fields
+
+    def _log_link(self, ctx: Any) -> None:
+        """A turn's link and loop, in the log: a device that feels stuck is
+        usually on a weak Wi-Fi link, and this tells that apart from the rest."""
+        if not isinstance(ctx, dict) or not isinstance(ctx.get("loop"), dict):
+            return
+        wifi = ctx.get("wifi") if isinstance(ctx.get("wifi"), dict) else {}
+        loop = ctx["loop"]
+        log.info("device %s: wifi %s dBm, channel %s, ap %s; slowest loop pass %s ms; speech ran out %s times",
+                 self.device_id, _num(wifi.get("rssi"), -120, 0), _num(wifi.get("channel"), 0, 200),
+                 _ctx_text(wifi.get("ap"), 20), _num(loop.get("slowest_ms"), 0, 600000),
+                 _num(loop.get("speech_dry"), 0, 100000))
 
     def _turn_started(self, text: str, turn: dict) -> None:
         self._forget_stream()  # a new answer

@@ -4,6 +4,7 @@
 // over before it sounded shows up in what was "heard".
 #pragma once
 #include <deque>
+#include <mutex>
 #include <vector>
 
 #include "Arduino.h"
@@ -51,11 +52,52 @@ struct FakeSpeaker {
   }
 };
 
+// Fills what it's given on the simulated clock, 16 samples a millisecond, from a
+// counter that never stops: a hole in what's heard is a jump in the numbers.
 struct FakeMic {
-  bool begin() { return true; }
-  void end() {}
-  size_t isRecording() const { return 0; }
-  bool record(int16_t*, size_t, uint32_t) { return true; }
+  struct Rec {
+    int16_t* ptr;
+    size_t n, done;
+  };
+  std::mutex lock;
+  std::deque<Rec> q;
+  uint32_t lastMs = 0;
+  static constexpr uint32_t kPeriod = 30011;  // (prime: no hole a whole number of periods long)
+  uint32_t heard = 0;  // samples spoken since begin()
+  bool begin() {
+    std::lock_guard<std::mutex> g(lock);
+    q.clear();
+    lastMs = g_simMs;
+    heard = 0;
+    return true;
+  }
+  void end() {
+    std::lock_guard<std::mutex> g(lock);
+    q.clear();
+  }
+  void advance() {
+    const uint32_t now = g_simMs;
+    for (; lastMs < now; ++lastMs) {
+      for (int i = 0; i < 16; ++i, ++heard) {
+        if (q.empty()) continue;  // nobody asked: said, and gone
+        Rec& f = q.front();
+        f.ptr[f.done++] = (int16_t)(heard % kPeriod);
+        if (f.done == f.n) q.pop_front();
+      }
+    }
+  }
+  size_t isRecording() {
+    std::lock_guard<std::mutex> g(lock);
+    advance();
+    return q.size();
+  }
+  bool record(int16_t* p, size_t n, uint32_t) {
+    std::lock_guard<std::mutex> g(lock);
+    advance();
+    if (q.size() >= 2) return false;
+    q.push_back({p, n, 0});
+    return true;
+  }
 };
 
 struct FakeM5 {

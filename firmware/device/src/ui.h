@@ -108,6 +108,8 @@ struct Status {
   bool wifi = false;
   String ssid, ip;
   int rssi = 0;
+  int channel = 0;
+  String ap;  // the access point it's on (the end of its address)
   bool deck = false;
   String deckHost;
   int rttMs = -1;
@@ -128,6 +130,8 @@ struct Status {
   uint8_t textSize = 0;
   String deviceId, fw;
   uint32_t freeKb = 0;
+  uint32_t slowestMs = 0;  // the main loop's slowest pass lately
+  int speechDry = 0;       // times the last answer's speech ran out before its end
   int notes = 0, notesRoomMin = 0;
   String notesLength;
   bool notesSending = false;
@@ -141,6 +145,7 @@ inline std::vector<Row> statusRows(const Status& s) {
   std::vector<Row> rows;
   rows.push_back({"Wi-Fi", s.wifi ? s.ssid + "  " + String(s.rssi) + " dBm" : String("not connected"),
                   s.wifi ? (s.rssi < -80 ? yellow : green) : red});
+  if (s.wifi && s.ap.length()) rows.push_back({"Access pt", s.ap + "  ch " + String(s.channel), text});
   rows.push_back({"IP", s.wifi ? s.ip : String("-"), text});
   rows.push_back({"Deck", s.deckHost + (s.deck ? (s.rttMs >= 0 ? "  " + String(s.rttMs) + " ms" : String("  ok")) : String("  offline")),
                   s.deck ? green : red});
@@ -166,6 +171,8 @@ inline std::vector<Row> statusRows(const Status& s) {
                                "  up " + s.uptime,
                   text});
   if (s.wake.length()) rows.push_back({"Woke", s.wake, text});
+  rows.push_back({"Loop", "slowest " + String(s.slowestMs) + " ms" + (s.speechDry ? "  voice ran out " + String(s.speechDry) + "x" : String("")),
+                  s.slowestMs > 250 || s.speechDry ? yellow : text});
   rows.push_back({"Device", s.deviceId + "  fw " + s.fw + "  " + String(s.freeKb) + "k free", text});
   if (s.notes) {
     rows.push_back({"Offline notes", String(s.notes) + " waiting  " + s.notesLength + "  room " + String(s.notesRoomMin) +

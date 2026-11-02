@@ -677,6 +677,18 @@ Flight Deck still speaks at most ~1500 characters of an answer (`MAX_SPOKEN_CHAR
 the rest is shown, not read.
 A single side click on an answer now waits 0.35 s to make sure it isn't a double-click.
 
+**A weak link** (0.20.4 / paper B 1.0.31). Buttons, the screen, the mic and the speaker
+all wait for one main loop, and a weak link holds that loop in the socket. So: the
+device joins the strongest access point the scan found, by its address (with the name
+alone it took the first it heard, and a mesh has several); a task keeps the mic
+recording, into a 4 s ring, while the loop is held up; speech that runs out with more
+to come waits for a second of it, one gap instead of a stutter. A device carried away
+from its access point stays on it until the link drops: it doesn't roam. To see how it's
+going: Status shows the access point, its channel and the loop's slowest pass of the
+last minute or two (under 100 ms is well, seconds is a link in trouble), and how often
+the last answer's voice ran out; the deck's log has the same line for each turn.
+(Mac check: `test/host/mic_stall.cpp` holds the loop up on a fake mic.)
+
 **A link that drops mid-turn** (weak Wi-Fi). The device stays on the working screen
 with *Connection lost — reconnecting…*, awake and retrying, for up to 2 minutes.
 Flight Deck keeps the turn and its answer (10 minutes): after the reconnect the answer

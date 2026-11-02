@@ -1089,7 +1089,7 @@ static void statusConnection(const Status& s) {
              kDim);
   if (s.wifi) {
     font(vlw::Small);
-    text(s.ip, CX, 386, kDim);
+    text(fit(s.ip + (s.ap.length() ? " · " + s.ap + " ch " + String(s.channel) : String("")), lineRoom(374, 398)), CX, 386, kDim);
   }
 }
 
@@ -1137,7 +1137,9 @@ static void statusDevice(const Status& s) {
   statusTile(240, s.speak ? kMint : kGold, "Voice " + s.voice + " · " + String(s.volumePct) + "%" +
                                                  (s.boostDb ? " · +" + String(s.boostDb) + " dB" : String("")),
              s.speak ? String("text ") + sizes[s.textSize % 3] : String("muted · text ") + sizes[s.textSize % 3], kDim);
-  statusTile(304, kText, String(s.freeKb) + " KB free", "memory for pictures and sound", kDim);
+  statusTile(304, kText, String(s.freeKb) + " KB free",
+             "slowest " + String(s.slowestMs) + " ms" + (s.speechDry ? " · voice ran out " + String(s.speechDry) + "x" : String("")),
+             s.slowestMs > 250 || s.speechDry ? kGold : kDim);
   if (s.notes) {
     statusTile(368, kGold, String(s.notes) + (s.notes == 1 ? " note kept offline" : " notes kept offline"),
                s.notesLength + " · room for " + String(s.notesRoomMin) + " min" + (s.notesSending ? " · sending…" : ""),

@@ -2,7 +2,7 @@
 // speaker): a long answer sent far faster than it's spoken, the deck holding
 // when asked; a long pause; a deck that doesn't hold; replay's rules.
 //
-//   c++ -std=c++17 -O1 -Itest/host/fake -Isrc -o /tmp/audio_ring test/host/audio_ring.cpp src/audio.cpp && /tmp/audio_ring
+//   c++ -std=c++17 -O1 -DBOARD_EPAPER154 -Itest/host/fake -Ipreview/include -Isrc -o /tmp/audio_ring test/host/audio_ring.cpp src/audio.cpp && /tmp/audio_ring
 #include <cstdio>
 #include <vector>
 
@@ -14,6 +14,9 @@ FakeM5 M5;
 void delay(uint32_t ms) {
   g_simMs += ms;
   M5.Speaker.advance();
+}
+namespace hw {
+void micStarted() {}
 }
 
 static int fails = 0;
@@ -104,9 +107,50 @@ static Run play(double seconds, int perStep, bool honourHold, double pauseAt = -
   return {M5.Speaker.heard, audio::clipCut(), audio::hasClip(), g_simMs - t0};
 }
 
+// The link falling behind the voice: `seconds` of answer arriving at `pace` of
+// the speed it's spoken. How many times it ran out, and how long the sound lasted.
+static int slowLink(int seconds, float pace, size_t* heard) {
+  M5.Speaker.heard.clear();
+  audio::newClip();
+  audio::playBegin(kRate);
+  const size_t total = seconds * kRate;
+  size_t sent = 0;
+  float owed = 0;
+  std::vector<uint8_t> frame;
+  for (int guard = 0; guard < 400000 && audio::playing(); ++guard) {
+    owed += kRate * pace / 100;
+    frame.clear();
+    for (; owed >= 1 && sent < total; owed -= 1, ++sent) {
+      const int16_t v = sampleAt(sent);
+      frame.push_back((uint8_t)v);
+      frame.push_back((uint8_t)(v >> 8));
+    }
+    if (!frame.empty()) audio::playFeed(frame.data(), frame.size());
+    if (sent >= total) audio::playEnd();
+    audio::playPoll();
+    delay(10);
+  }
+  *heard = M5.Speaker.heard.size();
+  return audio::speechDryRuns();
+}
+
 int main() {
   audio::begin(200, 0);
   size_t miss;
+
+  // Slower than it's spoken: a few real gaps with a second of sound after each,
+  // not one every tenth of a second. Every sample still comes, in order.
+  size_t heard = 0;
+  int dry = slowLink(20, 0.8f, &heard);
+  CHECK(heard == 20 * kRate, "slow link: heard %zu of %u samples", heard, 20 * kRate);
+  CHECK(breaks(M5.Speaker.heard, &miss) == 0, "slow link: what was heard isn't what was sent (first at %zu)", miss);
+  CHECK(dry >= 1 && dry <= 8, "slow link: ran dry %d times", dry);
+  printf("slow link (0.8x): ran dry %d times in 20 s of speech\n", dry);
+  // Faster than it's spoken: never.
+  dry = slowLink(10, 3.0f, &heard);
+  CHECK(heard == 10 * kRate, "fast link: heard %zu of %u samples", heard, 10 * kRate);
+  CHECK(dry == 0, "fast link: ran dry %d times", dry);
+  M5.Speaker.heard.clear();
 
   // A 3-minute answer, sent ~170x faster than it's spoken: all of it, in order.
   Run a = play(180, 3, true);

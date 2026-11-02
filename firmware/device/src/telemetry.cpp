@@ -205,6 +205,8 @@ void fill(JsonObject ctx) {
     JsonObject wifi = ctx["wifi"].to<JsonObject>();
     wifi["ssid"] = WiFi.SSID();
     wifi["rssi"] = WiFi.RSSI();
+    wifi["channel"] = WiFi.channel();
+    wifi["ap"] = WiFi.BSSIDstr();
   }
   if (haveImu && samples >= 5) {
     JsonObject motion = ctx["motion"].to<JsonObject>();
