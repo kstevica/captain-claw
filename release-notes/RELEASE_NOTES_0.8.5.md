@@ -30,7 +30,7 @@ Also in 0.8.5: real **Excel and PowerPoint** without scripts (`xlsx`, `pptx`); *
 groups** in the kiosk; a Users page with last login and tokens; and a new look for the devices,
 with Captain as the only character.
 
-48 pull requests, three days after 0.8.4.
+49 pull requests, three days after 0.8.4.
 
 **Restart Flight Deck, then every agent.** See [Upgrading](#upgrading). **Approving someone
 for Crew trusts them with the server:** [read this first](#before-you-approve-anyone-for-crew).
@@ -229,7 +229,8 @@ A desktop build or a container has no checkout, so the page says to update it th
 - **StopWatch: no automatic stop** (0.20.1). A 2.5 s pause no longer ends a recording. Press or tap when you're done, however long you pause. The 110 s limit stays.
 - **PaperColor B** (1.0.24 to 1.0.30). A dashboard in blocks of colour, the answer as a conversation, an icon beside each button instead of a legend, recording that works offline, a white pass only hourly and at power-on, and B held 4 s to switch off, leaving a capsized robot.
 - **Waveshare ePaper 1.54** (0.19.12 to 0.20.3). A new home screen with note mode at a glance, a tap on the tile to talk on the touch board, stop and cancel icons while recording, and the same capsized robot when switched off.
-- **Firmware 0.20.3** / PaperColor B **1.0.30**.
+- **A weak link no longer clogs the device** (0.20.4 / B 1.0.31). Buttons, screen, mic and speaker share one loop, and a weak Wi-Fi link holds it up. The device now joins the strongest access point by its address, a task keeps the mic recording into a 4 s ring while the loop is behind, and speech that runs out waits for a second of it, so one gap instead of a stutter. Status shows the access point, its channel, the loop's slowest pass and how often the voice ran out. Diagnosed from the code, and not yet reproduced on a device.
+- **Firmware 0.20.4** / PaperColor B **1.0.31**.
 
 ### What's still open
 
