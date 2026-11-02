@@ -76,11 +76,12 @@ async function passContext(browser, theme, phone) {
 async function pickArchetype(page, theme) {
   const spawn = page.locator('[role=dialog][aria-label="New agent from an archetype"]')
   await spawn.locator('ul button').first().waitFor()
-  if (theme === 'dark') console.log('archetypes:', (await spawn.locator('ul button span.font-medium').allTextContents()).join(' | '))
+  if (theme === 'dark') console.log('archetypes:', (await spawn.locator('ul button span.font-semibold').allTextContents()).join(' | '))
   const pick = spawn.locator('ul button', { hasText: /research/i }).first()
   const target = (await pick.count()) ? pick : spawn.locator('ul button').first()
   await target.click()
-  await target.scrollIntoViewIfNeeded()
+  // On a phone the detail has replaced the list by now.
+  if (await target.count()) await target.scrollIntoViewIfNeeded()
   await spawn.locator('input[aria-label="Agent name"]').evaluate((el) => { el.setSelectionRange(0, 0); el.blur() })
   await sleep(300)
   return spawn
