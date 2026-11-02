@@ -1,6 +1,7 @@
 import { useEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronRight, X, type LucideIcon } from 'lucide-react'
+import { tileInNextRow } from './tileNav'
 
 // ── A kiosk menu, as a modal ──
 //
@@ -53,25 +54,6 @@ export interface MenuSection {
 const TILE = 'group relative flex min-w-0 border border-zinc-800 bg-zinc-950/40 text-left transition-all hover:-translate-y-px hover:border-zinc-700 hover:bg-zinc-800/60 hover:shadow-lg hover:shadow-black/10 focus-visible:border-violet-500 focus-visible:bg-violet-500/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:translate-y-0 disabled:hover:border-zinc-800 disabled:hover:bg-zinc-950/40 disabled:hover:shadow-none'
 
 const GRID: Record<number, string> = { 1: 'grid-cols-1', 2: 'grid-cols-2', 3: 'grid-cols-3' }
-
-/** Up or down: the nearest tile in the next row that way (the rows aren't all the same length). */
-function tileInNextRow(tiles: HTMLElement[], from: HTMLElement, way: number) {
-  const box = from.getBoundingClientRect()
-  const middle = box.left + box.width / 2
-  let best: HTMLElement | undefined
-  let bestScore = Infinity
-  for (const tile of tiles) {
-    const b = tile.getBoundingClientRect()
-    const rows = (b.top - box.top) * way
-    if (rows < 1) continue
-    const score = rows * 1000 + Math.abs(b.left + b.width / 2 - middle)
-    if (score < bestScore) {
-      best = tile
-      bestScore = score
-    }
-  }
-  return best
-}
 
 function CompactTile({ item, wholeRow }: { item: MenuItem; wholeRow: boolean }) {
   const { icon: Icon, label, hint, onSelect, disabled, tone = 'zinc', on, busy } = item
