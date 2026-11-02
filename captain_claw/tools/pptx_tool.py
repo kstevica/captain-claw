@@ -9,18 +9,25 @@ agent's own files change in place with a backup; a user's upload, a read-only
 Drive folder or anything else stays untouched and the changed copy goes to
 ``saved/output/<session>/`` under the same name. A shared agent's member works on
 their own files only, with no backup and no host paths in results. A picture
-named in an edit must be one the caller may read.
+named in an edit must be one the caller may read; a link goes through the
+public-only client every other picture download uses, and an SVG is drawn in a
+browser that loads nothing else.
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
 import json
 import os
 import re
 import tempfile
 from pathlib import Path
 from typing import Any, Callable
+from urllib.parse import urlsplit
+
+from lxml import etree
 
 from captain_claw import pptx_ops as P
 from captain_claw.logging import get_logger
@@ -39,6 +46,9 @@ _OTHER_SUFFIXES = {".ppt", ".pps", ".pot", ".odp", ".key", ".pdf", ".txt", ".md"
 _READ_SLIDES = 25
 _RESULT_LINES = 60
 _READ_CHARS = 100_000
+_LINK = re.compile(r"https?://", re.I)
+_SVG_EDGE = 2400  # pixels on its long side: sharp across a slide
+_SVG_LENGTH = re.compile(r"\s*([\d.]+)\s*(?:px|pt|pc|mm|cm|in)?\s*$")
 
 
 def pptx_file_name(path: str) -> str:
@@ -76,18 +86,157 @@ def _list_arg(raw: Any, name: str) -> list[dict[str, Any]]:
     return raw
 
 
-def _image_finder(kwargs: dict[str, Any]) -> Callable[[str], Path | None]:
-    """Finds a picture named in an edit. A member gets only what they may read
-    (the docx tool's rule); so does an agent confined to its own folders."""
-    from captain_claw import deck_confine
+def _looks_like_svg(head: bytes) -> bool:
+    head = head.lstrip(b"\xef\xbb\xbf \t\r\n")
+    return head.startswith((b"<svg", b"<?xml", b"<!--", b"<!DOCTYPE")) and b"<svg" in head
+
+
+def _svg_page(data: bytes, name: str) -> tuple[str, int, int]:
+    """A page showing an SVG large enough to stay sharp on a slide, and its size."""
+    try:
+        root = etree.fromstring(data, etree.XMLParser(resolve_entities=False, no_network=True))
+    except etree.XMLSyntaxError:
+        raise P.PptxError(f"{name} isn't an SVG this server can read. Save it as a PNG.") from None
+
+    def length(name: str) -> float:
+        match = _SVG_LENGTH.match(root.get(name) or "")
+        return float(match.group(1)) if match else 0.0
+
+    view = [float(v) for v in re.findall(r"-?[\d.]+", root.get("viewBox") or "")]
+    if len(view) == 4 and view[2] > 0 and view[3] > 0:
+        width, height = view[2], view[3]
+    else:
+        width, height = length("width") or 300.0, length("height") or 150.0
+        root.set("viewBox", f"0 0 {width} {height}")
+    scale = _SVG_EDGE / max(width, height)
+    shown_w, shown_h = max(1, round(width * scale)), max(1, round(height * scale))
+    root.set("width", str(shown_w))
+    root.set("height", str(shown_h))
+    source = base64.b64encode(etree.tostring(root)).decode("ascii")
+    return (f'<!doctype html><body style="margin:0;background:transparent">'
+            f'<img style="display:block" src="data:image/svg+xml;base64,{source}">', shown_w, shown_h)
+
+
+async def _draw_svg(data: bytes, name: str) -> bytes:
+    """An SVG as a PNG, transparency kept. As an <img>, a browser runs no script in
+    it and loads nothing it names."""
+    from playwright.async_api import async_playwright
+
+    from captain_claw.tools.visualize import _launch
+
+    html, width, height = _svg_page(data, name)
+    async with async_playwright() as pw:
+        browser = await _launch(pw)
+        try:
+            context = await browser.new_context(viewport={"width": width, "height": height}, java_script_enabled=False,
+                                                service_workers="block", accept_downloads=False)
+            await context.route("**/*", lambda route: route.abort())
+            page = await context.new_page()
+            await page.set_content(html, wait_until="load", timeout=15_000)
+            return await page.screenshot(type="png", omit_background=True, timeout=15_000)
+        finally:
+            await browser.close()
+
+
+def _svg_as_png(found: Path, scratch: Path) -> Path:
+    data = found.read_bytes()
+    try:
+        png = asyncio.run(_draw_svg(data, found.name))
+    except P.PptxError:
+        raise
+    except Exception as exc:
+        raise P.PptxError(f"{found.name} is an SVG and this server couldn't draw it ({type(exc).__name__}). "
+                          "Save it as a PNG, or draw it with the visualize tool.") from None
+    # The hash keeps two different logo.svg apart.
+    target = scratch / hashlib.sha256(data).hexdigest()[:8] / f"{found.stem}.png"
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes(png)
+    return target
+
+
+def _download_picture(url: str, kwargs: dict[str, Any], scratch: Path) -> Path:
+    """A picture at a link: web_fetch's copy if it kept one, else fetched for this
+    call only (the deck holds it from then on)."""
+    from captain_claw import research_images as R
+
+    if _member() is None:
+        for store in R.lookup_stores(kwargs):
+            kept = store.find(url=url)
+            if kept is not None:
+                return Path(kept.path)
+
+    async def fetch() -> bytes | None:
+        client = R.make_client()
+        try:
+            return await R.download_image(client, url, allow_svg=True)
+        finally:
+            await client.aclose()
+
+    data = asyncio.run(fetch())
+    if data is None:
+        raise P.PptxError(f"Couldn't download the picture at {url}: it's gone, not a picture, over 12 MB, or not on "
+                          "the public internet. Use another, or a saved one.")
+    # The name is only for messages; the hash keeps two links to a logo.png apart.
+    name = re.sub(r"[^\w.-]+", "-", Path(urlsplit(url).path).name)[-60:] or "picture"
+    target = scratch / hashlib.sha256(url.encode("utf-8")).hexdigest()[:8] / name
+    target.parent.mkdir(exist_ok=True)
+    target.write_bytes(data)
+    return target
+
+
+def _saved_description(found: Path) -> str:
+    """What web_fetch recorded about a picture it saved: the alt text when none is given."""
+    try:
+        data = json.loads(found.with_name(f"{found.name}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("caption") or data.get("alt") or data.get("title") or "")
+
+
+def _image_finder(kwargs: dict[str, Any], scratch: Path) -> Callable[[str], Path | None]:
+    """Finds a picture named in an edit, wherever it is, as a file the engine can
+    read. It runs in the worker thread, so a download or a drawing can wait there.
+    A member gets only what they may read (the docx tool's rule); so does an agent
+    confined to its own folders."""
+    from captain_claw import deck_confine, speaker
+    from captain_claw.tools.document_extract import _resolve_readable_file
+    from captain_claw.tools.edit import EditTool
 
     find = DocxTool()._image_root(kwargs)
+    seen: dict[str, Path | None] = {}  # a logo on every slide is one download, one drawing
+
+    def local(src: str) -> Path | None:
+        found = find(src)
+        if found is None and not is_vfs_path(src):
+            # The deck's own fallbacks: the run's folder, the file registry, where a write would land.
+            found = EditTool._resolve_path(src, kwargs)
+            if found is None:
+                candidate = WriteTool.resolve_local_target(src, kwargs)
+                found = candidate if candidate.is_file() else None
+        if found is None or not found.is_file():
+            return None
+        if _member() is not None and not speaker.path_allowed(found):
+            return None
+        if deck_confine.active() and not deck_confine.allowed(found.resolve(), "read"):
+            return None
+        if is_vfs_path(src):
+            # A Drive folder holds placeholders; this asks for the real bytes.
+            real, _ = asyncio.run(_resolve_readable_file(src, kwargs.get("_runtime_base_path")))
+            return real
+        return found
 
     def resolve(src: str) -> Path | None:
-        found = find(src)
-        if found is not None and deck_confine.active() and not deck_confine.allowed(found.resolve(), "read"):
-            return None
-        return found
+        if src not in seen:
+            found = _download_picture(src, kwargs, scratch) if _LINK.match(src) else local(src)
+            if found is not None:
+                with found.open("rb") as handle:
+                    head = handle.read(4096)
+                if _looks_like_svg(head):
+                    found = _svg_as_png(found, scratch)
+            seen[src] = found
+        return seen[src]
 
     return resolve
 
@@ -123,7 +272,7 @@ class PptxTool(Tool):
         "write python-pptx scripts or use write/edit on them. Slides are built from the deck's "
         "layouts and placeholders, and every result says what doesn't fit. "
         "create: `slides` = [{layout, title, subtitle, body, placeholders, table, chart, image, "
-        "notes}]; body lines starting - are bullets, indent two spaces per level, **bold**, "
+        "images, notes}]; body lines starting - are bullets, indent two spaces per level, **bold**, "
         "*italic*, [link](url). With no layout one is chosen for what the slide holds; a table, "
         "chart or image takes the empty placeholder that suits it. Pass `template` (a .pptx or "
         ".potx) to use a firm's design. Optional font, heading_font, heading_color, accent_color, "
@@ -133,12 +282,20 @@ class PptxTool(Tool):
         "edit: `edits` = changes applied in order, all or nothing; slide numbers are as they stand "
         "after earlier edits. set_text, replace (find → replace_with across runs, on `slide`: a "
         "number, 2-5, or all), format, add_slide, duplicate_slide, delete_slide, move_slide, "
-        "hide_slide, set_notes, add_text, add_image, add_table, set_table, add_chart, set_chart "
+        "hide_slide, set_notes, add_text, add_image, set_image (a new picture in the same place), "
+        "add_table, set_table, add_chart, set_chart "
         "(new numbers, same look), place (x, y, width, height in inches; z front/back), "
         "delete_shape, set_alt, set_theme. Aim at a shape with `shape`: its id, or title, subtitle, "
         "body, ph:<number>. Native tables and charts stay editable in PowerPoint; never paste a "
         "picture of one. A bad edit fails the whole call. A user's upload is never changed: the "
         "changed copy goes under saved/output with the same name. "
+        "Pictures: `image` is a saved path, vfs:<project>/… or an https:// link, in any common "
+        "format (PNG, JPEG, WebP, AVIF, HEIC, SVG, GIF…). With no coordinates it takes a free "
+        "placeholder or the open part of the slide, moves text over to make room, or shares the "
+        "space with the pictures already there. Or say `position`: full (fills the slide, behind "
+        "the text; keep the text readable over it), left, right, top, bottom, center, or a corner "
+        "like top-right for a logo; or x and y with width or height (the other side follows). "
+        "Give each picture `alt`, and `caption` for a line under it such as its source. "
         "check: text that overflows, shapes off the slide or overlapping, empty placeholders, "
         "missing titles, small text, stretched pictures, leftover text, missing alt text. Run it "
         "before you hand over a deck. "
@@ -167,7 +324,26 @@ class PptxTool(Tool):
                         "table": {"type": "array", "description": "Rows, each a list of values; the first is the header.",
                                   "items": {"type": "array", "items": {"type": "string"}}},
                         "chart": {"type": "object", "description": "{type, title, categories, series: [{name, values}]}."},
-                        "image": {"type": "string", "description": "A saved picture's path."},
+                        "image": {"type": "string",
+                                  "description": "One picture: a saved path, vfs:<project>/… or an https:// link."},
+                        "images": {
+                            "type": "array",
+                            "description": "Pictures with details, or several on this slide (they share the space).",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "image": {"type": "string", "description": "A saved path, vfs:<project>/… or an https:// link."},
+                                    "alt": {"type": "string", "description": "What it shows, for screen readers."},
+                                    "caption": {"type": "string", "description": "A short line under it, e.g. its source."},
+                                    "fit": {"type": "string", "enum": ["contain", "cover"],
+                                            "description": "contain shows it whole; cover fills the space, cropping."},
+                                    "position": {"type": "string", "enum": list(P._POSITIONS)},
+                                    "x": {"type": "number"}, "y": {"type": "number"},
+                                    "width": {"type": "number"}, "height": {"type": "number"},
+                                },
+                                "required": ["image"],
+                            },
+                        },
                         "notes": {"type": "string", "description": "Speaker notes."},
                         "keep_empty": {"type": "boolean",
                                        "description": "Keep unfilled placeholders (normally removed)."},
@@ -182,7 +358,7 @@ class PptxTool(Tool):
                     "properties": {
                         "op": {"type": "string", "enum": list(P.OPS)},
                         "slide": {"type": "string",
-                                  "description": "Slide number. replace, format and hide_slide also take 2-5 or all."},
+                                  "description": "Slide number. replace, format, hide_slide and add_image also take 2-5 or all."},
                         "shape": {"type": "string",
                                   "description": "Its id from read, or title, subtitle, body, ph:<number>, or its name."},
                         "text": {"type": "string",
@@ -203,9 +379,16 @@ class PptxTool(Tool):
                         "width": {"type": "number", "description": "Inches."},
                         "height": {"type": "number", "description": "Inches."},
                         "z": {"type": "string", "enum": ["front", "back"], "description": "place."},
-                        "image": {"type": "string", "description": "add_image: a saved picture's path. add_slide: the same."},
-                        "fit": {"type": "string", "enum": ["contain", "cover"], "description": "add_image."},
-                        "alt": {"type": "string", "description": "add_image/add_table/add_chart: alt text."},
+                        "image": {"type": "string",
+                                  "description": "add_image/set_image/add_slide: a saved path, vfs:<project>/… or an https:// link."},
+                        "images": {"type": "array", "items": {"type": "object"},
+                                   "description": "add_image/add_slide: several, [{image, alt, caption, fit, position}]; they share the space."},
+                        "position": {"type": "string", "enum": list(P._POSITIONS),
+                                     "description": "add_image: where. full fills the slide behind the text; a corner suits a logo."},
+                        "fit": {"type": "string", "enum": ["contain", "cover"],
+                                "description": "add_image/set_image: contain shows it whole; cover fills the space, cropping."},
+                        "caption": {"type": "string", "description": "add_image/set_image: a short line under it, e.g. its source."},
+                        "alt": {"type": "string", "description": "add_image/set_image/add_table/add_chart: alt text."},
                         "rows": {"type": "array", "items": {"type": "array", "items": {"type": "string"}},
                                  "description": "add_table/set_table: rows of values."},
                         "cells": {"type": "object", "description": "set_table: {\"r2c3\": \"new\"}."},
@@ -384,14 +567,15 @@ class PptxTool(Tool):
         if kwargs.get("template"):
             template = await self._source(str(kwargs["template"]), kwargs, open_only=True)
         look = {key: kwargs[key] for key in ("font", "heading_font", "heading_color", "accent_color") if kwargs.get(key)}
-        finder = _image_finder(kwargs)
         author = _author(kwargs)
 
         def build() -> tuple[int, Any, P.Report]:
-            prs, report = P.build_deck(
-                slides, edits=edits, template=template.read_bytes() if template is not None else None,
-                keep_slides=bool(kwargs.get("keep_slides")), title=str(kwargs.get("title") or ""), author=author,
-                page_numbers=bool(kwargs.get("page_numbers")), look=look, image_root=finder)
+            with tempfile.TemporaryDirectory() as scratch:
+                prs, report = P.build_deck(
+                    slides, edits=edits, template=template.read_bytes() if template is not None else None,
+                    keep_slides=bool(kwargs.get("keep_slides")), title=str(kwargs.get("title") or ""), author=author,
+                    page_numbers=bool(kwargs.get("page_numbers")), look=look,
+                    image_root=_image_finder(kwargs, Path(scratch)), image_alt=_saved_description)
             return self._save(P.deck_bytes(prs), target), prs, report
 
         size, prs, report = await asyncio.to_thread(build)
@@ -492,11 +676,12 @@ class PptxTool(Tool):
                     "copy, edit that path; to start a separate copy from the original, pass output_path.")
             _writable(target)
             target.parent.mkdir(parents=True, exist_ok=True)
-        finder = _image_finder(kwargs)
 
         def run() -> tuple[bytes, P.Report]:
             prs = P.open_deck(source.read_bytes())
-            report = P.Editor(prs, image_root=finder).apply(edits)
+            with tempfile.TemporaryDirectory() as scratch:
+                report = P.Editor(prs, image_root=_image_finder(kwargs, Path(scratch)),
+                                  image_alt=_saved_description).apply(edits)
             return P.deck_bytes(prs), report
 
         data, report = await asyncio.to_thread(run)

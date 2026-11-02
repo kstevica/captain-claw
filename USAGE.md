@@ -862,7 +862,7 @@ Make and change PowerPoint decks properly, without scripts. Slides come from the
 |---|---|---|---|
 | `action` | string | yes | `create`, `read`, `edit`, `check`, `render` |
 | `path` | string | yes | The deck (`.pptx`, `.pptm`; for `create`, where to save it). `read`, `check` and `render` also open `.potx` and `.ppsx` |
-| `slides` | array | create | The slides, in order: `layout`, `title`, `subtitle`, `body`, `placeholders`, `table`, `chart`, `image`, `notes`, `keep_empty` |
+| `slides` | array | create | The slides, in order: `layout`, `title`, `subtitle`, `body`, `placeholders`, `table`, `chart`, `image`, `images`, `notes`, `keep_empty`. Anything else is refused, so a slide can't quietly lose what was asked for |
 | `edits` | array | edit | Changes applied in order, all or nothing (see below). `create` takes them too |
 | `output_path` | string | no | Save an edit to a new file instead |
 | `slide` | string | no | read, render: a number, `2-5` or `all` |
@@ -889,27 +889,46 @@ Make and change PowerPoint decks properly, without scripts. Slides come from the
 | `hide_slide` | `slide` (or a range); `hidden: false` shows it again |
 | `set_notes` | `slide`, `text` |
 | `add_text` | `slide`, `text`, `x`, `y`, `width` in inches; the box is as tall as its text |
-| `add_image` | `slide`, `image` (a saved picture's path), `alt`, `fit` (`contain` or `cover`) |
+| `add_image` | `slide` (a number, `2-5` or `all`), `image` or `images`, `alt`, `caption`, `fit`, `position` or `x`, `y`, `width`, `height` (see Pictures) |
+| `set_image` | `slide`, `shape`, `image`: a new picture in the same place, or in an empty placeholder. The old alt text goes with the old picture |
 | `add_table` | `slide`, `rows`. Columns are sized to what they hold, the font drops until the table fits, and numbers line up on the right |
 | `set_table` | `slide`, `shape`, then `cells` (`{"r2c3": "new"}`) or `rows` (the whole table, adding or removing rows and columns) |
 | `add_chart` | `slide`, `type` (`column`, `bar`, `line`, `area`, `pie`, `doughnut`, `scatter`), `categories`, `series` (`[{name, values}]`, or `{name, x, y}` for scatter), `title`, `stacked`, `legend`, `labels`, `number_format`, `alt`. A native chart, editable in PowerPoint |
 | `set_chart` | `slide`, `shape`, `categories`, `series`, `title`: new numbers, same look |
-| `place` | `slide`, `shape`, `x`, `y`, `width`, `height` in inches, `z` (`front` or `back`) |
+| `place` | `slide`, `shape`, `x`, `y`, `width`, `height` in inches, `z` (`front` or `back`). Name one side of a picture and the other follows |
 | `delete_shape` | `slide`, `shape`, and any animation on it |
 | `set_alt` | `slide`, `shape`, `text` |
 | `set_theme` | `font`, `heading_font`, `heading_color`, `accent_color` |
 
 With no `x`, `y`, `width` and `height`, a table, chart or image takes an empty placeholder, or else the open space on the slide. A bad edit fails the whole call and nothing is saved.
 
+**Pictures.** `image` is a saved path, a `vfs:` path, or an `https://` link. A link goes through the same public-only client as `web_fetch`'s pictures, up to 12 MB, and is held by the deck alone; a picture `web_fetch` already saved is used from there, with the description it recorded as alt text. `images` puts several on a slide, each a path or `{image, alt, caption, fit, position, x, y, width, height}`.
+
+| What it gets | What the deck holds |
+|---|---|
+| JPEG, PNG of 4 MB or less | The same bytes |
+| GIF | The same bytes, so it still moves |
+| WebP, AVIF, HEIC | JPEG, or PNG where it's transparent. HEIC needs `pillow-heif`, or macOS |
+| TIFF, BMP | PNG, or JPEG if that would still be over 4 MB |
+| SVG | A sharp PNG with its transparency, drawn in headless Chromium with no script and no network. Without Chromium the call says to save it as a PNG |
+| A photo turned only by its EXIF tag, or CMYK | Upright, RGB, tag gone |
+| Over 4 MB | At most 3000 pixels on its long side, and the result says so |
+
+Told nothing about where, a picture takes an empty place for a picture, then an empty content placeholder of at least 1.5 in. Failing that, it shares the space with the pictures already on the slide (not a logo or a background), and the result says which moved. On a slide with none, it takes the open part if that shows it well, else a column on the right, with the text moved over and the result saying so. If there's truly no room the call fails and says what to do. Several pictures make whatever grid shows them largest. A small picture isn't drawn past 72 pixels an inch unless you give a size.
+
+`position` says where instead: `left`, `right`, `top` or `bottom` take that half of the area under the title, using an empty placeholder there or moving text out of the way; `center` takes all of it; `full` fills the slide behind everything; a corner like `top-right` suits a logo, 1.5 in wide unless told otherwise. `width` or `height` sizes it within that. Or give `x` and `y` with one side, and the other side follows.
+
+`fit` is `contain` (whole) or `cover` (fills, cropping evenly). Without it a place meant for a picture, `full` and an already cropped picture being swapped use `cover`, as PowerPoint does; everything else uses `contain`. A picture is never stretched. `caption` is a 12 pt line under it, such as its source. It moves with the picture and goes when the picture does. `read` shows each picture's pixel size and whether it's cropped.
+
 **What fits.** Text is measured from font metrics, what the shape inherits from its layout and master, and wrapping. The estimate was compared with PowerPoint's own measurements; treat close calls as close. Where a placeholder shrinks text on overflow, the shrink is stored in the file, because PowerPoint only works it out itself when someone edits the text, and the result says so. A text box grows to its text. Text too long even after shrinking comes back as a warning, in the result of the edit that caused it.
 
-**check** looks for what a careful reviewer looks for first, with no model involved: text that overflows, shapes off the slide, overlaps, empty placeholders, missing titles, small text, stretched or low-resolution pictures, leftover text such as "lorem ipsum" or "TBD", wordy slides, repeated titles, hidden slides, many fonts, missing alt text, reviewers' comments still in the file, and files linked from outside.
+**check** looks for what a careful reviewer looks for first, with no model involved: text that overflows, shapes off the slide, overlaps (a picture on top of text is a warning, text on a picture a note, and a logo beside a short title neither), empty placeholders, missing titles, small text, stretched or low-resolution pictures, leftover text such as "lorem ipsum" or "TBD", wordy slides, repeated titles, hidden slides, many fonts, missing alt text, reviewers' comments still in the file, and files linked from outside.
 
 **render** saves each slide as a PNG to look at with `image_vision`, where LibreOffice is installed; without it the call says so and `check` is the way to go. It runs on a copy with outside links removed, so a stranger's deck can't make the server fetch anything. LibreOffice draws fonts and effects a little differently from PowerPoint.
 
 Where the result goes: a file in the agent's own `saved/` area (outside `downloads/`) or in a writable VFS folder is changed in place, with a backup. A user's upload (`saved/downloads/`), a read-only Drive folder or any other file is never changed: the changed copy goes to `saved/output/<session>/` under the same name, where chat bridges send it from. If that copy already exists, the edit is refused until the agent edits the copy (or names a new `output_path`). A macro deck keeps its `.pptm` extension and its macros, which are never run.
 
-On a shared agent, members use `pptx` on their own files only. They read anything they may read. Their changes land in place only on files they created; anything else becomes their own copy in their folder. Pictures named in an edit must be files they can read. No backup is kept, and results show `saved/…` or `vfs:…` paths, never host paths.
+On a shared agent, members use `pptx` on their own files only. They read anything they may read. Their changes land in place only on files they created; anything else becomes their own copy in their folder. Pictures named in an edit must be files they can read, or public links. No backup is kept, and results show `saved/…` or `vfs:…` paths, never host paths.
 
 `write` and `edit` refuse decks and point to this tool.
 

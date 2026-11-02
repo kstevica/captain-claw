@@ -598,7 +598,8 @@ class ImageStore:
             "Use the ones that support a finding, next to it, with their caption and source: "
             "**.md** → `![caption](original URL)`; **.html** → `<img src=\"<saved file>\">` "
             "(the write tool embeds it as base64); **.docx** → "
-            "`doc.add_picture(\"<saved file>\", width=Inches(6))`.", "",
+            "`doc.add_picture(\"<saved file>\", width=Inches(6))`; **.pptx** → the pptx tool's "
+            "`image` with the saved file.", "",
         ]
         for e in entries:
             desc = e.description() or "(no description)"
@@ -670,8 +671,9 @@ def make_client() -> Any:
     return client
 
 
-async def download_image(client: Any, url: str, referer: str = "") -> bytes | None:
-    """The bytes of the picture at *url* (None if it isn't one or can't be had)."""
+async def download_image(client: Any, url: str, referer: str = "", *, allow_svg: bool = False) -> bytes | None:
+    """The bytes of the picture at *url* (None if it isn't one or can't be had).
+    An SVG only for a caller who draws it itself (the pptx tool): a report can't."""
     headers = {
         "User-Agent": _USER_AGENT,
         "Accept": "image/avif,image/webp,image/png,image/jpeg,image/*;q=0.8",
@@ -683,9 +685,12 @@ async def download_image(client: Any, url: str, referer: str = "") -> bytes | No
             if resp.status_code != 200:
                 return None
             ctype = str(resp.headers.get("content-type") or "").lower()
-            if ctype and not ctype.startswith(("image/", "application/octet-stream", "binary/")):
+            kinds = ("image/", "application/octet-stream", "binary/")
+            if allow_svg:  # Often served as plain text or XML.
+                kinds += ("text/", "application/xml")
+            if ctype and not ctype.startswith(kinds):
                 return None
-            if "svg" in ctype:
+            if "svg" in ctype and not allow_svg:
                 return None
             chunks: list[bytes] = []
             size = 0
@@ -698,7 +703,7 @@ async def download_image(client: Any, url: str, referer: str = "") -> bytes | No
         log.debug("image download failed", url=url, error=str(e))
         return None
     data = b"".join(chunks)
-    return data if sniff_mime(data[:16]) else None
+    return data if sniff_mime(data[:16]) or (allow_svg and b"<svg" in data[:4096]) else None
 
 
 async def save_remote(store: ImageStore, client: Any, url: str, *, page_url: str = "",
@@ -782,7 +787,8 @@ async def save_page_images(candidates: list[PageImage], page_url: str, store: Im
 _REPORT_RULE = (
     "Put the ones that support a finding next to it, with caption + source page: "
     ".md → ![caption](original URL); .html → <img src=\"saved path\"> (write embeds it "
-    "as base64); .docx → doc.add_picture(\"saved path\"). Skip any that add nothing."
+    "as base64); .docx → doc.add_picture(\"saved path\"); .pptx → the pptx tool's image "
+    "with the saved path. Skip any that add nothing."
 )
 
 
