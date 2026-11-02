@@ -9,7 +9,7 @@ The same agents, the same conversation, from wherever you are.
 ## Voice devices
 
 <p align="center">
-  <img src="../screenshots/devices-0.8.2.webp" width="100%" alt="M5Stack StopWatch speaking an answer and showing its clock face, PaperColor e-paper showing its dashboard and an answer">
+  <img src="../screenshots/devices-0.8.5.webp" width="100%" alt="M5Stack StopWatch speaking an answer and showing its clock face with Captain, and the PaperColor's dashboard in blocks of colour beside an answer">
 </p>
 
 Push-to-talk Captain Claw clients on three M5Stack devices and a Waveshare board:
@@ -19,7 +19,7 @@ Push-to-talk Captain Claw clients on three M5Stack devices and a Waveshare board
 - the **StickS3**;
 - the **Waveshare ePaper 1.54** (0.8.4): a 200×200 black-and-white e-paper board, with or without touch.
 
-Press, talk, press again, or just stop talking. Flight Deck transcribes it, one of your agents answers, and the device **speaks the answer sentence by sentence while the model is still writing it**, the text following the voice. Since 0.8.2 the voice no longer stops at about 66 seconds: Flight Deck speaks up to about 1,500 characters of an answer, and the device shows the rest.
+Press, talk, press again (on the StickS3 and the PaperColor, just stopping talking also sends it). Flight Deck transcribes it, one of your agents answers, and the device **speaks the answer sentence by sentence while the model is still writing it**, the text following the voice. Since 0.8.2 the voice no longer stops at about 66 seconds: Flight Deck speaks up to about 1,500 characters of an answer, and the device shows the rest.
 
 - Out of Wi-Fi, it keeps **voice notes** and sends them when the deck is back.
 - Every question carries the battery, the room's temperature and the local time.
@@ -27,29 +27,31 @@ Press, talk, press again, or just stop talking. Flight Deck transcribes it, one 
 
 One firmware tree: `cd firmware/device && pio run -e stopwatch -t upload` (or `-e sticks3`, `-e papercolor_b`, `-e epaper154`, `-e epaper154_touch`). Details in [firmware/device/README.md](../../firmware/device/README.md).
 
-[![Every StopWatch screen: the clock face with the agent's character, listening, working, an answer whose spoken sentence is lit, a background picture, and the info page](../screenshots/stopwatch-screens.png)](../../firmware/device/README.md)
+[![StopWatch screens: the clock face with Captain, listening, working with a stop button, an answer whose spoken sentence is lit, Captain speaking, and Captain on a background picture](../screenshots/stopwatch-screens.png)](../../firmware/device/README.md)
 
-[![Every PaperColor screen: the e-paper dashboard with the clock, room climate, battery and voice notes, and an answer](../screenshots/papercolor-screens.png)](../../firmware/device/README.md)
+[![PaperColor B screens: the dashboard in blocks of colour, a short answer, a long Croatian answer, the options QR code, and an answer with a picture](../screenshots/papercolor-screens.png)](../../firmware/device/README.md)
 
 ### Four devices, one firmware
 
 | | StickS3 | StopWatch | PaperColor | Waveshare ePaper 1.54 |
 |---|---|---|---|---|
 | screen | 240×135 LCD | 466×466 round AMOLED, touch | 4" E Ink Spectra 6, six inks | 200×200 black-and-white e-paper, optional touch |
-| talk | front button | yellow button, or the on-screen record button | A (B build) / C (A build) | the upper button (the gear), or a tap in the middle of the screen on the touch board |
-| extras | 18 animated characters | clock face, raise to wake, vibration, background picture, info page | two status lights, room sensor, microSD notes, a dashboard every five minutes | a drawn menu, a sleeping clock on a timer you pick, a green status LED, PWR cancels a recording |
+| talk | front button | yellow button, or the on-screen record button | A (B build) / C (A build) | the upper button (the gear), or a tap on the home tile or the middle of an answer on the touch board |
+| extras | Captain, animated | clock face with Captain and a dial, raise to wake, vibration, background picture, info page | two status lights, room sensor, microSD notes, a dashboard in blocks of colour every five minutes | a drawn menu, a home screen with note mode at a glance, a sleeping clock on a timer you pick, a green status LED, PWR cancels a recording |
 | build | `pio run -e sticks3` | `pio run -e stopwatch` | `pio run -e papercolor_b` (or `papercolor`) | `pio run -e epaper154` (or `epaper154_touch`); V2 boards only |
 
 - **Signed over-the-air updates** from your own deck (`tools/publish.py`), rolled back if a build can't reach the deck within 90 s.
-- **Press to talk, press again — or just stop talking** (2.5 s of quiet sends it), with blips and chimes; the PaperColor records straight from sleep. On the Waveshare board only a press ends a recording, and a press from sleep only wakes it.
+- **Press to talk, press again — or just stop talking** (2.5 s of quiet sends it on the StickS3 and the PaperColor), with blips and chimes; the PaperColor records straight from sleep. On the StopWatch (since firmware 0.20.1) and the Waveshare board only a press, or a tap on the on-screen button, ends a recording, however long you pause, and on the Waveshare board a press from sleep only wakes it.
 - **Answers as they're written** — spoken sentence by sentence while the model is still writing; the lit sentence and the pages follow the voice; pause, replay, stop.
 - **Offline voice notes** (ADPCM in flash, or on the PaperColor's microSD) sent as one turn once the deck is back, and a **note-taking mode** for a run of notes.
 - **Context with every question** — battery and time left, Wi-Fi, motion, room temperature and humidity, local time, as a `[Context: …]` line the model reads.
 - **"Volume up", "beep off"** handled by the deck, never sent to the agent; a turn survives a dropped link.
-- **Something waiting?** (0.8.3, firmware 0.19.1 / PaperColor B 1.0.21) — a beep, a banner on the StopWatch and StickS3, and a magenta count badge on every screen when a proposal or nudge waits for you in Flight Deck. Quiet hours keep the count and skip the beep. The text stays in Flight Deck.
+- **Something waiting?** (0.8.3, firmware 0.19.1 / PaperColor B 1.0.21) — a beep, a banner on the StopWatch and StickS3, and a count on every screen when a proposal or nudge waits for you in Flight Deck. Quiet hours keep the count and skip the beep. What came stays in Flight Deck's bell.
 - **A link that renews itself** (0.8.3) — 30 seconds after its agent goes missing (backing off to every 10 minutes) and after 20 minutes idle, never in the middle of something.
-- **Asleep or switched off** (firmware 0.19.2 / PaperColor B 1.0.22) — the agent's dot turns blue while Flight Deck has put it to sleep for being idle (talking wakes it), red while it's stopped; the PaperColor writes the agent's name in the same colour.
-- **Waveshare ePaper 1.54** (0.8.4, firmware 0.19.10) — partial refresh in 0.6 s and full in 1.8 s, fast enough for a drawn menu and answers that page with the voice. Double-click PWR (or double-tap the touch board) for home; the sleeping screen keeps the clock, with a sleeping robot; the green LED is steady while recording, breathes while the agent works and blinks twice when something waits. Its onboard sensor isn't used, because the board's own heat throws it off. Flash it once over USB; updates come over the air after that.
+- **Asleep or switched off** (firmware 0.19.2 / PaperColor B 1.0.22) — the agent's dot turns blue while Flight Deck has put it to sleep for being idle (talking wakes it), red while it's stopped; the PaperColor's options screen writes the agent's name in the same colour.
+- **Captain on every screen** (0.8.5, firmware 0.20.0) — the 18-character choice is gone. The robot from the app icon is drawn at each size, and its face and lamp show the agent's state. The StopWatch has a new look: black, gold, cyan and coral, a dial with the seconds going round, the voice as bars, what the agent is doing while it works.
+- **PaperColor B** (0.8.5, 1.0.24 to 1.0.30) — a dashboard in blocks of colour, the answer as a conversation, an icon beside each button instead of a legend, recording that works offline, and B held 4 s to switch off.
+- **Waveshare ePaper 1.54** (0.8.4; a new home screen with note mode at a glance, a tap on the tile to talk on the touch board, and stop and cancel icons in 0.8.5, firmware 0.20.3) — partial refresh in 0.6 s and full in 1.8 s, fast enough for a drawn menu and answers that page with the voice. Double-click PWR (or double-tap the touch board) for home; the sleeping screen keeps the clock, with a sleeping robot; the green LED is steady while recording, breathes while the agent works and blinks twice when something waits. Its onboard sensor isn't used, because the board's own heat throws it off. Flash it once over USB; updates come over the air after that.
 
 ## Smart glasses
 

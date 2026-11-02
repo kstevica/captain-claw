@@ -41,6 +41,12 @@ The first account becomes the admin. The full checklist (sharing, team keys, Gma
 
 With sign-in on, agents stay in their own files and non-admins' agents don't run code (0.8.4); see the [checklist](../team-deployment.md#what-the-launch-hardening-changed-08x).
 
+Once it's running from a git checkout, **Console → Updates** updates the deck itself, with a test start, a warning to everyone and a way back (0.8.5). See [Updating the deck](flight-deck.md#updating-the-deck).
+
+## Coding agents as your crew
+
+To have Claude Code, Codex, OpenCode or Pi work for you, install the CLI on the deck's host and open **Crew**, which lists what's there and the command for what isn't (0.8.5). OpenCode's free models need no key. An admin can always use Crew; everyone else needs an admin's tick, and that tick trusts them with the server. See [Crew](flight-deck.md#crew).
+
 ## A voice device on your desk
 
 Flash an M5Stack StickS3, StopWatch or PaperColor, or a Waveshare ePaper 1.54 (the deck needs a Soniox key, in Connections → Soniox or as the admin's team key):
@@ -102,4 +108,4 @@ Full reference: [USAGE.md](../../USAGE.md#configuration-reference) (23 config se
 
 - [Flight Deck](flight-deck.md) — what to do once the dashboard is open
 - [BotPort and MCP](botport-and-mcp.md) — connect your decks to each other and to Claude
-- [Inside an agent](agents.md) — every supported model and the 65 built-in tools
+- [Inside an agent](agents.md) — every supported model and the 68 built-in tools

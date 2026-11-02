@@ -18,9 +18,17 @@ Mix providers freely — each session independently selects its model.
 | LiteRT (on-device) | `.litertlm` Gemma models running locally via an isolated subprocess worker |
 | OpenRouter | 200+ models via meta-router |
 
-## 65 built-in tools
+## 68 built-in tools
 
 Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), Microsoft 365 (Outlook mail, Calendar, OneDrive), Jev calibrated judgments (TypeSafe AI), Soniox speech in and out (`audio`), public file links, topic switching by asking (`sessions`), a read-only Telegram inbox, the StopWatch's background picture, bill payments (opt-in), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), Basna (read and start multi-agent ensemble runs), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
+
+New in 0.8.5:
+
+| Tool | What it does |
+|---|---|
+| `crew` | Runs Claude Code, Codex, OpenCode or Pi as workers, each in its own git worktree, and supervises them; see [Crew](flight-deck.md#crew). It starts a task, clones, prepares an environment, steers, asks for a pull request and asks you to Approve a merge. It can't merge or discard work. Shown only to an owner an admin approved. |
+| `xlsx` | Makes, reads, edits and checks Excel workbooks with no scripts. Only what a change touches is rewritten, so charts, pivots and macros stay. Formulas stay live, with results from about 200 functions compared with Excel, and every call lists the cells it changed and the totals that moved. |
+| `pptx` | Makes, reads, edits, checks and renders PowerPoint decks with no scripts, on the deck's own layouts. Text is measured and every result says what doesn't fit. Native charts and tables, and pictures in any format or from a link, placed where they work. `render` needs LibreOffice. |
 
 New in 0.8.4:
 
@@ -53,6 +61,8 @@ Three layers of protection that run before, during, and after agent operations:
 - **Every call on the record** (0.8.3) — each tool call lands in the deck's append-only, HMAC-chained [tool-call register](flight-deck.md#activity-and-audit), refused calls included; self-reflection reads a digest of repeated failures and repeated calls from it
 - **Held to its own files** (0.8.4) — on a deck with sign-in, file tools are checked by real path against the agent's folder, its workspace, its owner's VFS and the call's shared folders; a non-admin's agent also loses the tools that run code or drive the host. See the [checklist](../team-deployment.md#what-the-launch-hardening-changed-08x)
 - **Checked on hand-over** (0.8.4) — when you hand an agent a task on the [Taskboard](flight-deck.md#the-taskboard), its reply is compared with the tool-call register, Gmail and Calendar before anyone believes it
+
+- **A person lands a worker's work** (0.8.5) — a [Crew](flight-deck.md#crew) worker never pushes, and the `crew` tool can ask for a merge but not do one. A non-admin's agent has no other way; an admin's agent has a shell until agents run in an OS sandbox, so for it this is a rule it's told, not one it can't break
 
 Guards support two modes: `stop_suspicious` (block automatically) or `ask_for_approval` (prompt the user).
 

@@ -92,3 +92,5 @@ New in 0.8.3. Give an outside system, such as your CRM, shop or monitoring, its 
 - **The agent can write first** with the `linked_system` tool (`list`, `send`), if the link allows it (*the agent can message it*, on by default).
 - **Kept apart.** A link's turns run in a session of their own, are never mirrored into your chat, and may write email only if the link's own instructions ask for it. Keys are stored only as a hash; the webhook secret and an outbound link's remote key are sealed. Shared-agent members can't use `linked_system`.
 - Webhooks and outbound links go only to public `https://` and `wss://` addresses unless `FD_LINK_PRIVATE_ADDRESSES=1`.
+- **Follows its agent** (0.8.5). A link stays with its agent when a restart moves it to another port, and on a deck with accounts the agent gets its instructions before a link's first turn after it starts.
+- **Apps built for this** (0.8.5). [Forge agents](flight-deck.md#forge-agents) has apps built to a fixed contract that speaks this protocol, and connects them for you.

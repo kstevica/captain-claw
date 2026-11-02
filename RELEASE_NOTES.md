@@ -1,367 +1,287 @@
-# Captain Claw v0.8.4 Release Notes
+# Captain Claw v0.8.5 Release Notes
 
-**Release title:** Onboarded, On the Board
-**Release date:** 2026-10-30
+**Release title:** All Hands on Deck
+**Release date:** 2026-11-02
 
-0.8.3 kept a record of everything your agents do. 0.8.4 teaches them your work,
-and shows you where every piece of it stands.
+0.8.4 taught an agent your work. 0.8.5 gives it hands: a crew that builds things,
+and a team that forms around what you ask for.
 
-**Onboarding** gets an agent ready for the job. Give it your documents and your
-instructions. It keeps every document whole as a knowledge base it can search,
-at no token cost, reads as much as you budget for, and turns that into rules,
-skills, facts and lessons you review before it gets them. Then test it: an
-**exam** writes questions from the documents, asks them through the agent's real
-chat, grades the answers, and says why a wrong one went wrong. **Practice** on
-real tasks, correct it, and it tries again.
+**Crew** puts coding CLIs to work for you: **Claude Code, Codex, OpenCode and Pi**,
+each in a git worktree of its own, several at once. Talk to your agent ("have Codex
+fix the login test and Claude add dark mode") or use the Crew page. Flight Deck
+watches them without spending tokens and tells you when one finishes or needs a
+decision, on the channel you asked from. Nothing lands until a person says so.
 
-**The Taskboard** is one place for everything your agents were asked and sent,
-on every channel: **Needs me**, **Waiting on others**, **Agents working**,
-**Done**. It works like Gmail, keys included. Next steps wait for your approval,
-you can hand a task to an agent, and the board **checks that the agent really
-did it** instead of taking its word.
+**Forge agents** is for people who know what they need but not which agents would do
+it. Say it in your own words and attach your files. Captain plans a small team of
+standing agents, you approve it, and it recommends what should run on a schedule and
+what software is worth building. Crew builds those apps to a fixed contract, and your
+agents connect to them.
 
-**Team decks got much tighter.** On a deck with sign-in, agents are confined to
-their own files, non-admins' agents no longer run code, and the team's API keys
-can't be read or sent anywhere the team didn't choose.
-**[Read this before you upgrade a team deck.](#before-you-upgrade-a-team-deck)**
+**A deck updates itself.** **Console → Updates** tries the new version on a spare port,
+warns everyone with a two-minute countdown, stops the agents, pulls, restarts in place
+and goes back by itself if the new version doesn't come up.
 
-Also in 0.8.4: **your own AI keys** with no daily limits; a **Profile** with a
-researcher that drafts your texts; **two new tools**, `knowledge` and
-`visualize`; pictures that reach the chat and the channel; a slicker kiosk; the
-**Waveshare ePaper 1.54** boards; and a new Captain icon.
+**The Taskboard takes many tasks at once.** Tick them as in Gmail and give one instruction
+for all ("thank them and politely decline"). The agent works through them one at a time, each
+with its own details, and you can stop the rest at any point.
 
-71 pull requests, three days after 0.8.3.
+Also in 0.8.5: real **Excel and PowerPoint** without scripts (`xlsx`, `pptx`); **agent
+groups** in the kiosk; a Users page with last login and tokens; and a new look for the devices,
+with Captain as the only character.
 
-**Restart Flight Deck, then every agent.** See [Upgrading](#upgrading).
+48 pull requests, three days after 0.8.4.
+
+**Restart Flight Deck, then every agent.** See [Upgrading](#upgrading). **Approving someone
+for Crew trusts them with the server:** [read this first](#before-you-approve-anyone-for-crew).
 
 ## Highlights
 
-### Onboarding: teach an agent your work
+### Crew: how a task flows
 
-**⋯ → Onboarding** on an agent opens one page with five tabs: **Overview**
-(how it did, what to do next), **Lessons**, **Practice**, **Materials** and
-**Exams**. When you create an agent, tick *Set up its way of working next* to
-start there.
+Open **Crew** from the sidebar, or in the kiosk from the agent column or **Settings**, or just ask your agent.
 
-**Way of working: your material goes in**
+**1. Ask.** Tell your agent, in any channel, or press **New task**. Pick a CLI and say what's
+wanted. **Change the code** (a `ship` task) works on a branch; **Only look, and report** (a `scout`
+task) changes nothing. The same brief, for the same CLI in the same place, while the first is still
+active, is that task rather than a second worker.
 
-- Add up to 12 documents by drag and drop, upload or from the File library
-  (PDF, Word, Excel, PowerPoint, CSV, Markdown, text, HTML; up to 3,000 PDF pages
-  each), say how the agent should use each one (rules, procedures, reference,
-  templates, or let it decide), and add instructions of your own.
-- **A knowledge base that costs no tokens.** Every document reaches the agent
-  whole: an overview, parts under 200 KB, and a map of its sections. Semantic
-  memory indexes `knowledge/` first, and the new `knowledge` tool searches and
-  reads it.
-- **A budget for reading.** **Quick** (60k tokens), **Standard** (250k) or
-  **Deep** (1M). Material over the budget is read by its most instructive
-  sections, chosen without a model and pulled towards an optional **Focus on**.
-- **Read in the background.** Close the dialog or restart Flight Deck and it
-  goes on; the bell says when it's ready. Each step stays small and calls are
-  paced, and if the model server says "not now", the read waits it out and shows
-  the wait.
-- **The agent reads with its own model**, with thinking off, on its own key and
-  endpoint. Your tiers step in only if it's off or stops answering, and the
-  review says so.
-- **You review before anything lands.** Rules, what it should ask about first,
-  skills, facts, templates and a glossary, each with its source. A longer read
-  keeps more: up to 150 rules, 30 skills, 1,000 facts, 30 ask-first items, 20
-  templates and 400 terms from one read.
-- **Spreadsheets become tables.** An `.xlsx` or `.csv` also gives the agent one
-  datastore table per sheet, with no model involved, so prices and SKUs are exact
-  lookups. Codes like `00123` keep their zeros.
-- **Read the rest later.** Each document tracks which sections were read; pick
-  what to read next and only the unread part costs tokens.
-- **Add to it or replace it**, on new and existing agents alike. Learned facts
-  and the agent's own files stay either way, and an agent that's off gets
-  everything when it starts.
-- **Keep a file from chat.** "Put this in your knowledge" stores a chat file the
-  same way, with no model reading it.
+**2. Say where.** **A project**, **a repository address** or, for admins, **a folder here**.
+Crew clones an address itself, in the background: a wrong address is refused at once, the task
+shows **Getting the repository** with how far it has got, and a 216 MB clone doesn't hold anything
+up. `crew action=clone` gets a repository here with no work and no tokens.
 
-**Lessons: the right rule at the right moment**
+**3. Say what it runs on.**
 
-- A setup's rules, ask-first items and facts become the agent's lessons, each
-  with its source and who taught it. Add one by hand, reword it, or take it away.
-- **Always in mind** lessons stay in the instructions. **When it matters** lessons
-  reach the agent with the messages they bear on, picked by words and by meaning,
-  at most 6 items and 1,800 characters a turn, with no model call.
-- **Save as a lesson** on your chat messages: a hover action, and a chip when a
-  message reads like a correction or something to remember (English and Croatian).
+- **Its own:** the CLI's own login or, for OpenCode, its free models.
+- **An agent's model:** the model one of your agents is set to, on that agent's endpoint and key.
+- **A deck tier:** a tier from your models in Library, or the team's.
+- **Enter one:** an API address, a model name, a context size and a key, for this task only.
 
-**Exams: does it really know this?**
+With the last three the CLI needs no login, and gets none. The worker gets the deck's address and a key
+that works only during its current turn, and the deck puts the real key on the way out. A worker told to
+print its environment has nothing to print, so a team's key is safe to use this way. Tokens count toward
+your daily limit the way an agent's do: only what missed the model's prompt cache, plus its output. Your
+agent can do this too, when you ask: `runs_on` takes `me`, `agent:<name>` or `tier:<name>`. A key is never
+typed through a chat.
 
-- **Quick** (10 questions), **Standard** (25), **Deep** (60) or **Marathon** (120),
-  on all documents or the ones you tick. Token estimates follow your pick.
-- Questions are asked through the agent's real chat, on a private lane that keeps
-  nothing. Every answer is graded point by point against its section.
-- A wrong answer comes with its cause: didn't look, looked in the wrong place,
-  found it and got it wrong, or made things up.
-- **Teach it this** turns an answer into a lesson, **Read the parts it missed**
-  queues those documents, and asking the same exam again shows better or worse
-  since last time.
+**4. Give it what it needs.**
 
-**Practice: real work, nothing sent**
+- **Files.** Paste a screenshot, drop files or use the paperclip, on New task and in any later message, up
+  to 50 MB each and 30 files or 200 MB a task. Send your agent a screenshot and say "have OpenCode fix this",
+  and it passes it on.
+- **Folders of your files**, as many as you like. **Read** gives the worker its own copy, remade before each
+  turn. **Read and write** works in your real folder, at once, with no undo. Google Drive and OneDrive
+  folders aren't offered, and a folder shared with you to view stays that way. Why Read is a copy: OpenCode
+  wrote straight through a read-only link when we tried it.
+- **An environment to run and test in, for any project.** Prepare it once, in the project's main folder: by
+  hand, in a **terminal in the browser**, or with **Prepare it with**, where a worker works out what's needed,
+  installs it, checks it runs and reports its test and start commands. Every later task gets its own instant
+  copy of package folders, the shared Python environment with `PYTHONPATH` on its own code, and its own
+  ports (`CREW_PORT`) and temp folder. Captain never runs anything a repository brings with it.
 
-- Give it a task as a user would, or take one of three suggested from its
-  documents. It answers on the same private lane. **Good**, or **Fix it**: what it
-  should have done becomes a lesson, and it tries again.
+**5. It works, and you can step in.** Flight Deck watches from disk and spends no tokens. A worker outlives a
+deck restart.
 
-**For a team**
+- **Send now** (Enter) stops what the worker is doing, including any command it had running, and it goes on with
+  your message: its files stay. **After this turn** (⌘/Ctrl+Enter) waits for its turn to end.
+- **A line while it's quiet.** After a minute with nothing new, the page says what it's waiting on: the model
+  writing its reply, with how long and how much has come in, a command running, or a failed call being retried.
+- **It rides out a bad connection.** Each CLI asks again by itself, and that shows as a grey note, not a red
+  error. If it gives up or goes quiet, Captain starts it again from where it stopped, after 20 seconds, a minute,
+  then three. A refused key or a spent limit isn't retried. A worker running a long command is never restarted
+  for being quiet.
 
-- **An admin's base.** What an admin teaches a user's agent is its base. The user
-  adds to it, but can't reword or remove it, and their own Replace keeps it.
-- **Members suggest.** On a shared agent, *Suggest as a lesson* waits for the owner
-  in the bell and the Lessons tab.
-- **Pass it on.** Package an onboarded agent's documents, tables, lessons, skills
-  and exam questions as a new archetype, ready for anyone to start from.
+**6. It finishes, and your agent hears.** The agent is called back on the channel the task came from. A worktree is out
+of an agent's reach, so the results come to your VFS: `vfs:crew/<project>/<task>/` has `report.md` and `files/`. The
+task's **Files** tab shows them, with no `.git`, and only what was committed.
 
-**Also in the kiosk**
+**7. A person lands it.** Every task works on its own branch and never pushes. **Merge**, or Approve in the bell on a merge
+your agent asked for. Captain pushes and opens pull requests itself, with the GitHub token in **Crew → Logins**, and
+merges them too: a worker never sees that token. Work that hasn't landed is never removed unless you say so. **Tidy up**
+clears finished tasks off a project's page.
 
-- **Instructions, insights & skills** (⋯) replaces Instructions. Insights are
-  cards with their source document, which you can search, teach, correct or forget.
-  Skills can be read, switched on or off, and corrected where the agent keeps them
-  itself.
-- **Materials** browses the documents: a read meter, sections as a tree marked
-  read or searchable only, a reader and search across all of it.
+**Put it online.** **Live sites** lists everything you've published, whoever did it: **Stop** takes it offline and keeps its
+address, **Start** brings it back, and **Publish** puts up what a task made or one of your folders. On a deck with sign-in
+only an admin can run an app; a page is anyone's.
 
-### The Taskboard: where everything stands
+**Working on Captain itself.** Point a task at this deck's repository or your fork, land it through a pull request, then
+**Console → Updates** installs it, or your agent asks you to Approve that with `crew action=update_deck`.
 
-**Tasks** in the kiosk, **⋯ → Tasks** on an agent, or **Settings → Taskboard**. A
-badge counts what needs you. Every user has their own board: a member's tasks go
-to that member, and owners and admins never see them.
+#### The `crew` tool
 
-- **What's on it.** Every turn your agents run, on any channel; scheduled jobs and
-  their runs; Autonomous Work proposals; follow-ups; held Gmail auto-replies and
-  Gmail sends; linked systems; agents' to-do lists; and the last 30 days of each
-  agent's chats, read once, marked as history and never acted on.
-- **Your own inboxes, if you want.** Telegram inbox, WhatsApp Web and Gmail are each
-  off until you consent. Their text is kept 30 days, and switching one off deletes
-  it, names and addresses included.
-- **It reads the work.** One call on the agent's own model writes the title, the
-  ask, the result and who's involved. [Jev](https://console.typesafe.ai/keys) then
-  decides whether it's a task, who owes the next move, and whether it's done;
-  without Jev, rules decide. **Why is this here?** shows every decision.
-- **Like Gmail.** `j`/`k`, `e` Done, `b` Snooze, `/` search, `g` then a lane, `?` for
-  the list. A person's reply brings the same task back to **Needs me**, marked
-  *New reply*, with its history. Your corrections stick against later sweeps, with
-  Undo.
-- **Read it properly.** **Open bigger** (`f`) fills the board with one task. A task
-  with a Gmail thread shows the whole email there, fetched with your own token when
-  you open it and kept nowhere. Markdown renders in rows and the timeline; links
-  and pictures show as words, since this can be anyone's text.
-- **Next steps wait for you.** With Jev, the agent's model drafts a reply, a reminder
-  or a question as a proposal you edit, approve or reject. Email only ever becomes a
-  draft; recipients come only from verified parties, never from model text; and no
-  key or one-click button approves a next step. Nothing is proposed on a message
-  flagged as carrying instructions, or on history.
-- **Hand it to an agent.** **Next move** (`m`) → *The agent…*: pick the agent, say what
-  to do, **Hand over**. It runs as your own request in a session of its own, with
-  your words first and the task's text fenced as data. Sending still goes by your
-  Email sending switch and its recipient list.
-- **Then it checks.** An agent's "done" is only its word, so the board compares the
-  reply with the tool-call register, and reads Gmail and Google Calendar with your
-  token, to see that the message went out and the event exists. Jev then compares
-  your words with the record. **What the agent did** shows the verdict. In doubt, the
-  task stays open and yours.
-- **Merge, split, export.** Threads attach by strong keys; merge, unmerge and split
-  with Undo; Jev can suggest a merge but never applies one. Export as CSV or JSONL.
+| Action | What it does |
+|---|---|
+| `options` | The CLIs you may use, their logins, the model each last ran on and its limits (like Claude's weekly limit), the models `runs_on` can name, and the projects |
+| `dispatch` | Start a task: `harness`, `brief`, one of `project`, `repo_url`, `repo_path`, and optionally `kind`, `deliver`, `model`, `runs_on`, `effort`, `attachments`, `vfs_read`, `vfs_write` |
+| `clone` | A repository here and no work yet: no worker, no tokens, and a callback when it's ready |
+| `env`, `prepare_env` | What's installed for a project, and a worker that sets it up |
+| `list`, `status`, `files` | What's going on, one task, and where its results are |
+| `steer` | The next instruction, or an answer to a worker's question; `now=true` stops it to hear this at once |
+| `folders` | Which VFS folders a task has, from its next turn |
+| `stop` | Stop a task and keep its work |
+| `pr` | Captain pushes the branch and opens the pull request |
+| `request_merge` | Ask the person to Approve a merge |
+| `update_deck` | An admin's agent asks them to Approve updating this deck |
 
-Agents report their turns once restarted; the rest of the board fills from what the
-deck already records. Plan and known gaps: [docs/taskboard-plan.md](https://github.com/kstevica/captain-claw/blob/main/docs/taskboard-plan.md).
+The agent is told to report what git shows, not what a worker claims. A task's id exists only once a `crew` result gives it,
+and a made-up one is caught. It can't merge or discard work through this tool: a person's Approve does that.
 
-### Security: a deck for people who don't share a machine
+#### Who can use it
 
-Every process agent runs as the deck's OS user, so until now, on a multi-user deck,
-an agent's tools could reach other users' files. On a deck with sign-in:
+- **An admin approves it, per user.** On **Users**, open someone's row and tick Crew: which CLIs, and how many at once. It's off for
+  everyone else. Withdrawing it stops what's running at once. Admins, and a deck with sign-in off, can always use it.
+- **The browser terminal has its own tick** for a non-admin. `FD_CREW_TERMINAL=off` takes it from everyone.
+- **Each person's own logins**, in **Crew → Logins**: a `claude setup-token` token or an Anthropic key, an OpenAI key or Codex's
+  `auth.json`, provider keys for OpenCode and Pi ("Your own AI keys" count), and a GitHub token. A non-admin's worker never falls back
+  to the deck owner's login, and its environment holds none of the deck's secrets. OpenCode's free models need no login at all, though
+  a task with no key must name its model: your code goes to whichever model runs, and [they differ in what happens to it](https://opencode.ai/docs/zen/).
+- **Your own model.** Crew → Logins → *Your own model* runs OpenCode and Pi on your llama.cpp or Ollama. The key is in no file.
+- **Models and limits.** The page shows the model each CLI last ran on and its account's limits, as of its last run. Claude Code reports
+  both, Pi its model, and Codex and OpenCode neither.
 
-- **Agents stay in their own files.** Path arguments are checked by real path against
-  the agent's folder, its workspace, its owner's VFS and the call's shared folders.
-  `.env` is out of reach, control files can't be written, `glob` and `grep` results are
-  filtered, and the browser takes web URLs only.
-- **Non-admins' agents don't run code or drive the host.** `shell`, `terminal`,
-  `scripts`, `app_runner`, `code`, `termux`, `bat`, `desktop_action`, `screen_capture`
-  and `pinchtab` are refused and hidden. No skill dependency installs, no links outside
-  the user's VFS, no read folders. Their outbound web tools take public addresses only.
-- **Hosted apps are admin-only.** Publishing or starting one runs a command on the
-  server. Static sites stay open to everyone. Adding VFS links and browsing the host's
-  folders are admin-only too.
-- **Team keys stay put.** Non-admins read a team key as `····` and its last four; saving
-  a masked value keeps the key. A team key, and any key in Flight Deck's own environment,
-  goes only to the provider's own endpoint or one the published team sets route it
-  through. A change that would send it elsewhere is refused or re-keyed.
-- **Environment pins.** The variables that would have a non-admin's agent load code from
-  a path or route its calls elsewhere keep Flight Deck's values. Saving a new one in the
-  agent editor is now refused and named, not silently ignored.
-- **Callers are who they prove they are.** Agent routes bind an owner only from a verified
-  bearer or the agent's own token; a `source_port` or `owner_id` in a request counts as
-  identity only with sign-in off.
+Install the CLIs on the deck's host: Crew → Logins shows which are there and the command for those that aren't. OpenCode 1 and 2 both work.
 
-This is containment, not an OS sandbox: an admin's agent still has a shell that reaches the
-whole host. The sandbox is designed and parked in
-[docs/agent-os-sandbox-plan.md](https://github.com/kstevica/captain-claw/blob/main/docs/agent-os-sandbox-plan.md).
+### Forge agents: say what you need, get a team
 
-### Your own AI keys
+In the kiosk and the simple layout, **New agent → Forge agents**. Close the dialog at any point: it carries on, and the bell opens it again.
 
-- **Settings → Your own AI keys**: Anthropic, OpenAI, Google Gemini, OpenRouter or xAI. Each
-  key is checked with the provider before it's saved, sealed at rest, and never returned.
-- While it's on, your tier set runs on your keys and **no daily limits apply**. A tier on a
-  provider you have a key for keeps its model, any other moves to one of yours (pick per
-  tier), and local tiers stay. Existing agents follow, and running ones restart.
-- Turn it off and the old models return, with the team key back through the healer. On a shared
-  agent the owner's keys are what count.
-- On by default. An admin can turn it off for the deck, which moves everyone back.
+1. **Describe.** Your request in your own words, and up to 10 files of 25 MB each. **Plan my team** starts it.
+2. **Review.** Vatra's planner opens your files, the Lead picks the fewest standing agents that cover the request, and the Long Horizon Planner writes
+   each one's job and may ask you questions. Rename an agent, change what it's based on, rewrite its job or leave it out. **Update the plan** starts
+   from your edits. Nothing exists until you press **Create N agents**, and a plan never exceeds the room your agent limit leaves.
+3. **Create.** Each agent gets its archetype's way of working plus its job and its teammates. The team shares a folder (`vfs:<team>/`, your files under
+   `inputs/`) and one set of data tables, and teammates reach each other with `consult_peer`.
+4. **Finish.** Captain recommends what should run by itself and what software is worth building, with why and how you'd use each. Only what you keep gets made.
+   - **What runs by itself** becomes scheduled tasks, listed under Scheduled tasks like any other.
+   - **Software to build** goes to **Crew** as ordinary tasks (**Build it with Crew**), so Crew's approval and limits apply, and you land the work there. Every app is built to a
+     [fixed contract](https://github.com/kstevica/captain-claw/blob/main/captain_claw/instructions/forge/app_contract.md): an HTTP API under `/api/agent/` with a bearer
+     key and a manifest, a WebSocket at `/agent/ws` that speaks the agent link protocol, or both.
+   - **Connect your agents** works once the app is running: give its address and key. Flight Deck reads the manifest, registers the API as `direct_api` calls on each agent
+     you choose, and makes an outbound agent link to the socket. The key stays in the sealed link and the agents' stored calls, never in the plan or their instructions.
 
-### Profile, with a researcher
+**Agent Forge** is still there in the full layout, for designing a team around a goal and spawning it in one click. Forge agents goes further, to a standing team with
+its schedules and its software, and it's written for someone who has never seen an archetype.
 
-**Settings → Profile** is now **Personal · Deck-wide · Password**.
+**An agent now knows its job with no one in its chat.** Instructions used to arrive only with a browser chat, so an agent nobody had opened, or one restarted by idle sleep,
+ran scheduled and linked turns with no job. Flight Deck now tells it before each scheduled turn and before a linked system's first turn after it starts. A link also follows its
+agent when a restart moves it to another port. Both need accounts on the deck: with sign-in off, instructions live in the browser.
 
-- **Personal** holds who you are as material: your name, your links, your company and its
-  links, and documents such as a CV or a bio.
-- **Fill it in for me** reads those documents, visits the links, looks you and the company up on
-  the web, and drafts *About me*, *My company* and *My standing preferences*. It runs on your
-  go-ahead, on the team's model and credentials, and is followed live; the bell says when it's
-  finished. **Nothing reaches your agents until you Use a draft and Save.** Links to private hosts
-  are never fetched.
-- **Deck-wide**: an admin edits the defaults in place; everyone else reads them.
+**Known gaps.** It has run end to end with a stand-in model, CLI and app; a real model's plan and a real worker building to the contract have yet to be tried together. A team's
+tables live in `vfs:<team>/.datastore/store.db`, which the Data library doesn't list. A non-admin can't host a runnable app, so Connect needs an admin or another host for it.
+Agents come from the archetype catalog; no new ones are minted. An admin managing a user's agents doesn't get it in that dialog.
 
-### Two new tools
+### The Taskboard: many tasks, one instruction
+
+0.8.4's board handed over one task at a time. Now it works like Gmail here too.
+
+- **Pick several.** A tick box on every row, `x` on the open task or the cursor's row, Shift+click for a run, the list's own box, and `*` then `a` for all shown or `n` for none.
+- **One move for all.** A bar over the list offers **Hand to agent**, **Done**, **Snooze**, **Next move**, **Not a task**, **Reopen** and **Got it**, and the same keys act on what's ticked. Each applies as if made on its own, with Undo for the lot.
+- **One instruction, one at a time.** **Hand to agent** takes one set of words for all: "thank them and politely decline". Every task leaves **Needs me** at once and waits in a line. The agent takes them in order, each in a session of its own with only that task's details, read when its turn comes.
+- **You see how it stands.** A line over the board says how far it has got and which task it's on. **Stop the rest** sends what still waits back to you, and the run under way finishes.
+- **It's your own request**, so it writes email or messages if that's what you ask, and your Email sending switch and its recipient list still apply. When the agent is through, each task is read and [checked like any hand-over](https://github.com/kstevica/captain-claw/blob/main/release-notes/RELEASE_NOTES_0.8.4.md#the-taskboard-where-everything-stands).
+- **Things that change along the way.** A task you closed, merged or moved on before its turn is passed over and comes back saying why, as it does if the agent is off or the allowance is spent. A run that fails stops nothing else. A deck restart goes on with what waited, but the run it cut isn't sent again, since it may have sent its email, and its task says so.
+- **Not in bulk:** nothing approves or rejects a next step, and there's no bulk merge. Each is read on its own.
+
+Also: a reply that lands on a task already waiting on you is no longer closed over.
+
+### A deck updates itself
+
+**Console → Updates → Check now**, then **Update now**. It follows the branch it's on, so a fork follows the fork, and it only moves forward, to the commit you saw.
+
+1. **Test start.** The new commit runs from a temp folder on a spare port, with an empty data folder and none of the deck's keys. If its page lacks files or its code doesn't import, nothing has been touched.
+2. **Warning.** Everyone signed in gets a toast, then one they can't close, counting down two minutes.
+3. **Stop the agents.** Mid-turn ones can be waited for, up to 5 more minutes. Crew's workers keep going.
+4. **Pull.** New packages went in before the test start, so you don't run `pip` yourself.
+5. **Restart in place**: the same process, command line and tmux pane, so it can't lose the environment you started it with.
+6. **Check.** If it doesn't come up, the old commit goes back and the deck starts on that, by itself.
+
+Every admin gets an email with the date and time in the subject, from the Gmail or Outlook of the admin who started it or else the first admin who has one. **Automatically** is **Off** by default, or
+**Tell me**, or **Install by itself**: with that last one, whatever is merged to the branch goes live once it passes the test start.
+
+A desktop build or a container has no checkout, so the page says to update it the way it was installed. The first update to this needs one pull and restart by hand.
+
+### Two new tools for real office files
 
 | Tool | What it does |
 |---|---|
-| `knowledge` | Searches and reads the owner's documents, with no model: `search` (hybrid; exact codes first, quoted phrases required), `section` (a section whole, across parts), `outline`, `list`, and `add` (keep a file from chat). Shows on every Flight Deck agent; shared-agent members never get it. |
-| `visualize` | HTML in, the page and a PNG of it out: a fragment or whole page, with pinned Chart.js, ECharts, Plotly, D3, Mermaid or Leaflet. The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a `.docx`. Script errors, failed loads and blank pictures come back for the agent to fix. The page never touches the host. Always on. |
+| `xlsx` | Make, read, edit and check Excel workbooks with no scripts. Only what a change touches is rewritten, so charts, pivots, sparklines and macros stay. Formulas stay live and carry results from about 200 functions, compared with Microsoft Excel. Every call lists each cell it changed and each total that moved. Inserting a row rewrites what Excel would. `check` finds errors at their source, broken patterns and a `SUM` that stops one cell short. Functions that spill (`FILTER`, `LET`) aren't written, and a formula it can't calculate is reported rather than left with a stale number. |
+| `pptx` | Make, read, edit, check and render PowerPoint decks with no scripts. Slides come from the deck's own layouts and fill their placeholders, so a firm's template keeps doing the design. Text is measured against PowerPoint's own results, and every result says what doesn't fit. Native charts and tables. Pictures in any format or from a link, placed where they work, with captions and alt text. `render` needs LibreOffice. |
 
-That makes **65 built-in tools** per agent.
-
-### The chat
-
-- **Pictures show up.** On signed-in decks chat pictures were blank; that's fixed, and a
-  picture that can't load shows its name. A picture the turn saved but no picture tool reported
-  (a plotting script's chart) now reaches the web chat and the channels: from the reply's words,
-  or, when it names none, one Jev call decides (`tools.jev.find_images: false` turns that off).
-- **Files menu** in the composer: the last five files the agent made in this chat, with **Open** and
-  **Show in library**.
-- **Insert now** on a queued message (or `I`): hand it to the running turn, which reads it on its
-  next step. Inserting never starts the next queued task, and a click as the turn ends isn't lost.
-- **Compact cards** for automation results and the agent's rephrasing of your request: a small
-  card with a two-line preview and **Open**, instead of a full reply bubble.
+`write` and `edit` refuse these files and point to the tools. A user's upload is never changed: the result is a copy. With `crew`, that makes **68 built-in tools** per agent. `crew` shows only for an owner an admin approved.
 
 ### The kiosk
 
-- The agent's **⋯** opens a card of icon tiles (a sheet on a phone), and **Settings** shares the same
-  sheet, grouped, with a real dark-theme switch. Arrow keys move between tiles.
-- **Agent settings** has two tabs: *Model & thinking* and *Reasoning effort*. A model change being
-  typed survives switching, and saving a new model reads its reasoning levels afresh.
-- **The bell** puts proposals waiting for Approve or Reject on top, even ones older than the page.
+- **Agent groups.** Folders in the agent list, with a name and a colour, that fold away and still show an agent at work or a new reply. Drag an agent onto a group, or use its **⋯ → Group**. **Pin** one group to the top of the list, and as many agents as you like to the top of their group. Each person has their own, on all their devices.
+- **A page left open stays signed in.** Crew and the libraries renew their sign-in rather than showing "Token expired".
 
-### WhatsApp Web: a ban doesn't take your history
+### Running a deck
 
-A burner number can be banned, and the ban took the kept messages with it. Now every way a link can
-end moves the store aside, and only you delete it. **Disconnect** and a new **Switch number** ask
-first; a ban or a removal on the phone keeps it. Agents read the linked number and what's kept as one.
-Sending, the whitelist and auto-replies stay with the linked number, because an old number's chats are
-first contacts for a new one, the main ban trigger. This hasn't been tried against a real ban.
+- **Users page.** Last login with sorting, tokens used this month and all time (no prompt-cache reads, as the daily allowance counts them), and **Ask for feedback**, an editable email from your own Gmail or Outlook with the user's name first in its subject. A shared agent's member turns count against its owner.
+- **Hosting from an agent works.** `hosting` was refused with "agent routes require a bearer token" when the session's address went through a proxy or under `FD_LOCKDOWN`, and its `stop` and `start` always answered 401. Agents now call their own deck with their own identity and get a public link back, not a `localhost` one. A static site really stops now: its address answers 404 and comes back on Start.
+- **Confinement.** The `knowledge` tool's path and the file `payments` reads now follow the deck's path rules.
+- A [manual test checklist](https://github.com/kstevica/captain-claw/blob/main/docs/TESTING_CHECKLIST.md) for the dashboard, for anyone trying it on a clean machine.
 
 ### Devices
 
-- **Waveshare ESP32-S3-ePaper-1.54**, with and without touch (SKU 32298 and 34212, **V2 boards only**).
-  A 200×200 black-and-white panel, fast enough for a drawn menu and answers that page with the voice
-  (partial refresh 0.6 s, full 1.8 s).
-  - BOOT talks and PWR cancels a recording; double-click PWR (or double-tap the touch board) for home.
-  - Only a press ends a recording here: this mic's level cut sentences short.
-  - The sleeping screen keeps the clock, with a sleeping robot, and redraws on a timer you pick.
-  - The green LED shows what it's doing: steady recording, breathing while the agent works, two
-    blinks when something waits.
-  - The onboard sensor isn't used: the board's own heat throws it off.
-  - Flash it once over USB (`pio run -e epaper154 -t upload`, or `-e epaper154_touch`); it updates over
-    the air after that.
-- **Blue for asleep, red for stopped.** The agent's dot on every device now says why it can't be
-  reached: blue while Flight Deck has put it to sleep (talking wakes it), red while it's switched off.
-  A deck that doesn't say keeps the old yellow.
-- **Firmware 0.19.10** / PaperColor B **1.0.22**. For M5Stack boards the only change since 0.19.1 is
-  that dot (0.19.2); the rest is the Waveshare board's.
+- **Captain is the only character**, on every board: the 18-character choice and its menu row are gone. The robot is drawn from the app icon's geometry at each size, with the lamp and eyes moving on top, and its face shows the agent's state.
+- **StopWatch: a new look** (0.20.0). Black, gold, cyan and coral. Captain above the time on a dial with the seconds going round; the voice as bars while listening; what the agent is doing while it works; an answer's pages as an arc.
+- **StopWatch: no automatic stop** (0.20.1). A 2.5 s pause no longer ends a recording. Press or tap when you're done, however long you pause. The 110 s limit stays.
+- **PaperColor B** (1.0.24 to 1.0.30). A dashboard in blocks of colour, the answer as a conversation, an icon beside each button instead of a legend, recording that works offline, a white pass only hourly and at power-on, and B held 4 s to switch off, leaving a capsized robot.
+- **Waveshare ePaper 1.54** (0.19.12 to 0.20.3). A new home screen with note mode at a glance, a tap on the tile to talk on the touch board, stop and cancel icons while recording, and the same capsized robot when switched off.
+- **Firmware 0.20.3** / PaperColor B **1.0.30**.
 
-### Memory and fixes
+### What's still open
 
-- **Insights stop repeating themselves.** An exact repeat, or the same fact reworded, is dropped;
-  "within 14 days" and "30 days" stay two facts. Insights keep the file and section they came from,
-  and a dropped repeat fills that in if the stored fact lacks it. Dreams' intuitions get the same check.
-- **Spreadsheets read properly.** Workbooks from openpyxl and similar writers came out as their title
-  alone in `xlsx_extract`, and the datastore read only the first sheet. Both are fixed, and asking for a
-  sheet by name now gets that sheet or an error.
-- **Ollama.** Assistant tool calls are now sent back to the model, which stops Gemma 4 repeating a call
-  every turn, and `-cloud` models no longer get the 32k cap meant for local caches.
-- **PDFs with structure.** The optional `pdf` extra reads headings and tables, so a book's section map
-  follows its chapters. Without it, PDFs are read page by page as before.
-- **Malformed tool calls.** Parameters a model's XML call left inside another's value are split out before
-  the register and the guards see them.
+- **Merging is enforced at the `crew` tool.** A non-admin's agent has no shell, so for them that's the whole way to a merge. An admin's agent has a shell until agents run in an OS sandbox, so for it the rule is one it's told to follow, not one it can't break.
+- **Models through the deck** have run with all four CLIs on Ollama, which stands in for all three kinds of API, and with OpenCode on DeepSeek. Direct Anthropic, OpenAI, Gemini, xAI and OpenRouter endpoints haven't been run this way yet.
+- **On macOS**, a command a worker detached and left running at the natural end of a turn isn't caught, since macOS doesn't show a process's environment. **Stop** and **Send now** catch it on every system.
+- **Old worktrees aren't cleaned up automatically**, and Crew runs on the deck's own host only.
+- **Taskboard batches** have been run end to end with stand-in agents, not yet with a real agent, Gmail and Jev together.
 
-### And
+## Before you approve anyone for Crew
 
-- **A new icon.** The Captain icon is now the Bot in a captain's cap, everywhere an icon lives, the
-  desktop app and PWA included.
-- **deed.page example.** An optional [MCP example](https://github.com/kstevica/captain-claw/blob/main/examples/mcp/deed-page.md) for publishing pages,
-  thanks to [@f-o-x11](https://github.com/f-o-x11).
+**Approving someone trusts them with the server.** A worker runs commands as the same system user as Flight Deck, so it can reach what that user can, including other people's files and the deck's database. This is the reach [0.8.4's confinement](https://github.com/kstevica/captain-claw/blob/main/release-notes/RELEASE_NOTES_0.8.4.md#security-a-deck-for-people-who-dont-share-a-machine) took away from non-admins' agents, handed back on purpose to someone you name. No OS sandbox holds a worker to its worktree yet ([the plan](https://github.com/kstevica/captain-claw/blob/main/docs/agent-os-sandbox-plan.md)); Codex runs in its own `workspace-write` sandbox and the others don't. The approval dialog says so and needs a tick.
 
-## Before you upgrade a team deck
-
-These apply on a deck with sign-in (`FD_AUTH_ENABLED`), when each agent next starts.
-
-- **Non-admins' agents lose `shell`, `terminal`, `scripts`, `app_runner`, `code`, `termux`, `bat`,
-  `desktop_action`, `screen_capture` and `pinchtab`.** If someone relies on those, make them an admin or,
-  on a deck whose users all trust each other, set `FD_AGENT_CONFINE=off`.
-- **Agents can't read or write outside their own files**, admins' agents included: an admin's agent keeps
-  its linked folders and read folders, and its shell is not held back.
-- **Publishing or starting a hosted app, adding a VFS link and browsing the host's folders are admin-only.**
-- **A non-admin can't send a team key to another endpoint.** Moving an agent re-keys it to that endpoint's own
-  team key, or is refused. An `.env` edit that would send it elsewhere, or that adds a pinned variable such as
-  `HTTP_PROXY` or `PATH`, answers 400 and writes nothing.
-
-Decks with sign-in off, such as the desktop app and one person's deck, are unchanged.
+So Crew is off for every non-admin until an admin ticks it. Admins, and a deck with sign-in off, can always use it. `FD_CREW=off` turns it off for the whole deck.
 
 ## Upgrading
 
-1. **Each Flight Deck** — pull, and `pip install .` where Captain Claw is installed non-editable. Add
-   `pip install 'captain-claw[pdf]'` for PDFs with headings and tables. PyMuPDF is AGPL-3.0, so it stays optional.
-2. **Restart Flight Deck, then every agent** — including Docker and standalone agents. Agents need the
-   restart for confinement, the new tools, lessons, exams and reporting turns to the Taskboard. An agent
-   without it is told to restart before an exam and keeps its old instructions block. Then hard-refresh
-   every browser.
-3. **WhatsApp Web** — its service outlives a Flight Deck restart, so restart it too (turn *Allow WhatsApp Web*
-   off and on again), or it goes on deleting the history on a ban. Until then it answers 404 to the new
-   disconnect rather than deleting what you asked to keep.
-4. **Devices** — publish the new firmware from `firmware/device` with
-   `python tools/publish.py <env> --deck https://<deck>`; devices take it from *Menu → Software update* or by
-   themselves. Waveshare boards need one flash over USB first.
-5. **For the Taskboard's next steps** — a Jev key (*Connections → Jev*, or the team's). Each user turns on their
-   own inboxes on the board.
+1. **Each Flight Deck** — pull, and `pip install .` where Captain Claw is installed non-editable. There are no new Python packages since 0.8.4.
+2. **Restart Flight Deck, then every agent.** Agents need the restart for `crew`, `xlsx`, `pptx` and the `hosting` fix. Then hard-refresh every browser. From now on **Console → Updates** does this for a deck on a git checkout.
+3. **For Crew** — install the CLIs you want on the deck's host, tick Crew per user on **Users** (see [above](#before-you-approve-anyone-for-crew)), and each person saves their logins in **Crew → Logins**.
+4. **Devices** — publish the new firmware from `firmware/device` with `python tools/publish.py <env> --deck https://<deck>`; devices take it from *Menu → Software update* or by themselves.
+5. **The desktop app** embeds its own deck and bundle, so it needs a new build to get any of this.
 
-BotPort hubs need nothing new: 0.8.4 keeps protocol 2, and BotPort's code is unchanged since 0.8.2.
+BotPort hubs need nothing new: 0.8.5 keeps protocol 2, and BotPort's code is unchanged since 0.8.2.
 
 **Changed**
 
-- Non-admins' agents on a sign-in deck lose the tools that run code, and every agent is held to its own files
-  (see [above](#before-you-upgrade-a-team-deck)).
-- The agent's **⋯** menu: *Instructions* is now *Instructions, insights & skills*, and *Onboarding* is new.
-- A setup's facts are lessons, not insights, so they reach the agent when they bear on a message.
-- Reject on an Autonomous Work proposal is compare-and-set, like Approve.
+- The StopWatch doesn't end a recording on a pause, and devices have no character to pick.
+- The Users page shows tokens, not dollars.
+- Scheduled and linked turns now carry the agent's instructions, on a deck with accounts. An agent that ran with no job before now runs with its job.
+- A stopped static site answers 404 until you Start it again.
 
 **New settings**
 
 | Setting | Default | What it does |
 |---|---|---|
-| `FD_AGENT_CONFINE` | on with sign-in | `off` turns confinement off, for a deck whose users all trust each other |
-| `FD_TASKBOARD_DISABLED` | — | `true` stops the Taskboard's sweep and triage; it then fills only when opened |
-| `CLAW_TURN_REGISTER` (agent) | on | `off` stops an agent reporting its turns |
-| `FD_SETUP_TOKENS_PER_MIN` | `40000` | How fast a setup read may go; `0` is unpaced. Models on the same machine aren't paced |
-| `FD_SETUP_REASONING` | `off` | Thinking level for setup reads; `auto` leaves the model's own |
-| `FD_PROFILE_REASONING` | `low` | Thinking level for the Profile researcher |
-| `memory.max_knowledge_files` | `3000` | Semantic memory's cap for `knowledge/`, kept apart from other files |
-| `tools.jev.find_images` | `true` | Let Jev pick the picture a reply hands over |
-| *Your own AI keys* (admin) | on | Lets users run their agents on their own keys |
-| Taskboard inboxes (per user) | off | Telegram inbox, WhatsApp Web and Gmail on your board |
-| Taskboard auto-close, Jev and reading caps (per user) | on, 200, 100 a day | Whether Jev may close tasks, and how many calls a board makes a day; `0` is no cap |
-| `pdf` extra | not installed | `pip install 'captain-claw[pdf]'`: PDFs with headings and tables |
+| `FD_CREW` | on | `off` turns Crew off for the whole deck |
+| `FD_CREW_TERMINAL` | on | `off` takes the browser terminal from everyone, admins too |
+| `FD_CREW_CLAUDE_PERMISSION` | `auto` | Claude Code's permission mode for workers: `auto`, `acceptEdits` or `bypassPermissions` |
+| `FD_CREW_MAX_RUNNING` | `8` | Workers running at once on this deck |
+| `FD_CREW_MAX_TURN_HOURS` | `6` | The longest one turn may run |
+| `FD_CREW_STALL_MINUTES` | `15` | Silence before you're told a worker seems stuck |
+| `FD_CREW_WORKING_SECONDS` | `60` | How often the still-working line refreshes |
+| `FD_CREW_MODEL_SILENCE_SECONDS` | `300` | How long a model server through the deck can say nothing |
+| `FD_CREW_ERROR_WAIT_SECONDS` | `300` | How long a CLI gets to show it's past a failed call |
+| `FD_CREW_RETRY_WAIT_SECONDS` | `20` | The first wait between tries |
+| `FD_CREW_CLAUDE_BIN`, `_CODEX_BIN`, `_OPENCODE_BIN`, `_PI_BIN` | found on `PATH` | Where a CLI is, if Flight Deck can't find it |
+| `FD_UPDATE_REPO` | worked out | The checkout, when the deck can't work it out |
+| `FD_UPDATE_POLL_S` | `900` | How often **Tell me** and **Install by itself** look |
+| `FD_UPDATE_COUNTDOWN_S` | `120` | How long everyone gets before the restart |
+| `FD_UPDATE_BOOT_TIMEOUT_S` | `300` | How long the new version gets to come up |
+| *Crew* (per user, on Users) | off | Which CLIs, how many at once, and the terminal |
+| *Automatically* (Console → Updates) | Off | Off, Tell me or Install by itself |
 
-New stores create themselves on start: `taskboard.db` on the deck; `lessons.json`, `practice.json` and
-`.owner-setup.json` for each onboarded agent. No manual migration.
+New stores create themselves on start: `crew.db` and `<data>/crew/` for Crew, `<data>/update/` for updates. Forge plans live with Vatra's runs. No manual migration.

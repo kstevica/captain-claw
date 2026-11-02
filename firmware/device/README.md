@@ -595,7 +595,7 @@ states — `running`, `asleep` (Flight Deck put it to sleep for being idle) or
 again when that changes while the link is down (`bus_client.py`).
 
 - **Asleep: blue.** The agent dot on the paper, the watch and the stick, and
-  the agent's name on the paper (the dashboard's *Agent* row, "· asleep") and
+  the agent's name on the paper (the options screen's *Agent* row, "· asleep") and
   on the watch's info page. The device counts as ready: talking wakes the
   agent, so no offline blink, no offline redraw and no link renewal for it.
   The paper shows it on its next five-minute dashboard.
@@ -622,10 +622,10 @@ Deck's bell, where a proposal is approved or rejected (in the kiosk too).
 - **The banner** (0.19.1, watch and stick): "Flight Deck", the line that came
   and "Open the bell", at once on the home screen (not over an answer, a menu
   or a question); a press goes back.
-- **The count**: a magenta badge on every screen (0.19.1) — after the link dots
+- **The count**: a badge on every screen (0.19.1; coral on the watch since 0.20.0) — after the link dots
   in the watch's top row, before the battery in the stick's status bar — plus
   "n waiting in Flight Deck" in place of the home hint and a *Waiting* row. The
-  B paper lists it with its links (red ink) and asleep under how to wake it;
+  B paper shows it as a red pill at the top of its dashboard and asleep under how to wake it;
   while proposals wait its idle blink is magenta on the right. Approving,
   rejecting or expiring them updates it without a beep; 0 clears it.
 - **Asleep**: a device in deep sleep isn't connected, so it hears about it when
@@ -642,9 +642,9 @@ StickS3:
 | double-click | hear the last answer again | (on an answer) hear it again |
 | in the agent list | choose | move down |
 
-StopWatch (0.18.0): press the yellow button once, talk, and press it again —
-or just stop: 2.5 s of quiet sends it, as the on-screen record button does (it
-was hold-to-talk). A press while it speaks stops the speech; a double press
+StopWatch (0.18.0): press the yellow button once, talk, and press it again (it
+was hold-to-talk). From 0.20.1 a pause doesn't end a recording, here or with the
+on-screen record button. A press while it speaks stops the speech; a double press
 plays the last answer again; a press that wakes the watch — from sleep or a
 dark screen — only wakes it (0.18.1), the next one talks. The clock face is
 the middle of three pages (0.18.1): swipe right for the background picture

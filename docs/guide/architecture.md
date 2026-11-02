@@ -8,7 +8,7 @@ Where each part of Captain Claw lives in the code.
 |---|---|
 | Agent (14-mixin composition) | `captain_claw/agent.py` |
 | LLM providers | `captain_claw/llm/` |
-| 65 tools + registry | `captain_claw/tools/` |
+| 68 tools + registry | `captain_claw/tools/` |
 | Flight Deck (FastAPI + React) | `captain_claw/flight_deck/` |
 | Device bridge (StickS3 / StopWatch / PaperColor / Waveshare, `/device/ws`) + OTA store + backgrounds | `captain_claw/flight_deck/device_bridge.py`, `device_firmware.py`, `device_backgrounds.py` |
 | Device firmware (PlatformIO, every device) | `firmware/device/` |
@@ -32,6 +32,11 @@ Where each part of Captain Claw lives in the code.
 | Pictures in replies | `captain_claw/reply_images.py` |
 | HTML to page and PNG (`visualize` tool) | `captain_claw/tools/visualize.py` |
 | Word tracked changes (`docx` tool) | `captain_claw/docx_ops.py` |
+| Excel on the file's XML, with a formula engine (`xlsx` tool) | `captain_claw/xlsx_ops.py`, `xlsx_formula.py` |
+| PowerPoint on the deck's own layouts, with text measured (`pptx` tool) | `captain_claw/pptx_ops.py` |
+| Crew (approval, CLIs, logins, tasks, runner, routes, environments, terminal, files, folders, models through the deck) | `captain_claw/flight_deck/crew_*.py`, `flight-deck/src/components/crew/`; agent side `captain_claw/tools/crew.py`, `captain_claw/crew_client.py` |
+| Forge agents (plans, app handshake, contract) | `captain_claw/flight_deck/agent_forge.py`, `agent_handshake.py`, `captain_claw/instructions/forge/`, `flight-deck/src/components/forge/` |
+| Updating the deck (engine, guard, routes) | `captain_claw/flight_deck/deck_update.py`, `deck_update_guard.py`, `deck_update_routes.py` |
 | OneDrive VFS mounts | `captain_claw/onedrive_client.py` |
 | Bat (plan, loop, judge, store) | `captain_claw/flight_deck/bat_*.py` |
 | Fabrication guard | `captain_claw/fabrication_guard.py` |

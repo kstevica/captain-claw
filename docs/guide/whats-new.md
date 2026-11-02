@@ -4,7 +4,28 @@
 
 Every release from the newest back to 0.4.29. The full notes for each, with upgrade steps, are in [release-notes/](../../release-notes/).
 
-**Jump to:** [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+**Jump to:** [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+
+## What's New in 0.8.5
+
+**All Hands on Deck.** Coding CLIs working for you, a team forged from a plain request, a Taskboard that hands over many tasks at once, and a deck that updates itself. 48 merged PRs in the three days after 0.8.4. **Restart Flight Deck, then every agent. [Approving someone for Crew trusts them with the server](../../release-notes/RELEASE_NOTES_0.8.5.md#before-you-approve-anyone-for-crew).**
+
+- **[Crew](flight-deck.md#crew)**: Claude Code, Codex, OpenCode and Pi as workers, each in its own git worktree, from a chat or the Crew page.
+  - **The flow:** ask → say where and on what model → it works, watched at no token cost → your agent is called back → results in `vfs:crew/<project>/<task>/` → a person lands it.
+  - **What it runs on:** its own login, OpenCode's free models, an agent's model, a deck tier or a server you type in. Through the deck the key never reaches the worker.
+  - **What it gets:** files pasted or attached, folders of your VFS (read as a copy, or read and write), and an environment prepared once for any project, by hand in a browser terminal or by a worker.
+  - **Stepping in:** **Send now** stops it and it goes on with your message; dropped connections retry by themselves; a line says what a quiet worker is waiting on.
+  - **Landing:** branches only, merge by a person, pull requests by Captain with your token, **Live sites** to put things online. An admin approves it per user.
+- **[Forge agents](flight-deck.md#forge-agents)**: **New agent → Forge agents** turns your request and files into a plan of standing agents you review, then recommends scheduled tasks and apps. Crew builds the apps to a fixed contract, and Connect ties them to the agents.
+- **[The Taskboard](flight-deck.md#the-taskboard), many at once**: tick tasks as in Gmail, make one move for all with Undo, or **Hand to agent** with one instruction. The agent works through them one at a time, each with its own details; a line shows how far it has got and **Stop the rest** sends what waits back to you. Nothing approves a next step in bulk.
+- **[Updating the deck](flight-deck.md#updating-the-deck)**: Console → Updates runs a test start, warns everyone with a two-minute countdown, stops the agents, pulls, restarts in place and goes back by itself. Off, Tell me or Install by itself; every admin gets an email.
+- **Three new tools**: `crew`, `xlsx` (Excel, with live formulas compared against Excel) and `pptx` (PowerPoint on a deck's own layouts, saying what doesn't fit): **68 built-in tools** in all.
+- **An agent knows its job with no one in its chat**: scheduled and linked turns now carry its instructions, on a deck with accounts, and a link follows its agent to a new port.
+- **The kiosk**: agent groups with pins, and a page left open keeps its sign-in.
+- **Running a deck**: last login, tokens and Ask for feedback on Users; `hosting` from an agent works behind a proxy and under lockdown, with a public link; a static site really stops.
+- **Devices**: Captain is the only character; a new StopWatch look (0.20.0) with no automatic stop on a pause (0.20.1); PaperColor B in blocks of colour; a new Waveshare home screen; firmware **0.20.3** / PaperColor B **1.0.30**.
+
+See [RELEASE_NOTES_0.8.5.md](../../release-notes/RELEASE_NOTES_0.8.5.md).
 
 ## What's New in 0.8.4
 
