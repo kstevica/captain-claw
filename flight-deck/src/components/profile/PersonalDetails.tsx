@@ -15,7 +15,8 @@ import { dateLabel, docKindsLabel, keptLinks, labelForUrl, type DetailsDraft } f
 // down the page. The name and the links are a draft the page saves; a
 // document is kept the moment it is uploaded.
 
-const INPUT = 'w-full rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none disabled:opacity-50'
+const FIELD = 'rounded-md border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 placeholder-zinc-600 focus:border-violet-500/50 focus:outline-none disabled:opacity-50'
+const INPUT = `w-full ${FIELD}`
 const LABEL = 'mb-1 block text-[11px] font-medium uppercase tracking-wider text-zinc-500'
 
 export function PersonalDetails({
@@ -95,48 +96,51 @@ export function PersonalDetails({
         </div>
       </div>
 
-      {/* The account's name — how agents and teammates see the person. */}
-      {sources.can_rename && (
-        <div>
-          <label htmlFor={nameId} className={LABEL}>Your name</label>
-          <input
-            id={nameId}
-            value={draft.name}
-            onChange={(e) => set('name', e.target.value)}
-            maxLength={120}
-            autoComplete="name"
-            className={`${INPUT} sm:max-w-sm`}
+      {/* The person on the left and the company on the right, row for row, when
+          there's room; one under the other when not, where the company gets
+          its heading. */}
+      <div className="grid gap-5 @5xl:grid-cols-2 @5xl:gap-x-8">
+        {/* The account's name — how agents and teammates see the person. */}
+        {sources.can_rename && (
+          <div className="min-w-0 @5xl:col-start-1 @5xl:row-start-1">
+            <label htmlFor={nameId} className={LABEL}>Your name</label>
+            <input
+              id={nameId}
+              value={draft.name}
+              onChange={(e) => set('name', e.target.value)}
+              maxLength={120}
+              autoComplete="name"
+              className={INPUT}
+            />
+            <p className="mt-1 text-[11px] text-zinc-500">
+              How your agents address you{sources.email ? ` — the account is ${sources.email}` : ''}.
+            </p>
+          </div>
+        )}
+
+        {/* Where to find the person. */}
+        <div className={`min-w-0 @5xl:col-start-1 ${sources.can_rename ? '@5xl:row-start-2' : '@5xl:row-span-2 @5xl:row-start-1'}`}>
+          <div className={LABEL}>Your links</div>
+          <LinkList
+            links={draft.links}
+            onChange={(links) => set('links', links)}
+            cap={caps.links}
+            labelCap={caps.label}
+            urlCap={caps.url}
+            placeholder="linkedin.com/in/you, github.com/you, your site…"
+            addLabel="Add a link"
           />
           <p className="mt-1 text-[11px] text-zinc-500">
-            How your agents address you{sources.email ? ` — the account is ${sources.email}` : ''}.
+            LinkedIn, GitHub, X, a personal site, a speaker page — anything public about you.
           </p>
         </div>
-      )}
 
-      {/* Where to find the person. */}
-      <div>
-        <div className={LABEL}>Your links</div>
-        <LinkList
-          links={draft.links}
-          onChange={(links) => set('links', links)}
-          cap={caps.links}
-          labelCap={caps.label}
-          urlCap={caps.url}
-          placeholder="linkedin.com/in/you, github.com/you, your site…"
-          addLabel="Add a link"
-        />
-        <p className="mt-1 text-[11px] text-zinc-500">
-          LinkedIn, GitHub, X, a personal site, a speaker page — anything public about you.
-        </p>
-      </div>
-
-      {/* The company. */}
-      <div className="space-y-3">
-        <div className="flex items-center gap-2">
+        {/* The company. */}
+        <div className="-mb-2 flex items-center gap-2 @5xl:hidden">
           <Building2 className="h-4 w-4 shrink-0 text-violet-500" />
           <h4 className="text-sm font-semibold text-zinc-200">Your company</h4>
         </div>
-        <div>
+        <div className="min-w-0 @5xl:col-start-2 @5xl:row-start-1">
           <label htmlFor={companyId} className={LABEL}>Company name</label>
           <input
             id={companyId}
@@ -145,10 +149,10 @@ export function PersonalDetails({
             maxLength={caps.company_name}
             placeholder="The name it goes by"
             autoComplete="organization"
-            className={`${INPUT} sm:max-w-sm`}
+            className={INPUT}
           />
         </div>
-        <div>
+        <div className="min-w-0 @5xl:col-start-2 @5xl:row-start-2">
           <div className={LABEL}>Company links</div>
           <LinkList
             links={draft.company_links}
@@ -198,9 +202,9 @@ export function PersonalDetails({
           A CV, a bio, a company one-pager, a pitch deck — {kinds}, up to 25 MB each. Drop files here, too.
         </p>
         {sources.documents.length > 0 && (
-          <ul className="mt-3 space-y-1.5">
+          <ul className="mt-3 grid gap-1.5 @4xl:grid-cols-2">
             {sources.documents.map((d) => (
-              <li key={d.id} className="flex items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5">
+              <li key={d.id} className="flex min-w-0 items-center gap-2 rounded-md border border-zinc-800 bg-zinc-950/60 px-2.5 py-1.5">
                 <FileText className="h-3.5 w-3.5 shrink-0 text-zinc-500" />
                 <span className="min-w-0 flex-1 truncate text-xs text-zinc-200" title={d.name}>{d.name}</span>
                 <span className="shrink-0 text-[11px] text-zinc-600">
@@ -289,14 +293,14 @@ function LinkList({ links, onChange, cap, labelCap, urlCap, placeholder, addLabe
     <div className="space-y-2">
       {links.map((l, i) => (
         <div key={i} className="flex items-center gap-2">
-          <Link2 className="hidden h-3.5 w-3.5 shrink-0 text-zinc-600 sm:block" aria-hidden />
+          <Link2 className="hidden h-3.5 w-3.5 shrink-0 text-zinc-600 sm:block @5xl:hidden" aria-hidden />
           <input
             value={l.label}
             onChange={(e) => update(i, { label: e.target.value })}
             maxLength={labelCap}
             placeholder="Label"
             aria-label="Link label"
-            className={`${INPUT} w-24 shrink-0 sm:w-32`}
+            className={`${FIELD} w-24 shrink-0 sm:w-28`}
           />
           <input
             value={l.url}
@@ -308,7 +312,7 @@ function LinkList({ links, onChange, cap, labelCap, urlCap, placeholder, addLabe
             inputMode="url"
             autoComplete="url"
             spellCheck={false}
-            className={`${INPUT} min-w-0 flex-1`}
+            className={`${FIELD} min-w-0 flex-1`}
           />
           <button
             type="button"

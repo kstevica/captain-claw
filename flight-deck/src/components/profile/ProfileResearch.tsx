@@ -179,7 +179,7 @@ export function ProfileResearch({ research, canStart, busy, error, caps, current
           )}
           <LogDetails log={research.log} />
 
-          <div className="grid gap-3 lg:grid-cols-3">
+          <div className="grid gap-3 @4xl:grid-cols-3">
             {FIELDS.map((k) => {
               const text = research.drafts?.[k] ?? ''
               const n = charCount(text)
@@ -193,7 +193,7 @@ export function ProfileResearch({ research, canStart, busy, error, caps, current
                     </span>
                   </div>
                   {text ? (
-                    <pre className="max-h-56 flex-1 overflow-y-auto whitespace-pre-wrap break-words px-3 py-2 font-sans text-xs leading-relaxed text-zinc-300">
+                    <pre className="max-h-72 flex-1 overflow-y-auto whitespace-pre-wrap break-words px-3 py-2 font-sans text-xs leading-relaxed text-zinc-300">
                       {text}
                     </pre>
                   ) : (

@@ -83,9 +83,9 @@ export function MyContextPacks({ sharingOff = false, showEmpty = true, onPacks }
       ) : packs.length === 0 ? (
         <p className="text-xs text-zinc-500">{MY_PACKS_EMPTY}</p>
       ) : (
-        <div className="space-y-1.5">
+        <div className="grid gap-1.5 @5xl:grid-cols-2">
           {packs.map((p) => (
-            <div key={p.id} className="flex items-start gap-2 rounded-md border border-zinc-800 px-3 py-2">
+            <div key={p.id} className="flex min-w-0 items-start gap-2 rounded-md border border-zinc-800 px-3 py-2">
               <div className="min-w-0 flex-1">
                 <div className="truncate text-xs text-zinc-300">
                   {packSummary(p)}
