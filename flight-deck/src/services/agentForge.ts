@@ -115,9 +115,16 @@ export interface ForgePlan {
   recommend_error: string
   files: { name: string; size: number }[]
   team: string
-  /** How many more agents the person's plan had room for when this was planned. */
+  /** The most agents this plan could have: the person's limit, or the default, within their seats. */
   room: number
+  /** How many more agents the person's plan had room for when this was planned. */
+  seats: number
+  /** The limit the person set; 0 leaves it to Captain. */
+  cap: number
+  default_team: number
   max_team: number
+  /** Agents the Lead proposed that the limit left out. */
+  over_cap: number
   rationale: string
   overview: string
   agents: ForgeDraftAgent[]
@@ -161,14 +168,18 @@ export interface ForgeConnectResult {
 const post = <T>(path: string, body?: unknown) =>
   api<T>(path, { method: 'POST', ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
 
+/** What the Team size control can offer: `seats` are what the person's plan has left. */
+export interface ForgeLimits { seats: number; default_team: number; max_team: number }
+
 const plans = '/fd/agent-forge/plans'
 
 /** A multipart body, so not through api(), which says it's JSON. */
-async function start(request: string, files: File[]): Promise<{ id: string }> {
+async function start(request: string, files: File[], maxAgents = 0): Promise<{ id: string }> {
   const send = () => {
     const { token } = useAuthStore.getState()
     const form = new FormData()
     form.append('request', request)
+    form.append('max_agents', String(maxAgents))
     for (const f of files) form.append('files', f)
     return fetch(plans, { method: 'POST', body: form, credentials: 'include', headers: token ? { Authorization: `Bearer ${token}` } : {} })
   }
@@ -190,8 +201,9 @@ export const forgeApi = {
   list: () => api<{ plans: ForgePlanRow[] }>(plans).then((r) => r.plans),
   get: (id: string) => api<ForgePlan>(`${plans}/${id}`),
   feed: (id: string) => api<{ events: ForgeFeedEvent[]; active: boolean }>(`/fd/basna/sessions/${id}/progress`),
-  replan: (id: string, note: string, questions: ForgeQuestion[], agents: ForgeDraftAgent[] = []) =>
-    post<{ status: ForgeStatus }>(`${plans}/${id}/replan`, { note, questions, agents }),
+  limits: () => api<ForgeLimits>('/fd/agent-forge/limits'),
+  replan: (id: string, note: string, questions: ForgeQuestion[], agents: ForgeDraftAgent[] = [], maxAgents?: number) =>
+    post<{ status: ForgeStatus }>(`${plans}/${id}/replan`, { note, questions, agents, max_agents: maxAgents }),
   approve: (id: string, agents: ForgeDraftAgent[], overview: string) => post<{ status: ForgeStatus }>(`${plans}/${id}/approve`, { agents, overview }),
   recommend: (id: string) => post<{ status: ForgeStatus }>(`${plans}/${id}/recommend`),
   schedules: (id: string, items: ForgeSchedule[], tz: string) =>

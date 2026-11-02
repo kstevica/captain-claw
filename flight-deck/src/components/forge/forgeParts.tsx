@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react'
-import { AlertTriangle, ChevronDown, type LucideIcon } from 'lucide-react'
+import { AlertTriangle, ChevronDown, Users, type LucideIcon } from 'lucide-react'
 import type { Archetype } from '../../services/tierConfig'
 import { archetypeLook } from '../layout/archetypeLook'
 
@@ -58,6 +58,27 @@ export function Chip({ on, disabled, onClick, children }: { on: boolean; disable
     >
       {children}
     </button>
+  )
+}
+
+/** The most agents a team may have. 0 leaves it to Captain, who stays under `suggested`. */
+export function TeamSize({ value, largest, suggested, disabled, onChange }: {
+  value: number; largest: number; suggested: number; disabled?: boolean; onChange: (cap: number) => void
+}) {
+  const choices = Array.from({ length: Math.max(largest, value) }, (_, i) => i + 1)
+  return (
+    <label className="inline-flex shrink-0 items-center gap-2 text-xs font-medium text-zinc-400">
+      <Users className="h-3.5 w-3.5 text-zinc-500" /> Team size
+      <select
+        value={value}
+        disabled={disabled}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="rounded-lg border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-xs text-zinc-200 focus:border-violet-500/60 focus:outline-none focus:ring-2 focus:ring-violet-500/15 disabled:opacity-60"
+      >
+        <option value={0}>Captain decides, up to {Math.min(suggested, largest || suggested)}</option>
+        {choices.map((n) => <option key={n} value={n}>At most {n}</option>)}
+      </select>
+    </label>
   )
 }
 

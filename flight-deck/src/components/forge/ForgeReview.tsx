@@ -5,7 +5,7 @@ import {
 import { forgeApi, type ForgeDraftAgent, type ForgePlan, type ForgeQuestion } from '../../services/agentForge'
 import type { Archetype } from '../../services/tierConfig'
 import { Button, Card, Field, Pill, Sheet, inputCls } from '../console/parts'
-import { AgentBadge, Chip, Eyebrow, ErrorNote } from './forgeParts'
+import { AgentBadge, Chip, Eyebrow, ErrorNote, TeamSize } from './forgeParts'
 import { errorOf, roleOf } from './forgeUtil'
 
 // Step two: meet the team. The plan reads first, as cards in plain words; a click
@@ -23,6 +23,7 @@ export function ForgeReview({ plan, archetypes, onChanged }: {
   const [editingOverview, setEditingOverview] = useState(false)
   const [questions, setQuestions] = useState<ForgeQuestion[]>(plan.questions)
   const [note, setNote] = useState('')
+  const [cap, setCap] = useState(plan.cap)
   const [open, setOpen] = useState('')
   const [busy, setBusy] = useState<'' | 'plan' | 'create'>('')
   const [err, setErr] = useState('')
@@ -30,7 +31,7 @@ export function ForgeReview({ plan, archetypes, onChanged }: {
   const nameOf = useMemo(() => new Map(agents.map((a) => [a.id, a.name])), [agents])
   const answered = (q: ForgeQuestion) => (q.selected || []).length > 0 || !!(q.other || '').trim()
   const hasAnswers = questions.some(answered)
-  const wantsPlan = hasAnswers || !!note.trim()
+  const wantsPlan = hasAnswers || !!note.trim() || cap !== plan.cap
   const editing = agents.find((a) => a.id === open)
 
   const patch = (id: string, p: Partial<ForgeDraftAgent>) => setAgents((list) => list.map((a) => (a.id === id ? { ...a, ...p } : a)))
@@ -58,7 +59,7 @@ export function ForgeReview({ plan, archetypes, onChanged }: {
       setBusy('')
     }
   }
-  const replan = () => act('plan', () => forgeApi.replan(plan.id, note.trim(), questions, agents))
+  const replan = () => act('plan', () => forgeApi.replan(plan.id, note.trim(), questions, agents, cap))
   const create = () => act('create', () => forgeApi.approve(plan.id, agents, overview))
   const n = agents.length
 
@@ -84,9 +85,14 @@ export function ForgeReview({ plan, archetypes, onChanged }: {
                 </button>
               </div>
             ) : null}
-            {plan.room < plan.max_team && n >= plan.room && (
+            {plan.seats < (plan.cap || plan.default_team) && n >= plan.room && (
               <p className="mt-3 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
-                Your plan has room for {plan.room} more agent{plan.room === 1 ? '' : 's'}, so the team was kept to that size. An admin can raise the limit.
+                Your plan has room for {plan.seats} more agent{plan.seats === 1 ? '' : 's'}, so the team was kept to that size. An admin can raise the limit.
+              </p>
+            )}
+            {plan.over_cap > 0 && (
+              <p className="mt-3 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
+                Captain would have added {plan.over_cap} more agent{plan.over_cap === 1 ? '' : 's'}, so some of the work you described may not be covered. Raise the team size, or say what to combine.
               </p>
             )}
           </section>
@@ -143,6 +149,7 @@ export function ForgeReview({ plan, archetypes, onChanged }: {
       <div className="shrink-0 space-y-2 border-t border-zinc-800 bg-zinc-950 px-4 py-3 wide:px-6">
         {err && <ErrorNote>{err}</ErrorNote>}
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-2 wide:flex-row wide:items-center">
+          <TeamSize value={cap} largest={Math.min(plan.seats, plan.max_team)} suggested={plan.default_team} disabled={!!busy} onChange={setCap} />
           <input
             value={note}
             onChange={(e) => setNote(e.target.value)}
