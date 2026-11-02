@@ -682,15 +682,17 @@ async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
                          state_manifest: str = "",
                          prior_knowledge: str = "",
                          constraints_block: str = "",
-                         request_timeout: float | None = None) -> dict:
+                         request_timeout: float | None = None,
+                         lead_prompt: str = "vatra/lead.md") -> dict:
     """Ask the Lead to split the task into complementary, owner-assigned subtasks.
 
     Returns a normalized plan. On any LLM/parse failure raises — the caller turns
     that into a clean run failure (Phase 1 has no deterministic fallback planner).
-    `force_ids` fixes the team: the Lead must give each a subtask.
+    `force_ids` fixes the team: the Lead must give each a subtask. `lead_prompt` is
+    the Lead's brief under instructions/ (Forge agents plans standing agents with it).
     """
     from captain_claw.llm import Message
-    system_file = _INSTRUCTIONS_DIR / "vatra" / "lead.md"
+    system_file = _INSTRUCTIONS_DIR / lead_prompt
     if not system_file.is_file():
         raise HTTPException(500, "Vatra lead prompt not found")
     arch_by_id = {a["id"]: a for a in archetypes}
@@ -781,7 +783,8 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
                       force_ids: list[str] | None = None,
                       shared_datastore: bool = False, vfs_project: str = "",
                       prior_knowledge: str = "", constraints_block: str = "",
-                      timeout: float = _DECOMPOSE_TIMEOUT) -> dict:
+                      timeout: float = _DECOMPOSE_TIMEOUT,
+                      lead_prompt: str = "vatra/lead.md") -> dict:
     """Run the Lead and shape the result into a persistable Vatra route:
     {mode, domain, rationale, subtasks, selected}. `selected` mirrors Basna's
     shape so the read-tool and list UI render the owners. `force_ids` fixes the
@@ -809,7 +812,7 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
         _llm_decompose(intent, archetypes, reliability, creds, cap, force_ids=forced or None,
                        shared_datastore=shared_datastore, state_manifest=state_manifest,
                        prior_knowledge=prior_knowledge, constraints_block=constraints_block,
-                       request_timeout=timeout),
+                       request_timeout=timeout, lead_prompt=lead_prompt),
         timeout)
     subtasks = plan["subtasks"]
     # Guarantee every fixed-team archetype actually got a piece — if the Lead missed

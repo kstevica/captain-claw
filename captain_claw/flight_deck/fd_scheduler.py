@@ -880,6 +880,7 @@ async def run_prompt_and_capture(
     automation: dict[str, Any] | None = None,
     whatsapp_media_to: str = "",
     meta: dict[str, Any] | None = None,
+    identity: dict[str, Any] | None = None,
 ) -> str | None:
     """Inject ``prompt`` into a fresh ephemeral channel bound to the agent
     and return the first ``agent`` reply text, or None on timeout/failure.
@@ -891,7 +892,8 @@ async def run_prompt_and_capture(
     ``whatsapp_media_to`` (a job delivering to a WhatsApp number that may
     receive pushes right now) lets the agent send the files and pictures the
     turn makes to that chat itself; the text still goes through the job's
-    delivery.
+    delivery. ``identity`` (agent_handshake) goes first, so an agent no chat
+    has told since it started still knows its job.
 
     The ephemeral channel is torn down in all cases.
     """
@@ -916,6 +918,8 @@ async def run_prompt_and_capture(
         if not await await_agent_link(ch):
             return None
         async with ch.send_lock:
+            if identity:
+                await ch.agent_ws.send(json.dumps(identity))
             frame: dict[str, Any] = {"type": "chat", "content": prompt}
             if automation:
                 frame["automation"] = automation
@@ -1305,6 +1309,13 @@ async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str,
             **({"mirror": False} if delivery is not None and not delivery["chat"] else {}),
         }
     meta: dict[str, Any] = {}
+    try:
+        from captain_claw.flight_deck.agent_handshake import identity_frame
+
+        identity = await identity_frame(str(job.get("owner_id") or ""), slug)
+    except Exception:
+        _log.debug("scheduler: no identity for %s", slug, exc_info=True)
+        identity = None
     reply = await run_prompt_and_capture(
         host=host, port=port, auth=auth,
         prompt=_fire_time_preamble() + (_TASK_NOTE if delivery is not None else "") + raw_prompt,
@@ -1312,6 +1323,7 @@ async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str,
         automation=automation,
         whatsapp_media_to=_media_target(_kind, _target),
         meta=meta,
+        identity=identity,
     )
     agent_idle.touch(slug)  # the idle time starts when the run ends
     report = _RUN_REPORT.get()

@@ -4969,6 +4969,22 @@ Every process agent runs as the deck's OS user. On a deck with sign-in, Flight D
 - **Shared agents** (`FD_AGENT_SHARING=1`): one agent, several users — see [Shared agents](#shared-agents-a2-members-own-google-deep-memory-files) below.
 - **Agent options.** A gear on each agent opens a tabbed options dialog (General, Instructions, `config.yaml`, `.env`); name and description are stored by Flight Deck, so they survive a browser wipe. Instructions are stored per agent by Flight Deck, so two tabs can't erase each other's.
 
+### Forge agents: say what you need and get a team
+
+For someone who knows what they need but not which agents would do it. In the kiosk's **New agent** dialog, **Forge agents** takes your request in your own words and your files (up to 10, 25 MB each), and works in four steps. You can close the dialog at any point: it carries on, and the bell opens it again.
+
+1. **Plan.** Vatra's planner does this: an agent opens your files, the Lead picks the fewest standing agents that cover the request, and the Long Horizon Planner writes each one's job and may ask you questions. A plan never exceeds the room your account's agent limit leaves.
+2. **Approve.** Rename an agent, change what it's based on, rewrite its job, or leave it out. Answer the questions or say what you want different, then **Plan again**. Nothing exists until you approve.
+3. **Create.** Each agent gets its archetype's way of working plus its job and its teammates. The team shares a folder (`vfs:<team>/`, with your files under `inputs/`) and one set of data tables, and teammates reach each other with `consult_peer`.
+4. **Schedule and build.** Captain recommends what should run by itself and what software is worth building, with why and how you'd use each. You can change anything, and only what you keep gets made.
+   - **Scheduled tasks** appear under Scheduled tasks like any other.
+   - **Apps** go to Crew as ordinary tasks, so Crew's approval and limits apply, and you land the work there. Every app is built to a fixed contract (`captain_claw/instructions/forge/app_contract.md`): an HTTP API under `/api/agent/` with a bearer key and a manifest, a WebSocket at `/agent/ws` that speaks the agent link protocol, or both.
+   - **Connect** works once the app is running: give its address and key. Flight Deck reads the manifest, registers the API as `direct_api` calls on each agent you choose, and makes an outbound agent link to the socket. The key stays in the sealed link and the agents' stored calls, never in the plan or the agents' instructions. An app on a private address needs `FD_LINK_PRIVATE_ADDRESSES=1`.
+
+An agent now knows its job even if nobody has opened its chat: Flight Deck tells it before each scheduled turn and before a linked system's first turn after it starts. A link also follows its agent when a restart moves it to another port. Both need accounts on the deck, since with sign-in off instructions live in the browser.
+
+Plans are under `/fd/agent-forge/plans`.
+
 ### Crew: coding agents working for you
 
 Crew lets Captain run Claude Code, Codex, OpenCode and Pi for you. You talk to your agent ("have Codex fix the login test and Claude add dark mode"), or use the Crew page. Each task gets one of those CLIs in a git worktree of its own, several at once. Flight Deck watches them without spending tokens and tells you when one finishes or needs a decision, on the channel you asked from.

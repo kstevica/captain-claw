@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ArrowLeft, BarChart3, Bot, Brain, Briefcase, Calendar, Check, ClipboardList, Clock, Code2, Contact,
-  Database, Eye, FileSpreadsheet, FileText, Gauge, Globe, Image as ImageIcon, Library, Lightbulb, ListTodo,
+  Database, Eye, FileSpreadsheet, FileText, Gauge, Globe, Hammer, Image as ImageIcon, Library, Lightbulb, ListTodo,
   Loader2, Mail, Map as MapIcon, Mic, Monitor, PenLine, Presentation, Search, ScanText, Sparkles, Star,
   Telescope, TerminalSquare, Wand2, X, Zap,
 } from 'lucide-react'
@@ -33,6 +33,9 @@ import { useIsMobile } from '../../hooks/useMediaQuery'
 // created as usual, then the caller opens AgentSetupDialog on it — the
 // person's instructions and documents, read by their model into rules,
 // skills, facts and knowledge they review before it reaches the agent.
+//
+// "Forge agents" (the header button, when the caller offers it): the other way
+// in, for someone who knows what they need and not which agent — ForgeAgentsDialog.
 
 /** Mirrors the backend `_slug`: a process agent's name is its directory. */
 function agentSlug(name: string): string {
@@ -140,12 +143,14 @@ function firstSentence(text: string): string {
 /** What a caller needs to open AgentSetupDialog on the new agent. */
 export interface SetupRequest { slug: string; name: string; role: string; readDocs?: string[] }
 
-export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, ownerLabel }: {
+export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, asUser, ownerLabel }: {
   /** Slugs of the agents this user can see — the default name avoids them. */
   takenSlugs: Set<string>
   onClose: () => void
   /** `setup`: the person ticked "set up its way of working next". */
   onSpawned: (slug: string, setup?: SetupRequest) => void
+  /** Say what's needed and let Captain plan the team instead. */
+  onForge?: () => void
   /** Admin creating the agent FOR that user: their gallery, their ownership,
    *  their tier set and plan. */
   asUser?: string
@@ -282,7 +287,17 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, asUser, o
               {phoneDetail ? 'Give it a name and create it.' : 'Pick an archetype — its role, tools and model come with it. You only give it a name.'}
             </p>
           </div>
-          <button onClick={onClose} disabled={busy} aria-label="Close" className="ml-auto rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50" title="Close">
+          {onForge && !phoneDetail && (
+            <button
+              onClick={onForge}
+              disabled={busy}
+              title="Say what you need and attach files; Captain plans the agents"
+              className="ml-auto flex shrink-0 items-center gap-1.5 rounded-lg border border-violet-500/40 bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-500/20 disabled:opacity-50 dark:text-violet-200"
+            >
+              <Hammer className="h-3.5 w-3.5" /> Forge agents
+            </button>
+          )}
+          <button onClick={onClose} disabled={busy} aria-label="Close" className={`${onForge && !phoneDetail ? '' : 'ml-auto'} shrink-0 rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50`} title="Close">
             <X className="h-5 w-5" />
           </button>
         </div>

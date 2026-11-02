@@ -381,9 +381,17 @@ class BusClient:
             turn["heard"] = True
 
     # ── client → agent ──
+    async def before_send(self) -> None:
+        """Anything a client needs to put right before a turn goes to the agent."""
+
+    async def first_frame(self, ch: Any) -> dict | None:
+        """A frame the agent needs ahead of this turn, or None."""
+        return None
+
     async def send_to_agent(self, text: str, ctx: Any = None, extra_notes: list[str] | None = None) -> bool:
         """The words to the agent as this client's turn; False when it didn't
         go (the client has been told why)."""
+        await self.before_send()
         ch = self.ch
         if ch is None:
             await self.send_json({"type": "error", "text": "No agent bound."})
@@ -397,10 +405,13 @@ class BusClient:
             await self.send_json({"type": "error", "text": usage_quota.short_limit_text(quota)})
             await self.send_json({"type": "state", "state": "ready"})
             return False
+        first = await self.first_frame(ch)
         async with ch.send_lock:
             payload = {"type": "chat", "client_msg_id": self.MSG_ID_PREFIX + secrets.token_hex(6),
                        **self.chat_fields(ch, text, ctx, extra_notes)}
             try:
+                if first:
+                    await ch.agent_ws.send(json.dumps(first))
                 await ch.agent_ws.send(json.dumps(payload))
                 ch.context_sent = True
             except Exception as exc:

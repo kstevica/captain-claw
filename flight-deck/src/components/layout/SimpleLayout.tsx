@@ -81,6 +81,7 @@ import { AgentConfigEditor } from '../agents/AgentConfigEditor'
 import { AgentSetupDialog } from './AgentSetupDialog'
 import { OnboardingDialog, type OnboardingTab } from './OnboardingDialog'
 import { ArchetypeSpawnDialog, type SetupRequest } from './ArchetypeSpawnDialog'
+import { ForgeAgentsDialog } from './ForgeAgentsDialog'
 import { KioskByokDialog } from './KioskByokDialog'
 import { useByokStore } from '../../stores/byokStore'
 import { useQuotaStore } from '../../stores/quotaStore'
@@ -248,6 +249,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [optionsAgent, setOptionsAgent] = useState<SimpleAgent | null>(null)
   // Kiosk "New agent" picker.
   const [archetypeOpen, setArchetypeOpen] = useState(false)
+  const [forgeOpen, setForgeOpen] = useState(false)
   // A new agent whose "way of working" setup opens right after it is created.
   const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   // An agent's knowledge, to browse (its ⋯ menu → Knowledge).
@@ -859,6 +861,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             if (setup) setSetupFor(setup)
             else useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
           }}
+          onForge={() => { setArchetypeOpen(false); setForgeOpen(true) }}
+        />
+      )}
+      {forgeOpen && (
+        <ForgeAgentsDialog
+          onClose={() => setForgeOpen(false)}
+          onCreated={(slugs) => { for (const slug of slugs) startBoot(`proc-${slug}`, false) }}
         />
       )}
       {setupFor && (
