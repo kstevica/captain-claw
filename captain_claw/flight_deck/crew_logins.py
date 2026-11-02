@@ -8,18 +8,19 @@ Saved logins are sealed in ``user_settings`` as ``crew:logins`` (``fd_crypto``);
 * **codex** — an OpenAI API key, or the contents of their ``~/.codex/auth.json``.
 * **github** — a token. Flight Deck uses it to clone, push and open pull
   requests; the worker never sees it, since a worker never pushes.
-* **anthropic, openai, gemini, openrouter, xai** — provider keys for OpenCode and
-  Pi. Keys saved under "Your own AI keys" (``byok``) count as well. OpenCode also
-  has free models that need no key; Pi can't run without one.
+* **anthropic, openai, gemini, openrouter, xai** — provider keys for OpenCode, Crush
+  and Pi. Keys saved under "Your own AI keys" (``byok``) count as well. OpenCode also
+  has free models that need no key; Crush and Pi can't run without one.
 
 ``crew:models`` holds the model each of their CLIs uses when a task names none: a
 model picked in a CLI's own screen is in that person's home, which their worker
 doesn't share.
 
-``crew:own_model`` is a model server of their own (sealed, for its key): OpenCode
-and Pi run on it as ``own/<model>``. The key reaches a worker only in the environment
-of its turn, so it's in no file: OpenCode's config comes through
-``OPENCODE_CONFIG_CONTENT``, and Pi's ``models.json`` names the variable.
+``crew:own_model`` is a model server of their own (sealed, for its key): OpenCode,
+Crush and Pi run on it as ``own/<model>``. The key reaches a worker only in the
+environment of its turn, so it's in no file: OpenCode's config comes through
+``OPENCODE_CONFIG_CONTENT``, and the ``models.json`` of Pi and the ``crush.json`` of
+Crush name the variable.
 
 A task can also run on a model that isn't any of these (``crew_model``): then its CLI needs
 no login, and gets none. All it holds is Flight Deck's address and a key for that one turn.
@@ -56,9 +57,10 @@ _K_LOGINS = "crew:logins"
 _K_META = "crew:meta"
 _K_MODELS = "crew:models"
 _K_OWN = "crew:own_model"
-OWN_PROVIDER = "own"
+OWN_PROVIDER = crew_harness.OWN_PROVIDER
 OWN_KEY_ENV = "CREW_OWN_MODEL_KEY"
-OWN_HARNESSES = ("opencode", "pi")
+OWN_HARNESSES = ("opencode", "crush", "pi")
+CRUSH_CONFIG_ENV = "CREW_CRUSH_CONFIG"
 _OWN_MODELS_MAX = 20
 MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@+\-]{0,119}$")
 _CLAUDE_TOKEN_PREFIX = "sk-ant-oat"
@@ -169,12 +171,12 @@ def _codex_login_is_file(secret: str) -> bool:
 def clean_url(value: str) -> str:
     """An OpenAI-compatible address. It may well be on a private network: that's the
     point, and a worker reaches what it likes anyway. No braces: OpenCode expands
-    {env:…} and {file:…} in its config."""
+    {env:…} and {file:…} in its config. No dollars: Crush expands $VAR and $(command)."""
     url = (value or "").strip().rstrip("/")
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
         raise HTTPException(400, "Give its address as http://host:port/v1.")
-    if re.search(r"[\s{}\"'\\]", url):
+    if re.search(r"[\s{}$`\"'\\]", url):
         raise HTTPException(400, "That address has characters an address can't have.")
     return url if parsed.path else f"{url}/v1"
 
@@ -345,6 +347,34 @@ def opencode_route_config(route: crew_harness.Route) -> dict[str, Any]:
         "models": {route.model: model}}}}
 
 
+def _crush_model(name: str, context: int, output: int = 0, *, native: bool = False) -> dict[str, Any]:
+    """With no context size it never compacts, which is all it can do with a size it doesn't know.
+    It sends no limit on its reply where none is known, except that Anthropic's API requires one."""
+    model: dict[str, Any] = {"id": name, "name": name}
+    if context:
+        model["context_window"] = context
+    most = output or (min(context // 4, 65536) if context else 0) or (16384 if native else 0)
+    if most:
+        model["default_max_tokens"] = most
+    return model
+
+
+def crush_own_config(own: dict[str, Any]) -> dict[str, Any]:
+    provider: dict[str, Any] = {"name": "Your own model", "type": "openai-compat", "base_url": own["url"],
+                                "models": [_crush_model(m, own.get("context") or 0) for m in own.get("models") or []]}
+    if own.get("key"):
+        provider["api_key"] = f"${OWN_KEY_ENV}"
+    return {OWN_PROVIDER: provider}
+
+
+def crush_route_config(route: crew_harness.Route) -> dict[str, Any]:
+    native = route.api == "anthropic"
+    return {crew_harness.ROUTE_PROVIDER: {
+        "name": "Captain", "type": "anthropic" if native else "openai-compat",
+        "base_url": route.url.removesuffix("/v1") if native else route.url, "api_key": f"${crew_harness.ROUTE_TOKEN_ENV}",
+        "models": [_crush_model(route.model, route.context, route.output, native=native)]}}
+
+
 def _route_env(harness: str, route: crew_harness.Route, token: str, home: Path) -> dict[str, str]:
     """What points a CLI at Flight Deck for this turn. *token* is all it holds of the model's account."""
     env = {crew_harness.ROUTE_TOKEN_ENV: token}
@@ -359,6 +389,8 @@ def _route_env(harness: str, route: crew_harness.Route, token: str, home: Path) 
             env["CLAUDE_CODE_MAX_OUTPUT_TOKENS"] = str(route.output)
     elif harness == "opencode":
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_route_config(route))
+    elif harness == "crush":
+        env[CRUSH_CONFIG_ENV] = json.dumps(crush_route_config(route))
     elif harness == "pi":
         _sync_pi_route(home, route)
     return env
@@ -506,6 +538,8 @@ async def worker_env(db, user: dict, grant: Grant, harness: str, binary: str, *,
             env[OWN_KEY_ENV] = own["key"]
         if harness == "opencode" and own:
             env["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config(own))
+        if harness == "crush" and own:
+            env[CRUSH_CONFIG_ENV] = json.dumps(crush_own_config(own))
         if harness == "pi":
             _sync_pi_models(Path(env["HOME"]), own)
     return env

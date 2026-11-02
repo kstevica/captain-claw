@@ -20,7 +20,7 @@ A reply cut off part way can't be picked up: it's ended, and the CLI asks again 
 do. A server that goes quiet is hung up on. The runner watches for a worker that doesn't get past it.
 
 A CLI can only talk the way it was built to: Claude Code in Anthropic's API, Codex in OpenAI's
-Responses API, OpenCode and Pi in those and OpenAI's chat API. Which one a model's server has is
+Responses API, OpenCode, Crush and Pi in those and OpenAI's chat API. Which one a model's server has is
 known for the big providers and not for anything else, so a server of someone's own is given the
 benefit of the doubt, and says so itself with a 404 if it hasn't got it.
 """
@@ -53,7 +53,7 @@ OPENAI = "openai"
 RESPONSES = "responses"
 _EVERY_API = (ANTHROPIC, OPENAI, RESPONSES)
 # What each CLI can talk, the one it does best first.
-_CLI_APIS = {"claude": (ANTHROPIC,), "codex": (RESPONSES,), "opencode": (OPENAI, ANTHROPIC), "pi": (OPENAI, ANTHROPIC)}
+_CLI_APIS = {"claude": (ANTHROPIC,), "codex": (RESPONSES,), "opencode": (OPENAI, ANTHROPIC), "crush": (OPENAI, ANTHROPIC), "pi": (OPENAI, ANTHROPIC)}
 _OWN_ENDPOINTS: dict[str, tuple[str, tuple[str, ...]]] = {
     "anthropic": ("https://api.anthropic.com/v1", (ANTHROPIC,)),
     "openai": ("https://api.openai.com/v1", (OPENAI, RESPONSES)),
@@ -137,7 +137,7 @@ def route_for(harness: str, upstream: Upstream, deck_url: str) -> Route:
     api = next((a for a in _CLI_APIS.get(harness, ()) if a in upstream.apis), "")
     if not api:
         label = crew_harness.HARNESSES[harness].label
-        raise HTTPException(400, f"{label} can't talk to that model's server. " + ("OpenCode or Pi can."
+        raise HTTPException(400, f"{label} can't talk to that model's server. " + ("OpenCode, Crush or Pi can."
                             if harness in ("claude", "codex") else ""))
     return Route(url=f"{deck_url.rstrip('/')}/fd/crew/llm/v1", model=upstream.model, api=api, context=upstream.context,
                  output=upstream.output)

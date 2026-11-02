@@ -100,8 +100,8 @@ async def test_what_can_be_chosen_says_which_clis_can_use_it_and_never_a_key(dec
     assert TEAM_KEY not in json.dumps(got)
     tiers = {t["id"]: t for t in got["tiers"]}
     assert set(tiers) == {"balanced", "vision"}, "a tier for tiny models isn't one a coding CLI can work on"
-    assert set(tiers["balanced"]["works_with"]) == {"claude", "opencode", "pi"} and tiers["balanced"]["context"] == 200000
-    assert set(tiers["vision"]["works_with"]) == {"opencode", "pi"}
+    assert set(tiers["balanced"]["works_with"]) == {"claude", "opencode", "crush", "pi"} and tiers["balanced"]["context"] == 200000
+    assert set(tiers["vision"]["works_with"]) == {"opencode", "crush", "pi"}
     assert [a["id"] for a in got["agents"]] == ["mine"], "only their own: a shared one is on its owner's account"
     assert got["agents"][0]["model"] == "claude-agent" and got["agents"][0]["context"] == 90000
 
@@ -110,7 +110,7 @@ async def test_a_cli_only_gets_a_model_it_can_talk_to(deck):
     await _team_tiers(deck, vision=GEMINI_TIER)
     with pytest.raises(HTTPException) as refused:
         await _dispatch(deck, "SCENARIO:work", model_source={"kind": "tier", "tier": "vision"})
-    assert refused.value.status_code == 400 and "Claude Code can't talk to" in refused.value.detail and "OpenCode or Pi can" in refused.value.detail
+    assert refused.value.status_code == 400 and "Claude Code can't talk to" in refused.value.detail and "OpenCode, Crush or Pi can" in refused.value.detail
 
 
 async def test_someone_elses_agent_cant_be_named(deck, agents):

@@ -1,0 +1,9 @@
+{"type": "session", "uuid": "798f7858-1167-4a95-a341-18a982109826", "model": "fake-1", "cost": 0.0, "prompt_tokens": 1000, "completion_tokens": 50}
+{"type": "alive"}
+{"type": "tool_call", "name": "bash", "input": "{\"command\": \"echo hello > made.txt && git add made.txt && git commit -qm 'made it' && git log --oneline -1\", \"description\": \"make a file and commit it\"}"}
+{"type": "tool_result", "name": "bash", "content": "19f8921 made it\n\n\n<cwd>/work/wt</cwd>", "is_error": false}
+{"type": "session", "uuid": "798f7858-1167-4a95-a341-18a982109826", "model": "fake-1", "cost": 0.0, "prompt_tokens": 1001, "completion_tokens": 50}
+{"type": "tool_call", "name": "view", "input": "{\"file_path\": \"made.txt\"}"}
+{"type": "tool_result", "name": "view", "content": "<file>\n     1|hello\n     2|\n</file>\n", "is_error": false}
+{"type": "session", "uuid": "798f7858-1167-4a95-a341-18a982109826", "model": "fake-1", "cost": 0.0, "prompt_tokens": 1002, "completion_tokens": 50}
+{"type": "text", "text": "All done.\n\nCREW-STATUS: done made made.txt"}

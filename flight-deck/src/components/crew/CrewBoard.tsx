@@ -667,11 +667,11 @@ const LOGINS: { name: string; label: string; hint: string; placeholder: string; 
   { name: 'claude', label: 'Claude Code', hint: 'Run claude setup-token on your own computer and paste the token (uses your plan), or paste an Anthropic API key.', placeholder: 'sk-ant-…' },
   { name: 'codex', label: 'Codex', hint: 'Paste an OpenAI API key, or the contents of ~/.codex/auth.json after codex login. A login used here shouldn\'t also be used elsewhere: Codex refreshes it in place.', placeholder: 'sk-… or {"auth_mode": …}', multiline: true },
   { name: 'github', label: 'GitHub', hint: 'A token that can read and push your repositories. Only Flight Deck uses it, to clone, push and open pull requests; the agents never see it.', placeholder: 'github_pat_…' },
-  { name: 'anthropic', label: 'Anthropic key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'sk-ant-…' },
-  { name: 'openai', label: 'OpenAI key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'sk-…' },
-  { name: 'openrouter', label: 'OpenRouter key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'sk-or-…' },
-  { name: 'gemini', label: 'Google Gemini key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'AI…' },
-  { name: 'xai', label: 'xAI key', hint: 'For Pi, and OpenCode\'s paid models.', placeholder: 'xai-…' },
+  { name: 'anthropic', label: 'Anthropic key', hint: 'For Crush, Pi, and OpenCode\'s paid models.', placeholder: 'sk-ant-…' },
+  { name: 'openai', label: 'OpenAI key', hint: 'For Crush, Pi, and OpenCode\'s paid models.', placeholder: 'sk-…' },
+  { name: 'openrouter', label: 'OpenRouter key', hint: 'For Crush, Pi, and OpenCode\'s paid models.', placeholder: 'sk-or-…' },
+  { name: 'gemini', label: 'Google Gemini key', hint: 'For Crush, Pi, and OpenCode\'s paid models.', placeholder: 'AI…' },
+  { name: 'xai', label: 'xAI key', hint: 'For Crush, Pi, and OpenCode\'s paid models.', placeholder: 'xai-…' },
 ]
 
 function SavedPill({ hint }: { hint?: string }) {
@@ -737,7 +737,7 @@ function OwnModelCard({ own, onChanged }: { own?: CrewMe['own_model']; onChanged
     const saved = await crewApi.saveOwnModel({ url: url.trim(), key: key.trim(), models: models.trim(), context: context.trim() })
     setUrl(saved.url)
     setKey('')
-    setChecked(`Saved. OpenCode and Pi can run on ${saved.names.join(', ')}.`)
+    setChecked(`Saved. OpenCode, Crush and Pi can run on ${saved.names.join(', ')}.`)
     onChanged()
   })
   const remove = () => run(async () => {
@@ -753,7 +753,7 @@ function OwnModelCard({ own, onChanged }: { own?: CrewMe['own_model']; onChanged
         {own && <button disabled={busy} onClick={remove} className="ml-auto text-xs text-zinc-500 hover:text-red-600 dark:hover:text-red-300">Remove</button>}
       </div>
       <p className="text-xs leading-relaxed text-zinc-500">
-        A server that speaks the OpenAI API, like llama.cpp or Ollama, for OpenCode and Pi. It has to be reachable from the computer running Flight Deck, and able to call tools.
+        A server that speaks the OpenAI API, like llama.cpp or Ollama, for OpenCode, Crush and Pi. It has to be reachable from the computer running Flight Deck, and able to call tools.
       </p>
       <input value={url} onChange={(e) => setUrl(e.target.value)} placeholder="http://192.168.1.20:8080/v1" aria-label="Its address" autoComplete="off" spellCheck={false} className={fieldClass} />
       <input type="password" value={key} onChange={(e) => setKey(e.target.value)} placeholder={own?.has_key ? 'Key saved. Type to replace it…' : 'Key, if it needs one'} aria-label="Its key" autoComplete="off" className={fieldClass} />
