@@ -2,23 +2,7 @@ import { useState, useRef, useEffect } from 'react'
 import { Tag, Plus, X, Trash2, Pencil, Check, Users, Briefcase, ChevronDown, Filter } from 'lucide-react'
 import { useGroupStore } from '../../stores/groupStore'
 import type { GroupType } from '../../stores/groupStore'
-
-// ── Color mapping for group badges ──
-
-const colorMap: Record<string, { bg: string; text: string; border: string; dot: string }> = {
-  violet: { bg: 'bg-violet-500/15', text: 'text-violet-400', border: 'border-violet-500/25', dot: 'bg-violet-400' },
-  blue: { bg: 'bg-blue-500/15', text: 'text-blue-400', border: 'border-blue-500/25', dot: 'bg-blue-400' },
-  emerald: { bg: 'bg-emerald-500/15', text: 'text-emerald-400', border: 'border-emerald-500/25', dot: 'bg-emerald-400' },
-  amber: { bg: 'bg-amber-500/15', text: 'text-amber-400', border: 'border-amber-500/25', dot: 'bg-amber-400' },
-  pink: { bg: 'bg-pink-500/15', text: 'text-pink-400', border: 'border-pink-500/25', dot: 'bg-pink-400' },
-  cyan: { bg: 'bg-cyan-500/15', text: 'text-cyan-400', border: 'border-cyan-500/25', dot: 'bg-cyan-400' },
-  red: { bg: 'bg-red-500/15', text: 'text-red-400', border: 'border-red-500/25', dot: 'bg-red-400' },
-  indigo: { bg: 'bg-indigo-500/15', text: 'text-indigo-400', border: 'border-indigo-500/25', dot: 'bg-indigo-400' },
-}
-
-function getColors(color: string) {
-  return colorMap[color] || colorMap.violet
-}
+import { groupTone as getColors } from '../../utils/agentGroups'
 
 // ── Group badges shown on agent cards ──
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   ChevronLeft,
@@ -39,6 +39,8 @@ import {
   Activity,
   KeyRound,
   Ship,
+  FolderInput,
+  FolderPlus,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -56,6 +58,8 @@ import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import type { SharedAgent } from '../../services/sharedAgents'
 import { useScheduledStore } from '../../stores/scheduledStore'
 import { ScheduledTasks } from '../scheduler/ScheduledTasks'
+import { useGroupStore } from '../../stores/groupStore'
+import { agentSections, isFolder } from '../../utils/agentGroups'
 import { useFileLibraryStore } from '../../stores/fileLibraryStore'
 import { FileLibrary } from '../library/FileLibrary'
 import { useDataLibraryStore } from '../../stores/dataLibraryStore'
@@ -97,6 +101,7 @@ import {
   AgentDialog, AgentMenu, KioskAgentInfoDialog, KioskAgentInstructionsDialog, KioskAgentSettingsDialog, KioskRemoveAgentDialog,
   type AgentMenuItem,
 } from './KioskAgentDialogs'
+import { AgentGroupDialog, AgentGroupPicker, AgentSections, RailGroupMark, type RowDrag } from './KioskAgentGroups'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import { NetworkBadge, networkShareAction } from '../agents/NetworkShare'
 import { dockerShareKey, processShareKey, useNetworkShareStore } from '../../stores/networkShareStore'
@@ -136,6 +141,9 @@ interface SimpleAgent {
   ownerId?: string
   ownerName?: string
 }
+
+/** A group to edit (`id`), or a new one with these agents in it. */
+interface GroupRequest { id?: string; agentIds?: string[] }
 
 const STATE_RANK: Record<AgentState, number> = { running: 0, starting: 1, unknown: 2, stopped: 3 }
 
@@ -294,6 +302,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [agentRemoveId, setAgentRemoveId] = useState<string | null>(null)
   // …and its files and data, read live from the agent (see agentMenuItems).
   const [filesDataId, setFilesDataId] = useState<string | null>(null)
+  // Agent groups: a group being made or edited, and the agent whose "⋯" → Group is open.
+  const groups = useGroupStore((s) => s.groups)
+  const forgetAgent = useGroupStore((s) => s.forgetAgent)
+  const [groupDialog, setGroupDialog] = useState<GroupRequest | null>(null)
+  const [groupPickerId, setGroupPickerId] = useState<string | null>(null)
   // Kiosk Getting started guide. It opens by itself once per page load (so
   // once per person on a shared kiosk: sign-out reloads) until its "Do not
   // show again" is ticked — which is per user, so it waits for their settings.
@@ -606,6 +619,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       releaseChats(a.id)
       const result = a.kind === 'docker' ? await removeContainer(a.startKey, true) : await removeProcess(a.startKey, true)
       clearAgentSlices(a.id)
+      forgetAgent(a.id)
       setAgentRemoveId(null)
       if (result.ok) useNotificationStore.getState().add('info', 'Agent removed', `${a.name} and its folder are gone.`)
       else useNotificationStore.getState().add('warning', 'Agent removed — not everything went', result.message)
@@ -643,11 +657,22 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // with the user (when its owner's deck gives members some) or a Docker one.
   // Instructions, Settings and Remove are for the user's own agents only —
   // not one shared with them, a local one, or one Flight Deck runs itself.
+  const groupMenuItem = (a: SimpleAgent): AgentMenuItem => {
+    const inGroups = groups.filter((g) => isFolder(g) && g.agentIds.includes(a.id))
+    return {
+      icon: FolderInput, label: 'Group', tone: 'sky',
+      hint: inGroups.length ? `In ${inGroups.map((g) => g.name).join(', ')}` : 'Keep it with others like it',
+      onSelect: () => setGroupPickerId(a.id),
+    }
+  }
   const agentMenuItems = (a: SimpleAgent): AgentMenuItem[] => {
     if (a.kind === 'shared') {
-      return agentPanels(a.id, memberWorkspace, sharedAgents).region === 'member'
-        ? [{ icon: FolderOpen, label: 'Files & data', hint: 'What everyone who uses it can open', tone: 'amber', onSelect: () => setFilesDataId(a.id) }]
-        : []
+      return [
+        ...(agentPanels(a.id, memberWorkspace, sharedAgents).region === 'member'
+          ? [{ icon: FolderOpen, label: 'Files & data', hint: 'What everyone who uses it can open', tone: 'amber' as const, onSelect: () => setFilesDataId(a.id) }]
+          : []),
+        groupMenuItem(a),
+      ]
     }
     const up = a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
     const items: AgentMenuItem[] = [{
@@ -694,6 +719,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         onError: (m) => useNotificationStore.getState().add('error', 'BotPort network', m),
       })
       if (net.show) items.push({ icon: Globe, label: net.label, hint: net.hint, tone: 'cyan', onSelect: net.onClick, disabled: net.disabled })
+    }
+    items.push(groupMenuItem(a))
+    if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
         { icon: Trash2, label: 'Remove agent', hint: 'Delete it and its folder', danger: true,
           onSelect: () => setAgentRemoveId(a.id), disabled: switching.has(a.id) },
@@ -701,7 +729,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     }
     return items
   }
-  const menuFor = locked ? agentMenuItems : undefined
+  // Off the kiosk its "⋯" holds only the agent's group (the gear has the rest).
+  const menuFor = locked ? agentMenuItems : (a: SimpleAgent) => [groupMenuItem(a)]
+  const groupPickerAgent = groupPickerId ? agents.find((a) => a.id === groupPickerId) : undefined
   const agentInfo = agentInfoId ? agents.find((a) => a.id === agentInfoId) : undefined
   const agentInstructions = agentInstructionsId ? agents.find((a) => a.id === agentInstructionsId) : undefined
   const agentSettings = agentSettingsId ? agents.find((a) => a.id === agentSettingsId) : undefined
@@ -1024,6 +1054,19 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       {locked && filesData && (isMobile
         ? <PhoneFilesSheet agentId={filesData.id} agentName={filesData.name} onClose={() => setFilesDataId(null)} />
         : <KioskFilesDataDialog agentId={filesData.id} agentName={filesData.name} onClose={() => setFilesDataId(null)} />)}
+      {groupDialog && (
+        <AgentGroupDialog
+          key={groupDialog.id ?? 'new'}
+          groupId={groupDialog.id}
+          agentIds={groupDialog.agentIds}
+          agents={agents}
+          phone={isMobile}
+          onClose={() => setGroupDialog(null)}
+        />
+      )}
+      {groupPickerAgent && (
+        <AgentGroupPicker agentId={groupPickerAgent.id} agentName={groupPickerAgent.name} phone={isMobile} onClose={() => setGroupPickerId(null)} />
+      )}
       {locked && connectionsOpen && <KioskConnectionsDialog initialTab={connectionsTab} onClose={() => setConnectionsOpen(false)} />}
       {locked && profileOpen && <KioskProfileDialog onClose={() => setProfileOpen(false)} />}
 
@@ -1054,6 +1097,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onPower={handlePower}
           onLeave={handleLeave}
           onSpawn={goSpawn}
+          onGroup={setGroupDialog}
           onSettings={locked ? () => setSettingsOpen(true) : undefined}
           onInfo={locked ? () => setInfoOpen(true) : undefined}
           onTaskboard={() => openTaskboard()}
@@ -1088,6 +1132,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         onLeave={handleLeave}
         onRefresh={refresh}
         onSpawn={goSpawn}
+        onGroup={setGroupDialog}
         onOptions={setOptionsAgent}
         onSettings={locked ? () => setSettingsOpen(true) : undefined}
         onInfo={locked ? () => setInfoOpen(true) : undefined}
@@ -1412,7 +1457,7 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
 // ── Left: agents ─────────────────────────────────────────────────────
 
 function AgentsColumn({
-  agents, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onLeave, onRefresh, onSpawn, onOptions, onSettings, onInfo,
+  agents, activeAgentId, sessionInfo, switching, booting, onOpen, onPower, onLeave, onRefresh, onSpawn, onGroup, onOptions, onSettings, onInfo,
   onTaskboard, taskboardCount = 0,
   onScheduled, scheduledCount = 0, scheduledRunning = false, onLibrary, onData, onFolders, menuFor, locked = false, adminSwitch = false,
 }: {
@@ -1429,6 +1474,8 @@ function AgentsColumn({
   onLeave: (a: SimpleAgent) => void
   onRefresh: () => void
   onSpawn: () => void
+  /** Open the group sheet: a group to edit, or a new one. */
+  onGroup: (req: GroupRequest) => void
   onOptions: (a: SimpleAgent) => void
   /** Kiosk only: the footer is one Settings button opening this dialog. */
   onSettings?: () => void
@@ -1466,15 +1513,51 @@ function AgentsColumn({
   // The search box only renders past a threshold; gate the filter on the SAME
   // condition so a stale query can't strand the list once the box is gone.
   const searchable = agents.length > 6
-
-  const shown = useMemo(() => {
-    const q = searchable ? search.trim().toLowerCase() : ''
-    if (!q) return agents
-    return agents.filter((a) => a.name.toLowerCase().includes(q) || a.description.toLowerCase().includes(q))
-  }, [agents, search, searchable])
+  const groups = useGroupStore((s) => s.groups)
+  const collapsedGroups = useGroupStore((s) => s.collapsed)
+  const railSections = useMemo(() => agentSections(agents, groups), [agents, groups])
 
   // ── Collapsed rail ──
   if (!open) {
+    const railGrouped = groups.some(isFolder)
+    const railTile = (a: SimpleAgent) => {
+      const info = sessionInfo.get(a.id)
+      const active = a.id === activeAgentId
+      const hasChat = sessionInfo.has(a.id)
+      const isBooting = booting.has(a.id) && a.state !== 'stopped'
+      const openable = !switching.has(a.id) && ((a.reachable && !isBooting) || hasChat)
+      const canStart = a.kind === 'local' ? a.state !== 'running' && !locked
+        : a.kind !== 'shared' && a.state === 'stopped' && !a.managed
+      const railStart = canStart && !switching.has(a.id)
+      return (
+        <button
+          key={a.id}
+          onClick={() => openable ? onOpen(a) : railStart ? onPower(a, true) : undefined}
+          aria-disabled={!openable && !railStart}
+          title={openable
+            ? `Chat with ${a.name}`
+            : railStart
+              ? `${a.name} — ${stateLabel(a)} · click to ${a.kind === 'local' ? 'check again' : 'start'}`
+              : `${a.name} — ${isBooting ? 'Starting…' : stateLabel(a)}`}
+          className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold transition-colors ${
+            active
+              ? 'bg-violet-600/20 text-violet-300 ring-1 ring-violet-500/40'
+              : openable
+                ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
+                : 'bg-zinc-900 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-800'
+          }`}
+        >
+          {switching.has(a.id) || isBooting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(a.name)}
+          <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
+          {info?.busy && (
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" />
+          )}
+          {info?.unread && !active && !info.busy && (
+            <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-sky-400 ring-2 ring-zinc-900" />
+          )}
+        </button>
+      )
+    }
     return (
       <aside className="flex w-14 shrink-0 flex-col border-r border-zinc-800 bg-zinc-900/50">
         <div className="flex flex-col items-center gap-0.5 border-b border-zinc-800 py-2">
@@ -1496,42 +1579,14 @@ function AgentsColumn({
           <NotificationBell align="left" />
         </div>
         <div className="flex flex-1 flex-col items-center gap-1.5 overflow-y-auto py-2">
-          {agents.map((a) => {
-            const info = sessionInfo.get(a.id)
-            const active = a.id === activeAgentId
-            const hasChat = sessionInfo.has(a.id)
-            const isBooting = booting.has(a.id) && a.state !== 'stopped'
-            const openable = !switching.has(a.id) && ((a.reachable && !isBooting) || hasChat)
-            const canStart = a.kind === 'local' ? a.state !== 'running' && !locked
-              : a.kind !== 'shared' && a.state === 'stopped' && !a.managed
-            const railStart = canStart && !switching.has(a.id)
+          {railSections.map((s) => {
+            if (!s.group && s.agents.length === 0) return null
+            const folded = railGrouped && collapsedGroups.includes(s.id)
             return (
-              <button
-                key={a.id}
-                onClick={() => openable ? onOpen(a) : railStart ? onPower(a, true) : undefined}
-                aria-disabled={!openable && !railStart}
-                title={openable
-                  ? `Chat with ${a.name}`
-                  : railStart
-                    ? `${a.name} — ${stateLabel(a)} · click to ${a.kind === 'local' ? 'check again' : 'start'}`
-                    : `${a.name} — ${isBooting ? 'Starting…' : stateLabel(a)}`}
-                className={`relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold transition-colors ${
-                  active
-                    ? 'bg-violet-600/20 text-violet-300 ring-1 ring-violet-500/40'
-                    : openable
-                      ? 'bg-zinc-800 text-zinc-300 hover:bg-zinc-700'
-                      : 'bg-zinc-900 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-800'
-                }`}
-              >
-                {switching.has(a.id) || isBooting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(a.name)}
-                <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
-                {info?.busy && (
-                  <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" />
-                )}
-                {info?.unread && !active && !info.busy && (
-                  <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-sky-400 ring-2 ring-zinc-900" />
-                )}
-              </button>
+              <Fragment key={s.id}>
+                {railGrouped && <RailGroupMark section={s} sessionInfo={sessionInfo} />}
+                {(folded ? s.agents.filter((a) => a.id === activeAgentId) : s.agents).map(railTile)}
+              </Fragment>
             )
           })}
           <button onClick={onSpawn} className={`${iconBtn} mt-1`} title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}>
@@ -1670,9 +1725,16 @@ function AgentsColumn({
         <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">
           Agents ({agents.length})
         </span>
-        <button onClick={onSpawn} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300" title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}>
-          <Plus className="h-3.5 w-3.5" />
-        </button>
+        <div className="flex items-center gap-0.5">
+          {agents.length > 1 && (
+            <button onClick={() => onGroup({})} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300" title="New group" aria-label="New group">
+              <FolderPlus className="h-3.5 w-3.5" />
+            </button>
+          )}
+          <button onClick={onSpawn} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300" title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}>
+            <Plus className="h-3.5 w-3.5" />
+          </button>
+        </div>
       </div>
 
       {/* Search (only once the list is long enough to need it) */}
@@ -1695,11 +1757,14 @@ function AgentsColumn({
         {agents.length === 0 && (
           <p className="px-2.5 py-6 text-center text-xs text-zinc-600">No agents yet.</p>
         )}
-        {agents.length > 0 && shown.length === 0 && (
-          <p className="px-2.5 py-6 text-center text-xs text-zinc-600">No agents match your search.</p>
-        )}
-        <ul className="flex flex-col gap-0.5">
-          {shown.map((a) => {
+        <AgentSections
+          agents={agents}
+          query={searchable ? search : ''}
+          activeAgentId={activeAgentId}
+          sessionInfo={sessionInfo}
+          onEdit={(id) => onGroup({ id })}
+          onNew={(agentIds) => onGroup({ agentIds })}
+          renderRow={(a: SimpleAgent, drag: RowDrag) => {
             const info = sessionInfo.get(a.id)
             const active = a.id === activeAgentId
             const busy = !!info?.busy
@@ -1716,7 +1781,7 @@ function AgentsColumn({
             const canRecheck = a.kind === 'local' && a.state !== 'running' && !locked
             const menu = menuFor?.(a) ?? []
             return (
-              <li key={a.id} className="group flex items-center gap-0.5">
+              <li key={a.id} {...drag} className="group flex items-center gap-0.5">
                 <button
                   onClick={() => onOpen(a)}
                   disabled={!openable}
@@ -1816,8 +1881,8 @@ function AgentsColumn({
                 )}
               </li>
             )
-          })}
-        </ul>
+          }}
+        />
       </div>
 
       {(onTaskboard || onScheduled || onLibrary || onData || onFolders) && (
@@ -2157,7 +2222,7 @@ function KioskFilesDataDialog({ agentId, agentName, onClose }: { agentId: string
 
 function PhoneLayout({
   agents, activeAgent, activeAgentId, activeSessionName, sessionInfo, switching, booting,
-  onOpen, onPower, onLeave, onSpawn, onSettings, onInfo, onTaskboard, taskboardCount = 0, onScheduled, scheduledRunning = false,
+  onOpen, onPower, onLeave, onSpawn, onGroup, onSettings, onInfo, onTaskboard, taskboardCount = 0, onScheduled, scheduledRunning = false,
   onLibrary, onData, onFolders, menuFor, locked, adminSwitch = false, overlayOpen = false, onCloseOverlays, chatOpens = 0,
 }: {
   agents: SimpleAgent[]
@@ -2171,6 +2236,7 @@ function PhoneLayout({
   onPower: (a: SimpleAgent, on: boolean) => void
   onLeave: (a: SimpleAgent) => void
   onSpawn: () => void
+  onGroup: (req: GroupRequest) => void
   onSettings?: () => void
   onInfo?: () => void
   onTaskboard?: () => void
@@ -2271,11 +2337,6 @@ function PhoneLayout({
   }, [unwound])
 
   const searchable = agents.length > 6
-  const shown = useMemo(() => {
-    const q = searchable ? search.trim().toLowerCase() : ''
-    if (!q) return agents
-    return agents.filter((a) => a.name.toLowerCase().includes(q) || a.description.toLowerCase().includes(q))
-  }, [agents, search, searchable])
 
   const phoneBtn = 'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors active:bg-zinc-800 hover:bg-zinc-800 hover:text-zinc-100'
   // The agent list's header carries every tool: a little narrower, so seven
@@ -2384,8 +2445,14 @@ function PhoneLayout({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3">
-        <div className="mb-2 flex items-center justify-between px-1">
+        <div className="mb-2 flex h-8 items-center justify-between px-1">
           <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">Agents ({agents.length})</span>
+          {agents.length > 1 && (
+            <button onClick={() => onGroup({})} className="-mr-1 flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-zinc-500 transition-colors active:bg-zinc-800" aria-label="New group">
+              <FolderPlus className="h-4 w-4" />
+              New group
+            </button>
+          )}
         </div>
         {searchable && (
           <div className="relative mb-3">
@@ -2410,12 +2477,15 @@ function PhoneLayout({
             </p>
           </div>
         )}
-        {agents.length > 0 && shown.length === 0 && (
-          <p className="py-8 text-center text-sm text-zinc-500">No agents match your search.</p>
-        )}
-
-        <ul className="flex flex-col gap-2">
-          {shown.map((a) => {
+        <AgentSections
+          phone
+          agents={agents}
+          query={searchable ? search : ''}
+          activeAgentId={activeAgentId}
+          sessionInfo={sessionInfo}
+          onEdit={(id) => onGroup({ id })}
+          onNew={(agentIds) => onGroup({ agentIds })}
+          renderRow={(a: SimpleAgent) => {
             const info = sessionInfo.get(a.id)
             const busy = !!info?.busy
             const shared = a.kind === 'shared'
@@ -2485,8 +2555,8 @@ function PhoneLayout({
                 )}
               </li>
             )
-          })}
-        </ul>
+          }}
+        />
       </div>
 
       <div className="shrink-0 border-t border-zinc-800 bg-zinc-950 p-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">

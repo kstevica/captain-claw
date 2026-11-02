@@ -379,3 +379,8 @@ html.light .bg-violet-500\/5 { background-color: rgba(139,92,246,0.06) !importan
   .fd-sheet.fd-card-wide { animation: fd-pop 0.2s cubic-bezier(0.2, 0.8, 0.2, 1) both; }
 }
 @media (prefers-reduced-motion: reduce) { .fd-fade, .fd-sheet, .fd-sheet.fd-card-wide { animation: none; } }
+
+/* A group that just took an agent. */
+@keyframes fd-group-landed { 0%, 100% { background-color: transparent; } 25% { background-color: rgba(139, 92, 246, 0.22); } }
+.fd-group-landed { animation: fd-group-landed 0.9s ease-out; }
+@media (prefers-reduced-motion: reduce) { .fd-group-landed { animation: none; } }
