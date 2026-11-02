@@ -1358,7 +1358,7 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     if not source:
         state = await crew_logins.login_state(get_db(), user, grant, harness)
         if not state["ok"]:
-            raise HTTPException(400, f"Add your {HARNESSES[harness].label} login in Crew → Logins first.")
+            raise HTTPException(400, f"Add your {HARNESSES[harness].label} login in Crew → Logins first, or run it on an agent's model or a deck tier.")
         if state.get("free") and not model:
             # Left to itself it picks one of them, and they don't all treat code alike. Someone's repository goes
             # to whichever it is, so it's chosen by them.
