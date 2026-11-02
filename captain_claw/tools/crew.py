@@ -39,6 +39,34 @@ _WINDOWS = {"five_hour": "the 5-hour limit", "seven_day": "the weekly limit", "s
             "seven_day_sonnet": "the weekly Sonnet limit"}
 
 
+def _model_source_of(value: Any) -> tuple[dict[str, str] | None, str]:
+    """What runs_on names, as Flight Deck takes it: (choice, why it can't be read)."""
+    text = str(value or "").strip().lower()
+    if not text:
+        return None, ""
+    kind, _, name = text.partition(":")
+    if text == "me":
+        return {"kind": "agent", "agent": "me"}, ""
+    if kind in ("agent", "tier") and name.strip():
+        return {"kind": kind, kind: name.strip()}, ""
+    return None, "runs_on is 'me', 'agent:<name>' or 'tier:<name>', as action=options lists them."
+
+
+def _choice_lines(choices: dict, you: str) -> list[str]:
+    """What runs_on can name, and which CLIs can use each."""
+    rows = [("me" if a.get("id") == you else f"agent:{a.get('id')}", f"{a.get('label')}'s model", a) for a in choices.get("agents") or []]
+    rows.sort(key=lambda row: row[0] != "me")
+    rows += [(f"tier:{t.get('id')}", f"{t.get('label')} tier", t) for t in choices.get("tiers") or []]
+    if not rows:
+        return []
+    lines = ["Models a worker can run on instead of its CLI's own (runs_on, when the user asks. The CLI needs no login, the key stays "
+             "on the deck, and tokens count toward the user's daily limit):"]
+    for name, label, item in rows:
+        clis = ", ".join(item.get("works_with") or [])
+        lines.append(f"  {name}: {label}, {item.get('model')}, for {clis}" if clis else f"  {name}: {label}, can't be used: {item.get('why_not') or 'no CLI here can talk to it'}")
+    return lines
+
+
 def _usage_lines(row: dict | None) -> list[str]:
     """What a CLI last said about itself. It says so only while working, so its age is part of the fact."""
     if not row or not (row.get("model") or row.get("limits") or row.get("tasks")):
@@ -108,6 +136,10 @@ class CrewTool(Tool):
         "Giving a worker folders of the user's VFS: vfs_read and vfs_write on dispatch or prepare_env, or folders for a task under "
         "way. With vfs_read it gets its own copy; with vfs_write it works in the real folder, at once and with no undo, so give "
         "that only when the task has to change their files there. Google Drive and OneDrive folders can't be given. "
+        "Running a worker on another model: runs_on on dispatch or prepare_env, when the user asks for your model, another "
+        "agent's or a deck tier. Options lists them and which CLIs can use each. Its CLI then needs no login, the key stays "
+        "on the deck, and the tokens count toward the user's daily limit. A model with a key of its own is entered by the "
+        "user on Crew's New task page: never ask for a key in a chat. "
         "A task exists once a crew result here gives its id, and not before: never say one started, or that a repository "
         "is cloned, from anything else. If a call fails, tell the user what it said. "
         "Actions: options (the CLIs you may use, their logins, the model each last ran on and its usage limits, like "
@@ -168,6 +200,14 @@ class CrewTool(Tool):
             "repo_url": {"type": "string", "description": "dispatch, clone, prepare_env, env: a repository's https:// address, with no login in it. Crew clones it itself, in the background, and the worker starts inside it, so never ask a worker to clone. It makes its own project, named after the repository: send no project with it."},
             "repo_path": {"type": "string", "description": "dispatch, prepare_env, env: a git folder on this computer. Admins only."},
             "model": {"type": "string", "description": "dispatch: a model for the CLI, only if the user asked for one; otherwise their default is used. For OpenCode, exactly a name from 'options': never make one up."},
+            "runs_on": {
+                "type": "string",
+                "description": (
+                    "dispatch, prepare_env: run the worker on this instead of its CLI's own model, only if the user asked: "
+                    "'me' for your own model, 'agent:<name>' for another of the user's agents, 'tier:<name>' for a deck tier, "
+                    "exactly as 'options' lists them. Not with model."
+                ),
+            },
             "effort": {"type": "string", "description": "dispatch: reasoning effort for the CLI, only if the user asked for one."},
             "task_id": {"type": "string", "description": "status, files, steer, stop, pr, request_merge: the task."},
             "whole": {"type": "boolean", "description": "files: copy the whole project, not only what the task changed."},
@@ -234,7 +274,7 @@ class CrewTool(Tool):
         used = {u["id"]: u for u in (data.get("usage") or {}).get("harnesses", [])}
         for h in (data.get("me") or {}).get("harnesses", []):
             state = "not installed" if not h.get("installed") else (
-                f"ready, on {h['login']['how']}" if h["login"].get("ok") else "no login yet (Crew → Logins)")
+                f"ready, on {h['login']['how']}" if h["login"].get("ok") else "no login yet: it needs one in Crew → Logins, or runs_on")
             lines.append(f"  {h['id']} ({h['label']}): {state}")
             if h.get("installed"):
                 lines.extend(_usage_lines(used.get(h["id"])))
@@ -244,7 +284,8 @@ class CrewTool(Tool):
                     lines.append("    No model is chosen, so it needs one named. Its free models differ in what happens to "
                                  "the code, so that's the user's choice: ask them, don't pick for them.")
                 if h.get("models"):
-                    lines.append(f"    It can use only these, by exactly these names: {', '.join(h['models'][:30])}")
+                    lines.append(f"    Of its own, it can use only these, by exactly these names: {', '.join(h['models'][:30])}")
+        lines.extend(_choice_lines(data.get("model_choices") or {}, str(data.get("you") or "")))
         repos = data.get("repos") or {}
         lines.append("Projects (each folder is in your VFS at the path shown: read it yourself, no task needed):")
         for p in repos.get("projects", []):
@@ -367,8 +408,11 @@ class CrewTool(Tool):
         if not kwargs.get("deliver") and kwargs.get("kind") != "scout" and _OPENS_A_PR.search(brief):
             kwargs["deliver"] = "pr"
         folders, why = self._folders_of(kwargs)
-        if why:
-            return ToolResult(success=False, error=why)
+        source, why_not = _model_source_of(kwargs.get("runs_on"))
+        if why or why_not:
+            return ToolResult(success=False, error=why or why_not)
+        if source and kwargs.get("model"):
+            return ToolResult(success=False, error="Give model or runs_on, not both: runs_on already says which model.")
         held, refused = await self._attach(client, kwargs)
         if refused is not None:
             return refused
@@ -379,6 +423,7 @@ class CrewTool(Tool):
                                                      "repo_path", "model", "effort") if kwargs.get(k)},
             **({"attachments": [i["id"] for i in held]} if held else {}),
             **({"vfs_folders": folders} if folders else {}),
+            **({"model_source": source} if source else {}),
         }
         status, data = await client.call("POST", "dispatch", payload)
         if (refused := self._refused(status, data)) is not None:
@@ -392,7 +437,7 @@ class CrewTool(Tool):
                       f"landed: {'; '.join(data['unlanded'][:5])}.")
         return ToolResult(success=True, content=(
             f"Task {data.get('id')} is {where}: {data.get('harness_label')} in {data.get('repo_label')}, on branch "
-            f"{data.get('branch')}.{self._sent_line(held)}{f' Its folders: {self._folder_line(folders)}.' if folders else ''}{behind} It has only started: nothing is done yet, so tell the user it's under way, "
+            f"{data.get('branch')}.{self._runs_on_line(data)}{self._sent_line(held)}{f' Its folders: {self._folder_line(folders)}.' if folders else ''}{behind} It has only started: nothing is done yet, so tell the user it's under way, "
             f"end your turn and don't report a result. You'll be called back when it finishes or needs a decision."
             + (" Captain opens its pull request when it finishes." if kwargs.get("deliver") == "pr"
                else _NOT_A_WORKERS_JOB if _ASKS_TO_DELIVER.search(brief) else "")
@@ -430,8 +475,11 @@ class CrewTool(Tool):
             return ToolResult(success=False, error="Provide `harness`: which CLI does it (see action='options').")
         origin_platform, origin_user_id, origin_chat_id = self._origin_of(kwargs.get("_agent"))
         folders, why = self._folders_of(kwargs)
-        if why:
-            return ToolResult(success=False, error=why)
+        source, why_not = _model_source_of(kwargs.get("runs_on"))
+        if why or why_not:
+            return ToolResult(success=False, error=why or why_not)
+        if source and kwargs.get("model"):
+            return ToolResult(success=False, error="Give model or runs_on, not both: runs_on already says which model.")
         held, refused = await self._attach(client, kwargs)
         if refused is not None:
             return refused
@@ -441,13 +489,14 @@ class CrewTool(Tool):
             **{k: str(kwargs.get(k) or "") for k in ("brief", "title", "project", "folder", "repo_url", "repo_path", "model", "effort") if kwargs.get(k)},
             **({"attachments": [i["id"] for i in held]} if held else {}),
             **({"vfs_folders": folders} if folders else {}),
+            **({"model_source": source} if source else {}),
         })
         if (refused := self._refused(status, data)) is not None:
             await self._let_go(client, held)
             return refused
         return ToolResult(success=True, content=(
             f"Task {data.get('id')}: {data.get('harness_label')} is setting up {data.get('repo_label')}, in the project's main "
-            f"folder.{self._sent_line(held)} It has only started: nothing is installed yet, so tell the user it's under way and end your turn. You'll be "
+            f"folder.{self._runs_on_line(data)}{self._sent_line(held)} It has only started: nothing is installed yet, so tell the user it's under way and end your turn. You'll be "
             "called back when it's done. New tasks on this project wait for it."
         ))
 
@@ -475,7 +524,8 @@ class CrewTool(Tool):
         lines = [_task_line(data)]
         evidence = data.get("evidence") or {}
         if data.get("model_used") or data.get("model"):
-            lines.append(f"Model: {data.get('model_used') or data.get('model')}")
+            label = (data.get("model_source") or {}).get("label")
+            lines.append(f"Model: {data.get('model_used') or data.get('model')}{f' ({label})' if label else ''}")
         if evidence.get("log"):
             lines.append("Commits:\n" + "\n".join(f"  {c}" for c in evidence["log"]))
         if evidence.get("dirty"):
@@ -495,6 +545,11 @@ class CrewTool(Tool):
             lines.extend(f"  {e.get('tool') or e.get('kind')}: {str(e.get('text'))[:300]}"
                          for e in data.get("recent", []))
         return ToolResult(success=True, content="\n".join(lines))
+
+    @staticmethod
+    def _runs_on_line(task: dict) -> str:
+        label = (task.get("model_source") or {}).get("label")
+        return f" It runs on {label}: {task.get('model')}." if label else ""
 
     @staticmethod
     def _where_lines(results: dict) -> list[str]:

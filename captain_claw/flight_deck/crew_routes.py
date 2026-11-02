@@ -639,9 +639,9 @@ async def agent_status(request: Request) -> dict[str, Any]:
 
 @router.get("/agent/options")
 async def agent_options(request: Request) -> dict[str, Any]:
-    row, grant, _ = await _agent_caller(request)
+    row, grant, slug = await _agent_caller(request)
     return {"me": await _me(row), "repos": await repos(row), "usage": crew_runner.usage(row["id"]),
-            "envs": await _env_list(row, grant)}
+            "envs": await _env_list(row, grant), "you": slug, "model_choices": await crew_model.choices(get_db(), row, grant)}
 
 
 @router.post("/agent/env")
@@ -676,12 +676,22 @@ async def agent_drop_upload(upload_id: str, request: Request) -> dict[str, bool]
     return {"ok": True}
 
 
+def _agents_model_source(source: dict[str, Any] | None, slug: str) -> dict[str, Any] | None:
+    """What an agent can run a worker on. "me" is the agent asking, by Flight Deck's record of it. A model
+    with a key typed in comes only from the page: a key doesn't go through a chat."""
+    if not source:
+        return None
+    if source.get("kind") == "typed":
+        raise HTTPException(403, "A model with its own key is entered by the user, on Crew's New task page.")
+    return {**source, "agent": slug} if source.get("agent") == "me" else source
+
+
 @router.post("/agent/dispatch")
 async def agent_dispatch(body: AgentDispatchBody, request: Request) -> dict[str, Any]:
     row, grant, slug = await _agent_caller(request)
     fields = body.model_dump()
     fields.update(
-        agent_slug=slug, source_host=body.source_host or "localhost",
+        agent_slug=slug, source_host=body.source_host or "localhost", model_source=_agents_model_source(fields.get("model_source"), slug),
         origin={"platform": body.origin_platform, "user_id": body.origin_user_id, "chat_id": body.origin_chat_id},
     )
     task = await crew_runner.dispatch(row, grant, fields)
