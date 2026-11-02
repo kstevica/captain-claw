@@ -44,6 +44,13 @@ export function isFolder(g: AgentGroup): boolean {
   return (g.type || 'group') === 'group'
 }
 
+/** The groups as the list shows them: the pinned one first, the rest in their order. */
+export function orderedFolders(groups: AgentGroup[]): AgentGroup[] {
+  const folders = groups.filter(isFolder)
+  const top = folders.find((g) => g.pinned)
+  return top ? [top, ...folders.filter((g) => g !== top)] : folders
+}
+
 /** The section of the agents in no group (collapses like the others). */
 export const OTHER_SECTION = 'other'
 
@@ -55,16 +62,23 @@ export interface AgentSection<A> {
   agents: A[]
 }
 
-/** Each group in its order (empty ones too), then the agents in none. The
- *  agents keep the order they come in. One placed in two groups in the full
- *  layout shows in both. */
+/** Those pinned first, as they were pinned (a power switch doesn't move them), then the rest as they come. */
+function pinnedFirst<A extends { id: string }>(agents: A[], pinned: string[] = []): A[] {
+  if (pinned.length === 0) return agents
+  const on = pinned.flatMap((id) => agents.filter((a) => a.id === id))
+  return [...on, ...agents.filter((a) => !pinned.includes(a.id))]
+}
+
+/** Each group in the list's order (empty ones too), then the agents in none.
+ *  Within a section the agents keep the order they come in, those pinned first.
+ *  One placed in two groups in the full layout shows in both. */
 export function agentSections<A extends { id: string }>(agents: A[], groups: AgentGroup[]): AgentSection<A>[] {
-  const folders = groups.filter(isFolder)
+  const folders = orderedFolders(groups)
   const placed = new Set(folders.flatMap((g) => g.agentIds))
   return [
     ...folders.map((g) => {
       const members = new Set(g.agentIds)
-      return { id: g.id, group: g, name: g.name, agents: agents.filter((a) => members.has(a.id)) }
+      return { id: g.id, group: g, name: g.name, agents: pinnedFirst(agents.filter((a) => members.has(a.id)), g.pinnedAgentIds) }
     }),
     { id: OTHER_SECTION, group: null, name: 'Other agents', agents: agents.filter((a) => !placed.has(a.id)) },
   ]

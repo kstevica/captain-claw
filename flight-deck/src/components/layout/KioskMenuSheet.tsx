@@ -98,7 +98,7 @@ function CompactTile({ item, wholeRow }: { item: MenuItem; wholeRow: boolean }) 
 }
 
 function Tile({ item, across, wholeRow }: { item: MenuItem; across: boolean; wholeRow: boolean }) {
-  const { icon: Icon, label, hint, onSelect, disabled, tone = 'violet', busy } = item
+  const { icon: Icon, label, hint, onSelect, disabled, tone = 'violet', busy, direct } = item
   return (
     <button
       data-tile
@@ -114,8 +114,10 @@ function Tile({ item, across, wholeRow }: { item: MenuItem; across: boolean; who
         <span className="block text-sm font-semibold leading-snug text-zinc-100">{label}</span>
         {hint && <span className="mt-0.5 line-clamp-2 text-balance text-xs leading-snug text-zinc-500">{hint}</span>}
       </span>
-      <ChevronRight className={`h-4 w-4 shrink-0 text-zinc-600 transition-all group-hover:translate-x-0.5 group-hover:text-zinc-400 group-disabled:opacity-0 ${
-        across ? '' : 'absolute right-3 top-3.5'}`} />
+      {!direct && (
+        <ChevronRight className={`h-4 w-4 shrink-0 text-zinc-600 transition-all group-hover:translate-x-0.5 group-hover:text-zinc-400 group-disabled:opacity-0 ${
+          across ? '' : 'absolute right-3 top-3.5'}`} />
+      )}
     </button>
   )
 }

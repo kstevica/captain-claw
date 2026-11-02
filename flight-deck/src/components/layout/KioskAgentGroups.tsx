@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { ArrowDown, ArrowUp, Check, ChevronRight, Folder, FolderMinus, FolderPlus, MoreHorizontal, Plus, Search, Trash2, X } from 'lucide-react'
-import { useGroupStore } from '../../stores/groupStore'
-import { GROUP_COLORS, OTHER_SECTION, agentSections, groupTone, isFolder, nextGroupColor, type AgentSection } from '../../utils/agentGroups'
+import { ArrowDown, ArrowUp, Check, ChevronRight, Folder, FolderMinus, FolderPlus, MoreHorizontal, Pin, Plus, Search, Trash2, X } from 'lucide-react'
+import { useGroupStore, type AgentGroup } from '../../stores/groupStore'
+import { GROUP_COLORS, OTHER_SECTION, agentSections, groupTone, isFolder, nextGroupColor, orderedFolders, type AgentSection } from '../../utils/agentGroups'
 
 // ── Agent groups in the agent column ──
 //
@@ -12,7 +12,9 @@ import { GROUP_COLORS, OTHER_SECTION, agentSections, groupTone, isFolder, nextGr
 // or down; everywhere an agent's "⋯" → Group, or a group's "⋯" with its tick
 // list, does the same. With no groups the list is the plain list it always was.
 // What a folded group holds still shows on its header: an agent working or with
-// a new reply, and the one whose chat is open stays in view.
+// a new reply, and the one whose chat is open stays in view. One group can be
+// pinned to the top of the list, and any number of agents to the top of their
+// group; nothing goes above the pinned group, and "Other agents" has no pins.
 
 export interface GroupableAgent {
   id: string
@@ -30,6 +32,20 @@ export interface RowDrag {
   onDragStart?: (e: DragEvent<HTMLElement>) => void
   onDragEnd?: () => void
   style?: { opacity: number }
+}
+
+/** A row in a group: its pin, to the top of that group. */
+export interface RowPin {
+  pinned: boolean
+  groupName: string
+  onToggle: () => void
+}
+
+/** What an agent's row gets from its section. */
+export interface RowParts {
+  drag: RowDrag
+  /** None in "Other agents". */
+  pin?: RowPin
 }
 
 type Dragging = { kind: 'agent'; id: string; from: string } | { kind: 'group'; id: string }
@@ -53,7 +69,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
   query: string
   activeAgentId: string | null
   sessionInfo: SessionInfo
-  renderRow: (a: A, drag: RowDrag) => ReactNode
+  renderRow: (a: A, parts: RowParts) => ReactNode
   onEdit: (groupId: string) => void
   /** Start a group, with these agents in it. */
   onNew: (agentIds?: string[]) => void
@@ -64,14 +80,21 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
   const toggleCollapsed = useGroupStore((s) => s.toggleCollapsed)
   const placeAgent = useGroupStore((s) => s.placeAgent)
   const moveGroup = useGroupStore((s) => s.moveGroup)
+  const pinGroup = useGroupStore((s) => s.pinGroup)
+  const toggleAgentPin = useGroupStore((s) => s.toggleAgentPin)
 
   const [dragging, setDragging] = useState<Dragging | null>(null)
   const [over, setOver] = useState<{ id: string; above: boolean } | null>(null)
   const [overNew, setOverNew] = useState(false)
-  // The section that just took an agent, to say so.
+  // The section that just took an agent or the pin, to say so.
   const [landed, setLanded] = useState<string | null>(null)
   const landedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   useEffect(() => () => clearTimeout(landedTimer.current), [])
+  const showLanded = (id: string) => {
+    setLanded(id)
+    clearTimeout(landedTimer.current)
+    landedTimer.current = setTimeout(() => setLanded(null), 900)
+  }
 
   const endDrag = useCallback(() => {
     setDragging(null)
@@ -97,6 +120,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
   }, [allSections, q, searching])
 
   const grouped = groups.some(isFolder)
+  const pinnedName = groups.find((g) => g.pinned && isFolder(g))?.name
   const agentDrag = dragging?.kind === 'agent'
   const canDrag = !phone
 
@@ -112,20 +136,41 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
     onDragEnd: endDrag,
     ...(dragging?.kind === 'agent' && dragging.id === a.id ? { style: { opacity: 0.4 } } : {}),
   } : {})
+  const rowParts = (a: A, s: AgentSection<A>): RowParts => {
+    const { group } = s
+    return {
+      drag: rowDrag(a, s.id),
+      pin: group ? {
+        pinned: !!group.pinnedAgentIds?.includes(a.id),
+        groupName: group.name,
+        onToggle: () => toggleAgentPin(group.id, a.id),
+      } : undefined,
+    }
+  }
+
+  const togglePinned = (g: AgentGroup) => {
+    pinGroup(g.pinned ? null : g.id)
+    if (!g.pinned) showLanded(g.id)
+  }
+
+  // Nothing goes above the pinned group: a drop on it lands below it.
+  const dropsAbove = (e: DragEvent<HTMLElement>, s: AgentSection<A>) => {
+    if (s.group?.pinned) return false
+    const r = e.currentTarget.getBoundingClientRect()
+    return e.clientY < r.top + r.height / 2
+  }
 
   const dropOn = (s: AgentSection<A>, above: boolean) => {
     if (dragging?.kind === 'agent') {
       if (dragging.from !== s.id) {
         placeAgent(dragging.id, s.group?.id ?? null)
-        setLanded(s.id)
-        clearTimeout(landedTimer.current)
-        landedTimer.current = setTimeout(() => setLanded(null), 900)
+        showLanded(s.id)
       }
     } else if (dragging?.kind === 'group' && dragging.id !== s.id) {
       if (!s.group) moveGroup(dragging.id, null)
       else if (above) moveGroup(dragging.id, s.id)
       else {
-        const others = groups.filter((g) => isFolder(g) && g.id !== dragging.id)
+        const others = orderedFolders(groups).filter((g) => g.id !== dragging.id)
         moveGroup(dragging.id, others[others.findIndex((g) => g.id === s.id) + 1]?.id ?? null)
       }
     }
@@ -137,8 +182,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
       if (!dragging || (dragging.kind === 'group' && dragging.id === s.id)) return
       e.preventDefault()
       e.dataTransfer.dropEffect = 'move'
-      const r = e.currentTarget.getBoundingClientRect()
-      const above = e.clientY < r.top + r.height / 2
+      const above = dropsAbove(e, s)
       setOver((o) => (o?.id === s.id && o.above === above ? o : { id: s.id, above }))
     },
     onDragLeave: (e: DragEvent<HTMLElement>) => {
@@ -147,8 +191,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
     },
     onDrop: (e: DragEvent<HTMLElement>) => {
       e.preventDefault()
-      const r = e.currentTarget.getBoundingClientRect()
-      dropOn(s, e.clientY < r.top + r.height / 2)
+      dropOn(s, dropsAbove(e, s))
     },
   } : {})
 
@@ -187,7 +230,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
     const only = sections[0]?.agents ?? []
     return (
       <>
-        <ul className={listClass}>{only.map((a) => renderRow(a, rowDrag(a, OTHER_SECTION)))}</ul>
+        <ul className={listClass}>{only.map((a) => renderRow(a, { drag: rowDrag(a, OTHER_SECTION) }))}</ul>
         {newGroup}
       </>
     )
@@ -220,7 +263,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
               )}
               <div
                 className={`group/head flex items-center gap-0.5 rounded-md ${landed === s.id ? 'fd-group-landed' : ''}`}
-                {...(canDrag && s.group && !searching ? {
+                {...(canDrag && s.group && !s.group.pinned && !searching ? {
                   draggable: true,
                   onDragStart: (e: DragEvent<HTMLElement>) => startDrag(e, { kind: 'group', id: s.id }, 'application/x-fd-group'),
                   onDragEnd: endDrag,
@@ -237,9 +280,24 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
                   {tone && <span className={`shrink-0 rounded-[3px] ${tone.dot} ${phone ? 'h-2.5 w-2.5' : 'h-2 w-2'}`} />}
                   <span className={`min-w-0 truncate font-semibold ${phone ? 'text-sm' : 'text-xs'} ${s.group ? 'text-zinc-300' : 'text-zinc-500'}`}>{s.name}</span>
                   <span className={`shrink-0 tabular-nums text-zinc-500 ${phone ? 'text-xs' : 'text-[10px]'}`}>{s.agents.length}</span>
+                  {/* Off a phone its pin button says so. */}
+                  {phone && s.group?.pinned && <Pin className="h-3 w-3 shrink-0 fill-current text-violet-600 dark:text-violet-400" aria-label="Pinned to the top" />}
                   {signals?.busy && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500 dark:bg-amber-400" title="An agent here is working" />}
                   {signals?.unread && !signals.busy && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" title="A new reply here" />}
                 </button>
+                {s.group && !phone && (
+                  <button
+                    onClick={() => togglePinned(s.group!)}
+                    aria-pressed={!!s.group.pinned}
+                    aria-label={`${s.group.pinned ? 'Unpin' : 'Pin'} group ${s.name}`}
+                    title={s.group.pinned ? `Unpin ${s.name}` : pinnedName ? `Pin to the top, in place of ${pinnedName}` : 'Pin to the top'}
+                    className={`shrink-0 rounded p-1.5 transition-colors hover:bg-zinc-800 ${s.group.pinned
+                      ? 'text-violet-600 dark:text-violet-400'
+                      : 'text-zinc-500 opacity-0 hover:text-zinc-200 focus:opacity-100 group-hover/head:opacity-100 pointer-coarse:opacity-100'}`}
+                  >
+                    <Pin className={`h-3.5 w-3.5 ${s.group.pinned ? 'fill-current' : ''}`} />
+                  </button>
+                )}
                 {s.group && (
                   <button
                     onClick={() => onEdit(s.id)}
@@ -258,7 +316,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
               <div className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${isCollapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'}`}>
                 <div className="min-h-0 overflow-hidden" inert={isCollapsed}>
                   <div className={`${rail} ${phone ? 'pb-1 pt-1' : 'pb-0.5 pt-0.5'}`}>
-                    <ul className={listClass}>{s.agents.map((a) => renderRow(a, rowDrag(a, s.id)))}</ul>
+                    <ul className={listClass}>{s.agents.map((a) => renderRow(a, rowParts(a, s)))}</ul>
                     {s.group && s.agents.length === 0 && (
                       <button
                         onClick={() => onEdit(s.id)}
@@ -275,7 +333,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
                 </div>
               </div>
               {stillShown.length > 0 && (
-                <div className={rail}><ul className={listClass}>{stillShown.map((a) => renderRow(a, rowDrag(a, s.id)))}</ul></div>
+                <div className={rail}><ul className={listClass}>{stillShown.map((a) => renderRow(a, rowParts(a, s)))}</ul></div>
               )}
             </section>
           )
@@ -404,9 +462,10 @@ export function AgentGroupDialog<A extends GroupableAgent>({ groupId, agentIds, 
   const updateGroup = useGroupStore((s) => s.updateGroup)
   const deleteGroup = useGroupStore((s) => s.deleteGroup)
   const moveGroup = useGroupStore((s) => s.moveGroup)
+  const pinGroup = useGroupStore((s) => s.pinGroup)
   const setGroupMembers = useGroupStore((s) => s.setGroupMembers)
 
-  const folders = useMemo(() => groups.filter(isFolder), [groups])
+  const folders = useMemo(() => orderedFolders(groups), [groups])
   const group = groupId ? folders.find((g) => g.id === groupId) : undefined
   const [name, setName] = useState(group?.name ?? '')
   const [color, setColor] = useState(() => group?.color ?? nextGroupColor(groups))
@@ -415,6 +474,8 @@ export function AgentGroupDialog<A extends GroupableAgent>({ groupId, agentIds, 
   const [first] = useState(() => new Set(group?.agentIds ?? agentIds ?? []))
   const [filter, setFilter] = useState('')
   const [deleting, setDeleting] = useState(false)
+  // A new group's pin, until it's created; a group's own goes on at once, like its place.
+  const [newPinned, setNewPinned] = useState(false)
 
   // It went away on another device while this was open.
   useEffect(() => { if (groupId && !group) onClose() }, [groupId, group, onClose])
@@ -449,13 +510,24 @@ export function AgentGroupDialog<A extends GroupableAgent>({ groupId, agentIds, 
       // An agent not listed right now (an owner took a shared one back for a while) keeps its place.
       setGroupMembers(group.id, [...group.agentIds.filter((id) => !here.has(id)), ...ticked])
     } else {
-      setGroupMembers(createGroup(clean, 'group', color), ticked)
+      const id = createGroup(clean, 'group', color)
+      setGroupMembers(id, ticked)
+      if (newPinned) pinGroup(id)
     }
     onClose()
   }
 
+  const isPinned = group ? !!group.pinned : newPinned
+  const pinnedElsewhere = folders.find((g) => g.pinned && g.id !== groupId)
+  const togglePinned = () => {
+    if (group) pinGroup(group.pinned ? null : group.id)
+    else setNewPinned((v) => !v)
+  }
+
+  // Its place among the groups below the pinned one.
   const at = group ? folders.findIndex((g) => g.id === group.id) : -1
-  const moveUp = () => { if (group && at > 0) moveGroup(group.id, folders[at - 1].id) }
+  const highest = pinnedElsewhere ? 1 : 0
+  const moveUp = () => { if (group && at > highest) moveGroup(group.id, folders[at - 1].id) }
   const moveDown = () => { if (group && at >= 0 && at < folders.length - 1) moveGroup(group.id, folders[at + 2]?.id ?? null) }
 
   const headLabel = 'mb-2 px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500'
@@ -530,13 +602,33 @@ export function AgentGroupDialog<A extends GroupableAgent>({ groupId, agentIds, 
               </span>
             </button>
           ))}
-          {group && folders.length > 1 && (
+          {group && !isPinned && folders.length > 1 && (
             <span className="ml-auto flex items-center">
-              <button onClick={moveUp} disabled={at <= 0} className={stepBtn} aria-label="Higher in the list" title="Higher in the list"><ArrowUp className="h-4 w-4" /></button>
+              <button onClick={moveUp} disabled={at <= highest} className={stepBtn} aria-label="Higher in the list" title="Higher in the list"><ArrowUp className="h-4 w-4" /></button>
               <button onClick={moveDown} disabled={at >= folders.length - 1} className={stepBtn} aria-label="Lower in the list" title="Lower in the list"><ArrowDown className="h-4 w-4" /></button>
             </span>
           )}
         </div>
+
+        <button
+          role="switch"
+          aria-checked={isPinned}
+          onClick={togglePinned}
+          className="flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-950/40 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-800/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
+        >
+          <Pin className={`h-4 w-4 shrink-0 ${isPinned ? 'fill-current text-violet-600 dark:text-violet-400' : 'text-zinc-500'}`} />
+          <span className="min-w-0 flex-1">
+            <span className="block text-sm font-medium text-zinc-200">Pin to the top</span>
+            <span className="block truncate text-[11px] text-zinc-500">
+              {isPinned ? 'First in your list, above every other group'
+                : pinnedElsewhere ? `Takes the place of ${pinnedElsewhere.name}: one group can be pinned`
+                  : 'Keep it first in your list'}
+            </span>
+          </span>
+          <span className={`relative h-5 w-9 shrink-0 rounded-full transition-colors ${isPinned ? 'bg-violet-500' : 'bg-zinc-700'}`} aria-hidden>
+            <span className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow transition-transform motion-reduce:transition-none ${isPinned ? 'translate-x-4' : ''}`} />
+          </span>
+        </button>
 
         <div>
           <h3 className={headLabel}>Agents in it</h3>
@@ -604,7 +696,7 @@ export function AgentGroupPicker({ agentId, agentName, phone, onClose }: {
   const placeAgent = useGroupStore((s) => s.placeAgent)
   const createGroup = useGroupStore((s) => s.createGroup)
   const expand = useGroupStore((s) => s.expand)
-  const folders = useMemo(() => groups.filter(isFolder), [groups])
+  const folders = useMemo(() => orderedFolders(groups), [groups])
   const inGroups = folders.filter((g) => g.agentIds.includes(agentId))
   const [name, setName] = useState('')
   const listRef = useRef<HTMLDivElement>(null)
