@@ -5,10 +5,10 @@ import {
   FileText, Hourglass, Image as ImageIcon, ListChecks, Loader2, Mail, MessageSquareText, Paperclip, Presentation, Sparkles,
   Telescope, Trash2, Upload, X, type LucideIcon,
 } from 'lucide-react'
-import { forgeApi, type ForgePlanRow } from '../../services/agentForge'
+import { forgeApi, type ForgeLimits, type ForgePlanRow } from '../../services/agentForge'
 import { fmtRelative } from '../../services/schedulerApi'
 import { useIsMobile } from '../../hooks/useMediaQuery'
-import { ErrorNote } from './forgeParts'
+import { ErrorNote, TeamSize } from './forgeParts'
 import { errorOf, fmtSize } from './forgeUtil'
 
 // Step one: a blank page is the hardest part, so it starts with a sentence to
@@ -58,6 +58,8 @@ export function ForgeAsk({ onStarted }: { onStarted: (id: string) => void }) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [recent, setRecent] = useState<ForgePlanRow[]>([])
+  const [limits, setLimits] = useState<ForgeLimits | null>(null)
+  const [cap, setCap] = useState(0)
   const [dragging, setDragging] = useState(false)
   const depth = useRef(0)
   const picker = useRef<HTMLInputElement>(null)
@@ -65,6 +67,7 @@ export function ForgeAsk({ onStarted }: { onStarted: (id: string) => void }) {
   const { isMobile } = useIsMobile()
 
   useEffect(() => { forgeApi.list().then(setRecent).catch(() => {}) }, [])
+  useEffect(() => { forgeApi.limits().then(setLimits).catch(() => {}) }, [])
 
   const add = (list: File[]) => {
     if (!list.length) return
@@ -108,7 +111,7 @@ export function ForgeAsk({ onStarted }: { onStarted: (id: string) => void }) {
     setBusy(true)
     setErr('')
     try {
-      onStarted((await forgeApi.start(request.trim(), files)).id)
+      onStarted((await forgeApi.start(request.trim(), files, cap)).id)
     } catch (e) {
       setErr(errorOf(e))
       setBusy(false)
@@ -193,6 +196,16 @@ export function ForgeAsk({ onStarted }: { onStarted: (id: string) => void }) {
             </button>
           </div>
         </div>
+
+        {limits && limits.seats > 0 && (
+          <div className="fd-rise flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <TeamSize value={cap} largest={Math.min(limits.seats, limits.max_team)} suggested={limits.default_team} disabled={busy} onChange={setCap} />
+            <p className="min-w-0 flex-1 basis-56 text-xs leading-relaxed text-zinc-500">
+              A limit, not a target: Captain combines work that belongs together. For one agent per item, say so above.
+              {limits.seats < limits.max_team && ` Your plan has room for ${limits.seats} more.`}
+            </p>
+          </div>
+        )}
 
         {err && <ErrorNote>{err}</ErrorNote>}
 

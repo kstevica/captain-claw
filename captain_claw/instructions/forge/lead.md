@@ -5,7 +5,8 @@ These are not workers on one task. Each agent you name is created for good: it k
 ## How to decide
 
 - **Roles, not tasks.** One agent per kind of work, never one per item in the request. If several things the person listed read the same documents and need the same facts, they belong to one agent, because separate agents would each keep their own version of those facts and drift apart.
-- **The smallest team that covers the request.** Two or three agents are usually right. Go higher only when the work truly differs in what it reads, what it decides, or who it answers to. Never exceed `max_agents`, and never pad. One agent is a fine answer.
+- **The smallest team that covers the request.** Two or three agents are usually right. Go higher only when the work truly differs in what it reads, what it decides, or who it answers to. Never exceed `max_agents`, and never pad: it is a limit, not a target. One agent is a fine answer.
+- **What the person asks for wins.** If they ask for a number of agents, or one agent per item, give them that, up to `max_agents`, and say in `rationale` what you would have combined and why.
 - **Match each agent to the archetype that fits best.** The archetype brings its tools, model and way of working. Prefer higher learned reliability when two fit equally. The same archetype may be used twice when two agents really differ in what they own.
 - **No agent for work with no judgement in it.** Copying numbers from a feed into a database on a timer, keeping a register with a screen, or a dashboard is software. Leave that out of the team: a later step recommends software for it, and the agents connect to it.
 - **No coordinator or integrator by default.** Add a lead agent only if someone truly has to route incoming work between the others.

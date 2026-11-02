@@ -60,7 +60,10 @@ PLANNING, GATE, CREATING, RECOMMENDING, READY, FAILED = (
     "planning", "awaiting_plan", "creating", "recommending", "ready", "error")
 _WORKING = {PLANNING, CREATING, RECOMMENDING}
 
-MAX_TEAM = 8
+# A team when the person leaves it to Captain, and the most they can ask for: every
+# agent is a running process, and the planner writes each one's job in a single reply.
+DEFAULT_TEAM = 8
+MAX_TEAM = 12
 MAX_FILES = 10
 MAX_REQUEST_CHARS = 20_000
 MAX_SCHEDULES = 12
@@ -160,8 +163,16 @@ async def _refuse_when_spent(uid: str) -> None:
         raise HTTPException(429, "Today's allowance is used up, so Captain can't plan this now. It resets at midnight UTC.")
 
 
+def _team_cap(value: Any) -> int:
+    """The limit a person set: 0 leaves it to Captain, anything else is kept in range."""
+    try:
+        return max(0, min(int(value or 0), MAX_TEAM))
+    except (TypeError, ValueError):
+        return 0
+
+
 def _room(user: dict) -> int:
-    """How many more agents this person's plan lets them have, at most a full team."""
+    """How many more agents this person's plan lets them have, at most the largest team."""
     from captain_claw.flight_deck import rate_limiter
     from captain_claw.flight_deck.auth import _fd_auth_enabled
     from captain_claw.flight_deck.server import _load_process_registry
@@ -477,12 +488,15 @@ async def _run_plan(sid: str, user: dict, *, note: str = "", answers: list[dict]
         vr._phase(sid, "Lead · which agents you need", step="lead")
         vr._progress(sid, "route", "Lead deciding which agents you need…")
         clarifications = vr._format_clarifications(answers)
-        room = _room(user) or 1
-        await _save(sid, uid, room=room)
+        seats = _room(user)
+        room = min(seats or 1, _team_cap(forge.get("cap")) or DEFAULT_TEAM)
+        await _save(sid, uid, room=room, seats=seats)
         route = await vr._build_plan(
             db, uid, _lead_task(request, brief, note, clarifications, previous, names), room, creds,
             shared_datastore=True, timeout=vr._decompose_timeout(), lead_prompt="forge/lead.md")
         counted = await _count_tokens(sid, uid, 0)
+        # The Lead wanted more than the limit: say so, or that work just goes missing.
+        await _save(sid, uid, over_cap=int(route.get("over_cap") or 0))
         vr._progress(sid, "route", f"{len(route['subtasks'])} agent{'s' if len(route['subtasks']) != 1 else ''} · {route['domain']}",
                      agents=[{"name": x.get("title") or "", "archetype": x.get("owner_archetype_id") or ""} for x in route["subtasks"]])
 
@@ -750,12 +764,20 @@ def _view(sess: dict, uid: str) -> dict[str, Any]:
         "error": forge.get("error") or "", "recommend_error": forge.get("recommend_error") or "",
         "files": [{"name": f.get("name"), "size": f.get("size")} for f in vr._parse_files(sess)],
         "team": forge.get("folder") or forge.get("team") or "", "rationale": route.get("rationale") or "",
-        "room": int(forge.get("room") or MAX_TEAM), "max_team": MAX_TEAM,
+        "room": int(forge.get("room") or DEFAULT_TEAM), "seats": int(forge.get("seats") or forge.get("room") or DEFAULT_TEAM),
+        "cap": _team_cap(forge.get("cap")), "default_team": DEFAULT_TEAM, "max_team": MAX_TEAM,
+        "over_cap": int(forge.get("over_cap") or 0),
         "overview": forge.get("overview") or plan.get("overview") or "", "agents": agents,
         "questions": plan.get("questions") or [], "created": _created_view(forge.get("created") or []),
         "approved": [{"id": a["id"], "name": a["name"], "archetype": a["archetype"]} for a in forge.get("approved") or []],
         "recommendations": recs or None, "updated_at": sess.get("updated_at"), "created_at": sess.get("created_at"),
     }
+
+
+@router.get("/limits")
+async def team_limits(user: dict = Depends(get_current_user)) -> dict[str, int]:
+    """What the Team size control can offer this person."""
+    return {"seats": _room(user), "default_team": DEFAULT_TEAM, "max_team": MAX_TEAM}
 
 
 @router.get("/plans")
@@ -777,7 +799,7 @@ async def get_plan(plan_id: str, user: dict = Depends(get_current_user)) -> dict
 
 @router.post("/plans", status_code=201)
 async def start_plan(request: str = Form(""), files: list[UploadFile] = File(default=[]),
-                     user: dict = Depends(get_current_user)) -> dict[str, Any]:
+                     max_agents: int = Form(0), user: dict = Depends(get_current_user)) -> dict[str, Any]:
     text = request.strip()
     if not text:
         raise HTTPException(400, "Say what you need the agents for.")
@@ -805,6 +827,7 @@ async def start_plan(request: str = Form(""), files: list[UploadFile] = File(def
         (folder / name).write_bytes(content)
         listed[name] = {"name": name, "mime": mime, "size": len(content), "kind": "input"}
     await db.update_basna_session(sid, user["id"], status=PLANNING, files=json.dumps(list(listed.values())))
+    await _save(sid, user["id"], cap=_team_cap(max_agents))
     _start(sid, _run_plan(sid, user))
     return {"id": sid, "status": PLANNING}
 
@@ -813,6 +836,7 @@ class ReplanBody(BaseModel):
     note: str = Field(default="", max_length=8000)
     questions: list[dict] = []
     agents: list[dict] = []  # the team as they left it: what the next plan starts from
+    max_agents: int | None = None  # a new team size; None keeps the one it has
 
 
 @router.post("/plans/{plan_id}/replan")
@@ -829,6 +853,8 @@ async def replan(plan_id: str, body: ReplanBody, user: dict = Depends(get_curren
               for a in body.agents[:MAX_TEAM] if isinstance(a, dict) and a.get("name")]
     if edited:
         await _save(plan_id, user["id"], draft=edited)
+    if body.max_agents is not None:
+        await _save(plan_id, user["id"], cap=_team_cap(body.max_agents))
     await get_db().update_basna_session(plan_id, user["id"], status=PLANNING)
     _start(plan_id, _run_plan(plan_id, user, note=body.note, answers=answers))
     return {"id": plan_id, "status": PLANNING}

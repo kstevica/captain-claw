@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 import types
 
 import httpx
@@ -256,6 +257,86 @@ async def test_planning_stops_at_the_plan_with_nothing_created(forge):
     assert call["lead_prompt"] == "forge/lead.md"
     assert "The files say quarterly reports." in call["intent"] and "report.pdf" in call["intent"]
     assert "STANDING agents" in forge.planner_calls[0]["intent"]
+
+
+async def _start_with(c, **data) -> str:
+    resp = await c.post("/fd/agent-forge/plans", data={"request": "Fund reports", **{k: str(v) for k, v in data.items()}})
+    assert resp.status_code == 201, resp.text
+    sid = resp.json()["id"]
+    await _settle(sid)
+    return sid
+
+
+async def test_left_alone_a_team_stays_at_the_default_size(forge, monkeypatch):
+    monkeypatch.setattr(af, "_room", lambda user: af.MAX_TEAM)
+    async with _client(forge) as c:
+        sid = await _start_with(c)
+        plan = (await c.get(f"/fd/agent-forge/plans/{sid}")).json()
+    assert forge.lead_calls[0]["max_agents"] == af.DEFAULT_TEAM == 8
+    assert plan["cap"] == 0 and plan["room"] == 8 and plan["max_team"] == af.MAX_TEAM
+
+
+@pytest.mark.parametrize("asked, seats, planned", [
+    (3, 12, 3),    # lower than the default
+    (9, 12, 9),    # above the old limit of 8: nine examples can be nine agents
+    (12, 12, 12),
+    (99, 12, 12),  # kept in range
+    (9, 5, 5),     # the plan's seats still win
+    (-4, 12, 8),   # nonsense is the default
+])
+async def test_the_person_sets_the_team_size(forge, monkeypatch, asked, seats, planned):
+    monkeypatch.setattr(af, "_room", lambda user: seats)
+    async with _client(forge) as c:
+        sid = await _start_with(c, max_agents=asked)
+        plan = (await c.get(f"/fd/agent-forge/plans/{sid}")).json()
+    assert forge.lead_calls[0]["max_agents"] == planned
+    assert plan["room"] == planned and plan["seats"] == seats
+
+
+async def test_a_new_plan_can_change_the_size_or_keep_it(forge, monkeypatch):
+    monkeypatch.setattr(af, "_room", lambda user: af.MAX_TEAM)
+    async with _client(forge) as c:
+        sid = await _start_with(c, max_agents=3)
+        for body, expected in (({"note": "more"}, 3), ({"max_agents": 9}, 9), ({"note": "again"}, 9), ({"max_agents": 0}, 8)):
+            resp = await c.post(f"/fd/agent-forge/plans/{sid}/replan", json=body)
+            assert resp.status_code == 200, resp.text
+            await _settle(sid)
+            assert forge.lead_calls[-1]["max_agents"] == expected, body
+
+
+async def test_review_says_when_the_limit_left_work_out(forge, monkeypatch):
+    real_build = vr._build_plan
+
+    async def over(*args, **kw):
+        return {**await real_build(*args, **kw), "over_cap": 3}
+
+    monkeypatch.setattr(vr, "_build_plan", over)
+    async with _client(forge) as c:
+        sid = await _start_with(c, max_agents=2)
+        plan = (await c.get(f"/fd/agent-forge/plans/{sid}")).json()
+    assert plan["over_cap"] == 3
+
+
+async def test_the_form_asks_what_it_can_offer(forge, monkeypatch):
+    monkeypatch.setattr(af, "_room", lambda user: 5)
+    async with _client(forge) as c:
+        limits = (await c.get("/fd/agent-forge/limits")).json()
+    assert limits == {"seats": 5, "default_team": af.DEFAULT_TEAM, "max_team": af.MAX_TEAM}
+
+
+async def test_the_lead_counts_what_the_cap_left_out():
+    arch = {"a": {"id": "a", "role": "A"}}
+    raw = {"subtasks": [{"owner_archetype_id": "a", "brief": f"job {i}"} for i in range(5)]
+           + [{"owner_archetype_id": "nobody", "brief": "not a real owner"}]}
+    plan = vr._normalize_plan(raw, arch, 2)
+    assert len(plan["subtasks"]) == 2 and plan["over_cap"] == 3
+    assert vr._normalize_plan(raw, arch, 9)["over_cap"] == 0
+
+
+async def test_the_lead_is_told_a_persons_wish_wins_and_the_cap_is_no_target():
+    brief = (Path(af.__file__).parent.parent / "instructions" / "forge" / "lead.md").read_text(encoding="utf-8")
+    assert "What the person asks for wins" in brief and "one agent per item" in brief
+    assert "a limit, not a target" in brief
 
 
 async def test_a_request_is_required(forge):

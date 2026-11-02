@@ -632,12 +632,14 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
     domain = str(raw.get("domain") or "general").strip().lower() or "general"
     subtasks: list[dict] = []
     seen_ids: set[str] = set()
+    over_cap = 0  # usable subtasks the cap left out
     for i, s in enumerate(raw.get("subtasks") or []):
-        if len(subtasks) >= max_agents:
-            break
         owner = str(s.get("owner_archetype_id") or "").strip()
         brief = str(s.get("brief") or "").strip()
         if owner not in arch_by_id or not brief:
+            continue
+        if len(subtasks) >= max_agents:
+            over_cap += 1
             continue
         sid = str(s.get("id") or "").strip() or f"s{i + 1}"
         while sid in seen_ids:
@@ -672,7 +674,8 @@ def _normalize_plan(raw: dict, arch_by_id: dict, max_agents: int) -> dict:
     return {"domain": domain, "rationale": str(raw.get("rationale") or "").strip(),
             "shared_context": str(raw.get("shared_context") or "").strip(),
             "subtasks": subtasks,
-            "group_repairs": group_repairs}
+            "group_repairs": group_repairs,
+            "over_cap": over_cap}
 
 
 async def _llm_decompose(intent: str, archetypes: list[dict], reliability: dict,
@@ -842,7 +845,7 @@ async def _build_plan(db, user_id: str, intent: str, max_agents: int, creds: dic
         shared_context = (prior_knowledge.strip() + "\n\n" + shared_context).strip()
     return {"mode": "vatra", "domain": plan["domain"], "rationale": plan["rationale"],
             "shared_context": shared_context,
-            "subtasks": subtasks, "selected": selected}
+            "subtasks": subtasks, "selected": selected, "over_cap": plan.get("over_cap", 0)}
 
 
 # ── Spawn / teardown (mirrors Basna's; stamped CLAW_VATRA_WORKER) ─────
