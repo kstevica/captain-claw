@@ -15,7 +15,7 @@ import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { useUIStore } from '../../stores/uiStore'
 import { OPEN_PROFILE_EVENT } from '../../utils/profileSources'
 import { AgentSetupDialog } from '../layout/AgentSetupDialog'
-import { ForgeAgentsDialog } from '../layout/ForgeAgentsDialog'
+import { ForgeAgentsDialog } from '../forge/ForgeAgentsDialog'
 import { OnboardingDialog } from '../layout/OnboardingDialog'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import {

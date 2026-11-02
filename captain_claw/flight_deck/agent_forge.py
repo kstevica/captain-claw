@@ -461,7 +461,7 @@ async def _run_plan(sid: str, user: dict, *, note: str = "", answers: list[dict]
 
         brief = str(forge.get("brief") or "")
         if files and not brief:
-            vr._phase(sid, "Reading your files")
+            vr._phase(sid, "Reading your files", step="read")
             vr._progress(sid, "brief", f"Opening {len(files)} file{'s' if len(files) != 1 else ''}…")
             try:
                 brief = await vr._examine_files_brief(
@@ -474,7 +474,7 @@ async def _run_plan(sid: str, user: dict, *, note: str = "", answers: list[dict]
                 vr._progress(sid, "note", "Couldn't read the files; planning from what you wrote.", ok=False)
             await _save(sid, uid, brief=brief)
 
-        vr._phase(sid, "Lead · which agents you need")
+        vr._phase(sid, "Lead · which agents you need", step="lead")
         vr._progress(sid, "route", "Lead deciding which agents you need…")
         clarifications = vr._format_clarifications(answers)
         room = _room(user) or 1
@@ -483,9 +483,10 @@ async def _run_plan(sid: str, user: dict, *, note: str = "", answers: list[dict]
             db, uid, _lead_task(request, brief, note, clarifications, previous, names), room, creds,
             shared_datastore=True, timeout=vr._decompose_timeout(), lead_prompt="forge/lead.md")
         counted = await _count_tokens(sid, uid, 0)
-        vr._progress(sid, "route", f"{len(route['subtasks'])} agent{'s' if len(route['subtasks']) != 1 else ''} · {route['domain']}")
+        vr._progress(sid, "route", f"{len(route['subtasks'])} agent{'s' if len(route['subtasks']) != 1 else ''} · {route['domain']}",
+                     agents=[{"name": x.get("title") or "", "archetype": x.get("owner_archetype_id") or ""} for x in route["subtasks"]])
 
-        vr._phase(sid, "Long Horizon Planner · each agent's job")
+        vr._phase(sid, "Long Horizon Planner · each agent's job", step="plan")
         archetypes = await merged_archetypes(db, uid)
         by_id = {a["id"]: a for a in archetypes}
         try:
@@ -579,7 +580,7 @@ async def _run_create(sid: str, user: dict) -> None:
         approved: list[dict] = forge.get("approved") or []
         made: dict[str, dict] = {a["id"]: a for a in forge.get("created") or []}
         vr._progress_start(sid)
-        vr._phase(sid, "Creating your agents")
+        vr._phase(sid, "Creating your agents", step="create")
         folder = forge.get("folder") or await _team_folder(uid, str(forge.get("team") or ""), sid)
         files = [f for f in vr._parse_files(sess) if f.get("kind") != "generated"]
         if files and not forge.get("folder"):
@@ -651,7 +652,7 @@ async def _run_recommend(sid: str, user: dict) -> None:
             return
         forge = _forge_of(sess)
         agents = [a for a in forge.get("created") or [] if a.get("ok")]
-        vr._phase(sid, "Recommending scheduled tasks and apps")
+        vr._phase(sid, "Recommending scheduled tasks and apps", step="recommend")
         vr._progress(sid, "recommend", "Working out what should run by itself and what needs building…")
         tiers, _env = await vr._load_owner_tiers(db, uid)
         creds = vr._resolve_creds(vr._load_registry(), tiers, "", "reason")
@@ -710,7 +711,8 @@ def _crew_task(uid: str, task_id: str) -> dict | None:
     task = crew_store.get_store().get(uid, task_id)
     if not task:
         return {"id": task_id, "status": "gone", "note": "This task isn't on the Crew page any more."}
-    return {"id": task["id"], "status": task["status"], "note": task.get("note") or "",
+    return {"id": task["id"], "status": task["status"], "note": task.get("note") or "", "kind": task.get("kind") or "ship",
+            "stalled": bool(task.get("stalled_at")), "evidence": task.get("evidence") or {},
             "branch": task.get("branch") or "", "project_name": crew_runner.view(task)["project_name"]}
 
 
@@ -751,6 +753,7 @@ def _view(sess: dict, uid: str) -> dict[str, Any]:
         "room": int(forge.get("room") or MAX_TEAM), "max_team": MAX_TEAM,
         "overview": forge.get("overview") or plan.get("overview") or "", "agents": agents,
         "questions": plan.get("questions") or [], "created": _created_view(forge.get("created") or []),
+        "approved": [{"id": a["id"], "name": a["name"], "archetype": a["archetype"]} for a in forge.get("approved") or []],
         "recommendations": recs or None, "updated_at": sess.get("updated_at"), "created_at": sess.get("created_at"),
     }
 
@@ -759,6 +762,7 @@ def _view(sess: dict, uid: str) -> dict[str, Any]:
 async def list_plans(user: dict = Depends(get_current_user)) -> dict[str, Any]:
     rows = [s for s in await get_db().list_basna_sessions(user["id"]) if _is_plan(s)]
     return {"plans": [{"id": s["id"], "title": s.get("title") or "", "status": s.get("status") or "",
+                       "stalled": s.get("status") in _WORKING and vr._live_run_task(s["id"]) is None,
                        "updated_at": s.get("updated_at"), "created": sum(1 for a in _forge_of(s).get("created") or [] if a.get("ok"))}
                       for s in rows[:30]]}
 
@@ -808,6 +812,7 @@ async def start_plan(request: str = Form(""), files: list[UploadFile] = File(def
 class ReplanBody(BaseModel):
     note: str = Field(default="", max_length=8000)
     questions: list[dict] = []
+    agents: list[dict] = []  # the team as they left it: what the next plan starts from
 
 
 @router.post("/plans/{plan_id}/replan")
@@ -820,6 +825,10 @@ async def replan(plan_id: str, body: ReplanBody, user: dict = Depends(get_curren
         raise HTTPException(409, "This team has been created already. Forge a new one to plan again.")
     await _refuse_when_spent(user["id"])
     answers = vr._coerce_group0_questions(body.questions, keep_answers=True)
+    edited = [{"name": str(a.get("name") or "")[:60], "mandate": str(a.get("mandate") or "")[:2000]}
+              for a in body.agents[:MAX_TEAM] if isinstance(a, dict) and a.get("name")]
+    if edited:
+        await _save(plan_id, user["id"], draft=edited)
     await get_db().update_basna_session(plan_id, user["id"], status=PLANNING)
     _start(plan_id, _run_plan(plan_id, user, note=body.note, answers=answers))
     return {"id": plan_id, "status": PLANNING}

@@ -4974,7 +4974,7 @@ Every process agent runs as the deck's OS user. On a deck with sign-in, Flight D
 For someone who knows what they need but not which agents would do it. In the kiosk's **New agent** dialog, **Forge agents** takes your request in your own words and your files (up to 10, 25 MB each), and works in four steps. You can close the dialog at any point: it carries on, and the bell opens it again.
 
 1. **Plan.** Vatra's planner does this: an agent opens your files, the Lead picks the fewest standing agents that cover the request, and the Long Horizon Planner writes each one's job and may ask you questions. A plan never exceeds the room your account's agent limit leaves.
-2. **Approve.** Rename an agent, change what it's based on, rewrite its job, or leave it out. Answer the questions or say what you want different, then **Plan again**. Nothing exists until you approve.
+2. **Approve.** Rename an agent, change what it's based on, rewrite its job, or leave it out. Answer the questions or say what you want different, then **Update the plan**, which starts from your edits. Nothing exists until you approve.
 3. **Create.** Each agent gets its archetype's way of working plus its job and its teammates. The team shares a folder (`vfs:<team>/`, with your files under `inputs/`) and one set of data tables, and teammates reach each other with `consult_peer`.
 4. **Schedule and build.** Captain recommends what should run by itself and what software is worth building, with why and how you'd use each. You can change anything, and only what you keep gets made.
    - **Scheduled tasks** appear under Scheduled tasks like any other.

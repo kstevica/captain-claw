@@ -31,9 +31,11 @@ import {
 import { useProcessStore } from '../../stores/processStore'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { useScheduledStore } from '../../stores/scheduledStore'
+import { Switch } from '../console/parts'
+import { SchedulePicker } from './SchedulePicker'
+import { useSchedulePreview } from './schedulePreview'
 import { isManagedAgent } from '../../utils/managedAgents'
 import {
-  DAY_SHORT,
   buildSchedule,
   defaultScheduleForm,
   describeSchedule,
@@ -47,7 +49,6 @@ import {
   runTone,
   schedulerApi,
   type DeliveryOptions,
-  type Frequency,
   type RunDelivery,
   type ScheduleForm,
   type ScheduledJob,
@@ -770,30 +771,7 @@ function Glance({ label, children }: { label: string; children: ReactNode }) {
   )
 }
 
-function Switch({ on, busy, onChange }: { on: boolean; busy?: boolean; onChange: (on: boolean) => void }) {
-  return (
-    <button
-      type="button"
-      role="switch"
-      aria-checked={on}
-      disabled={busy}
-      onClick={() => onChange(!on)}
-      className={`relative h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-60 ${on ? 'bg-violet-600' : 'bg-zinc-700'}`}
-    >
-      <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${on ? 'left-[18px]' : 'left-0.5'}`} />
-    </button>
-  )
-}
-
 // ── The editor ──
-
-const FREQS: { id: Frequency; label: string }[] = [
-  { id: 'daily', label: 'Every day' },
-  { id: 'weekdays', label: 'Weekdays' },
-  { id: 'weekly', label: 'Weekly' },
-  { id: 'every', label: 'Repeat every…' },
-  { id: 'once', label: 'Once' },
-]
 
 function TaskEditor({ job, template, agents, defaultAgent, options, onOpenConnections, onCancel, onSaved }: {
   job: ScheduledJob | null
@@ -822,21 +800,12 @@ function TaskEditor({ job, template, agents, defaultAgent, options, onOpenConnec
   const [editTo, setEditTo] = useState(!!job?.delivery?.email_to)
   const [saving, setSaving] = useState<'' | 'save' | 'run'>('')
   const [error, setError] = useState('')
-  const [preview, setPreview] = useState<{ next: number[]; error: string } | null>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
 
   useEffect(() => { if (!job) promptRef.current?.focus() }, [job])
 
   const schedule = buildSchedule(form)
-  useEffect(() => {
-    let cancelled = false
-    const t = setTimeout(() => {
-      schedulerApi.preview(schedule, tz)
-        .then((p) => { if (!cancelled) setPreview({ next: p.next, error: p.error }) })
-        .catch(() => { if (!cancelled) setPreview(null) })
-    }, 200)
-    return () => { cancelled = true; clearTimeout(t) }
-  }, [schedule, tz])
+  const preview = useSchedulePreview(schedule, tz)
 
   const email = options?.email
   const telegram = options?.telegram
@@ -930,72 +899,7 @@ function TaskEditor({ job, template, agents, defaultAgent, options, onOpenConnec
         {/* When */}
         <section className="mb-5">
           <span className={label}>When</span>
-          <div className="flex flex-wrap gap-1 rounded-lg border border-zinc-800 bg-zinc-900/60 p-1">
-            {FREQS.map((f) => (
-              <button
-                key={f.id}
-                onClick={() => setForm((s) => ({ ...s, freq: f.id }))}
-                className={`flex-1 whitespace-nowrap rounded-md px-2.5 py-1.5 text-xs font-medium transition-colors ${
-                  form.freq === f.id ? 'bg-zinc-700 text-zinc-100 shadow-sm' : 'text-zinc-400 hover:text-zinc-200'}`}
-              >{f.label}</button>
-            ))}
-          </div>
-
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {form.freq === 'weekly' && (
-              <div className="flex gap-1">
-                {DAY_SHORT.map((d, i) => {
-                  const on = form.days.includes(i)
-                  return (
-                    <button
-                      key={d}
-                      onClick={() => setForm((s) => ({
-                        ...s, days: on ? (s.days.length > 1 ? s.days.filter((x) => x !== i) : s.days) : [...s.days, i],
-                      }))}
-                      className={`h-9 w-10 rounded-lg text-xs font-medium transition-colors ${
-                        on ? 'bg-violet-600 text-white' : 'border border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
-                    >{d.slice(0, 2)}</button>
-                  )
-                })}
-              </div>
-            )}
-            {form.freq === 'every' ? (
-              <div className="flex items-center gap-2 text-sm text-zinc-400">
-                Every
-                <input
-                  type="number" min={1} max={999}
-                  value={form.every}
-                  onChange={(e) => setForm((s) => ({ ...s, every: Number(e.target.value) || 1 }))}
-                  className={`${field} w-20`}
-                />
-                <select value={form.unit} onChange={(e) => setForm((s) => ({ ...s, unit: e.target.value as ScheduleForm['unit'] }))} className={field}>
-                  <option value="m">minutes</option>
-                  <option value="h">hours</option>
-                  <option value="d">days</option>
-                </select>
-              </div>
-            ) : (
-              <>
-                {form.freq === 'once' && (
-                  <input type="date" value={form.date} onChange={(e) => setForm((s) => ({ ...s, date: e.target.value }))} className={field} />
-                )}
-                <span className="text-sm text-zinc-400">at</span>
-                <input type="time" value={form.time} onChange={(e) => setForm((s) => ({ ...s, time: e.target.value }))} className={field} />
-              </>
-            )}
-          </div>
-          {form.freq === 'every' && form.unit === 'm' && form.every < 15 && (
-            <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400">That's very often — each run costs a full agent turn.</p>
-          )}
-          <p className={`mt-2 text-xs ${preview?.error ? 'text-red-600 dark:text-red-400' : 'text-zinc-500'}`}>
-            {preview?.error
-              ? capitalize(preview.error)
-              : preview?.next.length
-                ? <>Next: <span className="text-zinc-300">{fmtWhen(preview.next[0])}</span>
-                    {preview.next.slice(1).map((t) => <span key={t}>, then {fmtWhen(t)}</span>)}
-                    {tz && <span className="text-zinc-600"> · {tz.replace(/_/g, ' ')} time</span>}</>
-                : ' '}
-          </p>
+          <SchedulePicker form={form} onChange={setForm} preview={preview} tz={tz} />
         </section>
 
         {/* Where */}
