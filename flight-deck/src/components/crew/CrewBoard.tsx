@@ -6,7 +6,7 @@ import {
 import { Card, EmptyState, Pill, Segmented, StatTile, labelCls } from '../console/parts'
 import { FullscreenButton, libraryIconBtn } from '../library/libraryParts'
 import {
-  crewApi, type CrewDispatch, type CrewFolderChoice, type CrewEnv, type CrewEvent, type CrewHarness, type CrewMe, type CrewRepos, type CrewTask, type CrewTerminalTarget, type CrewUsage,
+  crewApi, type CrewDispatch, type CrewFolderChoice, type CrewEnv, type CrewEvent, type CrewHarness, type CrewMe, type CrewModelChoices, type CrewRepos, type CrewTask, type CrewTerminalTarget, type CrewUsage,
 } from '../../services/crewApi'
 import { hostingApi, type HostedSite } from '../../services/hostingApi'
 import { CrewActivity } from './CrewActivity'
@@ -15,6 +15,7 @@ import { CrewChanges } from './CrewChanges'
 import { EnvironmentCard } from './CrewEnvironment'
 import { CrewFiles } from './CrewFiles'
 import { FolderPicker, TaskFolders } from './CrewFolders'
+import { ModelChooser, NOTHING_CHOSEN, sourceOf, type ModelChoice } from './CrewModelChoice'
 import { CrewOverview, SitesCard, TaskLine } from './CrewOverview'
 import { CrewSites, PublishSheet, isLive } from './CrewSites'
 import {
@@ -118,6 +119,7 @@ function Details({ task }: { task: CrewTask }) {
   const rows: [string, string][] = [
     ['Agent', task.harness_label],
     ...(task.kind === 'clone' ? [] : [['Model', task.model_used || task.model || 'Its default'] as [string, string]]),
+    ...(task.model_source?.label ? [['Runs on', task.model_source.label] as [string, string]] : []),
     ...(task.env?.port ? [['Its port', String(task.env.port)] as [string, string]] : []),
     ...(task.env?.copied?.length ? [['Its own copies', task.env.copied.join(', ')] as [string, string]] : []),
     ...(task.effort ? [['Effort', task.effort] as [string, string]] : []),
@@ -464,7 +466,7 @@ function ProjectView({ project, sites, envs, me, onOpen, onNew, onChanged, onEnv
 /** A worker sends the model the code it reads, so whose model it is matters. */
 function FreeModelsNote({ url }: { url?: string }) {
   return (
-    <span className="block font-normal leading-relaxed text-zinc-500">
+    <span className="block text-xs font-normal leading-relaxed text-zinc-500">
       Free models need no key, and your code goes to them. They differ in what happens to it:
       {' '}<a href={url} target="_blank" rel="noreferrer" className="underline">check each one</a>.
     </span>
@@ -473,15 +475,15 @@ function FreeModelsNote({ url }: { url?: string }) {
 
 function harnessHint(h: CrewHarness): string {
   if (!h.installed) return 'Not installed on this computer'
-  if (!h.login.ok) return 'Needs a login'
+  if (!h.login.ok) return 'No login: it can run on a model you choose'
   return h.login.how ? `Ready, on ${h.login.how}` : 'Ready'
 }
 
 function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }: {
   me: CrewMe; initialProject: string; initialUrl: string; onCancel: () => void; onMade: (id: string) => void; onLogins: () => void
 }) {
-  const usable = useMemo(() => (me.harnesses ?? []).filter((h) => h.installed && h.login.ok), [me.harnesses])
-  const [harness, setHarness] = useState(usable[0]?.id ?? '')
+  const installed = useMemo(() => (me.harnesses ?? []).filter((h) => h.installed), [me.harnesses])
+  const [harness, setHarness] = useState((installed.find((h) => h.login.ok) ?? installed[0])?.id ?? '')
   const [brief, setBrief] = useState('')
   const [kind, setKind] = useState<'ship' | 'scout'>('ship')
   const [deliver, setDeliver] = useState('branch')
@@ -494,7 +496,13 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
   const [model, setModel] = useState('')
   const [effort, setEffort] = useState('')
   const chosen = me.harnesses?.find((h) => h.id === harness)
-  const needsModel = !!chosen?.login.free && !chosen.default_model
+  const [modelChoice, setModelChoice] = useState<ModelChoice>(NOTHING_CHOSEN)
+  const [modelChoices, setModelChoices] = useState<CrewModelChoices | null>(null)
+  const [modelChoicesError, setModelChoicesError] = useState('')
+  const onItsOwn = modelChoice.kind === 'own'
+  const needsModel = onItsOwn && !!chosen?.login.free && !chosen.default_model
+  const modelSource = sourceOf(modelChoice, modelChoices, harness)
+  const modelReady = onItsOwn ? !!chosen?.login.ok && (!needsModel || !!model.trim()) : !!modelSource
   const attachments = useAttachments()
   const [vfsFolders, setVfsFolders] = useState<CrewFolderChoice[]>([])
   const [busy, setBusy] = useState(false)
@@ -505,6 +513,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
       setRepos(r)
       if (r.projects[0]) setProject((p) => p || r.projects[0].project)
     }).catch((e) => setError(errorOf(e)))
+    crewApi.modelChoices().then(setModelChoices).catch((e) => setModelChoicesError(errorOf(e)))
   }, [])
 
   const folders = repos?.projects.find((p) => p.project === project)?.folders ?? []
@@ -513,7 +522,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
   const submit = async (ev: FormEvent) => {
     ev.preventDefault()
     setBusy(true); setError('')
-    const body: CrewDispatch = { harness, brief: brief.trim(), kind, deliver: kind === 'ship' ? deliver : 'branch', model: model.trim(), effort: effort.trim(), attachments: attachments.ids, vfs_folders: vfsFolders }
+    const body: CrewDispatch = { harness, brief: brief.trim(), kind, deliver: kind === 'ship' ? deliver : 'branch', model: onItsOwn ? model.trim() : '', effort: effort.trim(), attachments: attachments.ids, vfs_folders: vfsFolders, ...(modelSource ? { model_source: modelSource } : {}) }
     if (where === 'project') { body.project = project.trim(); body.folder = folder.trim() }
     if (where === 'url') body.repo_url = url.trim()
     if (where === 'path') body.repo_path = path.trim()
@@ -525,19 +534,6 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
       setBusy(false)
     }
   }
-
-  const modelField = (
-    <label className={labelCls}>
-      Model
-      <input
-        list="crew-models" value={model} onChange={(e) => setModel(e.target.value)} aria-label="Model"
-        placeholder={chosen?.default_model ? `Your default: ${chosen.default_model}` : needsModel ? 'Choose one of its free models' : 'Its default'}
-        className={`${fieldClass} mt-1.5 font-normal`}
-      />
-      <datalist id="crew-models">{chosen?.models?.map((m) => <option key={m} value={m} />)}</datalist>
-      {chosen?.login.free && <span className="mt-1.5 block"><FreeModelsNote url={me.free_terms_url} /></span>}
-    </label>
-  )
 
   return (
     <form onSubmit={submit} onDragOver={attachments.onDragOver} onDrop={attachments.onDrop} className="flex min-h-0 flex-1 flex-col">
@@ -551,10 +547,9 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
             </div>
           </div>
 
-          {!usable.length && (
+          {!installed.length && (
             <p className="rounded-2xl border border-amber-500/30 bg-amber-500/[0.06] px-4 py-3 text-sm text-amber-800 dark:text-amber-200">
-              No coding agent is ready yet. <button type="button" onClick={onLogins} className="underline">Add a login</button>{' '}
-              or ask an admin to install one.
+              No coding agent is installed yet. An admin can install one.
             </p>
           )}
 
@@ -575,11 +570,26 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
             <legend className={labelCls}>Who does it</legend>
             <div className="grid gap-2 sm:grid-cols-2">
               {(me.harnesses ?? []).map((h) => (
-                <ChoiceTile key={h.id} icon={Bot} title={h.label} hint={harnessHint(h)} disabled={!h.installed || !h.login.ok} on={harness === h.id} onClick={() => setHarness(h.id)} />
+                <ChoiceTile key={h.id} icon={Bot} title={h.label} hint={harnessHint(h)} disabled={!h.installed} on={harness === h.id} onClick={() => setHarness(h.id)} />
               ))}
             </div>
           </fieldset>
-          {needsModel && modelField}
+
+          <fieldset className="min-w-0">
+            <legend className={labelCls}>Model</legend>
+            <ModelChooser
+              choice={modelChoice} choices={modelChoices} harness={chosen} own={me.own_model} loadError={modelChoicesError}
+              onChange={(next) => setModelChoice((was) => ({ ...was, ...next }))} onLogins={onLogins}
+            >
+              <input
+                list="crew-models" value={model} onChange={(e) => setModel(e.target.value)} aria-label="Its model"
+                placeholder={chosen?.default_model ? `Your default: ${chosen.default_model}` : needsModel ? 'Choose one of its free models' : 'Its default'}
+                className={`${fieldClass} font-normal`}
+              />
+              <datalist id="crew-models">{chosen?.models?.map((m) => <option key={m} value={m} />)}</datalist>
+              {chosen?.login.free && <FreeModelsNote url={me.free_terms_url} />}
+            </ModelChooser>
+          </fieldset>
 
           <fieldset>
             <legend className={labelCls}>Where</legend>
@@ -632,7 +642,6 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
               <ChevronRight className="h-3.5 w-3.5 transition-transform group-open/more:rotate-90" /> More options
             </summary>
             <div className="mt-3 grid gap-3 sm:grid-cols-2">
-              {!needsModel && modelField}
               <label className={labelCls}>
                 Effort
                 <input value={effort} onChange={(e) => setEffort(e.target.value)} placeholder="Like high" aria-label="Effort" className={`${fieldClass} mt-1.5 font-normal`} />
@@ -644,7 +653,7 @@ function NewTask({ me, initialProject, initialUrl, onCancel, onMade, onLogins }:
       </div>
       <div className="flex shrink-0 justify-end gap-2 border-t border-zinc-800 bg-zinc-900/40 px-4 py-3">
         <button type="button" onClick={onCancel} className={quietBtn}>Cancel</button>
-        <button type="submit" disabled={busy || !harness || !brief.trim() || !named || !attachments.ready || (needsModel && !model.trim())} className={primaryBtn}>
+        <button type="submit" disabled={busy || !harness || !brief.trim() || !named || !attachments.ready || !modelReady} className={primaryBtn}>
           {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />} Start
         </button>
       </div>

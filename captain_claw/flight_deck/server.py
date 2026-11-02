@@ -1689,7 +1689,9 @@ from fastapi.responses import JSONResponse
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    log.error("Validation error on %s %s: %s", request.method, request.url.path, exc.errors())
+    # Not what it was sent: a body can carry a key, and a missing field's error quotes the whole of it.
+    said = [{k: v for k, v in e.items() if k != "input"} for e in exc.errors()]
+    log.error("Validation error on %s %s: %s", request.method, request.url.path, said)
     return JSONResponse(status_code=422, content={"detail": exc.errors()})
 
 # ── Auth dependency that always uses Depends ──

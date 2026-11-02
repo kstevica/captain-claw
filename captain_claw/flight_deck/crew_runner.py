@@ -51,6 +51,7 @@ from captain_claw.flight_deck import (
     crew_env,
     crew_harness,
     crew_logins,
+    crew_model,
     crew_store,
     crew_vfs,
 )
@@ -702,8 +703,21 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
         await _fail(task, f"{HARNESSES[harness].label} isn't installed on this computer. "
                           f"An admin can install it with: {HARNESSES[harness].install}")
         return
+    route = None
+    token = ""
+    source = task.get("model_source") or {}
     try:
-        env = await crew_logins.worker_env(get_db(), user, grant, harness, binary)
+        if source:
+            upstream = await crew_model.resolve(get_db(), user, grant, source)
+            route = crew_model.route_for(harness, upstream, crew_model.deck_url())
+            await crew_model.must_have_tokens(user["id"], upstream)
+            token = crew_model.new_token()
+            if upstream.model != task.get("model"):
+                if task.get("model"):
+                    _say(task, "note", f"{source.get('label') or 'What it runs on'} is {upstream.model} now.")
+                _store().update(task["id"], model=upstream.model, model_used="")
+                task = {**task, "model": upstream.model, "model_used": ""}
+        env = await crew_logins.worker_env(get_db(), user, grant, harness, binary, route=route, token=token)
     except HTTPException as exc:
         await _fail(task, str(exc.detail))
         return
@@ -740,10 +754,11 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
     turn = int(task.get("turn") or 0) + 1
     out_dir = crew_store.turn_dir(task["user_id"], task["id"], turn)
     spec = RunSpec(binary=binary, prompt=prompt, cwd=task["worktree"], git_common_dir=task.get("git_common_dir") or "",
-                   session=task.get("session") or "", model=task.get("model") or "",
+                   session=task.get("session") or "",
+                   model=crew_harness.route_model(harness, route) if route else task.get("model") or "",
                    effort=task.get("effort") or "", task_id=task["id"],
                    writable=(*crew_env.writable_roots(task["user_id"], task["repo"], state, env), *folders.live),
-                   add_dirs=tuple(folders.live))
+                   add_dirs=tuple(folders.live), route=route)
     try:
         argv = await asyncio.to_thread(HARNESSES[harness].argv, spec)
         pid, started = await asyncio.to_thread(_spawn, task["id"], argv, task["worktree"], env, out_dir)
@@ -755,8 +770,8 @@ async def _start_turn(task: dict, user: dict, grant: Grant) -> None:
     model_used = task.get("model_used") or task.get("model") or ""
     _store().update(task["id"], status="running", note="", turn=turn, pid=pid, pid_start=started, offset=0,
                     turn_state=TurnState(session=task.get("session") or "").to_json(), pending=[],
-                    turn_started_at=now, last_event_at=now, stalled_at=0, model_used=model_used)
-    if task.get("model"):
+                    turn_started_at=now, last_event_at=now, stalled_at=0, model_used=model_used, model_token=token)
+    if task.get("model") and not route:
         _store().note_seen(task["user_id"], harness, model=task["model"])
     fresh = _store().get(task["user_id"], task["id"]) or task
     _say(fresh, "turn", f"{task['brief']}\n\n{said}".rstrip() if first else said)
@@ -836,7 +851,7 @@ def _drain(task: dict, *, at_end: bool = False) -> TurnState:
                         session=state.session or task.get("session") or "")
         task.update(offset=offset, events=count, stalled_at=0, last_event_at=time.time(), model_used=model,
                     turn_state=state.to_json(), session=state.session or task.get("session") or "")
-        if state.model or state.limits:
+        if (state.model or state.limits) and not task.get("model_source"):
             _store().note_seen(task["user_id"], task["harness"], model=state.model, limits=state.limits)
     return state
 
@@ -1159,16 +1174,19 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
         raise HTTPException(413, f"A task can have {crew_attach.MAX_TASK_FILES} attached files, up to "
                                  f"{crew_attach.MAX_TASK_BYTES // 1_000_000} MB in all.")
     folders = await crew_vfs.choose(user["id"], grant, body.get("vfs_folders"))
+    source, upstream = await crew_model.choose(get_db(), user, grant, harness, body.get("model_source"))
     defaults = await crew_logins.read_models(get_db(), user["id"])
     own = await crew_logins.read_own_model(get_db(), user["id"])
-    model = _clean_axis(body.get("model"), _MODEL_RE, "model name") or crew_logins.effective_model(defaults, own, harness)
+    model = upstream.model if upstream else (_clean_axis(body.get("model"), _MODEL_RE, "model name")
+                                             or crew_logins.effective_model(defaults, own, harness))
     effort = _clean_axis(body.get("effort"), _EFFORT_RE, "reasoning effort")
     active = [t for t in _store().with_status(*crew_store.ACTIVE) if t["user_id"] == user["id"]]
     told = (brief[:100_000] + crew_attach.note(crew_attach.named(attached))).strip()
     # One setup at a time for a project, whoever does it and however it was put. Any other task
     # is the same one in the same words with the same files, as a retry sends it.
     twins = [t for t in active if t["kind"] == kind and (kind == "setup" or (
-        t["harness"] == harness and t["brief"] == told and (t.get("vfs") or []) == folders))]
+        t["harness"] == harness and t["brief"] == told and (t.get("vfs") or []) == folders
+        and crew_model.same(t.get("model_source"), source)))]
     for task in twins:
         if url and _same_repo(task.get("repo_url") or "", url):
             return _asked_again(user["id"], task, attached, told, folders)
@@ -1178,15 +1196,16 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     if not binary:
         raise HTTPException(400, f"{HARNESSES[harness].label} isn't installed on this computer. "
                                  f"An admin can install it with: {HARNESSES[harness].install}")
-    state = await crew_logins.login_state(get_db(), user, grant, harness)
-    if not state["ok"]:
-        raise HTTPException(400, f"Add your {HARNESSES[harness].label} login in Crew → Logins first.")
-    if state.get("free") and not model:
-        # Left to itself it picks one of them, and they don't all treat code alike. Someone's repository goes
-        # to whichever it is, so it's chosen by them.
-        raise HTTPException(400, f"Choose which of OpenCode's free models to use, for this task or as your default in "
-                                 f"Crew → Logins. They differ in what happens to your code: {FREE_TERMS_URL}")
-    if model:
+    if not source:
+        state = await crew_logins.login_state(get_db(), user, grant, harness)
+        if not state["ok"]:
+            raise HTTPException(400, f"Add your {HARNESSES[harness].label} login in Crew → Logins first.")
+        if state.get("free") and not model:
+            # Left to itself it picks one of them, and they don't all treat code alike. Someone's repository goes
+            # to whichever it is, so it's chosen by them.
+            raise HTTPException(400, f"Choose which of OpenCode's free models to use, for this task or as your default in "
+                                     f"Crew → Logins. They differ in what happens to your code: {FREE_TERMS_URL}")
+    if model and not source:
         # OpenCode answers a model it doesn't know with "Unexpected server error", after a worktree and a turn.
         known = await models_of(user, grant, harness, binary, get_db(), wanted=model)
         if known and model not in known:
@@ -1196,6 +1215,7 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
     origin = body.get("origin") if isinstance(body.get("origin"), dict) else {}
     fields: dict[str, Any] = dict(
         title=title, kind=kind, harness=harness, model=model, effort=effort, brief=told, deliver=deliver, vfs=folders,
+        model_source=source,
         agent_slug=str(body.get("agent_slug") or ""), source_host=str(body.get("source_host") or ""), origin=origin,
     )
     if url:
@@ -1566,6 +1586,8 @@ async def _remove_worktree(task: dict, *, force: bool) -> None:
     crew_env.drop_tmp(task)
     crew_attach.drop(task)
     crew_vfs.drop(task)
+    if task.get("model_source"):
+        _store().update(task["id"], model_source=crew_model.forget(task["model_source"]), model_token="")
     if task.get("kind") == "setup":
         return  # its "worktree" is the main checkout
     wt, repo, branch = task.get("worktree") or "", task["repo"], task.get("branch") or ""
@@ -1966,6 +1988,7 @@ def view(task: dict, *, grant: Grant | None = None, full: bool = False) -> dict[
         "id": task["id"], "title": task["title"], "kind": task["kind"], "harness": task["harness"],
         "harness_label": harness.label if harness else task["harness"] or "Captain", "model": task.get("model") or "",
         "model_used": task.get("model_used") or "",
+        "model_source": crew_model.public(task.get("model_source")),
         "effort": task.get("effort") or "", "status": task["status"], "note": task.get("note") or "",
         "repo_label": task.get("repo_label") or "", "repo_kind": task.get("repo_kind") or "",
         "vfs": task.get("vfs") or [],

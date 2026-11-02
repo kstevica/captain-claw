@@ -46,13 +46,15 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("results", "TEXT DEFAULT '{}'"),  # its files, copied to the owner's VFS (crew_runner._export_results)
     ("env", "TEXT DEFAULT '{}'"),  # what it was given to run and test in (crew_env.give_to_task)
     ("vfs", "TEXT DEFAULT '[]'"),  # folders of the person's VFS it can use (crew_vfs)
+    ("model_source", "TEXT DEFAULT '{}'"),  # a model that isn't its CLI's own (crew_model); a key in it is sealed
+    ("model_token", "TEXT DEFAULT ''"),  # what this turn's worker calls that model with
     ("agent_slug", "TEXT DEFAULT ''"), ("source_host", "TEXT DEFAULT ''"), ("origin", "TEXT DEFAULT '{}'"),
     ("last_event_at", "REAL DEFAULT 0"), ("turn_started_at", "REAL DEFAULT 0"), ("stalled_at", "REAL DEFAULT 0"),
     ("created_at", "REAL NOT NULL"), ("updated_at", "REAL NOT NULL"), ("closed_at", "REAL DEFAULT 0"),
     ("archived_at", "REAL DEFAULT 0"),  # tidied off the page; its row and its results stay
 )
 _NAMES = {name for name, _ in _COLUMNS}
-_JSON = {"pending": [], "evidence": {}, "delivery": {}, "results": {}, "origin": {}, "env": {}, "vfs": []}
+_JSON = {"pending": [], "evidence": {}, "delivery": {}, "results": {}, "origin": {}, "env": {}, "vfs": [], "model_source": {}}
 
 _ROOT: Path | None = None
 _STORE: "CrewStore | None" = None
