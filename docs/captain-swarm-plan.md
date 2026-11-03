@@ -752,9 +752,85 @@ computer use and gets its own review.
   the agent through the owner's click. The made-up inbox is easy, and the owner's real mail is the
   real test.
 
-**Phase 3b (next): the rehearsal guard.** `rehearsal_turn.py`, intents, authorize-only spending,
-the register check, Bat in rehearsal, Kind B with commit points, and carrying out once. As planned
-above.
+**Phase 3b as built (2026-11-03): the rehearsal guard and one task's best outcome.**
+- **The guard (`captain_claw/rehearsal_turn.py`).**
+  - **Where it runs:** a worker with `CLAW_REHEARSAL=<run>:<experiment>` in its environment rehearses
+    every turn. The guard sits in the tool registry's own chain, for every call, whoever asks.
+  - **What it decides,** from the tool's name and arguments, using `tool_risk`'s classes:
+    - **Run:** reads, the worker's own files, `ask_human`, `jev`, and `spend authorize`.
+    - **Recorded as an intent, not done:** everything outward. That covers mail sent or drafted,
+      mailbox and calendar changes, Drive, messages, other agents, payments, `spend settle`, MCP
+      writes, and any tool it doesn't know.
+    - **Refused:** code, the screen and other runs, and memory writes, because a rehearsal keeps
+      nothing.
+    - **The browser:** navigating, reading, `act`, typing and `login` run. A click whose label or
+      selector says submit, buy, pay, order, checkout, send, book, confirm, accept, delete…, a button
+      it can't read, Enter, a non-GET API replay and a workflow replay stop at the commit point.
+  - **What it keeps of an intent:** the worker sends it to Flight Deck with the arguments, minus
+    anything that looks like a secret. Even if the send fails, the action still isn't done.
+  - **One fix found while building it:** the `line` tool (#390) was missing from the risk table. It
+    is a read, and is now listed as one.
+- **Intents and proof (`captain_swarm_rehearsal.py`).**
+  - **Where they're kept:** the new `cs_intents` table, written through `/fd/captain-swarm/agent/intent`
+    (agent-guarded), for the owner's own attempt and only while it runs.
+  - **The proof:** after each attempt, Captain reads the tool-call register for that attempt's
+    workers (`bat-<id>-…`) and re-judges every call with the guard's own rules. Anything that should
+    have been stopped but ran `ok` disqualifies the attempt.
+- **Bat in rehearsal.** A Bat run whose config has `rehearsal: <tag>`:
+  - gives every worker `CLAW_REHEARSAL`;
+  - skips the plan gate, since nothing outward can happen;
+  - runs none of its check commands on the deck, which go to the reviewers instead;
+  - tells nobody when it ends, because the swarm reads the result.
+- **The kind (`captain_swarm_outcome.py`, `kind: "outcome"`).**
+  - **An attempt:** one Bat run in rehearsal, given a strategy, ending with JSON candidates (title,
+    url, value, details, next step).
+  - **Captain checks every claim itself (`verify`).**
+    - **Fetching:** Captain fetches the page itself, over public addresses only (every address the
+      name resolves to is checked, and every redirect again), up to 2 MB.
+    - **What must hold:** the page must show the number in any common format (412 · 412.00 ·
+      1.240,50…), name the thing, and carry every word the task insists on. The number must also be
+      within the limit.
+  - **The score:** the best verified number.
+  - **The held-out check:** a fresh look at the best candidate. If it fails, the attempt fails:
+    offers change.
+- **Carrying it out:** `POST /runs/{id}/carry-out`, only on the owner's click and only once.
+  - It starts one ordinary Bat run: re-check the page, ask the owner if anything changed, then do
+    it once and report the confirmation.
+  - Bat's own gate asks the owner's Go before any spending, mail or sign-up.
+- **The page:** a "Best result for a task" form, the best verified result with every check, each
+  attempt's recorded intents and commit points, and **Carry it out**.
+- **Tests:** 63 new. All four phases, Bat, the tool-call register, risk classes and confinement:
+  524 pass.
+  - Seven speaker and shared-agent tests fail, the same seven on a clean `main`, so they failed
+    before this change.
+
+*Live (2026-11-03, a throwaway deck, Haiku 5.5 workers, Sonnet 5.5 reviewers).*
+- **The task:** "the lowest price for a new bare Raspberry Pi 5 8GB from an EU shop, in EUR".
+- **Three attempts:**
+  - **Kept:** Raspberry Pi's official reseller list found **€189 at rasppishop.de**.
+  - **Discarded:** price-comparison sites found €189 too, which isn't a gain.
+  - **Discarded:** distributors by part number found €198.74.
+- **Captain's own checks:** it fetched every page and verified all four of the first attempt's
+  candidates (€189 rasppishop.de, €189 BerryBase, €189.90 Botland, €198.74 Kiwi). A fresh look at
+  the best still held.
+- **Cost:** $0.81 and 20.8M tokens, in about 37 minutes.
+- **The register:** 528 calls from those workers, all reads and local writes, so the leak check found
+  nothing.
+- **Two problems found and fixed live:**
+  - **Bat asked the owner to break a stalemate.** The reviewers wouldn't pass an attempt that
+    honestly found nothing under my cap, so Bat parked the attempt to ask the owner. In rehearsal it
+    now ends the attempt with the objection noted, and Captain's own checks decide.
+  - **My €150 cap was wrong.** Real prices are €189 and up, so the first run found nothing under it.
+    That run was stopped and restarted without a cap.
+- **A probe whose task required an email:**
+  - The worker tried `shell curl`, and the guard **refused** it.
+  - It opened BerryBase's contact form in the real browser, declined non-essential cookies, and
+    filled it in. Pressing Enter was **stopped at the commit point**, recorded under the right
+    attempt and worker. Nothing was submitted.
+  - The result: €189 at BerryBase, verified. It suggested sending the prepared email as the next
+    step, and didn't send it. Cost $0.08.
+- **Not done live:** **Carry it out**. That would start a real purchase run, and it is the owner's
+  decision.
 
 **Phase 4: parallel lanes.**
 - **Lanes and measurement:** K lanes, the per-site and per-account limit, staged measurement, and

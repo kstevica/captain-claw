@@ -991,6 +991,15 @@ class ToolRegistry:
             if exam_error:
                 raise ToolBlockedError(name, exam_error)
 
+        # A Captain Swarm rehearsal (CLAW_REHEARSAL on this worker): nothing in the
+        # world is changed — outward calls become intents, the browser stops at
+        # its commit point, code and the screen are refused. Every call, whoever asks.
+        from captain_claw import rehearsal_turn as _rehearsal
+
+        rehearsal_error = await _rehearsal.tool_block(name, arguments or {}, (arguments or {}).get("_agent"))
+        if rehearsal_error:
+            raise ToolBlockedError(name, rehearsal_error)
+
         # A multi-user deck (deck_confine): an owner call's paths stay in this
         # agent's own roots, and a non-admin's agent runs no code on the host.
         # Inside the tool context, after prepare_call, so shared folders resolve.

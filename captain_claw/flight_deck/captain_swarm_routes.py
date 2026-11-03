@@ -342,7 +342,15 @@ async def templates(user: dict = Depends(get_current_user)) -> dict:
     sets = [{"id": m["id"], "title": m.get("title") or m["id"], "open": (m.get("open") or {}).get("cases", 0),
              "holdout": (m.get("holdout") or {}).get("cases", 0)}
             for m in await asyncio.to_thread(practice.list_sets, _uid(user)) if m.get("state") == "ready"]
-    return {"templates": {"triage": {
+    return {"templates": {"outcome": {
+        "title": "Find the best result for a task",
+        "about": "Several attempts at one real task — each a Bat run in rehearsal: it searches, reads and browses, "
+                 "but buying, sending, booking and submitting are recorded instead of done, and the browser stops "
+                 "at the commit point. Captain opens every link itself and counts only what the page bears out. "
+                 "You carry the winner out once, through Bat's gate.",
+        "defaults": {"label": "price", "direction": "min", "per_round": 2, "attempt_usd": 2.0,
+                     "budget_usd": 10.0, "budget_hours": 4.0, "budget_max_experiments": 6},
+    }, "triage": {
         "title": "Triage my inbox the way I would",
         "about": "Improve an agent's triage rules against what you actually did: every version is tried on the "
                  "agent's exam lane (it can't send or change anything) over a practice set from your own mail, "
@@ -370,6 +378,27 @@ class RunBody(BaseModel):
 def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) -> dict:
     from captain_claw.flight_deck import captain_swarm_objective as om
     from captain_claw.flight_deck import captain_swarm_rules as rules
+    if body.objective and body.objective.get("kind") == "outcome" or (not body.objective and body.template == "outcome"):
+        from captain_claw.flight_deck import captain_swarm_outcome as outcome
+        o = body.options or {}
+        raw = body.objective or outcome.outcome_template(
+            task=str(o.get("task") or ""), label=str(o.get("label") or "price"),
+            direction=str(o.get("direction") or "min"),
+            max_value=None if o.get("max_value") in (None, "") else o.get("max_value"),
+            must_include=[w.strip() for w in str(o.get("must_include") or "").split(",") if w.strip()],
+            currency=str(o.get("currency") or ""))
+        if not body.objective:
+            if o.get("per_round"):
+                raw["lane"]["per_round"] = o["per_round"]
+            if o.get("attempt_usd"):
+                raw["lane"]["attempt_usd"] = o["attempt_usd"]
+            for k in ("usd", "hours", "max_experiments"):
+                if o.get(f"budget_{k}") not in (None, ""):
+                    raw["budget"][k] = o[f"budget_{k}"]
+        try:
+            return outcome.normalize(raw)
+        except om.ObjectiveError as exc:
+            raise HTTPException(400, str(exc)) from exc
     if body.objective and body.objective.get("kind") == "practice":
         try:
             return rules.normalize(body.objective)
@@ -428,7 +457,11 @@ async def _can_run(owner: str, objective: dict | None = None, user: dict | None 
     tiers, _ = await _load_owner_tiers(get_db(), owner)
     if not _creds_for(tiers):
         raise HTTPException(409, "Set up a model tier first: a run asks a model for ideas.")
-    if (objective or {}).get("kind") == "practice":
+    if (objective or {}).get("kind") == "outcome":
+        from captain_claw.flight_deck import bat_loop
+        if bat_loop.get_store() is None:
+            raise HTTPException(503, "Bat isn't running on this deck, and every attempt is a Bat run.")
+    elif (objective or {}).get("kind") == "practice":
         from captain_claw.flight_deck import agent_preset as ap
         subj = objective["subject"]
         meta = practice.get_meta(owner, subj["set_id"])
@@ -505,6 +538,16 @@ async def get_run(run_id: str, since: int = 0, user: dict = Depends(get_current_
         from captain_claw.flight_deck import captain_swarm_rules as rules
         extra["rules"] = {"baseline": await rules.rules_of((run.get("baseline") or {}).get("sha") or ""),
                           "champion": await rules.rules_of((run.get("champion") or {}).get("sha") or "")}
+    if obj.get("kind") == "outcome":
+        champ = run.get("champion") or {}
+        checks = await store.get_version(f"{champ.get('sha')}_c") if champ.get("sha") else None
+        extra["outcome"] = {"best": (champ.get("dev") or {}).get("best"),
+                            "checks": ((checks or {}).get("content") or {}).get("checks") or [],
+                            "carried_out": (run.get("state") or {}).get("carried_out") or ""}
+        extra["intents"] = {}
+        for intent in await store.list_intents(run_id):
+            extra["intents"].setdefault(intent["exp_id"], []).append(
+                {k: intent[k] for k in ("kind", "tool", "what", "created_at")})
     return {**_run_summary(run), **extra,
             "objective": {k: obj.get(k) for k in ("kind", "title", "goal", "subject", "metric", "guardrails", "noise",
                                                    "lane", "budget", "stop")}
@@ -540,6 +583,9 @@ async def go(run_id: str, user: dict = Depends(get_current_user)) -> dict:
         if run["objective"].get("kind") == "practice":
             from captain_claw.flight_deck import captain_swarm_rules as rules
             rules.normalize(run["objective"])
+        elif run["objective"].get("kind") == "outcome":
+            from captain_claw.flight_deck import captain_swarm_outcome as outcome
+            outcome.normalize(run["objective"])
         else:
             om.normalize(run["objective"], owner_has_shell=_owner_has_shell(user))
     except om.ObjectiveError as exc:
@@ -565,6 +611,48 @@ async def decline(run_id: str, user: dict = Depends(get_current_user)) -> dict:
     await _cs_store().set_status(run_id, "declined", "the owner declined it")
     await _cs_store().append_event(run_id, "stop", "the owner declined it")
     return _run_summary(await _cs_store().get_run(run_id))
+
+
+@router.post("/runs/{run_id}/carry-out")
+async def carry_out(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """The winner, carried out once: one ordinary Bat run that re-checks the page,
+    asks the owner if anything changed, and acts through Bat's gate — the owner's
+    Go for spending, mail and accounts. Only on the owner's click, only once."""
+    import uuid
+
+    from captain_claw.flight_deck import bat_loop
+    from captain_claw.flight_deck import captain_swarm_outcome as outcome
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _own_run(run_id, user)
+    if run["objective"].get("kind") != "outcome":
+        raise HTTPException(400, "Only a run for one task's best result is carried out.")
+    if run["status"] not in TERMINAL_STATES:
+        raise HTTPException(409, "Stop the run first, or wait for it to finish.")
+    state = run.get("state") or {}
+    if state.get("carried_out"):
+        raise HTTPException(409, f"It's being carried out already: Bat run {state['carried_out']}.")
+    champ = run.get("champion") or {}
+    best = (champ.get("dev") or {}).get("best")
+    if not champ.get("exp") or not best:
+        raise HTTPException(409, "No attempt found a result Captain could verify, so there's nothing to carry out.")
+    bat = bat_loop.get_store()
+    if bat is None:
+        raise HTTPException(503, "Bat isn't running on this deck.")
+    store = _cs_store()
+    intents = await store.list_intents(run_id, champ["exp"])
+    bat_id = f"bat_{uuid.uuid4().hex[:12]}"
+    await bat.create_run(run_id=bat_id, owner_id=run["owner_id"], title=f"Carry out: {run['title'][:80]}",
+                         task=outcome.carry_out_task(run, best, intents),
+                         config={"source": "captain_swarm_carry_out", "steps": []}, origin={},
+                         llm_usd_cap=float(run["objective"]["lane"].get("attempt_usd") or 2.0) * 2, status="planning")
+    await bat.append_event(bat_id, "note", f"carrying out the winner of Captain Swarm run {run_id}")
+    await store.update_run(run_id, state={**state, "carried_out": bat_id})
+    await store.append_event(run_id, "carry", f"carrying out the winner, once: Bat run {bat_id}")
+    try:
+        await bat_loop.kick()
+    except Exception:
+        log.warning("captain swarm: Bat kick failed (it starts on the next tick)", exc_info=True)
+    return {"bat_run": bat_id}
 
 
 @router.post("/runs/{run_id}/teach")
@@ -697,3 +785,31 @@ async def agent_cancel(body: AgentReq) -> dict:
     else:
         await loop_mod.cancel_run(_cs_store(), body.run_id)
     return {"found": True, "status": (await _cs_store().get_run(body.run_id))["status"]}
+
+
+class IntentReq(AgentReq):
+    tag: str = Field("", max_length=80)
+    kind: str = Field("intent", max_length=10)
+    tool: str = Field("", max_length=80)
+    what: str = Field("", max_length=500)
+    args: dict[str, Any] = Field(default_factory=dict)
+
+
+def _agent_slug(port: int) -> str:
+    if not port:
+        return ""
+    try:
+        from captain_claw.flight_deck import server as srv
+        return next((slug for slug, e in srv._load_process_registry().items()
+                     if int(e.get("web_port") or 0) == int(port)), "")
+    except Exception:
+        return ""
+
+
+@router.post("/agent/intent")
+async def agent_intent(body: IntentReq) -> dict:
+    """A rehearsal worker's intent or commit point: kept with its attempt. Only
+    the attempt's own owner's agents can add to it, and only while it runs."""
+    from captain_claw.flight_deck import captain_swarm_rehearsal as rehearsal
+    return await rehearsal.record(_cs_store(), _agent_owner(body), tag=body.tag, kind=body.kind, tool=body.tool,
+                                  what=body.what, args=body.args, agent=_agent_slug(body.source_port))
