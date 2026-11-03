@@ -289,13 +289,15 @@ class WebFetchToolConfig(BaseModel):
 class WebSearchToolConfig(BaseModel):
     """Web search tool configuration.
 
-    Supported providers: 'brave' (default), 'tavily', 'youcom'.
+    Supported providers: 'brave' (default), 'tavily', 'youcom', 'keenable'
+    (Keenable works without a key; keenable_api_key is optional).
     """
 
     provider: str = "brave"
     api_key: str = ""
     tavily_api_key: str = ""
     youcom_api_key: str = ""
+    keenable_api_key: str = ""
     base_url: str = "https://api.search.brave.com/res/v1/web/search"
     max_results: int = 5
     timeout: int = 20

@@ -708,7 +708,7 @@ Fetch a URL and return raw HTML source. Use only when you need the actual HTML m
 
 ### web_search
 
-Search the web via Brave Search (default), Tavily, or You.com (NEW in 0.8.0) — pick with `tools.web_search.provider: brave | tavily | youcom`.
+Search the web via Brave Search (default), Tavily, You.com (NEW in 0.8.0), or Keenable — pick with `tools.web_search.provider: brave | tavily | youcom | keenable`.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
@@ -720,7 +720,7 @@ Search the web via Brave Search (default), Tavily, or You.com (NEW in 0.8.0) —
 | `freshness` | string | no | Time filter: `pd` (past day), `pw` (past week), `pm` (past month), `py` (past year) |
 | `safesearch` | string | no | `off`, `moderate` (default), `strict` |
 
-Brave requires `BRAVE_API_KEY` or `tools.web_search.api_key`; Tavily uses `tools.web_search.tavily_api_key`; You.com uses `tools.web_search.youcom_api_key` or `YDC_API_KEY` (web and news results merged, count clamped to 20).
+Brave requires `BRAVE_API_KEY` or `tools.web_search.api_key`; Tavily uses `tools.web_search.tavily_api_key`; You.com uses `tools.web_search.youcom_api_key` or `YDC_API_KEY` (web and news results merged, count clamped to 20); Keenable needs no key (optional `tools.web_search.keenable_api_key` or `KEENABLE_API_KEY` uses the keyed endpoint for higher limits).
 
 ### pdf_extract
 
