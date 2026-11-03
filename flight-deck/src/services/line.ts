@@ -32,6 +32,8 @@ export interface LinePage extends LineCounts {
   items: LineItem[]
   /** The kinds the Line holds, by what the page calls them. */
   kinds: Record<string, string>
+  /** The agent that answers on the Line ("" = none picked yet). */
+  agent: string
 }
 
 export const LINE_PAGE = 50
@@ -49,7 +51,32 @@ export async function fetchLine(opts: { before?: string; kind?: string; needsYou
     unread: d?.unread || 0,
     waiting: d?.waiting || 0,
     kinds: d?.kinds && typeof d.kinds === 'object' ? d.kinds : {},
+    agent: typeof d?.agent === 'string' ? d.agent : '',
   }
+}
+
+async function _post<T>(path: string, body: unknown): Promise<T> {
+  const r = await fdFetch(path, { method: 'POST', body: JSON.stringify(body) })
+  if (!r.ok) {
+    let detail = `HTTP ${r.status}`
+    try {
+      const d = await r.json()
+      if (typeof d?.detail === 'string') detail = d.detail
+    } catch { /* keep the status */ }
+    throw new Error(detail)
+  }
+  return r.json()
+}
+
+/** Ask the agent picked for the Line; the question is on the Line now, the answer when it comes. */
+export function askLine(text: string): Promise<{ id: string; agent: string }> {
+  return _post('/fd/line/ask', { text })
+}
+
+/** A daily summary of the Line by that agent: a scheduled task (one per user). */
+export function addLineSummary(opts: { time: string; tz: string; telegram: boolean; email: boolean }):
+  Promise<{ agent: string; schedule: string; updated: boolean }> {
+  return _post('/fd/line/summary', opts)
 }
 
 export async function fetchLineCounts(): Promise<LineCounts | null> {

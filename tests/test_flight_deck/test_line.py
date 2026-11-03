@@ -604,3 +604,104 @@ async def test_the_channels_card_sets_levels_and_the_agent(db, monkeypatch):
         assert (await c.put("/fd/autonomy/notify", json={"telegram": "loud"})).status_code == 400
         assert (await c.put("/fd/autonomy/notify", json={"agent_level": "off"})).status_code == 400
         assert (await c.put("/fd/autonomy/notify", json={"agent": ""})).json()["agent"]["slug"] == ""
+
+
+# ── P4: talking in the Line, a daily summary ──────────────────────────
+
+@pytest.fixture
+def mira(monkeypatch):
+    """Mira, Alice's agent, picked for her Line; what the deck asked it."""
+    from captain_claw.flight_deck import agent_idle, fd_scheduler
+
+    asked: list = []
+
+    async def wake(slug, timeout=0):
+        return True
+
+    async def run(*, host, port, auth, prompt, timeout, automation=None, **kw):
+        asked.append({"prompt": prompt, "automation": automation, "port": port})
+        return asked_reply["text"]
+
+    asked_reply = {"text": "Nothing failed overnight. One proposal waits: reply to Ana."}
+    monkeypatch.setattr(agent_idle, "wake", wake)
+    monkeypatch.setattr(fd_scheduler, "resolve_agent_by_slug", lambda slug, a="": ("localhost", 24100, "tok"))
+    monkeypatch.setattr(fd_scheduler, "run_prompt_and_capture", run)
+    monkeypatch.setattr(line, "agent_name", lambda slug: {"mira": "Mira"}.get(slug, slug))
+    _set(ALICE, line_agent="mira")
+    return {"asked": asked, "reply": asked_reply}
+
+
+async def _answered() -> None:
+    await asyncio.gather(*list(line_routes._asking))
+
+
+async def test_asking_on_the_line_puts_question_and_answer_there(db, mira, channels):
+    _set(ALICE, line_agent="mira", line_whatsapp="everything", notify_telegram=True, line_telegram="everything")
+    async with _client() as c:
+        r = (await c.post("/fd/line/ask", json={"text": "  what failed   overnight? "})).json()
+        assert r["ok"] is True and r["agent"] == "Mira"
+        await _answered()
+        await _fanned()
+        page = (await c.get("/fd/line")).json()
+    assert page["agent"] == "Mira"
+    answer, question = page["items"][:2]
+    assert question["id"] == r["id"] and question["title"] == "You asked Mira"
+    assert question["body"] == "what failed overnight?" and question["kind"] == "talk"
+    assert answer["title"] == "Mira answered" and answer["body"].startswith("Nothing failed overnight")
+    assert answer["needs_you"] is False and answer["source"] == "Mira"
+    (call,) = mira["asked"]
+    assert call["prompt"] == "what failed overnight?" and call["port"] == 24100
+    assert call["automation"] == {"kind": "line", "job_text": "what failed overnight?", "mail_write": "intent",
+                                  "fd_delivers": True}
+    # Never on a phone, never back to Mira as a card — even at "everything".
+    assert channels["whatsapp"] == [] and channels["telegram"] == [] and channels["agent"] == []
+
+
+async def test_when_the_agent_cant_answer_the_line_says_so(db, mira, monkeypatch):
+    from captain_claw.flight_deck import fd_scheduler
+
+    mira["reply"]["text"] = None
+    async with _client() as c:
+        await c.post("/fd/line/ask", json={"text": "anything new?"})
+        await _answered()
+        monkeypatch.setattr(fd_scheduler, "resolve_agent_by_slug", lambda slug, a="": ("localhost", 0, ""))
+        await c.post("/fd/line/ask", json={"text": "and now?"})
+        await _answered()
+    titles = [(i["title"], i["body"]) for i in await db.list_line_items(ALICE, kinds=["talk"])]
+    assert ("Mira couldn't answer", "Mira didn't answer within 5 minutes.") in titles
+    assert ("Mira couldn't answer", "Mira isn't running.") in titles
+
+
+async def test_asking_needs_an_agent_and_words(db, mira):
+    async with _client() as c:
+        assert (await c.post("/fd/line/ask", json={"text": "  "})).status_code == 422
+        assert (await c.post("/fd/line/ask", json={"text": "x" * 2001})).status_code == 422
+        _set(ALICE)
+        r = await c.post("/fd/line/ask", json={"text": "hello?"})
+        assert r.status_code == 409 and "Pick an agent" in r.json()["detail"]
+        assert (await c.get("/fd/line")).json()["agent"] == ""
+
+
+async def test_a_daily_summary_is_one_scheduled_task_on_that_agent(db, mira, tmp_path, monkeypatch):
+    from captain_claw.flight_deck import fd_scheduler as sched
+
+    store = sched.SchedulerStore(db_path=tmp_path / "scheduler.db")
+    monkeypatch.setattr(sched, "_STORE", store)
+    async with _client() as c:
+        r = (await c.post("/fd/line/summary", json={"time": "07:30", "tz": "Europe/Zagreb",
+                                                      "telegram": True})).json()
+        assert r["updated"] is False and r["schedule"] == "daily 07:30" and r["agent"] == "Mira"
+        (job,) = store.list(owner_id=ALICE)
+        assert job["agent_slug"] == "mira" and job["schedule"] == "daily 07:30" and job["tz"] == "Europe/Zagreb"
+        assert job["prompt_author"] == "agent" and "line tool" in job["prompt"] and job["ignore_quiet_hours"]
+        assert sched.norm_delivery(job["delivery"]) == {**sched.norm_delivery(job["delivery"]), "chat": True,
+                                                        "telegram": True, "email": False}
+        store.update(job["id"], enabled=False)
+        r = (await c.post("/fd/line/summary", json={"time": "08:15"})).json()
+        assert r["updated"] is True
+        (job,) = store.list(owner_id=ALICE)                       # still one, moved and on again
+        assert job["schedule"] == "daily 08:15" and job["enabled"]
+        assert sched.norm_delivery(job["delivery"])["telegram"] is False
+        assert (await c.post("/fd/line/summary", json={"time": "25:00"})).status_code == 422
+        _set(ALICE)
+        assert (await c.post("/fd/line/summary", json={})).status_code == 409

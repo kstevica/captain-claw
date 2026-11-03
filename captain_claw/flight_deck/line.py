@@ -71,6 +71,7 @@ KIND_LABELS: dict[str, str] = {
     "fleet": "Fleet",
     "share": "Sharing",
     "deck": "Deck",
+    "talk": "Asked",
 }
 
 # A bell type → (kind, needs the user). A type not listed needs the user (it

@@ -117,3 +117,22 @@ async def test_the_frame_queues_it_and_a_public_socket_cant(monkeypatch):
     await ws_handler.handle_ws_message(s, public, {"type": "line_item", "title": "Spoof", "body": "y"})
     await asyncio.sleep(0)
     assert seen == [("Ana joined", "x", True)]
+
+
+# ── P4: a question asked on the Line ──────────────────────────────────
+
+def test_a_question_from_the_line_is_the_owners_own_and_runs_like_a_hand_over():
+    from captain_claw import mail_authority as ma
+    from captain_claw import msg_origin, turn_source
+    from captain_claw.web import chat_handler
+
+    assert "line" in ma.AUTOMATION_KINDS and ma.KIND_LABELS["line"] == "your Line"
+    with ma.bound(ma.Authority("automated", "line", "what failed overnight?", "intent")):
+        prefix = ma.automated_prefix()
+    assert prefix == ma.LINE_REQUEST_PREFIX and "their own question" in prefix
+    assert ma.strip_automated_prefix(f"{prefix}\nwhat failed overnight?") == "what failed overnight?"
+    # Its own lane, a copy back in the main chat — as a Taskboard hand-over.
+    assert "line" in chat_handler.REROUTED_AUTOMATION_KINDS and "line" in chat_handler.MIRRORED_AUTOMATION_KINDS
+    assert msg_origin._AUTOMATION_ORIGIN["line"] == "autonomy"
+    assert turn_source.SOURCE_LABELS["line"] == "Your Line"
+    assert any("line" in keys for _title, keys in turn_source.SETTINGS_GROUPS)
