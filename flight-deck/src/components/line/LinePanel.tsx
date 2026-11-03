@@ -3,10 +3,10 @@ import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   Bot, CheckCheck, CircleHelp, ClipboardCheck, Lightbulb, Loader2, Mail, MessageCircle, MessagesSquare, Network,
-  Radio, Receipt, Send, Server, Share2, SlidersHorizontal, Sunrise, Waypoints, X, type LucideIcon,
+  Forward, Radio, Receipt, Send, Server, Share2, SlidersHorizontal, Sunrise, Waypoints, X, type LucideIcon,
 } from 'lucide-react'
 import {
-  addLineSummary, askLine, fetchLine, LINE_PAGE, markAllLineRead, markLineRead, type LineItem,
+  addLineSummary, askLine, fetchLine, handLineItem, LINE_PAGE, markAllLineRead, markLineRead, type LineItem,
 } from '../../services/line'
 import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
 import { useLineStore } from '../../stores/lineStore'
@@ -75,6 +75,8 @@ export function LinePanel({ onClose, large = false }: { onClose?: () => void; la
   const [channels, setChannels] = useState(false)
   // The agent that answers on the Line, and a question waiting for its answer.
   const [agent, setAgent] = useState('')
+  // The user's agents an item can be handed to.
+  const [agents, setAgents] = useState<{ slug: string; name: string }[]>([])
   const [asked, setAsked] = useState<{ id: string; agent: string; at: number } | null>(null)
   // Proposals on the Line still waiting, by id: Approve / Reject here too.
   const [proposals, setProposals] = useState<Map<string, WaitingProposal> | null>(null)
@@ -104,6 +106,7 @@ export function LinePanel({ onClose, large = false }: { onClose?: () => void; la
       })
       setKinds(page.kinds)
       setAgent(page.agent)
+      setAgents(page.agents)
       if (asked === 'all') {
         setSeenKinds((prev) => Array.from(new Set([...prev, ...page.items.map((i) => i.kind)])))
       }
@@ -148,7 +151,7 @@ export function LinePanel({ onClose, large = false }: { onClose?: () => void; la
     if (!asked) return
     const q = items.find((i) => i.id === asked.id)
     if (q && items.some((i) => i.kind === 'talk' && i.source === asked.agent && i.id !== q.id
-        && i.created_at > q.created_at && !i.title.startsWith('You asked'))) setAsked(null)
+        && i.created_at > q.created_at && !i.title.startsWith('You '))) setAsked(null)
   }, [items, asked])
 
   const waitingIds = items.filter((i) => i.ref_type === 'autonomy_action' && i.needs_you && !i.resolved)
@@ -280,7 +283,9 @@ export function LinePanel({ onClose, large = false }: { onClose?: () => void; la
             {items.map((item) => (
               <LineRow key={item.id} item={item} expanded={open.has(item.id)} onToggle={() => toggle(item)}
                 proposal={item.ref_type === 'autonomy_action' ? proposals?.get(item.ref_id) : undefined}
-                onAnswered={() => { read(item); answered() }} />
+                onAnswered={() => { read(item); answered() }}
+                agents={agents} lineAgent={agent}
+                onHanded={(id, name) => { setAsked({ id, agent: name, at: Date.now() }); void loadRef.current() }} />
             ))}
           </ul>
         )}
@@ -431,12 +436,64 @@ function ProposalButtons({ id, onAnswered }: { id: string; onAnswered: () => voi
   )
 }
 
-function LineRow({ item, expanded, onToggle, proposal, onAnswered }: {
+// Hand an item to one of the user's agents, with a few words of theirs; the
+// answer lands on the Line. The item goes along quoted, as information.
+function HandForm({ item, agents, lineAgent, onHanded, onCancel }: {
+  item: LineItem; agents: { slug: string; name: string }[]; lineAgent: string
+  onHanded: (id: string, agent: string) => void; onCancel: () => void
+}) {
+  const [slug, setSlug] = useState(() => (agents.find((a) => a.name === lineAgent) || agents[0])?.slug || '')
+  const [note, setNote] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const send = async () => {
+    if (!slug || busy) return
+    setBusy(true); setError('')
+    try {
+      const r = await handLineItem(item.id, slug, note.trim())
+      onHanded(r.id, r.agent)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  const field = 'rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 focus:border-violet-500/60 focus:outline-none'
+  return (
+    <div className="mt-1.5 space-y-1.5 rounded-lg border border-zinc-800 bg-zinc-950/60 p-2"
+      onClick={(e) => e.stopPropagation()} onKeyDown={(e) => e.stopPropagation()}>
+      <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-zinc-400">
+        Hand to
+        <select value={slug} onChange={(e) => setSlug(e.target.value)} className={field} aria-label="The agent to hand it to">
+          {agents.map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
+        </select>
+      </div>
+      <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} maxLength={2000}
+        placeholder="What should it do? (optional — e.g. draft a reply, find out why it failed)"
+        aria-label="What the agent should do" className={`w-full resize-y ${field}`} />
+      <div className="flex items-center gap-1.5">
+        <button onClick={() => void send()} disabled={!slug || busy}
+          className="flex items-center gap-1 rounded-md bg-violet-600 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-violet-500 disabled:opacity-40">
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Forward className="h-3 w-3" />} Hand it over
+        </button>
+        <button onClick={onCancel} className="rounded-md px-2 py-1 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300">Cancel</button>
+        <span className="text-[10px] text-zinc-600">The answer lands on the Line.</span>
+      </div>
+      {error && <p className="text-[11px] text-red-600 dark:text-red-400">{error}</p>}
+    </div>
+  )
+}
+
+function LineRow({ item, expanded, onToggle, proposal, onAnswered, agents, lineAgent, onHanded }: {
   item: LineItem; expanded: boolean; onToggle: () => void
   /** A proposal still waiting (Approve / Reject here, unless its words are read on its task first). */
   proposal?: WaitingProposal
   onAnswered: () => void
+  agents: { slug: string; name: string }[]
+  lineAgent: string
+  onHanded: (id: string, agent: string) => void
 }) {
+  const [handing, setHanding] = useState(false)
   const Icon = KIND_ICON[item.kind] || Server
   const waiting = item.needs_you && !item.resolved
   const body = item.body.replace(TASK_LINK_LINE, '').trim()
@@ -470,6 +527,17 @@ function LineRow({ item, expanded, onToggle, proposal, onAnswered }: {
             </div>
           )}
           {waiting && proposal && !proposal.taskboard && <ProposalButtons id={item.ref_id} onAnswered={onAnswered} />}
+          {expanded && agents.length > 0 && !handing && (
+            <button onClick={(e) => { e.stopPropagation(); setHanding(true) }}
+              onKeyDown={(e) => e.stopPropagation()}
+              className="mt-1 flex items-center gap-1 rounded px-1 py-0.5 text-[11px] font-medium text-violet-600 hover:bg-violet-500/10 dark:text-violet-400">
+              <Forward className="h-3 w-3" /> Hand to agent…
+            </button>
+          )}
+          {expanded && handing && (
+            <HandForm item={item} agents={agents} lineAgent={lineAgent} onCancel={() => setHanding(false)}
+              onHanded={(id, name) => { setHanding(false); onHanded(id, name) }} />
+          )}
           <div className="mt-0.5 flex items-center gap-1.5 text-[10px] text-zinc-600">
             {item.source && <span className="truncate">{item.source}</span>}
             {item.source && <span>·</span>}

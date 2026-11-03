@@ -227,6 +227,21 @@ def soon(fn: Callable[..., Awaitable[Any]], *args: Any) -> None:
         _log.debug("line: nothing to run %s on: %s", getattr(fn, "__name__", fn), exc)
 
 
+def user_agents(user_id: str) -> list[dict[str, str]]:
+    """The agents a user may pick for their Line or hand an item to: their own
+    process agents (every one, with sign-in off), by name."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+    from captain_claw.flight_deck.server import _load_process_registry
+
+    me = _norm(user_id)
+    out = []
+    for slug, entry in _load_process_registry().items():
+        if _fd_auth_enabled() and str(entry.get("owner") or "") != me:
+            continue
+        out.append({"slug": slug, "name": str(entry.get("name") or slug)})
+    return sorted(out, key=lambda a: a["name"].lower())
+
+
 def agent_name(slug: str) -> str:
     """An agent's name on this deck, else its slug."""
     if not slug:

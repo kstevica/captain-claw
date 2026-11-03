@@ -34,6 +34,8 @@ export interface LinePage extends LineCounts {
   kinds: Record<string, string>
   /** The agent that answers on the Line ("" = none picked yet). */
   agent: string
+  /** The user's agents an item can be handed to. */
+  agents: { slug: string; name: string }[]
 }
 
 export const LINE_PAGE = 50
@@ -52,6 +54,7 @@ export async function fetchLine(opts: { before?: string; kind?: string; needsYou
     waiting: d?.waiting || 0,
     kinds: d?.kinds && typeof d.kinds === 'object' ? d.kinds : {},
     agent: typeof d?.agent === 'string' ? d.agent : '',
+    agents: Array.isArray(d?.agents) ? d.agents : [],
   }
 }
 
@@ -71,6 +74,11 @@ async function _post<T>(path: string, body: unknown): Promise<T> {
 /** Ask the agent picked for the Line; the question is on the Line now, the answer when it comes. */
 export function askLine(text: string): Promise<{ id: string; agent: string }> {
   return _post('/fd/line/ask', { text })
+}
+
+/** Hand an item to one of the user's agents, with their own words; the answer lands on the Line. */
+export function handLineItem(id: string, agent: string, note: string): Promise<{ id: string; agent: string }> {
+  return _post(`/fd/line/${encodeURIComponent(id)}/hand`, { agent, note })
 }
 
 /** A daily summary of the Line by that agent: a scheduled task (one per user). */

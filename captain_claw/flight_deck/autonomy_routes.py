@@ -299,17 +299,10 @@ _LINE_LEVEL_KEYS = {"whatsapp": "line_whatsapp", "telegram": "line_telegram"}
 
 
 def _line_agents(uid: str) -> list[dict[str, str]]:
-    """The agents this user may pick for the Line's agent channel: their own
-    process agents (every one, with sign-in off)."""
-    from captain_claw.flight_deck.server import _load_process_registry
+    """The agents this user may pick for the Line's agent channel (line.py)."""
+    from captain_claw.flight_deck.line import user_agents
 
-    me = _norm_user(uid)
-    out = []
-    for slug, entry in _load_process_registry().items():
-        if _auth_enabled() and str(entry.get("owner") or "") != me:
-            continue
-        out.append({"slug": slug, "name": str(entry.get("name") or slug)})
-    return sorted(out, key=lambda a: a["name"].lower())
+    return user_agents(uid)
 _NOTIFY_KEYS = ("notify_telegram", "notify_devices")
 _last_notify_test_at: dict[str, float] = {}
 
