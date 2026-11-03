@@ -6,8 +6,9 @@ Status: every decision below is made. **P0 is built** (#387): the store,
 on their own reaches the Line from the deck, finished runs leave a copy, and
 agents no longer get the fleet notice. **P2 is built** (#390): the `line`
 tool and the one-line count at the start of the owner's turns. **P3 is built**
-(branch `feat/line-p3`): the channels — WhatsApp and Telegram at a level, one
-agent's chat. P4 is not. Users see it as
+(#392): the channels — WhatsApp and Telegram at a level, one agent's chat.
+**P4 is built** (branch `feat/line-p4`): asking that agent on the Line, a daily
+summary, and Approve / Reject on the Line itself. Every phase is built. Users see it as
 **Line**; the internal id is `line`.
 
 ## The idea in one paragraph
@@ -276,11 +277,28 @@ inline Approve / Reject and "Hand to agent…" come later.)
 - **Settings**: the channel card — agent picker (with "None"), Telegram level,
   WhatsApp level, devices switch, quiet hours.
 
-### 6. Later: the line talks back
+### 6. The line talks back (built, P4)
 
 Typing in the line asks the chosen agent, which answers in the line with the
 `line` tool in hand. A morning digest is then just a scheduled task on that
 agent ("summarize the line since 08:00 yesterday, send to Telegram").
+
+**As built (P4):**
+- `POST /fd/line/ask`: the question goes on the Line as a `talk` item ("You
+  asked Mira"), then runs on the picked agent as a new automation kind,
+  `line`: its background lane and a copy in its chat (like a Taskboard
+  hand-over), the prefix "[From your owner, asked on their Line in Flight
+  Deck: this is their own question.]", email only when the words ask for it
+  (`mail_write: intent`). The answer comes back as "Mira answered" (or "Mira
+  couldn't answer" and why). Neither goes to a phone or back to that agent as
+  a card. A sleeping agent is woken for it (the user is waiting).
+- `POST /fd/line/summary`: one scheduled task per user, "Summary of your
+  Line", daily at the chosen time in the browser's zone, on the picked agent,
+  to its chat (and Telegram / email when ticked). Asked again, it's updated and
+  turned back on. Its result is on the Line like any scheduled task's.
+- The Line page: an ask box (or a pointer to Channels when no agent is
+  picked), Approve / Reject on waiting proposals (a Taskboard next step still
+  says to read it on its task first), and the summary row under Channels.
 
 ## Phases
 
@@ -290,7 +308,7 @@ agent ("summarize the line since 08:00 yesterday, send to Telegram").
 | P1 | agent results also → line (lane-A copy stays), posted by the deck; fleet injection off; run copies | FD |
 | P2 | `line` tool, cursors, awareness line | FD + agents |
 | P3 | channels: one agent, Telegram, WhatsApp with levels; settings beside the notify switches; owner_notify keeps nudges/proposals, the Line the rest | FD + bundle + agents |
-| P4 | talk in the line; digest | FD + agents |
+| P4 | talk in the line (`line` automation kind); daily summary; Approve / Reject on the Line | FD + bundle + agents |
 
 P0 and P3 must not overlap in a way that double-sends: until P3 lands, `post()`
 fans out to nothing but the line page and the bell, and the old phone paths

@@ -162,8 +162,9 @@ async def _generate_task_name(
 # on a conversation (or a flow step) that lives in the main chat.
 REROUTED_AUTOMATION_KINDS = frozenset({
     "fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan", "peer", "botport", "mcp_task", "link", "taskboard",
+    "line",
 })
-MIRRORED_AUTOMATION_KINDS = frozenset({"fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan", "taskboard"})
+MIRRORED_AUTOMATION_KINDS = frozenset({"fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan", "taskboard", "line"})
 
 
 def _reply_waid(whatsapp_waid: str | None, origin: dict | None,

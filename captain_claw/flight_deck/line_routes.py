@@ -2,6 +2,8 @@
 and the agents', for their owner's (the line tool, line_client)."""
 from __future__ import annotations
 
+import asyncio
+import re
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
@@ -32,7 +34,13 @@ async def list_line(
     await resolve_answered(user["id"])
     rows = await get_db().list_line_items(
         user["id"], limit=limit, before=before, kinds=[kind] if kind else (), needs_you=needs_you)
-    return {"items": [view(r) for r in rows], **(await _counts(user["id"])), "kinds": KIND_LABELS}
+    try:
+        agent = _line_agent(_norm_user(user["id"]))[1]
+    except HTTPException:
+        agent = ""
+    return {"items": [view(r) for r in rows], **(await _counts(user["id"])), "kinds": KIND_LABELS,
+            # The agent that answers on the Line ("" = none picked yet).
+            "agent": agent}
 
 
 @router.get("/unread")
@@ -162,3 +170,120 @@ async def agent_item(request: Request, body: dict = Body(default={})) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="No such item on your user's Line")
     return {"item": view(row)}
+
+
+# ── Talking in the Line: the agent the user picked answers there ──────
+#
+# The question is the user's own words: it runs on that agent as a ``line``
+# automation (its background lane, a copy in its chat, email only when the
+# words ask for it), and question and answer both land on the Line — never
+# on a phone, never back to that agent as a card.
+
+_ASK_MAX = 2000
+_ASK_TIMEOUT_S = 300.0
+_asking: set[asyncio.Task] = set()
+
+
+def _line_agent(user_id: str) -> tuple[str, str]:
+    """``(slug, name)`` of the agent this user picked for their Line, or 409."""
+    from captain_claw.flight_deck.autonomy import resolve_config
+    from captain_claw.flight_deck.line import agent_name, levels
+
+    slug = levels(resolve_config(user_id))["agent"]
+    if not slug:
+        raise HTTPException(status_code=409, detail="Pick an agent for your Line first (Channels → One agent's chat)")
+    return slug, agent_name(slug)
+
+
+async def _answer(user_id: str, slug: str, name: str, question: str) -> None:
+    """Run the question on the agent and put its answer on the Line."""
+    from captain_claw.flight_deck import agent_idle
+    from captain_claw.flight_deck import line as _line
+    from captain_claw.flight_deck.fd_scheduler import resolve_agent_by_slug, run_prompt_and_capture
+
+    reply, why = None, ""
+    try:
+        await agent_idle.wake(slug)
+        host, port, auth = resolve_agent_by_slug(slug)
+        if not port:
+            why = f"{name} isn't running."
+        else:
+            reply = await run_prompt_and_capture(
+                host=host, port=port, auth=auth, prompt=question, timeout=_ASK_TIMEOUT_S,
+                automation={"kind": "line", "job_text": question[:4000], "mail_write": "intent",
+                            "fd_delivers": True})
+            if reply is None:
+                why = f"{name} didn't answer within {int(_ASK_TIMEOUT_S // 60)} minutes."
+    except Exception as exc:  # noqa: BLE001
+        why = f"Couldn't ask {name}: {type(exc).__name__}"
+    if reply:
+        await _line.post(user_id, "talk", f"{name} answered", reply, source=name, trust="agent",
+                         bell_type="talk", to_phones=False)
+    else:
+        await _line.post(user_id, "talk", f"{name} couldn't answer", why, source=name,
+                         bell_type="talk", to_phones=False)
+
+
+@router.post("/ask")
+async def ask_line(body: dict = Body(default={}), user: dict = Depends(get_current_user)) -> dict:
+    """Ask the agent the user picked for their Line — about the Line or
+    anything: the question goes on the Line now, the answer when it comes."""
+    from captain_claw.flight_deck import line as _line
+
+    text = " ".join(str(body.get("text") or "").split()) if "\n" not in str(body.get("text") or "") \
+        else str(body.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="Ask something")
+    if len(text) > _ASK_MAX:
+        raise HTTPException(status_code=422, detail=f"At most {_ASK_MAX} characters")
+    uid = _norm_user(user["id"])
+    slug, name = _line_agent(uid)
+    item = await _line.post(uid, "talk", f"You asked {name}", text, source=name, bell_type="talk",
+                            to_phones=False)
+    task = asyncio.create_task(_answer(uid, slug, name, text))
+    _asking.add(task)
+    task.add_done_callback(_asking.discard)
+    return {"ok": True, "id": item, "agent": name}
+
+
+# ── A morning summary: a scheduled task on that agent ─────────────────
+
+SUMMARY_NAME = "Summary of your Line"
+SUMMARY_PROMPT = (
+    "Summarize my Line in Flight Deck for the last 24 hours. Use the line tool: action='recent' "
+    "with since='24h' (raise limit if it says there may be more). Start with what still waits for "
+    "me, then what failed, then results and finished runs — one short line each, the most "
+    "important first. Leave out fleet changes unless an agent stopped. If nothing happened, say so "
+    "in one line."
+)
+
+
+@router.post("/summary")
+async def add_summary(body: dict = Body(default={}), user: dict = Depends(get_current_user)) -> dict:
+    """A daily summary of the Line by the agent the user picked: a scheduled
+    task (they see and change it in Scheduled tasks) delivering to that
+    agent's chat, and to Telegram / email when asked. Its result is on the
+    Line too. One per user: asked again, the existing one is updated."""
+    from captain_claw.flight_deck.fd_scheduler import ScheduleError, get_store
+
+    uid = _norm_user(user["id"])
+    slug, name = _line_agent(uid)
+    at = str(body.get("time") or "08:00").strip()
+    if not re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", at):
+        raise HTTPException(status_code=422, detail="time must be HH:MM")
+    tz = str(body.get("tz") or "").strip()[:64]
+    delivery = {"chat": True, "telegram": bool(body.get("telegram")), "email": bool(body.get("email"))}
+    store = get_store()
+    fields = {"name": SUMMARY_NAME, "schedule": f"daily {at}", "tz": tz, "agent_slug": slug,
+              "prompt": SUMMARY_PROMPT, "delivery_kind": "agent", "delivery": delivery,
+              "ignore_quiet_hours": True, "enabled": True}
+    mine = [j for j in store.list(owner_id=uid) if j.get("name") == SUMMARY_NAME]
+    try:
+        if mine:
+            job = store.update(mine[0]["id"], prompt_author="agent", **fields)
+        else:
+            job = store.create(owner_id=uid, prompt_author="agent", **fields)
+    except (ScheduleError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return {"ok": True, "job_id": job["id"], "agent": name, "schedule": f"daily {at}",
+            "updated": bool(mine)}
