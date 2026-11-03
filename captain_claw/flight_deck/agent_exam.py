@@ -898,7 +898,7 @@ async def ask(job: ExamJob, q: dict) -> dict:
                 "ok": c.get("ok") is not False, "result": str(c.get("result") or "")}
                for c in report.get("lookups") or [] if isinstance(c, dict)]
     return {"answer": str(reply.get("content") or "")[:_ANSWER_CHARS], "lookups": lookups, "tokens": tokens,
-            "seconds": round(time.monotonic() - started)}
+            "usage": usage, "seconds": round(time.monotonic() - started)}
 
 
 async def _reply(ws: Any) -> dict:

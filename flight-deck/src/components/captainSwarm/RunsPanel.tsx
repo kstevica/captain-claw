@@ -1,10 +1,13 @@
-// Captain Swarm runs (docs/captain-swarm-plan.md, Phase 2): start one from a template,
-// watch it try ideas one at a time, and see every attempt's verdict. The best commit
-// sits on a branch; the owner opens the pull request from here, Captain never merges.
+// Captain Swarm runs (docs/captain-swarm-plan.md): start one from a template, watch it
+// try ideas one at a time, and see every attempt's verdict. Two kinds so far:
+// - inbox triage rules (Phase 3a): an agent's rules, tried on its exam lane against
+//   what the owner actually did; the best rules reach it only when the owner teaches them;
+// - code (Phase 2): the best commit sits on a branch; the owner opens the PR, Captain never merges.
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Check, GitPullRequest, Loader2, Play, Square, X } from 'lucide-react'
+import { BookOpen, Check, GitPullRequest, Loader2, Play, Square, X } from 'lucide-react'
 import { captainSwarmRuns } from '../../services/captainSwarm'
-import type { Experiment, MravTemplate, RunDetail, RunSummary } from '../../services/captainSwarm'
+import type { Experiment, MravTemplate, RunDetail, RunSummary, TriageTemplate } from '../../services/captainSwarm'
+import { useProcessStore } from '../../stores/processStore'
 
 const ACTIVE = ['awaiting_go', 'baseline', 'running']
 const STATUS_TEXT: Record<string, string> = {
@@ -43,27 +46,45 @@ function TextField({ label, value, onChange, wide }: {
 }
 
 function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
-  const [tpl, setTpl] = useState<MravTemplate | null>(null)
+  const [templates, setTemplates] = useState<{ mrav: MravTemplate; triage: TriageTemplate } | null>(null)
+  const [which, setWhich] = useState<'triage' | 'mrav'>('triage')
   const [canStart, setCanStart] = useState(false)
-  const [form, setForm] = useState<Record<string, string>>({})
-  const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
     captainSwarmRuns.templates().then((t) => {
-      setTpl(t.templates.mrav)
+      setTemplates(t.templates)
       setCanStart(t.can_start)
-      const d = t.templates.mrav.defaults
-      setForm(Object.fromEntries(Object.entries(d).map(([k, v]) => [k, String(v)])))
+      if (!t.templates.triage.sets.length && t.can_start) setWhich('mrav')
     }).catch((e) => setError(e instanceof Error ? e.message : String(e)))
   }, [])
 
-  const set = (k: string) => (v: string) => setForm((f) => ({ ...f, [k]: v }))
-  const start = async () => {
+  if (!templates) return error ? <div className="text-xs text-red-400">{error}</div> : null
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+      <div className="mb-3 inline-flex overflow-hidden rounded-md border border-zinc-700 text-xs">
+        {([['triage', 'Inbox triage rules'], ['mrav', 'Mrav eval (code)']] as const).map(([k, label]) => (
+          <button key={k} onClick={() => setWhich(k)}
+            className={`px-2.5 py-1 ${which === k ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {which === 'triage'
+        ? <StartTriage tpl={templates.triage} onStarted={onStarted} />
+        : <StartMrav tpl={templates.mrav} canStart={canStart} onStarted={onStarted} />}
+    </div>
+  )
+}
+
+function useStart(template: 'mrav' | 'triage', onStarted: (id: string) => void) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const start = async (options: Record<string, string | number>) => {
     setBusy(true)
     setError('')
     try {
-      const r = await captainSwarmRuns.start(form)
+      const r = await captainSwarmRuns.start(template, options)
       onStarted(r.id)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -71,10 +92,76 @@ function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
       setBusy(false)
     }
   }
+  return { busy, error, start }
+}
 
-  if (!tpl) return error ? <div className="text-xs text-red-400">{error}</div> : null
+function StartTriage({ tpl, onStarted }: { tpl: TriageTemplate; onStarted: (id: string) => void }) {
+  const processes = useProcessStore((s) => s.processes)
+  const fetchProcesses = useProcessStore((s) => s.fetchProcesses)
+  const [form, setForm] = useState<Record<string, string>>(
+    () => Object.fromEntries(Object.entries(tpl.defaults).map(([k, v]) => [k, String(v)])))
+  const { busy, error, start } = useStart('triage', onStarted)
+  useEffect(() => { fetchProcesses() }, [fetchProcesses])
+  useEffect(() => {
+    setForm((f) => ({ ...f, set_id: f.set_id || tpl.sets[0]?.id || '', agent: f.agent || processes[0]?.slug || '' }))
+  }, [tpl.sets, processes])
+  const set = (k: string) => (v: string) => setForm((f) => ({ ...f, [k]: v }))
+  const agent = processes.find((p) => p.slug === form.agent)
   return (
-    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+    <>
+      <div className="text-sm font-medium text-zinc-100">{tpl.title}</div>
+      <p className="mt-1 text-xs leading-relaxed text-zinc-400">{tpl.about}</p>
+      {tpl.sets.length === 0 ? (
+        <div className="mt-3 text-xs text-amber-400">Build a practice set first, on the Practice sets tab.</div>
+      ) : (
+        <>
+          <div className="mt-3 grid gap-3 sm:grid-cols-4">
+            <label className="flex flex-col gap-1 text-xs text-zinc-400 sm:col-span-2">
+              Practice set
+              <select value={form.set_id} onChange={(e) => set('set_id')(e.target.value)}
+                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100">
+                {tpl.sets.map((x) => <option key={x.id} value={x.id}>{x.title} · {x.open} open, {x.holdout} held back</option>)}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs text-zinc-400 sm:col-span-2">
+              Agent
+              <select value={form.agent} onChange={(e) => set('agent')(e.target.value)}
+                className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100">
+                {processes.map((p) => <option key={p.slug} value={p.slug}>{p.name}</option>)}
+              </select>
+            </label>
+            <TextField label="Open cases each time" value={form.cases || ''} onChange={set('cases')} />
+            <TextField label="Runs per case" value={form.repeat || ''} onChange={set('repeat')} />
+            <TextField label="Held-out cases (0 = all)" value={form.holdout_cases || ''} onChange={set('holdout_cases')} />
+            <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
+            <TextField label="Budget ($)" value={form.budget_usd || ''} onChange={set('budget_usd')} />
+            <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
+            <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
+          </div>
+          <p className="mt-2 text-xs text-zinc-500">
+            Each measurement asks {agent?.name || 'the agent'} {Number(form.cases || 0) * Number(form.repeat || 0)} questions
+            on its own model; a model also reads your open cases to suggest rules.
+          </p>
+          <div className="mt-3 flex items-center gap-3">
+            <button onClick={() => start({ ...form, agent_name: agent?.name || '' })} disabled={busy || !form.set_id || !form.agent}
+              className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50">
+              {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} Start the run
+            </button>
+            {error && <span className="text-xs text-red-400">{error}</span>}
+          </div>
+        </>
+      )}
+    </>
+  )
+}
+
+function StartMrav({ tpl, canStart, onStarted }: { tpl: MravTemplate; canStart: boolean; onStarted: (id: string) => void }) {
+  const [form, setForm] = useState<Record<string, string>>(
+    () => Object.fromEntries(Object.entries(tpl.defaults).map(([k, v]) => [k, String(v)])))
+  const { busy, error, start } = useStart('mrav', onStarted)
+  const set = (k: string) => (v: string) => setForm((f) => ({ ...f, [k]: v }))
+  return (
+    <>
       <div className="text-sm font-medium text-zinc-100">{tpl.title}</div>
       <p className="mt-1 text-xs leading-relaxed text-zinc-400">
         {tpl.about} Each idea is tried by a coding worker in its own branch; Captain measures every attempt
@@ -109,14 +196,14 @@ function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
         <div className="mt-2 text-xs text-amber-400">There are no held-out cases on this deck yet.</div>
       )}
       <div className="mt-3 flex items-center gap-3">
-        <button onClick={start} disabled={busy || !canStart}
+        <button onClick={() => start(form)} disabled={busy || !canStart}
           className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50">
           {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} Start the run
         </button>
         {!canStart && <span className="text-xs text-zinc-500">Measuring runs a command on this deck: admins only.</span>}
         {error && <span className="text-xs text-red-400">{error}</span>}
       </div>
-    </div>
+    </>
   )
 }
 
@@ -183,9 +270,15 @@ function Ledger({ exps }: { exps: Experiment[] }) {
               {open === e.id && (
                 <div className="mt-1 space-y-1 text-zinc-400">
                   {e.why && <div>Why: {e.why}</div>}
+                  {(e.change?.add?.length || e.change?.remove?.length) ? (
+                    <div className="space-y-0.5">
+                      {(e.change?.add || []).map((r) => <div key={`a${r}`} className="text-emerald-400/90">+ {r}</div>)}
+                      {(e.change?.remove || []).map((r) => <div key={`r${r}`} className="text-red-400/90">− rule {String(r)}</div>)}
+                    </div>
+                  ) : null}
                   {e.verdict_reason && <div>Verdict: {e.verdict_reason}</div>}
                   {e.lesson && <div>Lesson: {e.lesson}</div>}
-                  {e.diff_stat && <div>Change: {e.diff_stat} · {e.changed_files.join(', ')}</div>}
+                  {e.diff_stat && <div>Change: {e.diff_stat}{e.lane === 'crew' ? ` · ${e.changed_files.join(', ')}` : ''}</div>}
                   {e.head_sha && <div className="font-mono text-[11px] text-zinc-500">{e.head_sha.slice(0, 12)}</div>}
                 </div>
               )}
@@ -273,13 +366,22 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
               <Square size={12} /> Stop
             </button>
           )}
-          {!active && run.improved && (
+          {!active && run.improved && run.kind === 'code' && (
             <button onClick={() => act(async () => {
               const r = await captainSwarmRuns.pr(id)
               if (r.delivery.url) setNote(`Pull request: ${r.delivery.url}`)
             })}
               className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-500">
               <GitPullRequest size={13} /> Open a pull request
+            </button>
+          )}
+          {!active && run.improved && run.kind === 'practice' && (
+            <button onClick={() => act(async () => {
+              const r = await captainSwarmRuns.teach(id)
+              setNote(r.added ? `Taught ${r.added} rule(s) to ${run.objective.subject.agent_name}.` : 'It knew those rules already.')
+            })}
+              className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-500">
+              <BookOpen size={13} /> Teach these rules to {run.objective.subject.agent_name}
             </button>
           )}
         </div>
@@ -310,16 +412,40 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
         </div>
       </div>
       <Chart run={run} />
+      {run.kind === 'practice' && run.rules && (
+        <div className="rounded-md bg-zinc-950/60 p-3 text-xs">
+          <div className="mb-1 text-zinc-500">{run.improved ? 'The best rules so far' : 'Rules'}</div>
+          {run.rules.champion.length === 0 ? (
+            <div className="text-zinc-500">None: the agent as it is.</div>
+          ) : (
+            <ol className="list-decimal space-y-0.5 pl-4 text-zinc-200">
+              {run.rules.champion.map((r) => (
+                <li key={r} className={run.rules!.baseline.includes(r) ? '' : 'text-emerald-300'}>{r}</li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
       <Ledger exps={run.ledger} />
       <details className="text-xs text-zinc-400">
         <summary className="cursor-pointer text-zinc-500">What it measures and what it may change</summary>
         <div className="mt-2 space-y-1">
           <div>{run.objective.goal}</div>
-          <div>Repository: {run.objective.subject.repo_path}</div>
-          <div>May change: {run.objective.subject.editable.join(', ')}</div>
-          <div>Never changes: {run.objective.subject.protected.join(', ')}</div>
-          <div className="break-all font-mono text-[11px] text-zinc-500">{run.objective.metric.run}</div>
-          <div>Coding worker: {run.objective.lane.harness}{run.objective.lane.model ? ` (${run.objective.lane.model})` : ''}</div>
+          {run.kind === 'code' ? (
+            <>
+              <div>Repository: {run.objective.subject.repo_path}</div>
+              <div>May change: {(run.objective.subject.editable || []).join(', ')}</div>
+              <div>Never changes: {(run.objective.subject.protected || []).join(', ')}</div>
+              <div className="break-all font-mono text-[11px] text-zinc-500">{run.objective.metric.run}</div>
+              <div>Coding worker: {run.objective.lane.harness}{run.objective.lane.model ? ` (${run.objective.lane.model})` : ''}</div>
+            </>
+          ) : (
+            <>
+              <div>Agent: {run.objective.subject.agent_name} · practice set {run.objective.subject.set_id}</div>
+              <div>Each measurement: {run.objective.metric.cases} open cases × {run.objective.metric.repeat} runs, on the
+                agent's exam lane (it can't send or change anything). Scored by F1 on "needs your reply".</div>
+            </>
+          )}
         </div>
       </details>
       <details className="text-xs text-zinc-400" open={active}>

@@ -73,7 +73,7 @@ class Lane(Protocol):
     async def discard(self, run: dict, exp: dict) -> None: ...
 
 
-Proposer = Callable[[dict, list[dict], int], Awaitable[list[dict]]]
+Proposer = Callable[[dict, list[dict], int], Awaitable[list[dict]]]  # (run, ledger, k) → ideas
 Measure = Callable[[dict, str, str], Awaitable[dict]]
 Seal = Callable[[dict, str], Awaitable[None]]
 Screen = Callable[[dict, dict], Awaitable[dict]]
@@ -85,6 +85,7 @@ _MEASURE: Measure | None = None
 _SEAL: Seal | None = None
 _SCREEN: Screen | None = None
 _BRANCH: Branch | None = None
+_START: Callable[[dict], Awaitable[str]] | None = None
 _STORE: CaptainSwarmStore | None = None
 _SUPERVISOR: Supervisor | None = None
 
@@ -117,6 +118,11 @@ def set_screen(fn: Screen | None) -> None:
 def set_branch(fn: Branch | None) -> None:
     global _BRANCH
     _BRANCH = fn
+
+
+def set_start(fn: Callable[[dict], Awaitable[str]] | None) -> None:
+    global _START
+    _START = fn
 
 
 def set_store(store: CaptainSwarmStore | None) -> None:
@@ -359,9 +365,8 @@ def diverse(proposals: list[dict], ledger: list[dict]) -> list[dict]:
     return kept
 
 
-async def propose(run: dict, ledger: list[dict], k: int) -> list[dict]:
-    """One model call: up to *k* ideas, on the owner's model tiers, counted
-    against the run's budget."""
+async def ask_model(run: dict, system: str, user: str, *, label: str, temperature: float = 0.7) -> str:
+    """One model call on the owner's tiers, counted against the run's budget."""
     from captain_claw.flight_deck import pricing
     from captain_claw.flight_deck.auth import get_db
     from captain_claw.flight_deck.basna_routes import _RUN_USAGE, _load_owner_tiers, _provider_call, _run_sid
@@ -371,22 +376,26 @@ async def propose(run: dict, ledger: list[dict], k: int) -> list[dict]:
     creds = _creds_for(tiers, prefer=("reason", "balanced", "fast"))
     if not creds:
         raise RuntimeError("no model to plan experiments with: set up a tier set first")
-    key = f"{run['id']}:propose:{secrets.token_hex(3)}"
+    key = f"{run['id']}:{label}:{secrets.token_hex(3)}"
     token = _run_sid.set(key)
     _RUN_USAGE[key] = []
     try:
-        prov, max_tokens = _provider_call(creds, temperature=0.7, default_max=4096, cap=16384)
-        resp = await prov.complete(messages=[
-            Message(role="system", content=_PROPOSE_SYSTEM.format(k=k)),
-            Message(role="user", content=proposer_brief(run, ledger)),
-        ], temperature=0.7, max_tokens=max_tokens)
+        prov, max_tokens = _provider_call(creds, temperature=temperature, default_max=4096, cap=16384)
+        resp = await prov.complete(messages=[Message(role="system", content=system), Message(role="user", content=user)],
+                                   temperature=temperature, max_tokens=max_tokens)
     finally:
         _run_sid.reset(token)
         cost = pricing.summarize(_RUN_USAGE.pop(key, []))
         if _STORE is not None:
             await _STORE.add_spend(run["id"], float(cost.get("usd") or 0.0),
                                    int((cost.get("tokens") or {}).get("total_tokens", 0) or 0))
-    return diverse(parse_proposals(resp.content or "", k), ledger)
+    return resp.content or ""
+
+
+async def propose(run: dict, ledger: list[dict], k: int) -> list[dict]:
+    """Up to *k* ideas for code, from one model call."""
+    text = await ask_model(run, _PROPOSE_SYSTEM.format(k=k), proposer_brief(run, ledger), label="propose")
+    return diverse(parse_proposals(text, k), ledger)
 
 
 # ── the Crew lane ────────────────────────────────────────────────────
@@ -477,6 +486,24 @@ class CrewLane:
             await crew_runner.close(user["id"], exp["child_id"], discard=True)
 
 
+# ── what each kind of run brings ─────────────────────────────────────
+
+
+async def git_start(run: dict) -> str:
+    return await screen.resolve(run["objective"]["subject"]["repo_path"], "HEAD")
+
+
+def parts_for(kind: str) -> dict[str, Any]:
+    """The lane, proposer, measurement, seal, screen, best-so-far marker and
+    starting point of a kind of run: ``code`` (Phase 2) or ``practice`` (Phase 3a)."""
+    if kind == "practice":
+        from captain_claw.flight_deck import captain_swarm_rules as rules
+        return {"lane": rules.RulesLane(), "propose": rules.propose, "measure": rules.measure, "seal": rules.seal,
+                "screen": rules.screen, "branch": rules.no_branch, "start": rules.start_point}
+    return {"lane": CrewLane(), "propose": propose, "measure": measure_commit, "seal": seal,
+            "screen": screen_commit, "branch": move_champion_branch, "start": git_start}
+
+
 # ── the driver ───────────────────────────────────────────────────────
 
 
@@ -484,8 +511,10 @@ def report_of(run: dict, reason: str) -> dict:
     """Where a run ended up: the starting point against the best, on both sets."""
     base, champ = run.get("baseline") or {}, run.get("champion") or {}
     out: dict[str, Any] = {"reason": reason, "experiments": run["experiments"],
-                           "spent_usd": round(run["spent_usd"], 4),
-                           "champion_branch": champion_branch(run["id"]), "champion_sha": champ.get("sha", "")}
+                           "spent_usd": round(run["spent_usd"], 4), "spent_tokens": run.get("spent_tokens", 0),
+                           "champion_sha": champ.get("sha", "")}
+    if run["objective"].get("kind", "code") == "code":
+        out["champion_branch"] = champion_branch(run["id"])
     for part in ("dev", "holdout"):
         b, c = (base.get(part) or {}).get("stats"), (champ.get(part) or {}).get("stats")
         if b and c:
@@ -505,13 +534,18 @@ class Driver:
     def __init__(self, store: CaptainSwarmStore, run_id: str) -> None:
         self.store = store
         self.run_id = run_id
-        self.lane: Lane = _LANE or CrewLane()
-        self.propose: Proposer = _PROPOSER or propose
-        self.measure: Measure = _MEASURE or measure_commit
-        self.seal: Seal = _SEAL or seal
-        self.screen: Screen = _SCREEN or screen_commit
-        self.branch: Branch = _BRANCH or move_champion_branch
         self.lost = False
+
+    def _bind(self, run: dict) -> None:
+        """This run's kind's parts, with any seam a test set in their place."""
+        parts = parts_for(str(run["objective"].get("kind") or "code"))
+        self.lane: Lane = _LANE or parts["lane"]
+        self.propose: Proposer = _PROPOSER or parts["propose"]
+        self.measure: Measure = _MEASURE or parts["measure"]
+        self.seal: Seal = _SEAL or parts["seal"]
+        self.screen: Screen = _SCREEN or parts["screen"]
+        self.branch: Branch = _BRANCH or parts["branch"]
+        self.start: Callable[[dict], Awaitable[str]] = _START or parts["start"]
 
     # small helpers
 
@@ -559,6 +593,7 @@ class Driver:
         hb = asyncio.create_task(self._heartbeat())
         try:
             run = await self._run()
+            self._bind(run)
             if run["status"] == "baseline":
                 outcome = await self._baseline(run)
                 if outcome:
@@ -592,14 +627,14 @@ class Driver:
     async def _baseline(self, run: dict) -> str:
         obj = run["objective"]
         state = run.get("state") or {}
-        base_sha = state.get("base_sha") or await screen.resolve(obj["subject"]["repo_path"], "HEAD")
+        base_sha = state.get("base_sha") or await self.start(run)
         if not base_sha:
-            return await self._finish("failed", "the repository has no commit to start from")
+            return await self._finish("failed", "there is nothing to start from")
         await self._state(run, base_sha=base_sha, round=0, queue=[], current="", since_keep=0,
                           kept_this_round=False)
         if not run["started_at"]:
             await self.store.update_run(self.run_id, started_at=time.time())
-        await self._event("baseline", f"sealing the scorer at {base_sha[:10]}")
+        await self._event("baseline", f"sealing the scorer at {base_sha[:12]}")
         await self.seal(run, base_sha)
         await self._event("baseline", "measuring the starting point on the open cases")
         dev = await self.measure(await self._check(), base_sha, "dev")
@@ -643,7 +678,7 @@ class Driver:
             exp = await self.store.add_experiment(
                 exp_id=f"exp_{secrets.token_hex(6)}", run_id=self.run_id, round_no=int(state.get("round") or 0),
                 n=int(state.get("next_n") or 1), hypothesis=idea["hypothesis"], strategy_tag=idea.get("strategy_tag", ""),
-                why=idea.get("why", ""), lane=obj["lane"]["kind"], base_sha=champ["sha"])
+                why=idea.get("why", ""), lane=obj["lane"]["kind"], base_sha=champ["sha"], change=idea.get("change"))
             await self._state(run, queue=queue, current=exp["id"], next_n=int(state.get("next_n") or 1) + 1)
             await self._event("propose", f"#{exp['round']}.{exp['n']}: {idea['hypothesis'][:200]}")
 
@@ -702,7 +737,8 @@ class Driver:
             return ""
         if exp["status"] == "proposed":
             try:
-                got = await self.lane.start(run, exp, lane_brief(run, exp))
+                brief = lane_brief(run, exp) if run["objective"].get("kind", "code") == "code" else ""
+                got = await self.lane.start(run, exp, brief)
             except Exception as exc:  # noqa: BLE001
                 msg = str(getattr(exc, "detail", "") or exc)[:300]
                 same = (run.get("state") or {}).get("last_start_error") == msg
@@ -863,7 +899,7 @@ async def cancel_run(store: CaptainSwarmStore, run_id: str) -> None:
     if exp and exp["status"] in ("proposed", "running", "screening", "measuring"):
         await store.update_experiment(exp["id"], status="failed", verdict_reason="the run was stopped")
         if exp["child_id"]:
-            lane = _LANE or CrewLane()
+            lane = _LANE or parts_for(str(run["objective"].get("kind") or "code"))["lane"]
             with contextlib.suppress(Exception):
                 await lane.stop(run, exp)
 

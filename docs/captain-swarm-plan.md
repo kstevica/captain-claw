@@ -1,6 +1,6 @@
 # Captain Swarm — agents that get measurably better at real work
 
-**Status:** Phase 1 built (measurement), Phase 2 built (the loop, on code; proven live except a keep), Phases 3–7 not started · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
+**Status:** Phases 1–2 merged (measurement; the loop on code, proven live except a keep) · Phase 3a built (an agent's triage rules) · Phases 3b–7 not started · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
 
 Captain Swarm is a new orchestration mode, a sibling of Bat, Basna, Vatra and Council. Agents reach
 it through the `captain_swarm` tool, the way they reach Bat through `bat`.
@@ -696,6 +696,65 @@ emails with no real mail, and every email was asked twice on the agent's exam la
   - **Kind B:** one one-off search, such as offers or slots. Several attempts end at their commit
     points, Captain re-checks each claim, and the owner's choice is carried out once through Bat's
     gate.
+
+Phase 3 is built in two halves. **3a**, Kind A on the owner's own mail, needs no new safety
+machinery, because the exam lane already can't send or change anything. **3b** is the rehearsal
+guard, Bat in rehearsal, Kind B with commit points, and carrying out once. It is the groundwork for
+computer use and gets its own review.
+
+**Phase 3a as built (2026-11-03): an agent's triage rules.**
+- **What varies:** a short list of rules in the owner's voice. Versions live in a new `cs_versions`
+  table, and an attempt is an edit: `add` rules, `remove` rules by number.
+  - The "lane" applies the edit at once (`RulesLane`), with nothing to wait for or clean up.
+  - The model proposes the edits. It sees the rules now, the score with its precision and recall,
+    and the open emails the best version still gets wrong, never held-out ones.
+- **How a version is measured:** its rules go in front of each Phase 1 question, asked on the
+  agent's exam lane, and Phase 1's agreement scorer gives F1 across runs. The agent itself isn't
+  changed during a run, so its real conversations never see an experiment.
+- **The screen:** a version must change something and stay within 12 rules of 300 characters. A rule
+  carrying something only the held-out mail contains (a sender's address, a subject, a message id)
+  disqualifies it. Senders who also appear in the open part are fair to learn.
+- **The guardrail:** tokens per case, since rules make every question longer.
+- **Delivery:** **Teach these rules** adds the best version's new rules to the agent as lessons
+  (`agent_onboarding.teach_rules`, `taught_by: swarm`), only when the owner clicks.
+  - Like rules taught by hand, they reach the agent with the messages they bear on.
+  - In measurement they were always in front of the question, so the agent's real use is close to
+    what was measured, but not identical.
+- **What it needs:** no shell (nothing runs on the deck but the agent's own exam). Any owner with a
+  ready practice set and their own agent can start one, and the `captain_swarm` tool can propose one
+  (`template: "triage"`).
+- **The loop itself is shared with code:** `parts_for(kind)` picks the lane, the proposer, the
+  measurement, the seal, the screen, the champion marker and the starting point.
+
+*Live run (2026-11-03): the first kept gain.*
+- **Setup:**
+  - A throwaway deck and a made-up inbox, with no real mail: 23 open and 12 held-out emails of five
+    kinds. Direct asks and quiet asks need a reply; a question to someone else with the owner only in
+    Cc, marketing that says "reply YES", and FYI mail don't.
+  - The agent measured was "Inbox Helper" on **Claude Haiku 5.5**. The proposer was **Claude Sonnet
+    5.5**.
+  - A first try on the local `ornith:9b` was too slow (about 25 seconds a question) and was stopped.
+- **The start:** F1 0.900 ± 0 on the open emails and 0.899 ± 0.014 on the held-out ones.
+- **Round 1, idea 1, kept:** "If I'm only in Cc and the request is addressed by name to someone else,
+  I don't need to reply." It scored **1.000 ± 0** on the open emails and **1.000 on the held-out
+  ones**, so it became the best version.
+- **Three more ideas, all discarded.** Two scored 1.000, which is no gain, and one scored 0.974 ±
+  0.037. The run stopped at its 4-attempt limit, **8 minutes** after it started.
+- **Taught live:** **Teach** added the rule to the agent as a lesson (`taught_by: swarm`).
+- **Cost:** 6.18M tokens in all, about $0.62 at most at Haiku's price, plus about $0.01 for Sonnet.
+- **One gap found and fixed:** measurement answers were counted as tokens only, so the $ cap couldn't
+  see them.
+  - The exam lane now passes each answer's usage on (`agent_exam.ask` returns `usage`).
+  - Every answer is priced on the agent's own model as it comes, cache reads at their own rate, and
+    counted against the run at once.
+  - A measurement stops itself if the run's budget runs out partway.
+- **What it proves:** the whole loop on real work, keep included. A held-out-confirmed gain landed in
+  the agent through the owner's click. The made-up inbox is easy, and the owner's real mail is the
+  real test.
+
+**Phase 3b (next): the rehearsal guard.** `rehearsal_turn.py`, intents, authorize-only spending,
+the register check, Bat in rehearsal, Kind B with commit points, and carrying out once. As planned
+above.
 
 **Phase 4: parallel lanes.**
 - **Lanes and measurement:** K lanes, the per-site and per-account limit, staged measurement, and
