@@ -298,6 +298,10 @@ async def stop_measurement(set_id: str, mid: str, user: dict = Depends(get_curre
 #    POST   /fd/captain-swarm/runs/{id}/cancel          stop it now
 #    POST   /fd/captain-swarm/runs/{id}/go | /decline   an agent's run waits for one of these
 #    POST   /fd/captain-swarm/runs/{id}/pr              open a pull request from the best commit
+#    GET    /fd/captain-swarm/runs/{id}/playbook        the playbook a one-task run would give an agent
+#    POST   /fd/captain-swarm/runs/{id}/playbook        save it on one of the owner's agents
+#    GET    /fd/captain-swarm/lessons[?family=]         what earlier runs learned, per kind of task
+#    DELETE /fd/captain-swarm/lessons/{id}              forget one
 #    POST   /fd/captain-swarm/agent/{start,status,get,list,cancel}   the `captain_swarm` tool
 #    POST   /fd/captain-swarm/agent/{intent,site}        a rehearsal worker: an intent kept; may it use a site?
 
@@ -396,6 +400,8 @@ def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) ->
             for k in ("per_round", "parallel"):
                 if o.get(k):
                     raw["lane"][k] = o[k]
+            if str(o.get("family") or "").strip():
+                raw["family"] = str(o["family"])
             if o.get("attempt_usd"):
                 raw["lane"]["attempt_usd"] = o["attempt_usd"]
             for k in ("usd", "hours", "max_experiments"):
@@ -421,6 +427,8 @@ def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) ->
         for k in ("per_round", "parallel"):
             if o.get(k):
                 raw["lane"][k] = o[k]
+        if str(o.get("family") or "").strip():
+            raw["family"] = str(o["family"])
         for k in ("usd", "hours", "max_experiments"):
             if o.get(f"budget_{k}") not in (None, ""):
                 raw["budget"][k] = o[f"budget_{k}"]
@@ -443,6 +451,8 @@ def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) ->
         for k in ("per_round", "parallel"):
             if o.get(k):
                 raw["lane"][k] = o[k]
+        if str(o.get("family") or "").strip():
+            raw["family"] = str(o["family"])
         for k in ("usd", "hours", "max_experiments"):
             if o.get(f"budget_{k}") not in (None, ""):
                 raw["budget"][k] = o[f"budget_{k}"]
@@ -556,8 +566,21 @@ async def get_run(run_id: str, since: int = 0, user: dict = Depends(get_current_
         for intent in await store.list_intents(run_id):
             extra["intents"].setdefault(intent["exp_id"], []).append(
                 {k: intent[k] for k in ("kind", "tool", "what", "created_at")})
+    from captain_claw.flight_deck import captain_swarm_learning as learning
     from captain_claw.flight_deck import captain_swarm_loop as loop_mod
     from captain_claw.flight_deck import captain_swarm_rehearsal as rehearsal
+    family = learning.family_of(obj)
+    mine = await store.list_lessons(run["owner_id"], family, run_id=run_id, kinds=("reading", "strategy"), limit=40)
+    earlier = await store.list_lessons(run["owner_id"], family, other_than=run_id, limit=400)
+    extra["learning"] = {
+        "family": family,
+        "readings": [{"text": r["text"], "at": r["created_at"]} for r in mine if r["kind"] == "reading"],
+        "strategy": [{"text": r["text"], "at": r["created_at"]} for r in mine if r["kind"] == "strategy"],
+        "earlier": {"lessons": len(earlier), "runs": len({r["run_id"] for r in earlier})},
+        "weights": sorted(({"tag": t, **v} for t, v in (await learning.weights(store, run["owner_id"], family)).items()),
+                          key=lambda x: -x["weight"])[:20],
+        "playbook": (run.get("state") or {}).get("playbook") or None,
+    }
     extra["live"] = {"wave": loop_mod.wave_of(run.get("state") or {}) if run["status"] in ("baseline", "running") else [],
                      "measuring": loop_mod.measuring(run_id), "sites": rehearsal.sites_held(run_id),
                      "queued": len((run.get("state") or {}).get("queue") or [])}
@@ -709,6 +732,74 @@ async def open_pr(run_id: str, user: dict = Depends(get_current_user)) -> dict:
     task = await crew_runner.open_pr(row, crew_access.grant_of(row), exp["child_id"])
     await _cs_store().append_event(run_id, "pr", f"pull request opened: {(task.get('delivery') or {}).get('url', '')}")
     return {"delivery": task.get("delivery") or {}}
+
+
+@router.get("/lessons")
+async def lessons(family: str = "", user: dict = Depends(get_current_user)) -> dict:
+    """What earlier runs learned: the kinds of task there are lessons for, and,
+    for one *family*, its lessons and how often each strategy has won."""
+    from captain_claw.flight_deck import captain_swarm_learning as learning
+    owner, store = _uid(user), _cs_store()
+    fam = learning.family_slug(family)
+    out: dict[str, Any] = {"families": await store.families(owner)}
+    if fam:
+        out["family"] = fam
+        out["lessons"] = [{k: r[k] for k in ("id", "run_id", "kind", "strategy_tag", "outcome", "text", "created_at")}
+                          for r in await store.list_lessons(owner, fam, limit=300)]
+        out["weights"] = sorted(({"tag": t, **v} for t, v in (await learning.weights(store, owner, fam)).items()),
+                                key=lambda x: -x["weight"])
+    return out
+
+
+@router.delete("/lessons/{lesson_id}")
+async def forget_lesson(lesson_id: int, user: dict = Depends(get_current_user)) -> dict:
+    """The owner takes a lesson back: no later run reads it."""
+    if not await _cs_store().delete_lesson(_uid(user), lesson_id):
+        raise HTTPException(404, "No such lesson.")
+    return {"forgotten": lesson_id}
+
+
+async def _playbook_run(run_id: str, user: dict) -> tuple[dict, dict]:
+    from captain_claw.flight_deck import captain_swarm_learning as learning
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _own_run(run_id, user)
+    if run["objective"].get("kind") != "outcome":
+        raise HTTPException(400, "A playbook comes from a run for one task's best result.")
+    if run["status"] not in TERMINAL_STATES:
+        raise HTTPException(409, "Stop the run first, or wait for it to finish.")
+    if not (run.get("champion") or {}).get("exp"):
+        raise HTTPException(409, "No attempt found a result Captain could verify, so there's nothing to learn from.")
+    return run, learning.playbook_for(run, await _cs_store().list_experiments(run_id))
+
+
+@router.get("/runs/{run_id}/playbook")
+async def playbook_preview(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """The playbook this run would give an agent, to read before saving it."""
+    _, playbook = await _playbook_run(run_id, user)
+    return {"playbook": playbook}
+
+
+class PlaybookBody(BaseModel):
+    agent: str = Field(..., min_length=1, max_length=80)
+
+
+@router.post("/runs/{run_id}/playbook")
+async def playbook_save(run_id: str, body: PlaybookBody, user: dict = Depends(get_current_user)) -> dict:
+    """The run's ways that worked and didn't, as a playbook on one of the owner's
+    agents: only on the owner's click, and only that agent's own store."""
+    from captain_claw.flight_deck import agent_preset as ap
+    from captain_claw.flight_deck import captain_swarm_learning as learning
+    run, playbook = await _playbook_run(run_id, user)
+    try:
+        saved = await learning.save_playbook(ap._owner(user), body.agent, playbook)
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    store = _cs_store()
+    fresh = await store.get_run(run_id)
+    note = {"agent": body.agent, "id": str(saved.get("id") or ""), "at": time.time()}
+    await store.update_run(run_id, state={**((fresh or run).get("state") or {}), "playbook": note})
+    await store.append_event(run_id, "playbook", f"saved as a playbook on {body.agent}")
+    return {"saved": note}
 
 
 # ── the `captain_swarm` tool ─────────────────────────────────────────

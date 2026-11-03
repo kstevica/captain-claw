@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from captain_claw.flight_deck import captain_swarm_practice as practice
+from captain_claw.flight_deck.captain_swarm_learning import shown_verdict
 from captain_claw.flight_deck.captain_swarm_screen import EVAL_MARKERS
 from captain_claw.logging import get_logger
 
@@ -87,8 +88,10 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
     budget = {**DEFAULT_BUDGET, **(raw.get("budget") or {})}
     stop = raw.get("stop") or {}
     parallel, per_round = lanes(raw.get("lane") or {}, default=1, most=8, per_round_most=8)
+    from captain_claw.flight_deck.captain_swarm_learning import family_slug
     return {
         "kind": "practice",
+        "family": family_slug(raw.get("family") or subj.get("family")) or "mail-triage",
         "title": str(raw.get("title") or "").strip()[:200] or "Inbox triage",
         "goal": str(raw.get("goal") or "").strip()[:2000],
         "subject": {"type": "rules", "agent": agent, "agent_name": str(subj.get("agent_name") or agent)[:120],
@@ -448,7 +451,8 @@ async def brief(run: dict, ledger: list[dict]) -> str:
             ch = e.get("change") or {}
             lines.append(f"- [{e['status']}] ({e.get('strategy_tag') or '-'}) {e['hypothesis'][:200]}"
                          + (f" add {ch.get('add')}" if ch.get("add") else "")
-                         + (f" → {e['verdict_reason'][:160]}" if e.get("verdict_reason") else ""))
+                         + (f" → {shown_verdict(e)[:160]}" if e.get("verdict_reason") else ""))
+    lines.append(run.get("learned") or "")
     return "\n".join(lines)
 
 
@@ -481,5 +485,5 @@ async def propose(run: dict, ledger: list[dict], k: int) -> list[dict]:
     obj = run["objective"]
     who = obj["subject"].get("owner_name") or "the owner"
     system = _SYSTEM.format(owner=who, k=k, max_rules=obj["lane"].get("max_rules") or DEFAULT_MAX_RULES)
-    text = await loop.ask_model(run, system, await brief(run, ledger), label="propose")
+    text = await loop.ask_ideas(run, system, await brief(run, ledger))
     return loop.diverse(parse(text, k), ledger)

@@ -367,6 +367,10 @@ def harness(tmp_path, monkeypatch):
     loop.set_store(store)
     loop.set_review(passes_review)
 
+    async def no_strategy(run_, ledger):
+        return []
+    loop.set_strategy(no_strategy)
+
     async def new_run(objective=None, base="b" * 40):
         obj = objective or make_objective()
         r = await store.create_run(run_id="cs_test", owner_id="u", title="T", objective=obj, status="baseline")
@@ -376,7 +380,7 @@ def harness(tmp_path, monkeypatch):
     ns.drive = lambda: loop.Driver(store, "cs_test").drive()
     yield ns
     for setter in (loop.set_measure, loop.set_seal, loop.set_screen, loop.set_branch, loop.set_proposer,
-                   loop.set_lane, loop.set_store, loop.set_review):
+                   loop.set_lane, loop.set_store, loop.set_review, loop.set_strategy):
         setter(None)
     run(store.close())
 
@@ -451,20 +455,28 @@ def test_driver_disqualifies_before_measuring(harness):
 
 
 def test_driver_stalls_after_rounds_without_gain(harness):
+    """Two rounds without a gain bring a strategy round (Phase 6), then two more rounds; then it stops."""
     ns = harness
+    h4 = "4" * 40
     ns.scores = {(BASE, "dev"): [0.6, 0.6], (BASE, "holdout"): [0.6, 0.6],
-                 (H1, "dev"): [0.6, 0.61], (H2, "dev"): [0.59, 0.6]}
-    ns.lane.heads = {1: {"state": "done", "head_sha": H1, "commits": 1},
-                     2: {"state": "done", "head_sha": H2, "commits": 1}}
-    ns.ideas = [[idea("a", "a")], [idea("b", "b")], [idea("c", "c")]]
+                 (H1, "dev"): [0.6, 0.61], (H2, "dev"): [0.59, 0.6], (H3, "dev"): [0.6, 0.6], (h4, "dev"): [0.6, 0.6]}
+    ns.lane.heads = {i: {"state": "done", "head_sha": h, "commits": 1} for i, h in enumerate((H1, H2, H3, h4), 1)}
+    ns.ideas = [[idea("a", "a")], [idea("b", "b")], [idea("c", "c")], [idea("d", "d")], [idea("e", "e")]]
+    asked = []
+
+    async def strategy(run_, ledger):
+        asked.append(len(ledger))
+        return [{"direction": "change the digest, not the prompt", "why": "both tuned the prompt", "lens": "x"}]
+    loop.set_strategy(strategy)
 
     async def go():
         await ns.new_run()
         status = await ns.drive()
         return status, await ns.store.get_run("cs_test")
     status, r = run(go())
-    assert status == "stalled" and "2 rounds in a row" in r["stopped_reason"]
-    assert len(ns.ideas) == 1                                             # the third round was never asked for
+    assert status == "stalled" and "4 rounds in a row" in r["stopped_reason"] and "strategy round" in r["stopped_reason"]
+    assert asked == [2]                                                   # once, after the second round
+    assert len(ns.ideas) == 1                                             # the fifth round was never asked for
 
 
 def test_driver_stops_on_budget_and_stops_the_lane(harness):
