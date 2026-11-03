@@ -848,8 +848,8 @@ async def export_md(server: WebServer, request: web.Request) -> web.Response:
     html = _md_to_html(md_text)
 
     if fmt == "pdf":
-        import weasyprint
-        pdf_bytes = weasyprint.HTML(string=html).write_pdf()
+        from captain_claw.html_pdf import html_to_pdf
+        pdf_bytes = await html_to_pdf(html)
         return web.Response(
             body=pdf_bytes,
             content_type="application/pdf",

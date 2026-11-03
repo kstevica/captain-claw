@@ -195,6 +195,17 @@ def find_repo() -> tuple[Path | None, bool]:
     return None, False
 
 
+def _no_checkout_why() -> str:
+    """Why there's nothing to pull: the desktop app updates itself, any other install
+    the way it was installed."""
+    if os.environ.get("CAPTAIN_CLAW_DESKTOP_RUNTIME"):
+        return ("The desktop app installs its own updates: Check for Updates… in the app's menu "
+                "(the Captain menu on a Mac, Help on Windows and Linux).")
+    if getattr(sys, "_MEIPASS", None) and os.environ.get("FD_DESKTOP"):
+        return "This desktop app has everything built in. Download the new version to update it."
+    return "This deck wasn't installed from a git checkout, so there's nothing to pull. Update it the way it was installed."
+
+
 def _git_env() -> dict[str, str]:
     return {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
@@ -341,8 +352,7 @@ async def status(*, fetch: bool = False) -> dict[str, Any]:
         return {"available": True, "active": True, "job": job}
     repo, editable = find_repo()
     if repo is None:
-        return {"available": False, "why": "This deck wasn't installed from a git checkout, so there's nothing to pull. "
-                                           "Update it the way it was installed.", "job": job}
+        return {"available": False, "why": _no_checkout_why(), "job": job}
     rc, branch = await _git(repo, "symbolic-ref", "--short", "-q", "HEAD")
     if rc:
         return {"available": False, "why": f"The checkout at {repo} isn't on a branch, so there's nothing to follow.",
@@ -529,7 +539,7 @@ async def start(*, by: str, target: str, wait: bool = False, user_id: str = "", 
         raise RefusedError("An update is already under way.")
     repo, editable = find_repo()
     if repo is None:
-        raise RefusedError("This deck wasn't installed from a git checkout, so there's nothing to pull.")
+        raise RefusedError(_no_checkout_why())
     rc, head = await _git(repo, "rev-parse", "HEAD")
     rc2, upstream = await _git(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
     if rc or rc2:

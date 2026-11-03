@@ -719,7 +719,7 @@ async def export_visual_pdf(
         prompt = data.get("prompt", "").strip()
         filename = _prompt_to_filename(prompt)
 
-        pdf_bytes = await asyncio.to_thread(_html_to_pdf, html)
+        pdf_bytes = await _html_to_pdf(html)
 
         return web.Response(
             body=pdf_bytes,
@@ -773,9 +773,9 @@ table, figure, pre { page-break-inside: avoid; }
 """
 
 
-def _html_to_pdf(html: str) -> bytes:
-    """Render HTML to PDF using WeasyPrint (preserves all CSS styling)."""
-    from weasyprint import HTML
+async def _html_to_pdf(html: str) -> bytes:
+    """Render HTML to PDF: WeasyPrint (preserves all CSS styling), Chromium where it can't load."""
+    from captain_claw.html_pdf import html_to_pdf
 
     # Inject print-friendly CSS right before </head> (or at the top).
     if "</head>" in html:
@@ -783,4 +783,4 @@ def _html_to_pdf(html: str) -> bytes:
     else:
         html = _PRINT_CSS + html
 
-    return HTML(string=html).write_pdf()
+    return await html_to_pdf(html)
