@@ -126,6 +126,55 @@ async def build_mail_triage(body: TriageBody, user: dict = Depends(get_current_u
     return _view(owner, _meta_or_404(owner, set_id))
 
 
+class CalendarBody(BaseModel):
+    window_days: int = Field(180, ge=30, le=730)
+    holdout_days: int = Field(30, ge=7, le=120)
+    max_cases: int = Field(400, ge=20, le=1000)
+
+
+async def _build_calendar(owner: str, set_id: str, body: CalendarBody) -> None:
+    key = f"build:{owner}/{set_id}"
+    from captain_claw.flight_deck.google_oauth_routes import get_valid_google_access_token
+    try:
+        token = await get_valid_google_access_token(owner)
+        if not token:
+            raise RuntimeError("Connect Google first: the set is read from your own calendar.")
+
+        def progress(stage: str, done: int, total: int) -> None:
+            _PROGRESS[key] = {"stage": stage, "done": done, "total": total}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            built = await practice.build_calendar_invites(
+                practice.calendar_fetch(client, token), now_ms=int(time.time() * 1000),
+                window_days=body.window_days, holdout_days=body.holdout_days, max_cases=body.max_cases,
+                progress=progress)
+        if not built["open"] or not built["holdout"]:
+            raise RuntimeError("Too few answered invitations in that window to hold any back. Try a longer window.")
+        await asyncio.to_thread(practice.save_set, owner, set_id, built, body.model_dump(), kind=practice.KIND_CALENDAR)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("captain swarm: building a calendar practice set failed", owner=owner, exc_info=True)
+        await asyncio.to_thread(practice.mark, owner, set_id, state="error", error=str(exc)[:300])
+    finally:
+        _TASKS.pop(key, None)
+        _PROGRESS.pop(key, None)
+
+
+@router.post("/practice/calendar-invites")
+async def build_calendar_invites(body: CalendarBody, user: dict = Depends(get_current_user)) -> dict:
+    """Freeze the caller's past invitations, each labelled by whether they
+    accepted it. Read-only on Google Calendar."""
+    owner = _uid(user)
+    if any(k.startswith(f"build:{owner}/") for k in _TASKS):
+        raise HTTPException(409, "A practice set is already being built.")
+    set_id = practice.new_set_id(practice.KIND_CALENDAR)
+    await asyncio.to_thread(practice.mark, owner, set_id, state="building", kind=practice.KIND_CALENDAR,
+                            title=practice.KINDS[practice.KIND_CALENDAR]["title"], source={"params": body.model_dump()})
+    _TASKS[f"build:{owner}/{set_id}"] = asyncio.get_running_loop().create_task(_build_calendar(owner, set_id, body))
+    return _view(owner, _meta_or_404(owner, set_id))
+
+
 @router.get("/practice/{set_id}")
 async def get_practice(set_id: str, user: dict = Depends(get_current_user)) -> dict:
     owner = _uid(user)
@@ -197,13 +246,14 @@ async def _ask_agent(owner: str, slug: str, name: str, mid: str):
     return ask
 
 
-async def _measure(owner: str, set_id: str, mid: str, record: dict, cases: list[dict], ask, owner_name: str) -> None:
+async def _measure(owner: str, set_id: str, mid: str, record: dict, cases: list[dict], ask, owner_name: str,
+                   kind: str = practice.KIND_MAIL_TRIAGE) -> None:
     key = f"measure:{owner}/{set_id}/{mid}"
     path = _measure_path(owner, set_id, mid)
     try:
         try:
             result = await measure.run_triage(
-                cases, ask=ask, repeat=record["repeat"], owner_name=owner_name,
+                cases, ask=ask, repeat=record["repeat"], owner_name=owner_name, kind=kind,
                 progress=lambda done, total: _PROGRESS.__setitem__(key, {"done": done, "total": total}),
                 should_stop=lambda: key in _STOP)
             record.update(state="stopped" if result["stopped"] else "done", finished=time.time(), result=result)
@@ -244,14 +294,15 @@ async def start_measurement(set_id: str, body: MeasureBody, user: dict = Depends
     ask = await _ask_agent(ap._owner(user), body.agent, name, mid)
     record = {"id": mid, "set": set_id, "agent": body.agent, "agent_name": name, "split": body.split,
               "cases": len(cases), "repeat": body.repeat, "state": "running", "started": time.time(),
-              "scorer": "agreement", "question": "triage_v1"}
+              "scorer": "agreement",
+              "question": "invite_v1" if meta.get("kind") == practice.KIND_CALENDAR else "triage_v1"}
     await asyncio.to_thread(practice.write_json, _measure_path(owner, set_id, mid), record)
     owner_name = str(user.get("display_name") or user.get("name") or "")
     if owner_name.lower() == "local":
         owner_name = ""
     key = f"measure:{owner}/{set_id}/{mid}"
     _TASKS[key] = asyncio.get_running_loop().create_task(
-        _measure(owner, set_id, mid, record, cases, ask, owner_name))
+        _measure(owner, set_id, mid, record, cases, ask, owner_name, meta.get("kind") or practice.KIND_MAIL_TRIAGE))
     return _measurement_view(owner, set_id, record)
 
 
@@ -298,6 +349,7 @@ async def stop_measurement(set_id: str, mid: str, user: dict = Depends(get_curre
 #    POST   /fd/captain-swarm/runs/{id}/cancel          stop it now
 #    POST   /fd/captain-swarm/runs/{id}/go | /decline   an agent's run waits for one of these
 #    POST   /fd/captain-swarm/runs/{id}/pr              open a pull request from the best commit
+#    POST   /fd/captain-swarm/runs/{id}/save-document   a document run's best, into the owner's files
 #    GET    /fd/captain-swarm/runs/{id}/playbook        the playbook a one-task run would give an agent
 #    POST   /fd/captain-swarm/runs/{id}/playbook        save it on one of the owner's agents
 #    GET    /fd/captain-swarm/lessons[?family=]         what earlier runs learned, per kind of task
@@ -342,29 +394,52 @@ def _default_holdout() -> str:
 
 @router.get("/templates")
 async def templates(user: dict = Depends(get_current_user)) -> dict:
+    from captain_claw.flight_deck import captain_swarm_document as document
     from captain_claw.flight_deck import captain_swarm_objective as om
     from captain_claw.flight_deck import captain_swarm_outcome as outcome
+    from captain_claw.flight_deck import captain_swarm_rules as rules
     from captain_claw.flight_deck.bat_routes import _owner_has_shell
     sets = [{"id": m["id"], "title": m.get("title") or m["id"], "open": (m.get("open") or {}).get("cases", 0),
-             "holdout": (m.get("holdout") or {}).get("cases", 0)}
+             "holdout": (m.get("holdout") or {}).get("cases", 0), "kind": m.get("kind") or "mail-triage"}
             for m in await asyncio.to_thread(practice.list_sets, _uid(user)) if m.get("state") == "ready"]
-    return {"templates": {"outcome": {
+    return {"templates": {"document": {
+        "title": "Write or research something",
+        "about": "Several attempts at one document — each a Bat run in rehearsal that searches, reads and writes, "
+                 "with nothing sent or published. Each is graded against a checklist made from your brief (and a "
+                 "second one nobody sees, to confirm a gain); for research, Captain opens every source it cites "
+                 "and an attempt whose sources don't hold is out. The grades come from model judges, not from you: "
+                 "read the best ones yourself. The best reaches your files when you click.",
+        # Caps are in tokens: research reads many pages, so an attempt needs room to finish.
+        "defaults": {"sources": 1, "words": 0, "per_round": 3, "parallel": 3, "attempt_tokens": document.ATTEMPT_TOKENS,
+                     **_budget_defaults(document.BUDGET)},
+        "max_parallel": min(om.max_lanes(), outcome.bat_slots()),
+    }, "code": {
+        "title": "Make any repository score better",
+        "about": "Coding workers try ideas in branches of their own; Captain measures every commit with your command, "
+                 "copied at the start so no attempt can change it, and keeps only gains bigger than the noise. Without "
+                 "held-out cases, a fresh run of the same command checks every gain. Captain never merges: the best "
+                 "commit waits on a branch for your pull request.",
+        "defaults": {"harness": "claude", "per_round": 2, "parallel": 1, "min_gain": 0.01,
+                     **_budget_defaults(om.DEFAULT_BUDGET)},
+        "max_parallel": om.max_lanes(),
+    }, "outcome": {
         "title": "Find the best result for a task",
         "about": "Several attempts at one real task — each a Bat run in rehearsal: it searches, reads and browses, "
                  "but buying, sending, booking and submitting are recorded instead of done, and the browser stops "
                  "at the commit point. Captain opens every link itself and counts only what the page bears out. "
                  "You carry the winner out once, through Bat's gate.",
-        "defaults": {"label": "price", "direction": "min", "per_round": 3, "parallel": 3, "attempt_usd": 2.0,
-                     "budget_usd": 10.0, "budget_hours": 4.0, "budget_max_experiments": 6},
+        "defaults": {"label": "price", "direction": "min", "per_round": 3, "parallel": 3,
+                     "attempt_tokens": outcome.ATTEMPT_TOKENS, **_budget_defaults(outcome.BUDGET)},
         "max_parallel": min(om.max_lanes(), outcome.bat_slots()),
     }, "triage": {
-        "title": "Triage my inbox the way I would",
-        "about": "Improve an agent's triage rules against what you actually did: every version is tried on the "
-                 "agent's exam lane (it can't send or change anything) over a practice set from your own mail, "
-                 "and the best rules reach the agent only when you say so.",
+        "title": "Teach an agent your habits",
+        "about": "Improve an agent's rules against what you actually did: which mail you answered, or which "
+                 "invitations you accepted. Every version is tried on the agent's exam lane (it can't send or change "
+                 "anything) over a practice set from your own Gmail or Google Calendar, and the best rules reach the "
+                 "agent only when you say so.",
         "sets": sets,
         "defaults": {"cases": 40, "repeat": 2, "holdout_cases": 0, "per_round": 2, "parallel": 1,
-                     "budget_usd": 20.0, "budget_hours": 8.0, "budget_max_experiments": 16},
+                     **_budget_defaults(rules.BUDGET)},
         "max_parallel": om.max_lanes(),
     }, "mrav": {
         "title": "Mrav passes more of its eval",
@@ -372,10 +447,27 @@ async def templates(user: dict = Depends(get_current_user)) -> dict:
                  "local model: 20 open tasks in the repo, held-out tasks only on this deck.",
         "defaults": {"repo_path": _source_repo(), "model": "gemma4:e2b", "base_url": "http://127.0.0.1:11434",
                      "harness": "claude", "holdout_file": _default_holdout(), "per_round": 2, "parallel": 1,
-                     **{f"budget_{k}": v for k, v in om.DEFAULT_BUDGET.items()}},
+                     **_budget_defaults(om.DEFAULT_BUDGET)},
         "max_parallel": om.max_lanes(),
         "local_models": await _local_models(),
     }}, "can_start": _owner_has_shell(user)}
+
+
+def _budget_defaults(budget: dict) -> dict:
+    return {f"budget_{k}": v for k, v in budget.items()}
+
+
+_BUDGET_KEYS = ("tokens", "hours", "max_experiments")
+
+
+def _put_budget(raw: dict, o: dict) -> None:
+    """The limits a form sent (``budget_tokens``, ``budget_hours``,
+    ``budget_max_experiments``) over a template's. Caps are in tokens; a
+    dollar figure is not taken."""
+    raw.setdefault("budget", {})
+    for k in _BUDGET_KEYS:
+        if o.get(f"budget_{k}") not in (None, ""):
+            raw["budget"][k] = o[f"budget_{k}"]
 
 
 class RunBody(BaseModel):
@@ -387,6 +479,25 @@ class RunBody(BaseModel):
 def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) -> dict:
     from captain_claw.flight_deck import captain_swarm_objective as om
     from captain_claw.flight_deck import captain_swarm_rules as rules
+    if (body.objective and body.objective.get("kind") == "document") or (not body.objective and body.template == "document"):
+        from captain_claw.flight_deck import captain_swarm_document as document
+        o = body.options or {}
+        raw = body.objective or document.document_template(
+            task=str(o.get("task") or ""), audience=str(o.get("audience") or ""),
+            criteria=[c.strip(" -•\t") for c in str(o.get("criteria") or "").splitlines() if c.strip(" -•\t")],
+            sources=str(o.get("sources", "1")).strip().lower() not in ("0", "no", "false", ""),
+            words=int(float(o.get("words") or 0)))
+        if not body.objective:
+            for k in ("per_round", "parallel", "attempt_tokens"):
+                if o.get(k):
+                    raw["lane"][k] = o[k]
+            if str(o.get("family") or "").strip():
+                raw["family"] = str(o["family"])
+            _put_budget(raw, o)
+        try:
+            return document.normalize(raw)
+        except om.ObjectiveError as exc:
+            raise HTTPException(400, str(exc)) from exc
     if body.objective and body.objective.get("kind") == "outcome" or (not body.objective and body.template == "outcome"):
         from captain_claw.flight_deck import captain_swarm_outcome as outcome
         o = body.options or {}
@@ -402,11 +513,9 @@ def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) ->
                     raw["lane"][k] = o[k]
             if str(o.get("family") or "").strip():
                 raw["family"] = str(o["family"])
-            if o.get("attempt_usd"):
-                raw["lane"]["attempt_usd"] = o["attempt_usd"]
-            for k in ("usd", "hours", "max_experiments"):
-                if o.get(f"budget_{k}") not in (None, ""):
-                    raw["budget"][k] = o[f"budget_{k}"]
+            if o.get("attempt_tokens"):
+                raw["lane"]["attempt_tokens"] = o["attempt_tokens"]
+            _put_budget(raw, o)
         try:
             return outcome.normalize(raw)
         except om.ObjectiveError as exc:
@@ -419,19 +528,19 @@ def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) ->
     if not body.objective and body.template == "triage":
         o = body.options or {}
         owner_name = str((user or {}).get("display_name") or (user or {}).get("name") or "")
+        set_meta = (practice.get_meta(_uid(user), str(o.get("set_id") or "")) if user else None) or {}
         raw = rules.triage_template(
             set_id=str(o.get("set_id") or ""), agent=str(o.get("agent") or ""),
             agent_name=str(o.get("agent_name") or ""), owner_name="" if owner_name.lower() == "local" else owner_name,
             cases=int(o.get("cases") or 40), repeat=int(o.get("repeat") or 2),
-            holdout_cases=int(o.get("holdout_cases") or 0))
+            holdout_cases=int(o.get("holdout_cases") or 0),
+            set_kind=str(set_meta.get("kind") or practice.KIND_MAIL_TRIAGE))
         for k in ("per_round", "parallel"):
             if o.get(k):
                 raw["lane"][k] = o[k]
         if str(o.get("family") or "").strip():
             raw["family"] = str(o["family"])
-        for k in ("usd", "hours", "max_experiments"):
-            if o.get(f"budget_{k}") not in (None, ""):
-                raw["budget"][k] = o[f"budget_{k}"]
+        _put_budget(raw, o)
         try:
             return rules.normalize(raw)
         except om.ObjectiveError as exc:
@@ -453,9 +562,7 @@ def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) ->
                 raw["lane"][k] = o[k]
         if str(o.get("family") or "").strip():
             raw["family"] = str(o["family"])
-        for k in ("usd", "hours", "max_experiments"):
-            if o.get(f"budget_{k}") not in (None, ""):
-                raw["budget"][k] = o[f"budget_{k}"]
+        _put_budget(raw, o)
         if o.get("target") not in (None, ""):
             raw["stop"]["target"] = o["target"]
     try:
@@ -475,7 +582,7 @@ async def _can_run(owner: str, objective: dict | None = None, user: dict | None 
     tiers, _ = await _load_owner_tiers(get_db(), owner)
     if not _creds_for(tiers):
         raise HTTPException(409, "Set up a model tier first: a run asks a model for ideas.")
-    if (objective or {}).get("kind") == "outcome":
+    if (objective or {}).get("kind") in ("outcome", "document"):
         from captain_claw.flight_deck import bat_loop
         if bat_loop.get_store() is None:
             raise HTTPException(503, "Bat isn't running on this deck, and every attempt is a Bat run.")
@@ -556,6 +663,18 @@ async def get_run(run_id: str, since: int = 0, user: dict = Depends(get_current_
         from captain_claw.flight_deck import captain_swarm_rules as rules
         extra["rules"] = {"baseline": await rules.rules_of((run.get("baseline") or {}).get("sha") or ""),
                           "champion": await rules.rules_of((run.get("champion") or {}).get("sha") or "")}
+    if obj.get("kind") == "document":
+        from captain_claw.flight_deck import captain_swarm_document as document
+        best = await document.best_of(run)
+        lists = document.checklists(run_id)
+        grades = ((run.get("champion") or {}).get("dev") or {}).get("per_case") or {}
+        extra["document"] = {
+            "best": {**best, "text": best["text"][:60000], "cut": len(best["text"]) > 60000} if best else None,
+            "checklist": [{"item": item, "grade": grades.get(f"c{i + 1}") if best else None}
+                          for i, item in enumerate(lists["open"])],
+            "held_items": len(lists["held"]),
+            "saved": (run.get("state") or {}).get("saved_document") or "",
+        }
     if obj.get("kind") == "outcome":
         champ = run.get("champion") or {}
         checks = await store.get_version(f"{champ.get('sha')}_c") if champ.get("sha") else None
@@ -619,6 +738,9 @@ async def go(run_id: str, user: dict = Depends(get_current_user)) -> dict:
         if run["objective"].get("kind") == "practice":
             from captain_claw.flight_deck import captain_swarm_rules as rules
             rules.normalize(run["objective"])
+        elif run["objective"].get("kind") == "document":
+            from captain_claw.flight_deck import captain_swarm_document as document
+            document.normalize(run["objective"])
         elif run["objective"].get("kind") == "outcome":
             from captain_claw.flight_deck import captain_swarm_outcome as outcome
             outcome.normalize(run["objective"])
@@ -679,8 +801,9 @@ async def carry_out(run_id: str, user: dict = Depends(get_current_user)) -> dict
     bat_id = f"bat_{uuid.uuid4().hex[:12]}"
     await bat.create_run(run_id=bat_id, owner_id=run["owner_id"], title=f"Carry out: {run['title'][:80]}",
                          task=outcome.carry_out_task(run, best, intents),
-                         config={"source": "captain_swarm_carry_out", "steps": []}, origin={},
-                         llm_usd_cap=float(run["objective"]["lane"].get("attempt_usd") or 2.0) * 2, status="planning")
+                         config={"source": "captain_swarm_carry_out", "steps": [],
+                                 "token_cap": int(run["objective"]["lane"].get("attempt_tokens") or outcome.ATTEMPT_TOKENS) * 2},
+                         origin={}, llm_usd_cap=0.0, status="planning")
     await bat.append_event(bat_id, "note", f"carrying out the winner of Captain Swarm run {run_id}")
     await store.update_run(run_id, state={**state, "carried_out": bat_id})
     await store.append_event(run_id, "carry", f"carrying out the winner, once: Bat run {bat_id}")
@@ -759,12 +882,33 @@ async def forget_lesson(lesson_id: int, user: dict = Depends(get_current_user)) 
     return {"forgotten": lesson_id}
 
 
+@router.post("/runs/{run_id}/save-document")
+async def save_document(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """The best document, into the owner's own files: only on their click."""
+    from captain_claw.flight_deck import captain_swarm_document as document
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _own_run(run_id, user)
+    if run["objective"].get("kind") != "document":
+        raise HTTPException(400, "Only a document run has a document to save.")
+    if run["status"] not in TERMINAL_STATES:
+        raise HTTPException(409, "Stop the run first, or wait for it to finish.")
+    best = await document.best_of(run)
+    if not best.get("text"):
+        raise HTTPException(409, "No attempt made a document that passed its checks.")
+    where = await asyncio.to_thread(document.save_to_files, run["owner_id"], run, best["text"])
+    store = _cs_store()
+    fresh = await store.get_run(run_id)
+    await store.update_run(run_id, state={**((fresh or run).get("state") or {}), "saved_document": where})
+    await store.append_event(run_id, "save", f"the best document saved to {where}")
+    return {"saved": where}
+
+
 async def _playbook_run(run_id: str, user: dict) -> tuple[dict, dict]:
     from captain_claw.flight_deck import captain_swarm_learning as learning
     from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
     run = await _own_run(run_id, user)
-    if run["objective"].get("kind") != "outcome":
-        raise HTTPException(400, "A playbook comes from a run for one task's best result.")
+    if run["objective"].get("kind") not in ("outcome", "document"):
+        raise HTTPException(400, "A playbook comes from a run for one task's best result or document.")
     if run["status"] not in TERMINAL_STATES:
         raise HTTPException(409, "Stop the run first, or wait for it to finish.")
     if not (run.get("champion") or {}).get("exp"):

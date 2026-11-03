@@ -365,6 +365,11 @@ class BatDriver:
         cap = float(run.get("llm_usd_cap") or 0.0)
         if cap > 0 and float(run.get("cumulative_usd") or 0.0) + live >= cap:
             return True, "llm_usd_cap_reached"
+        # A cap in tokens (config.token_cap), against what's done and what running turns are using.
+        from captain_claw.flight_deck import bat_nested
+        tokens = bat_nested.token_cap(run)
+        if tokens and int(run.get("cumulative_tokens") or 0) + bat_nested.live_tokens(run_id) >= tokens:
+            return True, "llm_token_cap_reached"
         return False, ""
 
     async def watch_parked(self, run: dict) -> None:
@@ -374,7 +379,10 @@ class BatDriver:
         await self._poll_spend(run)
         fresh = await self.store.get_run(run["id"]) or run
         cap = float(fresh.get("llm_usd_cap") or 0.0)
-        if cap > 0 and float(fresh.get("cumulative_usd") or 0.0) >= cap:
+        from captain_claw.flight_deck import bat_nested
+        tokens = bat_nested.token_cap(fresh)
+        if (cap > 0 and float(fresh.get("cumulative_usd") or 0.0) >= cap) or (
+                tokens and int(fresh.get("cumulative_tokens") or 0) >= tokens):
             await self._stop_children(fresh)
 
     async def _stop_children(self, run: dict) -> None:
@@ -689,7 +697,7 @@ class BatDriver:
             return "running"  # left non-terminal for re-adoption
         if reason == "gone":
             return "gone"
-        # llm_usd_cap_reached (serious problem): stop, keep work, resumable
+        # llm_usd_cap_reached / llm_token_cap_reached (serious problem): stop, keep work, resumable
         steps = await self.store.list_steps(run_id)
         await self.store.append_event(run_id, "budget", f"stopped: {reason} (round {rounds})")
         await self._finish(run_id, "error", truth=_assemble_truth(steps),

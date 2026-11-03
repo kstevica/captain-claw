@@ -31,8 +31,13 @@ HARNESSES = ("claude", "codex", "opencode", "crush", "pi")
 _PLACES = ("python", "harness", "checkout", "dev", "holdout")
 _READ_RE = re.compile(r"^[A-Za-z0-9_.]{1,80}$")
 
-DEFAULT_BUDGET = {"usd": 50.0, "hours": 8.0, "max_experiments": 40}
-_LIMITS = {"usd": (0.5, 2000.0), "hours": (0.25, 72.0), "max_experiments": (1, 200)}
+# A run's limits. The money one is in tokens — what a person enters and Captain
+# counts — never dollars: a token is a token on any model, a dollar isn't.
+DEFAULT_BUDGET = {"tokens": 200_000_000, "hours": 8.0, "max_experiments": 40}
+_LIMITS = {"tokens": (100_000, 10_000_000_000), "hours": (0.25, 72.0), "max_experiments": (1, 200)}
+_ATTEMPT_LIMITS = (100_000, 1_000_000_000)   # what one Bat attempt may use
+_TOKENS_RE = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*([kKmMbBgG]?)\s*$")
+_TOKEN_UNITS = {"": 1, "k": 1_000, "m": 1_000_000, "b": 1_000_000_000, "g": 1_000_000_000}
 
 
 class ObjectiveError(ValueError):
@@ -97,6 +102,72 @@ def mrav_template(repo_path: str, *, model: str = "gemma4:e2b", base_url: str = 
 
 
 TEMPLATES = {"mrav": mrav_template}
+
+
+def parse_tokens(raw: Any) -> Any:
+    """A token count from what a person typed — ``80M``, ``500k``, ``1.5m``,
+    ``2_000_000`` or a number; anything else comes back as it was, for
+    :func:`_num` to refuse in words."""
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)):
+        return raw
+    m = _TOKENS_RE.match(str(raw or "").replace("_", "").replace(" ", ""))
+    if not m:
+        return raw
+    return float(m.group(1).replace(",", ".")) * _TOKEN_UNITS[m.group(2).lower()]
+
+
+def tokens_count(raw: Any, name: str, lo: int, hi: int) -> int:
+    return int(_num(parse_tokens(raw), name, lo, hi))
+
+
+def tokens_text(n: Any) -> str:
+    """``24.2M``, ``500k``, ``900`` — a token count the way a person reads it."""
+    v = float(n or 0)
+    for unit, size in (("B", 1e9), ("M", 1e6), ("k", 1e3)):
+        if v >= size:
+            return f"{v / size:.1f}".rstrip("0").rstrip(".") + unit
+    return str(int(v))
+
+
+def budget_of(raw: Any, defaults: dict[str, Any], *, hours_most: float = 72.0,
+              experiments_most: int = 200) -> dict[str, Any]:
+    """A run's limits from what was sent, over *defaults*: tokens, hours and
+    experiments. A dollar figure is not a limit any more and is ignored."""
+    got = {k: v for k, v in (raw or {}).items() if v not in (None, "")} if isinstance(raw, dict) else {}
+    b = {**defaults, **got}
+    return {"tokens": tokens_count(b.get("tokens", DEFAULT_BUDGET["tokens"]), "The token budget", *_LIMITS["tokens"]),
+            "hours": _num(b.get("hours", DEFAULT_BUDGET["hours"]), "The hours limit", 0.25, hours_most),
+            "max_experiments": int(_num(b.get("max_experiments", DEFAULT_BUDGET["max_experiments"]),
+                                        "The experiment limit", 1, experiments_most))}
+
+
+def budget_spent(run: dict[str, Any]) -> str:
+    """Why *run* has used its budget, or ``""``. A run started while budgets
+    were in dollars keeps its dollar limit."""
+    b = (run.get("objective") or {}).get("budget") or {}
+    if b.get("tokens"):
+        used = int(run.get("spent_tokens") or 0)
+        if used >= int(b["tokens"]):
+            return f"the token budget is used ({tokens_text(used)} of {tokens_text(b['tokens'])})"
+        return ""
+    if b.get("usd") and float(run.get("spent_usd") or 0.0) >= float(b["usd"]):
+        return f"the budget is spent (${float(run['spent_usd']):.2f} of ${float(b['usd']):.2f})"
+    return ""
+
+
+def tokens_left(run: dict[str, Any]) -> int | None:
+    """Tokens the run may still use; ``None`` for a run with a dollar budget."""
+    b = (run.get("objective") or {}).get("budget") or {}
+    if not b.get("tokens"):
+        return None
+    return max(0, int(b["tokens"]) - int(run.get("spent_tokens") or 0))
+
+
+def attempt_tokens(lane: dict[str, Any], default: int) -> int:
+    """The most tokens one Bat attempt may use (``lane.attempt_tokens``)."""
+    return tokens_count(lane.get("attempt_tokens") or default, "The most tokens one attempt may use", *_ATTEMPT_LIMITS)
 
 
 def _num(raw: Any, name: str, lo: float, hi: float) -> float:
@@ -180,11 +251,19 @@ def normalize(raw: dict[str, Any], *, owner_has_shell: bool) -> dict[str, Any]:
 
     hold = obj.get("holdout") or {}
     hold_file = str(hold.get("file") or "").strip()
-    if not hold_file or not Path(hold_file).is_file():
-        raise ObjectiveError("The held-out cases are a file on this deck, outside the repository.")
-    if Path(hold_file).resolve().is_relative_to(Path(repo).resolve()):
-        raise ObjectiveError("The held-out cases must live outside the repository, where attempts can't read them.")
-    obj["holdout"] = {"run": _command(hold.get("run"), "The held-out measurement"), "file": hold_file}
+    if hold_file:
+        if not Path(hold_file).is_file():
+            raise ObjectiveError("The held-out cases are a file on this deck, outside the repository.")
+        if Path(hold_file).resolve().is_relative_to(Path(repo).resolve()):
+            raise ObjectiveError("The held-out cases must live outside the repository, where attempts can't read them.")
+        obj["holdout"] = {"run": _command(hold.get("run"), "The held-out measurement"), "file": hold_file}
+    else:
+        # No held-out cases (a benchmark, a size, a count of warnings): the check
+        # of a gain is the same command run again on a fresh copy.
+        run_again = str(hold.get("run") or "").strip() or obj["metric"]["run"]
+        if "{holdout}" in run_again:
+            raise ObjectiveError("The held-out measurement names {holdout}, but there is no held-out file.")
+        obj["holdout"] = {"run": _command(run_again, "The held-out measurement"), "file": ""}
 
     guards = []
     for g in obj.get("guardrails") or []:
@@ -204,9 +283,7 @@ def normalize(raw: dict[str, Any], *, owner_has_shell: bool) -> dict[str, Any]:
     obj["lane"] = {"kind": "crew", "harness": harness, "model": str(lane.get("model") or "")[:120],
                    "model_source": src, "per_round": per_round, "parallel": parallel}
 
-    budget = {**DEFAULT_BUDGET, **(obj.get("budget") or {})}
-    obj["budget"] = {k: _num(budget[k], f"The {k.replace('_', ' ')} limit", *_LIMITS[k]) for k in DEFAULT_BUDGET}
-    obj["budget"]["max_experiments"] = int(obj["budget"]["max_experiments"])
+    obj["budget"] = budget_of(obj.get("budget"), DEFAULT_BUDGET)
 
     stop = obj.get("stop") or {}
     target = stop.get("target")

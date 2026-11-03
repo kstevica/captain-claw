@@ -239,13 +239,14 @@ async def seal(run: dict, base_sha: str) -> None:
     await screen.snapshot(obj["subject"]["repo_path"], base_sha, d / "harness",
                           paths=snap.get("paths") or (), exclude=snap.get("exclude") or ())
     hold = d / "holdout.json"
-    shutil.copyfile(obj["holdout"]["file"], hold)
-    os.chmod(hold, 0o600)
     strings: dict[str, str] = {}
+    if obj["holdout"].get("file"):
+        shutil.copyfile(obj["holdout"]["file"], hold)
+        os.chmod(hold, 0o600)
+        strings.update(screen.case_strings(hold, "holdout"))
     dev_file = obj["metric"].get("dev_file") or ""
     if dev_file:
         strings.update(screen.case_strings(d / "harness" / dev_file, "dev"))
-    strings.update(screen.case_strings(hold, "holdout"))
     (d / "strings.json").write_text(json.dumps(strings, ensure_ascii=False), encoding="utf-8")
     (d / "sealed.json").write_text(json.dumps({"base_sha": base_sha, "at": time.time()}), encoding="utf-8")
 
@@ -554,6 +555,11 @@ REVIEW_QUESTIONS = {
                 "used or refurbished one, or another variant, unless the task allows it), on terms the task "
                 "allows, with the number being that thing's own number on the page? Fail anything the page "
                 "excerpt doesn't support."),
+    "document": ("Judge only three things, which a checklist grade can't see. Fail it if it states facts, figures or "
+                 "sources it made up or that its own text contradicts; if it pads itself to tick a checklist (keyword "
+                 "lists, empty or repeated headings, filler); or if it answers a different question than the brief "
+                 "asks. Gaps, thin parts and evidence it says is weak are NOT reasons to fail: the checklist grades "
+                 "already count them, and a document honest about what it couldn't find passes."),
 }
 
 
@@ -712,13 +718,21 @@ def parts_for(kind: str) -> dict[str, Any]:
     (``capacity``), its measurement queue (``queue``), the reviewer's material
     (``review``), whether it has a quick look on a slice (``slice``) and whether
     an idea beaten in its wave comes back on the new best (``carry``). ``code``
-    (Phase 2), ``practice`` (Phase 3a) or ``outcome`` (Phase 3b)."""
+    (Phase 2), ``practice`` (Phase 3a), ``outcome`` (Phase 3b) or ``document``
+    (writing and research)."""
     if kind == "practice":
         from captain_claw.flight_deck import captain_swarm_rules as rules
         return {"lane": rules.RulesLane(), "propose": rules.propose, "measure": rules.measure, "seal": rules.seal,
                 "screen": rules.screen, "branch": rules.no_branch, "start": rules.start_point,
                 "capacity": as_asked, "queue": rules.measure_queue, "review": rules.review_material,
                 "slice": True, "carry": True}
+    if kind == "document":
+        from captain_claw.flight_deck import captain_swarm_document as document
+        from captain_claw.flight_deck import captain_swarm_outcome as outcome
+        return {"lane": document.DocumentLane(), "propose": document.propose, "measure": document.measure,
+                "seal": document.seal, "screen": document.screen, "branch": outcome.no_branch,
+                "start": document.start_point, "capacity": outcome.capacity, "queue": lambda run: None,
+                "review": document.review_material, "slice": False, "carry": False}
     if kind == "outcome":
         from captain_claw.flight_deck import captain_swarm_outcome as outcome
         return {"lane": outcome.BatLane(), "propose": outcome.propose, "measure": outcome.measure,
@@ -825,8 +839,9 @@ class Driver:
 
     def _limit_reason(self, run: dict) -> str:
         b = run["objective"]["budget"]
-        if run["spent_usd"] >= b["usd"]:
-            return f"the budget is spent (${run['spent_usd']:.2f} of ${b['usd']:.2f})"
+        spent = objective_mod.budget_spent(run)
+        if spent:
+            return spent
         if run["started_at"] and time.time() - run["started_at"] >= b["hours"] * 3600:
             return f"the time limit ({b['hours']:g} h) is up"
         return ""
@@ -1139,11 +1154,11 @@ class Driver:
 
     async def _start_lane(self, run: dict, exp: dict) -> None:
         # The budget left is shared by the wave's attempts, each with an equal part.
-        share = max(0.0, float(run["objective"]["budget"]["usd"]) - float(run["spent_usd"])) \
-            / max(1, len(wave_of(run.get("state") or {})))
+        left = objective_mod.tokens_left(run)
+        share = {} if left is None else {"token_share": left // max(1, len(wave_of(run.get("state") or {})))}
         try:
             brief = lane_brief(run, exp) if self.kind == "code" else ""
-            got = await self.lane.start(run, {**exp, "usd_share": share}, brief)
+            got = await self.lane.start(run, {**exp, **share}, brief)
         except Exception as exc:  # noqa: BLE001
             msg = str(getattr(exc, "detail", "") or exc)[:300]
             same = ((await self._run()).get("state") or {}).get("last_start_error") == msg

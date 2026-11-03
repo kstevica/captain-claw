@@ -11,6 +11,13 @@ addresses). Mail too new for that to be known yet is left out. The most
 recent weeks are held out: an attempt never sees them, and they decide
 whether a gain on the open part was real.
 
+The second is **calendar invitations** (:func:`build_calendar_invites`): past
+events on the owner's Google Calendar that someone else organized, each
+labelled by the owner's own answer — accepted is yes, declined is no. Ones
+left unanswered or tentative aren't a decision and are left out. The newest
+invitations are held out. It needs the calendar permission on the owner's
+Google connection.
+
 Sealed, per owner, in the deck's data dir — never in a repo, never in a lane::
 
     FD_DATA_DIR/captain_swarm/sealed/practice/<owner>/<set_id>/
@@ -36,7 +43,7 @@ import secrets
 import shutil
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +53,14 @@ from captain_claw.logging import get_logger
 log = get_logger(__name__)
 
 KIND_MAIL_TRIAGE = "mail_triage"
+KIND_CALENDAR = "calendar_invites"
+KINDS = {
+    KIND_MAIL_TRIAGE: {"title": "Inbox triage: did you reply?", "family": "mail-triage", "id": "mt"},
+    KIND_CALENDAR: {"title": "Calendar invitations: did you accept?", "family": "calendar-invites", "id": "ci"},
+}
+CALENDAR_API = "https://www.googleapis.com/calendar/v3"
+_EVENTS_CAP = 3000
+_DESC_CHARS = 1500
 
 _DAY_MS = 86_400_000
 _BODY_CHARS = 3000
@@ -323,6 +338,107 @@ async def build_mail_triage(fetch: Fetch, *, now_ms: int, window_days: int = 90,
             "window": {"from": _iso(start_ms), "to": _iso(end_ms), "holdout_from": _iso(end_ms - holdout_days * _DAY_MS)}}
 
 
+# ── reading Google Calendar ──────────────────────────────────────────
+
+
+def calendar_fetch(client: Any, token: str) -> Fetch:
+    """A :data:`Fetch` over the owner's Google Calendar (read-only calls)."""
+
+    async def fetch(path: str, params: Mapping[str, Any]) -> tuple[int, dict]:
+        try:
+            r = await client.get(f"{CALENDAR_API}{path}", params=dict(params),
+                                 headers={"Authorization": f"Bearer {token}"})
+            return r.status_code, (r.json() if r.content else {})
+        except Exception as exc:  # noqa: BLE001 — a failed read is a status, like Gmail's reader
+            return 0, {"error": str(exc)[:200]}
+    return fetch
+
+
+def _event_ms(value: Any) -> int:
+    """An event's time (``{"dateTime"}`` or ``{"date"}``, or an RFC 3339 string) in ms; 0 if unreadable."""
+    raw = value.get("dateTime") or value.get("date") if isinstance(value, Mapping) else value
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return 0
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=UTC)
+    return int(dt.timestamp() * 1000)
+
+
+def invite_case(event: Mapping[str, Any]) -> dict[str, Any] | None:
+    """One invitation the owner answered, as a case; None for anything else:
+    their own events, ones without guests, ones never or only tentatively answered."""
+    if (event.get("organizer") or {}).get("self") or event.get("status") == "cancelled":
+        return None
+    attendees = [a for a in event.get("attendees") or [] if isinstance(a, Mapping)]
+    me = next((a for a in attendees if a.get("self")), None)
+    answer = str((me or {}).get("responseStatus") or "")
+    if answer not in ("accepted", "declined"):
+        return None
+    start, end = _event_ms(event.get("start") or {}), _event_ms(event.get("end") or {})
+    asked = _event_ms(event.get("created")) or start
+    if not start or not asked:
+        return None
+    others = [str(a.get("displayName") or a.get("email") or "") for a in attendees if not a.get("self")]
+    organizer = event.get("organizer") or {}
+    return {
+        "id": str(event.get("id") or "")[:120], "received_ms": asked, "received": _iso(asked),
+        "title": str(event.get("summary") or "(no title)")[:300],
+        "organizer": (f"{organizer.get('displayName')} <{organizer.get('email')}>" if organizer.get("displayName")
+                      else str(organizer.get("email") or "(unknown)")),
+        "start": _iso(start), "duration_min": max(0, (end - start) // 60_000) if end else 0,
+        "all_day": "date" in (event.get("start") or {}) and "dateTime" not in (event.get("start") or {}),
+        "recurring": bool(event.get("recurringEventId")),
+        "guests": len(others), "others": [o for o in others if o][:8],
+        "location": str(event.get("location") or "")[:200],
+        "description": " ".join(str(event.get("description") or "").split())[:_DESC_CHARS],
+        "label": answer == "accepted",
+    }
+
+
+async def build_calendar_invites(fetch: Fetch, *, now_ms: int, window_days: int = 180, holdout_days: int = 30,
+                                 max_cases: int = 400,
+                                 progress: Callable[[str, int, int], None] | None = None) -> dict[str, Any]:
+    """Past invitations, each labelled by the owner's own answer; the newest held out."""
+    st, cal = await fetch("/calendars/primary", {})
+    if st in (401, 403):
+        raise RuntimeError("Your Google connection doesn't include the calendar: an admin turns on the calendar "
+                           "permission for Google, then you reconnect Google.")
+    if st != 200:
+        raise RuntimeError(f"Google Calendar didn't answer (HTTP {st}).")
+    own = str(cal.get("id") or "").lower()
+    params: dict[str, Any] = {"timeMin": _iso(now_ms - window_days * _DAY_MS), "timeMax": _iso(now_ms),
+                              "singleEvents": "true", "orderBy": "startTime", "maxResults": 250,
+                              "showDeleted": "false"}
+    events: list[dict] = []
+    while len(events) < _EVENTS_CAP:
+        st, data = await fetch("/calendars/primary/events", params)
+        if st != 200:
+            raise RuntimeError(f"Google Calendar wouldn't list the events (HTTP {st}).")
+        events += [e for e in data.get("items") or [] if isinstance(e, dict)]
+        if progress:
+            progress("listing", len(events), 0)
+        if not data.get("nextPageToken"):
+            break
+        params = {**params, "pageToken": data["nextPageToken"]}
+    skipped = {"own": 0, "not answered": 0}
+    # One case per series: the latest answer to a recurring meeting stands for it.
+    by_key: dict[str, dict] = {}
+    for e in events:
+        case = invite_case(e)
+        if case is None:
+            skipped["own" if (e.get("organizer") or {}).get("self") else "not answered"] += 1
+            continue
+        by_key[str(e.get("recurringEventId") or case["id"])] = case
+    cases = sorted(by_key.values(), key=lambda c: c["received_ms"])
+    cases = sample_evenly(cases, max_cases) if len(cases) > max_cases else cases
+    cut = now_ms - holdout_days * _DAY_MS
+    open_, hold = split_by_time(cases, cut)
+    return {"own": [own] if own else [], "open": open_, "holdout": hold, "skipped": skipped,
+            "window": {"from": _iso(now_ms - window_days * _DAY_MS), "to": _iso(now_ms), "holdout_from": _iso(cut)}}
+
+
 def _addr(header: str) -> str:
     m = re.search(r"<([^>]+)>", header or "")
     return (m.group(1) if m else (header or "").split(",")[0]).strip().strip('"').lower()
@@ -331,21 +447,24 @@ def _addr(header: str) -> str:
 # ── the store ────────────────────────────────────────────────────────
 
 
-def new_set_id() -> str:
-    return f"mt-{time.strftime('%Y%m%d')}-{secrets.token_hex(3)}"
+def new_set_id(kind: str = KIND_MAIL_TRIAGE) -> str:
+    return f"{KINDS[kind]['id']}-{time.strftime('%Y%m%d')}-{secrets.token_hex(3)}"
 
 
-def save_set(owner_id: str, set_id: str, built: dict[str, Any], params: dict[str, Any]) -> dict[str, Any]:
+def save_set(owner_id: str, set_id: str, built: dict[str, Any], params: dict[str, Any], *,
+             kind: str = KIND_MAIL_TRIAGE) -> dict[str, Any]:
     """Freeze *built* as practice set *set_id*; its meta."""
     d = set_dir(owner_id, set_id)
     for split in ("open", "holdout"):
         _write_private(d / f"{split}.jsonl",
                        "".join(json.dumps(c, ensure_ascii=False) + "\n" for c in built[split]))
     meta = {
-        "id": set_id, "kind": KIND_MAIL_TRIAGE, "state": "ready", "created": time.time(),
-        "title": "Inbox triage: did you reply?",
-        "source": {"gmail": built["own"][0] if built["own"] else "", "params": params, "window": built["window"]},
-        "label": f"you wrote in the thread within {params.get('reply_days', 3)} days",
+        "id": set_id, "kind": kind, "state": "ready", "created": time.time(),
+        "title": KINDS[kind]["title"],
+        "source": {"gmail" if kind == KIND_MAIL_TRIAGE else "calendar": built["own"][0] if built["own"] else "",
+                   "params": params, "window": built["window"]},
+        "label": (f"you wrote in the thread within {params.get('reply_days', 3)} days" if kind == KIND_MAIL_TRIAGE
+                  else "you accepted the invitation"),
         "open": _summary(built["open"]), "holdout": _summary(built["holdout"]),
         "skipped": built["skipped"],
     }
@@ -356,7 +475,8 @@ def save_set(owner_id: str, set_id: str, built: dict[str, Any], params: dict[str
 def mark(owner_id: str, set_id: str, **fields: Any) -> None:
     """Change a set's meta (its state while it is being built)."""
     d = set_dir(owner_id, set_id)
-    meta = _read_json(d / "meta.json") or {"id": set_id, "kind": KIND_MAIL_TRIAGE, "created": time.time()}
+    meta = _read_json(d / "meta.json") or {"id": set_id, "kind": fields.get("kind") or KIND_MAIL_TRIAGE,
+                                           "created": time.time()}
     meta.update(fields)
     write_json(d / "meta.json", meta)
 

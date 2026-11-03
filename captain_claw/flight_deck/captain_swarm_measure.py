@@ -7,7 +7,8 @@ measurement over the owner's mail never writes a draft, never replies and
 never learns from the cases.
 
 For inbox triage the question is whether the email needs the owner's own
-reply, answered YES or NO on the first line. Captain reads that word
+reply; for calendar invitations, whether the owner accepts (:func:`question_for`).
+Either is answered YES or NO on the first line. Captain reads that word
 (:func:`parse_yes_no`) and compares it with what the owner actually did
 (``captain_swarm_score.agreement``). Every case is asked *repeat* times, so
 the result carries its own noise: F1 per run, and their spread.
@@ -59,6 +60,37 @@ def triage_question(case: Mapping[str, Any], owner_name: str = "") -> str:
     )
 
 
+def invite_question(case: Mapping[str, Any], owner_name: str = "") -> str:
+    """The question one calendar invitation asks: accept, or not."""
+    who = owner_name.strip() or "the owner of this calendar"
+    when = case.get("start") or ""
+    if case.get("all_day"):
+        when += " (all day)"
+    elif case.get("duration_min"):
+        when += f", {case['duration_min']} minutes"
+    head = [f"Title: {case.get('title') or '(no title)'}", f"Organizer: {case.get('organizer') or '(unknown)'}",
+            f"When: {when}", f"Invited: {case.get('guests', 0)} other guest(s)"
+            + (f": {', '.join(case['others'])}" if case.get("others") else "")]
+    if case.get("recurring"):
+        head.append("It repeats.")
+    if case.get("location"):
+        head.append(f"Where: {case['location']}")
+    body = str(case.get("description") or "").strip() or "(no description)"
+    return (
+        f"{who} was invited to this calendar event. Decide whether {who} accepts it.\n\n"
+        + "\n".join(head) + "\n\n" + body + "\n\n"
+        + "Answer on the first line with exactly YES (they accept) or NO (they decline), "
+        + "then one short line on why."
+    )
+
+
+def question_for(kind: str) -> tuple[Callable[[Mapping[str, Any], str], str], str]:
+    """``(question, metric name)`` for a kind of practice set."""
+    if kind == "calendar_invites":
+        return invite_question, "f1_accepts"
+    return triage_question, "f1_needs_reply"
+
+
 def parse_yes_no(answer: str) -> bool | None:
     """The agent's decision: the first line's YES or NO; else a lone YES or NO
     in capitals early in the answer; else None (counted against it)."""
@@ -82,10 +114,12 @@ def pick_cases(cases: list[dict], limit: int) -> list[dict]:
 
 async def run_triage(cases: list[dict], *, ask: Ask, repeat: int = 3, owner_name: str = "",
                      progress: Callable[[int, int], None] | None = None,
-                     should_stop: Callable[[], bool] | None = None) -> dict[str, Any]:
+                     should_stop: Callable[[], bool] | None = None,
+                     kind: str = "mail_triage") -> dict[str, Any]:
     """Ask every case *repeat* times and score the answers against the
     owner's labels. ``stopped`` is True when *should_stop* ended it early;
-    the runs finished by then are still scored."""
+    the runs finished by then are still scored. *kind* picks the question."""
+    question, metric = question_for(kind)
     runs = max(1, int(repeat))
     total = runs * len(cases)
     rows = {c["id"]: {"id": c["id"], "label": bool(c.get("label")), "predicted": [], "seconds": [],
@@ -102,7 +136,7 @@ async def run_triage(cases: list[dict], *, ask: Ask, repeat: int = 3, owner_name
                 break
             started = time.monotonic()
             try:
-                got = await ask(triage_question(case, owner_name))
+                got = await ask(question(case, owner_name))
             except Exception as exc:  # noqa: BLE001 — one failed ask is a miss, not a crash
                 got = {"error": str(exc)}
             row = rows[case["id"]]
@@ -124,7 +158,7 @@ async def run_triage(cases: list[dict], *, ask: Ask, repeat: int = 3, owner_name
     seconds = [s for r in answered for s in r["seconds"]]
     tokens = [t for r in answered for t in r["tokens"]]
     return {
-        "metric": "f1_needs_reply",
+        "metric": metric,
         "value": round(f1.mean, 4),
         "f1": f1.to_dict(),
         "runs": per_run,

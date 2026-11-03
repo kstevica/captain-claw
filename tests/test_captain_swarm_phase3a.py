@@ -282,7 +282,7 @@ def client(env, monkeypatch):
 def test_routes_start_a_triage_run_without_a_shell(client):
     c, _ = client
     tpl = c.get("/fd/captain-swarm/templates").json()
-    assert tpl["templates"]["triage"]["sets"] == [{"id": "mt-1", "title": "Inbox triage: did you reply?", "open": 8, "holdout": 2}]
+    assert tpl["templates"]["triage"]["sets"] == [{"id": "mt-1", "title": "Inbox triage: did you reply?", "open": 8, "holdout": 2, "kind": "mail_triage"}]
     r = c.post("/fd/captain-swarm/runs", json={"template": "triage", "options": {"set_id": "mt-1", "agent": "helper", "cases": 8}})
     assert r.status_code == 200, r.text
     assert r.json()["kind"] == "practice" and "Ana" in r.json()["title"]
@@ -341,8 +341,8 @@ def test_answers_are_priced_on_the_agents_model_and_the_budget_stops_a_measureme
         await env.store.add_version(version_id="v_x", run_id="cs_r", content={"rules": []})
         got = await rules.measure(await env.store.get_run("cs_r"), "v_x", "dev")
         r = await env.store.get_run("cs_r")
-        # Nearly out of money: the next measurement stops itself after an answer or so.
-        obj = {**r["objective"], "budget": {**r["objective"]["budget"], "usd": r["spent_usd"] + 0.00001}}
+        # Nearly out of tokens: the next measurement stops itself after an answer or so.
+        obj = {**r["objective"], "budget": {**r["objective"]["budget"], "tokens": r["spent_tokens"] + 1}}
         await env.store.update_run("cs_r", objective=obj)
         calls.clear()
         stopped = await rules.measure(await env.store.get_run("cs_r"), "v_x", "dev")
@@ -360,4 +360,4 @@ def test_answers_are_priced_on_the_agents_model_and_the_budget_stops_a_measureme
     got, r, stopped = run(go())
     assert got["usd"] == pytest.approx(16 * 0.0003098, rel=1e-2) and r["spent_usd"] == pytest.approx(got["usd"])
     assert r["spent_tokens"] == 16 * 21000
-    assert stopped["value"] is None and "budget ran out" in stopped["error"] and len(calls) < 16
+    assert stopped["value"] is None and "token budget is used" in stopped["error"] and len(calls) < 16

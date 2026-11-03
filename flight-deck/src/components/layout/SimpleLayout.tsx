@@ -44,6 +44,7 @@ import {
   Pin,
   PinOff,
   Waypoints,
+  Target,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -73,6 +74,8 @@ import { takeTaskboardLink, useTaskboardStore } from '../../stores/taskboardStor
 import { TaskBoard } from '../taskboard/TaskBoard'
 import { CrewBoard } from '../crew/CrewBoard'
 import { useCrewAllowed, useCrewStore } from '../../stores/crewStore'
+import { useCaptainSwarmStore } from '../../stores/captainSwarmStore'
+import { CaptainSwarmPage } from '../../pages/CaptainSwarmPage'
 import { SharedFolders } from '../vfs/SharedFolders'
 import { DialogFullscreen } from '../library/dialogFullscreen'
 import { isManagedAgent } from '../../utils/managedAgents'
@@ -375,6 +378,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Crew: coding agents working for this user, when an admin approved it.
   const crewOpen = useCrewStore((s) => s.open)
   const closeCrew = useCrewStore((s) => s.close)
+  // Captain Swarm: many attempts at one task, documents and research, each checked by Captain.
+  const swarmOpen = useCaptainSwarmStore((s) => s.open)
+  const closeSwarm = useCaptainSwarmStore((s) => s.close)
   const taskboardCount = useTaskboardStore((s) => s.needsMe)
   // Shared folders: the files the agents keep together (vfs:<folder>/…).
   const [foldersOpen, setFoldersOpen] = useState(false)
@@ -817,7 +823,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     return !!a && a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
-  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || !!filesData
+  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen
+    || !!filesData
   const closePhoneOverlays = () => {
     closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null)
   }
@@ -1022,6 +1029,21 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       {crewOpen && (
         <KioskWideDialog label="Crew" phone={isMobile} onClose={closeCrew} roomy>
           <CrewBoard phone={isMobile} onClose={closeCrew} />
+        </KioskWideDialog>
+      )}
+      {swarmOpen && (
+        <KioskWideDialog label="Captain Swarm" phone={isMobile} onClose={closeSwarm} roomy>
+          <div className="flex h-full min-h-0 flex-col">
+            <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-3 py-2">
+              <span className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+                <Target className="h-4 w-4 text-amber-400" /> Captain Swarm
+              </span>
+              <button onClick={closeSwarm} aria-label="Close" className="rounded p-1 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-100">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="min-h-0 flex-1"><CaptainSwarmPage /></div>
+          </div>
         </KioskWideDialog>
       )}
       {dataOpen && (
@@ -1239,6 +1261,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
   const signedIn = authEnabled && authUser
   const crewAllowed = useCrewAllowed()
   const openCrew = useCrewStore((s) => s.openCrew)
+  const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
 
   // Closed without choosing: the focus goes back to the Settings button.
   const [opener] = useState(() => document.activeElement as HTMLElement | null)
@@ -1255,6 +1278,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
       items: [
         { icon: ListChecks, label: 'Taskboard', hint: 'Asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
         ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: () => { onClose(); openCrew() }, tone: 'teal' as const }] : []),
+        { icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: () => { onClose(); openSwarm() }, tone: 'amber' },
         { icon: AlarmClock, label: 'Scheduled tasks', hint: 'On a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
         { icon: Activity, label: 'Activity', hint: 'Every tool they used, and how it went', onSelect: onActivity, tone: 'emerald' },
       ],
@@ -1480,6 +1504,8 @@ const TILE_COLS: Record<number, string> = {
   4: 'grid-cols-[repeat(4,minmax(max-content,1fr))]',
   5: 'grid-cols-[repeat(5,minmax(max-content,1fr))]',
   6: 'grid-cols-[repeat(3,minmax(max-content,1fr))]',
+  7: 'grid-cols-[repeat(4,minmax(max-content,1fr))]',
+  8: 'grid-cols-[repeat(4,minmax(max-content,1fr))]',
 }
 
 /** The agent column's row of tools — the Taskboard (how many tasks need
@@ -1493,7 +1519,8 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
 }) {
   const crewAllowed = useCrewAllowed()
   const openCrew = useCrewStore((s) => s.openCrew)
-  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders, crewAllowed].filter(Boolean).length
+  const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
+  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders, crewAllowed, true].filter(Boolean).length
   return (
     <div className={`grid gap-0.5 border-t border-zinc-800 p-2 pb-0 ${TILE_COLS[n] ?? 'grid-cols-1'}`}>
       {onTaskboard && (
@@ -1527,6 +1554,10 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
           <span className="max-w-full truncate">Crew</span>
         </button>
       )}
+      <button onClick={openSwarm} className={toolTile} title="Captain Swarm — many tries at one task, document or research, each checked by Captain">
+        <Target className="h-[18px] w-[18px] text-amber-600 dark:text-amber-400" />
+        <span className="max-w-full truncate">Swarm</span>
+      </button>
       {onLibrary && (
         <button onClick={onLibrary} className={toolTile} title="File library — every file your agents made, summarised and searchable">
           <LibraryBig className="h-[18px] w-[18px] text-violet-600 dark:text-violet-400" />

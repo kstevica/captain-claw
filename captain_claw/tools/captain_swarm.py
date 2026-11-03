@@ -33,12 +33,17 @@ class CaptainSwarmTool(Tool):
         "only gains bigger than the noise that a reviewing model passes, and hands your owner the best result. "
         "A run you start WAITS for your owner's Go. Templates: 'mrav' (make Captain's "
         "small-model runtime pass more of its eval, each idea in its own git branch by a coding worker; "
-        "options: model, harness, budget_usd, budget_hours, budget_max_experiments, per_round, parallel); "
+        "options: model, harness, budget_tokens, budget_hours, budget_max_experiments, per_round, parallel); "
         "'triage' (improve an agent's email-triage rules against what the "
         "owner actually did, on a practice set from their mail; options: set_id, agent, cases, repeat, parallel); "
         "'outcome' (find the best result for one real task — offers, slots — in rehearsal: nothing is bought, "
         "sent or booked, Captain checks every result's page itself, and the owner carries the winner out once; "
-        "options: task, label, direction (min|max), max_value, must_include, budget_usd, parallel — up to 3). "
+        "options: task, label, direction (min|max), max_value, must_include, budget_tokens, attempt_tokens, "
+        "parallel — up to 3); "
+        "'document' (the best document for a brief — research with sources, or writing — each attempt in "
+        "rehearsal, graded against a checklist from the brief, every cited source opened by Captain; options: "
+        "task, audience, criteria (one per line), sources (1|0), words, budget_tokens, attempt_tokens, parallel). "
+        "Limits are in tokens, never dollars: '80M', '500k' or a number. "
         "Every template also takes 'family', the kind of task: runs of one family learn from each other. "
         "Actions: 'start' (template[, options]), 'status' (run_id), "
         "'get' (run_id — the ledger of attempts), 'list', 'cancel' (run_id)."
@@ -49,9 +54,10 @@ class CaptainSwarmTool(Tool):
         "properties": {
             "action": {"type": "string", "enum": ["start", "status", "get", "list", "cancel"],
                        "description": "propose a run, or follow / stop one."},
-            "template": {"type": "string", "enum": ["mrav", "triage", "outcome"], "description": "For 'start': what to improve."},
+            "template": {"type": "string", "enum": ["mrav", "triage", "outcome", "document"],
+                         "description": "For 'start': what to improve."},
             "options": {"type": "object", "description": "For 'start': the template's options, e.g. "
-                        '{"model": "gemma4:e2b", "harness": "claude", "budget_usd": 20, "budget_hours": 6}.'},
+                        '{"model": "gemma4:e2b", "harness": "claude", "budget_tokens": "100M", "budget_hours": 6}.'},
             "run_id": {"type": "string", "description": "For 'status', 'get' and 'cancel'."},
             "limit": {"type": "integer", "description": "How many runs ('list') or attempts ('get') to show."},
         },

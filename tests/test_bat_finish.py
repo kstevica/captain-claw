@@ -52,10 +52,11 @@ async def store(tmp_path):
     await s.close()
 
 
-async def _run(store, *, steps=None, cap=0.0, task="do the thing", owner="u1"):
+async def _run(store, *, steps=None, cap=0.0, task="do the thing", owner="u1", token_cap=0):
     rid = f"bat_{uuid.uuid4().hex[:8]}"
+    config = {"contract": [], **({"token_cap": token_cap} if token_cap else {})}
     await store.create_run(run_id=rid, owner_id=owner, title="t", task=task,
-                           config={"contract": []}, llm_usd_cap=cap, status="running")
+                           config=config, llm_usd_cap=cap, status="running")
     if steps:
         await store.seed_steps(rid, steps)
     return rid
@@ -419,6 +420,27 @@ async def test_a_turn_that_spends_past_the_cap_is_stopped_mid_turn(store):
     assert (await store.list_steps(rid))[0]["status"] == "pending"  # not left "running"
 
 
+async def test_a_turn_that_uses_more_tokens_than_the_cap_is_stopped_mid_turn(store):
+    """A cap in tokens (config.token_cap) — Captain Swarm's attempts — holds like a dollar one."""
+    rid = await _run(store, steps=[_step("a", 0)], token_cap=1_000_000)
+    started, ended = asyncio.Event(), []
+    runner = await _hanging_runner(started, ended)
+
+    async def poll(_store, run):
+        return bat_nested.live_usd(run["id"])
+
+    bat_loop.set_spend_watch(poll, None)
+    drive = asyncio.create_task(BatDriver(store, attempt_runner=runner).drive(rid))
+    await started.wait()
+    bat_nested.set_live(rid, "a", 0.0, 400_000)          # an unpriced model: no dollars, still tokens
+    await asyncio.sleep(0.05)
+    assert not drive.done()
+    bat_nested.set_live(rid, "a", 0.0, 1_200_000)
+    assert await asyncio.wait_for(drive, timeout=2) == "error"
+    run = await store.get_run(rid)
+    assert run["stopped_reason"] == "llm_token_cap_reached" and ended == ["a"]
+
+
 # ── runs a worker starts ──────────────────────────────────────────────
 
 def _fake_child(monkeypatch, states):
@@ -459,6 +481,14 @@ async def test_a_worker_of_a_spent_run_cannot_start_another(store):
     await store.bump_cost(rid, 1.0)
     assert "budget" in await bat_nested.refusal("u1", port=1234)
     assert await bat_nested.refusal("u1", port=4321) == ""  # not a Bat worker
+
+
+async def test_a_worker_of_a_run_out_of_tokens_cannot_start_another(store):
+    rid = await _run(store, token_cap=500_000)
+    bat_nested.worker_started(rid, "a", port=1234)
+    assert await bat_nested.refusal("u1", port=1234) == ""
+    await store.bump_cost(rid, 0.0, 500_000)
+    assert "500,000 tokens" in await bat_nested.refusal("u1", port=1234)
 
 
 async def test_a_childs_spend_counts_and_the_judge_waits_for_its_result(store, monkeypatch):

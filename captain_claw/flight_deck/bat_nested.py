@@ -37,8 +37,10 @@ KINDS = ("basna", "vatra", "code", "crew")
 # Who's working for which run, by what the start routes can see. In memory on
 # purpose: a worker doesn't outlive the deck that spawned it.
 _WORKERS: dict[str, tuple[str, str]] = {}
-# What a worker's current turn has spent so far, not yet in the run's total.
+# What a worker's current turn has spent so far, not yet in the run's total:
+# dollars, and tokens (a run can be capped in either).
 _LIVE: dict[tuple[str, str], float] = {}
+_LIVE_TOKENS: dict[tuple[str, str], int] = {}
 
 
 def worker_started(run_id: str, step_key: str, *, port: int = 0, slug: str = "") -> None:
@@ -52,18 +54,32 @@ def worker_ended(run_id: str, step_key: str, *, port: int = 0, slug: str = "") -
     _WORKERS.pop(f"port:{int(port)}", None)
     _WORKERS.pop(f"slug:{slug}", None)
     _LIVE.pop((run_id, step_key), None)
+    _LIVE_TOKENS.pop((run_id, step_key), None)
 
 
 def worker_of(*, port: int = 0, slug: str = "") -> tuple[str, str] | None:
     return (_WORKERS.get(f"slug:{slug}") if slug else None) or (_WORKERS.get(f"port:{int(port)}") if port else None)
 
 
-def set_live(run_id: str, step_key: str, usd: float) -> None:
+def set_live(run_id: str, step_key: str, usd: float, tokens: int = 0) -> None:
     _LIVE[(run_id, step_key)] = float(usd or 0.0)
+    _LIVE_TOKENS[(run_id, step_key)] = int(tokens or 0)
 
 
 def live_usd(run_id: str) -> float:
     return sum(v for (rid, _), v in _LIVE.items() if rid == run_id)
+
+
+def live_tokens(run_id: str) -> int:
+    return sum(v for (rid, _), v in _LIVE_TOKENS.items() if rid == run_id)
+
+
+def token_cap(run: dict) -> int:
+    """A run's cap in tokens (``config.token_cap``; 0 = none), beside its dollar cap."""
+    try:
+        return max(0, int((run.get("config") or {}).get("token_cap") or 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 async def refusal(owner: str, *, port: int = 0, slug: str = "") -> str:
@@ -80,6 +96,9 @@ async def refusal(owner: str, *, port: int = 0, slug: str = "") -> str:
     cap = float(run.get("llm_usd_cap") or 0.0)
     if cap > 0 and float(run.get("cumulative_usd") or 0.0) + live_usd(run["id"]) >= cap:
         return f"This Bat run has spent its LLM budget (${cap:.2f}), so it can't start another run."
+    tokens = token_cap(run)
+    if tokens and int(run.get("cumulative_tokens") or 0) + live_tokens(run["id"]) >= tokens:
+        return f"This Bat run has used its {tokens:,} tokens, so it can't start another run."
     return ""
 
 

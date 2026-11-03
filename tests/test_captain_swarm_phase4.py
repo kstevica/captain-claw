@@ -280,7 +280,7 @@ def make_objective(**lane):
             "holdout": {"run": "x {checkout}", "file": "/h"}, "guardrails": [], "noise": {"min_gain": 0.05},
             "lane": {"kind": "crew", "harness": "claude", "model": "", "model_source": None, "per_round": 3,
                      "parallel": 3, **lane},
-            "budget": {"usd": 50.0, "hours": 8.0, "max_experiments": 40},
+            "budget": {"tokens": 200_000_000, "hours": 8.0, "max_experiments": 40},
             "stop": {"target": None, "stall_rounds": 2, "remeasure_every": 50}}
 
 
@@ -452,16 +452,16 @@ def test_a_limit_stops_every_lane_of_the_wave(wave):
     loop.set_lane(lane)
     ns.ideas = [[idea("A"), idea("B"), idea("C")]]
     obj = make_objective()
-    obj["budget"]["usd"] = 0.25
+    obj["budget"]["tokens"] = 25
 
     async def go():
         await ns.new_run(obj)
         status = await ns.drive()
         return status, await ns.store.get_run(RID), await ns.store.list_experiments(RID)
     status, r, exps = run(go())
-    assert status == "stopped" and "budget is spent" in r["stopped_reason"]
+    assert status == "stopped" and "token budget is used" in r["stopped_reason"]
     assert sorted(lane.stopped) == ["c1", "c2", "c3"]
-    assert all(e["status"] == "failed" and e["verdict_reason"].startswith("stopped: the budget") for e in exps)
+    assert all(e["status"] == "failed" and e["verdict_reason"].startswith("stopped: the token budget") for e in exps)
 
 
 def test_cancel_stops_every_lane_of_the_wave(wave):
@@ -561,7 +561,7 @@ class FakeBat:
 def test_outcome_lanes_are_bat_slots_and_share_the_budget(monkeypatch):
     from captain_claw.flight_deck import bat_loop
     obj = outcome.normalize(outcome.outcome_template(task="Find the cheapest new paperback copy of The Book"))
-    r = {"id": RID, "owner_id": "u", "objective": obj, "spent_usd": 4.0}
+    r = {"id": RID, "owner_id": "u", "objective": obj, "spent_usd": 4.0, "spent_tokens": 44_000_000}
     bat = FakeBat(["running", "done", "waiting"])
     monkeypatch.setattr(bat_loop, "get_store", lambda: bat)
 
@@ -573,9 +573,12 @@ def test_outcome_lanes_are_bat_slots_and_share_the_budget(monkeypatch):
     assert run(outcome.capacity(r, 3)) == 0
     exp = {"id": "exp_aaaaaaaaaaaa", "round": 1, "n": 1, "hypothesis": "resellers", "why": "",
            "change": {"sites": ["berrybase.de"]}}
-    run(outcome.BatLane().start(r, {**exp, "usd_share": 1.5}, ""))
-    run(outcome.BatLane().start(r, {**exp, "usd_share": 9.0}, ""))
-    assert [c["llm_usd_cap"] for c in bat.created] == [1.5, 2.0]
+    run(outcome.BatLane().start(r, {**exp, "token_share": 3_000_000}, ""))
+    run(outcome.BatLane().start(r, {**exp, "token_share": 90_000_000}, ""))
+    run(outcome.BatLane().start(r, exp, ""))                                # no share: what the run has left
+    # Capped in tokens — its share or the most per attempt, whichever is less — never in dollars.
+    assert [c["config"]["token_cap"] for c in bat.created] == [3_000_000, 10_000_000, 6_000_000]
+    assert {c["llm_usd_cap"] for c in bat.created} == {0.0}
     assert "Mainly on: berrybase.de" in bat.created[0]["task"]
     assert bat.created[0]["config"]["rehearsal"] == f"{RID}:exp_aaaaaaaaaaaa"
 
