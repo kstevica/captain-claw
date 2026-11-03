@@ -3262,7 +3262,7 @@ async def _agent_code_run(owner: str, project: str, session_id: str, intent: str
     from captain_claw.flight_deck import line
     await line.post(owner, "run", f"Coding session {'finished' if ok else 'failed'}: {title}",
                     summary, bell_type="run" if ok else "run_error", ref_type="code",
-                    ref_id=f"{project}/{session_id}", trust="agent")
+                    ref_id=f"{project}/{session_id}", trust="agent", to_phones=False)
 
     await notify_source_agent(
         source_host=source_host, source_port=source_port, origin=origin,

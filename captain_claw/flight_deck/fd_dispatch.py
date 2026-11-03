@@ -461,9 +461,13 @@ def _nudge_delivery_mark(user_id: str, action: dict[str, Any]) -> dict[str, Any]
     delivery itself: it will push it (a bound, allowlisted number), or the
     owner turned nudges to WhatsApp off. The agent's mirror of the result is
     then not relayed again by the chat bridges (that was the second, plain
-    copy). With no number to push to, the mirror stays the one copy."""
+    copy). With no number to push to, the mirror stays the one copy. Any other
+    action: when the user's Line sends everything to a phone, its outcome goes
+    there from the Line (line.phones_take_results)."""
     if str(action.get("kind") or "") != "nudge":
-        return {}
+        from captain_claw.flight_deck.line import phones_take_results
+
+        return {"fd_delivers": True} if phones_take_results(user_id) else {}
     try:
         cfg = resolve_config(user_id)
         if not cfg.get("nudge_to_whatsapp", True) or _nudge_waids(cfg)[0]:

@@ -469,6 +469,29 @@ async def _mirror_automation_result(
     label = label[:1].upper() + label[1:]
     if task:
         label = f'Scheduled task "{task["name"]}"'
+    await _queue_result(server, ws, label, lane, text, fd_delivers=fd_delivers, task=task)
+
+
+LINE_LANE = "Line"
+
+
+async def mirror_line_item(server: Any, title: str, body: str, *, fd_delivers: bool = False) -> None:
+    """An item from the owner's Line, sent by Flight Deck to the one agent the
+    owner picked for it: into the main chat as a result card, kept as a lane
+    note — context the model reads as someone else's, never a turn."""
+    title = " ".join(str(title or "").replace("[", "(").replace("]", ")").split())[:200]
+    text = str(body or "").strip() or title
+    if not title or getattr(getattr(server, "agent", None), "session", None) is None:
+        return
+    await _queue_result(server, None, f"Line · {title}", LINE_LANE, text, fd_delivers=fd_delivers)
+
+
+async def _queue_result(
+    server: Any, ws: Any, label: str, lane: str, text: str, *, fd_delivers: bool = False,
+    task: dict | None = None,
+) -> None:
+    """Keep a result for the main chat and show it once lane A is idle."""
+    session = server.agent.session
     pending = session.metadata.setdefault(PENDING_RESULTS_KEY, [])
     pending.append({"label": label, "lane": lane, "text": text,
                     "at": datetime.now(UTC).isoformat(),

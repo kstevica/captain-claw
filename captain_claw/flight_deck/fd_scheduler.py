@@ -1421,6 +1421,8 @@ async def _to_line(job: dict[str, Any], status: str, result: str) -> None:
         bell_type="scheduled_task_error" if failed else "scheduled_task",
         source=line.agent_name(slug) if slug else ("A flow" if job.get("flow_id") else ""),
         needs_you=failed, ref_type="scheduled_task", ref_id=str(job.get("id") or ""), trust="agent",
+        # A result went out by the task's own delivery; a failure is news.
+        to_phones=failed,
     )
 
 

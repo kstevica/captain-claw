@@ -24,11 +24,24 @@ which hears the result: a scheduled task's run (fd_scheduler), an Autonomous
 Work action or a Taskboard hand-over ending on the ledger (``action_done``),
 a plan's step (plans). The agent's own chat keeps its copy as before. A run
 that answers somewhere else (WhatsApp, Telegram…) leaves a copy here too.
+
+Channels (``fan_out``): besides Flight Deck, each item can reach the user's
+WhatsApp and Telegram — each switched on by its old switch
+(``nudge_to_whatsapp`` / ``notify_telegram``), at a level: "everything", or
+"needs_you" (what waits for them or failed, and nudges) — and one agent's
+chat, as a card it keeps as context (never a turn). Fleet changes never leave
+the Line page. owner_notify rings the phones for nudges and proposals itself;
+their items only go on to the agent. A copy of something that already answered
+on a channel (a run, a scheduled task's own delivery) goes to no phone. In the
+user's quiet hours phones get nothing but nudges. The deck turns fan-out on at
+startup (``enable_fan_out``): a script or a test never sends.
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import json
 import logging
 import time
 from collections.abc import Awaitable, Callable
@@ -143,7 +156,7 @@ def retention_cutoff(now: datetime | None = None) -> str:
 async def post(
     user_id: str, kind: str, title: str, body: str = "", *, bell_type: str = "",
     source: str = "", needs_you: bool = False, ref_type: str = "", ref_id: str = "",
-    trust: str = "deck",
+    trust: str = "deck", to_phones: bool = True,
 ) -> str:
     """One item on ``user_id``'s Line; its id, "" when it couldn't be
     written. Never raises. (The bell's writers use ``db.add_notification``,
@@ -158,7 +171,7 @@ async def post(
         item_id = await db.add_line_item(
             _norm(user_id), kind if kind in KIND_LABELS else "deck", bell_type or kind,
             title[:TITLE_MAX], str(body or "").strip()[:BODY_MAX], source=source,
-            needs_you=needs_you, ref_type=ref_type, ref_id=ref_id, trust=trust,
+            needs_you=needs_you, ref_type=ref_type, ref_id=ref_id, trust=trust, to_phones=to_phones,
         )
         await maybe_prune(db)
         return item_id
@@ -240,6 +253,148 @@ async def action_done(row: dict[str, Any]) -> str:
         source=agent_name(str(row.get("target") or "")), needs_you=failed,
         ref_type="autonomy_result", ref_id=str(row.get("id") or ""), trust="agent",
     )
+
+
+# ── Channels ─────────────────────────────────────────────────────────
+
+LEVELS = ("everything", "needs_you", "off")
+_fan_out_on = False
+# Set while owner_notify writes an item whose phones it rings itself.
+phones_done: contextvars.ContextVar[bool] = contextvars.ContextVar("line_phones_done", default=False)
+_PHONE_BODY_MAX = 1500
+
+
+def enable_fan_out(on: bool = True) -> None:
+    """The deck's startup: items go out to the user's channels from now on."""
+    global _fan_out_on
+    _fan_out_on = on
+
+
+def levels(cfg: dict[str, Any]) -> dict[str, str]:
+    """The user's channels from their autonomy config: WhatsApp / Telegram
+    level ("off" while their switch is off), the agent and its level."""
+    def level(switch: bool, value: Any) -> str:
+        return "off" if not switch else (str(value) if value in ("everything", "needs_you") else "needs_you")
+
+    agent = str(cfg.get("line_agent") or "").strip()
+    agent_level = str(cfg.get("line_agent_level") or "everything")
+    return {
+        "whatsapp": level(bool(cfg.get("nudge_to_whatsapp", True)), cfg.get("line_whatsapp")),
+        "telegram": level(bool(cfg.get("notify_telegram", False)), cfg.get("line_telegram")),
+        "agent": agent,
+        "agent_level": agent_level if agent and agent_level in ("everything", "needs_you") else "off",
+    }
+
+
+def covers(level: str, kind: str, needs_you: bool) -> bool:
+    """Whether a channel at ``level`` gets an item of ``kind``."""
+    if kind == "fleet" or level == "off":
+        return False
+    return level == "everything" or needs_you or kind == "nudge"
+
+
+def phones_take_results(user_id: str) -> bool:
+    """Whether the user's phones get everything (results too) — then an agent's
+    mirror of a result isn't relayed by its chat bridges as well."""
+    try:
+        from captain_claw.flight_deck.autonomy import resolve_config
+
+        lv = levels(resolve_config(user_id))
+        return "everything" in (lv["whatsapp"], lv["telegram"])
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def phone_text(item: dict[str, Any]) -> str:
+    body = str(item.get("body") or "").strip()
+    if len(body) > _PHONE_BODY_MAX:
+        body = body[:_PHONE_BODY_MAX] + "…"
+    return f"{item.get('title') or ''}\n{body}".strip()
+
+
+def after_insert(user_id: str, item: dict[str, Any], *, to_phones: bool = True) -> None:
+    """A new item (db.add_line_item): on to the user's channels, once fan-out
+    is on. Reads :data:`phones_done` here, in the writer's context."""
+    if _fan_out_on:
+        rung = phones_done.get()
+        soon(fan_out, user_id, dict(item), to_phones and not rung, rung)
+
+
+async def fan_out(user_id: str, item: dict[str, Any], to_phones: bool = True,
+                  rung: bool = False) -> dict[str, Any]:
+    """Send one item to the channels that take it. What each did, None where
+    it didn't go; never raises. ``rung``: owner_notify rang its phones."""
+    out: dict[str, Any] = {"whatsapp": None, "telegram": None, "agent": None}
+    try:
+        from captain_claw.flight_deck.autonomy import get_store, resolve_config
+        from captain_claw.flight_deck.owner_notify import _quiet
+
+        cfg = resolve_config(user_id)
+        lv = levels(cfg)
+        kind, needs = str(item.get("kind") or ""), bool(item.get("needs_you"))
+        hushed = kind != "nudge" and _quiet(cfg)
+        store = get_store()
+        if to_phones and not hushed:
+            text = phone_text(item)
+            if covers(lv["whatsapp"], kind, needs):
+                from captain_claw.flight_deck.fd_dispatch import _nudge_waids
+                from captain_claw.flight_deck.whatsapp_bridge import push_to_waid
+
+                waids, _skipped = _nudge_waids(cfg)
+                sent = 0
+                for waid in waids:
+                    if await push_to_waid(waid, text):
+                        sent += 1
+                out["whatsapp"] = [sent, len(waids)]
+                if waids:
+                    store.log(user_id, "line → whatsapp", f"{item.get('title')} — {sent}/{len(waids)}")
+            if covers(lv["telegram"], kind, needs):
+                from captain_claw.flight_deck.fd_scheduler import _deliver_telegram_owner
+
+                res = await _deliver_telegram_owner(user_id, text)
+                out["telegram"] = bool(res.get("ok"))
+                store.log(user_id, "line → telegram" + ("" if res.get("ok") else " skipped"),
+                          str(item.get("title") or ""))
+        slug = lv["agent"]
+        if slug and covers(lv["agent_level"], kind, needs) and item.get("source") != agent_name(slug):
+            # A phone has it already: the agent's chat bridges don't relay it too.
+            phones = (rung or to_phones and not hushed) and (covers(lv["whatsapp"], kind, needs)
+                                                              or covers(lv["telegram"], kind, needs))
+            out["agent"] = await push_to_agent(slug, item, fd_delivers=phones)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("line fan-out for %s failed: %s", user_id, exc)
+    return out
+
+
+async def push_to_agent(slug: str, item: dict[str, Any], *, fd_delivers: bool = False) -> bool:
+    """One item into agent ``slug``'s chat (a ``line_item`` frame; the agent
+    keeps it as a card and as context, it runs no turn). An agent that isn't
+    running — asleep, stopped — isn't woken: False."""
+    import websockets
+
+    from captain_claw.flight_deck.fd_scheduler import resolve_agent_by_slug
+
+    host, port, auth = resolve_agent_by_slug(slug)
+    if not port:
+        return False
+    url = f"ws://{host}:{port}/ws" + (f"?token={auth}" if auth else "")
+    frame = {"type": "line_item", "title": str(item.get("title") or ""),
+             "body": str(item.get("body") or ""), "kind": str(item.get("kind") or ""),
+             **({"fd_delivers": True} if fd_delivers else {})}
+    try:
+        async with websockets.connect(url, open_timeout=5, close_timeout=3) as ws:
+            welcome = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+            if welcome.get("type") != "welcome":
+                return False
+            while True:  # the session's replay comes first
+                msg = json.loads(await asyncio.wait_for(ws.recv(), timeout=10))
+                if msg.get("type") == "replay_done":
+                    break
+            await ws.send(json.dumps(frame))
+        return True
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("line item to agent %s failed: %s", slug, exc)
+        return False
 
 
 async def maybe_prune(db: Any) -> int:

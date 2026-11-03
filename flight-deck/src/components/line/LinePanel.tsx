@@ -3,12 +3,13 @@ import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import {
   Bot, CheckCheck, CircleHelp, ClipboardCheck, Lightbulb, Loader2, Mail, MessageCircle, Network, Radio,
-  Receipt, Server, Share2, Waypoints, X, type LucideIcon,
+  Receipt, Server, Share2, SlidersHorizontal, Waypoints, X, type LucideIcon,
 } from 'lucide-react'
 import { fetchLine, LINE_PAGE, markAllLineRead, markLineRead, type LineItem } from '../../services/line'
 import { useLineStore } from '../../stores/lineStore'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
+import NotificationsConnection from '../connections/NotificationsConnection'
 
 const KIND_ICON: Record<string, LucideIcon> = {
   proposal: Lightbulb,
@@ -63,6 +64,8 @@ export function LinePanel({ onClose, large = false }: { onClose?: () => void; la
   const [more, setMore] = useState(false)
   const [error, setError] = useState('')
   const [open, setOpen] = useState<Set<string>>(new Set())
+  // Where the Line reaches you besides Flight Deck: the Notifications card, here.
+  const [channels, setChannels] = useState(false)
   const setCounts = useLineStore((s) => s.set)
   const counts = useLineStore()
   const key = filterKey(filter)
@@ -188,6 +191,12 @@ export function LinePanel({ onClose, large = false }: { onClose?: () => void; la
             Everything the deck and your agents said on their own. What needs you is in the bell too.
           </p>
         </div>
+        <button onClick={() => setChannels((v) => !v)} aria-expanded={channels}
+          className={`flex items-center gap-1 rounded px-2 py-1 text-[11px] hover:bg-zinc-800 hover:text-zinc-300 ${
+            channels ? 'text-violet-600 dark:text-violet-300' : 'text-zinc-500'}`}
+          title="Where your Line reaches you: WhatsApp, Telegram, devices, one agent's chat">
+          <SlidersHorizontal className="h-3.5 w-3.5" /><span className="hidden sm:inline">Channels</span>
+        </button>
         <button onClick={() => void readAll()} disabled={!counts.unread}
           className="flex items-center gap-1 rounded px-2 py-1 text-[11px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300 disabled:opacity-40"
           title="Mark everything read">
@@ -207,6 +216,11 @@ export function LinePanel({ onClose, large = false }: { onClose?: () => void; la
       </div>
 
       <div className="min-h-0 flex-1 overflow-y-auto">
+        {channels && (
+          <div className={large ? 'px-5 pt-3' : 'px-4 pt-3'}>
+            <NotificationsConnection kiosk open />
+          </div>
+        )}
         {loading && items.length === 0 ? (
           <div className="flex items-center justify-center gap-2 py-10 text-xs text-zinc-500">
             <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
