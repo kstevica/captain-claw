@@ -27,6 +27,7 @@ import { UsersPage } from './pages/UsersPage'
 import { CouncilPage } from './pages/CouncilPage'
 import { BasnaPage } from './pages/BasnaPage'
 import { BatPage } from './pages/BatPage'
+import { CaptainSwarmPage } from './pages/CaptainSwarmPage'
 import { CodePage } from './pages/CodePage'
 import { CrewBoard } from './components/crew/CrewBoard'
 import { DubinaPage } from './pages/DubinaPage'
@@ -399,6 +400,7 @@ function AppContent() {
       {view === 'council' && <CouncilPage />}
       {view === 'basna' && <BasnaPage />}
       {view === 'bat' && <BatPage />}
+      {view === 'captain-swarm' && <CaptainSwarmPage />}
       {view === 'payments' && <PaymentsPage />}
       {view === 'code' && <CodePage />}
       {view === 'crew' && <CrewBoard phone={isMobile} />}
