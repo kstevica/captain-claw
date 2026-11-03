@@ -400,11 +400,11 @@ async def test_a_waiting_proposal_stays_in_the_bell_past_its_page(store, tmp_pat
                                status="awaiting_approval")
         bell = await db.add_notification(ALICE, "autonomy_proposal", "Waiting for you", "Re-run",
                                          ref_type="autonomy_action", ref_id=act["id"])
-        await db._db.execute("UPDATE notifications SET created_at = ? WHERE id = ?",
+        await db._db.execute("UPDATE line_items SET created_at = ? WHERE id = ?",
                              ("2026-01-01T00:00:00+00:00", bell))
         await db._db.commit()
-        for i in range(5):
-            await db.add_notification(ALICE, "info", f"Notice {i}")
+        for i in range(5):  # the bell's own (it needs you), read: answered
+            await db.mark_notification_read(await db.add_notification(ALICE, "warning", f"Notice {i}"), ALICE)
         app = FastAPI()
         app.include_router(notification_routes.router)
         app.dependency_overrides[get_current_user] = lambda: {"id": ALICE}

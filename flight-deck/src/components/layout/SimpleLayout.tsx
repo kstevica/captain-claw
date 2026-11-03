@@ -43,6 +43,7 @@ import {
   FolderPlus,
   Pin,
   PinOff,
+  Waypoints,
 } from 'lucide-react'
 import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
@@ -95,6 +96,9 @@ import ConnectionsPage, { type TabId as ConnectionsTab } from '../../pages/Conne
 import { ProfilePage } from '../../pages/ProfilePage'
 import { OPEN_PROFILE_EVENT } from '../../utils/profileSources'
 import { NotificationBell } from '../common/NotificationCenter'
+import { LinePanel } from '../line/LinePanel'
+import { OPEN_LINE_EVENT } from '../../services/line'
+import { useLineStore } from '../../stores/lineStore'
 import { BrandMark } from '../common/BrandMark'
 import { KioskInfoDialog, type InfoAgent } from './KioskInfoDialog'
 import { KioskOnboardingDialog, type OnboardingAction } from './KioskOnboardingDialog'
@@ -283,6 +287,14 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const openConnections = (tab?: ConnectionsTab) => { setConnectionsTab(tab); setConnectionsOpen(true) }
   // Kiosk Profile dialog — the owner profile every agent of theirs receives.
   const [profileOpen, setProfileOpen] = useState(false)
+  // The Line: what the deck and the agents said on their own (its row above
+  // the agents, and the bell's link to it, open it).
+  const [lineOpen, setLineOpen] = useState(false)
+  useEffect(() => {
+    const open = () => setLineOpen(true)
+    window.addEventListener(OPEN_LINE_EVENT, open)
+    return () => window.removeEventListener(OPEN_LINE_EVENT, open)
+  }, [])
   // Kiosk Settings dialog — theme, connections, profile, refresh, sign-out.
   const [settingsOpen, setSettingsOpen] = useState(false)
   // "Your own AI keys": from Settings, or the plan bar when the day runs out.
@@ -1084,6 +1096,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       )}
       {locked && connectionsOpen && <KioskConnectionsDialog initialTab={connectionsTab} onClose={() => setConnectionsOpen(false)} />}
       {locked && profileOpen && <KioskProfileDialog onClose={() => setProfileOpen(false)} />}
+      {lineOpen && (
+        <KioskWideDialog label="Line" phone={isMobile} onClose={() => setLineOpen(false)}>
+          <LinePanel onClose={() => setLineOpen(false)} />
+        </KioskWideDialog>
+      )}
 
       {!locked && optionsAgent && optionsAgent.kind !== 'shared' && createPortal(
         <AgentConfigEditor
@@ -1372,6 +1389,43 @@ function KioskDialog({ label, widest = false, onClose, children }: {
 // first). Off a phone it can fill the window — the libraries and shared
 // folders put the switch in their header (FullscreenButton).
 
+/** The Line's row above the agents (or its button on the collapsed rail):
+ *  how many items are unread, and a mark while something waits for you. */
+function KioskLineRow({ rail = false }: { rail?: boolean }) {
+  const unread = useLineStore((s) => s.unread)
+  const waiting = useLineStore((s) => s.waiting)
+  const open = () => window.dispatchEvent(new Event(OPEN_LINE_EVENT))
+  const hint = `Line — everything the deck and your agents said on their own${unread ? ` (${unread} unread)` : ''}`
+  if (rail) {
+    return (
+      <button onClick={open} title={hint} aria-label="Open the Line"
+        className="relative rounded p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300">
+        <Waypoints className="h-4 w-4" />
+        {unread > 0 && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-violet-500" />}
+      </button>
+    )
+  }
+  return (
+    <button onClick={open} title={hint}
+      className="flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-zinc-300 transition-colors hover:bg-zinc-800/60">
+      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-violet-600/15 text-violet-500">
+        <Waypoints className="h-4 w-4" />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-medium">Line</span>
+        <span className="block truncate text-[11px] text-zinc-500">
+          {waiting ? `${waiting} waiting for you` : unread ? `${unread} new` : 'Everything said on its own'}
+        </span>
+      </span>
+      {unread > 0 && (
+        <span className="shrink-0 rounded-full bg-violet-600/20 px-1.5 text-[10px] font-semibold text-violet-600 dark:text-violet-300">
+          {unread > 99 ? '99+' : unread}
+        </span>
+      )}
+    </button>
+  )
+}
+
 function KioskWideDialog({ label, phone, widest = false, roomy = false, onClose, children }: {
   label: string; phone: boolean; widest?: boolean; roomy?: boolean; onClose: () => void; children: ReactNode
 }) {
@@ -1595,6 +1649,7 @@ function AgentsColumn({
           {/* Bell lives at the TOP so its downward dropdown isn't clipped by
               the h-screen overflow-hidden root when the rail is collapsed. */}
           <NotificationBell align="left" />
+          <KioskLineRow rail />
         </div>
         <div className="flex flex-1 flex-col items-center gap-1.5 overflow-y-auto py-2">
           {railSections.map((s) => {
@@ -1736,6 +1791,11 @@ function AgentsColumn({
             <ChevronLeft className="h-4 w-4" />
           </button>
         </div>
+      </div>
+
+      {/* The Line, pinned above the agents */}
+      <div className="px-2 pt-2">
+        <KioskLineRow />
       </div>
 
       {/* List header */}

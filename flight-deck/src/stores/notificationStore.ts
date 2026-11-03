@@ -50,7 +50,14 @@ export interface Notification {
   refId?: string
   createdAt: string
   read: boolean
+  /** The bell is the Line's Needs-you list: this waits for the user until
+   *  it is answered (a proposal, on the ledger) or read (anything else). */
+  needsYou?: boolean
+  resolved?: boolean
 }
+
+// Reading an item that needs the user answers it, unless it's answered elsewhere.
+const answeredByReading = (n: Notification) => !!n.needsYou && n.refType !== 'autonomy_action'
 
 interface NotificationStore {
   notifications: Notification[]
@@ -76,14 +83,15 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
   },
 
   markRead: (id) => {
-    const notifications = get().notifications.map((n) => n.id === id ? { ...n, read: true } : n)
+    const notifications = get().notifications.map((n) => n.id === id
+      ? { ...n, read: true, resolved: n.resolved || answeredByReading(n) } : n)
     const unreadCount = notifications.filter((n) => !n.read).length
     set({ notifications, unreadCount })
     if (isServerId(id)) void markNotificationRead(id)  // persist
   },
 
   markAllRead: () => {
-    const notifications = get().notifications.map((n) => ({ ...n, read: true }))
+    const notifications = get().notifications.map((n) => ({ ...n, read: true, resolved: n.resolved || answeredByReading(n) }))
     set({ notifications, unreadCount: 0 })
     void markAllNotificationsRead()  // persist
   },
@@ -111,6 +119,8 @@ export const useNotificationStore = create<NotificationStore>((set, get) => ({
       refId: s.ref_id || undefined,
       createdAt: s.created_at,
       read: !!s.read,
+      needsYou: s.needs_you,
+      resolved: s.resolved,
     }))
     // Keep local toasts (ephemeral), replace the server-sourced set.
     const localToasts = get().notifications.filter((n) => !isServerId(n.id))

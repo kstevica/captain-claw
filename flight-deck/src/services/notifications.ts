@@ -11,6 +11,9 @@ export interface ServerNotification {
   ref_id: string
   read: number
   created_at: string
+  /** The bell is the Line's Needs-you list: what still waits for an answer. */
+  needs_you?: boolean
+  resolved?: boolean
 }
 
 function authHeaders(): Record<string, string> {
@@ -20,7 +23,7 @@ function authHeaders(): Record<string, string> {
   return h
 }
 
-async function fdFetch(path: string, init?: RequestInit): Promise<Response> {
+export async function fdFetch(path: string, init?: RequestInit): Promise<Response> {
   let r = await fetch(path, { ...init, headers: { ...authHeaders(), ...(init?.headers || {}) }, credentials: 'include' })
   if (r.status === 401 && useAuthStore.getState().authEnabled) {
     const ok = await refreshAccessToken()

@@ -1066,6 +1066,33 @@ class FlightDeckDB:
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (user_id, agent_slug, chat_id)
             );
+            -- The Line (line.py): one timeline per user for everything the
+            -- deck says on its own. The bell is its Needs-you list; `type` is
+            -- the bell's word for an item, `kind` the Line's. `read_at` = seen,
+            -- `resolved_at` = answered (items that need the user). No user FK:
+            -- the 'local' bucket of a deck without sign-in has no users row.
+            CREATE TABLE IF NOT EXISTS line_items (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                kind        TEXT NOT NULL DEFAULT 'deck',
+                type        TEXT NOT NULL DEFAULT 'info',
+                title       TEXT NOT NULL DEFAULT '',
+                body        TEXT NOT NULL DEFAULT '',
+                source      TEXT NOT NULL DEFAULT '',
+                needs_you   INTEGER NOT NULL DEFAULT 0,
+                ref_type    TEXT NOT NULL DEFAULT '',
+                ref_id      TEXT NOT NULL DEFAULT '',
+                trust       TEXT NOT NULL DEFAULT 'deck',
+                read_at     TEXT NOT NULL DEFAULT '',
+                resolved_at TEXT NOT NULL DEFAULT '',
+                created_at  TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_line_items_user
+                ON line_items(user_id, created_at);
+            CREATE INDEX IF NOT EXISTS idx_line_items_needs
+                ON line_items(user_id, needs_you, resolved_at);
+            CREATE INDEX IF NOT EXISTS idx_line_items_ref
+                ON line_items(user_id, ref_type, ref_id);
         """)
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
@@ -1106,7 +1133,48 @@ class FlightDeckDB:
             " (SELECT MAX(s.created_at) FROM user_sessions s WHERE s.user_id = users.id)"
             " WHERE last_login_at = ''"
             " AND EXISTS (SELECT 1 FROM user_sessions s WHERE s.user_id = users.id)")
+        await self._copy_bell_into_line()
         await self._db.commit()
+
+    # The newest bell row the Line has taken in: a deck that ran an older
+    # build in between (a rollback) wrote bell rows the Line never saw.
+    _LINE_COPIED_KEY = "line_bell_copied_until"
+
+    async def _copy_bell_into_line(self) -> int:
+        """Bring bell rows the Line doesn't have into it, as items (the bell
+        reads the Line). Rows this build wrote are in both under one id, so
+        they're skipped. How many came in."""
+        from captain_claw.flight_deck.line import ANSWERED_REFS, classify, retention_cutoff
+
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT value FROM system_settings WHERE key = ?", (self._LINE_COPIED_KEY,)
+        ) as cur:
+            row = await cur.fetchone()
+        # The first time, everything; after that, nothing the Line has
+        # already cleared out as too old (it would come back).
+        since = max(row["value"], retention_cutoff()) if row else ""
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM notifications WHERE created_at > ? ORDER BY created_at", (since,))
+        items = []
+        for r in rows:
+            kind, needs_you, trust = classify(r["type"], r["ref_type"])
+            read_at = r["created_at"] if r["read"] else ""
+            # An answered-elsewhere item stays open until its answer is checked.
+            resolved = read_at if needs_you and r["ref_type"] not in ANSWERED_REFS else ""
+            items.append((r["id"], r["user_id"], kind, r["type"], r["title"], r["body"],
+                          int(needs_you), r["ref_type"], r["ref_id"], trust, read_at, resolved,
+                          r["created_at"]))
+        if items:
+            await self._db.executemany(
+                "INSERT OR IGNORE INTO line_items (id, user_id, kind, type, title, body, needs_you,"
+                " ref_type, ref_id, trust, read_at, resolved_at, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", items)
+            await self._db.execute(
+                "INSERT INTO system_settings (key, value, updated_at) VALUES (?, ?, ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                (self._LINE_COPIED_KEY, rows[-1]["created_at"], _utcnow()))
+        return len(items)
 
     # ── Users ────────────────────────────────────────────────────────
 
@@ -4430,15 +4498,159 @@ class FlightDeckDB:
         await self._db.commit()
         return cur.rowcount or 0
 
-    # ── Notifications (persistent in-app bell) ─────────────────────────
+    # ── The Line, and the bell as its Needs-you list (line.py) ─────────
+
+    async def add_line_item(
+        self, user_id: str, kind: str, type: str, title: str, body: str = "", *,
+        source: str = "", needs_you: bool = False, ref_type: str = "", ref_id: str = "",
+        trust: str = "deck", item_id: str = "",
+    ) -> str:
+        """Insert one Line item for `user_id`; returns its id."""
+        assert self._db is not None
+        iid = item_id or _uuid()
+        await self._db.execute(
+            "INSERT INTO line_items (id, user_id, kind, type, title, body, source, needs_you,"
+            " ref_type, ref_id, trust, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (iid, user_id, kind, type, title, body, source, int(bool(needs_you)),
+             ref_type, ref_id, trust, _utcnow()),
+        )
+        await self._db.commit()
+        return iid
+
+    async def list_line_items(
+        self, user_id: str, *, limit: int = 50, before: str = "", kinds: Iterable[str] = (),
+        needs_you: bool | None = None, unread_only: bool = False,
+    ) -> list[dict]:
+        """This user's Line, newest first; `before` = a created_at to page on."""
+        assert self._db is not None
+        q = "SELECT * FROM line_items WHERE user_id = ?"
+        args: list = [user_id]
+        if before:
+            q += " AND created_at < ?"
+            args.append(before)
+        ks = [k for k in kinds if k]
+        if ks:
+            q += f" AND kind IN ({','.join('?' * len(ks))})"
+            args.extend(ks)
+        if needs_you is not None:
+            q += " AND needs_you = ?"
+            args.append(int(needs_you))
+        if unread_only:
+            q += " AND read_at = ''"
+        q += " ORDER BY created_at DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 500)))
+        rows = await self._db.execute_fetchall(q, tuple(args))
+        return [dict(r) for r in rows]
+
+    async def list_unresolved_line_items(self, user_id: str, limit: int = 200) -> list[dict]:
+        """What still waits for this user, newest first, however old."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM line_items WHERE user_id = ? AND needs_you = 1 AND resolved_at = ''"
+            " ORDER BY created_at DESC LIMIT ?", (user_id, limit))
+        return [dict(r) for r in rows]
+
+    async def unresolved_line_refs(self, user_id: str, ref_type: str) -> list[str]:
+        """The ref ids of `ref_type` this user's still-waiting items are about."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT DISTINCT ref_id FROM line_items WHERE user_id = ? AND needs_you = 1"
+            " AND resolved_at = '' AND ref_type = ? AND ref_id != ''", (user_id, ref_type))
+        return [r["ref_id"] for r in rows]
+
+    async def resolve_line_items(self, user_id: str, ref_type: str, ref_ids: Iterable[str]) -> int:
+        """This user's items about `ref_ids` are answered. How many changed."""
+        assert self._db is not None
+        ids = [str(i) for i in ref_ids if i]
+        if not ids:
+            return 0
+        marks = ",".join("?" * len(ids))
+        cur = await self._db.execute(
+            f"UPDATE line_items SET resolved_at = ? WHERE user_id = ? AND ref_type = ?"
+            f" AND ref_id IN ({marks}) AND resolved_at = ''", (_utcnow(), user_id, ref_type, *ids))
+        await self._db.commit()
+        return int(cur.rowcount or 0)
+
+    async def count_unread_line_items(self, user_id: str, needs_you: bool | None = None) -> int:
+        assert self._db is not None
+        q = "SELECT COUNT(*) FROM line_items WHERE user_id = ? AND read_at = ''"
+        args: list = [user_id]
+        if needs_you is not None:
+            q += " AND needs_you = ?"
+            args.append(int(needs_you))
+        async with self._db.execute(q, tuple(args)) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+    # Reading an item that needs the user answers it, unless its answer is
+    # given elsewhere (line.ANSWERED_REFS: a proposal, on the ledger).
+    _READ_SET = (
+        "read_at = CASE WHEN read_at = '' THEN :now ELSE read_at END,"
+        " resolved_at = CASE WHEN needs_you = 1 AND resolved_at = '' AND ref_type != 'autonomy_action'"
+        " THEN :now ELSE resolved_at END"
+    )
+
+    async def mark_line_item_read(self, item_id: str, user_id: str) -> bool:
+        assert self._db is not None
+        cur = await self._db.execute(
+            f"UPDATE line_items SET {self._READ_SET} WHERE id = :id AND user_id = :uid",
+            {"now": _utcnow(), "id": item_id, "uid": user_id})
+        await self._db.execute(
+            "UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?", (item_id, user_id))
+        await self._db.commit()
+        return (cur.rowcount or 0) > 0
+
+    async def mark_all_line_items_read(self, user_id: str, needs_you: bool | None = None) -> int:
+        assert self._db is not None
+        q = f"UPDATE line_items SET {self._READ_SET} WHERE user_id = :uid AND read_at = ''"
+        params: dict = {"now": _utcnow(), "uid": user_id}
+        if needs_you is not None:
+            q += " AND needs_you = :needs"
+            params["needs"] = int(needs_you)
+        cur = await self._db.execute(q, params)
+        if needs_you is not False:
+            await self._db.execute(
+                "UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0", (user_id,))
+        await self._db.commit()
+        return int(cur.rowcount or 0)
+
+    async def prune_line_items(self, cutoff_iso: str) -> int:
+        """Drop items older than `cutoff_iso`, except what still waits."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "DELETE FROM line_items WHERE created_at < ? AND (needs_you = 0 OR resolved_at != '')",
+            (cutoff_iso,))
+        await self._db.commit()
+        return int(cur.rowcount or 0)
+
+    # ── Notifications (the bell): its old API, over the Line ────────────
+    #
+    # Every writer keeps calling add_notification; the item lands on the Line
+    # (kind and needs-you from line.classify). For one release it is also
+    # written to the old `notifications` table under the same id, so a deck
+    # rolled back to an older build still has its bell.
+
+    @staticmethod
+    def _bell_row(row: dict) -> dict:
+        return {
+            "id": row["id"], "user_id": row["user_id"], "type": row["type"],
+            "title": row["title"], "body": row["body"], "ref_type": row["ref_type"],
+            "ref_id": row["ref_id"], "read": 1 if row["read_at"] else 0,
+            "created_at": row["created_at"], "kind": row["kind"],
+            "needs_you": bool(row["needs_you"]), "resolved": bool(row["resolved_at"]),
+        }
 
     async def add_notification(
         self, user_id: str, type: str, title: str, body: str = "",
         ref_type: str = "", ref_id: str = "",
     ) -> str:
         """Insert one notification for `user_id`; returns its id."""
+        from captain_claw.flight_deck.line import classify
+
         assert self._db is not None
-        nid = _uuid()
+        kind, needs_you, trust = classify(type, ref_type)
+        nid = await self.add_line_item(user_id, kind, type, title, body, needs_you=needs_you,
+                                       ref_type=ref_type, ref_id=ref_id, trust=trust)
         await self._db.execute(
             "INSERT INTO notifications (id, user_id, type, title, body,"
             " ref_type, ref_id, read, created_at)"
@@ -4449,17 +4661,20 @@ class FlightDeckDB:
         return nid
 
     async def list_notifications(
-        self, user_id: str, limit: int = 50, unread_only: bool = False,
+        self, user_id: str, limit: int = 50, unread_only: bool = False, *,
+        needs_you: bool | None = None,
     ) -> list[dict]:
+        """This user's notifications, newest first. `needs_you=True` is the
+        bell: the items that need them — the newest `limit`, and every one
+        still waiting however old."""
         assert self._db is not None
-        q = "SELECT * FROM notifications WHERE user_id = ?"
-        args: list = [user_id]
-        if unread_only:
-            q += " AND read = 0"
-        q += " ORDER BY created_at DESC LIMIT ?"
-        args.append(limit)
-        rows = await self._db.execute_fetchall(q, tuple(args))
-        return [dict(r) for r in rows]
+        rows = await self.list_line_items(user_id, limit=limit, needs_you=needs_you, unread_only=unread_only)
+        if needs_you:
+            have = {r["id"] for r in rows}
+            rows += [r for r in await self.list_unresolved_line_items(user_id)
+                     if r["id"] not in have and not (unread_only and r["read_at"])]
+            rows.sort(key=lambda r: r["created_at"], reverse=True)
+        return [self._bell_row(r) for r in rows]
 
     async def list_notifications_by_ref(
         self, user_id: str, ref_type: str, ref_ids: Iterable[str],
@@ -4472,11 +4687,11 @@ class FlightDeckDB:
             return []
         marks = ",".join("?" * len(ids))
         rows = await self._db.execute_fetchall(
-            f"SELECT * FROM notifications WHERE user_id = ? AND ref_type = ? AND ref_id IN ({marks})"
+            f"SELECT * FROM line_items WHERE user_id = ? AND ref_type = ? AND ref_id IN ({marks})"
             " ORDER BY created_at DESC",
             (user_id, ref_type, *ids),
         )
-        return [dict(r) for r in rows]
+        return [self._bell_row(dict(r)) for r in rows]
 
     async def tell_notifications_plain(
         self, user_id: str, ref_type: str, ref_ids: Iterable[str], title: str,
@@ -4488,21 +4703,22 @@ class FlightDeckDB:
         if not ids:
             return 0
         marks = ",".join("?" * len(ids))
+        now = _utcnow()
         cur = await self._db.execute(
+            f"UPDATE line_items SET title = ?, body = '',"
+            f" read_at = CASE WHEN read_at = '' THEN ? ELSE read_at END"
+            f" WHERE user_id = ? AND ref_type = ? AND ref_id IN ({marks})",
+            (title, now, user_id, ref_type, *ids),
+        )
+        await self._db.execute(
             f"UPDATE notifications SET title = ?, body = '', read = 1 WHERE user_id = ? AND ref_type = ? AND ref_id IN ({marks})",
             (title, user_id, ref_type, *ids),
         )
         await self._db.commit()
         return int(cur.rowcount or 0)
 
-    async def count_unread_notifications(self, user_id: str) -> int:
-        assert self._db is not None
-        async with self._db.execute(
-            "SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read = 0",
-            (user_id,),
-        ) as cur:
-            row = await cur.fetchone()
-            return int(row[0]) if row else 0
+    async def count_unread_notifications(self, user_id: str, *, needs_you: bool | None = None) -> int:
+        return await self.count_unread_line_items(user_id, needs_you=needs_you)
 
     async def count_notifications_since(
         self, user_id: str, since_iso: str, types: Iterable[str] | str = (), *,
@@ -4512,7 +4728,7 @@ class FlightDeckDB:
         optionally only of `types` and with this `ref_type` / `ref_id`. For
         per-day bell caps and per-reason dedupe that survive a restart."""
         assert self._db is not None
-        q = "SELECT COUNT(*) FROM notifications WHERE user_id = ? AND created_at >= ?"
+        q = "SELECT COUNT(*) FROM line_items WHERE user_id = ? AND created_at >= ?"
         args: list = [user_id, since_iso or ""]
         kinds = [t for t in ([types] if isinstance(types, str) else types) if t]
         if kinds:
@@ -4529,22 +4745,10 @@ class FlightDeckDB:
             return int(row[0]) if row else 0
 
     async def mark_notification_read(self, notif_id: str, user_id: str) -> bool:
-        assert self._db is not None
-        async with self._db.execute(
-            "UPDATE notifications SET read = 1 WHERE id = ? AND user_id = ?",
-            (notif_id, user_id),
-        ) as cur:
-            await self._db.commit()
-            return (cur.rowcount or 0) > 0
+        return await self.mark_line_item_read(notif_id, user_id)
 
-    async def mark_all_notifications_read(self, user_id: str) -> int:
-        assert self._db is not None
-        async with self._db.execute(
-            "UPDATE notifications SET read = 1 WHERE user_id = ? AND read = 0",
-            (user_id,),
-        ) as cur:
-            await self._db.commit()
-            return cur.rowcount or 0
+    async def mark_all_notifications_read(self, user_id: str, *, needs_you: bool | None = None) -> int:
+        return await self.mark_all_line_items_read(user_id, needs_you=needs_you)
 
     # ── Gmail sends (audit for /fd/google/gmail/send) ─────────────────
 

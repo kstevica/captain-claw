@@ -15,6 +15,7 @@ goes to every channel the user switched on in their autonomy config:
 
 And always the bell — Flight Deck's own notifications, in the full view and
 the kiosk alike: where the text is read, and a proposal approved or rejected.
+The bell is the user's Line's Needs-you list (line.py); a nudge is on the Line.
 
 During the user's quiet hours a proposal rings no phone: it goes to the bell
 and, silently, to the devices' count (it can wait for the morning — the arbiter
@@ -301,22 +302,6 @@ async def bell_backfill(user_id: str) -> int:
     except Exception as exc:  # noqa: BLE001
         _log.debug("bell backfill for %s failed: %s", user_id, exc)
         return 0
-
-
-async def waiting_bells(user_id: str, have: set[str], *, unread_only: bool = False) -> list[dict[str, Any]]:
-    """The bell notifications of proposals still waiting for this user that
-    aren't in `have` (notification ids): older than the bell's page, yet
-    still to be answered there. Never raises."""
-    try:
-        from captain_claw.flight_deck.auth import get_db
-
-        aids = [str(a.get("id") or "") for a in
-                get_store().list_actions(user_id, status="awaiting_approval", limit=200)]
-        rows = await get_db().list_notifications_by_ref(user_id, BELL_REF, aids)
-        return [r for r in rows if r.get("id") not in have and not (unread_only and r.get("read"))]
-    except Exception as exc:  # noqa: BLE001
-        _log.debug("waiting bells for %s failed: %s", user_id, exc)
-        return []
 
 
 def waiting_may_have_changed(user_id: str) -> None:
