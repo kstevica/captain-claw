@@ -45,6 +45,8 @@ import { SchedulerPage } from './pages/SchedulerPage'
 import { FlowsPage } from './pages/FlowsPage'
 import { ObservatoryPage } from './pages/ObservatoryPage'
 import { AutonomousWorkPage } from './pages/AutonomousWorkPage'
+import { LinePage } from './pages/LinePage'
+import { useLineStore } from './stores/lineStore'
 import { VFSPage } from './pages/VFSPage'
 import { DeepMemoryPage } from './pages/DeepMemoryPage'
 import { AgentFoldersPage } from './pages/AgentFoldersPage'
@@ -292,8 +294,10 @@ function AppContent() {
   useEffect(() => {
     const { authEnabled, isAuthenticated } = useAuthStore.getState()
     if (authEnabled && !isAuthenticated) return  // wait until logged in
-    hydrateNotifications()
-    const interval = setInterval(() => { hydrateNotifications() }, 30000)
+    // The Line's badge rides along.
+    const poll = () => { hydrateNotifications(); void useLineStore.getState().refresh() }
+    poll()
+    const interval = setInterval(poll, 30000)
     return () => clearInterval(interval)
   }, [hydrateNotifications])
 
@@ -385,6 +389,7 @@ function AppContent() {
       {view === 'flows' && <FlowsPage />}
       {view === 'observatory' && <ObservatoryPage />}
       {view === 'autonomous-work' && <AutonomousWorkPage />}
+      {view === 'line' && <LinePage />}
       {view === 'skills' && <SkillsPage />}
       {view === 'games' && <GamesPage />}
       {view === 'spawner' && <SpawnerPage />}
