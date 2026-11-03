@@ -8,6 +8,8 @@ items past the retention go, unless they still wait."""
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -258,3 +260,99 @@ async def test_a_fleet_change_lands_on_the_owners_line(db, monkeypatch):
     assert items[1]["body"] == "Port 24100. No other agent running."
     # Never the bell.
     assert await db.list_notifications(ALICE, needs_you=True) == []
+
+
+# ── P1: what agents did on their own, heard by the deck ───────────────
+
+async def _settle() -> None:
+    """The items the ledger handed to the loop, written."""
+    await asyncio.gather(*[t for t in asyncio.all_tasks()
+                           if getattr(t.get_coro(), "__name__", "") == "action_done"])
+
+
+async def test_a_scheduled_run_lands_on_the_line(db, tmp_path, monkeypatch):
+    from captain_claw.flight_deck import fd_scheduler as sched
+
+    store = sched.SchedulerStore(db_path=tmp_path / "scheduler.db")
+    monkeypatch.setattr(sched, "_STORE", store)
+    monkeypatch.setattr(line, "agent_name", lambda slug: {"mira": "Mira"}.get(slug, slug))
+    fields = {"schedule": "daily 08:00", "agent_slug": "mira", "prompt": "Brief me",
+              "delivery_kind": "agent", "delivery": {"chat": True}}
+    brief = store.create(owner_id=ALICE, name="Morning brief", **fields)
+    sweep = store.create(owner_id=ALICE, name="Inbox sweep", **fields)
+    quiet = store.create(owner_id=ALICE, name="Quiet one", **fields)
+    outcomes = {brief["id"]: ("ok", "Three meetings today."),
+                sweep["id"]: ("error:no-reply", "agent produced no reply within timeout"),
+                quiet["id"]: ("skipped:quiet", "")}
+
+    async def fake(job, force=False):
+        return outcomes[job["id"]]
+
+    monkeypatch.setattr(sched, "execute_job", fake)
+    for job in (brief, sweep, quiet):
+        await sched.run_job(job, force=True)
+    items = {i["title"]: i for i in await db.list_line_items(ALICE)}
+    assert set(items) == {'Scheduled task "Morning brief"', 'Scheduled task "Inbox sweep" failed'}
+    ok, bad = items['Scheduled task "Morning brief"'], items['Scheduled task "Inbox sweep" failed']
+    assert ok["kind"] == "result" and ok["body"] == "Three meetings today." and ok["source"] == "Mira"
+    assert ok["needs_you"] == 0 and ok["ref_type"] == "scheduled_task" and ok["ref_id"] == brief["id"]
+    assert bad["needs_you"] == 1 and bad["body"] == "Problem: no-reply\n\nagent produced no reply within timeout"
+    assert [n["title"] for n in await db.list_notifications(ALICE, needs_you=True)] == [bad["title"]]
+
+
+async def test_an_action_ending_on_the_ledger_lands_on_the_line_once(db, monkeypatch):
+    monkeypatch.setattr(line, "agent_name", lambda slug: "Mira" if slug == "mira" else slug)
+    store = autonomy.get_store()
+    ran = store.add_action(ALICE, kind="run_prompt", title="Re-run the price check", status="dispatched",
+                           target="mira")
+    broke = store.add_action(ALICE, kind="tool_action", title="Draft a reply to Ana", status="dispatched")
+    nudge = store.add_action(ALICE, kind="nudge", title="Invoice due Friday", status="dispatched")
+    store.update_status(ran["id"], "done", outcome="success", outcome_note="Two prices moved.")
+    store.update_status(broke["id"], "done", outcome="fail", outcome_note="gmail said no")
+    store.update_status(nudge["id"], "done", outcome="success", outcome_note="delivered")
+    store.update_status(ran["id"], "done", outcome="success", outcome_note="again")   # once
+    waiting = store.add_action(ALICE, kind="run_prompt", title="Not yet", status="awaiting_approval")
+    store.update_status(waiting["id"], "rejected")                                      # not an outcome
+    await _settle()
+    rows = await db.list_line_items(ALICE)
+    assert sorted(i["title"] for i in rows) == ["Done: Re-run the price check", "Failed: Draft a reply to Ana"]
+    items = {i["title"]: i for i in rows}
+    done = items["Done: Re-run the price check"]
+    assert done["body"] == "Two prices moved." and done["source"] == "Mira" and done["needs_you"] == 0
+    assert done["ref_type"] == "autonomy_result" and done["ref_id"] == ran["id"] and done["trust"] == "agent"
+    assert items["Failed: Draft a reply to Ana"]["needs_you"] == 1
+
+
+def test_an_action_ending_off_the_loop_is_not_lost(monkeypatch):
+    """The Taskboard writes the ledger from a worker thread: the item goes to
+    the deck's loop."""
+    import threading
+
+    calls = []
+
+    async def fake_done(row):
+        calls.append(row["id"])
+
+    loop = asyncio.new_event_loop()
+    monkeypatch.setattr(line, "action_done", fake_done)
+    from captain_claw.flight_deck import taskboard_passive
+
+    monkeypatch.setattr(taskboard_passive, "_main_loop", lambda: loop)
+    t = threading.Thread(target=line.soon, args=(line.action_done, {"id": "a1"}))
+    t.start()
+    t.join()
+    loop.run_until_complete(asyncio.sleep(0.05))
+    loop.close()
+    assert calls == ["a1"]
+
+
+async def test_a_plan_step_lands_on_the_line(db, monkeypatch):
+    from captain_claw.flight_deck import plans
+
+    plan = {"id": "plan1", "goal": "Get the Q4 numbers to Ana"}
+    await plans._step_to_line(ALICE, plan, {"title": "Export the sheet", "result": "q4.xlsx saved"}, True)
+    await plans._step_to_line(ALICE, plan, {"title": "Email Ana", "result": "no Gmail"}, False)
+    done, failed = sorted(await db.list_line_items(ALICE), key=lambda i: i["title"])
+    assert done["title"] == "Plan step done: Export the sheet" and done["needs_you"] == 0
+    assert done["body"] == "q4.xlsx saved\n\nPlan: Get the Q4 numbers to Ana"
+    assert failed["title"] == "Plan step failed: Email Ana" and failed["needs_you"] == 1

@@ -1365,6 +1365,11 @@ async def _bat_on_finish(run: dict) -> None:
                 owner, "run" if ok else "run_error", run.get("title") or "Bat run",
                 summary, "bat", sid)
             return
+        # It answers on the channel it came from; the Line keeps a copy.
+        from captain_claw.flight_deck import line
+        await line.post(owner, "run", run.get("title") or "Bat run", summary,
+                        bell_type="run" if ok else "run_error", source=f"via {kind}",
+                        ref_type="bat", ref_id=sid, trust="agent")
         if address:
             from captain_claw.flight_deck import delivery_routes
             delivered = await delivery_routes.deliver_to_origin({"kind": kind, "address": address}, summary)

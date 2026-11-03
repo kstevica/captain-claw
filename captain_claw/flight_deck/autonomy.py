@@ -64,6 +64,15 @@ def _status_changed(user_id: str) -> None:
         pass
 
 
+def _action_done(row: dict[str, Any]) -> None:
+    """An action ended: its outcome goes on its user's Line (line.py)."""
+    try:
+        from captain_claw.flight_deck import line
+        line.soon(line.action_done, dict(row))
+    except Exception:  # noqa: BLE001 — the Line never breaks a write
+        pass
+
+
 def _db_path() -> Path:
     base = os.environ.get("FD_DATA_DIR", "").strip()
     if base:
@@ -495,6 +504,8 @@ class AutonomyStore:
         row = self.get_action(action_id)
         if row:
             _status_changed(str(row.get("user_id") or ""))
+            if status == "done":
+                _action_done(row)
         return row
 
     def count_since(self, user_id: str, iso_cutoff: str, *, exclude_source: str = "") -> int:

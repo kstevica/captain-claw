@@ -1398,7 +1398,30 @@ async def run_job(
             store.record_result(jid, status=status, result=result, last_run_at=time.time())
         if session_id and session_id != str(job.get("agent_session_id") or ""):
             store.set_session(jid, session_id)
+    if not status.startswith("skipped"):
+        await _to_line(job, status, result)
     return status, result, run_id
+
+
+async def _to_line(job: dict[str, Any], status: str, result: str) -> None:
+    """A run's result on its owner's Line (line.py); the agent's chat keeps
+    its own copy. A failed one — no reply, a delivery that didn't go — needs
+    them. Never raises."""
+    from captain_claw.flight_deck import line
+
+    failed = status.startswith(("error", "partial"))
+    problem = status.removeprefix("error:").strip()
+    body = str(result or "").strip()
+    if failed and problem and problem not in body:
+        body = f"Problem: {problem}" + (f"\n\n{body}" if body else "")
+    slug = str(job.get("agent_slug") or "")
+    await line.post(
+        str(job.get("owner_id") or ""), "result",
+        f'Scheduled task "{_task_title(job)}"' + (" failed" if failed else ""), body,
+        bell_type="scheduled_task_error" if failed else "scheduled_task",
+        source=line.agent_name(slug) if slug else ("A flow" if job.get("flow_id") else ""),
+        needs_you=failed, ref_type="scheduled_task", ref_id=str(job.get("id") or ""), trust="agent",
+    )
 
 
 async def _run_due_job(store: SchedulerStore, job: dict[str, Any]) -> None:
