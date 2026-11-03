@@ -1796,6 +1796,7 @@ from captain_claw.flight_deck import (
     agent_practice,
     agent_preset,
 )
+from captain_claw.flight_deck.captain_swarm_routes import router as captain_swarm_router
 from captain_claw.flight_deck.deck_update_routes import router as deck_update_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
@@ -1917,6 +1918,7 @@ app.include_router(agent_exam.router)
 app.include_router(agent_onboarding.router)
 app.include_router(agent_package.router)
 app.include_router(agent_practice.router)
+app.include_router(captain_swarm_router)
 app.include_router(system_router)
 app.include_router(deck_update_router)
 app.include_router(share_router)
