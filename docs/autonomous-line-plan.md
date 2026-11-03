@@ -4,9 +4,11 @@ Status: every decision below is made. **P0 is built** (#387): the store,
 `line.post`, the bell over the Line, the Line page (full view) and dialog
 (kiosk), fleet changes on the Line. **P1 is built** (#389): what agents did
 on their own reaches the Line from the deck, finished runs leave a copy, and
-agents no longer get the fleet notice. **P2 is built** (branch
-`feat/line-p2`): the `line` tool and the one-line count at the start of the
-owner's turns. P3–P4 are not. Users see it as
+agents no longer get the fleet notice. **P2 is built** (#390): the `line`
+tool and the one-line count at the start of the owner's turns. **P3 is built**
+(#392): the channels — WhatsApp and Telegram at a level, one agent's chat.
+**P4 is built** (branch `feat/line-p4`): asking that agent on the Line, a daily
+summary, and Approve / Reject on the Line itself. Every phase is built. Users see it as
 **Line**; the internal id is `line`.
 
 ## The idea in one paragraph
@@ -163,6 +165,36 @@ Migration: the autonomy switches `nudge_to_whatsapp`, `notify_waid`,
 values read once as defaults). Connections → Notifications becomes the line's
 channel card.
 
+**As built (P3):**
+- Settings live beside the old switches in the autonomy config: `line_whatsapp`
+  / `line_telegram` ("everything" / "needs_you", default "needs_you"),
+  `line_agent` (a slug) and `line_agent_level`. The old switch stays the master:
+  off is off, on uses the level — so the WhatsApp tab, which flips the switch,
+  can never disagree with the card. No migration step: an untouched user is at
+  "needs_you", which is what the switches always sent.
+- "Needs you" for a channel = what waits for the user or failed, **and
+  nudges** (a nudge's whole job is to reach them). Fleet changes go nowhere
+  but the Line page.
+- One fan-out (`line.fan_out`), from `db.add_line_item`, so bell writes and
+  `line.post` both go through it; the deck turns it on at startup
+  (`line.enable_fan_out`), so a script or a test never sends.
+- owner_notify still rings the phones for nudges and proposals itself (its
+  waids, quiet hours, logs, device beeps and the test button are unchanged);
+  it marks their items (`line.phones_done`) and the Line takes them on to the
+  agent only.
+- Copies that already answered somewhere don't go to phones (`to_phones=False`):
+  Basna / Vatra / Bat copies, coding sessions, a scheduled task's successful
+  result (its own delivery). Its failure does.
+- Quiet hours: phones get only nudges.
+- Agent channel: a `line_item` frame over the agent's WebSocket; the agent
+  keeps it as a lane note (`chat_handler.mirror_line_item`, label "Line · …",
+  lane "Line"), which the model reads as "another run's result, not your
+  reply". It skips the agent's own items and fleet changes, and never wakes a
+  sleeping agent. When a phone has the item too, `fd_delivers` stops the
+  agent's chat bridges relaying it again; autonomy and plan turns get
+  `fd_delivers` when the user's phones take everything.
+- The card: Connections → Notifications, and the Line's own "Channels" button.
+
 ### 4. Agent side
 
 1. **Tool `line`** (owner-only, read-only), actions:
@@ -245,11 +277,36 @@ inline Approve / Reject and "Hand to agent…" come later.)
 - **Settings**: the channel card — agent picker (with "None"), Telegram level,
   WhatsApp level, devices switch, quiet hours.
 
-### 6. Later: the line talks back
+### 6. The line talks back (built, P4)
 
 Typing in the line asks the chosen agent, which answers in the line with the
 `line` tool in hand. A morning digest is then just a scheduled task on that
 agent ("summarize the line since 08:00 yesterday, send to Telegram").
+
+**As built (P4):**
+- `POST /fd/line/ask`: the question goes on the Line as a `talk` item ("You
+  asked Mira"), then runs on the picked agent as a new automation kind,
+  `line`: its background lane and a copy in its chat (like a Taskboard
+  hand-over), the prefix "[From your owner, asked on their Line in Flight
+  Deck: this is their own question.]", email only when the words ask for it
+  (`mail_write: intent`). The answer comes back as "Mira answered" (or "Mira
+  couldn't answer" and why). Neither goes to a phone or back to that agent as
+  a card. A sleeping agent is woken for it (the user is waiting).
+- `POST /fd/line/summary`: one scheduled task per user, "Summary of your
+  Line", daily at the chosen time in the browser's zone, on the picked agent,
+  to its chat (and Telegram / email when ticked). Asked again, it's updated and
+  turned back on. Its result is on the Line like any scheduled task's.
+- The Line page: an ask box (or a pointer to Channels when no agent is
+  picked), Approve / Reject on waiting proposals (a Taskboard next step still
+  says to read it on its task first), and the summary row under Channels.
+
+**Hand to agent (after P4):** an opened item has "Hand to agent…": any of
+the user's agents, and a few words of theirs. `POST /fd/line/{id}/hand` runs
+it like an ask — the `line` kind, the words as the request (and all a mail
+write is judged on), the item quoted below them as information — and the
+hand-over and the answer land on the Line, linked to the item. In the kiosk the
+Line is reached from the row above the agents, the collapsed rail, and on a
+phone from the header button and a row above the agent list.
 
 ## Phases
 
@@ -258,8 +315,8 @@ agent ("summarize the line since 08:00 yesterday, send to Telegram").
 | P0 | `line.py` store + `post()` + routes + read-only page; the bell over the line (shim, read path, one-time copy, dual write for a release, `NotificationCenter` grouping); `owner_notify` and fleet changes also post (their phone sends still on) | FD + bundle |
 | P1 | agent results also → line (lane-A copy stays), posted by the deck; fleet injection off; run copies | FD |
 | P2 | `line` tool, cursors, awareness line | FD + agents |
-| P3 | channels: one agent, Telegram, WhatsApp with levels; migrate notify switches; old direct sends removed | FD + bundle |
-| P4 | talk in the line; digest | FD + agents |
+| P3 | channels: one agent, Telegram, WhatsApp with levels; settings beside the notify switches; owner_notify keeps nudges/proposals, the Line the rest | FD + bundle + agents |
+| P4 | talk in the line (`line` automation kind); daily summary; Approve / Reject on the Line | FD + bundle + agents |
 
 P0 and P3 must not overlap in a way that double-sends: until P3 lands, `post()`
 fans out to nothing but the line page and the bell, and the old phone paths

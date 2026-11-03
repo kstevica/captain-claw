@@ -1159,6 +1159,10 @@ async def lifespan(app: FastAPI):
         app.state.scheduler_stop = _sched_stop
         app.state.scheduler_task = asyncio.create_task(_sched_loop(_sched_stop))
         print("Flight Deck: scheduler started")
+    # ── The Line: new items go on to each user's channels (WhatsApp,
+    # Telegram, one agent) from now on (line.py). ──
+    from captain_claw.flight_deck import line as _line_mod
+    _line_mod.enable_fan_out()
     # ── Agent controller: idle process agents go to sleep, and wake 5 min
     # before a scheduled run or when something needs them (agent_idle.py).
     # Inert until an admin sets a time (Settings → Agents). ──

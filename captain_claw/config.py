@@ -1251,6 +1251,15 @@ class AutonomousWorkConfig(BaseModel):
     # show how many proposals wait (the text stays in Flight Deck). owner_notify.py.
     notify_telegram: bool = False
     notify_devices: bool = True
+    # How much of the user's Line (flight_deck/line.py) those two reach while
+    # switched on: "everything", or "needs_you" — what waits for them or failed,
+    # and nudges (the default, what the switches always sent). Off = the switch.
+    line_whatsapp: str = "needs_you"
+    line_telegram: str = "needs_you"
+    # One of the user's agents whose chat gets the Line too ("" = none), and how
+    # much of it ("everything" / "needs_you").
+    line_agent: str = ""
+    line_agent_level: str = "everything"
 
     # ── #5 Grounded verification — confirm a side effect actually landed ──
     # After a catalog action with a verify spec runs, read it back; if it's

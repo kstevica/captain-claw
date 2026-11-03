@@ -294,6 +294,15 @@ async def test_whatsapp_route(
 # Channel → its switch in the autonomy config (WhatsApp's predates the others).
 _NOTIFY_SWITCHES = {"whatsapp": "nudge_to_whatsapp", "telegram": "notify_telegram",
                     "devices": "notify_devices"}
+# How much of the Line each phone gets while its switch is on (line.levels).
+_LINE_LEVEL_KEYS = {"whatsapp": "line_whatsapp", "telegram": "line_telegram"}
+
+
+def _line_agents(uid: str) -> list[dict[str, str]]:
+    """The agents this user may pick for the Line's agent channel (line.py)."""
+    from captain_claw.flight_deck.line import user_agents
+
+    return user_agents(uid)
 _NOTIFY_KEYS = ("notify_telegram", "notify_devices")
 _last_notify_test_at: dict[str, float] = {}
 
@@ -304,16 +313,22 @@ def _notify_state(uid: str) -> dict[str, Any]:
     from captain_claw.flight_deck.fd_scheduler import _owner_telegram_chat
     from captain_claw.flight_deck.owner_notify import waiting_count
 
+    from captain_claw.flight_deck.line import levels
+
     cfg = resolve_config(uid)
+    lv = levels(cfg)
     wa = _whatsapp_state(uid)
     tg_linked = bool(_owner_telegram_chat(uid))
     devices = connected_devices(uid)
+    agents = _line_agents(uid)
+    picked = next((a for a in agents if a["slug"] == lv["agent"]), None)
     return {
         "autonomy_active": wa["autonomy_active"],
         "waiting": waiting_count(uid),
         "channels": {
             "whatsapp": {
                 "on": bool(cfg.get("nudge_to_whatsapp", True)),
+                "level": lv["whatsapp"],
                 "ready": bool(wa["bridge_configured"] and wa["recipients"]),
                 "detail": (", ".join(f"+{w}" for w in wa["recipients"]) if wa["recipients"]
                            else "WhatsApp isn't set up on this deck" if not wa["bridge_configured"]
@@ -321,6 +336,7 @@ def _notify_state(uid: str) -> dict[str, Any]:
             },
             "telegram": {
                 "on": bool(cfg.get("notify_telegram", False)),
+                "level": lv["telegram"],
                 "ready": tg_linked,
                 "detail": ("your chat with the deck's bot" if tg_linked
                            else "Telegram isn't linked — link it in Connections → Telegram"),
@@ -332,6 +348,13 @@ def _notify_state(uid: str) -> dict[str, Any]:
                 "detail": (f"{devices} connected now" if devices
                            else "none connected now — they hear it when they next connect"),
             },
+        },
+        # One agent whose chat gets the Line too (a card it keeps as context).
+        "agent": {
+            "slug": picked["slug"] if picked else "",
+            "name": picked["name"] if picked else "",
+            "level": lv["agent_level"] if picked else "off",
+            "options": agents,
         },
     }
 
@@ -350,8 +373,11 @@ async def put_notify_route(
     request: Request,
     _user: dict | None = Depends(get_optional_user),
 ):
-    """Switch channels on or off: ``{"whatsapp"|"telegram"|"devices": bool}``,
-    merged into the user's other overrides."""
+    """Set the channels, merged into the user's other overrides:
+    ``whatsapp`` / ``telegram`` — true / false (the switch), or how much of the
+    Line: "everything" / "needs_you" / "off"; ``devices`` — true / false;
+    ``agent`` — one of the user's agents ("" = none) and ``agent_level``
+    ("everything" / "needs_you")."""
     uid = _user_id(request)
     body = await request.json()
     if not isinstance(body, dict):
@@ -361,9 +387,26 @@ async def put_notify_route(
     for channel, key in _NOTIFY_SWITCHES.items():
         if channel not in body:
             continue
-        if not isinstance(body[channel], bool):
-            raise HTTPException(status_code=400, detail=f"{channel} must be true or false")
-        overrides[key] = body[channel]
+        value = body[channel]
+        if isinstance(value, bool):
+            overrides[key] = value
+        elif channel in _LINE_LEVEL_KEYS and value in ("everything", "needs_you", "off"):
+            overrides[key] = value != "off"
+            if value != "off":
+                overrides[_LINE_LEVEL_KEYS[channel]] = value
+        else:
+            raise HTTPException(status_code=400, detail=(
+                f"{channel} must be true or false" if channel == "devices"
+                else f"{channel} must be true, false, \"everything\", \"needs_you\" or \"off\""))
+    if "agent" in body:
+        slug = body["agent"]
+        if not isinstance(slug, str) or (slug and slug not in {a["slug"] for a in _line_agents(uid)}):
+            raise HTTPException(status_code=400, detail="agent must be one of your agents, or \"\"")
+        overrides["line_agent"] = slug
+    if "agent_level" in body:
+        if body["agent_level"] not in ("everything", "needs_you"):
+            raise HTTPException(status_code=400, detail='agent_level must be "everything" or "needs_you"')
+        overrides["line_agent_level"] = body["agent_level"]
     save_config(uid, overrides)
     if devices_were_on and body.get("devices") is False:
         from captain_claw.flight_deck.owner_notify import devices_switched_off

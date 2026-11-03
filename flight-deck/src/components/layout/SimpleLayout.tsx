@@ -1389,9 +1389,11 @@ function KioskDialog({ label, widest = false, onClose, children }: {
 // first). Off a phone it can fill the window — the libraries and shared
 // folders put the switch in their header (FullscreenButton).
 
-/** The Line's row above the agents (or its button on the collapsed rail):
- *  how many items are unread, and a mark while something waits for you. */
-function KioskLineRow({ rail = false }: { rail?: boolean }) {
+/** The Line's row above the agents (or its button on the collapsed rail, or a
+ *  phone's header): how many items are unread, and a mark while something waits. */
+function KioskLineRow({ rail = false, phone = false, buttonClass = '' }: {
+  rail?: boolean; phone?: boolean; buttonClass?: string
+}) {
   const unread = useLineStore((s) => s.unread)
   const waiting = useLineStore((s) => s.waiting)
   const open = () => window.dispatchEvent(new Event(OPEN_LINE_EVENT))
@@ -1399,9 +1401,30 @@ function KioskLineRow({ rail = false }: { rail?: boolean }) {
   if (rail) {
     return (
       <button onClick={open} title={hint} aria-label="Open the Line"
-        className="relative rounded p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300">
-        <Waypoints className="h-4 w-4" />
-        {unread > 0 && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-violet-500" />}
+        className={buttonClass ? `${buttonClass} relative` : 'relative rounded p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300'}>
+        <Waypoints className={buttonClass ? 'h-5 w-5 text-violet-600 dark:text-violet-400' : 'h-4 w-4'} />
+        {unread > 0 && <span className={`absolute rounded-full bg-violet-500 ${buttonClass ? 'right-1.5 top-2 h-2 w-2 ring-2 ring-zinc-950' : '-right-0.5 -top-0.5 h-2 w-2'}`} />}
+      </button>
+    )
+  }
+  if (phone) {
+    return (
+      <button onClick={open} title={hint}
+        className="mb-3 flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/60 px-3 py-2.5 text-left text-zinc-200 transition-colors active:bg-zinc-800">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-violet-600/15 text-violet-500">
+          <Waypoints className="h-5 w-5" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-base font-medium">Line</span>
+          <span className="block truncate text-xs text-zinc-500">
+            {waiting ? `${waiting} waiting for you` : unread ? `${unread} new` : 'Everything said on its own'}
+          </span>
+        </span>
+        {unread > 0 && (
+          <span className="shrink-0 rounded-full bg-violet-600/20 px-2 py-0.5 text-xs font-semibold text-violet-600 dark:text-violet-300">
+            {unread > 99 ? '99+' : unread}
+          </span>
+        )}
       </button>
     )
   }
@@ -2496,6 +2519,7 @@ function PhoneLayout({
           </button>
         )}
         <NotificationBell />
+        <KioskLineRow rail buttonClass={toolBtn} />
         {onTaskboard && (
           <button onClick={onTaskboard} className={`${toolBtn} relative`} aria-label="Taskboard" title="Taskboard">
             <ListChecks className="h-5 w-5 text-teal-600 dark:text-teal-400" />
@@ -2540,6 +2564,7 @@ function PhoneLayout({
       </header>
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3">
+        <KioskLineRow phone />
         <div className="mb-2 flex h-8 items-center justify-between px-1">
           <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">Agents ({agents.length})</span>
           {agents.length > 1 && (

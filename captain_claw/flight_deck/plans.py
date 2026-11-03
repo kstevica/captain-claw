@@ -288,9 +288,17 @@ async def _run_step(
               else f"[Plan task] {step.get('title')}")
     res = await _dispatch_one(
         int(agent.get("port") or 0), str(agent.get("auth", "")), prompt, 180.0,
-        automation={"kind": "plan", "job_text": str(job_text or "")[:4000], "mail_write": "intent"},
+        automation={"kind": "plan", "job_text": str(job_text or "")[:4000], "mail_write": "intent",
+                    # The step's result reaches the user's phones from the Line.
+                    **({"fd_delivers": True} if _phones_take_results(user_id) else {})},
     )
     return {"ok": bool(res.get("ok")), "content": str(res.get("output") or "")[:500], "reverse": None}
+
+
+def _phones_take_results(user_id: str) -> bool:
+    from captain_claw.flight_deck.line import phones_take_results
+
+    return phones_take_results(user_id)
 
 
 async def _step_to_line(user_id: str, plan: dict[str, Any], step: dict[str, Any], ok: bool) -> None:

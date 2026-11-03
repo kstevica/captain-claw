@@ -40,6 +40,7 @@ KIND_WORDS: dict[str, tuple[str, str]] = {
     "fleet": ("fleet change", "fleet changes"),
     "share": ("share", "shares"),
     "deck": ("deck notice", "deck notices"),
+    "talk": ("question asked on the Line", "questions asked on the Line"),
 }
 
 

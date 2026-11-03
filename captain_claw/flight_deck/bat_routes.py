@@ -1383,7 +1383,7 @@ async def _bat_on_finish(run: dict) -> None:
         from captain_claw.flight_deck import line
         await line.post(owner, "run", run.get("title") or "Bat run", summary,
                         bell_type="run" if ok else "run_error", source=f"via {kind}",
-                        ref_type="bat", ref_id=sid, trust="agent")
+                        ref_type="bat", ref_id=sid, trust="agent", to_phones=False)
         if address:
             from captain_claw.flight_deck import delivery_routes
             delivered = await delivery_routes.deliver_to_origin({"kind": kind, "address": address}, summary)

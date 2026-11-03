@@ -1,24 +1,42 @@
 import { useEffect, useState, type ComponentType, type ReactNode } from 'react'
 import { isAppShell } from '../../services/desktopShell'
-import { Bell, Loader2, Check, AlertCircle, ChevronDown, MessageCircle, Send, Watch } from 'lucide-react'
+import { Bell, Loader2, Check, AlertCircle, ChevronDown, MessageCircle, Send, Watch, Bot } from 'lucide-react'
 import { useAuthStore, refreshAccessToken } from '../../stores/authStore'
 import { useUIStore } from '../../stores/uiStore'
 
 // Mirrors captain_claw/flight_deck/autonomy_routes.py (/fd/autonomy/notify)
 type ChannelId = 'whatsapp' | 'telegram' | 'devices'
+// How much of the Line a channel gets (flight_deck/line.py levels).
+type Level = 'everything' | 'needs_you' | 'off'
 
 interface Channel {
   on: boolean
   ready: boolean
   detail: string
   connected?: number
+  /** WhatsApp and Telegram: how much of the Line. */
+  level?: Level
+}
+
+interface LineAgent {
+  slug: string
+  name: string
+  level: Level
+  options: { slug: string; name: string }[]
 }
 
 interface NotifyState {
   autonomy_active: boolean
   waiting: number
   channels: Record<ChannelId, Channel>
+  agent?: LineAgent
 }
+
+const LEVELS: { id: Level; label: string }[] = [
+  { id: 'off', label: 'Off' },
+  { id: 'needs_you', label: 'Needs you' },
+  { id: 'everything', label: 'Everything' },
+]
 
 // The WhatsApp card switches the same key: each tells the other to reload.
 export const NOTIFY_CHANGED = 'fd:notify-changed'
@@ -53,20 +71,21 @@ async function _detail(res: Response): Promise<string> {
 }
 
 const CHANNELS: { id: ChannelId; label: string; what: string; icon: ComponentType<{ className?: string }> }[] = [
-  { id: 'whatsapp', label: 'WhatsApp', what: 'the message, to your number', icon: MessageCircle },
-  { id: 'telegram', label: 'Telegram', what: "the message, to your chat with the deck's bot", icon: Send },
+  { id: 'whatsapp', label: 'WhatsApp', what: 'the item, to your number', icon: MessageCircle },
+  { id: 'telegram', label: 'Telegram', what: "the item, to your chat with the deck's bot", icon: Send },
   { id: 'devices', label: 'Devices', what: 'a beep, a banner and how many proposals wait', icon: Watch },
 ]
 
-// Where Autonomous Work's nudges, and proposals waiting for your approval,
-// reach you besides the agent's chat — a switch per channel.
+// Where your Line — what the deck and your agents said on their own — reaches
+// you besides Flight Deck: each phone at a level, devices, and one agent's chat.
 // `kiosk`: shown in the kiosk's Connections, which has no Autonomous Work page.
-export default function NotificationsConnection({ kiosk = false }: { kiosk?: boolean }) {
+// `open`: starts open (the Line's own Channels button).
+export default function NotificationsConnection({ kiosk = false, open = false }: { kiosk?: boolean; open?: boolean }) {
   const setView = useUIStore((s) => s.setView)
   const [state, setState] = useState<NotifyState | null>(null)
-  const [collapsed, setCollapsed] = useState(true)
+  const [collapsed, setCollapsed] = useState(!open)
   const [loading, setLoading] = useState(false)
-  const [saving, setSaving] = useState<ChannelId | null>(null)
+  const [saving, setSaving] = useState<ChannelId | 'agent' | null>(null)
   const [testing, setTesting] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -91,10 +110,10 @@ export default function NotificationsConnection({ kiosk = false }: { kiosk?: boo
     return () => window.removeEventListener(NOTIFY_CHANGED, reload)
   }, [])
 
-  const toggle = async (id: ChannelId, on: boolean) => {
+  const save = async (id: ChannelId | 'agent', body: Record<string, unknown>) => {
     setSaving(id); setError(null); setNotice(null)
     try {
-      const res = await api('/fd/autonomy/notify', { method: 'PUT', body: JSON.stringify({ [id]: on }) })
+      const res = await api('/fd/autonomy/notify', { method: 'PUT', body: JSON.stringify(body) })
       if (!res.ok) throw new Error(await _detail(res))
       setState(await res.json())
       window.dispatchEvent(new Event(NOTIFY_CHANGED))
@@ -126,7 +145,10 @@ export default function NotificationsConnection({ kiosk = false }: { kiosk?: boo
   }
 
   const pill = 'inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full border'
-  const onCount = state ? CHANNELS.filter((c) => state.channels[c.id].on).length : 0
+  const select = 'rounded-md border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-[11px] text-zinc-200 focus:border-violet-500/60 focus:outline-none disabled:opacity-50'
+  const onCount = state
+    ? CHANNELS.filter((c) => state.channels[c.id].on).length + (state.agent?.slug ? 1 : 0)
+    : 0
 
   let status: ReactNode
   if (!state && error && !loading) {
@@ -171,8 +193,8 @@ export default function NotificationsConnection({ kiosk = false }: { kiosk?: boo
             {status}
           </div>
           <div className="text-xs text-zinc-500 mt-0.5">
-            Where Autonomous Work's nudges, and proposals waiting for your approval, reach you
-            besides the agent's chat.
+            Where your Line — results, finished runs, proposals, nudges and what waits for you —
+            reaches you besides Flight Deck.
           </div>
         </div>
         <ChevronDown
@@ -184,7 +206,8 @@ export default function NotificationsConnection({ kiosk = false }: { kiosk?: boo
         <div className="px-5 py-4 space-y-4">
           {!state.autonomy_active && (
             <div className="rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
-              Autonomous Work isn't running for you, so nothing is sent yet.
+              Autonomous Work isn't running for you: no nudges or proposals. Everything else on
+              your Line still comes.
               {/* The desktop app and the kiosk have no Autonomous Work page to send you to. */}
               {!kiosk && !isAppShell() && (
                 <>
@@ -205,20 +228,35 @@ export default function NotificationsConnection({ kiosk = false }: { kiosk?: boo
           <div className="divide-y divide-zinc-800 rounded-md border border-zinc-800">
             {CHANNELS.map(({ id, label, what, icon: Icon }) => {
               const ch = state.channels[id]
+              // WhatsApp and Telegram take a level; devices are on or off.
+              const leveled = id !== 'devices' && ch.level !== undefined
               return (
                 <label key={id} className="flex items-start gap-3 px-3 py-2.5 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={ch.on}
-                    disabled={saving !== null}
-                    onChange={(e) => toggle(id, e.target.checked)}
-                    className="mt-0.5 h-3.5 w-3.5 accent-violet-600"
-                  />
+                  {!leveled && (
+                    <input
+                      type="checkbox"
+                      checked={ch.on}
+                      disabled={saving !== null}
+                      onChange={(e) => save(id, { [id]: e.target.checked })}
+                      className="mt-0.5 h-3.5 w-3.5 accent-violet-600"
+                    />
+                  )}
                   <Icon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400" />
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2 text-xs text-zinc-200">
                       {label}
                       {saving === id && <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />}
+                      {leveled && (
+                        <select
+                          value={ch.level}
+                          disabled={saving !== null}
+                          onChange={(e) => save(id, { [id]: e.target.value })}
+                          className={`ml-auto ${select}`}
+                          aria-label={`${label}: how much of the Line`}
+                        >
+                          {LEVELS.map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+                        </select>
+                      )}
                     </div>
                     <div className="text-[11px] text-zinc-500">{what}</div>
                     <div
@@ -233,12 +271,56 @@ export default function NotificationsConnection({ kiosk = false }: { kiosk?: boo
                 </label>
               )
             })}
+            {state.agent && (
+              <div className="flex items-start gap-3 px-3 py-2.5">
+                <Bot className="mt-0.5 h-3.5 w-3.5 shrink-0 text-zinc-400" />
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-zinc-200">
+                    One agent's chat
+                    {saving === 'agent' && <Loader2 className="h-3 w-3 animate-spin text-zinc-500" />}
+                    <span className="ml-auto flex items-center gap-1.5">
+                      <select
+                        value={state.agent.slug}
+                        disabled={saving !== null}
+                        onChange={(e) => save('agent', { agent: e.target.value })}
+                        className={`max-w-[10rem] ${select}`}
+                        aria-label="The agent whose chat gets the Line"
+                      >
+                        <option value="">None</option>
+                        {state.agent.options.map((a) => <option key={a.slug} value={a.slug}>{a.name}</option>)}
+                      </select>
+                      {state.agent.slug && (
+                        <select
+                          value={state.agent.level}
+                          disabled={saving !== null}
+                          onChange={(e) => save('agent', { agent_level: e.target.value })}
+                          className={select}
+                          aria-label="How much of the Line the agent gets"
+                        >
+                          {LEVELS.filter((l) => l.id !== 'off').map((l) => <option key={l.id} value={l.id}>{l.label}</option>)}
+                        </select>
+                      )}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-zinc-500">
+                    a card in its chat it keeps as context — ask it what happened; it never answers on its own
+                  </div>
+                  {state.agent.slug && (
+                    <div className="text-[11px] text-zinc-500">
+                      {state.agent.name}: only while it's running — an agent asleep reads the Line when it wakes
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           <p className="text-[11px] text-zinc-500">
-            Everything also lands in the bell (top left), where you read it and approve or reject
-            proposals. Devices: a sleeping one beeps when it next wakes; in quiet hours they show
-            the count without a beep. The WhatsApp number is set on the WhatsApp tab.
+            Needs you: what waits for you or failed, and nudges. Everything: all of it but fleet
+            changes, which stay on the Line. In quiet hours phones get only nudges. A run that
+            already answered on WhatsApp or Telegram, or a scheduled task's own delivery, isn't sent
+            twice. What needs you is also in the bell. Devices: a sleeping one beeps when it next
+            wakes. The WhatsApp number is set on the WhatsApp tab.
           </p>
 
           <div className="flex items-center gap-3">

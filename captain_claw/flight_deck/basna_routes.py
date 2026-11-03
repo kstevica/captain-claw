@@ -1204,7 +1204,7 @@ async def _run_and_notify(
 
         await line.post(owner, "run", f"Basna run {'finished' if ok else 'failed'}: {title}",
                         summary, bell_type="run" if ok else "run_error", source=f"via {_okind}",
-                        ref_type="basna", ref_id=session_id, trust="agent")
+                        ref_type="basna", ref_id=session_id, trust="agent", to_phones=False)
     kind = str(origin.get("kind") or "").strip().lower()
     address = str(origin.get("address") or "").strip()
     if kind and kind != "web" and address:
