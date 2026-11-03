@@ -300,6 +300,14 @@ agent ("summarize the line since 08:00 yesterday, send to Telegram").
   picked), Approve / Reject on waiting proposals (a Taskboard next step still
   says to read it on its task first), and the summary row under Channels.
 
+**Hand to agent (after P4):** an opened item has "Hand to agent…": any of
+the user's agents, and a few words of theirs. `POST /fd/line/{id}/hand` runs
+it like an ask — the `line` kind, the words as the request (and all a mail
+write is judged on), the item quoted below them as information — and the
+hand-over and the answer land on the Line, linked to the item. In the kiosk the
+Line is reached from the row above the agents, the collapsed rail, and on a
+phone from the header button and a row above the agent list.
+
 ## Phases
 
 | Phase | What | Restart |
