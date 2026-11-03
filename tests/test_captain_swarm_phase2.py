@@ -319,6 +319,10 @@ def make_objective(**over):
     return obj
 
 
+async def passes_review(run_, exp):
+    return {"ok": True, "reason": "a general change"}
+
+
 @pytest.fixture()
 def harness(tmp_path, monkeypatch):
     """A store, fake seams and a run factory; returns a namespace."""
@@ -361,6 +365,7 @@ def harness(tmp_path, monkeypatch):
     loop.set_proposer(propose_)
     loop.set_lane(ns.lane)
     loop.set_store(store)
+    loop.set_review(passes_review)
 
     async def new_run(objective=None, base="b" * 40):
         obj = objective or make_objective()
@@ -371,7 +376,7 @@ def harness(tmp_path, monkeypatch):
     ns.drive = lambda: loop.Driver(store, "cs_test").drive()
     yield ns
     for setter in (loop.set_measure, loop.set_seal, loop.set_screen, loop.set_branch, loop.set_proposer,
-                   loop.set_lane, loop.set_store):
+                   loop.set_lane, loop.set_store, loop.set_review):
         setter(None)
     run(store.close())
 

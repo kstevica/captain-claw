@@ -1,6 +1,6 @@
 # Captain Swarm — agents that get measurably better at real work
 
-**Status:** Phases 1–2 merged (measurement; the loop on code, proven live except a keep) · Phase 3a built (an agent's triage rules) · Phases 3b–7 not started · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
+**Status:** Phases 1–3b merged (measurement; the loop on code; an agent's triage rules; the rehearsal guard and one task's best outcome) · Phase 4 built (parallel lanes) · Phases 5–7 not started · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
 
 Captain Swarm is a new orchestration mode, a sibling of Bat, Basna, Vatra and Council. Agents reach
 it through the `captain_swarm` tool, the way they reach Bat through `bat`.
@@ -838,6 +838,117 @@ computer use and gets its own review.
 - **Shared plumbing:** `child_runs.py` extracted from `bat_nested.py`, with the budget counted
   across all lanes.
 - **Review:** the model reviewer on every champion candidate.
+
+**Phase 4 as built (2026-11-03): attempts at once.**
+- **Waves.** A round's ideas run in waves of up to `lane.parallel` attempts, all started together
+  from the same best. One lane is a wave of one, so a run with one lane works as Phases 2–3 did.
+  - **Lanes per kind:** each kind sets its own ceiling, all under `FD_CAPTAIN_SWARM_MAX_LANES` (4).
+    - **One-task attempts:** Bat's limit of 3 runs per owner, minus the owner's other Bat runs at
+      the start of each wave.
+    - **Code:** Crew's parallel grant for that owner.
+    - **Triage rules:** no limit of its own.
+
+    A request above the ceiling is cut to it, not refused. When no lane is free, the run waits.
+  - **Ideas per round:** never fewer than lanes.
+  - **The budget:** the attempts of one wave share what's left of it equally. A Bat attempt's own
+    cap is the smaller of that share and the per-attempt limit.
+- **One attempt per site and per account (§4.4).**
+  - **When planning:** an idea names the sites it will mainly use. Ideas that share a site go into
+    different waves (`FD_CAPTAIN_SWARM_PER_SITE`, 1).
+  - **While attempts run:** before a rehearsal worker's browser opens a page or signs in with
+    stored credentials, the guard asks Flight Deck (`/agent/site`).
+    - A site or account another attempt is using is refused, deck-wide, until that attempt ends or
+      leaves it alone for ten minutes.
+    - When Flight Deck can't be asked, the browser doesn't go there.
+    - Plain page reads (`web_fetch`) aren't held: they are what any visitor does.
+  - The holds live in memory, so a restart forgets them and the next look takes the site again.
+- **The measurement queue.**
+  - **Code:** command measurements queue deck-wide, one GPU (`FD_CAPTAIN_SWARM_MEASURE_PARALLEL`,
+    1).
+  - **Triage rules:** measurements queue per agent, since it answers one question at a time.
+  - **One-task attempts:** no queue, because they only read pages.
+  - **On the page:** what's waiting and what's being measured.
+- **Staged measurement.**
+  - **A quick look:** a wave of three or more triage-rule attempts first gets one on a third of the
+    open cases, asked once. Only the better half goes on to the full measurement.
+  - **Held-out:** only for the wave's winner, and for the next one only if the winner doesn't hold.
+  - **Not for code:** the Mrav eval has no slice, so code skips the quick look.
+  - **Not for one-task attempts:** checking a page is already cheap.
+- **One keeper per wave (§8).**
+  - **Who is kept:** of the attempts that beat the best by more than noise, the strongest that the
+    reviewer passes and the held-out cases confirm.
+  - **The others that beat it:** each comes back once, on top of the new best, for code and rules.
+    A one-task attempt doesn't, because there's nothing to build on.
+- **The model reviewer (§5.6).**
+  - **Who reviews:** Bat's panel choice reads every candidate before it may become the best: the
+    best model the workers don't run on.
+  - **What it reads, per kind:**
+    - **Code:** the diff, for gaming the eval.
+    - **Rules:** the new rules, for describing one particular email.
+    - **A one-task attempt:** the task and the page's own words around the number (a kit priced
+      like the board).
+  - **If it can't answer:** an unreadable answer is asked again once. After that the attempt
+    fails: no review is no pass.
+- **Stops and restarts.**
+  - **Stops:** a budget or time stop, a lane that can't start twice, and the owner's cancel all
+    stop every lane in the wave.
+  - **Restarts:** a restart resumes the wave where each attempt stood. A measurement it cut short
+    is run again. An attempt already measured waits for the wave's verdict.
+  - **Older runs:** a run from before waves (one `current` attempt) resumes as a wave of one.
+- **Not built: `child_runs.py`.** Each lane already reads its own child directly (a Crew task, a
+  Bat run), and the run's budget counts every lane. Bat's nested-run readers stay in
+  `bat_nested.py` until a lane needs them.
+- **The page:**
+  - an **At once** field on each start form, showing that kind's ceiling;
+  - a live panel for the wave: each attempt's step, its turn in the measurement queue, and the
+    sites or accounts it holds;
+  - the ledger: quick looks, sites, and attempts that came back.
+- **Tests:** 37 new, covering Phase 4 and the three fixes below. With Bat, confinement, the
+  tool-call register and every Captain Swarm phase, 663 pass.
+  - The older driver tests now set a reviewer that passes, since a reviewer now decides every keep.
+  - Phase 3b's driver test runs one lane, as it was written for.
+
+*Live (2026-11-03, a throwaway deck, Haiku 5.5 workers, Sonnet 5.5 reviewers): Phase 3b's task, three
+attempts at once.*
+- **The task:** "the lowest price for a new bare Raspberry Pi 5 8GB from an EU shop, in EUR", as in 3b.
+- **The wave:** three ideas, each on its own sites:
+  - official resellers (raspberrypi.com, farnell, rs-online);
+  - price-comparison sites (idealo, geizhals, kelkoo);
+  - German hobby shops (berrybase, conrad, reichelt).
+
+  All three started together, and each held only its own sites in its browser, released as its
+  lane ended.
+- **The result:**
+  - **Kept:** €189 at BerryBase. The reviewer read the page's own words ("Raspberry Pi 5, 8GB RAM",
+    article RPI5-8GB, 189,00 € incl. VAT) and passed it as the bare board's own price. A fresh look
+    held.
+  - **The others:** the hobby shops also found €189, and the price-comparison sites €198.74. Both
+    were discarded as beaten in the same wave.
+  - **Intents:** none.
+- **Against 3b:** the same result in **17 minutes instead of 37**, with 24.8M tokens against 20.8M
+  and $0.79 counted against $0.81. Both dollar figures are low for the same reason (the third fix
+  below). The done-when for Phase 4 ("the same results faster at no more $ per kept gain") holds on
+  this one task.
+- **Not seen live:** a refusal for a busy site. The planner kept the sites apart, so no attempt
+  asked for another's. The refusal path is covered by the tests.
+- **Three problems found and fixed live:**
+  - **Bat drove each run three times.** The three attempts kicked Bat's supervisor within
+    milliseconds of each other. Overlapping scans each saw the new runs as undriven, and Bat's lease
+    lets its own process claim a run again, so each run got three drivers: three plans, judges
+    ruling on steps that hadn't run, and every cap spent in under two minutes. Bat's and Captain
+    Swarm's supervisors now scan one at a time. Without the fix, the tests reproduce it: 9 drivers
+    for 3 Bat runs, and 2 for 1 Captain Swarm run.
+  - **A rehearsal couldn't list its own folders.** `vfs ls`, `tree` and `stat` were recorded as
+    intents, because the risk table counts all of `vfs` as a write. Those actions are now reads, for
+    every tool; `mkdir`, `mv` and `rm` are still writes.
+  - **A Bat step's dollars were dropped.** When the agent doesn't report which model answered, a
+    finished step was priced as unknown: "No price is known for claude-haiku-5-5", although the
+    table has it. The live watch already priced it on the worker's model, so the budget saw spend
+    during a step that the run's total then lost. A finished step is now priced on the worker's
+    model too. The 3b figure ($0.81 for 20.8M tokens) was low for this reason.
+- **Two runs before this one failed, at about $8 of the owner's credit.** One failed on the
+  triple-driver bug. The other set the test deck's tiers wrong: Sonnet on "reason", so the workers
+  ran on Sonnet.
 
 **Phase 5: computer use**, as soon as Captain's computer use lands. With one lane it doesn't need
 Phase 4, so it can come before Phase 4.

@@ -21,6 +21,10 @@ in its environment, and every turn it takes is a rehearsal:
   fields, but a click or key that would submit, buy, pay, send, delete,
   confirm, sign, publish, book or accept is recorded and not done. When it
   can't tell, it's a commit point.
+* **One attempt per site and per account.** Before the browser opens a page or
+  signs in with stored credentials, Flight Deck is asked whether another
+  attempt is on that site or account right now; if one is, or if it can't be
+  asked, the browser doesn't go there.
 
 Fails closed: a tool this module doesn't know is an intent, never a call. The
 decision is made here, from the tool's name and arguments, never from what the
@@ -68,6 +72,9 @@ COMMIT = ("Stopped at the commit point, not done: {what}. This is a rehearsal �
           "buy, pay, send, book or confirm is recorded instead. Note the page and what you filled in, and finish "
           "your result: the owner can have it carried out once if this attempt wins.")
 REFUSED = "{what} isn't available in a rehearsal: {why}"
+SITE_BUSY = ("Not now: {why}. Attempts run at the same time, and only one at a time may use a site or an account "
+             "in its browser, so the site doesn't see a crowd. Use another source for now, or read the page with "
+             "web_fetch; come back to it later if you still need its browser.")
 
 
 def active() -> str:
@@ -149,8 +156,9 @@ def safe_args(arguments: Any) -> dict:
     return out
 
 
-async def _record(tag: str, kind: str, name: str, arguments: Any, what: str, agent: Any) -> bool:
-    """Hand the intent to Flight Deck. Best effort: not recorded is still not done."""
+async def _post(path: str, body: dict, agent: Any) -> dict | None:
+    """POST *body* to Flight Deck's Captain Swarm agent route: its JSON answer, or
+    None when it can't be asked."""
     try:
         import httpx
 
@@ -158,7 +166,7 @@ async def _record(tag: str, kind: str, name: str, arguments: Any, what: str, age
         from captain_claw.tools.bat import _agent_secret_headers, _fd_url_pinned
         fd_url = resolve_flight_deck_url(getattr(agent, "_fd_url", "") or "")
         if not fd_url:
-            return False
+            return None
         try:
             from captain_claw.config import get_config
             web = get_config().web
@@ -166,14 +174,41 @@ async def _record(tag: str, kind: str, name: str, arguments: Any, what: str, age
         except Exception:
             port, auth = 0, ""
         body = {"web_auth": auth if _fd_url_pinned(fd_url) else "", "source_port": port,
-                "owner_id": os.environ.get("FD_OWNER_ID", ""), "tag": tag, "kind": kind, "tool": str(name),
-                "args": safe_args(arguments), "what": what[:500]}
+                "owner_id": os.environ.get("FD_OWNER_ID", ""), **body}
         async with httpx.AsyncClient(timeout=10.0) as client:
-            r = await client.post(f"{fd_url}/fd/captain-swarm/agent/intent", json=body,
+            r = await client.post(f"{fd_url}/fd/captain-swarm/agent/{path}", json=body,
                                   headers=_agent_secret_headers(fd_url))
-        return r.status_code == 200
+        return r.json() if r.status_code == 200 else None
     except Exception:
-        return False
+        return None
+
+
+async def _record(tag: str, kind: str, name: str, arguments: Any, what: str, agent: Any) -> bool:
+    """Hand the intent to Flight Deck. Best effort: not recorded is still not done."""
+    got = await _post("intent", {"tag": tag, "kind": kind, "tool": str(name), "args": safe_args(arguments),
+                                 "what": what[:500]}, agent)
+    return got is not None
+
+
+def browser_place(name: str, arguments: Any) -> dict:
+    """The site or account a browser call is about to use: ``{"url": …}``,
+    ``{"account": …}``, or ``{}`` for a call that goes nowhere new."""
+    args = arguments if isinstance(arguments, dict) else {}
+    if str(name or "") != "browser":
+        return {}
+    action = str(args.get("action") or "").strip().lower()
+    if action == "login" and str(args.get("app_name") or "").strip():
+        return {"account": str(args["app_name"]).strip()[:80]}
+    url = str(args.get("url") or "").strip()
+    return {"url": url[:2000]} if url.lower().startswith(("http://", "https://")) else {}
+
+
+async def _site_check(tag: str, place: dict, agent: Any) -> str:
+    """"" when this attempt may use *place* now, else why not. Fails closed."""
+    got = await _post("site", {"tag": tag, **place}, agent)
+    if got is None:
+        return "Flight Deck couldn't be asked whether another attempt is on that site"
+    return "" if got.get("ok") else str(got.get("why") or "another attempt is on that site")
 
 
 async def tool_block(name: str, arguments: Any, agent: Any) -> str | None:
@@ -183,6 +218,11 @@ async def tool_block(name: str, arguments: Any, agent: Any) -> str | None:
         return None
     verdict, what = classify(name, arguments)
     if verdict == "allow":
+        place = browser_place(name, arguments)
+        if place:
+            why = await _site_check(tag, place, agent)
+            if why:
+                return SITE_BUSY.format(why=why)
         return None
     if verdict == "refuse":
         return REFUSED.format(what=what, why=_why(what))

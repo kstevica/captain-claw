@@ -705,6 +705,10 @@ class BatSupervisor:
         self.store = store
         self.driver = driver or BatDriver(store)
         self._running: dict[str, asyncio.Task] = {}
+        # One scan at a time. kick() scans at once, and runs started together
+        # (a Captain Swarm wave) kick together: overlapping scans would each see a
+        # run as undriven, and this process's own lease doesn't stop it twice.
+        self._scan = asyncio.Lock()
 
     async def tick(self) -> int:
         """One scan. Returns how many new drive tasks were launched.
@@ -714,6 +718,10 @@ class BatSupervisor:
         that is still waiting on an OPEN ask, so a run parked on the human does
         not spin; it is re-driven only once the ask is answered (via kick()) or
         expired (no longer open)."""
+        async with self._scan:
+            return await self._tick()
+
+    async def _tick(self) -> int:
         try:
             await self.store.expire_asks()
         except Exception as e:  # noqa: BLE001

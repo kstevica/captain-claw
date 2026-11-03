@@ -328,8 +328,13 @@ def test_driver_keeps_the_best_verified_result(store, monkeypatch, tmp_path):
     async def propose(run_, ledger, k):
         return ideas.pop(0) if ideas else []
     loop.set_proposer(propose)
-    obj = outcome.normalize(outcome.outcome_template(task="Find the cheapest new paperback copy of The Book",
-                                                     must_include=["paperback"]))
+
+    async def passes_review(run_, exp):
+        return {"ok": True, "reason": "the right book"}
+    loop.set_review(passes_review)
+    tpl = outcome.outcome_template(task="Find the cheapest new paperback copy of The Book", must_include=["paperback"])
+    tpl["lane"].update(parallel=1, per_round=2)        # one at a time: Phase 4's waves have their own tests
+    obj = outcome.normalize(tpl)
 
     async def go():
         await store.create_run(run_id="cs_0123456789ab", owner_id="u", title="t", objective=obj, status="baseline")
@@ -341,6 +346,7 @@ def test_driver_keeps_the_best_verified_result(store, monkeypatch, tmp_path):
     finally:
         loop.set_lane(None)
         loop.set_proposer(None)
+        loop.set_review(None)
     assert [e["status"] for e in exps] == ["kept", "kept", "failed"]
     assert r["champion"]["dev"]["best"]["url"] == "https://b.example/y" and r["champion"]["dev"]["value"] == 39.9
     checks = r["champion"]["dev"]["checks"]

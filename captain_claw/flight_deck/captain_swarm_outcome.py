@@ -14,6 +14,13 @@ verified number is the attempt's score; the best attempt so far is the
 champion. The held-out check, for an outcome, is a fresh look at the
 champion's best candidate: offers and slots change.
 
+Attempts run at once (Phase 4): as many as the owner has Bat runs free
+(:func:`capacity`), each with an equal part of the budget left, each idea with
+its own sites; the rehearsal guard keeps a second attempt out of a site
+another one has open in its browser. Before an attempt becomes the best, a
+model reviewer reads the task and what the page says around the number
+(:func:`review_material`): a kit at the price of the board doesn't count.
+
 When the owner picks the winner, it is carried out once (:func:`carry_out_task`):
 one ordinary Bat run re-checks the page, asks the owner if anything changed,
 and acts through Bat's own gate — the owner's Go for spending, mail and accounts.
@@ -71,14 +78,20 @@ def outcome_template(*, task: str, label: str = "price", direction: str = "min",
         "metric": {"kind": "state", "read": "best_verified", "direction": direction},
         "guardrails": [],
         "noise": {"min_gain": 0.01},
-        "lane": {"kind": "bat", "per_round": 2, "attempt_usd": 2.0},
+        "lane": {"kind": "bat", "per_round": 3, "parallel": 3, "attempt_usd": 2.0},
         "budget": {"usd": 10.0, "hours": 4.0, "max_experiments": 6},
         "stop": {"target": None, "stall_rounds": 2, "remeasure_every": 99},
     }
 
 
+def bat_slots() -> int:
+    """Bat runs one owner may have going at once: every attempt is one."""
+    from captain_claw.flight_deck.bat_routes import _BAT_MAX_RUNS_PER_OWNER
+    return int(_BAT_MAX_RUNS_PER_OWNER)
+
+
 def normalize(raw: dict[str, Any]) -> dict[str, Any]:
-    from captain_claw.flight_deck.captain_swarm_objective import DEFAULT_BUDGET, ObjectiveError, _num
+    from captain_claw.flight_deck.captain_swarm_objective import DEFAULT_BUDGET, ObjectiveError, _num, lanes
     subj = raw.get("subject") or {}
     task = " ".join(str(subj.get("task") or raw.get("goal") or "").split())
     if len(task) < 10:
@@ -92,6 +105,7 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
     budget = {**DEFAULT_BUDGET, **(raw.get("budget") or {})}
     lane = raw.get("lane") or {}
     stop = raw.get("stop") or {}
+    parallel, per_round = lanes(lane, default=1, most=bat_slots(), per_round_most=6)
     return {
         "kind": "outcome",
         "title": str(raw.get("title") or "").strip()[:200] or f"Best result: {task[:90]}",
@@ -107,7 +121,7 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
         "metric": {"kind": "state", "read": "best_verified", "direction": direction},
         "guardrails": [],
         "noise": {"min_gain": _num((raw.get("noise") or {}).get("min_gain", 0.01), "The smallest gain that counts", 0, 1e9)},
-        "lane": {"kind": "bat", "per_round": int(_num(lane.get("per_round", 2), "Attempts per round", 1, 4)),
+        "lane": {"kind": "bat", "per_round": per_round, "parallel": parallel,
                  "attempt_usd": _num(lane.get("attempt_usd", 2.0), "The most one attempt may spend", 0.1, 100)},
         "budget": {"usd": _num(budget["usd"], "The usd limit", 0.5, 500), "hours": _num(budget["hours"], "The hours limit", 0.25, 48),
                    "max_experiments": int(_num(budget["max_experiments"], "The max experiments limit", 1, 30))},
@@ -134,11 +148,14 @@ def lane_brief(run: dict, exp: dict) -> str:
     subj = run["objective"]["subject"]
     cons = subj["constraints"]
     rank = subj["rank"]
+    sites = (exp.get("change") or {}).get("sites") or []
     lines = [
         f"Task: {subj['task']}",
         "",
         f"Try it this way: {exp['hypothesis']}",
         f"Why this way: {exp['why']}" if exp.get("why") else "",
+        f"Mainly on: {', '.join(sites)}. Other attempts run at the same time on other sites; if the browser says a "
+        "site is busy, use another source or read the page with web_fetch." if sites else "",
         "",
         "This is a REHEARSAL. Search, read and browse as much as you need, and fill in forms if it helps you see "
         "the real price or slot — but nothing outside changes: sending, buying, booking, signing up or submitting "
@@ -172,8 +189,9 @@ class BatLane:
         if store is None:
             raise RuntimeError("Bat isn't running on this deck")
         bat_id = f"bat_{uuid.uuid4().hex[:12]}"
-        left = max(0.1, run["objective"]["budget"]["usd"] - run["spent_usd"])
-        cap = min(float(run["objective"]["lane"].get("attempt_usd") or 2.0), left)
+        # Its part of what's left: the attempts of one wave share the budget equally.
+        left = exp.get("usd_share", run["objective"]["budget"]["usd"] - run["spent_usd"])
+        cap = max(0.1, min(float(run["objective"]["lane"].get("attempt_usd") or 2.0), float(left)))
         await store.create_run(
             run_id=bat_id, owner_id=run["owner_id"], title=f"Captain Swarm #{exp['round']}.{exp['n']}: "
                                                             f"{exp['hypothesis'][:60]}",
@@ -221,6 +239,18 @@ class BatLane:
 
 async def no_branch(run: dict, version_id: str) -> None:
     return None
+
+
+async def capacity(run: dict, want: int) -> int:
+    """Lanes free now: every attempt is a Bat run, so Bat's limit per owner, less
+    the owner's other Bat runs going (between waves none of this run's are)."""
+    from captain_claw.flight_deck import bat_loop
+    from captain_claw.flight_deck.bat_store import RUNNING_STATES
+    store = bat_loop.get_store()
+    if store is None:
+        return want  # the lane says why it can't start
+    busy = sum(1 for r in await store.list_runs(run["owner_id"], limit=100) if r["status"] in RUNNING_STATES)
+    return max(0, min(want, bat_slots() - busy))
 
 
 def parse_candidates(text: str) -> list[dict]:
@@ -349,6 +379,15 @@ def number_forms(value: float) -> list[str]:
     return sorted(f for f in forms if f)
 
 
+def excerpt(text: str, value: float, width: int = 240) -> str:
+    """What the page says around *value*, for the reviewer."""
+    for f in number_forms(value):
+        m = re.search(rf"(?<![\d.,]){re.escape(f)}(?![\d])", text or "")
+        if m:
+            return text[max(0, m.start() - width):m.end() + width]
+    return (text or "")[:2 * width]
+
+
 def _words(text: str) -> set[str]:
     return {w for w in re.findall(r"[a-z0-9]{4,}", text.lower())}
 
@@ -392,7 +431,7 @@ async def measure(run: dict, version_id: str, which: str) -> dict:
     for c in candidates[:_MAX_CANDIDATES]:
         text, where = await fetch_text(c["url"])
         ok, why = verify(c, text, subj["constraints"], direction) if text else (False, where)
-        checks.append({**c, "verified": ok, "why": why})
+        checks.append({**c, "verified": ok, "why": why, "snippet": excerpt(text, c["value"]) if ok else ""})
         per_case[c["url"]] = 1.0 if ok else 0.0
     good = [c for c in checks if c["verified"]]
     best = (min if direction == "min" else max)(good, key=lambda c: c["value"]) if good else None
@@ -429,9 +468,11 @@ _SYSTEM = (
     "You plan attempts at one real task for Captain Swarm. Each attempt is one way of going about it — which "
     "sources to try, how to search, what to compare — tried by an assistant with web search and a browser, in "
     "a rehearsal where nothing is bought, sent or booked. Captain then checks every result itself. Propose {k} "
-    "DIFFERENT ways: different sources or approaches, not rewordings. Don't repeat a way the ledger already "
-    "tried unless you say what is different now. Return ONLY a JSON array of objects: "
+    "DIFFERENT ways: different sources or approaches, not rewordings. Attempts run at the same time, and only "
+    "one at a time may use a website in its browser, so give each way its own sites. Don't repeat a way the "
+    "ledger already tried unless you say what is different now. Return ONLY a JSON array of objects: "
     '{{"hypothesis": "<the way, concretely>", "strategy_tag": "<2-4 word kebab-case tag>", '
+    '"sites": ["<the websites it will mainly use, as domains>"], '
     '"why": "<why it might find a better result>"}}. No prose.'
 )
 
@@ -457,6 +498,29 @@ async def propose(run: dict, ledger: list[dict], k: int) -> list[dict]:
     from captain_claw.flight_deck import captain_swarm_loop as loop
     text = await loop.ask_model(run, _SYSTEM.format(k=k), brief(run, ledger), label="propose")
     return loop.diverse(loop.parse_proposals(text, k), ledger)
+
+
+# ── the reviewer's material ──────────────────────────────────────────
+
+
+async def review_material(run: dict, exp: dict) -> str:
+    """The task, and the attempt's best result as Captain's own fetch saw it."""
+    subj = run["objective"]["subject"]
+    cons, rank = subj["constraints"], subj["rank"]
+    best = (exp.get("dev") or {}).get("best") or {}
+    if not best:
+        raise RuntimeError("it has no verified result to review")
+    return "\n".join(x for x in [
+        f"Task: {subj['task']}",
+        f"Ranked by {rank['label']} ({'lower' if rank['direction'] == 'min' else 'higher'} is better)"
+        + (f", in {cons['currency']}" if cons.get("currency") else "")
+        + (f", at most {cons['max_value']:g}" if cons.get("max_value") is not None else "")
+        + (f"; it must be: {', '.join(cons['must_include'])}" if cons.get("must_include") else "") + ".",
+        f"The result: {best.get('title')} — {best['value']:g} {best.get('currency') or ''} at {best.get('url')}",
+        f"What the attempt said about it: {best['details']}" if best.get("details") else "",
+        "What the page says around that number, from Captain's own fetch:",
+        best.get("snippet") or "(no excerpt)",
+    ] if x)
 
 
 # ── carrying the winner out, once ────────────────────────────────────

@@ -1,5 +1,6 @@
 // Captain Swarm runs (docs/captain-swarm-plan.md): start one from a template, watch it
-// try ideas one at a time, and see every attempt's verdict. Two kinds so far:
+// try ideas — one at a time, or several at once in waves (Phase 4) — and see every
+// attempt's verdict. Three kinds so far:
 // - inbox triage rules (Phase 3a): an agent's rules, tried on its exam lane against
 //   what the owner actually did; the best rules reach it only when the owner teaches them;
 // - code (Phase 2): the best commit sits on a branch; the owner opens the PR, Captain never merges;
@@ -24,8 +25,9 @@ const STATUS_DOT: Record<string, string> = {
 }
 const EXP_TEXT: Record<string, string> = {
   proposed: 'starting', running: 'worker busy', screening: 'screening', measuring: 'measuring',
-  kept: 'kept', discarded: 'discarded', disqualified: 'thrown out', failed: 'failed',
+  measured: 'waiting for the wave', kept: 'kept', discarded: 'discarded', disqualified: 'thrown out', failed: 'failed',
 }
+const LIVE_EXP = ['proposed', 'running', 'screening', 'measuring', 'measured']
 const EXP_COLOR: Record<string, string> = {
   kept: 'text-emerald-400', discarded: 'text-zinc-400', disqualified: 'text-red-400', failed: 'text-amber-400',
 }
@@ -47,6 +49,11 @@ function TextField({ label, value, onChange, wide }: {
         className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100" />
     </label>
   )
+}
+
+// How many attempts run at once: each kind has its own ceiling on this deck.
+function AtOnce({ value, onChange, most }: { value: string; onChange: (v: string) => void; most: number }) {
+  return <TextField label={`At once (up to ${most})`} value={value} onChange={onChange} />
 }
 
 function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
@@ -130,10 +137,16 @@ function StartOutcome({ tpl, onStarted }: { tpl: OutcomeTemplate; onStarted: (id
         <TextField label="Page must say (comma-separated)" value={form.must_include || ''} onChange={set('must_include')} wide />
         <TextField label="Most per attempt ($)" value={form.attempt_usd || ''} onChange={set('attempt_usd')} />
         <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
+        <AtOnce value={form.parallel || ''} onChange={set('parallel')} most={tpl.max_parallel} />
         <TextField label="Budget ($)" value={form.budget_usd || ''} onChange={set('budget_usd')} />
         <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
         <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
       </div>
+      <p className="mt-2 text-xs text-zinc-500">
+        Attempts that run at once share what's left of the budget equally, and each uses its own sites: only one
+        at a time may use a site or an account in its browser. Every attempt is a Bat run, so they count toward
+        your Bat runs.
+      </p>
       <div className="mt-3 flex items-center gap-3">
         <button onClick={() => start(form)} disabled={busy || form.task.trim().length < 10}
           className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50">
@@ -184,13 +197,16 @@ function StartTriage({ tpl, onStarted }: { tpl: TriageTemplate; onStarted: (id: 
             <TextField label="Runs per case" value={form.repeat || ''} onChange={set('repeat')} />
             <TextField label="Held-out cases (0 = all)" value={form.holdout_cases || ''} onChange={set('holdout_cases')} />
             <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
+            <AtOnce value={form.parallel || ''} onChange={set('parallel')} most={tpl.max_parallel} />
             <TextField label="Budget ($)" value={form.budget_usd || ''} onChange={set('budget_usd')} />
             <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
             <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
           </div>
           <p className="mt-2 text-xs text-zinc-500">
             Each measurement asks {agent?.name || 'the agent'} {Number(form.cases || 0) * Number(form.repeat || 0)} questions
-            on its own model; a model also reads your open cases to suggest rules.
+            on its own model; a model also reads your open cases to suggest rules. The agent answers one question at
+            a time, so ideas tried at once are measured in turn; with three or more, a quick look on a third of the
+            cases sends only the better half on.
           </p>
           <div className="mt-3 flex items-center gap-3">
             <button onClick={() => start({ ...form, agent_name: agent?.name || '' })} disabled={busy || !form.set_id || !form.agent}
@@ -236,6 +252,7 @@ function StartMrav({ tpl, canStart, onStarted }: { tpl: MravTemplate; canStart: 
         <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
         <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
         <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
+        <AtOnce value={form.parallel || ''} onChange={set('parallel')} most={tpl.max_parallel} />
       </div>
       {tpl.local_models.length > 0 && !tpl.local_models.includes(form.model) && (
         <div className="mt-2 text-xs text-amber-400">
@@ -258,7 +275,7 @@ function StartMrav({ tpl, canStart, onStarted }: { tpl: MravTemplate; canStart: 
 }
 
 function Chart({ run }: { run: RunDetail }) {
-  const points = run.ledger.filter((e) => e.dev?.stats)
+  const points = run.ledger.filter((e) => e.dev?.stats && e.dev.stage !== 'slice')
   const base = run.baseline?.dev?.stats?.mean
   if (base === undefined || points.length === 0) return null
   const values = [base, ...points.map((e) => e.dev.stats!.mean)]
@@ -326,6 +343,9 @@ function Ledger({ exps, intents }: { exps: Experiment[]; intents?: RunDetail['in
                       {(e.change?.remove || []).map((r) => <div key={`r${r}`} className="text-red-400/90">− rule {String(r)}</div>)}
                     </div>
                   ) : null}
+                  {(e.change?.sites || []).length > 0 && <div>Sites: {e.change!.sites!.join(', ')}</div>}
+                  {e.change?.again_of && <div>Tried again on top of the new best, after its wave.</div>}
+                  {e.dev?.slice !== undefined && <div>Quick look first: {f3(e.dev.slice)}</div>}
                   {e.verdict_reason && <div>Verdict: {e.verdict_reason}</div>}
                   {(intents?.[e.id] || []).length > 0 && (
                     <div>
@@ -344,13 +364,14 @@ function Ledger({ exps, intents }: { exps: Experiment[]; intents?: RunDetail['in
               )}
             </td>
             <td className={`whitespace-nowrap py-2 pr-3 ${EXP_COLOR[e.status] || 'text-sky-400'}`}>
-              {['proposed', 'running', 'screening', 'measuring'].includes(e.status) && (
+              {LIVE_EXP.includes(e.status) && (
                 <Loader2 size={11} className="mr-1 inline animate-spin" />
               )}
               {EXP_TEXT[e.status] || e.status}
             </td>
             <td className="whitespace-nowrap py-2 pr-3 text-zinc-300">
-              {e.dev?.stats ? <>{f3(e.dev.stats.mean)} <span className="text-zinc-500">± {f3(e.dev.stats.stdev)}</span></> : '—'}
+              {e.dev?.stage === 'slice' ? <span className="text-zinc-500">quick {f3(e.dev.value)}</span>
+                : e.dev?.stats ? <>{f3(e.dev.stats.mean)} <span className="text-zinc-500">± {f3(e.dev.stats.stdev)}</span></> : '—'}
             </td>
             <td className="py-2 pr-3 text-zinc-300">{e.holdout?.stats ? f3(e.holdout.stats.mean) : '—'}</td>
             <td className="py-2 text-zinc-400">{e.cost_usd ? usd(e.cost_usd) : ''}</td>
@@ -358,6 +379,44 @@ function Ledger({ exps, intents }: { exps: Experiment[]; intents?: RunDetail['in
         ))}
       </tbody>
     </table>
+  )
+}
+
+// The wave under way: each attempt's lane, its turn in the measurement queue, and the
+// sites or accounts it holds in its browser right now.
+function InFlight({ run }: { run: RunDetail }) {
+  const live = run.live
+  if (!live) return null
+  const wave = live.wave.map((id) => run.ledger.find((e) => e.id === id)).filter((e): e is Experiment => !!e)
+  const best = live.measuring['']
+  if (wave.length === 0 && !best) return null
+  const queue = (id: string) => live.measuring[id] === 'waiting' ? 'waiting to be measured'
+    : live.measuring[id] === 'measuring' ? 'being measured' : ''
+  return (
+    <div className="rounded-md bg-zinc-950/60 p-3 text-xs">
+      <div className="mb-1.5 text-zinc-500">
+        {wave.length > 1 ? `${wave.length} attempts at once` : 'In flight'}
+        {live.queued > 0 ? ` · ${live.queued} more idea${live.queued === 1 ? '' : 's'} waiting` : ''}
+      </div>
+      {best && <div className="text-zinc-400">The best so far is {best === 'waiting' ? 'waiting to be measured' : 'being measured'}.</div>}
+      <ul className="space-y-1">
+        {wave.map((e) => (
+          <li key={e.id} className="flex flex-wrap items-baseline gap-x-2">
+            <span className="text-zinc-500">{e.round}.{e.n}</span>
+            <span className="min-w-0 flex-1 truncate text-zinc-200">{e.hypothesis}</span>
+            <span className={EXP_COLOR[e.status] || 'text-sky-400'}>
+              {LIVE_EXP.includes(e.status) && <Loader2 size={11} className="mr-1 inline animate-spin" />}
+              {queue(e.id) || EXP_TEXT[e.status] || e.status}
+            </span>
+            {(live.sites[e.id] || []).map((s) => (
+              <span key={s} className="rounded border border-zinc-700 px-1 text-[11px] text-zinc-400">
+                {s.startsWith('account:') ? `account ${s.slice(8)}` : s}
+              </span>
+            ))}
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
 
@@ -521,11 +580,17 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
           )}
         </div>
       )}
+      {active && <InFlight run={run} />}
       <Ledger exps={run.ledger} intents={run.intents} />
       <details className="text-xs text-zinc-400">
         <summary className="cursor-pointer text-zinc-500">What it measures and what it may change</summary>
         <div className="mt-2 space-y-1">
           <div>{run.objective.goal}</div>
+          <div>
+            {(run.objective.lane.parallel || 1) > 1
+              ? `Up to ${run.objective.lane.parallel} attempts at once, all started from the best so far; one keeper per wave.`
+              : 'One attempt at a time, each started from the best so far.'}
+          </div>
           {run.kind === 'code' ? (
             <>
               <div>Repository: {run.objective.subject.repo_path}</div>
@@ -538,7 +603,8 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
             <>
               <div>Task: {run.objective.subject.task}</div>
               <div>Each attempt is a Bat run in rehearsal: nothing is bought, sent, booked or submitted, and Captain
-                opens every result's page itself.</div>
+                opens every result's page itself. Before one becomes the best, a model reviewer reads the task and
+                what the page says around the number.</div>
             </>
           ) : (
             <>

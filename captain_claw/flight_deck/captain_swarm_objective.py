@@ -1,9 +1,10 @@
 """Captain Swarm — the objective: what a run improves, how it is measured, what it may spend.
 
 docs/captain-swarm-plan.md §3.1. The objective is pinned when a run starts and
-an attempt never changes it. Phase 2 runs one kind: code, measured by a
+an attempt never changes it. This module checks the code kind: measured by a
 command Captain runs on the deck (so only an owner with a shell may start
-one), improved one attempt at a time by Crew in a worktree of its own.
+one), improved by Crew, each attempt in a worktree of its own — one at a time,
+or several at once (``lane.parallel``, Phase 4).
 
 A command names its places with placeholders, filled in for each measurement:
 
@@ -20,6 +21,7 @@ checked objective, or raises :class:`ObjectiveError` saying what's wrong.
 from __future__ import annotations
 
 import copy
+import os
 import re
 import sys
 from pathlib import Path
@@ -35,6 +37,28 @@ _LIMITS = {"usd": (0.5, 2000.0), "hours": (0.25, 72.0), "max_experiments": (1, 2
 
 class ObjectiveError(ValueError):
     """What's wrong with an objective, in words for the person who sent it."""
+
+
+def env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(os.environ.get(name, "") or default)))
+    except ValueError:
+        return default
+
+
+def max_lanes() -> int:
+    """How many attempts one run may have going at once (§10): FD_CAPTAIN_SWARM_MAX_LANES, 4."""
+    return env_int("FD_CAPTAIN_SWARM_MAX_LANES", 4, 1, 8)
+
+
+def lanes(raw_lane: dict, *, default: int, most: int, per_round_most: int) -> tuple[int, int]:
+    """``(parallel, per_round)`` from a lane's settings: attempts at once — cut to
+    what this deck and kind allow — and ideas asked for per round, never fewer
+    than lanes."""
+    parallel = int(_num(raw_lane.get("parallel", default), "Attempts at once", 1, 64))
+    parallel = min(parallel, max(1, min(most, max_lanes())))
+    per_round = int(_num(raw_lane.get("per_round", 2), "Attempts per round", 1, per_round_most))
+    return parallel, max(per_round, parallel)
 
 
 def mrav_template(repo_path: str, *, model: str = "gemma4:e2b", base_url: str = "http://127.0.0.1:11434",
@@ -65,7 +89,7 @@ def mrav_template(repo_path: str, *, model: str = "gemma4:e2b", base_url: str = 
         "holdout": {"run": cmd + "{holdout}", "file": holdout_file},
         "guardrails": [{"name": "tokens per task", "read": "summary.tokens_per_task", "max_increase": 0.25}],
         "noise": {"min_gain": 0.05},
-        "lane": {"kind": "crew", "harness": harness, "per_round": 2},
+        "lane": {"kind": "crew", "harness": harness, "per_round": 2, "parallel": 1},
         "budget": dict(DEFAULT_BUDGET),
         "stop": {"target": 1.0, "stall_rounds": 3, "remeasure_every": 3},
     }
@@ -173,8 +197,9 @@ def normalize(raw: dict[str, Any], *, owner_has_shell: bool) -> dict[str, Any]:
     if harness not in HARNESSES:
         raise ObjectiveError(f"The coding worker is one of {', '.join(HARNESSES)}.")
     src = lane.get("model_source") if isinstance(lane.get("model_source"), dict) else None
+    parallel, per_round = lanes(lane, default=1, most=8, per_round_most=8)
     obj["lane"] = {"kind": "crew", "harness": harness, "model": str(lane.get("model") or "")[:120],
-                   "model_source": src, "per_round": int(_num(lane.get("per_round", 2), "Attempts per round", 1, 6))}
+                   "model_source": src, "per_round": per_round, "parallel": parallel}
 
     budget = {**DEFAULT_BUDGET, **(obj.get("budget") or {})}
     obj["budget"] = {k: _num(budget[k], f"The {k.replace('_', ' ')} limit", *_LIMITS[k]) for k in DEFAULT_BUDGET}
