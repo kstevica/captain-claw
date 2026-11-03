@@ -34,6 +34,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(loop, "_POLL_S", 0)
     store = CaptainSwarmStore(tmp_path / "cs.db")
     loop.set_store(store)
+
+    async def passes_review(run_, exp):
+        return {"ok": True, "reason": "general rules"}
+    loop.set_review(passes_review)
     opened = [case(i, i % 2 == 0, subject=f"Open subject number {i}") for i in range(8)]
     held = [case(100, True, frm="Zed <zed@secret.example>", subject="Board meeting moved to Friday"),
             case(101, False, frm="News <news@shop.example>", subject="Weekly deals")]
@@ -49,7 +53,7 @@ def env(tmp_path, monkeypatch):
     ns.new_run = new_run
     yield ns
     for setter in (loop.set_measure, loop.set_seal, loop.set_screen, loop.set_branch, loop.set_proposer,
-                   loop.set_lane, loop.set_start, loop.set_store):
+                   loop.set_lane, loop.set_start, loop.set_store, loop.set_review):
         setter(None)
     run(store.close())
 
@@ -61,7 +65,7 @@ def test_template_normalizes():
     obj = rules.normalize(rules.triage_template(set_id="mt-1", agent="helper", cases=30, repeat=3))
     assert obj["kind"] == "practice" and obj["subject"]["type"] == "rules" and obj["subject"]["start_rules"] == []
     assert obj["metric"]["cases"] == 30 and obj["metric"]["repeat"] == 3 and obj["metric"]["holdout_repeat"] == 3
-    assert obj["lane"] == {"kind": "rules", "per_round": 2, "max_rules": 12}
+    assert obj["lane"] == {"kind": "rules", "per_round": 2, "parallel": 1, "max_rules": 12}
     from captain_claw.flight_deck.captain_swarm_objective import ObjectiveError
     with pytest.raises(ObjectiveError):
         rules.normalize(rules.triage_template(set_id="../x", agent="helper"))

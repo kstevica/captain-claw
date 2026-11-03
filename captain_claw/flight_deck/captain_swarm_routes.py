@@ -299,6 +299,7 @@ async def stop_measurement(set_id: str, mid: str, user: dict = Depends(get_curre
 #    POST   /fd/captain-swarm/runs/{id}/go | /decline   an agent's run waits for one of these
 #    POST   /fd/captain-swarm/runs/{id}/pr              open a pull request from the best commit
 #    POST   /fd/captain-swarm/agent/{start,status,get,list,cancel}   the `captain_swarm` tool
+#    POST   /fd/captain-swarm/agent/{intent,site}        a rehearsal worker: an intent kept; may it use a site?
 
 _MAX_ACTIVE_RUNS = int(os.environ.get("FD_CAPTAIN_SWARM_MAX_RUNS", "1") or 1)
 
@@ -338,6 +339,7 @@ def _default_holdout() -> str:
 @router.get("/templates")
 async def templates(user: dict = Depends(get_current_user)) -> dict:
     from captain_claw.flight_deck import captain_swarm_objective as om
+    from captain_claw.flight_deck import captain_swarm_outcome as outcome
     from captain_claw.flight_deck.bat_routes import _owner_has_shell
     sets = [{"id": m["id"], "title": m.get("title") or m["id"], "open": (m.get("open") or {}).get("cases", 0),
              "holdout": (m.get("holdout") or {}).get("cases", 0)}
@@ -348,23 +350,26 @@ async def templates(user: dict = Depends(get_current_user)) -> dict:
                  "but buying, sending, booking and submitting are recorded instead of done, and the browser stops "
                  "at the commit point. Captain opens every link itself and counts only what the page bears out. "
                  "You carry the winner out once, through Bat's gate.",
-        "defaults": {"label": "price", "direction": "min", "per_round": 2, "attempt_usd": 2.0,
+        "defaults": {"label": "price", "direction": "min", "per_round": 3, "parallel": 3, "attempt_usd": 2.0,
                      "budget_usd": 10.0, "budget_hours": 4.0, "budget_max_experiments": 6},
+        "max_parallel": min(om.max_lanes(), outcome.bat_slots()),
     }, "triage": {
         "title": "Triage my inbox the way I would",
         "about": "Improve an agent's triage rules against what you actually did: every version is tried on the "
                  "agent's exam lane (it can't send or change anything) over a practice set from your own mail, "
                  "and the best rules reach the agent only when you say so.",
         "sets": sets,
-        "defaults": {"cases": 40, "repeat": 2, "holdout_cases": 0, "per_round": 2,
+        "defaults": {"cases": 40, "repeat": 2, "holdout_cases": 0, "per_round": 2, "parallel": 1,
                      "budget_usd": 20.0, "budget_hours": 8.0, "budget_max_experiments": 16},
+        "max_parallel": om.max_lanes(),
     }, "mrav": {
         "title": "Mrav passes more of its eval",
         "about": "Improve Captain's small-model runtime (captain_claw/mrav/), measured by the Mrav eval on a "
                  "local model: 20 open tasks in the repo, held-out tasks only on this deck.",
         "defaults": {"repo_path": _source_repo(), "model": "gemma4:e2b", "base_url": "http://127.0.0.1:11434",
-                     "harness": "claude", "holdout_file": _default_holdout(), "per_round": 2,
+                     "harness": "claude", "holdout_file": _default_holdout(), "per_round": 2, "parallel": 1,
                      **{f"budget_{k}": v for k, v in om.DEFAULT_BUDGET.items()}},
+        "max_parallel": om.max_lanes(),
         "local_models": await _local_models(),
     }}, "can_start": _owner_has_shell(user)}
 
@@ -388,8 +393,9 @@ def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) ->
             must_include=[w.strip() for w in str(o.get("must_include") or "").split(",") if w.strip()],
             currency=str(o.get("currency") or ""))
         if not body.objective:
-            if o.get("per_round"):
-                raw["lane"]["per_round"] = o["per_round"]
+            for k in ("per_round", "parallel"):
+                if o.get(k):
+                    raw["lane"][k] = o[k]
             if o.get("attempt_usd"):
                 raw["lane"]["attempt_usd"] = o["attempt_usd"]
             for k in ("usd", "hours", "max_experiments"):
@@ -412,8 +418,9 @@ def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) ->
             agent_name=str(o.get("agent_name") or ""), owner_name="" if owner_name.lower() == "local" else owner_name,
             cases=int(o.get("cases") or 40), repeat=int(o.get("repeat") or 2),
             holdout_cases=int(o.get("holdout_cases") or 0))
-        if o.get("per_round"):
-            raw["lane"]["per_round"] = o["per_round"]
+        for k in ("per_round", "parallel"):
+            if o.get(k):
+                raw["lane"][k] = o[k]
         for k in ("usd", "hours", "max_experiments"):
             if o.get(f"budget_{k}") not in (None, ""):
                 raw["budget"][k] = o[f"budget_{k}"]
@@ -433,8 +440,9 @@ def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) ->
             holdout_file=str(o.get("holdout_file") or _default_holdout()))
         if o.get("lane_model"):
             raw["lane"]["model"] = str(o["lane_model"])
-        if o.get("per_round"):
-            raw["lane"]["per_round"] = o["per_round"]
+        for k in ("per_round", "parallel"):
+            if o.get(k):
+                raw["lane"][k] = o[k]
         for k in ("usd", "hours", "max_experiments"):
             if o.get(f"budget_{k}") not in (None, ""):
                 raw["budget"][k] = o[f"budget_{k}"]
@@ -548,6 +556,11 @@ async def get_run(run_id: str, since: int = 0, user: dict = Depends(get_current_
         for intent in await store.list_intents(run_id):
             extra["intents"].setdefault(intent["exp_id"], []).append(
                 {k: intent[k] for k in ("kind", "tool", "what", "created_at")})
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    from captain_claw.flight_deck import captain_swarm_rehearsal as rehearsal
+    extra["live"] = {"wave": loop_mod.wave_of(run.get("state") or {}) if run["status"] in ("baseline", "running") else [],
+                     "measuring": loop_mod.measuring(run_id), "sites": rehearsal.sites_held(run_id),
+                     "queued": len((run.get("state") or {}).get("queue") or [])}
     return {**_run_summary(run), **extra,
             "objective": {k: obj.get(k) for k in ("kind", "title", "goal", "subject", "metric", "guardrails", "noise",
                                                    "lane", "budget", "stop")}
@@ -813,3 +826,17 @@ async def agent_intent(body: IntentReq) -> dict:
     from captain_claw.flight_deck import captain_swarm_rehearsal as rehearsal
     return await rehearsal.record(_cs_store(), _agent_owner(body), tag=body.tag, kind=body.kind, tool=body.tool,
                                   what=body.what, args=body.args, agent=_agent_slug(body.source_port))
+
+
+class SiteReq(AgentReq):
+    tag: str = Field("", max_length=80)
+    url: str = Field("", max_length=2000)
+    account: str = Field("", max_length=80)
+
+
+@router.post("/agent/site")
+async def agent_site(body: SiteReq) -> dict:
+    """A rehearsal worker's browser asks before it opens a site or signs in to an
+    account: one attempt at a time per site and per account, deck-wide."""
+    from captain_claw.flight_deck import captain_swarm_rehearsal as rehearsal
+    return await rehearsal.take(_cs_store(), _agent_owner(body), tag=body.tag, url=body.url, account=body.account)

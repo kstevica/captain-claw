@@ -63,7 +63,7 @@ def triage_template(*, set_id: str, agent: str, agent_name: str = "", owner_name
                    "cases": cases, "repeat": repeat, "holdout_cases": holdout_cases, "holdout_repeat": repeat},
         "guardrails": [{"name": "tokens per case", "read": "tokens_per_case", "max_increase": 0.3}],
         "noise": {"min_gain": 0.03},
-        "lane": {"kind": "rules", "per_round": 2, "max_rules": DEFAULT_MAX_RULES},
+        "lane": {"kind": "rules", "per_round": 2, "parallel": 1, "max_rules": DEFAULT_MAX_RULES},
         "budget": {"usd": 20.0, "hours": 8.0, "max_experiments": 16},
         "stop": {"target": None, "stall_rounds": 2, "remeasure_every": 4},
     }
@@ -72,7 +72,7 @@ def triage_template(*, set_id: str, agent: str, agent_name: str = "", owner_name
 def normalize(raw: dict[str, Any]) -> dict[str, Any]:
     """A complete, checked practice objective. That the set and the agent are the
     owner's own is checked where the owner is known (the routes)."""
-    from captain_claw.flight_deck.captain_swarm_objective import DEFAULT_BUDGET, ObjectiveError, _num
+    from captain_claw.flight_deck.captain_swarm_objective import DEFAULT_BUDGET, ObjectiveError, _num, lanes
     subj = raw.get("subject") or {}
     if subj.get("type") != "rules":
         raise ObjectiveError("A practice run improves a set of rules.")
@@ -86,6 +86,7 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
     m = raw.get("metric") or {}
     budget = {**DEFAULT_BUDGET, **(raw.get("budget") or {})}
     stop = raw.get("stop") or {}
+    parallel, per_round = lanes(raw.get("lane") or {}, default=1, most=8, per_round_most=8)
     return {
         "kind": "practice",
         "title": str(raw.get("title") or "").strip()[:200] or "Inbox triage",
@@ -102,8 +103,7 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
                         "max_increase": _num(g.get("max_increase", 0.3), "A guardrail's allowed increase", 0, 10)}
                        for g in (raw.get("guardrails") or [{}])[:1]],
         "noise": {"min_gain": _num((raw.get("noise") or {}).get("min_gain", 0.03), "The smallest gain that counts", 0, 1)},
-        "lane": {"kind": "rules", "per_round": int(_num((raw.get("lane") or {}).get("per_round", 2), "Ideas per round", 1, 6)),
-                 "max_rules": max_rules},
+        "lane": {"kind": "rules", "per_round": per_round, "parallel": parallel, "max_rules": max_rules},
         "budget": {"usd": _num(budget["usd"], "The usd limit", 0.5, 2000), "hours": _num(budget["hours"], "The hours limit", 0.25, 72),
                    "max_experiments": int(_num(budget["max_experiments"], "The max experiments limit", 1, 200))},
         "stop": {"target": None if stop.get("target") in (None, "") else _num(stop["target"], "The target", 0, 1),
@@ -304,19 +304,35 @@ async def exam_asker(owner_id: str, slug: str, name: str, label: str):
     return ask
 
 
+def measure_queue(run: dict) -> tuple[str, int]:
+    """An agent answers one question at a time: its measurements queue."""
+    return f"agent:{run['objective']['subject']['agent']}", 1
+
+
+async def review_material(run: dict, exp: dict) -> str:
+    obj = run["objective"]
+    old, new = await rules_of(exp["base_sha"]), await rules_of(exp["head_sha"])
+    return "\n".join([f"Goal: {obj['title']}.", obj.get("goal") or "",
+                      "Rules before:" if old else "Rules before: none (the assistant decided on its own).",
+                      *(f"{i}. {r}" for i, r in enumerate(old, 1)),
+                      "Rules now:", *(f"{i}. {r}" for i, r in enumerate(new, 1)),
+                      f"The idea behind the change: {exp['hypothesis']}"])
+
+
 async def measure(run: dict, version_id: str, which: str) -> dict:
-    """The agent on the open cases (``dev``) or the held-out ones, with this
-    version's rules: F1 on "needs your reply" across runs, the guardrails, and
-    how often each case was right."""
+    """The agent on the open cases (``dev``), a third of them asked once
+    (``slice``, Phase 4's quick look), or the held-out ones, with this version's
+    rules: F1 on "needs your reply" across runs, the guardrails, and how often
+    each case was right."""
     import asyncio
 
     from captain_claw.flight_deck import captain_swarm_measure as cm
     obj = run["objective"]
     subj, m = obj["subject"], obj["metric"]
     rules = await rules_of(version_id)
-    split = "open" if which == "dev" else "holdout"
-    limit = m["cases"] if which == "dev" else m["holdout_cases"]
-    repeat = m["repeat"] if which == "dev" else m["holdout_repeat"]
+    split = "holdout" if which == "holdout" else "open"
+    limit = {"dev": m["cases"], "slice": max(5, m["cases"] // 3)}.get(which, m["holdout_cases"])
+    repeat = {"dev": m["repeat"], "slice": 1}.get(which, m["holdout_repeat"])
     cases = cm.pick_cases(await asyncio.to_thread(practice.load_cases, run["owner_id"], subj["set_id"], split), limit)
     if not cases:
         return {"value": None, "error": f"the practice set's {split} part has no cases"}

@@ -66,7 +66,7 @@ _READ_ACTIONS = frozenset({
     "screenshot", "download", "attachment", "get_attachment", "read_message", "get_thread",
     "list_messages", "list_labels", "list_drafts", "list_folders", "list_events", "search_events",
     "get_event", "list_calendars", "list_tables", "list_protections", "list_agents", "doc_read",
-    "sheet_read", "changes", "export", "wait",
+    "sheet_read", "changes", "export", "wait", "ls", "tree", "stat",
 })
 _READ_PREFIXES = ("list_", "get_", "search_", "read_")
 

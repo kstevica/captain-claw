@@ -931,6 +931,15 @@ def _teardown(slugs: list[str]) -> None:
         log.warning("bat teardown registry update failed", error=str(e))
 
 
+def step_cost(entries: list[dict], worker_model: str) -> dict:
+    """What one step's turn cost. The agent doesn't always say which model answered;
+    it is the worker's own, so it is priced as that rather than not at all (the live
+    watch already does the same, so the run's total would otherwise drop what the
+    budget had seen)."""
+    from captain_claw.flight_deck import pricing
+    return pricing.summarize([{**e, "model": e.get("model") or worker_model} for e in entries])
+
+
 def _pick_tier(tiers: dict | None, prefer: tuple[str, ...] = ("reason", "fast")) -> str:
     tiers = tiers or {}
     for name in prefer:
@@ -1125,7 +1134,7 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
             on_action=_on_action, on_usage=_on_usage, agent_name=key, automation=automation,
             usage_sink=so_far,
         )
-        cost = pricing.summarize(_RUN_USAGE.get(usage_key, []))
+        cost = step_cost(_RUN_USAGE.get(usage_key, []), worker_model)
         tokens = int((cost.get("tokens") or {}).get("total_tokens", 0) or 0)
         if tokens and cost.get("usd") is None and store and float(run.get("llm_usd_cap") or 0) > 0:
             model = str(res.get("model") or worker_model)

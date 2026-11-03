@@ -116,6 +116,8 @@ export interface Reading {
   per_case?: Record<string, number>
   error?: string
   seconds?: number
+  stage?: 'slice'      // only a quick look on a slice of the open cases so far
+  slice?: number       // what the quick look read, before the full measurement
 }
 
 export interface Point { sha: string; dev: Reading; holdout: Reading; exp: string }
@@ -150,7 +152,7 @@ export interface Experiment {
   strategy_tag: string
   why: string
   lane: string
-  status: 'proposed' | 'running' | 'screening' | 'measuring' | 'kept' | 'discarded' | 'disqualified' | 'failed'
+  status: 'proposed' | 'running' | 'screening' | 'measuring' | 'measured' | 'kept' | 'discarded' | 'disqualified' | 'failed'
   verdict_reason: string
   lesson: string
   base_sha: string
@@ -162,7 +164,7 @@ export interface Experiment {
   changed_files: string[]
   cost_usd: number
   tokens: number
-  change?: { add?: string[]; remove?: (number | string)[] }
+  change?: { add?: string[]; remove?: (number | string)[]; sites?: string[]; again_of?: string }
 }
 
 export interface RunEvent { id: number; ts: number; stage: string; message: string }
@@ -184,6 +186,9 @@ export interface RunDetail extends RunSummary {
   rules?: { baseline: string[]; champion: string[] }
   outcome?: { best: Candidate | null; checks: Candidate[]; carried_out: string }
   intents?: Record<string, Intent[]>
+  // Phase 4: the wave under way, the measurement queue ('' is the best itself), the sites
+  // and accounts each attempt holds in its browser, and how many ideas wait for a later wave.
+  live?: { wave: string[]; measuring: Record<string, 'waiting' | 'measuring'>; sites: Record<string, string[]>; queued: number }
   objective: {
     kind: 'code' | 'practice' | 'outcome'
     title: string
@@ -193,7 +198,7 @@ export interface RunDetail extends RunSummary {
       task?: string; rank?: { label: string; direction: 'min' | 'max' }
     }
     metric: { read: string; direction: 'max' | 'min'; run?: string; cases?: number; repeat?: number }
-    lane: { harness: string; model: string; per_round: number }
+    lane: { harness: string; model: string; per_round: number; parallel?: number }
     stop: { target: number | null; stall_rounds: number }
     budget: { usd: number; hours: number; max_experiments: number }
   }
@@ -208,6 +213,7 @@ export interface MravTemplate {
   title: string
   about: string
   defaults: Record<string, string | number>
+  max_parallel: number
   local_models: string[]
 }
 
@@ -215,6 +221,7 @@ export interface OutcomeTemplate {
   title: string
   about: string
   defaults: Record<string, string | number>
+  max_parallel: number
 }
 
 export interface TriageTemplate {
@@ -222,6 +229,7 @@ export interface TriageTemplate {
   about: string
   sets: { id: string; title: string; open: number; holdout: number }[]
   defaults: Record<string, string | number>
+  max_parallel: number
 }
 
 export const captainSwarmRuns = {
