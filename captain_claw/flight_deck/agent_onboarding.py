@@ -171,6 +171,28 @@ async def add_lesson(slug: str, body: LessonBody, request: Request, user: dict =
     return await _save(slug, owner_id, agent_dir, workspace, record, locked)
 
 
+async def teach_rules(slug: str, user: dict, request: Request, rules: list[str], *, source: str) -> dict:
+    """Rules a Captain Swarm run found better, taught when their owner says so
+    (``taught_by: swarm``). One the agent has already is skipped. Like rules
+    taught by hand, they reach the agent with the messages they bear on."""
+    owner_id, agent_dir, workspace = _place(slug, user)
+    layer, locked = _teaching(request, user)
+    record = await asyncio.to_thread(ap.earlier_setup, agent_dir, workspace)
+    added = 0
+    for raw in rules:
+        text = _clean(raw)
+        if not text or _taken(record, "rule", text):
+            continue
+        item = {"text": text, "always": False, "source": {"doc": "captain swarm", "section": source[:200]},
+                "taught_by": "swarm", "added": time.time(), **({"layer": layer} if layer else {})}
+        record = {**record, _GROUP["rule"]: [item, *(record.get(_GROUP["rule"]) or [])]}
+        added += 1
+    if not added:
+        return {"added": 0}
+    log.info("agent lessons: rules taught from a Captain Swarm run", agent=slug, added=added)
+    return {**await _save(slug, owner_id, agent_dir, workspace, record, locked), "added": added}
+
+
 class LessonPatch(BaseModel):
     text: str | None = Field(None, max_length=2000)
     always: bool | None = None

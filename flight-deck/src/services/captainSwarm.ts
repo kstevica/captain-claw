@@ -122,6 +122,7 @@ export interface Point { sha: string; dev: Reading; holdout: Reading; exp: strin
 
 export interface RunSummary {
   id: string
+  kind: 'code' | 'practice'
   title: string
   status: RunStatus
   stopped_reason: string
@@ -148,6 +149,7 @@ export interface Experiment {
   hypothesis: string
   strategy_tag: string
   why: string
+  lane: string
   status: 'proposed' | 'running' | 'screening' | 'measuring' | 'kept' | 'discarded' | 'disqualified' | 'failed'
   verdict_reason: string
   lesson: string
@@ -160,16 +162,19 @@ export interface Experiment {
   changed_files: string[]
   cost_usd: number
   tokens: number
+  change?: { add?: string[]; remove?: (number | string)[] }
 }
 
 export interface RunEvent { id: number; ts: number; stage: string; message: string }
 
 export interface RunDetail extends RunSummary {
+  rules?: { baseline: string[]; champion: string[] }
   objective: {
+    kind: 'code' | 'practice'
     title: string
     goal: string
-    subject: { repo_path: string; editable: string[]; protected: string[] }
-    metric: { read: string; direction: 'max' | 'min'; run: string }
+    subject: { repo_path?: string; editable?: string[]; protected?: string[]; agent?: string; agent_name?: string; set_id?: string }
+    metric: { read: string; direction: 'max' | 'min'; run?: string; cases?: number; repeat?: number }
     lane: { harness: string; model: string; per_round: number }
     stop: { target: number | null; stall_rounds: number }
     budget: { usd: number; hours: number; max_experiments: number }
@@ -188,14 +193,23 @@ export interface MravTemplate {
   local_models: string[]
 }
 
+export interface TriageTemplate {
+  title: string
+  about: string
+  sets: { id: string; title: string; open: number; holdout: number }[]
+  defaults: Record<string, string | number>
+}
+
 export const captainSwarmRuns = {
-  templates: () => call<{ templates: { mrav: MravTemplate }; can_start: boolean }>(`${BASE}/templates`),
-  start: (options: Record<string, string | number>) =>
-    call<RunSummary>(`${BASE}/runs`, { method: 'POST', body: JSON.stringify({ template: 'mrav', options }) }),
+  templates: () =>
+    call<{ templates: { mrav: MravTemplate; triage: TriageTemplate }; can_start: boolean }>(`${BASE}/templates`),
+  start: (template: 'mrav' | 'triage', options: Record<string, string | number>) =>
+    call<RunSummary>(`${BASE}/runs`, { method: 'POST', body: JSON.stringify({ template, options }) }),
   list: () => call<{ runs: RunSummary[] }>(`${BASE}/runs`),
   get: (id: string) => call<RunDetail>(`${BASE}/runs/${enc(id)}`),
   cancel: (id: string) => call<RunSummary>(`${BASE}/runs/${enc(id)}/cancel`, { method: 'POST' }),
   go: (id: string) => call<RunSummary>(`${BASE}/runs/${enc(id)}/go`, { method: 'POST' }),
   decline: (id: string) => call<RunSummary>(`${BASE}/runs/${enc(id)}/decline`, { method: 'POST' }),
   pr: (id: string) => call<{ delivery: { url?: string } }>(`${BASE}/runs/${enc(id)}/pr`, { method: 'POST' }),
+  teach: (id: string) => call<{ added: number; rules: string[] }>(`${BASE}/runs/${enc(id)}/teach`, { method: 'POST' }),
 }

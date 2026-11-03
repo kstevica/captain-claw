@@ -12,6 +12,11 @@ Tables, in ``captain_swarm.db`` in Flight Deck's data dir (deck-isolated via
   cs_runs         one row per run: objective, state, baseline, champion, spend, lease
   cs_experiments  one row per attempt: hypothesis, lane, child, scores, verdict, lesson
   cs_events       append-only log for the page
+  cs_versions     the texts a text-subject run tries (a set of rules): every version,
+                  each with the one it was made from
+
+An experiment's ``base_sha`` / ``head_sha`` name what it started from and what it
+made: a commit for code, a version id for a text subject.
 
 Imports nothing heavy, so it stays cheap to import.
 """
@@ -99,10 +104,22 @@ CREATE TABLE IF NOT EXISTS cs_events (
     detail      TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS cs_events_run ON cs_events(run_id, id);
+
+CREATE TABLE IF NOT EXISTS cs_versions (
+    id          TEXT PRIMARY KEY,
+    run_id      TEXT NOT NULL,
+    parent      TEXT NOT NULL DEFAULT '',
+    content     TEXT NOT NULL DEFAULT '{}',
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cs_versions_run ON cs_versions(run_id, created_at);
 """
 
+# Columns added after a table first shipped: added in place on an older database.
+_EXP_COLUMNS = (("change", "TEXT NOT NULL DEFAULT '{}'"),)
+
 _RUN_JSON = ("objective", "baseline", "champion", "state")
-_EXP_JSON = ("dev", "holdout", "guardrails", "changed_files")
+_EXP_JSON = ("dev", "holdout", "guardrails", "changed_files", "change")
 
 
 def _now() -> float:
@@ -161,6 +178,11 @@ class CaptainSwarmStore:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(_DDL)
+        async with db.execute("PRAGMA table_info(cs_experiments)") as cur:
+            have = {r["name"] for r in await cur.fetchall()}
+        for col, ddl in _EXP_COLUMNS:
+            if col not in have:
+                await db.execute(f"ALTER TABLE cs_experiments ADD COLUMN {col} {ddl}")
         await db.commit()
         self._db = db
         return db
@@ -226,14 +248,14 @@ class CaptainSwarmStore:
 
     async def add_experiment(self, *, exp_id: str, run_id: str, round_no: int, n: int, hypothesis: str,
                              strategy_tag: str = "", why: str = "", lane: str = "",
-                             base_sha: str = "") -> dict[str, Any]:
+                             base_sha: str = "", change: dict[str, Any] | None = None) -> dict[str, Any]:
         db = await self._ensure_db()
         now = _now()
         await db.execute(
             "INSERT INTO cs_experiments (id, run_id, round, n, hypothesis, strategy_tag, why, lane, base_sha,"
-            " status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)",
+            " change, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposed', ?, ?)",
             (exp_id, run_id, round_no, n, hypothesis[:2000], strategy_tag[:60], why[:1000], lane, base_sha,
-             now, now))
+             json.dumps(change or {}), now, now))
         await db.execute("UPDATE cs_runs SET experiments = experiments + 1, updated_at = ? WHERE id = ?",
                          (now, run_id))
         await db.commit()
@@ -263,6 +285,22 @@ class CaptainSwarmStore:
         vals.append(_now())
         await db.execute(f"UPDATE cs_experiments SET {', '.join(cols)} WHERE id = ?", (*vals, exp_id))
         await db.commit()
+
+    # ── versions (text subjects) ─────────────────────────────────────
+
+    async def add_version(self, *, version_id: str, run_id: str, content: dict[str, Any], parent: str = "") -> None:
+        db = await self._ensure_db()
+        await db.execute("INSERT INTO cs_versions (id, run_id, parent, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                         (version_id, run_id, parent, json.dumps(content), _now()))
+        await db.commit()
+
+    async def get_version(self, version_id: str) -> dict[str, Any] | None:
+        db = await self._ensure_db()
+        async with db.execute("SELECT * FROM cs_versions WHERE id = ?", (version_id,)) as cur:
+            row = await cur.fetchone()
+        if row is None:
+            return None
+        return {**dict(row), "content": _loads(row["content"], {})}
 
     # ── events ───────────────────────────────────────────────────────
 

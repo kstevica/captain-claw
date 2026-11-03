@@ -605,7 +605,7 @@ def client(harness, monkeypatch, repo, tmp_path):
     user = {"id": "u", "display_name": "Ana", "role": "admin"}
     app.dependency_overrides[get_current_user] = lambda: user
 
-    async def can_run(owner):
+    async def can_run(owner, objective=None, user=None):
         return None
     monkeypatch.setattr(routes, "_can_run", can_run)
     monkeypatch.setattr(routes, "_source_repo", lambda: str(repo))
