@@ -266,7 +266,7 @@ def _check_file_contains(repo: Path, check: dict) -> tuple[bool, str]:
         return False, f"`{rel}` is missing (expected to contain /{pat}/)"
     try:
         body = p.read_text(encoding="utf-8", errors="replace")[:_FILE_READ_CAP]
-        rx = re.compile(pat)
+        rx = re.compile(pat, re.MULTILINE)  # as grep reads them: ^ and $ are lines
     except re.error as e:
         return True, f"(unparseable pattern, skipped: {e})"
     return (bool(rx.search(body)), f"`{rel}` does not match /{pat}/")
@@ -278,7 +278,7 @@ def _check_no_pattern(repo: Path, check: dict) -> tuple[bool, str]:
     if not pat:
         return True, ""
     try:
-        rx = re.compile(pat)
+        rx = re.compile(pat, re.MULTILINE)
     except re.error as e:
         return True, f"(unparseable pattern, skipped: {e})"
     hits: list[str] = []

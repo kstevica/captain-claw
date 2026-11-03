@@ -103,6 +103,19 @@ CREATE TABLE IF NOT EXISTS bat_steps (
 );
 CREATE INDEX IF NOT EXISTS idx_bat_steps_run ON bat_steps(run_id, seq);
 
+CREATE TABLE IF NOT EXISTS bat_children (
+    run_id          TEXT NOT NULL,
+    child_id        TEXT NOT NULL,
+    kind            TEXT NOT NULL DEFAULT '',        -- basna | vatra | code | crew
+    step_key        TEXT NOT NULL DEFAULT '',
+    status          TEXT NOT NULL DEFAULT 'open',    -- open | closed
+    counted_usd     REAL NOT NULL DEFAULT 0.0,       -- what's in bat_runs.cumulative_usd so far
+    counted_tokens  INTEGER NOT NULL DEFAULT 0,
+    created_at      REAL NOT NULL,
+    updated_at      REAL NOT NULL,
+    PRIMARY KEY (run_id, child_id)
+);
+
 CREATE TABLE IF NOT EXISTS bat_events (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id    TEXT NOT NULL,
@@ -160,6 +173,16 @@ CREATE INDEX IF NOT EXISTS idx_bat_spend_run ON bat_spend(run_id, created_at);
 # an approval holds its ceiling, a consumed charge holds its actual amount.
 _COMMITTING_SPEND = ("requested", "approved", "consumed")
 
+# Step columns added after the first release; an older bat.db gets them on open.
+# depends_on: a JSON list of step keys, or '' for a step that just waits for
+# every earlier one. round: 0 for the plan, n for the fix round that added it.
+# brief: why a fix step exists, for its worker.
+_STEP_COLUMNS = (
+    ("depends_on", "TEXT NOT NULL DEFAULT ''"),
+    ("round", "INTEGER NOT NULL DEFAULT 0"),
+    ("brief", "TEXT NOT NULL DEFAULT ''"),
+)
+
 
 class BatStore:
     """Durable store for Bat runs, their step checkpoints and their event log."""
@@ -185,6 +208,11 @@ class BatStore:
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA synchronous=NORMAL")
         await db.executescript(_RUN_DDL)
+        async with db.execute("PRAGMA table_info(bat_steps)") as cur:
+            have = {r["name"] for r in await cur.fetchall()}
+        for col, ddl in _STEP_COLUMNS:
+            if col not in have:
+                await db.execute(f"ALTER TABLE bat_steps ADD COLUMN {col} {ddl}")
         await db.commit()
         self._db = db
         return db
@@ -382,12 +410,14 @@ class BatStore:
         db = await self._ensure_db()
         now = _now()
         for seq, s in enumerate(steps):
+            deps = s.get("depends_on")
             await db.execute(
                 """INSERT OR IGNORE INTO bat_steps
-                   (run_id, step_key, seq, title, status, updated_at)
-                   VALUES (?, ?, ?, ?, 'pending', ?)""",
+                   (run_id, step_key, seq, title, status, depends_on, round, brief, updated_at)
+                   VALUES (?, ?, ?, ?, 'pending', ?, ?, ?, ?)""",
                 (run_id, str(s["step_key"]), int(s.get("seq", seq)),
-                 str(s.get("title", "")), now),
+                 str(s.get("title", "")), "" if deps is None else json.dumps(list(deps)),
+                 int(s.get("round", 0)), str(s.get("brief", "")), now),
             )
         await db.commit()
 
@@ -403,6 +433,7 @@ class BatStore:
         produced_file: str | None = None,
         attempt: int | None = None,
         seq: int | None = None,
+        depends_on: list[str] | None = None,
     ) -> None:
         db = await self._ensure_db()
         now = _now()
@@ -414,8 +445,9 @@ class BatStore:
         )
         sets = ["updated_at = ?"]
         vals: list[Any] = [now]
+        deps = None if depends_on is None else json.dumps(list(depends_on))
         for col, v in (("status", status), ("title", title), ("output", output),
-                       ("error", error), ("produced_file", produced_file)):
+                       ("error", error), ("produced_file", produced_file), ("depends_on", deps)):
             if v is not None:
                 sets.append(f"{col} = ?")
                 vals.append(v)
@@ -449,7 +481,45 @@ class BatStore:
         async with db.execute(
             "SELECT * FROM bat_steps WHERE run_id = ? ORDER BY seq, step_key", (run_id,)
         ) as cur:
+            return [_row_to_step(r) for r in await cur.fetchall()]
+
+    # ── children (runs a Bat worker started under this run) ───────────
+
+    async def add_child(self, run_id: str, child_id: str, kind: str, step_key: str = "") -> None:
+        db = await self._ensure_db()
+        now = _now()
+        await db.execute(
+            """INSERT OR IGNORE INTO bat_children
+               (run_id, child_id, kind, step_key, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (run_id, child_id, kind, step_key, now, now),
+        )
+        await db.commit()
+
+    async def list_children(self, run_id: str, *, open_only: bool = False) -> list[dict]:
+        db = await self._ensure_db()
+        q = "SELECT * FROM bat_children WHERE run_id = ?"
+        if open_only:
+            q += " AND status = 'open'"
+        async with db.execute(q + " ORDER BY created_at", (run_id,)) as cur:
             return [dict(r) for r in await cur.fetchall()]
+
+    async def update_child(
+        self, run_id: str, child_id: str, *, status: str | None = None,
+        counted_usd: float | None = None, counted_tokens: int | None = None,
+    ) -> None:
+        db = await self._ensure_db()
+        sets = ["updated_at = ?"]
+        vals: list[Any] = [_now()]
+        for col, v in (("status", status), ("counted_usd", counted_usd), ("counted_tokens", counted_tokens)):
+            if v is not None:
+                sets.append(f"{col} = ?")
+                vals.append(v)
+        vals.extend([run_id, child_id])
+        await db.execute(
+            f"UPDATE bat_children SET {', '.join(sets)} WHERE run_id = ? AND child_id = ?", vals,
+        )
+        await db.commit()
 
     # ── events (append-only progress) ─────────────────────────────────
 
@@ -666,6 +736,13 @@ def _row_to_ask(row: aiosqlite.Row) -> dict:
     ask["options"] = _loads(ask.get("options"), [])
     ask["secret"] = bool(ask.get("secret"))
     return ask
+
+
+def _row_to_step(row: aiosqlite.Row) -> dict:
+    step = dict(row)
+    # None = no recorded dependencies: the step waits for every earlier one.
+    step["depends_on"] = _loads(step.get("depends_on"), None)
+    return step
 
 
 def _row_to_run(row: aiosqlite.Row) -> dict:

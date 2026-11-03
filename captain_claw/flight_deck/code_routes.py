@@ -3276,6 +3276,11 @@ async def agent_code_start(body: CodeAgentStartReq,
     if not task:
         raise HTTPException(400, "task is required")
 
+    from captain_claw.flight_deck import bat_nested
+    over_budget = await bat_nested.refusal(owner, port=body.source_port)
+    if over_budget:
+        return {"status": "rejected", "reason": over_budget}
+
     active = _agent_code_active.setdefault(owner, set())
     if len(active) >= _MAX_AGENT_CODE_RUNS_PER_OWNER:
         return {"status": "rejected",
@@ -3323,6 +3328,7 @@ async def agent_code_start(body: CodeAgentStartReq,
         origin, title))
     _agent_code_tasks.add(t)
     t.add_done_callback(_agent_code_tasks.discard)
+    await bat_nested.adopt("code", pkey, owner, port=body.source_port)
 
     return {"status": "running", "project": project, "session_id": session_id, "title": title}
 

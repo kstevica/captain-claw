@@ -5165,6 +5165,13 @@ A new orchestration mode beside Basna, Vatra and Council for work that has to **
 - **Workers** keep their full toolset (minus `bat` and `send_mail`), may start Vatra/Basna/Code sub-runs, and run as one generic worker per step or a specialist archetype per step (**Plain / Archetype** toggle).
 - **The Bat page:** compose box (optional spend cap), runs list, a "Bat needs you" banner, and run detail in tabs — Steps, Live agents, Progress, Result, Files. Bell notifications for questions, completion and errors.
 
+**How a run finishes:**
+
+- **Checks it can't talk its way past.** At the start Bat pins a short acceptance contract in `bat.db`: files that must exist, what they must contain, and for an admin's run, commands that must pass and the project's own tests. Captain runs these itself. A model writes these checks before the work exists, so a failed one gets a second look: if the files show the rule holds and the check is at fault, the rule goes to the reviewers. Otherwise it blocks done for good. The reviewers read what's really in the run's folder, not only the worker's report, and run on a different model from the workers when the deck has one.
+- **A refusal is new work.** When the check says no, its findings become new steps for the next round, and a step that ran out of attempts is replaced by them. A retry is told why the last attempt failed. A refusal from the reviewers alone gets two fix rounds, then Bat asks you: accept it as it is, or stop. It never calls a refused run done by itself. The same failed check after two fix rounds stops the run as no progress, and so does the ceiling of 8 rounds. New steps that would send mail, spend or create an account beyond what you approved ask you first.
+- **Parallel where the plan allows.** The planner says which steps need which, and steps that don't need each other run at once, up to `FD_BAT_MAX_PARALLEL` (default 3). A list of steps you give it runs in order. A worker that can't start because the deck is full waits its turn.
+- **One budget for the whole run.** `llm_usd_cap` now covers what a worker is spending right now and every Basna, Vatra, Code or Crew run a worker starts. A run with no cap gets `FD_BAT_DEFAULT_LLM_USD` (default 50; 0 means none). At the cap, or on a cancel, work in flight stops within seconds, including those runs. The judge waits for a started run and reads its result. A model with no known price (most local ones) can't count toward a dollar cap, and the run's log says so.
+
 `FD_BAT_DISABLED=1` turns Bat off. Set `CLAW_BROWSER_CREDENTIAL_KEY` before letting a run create accounts, or stored credentials fall back to base64 obfuscation. Design notes: [docs/bat-stubborn-loop-plan.md](docs/bat-stubborn-loop-plan.md).
 
 ### Vatra in 0.8.0 — long runs that finish
@@ -6160,6 +6167,8 @@ Flight Deck uses environment variables:
 | `FD_AGENT_SHARING` | (unset) | `1` = allow sharing an agent with other users (needs auth on) |
 | `FD_ARCHETYPE_GRID` | (unset) | `1` = function × domain archetype grid (`reviewer.legal`) |
 | `FD_BAT_DISABLED` / `FD_BAT_SPEND` | (unset) | Bat is on by default — `FD_BAT_DISABLED=1` turns it off; real-money spend stays off unless `FD_BAT_SPEND=1` |
+| `FD_BAT_DEFAULT_LLM_USD` | `50` | The LLM ceiling for a Bat run that doesn't name one, covering any runs its workers start; `0` means none |
+| `FD_BAT_MAX_PARALLEL` | `3` | How many steps of one Bat run may run at once |
 | `FD_GMAIL_SEND` / `FD_GMAIL_AUTOREPLY` | (unset) | Deck kill switches: `off` stops all agent Gmail sends / topic auto-replies |
 | `FD_SCHEDULER_QUIET_HOURS` | (unset) | e.g. `22-08`: scheduled-task deliveries and payment reminders wait out that window (it may wrap midnight) and go when it ends |
 | `FD_AGENT_WS_WAIT_S` | `30` | **NEW in 0.8.1.** How long the chat proxy holds a socket while an agent that isn't answering yet (restarting) comes up |

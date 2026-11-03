@@ -689,12 +689,17 @@ def _agents_model_source(source: dict[str, Any] | None, slug: str) -> dict[str, 
 @router.post("/agent/dispatch")
 async def agent_dispatch(body: AgentDispatchBody, request: Request) -> dict[str, Any]:
     row, grant, slug = await _agent_caller(request)
+    from captain_claw.flight_deck import bat_nested
+    over_budget = await bat_nested.refusal(row["id"], slug=slug)
+    if over_budget:
+        raise HTTPException(429, over_budget)
     fields = body.model_dump()
     fields.update(
         agent_slug=slug, source_host=body.source_host or "localhost", model_source=_agents_model_source(fields.get("model_source"), slug),
         origin={"platform": body.origin_platform, "user_id": body.origin_user_id, "chat_id": body.origin_chat_id},
     )
     task = await crew_runner.dispatch(row, grant, fields)
+    await bat_nested.adopt("crew", task["id"], row["id"], slug=slug)
     key = crew_runner.project_of(task)[0]
     return {**crew_runner.view(task, full=True), "unlanded": crew_runner.unlanded_in(row["id"], key, but=task["id"])}
 

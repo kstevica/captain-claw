@@ -466,6 +466,49 @@ Each phase is a PR; ship 1–3 before any world-action phase.
 
 ---
 
+## 9a. What the loop does now (2026-11-03)
+
+The first build stopped short of this plan in four places, and Bat was less stubborn than the sections
+above say. Fixed together:
+
+- **Layer 1 was only "all steps completed", and a panel veto was overridden as soon as no step was left.**
+  A run whose steps all finished was always done. Now the planner pins an acceptance contract in the run
+  (`code_contract`'s predicates, run against the run's VFS folder), and for an owner who has a shell, command
+  rules and the project's tests run too, under the floor. Anyone else's command rules go to the panel.
+  The panel reads what's in the folder (`_evidence_block`) and prefers a model the workers don't run on.
+- **A refusal ended the run.** Nothing replanned, and a retry repeated blindly. Now `bat_loop._replan` turns the
+  findings into `fix-<round>-<n>` steps (`_bat_replan`). They take over from steps out of attempts, whose
+  dependents are rewired to them. Retries get the last error. A panel-only objection gets two fix rounds, then the owner
+  decides (the §4 tie-break, `kind="tie_break"`): the first build's override called a run done that had delivered
+  nothing. A deterministic failure is never overridden, but a check is written by a model before the work exists,
+  so a failed one is audited first (`_audit_failed_checks`): if the files show the rule holds, the rule goes to the
+  panel. On a real run, correct files failed `wc -l | grep -qx 5` on macOS and a `^...$` regex without MULTILINE.
+  The same failure after two fix rounds stops the run (§7), and so does the round ceiling. Rounds, veto streak and failure history live on the
+  run, so a restart doesn't reset them. New steps go through the start gate again.
+- **Steps ran one at a time.** Plans now carry `after`, and `_run_wave` runs what's ready up to
+  `FD_BAT_MAX_PARALLEL`. A plain list stays sequential. Each attempt has its own usage account, so parallel steps
+  can't count each other's spend.
+- **The cap saw only Bat's own calls, and only between steps.** `bat_nested` ties a run started by a worker
+  (Basna, Vatra, Code, Crew) to the Bat run from what the start route knows about the caller. The driver looks up
+  every 10 seconds, counting live turn spend and children, so a cap or a cancel ends work in flight. The judge and
+  dependent steps wait for a child's result. No cap given means `FD_BAT_DEFAULT_LLM_USD`.
+
+Also fixed, all found on real runs on a local model:
+
+- `_STEP_SYSTEM` was never sent, so no worker ever got Bat's rules. It now heads every step's prompt.
+- A step whose worker called `ask_human` was marked done, so the answer never reached it.
+- The agent's Basna relay (`_detect_basna_run`) took a Bat step that mentioned Basna and started a run on the whole
+  prompt, ignoring `mode=vatra`. It's off inside a Bat worker now.
+- A failed spawn left a registry entry that counted against the agent limit and came back on the deck's next start.
+- A cancel while a Basna or Vatra team was still spawning missed those workers (`_sweep_run_workers`).
+- One dropped brace in a model's contract threw away every rule (`_read_rules` reads each on its own), and a thinking
+  model could spend its whole answer budget before replying, so the budgets went up.
+
+Still open: a model with no known price can't count toward a dollar cap (the run's log says so); a Crew task
+steered again after it closed isn't counted; peer and flow hand-offs from a worker aren't tied to the run.
+
+---
+
 ## 10. Containment checklist (keep in sync — a missed entry silently breaks safety)
 
 - Worker marker `CLAW_BAT_WORKER` added to: `agent_reasoning_mixin` FD-worker markers,

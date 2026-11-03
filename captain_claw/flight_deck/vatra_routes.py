@@ -5892,6 +5892,11 @@ async def agent_start(body: AgentStartReq):
     if not task:
         raise HTTPException(400, "task is required")
 
+    from captain_claw.flight_deck import bat_nested
+    over_budget = await bat_nested.refusal(owner, port=body.source_port)
+    if over_budget:
+        return {"status": "rejected", "reason": over_budget}
+
     active = _active_agent_runs.setdefault(owner, set())
     if len(active) >= _MAX_AGENT_RUNS_PER_OWNER:
         return {"status": "rejected",
@@ -5927,4 +5932,5 @@ async def agent_start(body: AgentStartReq):
     t = asyncio.create_task(_run_and_notify(
         user, session_id, title, exec_req, body.source_host, body.source_port, origin))
     _track_run_task(session_id, t)
+    await bat_nested.adopt("vatra", session_id, owner, port=body.source_port)
     return {"status": "running", "session_id": session_id, "title": title}

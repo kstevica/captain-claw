@@ -210,6 +210,7 @@ _NANO_TOOLS: frozenset[str] = frozenset({
 # ── Eco-mode: intent-based keyword → tool mapping ──
 # When eco mode is active, only core tools get full definitions by default.
 # These patterns add extra tools based on keywords detected in the user message.
+import os
 import re as _re
 
 _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
@@ -717,6 +718,10 @@ _PUBLISH_COMMAND_DIRECTIVE = (
 def _detect_basna_run(user_input: str) -> str | None:
     """If the message is a 'run a Basna' command, return the task to run, else None."""
     if not user_input:
+        return None
+    # A Bat worker's message is a prompt Bat built, not someone asking for a Basna.
+    # Relaying it would start a run on the whole prompt instead of doing the step.
+    if str(os.environ.get("CLAW_BAT_WORKER", "")).strip().lower() in ("1", "true", "yes"):
         return None
     # Never relay on injected system envelopes — the Basna/delegate COMPLETION
     # callbacks ("[Basna run '…' finished] … Relay it to the user …") mention
