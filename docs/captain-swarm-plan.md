@@ -1,6 +1,6 @@
 # Captain Swarm — agents that get measurably better at real work
 
-**Status:** Phases 1–4 merged (measurement; the loop on code; an agent's triage rules; the rehearsal guard and one task's best outcome; parallel lanes) · Phase 5 (computer use) parked by the owner · Phase 6 built (learning) · Phase 7 not started · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
+**Status:** Phases 1–4 and 6 merged (measurement; the loop on code; an agent's triage rules; the rehearsal guard and one task's best outcome; parallel lanes; learning) · Phases 5 (computer use) and 7 (live in the world) parked by the owner · Real work built: the kiosk, documents and research, Captain's own browser, any repository, calendar invitations · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
 
 Captain Swarm is a new orchestration mode, a sibling of Bat, Basna, Vatra and Council. Agents reach
 it through the `captain_swarm` tool, the way they reach Bat through `bat`.
@@ -405,9 +405,24 @@ The report at the end shows:
 
 ## 10. Budget and capacity
 
-**Caps.** Every run has a $ cap, an hours cap and a maximum number of experiments. The defaults are
-$50, 8 hours and 40 experiments, shown on the start screen. Unlike Bat, 0 is not allowed: a swarm
-exists to spend in parallel. Computer-use experiments also get a cap per experiment.
+**Caps.** Every run has a token cap, an hours cap and a maximum number of experiments, shown on the
+start screen. Unlike Bat, 0 is not allowed: a swarm exists to spend in parallel.
+
+- **Caps are entered in tokens, never dollars** (owner's call, 2026-11-03). A token is a token on any
+  model; a dollar cap goes blind on a model with no known price. Forms take `80M`, `500k` or a
+  number. Dollars are still counted and shown beside tokens, as "about $4.84".
+- **Defaults per kind:**
+  - Code and Mrav: 200M tokens, 8 hours, 40 experiments.
+  - Rules from your habits: 60M, 8 hours, 16.
+  - Best result for a task: 50M a run, 10M an attempt, 4 hours, 6.
+  - Write or research: 100M a run, 15M an attempt, 4 hours, 6.
+  - The yardstick, from the live research run: Haiku workers used about 5M tokens per dollar.
+- **Each Bat attempt has its own cap in tokens** (`config.token_cap`). It is the lane's most per
+  attempt or the attempt's share of what the run has left, whichever is less. Bat checks it against
+  finished steps plus what running turns are using, as it does a dollar cap, and stops with
+  `llm_token_cap_reached`.
+- **Runs started before 2026-11-03 keep their dollar budget.**
+- Computer-use experiments will also get a cap per experiment.
 
 **What counts:**
 - **The proposer and the reviewers:** Bat's `_metered`.
@@ -1060,6 +1075,91 @@ Phase 4, so it can come before Phase 4. **Parked by the owner (2026-11-03):** th
 - **Safety:** audience caps, the owner's consent per run, and every outward action through Bat's
   gate.
 - **First target:** something with a clear number and a forgiving audience, chosen with the owner.
+- **Parked by the owner (2026-11-03),** before anything was built.
+  - **Why:**
+    - A live number takes days to read back.
+    - Audiences small enough to consent to (10–20 people) can't tell a real gain from chance.
+    - It is the only kind that experiments on real people.
+    - What Captain sells, "Captain checks", is Kinds A and B.
+  - **If it's picked up again:** start with "drafts you send as written", where the only audience is the
+    owner, then follow-up nudges.
+
+**Real work (2026-11-03): the kiosk, documents and research, Captain's own browser, any repository,
+calendar invitations.** Built so the owner can try Captain Swarm on real tasks.
+- **The kiosk.** Captain Swarm is in the kiosk's menu, under "Your agents at work", and has a Swarm
+  tile next to Tasks and Crew. Both open the whole page in a kiosk window with its own close button.
+  - It is open to every user: runs use the user's own models, and the routes check every call.
+  - Found while checking it: a long run title, kept on one line, widened the runs column to 4,000
+    pixels and pushed the run off the page. This happened on any screen narrower than a wide desktop.
+    The column now shrinks (`minmax(0, …)`).
+- **Documents and research (`captain_swarm_document.py`, `kind: "document"`).** A brief, optional
+  must-haves, an audience, a length, and whether it is research.
+  - **An attempt:** a Bat run in rehearsal that writes `vfs:bat-<id8>/document.md`. When there is
+    none, Captain takes its largest Markdown file, or its answer if that is a document.
+  - **The checklist:** made once from the brief when the run starts (Vatra's checklist prompt), with
+    the owner's must-haves first, and pinned. A judge on the panel's model grades each document
+    against it, item by item (full, partial, none), twice. The score is the share covered.
+  - **The held-out checklist:** made at the same time on the panel's model, from a demanding expert
+    reader's angle. Attempts and the planner never see it, and its grades aren't kept per item.
+  - **Sources, for research:** Captain opens every cited link itself, in its browser when a plain
+    fetch can't see the page. A source must load and share words with the paragraph that cites it.
+    Under 70% holding, or no sources at all, and the attempt is out.
+  - **What isn't checked:** that every claim is true. The reviewer reads for made-up facts, padding
+    to the checklist, and answering a different question.
+  - **Delivery:** **Save to my files** (`vfs:captain-swarm/<run8>-<title>.md`) and **Save as a
+    playbook**, both only on the owner's click.
+  - **On the page:** the document itself, the checklist with each grade, and the sources with each
+    check. The page says the grades are a model's, not the owner's.
+- **Captain's own browser (`captain_swarm_browser.py`).**
+  - **When:** when a plain fetch gets nothing, or a page doesn't show the claimed number, Captain opens
+    it again in a headless Chromium of its own: Playwright, already a core dependency.
+  - **Limits:** every request the page makes must go to a public address. Downloads are refused, it
+    never signs in, nothing is typed or clicked, and every look starts from an empty browser. Two
+    run at once.
+  - **Off switch:** `FD_CAPTAIN_SWARM_BROWSER=0`.
+  - **Tried on BerryBase's page:** it found "189,00" and refused local addresses. The first use
+    installs the Chromium build Playwright wants, which took 14 seconds.
+- **Any repository.** A page form (admins) for any git repository, command and number.
+  - Held-out cases are now optional for code. Without them, a gain is checked by the same command run
+    again on a fresh copy, and `{holdout}` is refused.
+- **Calendar invitations (`build_calendar_invites`, `kind: calendar_invites`).**
+  - **The cases:** past events someone else organized, labelled by the owner's own answer: accepted
+    is yes, declined is no. Unanswered and tentative ones are left out, and a recurring meeting counts
+    once.
+  - **The rest:** the newest invitations are held out. The question is "does the owner accept this?".
+    The rules runs and their proposer speak of kinds of invitation, and the held-out screen covers
+    organizers and titles.
+  - **What it needs:** the calendar permission on the owner's Google connection, which an admin turns
+    on before the owner reconnects. It isn't live-tested, because that needs the owner's real account.
+- **Tests:** 17 new. With every Captain Swarm phase, Bat and confinement, 428 pass.
+
+*Live (2026-11-03): a research run started from the kiosk.* A throwaway deck in kiosk mode
+(`FD_SIMPLE_CHAT=1`), with Haiku 5.5 doing the research and Sonnet 5.5 judging and reviewing.
+- **The run:** started through the kiosk's Swarm tile and the "Write or research" form.
+  - **Brief:** which small open models (≤ 4B parameters) run well on a Raspberry Pi 5 8GB as an
+    always-on assistant, with tokens per second only where a source measured them on a Pi 5, and one
+    recommendation.
+  - **Limits:** three attempts at once, $1.50 each, $5 for the run.
+- **What worked end to end:**
+  - the checklists (19 open items, 12 held back, made in 15 seconds);
+  - three genuinely different research approaches;
+  - documents written to each attempt's folder and picked up;
+  - Captain opening every cited source;
+  - the judge's grades (0.66 and 0.53) and the reviewer.
+- **The result:** all three attempts were out, so nothing was kept. $4.84.
+- **What the run taught (all fixed):**
+  - **The reviewer was too broad for documents.** It failed the best attempt (0.66, with all 6 of its
+    sources holding) for gaps the document itself stated openly ("no Pi 5 measurement found"). It
+    now judges only what grades can't see: made-up facts, padding to the checklist, and answering a
+    different question. Gaps are the checklist's job.
+  - **The source check turned down data files.** A model's `config.json` backs its size and context
+    but shares no prose with the claim. A source now counts if its text or its own address shares two
+    words with the paragraph that cites it, or one name with a number in it (qwen3, phi4).
+  - **$1.50 doesn't finish a research attempt.** One attempt stopped at step 12 of 16, after 7.5–8.5M
+    tokens. Document runs now default to 15M tokens an attempt and 100M a run.
+  - **Caps are now in tokens** (§10). The run used 24.2M tokens for its $4.84.
+- **Still open:** when a run's budget runs out in the middle of a wave, attempts that already wrote
+  their document are dropped without being graded, though grading costs about $0.15 a document.
 
 ---
 
@@ -1104,8 +1204,9 @@ Phase 4, so it can come before Phase 4. **Parked by the owner (2026-11-03):** th
 5. **The first real-life target is inbox triage,** measured against the owner's actual replies, so
    the labels cost the owner no time.
 6. **The first code target is the Mrav eval on gemma4:e2b.**
-7. **Budget defaults** are $50, 8 hours and 40 experiments. No run is uncapped.
+7. **Budgets are in tokens.** The code default is 200M tokens, 8 hours and 40 experiments; each kind
+   has its own (§10). No run is uncapped.
 8. **Command scorers need a shell.** Every other scorer is open to any owner who can run Bat.
-9. **Lanes run through the deck proxy,** so the $ cap counts them.
+9. **Lanes run through the deck proxy,** so the token cap counts them.
 10. **The strategy round is a light panel,** not Council.
 11. **Names** as in §2, including renaming BotPort's tab label to "BotPort Workflows".

@@ -277,6 +277,8 @@ def playbook_for(run: dict, ledger: list[dict]) -> dict:
     didn't, with why."""
     obj = run["objective"]
     subj = obj["subject"]
+    if obj.get("kind") == "document":
+        return _document_playbook(run, ledger)
     best = ((run.get("champion") or {}).get("dev") or {}).get("best") or {}
     rank_ = subj.get("rank") or {}
     won = [e for e in ledger if outcome_of(e) == "won"]
@@ -298,6 +300,27 @@ def playbook_for(run: dict, ledger: list[dict]) -> dict:
                                 f"{subj.get('task', '')[:400]}"),
         "reasoning": (f"Learned by Captain Swarm run {run['id']}: {len(ledger)} attempts in rehearsal, every result "
                       "checked by Captain on the page itself."),
+        "tags": f"captain-swarm,{family_of(obj)}",
+        "source_session": run["id"],
+    }
+
+
+def _document_playbook(run: dict, ledger: list[dict]) -> dict:
+    """How to write or research this kind of thing: the ways that made the best
+    documents, and the ways that didn't."""
+    obj = run["objective"]
+    subj = obj["subject"]
+    won = [e for e in ledger if outcome_of(e) == "won"]
+    lost = [e for e in ledger if outcome_of(e) == "lost"]
+    return {
+        "name": f"Captain Swarm: {obj['title'][:90]}",
+        "task_type": "web-research" if subj.get("sources") else "document-processing",
+        "rating": "good",
+        "do_pattern": "\n".join(f"- {' '.join(e['hypothesis'].split())[:400]}" for e in won),
+        "dont_pattern": "\n".join(f"- {' '.join(e['hypothesis'].split())[:240]} — {shown_verdict(e)[:160]}" for e in lost),
+        "trigger_description": f"When asked to write or research something like: {subj.get('task', '')[:400]}",
+        "reasoning": (f"Learned by Captain Swarm run {run['id']}: {len(ledger)} attempts, each graded against a "
+                      "checklist made from the brief, with every cited source opened by Captain."),
         "tags": f"captain-swarm,{family_of(obj)}",
         "source_session": run["id"],
     }

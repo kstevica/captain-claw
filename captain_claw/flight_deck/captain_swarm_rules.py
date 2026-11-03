@@ -36,6 +36,7 @@ log = get_logger(__name__)
 
 RULE_MAX_CHARS = 300
 DEFAULT_MAX_RULES = 12
+BUDGET = {"tokens": 60_000_000, "hours": 8.0, "max_experiments": 16}
 _MIN_STRING = 10
 # A run with more unanswered questions than this measures the agent being away, not its rules.
 _MAX_UNANSWERED = 0.2
@@ -51,21 +52,28 @@ def _store():
 
 
 def triage_template(*, set_id: str, agent: str, agent_name: str = "", owner_name: str = "",
-                    cases: int = 40, repeat: int = 2, holdout_cases: int = 0) -> dict[str, Any]:
+                    cases: int = 40, repeat: int = 2, holdout_cases: int = 0,
+                    set_kind: str = practice.KIND_MAIL_TRIAGE) -> dict[str, Any]:
     who = owner_name or "the owner"
+    name = agent_name or agent
+    calendar = set_kind == practice.KIND_CALENDAR
     return {
         "kind": "practice",
-        "title": f"{agent_name or agent} triages {who}'s inbox the way {who} would",
-        "goal": (f"Decide, for each email, whether it needs {who}'s own reply, the way {who} actually decided — "
+        "title": (f"{name} answers {who}'s invitations the way {who} would" if calendar
+                  else f"{name} triages {who}'s inbox the way {who} would"),
+        "goal": (f"Decide, for each calendar invitation, whether {who} accepts it, the way {who} actually did — by "
+                 "giving the assistant a few general rules about kinds of invitation." if calendar else
+                 f"Decide, for each email, whether it needs {who}'s own reply, the way {who} actually decided — "
                  "by giving the assistant a few general rules about kinds of mail."),
-        "subject": {"type": "rules", "agent": agent, "agent_name": agent_name or agent, "owner_name": owner_name,
-                    "set_id": set_id, "family": "mail-triage", "start_rules": []},
-        "metric": {"kind": "agreement", "read": "f1_needs_reply", "direction": "max",
+        "subject": {"type": "rules", "agent": agent, "agent_name": name, "owner_name": owner_name,
+                    "set_id": set_id, "set_kind": set_kind, "family": practice.KINDS[set_kind]["family"],
+                    "start_rules": []},
+        "metric": {"kind": "agreement", "read": "f1_accepts" if calendar else "f1_needs_reply", "direction": "max",
                    "cases": cases, "repeat": repeat, "holdout_cases": holdout_cases, "holdout_repeat": repeat},
         "guardrails": [{"name": "tokens per case", "read": "tokens_per_case", "max_increase": 0.3}],
         "noise": {"min_gain": 0.03},
         "lane": {"kind": "rules", "per_round": 2, "parallel": 1, "max_rules": DEFAULT_MAX_RULES},
-        "budget": {"usd": 20.0, "hours": 8.0, "max_experiments": 16},
+        "budget": dict(BUDGET),
         "stop": {"target": None, "stall_rounds": 2, "remeasure_every": 4},
     }
 
@@ -73,7 +81,7 @@ def triage_template(*, set_id: str, agent: str, agent_name: str = "", owner_name
 def normalize(raw: dict[str, Any]) -> dict[str, Any]:
     """A complete, checked practice objective. That the set and the agent are the
     owner's own is checked where the owner is known (the routes)."""
-    from captain_claw.flight_deck.captain_swarm_objective import DEFAULT_BUDGET, ObjectiveError, _num, lanes
+    from captain_claw.flight_deck.captain_swarm_objective import ObjectiveError, _num, budget_of, lanes
     subj = raw.get("subject") or {}
     if subj.get("type") != "rules":
         raise ObjectiveError("A practice run improves a set of rules.")
@@ -85,19 +93,23 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
     max_rules = int(_num((raw.get("lane") or {}).get("max_rules", DEFAULT_MAX_RULES), "Most rules", 1, 30))
     start = [str(r).strip()[:RULE_MAX_CHARS] for r in subj.get("start_rules") or [] if str(r).strip()][:max_rules]
     m = raw.get("metric") or {}
-    budget = {**DEFAULT_BUDGET, **(raw.get("budget") or {})}
     stop = raw.get("stop") or {}
     parallel, per_round = lanes(raw.get("lane") or {}, default=1, most=8, per_round_most=8)
+    set_kind = set_kind_of(subj)
+    if set_kind not in practice.KINDS:
+        raise ObjectiveError("That isn't a kind of practice set Captain Swarm knows.")
+    default_family = practice.KINDS[set_kind]["family"]
     from captain_claw.flight_deck.captain_swarm_learning import family_slug
     return {
         "kind": "practice",
-        "family": family_slug(raw.get("family") or subj.get("family")) or "mail-triage",
+        "family": family_slug(raw.get("family") or subj.get("family")) or default_family,
         "title": str(raw.get("title") or "").strip()[:200] or "Inbox triage",
         "goal": str(raw.get("goal") or "").strip()[:2000],
         "subject": {"type": "rules", "agent": agent, "agent_name": str(subj.get("agent_name") or agent)[:120],
-                    "owner_name": str(subj.get("owner_name") or "")[:120], "set_id": set_id,
-                    "family": str(subj.get("family") or "mail-triage")[:60], "start_rules": start},
-        "metric": {"kind": "agreement", "read": "f1_needs_reply", "direction": "max",
+                    "owner_name": str(subj.get("owner_name") or "")[:120], "set_id": set_id, "set_kind": set_kind,
+                    "family": str(subj.get("family") or default_family)[:60], "start_rules": start},
+        "metric": {"kind": "agreement", "read": "f1_accepts" if set_kind == practice.KIND_CALENDAR else "f1_needs_reply",
+                   "direction": "max",
                    "cases": int(_num(m.get("cases", 40), "Cases per measurement", 5, 300)),
                    "repeat": int(_num(m.get("repeat", 2), "Runs per case", 1, 5)),
                    "holdout_cases": int(_num(m.get("holdout_cases", 0), "Held-out cases", 0, 300)),
@@ -107,8 +119,7 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
                        for g in (raw.get("guardrails") or [{}])[:1]],
         "noise": {"min_gain": _num((raw.get("noise") or {}).get("min_gain", 0.03), "The smallest gain that counts", 0, 1)},
         "lane": {"kind": "rules", "per_round": per_round, "parallel": parallel, "max_rules": max_rules},
-        "budget": {"usd": _num(budget["usd"], "The usd limit", 0.5, 2000), "hours": _num(budget["hours"], "The hours limit", 0.25, 72),
-                   "max_experiments": int(_num(budget["max_experiments"], "The max experiments limit", 1, 200))},
+        "budget": budget_of(raw.get("budget"), BUDGET),
         "stop": {"target": None if stop.get("target") in (None, "") else _num(stop["target"], "The target", 0, 1),
                  "stall_rounds": int(_num(stop.get("stall_rounds", 2), "Rounds without a gain", 1, 20)),
                  "remeasure_every": int(_num(stop.get("remeasure_every", 4), "Re-measure the best every", 1, 50))},
@@ -185,16 +196,18 @@ def sealed_dir(run_id: str) -> Path:
 
 
 def holdout_strings(cases: list[dict]) -> dict[str, str]:
-    """What only the held-out mail contains: its senders' addresses, its subjects
-    and its ids. A rule carrying one was written from mail it was never shown."""
+    """What only the held-out cases contain: their senders' or organizers'
+    addresses, their subjects or titles, and their ids. A rule carrying one was
+    written from a case it was never shown."""
     out: dict[str, str] = {}
     for c in cases:
         where = f"holdout:{c.get('id', '?')}"
-        m = re.search(r"<([^>]+@[^>]+)>", str(c.get("from") or ""))
-        addr = (m.group(1) if m else str(c.get("from") or "")).strip().lower()
+        sender = str(c.get("from") or c.get("organizer") or "")
+        m = re.search(r"<([^>]+@[^>]+)>", sender)
+        addr = (m.group(1) if m else sender).strip().lower()
         if "@" in addr:
             out.setdefault(addr, where)
-        subject = " ".join(str(c.get("subject") or "").split())
+        subject = " ".join(str(c.get("subject") or c.get("title") or "").split())
         if len(subject) >= _MIN_STRING:
             out.setdefault(subject.lower(), where)
         if c.get("id"):
@@ -254,13 +267,14 @@ async def screen(run: dict, exp: dict) -> dict:
 # ── measuring ────────────────────────────────────────────────────────
 
 
-def with_rules(question: str, rules: list[str], owner_name: str = "") -> str:
+def with_rules(question: str, rules: list[str], owner_name: str = "", set_kind: str = practice.KIND_MAIL_TRIAGE) -> str:
     """The question as one version asks it: its rules first. No rules is the
     agent as it is."""
     if not rules:
         return question
     who = owner_name or "your owner"
-    head = f"How {who} triages mail — apply these rules:\n" + "\n".join(f"- {r}" for r in rules)
+    what = "answers invitations" if set_kind == practice.KIND_CALENDAR else "triages mail"
+    head = f"How {who} {what} — apply these rules:\n" + "\n".join(f"- {r}" for r in rules)
     return f"{head}\n\n{question}"
 
 
@@ -346,7 +360,7 @@ async def measure(run: dict, version_id: str, which: str) -> dict:
     spent = {"usd": 0.0, "tokens": 0, "unpriced": 0}
 
     async def ask_with_rules(question: str) -> dict:
-        got = await ask(with_rules(question, rules, subj.get("owner_name") or ""))
+        got = await ask(with_rules(question, rules, subj.get("owner_name") or "", set_kind_of(subj)))
         # Every answer is the agent's own model at work: priced on it and counted
         # against the run as it comes, so the budget can stop a measurement midway.
         usd, tokens = price_answer(model, got)
@@ -356,11 +370,11 @@ async def measure(run: dict, version_id: str, which: str) -> dict:
         await store.add_spend(run["id"], usd or 0.0, tokens)
         return got
 
-    budget = float(obj["budget"]["usd"])
+    from captain_claw.flight_deck.captain_swarm_objective import budget_spent
 
     async def stopped() -> bool:
         cur = await store.get_run(run["id"])
-        return bool(cur and (cur["status"] not in ("baseline", "running") or cur["spent_usd"] >= budget))
+        return bool(cur and (cur["status"] not in ("baseline", "running") or budget_spent(cur)))
 
     flag = {"stop": False}
 
@@ -372,7 +386,7 @@ async def measure(run: dict, version_id: str, which: str) -> dict:
 
     watcher = asyncio.create_task(watch())
     try:
-        result = await cm.run_triage(cases, ask=ask_with_rules, repeat=repeat,
+        result = await cm.run_triage(cases, ask=ask_with_rules, repeat=repeat, kind=set_kind_of(subj),
                                      owner_name=subj.get("owner_name") or "", should_stop=lambda: flag["stop"])
     finally:
         flag["stop"] = True
@@ -382,8 +396,8 @@ async def measure(run: dict, version_id: str, which: str) -> dict:
                  answers=spent["unpriced"])
     if result["stopped"]:
         cur = await store.get_run(run["id"])
-        if cur and cur["spent_usd"] >= budget:
-            return {"value": None, "error": f"the budget ran out mid-measurement (${cur['spent_usd']:.2f})"}
+        if cur and budget_spent(cur):
+            return {"value": None, "error": f"{budget_spent(cur)} — it ran out mid-measurement"}
         return {"value": None, "error": "the run was stopped"}
     asked = max(1, result["asked"])
     if result["pooled"]["unanswered"] / asked > _MAX_UNANSWERED:
@@ -399,12 +413,18 @@ async def measure(run: dict, version_id: str, which: str) -> dict:
 # ── the proposer ─────────────────────────────────────────────────────
 
 
+_TASKS = {
+    practice.KIND_MAIL_TRIAGE: ("triages email. For each email it decides whether {owner} needs to reply personally",
+                                "mail (who it's from, what it asks, how it's addressed), never about one particular email"),
+    practice.KIND_CALENDAR: ("answers calendar invitations. For each invitation it decides whether {owner} accepts it",
+                             "invitation (who organizes it, what it is, when, how long, how many are invited), never "
+                             "about one particular event"),
+}
+
 _SYSTEM = (
-    "You improve how {owner}'s assistant triages email. For each email it decides whether {owner} needs to reply "
-    "personally; it is scored against what {owner} actually did. Its behaviour comes from a short list of rules "
-    "in {owner}'s voice. Propose {k} DIFFERENT edits to the rules: different ideas, not rewordings. A rule is one "
-    "short sentence about a KIND of mail (who it's from, what it asks, how it's addressed), never about one "
-    "particular email. Keep the list at {max_rules} rules or fewer. Don't repeat an edit the ledger already "
+    "You improve how {owner}'s assistant {task}; it is scored against what {owner} actually did. Its behaviour comes "
+    "from a short list of rules in {owner}'s voice. Propose {k} DIFFERENT edits to the rules: different ideas, not "
+    "rewordings. A rule is one short sentence about a KIND of {kind_of}. Keep the list at {max_rules} rules or fewer. Don't repeat an edit the ledger already "
     "discarded unless you say what is different now. Return ONLY a JSON array of objects: "
     '{{"hypothesis": "<the idea in one line>", "strategy_tag": "<2-4 word kebab-case tag>", '
     '"why": "<which mistakes it should fix>", "add": ["<new rule>"], "remove": [<numbers of current rules to drop>]}}. '
@@ -412,7 +432,15 @@ _SYSTEM = (
 )
 
 
+def set_kind_of(subj: dict) -> str:
+    return str(subj.get("set_kind") or practice.KIND_MAIL_TRIAGE)
+
+
 def _case_line(c: dict) -> str:
+    if "organizer" in c:  # a calendar invitation
+        return (f"- [{'accepted' if c.get('label') else 'declined'}] {c.get('title')}; from {c.get('organizer')}; "
+                f"{c.get('start')}, {c.get('duration_min', 0)} min, {c.get('guests', 0)} other guests"
+                f"{', repeats' if c.get('recurring') else ''}. {str(c.get('description') or '')[:160]}")
     body = " ".join(str(c.get("body") or "").split())[:220]
     extra = []
     if c.get("cc"):
@@ -443,7 +471,7 @@ async def brief(run: dict, ledger: list[dict]) -> str:
     if wrong:
         cases = {c["id"]: c for c in await asyncio.to_thread(practice.load_cases, run["owner_id"],
                                                              obj["subject"]["set_id"], "open")}
-        lines.append("\nOpen emails it still gets wrong:")
+        lines.append("\nOpen cases it still gets wrong:")
         lines += [_case_line(cases[cid]) for cid in wrong[:12] if cid in cases]
     if ledger:
         lines.append("\nTried so far (newest last):")
@@ -484,6 +512,8 @@ async def propose(run: dict, ledger: list[dict], k: int) -> list[dict]:
     from captain_claw.flight_deck import captain_swarm_loop as loop
     obj = run["objective"]
     who = obj["subject"].get("owner_name") or "the owner"
-    system = _SYSTEM.format(owner=who, k=k, max_rules=obj["lane"].get("max_rules") or DEFAULT_MAX_RULES)
+    task, kind_of = _TASKS[set_kind_of(obj["subject"])]
+    system = _SYSTEM.format(owner=who, k=k, task=task.format(owner=who), kind_of=kind_of,
+                            max_rules=obj["lane"].get("max_rules") or DEFAULT_MAX_RULES)
     text = await loop.ask_ideas(run, system, await brief(run, ledger))
     return loop.diverse(parse(text, k), ledger)

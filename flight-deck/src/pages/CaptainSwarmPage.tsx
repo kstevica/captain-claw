@@ -3,7 +3,7 @@
 // Practice sets: a set frozen from the owner's own history (inbox triage: did you reply?),
 // and an agent measured on it on its private exam lane — nothing sent, nothing kept (Phase 1).
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Loader2, Mail, Square, Target, Trash2 } from 'lucide-react'
+import { CalendarCheck, Loader2, Mail, Square, Target, Trash2 } from 'lucide-react'
 import { captainSwarmApi } from '../services/captainSwarm'
 import type { Measurement, PracticeSet } from '../services/captainSwarm'
 import { useProcessStore } from '../stores/processStore'
@@ -95,6 +95,59 @@ function BuildTriage({ onBuilt, busy }: { onBuilt: () => void; busy: boolean }) 
   )
 }
 
+// Past invitations from your Google Calendar, each labelled by your own answer.
+function BuildCalendar({ onBuilt, busy }: { onBuilt: () => void; busy: boolean }) {
+  const [windowDays, setWindowDays] = useState(180)
+  const [holdoutDays, setHoldoutDays] = useState(30)
+  const [maxCases, setMaxCases] = useState(400)
+  const [error, setError] = useState('')
+  const [sending, setSending] = useState(false)
+
+  const build = async () => {
+    setError('')
+    setSending(true)
+    try {
+      await captainSwarmApi.buildCalendar({ window_days: windowDays, holdout_days: holdoutDays, max_cases: maxCases })
+      onBuilt()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setSending(false)
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+      <div className="flex items-center gap-2 text-sm font-medium text-zinc-100">
+        <CalendarCheck size={15} className="text-emerald-400" /> Calendar invitations: did you accept?
+      </div>
+      <p className="mt-1.5 text-xs leading-relaxed text-zinc-400">
+        Captain reads your past invitations from Google Calendar (read-only) — the ones someone else organized — and
+        labels each by your own answer: accepted or declined. Ones you never answered are left out. The copy stays on
+        this deck in a locked folder, only for you; the newest invitations are held back to check gains later. It
+        needs the calendar permission on your Google connection.
+      </p>
+      <div className="mt-3 flex flex-wrap items-center gap-3">
+        <Field label="last" value={windowDays} onChange={setWindowDays} min={30} max={730} unit="days" />
+        <Field label="hold back the last" value={holdoutDays} onChange={setHoldoutDays} min={7} max={120} unit="days" />
+        <Field label="at most" value={maxCases} onChange={setMaxCases} min={20} max={1000} unit="invitations" />
+      </div>
+      <div className="mt-3 flex items-center gap-3">
+        <button
+          onClick={build}
+          disabled={sending || busy}
+          className="inline-flex items-center gap-1.5 rounded-md bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+        >
+          {sending ? <Loader2 size={14} className="animate-spin" /> : <CalendarCheck size={14} />}
+          Build from my calendar
+        </button>
+        {busy && <span className="text-xs text-zinc-500">A set is being built.</span>}
+        {error && <span className="text-xs text-red-400">{error}</span>}
+      </div>
+    </div>
+  )
+}
+
 function SetCard({ set, active, onSelect, onDelete }: {
   set: PracticeSet; active: boolean; onSelect: () => void; onDelete: () => void
 }) {
@@ -125,7 +178,10 @@ function SetCard({ set, active, onSelect, onDelete }: {
       {set.state === 'ready' && set.open && set.holdout && (
         <div className="mt-1 space-y-0.5 text-xs text-zinc-400">
           <div>{set.open.cases} open · {set.holdout.cases} held back</div>
-          <div>You replied to {pct(set.open.base_rate)} of the open part, {pct(set.holdout.base_rate)} of the held-back part</div>
+          <div>
+            You {set.kind === 'calendar_invites' ? 'accepted' : 'replied to'} {pct(set.open.base_rate)} of the open part,
+            {' '}{pct(set.holdout.base_rate)} of the held-back part
+          </div>
           <div className="text-zinc-500">
             {set.source?.window?.from?.slice(0, 10)} → {set.source?.window?.to?.slice(0, 10)}
             {set.source?.gmail ? ` · ${set.source.gmail}` : ''}
@@ -342,6 +398,7 @@ function PracticeSets() {
     <div className="space-y-4">
         {error && <div className="text-xs text-red-400">{error}</div>}
         <BuildTriage onBuilt={load} busy={building} />
+        <BuildCalendar onBuilt={load} busy={building} />
         {sets.length > 0 && (
           <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {sets.map((s) => (

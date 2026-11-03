@@ -94,6 +94,8 @@ export const captainSwarmApi = {
   sets: () => call<{ sets: PracticeSet[] }>(`${BASE}/practice`),
   buildTriage: (body: { window_days: number; reply_days: number; holdout_days: number; max_cases: number }) =>
     call<PracticeSet>(`${BASE}/practice/mail-triage`, { method: 'POST', body: JSON.stringify(body) }),
+  buildCalendar: (body: { window_days: number; holdout_days: number; max_cases: number }) =>
+    call<PracticeSet>(`${BASE}/practice/calendar-invites`, { method: 'POST', body: JSON.stringify(body) }),
   deleteSet: (id: string) => call<{ deleted: boolean }>(`${BASE}/practice/${enc(id)}`, { method: 'DELETE' }),
   measure: (id: string, body: { agent: string; split: 'open' | 'holdout'; cases: number; repeat: number }) =>
     call<Measurement>(`${BASE}/practice/${enc(id)}/measure`, { method: 'POST', body: JSON.stringify(body) }),
@@ -124,7 +126,7 @@ export interface Point { sha: string; dev: Reading; holdout: Reading; exp: strin
 
 export interface RunSummary {
   id: string
-  kind: 'code' | 'practice' | 'outcome'
+  kind: 'code' | 'practice' | 'outcome' | 'document'
   title: string
   status: RunStatus
   stopped_reason: string
@@ -141,7 +143,8 @@ export interface RunSummary {
   created_at: number
   started_at: number
   finished_at: number
-  budget?: { usd: number; hours: number; max_experiments: number }
+  // tokens since budgets are in tokens; usd on runs started before that
+  budget?: { tokens?: number; usd?: number; hours: number; max_experiments: number }
 }
 
 export interface Experiment {
@@ -178,13 +181,23 @@ export interface Candidate {
   next_step?: string
   verified?: boolean
   why?: string
+  via?: 'fetch' | 'browser'
 }
+
+export interface SourceCheck { url: string; ok: boolean; why: string; via: 'fetch' | 'browser' }
 
 export interface Intent { kind: 'intent' | 'commit'; tool: string; what: string; created_at: number }
 
 export interface RunDetail extends RunSummary {
   rules?: { baseline: string[]; champion: string[] }
   outcome?: { best: Candidate | null; checks: Candidate[]; carried_out: string }
+  // A document run: the best document so far, how it did on each checklist item, its sources.
+  document?: {
+    best: { text: string; cut: boolean; path: string; bat_run: string; words: number; sources: SourceCheck[] } | null
+    checklist: { item: string; grade: number | null }[]
+    held_items: number
+    saved: string
+  }
   intents?: Record<string, Intent[]>
   // Phase 4: the wave under way, the measurement queue ('' is the best itself), the sites
   // and accounts each attempt holds in its browser, and how many ideas wait for a later wave.
@@ -199,18 +212,19 @@ export interface RunDetail extends RunSummary {
     playbook: { agent: string; id: string; at: number } | null
   }
   objective: {
-    kind: 'code' | 'practice' | 'outcome'
+    kind: 'code' | 'practice' | 'outcome' | 'document'
     family?: string
     title: string
     goal: string
     subject: {
       repo_path?: string; editable?: string[]; protected?: string[]; agent?: string; agent_name?: string; set_id?: string
       task?: string; rank?: { label: string; direction: 'min' | 'max' }
+      set_kind?: string; criteria?: string[]; sources?: boolean; words?: number; audience?: string
     }
     metric: { read: string; direction: 'max' | 'min'; run?: string; cases?: number; repeat?: number }
-    lane: { harness: string; model: string; per_round: number; parallel?: number }
+    lane: { harness: string; model: string; per_round: number; parallel?: number; attempt_tokens?: number }
     stop: { target: number | null; stall_rounds: number }
-    budget: { usd: number; hours: number; max_experiments: number }
+    budget: { tokens?: number; usd?: number; hours: number; max_experiments: number }
   }
   baseline: Partial<Point>
   champion: Partial<Point>
@@ -255,20 +269,37 @@ export interface OutcomeTemplate {
   max_parallel: number
 }
 
+export interface DocumentTemplate {
+  title: string
+  about: string
+  defaults: Record<string, string | number>
+  max_parallel: number
+}
+
+export interface CodeTemplate {
+  title: string
+  about: string
+  defaults: Record<string, string | number>
+  max_parallel: number
+}
+
 export interface TriageTemplate {
   title: string
   about: string
-  sets: { id: string; title: string; open: number; holdout: number }[]
+  sets: { id: string; title: string; open: number; holdout: number; kind: string }[]
   defaults: Record<string, string | number>
   max_parallel: number
 }
 
 export const captainSwarmRuns = {
   templates: () =>
-    call<{ templates: { mrav: MravTemplate; triage: TriageTemplate; outcome: OutcomeTemplate }; can_start: boolean }>(
-      `${BASE}/templates`),
-  start: (template: 'mrav' | 'triage' | 'outcome', options: Record<string, string | number>) =>
+    call<{ templates: { mrav: MravTemplate; triage: TriageTemplate; outcome: OutcomeTemplate; document: DocumentTemplate;
+      code: CodeTemplate }; can_start: boolean }>(`${BASE}/templates`),
+  start: (template: 'mrav' | 'triage' | 'outcome' | 'document', options: Record<string, string | number>) =>
     call<RunSummary>(`${BASE}/runs`, { method: 'POST', body: JSON.stringify({ template, options }) }),
+  startObjective: (objective: Record<string, unknown>) =>
+    call<RunSummary>(`${BASE}/runs`, { method: 'POST', body: JSON.stringify({ template: 'code', objective }) }),
+  saveDocument: (id: string) => call<{ saved: string }>(`${BASE}/runs/${enc(id)}/save-document`, { method: 'POST' }),
   list: () => call<{ runs: RunSummary[] }>(`${BASE}/runs`),
   get: (id: string) => call<RunDetail>(`${BASE}/runs/${enc(id)}`),
   cancel: (id: string) => call<RunSummary>(`${BASE}/runs/${enc(id)}/cancel`, { method: 'POST' }),

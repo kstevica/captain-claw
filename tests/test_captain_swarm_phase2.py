@@ -170,7 +170,7 @@ def test_normalize_the_mrav_template(repo, tmp_path):
     obj = om.normalize(om.mrav_template(str(repo), holdout_file=_holdout(tmp_path)), owner_has_shell=True)
     assert obj["subject"]["editable"] == ["captain_claw/mrav/**"]
     assert "{checkout}" in obj["metric"]["run"] and obj["metric"]["dev_file"] == "evals/mrav/dev.json"
-    assert obj["budget"] == {"usd": 50.0, "hours": 8.0, "max_experiments": 40}
+    assert obj["budget"] == {"tokens": 200_000_000, "hours": 8.0, "max_experiments": 40}
     assert obj["lane"]["harness"] == "claude" and obj["lane"]["per_round"] == 2
 
 
@@ -182,7 +182,8 @@ def test_normalize_the_mrav_template(repo, tmp_path):
     (lambda o, t: o["subject"].__setitem__("editable", []), "may change"),
     (lambda o, t: o["subject"].__setitem__("protected", ["../x"]), "inside the repository"),
     (lambda o, t: o["lane"].__setitem__("harness", "vim"), "coding worker"),
-    (lambda o, t: o["budget"].__setitem__("usd", 0), "between"),
+    (lambda o, t: o["budget"].__setitem__("tokens", 0), "between"),
+    (lambda o, t: o["budget"].__setitem__("tokens", "lots"), "must be a number"),
     (lambda o, t: o.__setitem__("kind", "live"), "Only code"),
 ])
 def test_normalize_refuses(repo, tmp_path, change, message):
@@ -312,7 +313,7 @@ def make_objective(**over):
            "holdout": {"run": "x {checkout} {holdout}", "file": "/h"},
            "guardrails": [], "noise": {"min_gain": 0.05},
            "lane": {"kind": "crew", "harness": "claude", "model": "", "model_source": None, "per_round": 2},
-           "budget": {"usd": 50.0, "hours": 8.0, "max_experiments": 40},
+           "budget": {"tokens": 200_000_000, "hours": 8.0, "max_experiments": 40},
            "stop": {"target": None, "stall_rounds": 2, "remeasure_every": 50}}
     for k, v in over.items():
         obj[k] = {**obj[k], **v} if isinstance(v, dict) else v
@@ -482,11 +483,11 @@ def test_driver_stalls_after_rounds_without_gain(harness):
 def test_driver_stops_on_budget_and_stops_the_lane(harness):
     ns = harness
     ns.scores = {(BASE, "dev"): [0.6], (BASE, "holdout"): [0.6]}
-    ns.lane.heads = {1: {"state": "running", "usd": 9.0, "tokens": 10}}
+    ns.lane.heads = {1: {"state": "running", "usd": 0.0, "tokens": 9_000_000}}
     ns.ideas = [[idea("expensive", "x")]]
 
     async def go():
-        await ns.new_run(objective=make_objective(budget={"usd": 5.0}))
+        await ns.new_run(objective=make_objective(budget={"tokens": 5_000_000}))
         status = await ns.drive()
         return status, await ns.store.get_run("cs_test"), await ns.store.list_experiments("cs_test")
     status, r, exps = run(go())
@@ -640,13 +641,15 @@ def client(harness, monkeypatch, repo, tmp_path):
 
 def test_routes_start_list_get_cancel(client):
     c, routes, kicked = client
-    r = c.post("/fd/captain-swarm/runs", json={"template": "mrav", "options": {"model": "ornith:9b", "budget_usd": 5}})
+    r = c.post("/fd/captain-swarm/runs", json={"template": "mrav", "options": {"model": "ornith:9b", "budget_tokens": "5M",
+                                                                                "budget_usd": 5}})
     assert r.status_code == 200, r.text
     rid = r.json()["id"]
     assert r.json()["status"] == "baseline" and kicked
     assert [x["id"] for x in c.get("/fd/captain-swarm/runs").json()["runs"]] == [rid]
     got = c.get(f"/fd/captain-swarm/runs/{rid}").json()
-    assert got["objective"]["budget"]["usd"] == 5 and got["objective"]["holdout"] == {"file": "(sealed)"}
+    assert got["objective"]["budget"]["tokens"] == 5_000_000 and "usd" not in got["objective"]["budget"]
+    assert got["objective"]["holdout"] == {"file": "(sealed)"}
     assert "ornith:9b" in got["objective"]["metric"]["run"]
     assert c.post(f"/fd/captain-swarm/runs/{rid}/pr").status_code == 409
     assert c.post(f"/fd/captain-swarm/runs/{rid}/cancel").json()["status"] == "cancelled"

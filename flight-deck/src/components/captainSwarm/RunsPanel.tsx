@@ -9,10 +9,13 @@
 // Every run learns (Phase 6): lessons are kept per kind of task, and the next run of that kind
 // starts from them; the owner sees them and can forget any.
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { BookMarked, BookOpen, Check, ExternalLink, GitPullRequest, Hand, Loader2, Play, Square, X } from 'lucide-react'
+import {
+  BookMarked, BookOpen, Check, ExternalLink, FileDown, GitPullRequest, Hand, Loader2, Play, Square, X,
+} from 'lucide-react'
 import { captainSwarmRuns } from '../../services/captainSwarm'
 import type {
-  Experiment, Lesson, MravTemplate, OutcomeTemplate, Playbook, RunDetail, RunSummary, TriageTemplate,
+  CodeTemplate, DocumentTemplate, Experiment, Lesson, MravTemplate, OutcomeTemplate, Playbook, RunDetail, RunSummary,
+  TriageTemplate,
 } from '../../services/captainSwarm'
 import { useProcessStore } from '../../stores/processStore'
 
@@ -41,6 +44,28 @@ const MARK: Record<string, string> = {
 // "Nothing yet" (a one-task run's start is a sentinel far past any real number) reads as a dash.
 const f3 = (n?: number | null) => (n === null || n === undefined || Math.abs(n) >= 1e11 ? '—' : n.toFixed(3))
 const usd = (n?: number) => `$${(n || 0).toFixed(2)}`
+
+// Caps are entered and shown in tokens: "80M", "500k" or a number.
+function fmtTokens(n?: number): string {
+  const v = n || 0
+  for (const [unit, size] of [['B', 1e9], ['M', 1e6], ['k', 1e3]] as const) {
+    if (v >= size) return `${(v / size).toFixed(1).replace(/\.0$/, '')}${unit}`
+  }
+  return String(Math.round(v))
+}
+
+function parseTokens(s: string): number | null {
+  const m = s.replace(/[_\s]/g, '').match(/^(\d+(?:[.,]\d+)?)([kKmMbBgG]?)$/)
+  if (!m) return null
+  const unit = { '': 1, k: 1e3, m: 1e6, b: 1e9, g: 1e9 }[m[2].toLowerCase() as '' | 'k' | 'm' | 'b' | 'g']
+  return Math.round(parseFloat(m[1].replace(',', '.')) * unit)
+}
+
+const TOKEN_KEYS = ['attempt_tokens', 'budget_tokens']
+
+// A template's defaults as form text, token caps written short ("15M").
+const formOf = (defaults: Record<string, string | number>) => Object.fromEntries(Object.entries(defaults).map(
+  ([k, v]) => [k, TOKEN_KEYS.includes(k) && typeof v === 'number' ? fmtTokens(v) : String(v)]))
 
 function TextField({ label, value, onChange, wide }: {
   label: string; value: string; onChange: (v: string) => void; wide?: boolean
@@ -76,14 +101,31 @@ function FamilyField({ value, onChange, fallback, families }: {
   )
 }
 
+function TokenField({ label, value, onChange }: { label: string; value: string; onChange: (v: string) => void }) {
+  const n = parseTokens(value)
+  return (
+    <label className="flex flex-col gap-1 text-xs text-zinc-400">
+      {label}
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder="e.g. 15M"
+        className={`rounded border bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 ${
+          value.trim() && n === null ? 'border-red-500/70' : 'border-zinc-700'}`} />
+      <span className="text-[11px] text-zinc-500">
+        {n === null ? 'Write 80M, 500k or a number' : `${n.toLocaleString()} tokens`}
+      </span>
+    </label>
+  )
+}
+
 // How many attempts run at once: each kind has its own ceiling on this deck.
 function AtOnce({ value, onChange, most }: { value: string; onChange: (v: string) => void; most: number }) {
   return <TextField label={`At once (up to ${most})`} value={value} onChange={onChange} />
 }
 
 function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
-  const [templates, setTemplates] = useState<{ mrav: MravTemplate; triage: TriageTemplate; outcome: OutcomeTemplate } | null>(null)
-  const [which, setWhich] = useState<'outcome' | 'triage' | 'mrav'>('outcome')
+  const [templates, setTemplates] = useState<{
+    mrav: MravTemplate; triage: TriageTemplate; outcome: OutcomeTemplate; document: DocumentTemplate; code: CodeTemplate
+  } | null>(null)
+  const [which, setWhich] = useState<'outcome' | 'document' | 'triage' | 'code' | 'mrav'>('document')
   const [canStart, setCanStart] = useState(false)
   const [error, setError] = useState('')
   const [families, setFamilies] = useState<Families>({})
@@ -102,22 +144,25 @@ function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
   if (!templates) return error ? <div className="text-xs text-red-400">{error}</div> : null
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
-      <div className="mb-3 inline-flex overflow-hidden rounded-md border border-zinc-700 text-xs">
-        {([['outcome', 'Best result for a task'], ['triage', 'Inbox triage rules'], ['mrav', 'Mrav eval (code)']] as const).map(([k, label]) => (
+      <div className="mb-3 inline-flex flex-wrap overflow-hidden rounded-md border border-zinc-700 text-xs">
+        {([['document', 'Write or research'], ['outcome', 'Best result for a task'], ['triage', 'Rules from your habits'],
+          ['code', 'Any repository'], ['mrav', 'Mrav eval']] as const).map(([k, label]) => (
           <button key={k} onClick={() => setWhich(k)}
             className={`px-2.5 py-1 ${which === k ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}>
             {label}
           </button>
         ))}
       </div>
+      {which === 'document' && <StartDocument tpl={templates.document} families={families} onStarted={onStarted} />}
       {which === 'outcome' && <StartOutcome tpl={templates.outcome} families={families} onStarted={onStarted} />}
+      {which === 'code' && <StartCode tpl={templates.code} families={families} canStart={canStart} onStarted={onStarted} />}
       {which === 'triage' && <StartTriage tpl={templates.triage} families={families} onStarted={onStarted} />}
       {which === 'mrav' && <StartMrav tpl={templates.mrav} families={families} canStart={canStart} onStarted={onStarted} />}
     </div>
   )
 }
 
-function useStart(template: 'mrav' | 'triage' | 'outcome', onStarted: (id: string) => void) {
+function useStart(template: 'mrav' | 'triage' | 'outcome' | 'document', onStarted: (id: string) => void) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const start = async (options: Record<string, string | number>) => {
@@ -139,8 +184,7 @@ function StartOutcome({ tpl, families, onStarted }: {
   tpl: OutcomeTemplate; families: Families; onStarted: (id: string) => void
 }) {
   const [form, setForm] = useState<Record<string, string>>(
-    () => ({ task: '', max_value: '', must_include: '', currency: '',
-      ...Object.fromEntries(Object.entries(tpl.defaults).map(([k, v]) => [k, String(v)])) }))
+    () => ({ task: '', max_value: '', must_include: '', currency: '', ...formOf(tpl.defaults) }))
   const { busy, error, start } = useStart('outcome', onStarted)
   const set = (k: string) => (v: string) => setForm((f) => ({ ...f, [k]: v }))
   return (
@@ -166,10 +210,10 @@ function StartOutcome({ tpl, families, onStarted }: {
         <TextField label="At most (optional)" value={form.max_value || ''} onChange={set('max_value')} />
         <TextField label="Currency (optional)" value={form.currency || ''} onChange={set('currency')} />
         <TextField label="Page must say (comma-separated)" value={form.must_include || ''} onChange={set('must_include')} wide />
-        <TextField label="Most per attempt ($)" value={form.attempt_usd || ''} onChange={set('attempt_usd')} />
+        <TokenField label="Most tokens per attempt" value={form.attempt_tokens || ''} onChange={set('attempt_tokens')} />
         <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
         <AtOnce value={form.parallel || ''} onChange={set('parallel')} most={tpl.max_parallel} />
-        <TextField label="Budget ($)" value={form.budget_usd || ''} onChange={set('budget_usd')} />
+        <TokenField label="Token budget" value={form.budget_tokens || ''} onChange={set('budget_tokens')} />
         <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
         <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
         <FamilyField value={form.family || ''} onChange={set('family')} families={families}
@@ -191,13 +235,159 @@ function StartOutcome({ tpl, families, onStarted }: {
   )
 }
 
+// One document — writing or research — tried several ways, each graded against a checklist from the brief.
+function StartDocument({ tpl, families, onStarted }: {
+  tpl: DocumentTemplate; families: Families; onStarted: (id: string) => void
+}) {
+  const [form, setForm] = useState<Record<string, string>>(
+    () => ({ task: '', audience: '', criteria: '', ...formOf(tpl.defaults) }))
+  const { busy, error, start } = useStart('document', onStarted)
+  const set = (k: string) => (v: string) => setForm((f) => ({ ...f, [k]: v }))
+  const sources = form.sources !== '0'
+  return (
+    <>
+      <div className="text-sm font-medium text-zinc-100">{tpl.title}</div>
+      <p className="mt-1 text-xs leading-relaxed text-zinc-400">{tpl.about}</p>
+      <label className="mt-3 flex flex-col gap-1 text-xs text-zinc-400">
+        The brief
+        <textarea value={form.task} onChange={(e) => set('task')(e.target.value)} rows={3}
+          placeholder="A two-page brief for our studio on what the EU AI Act asks of a small design agency that uses AI image tools, and what we should do this quarter"
+          className="resize-y rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600" />
+      </label>
+      <label className="mt-3 flex flex-col gap-1 text-xs text-zinc-400">
+        It must (one per line, optional)
+        <textarea value={form.criteria} onChange={(e) => set('criteria')(e.target.value)} rows={2}
+          placeholder={'Name the deadlines that apply to us\nEnd with a checklist we can act on'}
+          className="resize-y rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600" />
+      </label>
+      <div className="mt-3 grid gap-3 sm:grid-cols-4">
+        <TextField label="Written for (optional)" value={form.audience || ''} onChange={set('audience')} wide />
+        <TextField label="About how many words (0 = any)" value={form.words || ''} onChange={set('words')} />
+        <label className="flex items-center gap-2 self-end pb-1.5 text-xs text-zinc-300">
+          <input type="checkbox" checked={sources} onChange={(e) => set('sources')(e.target.checked ? '1' : '0')} />
+          Research: back claims with sources
+        </label>
+        <TokenField label="Most tokens per attempt" value={form.attempt_tokens || ''} onChange={set('attempt_tokens')} />
+        <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
+        <AtOnce value={form.parallel || ''} onChange={set('parallel')} most={tpl.max_parallel} />
+        <TokenField label="Token budget" value={form.budget_tokens || ''} onChange={set('budget_tokens')} />
+        <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
+        <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
+        <FamilyField value={form.family || ''} onChange={set('family')} families={families}
+          fallback={sources ? 'research' : 'writing'} />
+      </div>
+      <div className="mt-3 flex items-center gap-3">
+        <button onClick={() => start(form)} disabled={busy || form.task.trim().length < 15}
+          className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50">
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} Start the run
+        </button>
+        {error && <span className="text-xs text-red-400">{error}</span>}
+      </div>
+    </>
+  )
+}
+
+const lines = (s: string) => s.split(/[\n,]/).map((x) => x.trim()).filter(Boolean)
+
+// Any repository with a command that prints a number: the objective, written out.
+function StartCode({ tpl, families, canStart, onStarted }: {
+  tpl: CodeTemplate; families: Families; canStart: boolean; onStarted: (id: string) => void
+}) {
+  const [form, setForm] = useState<Record<string, string>>(
+    () => ({ repo_path: '', goal: '', editable: '', protected: '', run: '', read: '', direction: 'max',
+      holdout_run: '', holdout_file: '', target: '', ...formOf(tpl.defaults) }))
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const set = (k: string) => (v: string) => setForm((f) => ({ ...f, [k]: v }))
+  const name = form.repo_path.split('/').filter(Boolean).pop() || 'the repository'
+  const start = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      const r = await captainSwarmRuns.startObjective({
+        kind: 'code', family: form.family || 'code', title: `${form.read || 'The number'} in ${name}`, goal: form.goal,
+        subject: { repo_path: form.repo_path.trim(), editable: lines(form.editable), protected: lines(form.protected),
+          snapshot: { paths: [], exclude: [] } },
+        metric: { kind: 'command', run: form.run.trim(), read: form.read.trim(), direction: form.direction,
+          timeout_s: 3600 },
+        holdout: { run: form.holdout_run.trim(), file: form.holdout_file.trim() },
+        guardrails: [], noise: { min_gain: Number(form.min_gain || 0.01) },
+        lane: { kind: 'crew', harness: form.harness || 'claude', per_round: Number(form.per_round || 2),
+          parallel: Number(form.parallel || 1) },
+        budget: { tokens: form.budget_tokens, hours: Number(form.budget_hours),
+          max_experiments: Number(form.budget_max_experiments) },
+        stop: { target: form.target.trim() === '' ? null : Number(form.target), stall_rounds: 3, remeasure_every: 3 },
+      })
+      onStarted(r.id)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <>
+      <div className="text-sm font-medium text-zinc-100">{tpl.title}</div>
+      <p className="mt-1 text-xs leading-relaxed text-zinc-400">{tpl.about}</p>
+      <div className="mt-3 grid gap-3 sm:grid-cols-4">
+        <TextField label="Repository (full path on this computer)" value={form.repo_path} onChange={set('repo_path')} wide />
+        <TextField label="What to improve, in a sentence" value={form.goal} onChange={set('goal')} wide />
+        <TextField label="May change (paths, comma-separated)" value={form.editable} onChange={set('editable')} wide />
+        <TextField label="Never change (paths)" value={form.protected} onChange={set('protected')} wide />
+      </div>
+      <label className="mt-3 flex flex-col gap-1 text-xs text-zinc-400">
+        The measuring command: it prints JSON; {'{checkout}'} is the copy being measured
+        <input value={form.run} onChange={(e) => set('run')(e.target.value)}
+          placeholder="cd {checkout} && npx vitest run --reporter=json --outputFile=/dev/stdout"
+          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 font-mono text-xs text-zinc-100 placeholder:text-zinc-600" />
+      </label>
+      <div className="mt-3 grid gap-3 sm:grid-cols-4">
+        <TextField label="The number in its JSON (e.g. numPassedTests)" value={form.read} onChange={set('read')} />
+        <label className="flex flex-col gap-1 text-xs text-zinc-400">
+          Better is
+          <select value={form.direction} onChange={(e) => set('direction')(e.target.value)}
+            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100">
+            <option value="max">higher</option>
+            <option value="min">lower</option>
+          </select>
+        </label>
+        <TextField label="Smallest gain that counts" value={form.min_gain || ''} onChange={set('min_gain')} />
+        <TextField label="Target (optional)" value={form.target} onChange={set('target')} />
+        <TextField label="Held-out command (optional, may use {holdout})" value={form.holdout_run} onChange={set('holdout_run')} wide />
+        <TextField label="Held-out cases file (outside the repository)" value={form.holdout_file} onChange={set('holdout_file')} wide />
+        <label className="flex flex-col gap-1 text-xs text-zinc-400">
+          Coding worker
+          <select value={form.harness || 'claude'} onChange={(e) => set('harness')(e.target.value)}
+            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100">
+            {['claude', 'codex', 'opencode', 'crush', 'pi'].map((h) => <option key={h} value={h}>{h}</option>)}
+          </select>
+        </label>
+        <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
+        <AtOnce value={form.parallel || ''} onChange={set('parallel')} most={tpl.max_parallel} />
+        <TokenField label="Token budget" value={form.budget_tokens || ''} onChange={set('budget_tokens')} />
+        <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
+        <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
+        <FamilyField value={form.family || ''} onChange={set('family')} families={families} fallback="code" />
+      </div>
+      <div className="mt-3 flex items-center gap-3">
+        <button onClick={start} disabled={busy || !canStart || !form.repo_path.trim() || !form.run.trim() || !form.read.trim()}
+          className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50">
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} Start the run
+        </button>
+        {!canStart && <span className="text-xs text-zinc-500">Measuring runs a command on this deck: admins only.</span>}
+        {error && <span className="text-xs text-red-400">{error}</span>}
+      </div>
+    </>
+  )
+}
+
 function StartTriage({ tpl, families, onStarted }: {
   tpl: TriageTemplate; families: Families; onStarted: (id: string) => void
 }) {
   const processes = useProcessStore((s) => s.processes)
   const fetchProcesses = useProcessStore((s) => s.fetchProcesses)
   const [form, setForm] = useState<Record<string, string>>(
-    () => Object.fromEntries(Object.entries(tpl.defaults).map(([k, v]) => [k, String(v)])))
+    () => formOf(tpl.defaults))
   const { busy, error, start } = useStart('triage', onStarted)
   useEffect(() => { fetchProcesses() }, [fetchProcesses])
   useEffect(() => {
@@ -205,6 +395,7 @@ function StartTriage({ tpl, families, onStarted }: {
   }, [tpl.sets, processes])
   const set = (k: string) => (v: string) => setForm((f) => ({ ...f, [k]: v }))
   const agent = processes.find((p) => p.slug === form.agent)
+  const calendar = tpl.sets.find((x) => x.id === form.set_id)?.kind === 'calendar_invites'
   return (
     <>
       <div className="text-sm font-medium text-zinc-100">{tpl.title}</div>
@@ -233,10 +424,11 @@ function StartTriage({ tpl, families, onStarted }: {
             <TextField label="Held-out cases (0 = all)" value={form.holdout_cases || ''} onChange={set('holdout_cases')} />
             <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
             <AtOnce value={form.parallel || ''} onChange={set('parallel')} most={tpl.max_parallel} />
-            <TextField label="Budget ($)" value={form.budget_usd || ''} onChange={set('budget_usd')} />
+            <TokenField label="Token budget" value={form.budget_tokens || ''} onChange={set('budget_tokens')} />
             <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
             <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
-            <FamilyField value={form.family || ''} onChange={set('family')} families={families} fallback="mail-triage" />
+            <FamilyField value={form.family || ''} onChange={set('family')} families={families}
+              fallback={calendar ? 'calendar-invites' : 'mail-triage'} />
           </div>
           <p className="mt-2 text-xs text-zinc-500">
             Each measurement asks {agent?.name || 'the agent'} {Number(form.cases || 0) * Number(form.repeat || 0)} questions
@@ -261,7 +453,7 @@ function StartMrav({ tpl, families, canStart, onStarted }: {
   tpl: MravTemplate; families: Families; canStart: boolean; onStarted: (id: string) => void
 }) {
   const [form, setForm] = useState<Record<string, string>>(
-    () => Object.fromEntries(Object.entries(tpl.defaults).map(([k, v]) => [k, String(v)])))
+    () => formOf(tpl.defaults))
   const { busy, error, start } = useStart('mrav', onStarted)
   const set = (k: string) => (v: string) => setForm((f) => ({ ...f, [k]: v }))
   return (
@@ -286,7 +478,7 @@ function StartMrav({ tpl, families, canStart, onStarted }: {
             {['claude', 'codex', 'opencode', 'crush', 'pi'].map((h) => <option key={h} value={h}>{h}</option>)}
           </select>
         </label>
-        <TextField label="Budget ($)" value={form.budget_usd || ''} onChange={set('budget_usd')} />
+        <TokenField label="Token budget" value={form.budget_tokens || ''} onChange={set('budget_tokens')} />
         <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
         <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
         <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
@@ -371,7 +563,7 @@ function Ledger({ exps, intents }: { exps: Experiment[]; intents?: RunDetail['in
           <th className="pb-1 pr-3 font-medium">Verdict</th>
           <th className="pb-1 pr-3 font-medium">Open</th>
           <th className="pb-1 pr-3 font-medium">Held-out</th>
-          <th className="pb-1 font-medium">Cost</th>
+          <th className="pb-1 font-medium">Tokens</th>
         </tr>
       </thead>
       <tbody>
@@ -421,7 +613,8 @@ function Ledger({ exps, intents }: { exps: Experiment[]; intents?: RunDetail['in
                 : e.dev?.stats ? <>{f3(e.dev.stats.mean)} <span className="text-zinc-500">± {f3(e.dev.stats.stdev)}</span></> : '—'}
             </td>
             <td className="py-2 pr-3 text-zinc-300">{e.holdout?.stats ? f3(e.holdout.stats.mean) : '—'}</td>
-            <td className="py-2 text-zinc-400">{e.cost_usd ? usd(e.cost_usd) : ''}</td>
+            <td className="py-2 text-zinc-400" title={e.cost_usd ? `about ${usd(e.cost_usd)}` : undefined}>
+              {e.tokens ? fmtTokens(e.tokens) : ''}</td>
           </tr>
         ))}
       </tbody>
@@ -463,6 +656,61 @@ function InFlight({ run }: { run: RunDetail }) {
           </li>
         ))}
       </ul>
+    </div>
+  )
+}
+
+// A document run's best document, how it did on each checklist item, and its sources.
+function DocumentPanel({ doc }: { doc: NonNullable<RunDetail['document']> }) {
+  const [open, setOpen] = useState(false)
+  const best = doc.best
+  return (
+    <div className="space-y-2 rounded-md bg-zinc-950/60 p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2 text-zinc-500">
+        {best ? `The best document so far · ${best.words} words` : 'No document has passed its checks yet.'}
+        {doc.saved && <span className="text-sky-300">saved to {doc.saved}</span>}
+      </div>
+      {best && (
+        <>
+          <div className={`whitespace-pre-wrap rounded border border-zinc-800 bg-zinc-900/60 p-3 text-[13px] leading-relaxed text-zinc-200 ${open ? '' : 'max-h-72 overflow-hidden'}`}>
+            {best.text}{best.cut ? '\n…' : ''}
+          </div>
+          <button onClick={() => setOpen((v) => !v)} className="text-sky-400 hover:underline">
+            {open ? 'Show less' : 'Read it all'}
+          </button>
+        </>
+      )}
+      {doc.checklist.length > 0 && (
+        <details>
+          <summary className="cursor-pointer text-zinc-500">
+            The checklist it is graded on ({doc.checklist.length} items, made from your brief; {doc.held_items} more
+            held back, unseen by anyone planning)
+          </summary>
+          <ul className="mt-1 space-y-0.5">
+            {doc.checklist.map((c, i) => (
+              <li key={i} className={c.grade === null ? 'text-zinc-400' : c.grade >= 1 ? 'text-emerald-300/90' : c.grade > 0 ? 'text-amber-300/90' : 'text-zinc-500'}>
+                {c.grade === null ? '·' : c.grade >= 1 ? '✓' : c.grade > 0 ? '½' : '✗'} {c.item}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+      {best && best.sources.length > 0 && (
+        <details>
+          <summary className="cursor-pointer text-zinc-500">
+            Sources Captain opened: {best.sources.filter((x) => x.ok).length} of {best.sources.length} hold
+          </summary>
+          <ul className="mt-1 space-y-0.5">
+            {best.sources.map((x) => (
+              <li key={x.url} className={x.ok ? 'text-zinc-300' : 'text-zinc-500'}>
+                {x.ok ? '✓' : '✗'}{' '}
+                <a href={x.url} target="_blank" rel="noreferrer" className="break-all text-sky-400 hover:underline">{x.url}</a>
+                {x.via === 'browser' ? ' (seen in a browser)' : ''}{!x.ok && x.why ? ` — ${x.why}` : ''}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
     </div>
   )
 }
@@ -683,7 +931,16 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
               <Hand size={13} /> Carry it out
             </button>
           )}
-          {!active && run.improved && run.kind === 'outcome' && !run.learning?.playbook && (
+          {!active && run.improved && run.kind === 'document' && !run.document?.saved && (
+            <button onClick={() => act(async () => {
+              const r = await captainSwarmRuns.saveDocument(id)
+              setNote(`Saved to your files: ${r.saved}`)
+            })}
+              className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-500">
+              <FileDown size={13} /> Save to my files
+            </button>
+          )}
+          {!active && run.improved && (run.kind === 'outcome' || run.kind === 'document') && !run.learning?.playbook && (
             <button onClick={() => setShowPlaybook((v) => !v)}
               className="inline-flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800">
               <BookMarked size={13} /> Save as a playbook
@@ -723,9 +980,20 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
           <div className="text-zinc-500">round {run.round || 0}</div>
         </div>
         <div className="rounded-md bg-zinc-950/60 p-2.5">
-          <div className="text-zinc-500">Spent</div>
-          <div className="mt-0.5 text-sm text-zinc-200">{usd(run.spent_usd)}{b ? ` of ${usd(b.usd)}` : ''}</div>
-          <div className="text-zinc-500">{Math.round(run.spent_tokens / 1000)}k tokens</div>
+          <div className="text-zinc-500">Used</div>
+          {b?.usd && !b.tokens ? (
+            <>
+              <div className="mt-0.5 text-sm text-zinc-200">{usd(run.spent_usd)} of {usd(b.usd)}</div>
+              <div className="text-zinc-500">{fmtTokens(run.spent_tokens)} tokens</div>
+            </>
+          ) : (
+            <>
+              <div className="mt-0.5 text-sm text-zinc-200">
+                {fmtTokens(run.spent_tokens)}{b?.tokens ? ` of ${fmtTokens(b.tokens)}` : ''} tokens
+              </div>
+              <div className="text-zinc-500">about {usd(run.spent_usd)}</div>
+            </>
+          )}
         </div>
       </div>
       <Chart run={run} />
@@ -747,6 +1015,7 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
               {run.outcome.checks.map((c) => (
                 <li key={c.url} className={c.verified ? 'text-zinc-300' : 'text-zinc-500'}>
                   {c.verified ? '✓' : '✗'} {c.value} {c.currency} · {c.title.slice(0, 80)}
+                  {c.via === 'browser' ? ' (seen in a browser)' : ''}
                   {!c.verified && c.why ? ` — ${c.why}` : ''}
                 </li>
               ))}
@@ -755,6 +1024,7 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
           {run.outcome.carried_out && <div className="text-sky-300">Being carried out by Bat run {run.outcome.carried_out}.</div>}
         </div>
       )}
+      {run.kind === 'document' && run.document && <DocumentPanel doc={run.document} />}
       {run.kind === 'practice' && run.rules && (
         <div className="rounded-md bg-zinc-950/60 p-3 text-xs">
           <div className="mb-1 text-zinc-500">{run.improved ? 'The best rules so far' : 'Rules'}</div>
@@ -789,6 +1059,15 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
               <div className="break-all font-mono text-[11px] text-zinc-500">{run.objective.metric.run}</div>
               <div>Coding worker: {run.objective.lane.harness}{run.objective.lane.model ? ` (${run.objective.lane.model})` : ''}</div>
             </>
+          ) : run.kind === 'document' ? (
+            <>
+              <div>Brief: {run.objective.subject.task}</div>
+              <div>Each attempt is a Bat run in rehearsal that searches, reads and writes; nothing is sent or published.
+                A judge on a model the workers don't use grades every document against a checklist made from the brief,
+                twice; a second checklist nobody planning sees confirms a gain
+                {run.objective.subject.sources ? ', and Captain opens every source a document cites' : ''}. These are
+                model grades, not yours: read the documents.</div>
+            </>
           ) : run.kind === 'outcome' ? (
             <>
               <div>Task: {run.objective.subject.task}</div>
@@ -800,7 +1079,8 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
             <>
               <div>Agent: {run.objective.subject.agent_name} · practice set {run.objective.subject.set_id}</div>
               <div>Each measurement: {run.objective.metric.cases} open cases × {run.objective.metric.repeat} runs, on the
-                agent's exam lane (it can't send or change anything). Scored by F1 on "needs your reply".</div>
+                agent's exam lane (it can't send or change anything). Scored by F1 on
+                {run.objective.subject.set_kind === 'calendar_invites' ? ' "you accept"' : ' "needs your reply"'}.</div>
             </>
           )}
         </div>
@@ -845,7 +1125,8 @@ export function RunsPanel() {
       {error && <div className="text-xs text-red-400">{error}</div>}
       <StartRun onStarted={(id) => { setActiveId(id); load() }} />
       {runs.length > 0 && (
-        <div className="grid gap-4 xl:grid-cols-[16rem_1fr]">
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-4 xl:grid-cols-[16rem_minmax(0,1fr)]">
+          {/* minmax(0, …): a long run title truncates instead of widening the column past the page. */}
           <ul className="space-y-1">
             {runs.map((r) => (
               <li key={r.id}>

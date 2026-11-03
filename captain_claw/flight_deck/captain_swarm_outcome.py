@@ -9,7 +9,10 @@ An attempt ends with what it found, as candidates with a link and a number.
 
 Captain doesn't take its word for any of it (:func:`verify`). It fetches each
 link itself — public addresses only — and a candidate counts only if the page
-shows its number, its name, and the words the task insists on. The best
+shows its number, its name, and the words the task insists on. A page that
+shows nothing to a plain fetch, or not the number, is opened again in a real
+browser of Captain's own (:mod:`captain_swarm_browser`): many shops only show
+their prices once the page's scripts have run. The best
 verified number is the attempt's score; the best attempt so far is the
 champion. The held-out check, for an outcome, is a fresh look at the
 champion's best candidate: offers and slots change.
@@ -40,6 +43,7 @@ import urllib.parse
 import uuid
 from typing import Any
 
+from captain_claw.flight_deck import captain_swarm_browser as browser
 from captain_claw.flight_deck import captain_swarm_rehearsal as rehearsal
 from captain_claw.flight_deck.captain_swarm_learning import shown_verdict
 from captain_claw.logging import get_logger
@@ -47,6 +51,11 @@ from captain_claw.logging import get_logger
 log = get_logger(__name__)
 
 WORST = 1e12
+# Tokens, not dollars (§ Real work): an attempt that searched and checked a few
+# shops used 7–8M on Haiku workers.
+ATTEMPT_TOKENS = 10_000_000
+ATTEMPT_TOKENS_FLOOR = 200_000   # an attempt with less can't open a page and say what it saw
+BUDGET = {"tokens": 50_000_000, "hours": 4.0, "max_experiments": 6}
 _MAX_CANDIDATES = 8
 _FETCH_TIMEOUT_S = 15.0
 _FETCH_MAX_BYTES = 2_000_000
@@ -79,8 +88,8 @@ def outcome_template(*, task: str, label: str = "price", direction: str = "min",
         "metric": {"kind": "state", "read": "best_verified", "direction": direction},
         "guardrails": [],
         "noise": {"min_gain": 0.01},
-        "lane": {"kind": "bat", "per_round": 3, "parallel": 3, "attempt_usd": 2.0},
-        "budget": {"usd": 10.0, "hours": 4.0, "max_experiments": 6},
+        "lane": {"kind": "bat", "per_round": 3, "parallel": 3, "attempt_tokens": ATTEMPT_TOKENS},
+        "budget": dict(BUDGET),
         "stop": {"target": None, "stall_rounds": 2, "remeasure_every": 99},
     }
 
@@ -92,7 +101,7 @@ def bat_slots() -> int:
 
 
 def normalize(raw: dict[str, Any]) -> dict[str, Any]:
-    from captain_claw.flight_deck.captain_swarm_objective import DEFAULT_BUDGET, ObjectiveError, _num, lanes
+    from captain_claw.flight_deck.captain_swarm_objective import ObjectiveError, _num, attempt_tokens, budget_of, lanes
     subj = raw.get("subject") or {}
     task = " ".join(str(subj.get("task") or raw.get("goal") or "").split())
     if len(task) < 10:
@@ -103,7 +112,6 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
         raise ObjectiveError("Lower or higher is better: min or max.")
     cons = subj.get("constraints") or {}
     max_value = cons.get("max_value")
-    budget = {**DEFAULT_BUDGET, **(raw.get("budget") or {})}
     lane = raw.get("lane") or {}
     stop = raw.get("stop") or {}
     parallel, per_round = lanes(lane, default=1, most=bat_slots(), per_round_most=6)
@@ -126,9 +134,8 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
         "guardrails": [],
         "noise": {"min_gain": _num((raw.get("noise") or {}).get("min_gain", 0.01), "The smallest gain that counts", 0, 1e9)},
         "lane": {"kind": "bat", "per_round": per_round, "parallel": parallel,
-                 "attempt_usd": _num(lane.get("attempt_usd", 2.0), "The most one attempt may spend", 0.1, 100)},
-        "budget": {"usd": _num(budget["usd"], "The usd limit", 0.5, 500), "hours": _num(budget["hours"], "The hours limit", 0.25, 48),
-                   "max_experiments": int(_num(budget["max_experiments"], "The max experiments limit", 1, 30))},
+                 "attempt_tokens": attempt_tokens(lane, ATTEMPT_TOKENS)},
+        "budget": budget_of(raw.get("budget"), BUDGET, hours_most=48, experiments_most=30),
         "stop": {"target": None, "stall_rounds": int(_num(stop.get("stall_rounds", 2), "Rounds without a gain", 1, 10)),
                  "remeasure_every": 99},
     }
@@ -183,9 +190,27 @@ def lane_brief(run: dict, exp: dict) -> str:
     return "\n".join(x for x in lines if x is not None).strip()
 
 
+def attempt_cap(run: dict, exp: dict) -> dict:
+    """An attempt's cap for its Bat run, in tokens: the lane's most per attempt,
+    or its part of what the run has left (the attempts of one wave share it
+    equally), whichever is less."""
+    from captain_claw.flight_deck.captain_swarm_objective import tokens_left
+    lane = run["objective"]["lane"]
+    most = int(lane.get("attempt_tokens") or ATTEMPT_TOKENS)
+    left = exp.get("token_share")
+    if left is None:
+        left = tokens_left(run)
+    cap = most if left is None else min(most, int(left))
+    return {"token_cap": max(ATTEMPT_TOKENS_FLOOR, cap)}
+
+
 class BatLane:
     """One attempt = one Bat run in rehearsal. Its workers carry the attempt's
     tag (``CLAW_REHEARSAL``), so nothing they do reaches the world."""
+
+    def task(self, run: dict, exp: dict, bat_id: str) -> str:
+        """What the attempt's Bat run is asked to do."""
+        return lane_brief(run, exp)
 
     async def start(self, run: dict, exp: dict, brief: str) -> dict:
         from captain_claw.flight_deck import bat_loop
@@ -193,16 +218,13 @@ class BatLane:
         if store is None:
             raise RuntimeError("Bat isn't running on this deck")
         bat_id = f"bat_{uuid.uuid4().hex[:12]}"
-        # Its part of what's left: the attempts of one wave share the budget equally.
-        left = exp.get("usd_share", run["objective"]["budget"]["usd"] - run["spent_usd"])
-        cap = max(0.1, min(float(run["objective"]["lane"].get("attempt_usd") or 2.0), float(left)))
         await store.create_run(
             run_id=bat_id, owner_id=run["owner_id"], title=f"Captain Swarm #{exp['round']}.{exp['n']}: "
                                                             f"{exp['hypothesis'][:60]}",
-            task=lane_brief(run, exp),
+            task=self.task(run, exp, bat_id),
             config={"source": "captain_swarm", "rehearsal": rehearsal.make_tag(run["id"], exp["id"]),
-                    "worker_mode": "plain", "steps": []},
-            origin={}, llm_usd_cap=cap, status="planning")
+                    "worker_mode": "plain", "steps": [], **attempt_cap(run, exp)},
+            origin={}, llm_usd_cap=0.0, status="planning")
         await store.append_event(bat_id, "note", f"a Captain Swarm rehearsal for {run['id']}")
         try:
             await bat_loop.kick()
@@ -435,7 +457,18 @@ async def measure(run: dict, version_id: str, which: str) -> dict:
     for c in candidates[:_MAX_CANDIDATES]:
         text, where = await fetch_text(c["url"])
         ok, why = verify(c, text, subj["constraints"], direction) if text else (False, where)
-        checks.append({**c, "verified": ok, "why": why, "snippet": excerpt(text, c["value"]) if ok else ""})
+        via = "fetch"
+        if not ok and browser.enabled():
+            # Many pages only show a price once their scripts run, and some refuse a
+            # plain fetch: Captain looks again, in a browser of its own.
+            rtext, rwhere = await browser.rendered_text(c["url"])
+            if rtext:
+                text, via = rtext, "browser"
+                ok, why = verify(c, text, subj["constraints"], direction)
+            else:
+                why = f"{why}; in a browser too: {rwhere}"
+        checks.append({**c, "verified": ok, "why": why, "via": via,
+                       "snippet": excerpt(text, c["value"]) if ok else ""})
         per_case[c["url"]] = 1.0 if ok else 0.0
     good = [c for c in checks if c["verified"]]
     best = (min if direction == "min" else max)(good, key=lambda c: c["value"]) if good else None

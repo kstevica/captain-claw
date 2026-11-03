@@ -1100,7 +1100,10 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
         return pricing.summarize([{"model": so_far.get("model") or worker_model, "usage": _finalize_usage(so_far)}])
 
     def _on_usage(_pt: int, _ct: int, _tt: int) -> None:
-        bat_nested.set_live(sid, key, float(_spent().get("usd") or 0.0))
+        spent = _spent()
+        t = spent.get("tokens") or {}
+        bat_nested.set_live(sid, key, float(spent.get("usd") or 0.0),
+                            int(t.get("total_tokens") or (t.get("prompt_tokens", 0) + t.get("completion_tokens", 0))))
 
     def _on_action(ev: dict) -> None:
         # _send_chat_and_collect calls this SYNCHRONOUSLY, so it must not be a
