@@ -4,7 +4,7 @@ An admin of a Captain deck wants a new set of ready-made agents for everyone on 
 
 ## What you decide
 
-- **Group:** the shelf these sit on in the gallery, next to Generalists, Focused and Personal. A short plain name the people on this deck would recognise, such as "Dental Practice" or "Our Clients". One line saying who it's for.
+- **Group:** the shelf these sit on under Company in the gallery, apart from the Generalists and Specialists that come with Captain. A short plain name the people on this deck would recognise, such as "Dental Practice" or "Our Clients". One line saying who it's for.
 - **Family:** the heading inside the group. A plain noun phrase. If the whole set is one kind of work it can be close to the group's name.
 - **Archetypes:** one per distinct job, never one per task. Each has to be worth keeping for months, and clearly different from the others. If two would read the same documents and make the same decisions, merge them. No coordinator unless someone truly has to route work between them.
 

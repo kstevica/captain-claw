@@ -227,17 +227,33 @@ async def test_a_spawn_can_use_it(deck):
 
 async def test_publishing_into_what_exists(deck):
     async with _client(deck) as c:
-        into_shelf = await c.post("/fd/archetypes/team", json=_pack(group={"id": "focused"}, family={"name": "Legal"}))
-        assert into_shelf.json()["group"] == "focused" and into_shelf.json()["family"] == "Legal"
-        stored = json.loads(deck.settings[TEAM_SETTING])
-        # A built-in family keeps its look, and no shelf was made.
-        assert stored["groups"] == [] and stored["families"] == []
-        same_name = await c.post("/fd/archetypes/team", json=_pack(group={"label": "focused"}))
-        assert same_name.json()["group"] == "focused"
+        # What the company publishes stays apart from the generalists and specialists.
+        onto_built_in = await c.post("/fd/archetypes/team", json=_pack(group={"id": "specialist"}))
+        assert onto_built_in.status_code == 400 and deck.settings.get(TEAM_SETTING) is None
+        named_like_one = await c.post("/fd/archetypes/team", json=_pack(group={"label": "Specialists"}, family={"name": "Legal"}))
+        assert named_like_one.json()["group"] == "group-specialists" and named_like_one.json()["family"] == "Legal"
+        # A built-in family keeps its look.
+        assert json.loads(deck.settings[TEAM_SETTING])["families"] == []
         first = await c.post("/fd/archetypes/team", json=_pack(group={"label": "Dental"}))
         again = await c.post("/fd/archetypes/team", json=_pack(group={"label": "dental"}))
-    assert first.json()["group"] == again.json()["group"] == "group-dental"
-    assert len(json.loads(deck.settings[TEAM_SETTING])["groups"]) == 1
+        by_id = await c.post("/fd/archetypes/team", json=_pack(group={"id": "group-dental"}))
+    assert first.json()["group"] == again.json()["group"] == by_id.json()["group"] == "group-dental"
+    assert len(json.loads(deck.settings[TEAM_SETTING])["groups"]) == 2
+
+
+async def test_an_edit_moves_it_between_company_groups_and_never_out_of_them(deck):
+    async with _client(deck) as c:
+        await c.post("/fd/archetypes/team", json=_pack())
+        other = _pack(group={"label": "Other"}, family={"name": "Other Family"})
+        other["archetypes"][0]["role"] = "Another Role"
+        await c.post("/fd/archetypes/team", json=other)
+        edit = {"role": "Renamed", "family": "Practice Administration", "fleet_instructions": WRITTEN, "tier": "reason"}
+        out = await c.put("/fd/archetypes/team/treatment-plan-explainer", json={**edit, "category": "generalist"})
+        assert out.json()["category"] == "group-dental-practice"
+        moved = await c.put("/fd/archetypes/team/treatment-plan-explainer", json={**edit, "category": "group-other"})
+        assert moved.json()["category"] == "group-other"
+    # Its old group went with its last archetype.
+    assert [g["id"] for g in json.loads(deck.settings[TEAM_SETTING])["groups"]] == ["group-other"]
 
 
 async def test_a_publish_never_takes_a_built_in_or_published_id(deck):
@@ -354,6 +370,14 @@ async def test_a_persons_own_archetype_of_the_same_id_wins():
     assert merged["a"]["source"] == "base"
 
 
+async def test_the_companys_own_come_first_in_every_list():
+    base = [{"id": "a", "role": "Base"}, {"id": "b", "role": "Base B"}]
+    team = [{"id": "t", "role": "Team"}, {"id": "b", "role": "Team B"}]
+    rows = [{"archetype_id": "mine", "data": json.dumps({"role": "Mine"})}]
+    merged = merge_archetypes(base, rows, None, team)
+    assert [(a["id"], a["source"]) for a in merged] == [("t", "team"), ("b", "team"), ("a", "base"), ("mine", "user")]
+
+
 async def test_an_unreadable_setting_never_breaks_the_gallery(deck):
     deck.settings[TEAM_SETTING] = "{not json"
     assert len(await merged_archetypes(deck, MEMBER["id"])) == len(load_base_registry()["archetypes"])
@@ -362,7 +386,7 @@ async def test_an_unreadable_setting_never_breaks_the_gallery(deck):
 async def test_planners_see_a_team_archetype_only_when_the_request_is_about_it():
     team = [{"id": "explainer", "role": "Treatment Plan Explainer", "family": "Practice", "category": "group-dental",
              "keywords": ["treatment plan letter"], "source": "team"}]
-    mine = [{"id": "mine", "role": "Mine", "family": "Custom", "category": "focused", "source": "user"}]
+    mine = [{"id": "mine", "role": "Mine", "family": "Custom", "category": "specialist", "source": "user"}]
     assert "explainer" in {a["id"] for a in shortlist_archetypes("write a treatment plan letter", [*team, *mine])}
     unrelated = {a["id"] for a in shortlist_archetypes("summarise this meeting", [*team, *mine])}
     assert "explainer" not in unrelated and "mine" in unrelated
@@ -370,7 +394,7 @@ async def test_planners_see_a_team_archetype_only_when_the_request_is_about_it()
 
 async def test_a_team_group_is_a_shelf_and_a_typo_is_not():
     assert archetype_category({"category": "group-dental"}) == "group-dental"
-    assert archetype_category({"category": "dental"}) == "focused"
+    assert archetype_category({"category": "dental"}) == "specialist"
 
 
 async def test_the_deck_can_draw_every_look_it_offers():

@@ -20,6 +20,7 @@ from captain_claw.config import without_retired_tools
 from captain_claw.flight_deck import auth as _auth
 from captain_claw.flight_deck.archetypes import (
     DEFAULT_CATEGORY,
+    TEAM_GROUP_PREFIX,
     archetype_category,
     disclaimer_text,
     load_base_registry,
@@ -56,7 +57,8 @@ class ArchetypeBody(BaseModel):
     archetype_id: str = ""
     role: str = ""
     family: str = "Custom"
-    # The shelf above the family: generalist, focused or personal.
+    # The shelf above the family: generalist, specialist or personal, or one of
+    # the company's groups (group-…) for what an admin publishes.
     category: str = DEFAULT_CATEGORY
     # legal, health or clinical: says so in chat and on the deck. See `disclaimers`.
     disclaimer: str = ""
@@ -91,8 +93,12 @@ def _slugify(s: str) -> str:
     return out.strip("-")
 
 
-def _validate(body: ArchetypeBody) -> dict:
-    """Validate and normalize an archetype into the stored ``data`` shape."""
+def _validate(body: ArchetypeBody, company: bool = False) -> dict:
+    """Validate and normalize an archetype into the stored ``data`` shape.
+
+    Only what an admin publishes (``company``) sits in the company's groups: a
+    person's own there would read as the company's to them, and nobody else sees it.
+    """
     aid = _slugify(body.archetype_id or body.role)
     if not aid:
         raise HTTPException(400, "archetype_id (or role) is required")
@@ -103,11 +109,14 @@ def _validate(body: ArchetypeBody) -> dict:
         raise HTTPException(400, f"cognitive_mode must be one of {sorted(_VALID_MODES)}")
     if not body.role.strip():
         raise HTTPException(400, "role is required")
+    category = archetype_category({"category": body.category})
+    if category.startswith(TEAM_GROUP_PREFIX) and not company:
+        category = DEFAULT_CATEGORY
     return {
         "id": aid,
         "role": body.role.strip(),
         "family": (body.family or "Custom").strip(),
-        "category": archetype_category({"category": body.category}),
+        "category": category,
         "disclaimer": body.disclaimer if disclaimer_text(body.disclaimer) else "",
         "description": body.description.strip(),
         "cognitive_mode": mode,

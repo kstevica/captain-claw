@@ -8,7 +8,7 @@ import {
   DISCLAIMER_CHOICES, outlineTeamPack, publishTeamPack, writeTeamInstructions,
   type PackArchetype, type PackFamily, type PackOutline,
 } from '../../services/archetypes'
-import { TEAM_COLORS, TEAM_ICONS, archetypeLook, lookFor, shelves } from '../layout/archetypeLook'
+import { TEAM_COLORS, TEAM_ICONS, archetypeLook, companyShelves, lookFor } from '../layout/archetypeLook'
 import { ErrorNote } from '../forge/forgeParts'
 import { errorOf, fmtSize } from '../forge/forgeUtil'
 import { Button, inputCls, labelCls } from './parts'
@@ -84,7 +84,7 @@ export function TeamPackDialog({ existingFamilies, onClose, onPublished }: {
       const text = await writeTeamInstructions({
         brief: brief.trim(),
         reference: outline?.reference || '',
-        group: groupChoice === NEW_GROUP ? groupLabel : shelves().find((s) => s.id === groupChoice)?.label || '',
+        group: groupChoice === NEW_GROUP ? groupLabel : companyShelves().find((s) => s.id === groupChoice)?.label || '',
         family: family.name,
         role: card.role,
         description: card.description,
@@ -125,7 +125,7 @@ export function TeamPackDialog({ existingFamilies, onClose, onPublished }: {
       onPublished()
       setPublished({
         count: out.published,
-        group: groupChoice === NEW_GROUP ? groupLabel.trim() : shelves().find((s) => s.id === groupChoice)?.label || '',
+        group: groupChoice === NEW_GROUP ? groupLabel.trim() : companyShelves().find((s) => s.id === groupChoice)?.label || '',
         family: out.family,
       })
     } catch (e) {
@@ -174,7 +174,7 @@ export function TeamPackDialog({ existingFamilies, onClose, onPublished }: {
             </span>
             <h2 className="mt-4 text-2xl font-semibold tracking-tight text-zinc-100">Published to everyone</h2>
             <p className="mt-1.5 max-w-md text-sm leading-relaxed text-zinc-500">
-              {published.count} archetype{published.count === 1 ? ' is' : 's are'} now in {published.group}, under {published.family}. Everyone on this deck sees them in New agent.
+              {published.count} archetype{published.count === 1 ? ' is' : 's are'} now under Company, in {published.group} › {published.family}. Everyone on this deck sees them in New agent.
             </p>
             <Button variant="primary" icon={Check} className="mt-5" onClick={onClose}>Done</Button>
           </div>
@@ -237,10 +237,10 @@ export function TeamPackDialog({ existingFamilies, onClose, onPublished }: {
                 <div className="grid gap-3 md:grid-cols-2">
                   <section aria-label="Group" className="space-y-3 rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
                     <div>
-                      <label className={labelCls} htmlFor="pack-group">Group</label>
+                      <label className={labelCls} htmlFor="pack-group">Company group</label>
                       <select id="pack-group" value={groupChoice} onChange={(e) => setGroupChoice(e.target.value)} className={inputCls}>
                         <option value={NEW_GROUP}>A new group</option>
-                        {shelves().map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+                        {companyShelves().map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
                       </select>
                     </div>
                     {groupChoice === NEW_GROUP && (

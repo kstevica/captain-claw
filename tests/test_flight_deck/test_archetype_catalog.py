@@ -55,8 +55,17 @@ def test_the_catalog_has_all_three_shelves():
     assert len(BY_ID) == len(ARCHETYPES), "duplicate ids"
     counts = {c: sum(a.get("category") == c for a in ARCHETYPES) for c in CATEGORIES}
     assert sum(counts.values()) == len(ARCHETYPES), "an archetype has no valid category"
-    assert counts["generalist"] >= 20 and counts["focused"] >= 70 and counts["personal"] >= 20
+    assert counts["specialist"] >= 70 and counts["personal"] >= 20
     assert len(DETAILED) == 100
+
+
+def test_the_first_31_are_the_generalists_and_the_100_after_them_specialists():
+    # The gallery's first split: Generalists and Specialists, which a person may want
+    # for work or for their own life. Company archetypes are an admin's, never built in.
+    assert {a["id"] for a in ARCHETYPES if a["category"] == "generalist"} == WRITTEN_SHORT
+    assert len(WRITTEN_SHORT) == 31
+    assert all(a["category"] in ("specialist", "personal") for a in DETAILED)
+    assert not any(a["category"].startswith("group-") for a in ARCHETYPES)
     # The current families stay: a shelf is above a family, never instead of one.
     assert all(a.get("family") for a in ARCHETYPES)
     for family in ("Data & Analysis", "Engineering", "Ops & Coordination", "Research & Intelligence",
@@ -278,12 +287,23 @@ def test_the_planner_prompt_stays_about_the_size_it_was():
 
 # ── The field itself ──
 
-def test_a_category_is_kept_on_save_and_an_unknown_one_becomes_focused():
+def test_a_category_is_kept_on_save_and_an_unknown_one_becomes_a_specialist():
     assert _validate(ArchetypeBody(role="X", category="personal"))["category"] == "personal"
-    assert _validate(ArchetypeBody(role="X", category="nonsense"))["category"] == "focused"
-    assert _validate(ArchetypeBody(role="X"))["category"] == "focused"
-    assert archetype_category({}) == "focused"
+    assert _validate(ArchetypeBody(role="X", category="nonsense"))["category"] == "specialist"
+    assert _validate(ArchetypeBody(role="X"))["category"] == "specialist"
+    assert archetype_category({}) == "specialist"
     assert archetype_category({"category": "generalist"}) == "generalist"
+
+
+def test_a_row_saved_when_specialists_were_called_focused_is_still_a_specialist():
+    assert archetype_category({"category": "focused"}) == "specialist"
+    assert _validate(ArchetypeBody(role="X", category="focused"))["category"] == "specialist"
+
+
+def test_a_persons_own_archetype_never_sits_in_a_company_group():
+    # It would read as the company's to them, and nobody else would see it there.
+    assert _validate(ArchetypeBody(role="X", category="group-dental"))["category"] == "specialist"
+    assert _validate(ArchetypeBody(role="X", category="group-dental"), company=True)["category"] == "group-dental"
 
 
 def test_a_base_archetype_on_any_tier_can_be_saved():
