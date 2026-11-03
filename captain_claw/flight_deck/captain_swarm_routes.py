@@ -21,6 +21,7 @@ with the set, so a restart shows where it stopped.
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import time
 from typing import Any
@@ -286,3 +287,336 @@ async def stop_measurement(set_id: str, mid: str, user: dict = Depends(get_curre
         raise HTTPException(409, "It isn't running.")
     _STOP.add(key)
     return {"stopping": True}
+
+
+# ── runs (Phase 2: the loop, on code) ────────────────────────────────
+#
+#    GET    /fd/captain-swarm/templates                 what a run can start from, with this deck's defaults
+#    POST   /fd/captain-swarm/runs                      start one (the owner's own: no gate)
+#    GET    /fd/captain-swarm/runs                      the owner's runs
+#    GET    /fd/captain-swarm/runs/{id}                 one run: objective, ledger, events
+#    POST   /fd/captain-swarm/runs/{id}/cancel          stop it now
+#    POST   /fd/captain-swarm/runs/{id}/go | /decline   an agent's run waits for one of these
+#    POST   /fd/captain-swarm/runs/{id}/pr              open a pull request from the best commit
+#    POST   /fd/captain-swarm/agent/{start,status,get,list,cancel}   the `captain_swarm` tool
+
+_MAX_ACTIVE_RUNS = int(os.environ.get("FD_CAPTAIN_SWARM_MAX_RUNS", "1") or 1)
+
+
+def _cs_store():
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    store = loop_mod.get_store()
+    if store is None:
+        raise HTTPException(503, "Captain Swarm isn't running on this deck (FD_CAPTAIN_SWARM_DISABLED).")
+    return store
+
+
+def _source_repo() -> str:
+    """This deck's own source checkout, when it is a git repository: the Mrav
+    template improves the code the deck runs."""
+    from pathlib import Path
+
+    import captain_claw
+    root = Path(captain_claw.__file__).resolve().parents[1]
+    return str(root) if (root / ".git").exists() else ""
+
+
+async def _local_models() -> list[str]:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get("http://127.0.0.1:11434/api/tags")
+        return sorted(m["name"] for m in r.json().get("models") or [] if not str(m.get("name", "")).endswith("cloud"))
+    except Exception:
+        return []
+
+
+def _default_holdout() -> str:
+    path = practice.sealed_root() / "mrav" / "holdout.json"
+    return str(path) if path.is_file() else ""
+
+
+@router.get("/templates")
+async def templates(user: dict = Depends(get_current_user)) -> dict:
+    from captain_claw.flight_deck import captain_swarm_objective as om
+    from captain_claw.flight_deck.bat_routes import _owner_has_shell
+    return {"templates": {"mrav": {
+        "title": "Mrav passes more of its eval",
+        "about": "Improve Captain's small-model runtime (captain_claw/mrav/), measured by the Mrav eval on a "
+                 "local model: 20 open tasks in the repo, held-out tasks only on this deck.",
+        "defaults": {"repo_path": _source_repo(), "model": "gemma4:e2b", "base_url": "http://127.0.0.1:11434",
+                     "harness": "claude", "holdout_file": _default_holdout(), "per_round": 2,
+                     **{f"budget_{k}": v for k, v in om.DEFAULT_BUDGET.items()}},
+        "local_models": await _local_models(),
+    }}, "can_start": _owner_has_shell(user)}
+
+
+class RunBody(BaseModel):
+    template: str = "mrav"
+    options: dict[str, Any] = Field(default_factory=dict)
+    objective: dict[str, Any] | None = None
+
+
+def _objective_from(body: RunBody, has_shell: bool) -> dict:
+    from captain_claw.flight_deck import captain_swarm_objective as om
+    if body.objective:
+        raw = body.objective
+    else:
+        if body.template not in om.TEMPLATES:
+            raise HTTPException(400, f"No template called {body.template!r}.")
+        o = body.options or {}
+        raw = om.TEMPLATES[body.template](
+            str(o.get("repo_path") or _source_repo()), model=str(o.get("model") or "gemma4:e2b"),
+            base_url=str(o.get("base_url") or "http://127.0.0.1:11434"), harness=str(o.get("harness") or "claude"),
+            holdout_file=str(o.get("holdout_file") or _default_holdout()))
+        if o.get("lane_model"):
+            raw["lane"]["model"] = str(o["lane_model"])
+        if o.get("per_round"):
+            raw["lane"]["per_round"] = o["per_round"]
+        for k in ("usd", "hours", "max_experiments"):
+            if o.get(f"budget_{k}") not in (None, ""):
+                raw["budget"][k] = o[f"budget_{k}"]
+        if o.get("target") not in (None, ""):
+            raw["stop"]["target"] = o["target"]
+    try:
+        return om.normalize(raw, owner_has_shell=has_shell)
+    except om.ObjectiveError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+async def _can_run(owner: str) -> None:
+    """What a run needs before it starts: a model to plan with, Crew open for a
+    local repository, and no other run of this owner's under way."""
+    from captain_claw.flight_deck import crew_access, crew_runner
+    from captain_claw.flight_deck.auth import get_db
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    from captain_claw.flight_deck.bat_routes import _creds_for
+    tiers, _ = await _load_owner_tiers(get_db(), owner)
+    if not _creds_for(tiers):
+        raise HTTPException(409, "Set up a model tier first: a run asks a model for ideas.")
+    grant = crew_access.grant_of(await crew_runner._user_of(owner))
+    if not grant.allowed or not grant.trusted:
+        raise HTTPException(403, "Captain Swarm's coding lane is Crew on a local repository, open to admins only.")
+    active = [r for r in await _cs_store().list_runs(owner) if r["status"] in ("baseline", "running", "awaiting_go")]
+    if len(active) >= _MAX_ACTIVE_RUNS:
+        raise HTTPException(409, f"You already have {len(active)} Captain Swarm run(s) going (limit {_MAX_ACTIVE_RUNS}).")
+
+
+def _run_summary(r: dict) -> dict:
+    champ, base = r.get("champion") or {}, r.get("baseline") or {}
+
+    def mean(point: dict, part: str) -> float | None:
+        s = (point.get(part) or {}).get("stats")
+        return round(s["mean"], 4) if s else None
+    return {"id": r["id"], "title": r["title"], "status": r["status"], "stopped_reason": r["stopped_reason"],
+            "started_by": r["started_by"], "round": (r.get("state") or {}).get("round", 0),
+            "experiments": r["experiments"], "spent_usd": round(r["spent_usd"], 4), "spent_tokens": r["spent_tokens"],
+            "baseline_dev": mean(base, "dev"), "champion_dev": mean(champ, "dev"),
+            "baseline_holdout": mean(base, "holdout"), "champion_holdout": mean(champ, "holdout"),
+            "improved": bool(champ.get("exp")), "created_at": r["created_at"], "started_at": r["started_at"],
+            "finished_at": r["finished_at"], "budget": (r.get("objective") or {}).get("budget")}
+
+
+async def _start(owner: str, objective: dict, *, status: str, started_by: str) -> dict:
+    import uuid
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    store = _cs_store()
+    run_id = f"cs_{uuid.uuid4().hex[:12]}"
+    run = await store.create_run(run_id=run_id, owner_id=owner, title=objective["title"], objective=objective,
+                                 status=status, started_by=started_by)
+    await store.append_event(run_id, "start", f"started by {started_by}"
+                             + (": waiting for the owner's Go" if status == "awaiting_go" else ""))
+    if status == "baseline":
+        await loop_mod.kick()
+    return run
+
+
+@router.post("/runs")
+async def start_run(body: RunBody, user: dict = Depends(get_current_user)) -> dict:
+    from captain_claw.flight_deck.bat_routes import _owner_has_shell
+    owner = _uid(user)
+    objective = _objective_from(body, _owner_has_shell(user))
+    await _can_run(owner)
+    return _run_summary(await _start(owner, objective, status="baseline", started_by="the owner"))
+
+
+@router.get("/runs")
+async def list_runs(user: dict = Depends(get_current_user)) -> dict:
+    return {"runs": [_run_summary(r) for r in await _cs_store().list_runs(_uid(user))]}
+
+
+async def _own_run(run_id: str, user: dict) -> dict:
+    run = await _cs_store().get_run(run_id)
+    if run is None or run["owner_id"] != _uid(user):
+        raise HTTPException(404, "No such run.")
+    return run
+
+
+@router.get("/runs/{run_id}")
+async def get_run(run_id: str, since: int = 0, user: dict = Depends(get_current_user)) -> dict:
+    run = await _own_run(run_id, user)
+    store = _cs_store()
+    obj = run["objective"]
+    return {**_run_summary(run),
+            "objective": {k: obj.get(k) for k in ("title", "goal", "subject", "metric", "guardrails", "noise",
+                                                   "lane", "budget", "stop")}
+            | {"holdout": {"file": "(sealed)"}},
+            "baseline": run["baseline"], "champion": run["champion"],
+            "report": (run.get("state") or {}).get("report"),
+            "ledger": await store.list_experiments(run_id),
+            "events": await store.list_events(run_id, since=since)}
+
+
+@router.post("/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _own_run(run_id, user)
+    if run["status"] in TERMINAL_STATES:
+        raise HTTPException(409, "It has already stopped.")
+    await loop_mod.cancel_run(_cs_store(), run_id)
+    return _run_summary(await _cs_store().get_run(run_id))
+
+
+@router.post("/runs/{run_id}/go")
+async def go(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """The owner's Go for a run an agent started. The checks a run needs are made
+    now, as the owner — the agent's say-so isn't enough for any of them."""
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    from captain_claw.flight_deck import captain_swarm_objective as om
+    from captain_claw.flight_deck.bat_routes import _owner_has_shell
+    run = await _own_run(run_id, user)
+    if run["status"] != "awaiting_go":
+        raise HTTPException(409, "It isn't waiting for a Go.")
+    try:
+        om.normalize(run["objective"], owner_has_shell=_owner_has_shell(user))
+    except om.ObjectiveError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    store = _cs_store()
+    await store.set_status(run_id, "declined", "")  # out of the count while it's checked
+    try:
+        await _can_run(_uid(user))
+    except HTTPException:
+        await store.set_status(run_id, "awaiting_go", "")
+        raise
+    await store.update_run(run_id, status="baseline", stopped_reason="", finished_at=0.0)
+    await store.append_event(run_id, "start", "the owner said Go")
+    await loop_mod.kick()
+    return _run_summary(await store.get_run(run_id))
+
+
+@router.post("/runs/{run_id}/decline")
+async def decline(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    run = await _own_run(run_id, user)
+    if run["status"] != "awaiting_go":
+        raise HTTPException(409, "It isn't waiting for a Go.")
+    await _cs_store().set_status(run_id, "declined", "the owner declined it")
+    await _cs_store().append_event(run_id, "stop", "the owner declined it")
+    return _run_summary(await _cs_store().get_run(run_id))
+
+
+@router.post("/runs/{run_id}/pr")
+async def open_pr(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """A pull request from the best commit, through Crew (its branch holds every
+    kept change). Captain never merges it."""
+    from captain_claw.flight_deck import crew_access, crew_runner
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _own_run(run_id, user)
+    if run["status"] not in TERMINAL_STATES:
+        raise HTTPException(409, "Stop the run first, or wait for it to finish.")
+    exp_id = (run.get("champion") or {}).get("exp")
+    exp = await _cs_store().get_experiment(exp_id) if exp_id else None
+    if exp is None or not exp.get("child_id"):
+        raise HTTPException(409, "No attempt beat the starting point, so there's nothing to propose.")
+    row = await crew_runner._user_of(_uid(user))
+    task = await crew_runner.open_pr(row, crew_access.grant_of(row), exp["child_id"])
+    await _cs_store().append_event(run_id, "pr", f"pull request opened: {(task.get('delivery') or {}).get('url', '')}")
+    return {"delivery": task.get("delivery") or {}}
+
+
+# ── the `captain_swarm` tool ─────────────────────────────────────────
+
+
+class AgentReq(BaseModel):
+    source_port: int = 0
+    web_auth: str = ""
+    owner_id: str = ""
+    run_id: str = ""
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class AgentStartReq(AgentReq):
+    template: str = "mrav"
+    options: dict[str, Any] = Field(default_factory=dict)
+    objective: dict[str, Any] | None = None
+    agent_name: str = ""
+
+
+def _agent_owner(body: AgentReq) -> str:
+    from captain_claw.flight_deck.basna_routes import _AgentReq, _resolve_owner
+    return _resolve_owner(_AgentReq(source_port=body.source_port, web_auth=body.web_auth, owner_id=body.owner_id)) \
+        or "local"
+
+
+@router.post("/agent/start")
+async def agent_start(body: AgentStartReq) -> dict:
+    """An agent's run never starts by itself: it waits for its owner's Go, with
+    the objective, the scorer and the budget in front of them."""
+    from captain_claw.flight_deck import crew_runner
+    from captain_claw.flight_deck.auth import get_db
+    from captain_claw.flight_deck.bat_routes import _owner_has_shell
+    owner = _agent_owner(body)
+    user = await crew_runner._user_of(owner)
+    try:
+        objective = _objective_from(RunBody(template=body.template, options=body.options, objective=body.objective),
+                                    _owner_has_shell(user))
+    except HTTPException as exc:
+        return {"status": "rejected", "reason": exc.detail}
+    run = await _start(owner, objective, status="awaiting_go", started_by=f"agent {body.agent_name or 'unknown'}")
+    try:
+        await get_db().add_notification(owner, "captain_swarm", "A Captain Swarm run waits for your Go",
+                                        objective["title"][:300], "captain_swarm_run", run["id"])
+    except Exception:
+        log.warning("captain swarm: the Go bell failed", owner=owner, exc_info=True)
+    return {"status": "awaiting_go", "run_id": run["id"], "title": run["title"],
+            "note": "It starts when your owner says Go on the Captain Swarm page."}
+
+
+@router.post("/agent/status")
+async def agent_status(body: AgentReq) -> dict:
+    run = await _cs_store().get_run(body.run_id)
+    if run is None or run["owner_id"] != _agent_owner(body):
+        return {"found": False}
+    return {"found": True, **_run_summary(run)}
+
+
+@router.post("/agent/get")
+async def agent_get(body: AgentReq) -> dict:
+    run = await _cs_store().get_run(body.run_id)
+    if run is None or run["owner_id"] != _agent_owner(body):
+        return {"found": False}
+    exps = await _cs_store().list_experiments(body.run_id)
+    return {"found": True, **_run_summary(run), "report": (run.get("state") or {}).get("report"),
+            "ledger": [{"round": e["round"], "n": e["n"], "status": e["status"], "hypothesis": e["hypothesis"][:300],
+                        "verdict": e["verdict_reason"][:300], "lesson": e["lesson"]} for e in exps[-body.limit:]]}
+
+
+@router.post("/agent/list")
+async def agent_list(body: AgentReq) -> dict:
+    runs = await _cs_store().list_runs(_agent_owner(body), limit=body.limit)
+    return {"runs": [_run_summary(r) for r in runs]}
+
+
+@router.post("/agent/cancel")
+async def agent_cancel(body: AgentReq) -> dict:
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _cs_store().get_run(body.run_id)
+    if run is None or run["owner_id"] != _agent_owner(body):
+        return {"found": False}
+    if run["status"] in TERMINAL_STATES:
+        return {"found": True, "status": run["status"]}
+    if run["status"] == "awaiting_go":
+        await _cs_store().set_status(body.run_id, "declined", "withdrawn by the agent")
+    else:
+        await loop_mod.cancel_run(_cs_store(), body.run_id)
+    return {"found": True, "status": (await _cs_store().get_run(body.run_id))["status"]}

@@ -1,6 +1,6 @@
 # Captain Swarm — agents that get measurably better at real work
 
-**Status:** Phase 1 built (measurement), Phases 2–7 not started · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
+**Status:** Phase 1 built (measurement), Phase 2 built (the loop, on code; proven live except a keep), Phases 3–7 not started · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
 
 Captain Swarm is a new orchestration mode, a sibling of Bat, Basna, Vatra and Council. Agents reach
 it through the `captain_swarm` tool, the way they reach Bat through `bat`.
@@ -616,6 +616,72 @@ emails with no real mail, and every email was asked twice on the agent's exam la
 - **Exit:** the dev score rises beyond noise and held-out confirms it. No guardrail breaks, and the
   owner reading the diff finds no special-casing.
 - **If it can't,** that is the finding: stop and report before Phase 3.
+
+**Phase 2 as built (2026-11-03).**
+
+*Code.*
+- **The store:** `captain_swarm_store.py` (`captain_swarm.db`), holding runs, experiments and events,
+  with leases.
+- **The objective:** `captain_swarm_objective.py`, with the Mrav template, checks and placeholders.
+  A command metric needs a shell owner.
+- **Screening:** `captain_swarm_screen.py`.
+  - A git snapshot of only what was committed.
+  - The scope check: editable, protected, nothing changed.
+  - The gaming scan: file names, expected answers and distinctive tokens from both case sets, plus
+    eval paths. Plain words, short phrases, task ids and code shapes are left out, because they
+    misfire on honest changes.
+- **The loop:** `captain_swarm_loop.py`.
+  - **Sealing:** the base commit's scorer and the held-out cases are copied once per run.
+  - **Measuring:** a fresh snapshot per measurement, run by the sealed harness with `--code-root`.
+    The environment is scrubbed, so code under test never sees the deck's secrets. `bat_floor`
+    screens the command.
+  - **The judge:** the open cases beyond noise, guardrails, then held-out.
+  - **The proposer:** the owner's tiers, metered, with a diversity filter.
+  - **The Crew lane:** a worktree cut from the champion, through a new `base_ref`
+    (`crew_runner._make_worktree(start_at=…)`).
+  - **The driver:** resumes after a restart, re-measures the champion on a schedule, and stops on a
+    budget, time or experiment limit, a stall, drift or a cancel.
+  - **The supervisor:** started with Flight Deck; `FD_CAPTAIN_SWARM_DISABLED` turns it off.
+- **Routes:** `/fd/captain-swarm/{templates,runs}`, with Go and decline for an agent's run, and a PR
+  from the champion through Crew's `open_pr`.
+- **The tool:** `captain_swarm` for agents. It is admin-only (`deck_confine`), has exec risk, and
+  every run it starts waits for the owner's Go, with a bell.
+- **The page:** the Runs tab, with a start form, the run, a chart, the ledger and the log.
+
+*What turned out different from the plan.*
+- **Crew's proxy doesn't make the dollar cap real.** It counts a lane's tokens toward the owner's
+  daily quota, not into the task's dollars. A lane's dollars are what its CLI reports: Claude Code
+  reports `total_cost_usd`, Codex reports none. The run counts both dollars and tokens, and the
+  experiment limit remains the backstop.
+- **One lane can keep more than one gain per round.** Each experiment starts from the newest best,
+  so the plan's "one keeper per round" applies only to parallel lanes (Phase 4).
+
+*Live run (2026-11-03, test deck, no cost).*
+- **Setup:**
+  - A throwaway clone of the repo.
+  - The Mrav objective cut down to 6 open and 3 held-out tasks, each run twice.
+  - Measured on `ornith:9b`.
+  - The coding worker was OpenCode on the deck's own `ornith:9b` tier, through Crew's proxy.
+- **The start:** 0.917 ± 0.118 on the open cases, 1.000 ± 0 on the held-out ones. Sealing,
+  snapshotting, scrubbed-environment measurement and the champion branch all worked.
+- **Ideas:** the proposer made two sensible ones. One was spelling out how to append a line; the
+  other was re-checking an edit before claiming success.
+- **Both attempts committed nothing.** The 9B worker worked for 16 and 21 minutes, used about 1.19M
+  tokens in all (counted toward the run), left one uncommitted change, and stopped mid-thought.
+  The loop marked each "it committed nothing", closed the Crew task and removed its worktree and
+  branch. It stopped as "stalled" after the one round this run allowed.
+- **Shown live:** the whole path except keep. The baseline, sealing, ideas, the Crew lane from the
+  champion, failure handling, token accounting, cleanup, the stop and the page all worked. Keeping a
+  gain, held-out confirmation and moving the champion branch are covered by the tests (48), not yet
+  by a live run.
+
+*Two findings for the real Phase 2 run.*
+1. **A local 9B model can't be the coding worker.** The real run needs Claude Code or Codex,
+   which spends the owner's quota and needs their OK.
+2. **The noise must be smaller than the headroom.** Here a gain had to be 0.236 or more, against a
+   ceiling only 0.083 away. A run can only keep something when the measured model has room to
+   improve (`gemma4:e2b`, not installed here) and the sets are large enough: at least 20 open tasks
+   with 3 repeats.
 
 **Phase 3: real work, in rehearsal.**
 - **Rehearsal:** `rehearsal_turn.py`, intents, authorize-only spending, and the register check

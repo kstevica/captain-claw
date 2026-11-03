@@ -1,12 +1,13 @@
-// Captain Swarm — Phase 1 (docs/captain-swarm-plan.md): measure before improving.
-// Build a practice set from the owner's own history (inbox triage: did you reply?),
-// then measure one of their agents on it. The agent answers on its private exam
-// lane, so nothing is sent and nothing is kept.
+// Captain Swarm (docs/captain-swarm-plan.md): agents that get measurably better at real work.
+// Runs: keep improving a measured number, one idea at a time (Phase 2, on code).
+// Practice sets: a set frozen from the owner's own history (inbox triage: did you reply?),
+// and an agent measured on it on its private exam lane — nothing sent, nothing kept (Phase 1).
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Loader2, Mail, Square, Target, Trash2 } from 'lucide-react'
 import { captainSwarmApi } from '../services/captainSwarm'
 import type { Measurement, PracticeSet } from '../services/captainSwarm'
 import { useProcessStore } from '../stores/processStore'
+import { RunsPanel } from '../components/captainSwarm/RunsPanel'
 
 const pct = (n?: number) => `${Math.round((n || 0) * 100)}%`
 const num = (n?: number, d = 2) => (n ?? 0).toFixed(d)
@@ -274,6 +275,34 @@ function Measure({ set }: { set: PracticeSet }) {
 }
 
 export function CaptainSwarmPage() {
+  const [tab, setTab] = useState<'runs' | 'practice'>('runs')
+  return (
+    <div className="h-full overflow-y-auto bg-zinc-950">
+      <div className="mx-auto max-w-6xl space-y-4 p-4 sm:p-6">
+        <div>
+          <h1 className="flex items-center gap-2 text-lg font-semibold text-zinc-100">
+            <Target size={18} className="text-amber-400" /> Captain Swarm
+          </h1>
+          <p className="mt-1 text-sm text-zinc-400">
+            Agents that get measurably better at real work. A run keeps improving one number: it tries ideas one
+            at a time, measures every attempt itself, and keeps only gains bigger than the noise.
+          </p>
+        </div>
+        <div className="inline-flex overflow-hidden rounded-md border border-zinc-700 text-xs">
+          {(['runs', 'practice'] as const).map((t) => (
+            <button key={t} onClick={() => setTab(t)}
+              className={`px-3 py-1.5 ${tab === t ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}>
+              {t === 'runs' ? 'Runs' : 'Practice sets'}
+            </button>
+          ))}
+        </div>
+        {tab === 'runs' ? <RunsPanel /> : <PracticeSets />}
+      </div>
+    </div>
+  )
+}
+
+function PracticeSets() {
   const [sets, setSets] = useState<PracticeSet[]>([])
   const [activeId, setActiveId] = useState('')
   const [error, setError] = useState('')
@@ -310,17 +339,7 @@ export function CaptainSwarmPage() {
   }
 
   return (
-    <div className="h-full overflow-y-auto bg-zinc-950">
-      <div className="mx-auto max-w-5xl space-y-4 p-4 sm:p-6">
-        <div>
-          <h1 className="flex items-center gap-2 text-lg font-semibold text-zinc-100">
-            <Target size={18} className="text-amber-400" /> Captain Swarm
-          </h1>
-          <p className="mt-1 text-sm text-zinc-400">
-            Agents that get measurably better at real work. First, measure: build a practice set from your own
-            history and see how an agent does on it.
-          </p>
-        </div>
+    <div className="space-y-4">
         {error && <div className="text-xs text-red-400">{error}</div>}
         <BuildTriage onBuilt={load} busy={building} />
         {sets.length > 0 && (
@@ -332,7 +351,6 @@ export function CaptainSwarmPage() {
           </div>
         )}
         {active && <Measure key={active.id} set={active} />}
-      </div>
     </div>
   )
 }

@@ -471,12 +471,23 @@ async def _github_token_for_url(user: dict, grant: Grant, url: str) -> str:
     return await crew_logins.github_token(get_db(), user, grant)
 
 
-async def _make_worktree(user: dict, grant: Grant, where: dict[str, Any], task_slug: str) -> dict[str, Any]:
+async def _make_worktree(user: dict, grant: Grant, where: dict[str, Any], task_slug: str,
+                         start_at: str = "") -> dict[str, Any]:
+    """A worktree of its own for the task, on a new ``crew/<slug>`` branch. It starts
+    from the repository's HEAD (origin's, for a cloned one), or from *start_at* when a
+    caller names a commit — Captain Swarm starts each experiment from its best so far.
+    ``base_branch`` stays the branch a pull request would go to either way."""
     uid = user["id"]
     repo = where["repo"]
     env = _repo_env(user, grant)
     base_branch = ""
     base_ref = "HEAD"
+    if start_at:
+        if not re.fullmatch(r"[0-9a-fA-F]{7,64}", start_at):
+            raise HTTPException(400, "A starting point is a commit id.")
+        rc, _ = await _git(repo, "rev-parse", "--verify", "--quiet", f"{start_at}^{{commit}}", env=env)
+        if rc != 0:
+            raise HTTPException(400, "That starting commit isn't in the repository.")
     if where.get("remote_base"):
         rc, head = await _git(repo, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", env=env)
         if rc == 0 and head:
@@ -485,7 +496,7 @@ async def _make_worktree(user: dict, grant: Grant, where: dict[str, Any], task_s
     else:
         rc, head = await _git(repo, "symbolic-ref", "--short", "HEAD", env=env)
         base_branch = head if rc == 0 else ""
-    rc, sha = await _git(repo, "rev-parse", "--verify", base_ref, env=env)
+    rc, sha = await _git(repo, "rev-parse", "--verify", f"{start_at}^{{commit}}" if start_at else base_ref, env=env)
     if rc != 0:
         raise HTTPException(400, "That repository has no commits yet.")
     worktrees = crew_store.user_dir(uid) / "worktrees"
@@ -1391,7 +1402,8 @@ async def dispatch(user: dict, grant: Grant, body: dict[str, Any]) -> dict[str, 
             return _asked_again(user["id"], task, attached, told, folders)
     if deliver == "pr":
         await _must_reach_github(user, grant, repo=where["repo"])
-    tree = await _setup_place(where["repo"]) if kind == "setup" else await _make_worktree(user, grant, where, slug)
+    tree = await _setup_place(where["repo"]) if kind == "setup" else await _make_worktree(
+        user, grant, where, slug, start_at=str(body.get("base_ref") or ""))
     where.pop("remote_base", None)
     task = _store().create(user["id"], status="queued", last_event_at=time.time(), **fields, **where, **tree)
     crew_attach.take(user["id"], task["id"], attached)

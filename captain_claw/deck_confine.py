@@ -47,7 +47,7 @@ TIERS = ("user", "admin")
 
 # Run code or drive the host computer. A `user` agent never gets them.
 EXEC_TOOLS = frozenset({
-    "shell", "terminal", "scripts", "app_runner", "code", "termux", "bat",
+    "shell", "terminal", "scripts", "app_runner", "code", "termux", "bat", "captain_swarm",
     "desktop_action", "screen_capture", "pinchtab",
 })
 

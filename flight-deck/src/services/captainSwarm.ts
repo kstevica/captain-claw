@@ -101,3 +101,101 @@ export const captainSwarmApi = {
   stop: (setId: string, mid: string) =>
     call<{ stopping: boolean }>(`${BASE}/measurements/${enc(setId)}/${enc(mid)}/stop`, { method: 'POST' }),
 }
+
+// ── runs (Phase 2: the loop, on code) ────────────────────────────────
+
+export type RunStatus =
+  | 'awaiting_go' | 'baseline' | 'running' | 'done' | 'stalled' | 'stopped' | 'failed' | 'cancelled' | 'declined'
+
+export interface Stats { n: number; mean: number; stdev: number; low: number; high: number }
+
+export interface Reading {
+  value: number | null
+  stats?: Stats
+  guard?: Record<string, number | null>
+  per_case?: Record<string, number>
+  error?: string
+  seconds?: number
+}
+
+export interface Point { sha: string; dev: Reading; holdout: Reading; exp: string }
+
+export interface RunSummary {
+  id: string
+  title: string
+  status: RunStatus
+  stopped_reason: string
+  started_by: string
+  round: number
+  experiments: number
+  spent_usd: number
+  spent_tokens: number
+  baseline_dev: number | null
+  champion_dev: number | null
+  baseline_holdout: number | null
+  champion_holdout: number | null
+  improved: boolean
+  created_at: number
+  started_at: number
+  finished_at: number
+  budget?: { usd: number; hours: number; max_experiments: number }
+}
+
+export interface Experiment {
+  id: string
+  round: number
+  n: number
+  hypothesis: string
+  strategy_tag: string
+  why: string
+  status: 'proposed' | 'running' | 'screening' | 'measuring' | 'kept' | 'discarded' | 'disqualified' | 'failed'
+  verdict_reason: string
+  lesson: string
+  base_sha: string
+  head_sha: string
+  child_id: string
+  dev: Reading
+  holdout: { stats?: Stats; value?: number }
+  diff_stat: string
+  changed_files: string[]
+  cost_usd: number
+  tokens: number
+}
+
+export interface RunEvent { id: number; ts: number; stage: string; message: string }
+
+export interface RunDetail extends RunSummary {
+  objective: {
+    title: string
+    goal: string
+    subject: { repo_path: string; editable: string[]; protected: string[] }
+    metric: { read: string; direction: 'max' | 'min'; run: string }
+    lane: { harness: string; model: string; per_round: number }
+    stop: { target: number | null; stall_rounds: number }
+    budget: { usd: number; hours: number; max_experiments: number }
+  }
+  baseline: Partial<Point>
+  champion: Partial<Point>
+  report?: Record<string, unknown> | null
+  ledger: Experiment[]
+  events: RunEvent[]
+}
+
+export interface MravTemplate {
+  title: string
+  about: string
+  defaults: Record<string, string | number>
+  local_models: string[]
+}
+
+export const captainSwarmRuns = {
+  templates: () => call<{ templates: { mrav: MravTemplate }; can_start: boolean }>(`${BASE}/templates`),
+  start: (options: Record<string, string | number>) =>
+    call<RunSummary>(`${BASE}/runs`, { method: 'POST', body: JSON.stringify({ template: 'mrav', options }) }),
+  list: () => call<{ runs: RunSummary[] }>(`${BASE}/runs`),
+  get: (id: string) => call<RunDetail>(`${BASE}/runs/${enc(id)}`),
+  cancel: (id: string) => call<RunSummary>(`${BASE}/runs/${enc(id)}/cancel`, { method: 'POST' }),
+  go: (id: string) => call<RunSummary>(`${BASE}/runs/${enc(id)}/go`, { method: 'POST' }),
+  decline: (id: string) => call<RunSummary>(`${BASE}/runs/${enc(id)}/decline`, { method: 'POST' }),
+  pr: (id: string) => call<{ delivery: { url?: string } }>(`${BASE}/runs/${enc(id)}/pr`, { method: 'POST' }),
+}

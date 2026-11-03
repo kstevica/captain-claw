@@ -90,6 +90,16 @@ def beats(candidate: Stats, champion: Stats, *, min_gain: float = 0.0, direction
 # ── command ──────────────────────────────────────────────────────────
 
 
+def read_path(data: Any, key: str) -> Any:
+    """The value at dotted *key* in *data*, or None."""
+    cur = data
+    for part in [p for p in key.split(".") if p]:
+        if not isinstance(cur, Mapping) or part not in cur:
+            return None
+        cur = cur[part]
+    return cur
+
+
 def read_number(data: Any, key: str) -> float | None:
     """The number at dotted *key* in *data* (``summary.pass_rate``), or None."""
     cur = data
@@ -126,14 +136,15 @@ def last_json(text: str) -> dict | None:
 
 
 async def score_command(command: Sequence[str] | str, cwd: str | Path, *, read: str,
-                        env: Mapping[str, str] | None = None,
+                        env: Mapping[str, str] | None = None, env_only: bool = False,
                         timeout: float = _COMMAND_TIMEOUT_S) -> dict[str, Any]:
     """Run *command* in *cwd* and read the number at *read* from the JSON it
     prints: ``{"value", "data", "exit_code", "error"}``. ``value`` is None when
     the command failed to give one; a non-zero exit with a number still counts
-    (an eval that fails a task exits 1 by design)."""
+    (an eval that fails a task exits 1 by design). With *env_only*, *env* is the
+    whole environment: code under test never sees the deck's own secrets."""
     shell = isinstance(command, str)
-    full_env = {**os.environ, **(env or {})}
+    full_env = dict(env or {}) if env_only else {**os.environ, **(env or {})}
     try:
         if shell:
             proc = await asyncio.create_subprocess_shell(
