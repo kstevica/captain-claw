@@ -27,7 +27,7 @@ import time
 from typing import Any
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck import captain_swarm_measure as measure
@@ -339,7 +339,18 @@ def _default_holdout() -> str:
 async def templates(user: dict = Depends(get_current_user)) -> dict:
     from captain_claw.flight_deck import captain_swarm_objective as om
     from captain_claw.flight_deck.bat_routes import _owner_has_shell
-    return {"templates": {"mrav": {
+    sets = [{"id": m["id"], "title": m.get("title") or m["id"], "open": (m.get("open") or {}).get("cases", 0),
+             "holdout": (m.get("holdout") or {}).get("cases", 0)}
+            for m in await asyncio.to_thread(practice.list_sets, _uid(user)) if m.get("state") == "ready"]
+    return {"templates": {"triage": {
+        "title": "Triage my inbox the way I would",
+        "about": "Improve an agent's triage rules against what you actually did: every version is tried on the "
+                 "agent's exam lane (it can't send or change anything) over a practice set from your own mail, "
+                 "and the best rules reach the agent only when you say so.",
+        "sets": sets,
+        "defaults": {"cases": 40, "repeat": 2, "holdout_cases": 0, "per_round": 2,
+                     "budget_usd": 20.0, "budget_hours": 8.0, "budget_max_experiments": 16},
+    }, "mrav": {
         "title": "Mrav passes more of its eval",
         "about": "Improve Captain's small-model runtime (captain_claw/mrav/), measured by the Mrav eval on a "
                  "local model: 20 open tasks in the repo, held-out tasks only on this deck.",
@@ -356,8 +367,31 @@ class RunBody(BaseModel):
     objective: dict[str, Any] | None = None
 
 
-def _objective_from(body: RunBody, has_shell: bool) -> dict:
+def _objective_from(body: RunBody, has_shell: bool, user: dict | None = None) -> dict:
     from captain_claw.flight_deck import captain_swarm_objective as om
+    from captain_claw.flight_deck import captain_swarm_rules as rules
+    if body.objective and body.objective.get("kind") == "practice":
+        try:
+            return rules.normalize(body.objective)
+        except om.ObjectiveError as exc:
+            raise HTTPException(400, str(exc)) from exc
+    if not body.objective and body.template == "triage":
+        o = body.options or {}
+        owner_name = str((user or {}).get("display_name") or (user or {}).get("name") or "")
+        raw = rules.triage_template(
+            set_id=str(o.get("set_id") or ""), agent=str(o.get("agent") or ""),
+            agent_name=str(o.get("agent_name") or ""), owner_name="" if owner_name.lower() == "local" else owner_name,
+            cases=int(o.get("cases") or 40), repeat=int(o.get("repeat") or 2),
+            holdout_cases=int(o.get("holdout_cases") or 0))
+        if o.get("per_round"):
+            raw["lane"]["per_round"] = o["per_round"]
+        for k in ("usd", "hours", "max_experiments"):
+            if o.get(f"budget_{k}") not in (None, ""):
+                raw["budget"][k] = o[f"budget_{k}"]
+        try:
+            return rules.normalize(raw)
+        except om.ObjectiveError as exc:
+            raise HTTPException(400, str(exc)) from exc
     if body.objective:
         raw = body.objective
     else:
@@ -383,9 +417,10 @@ def _objective_from(body: RunBody, has_shell: bool) -> dict:
         raise HTTPException(400, str(exc)) from exc
 
 
-async def _can_run(owner: str) -> None:
-    """What a run needs before it starts: a model to plan with, Crew open for a
-    local repository, and no other run of this owner's under way."""
+async def _can_run(owner: str, objective: dict | None = None, user: dict | None = None) -> None:
+    """What a run needs before it starts: a model to plan with, no other run of
+    this owner's under way, and for code Crew open for a local repository; for
+    a practice run, the owner's own ready set and their own agent."""
     from captain_claw.flight_deck import crew_access, crew_runner
     from captain_claw.flight_deck.auth import get_db
     from captain_claw.flight_deck.basna_routes import _load_owner_tiers
@@ -393,9 +428,17 @@ async def _can_run(owner: str) -> None:
     tiers, _ = await _load_owner_tiers(get_db(), owner)
     if not _creds_for(tiers):
         raise HTTPException(409, "Set up a model tier first: a run asks a model for ideas.")
-    grant = crew_access.grant_of(await crew_runner._user_of(owner))
-    if not grant.allowed or not grant.trusted:
-        raise HTTPException(403, "Captain Swarm's coding lane is Crew on a local repository, open to admins only.")
+    if (objective or {}).get("kind") == "practice":
+        from captain_claw.flight_deck import agent_preset as ap
+        subj = objective["subject"]
+        meta = practice.get_meta(owner, subj["set_id"])
+        if not meta or meta.get("state") != "ready":
+            raise HTTPException(409, "That practice set isn't ready.")
+        ap._own_process(subj["agent"], ap._owner(user) if user else (owner if ap._auth_enabled() else ""))
+    else:
+        grant = crew_access.grant_of(await crew_runner._user_of(owner))
+        if not grant.allowed or not grant.trusted:
+            raise HTTPException(403, "Captain Swarm's coding lane is Crew on a local repository, open to admins only.")
     active = [r for r in await _cs_store().list_runs(owner) if r["status"] in ("baseline", "running", "awaiting_go")]
     if len(active) >= _MAX_ACTIVE_RUNS:
         raise HTTPException(409, f"You already have {len(active)} Captain Swarm run(s) going (limit {_MAX_ACTIVE_RUNS}).")
@@ -407,7 +450,8 @@ def _run_summary(r: dict) -> dict:
     def mean(point: dict, part: str) -> float | None:
         s = (point.get(part) or {}).get("stats")
         return round(s["mean"], 4) if s else None
-    return {"id": r["id"], "title": r["title"], "status": r["status"], "stopped_reason": r["stopped_reason"],
+    return {"id": r["id"], "kind": (r.get("objective") or {}).get("kind", "code"),
+            "title": r["title"], "status": r["status"], "stopped_reason": r["stopped_reason"],
             "started_by": r["started_by"], "round": (r.get("state") or {}).get("round", 0),
             "experiments": r["experiments"], "spent_usd": round(r["spent_usd"], 4), "spent_tokens": r["spent_tokens"],
             "baseline_dev": mean(base, "dev"), "champion_dev": mean(champ, "dev"),
@@ -434,8 +478,8 @@ async def _start(owner: str, objective: dict, *, status: str, started_by: str) -
 async def start_run(body: RunBody, user: dict = Depends(get_current_user)) -> dict:
     from captain_claw.flight_deck.bat_routes import _owner_has_shell
     owner = _uid(user)
-    objective = _objective_from(body, _owner_has_shell(user))
-    await _can_run(owner)
+    objective = _objective_from(body, _owner_has_shell(user), user)
+    await _can_run(owner, objective, user)
     return _run_summary(await _start(owner, objective, status="baseline", started_by="the owner"))
 
 
@@ -456,8 +500,13 @@ async def get_run(run_id: str, since: int = 0, user: dict = Depends(get_current_
     run = await _own_run(run_id, user)
     store = _cs_store()
     obj = run["objective"]
-    return {**_run_summary(run),
-            "objective": {k: obj.get(k) for k in ("title", "goal", "subject", "metric", "guardrails", "noise",
+    extra: dict[str, Any] = {}
+    if obj.get("kind") == "practice":
+        from captain_claw.flight_deck import captain_swarm_rules as rules
+        extra["rules"] = {"baseline": await rules.rules_of((run.get("baseline") or {}).get("sha") or ""),
+                          "champion": await rules.rules_of((run.get("champion") or {}).get("sha") or "")}
+    return {**_run_summary(run), **extra,
+            "objective": {k: obj.get(k) for k in ("kind", "title", "goal", "subject", "metric", "guardrails", "noise",
                                                    "lane", "budget", "stop")}
             | {"holdout": {"file": "(sealed)"}},
             "baseline": run["baseline"], "champion": run["champion"],
@@ -488,13 +537,17 @@ async def go(run_id: str, user: dict = Depends(get_current_user)) -> dict:
     if run["status"] != "awaiting_go":
         raise HTTPException(409, "It isn't waiting for a Go.")
     try:
-        om.normalize(run["objective"], owner_has_shell=_owner_has_shell(user))
+        if run["objective"].get("kind") == "practice":
+            from captain_claw.flight_deck import captain_swarm_rules as rules
+            rules.normalize(run["objective"])
+        else:
+            om.normalize(run["objective"], owner_has_shell=_owner_has_shell(user))
     except om.ObjectiveError as exc:
         raise HTTPException(400, str(exc)) from exc
     store = _cs_store()
     await store.set_status(run_id, "declined", "")  # out of the count while it's checked
     try:
-        await _can_run(_uid(user))
+        await _can_run(_uid(user), run["objective"], user)
     except HTTPException:
         await store.set_status(run_id, "awaiting_go", "")
         raise
@@ -512,6 +565,30 @@ async def decline(run_id: str, user: dict = Depends(get_current_user)) -> dict:
     await _cs_store().set_status(run_id, "declined", "the owner declined it")
     await _cs_store().append_event(run_id, "stop", "the owner declined it")
     return _run_summary(await _cs_store().get_run(run_id))
+
+
+@router.post("/runs/{run_id}/teach")
+async def teach(run_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict:
+    """The rules the best version added, taught to the agent as lessons — only
+    when the owner says so, and only once the run has stopped."""
+    from captain_claw.flight_deck import agent_onboarding
+    from captain_claw.flight_deck import captain_swarm_rules as rules
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _own_run(run_id, user)
+    if run["objective"].get("kind") != "practice":
+        raise HTTPException(400, "Only a practice run has rules to teach.")
+    if run["status"] not in TERMINAL_STATES:
+        raise HTTPException(409, "Stop the run first, or wait for it to finish.")
+    champ = run.get("champion") or {}
+    if not champ.get("exp"):
+        raise HTTPException(409, "No version beat the starting point, so there's nothing to teach.")
+    start = await rules.rules_of((run.get("baseline") or {}).get("sha") or "")
+    new = [r for r in await rules.rules_of(champ["sha"]) if r not in start]
+    got = await agent_onboarding.teach_rules(run["objective"]["subject"]["agent"], user, request, new,
+                                             source=run["title"])
+    await _cs_store().append_event(run_id, "teach", f"{got.get('added', 0)} rule(s) taught to "
+                                                    f"{run['objective']['subject'].get('agent_name')}")
+    return {"added": got.get("added", 0), "rules": new}
 
 
 @router.post("/runs/{run_id}/pr")
@@ -568,7 +645,7 @@ async def agent_start(body: AgentStartReq) -> dict:
     user = await crew_runner._user_of(owner)
     try:
         objective = _objective_from(RunBody(template=body.template, options=body.options, objective=body.objective),
-                                    _owner_has_shell(user))
+                                    _owner_has_shell(user), user)
     except HTTPException as exc:
         return {"status": "rejected", "reason": exc.detail}
     run = await _start(owner, objective, status="awaiting_go", started_by=f"agent {body.agent_name or 'unknown'}")
