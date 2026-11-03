@@ -525,6 +525,11 @@ def _resolve_cc_web_bin() -> str:
         bundled = Path(sys._MEIPASS).parent / "captain-claw-web"
         if bundled.exists():
             return str(bundled)
+    # A venv's own script, next to its python: the desktop app starts the deck
+    # with that python directly, so the venv's bin folder isn't on PATH.
+    beside = Path(sys.executable).parent / ("captain-claw-web.exe" if os.name == "nt" else "captain-claw-web")
+    if beside.is_file():
+        return str(beside)
     return "captain-claw-web"
 
 

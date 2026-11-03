@@ -132,6 +132,16 @@ async def test_a_deck_with_no_checkout_says_so(world, monkeypatch):
         await deck_update.start(by="a", target="abc")
 
 
+async def test_the_desktop_app_points_to_its_own_updates(world, monkeypatch):
+    # The slim desktop app runs the deck from its own venv and installs updates itself.
+    monkeypatch.setattr(deck_update, "find_repo", lambda: (None, False))
+    monkeypatch.setenv("CAPTAIN_CLAW_DESKTOP_RUNTIME", "0.8.6")
+    seen = await deck_update.status()
+    assert not seen["available"] and "Check for Updates" in seen["why"]
+    with pytest.raises(deck_update.RefusedError, match="Check for Updates"):
+        await deck_update.start(by="a", target="abc")
+
+
 async def test_a_detached_checkout_or_one_with_no_upstream_says_so(world):
     git(world.deck, "checkout", "-q", "--detach")
     assert "isn't on a branch" in (await deck_update.status())["why"]

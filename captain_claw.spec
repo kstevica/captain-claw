@@ -186,7 +186,6 @@ hidden_imports = [
     "dotenv",
     "tenacity",
     "pocket_tts",
-    "glob2",
     "aiosqlite",
 ]
 

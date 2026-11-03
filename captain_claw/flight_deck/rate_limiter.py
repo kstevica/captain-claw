@@ -1,10 +1,11 @@
 """Per-user rate limiting for Flight Deck SaaS.
 
-In standalone (PyInstaller) builds, all limits are bypassed.
+In standalone builds (PyInstaller, or the desktop app's deck), all limits are bypassed.
 """
 
 from __future__ import annotations
 
+import os
 import sys
 import json
 import time
@@ -13,8 +14,12 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request, status
 
-# Standalone binary mode — no rate limiting or plan restrictions
-STANDALONE_MODE = getattr(sys, "_MEIPASS", None) is not None
+# Standalone mode — no rate limiting or plan restrictions: the PyInstaller build, or
+# the desktop app's deck (FD_DESKTOP=1), which now also runs from an installed venv.
+STANDALONE_MODE = (
+    getattr(sys, "_MEIPASS", None) is not None
+    or os.environ.get("FD_DESKTOP", "").lower() in ("1", "true", "yes")
+)
 
 if TYPE_CHECKING:
     from captain_claw.flight_deck.db import FlightDeckDB
