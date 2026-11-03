@@ -759,3 +759,34 @@ async def test_handing_without_words_asks_it_to_look_into_it(db, mira, monkeypat
         assert (await c.post(f"/fd/line/{long}/hand", json={"agent": "mira", "note": "y" * 2001})).status_code == 422
     titles = [i["title"] for i in await db.list_line_items("local", kinds=["talk"])]
     assert f"You handed “{'x' * 59}…” to Mira" in titles
+
+
+async def test_asking_a_chosen_agent_not_just_the_lines(db, mira, monkeypatch):
+    from captain_claw.flight_deck import server
+
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.setattr(server, "_load_process_registry", lambda: {
+        "mira": {"name": "Mira", "owner": ALICE}, "ivo": {"name": "Ivo", "owner": ALICE},
+        "zed": {"name": "Zed", "owner": BOB}})
+    _set(ALICE)                                                                  # none picked for the Line
+    async with _client() as c:
+        page = (await c.get("/fd/line")).json()
+        assert page["agent"] == "" and page["agent_slug"] == ""
+        r = (await c.post("/fd/line/ask", json={"text": "anything for me?", "agent": "ivo"})).json()
+        assert r["agent"] == "Ivo"
+        await _answered()
+        assert (await c.post("/fd/line/ask", json={"text": "hi", "agent": "zed"})).status_code == 400
+        _set(ALICE, line_agent="mira")
+        assert (await c.get("/fd/line")).json()["agent_slug"] == "mira"
+    titles = [i["title"] for i in await db.list_line_items(ALICE, kinds=["talk"])]
+    assert "You asked Ivo" in titles and "Ivo answered" in titles
+
+
+def test_a_hand_over_names_what_the_item_is_about():
+    nudge = {"title": "Nudge from Captain Research",
+             "body": "**Good news — the lunch is agreed.**\n\nWhat happened: …"}
+    assert line_routes.headline(nudge) == "Good news — the lunch is agreed."
+    proposal = {"title": "Waiting for your approval", "body": "- Re-run the [price check](http://x)\nTwo moved."}
+    assert line_routes.headline(proposal) == "Re-run the price check"
+    assert line_routes.headline({"title": 'Scheduled task "Brief" failed', "body": "x"}) == 'Scheduled task "Brief" failed'
+    assert line_routes.headline({"title": "Nudge from Ana", "body": ""}) == "Nudge from Ana"

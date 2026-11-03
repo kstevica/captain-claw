@@ -267,6 +267,17 @@ channel card.
 (P0 ships the page read-only: a waiting proposal says "answer it in the bell";
 inline Approve / Reject and "Hand to agent…" come later.)
 
+**As built (redesign, after #394):** two panes from 720 px wide — a list
+(agent initials avatar, sender · kind, a real headline: a nudge's or a
+proposal's first line instead of "Nudge from …", time on the right, day groups,
+Failed / Needs you / Approve? pills) and the open item (avatar header, the
+first line as its heading, the text as a readable document, Approve / Reject
+on a waiting proposal). On a phone the item takes the list's place with a back
+button. One composer at the bottom, with an agent pill: it asks any of the
+user's agents about the Line, or — with an item open — hands that item over,
+with quick suggestions. The answer opens by itself when it lands. Channels open
+in the item's place.
+
 - **Full view**: a pinned row at the top of the agent list ("Line", unread
   badge). Opens a timeline of compact cards (reuse `CompactMessage` +
   `CompactMessageDialog`), filter chips (Needs you · Results · Runs · Fleet ·

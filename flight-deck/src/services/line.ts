@@ -32,8 +32,9 @@ export interface LinePage extends LineCounts {
   items: LineItem[]
   /** The kinds the Line holds, by what the page calls them. */
   kinds: Record<string, string>
-  /** The agent that answers on the Line ("" = none picked yet). */
+  /** The agent that answers on the Line ("" = none picked yet), and its slug. */
   agent: string
+  agent_slug: string
   /** The user's agents an item can be handed to. */
   agents: { slug: string; name: string }[]
 }
@@ -54,6 +55,7 @@ export async function fetchLine(opts: { before?: string; kind?: string; needsYou
     waiting: d?.waiting || 0,
     kinds: d?.kinds && typeof d.kinds === 'object' ? d.kinds : {},
     agent: typeof d?.agent === 'string' ? d.agent : '',
+    agent_slug: typeof d?.agent_slug === 'string' ? d.agent_slug : '',
     agents: Array.isArray(d?.agents) ? d.agents : [],
   }
 }
@@ -71,9 +73,10 @@ async function _post<T>(path: string, body: unknown): Promise<T> {
   return r.json()
 }
 
-/** Ask the agent picked for the Line; the question is on the Line now, the answer when it comes. */
-export function askLine(text: string): Promise<{ id: string; agent: string }> {
-  return _post('/fd/line/ask', { text })
+/** Ask one of the user's agents (default: the one picked for the Line); the
+ *  question is on the Line now, the answer when it comes. */
+export function askLine(text: string, agent = ''): Promise<{ id: string; agent: string }> {
+  return _post('/fd/line/ask', agent ? { text, agent } : { text })
 }
 
 /** Hand an item to one of the user's agents, with their own words; the answer lands on the Line. */

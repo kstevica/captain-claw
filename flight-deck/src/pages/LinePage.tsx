@@ -4,8 +4,8 @@ import { LinePanel } from '../components/line/LinePanel'
 export function LinePage() {
   return (
     <div className="flex h-full min-h-0 justify-center overflow-hidden bg-zinc-950">
-      <div className="flex h-full w-full max-w-4xl min-h-0 flex-col border-x border-zinc-800/60">
-        <LinePanel large />
+      <div className="flex h-full w-full max-w-6xl min-h-0 flex-col xl:border-x xl:border-zinc-800/60">
+        <LinePanel />
       </div>
     </div>
   )
