@@ -717,6 +717,19 @@ async def handle_ws_message(
             log.info("Notification injected into session", content_len=len(notif_content),
                      agent_busy=server._busy, trigger=trigger)
 
+    elif msg_type == "line_item":
+        # An item from the owner's Line in Flight Deck (they picked this agent
+        # for it): a card in the main chat and context — no turn, no reply.
+        if getattr(ws, "_public_session_id", None):
+            return
+        import asyncio
+
+        from captain_claw.web.chat_handler import mirror_line_item
+
+        asyncio.create_task(mirror_line_item(
+            server, str(data.get("title") or ""), str(data.get("body") or "")[:8000],
+            fd_delivers=data.get("fd_delivers") is True))
+
     elif msg_type == "btw":
         # Inject additional instructions while a task is running. The reply
         # says whether a turn was on to take them (`busy`); without one the

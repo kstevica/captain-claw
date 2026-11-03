@@ -440,3 +440,167 @@ async def test_with_sign_in_on_the_owner_comes_from_the_deck(db, monkeypatch):
     await line.post(BOB, "run", "Bob's run")
     async with _agent_client(monkeypatch, auth=True) as c:
         assert [i["title"] for i in (await c.post("/fd/line/agent/items", json={})).json()["items"]] == ["Alice's run"]
+
+
+# ── P3: channels ──────────────────────────────────────────────────────
+
+def test_levels_follow_the_switches_and_default_to_needs_you():
+    base = AutonomousWorkConfig().model_dump()
+    assert line.levels(base) == {"whatsapp": "needs_you", "telegram": "off", "agent": "", "agent_level": "off"}
+    cfg = {**base, "notify_telegram": True, "line_telegram": "everything", "line_agent": "mira"}
+    assert line.levels(cfg) == {"whatsapp": "needs_you", "telegram": "everything", "agent": "mira",
+                                "agent_level": "everything"}
+    # The switch is the master: off is off whatever the level says.
+    assert line.levels({**cfg, "nudge_to_whatsapp": False, "line_whatsapp": "everything"})["whatsapp"] == "off"
+    assert line.covers("needs_you", "nudge", False) and line.covers("needs_you", "run", True)
+    assert not line.covers("needs_you", "result", False) and line.covers("everything", "result", False)
+    assert not line.covers("everything", "fleet", False) and not line.covers("off", "proposal", True)
+
+
+@pytest.fixture
+def channels(monkeypatch):
+    """Every channel stubbed; ``channels[name]`` lists what went out."""
+    from captain_claw.flight_deck import fd_dispatch, fd_scheduler, owner_notify, whatsapp_bridge
+
+    out: dict[str, list] = {"whatsapp": [], "telegram": [], "agent": []}
+
+    async def wa(waid, text):
+        out["whatsapp"].append(text)
+        return True
+
+    async def tg(owner, text):
+        out["telegram"].append(text)
+        return {"ok": True, "note": "sent"}
+
+    async def agent(slug, item, *, fd_delivers=False):
+        out["agent"].append((slug, item["title"], fd_delivers))
+        return True
+
+    monkeypatch.setattr(whatsapp_bridge, "push_to_waid", wa)
+    monkeypatch.setattr(fd_scheduler, "_deliver_telegram_owner", tg)
+    monkeypatch.setattr(fd_dispatch, "_nudge_waids", lambda cfg: (["111"], ""))
+    monkeypatch.setattr(line, "push_to_agent", agent)
+    monkeypatch.setattr(owner_notify, "_quiet", lambda cfg: False)
+    monkeypatch.setattr(line, "agent_name", lambda slug: {"mira": "Mira"}.get(slug, slug))
+    monkeypatch.setattr(line, "_fan_out_on", True)
+    return out
+
+
+async def _fanned() -> None:
+    await asyncio.gather(*[t for t in asyncio.all_tasks()
+                           if getattr(t.get_coro(), "__name__", "") == "fan_out"])
+
+
+def _set(user: str, **cfg) -> None:
+    autonomy.get_store().set_overrides(user, cfg)
+
+
+async def test_phones_get_what_their_level_covers(db, channels):
+    _set(ALICE, notify_telegram=True, line_telegram="everything")      # WhatsApp: needs_you (default)
+    await line.post(ALICE, "result", 'Scheduled task "Brief" failed', "No reply.", needs_you=True)
+    await line.post(ALICE, "result", "Done: Re-run the price check", "Two prices moved.")
+    await line.post(ALICE, "fleet", "Ana joined the fleet")
+    await _fanned()
+    assert channels["whatsapp"] == ['Scheduled task "Brief" failed\nNo reply.']
+    assert channels["telegram"] == ['Scheduled task "Brief" failed\nNo reply.',
+                                    "Done: Re-run the price check\nTwo prices moved."]
+    assert channels["agent"] == []
+
+
+async def test_a_copy_and_quiet_hours_keep_phones_out(db, channels, monkeypatch):
+    from captain_claw.flight_deck import owner_notify
+
+    _set(ALICE, line_whatsapp="everything", line_agent="mira")
+    await line.post(ALICE, "run", "Basna run finished: scan", to_phones=False)   # answered on WhatsApp
+    await _fanned()
+    assert channels["whatsapp"] == [] and channels["agent"] == [("mira", "Basna run finished: scan", False)]
+    monkeypatch.setattr(owner_notify, "_quiet", lambda cfg: True)
+    await line.post(ALICE, "payment", "Approve a purchase", needs_you=True)
+    await line.post(ALICE, "nudge", "Nudge from Mira", "Invoice due Friday.", source="Ana")
+    await _fanned()
+    assert channels["whatsapp"] == ["Nudge from Mira\nInvoice due Friday."]       # a nudge still goes
+
+
+async def test_the_agent_gets_its_level_but_not_its_own_items(db, channels):
+    _set(ALICE, nudge_to_whatsapp=False, line_agent="mira", line_agent_level="needs_you")
+    await line.post(ALICE, "result", 'Scheduled task "Brief" failed', needs_you=True, source="Ana")
+    await line.post(ALICE, "result", "Done: something", source="Ana")                 # not its level
+    await line.post(ALICE, "result", 'Scheduled task "Mine" failed', needs_you=True, source="Mira")
+    await line.post(ALICE, "fleet", "Ana joined the fleet", source="Ana")
+    await _fanned()
+    assert channels["agent"] == [("mira", 'Scheduled task "Brief" failed', False)]
+    assert channels["whatsapp"] == []
+
+
+async def test_a_nudge_rings_each_phone_once(db, channels, monkeypatch):
+    """owner_notify rings the phones for nudges and proposals itself; the Line
+    takes their item on to the agent only."""
+    from captain_claw.flight_deck import device_bridge, owner_notify
+
+    async def no_devices(user_id, count, text="", beep=False):
+        return []
+
+    monkeypatch.setattr(device_bridge, "push_waiting", no_devices)
+    _set(ALICE, notify_telegram=True, line_agent="mira", quiet_hours_start=0, quiet_hours_end=0)
+    await owner_notify.notify_owner(ALICE, "nudge", "Invoice due Friday.",
+                                    bell=("autonomy_nudge", "Nudge from Ana", "Invoice due Friday."))
+    await _fanned()
+    assert channels["whatsapp"] == ["Invoice due Friday."] and channels["telegram"] == ["Invoice due Friday."]
+    assert channels["agent"] == [("mira", "Nudge from Ana", True)]
+
+
+async def test_fan_out_is_off_until_the_deck_turns_it_on(db, channels, monkeypatch):
+    monkeypatch.setattr(line, "_fan_out_on", False)
+    await line.post(ALICE, "payment", "Approve a purchase", needs_you=True)
+    await _fanned()
+    assert channels["whatsapp"] == []
+
+
+async def test_a_result_the_phones_take_isnt_relayed_by_the_agent_too(db):
+    from captain_claw.flight_deck import fd_dispatch
+
+    _set(ALICE)
+    assert fd_dispatch._nudge_delivery_mark(ALICE, {"kind": "run_prompt"}) == {}
+    _set(ALICE, line_whatsapp="everything")
+    assert fd_dispatch._nudge_delivery_mark(ALICE, {"kind": "run_prompt"}) == {"fd_delivers": True}
+
+
+async def test_the_channels_card_sets_levels_and_the_agent(db, monkeypatch):
+    from captain_claw.flight_deck import autonomy_routes, device_bridge, fd_scheduler, server
+    from captain_claw.flight_deck.auth import get_optional_user
+
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.setattr(server, "_load_process_registry", lambda: {
+        "mira": {"name": "Mira", "owner": ALICE}, "zed": {"name": "Zed", "owner": BOB}})
+    monkeypatch.setattr(device_bridge, "connected_devices", lambda uid: 0)
+    monkeypatch.setattr(fd_scheduler, "_owner_telegram_chat", lambda uid: "42")
+    monkeypatch.setattr(autonomy_routes, "_whatsapp_state", lambda uid: {
+        "autonomy_active": True, "bridge_configured": True, "recipients": ["111"], "issue": ""})
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def as_alice(request, call_next):
+        request.state.user_id = ALICE
+        return await call_next(request)
+
+    app.include_router(autonomy_routes.router)
+    app.dependency_overrides[get_optional_user] = lambda: {"id": ALICE}
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fd.test") as c:
+        state = (await c.get("/fd/autonomy/notify")).json()
+        assert state["channels"]["whatsapp"]["level"] == "needs_you"
+        assert state["channels"]["telegram"]["level"] == "off"
+        assert state["agent"] == {"slug": "", "name": "", "level": "off",
+                                  "options": [{"slug": "mira", "name": "Mira"}]}       # not Bob's
+        state = (await c.put("/fd/autonomy/notify", json={
+            "whatsapp": "everything", "telegram": "needs_you", "agent": "mira", "agent_level": "needs_you"})).json()
+        assert state["channels"]["whatsapp"] == {**state["channels"]["whatsapp"], "on": True, "level": "everything"}
+        assert state["channels"]["telegram"]["on"] is True and state["channels"]["telegram"]["level"] == "needs_you"
+        assert state["agent"]["slug"] == "mira" and state["agent"]["level"] == "needs_you"
+        state = (await c.put("/fd/autonomy/notify", json={"whatsapp": "off"})).json()
+        assert state["channels"]["whatsapp"]["on"] is False and state["channels"]["whatsapp"]["level"] == "off"
+        state = (await c.put("/fd/autonomy/notify", json={"whatsapp": True})).json()   # the old switch
+        assert state["channels"]["whatsapp"]["level"] == "everything"                   # its level kept
+        assert (await c.put("/fd/autonomy/notify", json={"agent": "zed"})).status_code == 400
+        assert (await c.put("/fd/autonomy/notify", json={"telegram": "loud"})).status_code == 400
+        assert (await c.put("/fd/autonomy/notify", json={"agent_level": "off"})).status_code == 400
+        assert (await c.put("/fd/autonomy/notify", json={"agent": ""})).json()["agent"]["slug"] == ""

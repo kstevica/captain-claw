@@ -4514,9 +4514,12 @@ class FlightDeckDB:
     async def add_line_item(
         self, user_id: str, kind: str, type: str, title: str, body: str = "", *,
         source: str = "", needs_you: bool = False, ref_type: str = "", ref_id: str = "",
-        trust: str = "deck", item_id: str = "",
+        trust: str = "deck", item_id: str = "", to_phones: bool = True,
     ) -> str:
-        """Insert one Line item for `user_id`; returns its id."""
+        """Insert one Line item for `user_id`; returns its id. It goes on to the
+        user's channels (line.after_insert); `to_phones=False`: not to phones."""
+        from captain_claw.flight_deck.line import after_insert
+
         assert self._db is not None
         iid = item_id or _uuid()
         await self._db.execute(
@@ -4526,6 +4529,9 @@ class FlightDeckDB:
              ref_type, ref_id, trust, _utcnow()),
         )
         await self._db.commit()
+        after_insert(user_id, {"id": iid, "kind": kind, "type": type, "title": title, "body": body,
+                               "source": source, "needs_you": bool(needs_you), "ref_type": ref_type,
+                               "ref_id": ref_id}, to_phones=to_phones)
         return iid
 
     async def list_line_items(

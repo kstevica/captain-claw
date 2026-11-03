@@ -156,7 +156,14 @@ async def notify_owner(
     if not text:
         return out
     if bell:
-        out["bell"] = await _to_bell(user_id, *bell, action_id=action_id)
+        # Its phones are rung below: the Line takes the item on to the agent only.
+        from captain_claw.flight_deck import line
+
+        token = line.phones_done.set(True)
+        try:
+            out["bell"] = await _to_bell(user_id, *bell, action_id=action_id)
+        finally:
+            line.phones_done.reset(token)
     try:
         cfg = cfg or resolve_config(user_id)
     except Exception as exc:  # noqa: BLE001
