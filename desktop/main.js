@@ -2,10 +2,15 @@
  * Captain Claw – Electron main process.
  *
  * Lifecycle:
- *   1. Spawn the PyInstaller-built backend (captain-claw-web) as a child process.
- *   2. Wait for the backend HTTP server to become ready.
- *   3. Open a BrowserWindow pointing at the backend's URL.
- *   4. On quit, gracefully shut down the backend.
+ *   1. Find the backend: built in (resources/backend, the full build), or the
+ *      app's own installed Python (runtime.js), installing it on first launch.
+ *   2. Start the agent server and the Flight Deck as child processes.
+ *   3. Wait for the Flight Deck to answer, then show it in the window.
+ *   4. On quit, gracefully shut both down.
+ *
+ * The slim build ships without a backend: runtime.js installs it from the release
+ * manifest and later installs each new version beside the running one, test-starts
+ * it, and switches on a restart (going back by itself if it doesn't come up).
  */
 
 const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = require("electron");
@@ -15,6 +20,15 @@ const http = require("http");
 const net = require("net");
 const fs = require("fs");
 const log = require("electron-log/main");
+
+// A second app on the same machine (tests, or a build beside the installed one)
+// keeps its own window storage and single-instance lock.
+if (process.env.CAPTAIN_CLAW_USER_DATA) {
+  app.setPath("userData", process.env.CAPTAIN_CLAW_USER_DATA);
+  log.transports.file.resolvePathFn = () => path.join(process.env.CAPTAIN_CLAW_USER_DATA, "logs", "main.log");
+}
+
+const runtime = require("./runtime");
 
 // ── Constants ──────────────────────────────────────────────────
 
@@ -40,7 +54,13 @@ if (!GOT_LOCK) app.quit();
 const FD_HOST = "127.0.0.1";
 const HEALTH_POLL_MS = 300;
 const HEALTH_TIMEOUT_MS = 30_000;
+// The installed Python's first start after an install or update reads every
+// module from disk for the first time.
+const FD_TIMEOUT_MS = 90_000;
 const DEV_MODE = process.argv.includes("--dev");
+// `npm run dev -- --runtime`: the unpackaged shell with the installed Python.
+const RUNTIME_FLAG = process.argv.includes("--runtime");
+const UPDATE_CHECK_MS = 6 * 60 * 60 * 1000;
 
 // ── State ──────────────────────────────────────────────────────
 
@@ -51,8 +71,31 @@ let backendReady = false;
 let fdReady = false;
 let actualPort = BACKEND_PORT;
 let actualFdPort = FD_PORT;
+// What the Flight Deck last said on stderr: the reason when it doesn't come up.
+let fdTail = [];
 
 // ── Paths ──────────────────────────────────────────────────────
+
+// Where the backend comes from: "bundled" (the full build's resources/backend),
+// "runtime" (the app's own installed Python), or "source" (--dev, this checkout).
+let backendMode = null;
+
+function getBackendMode() {
+  if (backendMode) return backendMode;
+  if (RUNTIME_FLAG) backendMode = "runtime";
+  else if (getFdBinary()) backendMode = "bundled";
+  else backendMode = DEV_MODE ? "source" : "runtime";
+  return backendMode;
+}
+
+// How to start one Python module of the installed version, or null outside runtime mode.
+function runtimeCommand(module, args) {
+  if (getBackendMode() !== "runtime") return null;
+  const version = runtime.currentVersion();
+  if (!version) return null;
+  const { cmd, env } = runtime.pythonFor(version);
+  return { cmd, args: ["-m", module, ...args], env, version };
+}
 
 function getBackendBinary() {
   const exeName =
@@ -105,16 +148,20 @@ function getUserDataDir() {
 // ── Backend management ─────────────────────────────────────────
 
 function spawnBackend() {
-  const binary = getBackendBinary();
+  const installed = runtimeCommand("captain_claw.web_server", []);
+  const binary = getBackendMode() === "bundled" ? getBackendBinary() : null;
 
   let cmd, args, env;
 
   env = {
-    ...process.env,
+    ...(installed ? installed.env : process.env),
     CAPTAIN_CLAW_HOME: getUserDataDir(),
   };
 
-  if (binary) {
+  if (installed) {
+    ({ cmd, args } = installed);
+    log.info(`Starting backend: Captain ${installed.version}`);
+  } else if (binary) {
     cmd = binary;
     args = [];
     log.info(`Starting backend: ${binary}`);
@@ -126,7 +173,7 @@ function spawnBackend() {
     log.info("Starting backend from source (dev mode)");
   } else {
     dialog.showErrorBox(
-      "Captain Claw",
+      "Captain",
       "Backend binary not found. The application may not have been packaged correctly."
     );
     app.quit();
@@ -166,7 +213,7 @@ function spawnBackend() {
       dialog
         .showMessageBox(mainWindow, {
           type: "error",
-          title: "Captain Claw",
+          title: "Captain",
           message: "The backend process has stopped unexpectedly.",
           buttons: ["Restart", "Quit"],
         })
@@ -214,44 +261,57 @@ function waitForBackend() {
   });
 }
 
-function stopBackend() {
-  if (!backendProcess) return;
-
-  log.info("Stopping backend...");
-
-  if (process.platform === "win32") {
-    // On Windows, spawn taskkill for the process tree
-    spawn("taskkill", ["/pid", backendProcess.pid.toString(), "/f", "/t"]);
-  } else {
-    backendProcess.kill("SIGTERM");
-
+// Stops a child process; resolves once it has exited.
+function stopProcess(proc, name) {
+  if (!proc || proc.exitCode !== null || proc.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    proc.once("exit", () => resolve());
+    log.info(`Stopping ${name}...`);
+    if (process.platform === "win32") {
+      // On Windows, spawn taskkill for the process tree
+      spawn("taskkill", ["/pid", proc.pid.toString(), "/f", "/t"]);
+      return;
+    }
+    proc.kill("SIGTERM");
     // Force kill after 5 seconds
     setTimeout(() => {
-      if (backendProcess) {
-        log.warn("Backend did not exit gracefully, force killing");
-        backendProcess.kill("SIGKILL");
+      if (proc.exitCode === null && proc.signalCode === null) {
+        log.warn(`${name} did not exit gracefully, force killing`);
+        proc.kill("SIGKILL");
       }
     }, 5000);
-  }
+  });
+}
+
+function stopBackend() {
+  // Not a crash: no "stopped unexpectedly" dialog for this exit.
+  backendReady = false;
+  return stopProcess(backendProcess, "backend");
 }
 
 // ── Flight Deck management ─────────────────────────────────────
 
 function spawnFlightDeck() {
-  const binary = getFdBinary();
+  const fdArgs = ["--host", FD_HOST, "--port", String(actualFdPort)];
+  const installed = runtimeCommand("captain_claw.flight_deck.server", fdArgs);
+  const binary = getBackendMode() === "bundled" ? getFdBinary() : null;
 
   let cmd, args, env;
 
   env = {
-    ...process.env,
+    ...(installed ? installed.env : process.env),
     FD_DATA_DIR: path.join(getUserDataDir(), "fd-data"),
     FD_AUTH_ENABLED: "false",
     // This app's own deck: one local user on loopback, so Google and Microsoft
     // connect there — their sign-in in the system browser (openSignIn).
     FD_DESKTOP: "1",
   };
+  fdTail = [];
 
-  if (binary) {
+  if (installed) {
+    ({ cmd, args } = installed);
+    log.info(`Starting Flight Deck: Captain ${installed.version}`);
+  } else if (binary) {
     cmd = binary;
     args = ["--host", FD_HOST, "--port", String(actualFdPort)];
     log.info(`Starting Flight Deck: ${binary}`);
@@ -287,6 +347,10 @@ function spawnFlightDeck() {
   fdProcess.stderr.on("data", (data) => {
     const text = data.toString().trim();
     if (text) log.warn(`[flight-deck:err] ${text}`);
+    if (text) {
+      fdTail.push(text);
+      if (fdTail.length > 20) fdTail.shift();
+    }
 
     // uvicorn logs to stderr
     const portMatch = text.match(/Uvicorn running on http:\/\/[^:]+:(\d+)/i);
@@ -402,10 +466,16 @@ function getAppUrl() {
 }
 
 function waitForFlightDeck() {
+  const timeoutMs = getBackendMode() === "runtime" ? FD_TIMEOUT_MS : HEALTH_TIMEOUT_MS;
+  const proc = fdProcess;
   return new Promise((resolve, reject) => {
     const start = Date.now();
 
     function poll() {
+      if (!proc || proc.exitCode !== null || proc.signalCode !== null) {
+        reject(new Error(`It stopped before it answered:\n${fdTail.join("\n").split("\n").slice(-6).join("\n")}`));
+        return;
+      }
       const url = `http://${FD_HOST}:${actualFdPort}/api/health`;
       http
         .get(url, (res) => {
@@ -422,8 +492,8 @@ function waitForFlightDeck() {
     }
 
     function retry() {
-      if (Date.now() - start > HEALTH_TIMEOUT_MS) {
-        reject(new Error("Flight Deck did not start within timeout"));
+      if (Date.now() - start > timeoutMs) {
+        reject(new Error(`Flight Deck did not start within ${Math.round(timeoutMs / 1000)} seconds`));
         return;
       }
       setTimeout(poll, HEALTH_POLL_MS);
@@ -434,22 +504,8 @@ function waitForFlightDeck() {
 }
 
 function stopFlightDeck() {
-  if (!fdProcess) return;
-
-  log.info("Stopping Flight Deck...");
-
-  if (process.platform === "win32") {
-    spawn("taskkill", ["/pid", fdProcess.pid.toString(), "/f", "/t"]);
-  } else {
-    fdProcess.kill("SIGTERM");
-
-    setTimeout(() => {
-      if (fdProcess) {
-        log.warn("Flight Deck did not exit gracefully, force killing");
-        fdProcess.kill("SIGKILL");
-      }
-    }, 5000);
-  }
+  fdReady = false;
+  return stopProcess(fdProcess, "Flight Deck");
 }
 
 // ── Window management ──────────────────────────────────────────
@@ -460,7 +516,9 @@ function createWindow() {
     height: 900,
     minWidth: 800,
     minHeight: 600,
-    title: "Captain Claw",
+    title: "Captain",
+    // The page's own navy, so nothing flashes white before it paints.
+    backgroundColor: "#07071a",
     webPreferences: {
       preload: path.join(__dirname, "preload.js"),
       // The preload is sandboxed and can't read package.json: hand it the version.
@@ -489,22 +547,36 @@ function createWindow() {
 
 function buildMenu() {
   const isMac = process.platform === "darwin";
+  // Only the slim build installs its own updates; the full build is replaced whole.
+  const updateItems =
+    getBackendMode() === "runtime"
+      ? [
+          {
+            label: updateBusy ? "Installing Update…" : "Check for Updates…",
+            enabled: !updateBusy,
+            click: () => checkForUpdates({ interactive: true }),
+          },
+        ]
+      : [];
 
   const template = [
     ...(isMac
       ? [
           {
-            label: "Captain Claw",
+            label: "Captain",
+            // The app's internal name is captain-claw (package.json "name", which
+            // also names its data folder), so the roles get the brand by hand.
             submenu: [
-              { role: "about" },
+              { role: "about", label: "About Captain" },
+              ...updateItems,
               { type: "separator" },
               { role: "services" },
               { type: "separator" },
-              { role: "hide" },
+              { role: "hide", label: "Hide Captain" },
               { role: "hideOthers" },
               { role: "unhide" },
               { type: "separator" },
-              { role: "quit" },
+              { role: "quit", label: "Quit Captain" },
             ],
           },
         ]
@@ -545,6 +617,7 @@ function buildMenu() {
           : [{ role: "close" }]),
       ],
     },
+    ...(!isMac && updateItems.length ? [{ label: "Help", submenu: updateItems }] : []),
   ];
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
@@ -576,6 +649,277 @@ ipcMain.handle("open-sign-in", async (event, url) => {
   return true;
 });
 
+// ── The setup / loading page ───────────────────────────────────
+
+function logPath() {
+  return log.transports.file.getFile().path;
+}
+
+// The page every start shows first: mode "start" (the centred Bot), "update"
+// (the same, while switching versions) or "install" (the first start's steps and
+// product tour). *progress* is what setupProgress takes.
+function showSetupPage(progress) {
+  if (!mainWindow) return Promise.resolve();
+  return mainWindow.loadFile(path.join(__dirname, "setup.html")).then(() => setupProgress(progress));
+}
+
+// { mode, version, title, text, detail, step, fraction } onto the setup page
+// (fraction null = no end known).
+function setupProgress(progress) {
+  if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.webContents.getURL().endsWith("setup.html")) return;
+  mainWindow.webContents
+    .executeJavaScript(`window.setupProgress && window.setupProgress(${JSON.stringify(progress)})`)
+    .catch(() => {});
+}
+
+class QuitRequested extends Error {}
+
+// Whether the window had page storage before this launch showed anything: the
+// setup page creates it, so it's read before the window opens (see startServers).
+let hadPageStorage = false;
+
+// ── Starting the servers ───────────────────────────────────────
+
+async function startServers() {
+  // Backend is optional — start it but don't block on it
+  spawnBackend();
+  waitForBackend()
+    .then(() => log.info("Backend ready (background)"))
+    .catch((err) => log.warn("Backend failed to start (non-fatal):", err.message));
+
+  // Flight Deck is the primary UI — must start
+  await stopLeftoverFd();
+  // No port saved yet but the window had page storage before this launch: an
+  // upgrade from a build that ran on 25080 — keep its origin while 25080 is free.
+  const saved = readFdState().port;
+  const upgraded = saved === undefined && hadPageStorage;
+  actualFdPort = await pickFdPort(saved ?? (upgraded ? LEGACY_FD_PORT : undefined));
+  spawnFlightDeck();
+  await waitForFlightDeck();
+}
+
+async function stopServers() {
+  await Promise.all([stopFlightDeck(), stopBackend()]);
+}
+
+// Starts the current version; when that is a version just switched to and it
+// doesn't come up, goes back to the one before it and starts that.
+async function startServersOrGoBack(switched) {
+  try {
+    await startServers();
+    return null;
+  } catch (err) {
+    if (!switched || !switched.from) throw err;
+    log.error(`Captain ${switched.to} didn't start: ${err.message}`);
+    setupProgress({ text: `Captain ${switched.to} didn't start. Going back to ${switched.from}…` });
+    await stopServers();
+    const back = runtime.rollBack(switched.to);
+    if (!back) throw err;
+    await startServers();
+    return { failed: switched.to, back, error: err };
+  }
+}
+
+function tellWentBack(wentBack) {
+  if (!wentBack) return;
+  dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    title: "Captain",
+    message: `Captain ${wentBack.failed} didn't start, so the app went back to ${wentBack.back}.`,
+    detail: `${wentBack.error.message}\n\nThe log: ${logPath()}`,
+  });
+}
+
+// First launch of the slim build: install the newest release. Needs the internet.
+async function firstInstall() {
+  await showSetupPage({ mode: "install" });
+  for (;;) {
+    try {
+      setupProgress({ detail: "Looking up the newest version" });
+      const manifest = await runtime.fetchManifest();
+      setupProgress({ version: manifest.version });
+      if (manifest.shellTooOld) {
+        throw new Error(`Captain ${manifest.version} needs a newer version of this app. Download it from ${manifest.notes_url || "the Captain releases page"}.`);
+      }
+      await runtime.install(manifest, setupProgress);
+      runtime.switchTo(manifest.version);
+      setupProgress({ step: "start", detail: "" });
+      return;
+    } catch (err) {
+      log.error("Setup failed:", err);
+      const { response } = await dialog.showMessageBox(mainWindow, {
+        type: "error",
+        title: "Captain",
+        message: "Captain couldn't finish setting up.",
+        detail: `${err.message}\n\nThe first start downloads what Captain runs on (about 200 MB), so it needs the internet.\n\nThe log: ${logPath()}`,
+        buttons: ["Try Again", "Quit"],
+        defaultId: 0,
+        cancelId: 1,
+      });
+      if (response !== 0) throw new QuitRequested();
+    }
+  }
+}
+
+// After the deck is up: what an installed version does in the background.
+function afterStart() {
+  if (getBackendMode() !== "runtime") return;
+  const version = runtime.currentVersion();
+  // It runs now, so it's no longer one that failed here.
+  if (runtime.readState().failed === version) runtime.writeState({ failed: null });
+  if (process.platform === "darwin") {
+    app.setAboutPanelOptions({ applicationName: "Captain", applicationVersion: version, version: `app ${app.getVersion()}` });
+  }
+  runtime.prune();
+  runtime.ensureChromium();
+  if (!updateTimer) {
+    setTimeout(() => checkForUpdates({ interactive: false }), 60_000);
+    updateTimer = setInterval(() => checkForUpdates({ interactive: false }), UPDATE_CHECK_MS);
+  }
+}
+
+// ── Updates (the slim build) ───────────────────────────────────
+
+let updateBusy = false;
+let updateTimer = null;
+// The version the user said "Later" to: not offered again until the app restarts
+// or they check themselves.
+let declinedVersion = null;
+
+function info(message, detail) {
+  return dialog.showMessageBox(mainWindow, { type: "info", title: "Captain", message, detail });
+}
+
+async function checkForUpdates({ interactive }) {
+  if (getBackendMode() !== "runtime" || !mainWindow) return;
+  if (updateBusy) {
+    if (interactive) info("An update is already being installed.", "You'll be asked to restart when it's ready.");
+    return;
+  }
+  let manifest;
+  try {
+    manifest = await runtime.fetchManifest();
+  } catch (err) {
+    log.warn(`Update check failed: ${err.message}`);
+    if (interactive) dialog.showMessageBox(mainWindow, { type: "error", title: "Captain", message: "Couldn't check for updates.", detail: err.message });
+    return;
+  }
+  const current = runtime.currentVersion();
+  if (runtime.compareVersions(manifest.version, current) <= 0) {
+    if (interactive) info(`Captain ${current} is the newest version.`);
+    return;
+  }
+  const { pending } = runtime.readState();
+  if (pending === manifest.version && runtime.isReady(pending)) {
+    if (interactive || declinedVersion !== pending) await offerRestart(pending);
+    return;
+  }
+  // One that didn't start here and was gone back from: only when asked.
+  const failedHere = runtime.readState().failed === manifest.version;
+  if (!interactive && (declinedVersion === manifest.version || failedHere)) return;
+  if (manifest.shellTooOld) {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: "Captain",
+      message: `Captain ${manifest.version} is out, and it needs a newer version of this app.`,
+      detail: "Download the new app and install it over this one. Your agents and settings stay.",
+      buttons: ["Download", "Later"],
+      defaultId: 0,
+      cancelId: 1,
+    });
+    if (response === 0 && manifest.notes_url) shell.openExternal(manifest.notes_url);
+    else declinedVersion = manifest.version;
+    return;
+  }
+  for (;;) {
+    const { response } = await dialog.showMessageBox(mainWindow, {
+      type: "info",
+      title: "Captain",
+      message: `Captain ${manifest.version} is available. You have ${current}.`,
+      detail: `${manifest.summary ? `${manifest.summary}\n\n` : ""}${failedHere ? "It didn't start here last time, and the app went back. " : ""}It installs in the background while you keep working, and asks before it restarts.`,
+      buttons: ["Install", "What's New", "Later"],
+      defaultId: 0,
+      cancelId: 2,
+    });
+    if (response === 1) {
+      if (manifest.notes_url) shell.openExternal(manifest.notes_url);
+      continue;
+    }
+    if (response === 2) {
+      declinedVersion = manifest.version;
+      return;
+    }
+    break;
+  }
+  await installUpdate(manifest);
+}
+
+async function installUpdate(manifest) {
+  updateBusy = true;
+  buildMenu();
+  const progress = (p) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (typeof p.fraction === "number") mainWindow.setProgressBar(p.fraction);
+    else if (p.fraction === null) mainWindow.setProgressBar(2);
+    if (p.text) log.info(`Update: ${p.text}`);
+  };
+  try {
+    await runtime.install(manifest, progress);
+    await runtime.rehearse(manifest.version, progress);
+    runtime.writeState({ pending: manifest.version });
+  } catch (err) {
+    log.error(`Update to ${manifest.version} failed:`, err);
+    await runtime.removeVersion(manifest.version).catch(() => {});
+    dialog.showMessageBox(mainWindow, {
+      type: "error",
+      title: "Captain",
+      message: `Captain ${manifest.version} couldn't be installed, so nothing changed.`,
+      detail: `${err.message}\n\nThe log: ${logPath()}`,
+    });
+    return;
+  } finally {
+    updateBusy = false;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.setProgressBar(-1);
+    buildMenu();
+  }
+  await offerRestart(manifest.version);
+}
+
+async function offerRestart(version) {
+  const { response } = await dialog.showMessageBox(mainWindow, {
+    type: "info",
+    title: "Captain",
+    message: `Captain ${version} is ready.`,
+    detail: "Restart to start using it. Your agents stop for a moment and start again. If you'd rather wait, it starts the next time you open the app.",
+    buttons: ["Restart Now", "Later"],
+    defaultId: 0,
+    cancelId: 1,
+  });
+  if (response !== 0) {
+    declinedVersion = version;
+    return;
+  }
+  await restartIntoPending();
+}
+
+async function restartIntoPending() {
+  const { pending } = runtime.readState();
+  await showSetupPage({ mode: "update", text: "Stopping the agents for a moment", version: pending || "" });
+  await stopServers();
+  const switched = runtime.takePending();
+  setupProgress({ text: `Updating to Captain ${runtime.currentVersion()}` });
+  try {
+    const wentBack = await startServersOrGoBack(switched);
+    mainWindow?.loadURL(getAppUrl());
+    tellWentBack(wentBack);
+    afterStart();
+  } catch (err) {
+    log.error("Failed to start Flight Deck after the update:", err);
+    dialog.showErrorBox("Captain", `Captain couldn't start:\n\n${err.message}\n\nThe log: ${logPath()}`);
+    app.quit();
+  }
+}
+
 // ── App lifecycle ──────────────────────────────────────────────
 
 app.on("second-instance", () => {
@@ -586,42 +930,44 @@ app.on("second-instance", () => {
 
 app.whenReady().then(async () => {
   if (!GOT_LOCK) return;
-  log.info("Captain Claw Desktop starting...");
+  log.info("Captain Desktop starting...");
   log.info(`Platform: ${process.platform} ${process.arch}`);
   log.info(`Dev mode: ${DEV_MODE}`);
+  log.info(`Backend: ${getBackendMode()}`);
   log.info(`User data: ${getUserDataDir()}`);
+  if (getBackendMode() === "runtime") log.info(`Runtime: ${runtime.runtimeDir()} (releases: ${runtime.manifestUrl()})`);
 
+  hadPageStorage = fs.existsSync(path.join(app.getPath("userData"), "Local Storage"));
   buildMenu();
   createWindow();
 
-  // Show a loading state
-  mainWindow.loadURL(
-    `data:text/html;charset=utf-8,${encodeURIComponent(LOADING_HTML)}`
-  );
-
   try {
-    // Backend is optional — start it but don't block on it
-    spawnBackend();
-    waitForBackend()
-      .then(() => log.info("Backend ready (background)"))
-      .catch((err) => log.warn("Backend failed to start (non-fatal):", err.message));
-
-    // Flight Deck is the primary UI — must start
-    await stopLeftoverFd();
-    // No port saved yet but the window has page storage: an upgrade from a
-    // build that ran on 25080 — keep its origin while 25080 is free.
-    const saved = readFdState().port;
-    const upgraded = saved === undefined && fs.existsSync(path.join(app.getPath("userData"), "Local Storage"));
-    actualFdPort = await pickFdPort(saved ?? (upgraded ? LEGACY_FD_PORT : undefined));
-    spawnFlightDeck();
-    await waitForFlightDeck();
+    let switched = null;
+    if (getBackendMode() === "runtime") {
+      // A version installed and test-started earlier, waiting for this start.
+      switched = runtime.takePending();
+      if (!runtime.currentVersion()) await firstInstall();
+      else {
+        await showSetupPage({
+          mode: switched ? "update" : "start",
+          text: switched ? `Updating to Captain ${switched.to}` : "Starting…",
+          version: runtime.currentVersion(),
+        });
+      }
+    } else {
+      await showSetupPage({ mode: "start", text: "Starting…" });
+    }
+    const wentBack = await startServersOrGoBack(switched);
     mainWindow.loadURL(getAppUrl());
+    tellWentBack(wentBack);
+    afterStart();
   } catch (err) {
+    if (err instanceof QuitRequested) {
+      app.quit();
+      return;
+    }
     log.error("Failed to start Flight Deck:", err);
-    dialog.showErrorBox(
-      "Captain Claw",
-      `Failed to start Flight Deck:\n\n${err.message}\n\nCheck the logs at: ${log.transports.file.getFile().path}`
-    );
+    dialog.showErrorBox("Captain", `Captain couldn't start:\n\n${err.message}\n\nThe log: ${logPath()}`);
     app.quit();
   }
 });
@@ -644,40 +990,3 @@ app.on("activate", () => {
     mainWindow.loadURL(getAppUrl());
   }
 });
-
-// ── Loading screen HTML ────────────────────────────────────────
-
-const LOADING_HTML = `<!DOCTYPE html>
-<html>
-<head>
-<style>
-  body {
-    margin: 0;
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    background: #1a1a2e;
-    color: #e0e0e0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
-  }
-  h1 { font-size: 2rem; margin-bottom: 0.5rem; color: #00d4ff; }
-  p  { font-size: 1rem; opacity: 0.7; }
-  .spinner {
-    width: 40px; height: 40px;
-    border: 3px solid rgba(0,212,255,0.2);
-    border-top-color: #00d4ff;
-    border-radius: 50%;
-    animation: spin 0.8s linear infinite;
-    margin-bottom: 1.5rem;
-  }
-  @keyframes spin { to { transform: rotate(360deg); } }
-</style>
-</head>
-<body>
-  <div class="spinner"></div>
-  <h1>Captain Claw</h1>
-  <p>Starting backend server...</p>
-</body>
-</html>`;

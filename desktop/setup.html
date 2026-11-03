@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src file: data:; font-src file:">
+<title>Captain</title>
+<style>
+  @font-face { font-family: Sora; src: url("assets/fonts/sora-latin.woff2") format("woff2"); font-weight: 600 800; }
+  :root {
+    color-scheme: dark;
+    --bg: #07071a;
+    --ink: #e2e8f0;
+    --muted: #94a3b8;
+    --dim: #64748b;
+    --line: rgba(148, 163, 184, 0.14);
+    --cyan: #67e8f9;
+    --indigo: #818cf8;
+    --lilac: #d8b4fe;
+    --ok: #34d399;
+    --brand: linear-gradient(110deg, #67e8f9 0%, #818cf8 52%, #d8b4fe 100%);
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Inter, sans-serif;
+    --display: Sora, var(--sans);
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font: 14px/1.5 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    overflow: hidden;
+    -webkit-user-select: none;
+    user-select: none;
+    cursor: default;
+  }
+
+  /* ── Backdrop: glows, a fading grid, drifting light ─────────── */
+  .sky { position: fixed; inset: 0; pointer-events: none; }
+  .sky::before {
+    content: ""; position: absolute; inset: -20%;
+    background:
+      radial-gradient(38% 42% at 50% 8%, rgba(99, 102, 241, 0.34), transparent 70%),
+      radial-gradient(30% 36% at 88% 92%, rgba(34, 211, 238, 0.14), transparent 70%),
+      radial-gradient(28% 34% at 8% 88%, rgba(216, 180, 254, 0.10), transparent 70%);
+    animation: drift 24s ease-in-out infinite alternate;
+  }
+  .sky::after {
+    content: ""; position: absolute; inset: 0;
+    background-image:
+      linear-gradient(rgba(148, 163, 184, 0.055) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(148, 163, 184, 0.055) 1px, transparent 1px);
+    background-size: 36px 36px;
+    -webkit-mask-image: radial-gradient(60% 60% at 50% 40%, #000 20%, transparent 80%);
+  }
+  @keyframes drift { from { transform: translate3d(-2%, -1%, 0) scale(1); } to { transform: translate3d(2%, 1%, 0) scale(1.06); } }
+
+  .wordmark {
+    font: 800 1em/1.05 var(--display);
+    letter-spacing: -0.035em;
+    background: var(--brand);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* ── The Bot ─────────────────────────────────────────────────── */
+  .bot { display: block; overflow: visible; }
+  .bot .eyes { transform-box: fill-box; transform-origin: center; animation: blink 5.2s infinite; }
+  .bot .halo { animation: halo 2.4s ease-in-out infinite; }
+  .bot .float { animation: float 5s ease-in-out infinite; }
+  @keyframes blink { 0%, 93%, 100% { transform: scaleY(1); } 95.5% { transform: scaleY(0.12); } }
+  @keyframes halo { 0%, 100% { opacity: 0.35; } 50% { opacity: 1; } }
+  @keyframes float { 0%, 100% { transform: translateY(0); } 50% { transform: translateY(-2.5px); } }
+
+  /* ── Bars ────────────────────────────────────────────────────── */
+  .bar { position: relative; height: 4px; border-radius: 99px; background: rgba(129, 140, 248, 0.14); overflow: hidden; }
+  .bar .fill {
+    position: absolute; inset: 0 auto 0 0; width: 0; border-radius: inherit;
+    background: var(--brand); background-size: 200% 100%;
+    box-shadow: 0 0 14px rgba(129, 140, 248, 0.7);
+    transition: width 0.45s cubic-bezier(.2, .7, .2, 1);
+    animation: sheen 2.2s linear infinite;
+  }
+  .bar.busy .fill { width: 34%; animation: sweep 1.5s cubic-bezier(.45, 0, .2, 1) infinite, sheen 2.2s linear infinite; }
+  @keyframes sheen { from { background-position: 0 0; } to { background-position: -200% 0; } }
+  @keyframes sweep { from { transform: translateX(-110%); } to { transform: translateX(310%); } }
+
+  /* ── Start / update: one centred column ──────────────────────── */
+  .center {
+    position: relative; height: 100%;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 0; animation: rise 0.7s cubic-bezier(.2, .7, .2, 1) both;
+  }
+  .center .bot { position: relative; width: 132px; height: 152px; margin-bottom: 26px; filter: drop-shadow(0 18px 30px rgba(0, 0, 0, 0.55)); }
+  .center .aura { position: absolute; width: 360px; height: 360px; margin-top: -190px; border-radius: 50%; pointer-events: none;
+    background: radial-gradient(closest-side, rgba(99, 102, 241, 0.30), rgba(103, 232, 249, 0.07) 55%, transparent);
+    animation: breathe 5s ease-in-out infinite; }
+  @keyframes breathe { 0%, 100% { transform: scale(0.94); opacity: 0.8; } 50% { transform: scale(1.04); opacity: 1; } }
+  .center .wordmark { font-size: 64px; }
+  .center .status { margin-top: 14px; color: var(--muted); font-size: 15px; min-height: 1.5em; }
+  .center .bar { width: 260px; margin-top: 26px; }
+  .center .version { position: absolute; bottom: 26px; color: var(--dim); font: 12px var(--mono); letter-spacing: 0.02em; }
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+  /* ── First start: steps on the left, the tour on the right ───── */
+  .install { position: relative; height: 100%; display: none; flex-direction: column; padding: 28px 44px 30px; }
+  body.mode-install .install { display: flex; }
+  body.mode-install .center { display: none; }
+  .top { display: flex; align-items: center; gap: 10px; animation: rise 0.6s both; }
+  .top .bot { width: 30px; height: 35px; }
+  .top .wordmark { font-size: 22px; }
+  .top .chip {
+    margin-left: auto; font: 11px var(--mono); color: var(--muted);
+    padding: 4px 10px; border: 1px solid var(--line); border-radius: 99px; background: rgba(15, 15, 40, 0.6);
+  }
+  .grid {
+    flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(330px, 410px) 1fr;
+    gap: clamp(28px, 5vw, 72px); align-items: center; padding-top: 12px;
+  }
+  .left { animation: rise 0.7s 0.08s both; }
+  .eyebrow { font: 600 11px var(--mono); letter-spacing: 0.16em; text-transform: uppercase; color: var(--cyan); }
+  h1 { margin: 10px 0 10px; font: 800 clamp(30px, 3.4vw, 42px)/1.08 var(--display); letter-spacing: -0.035em; }
+  .lede { margin: 0 0 26px; color: var(--muted); font-size: 15px; max-width: 30em; }
+
+  .steps { list-style: none; margin: 0 0 24px; padding: 0; }
+  .step { display: grid; grid-template-columns: 22px 1fr auto; align-items: center; gap: 12px; padding: 7px 0; color: var(--dim); transition: color 0.3s; }
+  .step .mark { width: 22px; height: 22px; border-radius: 50%; border: 1.5px solid rgba(148, 163, 184, 0.28); position: relative; transition: all 0.3s; }
+  .step .note { font: 12px var(--mono); color: var(--dim); }
+  .step.active { color: var(--ink); }
+  .step.active .mark { border-color: transparent; background: conic-gradient(from 0deg, var(--cyan), var(--indigo), var(--lilac), transparent 75%); animation: spin 0.9s linear infinite; }
+  .step.active .mark::after { content: ""; position: absolute; inset: 2.5px; border-radius: 50%; background: var(--bg); }
+  .step.active .note { color: var(--indigo); }
+  .step.done { color: var(--muted); }
+  .step.done .mark { border-color: rgba(52, 211, 153, 0.5); background: rgba(52, 211, 153, 0.12); }
+  .step.done .mark::after {
+    content: ""; position: absolute; left: 7px; top: 3.5px; width: 5px; height: 10px;
+    border: solid var(--ok); border-width: 0 2px 2px 0; transform: rotate(45deg);
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  .overall { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 9px; }
+  .overall .label { color: var(--muted); font-size: 13px; }
+  .overall .pct { font: 600 13px var(--mono); color: var(--ink); }
+  .detail { margin-top: 12px; height: 18px; font: 11.5px var(--mono); color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  .right { position: relative; min-width: 0; padding-right: 18px; animation: rise 0.8s 0.16s both; }
+  .frame {
+    position: relative; aspect-ratio: 16 / 10; border-radius: 14px; overflow: hidden;
+    border: 1px solid rgba(129, 140, 248, 0.22);
+    box-shadow: 0 40px 80px -24px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.03) inset, 0 0 60px rgba(99, 102, 241, 0.18);
+    background: #0b0b1e;
+    transform: perspective(1800px) rotateY(-4deg) rotateX(1deg);
+    transform-origin: 0% 50%;
+  }
+  .frame .chrome { position: absolute; z-index: 2; top: 0; left: 0; right: 0; height: 26px; display: flex; gap: 6px; align-items: center; padding: 0 11px;
+    background: linear-gradient(rgba(10, 10, 30, 0.92), rgba(10, 10, 30, 0.75)); border-bottom: 1px solid rgba(148, 163, 184, 0.08); }
+  .frame .chrome i { width: 9px; height: 9px; border-radius: 50%; background: rgba(148, 163, 184, 0.25); }
+  .shot { position: absolute; inset: 26px 0 0 0; width: 100%; height: calc(100% - 26px); object-fit: cover; object-position: top left;
+    opacity: 0; transform: scale(1.04); transition: opacity 1.1s ease, transform 7.5s ease-out; }
+  .shot.on { opacity: 1; transform: scale(1); }
+  .frame::after { content: ""; position: absolute; inset: 0; z-index: 3; pointer-events: none;
+    background: linear-gradient(115deg, rgba(255, 255, 255, 0.06), transparent 35%); }
+  .caption { margin-top: 22px; min-height: 64px; }
+  .caption h2 { margin: 0 0 4px; font: 700 19px/1.25 var(--display); letter-spacing: -0.02em; transition: opacity 0.5s; }
+  .caption p { margin: 0; color: var(--muted); font-size: 14px; transition: opacity 0.5s; }
+  .caption.fade h2, .caption.fade p { opacity: 0; }
+  .dots { display: flex; gap: 6px; margin-top: 16px; }
+  .dots b { height: 4px; width: 16px; border-radius: 99px; background: rgba(148, 163, 184, 0.22); transition: all 0.4s; }
+  .dots b.on { width: 34px; background: var(--brand); }
+
+  @media (max-width: 980px) {
+    .grid { grid-template-columns: minmax(0, 470px); justify-content: center; }
+    .right { display: none; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { animation: none !important; transition: none !important; }
+    .bar.busy .fill { width: 100%; opacity: 0.5; }
+  }
+</style>
+</head>
+<body class="mode-start">
+<div class="sky"></div>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <!-- The Captain Bot (build_support/brand/bot/captains-cap.svg), in the firmware's units. -->
+    <linearGradient id="g-body" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b6bfcc"/><stop offset="1" stop-color="#8590a1"/></linearGradient>
+    <linearGradient id="g-ear" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#99a3b2"/><stop offset="1" stop-color="#78828f"/></linearGradient>
+    <linearGradient id="g-plate" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#262d3d"/><stop offset="1" stop-color="#121722"/></linearGradient>
+    <linearGradient id="g-cap" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#31449a"/><stop offset="1" stop-color="#151e55"/></linearGradient>
+    <linearGradient id="g-gold" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#f3cf6a"/><stop offset="0.55" stop-color="#dfa93f"/><stop offset="1" stop-color="#b17c20"/></linearGradient>
+    <radialGradient id="g-lamp" cx="0.35" cy="0.3" r="0.8"><stop offset="0" stop-color="#ff8f85"/><stop offset="1" stop-color="#df302a"/></radialGradient>
+    <filter id="f-glow" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="2.4"/></filter>
+    <filter id="f-lamp" x="-200%" y="-200%" width="500%" height="500%"><feGaussianBlur stdDeviation="4"/></filter>
+    <symbol id="captain-bot" viewBox="-60 -96 120 140">
+      <g class="float">
+        <line x1="0" y1="-68" x2="0" y2="-78" stroke="#96a0af" stroke-width="3" stroke-linecap="round"/>
+        <circle class="halo" cy="-81" r="8" fill="#ff5a4f" filter="url(#f-lamp)"/>
+        <circle cy="-81" r="5" fill="url(#g-lamp)"/>
+        <rect x="-52" y="-12" width="8" height="24" rx="3" fill="url(#g-ear)"/>
+        <rect x="44" y="-12" width="8" height="24" rx="3" fill="url(#g-ear)"/>
+        <rect x="-44" y="-36" width="88" height="76" rx="14" fill="url(#g-body)"/>
+        <rect x="-36" y="-28" width="72" height="58" rx="9" fill="url(#g-plate)"/>
+        <g class="eyes">
+          <g filter="url(#f-glow)" opacity="0.8" fill="#3ce6ff">
+            <rect x="-26" y="-14" width="16" height="11" rx="3"/><rect x="10" y="-14" width="16" height="11" rx="3"/>
+          </g>
+          <g fill="#3ce6ff"><rect x="-26" y="-14" width="16" height="11" rx="3"/><rect x="10" y="-14" width="16" height="11" rx="3"/></g>
+        </g>
+        <g fill="#3ce6ff">
+          <rect x="-24" y="13.5" width="5" height="5" rx="1.5"/><rect x="-17" y="12.5" width="5" height="7" rx="1.5"/>
+          <rect x="-10" y="11.5" width="5" height="9" rx="1.5"/><rect x="-3" y="11" width="5" height="10" rx="1.5"/>
+          <rect x="4" y="11.5" width="5" height="9" rx="1.5"/><rect x="11" y="12.5" width="5" height="7" rx="1.5"/>
+          <rect x="18" y="13.5" width="5" height="5" rx="1.5"/>
+        </g>
+        <rect x="-46" y="-68" width="92" height="28" rx="10" fill="url(#g-cap)"/>
+        <rect x="-46" y="-44" width="92" height="7" rx="2" fill="url(#g-gold)"/>
+        <ellipse cx="0" cy="-34" rx="50" ry="5.5" fill="#0e1640"/>
+        <circle cy="-55" r="7" fill="url(#g-gold)"/><circle cy="-55" r="4" fill="#182357"/><circle cy="-55" r="1.6" fill="#f3cf6a"/>
+      </g>
+    </symbol>
+  </defs>
+</svg>
+
+<!-- Start and update -->
+<main class="center">
+  <div class="aura"></div>
+  <svg class="bot"><use href="#captain-bot"/></svg>
+  <div class="wordmark">Captain</div>
+  <div class="status" id="status">Starting…</div>
+  <div class="bar busy"><div class="fill"></div></div>
+  <div class="version" id="version"></div>
+</main>
+
+<!-- First start -->
+<section class="install">
+  <header class="top">
+    <svg class="bot"><use href="#captain-bot"/></svg>
+    <span class="wordmark">Captain</span>
+    <span class="chip" id="chip">First start</span>
+  </header>
+  <div class="grid">
+    <div class="left">
+      <div class="eyebrow">Welcome aboard</div>
+      <h1>Setting up Captain</h1>
+      <p class="lede">Captain is downloading what it runs on, about 200&nbsp;MB. This happens once; after this it starts in seconds.</p>
+      <ol class="steps" id="steps">
+        <li class="step" data-step="uv"><span class="mark"></span><span>Getting the installer</span><span class="note"></span></li>
+        <li class="step" data-step="python"><span class="mark"></span><span>Installing Python</span><span class="note"></span></li>
+        <li class="step" data-step="wheel"><span class="mark"></span><span>Downloading Captain</span><span class="note"></span></li>
+        <li class="step" data-step="packages"><span class="mark"></span><span>Installing what Captain uses</span><span class="note"></span></li>
+        <li class="step" data-step="app"><span class="mark"></span><span>Putting it together</span><span class="note"></span></li>
+        <li class="step" data-step="start"><span class="mark"></span><span>Starting Captain</span><span class="note"></span></li>
+      </ol>
+      <div class="overall"><span class="label" id="label">Getting ready</span><span class="pct" id="pct">0%</span></div>
+      <div class="bar" id="ibar"><div class="fill"></div></div>
+      <div class="detail" id="detail"></div>
+    </div>
+    <div class="right">
+      <div class="frame" id="frame">
+        <div class="chrome"><i></i><i></i><i></i></div>
+        <img class="shot on" src="assets/tour/chat.webp" alt="">
+        <img class="shot" src="assets/tour/library.webp" alt="">
+        <img class="shot" src="assets/tour/taskboard.webp" alt="">
+        <img class="shot" src="assets/tour/forge.webp" alt="">
+      </div>
+      <div class="caption" id="caption"><h2></h2><p></p></div>
+      <div class="dots" id="dots"><b class="on"></b><b></b><b></b><b></b></div>
+    </div>
+  </div>
+</section>
+
+<script>
+  // ── The tour ─────────────────────────────────────────────────
+  const TOUR = [
+    ["Agents that know your work", "Ask in your own words. Skills, files and topics are one tap away."],
+    ["Every file, summarised", "What your agents read and write is filed, tagged and searchable."],
+    ["One board for every request", "Mail, chat and channels in one place, with what each agent did about them."],
+    ["Describe it, get a team", "Say what you need. Captain plans the agents and what they run on a schedule."],
+  ];
+  let slide = 0;
+  const shots = [...document.querySelectorAll(".shot")];
+  const dots = [...document.querySelectorAll("#dots b")];
+  const caption = document.getElementById("caption");
+  function showSlide(i) {
+    caption.classList.add("fade");
+    setTimeout(() => {
+      caption.querySelector("h2").textContent = TOUR[i][0];
+      caption.querySelector("p").textContent = TOUR[i][1];
+      caption.classList.remove("fade");
+    }, 260);
+    shots.forEach((s, k) => s.classList.toggle("on", k === i));
+    dots.forEach((d, k) => d.classList.toggle("on", k === i));
+  }
+  caption.querySelector("h2").textContent = TOUR[0][0];
+  caption.querySelector("p").textContent = TOUR[0][1];
+  setInterval(() => {
+    if (!document.body.classList.contains("mode-install")) return;
+    slide = (slide + 1) % TOUR.length;
+    showSlide(slide);
+  }, 6500);
+
+  // ── Progress ─────────────────────────────────────────────────
+  // How much of the whole each step is, so one bar runs from 0 to 100.
+  const ORDER = ["uv", "python", "wheel", "packages", "app", "start"];
+  const WEIGHT = { uv: 6, python: 9, wheel: 10, packages: 63, app: 7, start: 5 };
+  const LABEL = {
+    uv: "Getting the installer", python: "Installing Python", wheel: "Downloading Captain",
+    packages: "Installing what Captain uses", app: "Putting it together", start: "Starting Captain",
+  };
+  let current = null;
+  let stepFraction = 0;
+  let stepStarted = 0;
+  let shown = 0;
+
+  function overall() {
+    if (!current) return 0;
+    const i = ORDER.indexOf(current);
+    let before = 0;
+    for (let k = 0; k < i; k++) before += WEIGHT[ORDER[k]];
+    let within = stepFraction;
+    // Steps of unknown length creep toward their end, never past it.
+    if (within == null) within = 0.92 * (1 - Math.exp(-(Date.now() - stepStarted) / (current === "packages" ? 26000 : 6000)));
+    return Math.min(99, before + WEIGHT[current] * within);
+  }
+
+  function paint() {
+    if (!document.body.classList.contains("mode-install")) return;
+    shown = Math.max(shown, overall());
+    document.querySelector("#ibar .fill").style.width = `${shown.toFixed(1)}%`;
+    document.getElementById("pct").textContent = `${Math.floor(shown)}%`;
+  }
+  setInterval(paint, 250);
+
+  function setStep(step) {
+    if (!ORDER.includes(step) || step === current) return;
+    current = step;
+    stepFraction = null;
+    stepStarted = Date.now();
+    const at = ORDER.indexOf(step);
+    document.querySelectorAll(".step").forEach((li) => {
+      const k = ORDER.indexOf(li.dataset.step);
+      li.classList.toggle("done", k < at);
+      li.classList.toggle("active", k === at);
+      if (k !== at) li.querySelector(".note").textContent = "";
+    });
+    document.getElementById("label").textContent = LABEL[step];
+  }
+
+  // main.js calls this: { mode, version, title, text, detail, step, fraction }.
+  // mode "install" is the first start (steps + tour), "start" and "update" the
+  // centred screen. fraction: a number for how far the step is, null for unknown.
+  window.setupProgress = (p) => {
+    if (p.mode) {
+      document.body.className = `mode-${p.mode}`;
+      if (p.mode === "install") document.getElementById("chip").textContent = "First start";
+    }
+    if (typeof p.version === "string" && p.version) {
+      document.getElementById("version").textContent = `Captain ${p.version}`;
+      if (document.body.classList.contains("mode-install")) document.getElementById("chip").textContent = `First start · ${p.version}`;
+    }
+    if (typeof p.title === "string") document.getElementById("status").textContent = p.title;
+    if (typeof p.text === "string" && !document.body.classList.contains("mode-install")) {
+      document.getElementById("status").textContent = p.text;
+    }
+    if (p.step) setStep(p.step);
+    if (p.fraction !== undefined && current) {
+      stepFraction = typeof p.fraction === "number" ? Math.max(0, Math.min(1, p.fraction)) : null;
+      const note = document.querySelector(`.step[data-step="${current}"] .note`);
+      if (note) note.textContent = typeof p.fraction === "number" ? `${Math.round(stepFraction * 100)}%` : "";
+    }
+    // uv's own housekeeping ("Using Python … environment at", "Activate with") says nothing here.
+    if (typeof p.detail === "string" && !/^(Using |Creating |Activate |Audited |warning)/i.test(p.detail)) {
+      document.getElementById("detail").textContent = p.detail;
+    }
+    paint();
+  };
+</script>
+</body>
+</html>

@@ -13,7 +13,8 @@
     "dist": "electron-builder",
     "dist:mac": "electron-builder --mac",
     "dist:win": "electron-builder --win",
-    "dist:linux": "electron-builder --linux"
+    "dist:linux": "electron-builder --linux",
+    "dist:full": "electron-builder --config electron-builder.full.js"
   },
   "dependencies": {
     "electron-log": "^5.1.0"
@@ -24,7 +25,7 @@
   },
   "build": {
     "appId": "com.captainclaw.desktop",
-    "productName": "Captain Claw",
+    "productName": "Captain",
     "copyright": "Copyright © 2025 Stevica Kuharski",
     "directories": {
       "output": "../dist/desktop",
@@ -33,30 +34,45 @@
     "files": [
       "main.js",
       "preload.js",
+      "runtime.js",
+      "setup.html",
+      "assets/**/*",
       "node_modules/**/*"
-    ],
-    "extraResources": [
-      {
-        "from": "../dist/captain-claw",
-        "to": "backend",
-        "filter": ["**/*"]
-      }
     ],
     "mac": {
       "category": "public.app-category.developer-tools",
       "icon": "icons/icon.icns",
       "target": [
-        "dmg",
-        "zip"
+        "dmg"
       ],
       "hardenedRuntime": true,
       "gatekeeperAssess": false
     },
+    "dmg": {
+      "title": "Captain",
+      "background": "icons/dmg-background.png",
+      "iconSize": 112,
+      "window": {
+        "width": 660,
+        "height": 428
+      },
+      "contents": [
+        {
+          "x": 180,
+          "y": 196
+        },
+        {
+          "x": 480,
+          "y": 196,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
     "win": {
       "icon": "icons/icon.ico",
       "target": [
-        "nsis",
-        "zip"
+        "nsis"
       ]
     },
     "nsis": {
@@ -74,6 +90,9 @@
         "deb",
         "tar.gz"
       ]
-    }
+    },
+    "electronLanguages": [
+      "en"
+    ]
   }
 }

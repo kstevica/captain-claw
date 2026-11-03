@@ -109,60 +109,143 @@ To also create a platform archive (`.tar.gz` or `.zip`):
 
 ---
 
-## 2. Desktop App (Electron + Backend)
-
-This packages everything into a native desktop application.
+## 2. Desktop App (Electron)
 
 ```bash
-./build-desktop.sh
+./build-desktop.sh            # the slim app (default): 75 MB DMG on macOS
+./build-desktop.sh --full     # the self-contained app, backend inside (about 1 GB)
 ```
 
-### Build steps
+### The slim app
 
-The script performs four steps:
+The default build is the Electron shell alone. The backend is not inside: on its
+first launch the app installs it, and it installs every later release itself,
+without a new download of the app.
 
-**Step 1 — Build Python backend.**
-Runs `./build.sh` to produce the PyInstaller binaries in `dist/captain-claw/`.
+What the first launch installs, from the newest release's manifest
+(`desktop-manifest.json`, see [Releasing for the desktop app](#releasing-for-the-desktop-app)):
 
-**Step 2 — Install Electron dependencies.**
-Runs `npm install` inside `desktop/` to fetch Electron and electron-builder.
+| What | Where it comes from | Size (macOS arm64) |
+|------|---------------------|--------------------|
+| uv | GitHub (astral-sh/uv), version and sha256 pinned by the manifest | 14 MB |
+| Python 3.11 | python-build-standalone, installed by that uv (never the system's) | 20 MB |
+| The dependencies | PyPI, every package pinned with its hashes (`desktop-lock-<version>.txt`) | about 180 MB |
+| Captain Claw | the release's wheel, sha256 pinned by the manifest; it carries the backend and the Flight Deck frontend | 15 MB |
 
-**Step 3 — Verify backend binaries.**
-Checks that `dist/captain-claw/captain-claw-web` exists before packaging.
+It takes about half a minute on a fast line, with a progress page. Chromium for
+the browser tools follows in the background. Everything goes to the app's runtime
+folder, not to `~/.captain-claw` (your data):
 
-**Step 4 — Package with electron-builder.**
-Bundles the Electron shell and the backend binaries into a platform installer.
-The backend folder is embedded as an "extra resource" inside the app bundle.
+| Platform | Runtime folder |
+|----------|----------------|
+| macOS | `~/Library/Application Support/Captain/runtime` |
+| Windows | `%LOCALAPPDATA%\Captain\runtime` |
+| Linux | `~/.local/share/captain-claw-desktop/runtime` |
+
+Inside it: `bin/uv`, `python/`, uv's `cache/`, one venv per version under
+`envs/<version>/`, and `state.json` (which version runs, the one before it, and
+one waiting for a restart).
+
+### Updates
+
+The app checks the manifest a minute after it starts and every six hours, and
+**Check for Updates…** (the Captain menu on macOS, Help elsewhere) checks now.
+For a new version it asks first, then:
+
+1. **Installs it beside the running one** in `envs/<new>/`. uv's cache supplies
+   every package that didn't change, so a release whose lock is the same
+   downloads only its wheel (15 MB) and installs in seconds.
+2. **Test-starts it**: its agent code imports, its page has all its files, and its
+   Flight Deck answers on a spare port with an empty data folder and none of your
+   keys. A version that fails here is removed and nothing changes.
+3. **Asks to restart.** *Restart Now* stops the agents, switches and starts the
+   new version; *Later* leaves it for the next time the app opens.
+4. **Goes back by itself** when the new version doesn't come up: the old venv is
+   still there, so it switches back and says why. A version that failed isn't
+   offered again until you check yourself.
+
+The version before stays for that, and older ones are removed with what only they
+used in uv's cache. Console → Updates in the app points to this menu.
+
+A release that needs a newer shell raises `min_shell` in its manifest
+(`MIN_SHELL` in `scripts/desktop_release.py`, `SHELL_PROTOCOL` in
+`desktop/runtime.js`); the app then asks its user to download the new app.
+
+### Releasing for the desktop app
+
+```bash
+python scripts/desktop_release.py
+```
+
+builds the wheel (with the Flight Deck bundle as committed), locks its
+dependencies for every platform (`uv pip compile --universal --generate-hashes`),
+reads uv's checksums, and writes `dist/desktop-release/<version>/`:
+`captain_claw-<version>-py3-none-any.whl`, `desktop-lock-<version>.txt` and
+`desktop-manifest.json`, whose summary is the first paragraph of
+`release-notes/RELEASE_NOTES_<version>.md`. It prints the `gh release upload`
+command for the three files. The app reads
+`https://github.com/kstevica/captain-claw/releases/latest/download/desktop-manifest.json`,
+so they have to be on the release GitHub calls *latest*.
+
+To try a release before publishing it, write it for a local server and point an
+app at it; the variables keep the test app apart from an installed one:
+
+```bash
+python scripts/desktop_release.py --base-url http://127.0.0.1:8765/ --out /tmp/rel
+python3 -m http.server 8765 --directory /tmp/rel &
+CAPTAIN_CLAW_MANIFEST_URL=http://127.0.0.1:8765/desktop-manifest.json \
+CAPTAIN_CLAW_RUNTIME_DIR=/tmp/cc-test/runtime CAPTAIN_CLAW_HOME=/tmp/cc-test/home \
+CAPTAIN_CLAW_USER_DATA=/tmp/cc-test/userdata \
+  "dist/desktop/mac-arm64/Captain.app/Contents/MacOS/Captain"
+```
+
+### The full app
+
+`--full` is the build from before the slim app: the Flight Deck frontend is built,
+`./build.sh` makes the PyInstaller binaries in `dist/captain-claw/`, and
+electron-builder puts them in the app (`desktop/electron-builder.full.js`). Its
+first start needs no internet; it doesn't update itself.
+
+```bash
+./build-desktop.sh --backend-only    # full: only the PyInstaller backend
+./build-desktop.sh --electron-only   # full: package an already built backend
+```
+
+### What it looks like
+
+The app is **Captain** (`Captain.app`, `Captain Setup.exe`); `package.json`'s
+`name` stays `captain-claw`, so the window storage and logs of earlier builds
+carry over. Every start shows `desktop/setup.html` first: the Captain Bot and the
+wordmark while it starts or switches versions, and on the first start the install
+steps beside a short product tour. The macOS install window has its own
+background. `build_support/render_desktop_art.py` makes that artwork: it copies
+the tour shots from the website (`~/Dev/captain-claw.com/website/public`, or
+`--website DIR`) into `desktop/assets/tour/` and renders
+`desktop/icons/dmg-background.png` + `@2x` with Playwright. The display face is
+Sora (`desktop/assets/fonts/`, SIL Open Font License), as on the website.
+
+### Build steps (slim)
+
+1. `npm install` inside `desktop/`.
+2. electron-builder packages the shell for this CPU (`--arch arm64|x64` for the
+   other one: the slim shell is JavaScript only).
+3. On macOS the DMG is converted to LZMA (`hdiutil convert -format ULMO`):
+   electron-builder writes zlib images, 110 MB for Electron alone, against 75 MB
+   as LZMA.
 
 ### Output
 
 Output goes to `dist/desktop/`:
 
-| Platform | Artifacts |
-|----------|-----------|
-| macOS | `Captain Claw.dmg`, `.zip` |
-| Windows | `Captain Claw Setup.exe` (NSIS), `.zip` |
-| Linux | `.AppImage`, `.deb`, `.tar.gz` |
-
-### Platform-specific builds
+| Platform | Slim | Full |
+|----------|------|------|
+| macOS | `Captain-<version>-arm64.dmg` (75 MB) | `.dmg`, `.zip` |
+| Windows | `Captain Setup <version>.exe` (NSIS) | `.exe`, `.zip` |
+| Linux | `.AppImage`, `.deb`, `.tar.gz` | the same |
 
 ```bash
-./build-desktop.sh --platform mac
-./build-desktop.sh --platform win
-./build-desktop.sh --platform linux
-```
-
-### Partial builds
-
-```bash
-# Backend only (skip Electron packaging):
-./build-desktop.sh --backend-only
-
-# Electron only (assumes backend already built):
-./build-desktop.sh --electron-only
-
-# Clean everything first:
-./build-desktop.sh --clean
+./build-desktop.sh --platform mac|win|linux
+./build-desktop.sh --clean           # wipe build artifacts first
 ```
 
 ---
@@ -171,13 +254,19 @@ Output goes to `dist/desktop/`:
 
 ```
 ├── build.sh                    # Builds server binaries (PyInstaller)
-├── build-desktop.sh            # Builds desktop app (PyInstaller + Electron)
+├── build-desktop.sh            # Builds the desktop app (slim, or --full with PyInstaller)
 ├── captain_claw.spec           # PyInstaller spec (3 entry points, shared deps)
+├── scripts/desktop_release.py  # Wheel + lock + manifest the slim app installs from
+├── build_support/render_desktop_art.py # Tour shots + install-window background
 ├── build_support/
 │   └── runtime_hook.py         # Patches env vars for frozen binaries
 ├── desktop/
 │   ├── package.json            # Electron app config + electron-builder settings
-│   ├── main.js                 # Electron main process (backend lifecycle)
+│   ├── main.js                 # Electron main process (backend lifecycle, updates)
+│   ├── runtime.js              # The slim app's Python: install, update, test start, go back
+│   ├── setup.html              # Start, update and first-start screens
+│   ├── assets/                 # Tour shots + Sora for setup.html
+│   ├── electron-builder.full.js # The full build's config (backend inside)
 │   ├── preload.js              # Exposes desktop detection to renderer
 │   └── icons/                  # App icons (.icns, .ico, .png)
 └── dist/
@@ -191,9 +280,11 @@ Output goes to `dist/desktop/`:
 
 `desktop/main.js` handles the full lifecycle:
 
-1. **Spawn** — Locates the `captain-claw-web` binary inside the app
-   resources and spawns it as a child process. In dev mode (`--dev`), it
-   falls back to running from source via `python3 -m captain_claw.web_server`.
+1. **Spawn** — Starts the agent server and the Flight Deck: in the slim app with
+   the installed version's Python (`python -m captain_claw.flight_deck.server`,
+   installing it first on the first launch), in the full app from the
+   PyInstaller binaries inside it. In dev mode (`--dev`), it runs from source
+   via `python3 -m …`; `npm run dev -- --runtime` uses the installed Python instead.
 
 2. **Wait** — Polls `http://127.0.0.1:23080/api/commands` every 300ms
    until the backend responds with HTTP 200 (timeout: 30 seconds).
@@ -287,7 +378,13 @@ three platforms in parallel.
 
 ## Troubleshooting
 
-**"Backend binary not found" on launch**
+**"Captain Claw couldn't finish setting up" (slim app)**
+
+The first launch downloads Captain Claw, so it needs the internet; *Try Again*
+picks up where it stopped. The log (its path is in the dialog) has each step's
+output.
+
+**"Backend binary not found" on launch (full app)**
 
 The PyInstaller build was not included in the Electron package. Make sure
 `dist/captain-claw/` exists before running `build-desktop.sh --electron-only`.
@@ -304,9 +401,13 @@ Electron shell detects the actual port from the backend's stdout.
 
 **Large binary size**
 
-The PyInstaller bundle includes all Python dependencies. Typical sizes:
-- Backend alone: ~150-250 MB
-- Full desktop app (with Electron): ~350-500 MB
+The slim desktop app is 75 MB (macOS DMG) because it carries no Python; see
+[The slim app](#the-slim-app). The PyInstaller bundle includes all Python
+dependencies, and everything else importable in the environment it's built from
+(a development venv with torch, OpenCV or polars installed puts them in too), so
+build the full app from a clean venv. Typical sizes:
+- Backend alone: ~150-250 MB from a clean venv
+- Full desktop app (with Electron): ~350-500 MB from a clean venv
 
 The `excludes` list in `captain_claw.spec` strips unused packages (tkinter,
 matplotlib, scipy, test suites) to reduce size.
