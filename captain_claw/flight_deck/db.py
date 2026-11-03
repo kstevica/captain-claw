@@ -1093,6 +1093,17 @@ class FlightDeckDB:
                 ON line_items(user_id, needs_you, resolved_at);
             CREATE INDEX IF NOT EXISTS idx_line_items_ref
                 ON line_items(user_id, ref_type, ref_id);
+            -- How far each agent has looked at its owner's Line: `told_at`
+            -- moves with the one-line count at the start of a turn, `read_at`
+            -- with the line tool's "news" (created_at of the newest seen).
+            CREATE TABLE IF NOT EXISTS line_cursors (
+                user_id    TEXT NOT NULL,
+                agent_slug TEXT NOT NULL,
+                told_at    TEXT NOT NULL DEFAULT '',
+                read_at    TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (user_id, agent_slug)
+            );
         """)
         # Lightweight migrations: add columns introduced after a table first shipped.
         for table, col, ddl in [
@@ -4519,15 +4530,24 @@ class FlightDeckDB:
 
     async def list_line_items(
         self, user_id: str, *, limit: int = 50, before: str = "", kinds: Iterable[str] = (),
-        needs_you: bool | None = None, unread_only: bool = False,
+        needs_you: bool | None = None, unread_only: bool = False, after: str = "",
+        words: Iterable[str] = (), oldest_first: bool = False,
     ) -> list[dict]:
-        """This user's Line, newest first; `before` = a created_at to page on."""
+        """This user's Line, newest first (or oldest first); `before` / `after`
+        = created_at bounds, `words` must each be in the title, body or source."""
         assert self._db is not None
         q = "SELECT * FROM line_items WHERE user_id = ?"
         args: list = [user_id]
         if before:
             q += " AND created_at < ?"
             args.append(before)
+        if after:
+            q += " AND created_at > ?"
+            args.append(after)
+        for w in [w for w in words if w]:
+            q += " AND (title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\' OR source LIKE ? ESCAPE '\\')"
+            like = "%" + w.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+            args.extend([like, like, like])
         ks = [k for k in kinds if k]
         if ks:
             q += f" AND kind IN ({','.join('?' * len(ks))})"
@@ -4537,10 +4557,42 @@ class FlightDeckDB:
             args.append(int(needs_you))
         if unread_only:
             q += " AND read_at = ''"
-        q += " ORDER BY created_at DESC LIMIT ?"
+        q += f" ORDER BY created_at {'ASC' if oldest_first else 'DESC'} LIMIT ?"
         args.append(max(1, min(int(limit), 500)))
         rows = await self._db.execute_fetchall(q, tuple(args))
         return [dict(r) for r in rows]
+
+    async def get_line_item(self, user_id: str, item_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM line_items WHERE id = ? AND user_id = ?", (item_id, user_id)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def get_line_cursor(self, user_id: str, agent_slug: str) -> dict:
+        """``{told_at, read_at}`` of this agent on this user's Line ("" = never)."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT told_at, read_at FROM line_cursors WHERE user_id = ? AND agent_slug = ?",
+            (user_id, agent_slug),
+        ) as cur:
+            row = await cur.fetchone()
+        return {"told_at": row["told_at"], "read_at": row["read_at"]} if row else {"told_at": "", "read_at": ""}
+
+    async def set_line_cursor(
+        self, user_id: str, agent_slug: str, *, told_at: str | None = None, read_at: str | None = None,
+    ) -> None:
+        """Move this agent's cursor(s) forward (never back)."""
+        assert self._db is not None
+        await self._db.execute(
+            "INSERT INTO line_cursors (user_id, agent_slug, told_at, read_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?) ON CONFLICT(user_id, agent_slug) DO UPDATE SET"
+            " told_at = MAX(told_at, excluded.told_at), read_at = MAX(read_at, excluded.read_at),"
+            " updated_at = excluded.updated_at",
+            (user_id, agent_slug, told_at or "", read_at or "", _utcnow()),
+        )
+        await self._db.commit()
 
     async def list_unresolved_line_items(self, user_id: str, limit: int = 200) -> list[dict]:
         """What still waits for this user, newest first, however old."""

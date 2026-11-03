@@ -187,6 +187,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     "telegram_inbox",
     # The owner's own WhatsApp, the same way; hidden unless they linked it.
     "whatsapp_web",
+    # "What happened while I was away?" comes in any language; hidden without
+    # a deck and on a member's turn.
+    "line",
     # "Think harder" comes in any language, and the agent raises its own
     # effort mid-task: the schema has to be there to do either.
     "reasoning_effort",
@@ -1258,6 +1261,7 @@ class AgentOrchestrationMixin:
         # and a member, public or BotPort turn must never see the owner's chats.
         self._turn_telegram_news = None
         self._turn_whatsapp_news = None
+        self._turn_line_news = None
         if self._turn_wants_telegram_news():
             try:
                 from captain_claw import telegram_inbox_client
@@ -1270,6 +1274,13 @@ class AgentOrchestrationMixin:
                 self._turn_whatsapp_news = await whatsapp_web_client.news()
             except Exception:
                 self._turn_whatsapp_news = None
+            # The owner's Line in Flight Deck, the same way (the count moves
+            # this agent's "told" cursor there).
+            try:
+                from captain_claw import line_client
+                self._turn_line_news = await line_client.news()
+            except Exception:
+                self._turn_line_news = None
         # Pre-populate playbook context cache for the sync _build_messages path.
         if hasattr(self, "_build_playbook_context_note"):
             try:

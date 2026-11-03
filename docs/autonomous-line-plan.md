@@ -1,8 +1,12 @@
 # Line (the autonomous line) — plan, 2026-11-03
 
-Status: every decision below is made. **P0 is built** (branch `feat/line-p0`):
-the store, `line.post`, the bell over the Line, the Line page (full view) and
-dialog (kiosk), fleet changes on the Line. P1–P4 are not. Users see it as
+Status: every decision below is made. **P0 is built** (#387): the store,
+`line.post`, the bell over the Line, the Line page (full view) and dialog
+(kiosk), fleet changes on the Line. **P1 is built** (#389): what agents did
+on their own reaches the Line from the deck, finished runs leave a copy, and
+agents no longer get the fleet notice. **P2 is built** (branch
+`feat/line-p2`): the `line` tool and the one-line count at the start of the
+owner's turns. P3–P4 are not. Users see it as
 **Line**; the internal id is `line`.
 
 ## The idea in one paragraph
@@ -170,11 +174,21 @@ channel card.
    Served by `/fd/line/agent/*`. Dropped for public, BotPort, Iskra and
    shared-member turns (`drop_unusable`, like `telegram_inbox`). Bodies come back
    wrapped as untrusted: results carry email and web text.
-2. **Awareness line** at the start of the owner's live turns, next to the clock:
+
+   **As built (P2):** `captain_claw/tools/line.py` + `captain_claw/line_client.py`;
+   always enabled, its schema always sent, shown by the registry only under
+   Flight Deck and never on a member's turn (`requires_line`). The deck's routes
+   (`/fd/line/agent/news|unread|items|item`) know the agent by the `X-Agent-Auth`
+   token they issued; with sign-in on the owner comes from `_agent_owner`, with it
+   off it is the local user. Two cursors per agent (`line_cursors`): `told_at`
+   moves with the count, `read_at` with `news`, so the count never uses up what
+   the tool would read. The first look covers the last day.
+2. **Awareness line** (built, P2) at the start of the owner's live turns, next to the clock:
    "Line since your last look: 4 new — 1 needs you (proposal), 2 results, 1
    fleet". Counts by kind only, no text (the Telegram inbox #135 pattern:
    `telegram_inbox_client.news()`, fetched once per turn). Cron, autonomy, peer
-   and worker turns neither see nor move it.
+   and worker turns neither see nor move it. What the agent posted itself (its
+   name as the item's source) is left out of its count.
 3. **"From time to time"**: the awareness line plus the tool covers it; an
    agent with a heartbeat (consciousness pulse, being tick) may call `news`
    there. Line items never wake a sleeping agent.
@@ -189,11 +203,25 @@ channel card.
      it. With the phone channels off, the bridges relay as they do today.
 
    A standalone agent (no deck) keeps today's mirroring and posts nothing.
-5. **Fleet changes stop being injected.** `_notify_fleet_change` posts one
+
+   **As built (P1):** the deck posts, not the agent. Every mirrored kind but
+   `cron` is a turn the deck runs and hears the reply of, so the agent is
+   unchanged (no restart): a scheduled task's run (`fd_scheduler.run_job`, a
+   failed run or delivery needs you), an Autonomous Work action or Taskboard
+   hand-over ending on the ledger (`AutonomyStore.update_status` → "done" →
+   `line.action_done`, once per action; a nudge is already a `nudge` item), a
+   plan's step (`plans._step_to_line`). `cron` is the old in-agent scheduler:
+   its turns never reached the mirror and stay off the Line. The
+   `deck_delivers` rule above comes with the phone channels (P3).
+5. **Fleet changes stop being injected** (built, P1). `_notify_fleet_change` posts one
    `fleet` item instead of opening a socket into every agent. Agents still get
    their peers the way they do now (`_peer_agents`); the `fleet_events` note
    goes, the awareness line counts fleet items instead.
-6. **Run completions go to both** (decided 2026-11-03). Basna / Vatra / Crew /
+6. **Run completions go to both** (decided 2026-11-03; built, P1 — Basna,
+   Vatra and Bat answering on another channel leave a copy that doesn't need
+   you (web ones were bell items already); a coding session always does; Crew
+   tasks were bell items already; background delegation between agents isn't
+   copied). Basna / Vatra / Crew /
    Bat / Code and background delegation still `trigger_response` into the
    agent that started them (it was asked, it relays to wherever the user
    asked), and a `run` copy goes to the line. The same two rules as 4.4 keep it
@@ -228,8 +256,8 @@ agent ("summarize the line since 08:00 yesterday, send to Telegram").
 | Phase | What | Restart |
 |---|---|---|
 | P0 | `line.py` store + `post()` + routes + read-only page; the bell over the line (shim, read path, one-time copy, dual write for a release, `NotificationCenter` grouping); `owner_notify` and fleet changes also post (their phone sends still on) | FD + bundle |
-| P1 | agent results also → line (lane-A copy stays); fleet injection off; run copies | FD + agents |
-| P2 | `line` tool, cursors, awareness line | agents |
+| P1 | agent results also → line (lane-A copy stays), posted by the deck; fleet injection off; run copies | FD |
+| P2 | `line` tool, cursors, awareness line | FD + agents |
 | P3 | channels: one agent, Telegram, WhatsApp with levels; migrate notify switches; old direct sends removed | FD + bundle |
 | P4 | talk in the line; digest | FD + agents |
 

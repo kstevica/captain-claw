@@ -135,6 +135,11 @@ class AgentToolLoopMixin:
             step = str(arguments.get("step", "")).strip()
             return f"Session procreation: {step}" if step else "Procreating session"
         # ── LLM tracing ────────────────────────────────────
+        if name == "line":
+            action = str(arguments.get("action", "")).strip().lower()
+            if action == "search":
+                return f"Searching the Line: {str(arguments.get('query', '')).strip()}".rstrip(": ")
+            return "Reading the Line"
         if name == "telegram_inbox":
             action = str(arguments.get("action", "")).strip().lower()
             chat = str(arguments.get("chat", "")).strip()

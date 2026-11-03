@@ -241,7 +241,7 @@ function LineRow({ item, expanded, onToggle }: { item: LineItem; expanded: boole
   const Icon = KIND_ICON[item.kind] || Server
   const waiting = item.needs_you && !item.resolved
   const body = item.body.replace(TASK_LINK_LINE, '').trim()
-  const failed = /_error$/.test(item.type) || item.type === 'error'
+  const failed = /_(error|failed)$/.test(item.type) || item.type === 'error'
   return (
     <li>
       <div role="button" tabIndex={0} onClick={onToggle}

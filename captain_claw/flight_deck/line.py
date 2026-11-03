@@ -18,12 +18,20 @@ the user counts as answered once it is read (until its own answer is wired
 in). The bell lists what still waits on top, however old.
 
 Old items go after ``RETENTION_DAYS``; one that still waits never does.
+
+What the deck has an agent do on its own reaches the Line from the deck,
+which hears the result: a scheduled task's run (fd_scheduler), an Autonomous
+Work action or a Taskboard hand-over ending on the ledger (``action_done``),
+a plan's step (plans). The agent's own chat keeps its copy as before. A run
+that answers somewhere else (WhatsApp, Telegram…) leaves a copy here too.
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -66,6 +74,13 @@ _TYPES: dict[str, tuple[str, bool]] = {
     "crew_task": ("run", True),
     "fleet": ("fleet", False),
     "deck_update": ("deck", True),
+    # What an agent did on its own, heard by the deck: done, or failed.
+    "scheduled_task": ("result", False),
+    "scheduled_task_error": ("result", True),
+    "autonomy_done": ("result", False),
+    "autonomy_failed": ("result", True),
+    "plan_step": ("result", False),
+    "plan_step_error": ("result", True),
     "telegram": ("ask", True),
     "payment": ("payment", True),
     "share": ("share", False),
@@ -150,6 +165,81 @@ async def post(
     except Exception as exc:  # noqa: BLE001
         _log.debug("line item for %s not written: %s", user_id, exc)
         return ""
+
+
+# post_once's items being written right now: a second call for one of them
+# (two "done"s close together) must not pass the check before the first writes.
+_writing: set[tuple[str, str, str]] = set()
+
+
+async def post_once(user_id: str, kind: str, title: str, body: str = "", *,
+                    ref_type: str, ref_id: str, **kw: Any) -> str:
+    """``post``, unless this user's Line already has an item about
+    ``ref_type`` / ``ref_id``. Never raises."""
+    key = (_norm(user_id), ref_type, ref_id)
+    if key in _writing:
+        return ""
+    _writing.add(key)
+    try:
+        from captain_claw.flight_deck.auth import get_db
+
+        if ref_id and await get_db().count_notifications_since(
+                key[0], "", ref_type=ref_type, ref_id=ref_id):
+            return ""
+        return await post(user_id, kind, title, body, ref_type=ref_type, ref_id=ref_id, **kw)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("line: could not check %s/%s: %s", ref_type, ref_id, exc)
+        return ""
+    finally:
+        _writing.discard(key)
+
+
+def soon(fn: Callable[..., Awaitable[Any]], *args: Any) -> None:
+    """Run ``fn(*args)`` on the deck's loop, from sync code that may be on a
+    worker thread (the Taskboard writes the ledger off the loop). No loop (a
+    script, a test without one): nothing."""
+    try:
+        asyncio.get_running_loop().create_task(fn(*args))
+        return
+    except RuntimeError:
+        pass
+    try:
+        from captain_claw.flight_deck.taskboard_passive import _main_loop
+
+        loop = _main_loop()
+        if loop is not None:
+            asyncio.run_coroutine_threadsafe(fn(*args), loop)
+    except Exception as exc:  # noqa: BLE001
+        _log.debug("line: nothing to run %s on: %s", getattr(fn, "__name__", fn), exc)
+
+
+def agent_name(slug: str) -> str:
+    """An agent's name on this deck, else its slug."""
+    if not slug:
+        return ""
+    try:
+        from captain_claw.flight_deck.server import _load_process_registry
+
+        return str((_load_process_registry().get(slug) or {}).get("name") or slug)
+    except Exception:  # noqa: BLE001
+        return slug
+
+
+async def action_done(row: dict[str, Any]) -> str:
+    """An Autonomous Work action, or a Taskboard hand-over, ended on the
+    ledger: its outcome on the Line, once. A nudge is already there (it went
+    to the bell as one). Never raises."""
+    kind = str(row.get("kind") or "")
+    if kind == "nudge":
+        return ""
+    failed = str(row.get("outcome") or "") == "fail"
+    title = " ".join(str(row.get("title") or kind or "An action").split())
+    return await post_once(
+        str(row.get("user_id") or ""), "result", f"{'Failed' if failed else 'Done'}: {title}",
+        str(row.get("outcome_note") or ""), bell_type="autonomy_failed" if failed else "autonomy_done",
+        source=agent_name(str(row.get("target") or "")), needs_you=failed,
+        ref_type="autonomy_result", ref_id=str(row.get("id") or ""), trust="agent",
+    )
 
 
 async def maybe_prune(db: Any) -> int:

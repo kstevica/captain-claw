@@ -8,6 +8,8 @@ items past the retention go, unless they still wait."""
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -258,3 +260,183 @@ async def test_a_fleet_change_lands_on_the_owners_line(db, monkeypatch):
     assert items[1]["body"] == "Port 24100. No other agent running."
     # Never the bell.
     assert await db.list_notifications(ALICE, needs_you=True) == []
+
+
+# ── P1: what agents did on their own, heard by the deck ───────────────
+
+async def _settle() -> None:
+    """The items the ledger handed to the loop, written."""
+    await asyncio.gather(*[t for t in asyncio.all_tasks()
+                           if getattr(t.get_coro(), "__name__", "") == "action_done"])
+
+
+async def test_a_scheduled_run_lands_on_the_line(db, tmp_path, monkeypatch):
+    from captain_claw.flight_deck import fd_scheduler as sched
+
+    store = sched.SchedulerStore(db_path=tmp_path / "scheduler.db")
+    monkeypatch.setattr(sched, "_STORE", store)
+    monkeypatch.setattr(line, "agent_name", lambda slug: {"mira": "Mira"}.get(slug, slug))
+    fields = {"schedule": "daily 08:00", "agent_slug": "mira", "prompt": "Brief me",
+              "delivery_kind": "agent", "delivery": {"chat": True}}
+    brief = store.create(owner_id=ALICE, name="Morning brief", **fields)
+    sweep = store.create(owner_id=ALICE, name="Inbox sweep", **fields)
+    quiet = store.create(owner_id=ALICE, name="Quiet one", **fields)
+    outcomes = {brief["id"]: ("ok", "Three meetings today."),
+                sweep["id"]: ("error:no-reply", "agent produced no reply within timeout"),
+                quiet["id"]: ("skipped:quiet", "")}
+
+    async def fake(job, force=False):
+        return outcomes[job["id"]]
+
+    monkeypatch.setattr(sched, "execute_job", fake)
+    for job in (brief, sweep, quiet):
+        await sched.run_job(job, force=True)
+    items = {i["title"]: i for i in await db.list_line_items(ALICE)}
+    assert set(items) == {'Scheduled task "Morning brief"', 'Scheduled task "Inbox sweep" failed'}
+    ok, bad = items['Scheduled task "Morning brief"'], items['Scheduled task "Inbox sweep" failed']
+    assert ok["kind"] == "result" and ok["body"] == "Three meetings today." and ok["source"] == "Mira"
+    assert ok["needs_you"] == 0 and ok["ref_type"] == "scheduled_task" and ok["ref_id"] == brief["id"]
+    assert bad["needs_you"] == 1 and bad["body"] == "Problem: no-reply\n\nagent produced no reply within timeout"
+    assert [n["title"] for n in await db.list_notifications(ALICE, needs_you=True)] == [bad["title"]]
+
+
+async def test_an_action_ending_on_the_ledger_lands_on_the_line_once(db, monkeypatch):
+    monkeypatch.setattr(line, "agent_name", lambda slug: "Mira" if slug == "mira" else slug)
+    store = autonomy.get_store()
+    ran = store.add_action(ALICE, kind="run_prompt", title="Re-run the price check", status="dispatched",
+                           target="mira")
+    broke = store.add_action(ALICE, kind="tool_action", title="Draft a reply to Ana", status="dispatched")
+    nudge = store.add_action(ALICE, kind="nudge", title="Invoice due Friday", status="dispatched")
+    store.update_status(ran["id"], "done", outcome="success", outcome_note="Two prices moved.")
+    store.update_status(broke["id"], "done", outcome="fail", outcome_note="gmail said no")
+    store.update_status(nudge["id"], "done", outcome="success", outcome_note="delivered")
+    store.update_status(ran["id"], "done", outcome="success", outcome_note="again")   # once
+    waiting = store.add_action(ALICE, kind="run_prompt", title="Not yet", status="awaiting_approval")
+    store.update_status(waiting["id"], "rejected")                                      # not an outcome
+    await _settle()
+    rows = await db.list_line_items(ALICE)
+    assert sorted(i["title"] for i in rows) == ["Done: Re-run the price check", "Failed: Draft a reply to Ana"]
+    items = {i["title"]: i for i in rows}
+    done = items["Done: Re-run the price check"]
+    assert done["body"] == "Two prices moved." and done["source"] == "Mira" and done["needs_you"] == 0
+    assert done["ref_type"] == "autonomy_result" and done["ref_id"] == ran["id"] and done["trust"] == "agent"
+    assert items["Failed: Draft a reply to Ana"]["needs_you"] == 1
+
+
+def test_an_action_ending_off_the_loop_is_not_lost(monkeypatch):
+    """The Taskboard writes the ledger from a worker thread: the item goes to
+    the deck's loop."""
+    import threading
+
+    calls = []
+
+    async def fake_done(row):
+        calls.append(row["id"])
+
+    loop = asyncio.new_event_loop()
+    monkeypatch.setattr(line, "action_done", fake_done)
+    from captain_claw.flight_deck import taskboard_passive
+
+    monkeypatch.setattr(taskboard_passive, "_main_loop", lambda: loop)
+    t = threading.Thread(target=line.soon, args=(line.action_done, {"id": "a1"}))
+    t.start()
+    t.join()
+    loop.run_until_complete(asyncio.sleep(0.05))
+    loop.close()
+    assert calls == ["a1"]
+
+
+async def test_a_plan_step_lands_on_the_line(db, monkeypatch):
+    from captain_claw.flight_deck import plans
+
+    plan = {"id": "plan1", "goal": "Get the Q4 numbers to Ana"}
+    await plans._step_to_line(ALICE, plan, {"title": "Export the sheet", "result": "q4.xlsx saved"}, True)
+    await plans._step_to_line(ALICE, plan, {"title": "Email Ana", "result": "no Gmail"}, False)
+    done, failed = sorted(await db.list_line_items(ALICE), key=lambda i: i["title"])
+    assert done["title"] == "Plan step done: Export the sheet" and done["needs_you"] == 0
+    assert done["body"] == "q4.xlsx saved\n\nPlan: Get the Q4 numbers to Ana"
+    assert failed["title"] == "Plan step failed: Email Ana" and failed["needs_you"] == 1
+
+
+# ── P2: the agent's side (line tool, per-turn count) ──────────────────
+
+def _agent_client(monkeypatch, *, token_owner=("user-alice", "mira"), auth=False) -> httpx.AsyncClient:
+    from captain_claw.flight_deck import google_oauth_routes, server
+
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true" if auth else "false")
+    monkeypatch.setattr(google_oauth_routes, "_authorize_agent_call", lambda request: None)
+    owner, slug = token_owner
+    monkeypatch.setattr(server, "_find_agent_by_auth",
+                        lambda token: (True, owner, slug) if token == "tok-mira" else (False, "", ""))
+    monkeypatch.setattr(line, "agent_name", lambda s: {"mira": "Mira"}.get(s, s))
+    app = FastAPI()
+    app.include_router(line_routes.router)
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fd.test",
+                             headers={"X-Agent-Auth": "tok-mira"})
+
+
+async def test_the_agents_count_is_new_since_it_was_told_and_leaves_out_its_own(db, monkeypatch):
+    old = await line.post("local", "run", "Yesterday's run")
+    await _age(db, old, "2026-01-01T00:00:00+00:00")                     # before the first look's day
+    await line.post("local", "result", 'Scheduled task "Brief"', source="Mira")   # its own
+    await line.post("local", "proposal", "Reply to Ana?", needs_you=True, source="Ana")
+    await line.post("local", "fleet", "Ana joined the fleet", source="Ana")
+    async with _agent_client(monkeypatch, token_owner=("", "mira")) as c:   # sign-in off: the local user
+        first = (await c.post("/fd/line/agent/news")).json()
+        assert first == {"connected": True, "new": 2, "kinds": {"proposal": 1, "fleet": 1},
+                         "first_look": True, "needs_you": 1}
+        again = (await c.post("/fd/line/agent/news")).json()
+        assert again["new"] == 0 and again["first_look"] is False
+        await line.post("local", "run", "Basna run finished: scan")
+        assert (await c.post("/fd/line/agent/news")).json()["kinds"] == {"run": 1}
+
+
+async def test_news_reads_the_unread_oldest_first_on_its_own_cursor(db, monkeypatch):
+    for i in range(3):
+        await line.post("local", "result", f"Result {i}")
+    async with _agent_client(monkeypatch, token_owner=("", "mira")) as c:
+        await c.post("/fd/line/agent/news")                                # the count's cursor
+        page = (await c.post("/fd/line/agent/unread", json={"limit": 2})).json()
+        assert [i["title"] for i in page["items"]] == ["Result 0", "Result 1"]
+        assert page["more"] is True and page["first_look"] is True
+        page = (await c.post("/fd/line/agent/unread", json={"limit": 2})).json()
+        assert [i["title"] for i in page["items"]] == ["Result 2"] and page["more"] is False
+        assert (await c.post("/fd/line/agent/unread", json={})).json()["items"] == []
+
+
+async def test_recent_search_and_read_by_the_agent(db, monkeypatch):
+    pay = await line.post("local", "payment", "Approve a purchase: Hetzner · €38.70", "An automated job",
+                          needs_you=True)
+    await line.post("local", "run", "Basna run finished: market scan", "Acme raised prices 4%")
+    await line.post("local", "fleet", "Ana joined the fleet")
+    other = await line.post(BOB, "run", "Bob's run", "Acme")
+    async with _agent_client(monkeypatch, token_owner=("", "mira")) as c:
+        items = lambda **kw: c.post("/fd/line/agent/items", json=kw)   # noqa: E731
+        assert [i["title"] for i in (await items(kind="fleet")).json()["items"]] == ["Ana joined the fleet"]
+        assert [i["id"] for i in (await items(needs_you=True)).json()["items"]] == [pay]
+        found = (await items(query="acme 4%")).json()["items"]
+        assert [i["title"] for i in found] == ["Basna run finished: market scan"]       # Bob's isn't hers
+        assert len((await items(since="2099-01-01")).json()["items"]) == 0
+        assert (await items(since="soon")).status_code == 422
+        assert (await c.post("/fd/line/agent/item", json={"id": pay})).json()["item"]["body"] == "An automated job"
+        assert (await c.post("/fd/line/agent/item", json={"id": other})).status_code == 404
+
+
+async def test_an_agent_this_deck_didnt_spawn_is_refused(db, monkeypatch):
+    async with _agent_client(monkeypatch) as c:
+        r = await c.post("/fd/line/agent/news", headers={"X-Agent-Auth": "someone-elses"})
+        assert r.status_code == 403
+
+
+async def test_with_sign_in_on_the_owner_comes_from_the_deck(db, monkeypatch):
+    from captain_claw.flight_deck import google_oauth_routes
+
+    async def owner(request, *, service="Google"):
+        assert service == "Line"
+        return ALICE
+
+    monkeypatch.setattr(google_oauth_routes, "_agent_owner", owner)
+    await line.post(ALICE, "run", "Alice's run")
+    await line.post(BOB, "run", "Bob's run")
+    async with _agent_client(monkeypatch, auth=True) as c:
+        assert [i["title"] for i in (await c.post("/fd/line/agent/items", json={})).json()["items"]] == ["Alice's run"]

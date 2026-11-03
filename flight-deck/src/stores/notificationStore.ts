@@ -32,6 +32,9 @@ function mapServerType(t: string): NotificationType {
   if (t === 'profile_research') return 'success'
   if (t === 'profile_research_error') return 'error'
   if (t === 'autonomy_nudge') return 'info'
+  // What an agent did on its own, heard by the deck (the Line): done, or failed.
+  if (t === 'scheduled_task' || t === 'autonomy_done' || t === 'plan_step') return 'success'
+  if (t === 'scheduled_task_error' || t === 'autonomy_failed' || t === 'plan_step_error') return 'error'
   if (t === 'share' || t === 'info') return 'info'
   if (t === 'success' || t === 'warning' || t === 'error') return t
   return 'info'

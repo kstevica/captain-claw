@@ -649,6 +649,7 @@ class ToolsConfig(BaseModel):
         "audio",
         "telegram_inbox",
         "whatsapp_web",
+        "line",
         "todo",
         "contacts",
         "scripts",
@@ -706,7 +707,7 @@ class ToolsConfig(BaseModel):
         "browser", "datastore", "direct_api", "cron",
         "google_drive", "google_calendar", "google_mail",
         "microsoft_onedrive", "microsoft_calendar", "microsoft_mail",
-        "jev", "audio", "telegram_inbox", "whatsapp_web",
+        "jev", "audio", "telegram_inbox", "whatsapp_web", "line",
         "whatsapp_send_file", "intentions", "image_vision", "video_vision", "cv", "topics",
         "sessions", "history", "vfs",
         # The documents an owner's setup gave the agent (knowledge/): shown
