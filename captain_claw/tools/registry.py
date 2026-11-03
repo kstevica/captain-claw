@@ -566,6 +566,7 @@ class ToolRegistry:
                     and not self._tool_metadata.get(t.name, {}).get("requires_crew")
                     and not self._tool_metadata.get(t.name, {}).get("requires_telegram_inbox")
                     and not self._tool_metadata.get(t.name, {}).get("requires_whatsapp_web")
+                    and not self._tool_metadata.get(t.name, {}).get("requires_line")
                     and not self._tool_metadata.get(t.name, {}).get("requires_knowledge")
                 ]
         except Exception:
@@ -667,6 +668,17 @@ class ToolRegistry:
                              if not self._tool_metadata.get(t.name, {}).get("requires_telegram_inbox")]
         except Exception:
             tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_telegram_inbox")]
+
+        # The Line: shown only under Flight Deck and never on a member's turn
+        # (``line_client.usable()``, no network). Owner-only; fails closed.
+        try:
+            if any(self._tool_metadata.get(t.name, {}).get("requires_line") for t in tools):
+                from captain_claw import line_client
+
+                if not line_client.usable():
+                    tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_line")]
+        except Exception:
+            tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_line")]
 
         # WhatsApp Web: shown only while the owner has WhatsApp linked in Flight
         # Deck (refreshed per turn by ``whatsapp_web_client.refresh_connected()``).

@@ -55,6 +55,7 @@ HIDDEN_BECAUSE = {
     "requires_crew": "Crew isn't approved for this account (an admin approves it on the Users page)",
     "requires_telegram_inbox": "no Telegram inbox kept in Flight Deck",
     "requires_whatsapp_web": "WhatsApp not linked in Flight Deck",
+    "requires_line": "not running under Flight Deck",
     "requires_shared_members": "this agent isn't shared with anyone",
 }
 

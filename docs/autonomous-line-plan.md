@@ -2,9 +2,11 @@
 
 Status: every decision below is made. **P0 is built** (#387): the store,
 `line.post`, the bell over the Line, the Line page (full view) and dialog
-(kiosk), fleet changes on the Line. **P1 is built** (branch `feat/line-p1`):
-what agents did on their own reaches the Line from the deck, finished runs
-leave a copy, and agents no longer get the fleet notice. P2–P4 are not. Users see it as
+(kiosk), fleet changes on the Line. **P1 is built** (#389): what agents did
+on their own reaches the Line from the deck, finished runs leave a copy, and
+agents no longer get the fleet notice. **P2 is built** (branch
+`feat/line-p2`): the `line` tool and the one-line count at the start of the
+owner's turns. P3–P4 are not. Users see it as
 **Line**; the internal id is `line`.
 
 ## The idea in one paragraph
@@ -172,11 +174,21 @@ channel card.
    Served by `/fd/line/agent/*`. Dropped for public, BotPort, Iskra and
    shared-member turns (`drop_unusable`, like `telegram_inbox`). Bodies come back
    wrapped as untrusted: results carry email and web text.
-2. **Awareness line** at the start of the owner's live turns, next to the clock:
+
+   **As built (P2):** `captain_claw/tools/line.py` + `captain_claw/line_client.py`;
+   always enabled, its schema always sent, shown by the registry only under
+   Flight Deck and never on a member's turn (`requires_line`). The deck's routes
+   (`/fd/line/agent/news|unread|items|item`) know the agent by the `X-Agent-Auth`
+   token they issued; with sign-in on the owner comes from `_agent_owner`, with it
+   off it is the local user. Two cursors per agent (`line_cursors`): `told_at`
+   moves with the count, `read_at` with `news`, so the count never uses up what
+   the tool would read. The first look covers the last day.
+2. **Awareness line** (built, P2) at the start of the owner's live turns, next to the clock:
    "Line since your last look: 4 new — 1 needs you (proposal), 2 results, 1
    fleet". Counts by kind only, no text (the Telegram inbox #135 pattern:
    `telegram_inbox_client.news()`, fetched once per turn). Cron, autonomy, peer
-   and worker turns neither see nor move it.
+   and worker turns neither see nor move it. What the agent posted itself (its
+   name as the item's source) is left out of its count.
 3. **"From time to time"**: the awareness line plus the tool covers it; an
    agent with a heartbeat (consciousness pulse, being tick) may call `news`
    there. Line items never wake a sleeping agent.
@@ -245,7 +257,7 @@ agent ("summarize the line since 08:00 yesterday, send to Telegram").
 |---|---|---|
 | P0 | `line.py` store + `post()` + routes + read-only page; the bell over the line (shim, read path, one-time copy, dual write for a release, `NotificationCenter` grouping); `owner_notify` and fleet changes also post (their phone sends still on) | FD + bundle |
 | P1 | agent results also → line (lane-A copy stays), posted by the deck; fleet injection off; run copies | FD |
-| P2 | `line` tool, cursors, awareness line | agents |
+| P2 | `line` tool, cursors, awareness line | FD + agents |
 | P3 | channels: one agent, Telegram, WhatsApp with levels; migrate notify switches; old direct sends removed | FD + bundle |
 | P4 | talk in the line; digest | FD + agents |
 
