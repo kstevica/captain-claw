@@ -252,6 +252,13 @@ async def move_champion_branch(run: dict, sha: str) -> None:
 # ── judging ──────────────────────────────────────────────────────────
 
 
+def fmt(value: float | None) -> str:
+    """A score as a person reads it; "nothing yet" (an outcome run's start) is a dash."""
+    if value is None or abs(float(value)) >= 1e11:
+        return "—"
+    return f"{float(value):.3f}"
+
+
 def judge_dev(obj: dict, cand: dict, champ: dict) -> tuple[bool, str]:
     """Does *cand* beat *champ* on the open cases by more than noise, without
     breaking a guardrail? ``(passes, why)``."""
@@ -259,7 +266,7 @@ def judge_dev(obj: dict, cand: dict, champ: dict) -> tuple[bool, str]:
     c, b = Stats(**cand["stats"]), Stats(**champ["stats"])
     need = max(margin(b, obj["noise"]["min_gain"]), 2.0 * c.stdev)
     if not beats(c, b, min_gain=obj["noise"]["min_gain"], direction=direction):
-        return False, (f"{c.mean:.3f} ± {c.stdev:.3f} against the best {b.mean:.3f} ± {b.stdev:.3f}: "
+        return False, (f"{fmt(c.mean)} ± {c.stdev:.3f} against the best {fmt(b.mean)} ± {b.stdev:.3f}: "
                        f"not a gain of at least {need:.3f}")
     for g in obj.get("guardrails") or []:
         new, old = (cand.get("guard") or {}).get(g["name"]), (champ.get("guard") or {}).get(g["name"])
@@ -267,7 +274,7 @@ def judge_dev(obj: dict, cand: dict, champ: dict) -> tuple[bool, str]:
             rise = (new - old) / old
             if rise > g["max_increase"]:
                 return False, f"{g['name']} went up {rise:.0%} (allowed {g['max_increase']:.0%})"
-    return True, f"{c.mean:.3f} ± {c.stdev:.3f} beats the best {b.mean:.3f} ± {b.stdev:.3f}"
+    return True, f"{fmt(c.mean)} ± {c.stdev:.3f} beats the best {fmt(b.mean)} ± {b.stdev:.3f}"
 
 
 def judge_holdout(obj: dict, cand: dict, champ: dict) -> tuple[bool, str]:
@@ -275,7 +282,7 @@ def judge_holdout(obj: dict, cand: dict, champ: dict) -> tuple[bool, str]:
     c, b = Stats(**cand["stats"]), Stats(**champ["stats"])
     slack = margin(b, 0.0)
     ok = c.mean >= b.mean - slack if obj["metric"]["direction"] == "max" else c.mean <= b.mean + slack
-    return ok, f"held-out {c.mean:.3f} against the best's {b.mean:.3f}" + ("" if ok else ": the gain didn't hold")
+    return ok, f"held-out {fmt(c.mean)} against the best's {fmt(b.mean)}" + ("" if ok else ": the gain didn't hold")
 
 
 def target_met(obj: dict, dev: dict) -> bool:
@@ -489,17 +496,27 @@ class CrewLane:
 # ── what each kind of run brings ─────────────────────────────────────
 
 
+async def no_seal(run: dict, base: str) -> None:
+    """Nothing to seal: an outcome's checks are fresh looks at the pages themselves."""
+    return None
+
+
 async def git_start(run: dict) -> str:
     return await screen.resolve(run["objective"]["subject"]["repo_path"], "HEAD")
 
 
 def parts_for(kind: str) -> dict[str, Any]:
     """The lane, proposer, measurement, seal, screen, best-so-far marker and
-    starting point of a kind of run: ``code`` (Phase 2) or ``practice`` (Phase 3a)."""
+    starting point of a kind of run: ``code`` (Phase 2), ``practice`` (Phase 3a)
+    or ``outcome`` (Phase 3b)."""
     if kind == "practice":
         from captain_claw.flight_deck import captain_swarm_rules as rules
         return {"lane": rules.RulesLane(), "propose": rules.propose, "measure": rules.measure, "seal": rules.seal,
                 "screen": rules.screen, "branch": rules.no_branch, "start": rules.start_point}
+    if kind == "outcome":
+        from captain_claw.flight_deck import captain_swarm_outcome as outcome
+        return {"lane": outcome.BatLane(), "propose": outcome.propose, "measure": outcome.measure,
+                "seal": no_seal, "screen": outcome.screen, "branch": outcome.no_branch, "start": outcome.start_point}
     return {"lane": CrewLane(), "propose": propose, "measure": measure_commit, "seal": seal,
             "screen": screen_commit, "branch": move_champion_branch, "start": git_start}
 
@@ -640,11 +657,11 @@ class Driver:
         dev = await self.measure(await self._check(), base_sha, "dev")
         if dev.get("value") is None:
             return await self._finish("failed", f"the starting point couldn't be measured: {dev.get('error')}")
-        await self._event("baseline", f"open cases: {dev['stats']['mean']:.3f} ± {dev['stats']['stdev']:.3f}")
+        await self._event("baseline", f"open cases: {fmt(dev['stats']['mean'])} ± {dev['stats']['stdev']:.3f}")
         hold = await self.measure(await self._check(), base_sha, "holdout")
         if hold.get("value") is None:
             return await self._finish("failed", f"the held-out cases couldn't be measured: {hold.get('error')}")
-        await self._event("baseline", f"held-out cases: {hold['stats']['mean']:.3f} ± {hold['stats']['stdev']:.3f}")
+        await self._event("baseline", f"held-out cases: {fmt(hold['stats']['mean'])} ± {hold['stats']['stdev']:.3f}")
         point = {"sha": base_sha, "dev": dev, "holdout": hold, "exp": ""}
         await self.store.update_run(self.run_id, baseline=point, champion=point, status="running")
         await self.branch(await self._run(), base_sha)
@@ -787,6 +804,9 @@ class Driver:
         return ""
 
     def _lesson(self, dev: dict, champ_dev: dict, held: bool | None) -> str:
+        if fmt(champ_dev["stats"]["mean"]) == "—" or fmt(dev["stats"]["mean"]) == "—":
+            held_s = "" if held is None else ("; confirmed" if held else "; not confirmed")
+            return f"{fmt(dev['stats']['mean'])} where there was {fmt(champ_dev['stats']['mean'])}{held_s}"
         d = dev["stats"]["mean"] - champ_dev["stats"]["mean"]
         g = ", ".join(f"{k} {v:g}" for k, v in (dev.get("guard") or {}).items() if isinstance(v, (int, float)))
         held_s = "" if held is None else ("; held-out confirmed" if held else "; held-out did not confirm")

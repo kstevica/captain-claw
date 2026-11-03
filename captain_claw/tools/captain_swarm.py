@@ -34,7 +34,10 @@ class CaptainSwarmTool(Tool):
         "a branch to review. A run you start WAITS for your owner's Go. Templates: 'mrav' (make Captain's "
         "small-model runtime pass more of its eval; options: model, harness, budget_usd, budget_hours, "
         "budget_max_experiments, per_round); 'triage' (improve an agent's email-triage rules against what the "
-        "owner actually did, on a practice set from their mail; options: set_id, agent, cases, repeat). "
+        "owner actually did, on a practice set from their mail; options: set_id, agent, cases, repeat); "
+        "'outcome' (find the best result for one real task — offers, slots — in rehearsal: nothing is bought, "
+        "sent or booked, Captain checks every result's page itself, and the owner carries the winner out once; "
+        "options: task, label, direction (min|max), max_value, must_include, budget_usd). "
         "Actions: 'start' (template[, options]), 'status' (run_id), "
         "'get' (run_id — the ledger of attempts), 'list', 'cancel' (run_id)."
     )
@@ -44,7 +47,7 @@ class CaptainSwarmTool(Tool):
         "properties": {
             "action": {"type": "string", "enum": ["start", "status", "get", "list", "cancel"],
                        "description": "propose a run, or follow / stop one."},
-            "template": {"type": "string", "enum": ["mrav", "triage"], "description": "For 'start': what to improve."},
+            "template": {"type": "string", "enum": ["mrav", "triage", "outcome"], "description": "For 'start': what to improve."},
             "options": {"type": "object", "description": "For 'start': the template's options, e.g. "
                         '{"model": "gemma4:e2b", "harness": "claude", "budget_usd": 20, "budget_hours": 6}.'},
             "run_id": {"type": "string", "description": "For 'status', 'get' and 'cancel'."},

@@ -2,11 +2,15 @@
 // try ideas one at a time, and see every attempt's verdict. Two kinds so far:
 // - inbox triage rules (Phase 3a): an agent's rules, tried on its exam lane against
 //   what the owner actually did; the best rules reach it only when the owner teaches them;
-// - code (Phase 2): the best commit sits on a branch; the owner opens the PR, Captain never merges.
+// - code (Phase 2): the best commit sits on a branch; the owner opens the PR, Captain never merges;
+// - one task's best result (Phase 3b): attempts in rehearsal, every claim re-checked by Captain,
+//   the winner carried out once by a Bat run, through Bat's gate.
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { BookOpen, Check, GitPullRequest, Loader2, Play, Square, X } from 'lucide-react'
+import { BookOpen, Check, ExternalLink, GitPullRequest, Hand, Loader2, Play, Square, X } from 'lucide-react'
 import { captainSwarmRuns } from '../../services/captainSwarm'
-import type { Experiment, MravTemplate, RunDetail, RunSummary, TriageTemplate } from '../../services/captainSwarm'
+import type {
+  Experiment, MravTemplate, OutcomeTemplate, RunDetail, RunSummary, TriageTemplate,
+} from '../../services/captainSwarm'
 import { useProcessStore } from '../../stores/processStore'
 
 const ACTIVE = ['awaiting_go', 'baseline', 'running']
@@ -46,8 +50,8 @@ function TextField({ label, value, onChange, wide }: {
 }
 
 function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
-  const [templates, setTemplates] = useState<{ mrav: MravTemplate; triage: TriageTemplate } | null>(null)
-  const [which, setWhich] = useState<'triage' | 'mrav'>('triage')
+  const [templates, setTemplates] = useState<{ mrav: MravTemplate; triage: TriageTemplate; outcome: OutcomeTemplate } | null>(null)
+  const [which, setWhich] = useState<'outcome' | 'triage' | 'mrav'>('outcome')
   const [canStart, setCanStart] = useState(false)
   const [error, setError] = useState('')
 
@@ -55,7 +59,7 @@ function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
     captainSwarmRuns.templates().then((t) => {
       setTemplates(t.templates)
       setCanStart(t.can_start)
-      if (!t.templates.triage.sets.length && t.can_start) setWhich('mrav')
+
     }).catch((e) => setError(e instanceof Error ? e.message : String(e)))
   }, [])
 
@@ -63,21 +67,21 @@ function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
   return (
     <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
       <div className="mb-3 inline-flex overflow-hidden rounded-md border border-zinc-700 text-xs">
-        {([['triage', 'Inbox triage rules'], ['mrav', 'Mrav eval (code)']] as const).map(([k, label]) => (
+        {([['outcome', 'Best result for a task'], ['triage', 'Inbox triage rules'], ['mrav', 'Mrav eval (code)']] as const).map(([k, label]) => (
           <button key={k} onClick={() => setWhich(k)}
             className={`px-2.5 py-1 ${which === k ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-400 hover:bg-zinc-800'}`}>
             {label}
           </button>
         ))}
       </div>
-      {which === 'triage'
-        ? <StartTriage tpl={templates.triage} onStarted={onStarted} />
-        : <StartMrav tpl={templates.mrav} canStart={canStart} onStarted={onStarted} />}
+      {which === 'outcome' && <StartOutcome tpl={templates.outcome} onStarted={onStarted} />}
+      {which === 'triage' && <StartTriage tpl={templates.triage} onStarted={onStarted} />}
+      {which === 'mrav' && <StartMrav tpl={templates.mrav} canStart={canStart} onStarted={onStarted} />}
     </div>
   )
 }
 
-function useStart(template: 'mrav' | 'triage', onStarted: (id: string) => void) {
+function useStart(template: 'mrav' | 'triage' | 'outcome', onStarted: (id: string) => void) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const start = async (options: Record<string, string | number>) => {
@@ -93,6 +97,52 @@ function useStart(template: 'mrav' | 'triage', onStarted: (id: string) => void) 
     }
   }
   return { busy, error, start }
+}
+
+function StartOutcome({ tpl, onStarted }: { tpl: OutcomeTemplate; onStarted: (id: string) => void }) {
+  const [form, setForm] = useState<Record<string, string>>(
+    () => ({ task: '', max_value: '', must_include: '', currency: '',
+      ...Object.fromEntries(Object.entries(tpl.defaults).map(([k, v]) => [k, String(v)])) }))
+  const { busy, error, start } = useStart('outcome', onStarted)
+  const set = (k: string) => (v: string) => setForm((f) => ({ ...f, [k]: v }))
+  return (
+    <>
+      <div className="text-sm font-medium text-zinc-100">{tpl.title}</div>
+      <p className="mt-1 text-xs leading-relaxed text-zinc-400">{tpl.about}</p>
+      <label className="mt-3 flex flex-col gap-1 text-xs text-zinc-400">
+        What to find
+        <textarea value={form.task} onChange={(e) => set('task')(e.target.value)} rows={2}
+          placeholder="The cheapest new paperback copy of The Pragmatic Programmer, 20th Anniversary Edition, shipped to Croatia"
+          className="resize-y rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600" />
+      </label>
+      <div className="mt-3 grid gap-3 sm:grid-cols-4">
+        <TextField label="Ranked by" value={form.label || ''} onChange={set('label')} />
+        <label className="flex flex-col gap-1 text-xs text-zinc-400">
+          Better is
+          <select value={form.direction || 'min'} onChange={(e) => set('direction')(e.target.value)}
+            className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100">
+            <option value="min">lower</option>
+            <option value="max">higher</option>
+          </select>
+        </label>
+        <TextField label="At most (optional)" value={form.max_value || ''} onChange={set('max_value')} />
+        <TextField label="Currency (optional)" value={form.currency || ''} onChange={set('currency')} />
+        <TextField label="Page must say (comma-separated)" value={form.must_include || ''} onChange={set('must_include')} wide />
+        <TextField label="Most per attempt ($)" value={form.attempt_usd || ''} onChange={set('attempt_usd')} />
+        <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
+        <TextField label="Budget ($)" value={form.budget_usd || ''} onChange={set('budget_usd')} />
+        <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
+        <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
+      </div>
+      <div className="mt-3 flex items-center gap-3">
+        <button onClick={() => start(form)} disabled={busy || form.task.trim().length < 10}
+          className="inline-flex items-center gap-1.5 rounded-md bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-500 disabled:opacity-50">
+          {busy ? <Loader2 size={14} className="animate-spin" /> : <Play size={14} />} Start the run
+        </button>
+        {error && <span className="text-xs text-red-400">{error}</span>}
+      </div>
+    </>
+  )
 }
 
 function StartTriage({ tpl, onStarted }: { tpl: TriageTemplate; onStarted: (id: string) => void }) {
@@ -245,7 +295,7 @@ function Chart({ run }: { run: RunDetail }) {
   )
 }
 
-function Ledger({ exps }: { exps: Experiment[] }) {
+function Ledger({ exps, intents }: { exps: Experiment[]; intents?: RunDetail['intents'] }) {
   const [open, setOpen] = useState('')
   if (exps.length === 0) return <p className="text-xs text-zinc-500">No attempts yet.</p>
   return (
@@ -277,6 +327,16 @@ function Ledger({ exps }: { exps: Experiment[] }) {
                     </div>
                   ) : null}
                   {e.verdict_reason && <div>Verdict: {e.verdict_reason}</div>}
+                  {(intents?.[e.id] || []).length > 0 && (
+                    <div>
+                      <div className="text-zinc-500">Recorded instead of done:</div>
+                      {(intents?.[e.id] || []).slice(0, 12).map((i, k) => (
+                        <div key={k} className={i.kind === 'commit' ? 'text-amber-300/90' : 'text-zinc-400'}>
+                          {i.kind === 'commit' ? 'stopped at' : 'intent'}: {i.what}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                   {e.lesson && <div>Lesson: {e.lesson}</div>}
                   {e.diff_stat && <div>Change: {e.diff_stat}{e.lane === 'crew' ? ` · ${e.changed_files.join(', ')}` : ''}</div>}
                   {e.head_sha && <div className="font-mono text-[11px] text-zinc-500">{e.head_sha.slice(0, 12)}</div>}
@@ -375,6 +435,15 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
               <GitPullRequest size={13} /> Open a pull request
             </button>
           )}
+          {!active && run.improved && run.kind === 'outcome' && !run.outcome?.carried_out && (
+            <button onClick={() => act(async () => {
+              const r = await captainSwarmRuns.carryOut(id)
+              setNote(`Carrying it out once: Bat run ${r.bat_run}. Bat asks for your Go before it spends, sends or signs up.`)
+            })}
+              className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-sky-500">
+              <Hand size={13} /> Carry it out
+            </button>
+          )}
           {!active && run.improved && run.kind === 'practice' && (
             <button onClick={() => act(async () => {
               const r = await captainSwarmRuns.teach(id)
@@ -412,6 +481,32 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
         </div>
       </div>
       <Chart run={run} />
+      {run.kind === 'outcome' && run.outcome && (
+        <div className="space-y-2 rounded-md bg-zinc-950/60 p-3 text-xs">
+          <div className="text-zinc-500">Best result Captain could check itself</div>
+          {run.outcome.best ? (
+            <div className="text-zinc-200">
+              <span className="text-sm text-emerald-300">{run.outcome.best.value} {run.outcome.best.currency}</span>
+              {' '}· {run.outcome.best.title}{' '}
+              <a href={run.outcome.best.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-0.5 text-sky-400 hover:underline">
+                page <ExternalLink size={11} />
+              </a>
+              {run.outcome.best.next_step && <div className="text-zinc-500">Would commit by: {run.outcome.best.next_step}</div>}
+            </div>
+          ) : <div className="text-zinc-500">Nothing verified yet.</div>}
+          {run.outcome.checks.length > 0 && (
+            <ul className="space-y-0.5">
+              {run.outcome.checks.map((c) => (
+                <li key={c.url} className={c.verified ? 'text-zinc-300' : 'text-zinc-500'}>
+                  {c.verified ? '✓' : '✗'} {c.value} {c.currency} · {c.title.slice(0, 80)}
+                  {!c.verified && c.why ? ` — ${c.why}` : ''}
+                </li>
+              ))}
+            </ul>
+          )}
+          {run.outcome.carried_out && <div className="text-sky-300">Being carried out by Bat run {run.outcome.carried_out}.</div>}
+        </div>
+      )}
       {run.kind === 'practice' && run.rules && (
         <div className="rounded-md bg-zinc-950/60 p-3 text-xs">
           <div className="mb-1 text-zinc-500">{run.improved ? 'The best rules so far' : 'Rules'}</div>
@@ -426,7 +521,7 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
           )}
         </div>
       )}
-      <Ledger exps={run.ledger} />
+      <Ledger exps={run.ledger} intents={run.intents} />
       <details className="text-xs text-zinc-400">
         <summary className="cursor-pointer text-zinc-500">What it measures and what it may change</summary>
         <div className="mt-2 space-y-1">
@@ -438,6 +533,12 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
               <div>Never changes: {(run.objective.subject.protected || []).join(', ')}</div>
               <div className="break-all font-mono text-[11px] text-zinc-500">{run.objective.metric.run}</div>
               <div>Coding worker: {run.objective.lane.harness}{run.objective.lane.model ? ` (${run.objective.lane.model})` : ''}</div>
+            </>
+          ) : run.kind === 'outcome' ? (
+            <>
+              <div>Task: {run.objective.subject.task}</div>
+              <div>Each attempt is a Bat run in rehearsal: nothing is bought, sent, booked or submitted, and Captain
+                opens every result's page itself.</div>
             </>
           ) : (
             <>

@@ -14,6 +14,8 @@ Tables, in ``captain_swarm.db`` in Flight Deck's data dir (deck-isolated via
   cs_events       append-only log for the page
   cs_versions     the texts a text-subject run tries (a set of rules): every version,
                   each with the one it was made from
+  cs_intents      what a rehearsal would have done in the world, and didn't: an
+                  outward call recorded instead of made, or a commit point
 
 An experiment's ``base_sha`` / ``head_sha`` name what it started from and what it
 made: a commit for code, a version id for a text subject.
@@ -113,6 +115,19 @@ CREATE TABLE IF NOT EXISTS cs_versions (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS cs_versions_run ON cs_versions(run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS cs_intents (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    exp_id      TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    tool        TEXT NOT NULL,
+    what        TEXT NOT NULL DEFAULT '',
+    args        TEXT NOT NULL DEFAULT '{}',
+    agent       TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cs_intents_exp ON cs_intents(run_id, exp_id, id);
 """
 
 # Columns added after a table first shipped: added in place on an older database.
@@ -301,6 +316,34 @@ class CaptainSwarmStore:
         if row is None:
             return None
         return {**dict(row), "content": _loads(row["content"], {})}
+
+    # ── intents (rehearsals) ─────────────────────────────────────────
+
+    async def add_intent(self, *, run_id: str, exp_id: str, kind: str, tool: str, what: str,
+                         args: dict[str, Any], agent: str = "") -> int:
+        db = await self._ensure_db()
+        cur = await db.execute(
+            "INSERT INTO cs_intents (run_id, exp_id, kind, tool, what, args, agent, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (run_id, exp_id, kind[:20], tool[:80], what[:500], json.dumps(args)[:20000], agent[:120], _now()))
+        await db.commit()
+        return int(cur.lastrowid or 0)
+
+    async def list_intents(self, run_id: str, exp_id: str = "", *, limit: int = 500) -> list[dict[str, Any]]:
+        db = await self._ensure_db()
+        q, args = "SELECT * FROM cs_intents WHERE run_id = ?", [run_id]
+        if exp_id:
+            q += " AND exp_id = ?"
+            args.append(exp_id)
+        async with db.execute(q + " ORDER BY id LIMIT ?", (*args, int(limit))) as cur:
+            return [{**dict(r), "args": _loads(r["args"], {})} for r in await cur.fetchall()]
+
+    async def count_intents(self, run_id: str, exp_id: str) -> int:
+        db = await self._ensure_db()
+        async with db.execute("SELECT COUNT(*) FROM cs_intents WHERE run_id = ? AND exp_id = ?",
+                              (run_id, exp_id)) as cur:
+            row = await cur.fetchone()
+        return int(row[0]) if row else 0
 
     # ── events ───────────────────────────────────────────────────────
 

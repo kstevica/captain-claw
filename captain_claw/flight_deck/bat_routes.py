@@ -949,7 +949,8 @@ async def _bat_planner(run: dict) -> list[dict]:
             db = get_db()
             tiers, _ = await _load_owner_tiers(db, run["owner_id"])
             user = await db.get_user_by_id(run["owner_id"])
-            await _ensure_contract(run, _creds_for(tiers), _owner_has_shell(user))
+            await _ensure_contract(run, _creds_for(tiers),
+                                   _owner_has_shell(user) and not (run.get("config") or {}).get("rehearsal"))
         except Exception as e:  # noqa: BLE001
             log.warning("bat contract step failed", run_id=run.get("id"), error=str(e))
         store = bat_loop.get_store()
@@ -1050,6 +1051,13 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
     tier = _pick_tier(tiers)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
     bat_env = _bat_env(sid, key, owner)
+    rehearsal = str((run.get("config") or {}).get("rehearsal") or "")
+    if rehearsal:
+        from captain_claw.flight_deck import captain_swarm_rehearsal
+        if captain_swarm_rehearsal.parse_tag(rehearsal) is None:
+            return {"ok": False, "error": "a rehearsal run with no valid tag", "spawn_refused": True}
+        # Every turn this worker takes is a rehearsal: nothing in the world changes.
+        bat_env.append({"key": "CLAW_REHEARSAL", "value": rehearsal})
     # Hybrid worker mode: 'archetype' boots the planner-assigned specialist for
     # this step (its tools/tier/persona), still stamped CLAW_BAT_WORKER so the
     # hard floor + the ask_human/spend tools apply; 'plain' (default) boots a
@@ -1165,7 +1173,9 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
                  detail=("failed: " + "; ".join(f"{s['step_key']} ({str(s.get('error') or '')[:300]})" for s in failed)
                          if failed else "pending steps remain"))]
     db = get_db()
-    has_shell = _owner_has_shell(await db.get_user_by_id(run["owner_id"]))
+    # A rehearsal runs nothing on the deck either: its command checks go to the reviewers.
+    has_shell = (_owner_has_shell(await db.get_user_by_id(run["owner_id"]))
+                 and not (run.get("config") or {}).get("rehearsal"))
     open_rules: list[dict] = []
     evidence = ""
     store = bat_loop.get_store()
@@ -1257,7 +1267,9 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
             and verdict.panel.get("verdict") in ("disagree", "tie", "no_quorum"):
         await store.set_config(sid, {**cfg, "veto_rounds": prior + 1})
     now = await store.get_run(sid) if store is not None else None
-    if now and now["status"] != "cancelled" and verdict.overridden:
+    # A Captain Swarm rehearsal doesn't ask: its run checks every result's page
+    # itself, so the reviewers' objection rides along with the result instead.
+    if now and now["status"] != "cancelled" and verdict.overridden and not cfg.get("rehearsal"):
         findings = _findings(verdict.to_dict())
         await store.set_config(sid, {**cfg, "tie_break_findings": findings[:1500]})
         await human_ask.raise_ask(
@@ -1344,6 +1356,8 @@ async def _bat_on_finish(run: dict) -> None:
     agent), mirroring Basna/Vatra's completion delivery."""
     sid = run["id"]
     await _log_own_cost(run)
+    if (run.get("config") or {}).get("rehearsal"):
+        return  # a Captain Swarm attempt: its run reads the result; nobody is told
     status = run.get("status")
     ok = status == "done"
     truth = (run.get("truth") or "").strip()
@@ -1493,6 +1507,11 @@ async def _gate_check(store, run: dict) -> str:
     # A fresh run — the start gate — or a fix round's new steps: approval covers the
     # plan the owner saw, so work beyond it asks again.
     cfg = run.get("config") or {}
+    if cfg.get("rehearsal"):
+        # A Captain Swarm rehearsal can't send, spend, sign up or organize: its
+        # workers turn all of that into intents. The owner is asked when the
+        # winner is carried out, not now.
+        return "proceed"
     steps = await store.list_steps(run_id)
     needs, reason = plan_needs_gate(run.get("task", ""), steps)
     if not needs:

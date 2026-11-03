@@ -901,6 +901,17 @@ async def test_a_panel_refusal_is_work_while_rounds_remain_then_the_owner_decide
     assert ask["options"] == [bat_routes._TIE_BREAK_ACCEPT, bat_routes._TIE_BREAK_STOP]
 
 
+async def test_a_rehearsal_never_asks_the_owner_to_break_a_stalemate(store, judge_env):
+    """A Captain Swarm attempt: its run checks every result's page itself, so the
+    reviewers' objection rides along with the result instead of parking it."""
+    judge_env["votes"] = ["DISAGREE"]
+    run, steps = await _judged_run(store, [], cfg={"rounds": bat_loop._DEFAULT_MAX_ROUNDS - 1,
+                                                   "rehearsal": "cs_0123456789ab:exp_abcdef123456"})
+    verdict = await bat_routes._bat_judge(run, steps)
+    assert verdict["done"] and verdict["overridden"] and not verdict.get("parked")
+    assert await store.latest_open_ask(run["id"]) is None
+
+
 async def test_no_rounds_left_asks_the_owner_too(store, judge_env):
     judge_env["votes"] = ["DISAGREE"]
     run, steps = await _judged_run(store, [], cfg={"rounds": bat_loop._DEFAULT_MAX_ROUNDS - 1})

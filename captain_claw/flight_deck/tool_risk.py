@@ -35,7 +35,7 @@ _TOOL_RISK: dict[str, str] = {
     "video_vision": "read", "summarize_files": "read", "history": "read", "knowledge": "read", "sessions": "read",
     "workspace_read": "read", "codemap": "read", "cv": "read", "screen_capture": "read",
     "telegram_inbox": "read", "self_check": "read", "activity": "read", "researchmap": "read", "watch_background": "read",
-    "audio": "read",
+    "audio": "read", "line": "read",
     # keep
     "write": "write", "edit": "write", "workspace_write": "write", "datastore": "write",
     "google_drive": "write", "microsoft_onedrive": "write", "google_calendar": "write",
