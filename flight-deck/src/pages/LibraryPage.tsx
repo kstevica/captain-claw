@@ -12,7 +12,8 @@ import {
   INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS, fmtCtxTokens, type Archetype,
   REASONING_EFFORTS, REASONING_EFFORT_PROVIDERS, splitReasoningEffort, withReasoningEffort,
 } from '../services/tierConfig'
-import { archetypeCategory, rememberTeamLooks, shelves } from '../components/layout/archetypeLook'
+import { CATEGORIES, archetypeCategory, archetypeKind, rememberTeamLooks, type ArchetypeKind } from '../components/layout/archetypeLook'
+import { KindTabs, type KindFilter } from '../components/layout/KindTabs'
 import { CtxSelect } from '../components/common/CtxSelect'
 import {
   createArchetype, updateArchetype, deleteArchetype, generateArchetype,
@@ -79,6 +80,8 @@ export function LibraryPage() {
   const [shareTarget, setShareTarget] = useState<Archetype | null>(null)
 
   const [tab, setTab] = useState<'tiers' | 'archetypes'>('tiers')
+  // Which kind of archetype the gallery lists: Company, Generalists or Specialists.
+  const [kind, setKind] = useState<KindFilter>('all')
 
   // ── Setup wizard: one model → all tiers. Auto-opens once on a fresh install. ──
   const setView = useUIStore((s) => s.setView)
@@ -108,7 +111,7 @@ export function LibraryPage() {
   }
 
   const blankDraft = (): ArchetypeInput => ({
-    archetype_id: '', role: '', family: 'Custom', category: 'focused', description: '',
+    archetype_id: '', role: '', family: 'Custom', category: 'specialist', description: '',
     cognitive_mode: 'neutra', tier: 'balanced', runtime: '',
     tools: registry?.base_tools ? [...registry.base_tools] : [],
     fleet_instructions: '', keywords: [], lead: false, reliability_seed: 0.7,
@@ -304,7 +307,10 @@ export function LibraryPage() {
   }
 
   rememberTeamLooks(registry)
-  const families = registry ? [...new Set(registry.archetypes.map((a) => a.family))] : []
+  const kindCounts: Partial<Record<ArchetypeKind, number>> = {}
+  for (const a of registry?.archetypes || []) kindCounts[archetypeKind(a)] = (kindCounts[archetypeKind(a)] || 0) + 1
+  const listed = (registry?.archetypes || []).filter((a) => kind === 'all' || archetypeKind(a) === kind)
+  const families = [...new Set(listed.map((a) => a.family))]
 
   return (
     <div className="h-full overflow-auto p-4 md:p-6">
@@ -741,11 +747,12 @@ export function LibraryPage() {
             <p className="text-[11px] text-zinc-600">Loading archetypes…</p>
           ) : (
             <div className="space-y-4">
+              {Object.keys(kindCounts).length > 1 && <KindTabs value={kind} onChange={setKind} counts={kindCounts} hints />}
               {families.map((family) => (
                 <div key={family}>
                   <p className="text-[11px] font-semibold uppercase tracking-wide text-zinc-500 mb-2">{family}</p>
                   <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-                    {registry.archetypes.filter((a) => a.family === family).map((a) => {
+                    {listed.filter((a) => a.family === family).map((a) => {
                       const st = spawnState[a.id]
                       const isUser = a.source === 'user'
                       return (
@@ -946,7 +953,7 @@ export function LibraryPage() {
                     onChange={(e) => setEditor({ ...editor, category: e.target.value })}
                     className="w-full rounded-lg border border-zinc-700 bg-zinc-950 px-2.5 py-1.5 text-sm text-zinc-200 focus:border-violet-500/50 focus:outline-none"
                   >
-                    {shelves().map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+                    {CATEGORIES.map((c) => <option key={c.id} value={c.id}>{c.full}</option>)}
                   </select>
                 </div>
                 <div>

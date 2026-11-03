@@ -8,9 +8,13 @@ import {
   TerminalSquare, Wand2, X, Zap,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
-import { archetypeCategory, archetypeLook, familyLook, rememberTeamLooks, shelves, type FamilyLook } from './archetypeLook'
+import {
+  KINDS, archetypeCategory, archetypeKind, archetypeLook, familyLook, kindLook, kindName, rememberTeamLooks, shelves,
+  type ArchetypeKind, type FamilyLook, type KindLook,
+} from './archetypeLook'
+import { KindTabs, type KindFilter } from './KindTabs'
 import { tileInNextRow } from './tileNav'
-import { Button, EmptyState, Segmented, Switch, inputCls, labelCls } from '../console/parts'
+import { Button, EmptyState, Switch, inputCls, labelCls } from '../console/parts'
 import { ErrorNote } from '../forge/forgeParts'
 import { DialogFullscreen } from '../library/dialogFullscreen'
 import { FullscreenButton } from '../library/libraryParts'
@@ -29,9 +33,10 @@ import { useIsMobile } from '../../hooks/useMediaQuery'
 // account's tier set (or the admin's team default), so no model config or API
 // key is exposed here.
 //
-// Layout, in the Admin console's look: the three shelves (Generalists, Focused,
-// Personal) over the search, the families down the left (chips on a narrower
-// window), the cards in the middle, and on the right
+// Layout, in the Admin console's look: the kinds (Company, Generalists,
+// Specialists, each in its own colour) over the search, the families down the
+// left under their kind and shelf (chips on a narrower window), the cards in the
+// middle under a band per kind that stays in view while they scroll, and on the right
 // the detail of the card in hand — what it does, how it thinks, which model
 // class it runs on, what it can reach — with the name and Create button under
 // it. The detail is never empty: it shows the first card until another is
@@ -166,8 +171,9 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
   const [registry, setRegistry] = useState<ArchetypeRegistry | null>(null)
   const [loadErr, setLoadErr] = useState('')
   const [query, setQuery] = useState('')
-  const [category, setCategory] = useState<ArchetypeCategory | 'all'>('all')
-  const [family, setFamily] = useState<string | null>(null)
+  const [kind, setKind] = useState<KindFilter>('all')
+  // A family is picked on its shelf: the company's "Legal" isn't the built-in one.
+  const [family, setFamily] = useState<FamilyPick | null>(null)
   const [picked, setPicked] = useState<Archetype | null>(null)
   // What the person typed as its name; until then, the name that goes with the card.
   const [typedName, setTypedName] = useState<string | null>(null)
@@ -205,39 +211,30 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
     return () => window.removeEventListener('keydown', onKey)
   }, [busy, onClose, isMobile, picked])
 
-  // Each shelf with its families and how many each holds, whatever the search says.
-  const onDeck = useMemo(() => shelves().map((c) => {
-    const counts = new Map<string, number>()
-    for (const a of archetypes || []) {
-      if (archetypeCategory(a) !== c.id) continue
-      const fam = a.family || 'Other'
-      counts.set(fam, (counts.get(fam) || 0) + 1)
-    }
-    return { ...c, total: [...counts.values()].reduce((n, v) => n + v, 0), families: [...counts.entries()].sort(([x], [y]) => x.localeCompare(y)) }
-  }).filter((s) => s.total > 0), [archetypes])
-  const onShelf = onDeck.filter((s) => category === 'all' || s.id === category)
-  const familiesOnShelf = onShelf.flatMap((s) => s.families)
+  // Each kind, its shelves, their families and how many each holds, whatever the search says.
+  const onDeck = useMemo(() => byKind(archetypes || []).map((k) => ({
+    ...k,
+    shelves: k.shelves.map((sh) => ({ ...sh, families: sh.families.map(([fam, list]) => [fam, list.length] as const) })),
+  })), [archetypes])
+  const inView = onDeck.filter((k) => kind === 'all' || k.id === kind)
+  const inViewTotal = inView.reduce((n, k) => n + k.total, 0)
+  const familiesInView = inView.flatMap((k) => k.shelves.flatMap((sh) => sh.families.map(([name, n]) => ({ shelf: sh.id, name, n }))))
+  const kindCounts = useMemo(() => Object.fromEntries(onDeck.map((k) => [k.id, k.total])) as Partial<Record<ArchetypeKind, number>>, [onDeck])
+  // A shelf gets a heading when its name says more than its kind's does.
+  const titled = useMemo(() => new Set(onDeck.filter((k) => k.id === 'company' || k.shelves.length > 1).map((k) => k.id)), [onDeck])
 
   const q = query.trim().toLowerCase()
   const shown = useMemo(() => (archetypes || []).filter((a) => {
-    if (category !== 'all' && archetypeCategory(a) !== category) return false
-    if (family && (a.family || 'Other') !== family) return false
+    if (kind !== 'all' && archetypeKind(a) !== kind) return false
+    if (family && (archetypeCategory(a) !== family.shelf || (a.family || 'Other') !== family.name)) return false
     return matchesQuery(a, q)
-  }), [archetypes, q, category, family])
-  // A search that finds nothing here may still find something on another shelf.
+  }), [archetypes, q, kind, family])
+  // A search that finds nothing here may still find something of another kind.
   const elsewhere = useMemo(() => (q && !shown.length ? (archetypes || []).filter((a) => matchesQuery(a, q)).length : 0), [archetypes, q, shown])
 
-  const groups = useMemo(() => shelves().map((c) => {
-    const byFamily = new Map<string, Archetype[]>()
-    for (const a of shown) {
-      if (archetypeCategory(a) !== c.id) continue
-      const fam = a.family || 'Other'
-      byFamily.set(fam, [...(byFamily.get(fam) || []), a])
-    }
-    return { ...c, families: [...byFamily.entries()].sort(([x], [y]) => x.localeCompare(y)) }
-  }).filter((g) => g.families.length > 0), [shown])
+  const groups = useMemo(() => byKind(shown), [shown])
 
-  const inOrder = useMemo(() => groups.flatMap((g) => g.families.flatMap(([, list]) => list)), [groups])
+  const inOrder = useMemo(() => groups.flatMap((k) => k.shelves.flatMap((sh) => sh.families.flatMap(([, list]) => list))), [groups])
   // The search's answer: a card with a word of its name starting that way ("fact"
   // is the Fact Checker, not the Refactorer), then one with it inside its name
   // ("bug" is the Debugger, though the Code Reviewer has it as a keyword), else
@@ -268,14 +265,14 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
     }
   }, [nameTurn, isMobile])
 
-  const chooseFamily = (fam: string | null) => {
-    setFamily(family === fam ? null : fam)
+  const chooseFamily = (fam: FamilyPick | null) => {
+    setFamily(fam && family && family.shelf === fam.shelf && family.name === fam.name ? null : fam)
     setPicked(null)
     listRef.current?.scrollTo(0, 0)
   }
 
-  const chooseCategory = (next: ArchetypeCategory | 'all') => {
-    setCategory(next)
+  const chooseKind = (next: KindFilter) => {
+    setKind(next)
     setFamily(null)
     setPicked(null)
     listRef.current?.scrollTo(0, 0)
@@ -331,7 +328,6 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
   }
 
   const phoneDetail = isMobile && !!picked
-  const total = archetypes?.length || 0
 
   return createPortal(
     <div className={`fd-fade fixed inset-0 z-50 flex items-stretch justify-center bg-black/60 backdrop-blur-[2px] wide:items-center ${big ? '' : 'wide:p-4'}`} onClick={() => { if (!busy) onClose() }}>
@@ -388,18 +384,27 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
                   <RailItem
                     active={family === null}
                     onClick={() => chooseFamily(null)}
-                    icon={LayoutGrid}
-                    iconClass="text-violet-600 dark:text-violet-400"
-                    label={category === 'all' ? 'All' : `All ${onShelf[0]?.label.toLowerCase() || ''}`}
-                    count={onShelf.reduce((n, s) => n + s.total, 0)}
+                    icon={kind === 'all' ? LayoutGrid : kindLook(kind).icon}
+                    iconClass={kind === 'all' ? 'text-violet-600 dark:text-violet-400' : kindLook(kind).text}
+                    label={kind === 'all' ? 'All' : `All ${kindLook(kind).label.toLowerCase()}`}
+                    count={inViewTotal}
                   />
-                  {onShelf.map((s) => (
-                    <div key={s.id} className="mt-3 space-y-0.5">
-                      {category === 'all' && <p className="px-2.5 pb-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{s.label}</p>}
-                      {s.families.map(([fam, n]) => {
-                        const look = familyLook(fam)
-                        return <RailItem key={fam} active={family === fam} onClick={() => chooseFamily(fam)} icon={look.icon} iconClass={look.text} label={fam} count={n} />
-                      })}
+                  {inView.map((k) => (
+                    <div key={k.id} className="mt-4">
+                      {kind === 'all' && (
+                        <p className={`flex items-center gap-1.5 px-2.5 pb-1 text-[11px] font-semibold uppercase tracking-wider ${k.text}`}>
+                          <k.icon className="h-3.5 w-3.5" /> {k.label}
+                        </p>
+                      )}
+                      {k.shelves.map((sh) => (
+                        <div key={sh.id} className="space-y-0.5">
+                          {titled.has(k.id) && <p className="px-2.5 pb-0.5 pt-1.5 text-[11px] font-medium text-zinc-500">{sh.label}</p>}
+                          {sh.families.map(([fam, n]) => {
+                            const look = familyLook(fam)
+                            return <RailItem key={fam} active={family?.shelf === sh.id && family.name === fam} onClick={() => chooseFamily({ shelf: sh.id, name: fam })} icon={look.icon} iconClass={look.text} label={fam} count={n} />
+                          })}
+                        </div>
+                      ))}
                     </div>
                   ))}
                 </nav>
@@ -427,17 +432,7 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
             {!phoneDetail && (
               <div className="flex min-h-0 min-w-0 flex-1 flex-col">
                 <div className="shrink-0 space-y-2.5 px-4 pt-3 wide:px-5 wide:pt-4">
-                  {onDeck.length > 1 && (
-                    <Segmented
-                      label="Kind of agent"
-                      value={category}
-                      onChange={chooseCategory}
-                      options={[
-                        { value: 'all' as const, label: 'All', count: isMobile ? undefined : total },
-                        ...onDeck.map((s) => ({ value: s.id, label: s.label, count: isMobile ? undefined : s.total })),
-                      ]}
-                    />
-                  )}
+                  {onDeck.length > 1 && <KindTabs value={kind} onChange={chooseKind} counts={kindCounts} hints={big} compact={isMobile} />}
                   <div className="relative">
                     <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500" />
                     <input
@@ -466,11 +461,11 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
                       </button>
                     )}
                   </div>
-                  {familiesOnShelf.length > 1 && (
+                  {familiesInView.length > 1 && (
                     <div className={`-mx-4 flex gap-1.5 overflow-x-auto px-4 py-0.5 [mask-image:linear-gradient(to_right,black_calc(100%-1.5rem),transparent)] [scrollbar-width:none] wide:-mx-5 wide:px-5 [&::-webkit-scrollbar]:hidden ${isMobile ? '' : 'lg:hidden'}`} role="tablist" aria-label="Archetype families">
-                      <FamilyChip active={family === null} onClick={() => chooseFamily(null)} label="All" count={onShelf.reduce((n, s) => n + s.total, 0)} />
-                      {familiesOnShelf.map(([fam, n]) => (
-                        <FamilyChip key={fam} active={family === fam} onClick={() => chooseFamily(fam)} label={fam} count={n} look={familyLook(fam)} />
+                      <FamilyChip active={family === null} onClick={() => chooseFamily(null)} label="All" count={inViewTotal} />
+                      {familiesInView.map((f) => (
+                        <FamilyChip key={`${f.shelf}/${f.name}`} active={family?.shelf === f.shelf && family.name === f.name} onClick={() => chooseFamily({ shelf: f.shelf, name: f.name })} label={f.name} count={f.n} look={familyLook(f.name)} />
                       ))}
                     </div>
                   )}
@@ -487,48 +482,53 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
                     archetypes.length === 0 ? (
                       <EmptyState icon={Bot} title="No archetypes available">Ask an administrator to add some.</EmptyState>
                     ) : (
-                      <EmptyState icon={SearchX} title={`Nothing matches “${query.trim()}”${family ? ` in ${family}` : category !== 'all' ? ` in ${onShelf[0]?.label}` : ''}`}>
+                      <EmptyState icon={SearchX} title={`Nothing matches “${query.trim()}”${family ? ` in ${family.name}` : kind !== 'all' ? ` in ${kindLook(kind).label}` : ''}`}>
                         <span className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
                           {elsewhere > 0 ? (
-                            <button onClick={() => chooseCategory('all')} className="font-medium text-violet-700 hover:underline dark:text-violet-300">
+                            <button onClick={() => chooseKind('all')} className="font-medium text-violet-700 hover:underline dark:text-violet-300">
                               See {elsewhere} match{elsewhere === 1 ? '' : 'es'} everywhere else
                             </button>
                           ) : (
-                            <button onClick={() => { setQuery(''); chooseCategory('all') }} className="font-medium text-violet-700 hover:underline dark:text-violet-300">Show everything</button>
+                            <button onClick={() => { setQuery(''); chooseKind('all') }} className="font-medium text-violet-700 hover:underline dark:text-violet-300">Show everything</button>
                           )}
                           {onForge && <button onClick={onForge} className="font-medium text-violet-700 hover:underline dark:text-violet-300">Describe it to Captain instead</button>}
                         </span>
                       </EmptyState>
                     )
                   )}
-                  <div key={`${category}/${family ?? 'all'}`} className="fd-fade space-y-8">
-                    {groups.map((g) => (
-                      <section key={g.id} aria-label={g.label} className="space-y-5">
-                        {!family && (
-                          <div className="px-0.5">
-                            <h4 className="text-base font-semibold tracking-tight text-zinc-100">{g.label}</h4>
-                            <p className="text-xs text-zinc-500">{g.hint}</p>
-                          </div>
-                        )}
-                        {g.families.map(([fam, list]) => {
-                          const look = familyLook(fam)
-                          const FamIcon = look.icon
-                          return (
-                            <section key={fam} aria-label={fam}>
-                              <h5 className="mb-2 flex items-center gap-1.5 px-0.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
-                                <FamIcon className={`h-3.5 w-3.5 ${look.text}`} /> {fam}
-                                <span className="font-medium tabular-nums text-zinc-600">{list.length}</span>
-                              </h5>
-                              <ul className={CARD_GRID}>
-                                {list.map((a) => (
-                                  <li key={a.id}>
-                                    <ArchetypeCard a={a} active={current?.id === a.id} disabled={busy} tier={tierLook(a, registry)} onPick={() => pick(a)} onShow={isMobile ? undefined : () => setPicked(a)} />
-                                  </li>
-                                ))}
-                              </ul>
-                            </section>
-                          )
-                        })}
+                  <div key={`${kind}/${family ? `${family.shelf}/${family.name}` : 'all'}`} className="fd-fade space-y-8">
+                    {groups.map((k) => (
+                      <section key={k.id} aria-label={k.label} className="space-y-5">
+                        {!family && <KindBand k={k} count={k.total} />}
+                        {k.shelves.map((sh) => (
+                          <section key={sh.id} aria-label={titled.has(k.id) ? sh.label : undefined} className="space-y-5">
+                            {!family && titled.has(k.id) && (
+                              <div className="px-0.5">
+                                <h4 className="text-sm font-semibold text-zinc-200">{sh.label}</h4>
+                                <p className="text-xs text-zinc-500">{sh.hint}</p>
+                              </div>
+                            )}
+                            {sh.families.map(([fam, list]) => {
+                              const look = familyLook(fam)
+                              const FamIcon = look.icon
+                              return (
+                                <section key={fam} aria-label={fam}>
+                                  <h5 className="mb-2 flex items-center gap-1.5 px-0.5 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">
+                                    <FamIcon className={`h-3.5 w-3.5 ${look.text}`} /> {fam}
+                                    <span className="font-medium tabular-nums text-zinc-600">{list.length}</span>
+                                  </h5>
+                                  <ul className={CARD_GRID}>
+                                    {list.map((a) => (
+                                      <li key={a.id}>
+                                        <ArchetypeCard a={a} active={current?.id === a.id} disabled={busy} tier={tierLook(a, registry)} onPick={() => pick(a)} onShow={isMobile ? undefined : () => setPicked(a)} />
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </section>
+                              )
+                            })}
+                          </section>
+                        ))}
                       </section>
                     ))}
                   </div>
@@ -611,6 +611,24 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
 
 // ── Pieces ───────────────────────────────────────────────────────────
 
+interface FamilyPick { shelf: ArchetypeCategory; name: string }
+
+/** The archetypes under their kind, shelf and family, in the gallery's order; empty ones left out. */
+function byKind(list: Archetype[]) {
+  return KINDS.map((k) => {
+    const inKind = shelves().filter((sh) => sh.kind === k.id).map((sh) => {
+      const byFamily = new Map<string, Archetype[]>()
+      for (const a of list) {
+        if (archetypeCategory(a) !== sh.id) continue
+        const fam = a.family || 'Other'
+        byFamily.set(fam, [...(byFamily.get(fam) || []), a])
+      }
+      return { ...sh, families: [...byFamily.entries()].sort(([x], [y]) => x.localeCompare(y)) }
+    }).filter((sh) => sh.families.length > 0)
+    return { ...k, shelves: inKind, total: inKind.reduce((n, sh) => n + sh.families.reduce((m, [, l]) => m + l.length, 0), 0) }
+  }).filter((k) => k.total > 0)
+}
+
 // As many columns as the room gives: the dialog can go fullscreen.
 const CARD_GRID = 'grid grid-cols-[repeat(auto-fill,minmax(14.5rem,1fr))] gap-2.5'
 
@@ -627,6 +645,26 @@ function tierLook(a: Archetype, registry: ArchetypeRegistry | null) {
   const known = TIER_LOOKS[a.tier]
   if (known) return known
   return { icon: Gauge, label: registry?.tiers?.[a.tier]?.label || a.tier || 'Default', blurb: registry?.tiers?.[a.tier]?.use || '' }
+}
+
+/** A kind's heading over its cards: it stays in view while they scroll by. Its
+ *  backing reaches up over the list's top padding, so no card shows above it. */
+function KindBand({ k, count }: { k: KindLook; count: number }) {
+  return (
+    <div className="sticky -top-4 z-10 -mx-1 -mt-4 bg-zinc-950 px-1 pb-1 pt-4">
+      <div className={`flex items-center gap-3 rounded-2xl border border-zinc-800 bg-gradient-to-r ${k.wash} to-transparent px-3 py-2.5`}>
+        <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1 ${k.bg} ${k.text} ${k.ring}`}>
+          <k.icon className="h-[18px] w-[18px]" />
+        </span>
+        <div className="min-w-0">
+          <h4 className="flex items-baseline gap-2 text-base font-semibold tracking-tight text-zinc-100">
+            {k.label} <span className="text-xs font-medium tabular-nums text-zinc-500">{count}</span>
+          </h4>
+          <p className="truncate text-xs text-zinc-500">{k.hint}</p>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 function RailItem({ active, onClick, icon: Icon, iconClass, label, count }: {
@@ -713,6 +751,7 @@ function ArchetypeCard({ a, active, disabled, tier, onPick, onShow }: {
 function ArchetypeDetail({ a, registry }: { a: Archetype; registry: ArchetypeRegistry | null }) {
   const look = archetypeLook(a.id, a.family || 'Other')
   const Icon = look.icon
+  const kind = kindLook(archetypeKind(a))
   const tier = tierLook(a, registry)
   const TierIcon = tier.icon
   const mode = modeInfo(a.cognitive_mode)
@@ -734,6 +773,9 @@ function ArchetypeDetail({ a, registry }: { a: Archetype; registry: ArchetypeReg
             <h4 className="text-lg font-semibold leading-tight tracking-tight text-zinc-100">{a.role || a.id}</h4>
           </div>
         </div>
+        <p className={`mt-3 inline-flex max-w-full items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ring-1 ${kind.bg} ${kind.text} ${kind.ring}`}>
+          <kind.icon className="h-3 w-3 shrink-0" /> <span className="truncate">{kindName(a)}</span>
+        </p>
         {a.description && <p className="mt-3 text-sm leading-relaxed text-zinc-400">{a.description}</p>}
       </div>
 

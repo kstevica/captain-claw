@@ -11,7 +11,7 @@ import {
   Megaphone, MessageCircleHeart, MessageCircleQuestion, MessagesSquare, Mic, Microscope, Milestone, Mountain,
   MousePointerClick, NotebookPen, Newspaper, Package, PackageSearch, Palette, PencilLine, PencilRuler, PenLine, Percent,
   PhoneCall, PiggyBank, Plane, Presentation, Radar, Radio, ReceiptText, Repeat, Rocket, Ruler, Scale, ScanEye,
-  ScanSearch, ScanText, Scissors, ScrollText, SearchCheck, Send, ShieldAlert, ShieldCheck, ShieldHalf, Ship,
+  ScanSearch, ScanText, Scissors, ScrollText, SearchCheck, Send, Shapes, ShieldAlert, ShieldCheck, ShieldHalf, Ship,
   ShoppingBag, ShoppingCart, Sigma, Signpost, Siren, Smile, Sparkles, Speech, Sprout, Stamp, Stethoscope, Store, Table2,
   Tags, Target, Telescope, Timer, TrendingUp, Truck, Umbrella, UserCheck, UserPlus, UserSearch, Users, UtensilsCrossed,
   Wallet, Workflow, Wrench,
@@ -25,11 +25,57 @@ import type { ArchetypeCategory, ArchetypeRegistry } from '../../services/tierCo
 
 export interface FamilyLook { icon: LucideIcon; text: string; bg: string; ring: string; wash: string }
 
-// The shelves above the families, in the order the gallery shows them.
-export const CATEGORIES: { id: ArchetypeCategory; label: string; hint: string }[] = [
-  { id: 'generalist', label: 'Generalists', hint: 'Roles that fit any team, whatever the industry.' },
-  { id: 'focused', label: 'Focused', hint: 'Specialists for one industry or one job, with the method it takes.' },
-  { id: 'personal', label: 'Personal', hint: 'For your own life: home, health, money, learning and fun.' },
+// What kind of agent an archetype is, the gallery's first split: the generalists
+// and specialists Captain comes with, and what the company's admin made. Each wears
+// a colour and an icon of its own, so the three never read alike.
+export type ArchetypeKind = 'generalist' | 'specialist' | 'company'
+
+export interface KindLook {
+  id: ArchetypeKind
+  label: string
+  /** One of them: "a Specialist". */
+  one: string
+  hint: string
+  icon: LucideIcon
+  text: string
+  bg: string
+  ring: string
+  wash: string
+  /** A selected tab of this kind. */
+  active: string
+}
+
+// In the order the gallery shows them: this deck's own come first.
+export const KINDS: KindLook[] = [
+  {
+    id: 'company', label: 'Company', one: 'Company', hint: 'Made for this team by its admin.', icon: Building2,
+    text: 'text-emerald-600 dark:text-emerald-300', bg: 'bg-emerald-500/15', ring: 'ring-emerald-500/25', wash: 'from-emerald-500/[0.10]',
+    active: 'border-emerald-500/50 bg-emerald-500/[0.08]',
+  },
+  {
+    id: 'generalist', label: 'Generalists', one: 'Generalist', hint: 'Roles that fit any team, whatever the industry.', icon: Shapes,
+    text: 'text-sky-600 dark:text-sky-300', bg: 'bg-sky-500/15', ring: 'ring-sky-500/25', wash: 'from-sky-500/[0.10]',
+    active: 'border-sky-500/50 bg-sky-500/[0.08]',
+  },
+  {
+    id: 'specialist', label: 'Specialists', one: 'Specialist', hint: 'One profession or one job, with the method it takes.', icon: Target,
+    text: 'text-amber-600 dark:text-amber-300', bg: 'bg-amber-500/15', ring: 'ring-amber-500/25', wash: 'from-amber-500/[0.10]',
+    active: 'border-amber-500/50 bg-amber-500/[0.08]',
+  },
+]
+
+export function kindLook(kind: ArchetypeKind): KindLook {
+  return KINDS.find((k) => k.id === kind) || KINDS[2]
+}
+
+/** A shelf: the heading under a kind. `full` names it on its own, as in a form. */
+export interface Shelf { id: ArchetypeCategory; kind: ArchetypeKind; label: string; hint: string; full: string }
+
+// The built-in shelves, in the order the gallery shows them.
+export const CATEGORIES: Shelf[] = [
+  { id: 'generalist', kind: 'generalist', label: 'Generalists', full: 'Generalist', hint: 'Roles that fit any team, whatever the industry.' },
+  { id: 'specialist', kind: 'specialist', label: 'For work', full: 'Specialist, for work', hint: 'An industry or a profession, with the method it takes.' },
+  { id: 'personal', kind: 'specialist', label: 'For your own life', full: 'Specialist, for your own life', hint: 'Home, health, money, learning and fun.' },
 ]
 
 // What an admin's group or family may look like: team_archetypes.py offers a model
@@ -62,25 +108,46 @@ export function lookFor(icon: string, color: string): FamilyLook {
 }
 
 // What the deck's admin published: read from the registry wherever it loads.
-let teamGroups: { id: ArchetypeCategory; label: string; hint: string }[] = []
+let teamGroups: Shelf[] = []
 let teamFamilies: Record<string, FamilyLook> = {}
 let teamIcons: Record<string, LucideIcon> = {}
 
 export function rememberTeamLooks(registry: ArchetypeRegistry | null | undefined): void {
   if (!registry) return
-  teamGroups = (registry.groups || []).map((g) => ({ id: g.id, label: g.label, hint: g.hint }))
+  teamGroups = (registry.groups || []).map((g) => ({ id: g.id, kind: 'company', label: g.label, hint: g.hint, full: `Company, ${g.label}` }))
   teamFamilies = Object.fromEntries((registry.family_looks || []).map((f) => [f.name, lookFor(f.icon, f.color)]))
   teamIcons = Object.fromEntries(registry.archetypes.filter((a) => a.icon && TEAM_ICONS[a.icon]).map((a) => [a.id, TEAM_ICONS[a.icon as string]]))
 }
 
 /** Every shelf, in the order the gallery shows them: this deck's own come first. */
-export function shelves(): { id: ArchetypeCategory; label: string; hint: string }[] {
+export function shelves(): Shelf[] {
   return [...teamGroups, ...CATEGORIES]
 }
 
-/** A person's own archetype has no shelf until they pick one: it was made for a job. */
+/** The company's own shelves: only what an admin publishes sits on one. */
+export function companyShelves(): Shelf[] {
+  return teamGroups
+}
+
+/** A person's own archetype has no shelf until they pick one: it was made for a job.
+ *  "focused" is what specialists were called before. */
 export function archetypeCategory(a: { category?: string }): ArchetypeCategory {
-  return shelves().find((c) => c.id === a.category)?.id ?? 'focused'
+  const category = a.category === 'focused' ? 'specialist' : a.category
+  return shelves().find((c) => c.id === category)?.id ?? 'specialist'
+}
+
+export function shelfOf(category: ArchetypeCategory): Shelf {
+  return shelves().find((c) => c.id === category) || CATEGORIES[1]
+}
+
+export function archetypeKind(a: { category?: string }): ArchetypeKind {
+  return shelfOf(archetypeCategory(a)).kind
+}
+
+/** What kind it is, said on its own: "Specialist", "Company, Dental Practice". */
+export function kindName(a: { category?: string }): string {
+  const shelf = shelfOf(archetypeCategory(a))
+  return shelf.id === 'specialist' ? kindLook('specialist').one : shelf.full
 }
 
 const FAMILY_LOOKS: Record<string, FamilyLook> = {

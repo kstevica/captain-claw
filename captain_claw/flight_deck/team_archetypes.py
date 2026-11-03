@@ -1,8 +1,8 @@
 """Archetypes an admin generates and publishes for the whole deck.
 
-An admin describes what their people need. Captain drafts a group (a shelf beside
-Generalists, Focused and Personal), a family inside it and an outline of the
-archetypes; the admin changes what they like; then each archetype's instructions are
+An admin describes what their people need. Captain drafts a group (a shelf under
+Company, apart from the built-in Generalists and Specialists), a family inside it
+and an outline of the archetypes; the admin changes what they like; then each archetype's instructions are
 written in a call of its own, so one that fails can be tried again without losing the
 others, and a large set never hits a single reply's output limit. Publishing makes
 them available to everyone on the deck, read-only for all but admins.
@@ -34,7 +34,6 @@ from captain_claw.flight_deck.archetype_routes import (
     read_documents,
 )
 from captain_claw.flight_deck.archetypes import (
-    CATEGORIES,
     TEAM_GROUP_PREFIX,
     TEAM_SETTING,
     load_base_registry,
@@ -53,7 +52,6 @@ MAX_TEAM_ARCHETYPES = 300
 _MAX_REFERENCE = 60_000
 _MIN_INSTRUCTIONS = 800
 _DISCLAIMERS = ("legal", "health", "clinical")
-_BUILT_IN_GROUPS = {"generalist": "Generalists", "focused": "Focused", "personal": "Personal"}
 
 # What a generated family or archetype may look like. The deck's own archetypeLook.ts
 # draws exactly these: a colour needs its classes written out, and an icon its import.
@@ -243,18 +241,15 @@ class PublishBody(BaseModel):
 
 
 def _resolve_group(catalog: dict, group: PackGroup) -> str:
+    """One of the company's own groups, never a built-in shelf: what an admin
+    publishes stays apart from the generalists and specialists Captain comes with."""
     wanted = group.id.strip()
-    if wanted in CATEGORIES:
-        return wanted
     existing = next((g for g in catalog["groups"] if g["id"] == wanted), None)
     if existing:
         return existing["id"]
     label = group.label.strip()[:40]
     if not label:
         raise HTTPException(400, "The group needs a name.")
-    for built_in, name in _BUILT_IN_GROUPS.items():
-        if name.casefold() == label.casefold():
-            return built_in
     same = next((g for g in catalog["groups"] if g["label"].casefold() == label.casefold()), None)
     if same:
         return same["id"]
@@ -320,7 +315,7 @@ async def publish(body: PublishBody, user: dict = Depends(require_admin)) -> dic
             "archetype_id": aid, "category": group_id, "family": family, "tools": _clean_tools(item.tools, registry),
             # The admin may have changed the disclaimer after these were written.
             "fleet_instructions": place_safety_rules(item.fleet_instructions, item.disclaimer),
-        }))
+        }), company=True)
         data["id"] = aid
         data["icon"] = _clean_icon(item.icon)
         made.append(data)
@@ -336,10 +331,14 @@ async def update_one(archetype_id: str, body: ArchetypeBody, user: dict = Depend
     at = next((i for i, a in enumerate(catalog["archetypes"]) if a.get("id") == archetype_id), None)
     if at is None:
         raise HTTPException(404, "There's no team archetype by that name.")
+    # It moves between the company's groups, and stays in one.
+    groups = {g["id"] for g in catalog["groups"]}
+    group = body.category if body.category in groups else catalog["archetypes"][at].get("category")
     data = _validate(body.model_copy(update={
+        "category": group,
         "tools": _clean_tools(body.tools, load_base_registry()),
         "fleet_instructions": place_safety_rules(body.fleet_instructions, body.disclaimer),
-    }))
+    }), company=True)
     data["id"] = archetype_id
     data["icon"] = _clean_icon(body.icon, str(catalog["archetypes"][at].get("icon") or ""))
     catalog["archetypes"][at] = data
