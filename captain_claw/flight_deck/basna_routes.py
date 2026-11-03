@@ -803,6 +803,32 @@ _AGENT_RUN_WINDOW_SECONDS = 300.0      # … per owner in this rolling window (5
 _agent_run_starts: dict[str, list[float]] = {}  # owner_id → [monotonic start times]
 
 
+def _sweep_run_workers(session_id: str, owner: str) -> int:
+    """Stop and remove what's left of a cancelled run's workers. A cancel can land
+    while they're spawning, before they're on _run_workers, and those would run on
+    idle, holding a slot and coming back on the deck's next start. They're found by
+    the name every Basna and Vatra worker is spawned with."""
+    from captain_claw.flight_deck.server import (
+        DATA_DIR, _do_stop_process, _load_process_registry, _processes, _save_process_registry,
+    )
+    prefixes = (f"basna-{session_id[:8]}-", f"vatra-{session_id[:8]}-")
+    left = [slug for slug, e in _load_process_registry().items()
+            if slug.startswith(prefixes) and str(e.get("owner") or owner) == owner]
+    for slug in left:
+        try:
+            _do_stop_process(slug)
+        except Exception as exc:
+            log.warning("cancel: worker stop failed", slug=slug, error=str(exc))
+    if left:
+        reg = _load_process_registry()  # reload after the stops above persisted
+        for slug in left:
+            reg.pop(slug, None)
+            _processes.pop(slug, None)
+            shutil.rmtree(DATA_DIR / slug, ignore_errors=True)
+        _save_process_registry(reg)
+    return len(left)
+
+
 async def _cancel_basna_run(session_id: str, owner: str) -> dict:
     """Hard-stop a Basna run: kill its spawned workers (this tears the run's
     compute down — the in-flight dispatch sees the sockets die and unwinds),
@@ -819,6 +845,8 @@ async def _cancel_basna_run(session_id: str, owner: str) -> dict:
     t = _agent_run_tasks.get(session_id)
     if t is not None and not t.done():
         t.cancel()
+        await asyncio.wait({t}, timeout=15)
+    stopped += _sweep_run_workers(session_id, owner)
     runs = _active_agent_runs.get(owner)
     if runs:
         runs.discard(session_id)
@@ -1208,6 +1236,11 @@ async def agent_start(body: AgentStartReq):
     if not task:
         raise HTTPException(400, "task is required")
 
+    from captain_claw.flight_deck import bat_nested
+    over_budget = await bat_nested.refusal(owner, port=body.source_port)
+    if over_budget:
+        return {"status": "rejected", "reason": over_budget}
+
     active = _active_agent_runs.setdefault(owner, set())
     if len(active) >= _MAX_AGENT_RUNS_PER_OWNER:
         return {
@@ -1280,6 +1313,7 @@ async def agent_start(body: AgentStartReq):
         _agent_run_tasks.pop(_sid, None)
 
     t.add_done_callback(_on_done)
+    await bat_nested.adopt("basna", session_id, owner, port=body.source_port)
 
     return {"status": "running", "session_id": session_id, "title": title,
             "n_agents": len(selected)}
@@ -2939,14 +2973,16 @@ async def _dispatch_one(port: int, token: str, prompt: str, timeout: float, on_a
                         fleet_instructions: str = "", agent_name: str = "",
                         file_paths: list[str] | None = None,
                         image_paths: list[str] | None = None, on_usage=None,
-                        on_status=None, automation: dict | None = None) -> dict:
+                        on_status=None, automation: dict | None = None,
+                        usage_sink: dict | None = None) -> dict:
     # Max-parallel gate: wait for a dispatch slot before doing any work. Started is
     # taken AFTER acquiring, so latency measures the turn, not the queue wait.
     gate = _run_gate.get()
     if gate is not None:
         await gate.acquire()
     started = time.monotonic()
-    sink: dict = {}
+    # A caller's sink lets it read the cache split and model while the turn runs.
+    sink: dict = usage_sink if usage_sink is not None else {}
     err: dict = {}
     try:
         out, actions = await _send_chat_and_collect(

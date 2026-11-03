@@ -34,15 +34,18 @@ def _wire():
     async def rec(ask):
         notes.append(ask)
 
-    saved = (bat_loop._GATE_CHECK, bat_loop._PLANNER, bat_loop._JUDGE, human_ask._NOTIFY)
+    saved = (bat_loop._GATE_CHECK, bat_loop._PLANNER, bat_loop._JUDGE, human_ask._NOTIFY,
+             bat_loop._REPLANNER, bat_loop._POLL_SPEND, bat_loop._STOP_CHILDREN)
     bat_loop.set_gate_check(bat_routes._gate_check)
+    bat_loop._REPLANNER = bat_loop._POLL_SPEND = bat_loop._STOP_CHILDREN = None
     bat_loop._PLANNER = bat_loop._default_planner
     bat_loop._JUDGE = bat_loop._default_judge
     human_ask.set_notifier(rec)
     human_ask._SECRETS.clear()
     bat_routes._SECRET_ANSWERS.clear()
     yield notes
-    bat_loop._GATE_CHECK, bat_loop._PLANNER, bat_loop._JUDGE, _old_notify = saved
+    (bat_loop._GATE_CHECK, bat_loop._PLANNER, bat_loop._JUDGE, _old_notify,
+     bat_loop._REPLANNER, bat_loop._POLL_SPEND, bat_loop._STOP_CHILDREN) = saved
     human_ask.set_notifier(_old_notify)
 
 

@@ -3933,6 +3933,24 @@ class FlightDeckDB:
             rows = await cur.fetchall()
         return [dict(r) for r in rows]
 
+    async def run_cost_total(self, owner_user_id: str, run_id: str) -> tuple[float, int]:
+        """(usd, total tokens) on record for one run; (0.0, 0) when there's none yet."""
+        assert self._db is not None
+        import json as _json
+        async with self._db.execute(
+            "SELECT usage, usd FROM cost_ledger WHERE owner_user_id = ? AND run_id = ?",
+            (owner_user_id, run_id),
+        ) as cur:
+            rows = await cur.fetchall()
+        usd, tokens = 0.0, 0
+        for r in rows:
+            usd += float(r["usd"] or 0.0)
+            try:
+                tokens += int((_json.loads(r["usage"] or "{}") or {}).get("total_tokens", 0) or 0)
+            except (TypeError, ValueError):
+                pass
+        return usd, tokens
+
     async def aggregate_run_costs(
         self, since: str | None = None, until: str | None = None,
     ) -> dict:

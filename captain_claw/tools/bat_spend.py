@@ -76,7 +76,8 @@ class SpendTool(Tool):
             "source_port": port,
             "owner_id": os.environ.get("FD_OWNER_ID", ""),
             "session_id": self._session(),
-            "agent": os.environ.get("FD_AGENT_SLUG", ""),
+            # The step, so an approval re-runs the step that asked and no other.
+            "agent": os.environ.get("CLAW_BAT_SUBTASK", "") or os.environ.get("FD_AGENT_SLUG", ""),
         }
 
     async def _post(self, fd_url: str, path: str, payload: dict) -> Any:

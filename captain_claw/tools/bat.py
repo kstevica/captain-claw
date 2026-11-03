@@ -76,7 +76,7 @@ class BatTool(Tool):
             },
             "task": {"type": "string", "description": "For 'start': a clear, self-contained statement of the goal to finish."},
             "title": {"type": "string", "description": "Optional short title for the run ('start')."},
-            "llm_usd_cap": {"type": "number", "description": "Optional hard ceiling on LLM spend in USD for the whole run ('start'); 0/omitted = unbounded."},
+            "llm_usd_cap": {"type": "number", "description": "Optional hard ceiling on LLM spend in USD for the whole run, including any runs its workers start ('start'); 0/omitted = this deck's default ceiling."},
             "worker_mode": {"type": "string", "enum": ["plain", "archetype"], "description": "For 'start': 'plain' (default) spawns a generic full-toolset worker per step; 'archetype' assigns a best-fit specialist agent per step."},
             "steps": {
                 "type": "array", "items": {"type": "string"},

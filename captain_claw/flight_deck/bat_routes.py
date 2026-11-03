@@ -13,9 +13,12 @@ live, agent-invocable mode:
                        `vatra`/`basna` launchers; only `bat` is stripped — a Bat
                        worker may delegate to Vatra), dispatch the step through
                        the proven ``_dispatch_one`` path, meter spend;
-      - judge        → the fail-closed ``bat_judge`` verdict (deterministic
-                       "all steps done" + an independent vote panel on a tier
-                       resolved separately from the workers).
+      - judge        → the fail-closed ``bat_judge`` verdict: deterministic checks
+                       Captain runs itself (the steps, the run's acceptance contract,
+                       the project's tests), then an independent vote panel on a
+                       different model from the workers, reading what's really in
+                       the run's folder;
+      - replanner    → a refusal's findings become the next round's fix steps.
   * ``on_finish`` → deliver the result back to the caller / origin channel.
 
 Phase 3 scope: agents can invoke Bat for build/research tasks. World-action
@@ -26,11 +29,14 @@ with the owner's normal toolset.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
 import types
 import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import structlog
@@ -44,7 +50,7 @@ from pydantic import BaseModel, Field
 from captain_claw import mail_authority
 from captain_claw.flight_deck.auth import get_current_user
 
-from captain_claw.flight_deck import bat_loop, human_ask
+from captain_claw.flight_deck import bat_loop, bat_nested, human_ask
 from captain_claw.flight_deck.bat_judge import Check, evaluate as _judge_evaluate
 from captain_claw.flight_deck.bat_store import RUNNING_STATES
 
@@ -56,11 +62,27 @@ _WORKER_MARKER = "CLAW_BAT_WORKER"
 _BAT_MAX_RUNS_PER_OWNER = 3
 _STEP_TIMEOUT_S = 1800.0
 _PANEL_SIZE = 3
-_MAX_MODEL_VETO_ROUNDS = 2
+# A panel's refusal gets this many judgements (two fix rounds). After that, more
+# rounds won't settle it and the owner decides: Bat never calls a refused run done
+# on its own, and a model's opinion alone can't fail one for good either.
+_MAX_MODEL_VETO_ROUNDS = 3
+_TIE_BREAK_ACCEPT = "Accept it as it is"
+_TIE_BREAK_STOP = "Stop the run"
+# The LLM ceiling for a run that doesn't name one. FD_BAT_DEFAULT_LLM_USD=0 means none.
+_DEFAULT_LLM_USD = 50.0
+_MAX_FIX_STEPS = 4
+_MAX_CONTRACT_RULES = 6
+_UNPRICED_NOTED: set[tuple[str, str]] = set()
 
-# model-veto streak per run (anti-deadlock; in-memory, resets on restart — the
-# override is a soft backstop, not a safety guarantee).
-_VETO_ROUNDS: dict[str, int] = {}
+
+def _llm_cap(asked: float) -> float:
+    """The ceiling a run gets: what was asked for, or the deck's default."""
+    if float(asked or 0.0) > 0:
+        return float(asked)
+    try:
+        return max(0.0, float(os.environ.get("FD_BAT_DEFAULT_LLM_USD", _DEFAULT_LLM_USD)))
+    except ValueError:
+        return _DEFAULT_LLM_USD
 
 
 # ── request models ────────────────────────────────────────────────────
@@ -311,9 +333,23 @@ def _parse_vote(text: str) -> dict:
     return {"vote": vote, "reason": (r.group(1).strip() if r else "")[:300]}
 
 
+def _after_of(item: Any, i: int) -> list[str] | None:
+    """The step keys a plan item waits for. None when the planner didn't say, which
+    means every earlier step. Only earlier steps count, so a plan can't deadlock."""
+    raw = (item.get("after", item.get("depends_on")) if isinstance(item, dict) else None)
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for a in raw:
+        tail = str(a).rsplit("-", 1)[-1]
+        if tail.isdigit() and 1 <= int(tail) <= i:
+            out.append(f"step-{int(tail)}")
+    return out
+
+
 def _parse_plan(content: str, task: str) -> list[dict]:
     """Parse the planner LLM's JSON into ordered steps. Tolerates ``` fences.
-    Each step: {step_key, title, seq}. Empty/invalid → [] (caller falls back)."""
+    Each step: {step_key, title, seq, depends_on}. Empty/invalid → [] (caller falls back)."""
     c = (content or "").strip()
     if c.startswith("```"):
         c = "\n".join(l for l in c.split("\n") if not l.strip().startswith("```"))
@@ -333,8 +369,31 @@ def _parse_plan(content: str, task: str) -> list[dict]:
         else:
             continue
         if title:
-            out.append({"step_key": f"step-{i + 1}", "title": title[:400], "seq": i})
+            out.append({"step_key": f"step-{i + 1}", "title": title[:400], "seq": i,
+                        "depends_on": _after_of(it, i)})
     return out[:12]
+
+
+def _parse_fix_plan(content: str) -> list[dict]:
+    """A fix round's new steps: [{title, after}], ``after`` as 1-based places in the
+    same list (bat_loop.fix_steps gives them their keys). Invalid → []."""
+    c = (content or "").strip()
+    if c.startswith("```"):
+        c = "\n".join(l for l in c.split("\n") if not l.strip().startswith("```"))
+    try:
+        raw = json.loads(c)
+    except (json.JSONDecodeError, TypeError):
+        return []
+    items = raw.get("steps") if isinstance(raw, dict) else raw
+    out: list[dict] = []
+    for it in items if isinstance(items, list) else []:
+        title = (it if isinstance(it, str) else
+                 str(it.get("step") or it.get("title") or "") if isinstance(it, dict) else "").strip()
+        if title:
+            after = it.get("after") if isinstance(it, dict) else None
+            out.append({"title": title[:400],
+                        "after": [a for a in after if isinstance(a, int)] if isinstance(after, list) else []})
+    return out[:_MAX_FIX_STEPS]
 
 
 # Tools a Bat worker never gets: the `bat` launcher (blocks Bat-in-Bat) and
@@ -372,7 +431,7 @@ def _parse_archetype_plan(content: str, valid_ids: set[str]) -> tuple[list[dict]
         if not title:
             continue
         key = f"step-{i + 1}"
-        steps.append({"step_key": key, "title": title[:400], "seq": i})
+        steps.append({"step_key": key, "title": title[:400], "seq": i, "depends_on": _after_of(it, i)})
         if arch and arch in valid_ids:
             arch_map[key] = arch
     return steps[:12], {k: v for k, v in arch_map.items() if k in {s["step_key"] for s in steps[:12]}}
@@ -409,22 +468,26 @@ def _assemble_deliverable(steps: list[dict]) -> str:
 
 
 def _final_deliverable(steps: list[dict]) -> str:
-    """What the judge evaluates for 'done': the LAST completed step's output (the
-    final answer/summary) — not the concatenation of every step's working notes,
-    which reads as unfinished. Falls back to the full assembly only when the
-    final step's output is too thin to stand alone."""
+    """What the judge evaluates for 'done': what the plan ends in, the output of
+    every completed step nothing else waits for (the last step of a straight plan;
+    every branch and fix of a parallel one) — not the concatenation of every step's
+    working notes, which reads as unfinished. Falls back to the full assembly only
+    when that's too thin to stand alone."""
     done = [s for s in steps if s.get("status") == "done" and (s.get("output") or "").strip()]
     if not done:
         return ""
-    last = max(done, key=lambda s: int(s.get("seq", 0)))
-    out = (last.get("output") or "").strip()
+    needed = {d for ds in bat_loop.effective_deps(steps).values() for d in ds}
+    ends = [s for s in done if s["step_key"] not in needed] or done[-1:]
+    out = "\n\n".join((s.get("output") or "").strip() for s in ends)
     return out if len(out) >= 200 else _assemble_deliverable(steps)
 
 
 _STEP_SYSTEM = (
     "You are a Bat worker — the stubborn finisher. Complete the assigned step no matter how many "
     "approaches it takes; retry, change tactics, and use any tool available to you (including the "
-    "browser, computer use, and starting a `vatra` run for a sub-problem). Be honest: only report "
+    "browser, computer use, and starting a `vatra` run for a sub-problem). If you start a Basna, Vatra, "
+    "Code or Crew run, end your turn once it has started: Captain waits for it and adds its result to "
+    "this step, so don't poll it. Be honest: only report "
     "what you actually accomplished and verified — never claim a step is done when it isn't. "
     "If you are blocked on something only the human can provide (a verification code, a 2FA/OTP, a "
     "CAPTCHA, a credential), call the `ask_human` tool (kind='secret' for codes/passwords) and STOP — "
@@ -434,7 +497,24 @@ _STEP_SYSTEM = (
 
 
 def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: str = "") -> str:
-    lines = [f"# Goal\n{run.get('task', '')}", f"\n# Your step\n{step.get('title') or step.get('step_key')}"]
+    lines = [_STEP_SYSTEM, f"\n# Goal\n{run.get('task', '')}", f"\n# Your step\n{step.get('title') or step.get('step_key')}"]
+    if (step.get("brief") or "").strip():
+        lines.append(f"\n# Why this step exists\nThe work was checked and these problems were found. "
+                     f"Fix them, and report the whole result, not only what changed.\n{step['brief']}")
+    if int(step.get("attempt", 0) or 0) >= 1 and (step.get("error") or "").strip():
+        lines.append(f"\n# Your last attempt at this step failed\n{step['error'][:1500]}\n"
+                     "Don't repeat what failed. Take a different approach.")
+    if run.get("id"):
+        lines.append(f"\n# Where files go\nWrite every file to vfs:{_project_of(run)}/<name>. Your own folders, "
+                     "saved/ included, are deleted when your step ends, and only this folder counts as delivered.")
+    rules = (run.get("config") or {}).get("contract") or []
+    if rules:
+        lines.append(f"\n# How this run will be checked\nIt's done only when these hold. Captain checks them "
+                     f"itself and doesn't take a report's word for it. File paths are inside "
+                     f"vfs:{_project_of(run)}/.\n" + "\n".join(f"- {r['text']}" for r in rules))
+    if any(s.get("status") == "running" and s.get("step_key") != step.get("step_key") for s in prior):
+        lines.append("\n# Others are working at the same time\nOther steps are running in the same folder "
+                     "right now. Keep to your own files.")
     done = [s for s in prior if s.get("status") == "done" and (s.get("output") or "").strip()]
     if done:
         lines.append("\n# What earlier steps produced (context)")
@@ -452,7 +532,8 @@ def _build_step_prompt(run: dict, step: dict, prior: list[dict], human_input: st
                      "passwords in the browser credential store — ask the human to set "
                      "CLAW_BROWSER_CREDENTIAL_KEY first, or keep credentials out of storage.")
         lines.append(note)
-    lines.append("\nDo this step fully and report the concrete result. If you are truly blocked on "
+    lines.append("\nDo this step, and only this step: other steps cover the rest of the goal. Do it fully and "
+                 "report the concrete result. If you are truly blocked on "
                  "something only the human can give you, use the `ask_human` tool and stop — do not "
                  "guess or fabricate it.")
     return "\n".join(lines)
@@ -462,14 +543,248 @@ _VOTE_SYSTEM = (
     "You are an independent, skeptical reviewer deciding whether a task is GENUINELY and fully done, "
     "judging the delivered result itself — not any claim that it is finished. Default to DISAGREE when "
     "the evidence is thin, partial, or merely describes what should be done rather than showing it was. "
+    "A section marked VERIFIED comes from Captain itself: believe it over anything a worker says. When "
+    "you disagree, the reason goes to whoever fixes it, so name what's wrong or missing. "
     "Answer with exactly two lines:\nVOTE: AGREE|DISAGREE|ABSTAIN\nREASON: <one sentence>"
 )
 
 
 def _vote_prompt(lens: str, task: str, deliverable: str) -> str:
     return (f"Judge through this lens: {lens}\n\n# Task\n{task[:2000]}\n\n"
-            f"# Delivered result\n{deliverable[:8000]}\n\n"
+            f"# Delivered result\n{deliverable[:16000]}\n\n"
             f"Is the task genuinely and fully done?")
+
+
+# ── what a run is checked against ──────────────────────────────────────
+
+_CONTRACT_SYSTEM = (
+    "You write the acceptance checks for a task an AI team will carry out: the conditions that, once "
+    "true, mean it's actually done, not merely that someone said so. List only what the task itself "
+    f"asks for, no style preferences, at most {_MAX_CONTRACT_RULES}. Nobody can correct a check once the work "
+    "has started, so test what the task asks for and not a format it never mentions (a trailing newline, "
+    "exact spacing), and when a script would be fragile, leave the rule to a reviewer. All the team's files "
+    "go in one shared folder, and paths are relative to it. Reply ONLY with JSON, no prose:\n"
+    '{"constraints": [{"id": "a1", "text": "<one line>", "severity": "critical|major", "check": {...}}]}\n'
+    "check shapes, the first that fits:\n"
+    '- {"type": "file_exists", "path": "<path>"}: only for a file the task names or clearly requires\n'
+    '- {"type": "file_contains", "path": "<path>", "pattern": "<regex>"}: ^ and $ match at each line\n'
+    '- {"type": "no_pattern", "pattern": "<regex>", "glob": "<glob>"}: passes when no file matches\n'
+    "COMMAND_SHAPE"
+    '- {"type": "judge"}: anything else; a reviewer decides from the result\n'
+    'If the task states nothing checkable, return {"constraints": []}.'
+)
+_COMMAND_SHAPE = ('- {"type": "command", "cmd": "<shell command>"}: passes when it exits 0; cheap, '
+                  "deterministic and portable (wc -l pads its number on some systems), no servers or network\n")
+
+
+def _project_of(run: dict) -> str:
+    """The run's shared VFS folder, as its workers are told (_bat_env)."""
+    return f"bat-{str(run.get('id', ''))[:8]}"
+
+
+def _run_folder(run: dict) -> Path:
+    from captain_claw.flight_deck.vfs_routes import _user_root
+    return _user_root(run["owner_id"]) / _project_of(run)
+
+
+def _owner_has_shell(user: dict | None) -> bool:
+    """A contract command and a project's tests run on the deck itself, outside any
+    worker's confinement. The same people who already have a shell here (Crew's
+    `trusted`, hosting's admin rule) may have them; for anyone else a command rule
+    goes to the reviewers instead."""
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+    return not _fd_auth_enabled() or (user or {}).get("role") == "admin"
+
+
+async def _floor_runner(command: str, cwd: str) -> tuple[bool, str]:
+    """Run a check under the same floor as the workers' own commands."""
+    from captain_claw import bat_floor
+    from captain_claw.dubina.coder import shell_command_runner
+    blocked, why = bat_floor.screen("shell", {"command": command})
+    if blocked:
+        return False, bat_floor.refusal("shell", why)
+    return await shell_command_runner(command, cwd)
+
+
+def _read_rules(reply: str) -> list[dict]:
+    """The rules in a model's reply. A weak model often drops a brace, and one drop
+    shouldn't cost every rule: when the whole reply won't parse, each rule is read
+    on its own, closing what it left open."""
+    from captain_claw.flight_deck import code_contract
+    rules = code_contract.parse_contract(reply)
+    if rules or not reply:
+        return rules
+    items = []
+    starts = [m.start() for m in re.finditer(r'\{\s*"id"\s*:', reply)]
+    for start, end in zip(starts, [*starts[1:], len(reply)]):
+        text = reply[start:end].strip().removesuffix("```").rstrip().rstrip(",]} \n")
+        for closers in ("}", "}}", '"}}'):
+            try:
+                items.append(json.loads(text + closers))
+                break
+            except ValueError:
+                continue
+    return code_contract.parse_contract(json.dumps({"constraints": items}))
+
+
+async def _ensure_contract(run: dict, creds: dict | None, has_shell: bool) -> None:
+    """Derive the run's acceptance contract once and pin it in bat.db, outside any
+    folder a worker can write to. No contract just means a run rests on its steps
+    and its reviewers, so a failure here never stops one."""
+    cfg = dict(run.get("config") or {})
+    store = bat_loop.get_store()
+    if "contract" in cfg or not creds or store is None:
+        return
+    from captain_claw.flight_deck.basna_routes import _provider_call
+    from captain_claw.llm import Message
+    rules: list[dict] = []
+    try:
+        prov, mt = _provider_call(creds, temperature=0.0, default_max=4096, cap=16384)
+        resp = await prov.complete(messages=[
+            Message(role="system", content=_CONTRACT_SYSTEM.replace("COMMAND_SHAPE", _COMMAND_SHAPE if has_shell else "")),
+            Message(role="user", content=str(run.get("task", ""))[:8000]),
+        ], temperature=0.0, max_tokens=mt)
+        rules = _read_rules(resp.content or "")[:_MAX_CONTRACT_RULES]
+    except Exception as e:  # noqa: BLE001
+        log.warning("bat contract derivation failed", run_id=run.get("id"), error=str(e))
+    cfg["contract"] = rules
+    await store.set_config(run["id"], cfg)
+    await store.append_event(run["id"], "note", (
+        f"{len(rules)} acceptance check(s) pinned: " + "; ".join(r["text"] for r in rules)[:400] if rules
+        else "No acceptance checks came out of the task, so the reviewers alone decide when it's done."))
+
+
+async def _contract_checks(run: dict, has_shell: bool) -> tuple[list[Check], list[dict], list[dict]]:
+    """Run what can be checked without a model. Returns the results, the rules that
+    take a reviewer, and the rules a script failed. Only a rule a script decided can
+    block a run for good."""
+    from captain_claw.flight_deck import code_contract, code_verify
+    rules = []
+    for r in (run.get("config") or {}).get("contract") or []:
+        command_blocked = (r.get("check") or {}).get("type") == "command" and not has_shell
+        rules.append({**r, "check": {"type": "judge"}} if command_blocked else r)
+    folder = _run_folder(run)
+    res = await code_contract.validate(folder, rules, runner=_floor_runner)
+    checks = [Check(f"acceptance: {r['text']}", passed=True, critical=r["severity"] != "minor")
+              for r in res["passed"]]
+    checks += [Check(f"acceptance: {r['text']}", passed=False, critical=r["severity"] != "minor",
+                     detail=str(r.get("note", ""))[:600]) for r in res["failed"]]
+    if has_shell and folder.is_dir():
+        command = code_verify.detect_test_command(folder)
+        if command:
+            result = await code_verify.run_tests(folder, command, runner=_floor_runner)
+            checks.append(Check("the project's tests pass", passed=bool(result["ok"]),
+                                detail="" if result["ok"] else f"`{command}`: {str(result['output'])[-600:]}"))
+    return checks, res["unresolved"], res["failed"]
+
+
+_AUDIT_SYSTEM = (
+    "Automatic checks failed on an AI team's work. A model wrote those checks before the work existed, so a "
+    "check can itself be wrong: a regex or shell quirk, or a format the task never asked for. For EACH rule, "
+    "look at the real files and decide whether the work meets it. pass: the files show the rule holds, and "
+    "you can name what's wrong with the check. fail: the work doesn't meet it. unclear: you can't tell. "
+    'Reply ONLY with a JSON array: [{"id": "<id>", "verdict": "pass|fail|unclear", "note": "<one line>"}]'
+)
+
+
+async def _audit_failed_checks(run: dict, failed: list[dict], creds: dict, folder: Path) -> dict[str, str]:
+    """A check written by a model can be wrong, and a wrong one would hold a correct
+    run back for good, so a failed one gets a second look before it counts. Returns
+    {rule id: why} for the ones whose check is at fault. That doesn't pass them: the
+    rule goes to the reviewers instead. Anything unclear stays a failure."""
+    from captain_claw.flight_deck import code_contract
+    from captain_claw.flight_deck.basna_routes import _provider_call
+    from captain_claw.llm import Message
+    rules = {str(r["id"]): r for r in (run.get("config") or {}).get("contract") or []}
+    listing = "\n".join(
+        f"- id \"{f['id']}\": {f['text']}\n  checked by: {json.dumps((rules.get(str(f['id'])) or {}).get('check') or {})}"
+        f"\n  it reported: {str(f.get('note', ''))[:600]}" for f in failed)
+    evidence = await asyncio.to_thread(_evidence_block, folder, excerpts=5)
+    try:
+        async with _metered(run["id"], "audit"):
+            prov, mt = _provider_call(creds, temperature=0.0, default_max=4096, cap=16384)
+            resp = await prov.complete(messages=[
+                Message(role="system", content=_AUDIT_SYSTEM),
+                Message(role="user", content=f"# Task\n{str(run.get('task', ''))[:4000]}\n\n# Failed checks\n{listing}\n\n{evidence}"),
+            ], temperature=0.0, max_tokens=mt)
+        return {j["id"]: j.get("note", "") for j in code_contract.parse_judgement(resp.content or "")
+                if j["verdict"] == "pass"}
+    except Exception as e:  # noqa: BLE001 — no second look means the failure stands
+        log.warning("bat check audit failed", run_id=run.get("id"), error=str(e))
+        return {}
+
+
+_TEXT_SUFFIXES = {".md", ".txt", ".csv", ".json", ".html", ".css", ".js", ".ts", ".tsx", ".py", ".yaml",
+                  ".yml", ".toml", ".xml", ".sh", ".sql", ".rst", ".tex"}
+
+
+_NO_FILES = "The folder holds no files."
+
+
+def _evidence_block(folder: Path, *, max_files: int = 40, excerpts: int = 3, excerpt_chars: int = 1500) -> str:
+    """What's really in the run's folder, read by Captain and not reported by a
+    worker: the panel judges this, not only the story of it. Hidden folders aren't
+    walked and the walk has a limit, since a worker may have cloned anything here."""
+    head = "## VERIFIED — files in the run's shared folder"
+    found: list[tuple[float, str, Path, int]] = []
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = [d for d in dirs if not d.startswith(".")]
+        for name in names:
+            p = Path(root) / name
+            if name.startswith(".") or p.is_symlink() or len(found) >= 5000:
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            found.append((st.st_mtime, p.relative_to(folder).as_posix(), p, st.st_size))
+    if not found:
+        return f"{head}\n{_NO_FILES} Any claim that a file was written there is false."
+    found.sort(key=lambda f: f[0], reverse=True)
+    lines = [head, *[f"- {rel} ({size:,} bytes)" for _, rel, _, size in found[:max_files]]]
+    if len(found) > max_files:
+        lines.append(f"- … and {len(found) - max_files} more")
+    shown = 0
+    for _, rel, p, size in found:
+        if shown >= excerpts:
+            break
+        if p.suffix.lower() in _TEXT_SUFFIXES and size:
+            try:
+                body = p.read_text(encoding="utf-8", errors="replace")[:excerpt_chars]
+            except OSError:
+                continue
+            lines.append(f"\n### {rel}\n{body}")
+            shown += 1
+    return "\n".join(lines)
+
+
+def _findings(verdict: dict) -> str:
+    """What a judgement found, for whoever has to fix it."""
+    lines = [f"- Failed check: {c}" for c in verdict.get("det_criticals") or []]
+    lines += [f"- Reviewer: {v['reason']}" for v in (verdict.get("panel") or {}).get("votes") or []
+              if v.get("vote") != "agree" and v.get("reason")]
+    return "\n".join(lines) or f"- {verdict.get('reason', 'not done yet')}"
+
+
+@asynccontextmanager
+async def _metered(run_id: str, label: str):
+    """Model calls inside this block count against the run's budget. Each block has
+    its own account, so steps running at the same time can't count each other."""
+    from captain_claw.flight_deck import pricing
+    from captain_claw.flight_deck.basna_routes import _RUN_USAGE, _run_sid
+    key = f"{run_id}:{label}"
+    token = _run_sid.set(key)
+    _RUN_USAGE[key] = []
+    try:
+        yield
+    finally:
+        _run_sid.reset(token)
+        cost = pricing.summarize(_RUN_USAGE.pop(key, []))
+        usd = float(cost.get("usd") or 0.0)
+        tokens = int((cost.get("tokens") or {}).get("total_tokens", 0) or 0)
+        store = bat_loop.get_store()
+        if store is not None and (usd or tokens):
+            await store.bump_cost(run_id, usd, tokens)
 
 
 # ── credential / owner resolution ──────────────────────────────────────
@@ -493,6 +808,19 @@ def _creds_for(tiers: dict | None, prefer: tuple[str, ...] = ("reason", "fast"))
         if isinstance(lt, dict) and lt.get("model"):
             return build(lt)
     return None
+
+
+def _panel_creds(tiers: dict | None) -> tuple[dict | None, bool]:
+    """Who reviews: the best model that isn't the one workers run on, so nobody
+    grades their own work. Returns the credentials, and whether it's a different
+    model (a deck with one model has no choice)."""
+    tiers = tiers or {}
+    worker_model = (tiers.get(_pick_tier(tiers)) or {}).get("model", "")
+    for name in ("reason", "balanced", "longctx", "fast"):
+        model = (tiers.get(name) or {}).get("model", "")
+        if model and model != worker_model:
+            return _creds_for(tiers, prefer=(name,)), True
+    return _creds_for(tiers), False
 
 
 def _store():
@@ -540,6 +868,9 @@ async def _spawn_bat_worker(request, user, *, name: str, tier: str,
     entry = reg.get(res.slug) or {}
     port = entry.get("web_port")
     if not res.ok or not port:
+        # A failed spawn still left an entry: it would count against the agent limit
+        # and come back to life on the deck's next start.
+        _teardown([res.slug])
         return {"ok": False, "slug": res.slug, "port": 0, "auth": "", "message": res.message or "no port"}
     return {"ok": True, "slug": res.slug, "port": port, "auth": entry.get("web_auth", ""), "message": ""}
 
@@ -611,6 +942,22 @@ def _pick_tier(tiers: dict | None, prefer: tuple[str, ...] = ("reason", "fast"))
 # ── the three handlers (registered into bat_loop at import) ────────────
 
 async def _bat_planner(run: dict) -> list[dict]:
+    async with _metered(run["id"], "plan"):
+        try:
+            from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+            from captain_claw.flight_deck.auth import get_db
+            db = get_db()
+            tiers, _ = await _load_owner_tiers(db, run["owner_id"])
+            user = await db.get_user_by_id(run["owner_id"])
+            await _ensure_contract(run, _creds_for(tiers), _owner_has_shell(user))
+        except Exception as e:  # noqa: BLE001
+            log.warning("bat contract step failed", run_id=run.get("id"), error=str(e))
+        store = bat_loop.get_store()
+        fresh = await store.get_run(run["id"]) if store is not None else None
+        return await _plan_steps(fresh or run)
+
+
+async def _plan_steps(run: dict) -> list[dict]:
     cfg = run.get("config") or {}
     explicit = cfg.get("steps") or []
     if explicit:
@@ -631,12 +978,15 @@ async def _bat_planner(run: dict) -> list[dict]:
                 return steps
             # no usable archetype plan → fall through to the plain decomposition
         if creds:
-            prov, mt = _provider_call(creds, temperature=0.2, default_max=1024, cap=4096)
+            prov, mt = _provider_call(creds, temperature=0.2, default_max=4096, cap=16384)
             resp = await prov.complete(messages=[
                 Message(role="system", content=(
                     "Break the user's goal into the smallest ordered list of concrete, independently "
-                    "checkable steps that together finish it. Return ONLY a JSON array of short step "
-                    "strings (max 8). No prose.")),
+                    "checkable steps that together finish it. Return ONLY a JSON array (max 8) of objects "
+                    '{"step": "<short step>", "after": [<1-based numbers of the earlier steps it needs>]}. '
+                    'A step that needs none gets "after": []. Steps that don\'t need each other run at the '
+                    "same time, so say so wherever order doesn't matter, and keep such steps to separate "
+                    "files. No prose.")),
                 Message(role="user", content=run.get("task", "")),
             ], temperature=0.2, max_tokens=mt)
             steps = _parse_plan(resp.content or "", run.get("task", ""))
@@ -661,13 +1011,15 @@ async def _plan_with_archetypes(run: dict, db, creds: dict) -> list[dict]:
     valid = {a["id"] for a in archetypes}
     catalog = "\n".join(f"- {a['id']}: {a.get('role', '')} — {str(a.get('description', ''))[:120]}"
                         for a in archetypes[:40])
-    prov, mt = _provider_call(creds, temperature=0.2, default_max=1536, cap=6144)
+    prov, mt = _provider_call(creds, temperature=0.2, default_max=4096, cap=16384)
     resp = await prov.complete(messages=[
         Message(role="system", content=(
             "Break the user's goal into the smallest ordered list of concrete, independently checkable "
             "steps. For EACH step pick the best-fit agent from the catalog by its exact id. Return ONLY "
-            "a JSON array of objects {\"step\": \"...\", \"archetype\": \"<id from the catalog>\"}, max 8, "
-            "no prose.\n\n## Agent catalog\n" + catalog)),
+            "a JSON array of objects {\"step\": \"...\", \"archetype\": \"<id from the catalog>\", "
+            "\"after\": [<1-based numbers of the earlier steps it needs>]}, max 8, no prose. A step that "
+            "needs none gets \"after\": []; steps that don't need each other run at the same time, so keep "
+            "those to separate files.\n\n## Agent catalog\n" + catalog)),
         Message(role="user", content=run.get("task", "")),
     ], temperature=0.2, max_tokens=mt)
     steps, arch_map = _parse_archetype_plan(resp.content or "", valid)
@@ -684,39 +1036,54 @@ async def _plan_with_archetypes(run: dict, db, creds: dict) -> list[dict]:
 
 async def _bat_attempt(run: dict, step: dict) -> dict:
     from captain_claw.flight_deck.basna_routes import (
-        _RUN_USAGE, _dispatch_one, _load_owner_tiers, _run_sid,
+        _RUN_USAGE, _dispatch_one, _finalize_usage, _load_owner_tiers, _run_sid,
     )
     from captain_claw.flight_deck.auth import get_db
     from captain_claw.flight_deck import pricing
 
     sid = run["id"]
     owner = run["owner_id"]
+    key = step["step_key"]
     db = get_db()
     user = await db.get_user_by_id(owner) or {"id": owner}
     tiers, env_vars = await _load_owner_tiers(db, owner)
     tier = _pick_tier(tiers)
     stub = types.SimpleNamespace(state=types.SimpleNamespace(user_id=owner))
-    bat_env = _bat_env(sid, step["step_key"], owner)
+    bat_env = _bat_env(sid, key, owner)
     # Hybrid worker mode: 'archetype' boots the planner-assigned specialist for
     # this step (its tools/tier/persona), still stamped CLAW_BAT_WORKER so the
     # hard floor + the ask_human/spend tools apply; 'plain' (default) boots a
     # generic full-toolset worker.
     mode = (run.get("config") or {}).get("worker_mode") or "plain"
-    arch_id = ((run.get("config") or {}).get("step_archetypes") or {}).get(step["step_key"])
+    arch_id = ((run.get("config") or {}).get("step_archetypes") or {}).get(key)
     if mode == "archetype" and arch_id:
         port, auth, slug = await _spawn_archetype_bat_worker(
             stub, user, sid, step, owner, arch_id, tiers, env_vars, bat_env)
         if not slug:
-            return {"ok": False, "error": f"could not spawn archetype worker for {arch_id}"}
+            return {"ok": False, "error": f"could not spawn archetype worker for {arch_id}", "spawn_refused": True}
     else:
-        name = f"bat-{sid[:8]}-{step['step_key']}"[:60]
-        worker = await _spawn_bat_worker(
-            stub, user, name=name, tier=tier, tiers=tiers, env_vars=env_vars, extra_env=bat_env)
+        name = f"bat-{sid[:8]}-{key}"[:60]
+        try:
+            worker = await _spawn_bat_worker(
+                stub, user, name=name, tier=tier, tiers=tiers, env_vars=env_vars, extra_env=bat_env)
+        except HTTPException as e:  # a plan's agent or spawn limit
+            return {"ok": False, "error": f"could not spawn worker: {e.detail}", "spawn_refused": True}
         if not worker["ok"]:
-            return {"ok": False, "error": f"could not spawn worker: {worker['message']}"}
+            return {"ok": False, "error": f"could not spawn worker: {worker['message']}", "spawn_refused": True}
         port, auth, slug = worker["port"], worker["auth"], worker["slug"]
 
     store = bat_loop.get_store()
+    bat_nested.worker_started(sid, key, port=port, slug=slug)
+    worker_model = (tiers.get(tier) or {}).get("model", "") if tiers else ""
+    # What this turn has spent so far: the agent reports it after every model call,
+    # so the budget watch sees a long turn while it's happening.
+    so_far: dict = {}
+
+    def _spent() -> dict:
+        return pricing.summarize([{"model": so_far.get("model") or worker_model, "usage": _finalize_usage(so_far)}])
+
+    def _on_usage(_pt: int, _ct: int, _tt: int) -> None:
+        bat_nested.set_live(sid, key, float(_spent().get("usd") or 0.0))
 
     def _on_action(ev: dict) -> None:
         # _send_chat_and_collect calls this SYNCHRONOUSLY, so it must not be a
@@ -724,91 +1091,147 @@ async def _bat_attempt(run: dict, step: dict) -> dict:
         if store is None:
             return
         try:
-            import asyncio
             tool = str(ev.get("tool", ""))
             stage = "narration" if tool == "narration" else "action"
             asyncio.get_running_loop().create_task(
                 store.append_event(sid, stage, tool[:60],
-                                   agent=step["step_key"], detail=str(ev.get("detail", ""))[:300]))
+                                   agent=key, detail=str(ev.get("detail", ""))[:300]))
         except Exception:
             pass
 
+    usage_key = f"{sid}:{key}:{uuid.uuid4().hex[:6]}"
+    token = _run_sid.set(usage_key)
+    _RUN_USAGE[usage_key] = []
     try:
         prior = await store.list_steps(sid) if store else []
         # A human answer provided while this step was awaiting_human: a secret
         # lives only in memory (consumed once), a non-secret was stashed in config.
-        human_input = _SECRET_ANSWERS.pop((sid, step["step_key"]), "") or \
-            ((run.get("config") or {}).get("answers") or {}).get(step["step_key"], "")
+        human_input = _SECRET_ANSWERS.pop((sid, key), "") or \
+            ((run.get("config") or {}).get("answers") or {}).get(key, "")
         prompt = _build_step_prompt(run, step, prior, human_input=human_input)
-        _run_sid.set(sid)
-        _RUN_USAGE.setdefault(sid, [])
-        before = len(_RUN_USAGE[sid])
         # Mail-write / organize grants come only from the owner's approval of
         # THIS run's plan (see _bat_automation).
         automation = _bat_automation(run)
         res = await _dispatch_one(
             port, auth, prompt, _STEP_TIMEOUT_S,
-            on_action=_on_action, agent_name=step["step_key"], automation=automation,
+            on_action=_on_action, on_usage=_on_usage, agent_name=key, automation=automation,
+            usage_sink=so_far,
         )
-        new_usage = _RUN_USAGE[sid][before:]
-        cost = pricing.summarize(new_usage)
+        cost = pricing.summarize(_RUN_USAGE.get(usage_key, []))
+        tokens = int((cost.get("tokens") or {}).get("total_tokens", 0) or 0)
+        if tokens and cost.get("usd") is None and store and float(run.get("llm_usd_cap") or 0) > 0:
+            model = str(res.get("model") or worker_model)
+            if (sid, model) not in _UNPRICED_NOTED:
+                _UNPRICED_NOTED.add((sid, model))
+                await store.append_event(sid, "note", f"No price is known for {model}, so the budget can't see its spend.")
         ok = bool(res.get("ok")) and not res.get("timed_out")
         return {
             "ok": ok,
             "output": res.get("output", ""),
             "usd": float(cost.get("usd") or 0.0),
-            "tokens": int((cost.get("tokens") or {}).get("total_tokens", 0) or 0),
+            "tokens": tokens,
             "error": res.get("error", "") or ("timed out" if res.get("timed_out") else ""),
         }
+    except asyncio.CancelledError:
+        # Stopped mid-turn (a cancel or a spent budget): what it spent is still spent.
+        spent = _spent()
+        if store is not None:
+            await store.bump_cost(sid, float(spent.get("usd") or 0.0),
+                                  int((spent.get("tokens") or {}).get("total_tokens", 0) or 0))
+        raise
     finally:
+        _RUN_USAGE.pop(usage_key, None)
+        _run_sid.reset(token)
+        bat_nested.worker_ended(sid, key, port=port, slug=slug)
         _teardown([slug])
 
 
 async def _bat_judge(run: dict, steps: list[dict]) -> dict:
-    from captain_claw.flight_deck.basna_routes import _load_owner_tiers, _provider_call, _RUN_USAGE, _run_sid
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers, _provider_call
     from captain_claw.flight_deck.auth import get_db
-    from captain_claw.flight_deck import pricing
     from captain_claw.llm import Message
 
     sid = run["id"]
+    cfg = run.get("config") or {}
+    if cfg.get("tie_break") == "accepted":
+        return {"done": True, "overridden": True, "failing": [],
+                "reason": f"you accepted it anyway. They said: {cfg.get('tie_break_findings') or 'not done'}"}
     deliverable = _final_deliverable(steps)
-    all_done = bool(steps) and all(s.get("status") == "done" for s in steps)
-    failed = [s["step_key"] for s in steps if s.get("status") == "failed"]
-    det = [Check("all planned steps completed", passed=all_done, critical=True,
-                 detail=(f"failed: {', '.join(failed)}" if failed else "pending steps remain"))]
+    finished = bool(steps) and all(s.get("status") in ("done", "skipped") for s in steps)
+    failed = [s for s in steps if s.get("status") == "failed"]
+    # Why they failed, not only which: this is what the next round's planner and
+    # the person reading the stop reason have to go on.
+    det = [Check("all planned steps completed", passed=finished, critical=True,
+                 detail=("failed: " + "; ".join(f"{s['step_key']} ({str(s.get('error') or '')[:300]})" for s in failed)
+                         if failed else "pending steps remain"))]
+    db = get_db()
+    has_shell = _owner_has_shell(await db.get_user_by_id(run["owner_id"]))
+    open_rules: list[dict] = []
+    evidence = ""
+    store = bat_loop.get_store()
+    try:
+        tiers, _ = await _load_owner_tiers(db, run["owner_id"])
+        creds, independent = _panel_creds(tiers)
+    except Exception as e:  # noqa: BLE001
+        log.warning("bat judge tiers failed; deterministic-only", run_id=sid, error=str(e))
+        creds, independent = None, False
+    if finished:
+        evidence = await asyncio.to_thread(_evidence_block, _run_folder(run))
+        try:
+            more, open_rules, script_failed = await _contract_checks(run, has_shell)
+            cleared = await _audit_failed_checks(run, script_failed, creds, _run_folder(run)) if script_failed and creds else {}
+            for rule in script_failed:
+                why = cleared.get(str(rule["id"]))
+                if why is None:
+                    continue
+                more = [c for c in more if c.name != f"acceptance: {rule['text']}"]
+                open_rules.append(rule)
+                # For the rest of the run too: the same check would only fail again.
+                cfg = {**cfg, "contract": [{**r, "check": {"type": "judge"}} if str(r["id"]) == str(rule["id"]) else r
+                                           for r in cfg.get("contract") or []]}
+                if store is not None:
+                    await store.set_config(sid, cfg)
+                    await store.append_event(sid, "note", f"The check for \"{rule['text']}\" was at fault ({why}). "
+                                             "Reviewers decide that rule instead.")
+            det += more
+        except Exception as e:  # noqa: BLE001 — a broken check goes to the reviewers
+            log.warning("bat contract checks failed", run_id=sid, error=str(e))
+            open_rules = list(cfg.get("contract") or [])
     # The panel may hold out for MORE work only while more work is possible; once
-    # every step is done (and none can retry), a deterministically-complete
-    # deliverable must not be blocked by a picky panel.
-    work_remaining = any(s.get("status") == "pending" for s in steps) or any(
-        s.get("status") == "failed" and int(s.get("attempt", 0)) < bat_loop._DEFAULT_MAX_STEP_ATTEMPTS
-        for s in steps)
+    # there are no rounds left, a deterministically-complete deliverable must not
+    # be blocked by a picky panel.
+    work_remaining = (bat_loop._REPLANNER is not None
+                      and int(cfg.get("rounds") or 0) + 1 < bat_loop._DEFAULT_MAX_ROUNDS)
 
     panel_fn = None
     try:
-        db = get_db()
-        tiers, _ = await _load_owner_tiers(db, run["owner_id"])
-        creds = _creds_for(tiers)
+        if store is not None and creds and not independent and not cfg.get("panel_note"):
+            await store.append_event(sid, "note", "Reviewers run on the same model as the workers: "
+                                     "this deck has no other model set up.")
+            cfg = {**cfg, "panel_note": True}
+            await store.set_config(sid, cfg)
         # Layer-3 evidence: if this run could send mail, hand the panel the
         # ground-truth send audit so it judges honesty against reality, not the
         # worker's claim.
         receipt = ""
-        if (run.get("config") or {}).get("email_allowed"):
+        if cfg.get("email_allowed"):
             try:
                 sends = await db.list_gmail_sends(run["owner_id"], limit=50, origin="agent")
                 receipt = _email_receipt_block(sends, sid[:8])
             except Exception:
                 receipt = ""
-        if creds and deliverable.strip():
+        rules = ("## Acceptance rules: every one must hold\n" + "\n".join(f"- {r['text']}" for r in open_rules)
+                 if open_rules else "")
+        to_judge = deliverable or ("" if _NO_FILES in evidence else evidence)
+        if creds and to_judge.strip():
             lenses = ["correctness and completeness",
                       "whether it ACTUALLY did the task vs merely described it",
                       "edge cases, honesty, and unverified claims"]
 
             async def vote(deliverable_text: str, task: str, idx: int) -> dict:
                 lens = lenses[idx % len(lenses)]
-                _run_sid.set(sid)
-                _RUN_USAGE.setdefault(sid, [])
-                shown = (receipt + "\n\n" + deliverable_text) if receipt else deliverable_text
-                prov, mt = _provider_call(creds, temperature=0.0, default_max=256, cap=1024)
+                shown = "\n\n".join(p for p in (receipt, rules, deliverable_text[:8000], evidence) if p)
+                prov, mt = _provider_call(creds, temperature=0.0, default_max=2048, cap=8192)
                 resp = await prov.complete(messages=[
                     Message(role="system", content=_VOTE_SYSTEM),
                     Message(role="user", content=_vote_prompt(lens, task, shown)),
@@ -819,39 +1242,108 @@ async def _bat_judge(run: dict, steps: list[dict]) -> dict:
     except Exception as e:  # noqa: BLE001
         log.warning("bat judge panel setup failed; deterministic-only", run_id=sid, error=str(e))
 
-    prior = _VETO_ROUNDS.get(sid, 0)
-    before = len(_RUN_USAGE.get(sid, []))
-    verdict = await _judge_evaluate(
-        task=run.get("task", ""), deliverable=deliverable, deterministic=det,
-        panel_vote_fn=panel_fn, panel_size=_PANEL_SIZE,
-        prior_model_veto_rounds=prior, max_model_veto_rounds=_MAX_MODEL_VETO_ROUNDS,
-        work_remaining=work_remaining,
-    )
-    # Count judge spend against the run's persisted cap.
+    prior = int(cfg.get("veto_rounds") or 0)
+    async with _metered(sid, "judge"):
+        verdict = await _judge_evaluate(
+            task=run.get("task", ""), deliverable=deliverable or ("" if _NO_FILES in evidence else evidence),
+            deterministic=det,
+            panel_vote_fn=panel_fn, panel_size=_PANEL_SIZE,
+            prior_model_veto_rounds=prior, max_model_veto_rounds=_MAX_MODEL_VETO_ROUNDS,
+            work_remaining=work_remaining,
+        )
+    # Track the model-veto streak for the anti-deadlock override. Kept on the run,
+    # so a restart can't reset it.
+    if store is not None and not verdict.done and not verdict.det_criticals \
+            and verdict.panel.get("verdict") in ("disagree", "tie", "no_quorum"):
+        await store.set_config(sid, {**cfg, "veto_rounds": prior + 1})
+    now = await store.get_run(sid) if store is not None else None
+    if now and now["status"] != "cancelled" and verdict.overridden:
+        findings = _findings(verdict.to_dict())
+        await store.set_config(sid, {**cfg, "tie_break_findings": findings[:1500]})
+        await human_ask.raise_ask(
+            store, run_id=sid, owner=run["owner_id"], kind="tie_break",
+            question=("The checks pass, but the reviewers won't pass this run, and more fix rounds aren't "
+                      f"settling it.\n\nWhat they said:\n{findings}"),
+            options=[_TIE_BREAK_ACCEPT, _TIE_BREAK_STOP])
+        await store.set_status(sid, "awaiting_human")
+        await store.append_event(sid, "awaiting_human", "the reviewers won't pass it: asking you to decide")
+        return {**verdict.to_dict(), "done": False, "parked": True, "failing": []}
+    # What "the same failure again" means: a step's error, since fix steps are new
+    # steps with new names, and a check's name, since its details change every run.
+    failing = sorted({f"step failed: {str(s.get('error') or '')[:80]}" for s in failed})
+    failing += [c.name for c in det[1:] if c.critical and not c.passed]
+    if not finished and not failed:
+        failing.append(det[0].name)
+    return {**verdict.to_dict(), "failing": failing}
+
+
+_REPLAN_SYSTEM = (
+    "A team's work on a goal was checked and it isn't done yet. Write the smallest set of NEW steps that "
+    "fix exactly what the check found. Don't repeat a step that already finished. If an approach failed, "
+    "the new step must take a different one. Each step goes to a fresh worker who can see the team's shared "
+    f"folder and earlier results. Return ONLY a JSON array, at most {_MAX_FIX_STEPS} items: "
+    '{"step": "<what to do>", "after": [<1-based numbers of the new steps it must wait for>]}. Steps that '
+    "don't wait for each other run at the same time, so keep those to separate files. No prose."
+)
+
+
+async def _bat_replan(run: dict, steps: list[dict], verdict: dict, round_no: int) -> list[dict]:
+    """A refusal is new work. If the model can't plan it, the findings themselves
+    are the step: Bat doesn't give up because a planning call failed."""
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers, _provider_call
+    from captain_claw.flight_deck.auth import get_db
+    from captain_claw.llm import Message
+
+    findings = _findings(verdict)
+    plan: list[dict] = []
+    try:
+        tiers, _ = await _load_owner_tiers(get_db(), run["owner_id"])
+        creds = _creds_for(tiers)
+        if creds:
+            so_far = "\n".join(
+                f"- [{s.get('status')}] {s.get('title') or s.get('step_key')}"
+                + (f": {(s.get('error') or s.get('output') or '').strip()[:300]}"
+                   if (s.get("error") or s.get("output")) else "")
+                for s in steps)
+            async with _metered(run["id"], f"replan-{round_no}"):
+                prov, mt = _provider_call(creds, temperature=0.2, default_max=4096, cap=16384)
+                resp = await prov.complete(messages=[
+                    Message(role="system", content=_REPLAN_SYSTEM),
+                    Message(role="user", content=(f"# Goal\n{str(run.get('task', ''))[:4000]}\n\n"
+                                                  f"# The work so far\n{so_far[:8000]}\n\n"
+                                                  f"# What the check found\n{findings}")),
+                ], temperature=0.2, max_tokens=mt)
+            plan = _parse_fix_plan(resp.content or "")
+    except Exception as e:  # noqa: BLE001
+        log.warning("bat replan fell back to one fix step", run_id=run.get("id"), error=str(e))
+    if not plan:
+        plan = [{"title": "Fix what the check found", "after": []}]
+    return [{**p, "brief": findings[:4000]} for p in plan]
+
+
+async def _log_own_cost(run: dict) -> None:
+    """Bat's line in the cost ledger: its own workers, planning and review. Runs it
+    started are in the run's total for the cap, but have their own ledger lines."""
     store = bat_loop.get_store()
-    if store is not None and _RUN_USAGE.get(sid):
-        new = _RUN_USAGE[sid][before:]
-        if new:
-            cost = pricing.summarize(new)
-            if cost.get("usd"):
-                try:
-                    await store.bump_cost(sid, float(cost["usd"]),
-                                          int((cost.get("tokens") or {}).get("total_tokens", 0) or 0))
-                except Exception:
-                    pass
-    # Track the model-veto streak for the anti-deadlock override.
-    if not verdict.done and not verdict.det_criticals and verdict.panel.get("verdict") in ("disagree", "tie", "no_quorum"):
-        _VETO_ROUNDS[sid] = prior + 1
-    elif verdict.done:
-        _VETO_ROUNDS.pop(sid, None)
-    return {"done": verdict.done, "reason": verdict.reason, "overridden": verdict.overridden}
+    try:
+        from captain_claw.flight_deck.auth import get_db
+        kids = await store.list_children(run["id"]) if store is not None else []
+        usd = max(0.0, float(run.get("cumulative_usd") or 0.0) - sum(float(k["counted_usd"]) for k in kids))
+        tokens = max(0, int(run.get("cumulative_tokens") or 0) - sum(int(k["counted_tokens"]) for k in kids))
+        if usd or tokens:
+            await get_db().log_run_cost(run["owner_id"], "bat", run["id"], {
+                "tokens": {"total_tokens": tokens}, "usd": round(usd, 6),
+                "elapsed_seconds": max(0.0, float(run.get("updated_at") or 0.0) - float(run.get("created_at") or 0.0)),
+            })
+    except Exception as e:  # noqa: BLE001 — cost is best-effort, never blocks the result
+        log.warning("bat cost ledger failed", run_id=run.get("id"), error=str(e))
 
 
 async def _bat_on_finish(run: dict) -> None:
     """Deliver the result back where the run came from (bell / channel / caller
     agent), mirroring Basna/Vatra's completion delivery."""
     sid = run["id"]
-    _VETO_ROUNDS.pop(sid, None)
+    await _log_own_cost(run)
     status = run.get("status")
     ok = status == "done"
     truth = (run.get("truth") or "").strip()
@@ -894,12 +1386,18 @@ async def _bat_on_finish(run: dict) -> None:
         log.warning("bat source-agent notify failed", run_id=sid, error=str(e))
 
 
+# What each gate reason grants once the owner approves it.
+_GRANT_OF = {"send email": "email_allowed", "spend money": "spend_allowed",
+             "create an account": "account_allowed", _ORGANIZE_GATE: "organize_allowed"}
+
+
 async def _gate_check(store, run: dict) -> str:
     """Human-in-the-loop gate (bat_loop seam). Returns proceed|wait|cancelled|error.
 
     Two jobs: (1) the START GATE — a fresh run whose plan would send mail, spend,
     create an account or organize mail pauses (awaiting_plan) for owner
-    approval; (2) RESUME — an awaiting_* run proceeds once its ask is answered,
+    approval, and so does a fix round whose new steps go beyond what was approved;
+    (2) RESUME — an awaiting_* run proceeds once its ask is answered,
     is cancelled if the plan is rejected, and errors if the ask expired."""
     from captain_claw.flight_deck import human_ask
     run_id = run["id"]
@@ -962,6 +1460,16 @@ async def _gate_check(store, run: dict) -> str:
             await store.append_event(
                 run_id, "note", f"spend {'approved' if approved else 'declined'} by the owner")
             return "proceed"
+        if ask["kind"] == "tie_break":
+            if (ask.get("answer") or "").strip() == _TIE_BREAK_STOP:
+                await store.set_status(run_id, "error", truth=bat_loop._assemble_truth(await store.list_steps(run_id)),
+                                       stopped_reason=f"stopped by you: the reviewers wouldn't pass it. "
+                                                      f"{(run.get('config') or {}).get('tie_break_findings') or ''}".strip())
+                await store.append_event(run_id, "error", "stopped by the owner: the reviewers wouldn't pass it")
+                return "error"
+            await store.set_config(run_id, {**(run.get("config") or {}), "tie_break": "accepted"})
+            await store.append_event(run_id, "note", "accepted by the owner over the reviewers' objection")
+            return "proceed"
         # input / secret answer → hand it to the resuming step
         text = await human_ask.resolve_answer_text(store, ask)
         step_key = ask.get("step_key") or ""
@@ -977,13 +1485,15 @@ async def _gate_check(store, run: dict) -> str:
         await store.append_event(run_id, "note", "input received — resuming", agent=step_key)
         return "proceed"
 
-    # fresh run — start gate
+    # A fresh run — the start gate — or a fix round's new steps: approval covers the
+    # plan the owner saw, so work beyond it asks again.
     cfg = run.get("config") or {}
-    if cfg.get("plan_approved"):
-        return "proceed"
     steps = await store.list_steps(run_id)
     needs, reason = plan_needs_gate(run.get("task", ""), steps)
     if not needs:
+        return "proceed"
+    new_asks = [g for g, flag in _GRANT_OF.items() if g in reason and not cfg.get(flag)]
+    if cfg.get("plan_approved") and not new_asks:
         return "proceed"
     # Remember what was gated so approval can grant the matching capability
     # (e.g. 'send email' → the run-scoped email exception), and for organizing
@@ -995,8 +1505,11 @@ async def _gate_check(store, run: dict) -> str:
     await store.set_config(run_id, cfg)
     existing = await store.latest_open_ask(run_id)
     if not (existing and existing["kind"] == "plan_approval"):
-        q = (f"This Bat run would {reason}. Approve it to run, or cancel.\n\nPlan:\n"
-             + "\n".join(f"- {s.get('title')}" for s in steps))
+        q = (f"This Bat run would {', '.join(new_asks) or reason}. Approve it to run, or cancel.\n\nPlan:\n"
+             + "\n".join(f"- {s.get('title')}" for s in steps if s.get("status") != "skipped"))
+        checks = cfg.get("contract") or []
+        if checks:
+            q += "\n\nIt's done when:\n" + "\n".join(f"- {r['text']}" for r in checks)
         await human_ask.raise_ask(store, run_id=run_id, owner=run["owner_id"],
                                   kind="plan_approval", question=q, options=["approve", "cancel"])
     await store.set_status(run_id, "awaiting_plan")
@@ -1034,6 +1547,7 @@ async def _notify_ask(ask: dict) -> None:
 bat_loop.set_planner(_bat_planner)
 bat_loop.set_attempt_runner(_bat_attempt)
 bat_loop.set_judge(_bat_judge)
+bat_loop.set_replanner(_bat_replan)
 bat_loop.set_on_finish(_bat_on_finish)
 bat_loop.set_gate_check(_gate_check)
 human_ask.set_notifier(_notify_ask)
@@ -1071,7 +1585,7 @@ async def agent_start(body: BatStartReq):
                 "chat_id": body.origin_chat_id, "kind": body.origin_kind,
                 "address": body.origin_address},
         source_host=body.source_host or "localhost", source_port=int(body.source_port or 0),
-        llm_usd_cap=float(body.llm_usd_cap or 0.0), status="planning",
+        llm_usd_cap=_llm_cap(body.llm_usd_cap), status="planning",
     )
     await store.append_event(run_id, "note", "run created")
     try:
@@ -1374,7 +1888,7 @@ async def ui_start(body: _UiStartReq, user: dict = Depends(get_current_user)):
                 "worker_mode": _norm_worker_mode(body.worker_mode)},
         origin={"platform": "web", "kind": "", "address": ""},
         source_host="localhost", source_port=0,
-        llm_usd_cap=float(body.llm_usd_cap or 0.0), status="planning")
+        llm_usd_cap=_llm_cap(body.llm_usd_cap), status="planning")
     await store.append_event(run_id, "note", "run created from the Bat page")
     try:
         await bat_loop.kick()
