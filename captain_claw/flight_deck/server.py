@@ -6990,10 +6990,9 @@ async def fd_flows_runs(flow_id: str, request: Request, user: dict | None = _req
 
 
 async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: str = "joined", owner_id: str = ""):
-    """Notify running agents about a fleet change. When auth is enabled, only notify agents owned by the same user."""
-    import websockets as _ws
-    import json as _json
-
+    """A fleet change goes on the owner's Line (line.py). Agents aren't told
+    in their chats any more: their peers reach them in a ``peer_agents`` frame
+    (agent_handshake), and the Line is where the user reads what changed."""
     # Other Flight Decks see this deck's exposed agents: re-advertise them.
     try:
         from captain_claw.flight_deck.botport_link import get_link as _get_botport_link
@@ -7002,10 +7001,8 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
     except Exception:
         pass
 
-    # Build list of running agent WebSocket endpoints (excluding the new one),
-    # scoped to the same owner when auth is enabled.
-    targets: list[tuple[str, int, str]] = []  # (host, port, auth)
-
+    # The owner's other running agents (docker and process), for the item's text.
+    peers = 0
     try:
         client = get_docker()
         for c in _deck_containers(client=client):
@@ -7014,85 +7011,26 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
                 continue
             wp = labels.get("flight-deck.web-port", "")
             if wp and int(wp) != new_agent_port:
-                targets.append(("localhost", int(wp), labels.get("flight-deck.web-auth", "")))
+                peers += 1
     except Exception:
         pass
-
-    registry = _load_process_registry()
-    for slug, entry in registry.items():
+    for slug, entry in _load_process_registry().items():
         if AUTH_ENABLED and owner_id and entry.get("owner", "") != owner_id:
             continue
         wp = entry.get("web_port", 0)
         if wp and wp != new_agent_port and _process_is_alive(slug):
-            targets.append(("localhost", wp, entry.get("web_auth", "")))
+            peers += 1
 
-    # The owner's Line keeps it too, peers or not.
     from captain_claw.flight_deck import line as _line
 
-    _peers = len(targets)
     await _line.post(
         owner_id, "fleet",
         f"{new_agent_name} moved to port {new_agent_port}" if event == "rebound"
         else f"{new_agent_name} {event} the fleet",
-        f"Port {new_agent_port}. " + (f"{_peers} other agent{'s' if _peers != 1 else ''} running."
-                                      if _peers else "No other agent running."),
+        f"Port {new_agent_port}. " + (f"{peers} other agent{'s' if peers != 1 else ''} running."
+                                      if peers else "No other agent running."),
         bell_type="fleet", source=new_agent_name,
     )
-
-    if not targets:
-        return
-
-    # Build fleet list scoped to the same owner
-    fleet: list[dict] = []
-    try:
-        client = get_docker()
-        for c in _deck_containers(all=True, client=client):
-            labels = c.labels or {}
-            if AUTH_ENABLED and owner_id and labels.get(OWNER_LABEL, "") != owner_id:
-                continue
-            wp = labels.get("flight-deck.web-port", "")
-            fleet.append({"name": labels.get("flight-deck.agent-name", c.name), "status": c.status, "port": int(wp) if wp else 0})
-    except Exception:
-        pass
-    reg = _load_process_registry()
-    for slug, entry in reg.items():
-        if AUTH_ENABLED and owner_id and entry.get("owner", "") != owner_id:
-            continue
-        fleet.append({"name": entry.get("name", slug), "status": "running" if _process_is_alive(slug) else "stopped", "port": entry.get("web_port", 0)})
-
-    notification = (
-        f"[Flight Deck] Agent '{new_agent_name}' has {event} the fleet on port {new_agent_port}. "
-        f"Current fleet: {', '.join(a['name'] + ' (' + a['status'] + ', :' + str(a['port']) + ')' for a in fleet)}"
-    )
-
-    async def _send_to(host: str, port: int, auth: str):
-        params = f"?token={auth}" if auth else ""
-        url = f"ws://{host}:{port}/ws{params}"
-        try:
-            async with _ws.connect(url, open_timeout=5, close_timeout=3) as ws:
-                # Wait for welcome
-                raw = await asyncio.wait_for(ws.recv(), timeout=5)
-                welcome = _json.loads(raw)
-                if welcome.get("type") != "welcome":
-                    return
-                # Skip replay
-                while True:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=5)
-                    msg = _json.loads(raw)
-                    if msg.get("type") == "replay_done":
-                        break
-                # Send as notification (injected into session, no LLM response triggered)
-                await ws.send(_json.dumps({"type": "notification", "content": notification}))
-                # Wait briefly then disconnect
-                try:
-                    await asyncio.wait_for(ws.recv(), timeout=5)
-                except asyncio.TimeoutError:
-                    pass
-        except Exception:
-            pass  # Best-effort; don't fail spawn if notification fails
-
-    # Fire all notifications concurrently
-    await asyncio.gather(*[_send_to(h, p, a) for h, p, a in targets], return_exceptions=True)
 
 
 _IMAGE_EXTS_TRANSFER = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}

@@ -293,6 +293,19 @@ async def _run_step(
     return {"ok": bool(res.get("ok")), "content": str(res.get("output") or "")[:500], "reverse": None}
 
 
+async def _step_to_line(user_id: str, plan: dict[str, Any], step: dict[str, Any], ok: bool) -> None:
+    """A step's result on its user's Line (line.py): a failed one needs them."""
+    from captain_claw.flight_deck import line
+
+    goal = " ".join(str(plan.get("goal") or "").split())[:80]
+    await line.post(
+        user_id, "result", f"Plan step {'done' if ok else 'failed'}: {step.get('title') or 'a step'}",
+        str(step.get("result") or "") + (f"\n\nPlan: {goal}" if goal else ""),
+        bell_type="plan_step" if ok else "plan_step_error", needs_you=not ok,
+        ref_type="plan", ref_id=str(plan.get("id") or ""), trust="agent",
+    )
+
+
 async def advance_one(user_id: str, plan_id: str, *, auto: bool = False) -> dict[str, Any]:
     """Run the plan's next pending step. ``auto=True`` only runs a step that's
     trust-eligible to auto-fire; otherwise it pauses for approval. Manual advance
@@ -333,6 +346,7 @@ async def advance_one(user_id: str, plan_id: str, *, auto: bool = False) -> dict
                           job_text=str(plan.get("goal") or ""))
     step["result"] = str(res.get("content") or "")[:500]
     step["reverse"] = res.get("reverse")
+    await _step_to_line(user_id, plan, step, bool(res.get("ok")))
     if res.get("ok"):
         step["status"] = "done"
         remaining = any(s["status"] == "pending" for s in steps)
