@@ -1232,6 +1232,20 @@ async def lifespan(app: FastAPI):
         app.state.bat_stop = _bat_stop
         app.state.bat_task = asyncio.create_task(_bat_loop_mod.bat_loop(_bat_store, _bat_stop))
         print("Flight Deck: Bat supervisor started")
+    # ── Captain Swarm supervisor (runs that keep improving a measured number:
+    # adopt a leased run, drive it, re-adopt it after a restart). Disable with
+    # FD_CAPTAIN_SWARM_DISABLED=true. Idle until a run exists. ──
+    if os.environ.get("FD_CAPTAIN_SWARM_DISABLED", "").lower() not in ("true", "1", "yes"):
+        from captain_claw.flight_deck import captain_swarm_loop as _cs_loop
+        from captain_claw.flight_deck.captain_swarm_store import CaptainSwarmStore as _CSStore
+        _cs_store = _CSStore(DATA_DIR / "captain_swarm.db")
+        await _cs_store.init()
+        app.state.captain_swarm_store = _cs_store
+        _cs_loop.set_store(_cs_store)
+        _cs_stop = asyncio.Event()
+        app.state.captain_swarm_stop = _cs_stop
+        app.state.captain_swarm_task = asyncio.create_task(_cs_loop.supervisor_loop(_cs_store, _cs_stop))
+        print("Flight Deck: Captain Swarm supervisor started")
     # ── Flow engine (process automations: trigger → steps on the agent pool) ──
     try:
         from captain_claw.flight_deck.flows_store import FlowStore
@@ -1462,6 +1476,18 @@ async def lifespan(app: FastAPI):
                 await asyncio.wait_for(app.state.context_packs_task, timeout=5.0)
             except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
+    # Stop the Captain Swarm supervisor: its runs go stale and are re-adopted
+    # on the next boot, and a measurement it was in the middle of runs again.
+    if hasattr(app.state, "captain_swarm_stop"):
+        app.state.captain_swarm_stop.set()
+        try:
+            await asyncio.wait_for(app.state.captain_swarm_task, timeout=5.0)
+        except (TimeoutError, asyncio.CancelledError, Exception):
+            pass
+        try:
+            await app.state.captain_swarm_store.close()
+        except Exception:
+            pass
     # Stop the Bat supervisor (before killing worker processes). Running Bat
     # runs go stale and are re-adopted on the next boot from their checkpoints.
     if hasattr(app.state, "bat_stop"):
@@ -1569,7 +1595,7 @@ def _lockdown_enabled() -> bool:
     return os.environ.get("FD_LOCKDOWN", "").lower() in ("true", "1", "yes")
 
 
-_AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/", "/fd/bat/agent/")
+_AGENT_GUARD_PREFIXES = ("/fd/basna/agent/", "/fd/vatra/agent/", "/fd/bat/agent/", "/fd/captain-swarm/agent/")
 
 # Agent routes whose handlers treat a verified bearer as authoritative (caller
 # may act only as itself). A valid bearer is an accepted caller here in
@@ -1796,6 +1822,7 @@ from captain_claw.flight_deck import (
     agent_practice,
     agent_preset,
 )
+from captain_claw.flight_deck.captain_swarm_routes import router as captain_swarm_router
 from captain_claw.flight_deck.deck_update_routes import router as deck_update_router
 from captain_claw.flight_deck.system_routes import router as system_router
 from captain_claw.flight_deck.share_routes import router as share_router
@@ -1918,6 +1945,7 @@ app.include_router(agent_exam.router)
 app.include_router(agent_onboarding.router)
 app.include_router(agent_package.router)
 app.include_router(agent_practice.router)
+app.include_router(captain_swarm_router)
 app.include_router(system_router)
 app.include_router(deck_update_router)
 app.include_router(share_router)

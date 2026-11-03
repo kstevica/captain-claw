@@ -1,0 +1,622 @@
+"""Captain Swarm — the owner's routes (Phase 1: practice sets and measurements).
+
+docs/captain-swarm-plan.md. Phase 1 builds no swarm yet, only what it will be
+measured by: a practice set frozen from the owner's own mail, and a
+measurement of one of the owner's agents on it.
+
+    GET    /fd/captain-swarm/practice                         the owner's sets
+    POST   /fd/captain-swarm/practice/mail-triage             build one from their Gmail
+    GET    /fd/captain-swarm/practice/{set}                   one set (and how its build goes)
+    DELETE /fd/captain-swarm/practice/{set}                   delete it, mail copy and all
+    POST   /fd/captain-swarm/practice/{set}/measure           measure an agent on it
+    GET    /fd/captain-swarm/practice/{set}/measurements      what was measured
+    GET    /fd/captain-swarm/measurements/{set}/{id}          one measurement
+    POST   /fd/captain-swarm/measurements/{set}/{id}/stop     stop one under way
+
+Everything is the caller's own: their Google account, their sets, their
+agents. Building and measuring run in the background; the state is kept
+with the set, so a restart shows where it stopped.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import secrets
+import time
+from typing import Any
+
+import httpx
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+
+from captain_claw.flight_deck import captain_swarm_measure as measure
+from captain_claw.flight_deck import captain_swarm_practice as practice
+from captain_claw.flight_deck.auth import get_current_user
+from captain_claw.logging import get_logger
+
+log = get_logger(__name__)
+
+router = APIRouter(prefix="/fd/captain-swarm", tags=["captain-swarm"])
+
+_TASKS: dict[str, asyncio.Task] = {}      # "build:<owner>/<set>" or "measure:<owner>/<set>/<id>"
+_PROGRESS: dict[str, dict] = {}
+_STOP: set[str] = set()
+_MAX_MEASURE_CASES = 300
+_MAX_REPEAT = 5
+
+
+def _uid(user: dict) -> str:
+    return str(user.get("id") or "local")
+
+
+def _meta_or_404(owner: str, set_id: str) -> dict:
+    meta = practice.get_meta(owner, set_id)
+    if meta is None:
+        raise HTTPException(404, "No such practice set.")
+    return meta
+
+
+def _view(owner: str, meta: dict) -> dict:
+    key = f"build:{owner}/{meta['id']}"
+    out = {**meta}
+    if meta.get("state") == "building":
+        out["progress"] = _PROGRESS.get(key, {})
+        if key not in _TASKS:
+            out["state"], out["error"] = "error", meta.get("error") or "Flight Deck restarted while it was building."
+    return out
+
+
+# ── practice sets ────────────────────────────────────────────────────
+
+
+@router.get("/practice")
+async def list_practice(user: dict = Depends(get_current_user)) -> dict:
+    owner = _uid(user)
+    return {"sets": [_view(owner, m) for m in await asyncio.to_thread(practice.list_sets, owner)]}
+
+
+class TriageBody(BaseModel):
+    window_days: int = Field(90, ge=14, le=365)
+    reply_days: int = Field(3, ge=1, le=14)
+    holdout_days: int = Field(21, ge=7, le=90)
+    max_cases: int = Field(400, ge=20, le=1000)
+
+
+async def _build(owner: str, set_id: str, body: TriageBody) -> None:
+    key = f"build:{owner}/{set_id}"
+    from captain_claw.flight_deck.google_oauth_routes import get_valid_google_access_token
+    try:
+        token = await get_valid_google_access_token(owner)
+        if not token:
+            raise RuntimeError("Connect Google first: the set is read from your own Gmail.")
+
+        def progress(stage: str, done: int, total: int) -> None:
+            _PROGRESS[key] = {"stage": stage, "done": done, "total": total}
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            built = await practice.build_mail_triage(
+                practice.gmail_fetch(client, token), now_ms=int(time.time() * 1000),
+                window_days=body.window_days, reply_days=body.reply_days,
+                holdout_days=body.holdout_days, max_cases=body.max_cases, progress=progress)
+        if not built["open"] or not built["holdout"]:
+            raise RuntimeError("Too little mail in that window to hold any back. Try a longer window.")
+        await asyncio.to_thread(practice.save_set, owner, set_id, built, body.model_dump())
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("captain swarm: building a practice set failed", owner=owner, exc_info=True)
+        await asyncio.to_thread(practice.mark, owner, set_id, state="error", error=str(exc)[:300])
+    finally:
+        _TASKS.pop(key, None)
+        _PROGRESS.pop(key, None)
+
+
+@router.post("/practice/mail-triage")
+async def build_mail_triage(body: TriageBody, user: dict = Depends(get_current_user)) -> dict:
+    """Freeze a sample of the caller's received mail, each labelled by whether
+    they wrote in its thread within *reply_days*. Read-only on Gmail."""
+    owner = _uid(user)
+    if any(k.startswith(f"build:{owner}/") for k in _TASKS):
+        raise HTTPException(409, "A practice set is already being built.")
+    set_id = practice.new_set_id()
+    await asyncio.to_thread(practice.mark, owner, set_id, state="building", title="Inbox triage: did you reply?",
+                            source={"params": body.model_dump()})
+    _TASKS[f"build:{owner}/{set_id}"] = asyncio.get_running_loop().create_task(_build(owner, set_id, body))
+    return _view(owner, _meta_or_404(owner, set_id))
+
+
+@router.get("/practice/{set_id}")
+async def get_practice(set_id: str, user: dict = Depends(get_current_user)) -> dict:
+    owner = _uid(user)
+    return _view(owner, _meta_or_404(owner, set_id))
+
+
+@router.delete("/practice/{set_id}")
+async def delete_practice(set_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """Delete the set: the frozen mail and every measurement made on it."""
+    owner = _uid(user)
+    _meta_or_404(owner, set_id)
+    if f"build:{owner}/{set_id}" in _TASKS:
+        # Its last write runs in a thread a cancel can't stop: deleting now
+        # could leave the mail copy behind after the folder is gone.
+        raise HTTPException(409, "It's still being built. Delete it once it's done.")
+    for key in [k for k in _TASKS if k.startswith(f"measure:{owner}/{set_id}/")]:
+        _STOP.add(key)
+        _TASKS[key].cancel()
+    return {"deleted": await asyncio.to_thread(practice.delete_set, owner, set_id)}
+
+
+# ── measurements ─────────────────────────────────────────────────────
+
+
+class MeasureBody(BaseModel):
+    agent: str = Field(..., min_length=1, max_length=120)
+    split: str = Field("open", pattern="^(open|holdout)$")
+    cases: int = Field(50, ge=5, le=_MAX_MEASURE_CASES)
+    repeat: int = Field(3, ge=1, le=_MAX_REPEAT)
+
+
+def _measure_path(owner: str, set_id: str, mid: str):
+    if not practice._ID_RE.match(mid or ""):
+        raise HTTPException(404, "No such measurement.")
+    return practice.set_dir(owner, set_id) / "measurements" / f"{mid}.json"
+
+
+def _read_measurement(owner: str, set_id: str, mid: str) -> dict | None:
+    return practice._read_json(_measure_path(owner, set_id, mid))
+
+
+def _measurement_view(owner: str, set_id: str, m: dict, *, full: bool = False) -> dict:
+    key = f"measure:{owner}/{set_id}/{m['id']}"
+    out = {k: v for k, v in m.items() if full or k != "result" or not isinstance(v, dict)}
+    if not full and isinstance(m.get("result"), dict):
+        out["result"] = {k: v for k, v in m["result"].items() if k != "cases"}
+    if m.get("state") == "running":
+        out["progress"] = _PROGRESS.get(key, {})
+        if key not in _TASKS:
+            out["state"], out["error"] = "error", m.get("error") or "Flight Deck restarted while it was measuring."
+    return out
+
+
+async def _ask_agent(owner: str, slug: str, name: str, mid: str):
+    """An ask over the agent's exam lane: read-only, keeps nothing."""
+    from captain_claw.flight_deck import agent_exam as ex
+    job = ex.ExamJob(id=f"swarm{mid}", agent=slug, agent_name=name, owner_id=owner)
+    if not await ex.can_take_exams(job):
+        raise HTTPException(409, f"Restart {name} first: it was started before it could answer practice cases.")
+    counter = 0
+
+    async def ask(question: str) -> dict:
+        nonlocal counter
+        counter += 1
+        try:
+            return await ex.ask(job, {"id": f"c{counter}", "question": question})
+        except ex._ExamError as exc:
+            return {"error": str(exc)}
+    return ask
+
+
+async def _measure(owner: str, set_id: str, mid: str, record: dict, cases: list[dict], ask, owner_name: str) -> None:
+    key = f"measure:{owner}/{set_id}/{mid}"
+    path = _measure_path(owner, set_id, mid)
+    try:
+        try:
+            result = await measure.run_triage(
+                cases, ask=ask, repeat=record["repeat"], owner_name=owner_name,
+                progress=lambda done, total: _PROGRESS.__setitem__(key, {"done": done, "total": total}),
+                should_stop=lambda: key in _STOP)
+            record.update(state="stopped" if result["stopped"] else "done", finished=time.time(), result=result)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("captain swarm: a measurement failed", owner=owner, exc_info=True)
+            record.update(state="error", finished=time.time(), error=str(exc)[:300])
+        # Written while it still counts as running, so a reader never sees a
+        # finished measurement as one a restart cut short.
+        if practice.set_dir(owner, set_id).is_dir():
+            await asyncio.to_thread(practice.write_json, path, record)
+    finally:
+        _TASKS.pop(key, None)
+        _PROGRESS.pop(key, None)
+        _STOP.discard(key)
+
+
+@router.post("/practice/{set_id}/measure")
+async def start_measurement(set_id: str, body: MeasureBody, user: dict = Depends(get_current_user)) -> dict:
+    """Ask one of the caller's agents every chosen case, *repeat* times, on its
+    exam lane, and score its YES/NO against what the caller actually did."""
+    from captain_claw.flight_deck import agent_preset as ap
+    owner = _uid(user)
+    meta = _meta_or_404(owner, set_id)
+    if meta.get("state") != "ready":
+        raise HTTPException(409, "That set isn't ready.")
+    entry = ap._own_process(body.agent, ap._owner(user))
+    if any(k.startswith(f"measure:{owner}/") for k in _TASKS):
+        raise HTTPException(409, "A measurement is already under way. Wait for it, or stop it.")
+    if await ap._quota_spent(ap._owner(user)):
+        raise HTTPException(429, "Today's allowance is used up.")
+    cases = measure.pick_cases(await asyncio.to_thread(practice.load_cases, owner, set_id, body.split), body.cases)
+    if not cases:
+        raise HTTPException(409, "That part of the set has no cases.")
+    name = str(entry.get("name") or body.agent)
+    mid = f"m{time.strftime('%Y%m%d%H%M')}-{secrets.token_hex(2)}"
+    ask = await _ask_agent(ap._owner(user), body.agent, name, mid)
+    record = {"id": mid, "set": set_id, "agent": body.agent, "agent_name": name, "split": body.split,
+              "cases": len(cases), "repeat": body.repeat, "state": "running", "started": time.time(),
+              "scorer": "agreement", "question": "triage_v1"}
+    await asyncio.to_thread(practice.write_json, _measure_path(owner, set_id, mid), record)
+    owner_name = str(user.get("display_name") or user.get("name") or "")
+    if owner_name.lower() == "local":
+        owner_name = ""
+    key = f"measure:{owner}/{set_id}/{mid}"
+    _TASKS[key] = asyncio.get_running_loop().create_task(
+        _measure(owner, set_id, mid, record, cases, ask, owner_name))
+    return _measurement_view(owner, set_id, record)
+
+
+@router.get("/practice/{set_id}/measurements")
+async def list_measurements(set_id: str, user: dict = Depends(get_current_user)) -> dict:
+    owner = _uid(user)
+    _meta_or_404(owner, set_id)
+    folder = practice.set_dir(owner, set_id) / "measurements"
+    rows = []
+    if folder.is_dir():
+        for p in sorted(folder.glob("*.json"), reverse=True):
+            m = practice._read_json(p)
+            if m and m.get("id"):
+                rows.append(_measurement_view(owner, set_id, m))
+    return {"measurements": rows}
+
+
+@router.get("/measurements/{set_id}/{mid}")
+async def get_measurement(set_id: str, mid: str, user: dict = Depends(get_current_user)) -> dict:
+    owner = _uid(user)
+    _meta_or_404(owner, set_id)
+    m = _read_measurement(owner, set_id, mid)
+    if m is None:
+        raise HTTPException(404, "No such measurement.")
+    return _measurement_view(owner, set_id, m, full=True)
+
+
+@router.post("/measurements/{set_id}/{mid}/stop")
+async def stop_measurement(set_id: str, mid: str, user: dict = Depends(get_current_user)) -> dict:
+    owner = _uid(user)
+    key = f"measure:{owner}/{set_id}/{mid}"
+    if key not in _TASKS:
+        raise HTTPException(409, "It isn't running.")
+    _STOP.add(key)
+    return {"stopping": True}
+
+
+# ── runs (Phase 2: the loop, on code) ────────────────────────────────
+#
+#    GET    /fd/captain-swarm/templates                 what a run can start from, with this deck's defaults
+#    POST   /fd/captain-swarm/runs                      start one (the owner's own: no gate)
+#    GET    /fd/captain-swarm/runs                      the owner's runs
+#    GET    /fd/captain-swarm/runs/{id}                 one run: objective, ledger, events
+#    POST   /fd/captain-swarm/runs/{id}/cancel          stop it now
+#    POST   /fd/captain-swarm/runs/{id}/go | /decline   an agent's run waits for one of these
+#    POST   /fd/captain-swarm/runs/{id}/pr              open a pull request from the best commit
+#    POST   /fd/captain-swarm/agent/{start,status,get,list,cancel}   the `captain_swarm` tool
+
+_MAX_ACTIVE_RUNS = int(os.environ.get("FD_CAPTAIN_SWARM_MAX_RUNS", "1") or 1)
+
+
+def _cs_store():
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    store = loop_mod.get_store()
+    if store is None:
+        raise HTTPException(503, "Captain Swarm isn't running on this deck (FD_CAPTAIN_SWARM_DISABLED).")
+    return store
+
+
+def _source_repo() -> str:
+    """This deck's own source checkout, when it is a git repository: the Mrav
+    template improves the code the deck runs."""
+    from pathlib import Path
+
+    import captain_claw
+    root = Path(captain_claw.__file__).resolve().parents[1]
+    return str(root) if (root / ".git").exists() else ""
+
+
+async def _local_models() -> list[str]:
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            r = await client.get("http://127.0.0.1:11434/api/tags")
+        return sorted(m["name"] for m in r.json().get("models") or [] if not str(m.get("name", "")).endswith("cloud"))
+    except Exception:
+        return []
+
+
+def _default_holdout() -> str:
+    path = practice.sealed_root() / "mrav" / "holdout.json"
+    return str(path) if path.is_file() else ""
+
+
+@router.get("/templates")
+async def templates(user: dict = Depends(get_current_user)) -> dict:
+    from captain_claw.flight_deck import captain_swarm_objective as om
+    from captain_claw.flight_deck.bat_routes import _owner_has_shell
+    return {"templates": {"mrav": {
+        "title": "Mrav passes more of its eval",
+        "about": "Improve Captain's small-model runtime (captain_claw/mrav/), measured by the Mrav eval on a "
+                 "local model: 20 open tasks in the repo, held-out tasks only on this deck.",
+        "defaults": {"repo_path": _source_repo(), "model": "gemma4:e2b", "base_url": "http://127.0.0.1:11434",
+                     "harness": "claude", "holdout_file": _default_holdout(), "per_round": 2,
+                     **{f"budget_{k}": v for k, v in om.DEFAULT_BUDGET.items()}},
+        "local_models": await _local_models(),
+    }}, "can_start": _owner_has_shell(user)}
+
+
+class RunBody(BaseModel):
+    template: str = "mrav"
+    options: dict[str, Any] = Field(default_factory=dict)
+    objective: dict[str, Any] | None = None
+
+
+def _objective_from(body: RunBody, has_shell: bool) -> dict:
+    from captain_claw.flight_deck import captain_swarm_objective as om
+    if body.objective:
+        raw = body.objective
+    else:
+        if body.template not in om.TEMPLATES:
+            raise HTTPException(400, f"No template called {body.template!r}.")
+        o = body.options or {}
+        raw = om.TEMPLATES[body.template](
+            str(o.get("repo_path") or _source_repo()), model=str(o.get("model") or "gemma4:e2b"),
+            base_url=str(o.get("base_url") or "http://127.0.0.1:11434"), harness=str(o.get("harness") or "claude"),
+            holdout_file=str(o.get("holdout_file") or _default_holdout()))
+        if o.get("lane_model"):
+            raw["lane"]["model"] = str(o["lane_model"])
+        if o.get("per_round"):
+            raw["lane"]["per_round"] = o["per_round"]
+        for k in ("usd", "hours", "max_experiments"):
+            if o.get(f"budget_{k}") not in (None, ""):
+                raw["budget"][k] = o[f"budget_{k}"]
+        if o.get("target") not in (None, ""):
+            raw["stop"]["target"] = o["target"]
+    try:
+        return om.normalize(raw, owner_has_shell=has_shell)
+    except om.ObjectiveError as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+
+async def _can_run(owner: str) -> None:
+    """What a run needs before it starts: a model to plan with, Crew open for a
+    local repository, and no other run of this owner's under way."""
+    from captain_claw.flight_deck import crew_access, crew_runner
+    from captain_claw.flight_deck.auth import get_db
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    from captain_claw.flight_deck.bat_routes import _creds_for
+    tiers, _ = await _load_owner_tiers(get_db(), owner)
+    if not _creds_for(tiers):
+        raise HTTPException(409, "Set up a model tier first: a run asks a model for ideas.")
+    grant = crew_access.grant_of(await crew_runner._user_of(owner))
+    if not grant.allowed or not grant.trusted:
+        raise HTTPException(403, "Captain Swarm's coding lane is Crew on a local repository, open to admins only.")
+    active = [r for r in await _cs_store().list_runs(owner) if r["status"] in ("baseline", "running", "awaiting_go")]
+    if len(active) >= _MAX_ACTIVE_RUNS:
+        raise HTTPException(409, f"You already have {len(active)} Captain Swarm run(s) going (limit {_MAX_ACTIVE_RUNS}).")
+
+
+def _run_summary(r: dict) -> dict:
+    champ, base = r.get("champion") or {}, r.get("baseline") or {}
+
+    def mean(point: dict, part: str) -> float | None:
+        s = (point.get(part) or {}).get("stats")
+        return round(s["mean"], 4) if s else None
+    return {"id": r["id"], "title": r["title"], "status": r["status"], "stopped_reason": r["stopped_reason"],
+            "started_by": r["started_by"], "round": (r.get("state") or {}).get("round", 0),
+            "experiments": r["experiments"], "spent_usd": round(r["spent_usd"], 4), "spent_tokens": r["spent_tokens"],
+            "baseline_dev": mean(base, "dev"), "champion_dev": mean(champ, "dev"),
+            "baseline_holdout": mean(base, "holdout"), "champion_holdout": mean(champ, "holdout"),
+            "improved": bool(champ.get("exp")), "created_at": r["created_at"], "started_at": r["started_at"],
+            "finished_at": r["finished_at"], "budget": (r.get("objective") or {}).get("budget")}
+
+
+async def _start(owner: str, objective: dict, *, status: str, started_by: str) -> dict:
+    import uuid
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    store = _cs_store()
+    run_id = f"cs_{uuid.uuid4().hex[:12]}"
+    run = await store.create_run(run_id=run_id, owner_id=owner, title=objective["title"], objective=objective,
+                                 status=status, started_by=started_by)
+    await store.append_event(run_id, "start", f"started by {started_by}"
+                             + (": waiting for the owner's Go" if status == "awaiting_go" else ""))
+    if status == "baseline":
+        await loop_mod.kick()
+    return run
+
+
+@router.post("/runs")
+async def start_run(body: RunBody, user: dict = Depends(get_current_user)) -> dict:
+    from captain_claw.flight_deck.bat_routes import _owner_has_shell
+    owner = _uid(user)
+    objective = _objective_from(body, _owner_has_shell(user))
+    await _can_run(owner)
+    return _run_summary(await _start(owner, objective, status="baseline", started_by="the owner"))
+
+
+@router.get("/runs")
+async def list_runs(user: dict = Depends(get_current_user)) -> dict:
+    return {"runs": [_run_summary(r) for r in await _cs_store().list_runs(_uid(user))]}
+
+
+async def _own_run(run_id: str, user: dict) -> dict:
+    run = await _cs_store().get_run(run_id)
+    if run is None or run["owner_id"] != _uid(user):
+        raise HTTPException(404, "No such run.")
+    return run
+
+
+@router.get("/runs/{run_id}")
+async def get_run(run_id: str, since: int = 0, user: dict = Depends(get_current_user)) -> dict:
+    run = await _own_run(run_id, user)
+    store = _cs_store()
+    obj = run["objective"]
+    return {**_run_summary(run),
+            "objective": {k: obj.get(k) for k in ("title", "goal", "subject", "metric", "guardrails", "noise",
+                                                   "lane", "budget", "stop")}
+            | {"holdout": {"file": "(sealed)"}},
+            "baseline": run["baseline"], "champion": run["champion"],
+            "report": (run.get("state") or {}).get("report"),
+            "ledger": await store.list_experiments(run_id),
+            "events": await store.list_events(run_id, since=since)}
+
+
+@router.post("/runs/{run_id}/cancel")
+async def cancel_run(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _own_run(run_id, user)
+    if run["status"] in TERMINAL_STATES:
+        raise HTTPException(409, "It has already stopped.")
+    await loop_mod.cancel_run(_cs_store(), run_id)
+    return _run_summary(await _cs_store().get_run(run_id))
+
+
+@router.post("/runs/{run_id}/go")
+async def go(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """The owner's Go for a run an agent started. The checks a run needs are made
+    now, as the owner — the agent's say-so isn't enough for any of them."""
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    from captain_claw.flight_deck import captain_swarm_objective as om
+    from captain_claw.flight_deck.bat_routes import _owner_has_shell
+    run = await _own_run(run_id, user)
+    if run["status"] != "awaiting_go":
+        raise HTTPException(409, "It isn't waiting for a Go.")
+    try:
+        om.normalize(run["objective"], owner_has_shell=_owner_has_shell(user))
+    except om.ObjectiveError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    store = _cs_store()
+    await store.set_status(run_id, "declined", "")  # out of the count while it's checked
+    try:
+        await _can_run(_uid(user))
+    except HTTPException:
+        await store.set_status(run_id, "awaiting_go", "")
+        raise
+    await store.update_run(run_id, status="baseline", stopped_reason="", finished_at=0.0)
+    await store.append_event(run_id, "start", "the owner said Go")
+    await loop_mod.kick()
+    return _run_summary(await store.get_run(run_id))
+
+
+@router.post("/runs/{run_id}/decline")
+async def decline(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    run = await _own_run(run_id, user)
+    if run["status"] != "awaiting_go":
+        raise HTTPException(409, "It isn't waiting for a Go.")
+    await _cs_store().set_status(run_id, "declined", "the owner declined it")
+    await _cs_store().append_event(run_id, "stop", "the owner declined it")
+    return _run_summary(await _cs_store().get_run(run_id))
+
+
+@router.post("/runs/{run_id}/pr")
+async def open_pr(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+    """A pull request from the best commit, through Crew (its branch holds every
+    kept change). Captain never merges it."""
+    from captain_claw.flight_deck import crew_access, crew_runner
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _own_run(run_id, user)
+    if run["status"] not in TERMINAL_STATES:
+        raise HTTPException(409, "Stop the run first, or wait for it to finish.")
+    exp_id = (run.get("champion") or {}).get("exp")
+    exp = await _cs_store().get_experiment(exp_id) if exp_id else None
+    if exp is None or not exp.get("child_id"):
+        raise HTTPException(409, "No attempt beat the starting point, so there's nothing to propose.")
+    row = await crew_runner._user_of(_uid(user))
+    task = await crew_runner.open_pr(row, crew_access.grant_of(row), exp["child_id"])
+    await _cs_store().append_event(run_id, "pr", f"pull request opened: {(task.get('delivery') or {}).get('url', '')}")
+    return {"delivery": task.get("delivery") or {}}
+
+
+# ── the `captain_swarm` tool ─────────────────────────────────────────
+
+
+class AgentReq(BaseModel):
+    source_port: int = 0
+    web_auth: str = ""
+    owner_id: str = ""
+    run_id: str = ""
+    limit: int = Field(default=20, ge=1, le=100)
+
+
+class AgentStartReq(AgentReq):
+    template: str = "mrav"
+    options: dict[str, Any] = Field(default_factory=dict)
+    objective: dict[str, Any] | None = None
+    agent_name: str = ""
+
+
+def _agent_owner(body: AgentReq) -> str:
+    from captain_claw.flight_deck.basna_routes import _AgentReq, _resolve_owner
+    return _resolve_owner(_AgentReq(source_port=body.source_port, web_auth=body.web_auth, owner_id=body.owner_id)) \
+        or "local"
+
+
+@router.post("/agent/start")
+async def agent_start(body: AgentStartReq) -> dict:
+    """An agent's run never starts by itself: it waits for its owner's Go, with
+    the objective, the scorer and the budget in front of them."""
+    from captain_claw.flight_deck import crew_runner
+    from captain_claw.flight_deck.auth import get_db
+    from captain_claw.flight_deck.bat_routes import _owner_has_shell
+    owner = _agent_owner(body)
+    user = await crew_runner._user_of(owner)
+    try:
+        objective = _objective_from(RunBody(template=body.template, options=body.options, objective=body.objective),
+                                    _owner_has_shell(user))
+    except HTTPException as exc:
+        return {"status": "rejected", "reason": exc.detail}
+    run = await _start(owner, objective, status="awaiting_go", started_by=f"agent {body.agent_name or 'unknown'}")
+    try:
+        await get_db().add_notification(owner, "captain_swarm", "A Captain Swarm run waits for your Go",
+                                        objective["title"][:300], "captain_swarm_run", run["id"])
+    except Exception:
+        log.warning("captain swarm: the Go bell failed", owner=owner, exc_info=True)
+    return {"status": "awaiting_go", "run_id": run["id"], "title": run["title"],
+            "note": "It starts when your owner says Go on the Captain Swarm page."}
+
+
+@router.post("/agent/status")
+async def agent_status(body: AgentReq) -> dict:
+    run = await _cs_store().get_run(body.run_id)
+    if run is None or run["owner_id"] != _agent_owner(body):
+        return {"found": False}
+    return {"found": True, **_run_summary(run)}
+
+
+@router.post("/agent/get")
+async def agent_get(body: AgentReq) -> dict:
+    run = await _cs_store().get_run(body.run_id)
+    if run is None or run["owner_id"] != _agent_owner(body):
+        return {"found": False}
+    exps = await _cs_store().list_experiments(body.run_id)
+    return {"found": True, **_run_summary(run), "report": (run.get("state") or {}).get("report"),
+            "ledger": [{"round": e["round"], "n": e["n"], "status": e["status"], "hypothesis": e["hypothesis"][:300],
+                        "verdict": e["verdict_reason"][:300], "lesson": e["lesson"]} for e in exps[-body.limit:]]}
+
+
+@router.post("/agent/list")
+async def agent_list(body: AgentReq) -> dict:
+    runs = await _cs_store().list_runs(_agent_owner(body), limit=body.limit)
+    return {"runs": [_run_summary(r) for r in runs]}
+
+
+@router.post("/agent/cancel")
+async def agent_cancel(body: AgentReq) -> dict:
+    from captain_claw.flight_deck import captain_swarm_loop as loop_mod
+    from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    run = await _cs_store().get_run(body.run_id)
+    if run is None or run["owner_id"] != _agent_owner(body):
+        return {"found": False}
+    if run["status"] in TERMINAL_STATES:
+        return {"found": True, "status": run["status"]}
+    if run["status"] == "awaiting_go":
+        await _cs_store().set_status(body.run_id, "declined", "withdrawn by the agent")
+    else:
+        await loop_mod.cancel_run(_cs_store(), body.run_id)
+    return {"found": True, "status": (await _cs_store().get_run(body.run_id))["status"]}

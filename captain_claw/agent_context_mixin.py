@@ -133,6 +133,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
     "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
     "bat": "Bat — the stubborn finisher: start a long-running autonomous run that keeps working a goal across retries and strategy changes until an independent judge says it's genuinely done (survives restarts, reports back when finished); also status/get/list/cancel.",
+    "captain_swarm": "Captain Swarm — propose a run that keeps improving one measured number (it tries ideas one at a time, measures each on open and held-out cases, keeps only real gains, hands the owner the best branch); a run you propose waits for the owner's Go; also status/get/list/cancel.",
     "spend": "Inside a Bat run only: declare a real-money purchase for pre-authorization (auto-approved under the owner's per-item limit, else paused for the owner), then settle it with the actual amount. Never pay without an 'approved' id.",
     "ask_human": "Inside a Bat run only: pause the run to ask the owner for something only they can give (a verification code, 2FA/OTP, a CAPTCHA, a credential). Use kind='secret' for codes/passwords. Stop after calling; the step re-runs with their answer.",
     "insights": "Search and manage persistent cross-session insights — facts, contacts, decisions, preferences, deadlines auto-extracted from conversations. Actions: search, list, add, update, delete.",
@@ -208,6 +209,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "datastore": "persistent relational tables",
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
     "bat": "start/inspect a Bat run (stubborn finisher: works a goal until an independent judge says it's done)",
+    "captain_swarm": "propose/follow a Captain Swarm run (keeps improving a measured number; waits for the owner's Go)",
     "spend": "Bat-run only: pre-authorize a real-money purchase (capped; owner approves over the per-item limit), then settle it",
     "ask_human": "Bat-run only: pause and ask the owner for a code/credential/CAPTCHA you can't get yourself (secret kind for private values)",
     "insights": "persistent cross-session insights (facts, contacts, decisions, deadlines)",
@@ -2773,6 +2775,11 @@ class AgentContextMixin:
             # unavailable; the tool refuses recursion from inside any run).
             from captain_claw.tools.bat import BatTool
             self.tools.register(BatTool())
+            # Captain Swarm — proposes a run that keeps improving a measured number.
+            # Always registered; a run it proposes waits for the owner's Go, and it
+            # refuses from inside any run.
+            from captain_claw.tools.captain_swarm import CaptainSwarmTool
+            self.tools.register(CaptainSwarmTool())
             # Bat worker's capped real-money spend. Always registered; refuses
             # outside a Bat run (CLAW_BAT_SESSION unset), so it's inert elsewhere.
             from captain_claw.tools.bat_spend import SpendTool
