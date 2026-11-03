@@ -1,4 +1,4 @@
-"""Web search tool powered by Brave Search API, Tavily, or You.com."""
+"""Web search tool powered by Brave Search API, Tavily, You.com, or Keenable."""
 
 import os
 import re
@@ -107,6 +107,11 @@ class WebSearchTool(Tool):
             if any([offset, country.strip(), freshness.strip(), safesearch.strip()]):
                 log.debug("Tavily provider ignores offset/country/freshness/safesearch parameters")
             return await self._execute_tavily(q, search_cfg, count=count)
+
+        if provider == "keenable":
+            if any([offset, country.strip(), freshness.strip(), safesearch.strip()]):
+                log.debug("Keenable provider ignores offset/country/freshness/safesearch parameters")
+            return await self._execute_keenable(q, search_cfg, count=count)
 
         if provider == "youcom":
             if offset:
@@ -307,6 +312,84 @@ class WebSearchTool(Tool):
             if body:
                 detail = f"{detail}: {self._clean_text(body, max_chars=300)}"
             log.error("Tavily web search failed", query=query, error=detail)
+            return ToolResult(success=False, error=detail)
+        except Exception as e:
+            log.error("Web search failed", query=query, error=str(e))
+            return ToolResult(success=False, error=str(e))
+
+    async def _execute_keenable(
+        self,
+        query: str,
+        search_cfg: Any,
+        count: int | None = None,
+    ) -> ToolResult:
+        """Execute a Keenable web search.
+
+        Works without an API key (keyless public endpoint). If
+        tools.web_search.keenable_api_key or KEENABLE_API_KEY is set, the
+        keyed endpoint is used instead.
+        """
+        api_key = (
+            str(getattr(search_cfg, "keenable_api_key", "") or "").strip()
+            or str(os.environ.get("KEENABLE_API_KEY", "")).strip()
+        )
+        timeout = float(getattr(search_cfg, "timeout", 20) or 20)
+        default_count = int(getattr(search_cfg, "max_results", 5) or 5)
+        effective_count = default_count if count is None else int(count)
+        effective_count = min(max(effective_count, 1), 20)
+
+        headers = {"Content-Type": "application/json", "X-Keenable-Title": "Captain Claw"}
+        url = "https://api.keenable.ai/v1/search/public"
+        if api_key:
+            headers["X-API-Key"] = api_key
+            url = "https://api.keenable.ai/v1/search"
+
+        try:
+            response = await self.client.post(
+                url,
+                json={"query": query, "max_results": effective_count},
+                headers=headers,
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            data = response.json()
+
+            results = data.get("results", []) if isinstance(data, dict) else []
+            if not isinstance(results, list):
+                results = []
+            results = [r for r in results if isinstance(r, dict) and r.get("url")]
+
+            lines = [
+                "[SEARCH ENGINE: Keenable]",
+                f"[QUERY: {query}]",
+                f"[RESULTS: {len(results)}]",
+                "",
+            ]
+            if not results:
+                lines.append("No results found.")
+            else:
+                for idx, item in enumerate(results, start=1):
+                    title = self._clean_text(str(item.get("title", "") or "Untitled"), max_chars=180)
+                    link = str(item.get("url", "") or "").strip()
+                    desc = self._clean_text(
+                        str(item.get("description", "") or item.get("snippet", "") or "")
+                    )
+                    lines.append(f"{idx}. {title}")
+                    lines.append(f"   URL: {link}")
+                    lines.append(f"   Snippet: {desc or '-'}")
+                    lines.append("")
+
+            return ToolResult(success=True, content="\n".join(lines).strip())
+        except httpx.HTTPStatusError as e:
+            body = ""
+            try:
+                body = (e.response.text or "").strip()
+            except Exception:
+                body = ""
+            detail = f"HTTP {e.response.status_code}" if e.response is not None else str(e)
+            if body:
+                detail = f"{detail}: {self._clean_text(body, max_chars=300)}"
+            log.error("Keenable web search failed", query=query, error=detail)
             return ToolResult(success=False, error=detail)
         except Exception as e:
             log.error("Web search failed", query=query, error=str(e))
