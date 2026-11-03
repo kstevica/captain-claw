@@ -6,7 +6,9 @@ import { useUIStore } from '../../stores/uiStore'
 import { APP_VERSION } from '../../version'
 import { useChatStore } from '../../stores/chatStore'
 import { openConsole, selectConsoleAdmin } from '../../stores/consoleStore'
+import { useEffect } from 'react'
 import { NotificationBell } from '../common/NotificationCenter'
+import { OPEN_LINE_EVENT } from '../../services/line'
 
 interface TopBarProps {
   directorOpen?: boolean
@@ -39,6 +41,15 @@ export function TopBar({
   const chatSessions = useChatStore((s) => s.sessions)
 
   const compact = isMobile || isTablet
+
+  // The bell's link to the Line: its page, in the full view (the top bar is
+  // there on every screen size; the kiosk opens its own dialog).
+  const setView = useUIStore((s) => s.setView)
+  useEffect(() => {
+    const open = () => setView('line')
+    window.addEventListener(OPEN_LINE_EVENT, open)
+    return () => window.removeEventListener(OPEN_LINE_EVENT, open)
+  }, [setView])
 
   const refresh = () => {
     fetchInstances()

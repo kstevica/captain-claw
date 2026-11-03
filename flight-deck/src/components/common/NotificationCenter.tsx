@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import Markdown, { type Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Bell, X, CheckCheck, Trash2, AlertTriangle, Info, CheckCircle2, AlertCircle, ListChecks, Loader2, Maximize2 } from 'lucide-react'
+import { Bell, X, CheckCheck, Trash2, AlertTriangle, Info, CheckCircle2, AlertCircle, ListChecks, Loader2, Maximize2, Waypoints } from 'lucide-react'
 import { useNotificationStore, type Notification, type NotificationType } from '../../stores/notificationStore'
 import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
+import { OPEN_LINE_EVENT } from '../../services/line'
 import { taskboardApi } from '../../services/taskboardApi'
 import { useTaskboardStore } from '../../stores/taskboardStore'
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
@@ -244,8 +245,10 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
   }
 
   const filtered = filter === 'all' ? notifications : notifications.filter((n) => n.type === filter)
-  // What still waits for Approve / Reject goes on top; the rest keep their order.
-  const waits = (n: Notification) => n.refType === 'autonomy_action' && !!n.refId && !!waiting?.has(n.refId)
+  // What still waits for the user goes on top — a proposal until it's
+  // approved or rejected, anything else until it's read; the rest keep their order.
+  const waits = (n: Notification) => (n.refType === 'autonomy_action'
+    ? !!n.refId && !!waiting?.has(n.refId) : !!n.needsYou && !n.resolved)
   const shown = [...filtered.filter(waits), ...filtered.filter((n) => !waits(n))]
 
   return (
@@ -291,7 +294,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
 
       <div className="flex-1 overflow-y-auto">
         {shown.length === 0 ? (
-          <div className="px-3 py-6 text-center text-xs text-zinc-600">No notifications</div>
+          <div className="px-3 py-6 text-center text-xs text-zinc-600">Nothing waits for you</div>
         ) : (
           shown.map((n) => {
             const setup = (n.refType === 'agent_setup' || n.refType === 'agent_exam' || n.refType === 'agent_lessons')
@@ -324,6 +327,14 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
           })
         )}
       </div>
+      {/* The bell is the Line's Needs-you part: the rest is on the Line. */}
+      <button
+        onClick={() => { onClose(); window.dispatchEvent(new Event(OPEN_LINE_EVENT)) }}
+        className={`flex items-center justify-center gap-1.5 border-t border-zinc-800 text-violet-600 hover:bg-zinc-900/40 dark:text-violet-400 ${large ? 'px-5 py-2.5 text-xs' : 'px-3 py-2 text-[11px]'}`}
+        title="Results, finished runs, fleet changes and everything else the deck said on its own"
+      >
+        <Waypoints className="h-3.5 w-3.5" /> Everything else is on the Line — open it
+      </button>
     </div>
   )
 }

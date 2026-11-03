@@ -37,6 +37,7 @@ import {
   Bug,
   IdCard,
   Receipt,
+  Waypoints,
 } from 'lucide-react'
 import { useCrewAllowed } from '../../stores/crewStore'
 import { usePaymentsEnabled } from '../../services/payments'
@@ -46,6 +47,7 @@ import { useAuthStore } from '../../stores/authStore'
 import { useConnectionStore } from '../../stores/connectionStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useOnboardingStore } from '../../stores/onboardingStore'
+import { useLineStore } from '../../stores/lineStore'
 import { botportWS } from '../../services/ws'
 import { StatusBadge } from '../common/StatusBadge'
 import { BrandMark } from '../common/BrandMark'
@@ -57,6 +59,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
   {
     title: 'Workspace',
     items: [
+      { id: 'line', icon: Waypoints, label: 'Line' },
       { id: 'quick-chat', icon: MessagesSquare, label: 'Quick chat' },
       { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
       { id: 'payments', icon: Receipt, label: 'Payments', needsPayments: true },
@@ -141,6 +144,8 @@ const navSections: { title: string; items: NavItem[] }[] = [
 
 export function Sidebar() {
   const { view, setView, sidebarOpen, toggleSidebar } = useUIStore()
+  // The Line's badge: what's unread on it.
+  const lineUnread = useLineStore((s) => s.unread)
   const { instances, wsConnected, selectInstance, selectedInstanceId, fetchInstances, fetchStats, fetchConcerns } = useAgentStore()
   const { authEnabled, user: authUser } = useAuthStore()
   const paymentsOn = usePaymentsEnabled()
@@ -274,8 +279,16 @@ export function Sidebar() {
                     {((id === 'forge' && !onboardingCompleted.forge) || (id === 'council' && !onboardingCompleted.council)) && (
                       <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-violet-500 animate-pulse" />
                     )}
+                    {id === 'line' && lineUnread > 0 && !sidebarOpen && (
+                      <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-violet-500" />
+                    )}
                   </span>
                   {sidebarOpen && label}
+                  {sidebarOpen && id === 'line' && lineUnread > 0 && (
+                    <span className="ml-auto rounded-full bg-violet-600/20 px-1.5 text-[10px] font-semibold text-violet-600 dark:text-violet-300">
+                      {lineUnread > 99 ? '99+' : lineUnread}
+                    </span>
+                  )}
                 </button>
               ))}
             </div>

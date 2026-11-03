@@ -1807,6 +1807,7 @@ from captain_claw.flight_deck.context_pack_routes import router as context_pack_
 from captain_claw.flight_deck.shared_workspace_routes import router as shared_workspace_router
 from captain_claw.flight_deck.shared_usage_routes import router as shared_usage_router
 from captain_claw.flight_deck.notification_routes import router as notification_router
+from captain_claw.flight_deck.line_routes import router as line_router
 from captain_claw.flight_deck.mcp_server_routes import router as mcp_inbound_router
 from captain_claw.flight_deck.mcp_oauth_routes import router as mcp_oauth_router
 from captain_claw.flight_deck.costs_routes import router as costs_router
@@ -1952,6 +1953,7 @@ app.include_router(context_pack_router)
 app.include_router(shared_workspace_router)
 app.include_router(shared_usage_router)
 app.include_router(notification_router)
+app.include_router(line_router)
 app.include_router(mcp_inbound_router)
 app.include_router(mcp_oauth_router)
 app.include_router(costs_router)
@@ -6995,6 +6997,19 @@ async def _notify_fleet_change(new_agent_name: str, new_agent_port: int, event: 
         wp = entry.get("web_port", 0)
         if wp and wp != new_agent_port and _process_is_alive(slug):
             targets.append(("localhost", wp, entry.get("web_auth", "")))
+
+    # The owner's Line keeps it too, peers or not.
+    from captain_claw.flight_deck import line as _line
+
+    _peers = len(targets)
+    await _line.post(
+        owner_id, "fleet",
+        f"{new_agent_name} moved to port {new_agent_port}" if event == "rebound"
+        else f"{new_agent_name} {event} the fleet",
+        f"Port {new_agent_port}. " + (f"{_peers} other agent{'s' if _peers != 1 else ''} running."
+                                      if _peers else "No other agent running."),
+        bell_type="fleet", source=new_agent_name,
+    )
 
     if not targets:
         return
