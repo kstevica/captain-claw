@@ -386,7 +386,7 @@ def test_routes_show_and_forget_lessons_and_save_a_playbook(store, monkeypatch):
 
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "user"}
+    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "admin"}
     _outcome_run(store, status="running")
     run(learning.record_run(store, run(store.get_run("cs_000000000001"))))
     saved = []

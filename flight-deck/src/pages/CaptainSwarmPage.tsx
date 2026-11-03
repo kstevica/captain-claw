@@ -7,6 +7,7 @@ import { CalendarCheck, Loader2, Mail, Square, Target, Trash2 } from 'lucide-rea
 import { captainSwarmApi } from '../services/captainSwarm'
 import type { Measurement, PracticeSet } from '../services/captainSwarm'
 import { useProcessStore } from '../stores/processStore'
+import { useCanSwarm } from '../stores/captainSwarmStore'
 import { RunsPanel } from '../components/captainSwarm/RunsPanel'
 
 const pct = (n?: number) => `${Math.round((n || 0) * 100)}%`
@@ -331,6 +332,18 @@ function Measure({ set }: { set: PracticeSet }) {
 }
 
 export function CaptainSwarmPage() {
+  const canSwarm = useCanSwarm()
+  if (!canSwarm) {
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-sm text-zinc-400">
+        Captain Swarm is open to this deck's admins only.
+      </div>
+    )
+  }
+  return <SwarmPage />
+}
+
+function SwarmPage() {
   const [tab, setTab] = useState<'runs' | 'practice'>('runs')
   return (
     <div className="h-full overflow-y-auto bg-zinc-950">

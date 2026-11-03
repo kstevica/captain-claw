@@ -74,7 +74,7 @@ import { takeTaskboardLink, useTaskboardStore } from '../../stores/taskboardStor
 import { TaskBoard } from '../taskboard/TaskBoard'
 import { CrewBoard } from '../crew/CrewBoard'
 import { useCrewAllowed, useCrewStore } from '../../stores/crewStore'
-import { useCaptainSwarmStore } from '../../stores/captainSwarmStore'
+import { useCaptainSwarmStore, useCanSwarm } from '../../stores/captainSwarmStore'
 import { CaptainSwarmPage } from '../../pages/CaptainSwarmPage'
 import { SharedFolders } from '../vfs/SharedFolders'
 import { DialogFullscreen } from '../library/dialogFullscreen'
@@ -381,6 +381,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Captain Swarm: many attempts at one task, documents and research, each checked by Captain.
   const swarmOpen = useCaptainSwarmStore((s) => s.open)
   const closeSwarm = useCaptainSwarmStore((s) => s.close)
+  const canSwarm = useCanSwarm()
   const taskboardCount = useTaskboardStore((s) => s.needsMe)
   // Shared folders: the files the agents keep together (vfs:<folder>/…).
   const [foldersOpen, setFoldersOpen] = useState(false)
@@ -1031,7 +1032,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           <CrewBoard phone={isMobile} onClose={closeCrew} />
         </KioskWideDialog>
       )}
-      {swarmOpen && (
+      {swarmOpen && canSwarm && (
         <KioskWideDialog label="Captain Swarm" phone={isMobile} onClose={closeSwarm} roomy>
           <div className="flex h-full min-h-0 flex-col">
             <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-3 py-2">
@@ -1262,6 +1263,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
   const crewAllowed = useCrewAllowed()
   const openCrew = useCrewStore((s) => s.openCrew)
   const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
+  const canSwarm = useCanSwarm()
 
   // Closed without choosing: the focus goes back to the Settings button.
   const [opener] = useState(() => document.activeElement as HTMLElement | null)
@@ -1278,7 +1280,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
       items: [
         { icon: ListChecks, label: 'Taskboard', hint: 'Asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
         ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: () => { onClose(); openCrew() }, tone: 'teal' as const }] : []),
-        { icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: () => { onClose(); openSwarm() }, tone: 'amber' },
+        ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: () => { onClose(); openSwarm() }, tone: 'amber' as const }] : []),
         { icon: AlarmClock, label: 'Scheduled tasks', hint: 'On a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
         { icon: Activity, label: 'Activity', hint: 'Every tool they used, and how it went', onSelect: onActivity, tone: 'emerald' },
       ],
@@ -1520,7 +1522,8 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
   const crewAllowed = useCrewAllowed()
   const openCrew = useCrewStore((s) => s.openCrew)
   const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
-  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders, crewAllowed, true].filter(Boolean).length
+  const canSwarm = useCanSwarm()
+  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders, crewAllowed, canSwarm].filter(Boolean).length
   return (
     <div className={`grid gap-0.5 border-t border-zinc-800 p-2 pb-0 ${TILE_COLS[n] ?? 'grid-cols-1'}`}>
       {onTaskboard && (
@@ -1554,10 +1557,12 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
           <span className="max-w-full truncate">Crew</span>
         </button>
       )}
-      <button onClick={openSwarm} className={toolTile} title="Captain Swarm — many tries at one task, document or research, each checked by Captain">
-        <Target className="h-[18px] w-[18px] text-amber-600 dark:text-amber-400" />
-        <span className="max-w-full truncate">Swarm</span>
-      </button>
+      {canSwarm && (
+        <button onClick={openSwarm} className={toolTile} title="Captain Swarm — many tries at one task, document or research, each checked by Captain">
+          <Target className="h-[18px] w-[18px] text-amber-600 dark:text-amber-400" />
+          <span className="max-w-full truncate">Swarm</span>
+        </button>
+      )}
       {onLibrary && (
         <button onClick={onLibrary} className={toolTile} title="File library — every file your agents made, summarised and searchable">
           <LibraryBig className="h-[18px] w-[18px] text-violet-600 dark:text-violet-400" />

@@ -31,7 +31,8 @@ class CaptainSwarmTool(Tool):
         "Captain Swarm — a run that keeps improving one measured number: it tries ideas — one at a time, or "
         "several at once (option parallel) — measures every attempt itself on open and held-out cases, keeps "
         "only gains bigger than the noise that a reviewing model passes, and hands your owner the best result. "
-        "A run you start WAITS for your owner's Go. Templates: 'mrav' (make Captain's "
+        "A run you start WAITS for your owner's Go. Only agents of the deck's admins may use it. "
+        "Templates: 'mrav' (make Captain's "
         "small-model runtime pass more of its eval, each idea in its own git branch by a coding worker; "
         "options: model, harness, budget_tokens, budget_hours, budget_max_experiments, per_round, parallel); "
         "'triage' (improve an agent's email-triage rules against what the "
@@ -92,7 +93,11 @@ class CaptainSwarmTool(Tool):
                                      json={**self._identity(fd_url), **payload},
                                      headers=_agent_secret_headers(fd_url))
         if resp.status_code == 403:
-            return {"_error": "this agent's owner could not be resolved (not authorized)"}
+            try:
+                detail = str(resp.json().get("detail") or "")
+            except ValueError:
+                detail = ""
+            return {"_error": detail or "this agent's owner could not be resolved (not authorized)"}
         if resp.status_code == 404:
             return {"_error": "Captain Swarm isn't on this Flight Deck yet"}
         resp.raise_for_status()

@@ -54,7 +54,8 @@ import { StatusBadge } from '../common/StatusBadge'
 import { BrandMark } from '../common/BrandMark'
 import type { ViewMode } from '../../types'
 
-type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; needsPayments?: boolean; needsCrew?: boolean }
+// adminOnly needs sign-in on; adminOrLocal is also shown on a deck with sign-in off (its one user is the admin).
+type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; adminOrLocal?: boolean; needsPayments?: boolean; needsCrew?: boolean }
 
 const navSections: { title: string; items: NavItem[] }[] = [
   {
@@ -72,7 +73,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
       { id: 'council', icon: Users, label: 'Council' },
       { id: 'basna', icon: Network, label: 'Basna' },
       { id: 'bat', icon: Hammer, label: 'Bat' },
-      { id: 'captain-swarm', icon: Target, label: 'Captain Swarm' },
+      { id: 'captain-swarm', icon: Target, label: 'Captain Swarm', adminOrLocal: true },
       { id: 'code', icon: Code2, label: 'Code' },
       { id: 'crew', icon: Ship, label: 'Crew', needsCrew: true },
     ],
@@ -251,6 +252,7 @@ export function Sidebar() {
         {navSections.map((section, sectionIndex) => {
           const items = section.items.filter((item) => {
             if (item.adminOnly) return authEnabled && authUser?.role === 'admin'
+            if (item.adminOrLocal) return authEnabled === false || authUser?.role === 'admin'
             if (item.needsPayments) return paymentsOn
             if (item.needsCrew) return crewOn
             return true
