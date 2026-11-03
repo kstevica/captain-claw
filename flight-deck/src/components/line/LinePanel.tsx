@@ -7,13 +7,15 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import {
-  addLineSummary, askLine, fetchLine, handLineItem, LINE_PAGE, markAllLineRead, markLineRead, type LineItem,
+  addLineSummary, askLine, fetchLine, fetchThread, handLineItem, LINE_PAGE, markAllLineRead, markThreadRead,
+  type LineItem,
 } from '../../services/line'
 import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
 import { useLineStore } from '../../stores/lineStore'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
 import NotificationsConnection from '../connections/NotificationsConnection'
+import { FullscreenButton } from '../library/libraryParts'
 
 type Agent = { slug: string; name: string }
 
@@ -98,6 +100,44 @@ function headlineOf(item: LineItem): { headline: string; preview: string } {
   return { headline: item.title, preview: lines.join(' ') }
 }
 const isFailed = (item: LineItem) => /_(error|failed)$/.test(item.type) || item.type === 'error'
+/** The user's own words on the Line: a question asked, an item handed over. */
+const isMine = (item: LineItem) => item.kind === 'talk' && item.title.startsWith('You ')
+/** Who said an item, in a thread's last line. */
+const actorOf = (item: LineItem) => (isMine(item) ? 'You' : whoOf(item) || KIND_WORD[item.kind] || 'Deck')
+/** An item in one line: what was said, for what was talked; else its headline. */
+const snippetOf = (item: LineItem) => (item.kind === 'talk'
+  ? plainLines(item.body)[0] || item.title : headlineOf(item).headline)
+/** A later headline without what it shares with the thread's topic
+ *  ("Taskboard: Q4 update — step 2 done" under "Taskboard: Q4 update — …"). */
+function past(topic: string, text: string): string {
+  let n = 0
+  while (n < topic.length && topic[n] === text[n]) n++
+  const cut = text.lastIndexOf(' — ', n - 1)
+  return cut > 0 && cut + 3 < text.length ? text.slice(cut + 3) : text
+}
+
+/** What belongs together on the Line: an item, its hand-overs and their
+ *  answers, or everything about one Taskboard task — newest first. */
+type Thread = { id: string; items: LineItem[]; root: LineItem; latest: LineItem }
+function groupThreads(items: LineItem[]): Thread[] {
+  const byId = new Map<string, LineItem[]>()
+  for (const item of items) {
+    const id = item.thread_id || item.id
+    const list = byId.get(id)
+    if (list) list.push(item)
+    else byId.set(id, [item])
+  }
+  return [...byId].map(([id, list]) => ({ id, items: list, root: list[list.length - 1], latest: list[0] }))
+}
+/** What a thread is about: its first item's headline — a question's own words,
+ *  or (when the first item is out of reach) the item a hand-over names. */
+function topicOf(root: LineItem): string {
+  if (isMine(root)) {
+    return /^You handed “(.+)” to /.exec(root.title)?.[1] || plainLines(root.body)[0] || root.title
+  }
+  return headlineOf(root).headline
+}
+const threadWaits = (t: Thread) => t.items.some((i) => i.needs_you && !i.resolved)
 
 const sameDay = (a: Date, b: Date) => a.toDateString() === b.toDateString()
 function dayLabel(iso: string): string {
@@ -117,6 +157,12 @@ function shortTime(iso: string): string {
   if (sameDay(d, now)) return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
   if (now.getTime() - d.getTime() < 6 * 86_400_000) return d.toLocaleDateString(undefined, { weekday: 'short' })
   return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short' })
+}
+function clock(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+  return sameDay(d, new Date()) ? time : `${shortTime(iso)}, ${time}`
 }
 function ago(iso: string): string {
   const s = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
@@ -156,10 +202,10 @@ function useWidth<T extends HTMLElement>(): [React.RefObject<T | null>, number] 
   return [ref, width]
 }
 
-/** The Line: what the deck and the agents said on their own, newest first —
- *  a list, the open item beside it (on a phone, in its place), and one box to
- *  ask an agent about the Line or hand it the open item. The bell holds the
- *  part of it that needs you. */
+/** The Line: what the deck and the agents said on their own, newest first and
+ *  in threads — a list, the open thread beside it (on a phone, in its place) as
+ *  a conversation, and one box to ask an agent about the Line or hand it the
+ *  open thread. The bell holds the part of it that needs you. */
 export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }) {
   const [rootRef, width] = useWidth<HTMLDivElement>()
   const wide = width >= TWO_PANES
@@ -171,14 +217,14 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
   const [older, setOlder] = useState(false)
   const [more, setMore] = useState(false)
   const [error, setError] = useState('')
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-  // Where the Line reaches you besides Flight Deck, in the open item's place.
+  const [threadId, setThreadId] = useState<string | null>(null)
+  // Where the Line reaches you besides Flight Deck, in the open thread's place.
   const [channels, setChannels] = useState(false)
   // The agent that answers on the Line, and the user's agents.
   const [lineAgent, setLineAgent] = useState({ slug: '', name: '' })
   const [agents, setAgents] = useState<Agent[]>([])
-  // A question or a hand-over waiting for its answer.
-  const [asked, setAsked] = useState<{ id: string; agent: string; at: number; from: string | null } | null>(null)
+  // A question or a hand-over waiting for its answer, and its thread.
+  const [asked, setAsked] = useState<{ id: string; agent: string; at: number; thread: string } | null>(null)
   // Proposals on the Line still waiting, by id: Approve / Reject here too.
   const [proposals, setProposals] = useState<Map<string, WaitingProposal> | null>(null)
   const setCounts = useLineStore((s) => s.set)
@@ -239,8 +285,9 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
     void loadRef.current()
   }, [bellState])
 
-  // A question asked: read the Line every few seconds until its answer comes,
-  // then open the answer (unless the user went on to something else).
+  // A question asked: read the Line every few seconds until its answer comes
+  // (it joins the question's thread, which is open — or opens, unless the user
+  // went on to something else).
   useEffect(() => {
     if (!asked) return
     const t = setInterval(() => {
@@ -252,11 +299,11 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
   useEffect(() => {
     if (!asked) return
     const q = items.find((i) => i.id === asked.id)
-    const answer = q && items.find((i) => i.kind === 'talk' && i.source === asked.agent && i.id !== q.id
-      && i.created_at > q.created_at && !i.title.startsWith('You '))
+    const answer = q && items.find((i) => i.kind === 'talk' && !isMine(i) && i.source === asked.agent
+      && i.created_at > q.created_at && (i.thread_id || i.id) === asked.thread)
     if (!answer) return
     setAsked(null)
-    setSelectedId((cur) => (cur === null || cur === asked.from || cur === q.id ? answer.id : cur))
+    setThreadId((cur) => cur ?? asked.thread)
   }, [items, asked])
 
   const waitingIds = items.filter((i) => i.ref_type === 'autonomy_action' && i.needs_you && !i.resolved)
@@ -290,14 +337,6 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
     void useLineStore.getState().refresh()
     void useNotificationStore.getState().hydrateFromServer()
   }
-  const read = (item: LineItem) => {
-    if (item.read) return
-    setItems((prev) => prev.map((i) => (i.id === item.id ? {
-      ...i, read: true, resolved: i.resolved || (i.needs_you && i.ref_type !== 'autonomy_action'),
-    } : i)))
-    setCounts({ unread: Math.max(0, counts.unread - 1), waiting: counts.waiting })
-    void markLineRead(item.id).then(syncBell)
-  }
   const readAll = async () => {
     setItems((prev) => prev.map((i) => ({
       ...i, read: true, resolved: i.resolved || (i.needs_you && i.ref_type !== 'autonomy_action'),
@@ -305,27 +344,30 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
     await markAllLineRead()
     syncBell()
   }
-  const open = (item: LineItem) => {
-    setChannels(false)
-    setSelectedId(item.id)
-  }
-  const back = () => { setSelectedId(null); setChannels(false) }
-  const answered = (item: LineItem) => {
-    read(item)
+  const back = () => { setThreadId(null); setChannels(false) }
+  const answered = () => {
     loadProposals()
     void loadRef.current()
     syncBell()
   }
 
-  const selected = useMemo(() => items.find((i) => i.id === selectedId) || null, [items, selectedId])
-  // Open is read — opened by a click, or an answer that opened on its own.
-  const readRef = useRef(read)
-  readRef.current = read
+  const threads = useMemo(() => groupThreads(items), [items])
+  const thread = useMemo(() => threads.find((t) => t.id === threadId) || null, [threads, threadId])
+  // An open thread is read — opened by a click, or one that opened by itself
+  // or got a new item while open.
+  const unreadKey = thread ? thread.items.filter((i) => !i.read).map((i) => i.id).join(',') : ''
   useEffect(() => {
-    if (selected && !selected.read) readRef.current(selected)
-  }, [selected])
+    if (!threadId || !unreadKey) return
+    const n = unreadKey.split(',').length
+    setItems((prev) => prev.map((i) => ((i.thread_id || i.id) === threadId && !i.read ? {
+      ...i, read: true, resolved: i.resolved || (i.needs_you && i.ref_type !== 'autonomy_action'),
+    } : i)))
+    setCounts({ unread: Math.max(0, useLineStore.getState().unread - n), waiting: useLineStore.getState().waiting })
+    void markThreadRead(threadId).then(syncBell)
+  }, [threadId, unreadKey, setCounts])
+
   const chips = useMemo(() => Object.keys(kinds).filter((k) => seenKinds.includes(k)), [kinds, seenKinds])
-  const detailShown = channels || selected !== null
+  const detailShown = channels || threadId !== null
   const iconBtn = (on = false) => `flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs transition-colors ${
     on ? 'bg-violet-500/15 text-violet-700 dark:text-violet-300' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200'}`
 
@@ -347,16 +389,16 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
           <EmptyList error={error} filtered={!!filter} />
         ) : (
           <ul>
-            {items.map((item, i) => {
-              const day = dayLabel(item.created_at)
-              const showDay = i === 0 || dayLabel(items[i - 1].created_at) !== day
+            {threads.map((t, i) => {
+              const day = dayLabel(t.latest.created_at)
+              const showDay = i === 0 || dayLabel(threads[i - 1].latest.created_at) !== day
               return (
-                <li key={item.id}>
+                <li key={t.id}>
                   {showDay && (
                     <div className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-wider text-zinc-500">{day}</div>
                   )}
-                  <ListRow item={item} selected={item.id === selectedId} onOpen={() => open(item)}
-                    proposal={item.ref_type === 'autonomy_action' ? proposals?.get(item.ref_id) : undefined} />
+                  <ThreadRow thread={t} selected={t.id === threadId} proposals={proposals}
+                    onOpen={() => { setChannels(false); setThreadId(t.id) }} />
                 </li>
               )
             })}
@@ -376,10 +418,10 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
 
   const detail = channels ? (
     <ChannelsView agent={lineAgent.name} onBack={wide ? undefined : back} onClose={() => setChannels(false)} />
-  ) : selected ? (
-    <Detail item={selected} onBack={wide ? undefined : back}
-      proposal={selected.ref_type === 'autonomy_action' ? proposals?.get(selected.ref_id) : undefined}
-      onAnswered={() => answered(selected)} />
+  ) : threadId ? (
+    <ThreadView key={threadId} threadId={threadId} known={thread?.items || []} proposals={proposals}
+      pending={asked && asked.thread === threadId ? asked.agent : ''}
+      onBack={wide ? undefined : back} onAnswered={answered} />
   ) : (
     <EmptyDetail unread={counts.unread} waiting={counts.waiting} />
   )
@@ -402,6 +444,7 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
           title="Mark everything read">
           <CheckCheck className="h-4 w-4" /><span className={wide ? '' : 'sr-only'}>Mark all read</span>
         </button>
+        <FullscreenButton className={iconBtn()} />
         {onClose && (
           <button onClick={onClose} className={iconBtn()} title="Close" aria-label="Close">
             <X className="h-4 w-4" />
@@ -412,7 +455,7 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
       <div className="flex min-h-0 flex-1">
         {wide ? (
           <>
-            <div className="flex w-[min(400px,42%)] shrink-0 flex-col border-r border-zinc-800">{list}</div>
+            <div className="flex w-[min(400px,40%)] shrink-0 flex-col border-r border-zinc-800">{list}</div>
             <div className="flex min-w-0 flex-1 flex-col">{detail}</div>
           </>
         ) : detailShown ? (
@@ -421,9 +464,18 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
       </div>
 
       {!channels && (
-        <Composer agents={agents} lineAgent={lineAgent} target={selected} pending={asked?.agent || ''} compact={!wide}
-          onDetach={() => setSelectedId(null)}
-          onSent={(id, agent) => { setAsked({ id, agent, at: Date.now(), from: selected?.id || null }); void loadRef.current() }}
+        <Composer agents={agents} lineAgent={lineAgent} compact={!wide}
+          talkedTo={thread?.items.find((i) => i.kind === 'talk')?.source || ''}
+          target={thread?.latest || null} about={thread ? topicOf(thread.root) : ''}
+          more={!!thread && (thread.items.length > 1 || isMine(thread.root))}
+          pending={asked && asked.thread !== threadId ? asked.agent : ''}
+          onDetach={() => setThreadId(null)}
+          onSent={(id, agent, ask) => {
+            const t = ask ? id : threadId || id
+            setAsked({ id, agent, at: Date.now(), thread: t })
+            if (ask) { setChannels(false); setThreadId(id) }
+            void loadRef.current()
+          }}
           onSetUp={() => setChannels(true)} />
       )}
     </div>
@@ -444,16 +496,17 @@ function FilterChip({ label, on, onClick, count = 0 }: { label: string; on: bool
 }
 
 /** Who an item is from: the agent's initials in its colour, else the kind's icon. */
-function Avatar({ item, size = 'md' }: { item: LineItem; size?: 'md' | 'lg' }) {
+const AVATAR_BOX = { sm: 'h-7 w-7 rounded-lg text-[10px]', md: 'h-9 w-9 rounded-xl text-[11px]', lg: 'h-10 w-10 rounded-xl text-xs' }
+function Avatar({ item, size = 'md' }: { item: LineItem; size?: 'sm' | 'md' | 'lg' }) {
   const who = whoOf(item)
-  const box = size === 'lg' ? 'h-10 w-10 rounded-xl text-xs' : 'h-9 w-9 rounded-xl text-[11px]'
+  const box = AVATAR_BOX[size]
   if (who) {
     return <span className={`flex shrink-0 items-center justify-center font-semibold ${box} ${hueOf(who)}`}>{initials(who)}</span>
   }
   const Icon = KIND_ICON[item.kind] || Server
   return (
     <span className={`flex shrink-0 items-center justify-center bg-zinc-800 text-zinc-400 ${box}`}>
-      <Icon className={size === 'lg' ? 'h-5 w-5' : 'h-4 w-4'} />
+      <Icon className={size === 'lg' ? 'h-5 w-5' : size === 'sm' ? 'h-3.5 w-3.5' : 'h-4 w-4'} />
     </span>
   )
 }
@@ -469,47 +522,86 @@ function StatusPill({ item, proposal }: { item: LineItem; proposal?: WaitingProp
   return null
 }
 
-function ListRow({ item, selected, onOpen, proposal }: {
-  item: LineItem; selected: boolean; onOpen: () => void; proposal?: WaitingProposal
+/** A thread's state, in one pill: its last item failed, a proposal in it
+ *  waits, or something in it needs the user. */
+function ThreadPill({ thread, proposals }: { thread: Thread; proposals: Map<string, WaitingProposal> | null }) {
+  const pill = 'shrink-0 rounded-md px-1.5 py-px text-[10px] font-semibold'
+  if (isFailed(thread.latest)) return <span className={`${pill} bg-red-500/15 text-red-600 dark:text-red-400`}>Failed</span>
+  const proposal = thread.items.find((i) => i.ref_type === 'autonomy_action' && i.needs_you && !i.resolved)
+  if (proposal) {
+    return <span className={`${pill} bg-amber-500/15 text-amber-700 dark:text-amber-300`}>{proposals?.get(proposal.ref_id) ? 'Approve?' : 'Waiting'}</span>
+  }
+  if (threadWaits(thread)) return <span className={`${pill} bg-amber-500/15 text-amber-700 dark:text-amber-300`}>Needs you</span>
+  return null
+}
+
+function ThreadRow({ thread, selected, onOpen, proposals }: {
+  thread: Thread; selected: boolean; onOpen: () => void; proposals: Map<string, WaitingProposal> | null
 }) {
-  const who = whoOf(item)
-  const { headline, preview } = headlineOf(item)
+  const { root, latest } = thread
+  const who = whoOf(root)
+  const n = thread.items.length
+  const unread = thread.items.some((i) => !i.read)
+  // One item: what follows its headline; a thread: who said the last thing, and what.
+  const last = n > 1 ? `${actorOf(latest)}: ${past(topicOf(root), snippetOf(latest))}` : headlineOf(root).preview
   return (
     <button onClick={onOpen} aria-current={selected || undefined}
       className={`group relative flex w-full items-start gap-3 rounded-xl px-3 py-2.5 text-left transition-colors ${
         selected ? 'bg-violet-500/10 ring-1 ring-inset ring-violet-500/25' : 'hover:bg-zinc-900'}`}>
-      {!item.read && <span className="absolute left-1 top-[22px] h-1.5 w-1.5 rounded-full bg-violet-500" aria-label="Unread" />}
-      <Avatar item={item} />
+      {unread && <span className="absolute left-1 top-[22px] h-1.5 w-1.5 rounded-full bg-violet-500" aria-label="Unread" />}
+      <Avatar item={root} />
       <span className="min-w-0 flex-1">
         <span className="flex items-center gap-1.5">
-          <span className={`min-w-0 truncate text-xs ${item.read ? 'text-zinc-400' : 'font-semibold text-zinc-200'}`}>
-            {who || KIND_WORD[item.kind] || 'Deck'}
+          <span className={`min-w-0 truncate text-xs ${unread ? 'font-semibold text-zinc-200' : 'text-zinc-400'}`}>
+            {who || KIND_WORD[root.kind] || 'Deck'}
           </span>
-          {who && <span className="shrink-0 text-[11px] text-zinc-600">· {KIND_WORD[item.kind] || item.kind}</span>}
-          <span className="ml-auto shrink-0 pl-2 text-[11px] tabular-nums text-zinc-500">{shortTime(item.created_at)}</span>
+          {who && <span className="shrink-0 text-[11px] text-zinc-600">· {KIND_WORD[root.kind] || root.kind}</span>}
+          <span className="ml-auto shrink-0 pl-2 text-[11px] tabular-nums text-zinc-500">{shortTime(latest.created_at)}</span>
         </span>
         <span className="mt-0.5 flex items-center gap-1.5">
-          <span className={`min-w-0 truncate text-[13px] ${item.read ? 'text-zinc-300' : 'font-medium text-zinc-100'}`}>{headline}</span>
-          <StatusPill item={item} proposal={proposal} />
+          <span className={`min-w-0 truncate text-[13px] ${unread ? 'font-medium text-zinc-100' : 'text-zinc-300'}`}>{topicOf(root)}</span>
+          {n > 1 && (
+            <span className="flex shrink-0 items-center gap-0.5 rounded-md bg-zinc-800 px-1.5 py-px text-[10px] font-semibold text-zinc-400"
+              title={`${n} in this thread`}>
+              <MessagesSquare className="h-3 w-3" />{n}
+            </span>
+          )}
+          <ThreadPill thread={thread} proposals={proposals} />
         </span>
-        {preview && <span className="mt-0.5 block truncate text-xs text-zinc-500">{preview}</span>}
+        {last && <span className="mt-0.5 block truncate text-xs text-zinc-500">{last}</span>}
       </span>
     </button>
   )
 }
 
-function Detail({ item, proposal, onBack, onAnswered }: {
-  item: LineItem; proposal?: WaitingProposal; onBack?: () => void; onAnswered: () => void
+/** A thread as a conversation: the item it started with, then what followed —
+ *  the user's hand-overs on the right, the agents' answers on the left, other
+ *  items about the same task as cards — and who's still on it. */
+function ThreadView({ threadId, known, proposals, pending, onBack, onAnswered }: {
+  threadId: string; known: LineItem[]; proposals: Map<string, WaitingProposal> | null; pending: string
+  onBack?: () => void; onAnswered: () => void
 }) {
-  const who = whoOf(item)
-  const full = item.body.replace(TASK_LINK_LINE, '').trim()
-  // A generic title gives way to the text's own first line, as the heading.
-  const generic = GENERIC_TITLE.test(item.title) && !!full
-  const heading = generic ? headlineOf(item).headline : item.title
-  const body = generic ? full.replace(/^[^\n]*\n*/, '').trim() : full
-  const waiting = item.needs_you && !item.resolved
+  const [items, setItems] = useState<LineItem[] | null>(null)
+  // Read again whenever the list sees this thread change (a new item, an answer, a read).
+  const changes = known.map((i) => `${i.id}${i.read ? 'r' : ''}${i.resolved ? 'x' : ''}`).join(',')
+  useEffect(() => {
+    let gone = false
+    fetchThread(threadId).then((rows) => { if (!gone) setItems(rows) }).catch(() => {})
+    return () => { gone = true }
+  }, [threadId, changes])
+  const shown = items ?? [...known].reverse()
+  // Something new at the end (an answer, a hand-over, who's on it): bring it into view.
   const scroller = useRef<HTMLDivElement>(null)
-  useEffect(() => { scroller.current?.scrollTo({ top: 0 }) }, [item.id])
+  const seen = useRef(0)
+  const length = shown.length + (pending ? 1 : 0)
+  useEffect(() => {
+    if (seen.current && length > seen.current) {
+      scroller.current?.scrollTo({ top: scroller.current.scrollHeight, behavior: 'smooth' })
+    }
+    seen.current = length
+  }, [length])
+
+  const root = shown[0]
   return (
     <div className="flex min-h-0 flex-1 flex-col">
       {onBack && (
@@ -518,50 +610,158 @@ function Detail({ item, proposal, onBack, onAnswered }: {
         </button>
       )}
       <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto">
-        <div className="mx-auto max-w-2xl px-5 py-5 sm:px-6">
-          <div className="flex items-center gap-3">
-            <Avatar item={item} size="lg" />
-            <div className="min-w-0 flex-1">
-              <div className="flex items-center gap-2">
-                <span className="truncate text-sm font-medium text-zinc-100">{who || KIND_WORD[item.kind] || 'Flight Deck'}</span>
-                <StatusPill item={item} proposal={proposal} />
-              </div>
-              <div className="truncate text-[11px] text-zinc-500">
-                {who ? `${KIND_WORD[item.kind] || item.kind} · ` : ''}{fullTime(item.created_at)}
-              </div>
-            </div>
+        {!root ? (
+          <div className="flex items-center justify-center gap-2 py-16 text-xs text-zinc-500">
+            <Loader2 className="h-4 w-4 animate-spin" /> Opening…
           </div>
+        ) : (
+          <div className="mx-auto max-w-2xl space-y-5 px-5 py-5 sm:px-6">
+            <ThreadStart item={root} proposal={root.ref_type === 'autonomy_action' ? proposals?.get(root.ref_id) : undefined}
+              onAnswered={onAnswered} />
+            {shown.slice(1).map((item) => (
+              <ThreadEntry key={item.id} item={item} onAnswered={onAnswered}
+                proposal={item.ref_type === 'autonomy_action' ? proposals?.get(item.ref_id) : undefined} />
+            ))}
+            {pending && (
+              <div className="flex items-center gap-3">
+                <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg text-[10px] font-semibold ${hueOf(pending)}`}>
+                  {initials(pending)}
+                </span>
+                <span className="flex items-center gap-2 rounded-2xl rounded-tl-md bg-zinc-900 px-3.5 py-2 text-xs text-zinc-400 ring-1 ring-zinc-800">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" /> {pending} is on it…
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
 
-          <h3 className="mt-4 text-base font-semibold leading-snug text-zinc-100">{heading}</h3>
+/** The item a thread starts with: a header, its heading, its text — or a
+ *  question the user asked. */
+function ThreadStart({ item, proposal, onAnswered }: { item: LineItem; proposal?: WaitingProposal; onAnswered: () => void }) {
+  if (isMine(item)) {
+    return (
+      <div>
+        <div className="text-[11px] text-zinc-500">You asked {item.source} · {fullTime(item.created_at)}</div>
+        <h3 className="mt-1.5 text-base font-semibold leading-snug text-zinc-100">{topicOf(item)}</h3>
+      </div>
+    )
+  }
+  const who = whoOf(item)
+  const full = item.body.replace(TASK_LINK_LINE, '').trim()
+  // A generic title gives way to the text's own first line, as the heading.
+  const generic = GENERIC_TITLE.test(item.title) && !!full
+  const heading = generic ? headlineOf(item).headline : item.title
+  const body = generic ? full.replace(/^[^\n]*\n*/, '').trim() : full
+  return (
+    <div>
+      <div className="flex items-center gap-3">
+        <Avatar item={item} size="lg" />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="truncate text-sm font-medium text-zinc-100">{who || KIND_WORD[item.kind] || 'Flight Deck'}</span>
+            <StatusPill item={item} proposal={proposal} />
+          </div>
+          <div className="truncate text-[11px] text-zinc-500">
+            {who ? `${KIND_WORD[item.kind] || item.kind} · ` : ''}{fullTime(item.created_at)}
+          </div>
+        </div>
+      </div>
+      <h3 className="mt-4 text-base font-semibold leading-snug text-zinc-100">{heading}</h3>
+      <ProposalCard item={item} proposal={proposal} onAnswered={onAnswered} />
+      {body && (
+        <article className={`mt-3 ${PROSE}`}>
+          <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={LINE_MD}>{keepBreaks(body)}</Markdown>
+        </article>
+      )}
+      {item.trust === 'untrusted' && (
+        <p className="mt-3 text-[11px] text-zinc-500">This quotes someone else's words — links aren't followed and pictures aren't shown.</p>
+      )}
+    </div>
+  )
+}
 
-          {waiting && item.ref_type === 'autonomy_action' && (
-            <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-3">
-              {proposal && !proposal.taskboard ? (
-                <>
-                  <div className="text-xs font-medium text-amber-800 dark:text-amber-200">Waiting for your approval</div>
-                  <ProposalButtons id={item.ref_id} onAnswered={onAnswered} />
-                </>
-              ) : (
-                <div className="text-xs text-amber-800 dark:text-amber-200">
-                  {proposal?.taskboard ? 'A next step on the Taskboard — read and approve it on its task.'
-                    : 'Waiting for your answer — in the bell.'}
-                </div>
-              )}
-            </div>
-          )}
-
-          {body ? (
-            <article className={`mt-4 ${PROSE}`}>
+/** One later item in a thread. */
+function ThreadEntry({ item, proposal, onAnswered }: { item: LineItem; proposal?: WaitingProposal; onAnswered: () => void }) {
+  const body = item.body.replace(TASK_LINK_LINE, '').trim()
+  if (isMine(item)) {
+    return (
+      <div className="flex justify-end">
+        <div className="max-w-[85%]">
+          <div className="mb-1 text-right text-[11px] text-zinc-500">You → {item.source} · {clock(item.created_at)}</div>
+          <div className="whitespace-pre-wrap rounded-2xl rounded-tr-md bg-violet-500/15 px-3.5 py-2 text-[13px] leading-relaxed text-zinc-100">
+            {body || 'Look into it.'}
+          </div>
+        </div>
+      </div>
+    )
+  }
+  if (item.kind === 'talk') {
+    const failed = /couldn't answer/.test(item.title)
+    return (
+      <div className="flex gap-3">
+        <Avatar item={item} size="sm" />
+        <div className="min-w-0 flex-1">
+          <div className="text-[11px] text-zinc-500"><span className="font-medium text-zinc-300">{whoOf(item)}</span> · {clock(item.created_at)}</div>
+          {failed ? (
+            <p className="mt-1 text-xs text-zinc-500">Couldn't answer — {body}</p>
+          ) : (
+            <article className={`mt-1 ${PROSE}`}>
               <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={LINE_MD}>{keepBreaks(body)}</Markdown>
             </article>
-          ) : !generic && (
-            <p className="mt-4 text-xs text-zinc-500">Nothing more to it.</p>
-          )}
-          {item.trust === 'untrusted' && (
-            <p className="mt-4 text-[11px] text-zinc-500">This quotes someone else's words — links aren't followed and pictures aren't shown.</p>
           )}
         </div>
       </div>
+    )
+  }
+  const who = whoOf(item)
+  const generic = GENERIC_TITLE.test(item.title) && !!body
+  const heading = generic ? headlineOf(item).headline : item.title
+  const rest = generic ? body.replace(/^[^\n]*\n*/, '').trim() : body
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 p-4">
+      <div className="flex items-center gap-2.5">
+        <Avatar item={item} size="sm" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs font-medium text-zinc-200">
+            {who || KIND_WORD[item.kind] || 'Flight Deck'}
+            {who && <span className="font-normal text-zinc-500"> · {KIND_WORD[item.kind] || item.kind}</span>}
+          </div>
+          <div className="text-[11px] text-zinc-500">{clock(item.created_at)}</div>
+        </div>
+        <StatusPill item={item} proposal={proposal} />
+      </div>
+      <h4 className="mt-2.5 text-sm font-semibold leading-snug text-zinc-100">{heading}</h4>
+      <ProposalCard item={item} proposal={proposal} onAnswered={onAnswered} />
+      {rest && (
+        <article className={`mt-1.5 ${PROSE}`}>
+          <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={LINE_MD}>{keepBreaks(rest)}</Markdown>
+        </article>
+      )}
+    </div>
+  )
+}
+
+/** Approve / Reject on a proposal still waiting (a Taskboard next step is
+ *  read and approved on its task). */
+function ProposalCard({ item, proposal, onAnswered }: { item: LineItem; proposal?: WaitingProposal; onAnswered: () => void }) {
+  if (!(item.needs_you && !item.resolved && item.ref_type === 'autonomy_action')) return null
+  return (
+    <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-3">
+      {proposal && !proposal.taskboard ? (
+        <>
+          <div className="text-xs font-medium text-amber-800 dark:text-amber-200">Waiting for your approval</div>
+          <ProposalButtons id={item.ref_id} onAnswered={onAnswered} />
+        </>
+      ) : (
+        <div className="text-xs text-amber-800 dark:text-amber-200">
+          {proposal?.taskboard ? 'A next step on the Taskboard — read and approve it on its task.'
+            : 'Waiting for your answer — in the bell.'}
+        </div>
+      )}
     </div>
   )
 }
@@ -642,11 +842,18 @@ function AgentPill({ agents, value, onChange, compact = false }: {
 
 /** One box at the bottom: ask an agent about the Line or, with an item open,
  *  hand it that item with a few words. The answer lands on the Line. */
-function Composer({ agents, lineAgent, target, pending, compact, onDetach, onSent, onSetUp }: {
-  agents: Agent[]; lineAgent: { slug: string; name: string }; target: LineItem | null; pending: string
+function Composer({ agents, lineAgent, talkedTo, target, about, more, pending, compact, onDetach, onSent, onSetUp }: {
+  agents: Agent[]; lineAgent: { slug: string; name: string }
+  /** The agent the open thread last talked with: picked when the thread opens. */
+  talkedTo: string
+  /** The open thread's newest item (handed over with the thread behind it), and what the thread is about. */
+  target: LineItem | null; about: string
+  /** The thread has more than its first item. */
+  more: boolean
+  pending: string
   /** Narrow: the agent pill shows only initials. */
   compact: boolean
-  onDetach: () => void; onSent: (id: string, agent: string) => void; onSetUp: () => void
+  onDetach: () => void; onSent: (id: string, agent: string, ask: boolean) => void; onSetUp: () => void
 }) {
   const [slug, setSlug] = useState('')
   const [text, setText] = useState('')
@@ -657,6 +864,10 @@ function Composer({ agents, lineAgent, target, pending, compact, onDetach, onSen
   useEffect(() => {
     if (!agents.some((a) => a.slug === slug)) setSlug(agents.some((a) => a.slug === lineAgent.slug) ? lineAgent.slug : agents[0]?.slug || '')
   }, [agents, lineAgent.slug, slug])
+  useEffect(() => {
+    const agent = agents.find((a) => a.name === talkedTo)
+    if (agent) setSlug(agent.slug)
+  }, [talkedTo]) // eslint-disable-line react-hooks/exhaustive-deps -- only when the thread's agent changes
   useLayoutEffect(() => {
     const el = box.current
     if (!el) return
@@ -680,14 +891,13 @@ function Composer({ agents, lineAgent, target, pending, compact, onDetach, onSen
     try {
       const r = target ? await handLineItem(target.id, slug, words) : await askLine(words, slug)
       setText('')
-      onSent(r.id, r.agent)
+      onSent(r.id, r.agent, !target)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
       setBusy(false)
     }
   }
-  const about = target ? headlineOf(target).headline : ''
   return (
     <div className={shell}>
       {pending && (
@@ -698,7 +908,7 @@ function Composer({ agents, lineAgent, target, pending, compact, onDetach, onSen
       {target && (
         <div className="mb-2 flex flex-wrap items-center gap-1.5">
           <span className="flex min-w-0 max-w-full items-center gap-1 rounded-lg bg-violet-500/10 py-0.5 pl-2 pr-1 text-[11px] text-violet-700 dark:text-violet-300">
-            <span className="shrink-0 font-medium">Hand over:</span>
+            <span className="shrink-0 font-medium">{more ? 'Thread:' : 'Hand over:'}</span>
             <span className="min-w-0 truncate">{about}</span>
             <button onClick={onDetach} className="shrink-0 rounded p-0.5 hover:bg-violet-500/20" aria-label="Not about this item">
               <X className="h-3 w-3" />
@@ -717,7 +927,7 @@ function Composer({ agents, lineAgent, target, pending, compact, onDetach, onSen
         <textarea ref={box} value={text} rows={1} maxLength={2000}
           onChange={(e) => setText(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); void send() } }}
-          placeholder={target ? `What should ${name} do with it?` : `Ask ${name} about your Line…`}
+          placeholder={target ? `What should ${name} do ${more ? 'next' : 'with it'}?` : `Ask ${name ? `${name} ` : ''}about your Line…`}
           aria-label={target ? `Hand it to ${name}` : `Ask ${name}`}
           className="max-h-[132px] min-h-[32px] min-w-0 flex-1 resize-none bg-transparent px-1.5 py-1.5 text-base text-zinc-100 placeholder-zinc-500 focus:outline-none sm:text-[13px]" />
         <button onClick={() => void send()} disabled={busy || (!text.trim() && !target)}
