@@ -67,7 +67,7 @@ export interface TierDef {
 // caller's own custom archetypes (the latter tagged source: 'user').
 // The shelf above the family: a built-in one, or one an admin published for the deck.
 // A person's own archetype may not have one yet.
-export type ArchetypeCategory = 'generalist' | 'focused' | 'personal' | `group-${string}`
+export type ArchetypeCategory = 'generalist' | 'specialist' | 'personal' | `group-${string}`
 
 export interface Archetype {
   id: string

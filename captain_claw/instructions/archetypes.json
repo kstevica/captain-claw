@@ -1116,7 +1116,7 @@
     },
     {
       "id": "deal-screener",
-      "category": "focused",
+      "category": "generalist",
       "family": "Investment & VC",
       "role": "Deal Screener",
       "keywords": [
@@ -1157,7 +1157,7 @@
     },
     {
       "id": "ic-prep",
-      "category": "focused",
+      "category": "generalist",
       "family": "Investment & VC",
       "role": "IC Memo Preparer",
       "keywords": [
@@ -1198,7 +1198,7 @@
     },
     {
       "id": "portfolio-watch",
-      "category": "focused",
+      "category": "generalist",
       "family": "Investment & VC",
       "role": "Portfolio Watcher",
       "keywords": [
@@ -1369,7 +1369,7 @@
     },
     {
       "id": "contract-reviewer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Legal",
       "disclaimer": "legal",
       "role": "Contract Reviewer & Redliner",
@@ -1417,7 +1417,7 @@
     },
     {
       "id": "legal-research-memo",
-      "category": "focused",
+      "category": "specialist",
       "family": "Legal",
       "disclaimer": "legal",
       "role": "Legal Research Memo Writer",
@@ -1466,7 +1466,7 @@
     },
     {
       "id": "legal-intake",
-      "category": "focused",
+      "category": "specialist",
       "family": "Legal",
       "disclaimer": "legal",
       "role": "Law Firm Intake & Conflicts Clerk",
@@ -1513,7 +1513,7 @@
     },
     {
       "id": "litigation-chronologist",
-      "category": "focused",
+      "category": "specialist",
       "family": "Legal",
       "disclaimer": "legal",
       "role": "Litigation Chronology & Document Reviewer",
@@ -1563,7 +1563,7 @@
     },
     {
       "id": "trademark-clearance",
-      "category": "focused",
+      "category": "specialist",
       "family": "Legal",
       "disclaimer": "legal",
       "role": "Trademark & IP Clearance Analyst",
@@ -1612,7 +1612,7 @@
     },
     {
       "id": "corporate-secretary",
-      "category": "focused",
+      "category": "specialist",
       "family": "Legal",
       "disclaimer": "legal",
       "role": "Corporate Secretary",
@@ -1662,7 +1662,7 @@
     },
     {
       "id": "privacy-officer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Legal",
       "disclaimer": "legal",
       "role": "Privacy & GDPR Officer",
@@ -1712,7 +1712,7 @@
     },
     {
       "id": "strategy-consultant",
-      "category": "focused",
+      "category": "specialist",
       "family": "Consulting & Strategy",
       "role": "Strategy Consultant",
       "keywords": [
@@ -1760,7 +1760,7 @@
     },
     {
       "id": "deck-storyliner",
-      "category": "focused",
+      "category": "specialist",
       "family": "Consulting & Strategy",
       "role": "Executive Deck Storyliner",
       "keywords": [
@@ -1808,7 +1808,7 @@
     },
     {
       "id": "commercial-dd",
-      "category": "focused",
+      "category": "specialist",
       "family": "Consulting & Strategy",
       "role": "Commercial Due Diligence Analyst",
       "keywords": [
@@ -1857,7 +1857,7 @@
     },
     {
       "id": "bookkeeper",
-      "category": "focused",
+      "category": "specialist",
       "family": "Accounting & Tax",
       "role": "Bookkeeper & Bank Reconciler",
       "keywords": [
@@ -1905,7 +1905,7 @@
     },
     {
       "id": "month-end-close",
-      "category": "focused",
+      "category": "specialist",
       "family": "Accounting & Tax",
       "role": "Month-End Close Controller",
       "keywords": [
@@ -1952,7 +1952,7 @@
     },
     {
       "id": "ap-clerk",
-      "category": "focused",
+      "category": "specialist",
       "family": "Accounting & Tax",
       "role": "Accounts Payable Processor",
       "keywords": [
@@ -2000,7 +2000,7 @@
     },
     {
       "id": "ar-collections",
-      "category": "focused",
+      "category": "specialist",
       "family": "Accounting & Tax",
       "role": "Receivables & Collections Specialist",
       "keywords": [
@@ -2048,7 +2048,7 @@
     },
     {
       "id": "vat-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Accounting & Tax",
       "role": "VAT & Indirect Tax Analyst",
       "keywords": [
@@ -2096,7 +2096,7 @@
     },
     {
       "id": "fpa-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Accounting & Tax",
       "role": "FP&A Analyst",
       "keywords": [
@@ -2144,7 +2144,7 @@
     },
     {
       "id": "audit-senior",
-      "category": "focused",
+      "category": "specialist",
       "family": "Accounting & Tax",
       "role": "Audit Workpaper Senior",
       "keywords": [
@@ -2192,7 +2192,7 @@
     },
     {
       "id": "financial-modeler",
-      "category": "focused",
+      "category": "specialist",
       "family": "Investment & VC",
       "role": "Financial Modeler",
       "keywords": [
@@ -2238,7 +2238,7 @@
     },
     {
       "id": "term-sheet-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Investment & VC",
       "disclaimer": "legal",
       "role": "Term Sheet & Cap Table Analyst",
@@ -2287,7 +2287,7 @@
     },
     {
       "id": "lp-reporting",
-      "category": "focused",
+      "category": "specialist",
       "family": "Investment & VC",
       "role": "Fund Reporting & LP Relations Analyst",
       "keywords": [
@@ -2335,7 +2335,7 @@
     },
     {
       "id": "credit-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Banking & Insurance",
       "role": "Commercial Credit Analyst",
       "keywords": [
@@ -2381,7 +2381,7 @@
     },
     {
       "id": "aml-kyc-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Banking & Insurance",
       "role": "AML & KYC Analyst",
       "keywords": [
@@ -2429,7 +2429,7 @@
     },
     {
       "id": "claims-handler",
-      "category": "focused",
+      "category": "specialist",
       "family": "Banking & Insurance",
       "role": "Insurance Claims Handler",
       "keywords": [
@@ -2475,7 +2475,7 @@
     },
     {
       "id": "insurance-placement",
-      "category": "focused",
+      "category": "specialist",
       "family": "Banking & Insurance",
       "role": "Insurance Broker Assistant",
       "keywords": [
@@ -2521,7 +2521,7 @@
     },
     {
       "id": "medical-coder",
-      "category": "focused",
+      "category": "specialist",
       "family": "Healthcare & Life Sciences",
       "disclaimer": "clinical",
       "role": "Medical Coding & Billing Specialist",
@@ -2568,7 +2568,7 @@
     },
     {
       "id": "prior-auth",
-      "category": "focused",
+      "category": "specialist",
       "family": "Healthcare & Life Sciences",
       "disclaimer": "clinical",
       "role": "Prior Authorization & Appeals Specialist",
@@ -2614,7 +2614,7 @@
     },
     {
       "id": "clinical-scribe",
-      "category": "focused",
+      "category": "specialist",
       "family": "Healthcare & Life Sciences",
       "disclaimer": "clinical",
       "role": "Clinical Documentation Scribe",
@@ -2660,7 +2660,7 @@
     },
     {
       "id": "clinical-evidence",
-      "category": "focused",
+      "category": "specialist",
       "family": "Healthcare & Life Sciences",
       "disclaimer": "clinical",
       "role": "Clinical Evidence Reviewer",
@@ -2707,7 +2707,7 @@
     },
     {
       "id": "regulatory-writer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Healthcare & Life Sciences",
       "disclaimer": "clinical",
       "role": "Regulatory & Medical Writer",
@@ -2754,7 +2754,7 @@
     },
     {
       "id": "re-listing-assistant",
-      "category": "focused",
+      "category": "specialist",
       "family": "Real Estate",
       "role": "Real Estate Listing & Market Analyst",
       "keywords": [
@@ -2801,7 +2801,7 @@
     },
     {
       "id": "lease-abstractor",
-      "category": "focused",
+      "category": "specialist",
       "family": "Real Estate",
       "disclaimer": "legal",
       "role": "Commercial Lease Abstractor",
@@ -2849,7 +2849,7 @@
     },
     {
       "id": "property-manager",
-      "category": "focused",
+      "category": "specialist",
       "family": "Real Estate",
       "role": "Property Manager",
       "keywords": [
@@ -2896,7 +2896,7 @@
     },
     {
       "id": "seo-strategist",
-      "category": "focused",
+      "category": "specialist",
       "family": "Marketing & Agencies",
       "role": "SEO & Answer-Engine Strategist",
       "keywords": [
@@ -2944,7 +2944,7 @@
     },
     {
       "id": "paid-media-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Marketing & Agencies",
       "role": "Paid Media & Attribution Analyst",
       "keywords": [
@@ -2992,7 +2992,7 @@
     },
     {
       "id": "lifecycle-email",
-      "category": "focused",
+      "category": "specialist",
       "family": "Marketing & Agencies",
       "role": "Lifecycle Email Marketer",
       "keywords": [
@@ -3039,7 +3039,7 @@
     },
     {
       "id": "conversion-copywriter",
-      "category": "focused",
+      "category": "specialist",
       "family": "Marketing & Agencies",
       "role": "Conversion Copywriter",
       "keywords": [
@@ -3084,7 +3084,7 @@
     },
     {
       "id": "pr-manager",
-      "category": "focused",
+      "category": "specialist",
       "family": "Marketing & Agencies",
       "role": "PR & Media Relations Manager",
       "keywords": [
@@ -3130,7 +3130,7 @@
     },
     {
       "id": "account-manager",
-      "category": "focused",
+      "category": "specialist",
       "family": "Marketing & Agencies",
       "role": "Agency Account Manager",
       "keywords": [
@@ -3179,7 +3179,7 @@
     },
     {
       "id": "sdr-prospector",
-      "category": "focused",
+      "category": "specialist",
       "family": "Sales & Customer Success",
       "role": "Outbound SDR & Prospect Researcher",
       "keywords": [
@@ -3225,7 +3225,7 @@
     },
     {
       "id": "sales-call-coach",
-      "category": "focused",
+      "category": "specialist",
       "family": "Sales & Customer Success",
       "role": "Sales Call Coach",
       "keywords": [
@@ -3270,7 +3270,7 @@
     },
     {
       "id": "rfp-responder",
-      "category": "focused",
+      "category": "specialist",
       "family": "Sales & Customer Success",
       "role": "RFP & Tender Response Writer",
       "keywords": [
@@ -3317,7 +3317,7 @@
     },
     {
       "id": "revops-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Sales & Customer Success",
       "role": "RevOps & Pipeline Analyst",
       "keywords": [
@@ -3364,7 +3364,7 @@
     },
     {
       "id": "customer-success",
-      "category": "focused",
+      "category": "specialist",
       "family": "Sales & Customer Success",
       "role": "Customer Success Manager",
       "keywords": [
@@ -3410,7 +3410,7 @@
     },
     {
       "id": "support-specialist",
-      "category": "focused",
+      "category": "specialist",
       "family": "Sales & Customer Success",
       "role": "Customer Support Specialist",
       "keywords": [
@@ -3456,7 +3456,7 @@
     },
     {
       "id": "recruiter",
-      "category": "focused",
+      "category": "specialist",
       "family": "HR & People",
       "role": "Recruiter & Candidate Screener",
       "keywords": [
@@ -3502,7 +3502,7 @@
     },
     {
       "id": "hr-advisor",
-      "category": "focused",
+      "category": "specialist",
       "family": "HR & People",
       "disclaimer": "legal",
       "role": "HR Policy & Employee Relations Advisor",
@@ -3549,7 +3549,7 @@
     },
     {
       "id": "comp-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "HR & People",
       "role": "Compensation & Pay Equity Analyst",
       "keywords": [
@@ -3595,7 +3595,7 @@
     },
     {
       "id": "learning-designer",
-      "category": "focused",
+      "category": "specialist",
       "family": "HR & People",
       "role": "Corporate Learning Designer",
       "keywords": [
@@ -3641,7 +3641,7 @@
     },
     {
       "id": "product-manager",
-      "category": "focused",
+      "category": "specialist",
       "family": "Product & Technology",
       "role": "Product Manager",
       "keywords": [
@@ -3687,7 +3687,7 @@
     },
     {
       "id": "ux-researcher",
-      "category": "focused",
+      "category": "specialist",
       "family": "Product & Technology",
       "role": "UX Researcher",
       "keywords": [
@@ -3733,7 +3733,7 @@
     },
     {
       "id": "accessibility-auditor",
-      "category": "focused",
+      "category": "specialist",
       "family": "Product & Technology",
       "role": "Accessibility Auditor",
       "keywords": [
@@ -3780,7 +3780,7 @@
     },
     {
       "id": "analytics-engineer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Product & Technology",
       "role": "Analytics Engineer",
       "keywords": [
@@ -3826,7 +3826,7 @@
     },
     {
       "id": "sre-incident",
-      "category": "focused",
+      "category": "specialist",
       "family": "Product & Technology",
       "role": "SRE & Incident Commander",
       "keywords": [
@@ -3872,7 +3872,7 @@
     },
     {
       "id": "technical-writer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Product & Technology",
       "role": "Technical Writer",
       "keywords": [
@@ -3917,7 +3917,7 @@
     },
     {
       "id": "policy-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Public Sector & Nonprofit",
       "role": "Public Policy Analyst",
       "keywords": [
@@ -3963,7 +3963,7 @@
     },
     {
       "id": "donor-relations",
-      "category": "focused",
+      "category": "specialist",
       "family": "Public Sector & Nonprofit",
       "role": "Nonprofit Fundraising & Donor Relations",
       "keywords": [
@@ -4010,7 +4010,7 @@
     },
     {
       "id": "soc-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Security & Compliance",
       "role": "SOC Analyst & Incident Responder",
       "keywords": [
@@ -4057,7 +4057,7 @@
     },
     {
       "id": "iso-soc2-auditor",
-      "category": "focused",
+      "category": "specialist",
       "family": "Security & Compliance",
       "role": "ISO 27001 & SOC 2 Readiness Auditor",
       "keywords": [
@@ -4104,7 +4104,7 @@
     },
     {
       "id": "questionnaire-responder",
-      "category": "focused",
+      "category": "specialist",
       "family": "Security & Compliance",
       "role": "Security Questionnaire & Vendor Risk Analyst",
       "keywords": [
@@ -4149,7 +4149,7 @@
     },
     {
       "id": "ai-act-officer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Security & Compliance",
       "disclaimer": "legal",
       "role": "EU AI Act Compliance Analyst",
@@ -4197,7 +4197,7 @@
     },
     {
       "id": "esg-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Security & Compliance",
       "role": "ESG & CSRD Reporting Analyst",
       "keywords": [
@@ -4244,7 +4244,7 @@
     },
     {
       "id": "procurement-analyst",
-      "category": "focused",
+      "category": "specialist",
       "family": "Operations & Supply Chain",
       "role": "Procurement & Sourcing Analyst",
       "keywords": [
@@ -4291,7 +4291,7 @@
     },
     {
       "id": "supply-planner",
-      "category": "focused",
+      "category": "specialist",
       "family": "Operations & Supply Chain",
       "role": "Demand & Inventory Planner",
       "keywords": [
@@ -4340,7 +4340,7 @@
     },
     {
       "id": "trade-compliance",
-      "category": "focused",
+      "category": "specialist",
       "family": "Operations & Supply Chain",
       "role": "Customs & Trade Compliance Analyst",
       "keywords": [
@@ -4388,7 +4388,7 @@
     },
     {
       "id": "quality-engineer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Operations & Supply Chain",
       "role": "Quality & Root Cause Engineer",
       "keywords": [
@@ -4437,7 +4437,7 @@
     },
     {
       "id": "ecommerce-manager",
-      "category": "focused",
+      "category": "specialist",
       "family": "Operations & Supply Chain",
       "role": "E-commerce Catalog & Marketplace Manager",
       "keywords": [
@@ -4486,7 +4486,7 @@
     },
     {
       "id": "curriculum-designer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Education & Research",
       "role": "Curriculum & Lesson Designer",
       "keywords": [
@@ -4533,7 +4533,7 @@
     },
     {
       "id": "literature-reviewer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Education & Research",
       "role": "Systematic Literature Reviewer",
       "keywords": [
@@ -4582,7 +4582,7 @@
     },
     {
       "id": "statistician",
-      "category": "focused",
+      "category": "specialist",
       "family": "Education & Research",
       "role": "Research Statistician & Experiment Analyst",
       "keywords": [
@@ -4629,7 +4629,7 @@
     },
     {
       "id": "grant-writer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Education & Research",
       "role": "Grant Writer",
       "keywords": [
@@ -4676,7 +4676,7 @@
     },
     {
       "id": "news-editor",
-      "category": "focused",
+      "category": "specialist",
       "family": "Media & Language",
       "role": "Newsroom Editor & Verifier",
       "keywords": [
@@ -4724,7 +4724,7 @@
     },
     {
       "id": "translator",
-      "category": "focused",
+      "category": "specialist",
       "family": "Media & Language",
       "role": "Translator & Localization Reviewer",
       "keywords": [
@@ -4772,7 +4772,7 @@
     },
     {
       "id": "video-producer",
-      "category": "focused",
+      "category": "specialist",
       "family": "Media & Language",
       "role": "Video & Podcast Producer",
       "keywords": [
@@ -4818,7 +4818,7 @@
     },
     {
       "id": "construction-estimator",
-      "category": "focused",
+      "category": "specialist",
       "family": "Construction & Local Business",
       "role": "Construction Estimator & Project Engineer",
       "keywords": [
@@ -4867,7 +4867,7 @@
     },
     {
       "id": "hospitality-ops",
-      "category": "focused",
+      "category": "specialist",
       "family": "Construction & Local Business",
       "role": "Restaurant & Hotel Operations Manager",
       "keywords": [
@@ -4915,7 +4915,7 @@
     },
     {
       "id": "field-service",
-      "category": "focused",
+      "category": "specialist",
       "family": "Construction & Local Business",
       "role": "Trades & Field Service Office Manager",
       "keywords": [

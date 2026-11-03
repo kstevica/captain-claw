@@ -1,11 +1,12 @@
 import { useMemo, useState } from 'react'
 import {
   Library, Plus, Wand2, Search, Crown, Pencil, Trash2, Copy, Share2, Users, Sparkles,
-  Check, Wrench, Gauge, Layers, Lock,
+  Check, Wrench, Gauge, Layers, Lock, Building2,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { useTierConfig, TIER_ORDER, type Archetype, type ArchetypeCategory, type ArchetypeRegistry } from '../../services/tierConfig'
-import { archetypeCategory, rememberTeamLooks, shelves } from '../layout/archetypeLook'
+import { CATEGORIES, archetypeCategory, archetypeKind, companyShelves, kindLook, rememberTeamLooks, shelves, type ArchetypeKind } from '../layout/archetypeLook'
+import { KindTabs, type KindFilter } from '../layout/KindTabs'
 import { TeamPackDialog } from './TeamPackDialog'
 import {
   DISCLAIMER_CHOICES,
@@ -24,9 +25,10 @@ import {
 // Archetypes: the ready-made agents people start from (the kiosk's "New
 // agent" picker lists the same gallery). Built-in ones come with Captain Claw;
 // yours can be edited, shared with other users, or forged in bulk from
-// documents. A built-in or shared one is copied before it's changed.
+// documents. A built-in or shared one is copied before it's changed. What the
+// admin publishes for everyone is the Company kind, in groups of its own.
 
-type Source = 'all' | 'user' | 'base' | 'shared' | 'team'
+type Source = 'all' | 'user' | 'base' | 'shared'
 
 function slugify(s: string): string {
   return s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
@@ -55,7 +57,9 @@ export function ArchetypesPage() {
   const [query, setQuery] = useState('')
   const [source, setSource] = useState<Source>('all')
   const [family, setFamily] = useState('')
-  const [category, setCategory] = useState<ArchetypeCategory | 'all'>('all')
+  const [kind, setKind] = useState<KindFilter>('all')
+  // A shelf under the kind: the company's groups, or specialists for work or for life.
+  const [shelf, setShelf] = useState<ArchetypeCategory | ''>('')
   // The editor: a draft plus the id it saves over (null = a new archetype).
   const [draft, setDraft] = useState<{ input: ArchetypeInput; id: string | null; team?: boolean } | null>(null)
   const [viewing, setViewing] = useState<Archetype | null>(null)
@@ -73,15 +77,27 @@ export function ArchetypesPage() {
     user: all.filter((a) => a.source === 'user').length,
     base: all.filter((a) => (a.source || 'base') === 'base').length,
     shared: all.filter((a) => a.source === 'shared').length,
-    team: all.filter((a) => a.source === 'team').length,
   }), [all])
-  const families = useMemo(() => [...new Set(all
-    .filter((a) => category === 'all' || archetypeCategory(a) === category)
-    .map((a) => a.family || 'Custom'))].sort(), [all, category])
+  const kindCounts = useMemo(() => {
+    const out: Partial<Record<ArchetypeKind, number>> = {}
+    for (const a of all) out[archetypeKind(a)] = (out[archetypeKind(a)] || 0) + 1
+    return out
+  }, [all])
+  const inKind = (a: Archetype) => (kind === 'all' || archetypeKind(a) === kind) && (!shelf || archetypeCategory(a) === shelf)
+  // The shelves under the chosen kind, worth a row of their own when there's a choice,
+  // and always for the company's groups: removing one starts there.
+  const kindShelves = kind === 'all' ? [] : shelves()
+    .filter((c) => c.kind === kind)
+    .map((c) => ({ ...c, count: all.filter((a) => archetypeCategory(a) === c.id).length }))
+    .filter((c) => c.count > 0)
+  // The company's families first, as its archetypes are.
+  const companyFamilies = new Set(all.filter((a) => archetypeKind(a) === 'company').map((a) => a.family || 'Custom'))
+  const families = [...new Set(all.filter(inKind).map((a) => a.family || 'Custom'))]
+    .sort((x, y) => Number(companyFamilies.has(y)) - Number(companyFamilies.has(x)) || x.localeCompare(y))
 
   const shown = all.filter((a) =>
     (source === 'all' || (a.source || 'base') === source)
-    && (category === 'all' || archetypeCategory(a) === category)
+    && inKind(a)
     && (!family || (a.family || 'Custom') === family)
     && matchesQuery(query, a.role, a.id, a.description, a.family, (a.keywords || []).join(' ')),
   )
@@ -94,13 +110,15 @@ export function ArchetypesPage() {
   }, [registry, all])
 
   const blank = (): ArchetypeInput => ({
-    archetype_id: '', role: '', family: 'Custom', category: 'focused', description: '', cognitive_mode: 'neutra', tier: 'balanced',
+    archetype_id: '', role: '', family: 'Custom', category: 'specialist', description: '', cognitive_mode: 'neutra', tier: 'balanced',
     runtime: '', tools: registry?.base_tools ? [...registry.base_tools] : [], fleet_instructions: '',
     keywords: [], lead: false, reliability_seed: 0.7,
   })
 
+  // A copy is the person's own, so it leaves the company's groups.
   const copyOf = (a: Archetype): ArchetypeInput => ({
     ...toInput(a), archetype_id: freeId(registry, slugify(a.id || a.role || 'archetype')), role: `${a.role} (copy)`,
+    ...(archetypeKind(a) === 'company' ? { category: 'specialist' } : {}),
   })
 
   const remove = async (a: Archetype) => {
@@ -118,13 +136,13 @@ export function ArchetypesPage() {
   }
 
   const removeGroup = async () => {
-    const group = shelves().find((c) => c.id === category)
-    const inIt = all.filter((a) => a.source === 'team' && a.category === category).length
+    const group = companyShelves().find((c) => c.id === shelf)
+    const inIt = all.filter((a) => a.source === 'team' && a.category === shelf).length
     if (!group || !confirm(`Remove "${group.label}" and its ${inIt} archetype${inIt === 1 ? '' : 's'} for everyone on this deck? Agents already made from them keep working.`)) return
     setError('')
     try {
       await deleteTeamGroup(group.id)
-      setCategory('all')
+      setShelf('')
       setFamily('')
       refreshRegistry()
     } catch (e) {
@@ -170,24 +188,32 @@ export function ArchetypesPage() {
             { value: 'all', label: 'All', count: counts.all },
             { value: 'user', label: 'Yours', count: counts.user },
             { value: 'base', label: 'Built-in', count: counts.base },
-            ...(counts.team ? [{ value: 'team' as const, label: 'Your team', count: counts.team }] : []),
             ...(counts.shared ? [{ value: 'shared' as const, label: 'Shared with you', count: counts.shared }] : []),
           ]}
         />
       </div>
 
-      <Segmented
-        label="Kind of agent"
-        value={category}
-        onChange={(next) => { setCategory(next); setFamily('') }}
-        options={[
-          { value: 'all' as const, label: 'All', count: all.length },
-          ...shelves().map((c) => ({ value: c.id, label: c.label, count: all.filter((a) => archetypeCategory(a) === c.id).length })),
-        ]}
-      />
-      {category.startsWith('group-') && (
+      <KindTabs value={kind} onChange={(next) => { setKind(next); setShelf(''); setFamily('') }} counts={kindCounts} hints />
+      {(kindShelves.length > 1 || kind === 'company') && (
+        <div className="-mt-2 flex flex-wrap items-center gap-1.5">
+          {[{ id: '' as const, label: `All ${kindLook(kind as ArchetypeKind).label.toLowerCase()}`, count: kindShelves.reduce((n, c) => n + c.count, 0) }, ...kindShelves].map((c) => (
+            <button
+              key={c.id || 'all'}
+              onClick={() => { setShelf(c.id); setFamily('') }}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-medium transition-colors ${
+                shelf === c.id
+                  ? `${kindLook(kind as ArchetypeKind).active} text-zinc-100`
+                  : 'border-zinc-800 text-zinc-500 hover:border-zinc-600 hover:text-zinc-200'
+              }`}
+            >
+              {c.label} <span className="tabular-nums text-zinc-500">{c.count}</span>
+            </button>
+          ))}
+        </div>
+      )}
+      {shelf.startsWith('group-') && (
         <div className="-mt-2 flex flex-wrap items-center gap-2 text-xs text-zinc-500">
-          <span>{shelves().find((c) => c.id === category)?.hint}</span>
+          <span>{companyShelves().find((c) => c.id === shelf)?.hint}</span>
           <Button variant="danger" icon={Trash2} className="!px-2 !py-1 !text-xs" onClick={removeGroup}>Remove this group for everyone</Button>
         </div>
       )}
@@ -310,7 +336,7 @@ function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onDelete }: {
             <span className="truncate">{a.role}</span>
           </span>
           {a.source === 'team'
-            ? <Pill tone="emerald" icon={Users} title="Published for everyone on this deck">your team</Pill>
+            ? <Pill tone="emerald" icon={Building2} title="Published for everyone on this deck">company</Pill>
             : mine
             ? <Pill tone="violet">{a.overrides ? 'yours · replaces built-in' : 'yours'}</Pill>
             : a.source === 'shared'
@@ -500,9 +526,9 @@ function ArchetypeSheet({ initial, editingId, team, registry, toolPalette, canDr
           <Field label="Description" hint="One sentence on what it does — shown in the picker.">
             <input value={d.description} onChange={(e) => set({ description: e.target.value })} className={inputCls} />
           </Field>
-          <Field label="Kind" hint="The shelf it sits on in the picker.">
+          <Field label="Kind" hint={team ? 'The company group it sits in, for everyone.' : 'Where it sits in the picker.'}>
             <select value={archetypeCategory(d)} onChange={(e) => set({ category: e.target.value })} className={inputCls}>
-              {shelves().map((c) => <option key={c.id} value={c.id}>{c.label}</option>)}
+              {(team ? companyShelves() : CATEGORIES).map((c) => <option key={c.id} value={c.id}>{c.full}</option>)}
             </select>
           </Field>
           <Field label="Disclaimer" hint="For legal or health work: the agent says it, and the deck shows it in the picker and under the chat.">

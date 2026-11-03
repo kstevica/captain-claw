@@ -27,13 +27,16 @@ log = get_logger(__name__)
 
 _REGISTRY_FILE = Path(__file__).parent.parent / "instructions" / "archetypes.json"
 
-# The gallery's three shelves, above the families. An archetype without one (a
-# person's own, or a row stored before there were any) counts as focused: it was
-# made for a job.
-CATEGORIES = ("generalist", "focused", "personal")
-DEFAULT_CATEGORY = "focused"
-# An admin's own shelves, published for the whole deck (team_archetypes.py), carry
-# this prefix, so a mistyped category can never pass for one.
+# The built-in shelves, above the families: the generalists, and the specialists
+# for work or for someone's own life. An archetype without one (a person's own, or
+# a row stored before there were any) counts as a specialist: it was made for a job.
+CATEGORIES = ("generalist", "specialist", "personal")
+DEFAULT_CATEGORY = "specialist"
+# What specialists were called before, still on rows people saved then.
+_LEGACY_CATEGORIES = {"focused": "specialist"}
+# The company's own shelves, which only an admin publishes for the whole deck
+# (team_archetypes.py), carry this prefix, so a mistyped category can never pass
+# for one.
 TEAM_GROUP_PREFIX = "group-"
 TEAM_SETTING = "fd:team-archetypes"
 
@@ -118,6 +121,7 @@ def place_safety_rules(instructions: str, disclaimer: str) -> str:
 def archetype_category(archetype: dict) -> str:
     """The shelf an archetype sits on."""
     category = str((archetype or {}).get("category") or "")
+    category = _LEGACY_CATEGORIES.get(category, category)
     return category if category in CATEGORIES or category.startswith(TEAM_GROUP_PREFIX) else DEFAULT_CATEGORY
 
 
@@ -203,7 +207,8 @@ def merge_archetypes(
     base list.
 
     Each base entry is tagged ``source="base"``, and each deck-wide one ``source="team"``,
-    which a person's own archetype of the same id replaces for them. Each owned user row is tagged
+    which a person's own archetype of the same id replaces for them. The deck-wide ones come
+    first, so every list of archetypes shows the company's own on top. Each owned user row is tagged
     ``source="user"`` and replaces a base entry in place when ids match, else is
     appended. Rows shared *to* the user are then overlaid tagged
     ``source="shared"`` (carrying the owner's id/email + permission) — but never
@@ -212,18 +217,18 @@ def merge_archetypes(
     """
     merged: list[dict] = []
     index: dict[str, int] = {}
-    for a in base:
-        entry = {**a, "source": "base"}
+    for a in team or []:
+        entry = {**a, "source": "team"}
         index[entry.get("id", "")] = len(merged)
         merged.append(entry)
 
-    for a in team or []:
-        entry = {**a, "source": "team"}
-        if entry.get("id", "") in index:
-            merged[index[entry["id"]]] = entry
-        else:
-            index[entry.get("id", "")] = len(merged)
-            merged.append(entry)
+    for a in base:
+        # A deck-wide archetype of the same id stands in for the built-in one.
+        if a.get("id", "") in index:
+            continue
+        entry = {**a, "source": "base"}
+        index[entry.get("id", "")] = len(merged)
+        merged.append(entry)
 
     def _data(row: dict) -> dict | None:
         try:
