@@ -119,6 +119,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "pptx_extract": "Extract a single .pptx file into markdown. ONLY for .pptx files — never use on .pdf/.docx/.xlsx. For multiple files in a folder use summarize_files instead.",
     "pocket_tts": "Convert text to local speech audio and save as MP3",
     "audio": "Speech-to-text and text-to-speech (Soniox): transcribe an audio/video file (voice note, recording, meeting) to text, optionally with timestamps; speak text as an MP3 voice recording the chat sends to the user automatically; list voices.",
+    "line": "Read the user's Line in Flight Deck (read-only): what the deck and their agents did or said on their own — results, finished runs, proposals and questions waiting for the user, payments, fleet changes. news (unread), recent, search, read one item.",
     "telegram_inbox": "Read the user's Telegram (read-only): their connected private chats and groups with the team bot — list chats, read one chat, recent messages, search. Never sends or replies.",
     "whatsapp_web": "The user's own WhatsApp: every chat on their linked account — status, list chats, read one chat, recent messages, search, look up a contact, save a file or voice note (transcribed). Sends a text only when the user turned sending on, only to chats on their whitelist, only what they asked to send.",
     "send_mail": "Send emails via SMTP — only when the user asked for that email. Supports to, cc, bcc, subject, body, and file attachments.",
@@ -192,6 +193,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "pptx_extract": "single .pptx → markdown (ONLY .pptx, never .pdf; for multiple files use summarize_files)",
     "pocket_tts": "text-to-speech MP3",
     "audio": "Soniox: transcribe an audio/video file to text (timestamps optional); speak text as an MP3 sent to the user; list voices",
+    "line": "read-only Line: what ran or was said on its own — news / recent / search / read",
     "telegram_inbox": "read-only Telegram: chats / read one chat / recent / search; never sends",
     "whatsapp_web": "own WhatsApp: status / chats / read / recent / search / contact / attachment; send only to the user's whitelist, only when asked",
     "send_mail": "send emails via SMTP (only when asked)",
@@ -2502,6 +2504,7 @@ class AgentContextMixin:
             JevTool,
             AudioTool,
             TelegramInboxTool,
+            LineTool,
             WhatsAppWebTool,
             MicrosoftCalendarTool,
             MicrosoftMailTool,
@@ -2650,6 +2653,10 @@ class AgentContextMixin:
             elif tool_name == "telegram_inbox":
                 # Hidden until the owner keeps a Telegram inbox in Flight Deck.
                 self.tools.register(TelegramInboxTool(), metadata={"requires_telegram_inbox": True})
+            elif tool_name == "line":
+                # The owner's Line in Flight Deck: hidden when there's no deck,
+                # and on a member's turn.
+                self.tools.register(LineTool(), metadata={"requires_line": True})
             elif tool_name == "whatsapp_web":
                 # Hidden until the owner links their WhatsApp in Flight Deck.
                 self.tools.register(WhatsAppWebTool(), metadata={"requires_whatsapp_web": True})
@@ -4656,6 +4663,22 @@ class AgentContextMixin:
             detail = "normal"
         return news_line(news, detail=detail)
 
+    def _line_news_note(self) -> str:
+        """One line of what came on the owner's Line since this agent was last
+        told — only when the turn fetched it (owner's live turns)."""
+        news = getattr(self, "_turn_line_news", None)
+        if not news:
+            return ""
+        from captain_claw.line_client import news_line
+
+        if self.instructions.use_nano:
+            detail = "nano"
+        elif self.instructions.use_micro:
+            detail = "micro"
+        else:
+            detail = "normal"
+        return news_line(news, detail=detail)
+
     def _whatsapp_web_news_note(self) -> str:
         """One line of what others wrote on the owner's WhatsApp since this
         agent's last look — only when the turn fetched it (owner's live turns)."""
@@ -5173,6 +5196,10 @@ class AgentContextMixin:
             _whatsapp_web_text = self._whatsapp_web_news_note()
             if _whatsapp_web_text:
                 env_note = [("whatsapp_web_news", _whatsapp_web_text)] + env_note
+            # What came on the owner's Line (fetched at turn start).
+            _line_text = self._line_news_note()
+            if _line_text:
+                env_note = [("line_news", _line_text)] + env_note
             self._turn_env_tokens = self._count_tokens(_env_text) if _env_text else 0
             reserved_tokens = 0
             if turn_anchor_pos is not None:

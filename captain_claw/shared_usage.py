@@ -166,7 +166,7 @@ def _def_name(definition: Any) -> str:
 
 def drop_unusable(tool_defs: Any, agent: Any) -> list:
     """*tool_defs* without the ``requires_shared_members`` tools (and the
-    owner's ``requires_telegram_inbox`` / ``requires_whatsapp_web`` ones) unless :func:`usage_instance_allowed`
+    owner's ``requires_telegram_inbox`` / ``requires_whatsapp_web`` / ``requires_line`` ones) unless :func:`usage_instance_allowed`
     (J18: the registry is process-global, so a public / BotPort / Iskra /
     VFS-scoped agent in this process would list them). Never raises: an error
     drops those tools."""
@@ -186,7 +186,8 @@ def drop_unusable(tool_defs: Any, agent: Any) -> list:
             meta = registry.get_tool_metadata(name) if registry is not None else {}
             return bool((meta or {}).get("requires_shared_members")
                         or (meta or {}).get("requires_telegram_inbox")
-                        or (meta or {}).get("requires_whatsapp_web"))
+                        or (meta or {}).get("requires_whatsapp_web")
+                        or (meta or {}).get("requires_line"))
         except Exception:
             return False
 
