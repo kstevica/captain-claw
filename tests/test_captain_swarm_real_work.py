@@ -333,7 +333,7 @@ def test_a_document_run_end_to_end(store, tmp_path, monkeypatch):
 
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "user"}
+    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "admin"}
     with TestClient(app) as c:
         view = c.get(f"/fd/captain-swarm/runs/{RID}").json()["document"]
         assert view["best"]["text"].startswith("A clear brief") and view["held_items"] == 2
@@ -448,7 +448,7 @@ def test_routes_offer_documents_code_and_calendar_sets(store, tmp_path, monkeypa
     monkeypatch.setattr(routes, "_can_run", can_run)
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "user"}
+    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "admin"}
 
     async def token(owner):
         return "tok"

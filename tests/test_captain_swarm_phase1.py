@@ -467,7 +467,7 @@ def client(sealed, monkeypatch):
 
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[get_current_user] = lambda: {"id": "user-1", "display_name": "Ana", "role": "user"}
+    app.dependency_overrides[get_current_user] = lambda: {"id": "user-1", "display_name": "Ana", "role": "admin"}
     monkeypatch.setattr(ap, "_own_process", lambda slug, owner: {"name": "Helper"} if slug == "helper"
                         else (_ for _ in ()).throw(__import__("fastapi").HTTPException(404, "no")))
     monkeypatch.setattr(ap, "_owner", lambda user: user["id"])

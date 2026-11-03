@@ -1206,7 +1206,12 @@ calendar invitations.** Built so the owner can try Captain Swarm on real tasks.
 6. **The first code target is the Mrav eval on gemma4:e2b.**
 7. **Budgets are in tokens.** The code default is 200M tokens, 8 hours and 40 experiments; each kind
    has its own (§10). No run is uncapped.
-8. **Command scorers need a shell.** Every other scorer is open to any owner who can run Bat.
+8. **Captain Swarm is for the deck's admins** (owner's call, 2026-11-03, while it is being tested).
+   - Every page route needs an admin, and so does the `captain_swarm` tool: an agent whose owner isn't an
+     admin is refused.
+   - The kiosk menu, the Swarm tile and the sidebar entry are hidden from everyone else.
+   - A deck with sign-in off has one user, its local admin.
+   - Command scorers still need a shell, which admins have.
 9. **Lanes run through the deck proxy,** so the token cap counts them.
 10. **The strategy round is a light panel,** not Council.
 11. **Names** as in §2, including renaming BotPort's tab label to "BotPort Workflows".

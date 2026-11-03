@@ -257,7 +257,7 @@ def client(env, monkeypatch):
 
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "display_name": "Ana", "role": "user"}
+    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "display_name": "Ana", "role": "admin"}
 
     class DB:
         pass
@@ -279,7 +279,9 @@ def client(env, monkeypatch):
         yield c, routes
 
 
-def test_routes_start_a_triage_run_without_a_shell(client):
+def test_routes_start_a_triage_run_without_a_shell(client, monkeypatch):
+    from captain_claw.flight_deck import bat_routes
+    monkeypatch.setattr(bat_routes, "_owner_has_shell", lambda user: False)
     c, _ = client
     tpl = c.get("/fd/captain-swarm/templates").json()
     assert tpl["templates"]["triage"]["sets"] == [{"id": "mt-1", "title": "Inbox triage: did you reply?", "open": 8, "holdout": 2, "kind": "mail_triage"}]

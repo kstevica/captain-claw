@@ -1153,6 +1153,20 @@ class Driver:
             await self.store.update_experiment(exp_id, status="measuring")
 
     async def _start_lane(self, run: dict, exp: dict) -> None:
+        """Start one attempt. A wave ended by a stop cancels the attempts still
+        starting; a start that had already begun is let land and then stopped,
+        so no attempt is left running unseen (its Bat run, say)."""
+        task = asyncio.ensure_future(self._start_lane_now(run, exp))
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            with contextlib.suppress(Exception):
+                child = await task
+                if child:
+                    await self.lane.stop(await self._run(), {**exp, "child_id": child})
+            raise
+
+    async def _start_lane_now(self, run: dict, exp: dict) -> str:
         # The budget left is shared by the wave's attempts, each with an equal part.
         left = objective_mod.tokens_left(run)
         share = {} if left is None else {"token_share": left // max(1, len(wave_of(run.get("state") or {})))}
@@ -1167,9 +1181,18 @@ class Driver:
             # The same refusal twice is the setup, not the idea: more ideas won't help.
             if same:
                 raise _StopError("failed", f"the lane can't start: {msg}") from exc
-            return
+            return ""
         await self._state(last_start_error="")
+        # Stopped while it was starting: the owner's stop couldn't reach a lane
+        # that had no id yet, so it is told to stop here, never left running.
+        now, cur = await self._run(), await self.store.get_experiment(exp["id"])
+        if now["status"] not in ACTIVE_STATES or (cur and cur["status"] not in LIVE_EXP):
+            await self.store.update_experiment(exp["id"], child_id=got["child_id"], branch=got.get("branch", ""))
+            with contextlib.suppress(Exception):
+                await self.lane.stop(now, {**exp, "child_id": got["child_id"]})
+            return ""
         await self.store.update_experiment(exp["id"], status="running", child_id=got["child_id"], branch=got.get("branch", ""))
+        return str(got["child_id"])
 
     async def _wait_lane(self, exp: dict) -> None:
         counted_usd, counted_tokens = float(exp["cost_usd"]), int(exp["tokens"])

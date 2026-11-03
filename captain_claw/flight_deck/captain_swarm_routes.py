@@ -46,6 +46,28 @@ _MAX_MEASURE_CASES = 300
 _MAX_REPEAT = 5
 
 
+ADMINS_ONLY = "Captain Swarm is open to this deck's admins only."
+
+
+async def admin_user(user: dict = Depends(get_current_user)) -> dict:
+    """Captain Swarm is for the deck's admins (owner's call, 2026-11-03): a run
+    spends on the deck's tiers and starts workers. A deck with sign-in off has
+    one user, its local admin."""
+    if user.get("role") != "admin":
+        raise HTTPException(403, ADMINS_ONLY)
+    return user
+
+
+async def _agent_admin(body: AgentReq) -> str:
+    """The asking agent's owner, who must be one of this deck's admins."""
+    from captain_claw.flight_deck import crew_runner
+    owner = _agent_owner(body)
+    user = await crew_runner._user_of(owner)
+    if not user or user.get("role") != "admin":
+        raise HTTPException(403, ADMINS_ONLY)
+    return owner
+
+
 def _uid(user: dict) -> str:
     return str(user.get("id") or "local")
 
@@ -71,7 +93,7 @@ def _view(owner: str, meta: dict) -> dict:
 
 
 @router.get("/practice")
-async def list_practice(user: dict = Depends(get_current_user)) -> dict:
+async def list_practice(user: dict = Depends(admin_user)) -> dict:
     owner = _uid(user)
     return {"sets": [_view(owner, m) for m in await asyncio.to_thread(practice.list_sets, owner)]}
 
@@ -113,7 +135,7 @@ async def _build(owner: str, set_id: str, body: TriageBody) -> None:
 
 
 @router.post("/practice/mail-triage")
-async def build_mail_triage(body: TriageBody, user: dict = Depends(get_current_user)) -> dict:
+async def build_mail_triage(body: TriageBody, user: dict = Depends(admin_user)) -> dict:
     """Freeze a sample of the caller's received mail, each labelled by whether
     they wrote in its thread within *reply_days*. Read-only on Gmail."""
     owner = _uid(user)
@@ -162,7 +184,7 @@ async def _build_calendar(owner: str, set_id: str, body: CalendarBody) -> None:
 
 
 @router.post("/practice/calendar-invites")
-async def build_calendar_invites(body: CalendarBody, user: dict = Depends(get_current_user)) -> dict:
+async def build_calendar_invites(body: CalendarBody, user: dict = Depends(admin_user)) -> dict:
     """Freeze the caller's past invitations, each labelled by whether they
     accepted it. Read-only on Google Calendar."""
     owner = _uid(user)
@@ -176,13 +198,13 @@ async def build_calendar_invites(body: CalendarBody, user: dict = Depends(get_cu
 
 
 @router.get("/practice/{set_id}")
-async def get_practice(set_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def get_practice(set_id: str, user: dict = Depends(admin_user)) -> dict:
     owner = _uid(user)
     return _view(owner, _meta_or_404(owner, set_id))
 
 
 @router.delete("/practice/{set_id}")
-async def delete_practice(set_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def delete_practice(set_id: str, user: dict = Depends(admin_user)) -> dict:
     """Delete the set: the frozen mail and every measurement made on it."""
     owner = _uid(user)
     _meta_or_404(owner, set_id)
@@ -273,7 +295,7 @@ async def _measure(owner: str, set_id: str, mid: str, record: dict, cases: list[
 
 
 @router.post("/practice/{set_id}/measure")
-async def start_measurement(set_id: str, body: MeasureBody, user: dict = Depends(get_current_user)) -> dict:
+async def start_measurement(set_id: str, body: MeasureBody, user: dict = Depends(admin_user)) -> dict:
     """Ask one of the caller's agents every chosen case, *repeat* times, on its
     exam lane, and score its YES/NO against what the caller actually did."""
     from captain_claw.flight_deck import agent_preset as ap
@@ -307,7 +329,7 @@ async def start_measurement(set_id: str, body: MeasureBody, user: dict = Depends
 
 
 @router.get("/practice/{set_id}/measurements")
-async def list_measurements(set_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def list_measurements(set_id: str, user: dict = Depends(admin_user)) -> dict:
     owner = _uid(user)
     _meta_or_404(owner, set_id)
     folder = practice.set_dir(owner, set_id) / "measurements"
@@ -321,7 +343,7 @@ async def list_measurements(set_id: str, user: dict = Depends(get_current_user))
 
 
 @router.get("/measurements/{set_id}/{mid}")
-async def get_measurement(set_id: str, mid: str, user: dict = Depends(get_current_user)) -> dict:
+async def get_measurement(set_id: str, mid: str, user: dict = Depends(admin_user)) -> dict:
     owner = _uid(user)
     _meta_or_404(owner, set_id)
     m = _read_measurement(owner, set_id, mid)
@@ -331,7 +353,7 @@ async def get_measurement(set_id: str, mid: str, user: dict = Depends(get_curren
 
 
 @router.post("/measurements/{set_id}/{mid}/stop")
-async def stop_measurement(set_id: str, mid: str, user: dict = Depends(get_current_user)) -> dict:
+async def stop_measurement(set_id: str, mid: str, user: dict = Depends(admin_user)) -> dict:
     owner = _uid(user)
     key = f"measure:{owner}/{set_id}/{mid}"
     if key not in _TASKS:
@@ -393,7 +415,7 @@ def _default_holdout() -> str:
 
 
 @router.get("/templates")
-async def templates(user: dict = Depends(get_current_user)) -> dict:
+async def templates(user: dict = Depends(admin_user)) -> dict:
     from captain_claw.flight_deck import captain_swarm_document as document
     from captain_claw.flight_deck import captain_swarm_objective as om
     from captain_claw.flight_deck import captain_swarm_outcome as outcome
@@ -633,7 +655,7 @@ async def _start(owner: str, objective: dict, *, status: str, started_by: str) -
 
 
 @router.post("/runs")
-async def start_run(body: RunBody, user: dict = Depends(get_current_user)) -> dict:
+async def start_run(body: RunBody, user: dict = Depends(admin_user)) -> dict:
     from captain_claw.flight_deck.bat_routes import _owner_has_shell
     owner = _uid(user)
     objective = _objective_from(body, _owner_has_shell(user), user)
@@ -642,7 +664,7 @@ async def start_run(body: RunBody, user: dict = Depends(get_current_user)) -> di
 
 
 @router.get("/runs")
-async def list_runs(user: dict = Depends(get_current_user)) -> dict:
+async def list_runs(user: dict = Depends(admin_user)) -> dict:
     return {"runs": [_run_summary(r) for r in await _cs_store().list_runs(_uid(user))]}
 
 
@@ -654,7 +676,7 @@ async def _own_run(run_id: str, user: dict) -> dict:
 
 
 @router.get("/runs/{run_id}")
-async def get_run(run_id: str, since: int = 0, user: dict = Depends(get_current_user)) -> dict:
+async def get_run(run_id: str, since: int = 0, user: dict = Depends(admin_user)) -> dict:
     run = await _own_run(run_id, user)
     store = _cs_store()
     obj = run["objective"]
@@ -714,7 +736,7 @@ async def get_run(run_id: str, since: int = 0, user: dict = Depends(get_current_
 
 
 @router.post("/runs/{run_id}/cancel")
-async def cancel_run(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def cancel_run(run_id: str, user: dict = Depends(admin_user)) -> dict:
     from captain_claw.flight_deck import captain_swarm_loop as loop_mod
     from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
     run = await _own_run(run_id, user)
@@ -725,7 +747,7 @@ async def cancel_run(run_id: str, user: dict = Depends(get_current_user)) -> dic
 
 
 @router.post("/runs/{run_id}/go")
-async def go(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def go(run_id: str, user: dict = Depends(admin_user)) -> dict:
     """The owner's Go for a run an agent started. The checks a run needs are made
     now, as the owner — the agent's say-so isn't enough for any of them."""
     from captain_claw.flight_deck import captain_swarm_loop as loop_mod
@@ -762,7 +784,7 @@ async def go(run_id: str, user: dict = Depends(get_current_user)) -> dict:
 
 
 @router.post("/runs/{run_id}/decline")
-async def decline(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def decline(run_id: str, user: dict = Depends(admin_user)) -> dict:
     run = await _own_run(run_id, user)
     if run["status"] != "awaiting_go":
         raise HTTPException(409, "It isn't waiting for a Go.")
@@ -772,7 +794,7 @@ async def decline(run_id: str, user: dict = Depends(get_current_user)) -> dict:
 
 
 @router.post("/runs/{run_id}/carry-out")
-async def carry_out(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def carry_out(run_id: str, user: dict = Depends(admin_user)) -> dict:
     """The winner, carried out once: one ordinary Bat run that re-checks the page,
     asks the owner if anything changed, and acts through Bat's gate — the owner's
     Go for spending, mail and accounts. Only on the owner's click, only once."""
@@ -815,7 +837,7 @@ async def carry_out(run_id: str, user: dict = Depends(get_current_user)) -> dict
 
 
 @router.post("/runs/{run_id}/teach")
-async def teach(run_id: str, request: Request, user: dict = Depends(get_current_user)) -> dict:
+async def teach(run_id: str, request: Request, user: dict = Depends(admin_user)) -> dict:
     """The rules the best version added, taught to the agent as lessons — only
     when the owner says so, and only once the run has stopped."""
     from captain_claw.flight_deck import agent_onboarding
@@ -839,7 +861,7 @@ async def teach(run_id: str, request: Request, user: dict = Depends(get_current_
 
 
 @router.post("/runs/{run_id}/pr")
-async def open_pr(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def open_pr(run_id: str, user: dict = Depends(admin_user)) -> dict:
     """A pull request from the best commit, through Crew (its branch holds every
     kept change). Captain never merges it."""
     from captain_claw.flight_deck import crew_access, crew_runner
@@ -858,7 +880,7 @@ async def open_pr(run_id: str, user: dict = Depends(get_current_user)) -> dict:
 
 
 @router.get("/lessons")
-async def lessons(family: str = "", user: dict = Depends(get_current_user)) -> dict:
+async def lessons(family: str = "", user: dict = Depends(admin_user)) -> dict:
     """What earlier runs learned: the kinds of task there are lessons for, and,
     for one *family*, its lessons and how often each strategy has won."""
     from captain_claw.flight_deck import captain_swarm_learning as learning
@@ -875,7 +897,7 @@ async def lessons(family: str = "", user: dict = Depends(get_current_user)) -> d
 
 
 @router.delete("/lessons/{lesson_id}")
-async def forget_lesson(lesson_id: int, user: dict = Depends(get_current_user)) -> dict:
+async def forget_lesson(lesson_id: int, user: dict = Depends(admin_user)) -> dict:
     """The owner takes a lesson back: no later run reads it."""
     if not await _cs_store().delete_lesson(_uid(user), lesson_id):
         raise HTTPException(404, "No such lesson.")
@@ -883,7 +905,7 @@ async def forget_lesson(lesson_id: int, user: dict = Depends(get_current_user)) 
 
 
 @router.post("/runs/{run_id}/save-document")
-async def save_document(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def save_document(run_id: str, user: dict = Depends(admin_user)) -> dict:
     """The best document, into the owner's own files: only on their click."""
     from captain_claw.flight_deck import captain_swarm_document as document
     from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
@@ -917,7 +939,7 @@ async def _playbook_run(run_id: str, user: dict) -> tuple[dict, dict]:
 
 
 @router.get("/runs/{run_id}/playbook")
-async def playbook_preview(run_id: str, user: dict = Depends(get_current_user)) -> dict:
+async def playbook_preview(run_id: str, user: dict = Depends(admin_user)) -> dict:
     """The playbook this run would give an agent, to read before saving it."""
     _, playbook = await _playbook_run(run_id, user)
     return {"playbook": playbook}
@@ -928,7 +950,7 @@ class PlaybookBody(BaseModel):
 
 
 @router.post("/runs/{run_id}/playbook")
-async def playbook_save(run_id: str, body: PlaybookBody, user: dict = Depends(get_current_user)) -> dict:
+async def playbook_save(run_id: str, body: PlaybookBody, user: dict = Depends(admin_user)) -> dict:
     """The run's ways that worked and didn't, as a playbook on one of the owner's
     agents: only on the owner's click, and only that agent's own store."""
     from captain_claw.flight_deck import agent_preset as ap
@@ -977,7 +999,7 @@ async def agent_start(body: AgentStartReq) -> dict:
     from captain_claw.flight_deck import crew_runner
     from captain_claw.flight_deck.auth import get_db
     from captain_claw.flight_deck.bat_routes import _owner_has_shell
-    owner = _agent_owner(body)
+    owner = await _agent_admin(body)
     user = await crew_runner._user_of(owner)
     try:
         objective = _objective_from(RunBody(template=body.template, options=body.options, objective=body.objective),
@@ -996,16 +1018,18 @@ async def agent_start(body: AgentStartReq) -> dict:
 
 @router.post("/agent/status")
 async def agent_status(body: AgentReq) -> dict:
+    owner = await _agent_admin(body)
     run = await _cs_store().get_run(body.run_id)
-    if run is None or run["owner_id"] != _agent_owner(body):
+    if run is None or run["owner_id"] != owner:
         return {"found": False}
     return {"found": True, **_run_summary(run)}
 
 
 @router.post("/agent/get")
 async def agent_get(body: AgentReq) -> dict:
+    owner = await _agent_admin(body)
     run = await _cs_store().get_run(body.run_id)
-    if run is None or run["owner_id"] != _agent_owner(body):
+    if run is None or run["owner_id"] != owner:
         return {"found": False}
     exps = await _cs_store().list_experiments(body.run_id)
     return {"found": True, **_run_summary(run), "report": (run.get("state") or {}).get("report"),
@@ -1015,7 +1039,7 @@ async def agent_get(body: AgentReq) -> dict:
 
 @router.post("/agent/list")
 async def agent_list(body: AgentReq) -> dict:
-    runs = await _cs_store().list_runs(_agent_owner(body), limit=body.limit)
+    runs = await _cs_store().list_runs(await _agent_admin(body), limit=body.limit)
     return {"runs": [_run_summary(r) for r in runs]}
 
 
@@ -1023,8 +1047,9 @@ async def agent_list(body: AgentReq) -> dict:
 async def agent_cancel(body: AgentReq) -> dict:
     from captain_claw.flight_deck import captain_swarm_loop as loop_mod
     from captain_claw.flight_deck.captain_swarm_store import TERMINAL_STATES
+    owner = await _agent_admin(body)
     run = await _cs_store().get_run(body.run_id)
-    if run is None or run["owner_id"] != _agent_owner(body):
+    if run is None or run["owner_id"] != owner:
         return {"found": False}
     if run["status"] in TERMINAL_STATES:
         return {"found": True, "status": run["status"]}

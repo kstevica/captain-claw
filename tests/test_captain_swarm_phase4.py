@@ -487,6 +487,42 @@ def test_cancel_stops_every_lane_of_the_wave(wave):
     assert all(e["status"] == "failed" for e in exps)
 
 
+def test_a_lane_still_starting_when_the_run_is_stopped_is_stopped_too(wave):
+    """Found as a flaky test: a stop cancelled the attempts still starting, and one
+    whose run already existed (a Bat run) but whose id wasn't back was never stopped."""
+    ns = wave
+    ns.scores = {(BASE, "dev"): 0.60, (BASE, "holdout"): 0.50}
+    lane = WaveLane({}, together=2)
+    lane.hold = True
+    gate = asyncio.Event()
+    made = lane.start
+
+    async def slow_start(run_, exp, brief):
+        got = await made(run_, exp, brief)          # its run exists from here...
+        if exp["hypothesis"] == "B":
+            await gate.wait()                       # ...but its id isn't back yet
+        return got
+    lane.start = slow_start
+    loop.set_lane(lane)
+    ns.ideas = [[idea("A"), idea("B")]]
+
+    async def go():
+        await ns.new_run()
+        task = asyncio.create_task(ns.drive())
+        for _ in range(500):
+            await asyncio.sleep(0.005)
+            if len(lane.started) == 2:
+                break
+        await loop.cancel_run(ns.store, RID)
+        await asyncio.sleep(0.1)                    # the wave ends while B is still starting
+        gate.set()
+        status = await asyncio.wait_for(task, 5)
+        return status, await ns.store.list_experiments(RID)
+    status, exps = run(go())
+    assert status == "cancelled" and sorted(set(lane.stopped)) == ["c1", "c2"]
+    assert all(e["status"] == "failed" for e in exps)
+
+
 def test_a_wave_resumes_after_a_restart(wave):
     ns = wave
     ns.scores = {(H1, "dev"): 0.80, (H1, "holdout"): 0.70}
@@ -595,7 +631,7 @@ def test_routes_site_check_and_live_view(store, monkeypatch):
 
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "user"}
+    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "admin"}
     monkeypatch.setattr(routes, "_agent_owner", lambda body: "u")
     obj = outcome.normalize(outcome.outcome_template(task="Find the cheapest new paperback copy of The Book"))
 

@@ -394,7 +394,7 @@ def test_carry_out_route_starts_one_bat_run(store, monkeypatch, tmp_path):
     monkeypatch.setattr(bat_loop, "kick", kick)
     app = FastAPI()
     app.include_router(routes.router)
-    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "user"}
+    app.dependency_overrides[get_current_user] = lambda: {"id": "u", "role": "admin"}
     obj = outcome.normalize(outcome.outcome_template(task="Find the cheapest new paperback copy of The Book"))
     best = {"title": "The Book", "url": "https://b.example/y", "value": 39.9, "currency": "EUR", "details": "", "next_step": ""}
 
