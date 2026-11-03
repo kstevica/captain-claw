@@ -157,7 +157,7 @@ def retention_cutoff(now: datetime | None = None) -> str:
 async def post(
     user_id: str, kind: str, title: str, body: str = "", *, bell_type: str = "",
     source: str = "", needs_you: bool = False, ref_type: str = "", ref_id: str = "",
-    trust: str = "deck", to_phones: bool = True,
+    trust: str = "deck", to_phones: bool = True, thread_id: str = "",
 ) -> str:
     """One item on ``user_id``'s Line; its id, "" when it couldn't be
     written. Never raises. (The bell's writers use ``db.add_notification``,
@@ -173,6 +173,7 @@ async def post(
             _norm(user_id), kind if kind in KIND_LABELS else "deck", bell_type or kind,
             title[:TITLE_MAX], str(body or "").strip()[:BODY_MAX], source=source,
             needs_you=needs_you, ref_type=ref_type, ref_id=ref_id, trust=trust, to_phones=to_phones,
+            thread_id=thread_id,
         )
         await maybe_prune(db)
         return item_id
@@ -262,12 +263,20 @@ async def action_done(row: dict[str, Any]) -> str:
     if kind == "nudge":
         return ""
     failed = str(row.get("outcome") or "") == "fail"
+    # With the Taskboard task it's about, it joins that task's thread.
+    try:
+        from captain_claw.flight_deck.owner_notify import task_of
+
+        task = await asyncio.to_thread(task_of, dict(row))
+    except Exception:  # noqa: BLE001
+        task = ""
     title = " ".join(str(row.get("title") or kind or "An action").split())
     return await post_once(
         str(row.get("user_id") or ""), "result", f"{'Failed' if failed else 'Done'}: {title}",
         str(row.get("outcome_note") or ""), bell_type="autonomy_failed" if failed else "autonomy_done",
         source=agent_name(str(row.get("target") or "")), needs_you=failed,
         ref_type="autonomy_result", ref_id=str(row.get("id") or ""), trust="agent",
+        thread_id=f"task:{task}" if task else "",
     )
 
 
@@ -464,4 +473,7 @@ def view(row: dict[str, Any]) -> dict[str, Any]:
         "ref_id": row.get("ref_id") or "",
         "trust": row.get("trust") or "deck",
         "created_at": row.get("created_at") or "",
+        # What it belongs with: an item, its hand-overs and their answers, or
+        # everything about one Taskboard task.
+        "thread_id": row.get("thread_id") or row["id"],
     }

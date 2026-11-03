@@ -15,6 +15,10 @@ from typing import Any
 import aiosqlite
 
 
+# A Line item's link to a Taskboard task ("[Open in Taskboard](?taskboard=<id>)").
+_LINE_TASK_LINK = re.compile(r"[?&]taskboard=([A-Za-z0-9_.:-]{1,200})")
+
+
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1085,7 +1089,8 @@ class FlightDeckDB:
                 trust       TEXT NOT NULL DEFAULT 'deck',
                 read_at     TEXT NOT NULL DEFAULT '',
                 resolved_at TEXT NOT NULL DEFAULT '',
-                created_at  TEXT NOT NULL
+                created_at  TEXT NOT NULL,
+                thread_id   TEXT NOT NULL DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_line_items_user
                 ON line_items(user_id, created_at);
@@ -1128,6 +1133,8 @@ class FlightDeckDB:
             ("daily_usage", "byok_tokens", "INTEGER NOT NULL DEFAULT 0"),
             ("users", "last_login_at", "TEXT NOT NULL DEFAULT ''"),
             ("users", "feedback_asked_at", "TEXT NOT NULL DEFAULT ''"),
+            # The Line's threads (line.py): what an item belongs with.
+            ("line_items", "thread_id", "TEXT NOT NULL DEFAULT ''"),
         ]:
             try:
                 await self._db.execute(f"ALTER TABLE {table} ADD COLUMN {col} {ddl}")
@@ -1144,7 +1151,10 @@ class FlightDeckDB:
             " (SELECT MAX(s.created_at) FROM user_sessions s WHERE s.user_id = users.id)"
             " WHERE last_login_at = ''"
             " AND EXISTS (SELECT 1 FROM user_sessions s WHERE s.user_id = users.id)")
+        await self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_line_items_thread ON line_items(user_id, thread_id)")
         await self._copy_bell_into_line()
+        await self._thread_line_items()
         await self._db.commit()
 
     # The newest bell row the Line has taken in: a deck that ran an older
@@ -1186,6 +1196,25 @@ class FlightDeckDB:
                 " ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
                 (self._LINE_COPIED_KEY, rows[-1]["created_at"], _utcnow()))
         return len(items)
+
+    async def _thread_line_items(self) -> int:
+        """Give every Line item without one its thread (oldest first, so a
+        hand-over finds its item's): see :meth:`_line_thread`. How many."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT id, user_id, body, ref_type, ref_id FROM line_items WHERE thread_id = ''"
+            " ORDER BY created_at")
+        known: dict[str, str] = {}
+        updates = []
+        for r in rows:
+            thread = known.get(r["ref_id"]) if r["ref_type"] == "line_item" else None
+            if thread is None:
+                thread = await self._line_thread(r["user_id"], r["id"], r["body"], r["ref_type"], r["ref_id"])
+            known[r["id"]] = thread
+            updates.append((thread, r["id"]))
+        if updates:
+            await self._db.executemany("UPDATE line_items SET thread_id = ? WHERE id = ?", updates)
+        return len(updates)
 
     # ── Users ────────────────────────────────────────────────────────
 
@@ -4511,22 +4540,35 @@ class FlightDeckDB:
 
     # ── The Line, and the bell as its Needs-you list (line.py) ─────────
 
+    async def _line_thread(self, user_id: str, item_id: str, body: str, ref_type: str, ref_id: str) -> str:
+        """The thread a Line item belongs with: a hand-over's or an answer's is
+        its item's; one about a Taskboard task (its text links it) shares the
+        task's; any other starts its own."""
+        if ref_type == "line_item" and ref_id:
+            parent = await self.get_line_item(user_id, ref_id)
+            if parent is not None:
+                return parent.get("thread_id") or parent["id"]
+        found = _LINE_TASK_LINK.search(body or "")
+        return f"task:{found.group(1)}" if found else item_id
+
     async def add_line_item(
         self, user_id: str, kind: str, type: str, title: str, body: str = "", *,
         source: str = "", needs_you: bool = False, ref_type: str = "", ref_id: str = "",
-        trust: str = "deck", item_id: str = "", to_phones: bool = True,
+        trust: str = "deck", item_id: str = "", to_phones: bool = True, thread_id: str = "",
     ) -> str:
         """Insert one Line item for `user_id`; returns its id. It goes on to the
-        user's channels (line.after_insert); `to_phones=False`: not to phones."""
+        user's channels (line.after_insert); `to_phones=False`: not to phones.
+        `thread_id`: what it belongs with (default: :meth:`_line_thread`)."""
         from captain_claw.flight_deck.line import after_insert
 
         assert self._db is not None
         iid = item_id or _uuid()
+        thread = thread_id or await self._line_thread(user_id, iid, body, ref_type, ref_id)
         await self._db.execute(
             "INSERT INTO line_items (id, user_id, kind, type, title, body, source, needs_you,"
-            " ref_type, ref_id, trust, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " ref_type, ref_id, trust, created_at, thread_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (iid, user_id, kind, type, title, body, source, int(bool(needs_you)),
-             ref_type, ref_id, trust, _utcnow()),
+             ref_type, ref_id, trust, _utcnow(), thread),
         )
         await self._db.commit()
         after_insert(user_id, {"id": iid, "kind": kind, "type": type, "title": title, "body": body,
@@ -4567,6 +4609,29 @@ class FlightDeckDB:
         args.append(max(1, min(int(limit), 500)))
         rows = await self._db.execute_fetchall(q, tuple(args))
         return [dict(r) for r in rows]
+
+    async def list_line_thread(self, user_id: str, thread_id: str, limit: int = 200) -> list[dict]:
+        """One thread of this user's Line, oldest first (the newest `limit`)."""
+        assert self._db is not None
+        rows = await self._db.execute_fetchall(
+            "SELECT * FROM (SELECT * FROM line_items WHERE user_id = ? AND (thread_id = ? OR id = ?)"
+            " ORDER BY created_at DESC LIMIT ?) ORDER BY created_at",
+            (user_id, thread_id, thread_id, max(1, min(int(limit), 500))))
+        return [dict(r) for r in rows]
+
+    async def mark_line_thread_read(self, user_id: str, thread_id: str) -> int:
+        """Every unread item of one thread read (and answered, as reading one is)."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            f"UPDATE line_items SET {self._READ_SET} WHERE user_id = :uid AND read_at = ''"
+            " AND (thread_id = :tid OR id = :tid)",
+            {"now": _utcnow(), "uid": user_id, "tid": thread_id})
+        await self._db.execute(
+            "UPDATE notifications SET read = 1 WHERE user_id = ? AND id IN"
+            " (SELECT id FROM line_items WHERE user_id = ? AND (thread_id = ? OR id = ?))",
+            (user_id, user_id, thread_id, thread_id))
+        await self._db.commit()
+        return int(cur.rowcount or 0)
 
     async def get_line_item(self, user_id: str, item_id: str) -> dict | None:
         assert self._db is not None

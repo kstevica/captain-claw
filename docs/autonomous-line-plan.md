@@ -319,6 +319,32 @@ hand-over and the answer land on the Line, linked to the item. In the kiosk the
 Line is reached from the row above the agents, the collapsed rail, and on a
 phone from the header button and a row above the agent list.
 
+**Threads (after the redesign):** one topic was several rows — a nudge, "You
+handed …", "Glasses answered on …", the next hand-over. Every item now has a
+`thread_id` (`line_items.thread_id`, indexed per user, set by
+`add_line_item`):
+- an item linked to another Line item (`ref_type = line_item`: a hand-over, an
+  answer, the answer to a question) joins that item's thread;
+- an item whose text links a Taskboard task (`?taskboard=<id>`) is in
+  `task:<id>`; a finished autonomy action finds its task through
+  `owner_notify.task_of`;
+- anything else starts its own thread (its own id).
+Items from before are threaded once, oldest first, when the deck starts.
+`GET /fd/line/thread/{id}` reads a thread oldest first and
+`POST /fd/line/thread/{id}/read` reads all of it (a needs-you item that isn't
+a proposal is answered by reading it, as before). A hand-over quotes the
+thread up to the handed item — at most 10 items and 8,000 characters, as
+information — so the agent picks up where the last one left off.
+
+The page lists one row per thread, by its newest item: the first item's
+avatar and headline, a count chip, the thread's state pill, and who said the
+last thing. The open thread is a conversation: the first item in full, the
+user's hand-overs on the right, the agents' answers on the left, other items
+about the same task as cards, and "Glasses is on it…" while an answer is
+coming. The composer hands the thread's newest item over (the thread comes
+along) to the agent the thread last talked with. The dialog has a fullscreen
+button.
+
 ## Phases
 
 | Phase | What | Restart |
