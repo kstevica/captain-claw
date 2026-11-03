@@ -5,12 +5,14 @@
 //   what the owner actually did; the best rules reach it only when the owner teaches them;
 // - code (Phase 2): the best commit sits on a branch; the owner opens the PR, Captain never merges;
 // - one task's best result (Phase 3b): attempts in rehearsal, every claim re-checked by Captain,
-//   the winner carried out once by a Bat run, through Bat's gate.
+//   the winner carried out once by a Bat run, through Bat's gate, and saved as a playbook if wanted.
+// Every run learns (Phase 6): lessons are kept per kind of task, and the next run of that kind
+// starts from them; the owner sees them and can forget any.
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { BookOpen, Check, ExternalLink, GitPullRequest, Hand, Loader2, Play, Square, X } from 'lucide-react'
+import { BookMarked, BookOpen, Check, ExternalLink, GitPullRequest, Hand, Loader2, Play, Square, X } from 'lucide-react'
 import { captainSwarmRuns } from '../../services/captainSwarm'
 import type {
-  Experiment, MravTemplate, OutcomeTemplate, RunDetail, RunSummary, TriageTemplate,
+  Experiment, Lesson, MravTemplate, OutcomeTemplate, Playbook, RunDetail, RunSummary, TriageTemplate,
 } from '../../services/captainSwarm'
 import { useProcessStore } from '../../stores/processStore'
 
@@ -36,7 +38,8 @@ const MARK: Record<string, string> = {
   kept: '#34d399', discarded: '#a1a1aa', disqualified: '#f87171', failed: '#fbbf24',
 }
 
-const f3 = (n?: number | null) => (n === null || n === undefined ? '—' : n.toFixed(3))
+// "Nothing yet" (a one-task run's start is a sentinel far past any real number) reads as a dash.
+const f3 = (n?: number | null) => (n === null || n === undefined || Math.abs(n) >= 1e11 ? '—' : n.toFixed(3))
 const usd = (n?: number) => `$${(n || 0).toFixed(2)}`
 
 function TextField({ label, value, onChange, wide }: {
@@ -51,6 +54,28 @@ function TextField({ label, value, onChange, wide }: {
   )
 }
 
+const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60)
+
+type Families = Record<string, { lessons: number; runs: number }>
+
+// The kind of task a run's lessons are kept under: runs of the same kind learn from each other.
+function FamilyField({ value, onChange, fallback, families }: {
+  value: string; onChange: (v: string) => void; fallback: string; families: Families
+}) {
+  const known = families[slug(value) || fallback]
+  return (
+    <label className="flex flex-col gap-1 text-xs text-zinc-400">
+      Kind of task
+      <input value={value} onChange={(e) => onChange(e.target.value)} placeholder={fallback}
+        className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600" />
+      <span className="text-[11px] text-zinc-500">
+        {known ? `${known.lessons} lesson${known.lessons === 1 ? '' : 's'} from ${known.runs} earlier run${known.runs === 1 ? '' : 's'}`
+          : 'nothing learned yet'}
+      </span>
+    </label>
+  )
+}
+
 // How many attempts run at once: each kind has its own ceiling on this deck.
 function AtOnce({ value, onChange, most }: { value: string; onChange: (v: string) => void; most: number }) {
   return <TextField label={`At once (up to ${most})`} value={value} onChange={onChange} />
@@ -61,6 +86,7 @@ function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
   const [which, setWhich] = useState<'outcome' | 'triage' | 'mrav'>('outcome')
   const [canStart, setCanStart] = useState(false)
   const [error, setError] = useState('')
+  const [families, setFamilies] = useState<Families>({})
 
   useEffect(() => {
     captainSwarmRuns.templates().then((t) => {
@@ -68,6 +94,9 @@ function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
       setCanStart(t.can_start)
 
     }).catch((e) => setError(e instanceof Error ? e.message : String(e)))
+    captainSwarmRuns.lessons().then((l) => setFamilies(
+      Object.fromEntries(l.families.map((f) => [f.family, { lessons: f.lessons, runs: f.runs }]))))
+      .catch(() => setFamilies({}))
   }, [])
 
   if (!templates) return error ? <div className="text-xs text-red-400">{error}</div> : null
@@ -81,9 +110,9 @@ function StartRun({ onStarted }: { onStarted: (id: string) => void }) {
           </button>
         ))}
       </div>
-      {which === 'outcome' && <StartOutcome tpl={templates.outcome} onStarted={onStarted} />}
-      {which === 'triage' && <StartTriage tpl={templates.triage} onStarted={onStarted} />}
-      {which === 'mrav' && <StartMrav tpl={templates.mrav} canStart={canStart} onStarted={onStarted} />}
+      {which === 'outcome' && <StartOutcome tpl={templates.outcome} families={families} onStarted={onStarted} />}
+      {which === 'triage' && <StartTriage tpl={templates.triage} families={families} onStarted={onStarted} />}
+      {which === 'mrav' && <StartMrav tpl={templates.mrav} families={families} canStart={canStart} onStarted={onStarted} />}
     </div>
   )
 }
@@ -106,7 +135,9 @@ function useStart(template: 'mrav' | 'triage' | 'outcome', onStarted: (id: strin
   return { busy, error, start }
 }
 
-function StartOutcome({ tpl, onStarted }: { tpl: OutcomeTemplate; onStarted: (id: string) => void }) {
+function StartOutcome({ tpl, families, onStarted }: {
+  tpl: OutcomeTemplate; families: Families; onStarted: (id: string) => void
+}) {
   const [form, setForm] = useState<Record<string, string>>(
     () => ({ task: '', max_value: '', must_include: '', currency: '',
       ...Object.fromEntries(Object.entries(tpl.defaults).map(([k, v]) => [k, String(v)])) }))
@@ -141,6 +172,8 @@ function StartOutcome({ tpl, onStarted }: { tpl: OutcomeTemplate; onStarted: (id
         <TextField label="Budget ($)" value={form.budget_usd || ''} onChange={set('budget_usd')} />
         <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
         <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
+        <FamilyField value={form.family || ''} onChange={set('family')} families={families}
+          fallback={slug(`find-${form.label || 'price'}`)} />
       </div>
       <p className="mt-2 text-xs text-zinc-500">
         Attempts that run at once share what's left of the budget equally, and each uses its own sites: only one
@@ -158,7 +191,9 @@ function StartOutcome({ tpl, onStarted }: { tpl: OutcomeTemplate; onStarted: (id
   )
 }
 
-function StartTriage({ tpl, onStarted }: { tpl: TriageTemplate; onStarted: (id: string) => void }) {
+function StartTriage({ tpl, families, onStarted }: {
+  tpl: TriageTemplate; families: Families; onStarted: (id: string) => void
+}) {
   const processes = useProcessStore((s) => s.processes)
   const fetchProcesses = useProcessStore((s) => s.fetchProcesses)
   const [form, setForm] = useState<Record<string, string>>(
@@ -201,6 +236,7 @@ function StartTriage({ tpl, onStarted }: { tpl: TriageTemplate; onStarted: (id: 
             <TextField label="Budget ($)" value={form.budget_usd || ''} onChange={set('budget_usd')} />
             <TextField label="Hours" value={form.budget_hours || ''} onChange={set('budget_hours')} />
             <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
+            <FamilyField value={form.family || ''} onChange={set('family')} families={families} fallback="mail-triage" />
           </div>
           <p className="mt-2 text-xs text-zinc-500">
             Each measurement asks {agent?.name || 'the agent'} {Number(form.cases || 0) * Number(form.repeat || 0)} questions
@@ -221,7 +257,9 @@ function StartTriage({ tpl, onStarted }: { tpl: TriageTemplate; onStarted: (id: 
   )
 }
 
-function StartMrav({ tpl, canStart, onStarted }: { tpl: MravTemplate; canStart: boolean; onStarted: (id: string) => void }) {
+function StartMrav({ tpl, families, canStart, onStarted }: {
+  tpl: MravTemplate; families: Families; canStart: boolean; onStarted: (id: string) => void
+}) {
   const [form, setForm] = useState<Record<string, string>>(
     () => Object.fromEntries(Object.entries(tpl.defaults).map(([k, v]) => [k, String(v)])))
   const { busy, error, start } = useStart('mrav', onStarted)
@@ -253,6 +291,7 @@ function StartMrav({ tpl, canStart, onStarted }: { tpl: MravTemplate; canStart: 
         <TextField label="Most attempts" value={form.budget_max_experiments || ''} onChange={set('budget_max_experiments')} />
         <TextField label="Ideas per round" value={form.per_round || ''} onChange={set('per_round')} />
         <AtOnce value={form.parallel || ''} onChange={set('parallel')} most={tpl.max_parallel} />
+        <FamilyField value={form.family || ''} onChange={set('family')} families={families} fallback="mrav" />
       </div>
       {tpl.local_models.length > 0 && !tpl.local_models.includes(form.model) && (
         <div className="mt-2 text-xs text-amber-400">
@@ -275,10 +314,13 @@ function StartMrav({ tpl, canStart, onStarted }: { tpl: MravTemplate; canStart: 
 }
 
 function Chart({ run }: { run: RunDetail }) {
-  const points = run.ledger.filter((e) => e.dev?.stats && e.dev.stage !== 'slice')
-  const base = run.baseline?.dev?.stats?.mean
-  if (base === undefined || points.length === 0) return null
-  const values = [base, ...points.map((e) => e.dev.stats!.mean)]
+  // "Nothing found" (a one-task run's start, an attempt that verified nothing) isn't a point on it.
+  const real = (v?: number) => v !== undefined && Math.abs(v) < 1e11
+  const points = run.ledger.filter((e) => e.dev?.stats && e.dev.stage !== 'slice' && real(e.dev.stats.mean))
+  const start = run.baseline?.dev?.stats?.mean
+  const base = real(start) ? start : undefined
+  if (start === undefined || points.length === 0) return null
+  const values = [...(base === undefined ? [] : [base]), ...points.map((e) => e.dev.stats!.mean)]
   const lo = Math.min(...values)
   const hi = Math.max(...values)
   const pad = Math.max((hi - lo) * 0.15, 0.02)
@@ -289,19 +331,24 @@ function Chart({ run }: { run: RunDetail }) {
   const y = (v: number) => H - 18 - ((v - y0) / (y1 - y0)) * (H - 30)
   // The best so far, as a step line: it only moves at a kept attempt.
   let best = base
-  const steps: string[] = [`M 24 ${y(base)}`]
+  const steps: string[] = base === undefined ? [] : [`M 24 ${y(base)}`]
   points.forEach((e, i) => {
     if (e.status === 'kept') {
-      steps.push(`L ${x(i)} ${y(best)}`, `L ${x(i)} ${y(e.dev.stats!.mean)}`)
-      best = e.dev.stats!.mean
+      const v = e.dev.stats!.mean
+      steps.push(...(best === undefined ? [`M ${x(i)} ${y(v)}`] : [`L ${x(i)} ${y(best)}`, `L ${x(i)} ${y(v)}`]))
+      best = v
     }
   })
-  steps.push(`L ${W - 8} ${y(best)}`)
+  if (best !== undefined) steps.push(`L ${W - 8} ${y(best)}`)
   return (
     <svg viewBox={`0 0 ${W} ${H}`} className="h-36 w-full" role="img"
       aria-label="Each attempt's score on the open cases, and the best so far">
-      <line x1={24} x2={W - 8} y1={y(base)} y2={y(base)} stroke="#52525b" strokeDasharray="3 3" />
-      <text x={26} y={y(base) - 4} fill="#71717a" fontSize="10">start {base.toFixed(3)}</text>
+      {base !== undefined && (
+        <>
+          <line x1={24} x2={W - 8} y1={y(base)} y2={y(base)} stroke="#52525b" strokeDasharray="3 3" />
+          <text x={26} y={y(base) - 4} fill="#71717a" fontSize="10">start {base.toFixed(3)}</text>
+        </>
+      )}
       <path d={steps.join(' ')} fill="none" stroke="#34d399" strokeWidth={1.5} />
       {points.map((e, i) => (
         <circle key={e.id} cx={x(i)} cy={y(e.dev.stats!.mean)} r={4} fill={MARK[e.status] || '#a1a1aa'}>
@@ -420,10 +467,143 @@ function InFlight({ run }: { run: RunDetail }) {
   )
 }
 
+// What the run learned (Phase 6): what it started with from earlier runs of the same kind of
+// task, the planner's readings, a strategy round's directions, and how each strategy has done.
+function Learning({ run }: { run: RunDetail }) {
+  const l = run.learning
+  const [earlier, setEarlier] = useState<Lesson[] | null>(null)
+  const [error, setError] = useState('')
+  if (!l) return null
+  const nothing = !l.earlier.lessons && !l.readings.length && !l.strategy.length && !l.weights.length && !l.playbook
+  if (nothing) return null
+  const show = async () => {
+    try {
+      setEarlier(((await captainSwarmRuns.lessons(l.family)).lessons || []).filter((x) => x.run_id !== run.id))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+  const forget = async (lesson: Lesson) => {
+    try {
+      await captainSwarmRuns.forget(lesson.id)
+      setEarlier((xs) => (xs || []).filter((x) => x.id !== lesson.id))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    }
+  }
+  return (
+    <div className="space-y-2 rounded-md bg-zinc-950/60 p-3 text-xs">
+      <div className="flex flex-wrap items-center gap-2 text-zinc-500">
+        What it learned
+        <span className="rounded border border-zinc-700 px-1 text-[11px] text-zinc-400">{l.family}</span>
+        {l.earlier.lessons > 0 && (
+          <button onClick={() => (earlier ? setEarlier(null) : show())} className="text-sky-400 hover:underline">
+            started from {l.earlier.lessons} lessons of {l.earlier.runs} earlier run{l.earlier.runs === 1 ? '' : 's'}
+          </button>
+        )}
+      </div>
+      {error && <div className="text-red-400">{error}</div>}
+      {earlier && (
+        <ul className="max-h-56 space-y-0.5 overflow-y-auto">
+          {earlier.map((x) => (
+            <li key={x.id} className="flex gap-2">
+              <span className={x.outcome === 'won' ? 'text-emerald-400' : x.outcome === 'lost' ? 'text-zinc-500' : 'text-sky-400'}>
+                {x.kind === 'attempt' ? (x.outcome === 'won' ? 'worked' : x.outcome === 'lost' ? "didn't" : 'tried') : x.kind === 'strategy' ? 'direction' : 'reading'}
+              </span>
+              <span className="min-w-0 flex-1 text-zinc-300">{x.text}</span>
+              <button onClick={() => forget(x)} title="Forget this lesson: no later run reads it"
+                className="shrink-0 text-zinc-500 hover:text-red-400"><X size={12} /></button>
+            </li>
+          ))}
+        </ul>
+      )}
+      {l.strategy.length > 0 && (
+        <div>
+          <div className="text-zinc-500">It stalled; a strategy round suggested:</div>
+          {l.strategy.map((x, i) => <div key={i} className="text-amber-200/90">→ {x.text}</div>)}
+        </div>
+      )}
+      {l.readings.length > 0 && (
+        <div>
+          <div className="text-zinc-500">The planner's readings, newest first:</div>
+          {l.readings.slice(0, 4).map((x, i) => <div key={i} className="text-zinc-300">{x.text}</div>)}
+        </div>
+      )}
+      {l.weights.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {l.weights.map((w) => (
+            <span key={w.tag} title={`won ${w.won} of ${w.won + w.lost} on this kind of task`}
+              className="rounded border border-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-400">
+              {w.tag} <span className={w.weight >= 0.5 ? 'text-emerald-400' : 'text-zinc-500'}>{w.won}/{w.won + w.lost}</span>
+            </span>
+          ))}
+        </div>
+      )}
+      {l.playbook && <div className="text-sky-300">Saved as a playbook on {l.playbook.agent}.</div>}
+    </div>
+  )
+}
+
+// A one-task run's ways that worked and didn't, as a playbook on one of the owner's agents.
+function PlaybookPanel({ id, onSaved }: { id: string; onSaved: (agent: string) => void }) {
+  const processes = useProcessStore((s) => s.processes)
+  const fetchProcesses = useProcessStore((s) => s.fetchProcesses)
+  const [playbook, setPlaybook] = useState<Playbook | null>(null)
+  const [agent, setAgent] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  useEffect(() => {
+    fetchProcesses()
+    captainSwarmRuns.playbook(id).then((r) => setPlaybook(r.playbook))
+      .catch((e) => setError(e instanceof Error ? e.message : String(e)))
+  }, [id, fetchProcesses])
+  const chosen = agent || processes[0]?.slug || ''
+  const save = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      await captainSwarmRuns.savePlaybook(id, chosen)
+      onSaved(processes.find((p) => p.slug === chosen)?.name || chosen)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="space-y-2 rounded-md border border-zinc-800 bg-zinc-950/60 p-3 text-xs">
+      <div className="text-zinc-400">
+        The agent reads this when it meets a task like this one. Nothing is saved until you click Save.
+      </div>
+      {playbook ? (
+        <div className="space-y-1 text-zinc-300">
+          <div className="text-sm text-zinc-100">{playbook.name}</div>
+          <div className="text-zinc-500">{playbook.trigger_description}</div>
+          {playbook.do_pattern && <pre className="whitespace-pre-wrap text-emerald-300/90">{playbook.do_pattern}</pre>}
+          {playbook.dont_pattern && <pre className="whitespace-pre-wrap text-zinc-400">{playbook.dont_pattern}</pre>}
+        </div>
+      ) : !error && <Loader2 size={14} className="animate-spin text-zinc-500" />}
+      <div className="flex flex-wrap items-center gap-2">
+        <select value={chosen} onChange={(e) => setAgent(e.target.value)}
+          className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-sm text-zinc-100">
+          {processes.map((p) => <option key={p.slug} value={p.slug}>{p.name}</option>)}
+        </select>
+        <button onClick={save} disabled={busy || !playbook || !chosen}
+          className="inline-flex items-center gap-1 rounded-md bg-sky-600 px-2.5 py-1 font-medium text-white hover:bg-sky-500 disabled:opacity-50">
+          {busy ? <Loader2 size={12} className="animate-spin" /> : <BookMarked size={12} />} Save
+        </button>
+        {processes.length === 0 && <span className="text-zinc-500">You have no agents to give it to.</span>}
+        {error && <span className="text-red-400">{error}</span>}
+      </div>
+    </div>
+  )
+}
+
 function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
   const [run, setRun] = useState<RunDetail | null>(null)
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
+  const [showPlaybook, setShowPlaybook] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -503,6 +683,12 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
               <Hand size={13} /> Carry it out
             </button>
           )}
+          {!active && run.improved && run.kind === 'outcome' && !run.learning?.playbook && (
+            <button onClick={() => setShowPlaybook((v) => !v)}
+              className="inline-flex items-center gap-1 rounded-md border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800">
+              <BookMarked size={13} /> Save as a playbook
+            </button>
+          )}
           {!active && run.improved && run.kind === 'practice' && (
             <button onClick={() => act(async () => {
               const r = await captainSwarmRuns.teach(id)
@@ -515,6 +701,9 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
         </div>
       </div>
       {(error || note) && <div className={`text-xs ${error ? 'text-red-400' : 'text-emerald-400'}`}>{error || note}</div>}
+      {showPlaybook && (
+        <PlaybookPanel id={id} onSaved={(agent) => { setShowPlaybook(false); setNote(`Saved as a playbook on ${agent}.`); load() }} />
+      )}
       <div className="grid grid-cols-2 gap-3 text-xs md:grid-cols-4">
         <div className="rounded-md bg-zinc-950/60 p-2.5">
           <div className="text-zinc-500">Start</div>
@@ -581,6 +770,7 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
         </div>
       )}
       {active && <InFlight run={run} />}
+      <Learning run={run} />
       <Ledger exps={run.ledger} intents={run.intents} />
       <details className="text-xs text-zinc-400">
         <summary className="cursor-pointer text-zinc-500">What it measures and what it may change</summary>
@@ -666,7 +856,7 @@ export function RunsPanel() {
                     <span className="truncate text-zinc-100">{r.title}</span>
                   </div>
                   <div className="mt-0.5 pl-4 text-[11px] text-zinc-500">
-                    {STATUS_TEXT[r.status]} · {f3(r.baseline_dev)} → {f3(r.champion_dev)} · {r.experiments} attempts
+                    {STATUS_TEXT[r.status]} · {f3(r.baseline_dev)} → {f3(r.champion_dev)} · {r.experiments} attempt{r.experiments === 1 ? '' : 's'}
                   </div>
                 </button>
               </li>

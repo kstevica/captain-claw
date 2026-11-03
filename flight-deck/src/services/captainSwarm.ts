@@ -189,8 +189,18 @@ export interface RunDetail extends RunSummary {
   // Phase 4: the wave under way, the measurement queue ('' is the best itself), the sites
   // and accounts each attempt holds in its browser, and how many ideas wait for a later wave.
   live?: { wave: string[]; measuring: Record<string, 'waiting' | 'measuring'>; sites: Record<string, string[]>; queued: number }
+  // Phase 6: what this run learned, and what it started from.
+  learning?: {
+    family: string
+    readings: { text: string; at: number }[]
+    strategy: { text: string; at: number }[]
+    earlier: { lessons: number; runs: number }
+    weights: StrategyWeight[]
+    playbook: { agent: string; id: string; at: number } | null
+  }
   objective: {
     kind: 'code' | 'practice' | 'outcome'
+    family?: string
     title: string
     goal: string
     subject: {
@@ -207,6 +217,27 @@ export interface RunDetail extends RunSummary {
   report?: Record<string, unknown> | null
   ledger: Experiment[]
   events: RunEvent[]
+}
+
+export interface StrategyWeight { tag: string; won: number; lost: number; weight: number }
+
+export interface Lesson {
+  id: number
+  run_id: string
+  kind: 'attempt' | 'reading' | 'strategy'
+  strategy_tag: string
+  outcome: 'won' | 'lost' | ''
+  text: string
+  created_at: number
+}
+
+export interface Playbook {
+  name: string
+  task_type: string
+  do_pattern: string
+  dont_pattern: string
+  trigger_description: string
+  reasoning: string
 }
 
 export interface MravTemplate {
@@ -246,4 +277,12 @@ export const captainSwarmRuns = {
   pr: (id: string) => call<{ delivery: { url?: string } }>(`${BASE}/runs/${enc(id)}/pr`, { method: 'POST' }),
   teach: (id: string) => call<{ added: number; rules: string[] }>(`${BASE}/runs/${enc(id)}/teach`, { method: 'POST' }),
   carryOut: (id: string) => call<{ bat_run: string }>(`${BASE}/runs/${enc(id)}/carry-out`, { method: 'POST' }),
+  lessons: (family = '') =>
+    call<{ families: { family: string; lessons: number; runs: number }[]; family?: string; lessons?: Lesson[];
+      weights?: StrategyWeight[] }>(`${BASE}/lessons${family ? `?family=${enc(family)}` : ''}`),
+  forget: (lessonId: number) => call<{ forgotten: number }>(`${BASE}/lessons/${lessonId}`, { method: 'DELETE' }),
+  playbook: (id: string) => call<{ playbook: Playbook }>(`${BASE}/runs/${enc(id)}/playbook`),
+  savePlaybook: (id: string, agent: string) =>
+    call<{ saved: { agent: string; id: string } }>(`${BASE}/runs/${enc(id)}/playbook`,
+      { method: 'POST', body: JSON.stringify({ agent }) }),
 }

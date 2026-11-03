@@ -32,6 +32,12 @@ Phase 4: lanes in parallel. A round's ideas run in *waves* of up to
 
 With one lane a wave is one attempt, and the loop is Phase 2's.
 
+Phase 6: learning (:mod:`captain_swarm_learning`). The proposer adds a
+reading of the run to every round's ideas; a stall brings one strategy round
+before the run gives up; and a run's lessons are written down when it ends,
+so the next run of the same kind of task starts from them, with the
+strategies that have won there going into the first waves.
+
 Durable like Bat: one driver per run under a lease, every step written down
 as it goes, a run re-adopted after a restart; a measurement interrupted by a
 restart is run again, never trusted. The lane, the proposer, the measurement
@@ -55,6 +61,7 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Protocol
 
+from captain_claw.flight_deck import captain_swarm_learning as learning
 from captain_claw.flight_deck import captain_swarm_objective as objective_mod
 from captain_claw.flight_deck import captain_swarm_rehearsal as rehearsal
 from captain_claw.flight_deck import captain_swarm_screen as screen
@@ -101,6 +108,7 @@ Seal = Callable[[dict, str], Awaitable[None]]
 Screen = Callable[[dict, dict], Awaitable[dict]]
 Branch = Callable[[dict, str], Awaitable[None]]
 Review = Callable[[dict, dict], Awaitable[dict]]  # (run, exp) → {"ok", "reason"}
+Strategy = Callable[[dict, list[dict]], Awaitable[list[dict]]]  # (run, ledger) → directions
 
 _LANE: Lane | None = None
 _PROPOSER: Proposer | None = None
@@ -109,6 +117,7 @@ _SEAL: Seal | None = None
 _SCREEN: Screen | None = None
 _BRANCH: Branch | None = None
 _REVIEW: Review | None = None
+_STRATEGY: Strategy | None = None
 _START: Callable[[dict], Awaitable[str]] | None = None
 _STORE: CaptainSwarmStore | None = None
 _SUPERVISOR: Supervisor | None = None
@@ -122,6 +131,11 @@ def set_lane(fn: Lane | None) -> None:
 def set_review(fn: Review | None) -> None:
     global _REVIEW
     _REVIEW = fn
+
+
+def set_strategy(fn: Strategy | None) -> None:
+    global _STRATEGY
+    _STRATEGY = fn
 
 
 def set_proposer(fn: Proposer | None) -> None:
@@ -406,7 +420,8 @@ def proposer_brief(run: dict, ledger: list[dict]) -> str:
         lines.append("\nTried so far (newest last):")
         for e in ledger[-_LEDGER_FOR_PROPOSER:]:
             lines.append(f"- [{e['status']}] ({e.get('strategy_tag') or '-'}) {e['hypothesis'][:300]}"
-                         + (f" → {e['verdict_reason'][:200]}" if e.get("verdict_reason") else ""))
+                         + (f" → {learning.shown_verdict(e)[:200]}" if e.get("verdict_reason") else ""))
+    lines.append(run.get("learned") or "")
     return "\n".join(x for x in lines if x is not None)
 
 
@@ -481,8 +496,20 @@ async def ask_model(run: dict, system: str, user: str, *, label: str, temperatur
 
 async def propose(run: dict, ledger: list[dict], k: int) -> list[dict]:
     """Up to *k* ideas for code, from one model call."""
-    text = await ask_model(run, _PROPOSE_SYSTEM.format(k=k), proposer_brief(run, ledger), label="propose")
+    text = await ask_ideas(run, _PROPOSE_SYSTEM.format(k=k), proposer_brief(run, ledger))
     return diverse(parse_proposals(text, k), ledger)
+
+
+async def ask_ideas(run: dict, system: str, brief: str) -> str:
+    """The proposer's one call: its ideas, and a reading of the run so far,
+    kept as a lesson of this run."""
+    text = await ask_model(run, system + learning.READING_ASK, brief, label="propose")
+    if _STORE is not None:
+        try:
+            await learning.note_reading(_STORE, run, text)
+        except Exception:  # noqa: BLE001 — a lost reading never costs the round its ideas
+            log.warning("captain swarm: couldn't keep the planner's reading", run_id=run.get("id"), exc_info=True)
+    return text
 
 
 def sites_of(idea: dict) -> list[str]:
@@ -767,6 +794,8 @@ class Driver:
         self.branch: Branch = _BRANCH or parts["branch"]
         self.start: Callable[[dict], Awaitable[str]] = _START or parts["start"]
         self.review: Review = _REVIEW or review
+        self.strategy: Strategy = _STRATEGY or learning.strategy_round
+        self._no_ideas = ""
         # A test's own lane has no grants to count.
         self.capacity: Callable[[dict, int], Awaitable[int]] = parts["capacity"] if _LANE is None else as_asked
         self.slice, self.carry = bool(parts["slice"]), bool(parts["carry"])
@@ -816,6 +845,7 @@ class Driver:
         await self.store.set_status(self.run_id, status, reason)
         await self._state(report=report_of(await self._run(), reason))
         rehearsal.release_sites(self.run_id)
+        await remember(self.store, self.run_id)
         return status
 
     async def _measured(self, exp_id: str, sha: str, which: str) -> dict:
@@ -981,11 +1011,22 @@ class Driver:
         state = run.get("state") or {}
         round_no = int(state.get("round") or 0)
         since_keep = int(state.get("since_keep") or 0)
+        strategised = bool(state.get("strategised"))
         if round_no >= 1:
-            since_keep = 0 if state.get("kept_this_round") else since_keep + 1
-            if since_keep >= obj["stop"]["stall_rounds"]:
+            if state.get("kept_this_round"):
+                since_keep, strategised = 0, False     # a gain: the next stall earns a strategy round again
+            else:
+                since_keep += 1
+            stall = int(obj["stop"]["stall_rounds"])
+            if since_keep >= stall and not strategised:
+                # Stalled: before giving up, one strategy round, then two more rounds (§9).
+                await self._strategy_round(run, f"{since_keep} round{'s' if since_keep != 1 else ''} in a row "
+                                                "brought no gain")
+                strategised = True
+            elif since_keep >= stall + 2:
                 await self._state(since_keep=since_keep)
-                return await self._finish("stalled", f"{since_keep} round{'s' if since_keep != 1 else ''} in a row brought no gain")
+                return await self._finish("stalled", f"{since_keep} rounds in a row brought no gain, a strategy "
+                                                     "round included")
         round_no += 1
         if round_no > 1 and (round_no - 1) % obj["stop"]["remeasure_every"] == 0:
             outcome = await self._remeasure(run)
@@ -993,15 +1034,52 @@ class Driver:
                 return outcome
             run = await self._run()
         await self._event("round", f"round {round_no}: asking for ideas")
-        ledger = await self.store.list_experiments(self.run_id)
-        try:
-            ideas = await self.propose(run, ledger, int(obj["lane"]["per_round"]))
-        except Exception as exc:  # noqa: BLE001
-            return await self._finish("failed", f"no ideas: {str(exc)[:300]}")
+        ideas = await self._ideas(run)
+        if ideas is None:
+            return await self._finish("failed", f"no ideas: {self._no_ideas}")
+        if not ideas and not strategised:
+            # Nothing new to try is a stall too: a strategy round, and one more ask.
+            await self._strategy_round(run, "the planner had nothing new to try")
+            strategised = True
+            ideas = await self._ideas(run)
+            if ideas is None:
+                return await self._finish("failed", f"no ideas: {self._no_ideas}")
         if not ideas:
             return await self._finish("stalled", "the planner had nothing new to try")
-        await self._state(round=round_no, queue=ideas, next_n=1, since_keep=since_keep, kept_this_round=False)
+        ideas = await learning.rank(self.store, run, ideas)
+        await self._state(round=round_no, queue=ideas, next_n=1, since_keep=since_keep, kept_this_round=False,
+                          strategised=strategised)
         return ""
+
+    async def _ideas(self, run: dict) -> list[dict] | None:
+        """This round's ideas, with what was learned in the proposer's brief.
+        None when the proposer failed (why: ``self._no_ideas``)."""
+        run = await self._run()
+        ledger = await self.store.list_experiments(self.run_id)
+        try:
+            run = {**run, "learned": await learning.brief_block(self.store, run)}
+        except Exception:  # noqa: BLE001 — a lesson that can't be read never stops a round
+            log.warning("captain swarm: couldn't read what earlier runs learned", run_id=self.run_id, exc_info=True)
+        try:
+            return await self.propose(run, ledger, int(run["objective"]["lane"]["per_round"]))
+        except Exception as exc:  # noqa: BLE001
+            self._no_ideas = str(exc)[:300]
+            return None
+
+    async def _strategy_round(self, run: dict, why: str) -> None:
+        """A stalled run, read three ways; the directions go into the next briefs."""
+        await self._event("strategy", f"{why}: a strategy round before giving up")
+        try:
+            directions = await self.strategy(await self._run(), await self.store.list_experiments(self.run_id))
+            await learning.keep_directions(self.store, run, directions)
+        except Exception as exc:  # noqa: BLE001 — without it the run still gets its two more rounds
+            log.warning("captain swarm: the strategy round failed", run_id=self.run_id, exc_info=True)
+            await self._event("strategy", f"the strategy round couldn't be done: {str(exc)[:200]}")
+            return
+        for d in directions:
+            await self._event("strategy", f"new direction: {d['direction'][:300]}")
+        if not directions:
+            await self._event("strategy", "the strategy round named no new direction")
 
     async def _remeasure(self, run: dict) -> str:
         """The best, measured again: drift (a model update, a warm cache) must not
@@ -1206,7 +1284,7 @@ class Driver:
         """Beaten in its wave by the keeper, but a gain of its own: it comes back
         once, on top of the new best (not for an outcome: there is nothing to build on)."""
         again = self.carry and not (exp.get("change") or {}).get("again_of")
-        await self._close(exp, "discarded", f"{why}, but {label(kept)} did better in the same wave"
+        await self._close(exp, "discarded", f"{why}, but {label(kept)} {learning.RUNNER_UP}"
                           + ("; it comes back on top of that one" if again else ""),
                           lesson=self._lesson(exp["dev"], base_dev, None))
         if again:
@@ -1294,6 +1372,16 @@ async def kick() -> int:
     return await _SUPERVISOR.tick() if _SUPERVISOR is not None else 0
 
 
+async def remember(store: CaptainSwarmStore, run_id: str) -> None:
+    """Write down what a run that has ended taught; never in the way of its end."""
+    try:
+        run = await store.get_run(run_id)
+        if run is not None:
+            await learning.record_run(store, run)
+    except Exception:  # noqa: BLE001
+        log.warning("captain swarm: couldn't write down what the run learned", run_id=run_id, exc_info=True)
+
+
 async def cancel_run(store: CaptainSwarmStore, run_id: str) -> None:
     """The owner's stop: the run ends now, and every lane of its wave is told to stop."""
     run = await store.get_run(run_id)
@@ -1312,6 +1400,7 @@ async def cancel_run(store: CaptainSwarmStore, run_id: str) -> None:
             with contextlib.suppress(Exception):
                 await lane.stop(run, exp)
     rehearsal.release_sites(run_id)
+    await remember(store, run_id)
 
 
 async def supervisor_loop(store: CaptainSwarmStore, stop_event: asyncio.Event) -> None:

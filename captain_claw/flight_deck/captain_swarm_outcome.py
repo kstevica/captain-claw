@@ -41,6 +41,7 @@ import uuid
 from typing import Any
 
 from captain_claw.flight_deck import captain_swarm_rehearsal as rehearsal
+from captain_claw.flight_deck.captain_swarm_learning import shown_verdict
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -106,8 +107,11 @@ def normalize(raw: dict[str, Any]) -> dict[str, Any]:
     lane = raw.get("lane") or {}
     stop = raw.get("stop") or {}
     parallel, per_round = lanes(lane, default=1, most=bat_slots(), per_round_most=6)
+    from captain_claw.flight_deck.captain_swarm_learning import family_slug
+    label = str(rank.get("label") or "price")[:40]
     return {
         "kind": "outcome",
+        "family": family_slug(raw.get("family")) or family_slug(f"find-{label}"),
         "title": str(raw.get("title") or "").strip()[:200] or f"Best result: {task[:90]}",
         "goal": task[:2000],
         "subject": {"type": "attempts", "task": task[:2000],
@@ -490,13 +494,14 @@ def brief(run: dict, ledger: list[dict]) -> str:
         lines.append("\nTried so far:")
         for e in ledger[-10:]:
             lines.append(f"- [{e['status']}] ({e.get('strategy_tag') or '-'}) {e['hypothesis'][:200]}"
-                         + (f" → {e['verdict_reason'][:160]}" if e.get("verdict_reason") else ""))
+                         + (f" → {shown_verdict(e)[:160]}" if e.get("verdict_reason") else ""))
+    lines.append(run.get("learned") or "")
     return "\n".join(lines)
 
 
 async def propose(run: dict, ledger: list[dict], k: int) -> list[dict]:
     from captain_claw.flight_deck import captain_swarm_loop as loop
-    text = await loop.ask_model(run, _SYSTEM.format(k=k), brief(run, ledger), label="propose")
+    text = await loop.ask_ideas(run, _SYSTEM.format(k=k), brief(run, ledger))
     return loop.diverse(loop.parse_proposals(text, k), ledger)
 
 

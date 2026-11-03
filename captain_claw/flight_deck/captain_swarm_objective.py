@@ -69,6 +69,7 @@ def mrav_template(repo_path: str, *, model: str = "gemma4:e2b", base_url: str = 
            + " --repeat 3 --isolate --code-root {checkout} --json --tasks ")
     return {
         "kind": "code",
+        "family": "mrav",
         "title": f"Mrav on {model} passes more of its eval",
         "goal": ("Mrav is Captain's runtime for small models (captain_claw/mrav/). Make a small model "
                  "finish more of the eval's everyday tasks — files, counting, searching, editing, running "
@@ -137,6 +138,8 @@ def normalize(raw: dict[str, Any], *, owner_has_shell: bool) -> dict[str, Any]:
     if obj.get("kind", "code") != "code":
         raise ObjectiveError("Only code objectives run so far (Phase 2).")
     obj["kind"] = "code"
+    from captain_claw.flight_deck.captain_swarm_learning import family_slug
+    obj["family"] = family_slug(obj.get("family")) or "code"
     obj["title"] = str(obj.get("title") or "").strip()[:200] or "Captain Swarm run"
     obj["goal"] = str(obj.get("goal") or "").strip()[:4000]
 

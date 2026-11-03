@@ -1,6 +1,6 @@
 # Captain Swarm — agents that get measurably better at real work
 
-**Status:** Phases 1–3b merged (measurement; the loop on code; an agent's triage rules; the rehearsal guard and one task's best outcome) · Phase 4 built (parallel lanes) · Phases 5–7 not started · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
+**Status:** Phases 1–4 merged (measurement; the loop on code; an agent's triage rules; the rehearsal guard and one task's best outcome; parallel lanes) · Phase 5 (computer use) parked by the owner · Phase 6 built (learning) · Phase 7 not started · **Date:** 2026-11-03 · **Prerequisite done:** Bat finishes for real (#384)
 
 Captain Swarm is a new orchestration mode, a sibling of Bat, Basna, Vatra and Council. Agents reach
 it through the `captain_swarm` tool, the way they reach Bat through `bat`.
@@ -951,7 +951,8 @@ attempts at once.*
   ran on Sonnet.
 
 **Phase 5: computer use**, as soon as Captain's computer use lands. With one lane it doesn't need
-Phase 4, so it can come before Phase 4.
+Phase 4, so it can come before Phase 4. **Parked by the owner (2026-11-03):** the rehearsal guard keeps
+`desktop_action` and `screen_capture` refused until it is picked up again.
 - **Where it runs:** desktops per lane (§4.5).
 - **Rehearsal:** commit-point detection (§4.2).
 - **Scoring:** `screen` scorers paired with a second signal, and asks per case as a guardrail.
@@ -961,6 +962,98 @@ Phase 4, so it can come before Phase 4.
 - **From the ledger:** lessons, and the strategy round on a stall.
 - **Across runs:** lessons carried to the next run, and reliability weights per strategy.
 - **Delivery:** champions delivered as playbooks, lessons and workflows.
+
+**Phase 6 as built (2026-11-03): learning (`captain_swarm_learning.py`).**
+- **Families.** Every objective has a `family`, the kind of task its lessons are kept under:
+  - `mrav` for the Mrav template, `mail-triage` for triage, `find-<label>` for a one-task run;
+  - the owner can name one on the start form.
+
+  Lessons are per owner and family, in a new `cs_lessons` table.
+- **Within a run.**
+  - **Lessons per attempt:** each attempt keeps its measured one-line lesson.
+  - **Readings:** the proposer now writes one `READING:` line before its ideas, saying what the
+    attempts so far teach. It's kept as a lesson of the run and goes into later briefs.
+- **What a proposer may read.** Whether the held-out cases confirmed a gain, never their numbers
+  and never what a held-out case contains (`shown_verdict`).
+  - This now also holds for the run's own ledger. Before Phase 6, a proposer saw held-out scores,
+    and a disqualified rule's reason quoted the held-out string it carried.
+  - Rules lessons carry the rules they added, except a disqualified attempt's.
+- **The strategy round (§9, §12).**
+  - **When:** `stall_rounds` rounds without a gain, or a planner with nothing new to try.
+  - **What:** three reviews on the panel's model, each through its own lens (a shared assumption;
+    what nobody tried; what the best still gets wrong), each name one new direction. The next
+    rounds' briefs start from them.
+  - **After it:** two more rounds without a gain and the run stops as stalled. A gain re-arms it.
+  - **If it fails:** the run still gets its two rounds.
+  - There's no vote: the three directions go to the proposer side by side.
+- **Across runs.**
+  - **Written down:** when a run ends, however it ends (the owner's stop included), every attempt
+    with a verdict is written down. It records its strategy tag and whether it **won** (kept, or
+    beat the best and lost only to a better one in its wave) or **lost** (discarded,
+    disqualified). An attempt whose lane or run failed counts neither way.
+  - **Read back:** the next run of the same family gets in its brief what worked, what didn't, the
+    earlier readings and strategy directions, and every strategy's won/tried.
+  - **Weights:** each strategy tag's weight is `db._reliability_weight`'s Bayesian shrink (seed 0.5,
+    a loss counts double). Ideas are ranked by it, so a strategy that keeps winning goes into the
+    first waves.
+- **Delivery.**
+  - **One-task runs:** a run's ways that worked and didn't, plus the verified best, become a
+    playbook (`playbook_for`). It is saved to one of the owner's agents through that agent's own
+    `/api/playbooks`, only on the owner's click with the text in front of them.
+  - **Rules** still reach an agent through Teach, and **code** through a PR.
+  - **Workflows** wait with computer use.
+- **The page:**
+  - a **Kind of task** field on every start form, with how many lessons earlier runs left;
+  - **What it learned** on every run: its readings, a strategy round's directions, strategy
+    won/tried, and the earlier lessons it started from, each one forgettable;
+  - **Save as a playbook** on one-task runs.
+- **Routes:** `GET /lessons[?family=]`, `DELETE /lessons/{id}`, and `GET`/`POST /runs/{id}/playbook`.
+- **Tests:** 25 new. Phase 2's stall test now expects the strategy round and its two extra rounds.
+
+*Live (2026-11-03, a throwaway deck, a Haiku 5.5 inbox agent, Sonnet 5.5 proposer, Haiku reviewer).*
+- **The set-up:** two made-up weeks of one owner's mail, A and B. Each has 48 open and 8 held-out
+  emails, asked once each, of eight kinds:
+  - five a model can judge from the text alone;
+  - three habits only the owner's replies reveal: recruiters never answered, the accountant always
+    acknowledged, supplier invoices left to bookkeeping.
+
+  Week B has different emails of the same kinds.
+- **Run 1, week A, nothing learned yet:**
+  - **Result:** F1 0.537 → **0.900** on the open emails, 0.571 → 0.857 held-out, reached at its
+    **4th** attempt.
+  - **Kept:** the accountant habit; "a greeting naming someone else isn't for me"; invoice receipts
+    from billing addresses.
+  - **Never kept:** a recruiter rule. Three versions reached 0.973–1.000 on the open emails, but each
+    lost a held-out email, most likely the stranger investor asking for an intro call (not checked
+    case by case).
+  - **The strategy round** fired after two rounds without a gain.
+  - **End:** the $3 budget, after 9 attempts, 19.5 minutes and $3.02.
+- **Run 2, week B, starting from run 1's 17 lessons:**
+  - **Attempt 1:** "Restore the two confirmed rules", straight from the lessons, gave **0.878** with
+    held-out 1.000.
+  - **Attempt 3:** a recruiter rule that run 1's failures had pointed at ("if a message pitches an
+    opportunity in generic terms, with nothing that refers to my own work or to anything we've
+    discussed before, I don't reply") gave **1.000**, confirmed on held-out 1.000. The target was
+    met.
+  - **Totals:** 3 attempts, 8.5 minutes, $1.33.
+- **What it shows:** the second run of the family reached the first run's level in 1 attempt instead
+  of 4, and went past it. That meets Phase 6's done-when on this family.
+- **The playbook:**
+  - **The run:** a one-task run of one attempt ($1.14), with Haiku workers and a Sonnet reviewer,
+    found €189 at BerryBase.
+  - **Saving it:** its playbook was previewed and saved to the inbox agent through the routes the
+    page uses.
+  - **Read back:** the agent's own `/api/playbooks` returned it, `web-research`, tagged
+    `captain-swarm,find-price`, with the run as its source.
+- **Cost:** $5.49 in all ($3.02 + $1.33 + $1.14). Each triage measurement cost about $0.25,
+  because the agent's long instructions go with every question.
+- **Fixed on the page while checking it:** older display bugs from 3b.
+  - A one-task run's "nothing yet" start showed as 1000000000000.000 in the runs list.
+  - It also set the scale of the run's chart.
+  - "1 attempts" and "1 lessons".
+- **What it doesn't show:**
+  - The weeks are synthetic and small, and 8 held-out emails asked once are a strict, coarse check.
+  - The owner's real mail is the real test.
 
 **Phase 7: live in the world (Kind C).**
 - **Measurement:** `delayed` scorers through connectors.

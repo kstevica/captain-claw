@@ -16,6 +16,9 @@ Tables, in ``captain_swarm.db`` in Flight Deck's data dir (deck-isolated via
                   each with the one it was made from
   cs_intents      what a rehearsal would have done in the world, and didn't: an
                   outward call recorded instead of made, or a commit point
+  cs_lessons      what runs learned, per owner and kind of task (family): each
+                  attempt's verdict and lesson, the proposer's readings, and the
+                  directions a strategy round gave (Phase 6)
 
 An experiment's ``base_sha`` / ``head_sha`` name what it started from and what it
 made: a commit for code, a version id for a text subject.
@@ -128,6 +131,21 @@ CREATE TABLE IF NOT EXISTS cs_intents (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS cs_intents_exp ON cs_intents(run_id, exp_id, id);
+
+CREATE TABLE IF NOT EXISTS cs_lessons (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    owner_id      TEXT NOT NULL,
+    family        TEXT NOT NULL,
+    run_id        TEXT NOT NULL,
+    exp_id        TEXT NOT NULL DEFAULT '',
+    kind          TEXT NOT NULL,
+    strategy_tag  TEXT NOT NULL DEFAULT '',
+    outcome       TEXT NOT NULL DEFAULT '',
+    text          TEXT NOT NULL DEFAULT '',
+    created_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cs_lessons_family ON cs_lessons(owner_id, family, id);
+CREATE INDEX IF NOT EXISTS cs_lessons_run ON cs_lessons(run_id, id);
 """
 
 # Columns added after a table first shipped: added in place on an older database.
@@ -344,6 +362,51 @@ class CaptainSwarmStore:
                               (run_id, exp_id)) as cur:
             row = await cur.fetchone()
         return int(row[0]) if row else 0
+
+    # ── lessons (what runs learned) ──────────────────────────────────
+
+    async def add_lesson(self, *, owner_id: str, family: str, run_id: str, kind: str, text: str,
+                         exp_id: str = "", strategy_tag: str = "", outcome: str = "") -> int:
+        db = await self._ensure_db()
+        cur = await db.execute(
+            "INSERT INTO cs_lessons (owner_id, family, run_id, exp_id, kind, strategy_tag, outcome, text, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (owner_id, family[:60], run_id, exp_id, kind[:20], strategy_tag[:60], outcome[:10], text[:1500], _now()))
+        await db.commit()
+        return int(cur.lastrowid or 0)
+
+    async def list_lessons(self, owner_id: str, family: str = "", *, run_id: str = "", other_than: str = "",
+                           kinds: tuple[str, ...] = (), limit: int = 500) -> list[dict[str, Any]]:
+        """*owner_id*'s lessons, newest first: of one *family*, of one run, or all
+        of a family but *other_than* one run."""
+        db = await self._ensure_db()
+        q, args = "SELECT * FROM cs_lessons WHERE owner_id = ?", [owner_id]
+        for col, val in (("family", family), ("run_id", run_id)):
+            if val:
+                q += f" AND {col} = ?"
+                args.append(val)
+        if other_than:
+            q += " AND run_id != ?"
+            args.append(other_than)
+        if kinds:
+            q += f" AND kind IN ({','.join('?' for _ in kinds)})"
+            args.extend(kinds)
+        async with db.execute(q + " ORDER BY id DESC LIMIT ?", (*args, int(limit))) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def delete_lesson(self, owner_id: str, lesson_id: int) -> bool:
+        db = await self._ensure_db()
+        cur = await db.execute("DELETE FROM cs_lessons WHERE id = ? AND owner_id = ?", (int(lesson_id), owner_id))
+        await db.commit()
+        return bool(cur.rowcount)
+
+    async def families(self, owner_id: str) -> list[dict[str, Any]]:
+        """The kinds of task *owner_id* has lessons for, with how many runs taught them."""
+        db = await self._ensure_db()
+        async with db.execute(
+            "SELECT family, COUNT(*) AS lessons, COUNT(DISTINCT run_id) AS runs, MAX(created_at) AS last"
+            " FROM cs_lessons WHERE owner_id = ? GROUP BY family ORDER BY last DESC", (owner_id,)) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
     # ── events ───────────────────────────────────────────────────────
 

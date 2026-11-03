@@ -39,6 +39,7 @@ class CaptainSwarmTool(Tool):
         "'outcome' (find the best result for one real task — offers, slots — in rehearsal: nothing is bought, "
         "sent or booked, Captain checks every result's page itself, and the owner carries the winner out once; "
         "options: task, label, direction (min|max), max_value, must_include, budget_usd, parallel — up to 3). "
+        "Every template also takes 'family', the kind of task: runs of one family learn from each other. "
         "Actions: 'start' (template[, options]), 'status' (run_id), "
         "'get' (run_id — the ledger of attempts), 'list', 'cancel' (run_id)."
     )
