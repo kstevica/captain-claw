@@ -35,15 +35,15 @@ async def list_line(
     rows = await get_db().list_line_items(
         user["id"], limit=limit, before=before, kinds=[kind] if kind else (), needs_you=needs_you)
     try:
-        agent = _line_agent(_norm_user(user["id"]))[1]
+        agent_slug, agent = _line_agent(_norm_user(user["id"]))
     except HTTPException:
-        agent = ""
+        agent_slug, agent = "", ""
     from captain_claw.flight_deck.line import user_agents
 
     return {"items": [view(r) for r in rows], **(await _counts(user["id"])), "kinds": KIND_LABELS,
             # The agent that answers on the Line ("" = none picked yet), and
-            # the ones an item can be handed to.
-            "agent": agent, "agents": user_agents(user["id"])}
+            # the ones a question or an item can go to.
+            "agent": agent, "agent_slug": agent_slug, "agents": user_agents(user["id"])}
 
 
 @router.get("/unread")
@@ -234,8 +234,9 @@ async def _answer(user_id: str, slug: str, name: str, question: str, *, job_text
 
 @router.post("/ask")
 async def ask_line(body: dict = Body(default={}), user: dict = Depends(get_current_user)) -> dict:
-    """Ask the agent the user picked for their Line — about the Line or
-    anything: the question goes on the Line now, the answer when it comes."""
+    """Ask one of the user's agents (``agent``; default: the one picked for
+    their Line) — about the Line or anything: the question goes on the Line
+    now, the answer when it comes."""
     from captain_claw.flight_deck import line as _line
 
     text = " ".join(str(body.get("text") or "").split()) if "\n" not in str(body.get("text") or "") \
@@ -245,7 +246,14 @@ async def ask_line(body: dict = Body(default={}), user: dict = Depends(get_curre
     if len(text) > _ASK_MAX:
         raise HTTPException(status_code=422, detail=f"At most {_ASK_MAX} characters")
     uid = _norm_user(user["id"])
-    slug, name = _line_agent(uid)
+    wanted = str(body.get("agent") or "").strip()
+    if wanted:
+        agent = next((a for a in _line.user_agents(uid) if a["slug"] == wanted), None)
+        if agent is None:
+            raise HTTPException(status_code=400, detail="agent must be one of your agents")
+        slug, name = agent["slug"], agent["name"]
+    else:
+        slug, name = _line_agent(uid)
     item = await _line.post(uid, "talk", f"You asked {name}", text, source=name, bell_type="talk",
                             to_phones=False)
     task = asyncio.create_task(_answer(uid, slug, name, text))
@@ -261,6 +269,23 @@ async def ask_line(body: dict = Body(default={}), user: dict = Depends(get_curre
 # judged on); the item comes along quoted, as information.
 
 _TITLE_IN_ANSWER = 60
+# A title that only says who or what kind; the text's first line says what about.
+_GENERIC_TITLE = re.compile(r"^(Nudge from |Waiting for your approval)")
+
+
+def headline(item: dict) -> str:
+    """What an item is about, in one line: its title, or — when the title only
+    names a sender — its text's first line, without markdown marks."""
+    title = " ".join(str(item.get("title") or "").split())
+    if not _GENERIC_TITLE.match(title):
+        return title
+    for line in str(item.get("body") or "").splitlines():
+        line = re.sub(r"^\s{0,3}(#{1,6}\s+|[-*+]\s+|\d+[.)]\s+|>\s?)", "", line)
+        line = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", line)
+        line = " ".join(line.replace("**", "").replace("__", "").replace("`", "").split())
+        if line:
+            return line
+    return title
 
 
 def hand_prompt(note: str, item: dict) -> str:
@@ -289,7 +314,7 @@ async def hand_item(item_id: str, body: dict = Body(default={}), user: dict = De
     note = str(body.get("note") or "").strip()
     if len(note) > _ASK_MAX:
         raise HTTPException(status_code=422, detail=f"At most {_ASK_MAX} characters")
-    title = " ".join(str(item.get("title") or "").split())
+    title = headline(item)
     short = title if len(title) <= _TITLE_IN_ANSWER else title[:_TITLE_IN_ANSWER - 1] + "…"
     name = agent["name"]
     handed = await _line.post(uid, "talk", f"You handed “{short}” to {name}", note or "Look into it.",

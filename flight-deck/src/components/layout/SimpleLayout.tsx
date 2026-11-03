@@ -1097,7 +1097,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       {locked && connectionsOpen && <KioskConnectionsDialog initialTab={connectionsTab} onClose={() => setConnectionsOpen(false)} />}
       {locked && profileOpen && <KioskProfileDialog onClose={() => setProfileOpen(false)} />}
       {lineOpen && (
-        <KioskWideDialog label="Line" phone={isMobile} onClose={() => setLineOpen(false)}>
+        <KioskWideDialog label="Line" phone={isMobile} widest onClose={() => setLineOpen(false)}>
           <LinePanel onClose={() => setLineOpen(false)} />
         </KioskWideDialog>
       )}
