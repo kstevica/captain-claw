@@ -283,9 +283,11 @@ tools:
     provider: brave
     api_key: ''
     # Optional: set to 'tavily' (uses tavily_api_key) or 'youcom' (uses
-    # youcom_api_key / YDC_API_KEY) instead of Brave.
+    # youcom_api_key / YDC_API_KEY) instead of Brave, or 'keenable' (no key
+    # needed; optional keenable_api_key / KEENABLE_API_KEY for higher limits).
     tavily_api_key: ''
     youcom_api_key: ''
+    keenable_api_key: ''
     base_url: https://api.search.brave.com/res/v1/web/search
     max_results: 10
     timeout: 20

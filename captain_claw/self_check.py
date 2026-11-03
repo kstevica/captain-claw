@@ -633,15 +633,17 @@ async def _mail() -> Check:
 async def _web_search(deep: bool) -> Check:
     cfg = get_config().tools.web_search
     provider = str(cfg.provider or "brave").lower()
-    key = {"tavily": cfg.tavily_api_key, "youcom": cfg.youcom_api_key}.get(provider, cfg.api_key)
-    key = key or os.environ.get({"tavily": "TAVILY_API_KEY", "youcom": "YDC_API_KEY"}.get(
-        provider, "BRAVE_API_KEY"), "")
+    key = {"tavily": cfg.tavily_api_key, "youcom": cfg.youcom_api_key,
+           "keenable": cfg.keenable_api_key}.get(provider, cfg.api_key)
+    key = key or os.environ.get({"tavily": "TAVILY_API_KEY", "youcom": "YDC_API_KEY",
+                                 "keenable": "KEENABLE_API_KEY"}.get(provider, "BRAVE_API_KEY"), "")
     name = "Web search"
-    if not key:
+    if not key and provider != "keenable":  # Keenable works without a key
         return Check("connections", name, "fail", f"{provider} has no API key",
                      fix=f"set the {provider} search key — web_search can't work without it")
     if not deep:
-        return Check("connections", name, "ok", f"{provider} key {_hint(key)} (run deep=true to query it)")
+        detail = f"{provider} key {_hint(key)}" if key else f"{provider} (no key needed)"
+        return Check("connections", name, "ok", f"{detail} (run deep=true to query it)")
     from captain_claw.tools.web_search import WebSearchTool
 
     result = await WebSearchTool().execute(query="Captain Claw", count=1)

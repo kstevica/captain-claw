@@ -20,6 +20,9 @@ export interface LineItem {
   /** Whose words the text is: the deck's, an agent's, or someone else's. */
   trust: 'deck' | 'agent' | 'untrusted' | string
   created_at: string
+  /** What it belongs with: an item, its hand-overs and their answers, or
+   *  everything about one Taskboard task. */
+  thread_id: string
 }
 
 export interface LineCounts {
@@ -99,6 +102,18 @@ export async function fetchLineCounts(): Promise<LineCounts | null> {
   } catch {
     return null
   }
+}
+
+/** One thread, oldest first. */
+export async function fetchThread(threadId: string): Promise<LineItem[]> {
+  const r = await fdFetch(`/fd/line/thread/${encodeURIComponent(threadId)}`)
+  if (!r.ok) throw new Error(`HTTP ${r.status}`)
+  const d = await r.json()
+  return Array.isArray(d?.items) ? d.items : []
+}
+
+export async function markThreadRead(threadId: string): Promise<void> {
+  try { await fdFetch(`/fd/line/thread/${encodeURIComponent(threadId)}/read`, { method: 'POST' }) } catch { /* ignore */ }
 }
 
 export async function markLineRead(id: string): Promise<void> {

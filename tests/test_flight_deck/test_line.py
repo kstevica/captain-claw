@@ -790,3 +790,87 @@ def test_a_hand_over_names_what_the_item_is_about():
     assert line_routes.headline(proposal) == "Re-run the price check"
     assert line_routes.headline({"title": 'Scheduled task "Brief" failed', "body": "x"}) == 'Scheduled task "Brief" failed'
     assert line_routes.headline({"title": "Nudge from Ana", "body": ""}) == "Nudge from Ana"
+
+
+# ── Threads ───────────────────────────────────────────────────────────
+
+async def test_a_hand_over_and_its_answers_are_one_thread(db, mira, monkeypatch):
+    from captain_claw.flight_deck import server
+
+    monkeypatch.setenv("FD_AUTH_ENABLED", "true")
+    monkeypatch.setattr(server, "_load_process_registry", lambda: {"mira": {"name": "Mira", "owner": ALICE}})
+    nudge = await line.post(ALICE, "nudge", "Nudge from Captain Research",
+                            "**Lunch with Kristijan agreed: Mon 23 Nov, 12:30, MIVA.**\nBook a table?")
+    other = await line.post(ALICE, "run", "Basna run finished: scan")
+    async with _client() as c:
+        await c.post(f"/fd/line/{nudge}/hand", json={"agent": "mira", "note": "calendar it"})
+        await _answered()
+        first_answer = next(i for i in (await c.get(f"/fd/line/thread/{nudge}")).json()["items"]
+                            if i["title"].startswith("Mira answered"))
+        mira["reply"]["text"] = "Table for 2 requested from MIVA."
+        await c.post(f"/fd/line/{first_answer['id']}/hand", json={"agent": "mira", "note": "now reserve for 2"})
+        await _answered()
+        thread = (await c.get(f"/fd/line/thread/{nudge}")).json()["items"]
+        assert [i["title"][:12] for i in thread] == ["Nudge from C", "You handed “", "Mira answere",
+                                                    "You handed “", "Mira answere"]
+        assert {i["thread_id"] for i in thread} == {nudge}
+        page = (await c.get("/fd/line")).json()["items"]
+        assert {i["thread_id"] for i in page} == {nudge, other}
+        # The second hand-over quotes the whole thread, oldest first; only the words are the request.
+        second = mira["asked"][1]
+        assert second["prompt"].startswith("now reserve for 2\n\nThe thread it's about, from my Line")
+        quoted = second["prompt"].split("---\n", 1)[1]
+        assert quoted.index("[Nudge] Nudge from Captain Research") < quoted.index("[Me]\ncalendar it") \
+            < quoted.index("[Mira]\nNothing failed overnight")
+        assert second["automation"]["job_text"] == "now reserve for 2"
+        # Opening the thread reads all of it.
+        assert (await c.post(f"/fd/line/thread/{nudge}/read")).json()["marked"] == 5
+        assert all(i["read"] for i in (await c.get(f"/fd/line/thread/{nudge}")).json()["items"])
+        assert not next(i for i in (await c.get("/fd/line")).json()["items"] if i["id"] == other)["read"]
+
+
+async def test_an_asked_question_and_its_answer_are_one_thread(db, mira):
+    async with _client() as c:
+        r = (await c.post("/fd/line/ask", json={"text": "what's new?"})).json()
+        await _answered()
+        thread = (await c.get(f"/fd/line/thread/{r['id']}")).json()["items"]
+    assert [i["title"] for i in thread] == ["You asked Mira", "Mira answered"]
+
+
+async def test_items_about_one_taskboard_task_share_a_thread(db, monkeypatch):
+    a = await line.post(ALICE, "nudge", "Nudge from Ana", "MIVA lunch\n[Open in Taskboard](?taskboard=tsk_42)")
+    b = await line.post(ALICE, "proposal", "Waiting for your approval", "Book MIVA\n[Open in Taskboard](?taskboard=tsk_42)")
+    c = await line.post(ALICE, "nudge", "Nudge from Ana", "Something else")
+    rows = {i["id"]: i for i in await db.list_line_items(ALICE)}
+    assert rows[a]["thread_id"] == rows[b]["thread_id"] == "task:tsk_42" and rows[c]["thread_id"] == c
+    # An action that ends on the ledger joins its task's thread.
+    from captain_claw.flight_deck import owner_notify
+
+    monkeypatch.setattr(owner_notify, "task_of", lambda action: "tsk_42")
+    store = autonomy.get_store()
+    act = store.add_action(ALICE, kind="run_prompt", title="Hand to Glasses: MIVA", status="dispatched")
+    store.update_status(act["id"], "done", outcome="success", outcome_note="Booked.")
+    await _settle()
+    done = next(i for i in await db.list_line_items(ALICE) if i["title"] == "Done: Hand to Glasses: MIVA")
+    assert done["thread_id"] == "task:tsk_42"
+    assert len(await db.list_line_thread(ALICE, "task:tsk_42")) == 3
+
+
+async def test_items_from_before_threads_get_one(tmp_path):
+    path = tmp_path / "fd.db"
+    d = FlightDeckDB(path)
+    await d.init()
+    rows = [("r1", "nudge", "Lunch\n[Open in Taskboard](?taskboard=t9)", "", "", "2026-01-01T00:00:00+00:00"),
+            ("r2", "talk", "reserve it", "line_item", "r1", "2026-01-01T00:01:00+00:00"),
+            ("r3", "talk", "Done", "line_item", "r2", "2026-01-01T00:02:00+00:00"),
+            ("r4", "run", "", "", "", "2026-01-01T00:03:00+00:00")]
+    await d._db.executemany(
+        "INSERT INTO line_items (id, user_id, kind, type, title, body, ref_type, ref_id, created_at, thread_id)"
+        " VALUES (?, ?, ?, ?, 't', ?, ?, ?, ?, '')", [(i, ALICE, k, k, b, rt, ri, at) for i, k, b, rt, ri, at in rows])
+    await d._db.commit()
+    await d.close()
+    d = FlightDeckDB(path)
+    await d.init()
+    threads = {i["id"]: i["thread_id"] for i in await d.list_line_items(ALICE)}
+    assert threads == {"r1": "task:t9", "r2": "task:t9", "r3": "task:t9", "r4": "r4"}
+    await d.close()
