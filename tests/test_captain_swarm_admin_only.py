@@ -89,3 +89,46 @@ def store(tmp_path):
     yield s
     loop.set_store(None)
     asyncio.run(s.close())
+
+
+# ── Not in the desktop app (2026-11-04) ─────────────────────────────
+
+@pytest.fixture
+def desktop_deck(monkeypatch):
+    monkeypatch.setattr("captain_claw.flight_deck.auth._fd_desktop_deck", lambda: True)
+
+
+@pytest.mark.parametrize("method,path", [
+    ("get", "/fd/captain-swarm/templates"),
+    ("get", "/fd/captain-swarm/runs"),
+    ("post", "/fd/captain-swarm/runs"),
+    ("get", "/fd/captain-swarm/lessons"),
+])
+def test_the_desktop_app_has_no_captain_swarm(desktop_deck, method, path):
+    # Its one local user is the admin, and still gets no Captain Swarm.
+    with _app({"id": "local", "role": "admin"}) as c:
+        r = getattr(c, method)(path, **({"json": {}} if method == "post" else {}))
+    assert r.status_code == 403 and r.json()["detail"] == routes.NOT_ON_DESKTOP
+
+
+def test_the_desktop_apps_agents_have_no_captain_swarm(desktop_deck, monkeypatch):
+    monkeypatch.setattr(routes, "_agent_owner", lambda body: "local")
+    with _app({"id": "local", "role": "admin"}) as c:
+        r = c.post("/fd/captain-swarm/agent/list", json={})
+    assert r.status_code == 403 and r.json()["detail"] == routes.NOT_ON_DESKTOP
+
+
+@pytest.mark.parametrize("env,inside", [
+    ({}, False),
+    ({"FD_DESKTOP": "1"}, True),
+    ({"FD_DESKTOP": "0"}, False),
+    ({"CAPTAIN_CLAW_DESKTOP_RUNTIME": "0.8.7"}, True),
+])
+def test_an_agent_knows_it_is_in_the_desktop_app(monkeypatch, env, inside):
+    # Decides whether the agent gets the captain_swarm tool at all.
+    from captain_claw.agent_context_mixin import in_desktop_app
+    for key in ("FD_DESKTOP", "CAPTAIN_CLAW_DESKTOP_RUNTIME"):
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    assert in_desktop_app() is inside

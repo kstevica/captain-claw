@@ -1243,8 +1243,10 @@ async def lifespan(app: FastAPI):
         print("Flight Deck: Bat supervisor started")
     # ── Captain Swarm supervisor (runs that keep improving a measured number:
     # adopt a leased run, drive it, re-adopt it after a restart). Disable with
-    # FD_CAPTAIN_SWARM_DISABLED=true. Idle until a run exists. ──
-    if os.environ.get("FD_CAPTAIN_SWARM_DISABLED", "").lower() not in ("true", "1", "yes"):
+    # FD_CAPTAIN_SWARM_DISABLED=true. Idle until a run exists. Never in the
+    # desktop app, which has no Captain Swarm. ──
+    from captain_claw.flight_deck.auth import _fd_desktop_deck
+    if os.environ.get("FD_CAPTAIN_SWARM_DISABLED", "").lower() not in ("true", "1", "yes") and not _fd_desktop_deck():
         from captain_claw.flight_deck import captain_swarm_loop as _cs_loop
         from captain_claw.flight_deck.captain_swarm_store import CaptainSwarmStore as _CSStore
         _cs_store = _CSStore(DATA_DIR / "captain_swarm.db")

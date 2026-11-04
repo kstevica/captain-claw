@@ -5198,7 +5198,7 @@ Routes, all for the signed-in person only: `GET /fd/line`, `/fd/line/unread`, `/
 
 ### Captain Swarm — NEW in 0.8.6
 
-**Admins only while it's being tested.** Every `/fd/captain-swarm/*` page route answers 403 "Captain Swarm is open to this deck's admins only." to anyone else, the `captain_swarm` tool refuses agents of non-admin owners, and the menu item, tile and sidebar entry are hidden from them. With sign-in off, the one local user is the admin.
+**Admins only while it's being tested.** Every `/fd/captain-swarm/*` page route answers 403 "Captain Swarm is open to this deck's admins only." to anyone else, the `captain_swarm` tool refuses agents of non-admin owners, and the menu item, tile and sidebar entry are hidden from them. With sign-in off, the one local user is the admin. **The desktop app has no Captain Swarm**: its deck doesn't start the supervisor and answers "Captain Swarm isn't part of the desktop app.", its agents don't get the tool, and the page shows no Swarm anywhere.
 
 Captain Swarm keeps improving one measured number. Open it next to Bat in the full layout, or from the kiosk's menu and tool tiles. **Runs** starts and follows runs; **Practice sets** holds the cases built from your mail or calendar, sealed per person.
 
