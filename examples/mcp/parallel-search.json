@@ -3,7 +3,7 @@
   "transport": "http",
   "url": "https://search.parallel.ai/mcp",
   "headers": {
-    "User-Agent": "captain-claw-flight-deck/0.8.6"
+    "User-Agent": "captain-claw-flight-deck/0.8.7"
   },
   "enabled": true,
   "allowed_agents": []
