@@ -132,9 +132,60 @@ def repair_declared_name(basename: str, declared: list[str] | None) -> str | Non
 
 _HASH_MAX_BYTES = 4 * 1024 * 1024  # sha256 only for files this small
 
+# ── Line endings ──────────────────────────────────────────────────────────
+# A file keeps its own line endings, on every OS. Python's text mode writes
+# os.linesep for every "\n" — on Windows a 35-line file sent as 1648 bytes lands
+# as 1683 — and reads CRLF back as LF, so `edit` used to turn a Windows file into
+# an LF one on Linux and an LF file into CRLF on Windows. Writers here open
+# with newline="" (bytes as sent) and pick the ending by these rules:
+#   1. an existing file keeps the ending most of its lines already have;
+#   2. a new .bat/.cmd gets CRLF (cmd.exe misreads labels and GOTO in LF files);
+#   3. anything else is written exactly as the model sent it.
+CRLF_SUFFIXES = frozenset({".bat", ".cmd"})
+_EOL_SNIFF_BYTES = 64 * 1024
+
+
+def eol_of(data: bytes | str) -> str | None:
+    """``"\\r\\n"`` when most of *data*'s line breaks are CRLF, ``"\\n"`` when
+    they are LF, ``None`` when it has none."""
+    lf, crlf = ("\n", "\r\n") if isinstance(data, str) else (b"\n", b"\r\n")
+    n = data.count(lf)
+    if not n:
+        return None
+    return "\r\n" if data.count(crlf) * 2 > n else "\n"
+
+
+def file_eol(path: str | Path) -> str | None:
+    """The line ending an existing file uses (its first 64 KB), else ``None``."""
+    try:
+        with open(path, "rb") as f:
+            return eol_of(f.read(_EOL_SNIFF_BYTES))
+    except OSError:
+        return None
+
+
+def to_eol(text: str, eol: str | None) -> str:
+    """*text* with every line break made *eol*; unchanged when *eol* is None."""
+    if not eol or not text:
+        return text
+    flat = text.replace("\r\n", "\n")
+    return flat if eol == "\n" else flat.replace("\n", "\r\n")
+
+
+def eol_for_write(path: str | Path, *, exists: bool) -> str | None:
+    """The line ending a write to *path* must use (rules above), or ``None`` to
+    keep the content exactly as sent."""
+    if exists:
+        return file_eol(path)
+    return "\r\n" if Path(path).suffix.lower() in CRLF_SUFFIXES else None
+
 
 def _sha8(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:8]
+
+
+def _flat(data: bytes) -> bytes:
+    return data.replace(b"\r\n", b"\n")
 
 
 def verify_readback(
@@ -145,27 +196,46 @@ def verify_readback(
 ) -> dict:
     """Re-read *file_path* and confirm it holds what was written.
 
-    Returns ``{ok, bytes, sha8, reason}``. ``bytes`` is the observed on-disk
-    size. For an overwrite the whole file is compared (length always; sha256 when
-    ≤ 4 MB). For an append only the length is checked against
+    Returns ``{ok, bytes, sha8, reason, note}``. ``bytes`` is the observed
+    on-disk size. For an overwrite the whole file is compared (length always;
+    sha256 when ≤ 4 MB). For an append only the length is checked against
     ``prev_size + len(content)`` — the prior bytes are not re-hashed.
+
+    A file whose only difference is its line endings (a writer that went through
+    text mode on Windows) holds everything that was sent: that is ``ok`` with a
+    ``note``, never a failure — calling it truncated made the model re-issue the
+    same write, which landed the same way again.
     """
     fp = Path(file_path)
-    expected_new = len(content.encode("utf-8", errors="replace"))
+    want = content.encode("utf-8", errors="replace")
+    expected_new = len(want)
     try:
         observed = fp.stat().st_size
     except Exception as e:  # noqa: BLE001 — a missing file after write IS the failure
-        return {"ok": False, "bytes": 0, "sha8": "", "reason": f"stat_failed: {e}"}
+        return {"ok": False, "bytes": 0, "sha8": "", "reason": f"stat_failed: {e}", "note": ""}
 
     if append:
         expected_total = prev_size + expected_new
-        if observed != expected_total:
-            return {"ok": False, "bytes": observed, "sha8": "",
-                    "reason": f"append_size_mismatch: on_disk={observed} expected={expected_total}"}
-        return {"ok": True, "bytes": observed, "sha8": "", "reason": ""}
+        if observed == expected_total:
+            return {"ok": True, "bytes": observed, "sha8": "", "reason": "", "note": ""}
+        # Text mode adds one byte per "\n" that was not already "\r\n".
+        crlf_total = prev_size + expected_new + content.count("\n") - content.count("\r\n")
+        if observed == crlf_total:
+            return {"ok": True, "bytes": observed, "sha8": "", "reason": "",
+                    "note": "line endings became CRLF on disk"}
+        return {"ok": False, "bytes": observed, "sha8": "", "note": "",
+                "reason": f"append_size_mismatch: on_disk={observed} expected={expected_total}"}
 
     if observed != expected_new:
-        return {"ok": False, "bytes": observed, "sha8": "",
+        if expected_new <= _HASH_MAX_BYTES and observed <= 2 * expected_new + 2:
+            try:
+                disk = fp.read_bytes()
+            except Exception:  # noqa: BLE001
+                disk = b""
+            if disk and _flat(disk) == _flat(want):
+                return {"ok": True, "bytes": observed, "sha8": _sha8(disk), "reason": "",
+                        "note": "only the line endings differ from what was sent"}
+        return {"ok": False, "bytes": observed, "sha8": "", "note": "",
                 "reason": f"size_mismatch: on_disk={observed} expected={expected_new}"}
     # Length matches — for small files also confirm the bytes are identical, so a
     # same-length corruption (control chars, encoding surprise) is caught too.
@@ -173,13 +243,13 @@ def verify_readback(
         try:
             disk = fp.read_bytes()
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "bytes": observed, "sha8": "", "reason": f"read_failed: {e}"}
-        want = content.encode("utf-8", errors="replace")
+            return {"ok": False, "bytes": observed, "sha8": "", "reason": f"read_failed: {e}",
+                    "note": ""}
         if disk != want:
             return {"ok": False, "bytes": observed, "sha8": _sha8(disk),
-                    "reason": "content_mismatch"}
-        return {"ok": True, "bytes": observed, "sha8": _sha8(disk), "reason": ""}
-    return {"ok": True, "bytes": observed, "sha8": "", "reason": ""}
+                    "reason": "content_mismatch", "note": ""}
+        return {"ok": True, "bytes": observed, "sha8": _sha8(disk), "reason": "", "note": ""}
+    return {"ok": True, "bytes": observed, "sha8": "", "reason": "", "note": ""}
 
 
 @dataclass(frozen=True)

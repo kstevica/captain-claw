@@ -209,12 +209,15 @@ class EditTool(Tool):
                     return ToolResult(success=False, error=_speaker.EDIT_UNDO_MESSAGE)
                 return self._undo(file_path, kwargs)
 
-            # Read current contents
+            # Read current contents — newline="" keeps "\r\n" as it is, so the
+            # line-ending detection below sees the file's real endings and
+            # _atomic_write puts them back (read_text() turned CRLF into LF,
+            # so an edited Windows file came back all-LF).
             try:
-                content = file_path.read_text(encoding="utf-8")
+                content = self._read_text(file_path, "utf-8")
             except UnicodeDecodeError:
                 try:
-                    content = file_path.read_text(encoding="latin-1")
+                    content = self._read_text(file_path, "latin-1")
                     log.warning("File not UTF-8, fell back to latin-1", path=str(file_path))
                 except Exception:
                     return ToolResult(success=False, error=f"Cannot read file (binary or unknown encoding): {path}")
@@ -228,8 +231,14 @@ class EditTool(Tool):
             # shows; _commit puts them back.
             content, inline_images = research_images.collapse_inline_images(content)
 
-            # Detect line ending style
-            line_ending = "\r\n" if "\r\n" in content else "\n"
+            # Detect line ending style: the one most lines use. A file with
+            # both is made all that one, so the model's old_string (normalized
+            # to it below) matches every line.
+            from captain_claw import write_guard
+
+            line_ending = write_guard.eol_of(content) or "\n"
+            if "\r\n" in content and content.count("\r\n") != content.count("\n"):
+                content = write_guard.to_eol(content, line_ending)
 
             # Normalize old_string / new_string line endings to match file
             if old_string is not None:
@@ -437,8 +446,15 @@ class EditTool(Tool):
     # ── Atomic write ────────────────────────────────────────────────
 
     @staticmethod
+    def _read_text(file_path: Path, encoding: str) -> str:
+        """The file's text with its line endings as they are on disk."""
+        with open(file_path, encoding=encoding, newline="") as f:
+            return f.read()
+
+    @staticmethod
     def _atomic_write(file_path: Path, content: str) -> None:
-        """Write content atomically via temp file + rename."""
+        """Write content atomically via temp file + rename — the bytes as given
+        (newline=""), never os.linesep, so a file keeps its own line endings."""
         # Write to temp file in the same directory (ensures same filesystem)
         fd, tmp_path = tempfile.mkstemp(
             dir=str(file_path.parent),
@@ -446,7 +462,7 @@ class EditTool(Tool):
             suffix=".tmp",
         )
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as f:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
                 f.write(content)
             # Preserve original file permissions
             shutil.copymode(str(file_path), tmp_path)
