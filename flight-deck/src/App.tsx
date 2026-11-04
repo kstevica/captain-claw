@@ -6,6 +6,7 @@ import { SimpleLayout } from './components/layout/SimpleLayout'
 import { ConsoleLayout } from './components/console/ConsoleLayout'
 import { DeckUpdateNotice } from './components/layout/DeckUpdateNotice'
 import BrowserPairDialog from './components/BrowserPairDialog'
+import TaskDeepLink from './components/TaskDeepLink'
 import { ChatPanel } from './components/agents/ChatPanel'
 import { DirectorPanel } from './components/agents/DirectorPanel'
 import { PinnedMessages } from './components/common/PinnedMessages'
@@ -800,6 +801,7 @@ function App() {
       <AppContent />
       <DeckUpdateNotice />
       <BrowserPairDialog />
+      <TaskDeepLink />
     </>
   )
 }

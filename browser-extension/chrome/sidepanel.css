@@ -182,6 +182,13 @@ details.include[open] > summary .ic.chev { transform: rotate(180deg); }
 .file-name { font-size: calc(12px * var(--fs)); word-break: break-word; }
 .file-meta { font-size: calc(11px * var(--fs)); color: var(--dim); }
 .tag { display: inline-block; font-size: calc(10px * var(--fs)); padding: 0 5px; border-radius: 4px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); text-transform: uppercase; }
+.link-btn {
+  display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border-radius: 6px;
+  border: 0; background: none; color: var(--accent-text); cursor: pointer; font-size: calc(11.5px * var(--fs));
+}
+.link-btn:hover:not(:disabled) { background: var(--accent-soft); }
+.link-btn:disabled { opacity: .5; cursor: default; }
+.link-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .links-row { display: flex; gap: 10px; font-size: calc(11px * var(--fs)); margin-top: 6px; }
 .links-row button { background: none; border: 0; padding: 0; color: var(--accent-text); cursor: pointer; }
 
@@ -205,6 +212,8 @@ details.include[open] > summary .ic.chev { transform: rotate(180deg); }
 .notice.err { background: var(--err-soft); border-color: transparent; color: var(--err); }
 
 /* run */
+.watch-card { border-color: var(--accent); background: var(--accent-soft); }
+.watch-card .ic { color: var(--accent-text); margin-top: 2px; }
 .status-pill { display: inline-flex; align-items: center; gap: 5px; font-size: calc(11px * var(--fs)); padding: 2px 8px; border-radius: 999px; background: var(--panel-2); border: 1px solid var(--border); color: var(--muted); }
 .status-pill.working { color: var(--accent-text); border-color: var(--accent); }
 .status-pill.done { color: var(--ok); }

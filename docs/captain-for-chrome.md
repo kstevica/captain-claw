@@ -44,6 +44,20 @@ The prompts for actions and lenses live on the deck (`ACTIONS`,
 `PERSPECTIVES`); the extension draws what `/fd/clip/me` returns, so a deck
 update improves them for every browser.
 
+**Watch it = the deck's Scheduled tasks.** For a Watch it clip, `/fd/clip/send`
+makes the check in `fd_scheduler` itself (`_schedule_watch`) — never the
+agent's cron, which the deck can't see. One task per page and agent:
+its prompt starts `Watch check for <url> `, and the same page watched again
+updates that task (schedule, zone, the newest clip folder). Owner = the person,
+`delivery_kind: agent` with chat delivery, `prompt_author: human`, the
+browser's time zone (one the deck doesn't know → the deck's time). How often:
+`every 1h` · `every 6h` · `daily 09:00` · `weekly mon 09:00`. The clip's own
+turn tells the agent the check exists ("don't schedule anything yourself")
+and to save `watch/latest.md`, which each run compares against. The answer
+carries the task (`watch`); the panel links to `<deck>/#task=<id>`, which
+opens it in Scheduled tasks (`TaskDeepLink`). A task the scheduler refuses
+keeps nothing: the clip folder goes and the send fails.
+
 **The agent's own lenses.** `GET /fd/clip/agents/<slug>/lenses` answers with
 the lenses the chosen agent suggested for itself: the deck reads the agent's
 `/api/personality`, asks the agent's own model (its `/api/llm/complete`, no
