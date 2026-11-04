@@ -1057,11 +1057,14 @@ async def test_a_send_claimed_next_to_its_own_send_stands_once_it_went_out(_huma
 
 
 @pytest.mark.asyncio
-async def test_the_iteration_budget_salvage_never_ships_a_rejected_claim(_human_turn):
+async def test_the_iteration_budget_salvage_never_ships_a_rejected_claim(_human_turn, monkeypatch):
     # The gate fires on the last allowed iteration; the salvage must not ship
     # the rejected reply, and what it does ship still claiming a send gets the
-    # backstop line.
+    # backstop line. (Progress would extend the budget; held at 4 here.)
+    from captain_claw import agent_orchestration_mixin as aom
     from captain_claw.fabrication_guard import MAIL_BACKSTOP
+
+    monkeypatch.setattr(aom, "_budget_extends", lambda *a, **k: False)
 
     false_claim = ("**Sent** to Ana — confirming 10:30, with the agenda and the room details "
                    "attached. Message ID `1a2b3c4d5e6f7a8b`.")

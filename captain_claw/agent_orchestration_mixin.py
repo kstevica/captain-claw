@@ -16,6 +16,7 @@ from captain_claw.agent_stuck import (
     MSG_BUDGET_EXHAUSTED,
     MSG_RETRIES_EXHAUSTED,
     MSG_STUCK,
+    budget_partial,
 )
 from captain_claw import fabrication_guard, jev_progress, loop_guards, mail_authority, msg_origin
 from captain_claw.config import get_config
@@ -46,6 +47,24 @@ _CONTEXT_OVERFLOW_HINTS = (
 def _looks_like_context_overflow(message: str) -> bool:
     """Whether a lowercased provider error reads like a context overflow."""
     return any(hint in message for hint in _CONTEXT_OVERFLOW_HINTS)
+
+
+def _budget_extends(
+    recent_progress: bool, remaining_work: bool, soft_limit: int, free_limit: int,
+    *, judge_available: bool,
+) -> bool:
+    """Whether a turn at its step limit gets more steps without asking a judge.
+
+    Progress earns them: freely below *free_limit* (twice the planned budget),
+    and beyond it while work is still open. Past that a judge (Jev) decides
+    when one is available; with none, progress alone is enough up to the hard
+    ceiling — most decks have no Jev, and a working turn was cut off with "I
+    wasn't able to fully complete this request" in the middle of the job.
+    No progress → no free steps (the stuck detector handles the spinning).
+    """
+    if not recent_progress:
+        return False
+    return remaining_work or soft_limit < free_limit or not judge_available
 
 
 def _stuck_warmup(base_iterations: int, soft_iterations: int) -> int:
@@ -1416,7 +1435,7 @@ class AgentOrchestrationMixin:
                 return text
             return self._with_fabrication_backstop(text, turn_start_idx, user_input, _offered_tools)
 
-        async def _salvage_partial_result(reason: str) -> str:
+        async def _salvage_partial_result(reason: str, fresh_summary: bool = False) -> str:
             """Try to produce a useful partial result when the agent gets
             stuck, exhausts its budget, or fails after retries.
 
@@ -1430,16 +1449,58 @@ class AgentOrchestrationMixin:
 
             A reply a gate turned down is never salvaged, and what is shipped
             still reporting tool work nobody did gets the gate's backstop lines.
-            """
-            return _backstopped(await _salvage_raw(reason))
 
-        async def _salvage_raw(reason: str) -> str:
+            *fresh_summary* (the step limit): the model writes where the work
+            stands from everything it gathered, before any older reply is
+            reused — the last long reply is then usually a mid-run narration
+            ("Now I'll render pages 3-9…"), not a result.
+            """
+            return _backstopped(await _salvage_raw(reason, fresh_summary))
+
+        async def _salvage_summary(prompt: str) -> str:
+            try:
+                self._set_runtime_status("thinking")
+                salvage_messages = self._build_messages(
+                    tool_messages_from_index=turn_start_idx,
+                    query=effective_user_input,
+                )
+                salvage_messages.append(Message(role="user", content=prompt))
+                salvage_resp = await self.provider.complete(
+                    messages=salvage_messages,
+                    tools=None,
+                    max_tokens=2048,
+                )
+                salvage_text = str(getattr(salvage_resp, "content", "") or "").strip()
+                if salvage_text and len(salvage_text) > 30:
+                    return salvage_text
+            except Exception as _salv_err:
+                log.debug("Salvage LLM call failed", error=str(_salv_err))
+            return ""
+
+        async def _salvage_raw(reason: str, fresh_summary: bool = False) -> str:
             if not self.session:
                 return ""
             # 0. An answer cut off mid-continuation: its joined parts.
             if _answer_parts:
                 return _join_cut_off(_answer_parts)
             turn_msgs = self.session.messages[turn_start_idx:]
+            has_tool_results = any(
+                _msg.get("role") == "tool"
+                and len(str(_msg.get("content", ""))) > 80
+                for _msg in turn_msgs
+            )
+            # The step limit: any tool work is worth a landing, however short
+            # its results were.
+            if fresh_summary and any(_msg.get("role") == "tool" for _msg in turn_msgs):
+                _landing = await _salvage_summary(
+                    "[SYSTEM: This message's step limit is reached — no more tool calls. "
+                    "Write the user the result so far from what you gathered and did: "
+                    "what is done (with its results and the files you saved), what is "
+                    "still left, and what you'd do next. Do NOT call any tools and do "
+                    "not claim anything you didn't do.]"
+                )
+                if _landing:
+                    return _landing
 
             # 1. Look for a substantial assistant response (likely a real answer).
             last_short_assistant = ""
@@ -1453,39 +1514,15 @@ class AgentOrchestrationMixin:
 
             # 2. Check if tool results have meaningful content worth
             #    salvaging via a quick LLM summary call.
-            has_tool_results = any(
-                _msg.get("role") == "tool"
-                and len(str(_msg.get("content", ""))) > 80
-                for _msg in turn_msgs
-            )
-            if has_tool_results:
-                try:
-                    self._set_runtime_status("thinking")
-                    salvage_messages = self._build_messages(
-                        tool_messages_from_index=turn_start_idx,
-                        query=effective_user_input,
-                    )
-                    salvage_messages.append(Message(
-                        role="user",
-                        content=(
-                            f"[SYSTEM: {reason}. Based on the tools you used "
-                            "and data you gathered, provide the best possible "
-                            "response to the original request. Summarise what "
-                            "you found. Do NOT call any tools.]"
-                        ),
-                    ))
-                    salvage_resp = await self.provider.complete(
-                        messages=salvage_messages,
-                        tools=None,
-                        max_tokens=2048,
-                    )
-                    salvage_text = str(
-                        getattr(salvage_resp, "content", "") or ""
-                    ).strip()
-                    if salvage_text and len(salvage_text) > 30:
-                        return salvage_text
-                except Exception as _salv_err:
-                    log.debug("Salvage LLM call failed", error=str(_salv_err))
+            if has_tool_results and not fresh_summary:
+                salvage_text = await _salvage_summary(
+                    f"[SYSTEM: {reason}. Based on the tools you used "
+                    "and data you gathered, provide the best possible "
+                    "response to the original request. Summarise what "
+                    "you found. Do NOT call any tools.]"
+                )
+                if salvage_text:
+                    return salvage_text
 
             # 3. Fall back to last short assistant text.
             return last_short_assistant
@@ -1999,11 +2036,17 @@ class AgentOrchestrationMixin:
             scale_budget = min(120, 10 + estimated_items * 2)
             if scale_budget > planned_turn_iterations:
                 planned_turn_iterations = scale_budget
-        # Hard ceiling: 2x planned (was 3x) capped at 200 (was 500).
-        # Prevents runaway loops when the critic keeps rejecting.
-        hard_turn_iterations = max(planned_turn_iterations, min(200, planned_turn_iterations * 2))
+        # Generous by design: a turn that keeps making progress keeps going.
+        # The soft limit is where the checks start, not a stop; the hard
+        # ceiling — 4x planned, capped at 300 (was 2x / 200) — is the backstop
+        # for runaway loops. Spinning without progress is stopped sooner by
+        # the stuck detector (max_stagnant_iterations), not by this budget.
+        hard_turn_iterations = max(planned_turn_iterations, min(300, planned_turn_iterations * 4))
         soft_turn_iterations = planned_turn_iterations
-        extension_step = max(6, min(24, max(1, planned_turn_iterations // 3)))
+        extension_step = max(6, min(30, max(1, planned_turn_iterations // 2)))
+        # Up to here a turn that is making progress is extended with no judge;
+        # past it Jev (where set up) decides each extension.
+        free_extension_limit = planned_turn_iterations * 2
         max_stagnant_iterations = 6
         stagnant_iterations = 0
         progress_window: list[bool] = []
@@ -2094,12 +2137,23 @@ class AgentOrchestrationMixin:
                     or bool(completion_requirements)
                 )
                 can_extend = soft_turn_iterations < hard_turn_iterations
-                extend = recent_progress and remaining_work and can_extend
-                # That rule stops an ordinary request (no plan, no
-                # requirements) at the soft limit even while the agent is
-                # plainly working — Jev reads the turn's steps and judges.
+                # Progress earns more steps (_budget_extends). Jev's readiness
+                # is only looked up when that alone doesn't decide.
+                extend = can_extend and _budget_extends(
+                    recent_progress, remaining_work, soft_turn_iterations,
+                    free_extension_limit, judge_available=True,
+                )
+                jev_ready = False
+                if not extend and can_extend and self.session:
+                    jev_ready = await jev_progress.ready()
+                    if not jev_ready:
+                        extend = _budget_extends(
+                            recent_progress, remaining_work, soft_turn_iterations,
+                            free_extension_limit, judge_available=False,
+                        )
+                judged_by = "progress" if extend else ""
                 jev_p: float | None = None
-                if not extend and can_extend and self.session and await jev_progress.ready():
+                if not extend and jev_ready:
                     self._emit_thinking(
                         "Step budget used up — asking Jev whether the work is still moving",
                         tool="progress", phase="tool",
@@ -2121,6 +2175,9 @@ class AgentOrchestrationMixin:
                 if extend:
                     previous_limit = soft_turn_iterations
                     soft_turn_iterations = min(hard_turn_iterations, soft_turn_iterations + extension_step)
+                    if judged_by and not jev_data:
+                        jev_data = {"judge": judged_by}
+                        jev_lines = f"\njudge={judged_by}"
                     self._emit_tool_output(
                         "completion_gate",
                         {
@@ -2160,15 +2217,10 @@ class AgentOrchestrationMixin:
                     )
                     self._set_runtime_status("waiting")
                     _partial_budget = await _salvage_partial_result(
-                        "Iteration budget exhausted"
+                        "Iteration budget exhausted", fresh_summary=True,
                     )
                     if _partial_budget:
-                        return finish(
-                            "⚠️ I wasn't able to fully complete this request "
-                            "(iteration budget exhausted), but here's what I "
-                            f"have so far:\n\n{_partial_budget}",
-                            success=False,
-                        )
+                        return finish(budget_partial(_partial_budget, iteration), success=False)
                     return finish(MSG_BUDGET_EXHAUSTED, success=False)
 
             # ── Progress / stagnation tracking ────────────────────
@@ -2802,7 +2854,8 @@ class AgentOrchestrationMixin:
                                 hard_turn_iterations,
                                 min(500, _glob_scale_budget * 3),
                             )
-                            extension_step = max(6, min(24, max(1, _glob_scale_budget // 3)))
+                            extension_step = max(6, min(30, max(1, _glob_scale_budget // 2)))
+                            free_extension_limit = max(free_extension_limit, _glob_scale_budget * 2)
                         # Inject the scale advisory into effective_user_input
                         # so the LLM adopts the incremental strategy.
                         _sp_glob = getattr(self, "_scale_progress", None)
@@ -3747,14 +3800,9 @@ class AgentOrchestrationMixin:
         # so the budget check above never stopped the turn): ship what the
         # turn has, as the budget stop does.
         self._set_runtime_status("waiting")
-        _partial_hard = await _salvage_partial_result("Iteration budget exhausted")
+        _partial_hard = await _salvage_partial_result("Iteration budget exhausted", fresh_summary=True)
         if _partial_hard:
-            return finish(
-                "⚠️ I wasn't able to fully complete this request "
-                "(iteration budget exhausted), but here's what I "
-                f"have so far:\n\n{_partial_hard}",
-                success=False,
-            )
+            return finish(budget_partial(_partial_hard, hard_turn_iterations), success=False)
         return finish(MSG_BUDGET_EXHAUSTED, success=False)
 
     # ------------------------------------------------------------------

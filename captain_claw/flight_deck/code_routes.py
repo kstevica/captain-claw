@@ -957,7 +957,8 @@ def _should_escalate(d: dict | None) -> tuple[bool, str]:
     if not d.get("ok"):
         return True, f"the quick edit failed: {d.get('error', 'unknown error')}"
     low = out.lower()
-    if ("iteration budget" in low or "wasn't able to fully complete" in low
+    if ("iteration budget" in low or "budget exhausted" in low or "step limit" in low
+            or "wasn't able to fully complete" in low
             or "unable to complete this request" in low or "couldn't fully complete" in low):
         return True, "the quick-edit agent ran out of its iteration budget before finishing."
     return False, ""
