@@ -460,54 +460,8 @@ if __name__ == "__main__":
     # binary — without this it starts another full server instead.
     import multiprocessing
     multiprocessing.freeze_support()
-    import typer
-
-    def _version_callback(value: bool) -> None:
-        if value:
-            version()
-            raise typer.Exit()
-
-    cli = typer.Typer(help="Captain Claw: self-hosted framework for orchestrating fleets of specialist AI agents — ensemble reasoning and a full agentic coding pipeline, model-agnostic and local-friendly")
-
-    @cli.callback(invoke_without_command=True)
-    def _cli_root(
-        version_flag: bool = typer.Option(
-            False,
-            "--version",
-            help="Show version information and exit",
-            callback=_version_callback,
-            is_eager=True,
-        ),
-    ) -> None:
-        """Captain Claw: self-hosted framework for orchestrating fleets of specialist AI agents — ensemble reasoning and a full agentic coding pipeline, model-agnostic and local-friendly."""
-
-    @cli.command()
-    def run(
-        config: str = typer.Option("", "-c", "--config", help="Path to config file"),
-        model: str = typer.Option("", "-m", "--model", help="Override model"),
-        provider: str = typer.Option("", "-p", "--provider", help="Override provider"),
-        no_stream: bool = typer.Option(False, "--no-stream", help="Disable streaming"),
-        verbose: bool = typer.Option(False, "-v", "--verbose", help="Debug logging"),
-        onboarding: bool = typer.Option(
-            False,
-            "--onboarding",
-            help="Run interactive onboarding wizard before starting",
-        ),
-        tui: bool = typer.Option(
-            False,
-            "--tui",
-            help="Start the terminal UI instead of the web UI",
-        ),
-        old_man: bool = typer.Option(
-            False,
-            "--old-man",
-            help="Start in Old Man supervisor mode (hotkey on, auto-delegation)",
-        ),
-    ) -> None:
-        main(config, model, provider, no_stream, verbose, onboarding, tui=tui, old_man=old_man)
-
-    @cli.command()
-    def ver() -> None:
-        version()
-
-    cli()
+    # The same entry as the `captain-claw` script pip installs: main() reads
+    # sys.argv itself (--version, ver, run, orchestrate, --help, ...). This was
+    # a Typer app, and typer isn't a dependency, so the frozen binary stopped
+    # on its first line ("No module named 'typer'") on every tag since 0.8.0.
+    main()

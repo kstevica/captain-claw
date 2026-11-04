@@ -175,7 +175,6 @@ hidden_imports = [
     "httpx",
     "httpx._transports",
     "httpx._transports.default",
-    "beautifulsoup4",
     "bs4",
     "pypdf",
     "aiofiles",
@@ -185,9 +184,13 @@ hidden_imports = [
     "blessed",
     "dotenv",
     "tenacity",
-    "pocket_tts",
     "aiosqlite",
 ]
+
+# Optional extras, bundled only where they're installed (pocket-tts is the `tts`
+# extra; asking for it where it isn't logged an ERROR on every CI build).
+import importlib.util
+hidden_imports += [m for m in ("pocket_tts",) if importlib.util.find_spec(m) is not None]
 
 # ── Excludes (reduce binary size) ───────────────────────────────
 excludes = [

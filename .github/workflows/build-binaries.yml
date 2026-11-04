@@ -12,7 +12,7 @@ on:
         default: "dev"
 
 permissions:
-  contents: write      # Needed to create GitHub Releases
+  contents: write      # Needed to upload assets to the release
 
 env:
   PYTHON_VERSION: "3.12"
@@ -129,12 +129,19 @@ jobs:
           path: dist/${{ env.ARCHIVE }}
           retention-days: 30
 
-  # ── GitHub Release (only on version tags) ──────────────────────
+  # ── Attach to the GitHub release (only on version tags) ────────
+  # Releases are made by hand: the release title, the notes from
+  # release-notes/RELEASE_NOTES_<version>.md, and the desktop app's files
+  # (scripts/desktop_release.py), which installed desktop apps read from the
+  # release GitHub calls latest. This job only ADDS the binaries to that
+  # release. It never creates one, renames it, drafts it or writes its notes:
+  # the action used before did all four, and run after a release was
+  # published it would have turned it back into a draft.
   release:
     needs: build
     if: github.ref_type == 'tag'
     runs-on: ubuntu-latest
-    name: Create Release
+    name: Attach to release
 
     steps:
       - name: Download all artifacts
@@ -145,12 +152,21 @@ jobs:
       - name: List downloaded files
         run: find artifacts/ -type f
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: Captain Claw ${{ github.ref_name }}
-          draft: true
-          generate_release_notes: true
-          files: artifacts/**/*
+      - name: Upload the binaries to the release
+        shell: bash
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The tag usually comes before the release: wait for it, up to 30 minutes.
+          for i in $(seq 1 30); do
+            if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              mapfile -t files < <(find artifacts/ -type f)
+              gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+              echo "Attached ${#files[@]} files to $TAG."
+              exit 0
+            fi
+            echo "No release for $TAG yet; looking again in a minute ($i/30)."
+            sleep 60
+          done
+          echo "::warning::No release for $TAG after 30 minutes, so nothing was attached. The binaries stay as this run's artifacts for 30 days; attach them with: gh release upload $TAG <files>"
