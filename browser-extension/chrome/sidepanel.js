@@ -51,9 +51,14 @@ const S = {
   pairing: null,
   connectError: '',
   deckInput: '',
-  prefs: { snapshot: false, screenshot: false },
+  prefs: { snapshot: false, screenshot: false, textSize: 'small' },
   allSites: false,
   history: [],
+  follow: true,        // the run view keeps the newest activity in sight
+  fileQuery: '',
+  fileType: '',
+  lenses: {},          // agent slug → {state, lenses, general, agent, at}
+  lensMore: false,     // the general lenses shown beside the agent's own
 }
 
 // ── small helpers ──
@@ -117,11 +122,36 @@ function keepFocus(fn) {
   }
 }
 
+// Lists that scroll on their own keep their place across a redraw; the steps
+// list stays at its newest line unless the person scrolled it up.
+function listScroll() {
+  const out = {}
+  for (const id of ['steps', 'fileList']) {
+    const el = document.getElementById(id)
+    if (el) out[id] = { top: el.scrollTop, atEnd: el.scrollTop + el.clientHeight >= el.scrollHeight - 8 }
+  }
+  return out
+}
+
+function restoreScroll(before) {
+  const steps = document.getElementById('steps')
+  if (steps) steps.scrollTop = !before.steps || before.steps.atEnd ? steps.scrollHeight : before.steps.top
+  const files = document.getElementById('fileList')
+  if (files && before.fileList) files.scrollTop = before.fileList.top
+}
+
 function render() {
   const connected = !!S.conn
   $btnHistory.hidden = !connected || S.view === 'connect'
   $btnSettings.hidden = !connected || S.view === 'connect'
   $deckName.textContent = connected ? (S.me?.deck?.name ? `${S.me.deck.name} · ${hostOf(S.conn.url)}` : hostOf(S.conn.url)) : 'Not connected'
+  const before = listScroll()
+  renderView()
+  restoreScroll(before)
+  if (S.view === 'run') followRun()
+}
+
+function renderView() {
   keepFocus(() => {
     if (S.view === 'connect') $view.innerHTML = viewConnect()
     else if (S.view === 'main') $view.innerHTML = viewMain()
@@ -151,7 +181,7 @@ function viewConnect() {
   }
   return `
     <div class="card">
-      <div style="font-weight:600;font-size:14px;margin-bottom:4px">Send any page to your agents</div>
+      <div style="font-weight:600;font-size:calc(14px * var(--fs));margin-bottom:4px">Send any page to your agents</div>
       <p class="muted" style="margin:0">Summarize it, keep it with its files, pull out its data or ask about it — your agent works on it in Flight Deck, and the page lands in your <b>Web clips</b> shared folder.</p>
     </div>
     <div class="card">
@@ -237,6 +267,8 @@ async function disconnected(why) {
   await clearConn()
   S.conn = null
   S.me = null
+  S.lenses = {}
+  setStore({ lenses: {} })
   S.view = 'connect'
   S.connectError = why || ''
   render()
@@ -249,6 +281,7 @@ async function afterConnect() {
   applyDefaults()
   render()
   scan()
+  loadLenses()
 }
 
 // ── reading the page ──
@@ -290,6 +323,8 @@ async function scan() {
     S.scan = null
     S.touchedFiles = false
     S.extraFiles = []
+    S.fileQuery = ''
+    S.fileType = ''
     if (S.focus && (!tab || S.focus.tabId !== tab.id)) S.focus = null
   }
   if (!tab || !readable(tab.url)) {
@@ -359,6 +394,115 @@ function applyDefaults() {
   }
 }
 
+// ── files: their kinds, and the list's search and filter ──
+
+const FILE_GROUPS = [
+  ['pdf', 'PDF', (f) => f.ext === 'pdf'],
+  ['docs', 'Docs', (f) => /^(doc|docx|dot|dotx|odt|rtf|pages|epub|mobi|txt|md)$/.test(f.ext)],
+  ['sheets', 'Sheets', (f) => /^(xls|xlsx|xlsm|xlsb|ods|numbers|csv|tsv)$/.test(f.ext)],
+  ['slides', 'Slides', (f) => /^(ppt|pptx|pps|ppsx|odp|key)$/.test(f.ext)],
+  ['archives', 'Archives', (f) => f.kind === 'archive'],
+  ['data', 'Data', (f) => f.kind === 'data'],
+  ['images', 'Images', (f) => f.kind === 'image'],
+  ['media', 'Audio & video', (f) => f.kind === 'media'],
+  ['design', 'Design', (f) => f.kind === 'design'],
+]
+
+function fileGroup(f) {
+  const g = { ...f, ext: String(f.ext || '').toLowerCase() }
+  for (const [id, , test] of FILE_GROUPS) if (test(g)) return id
+  return 'other'
+}
+
+function matchesQuery(f) {
+  const words = S.fileQuery.toLowerCase().split(/\s+/).filter(Boolean)
+  if (!words.length) return true
+  const text = `${f.name} ${f.ext || ''} ${f.context || ''} ${hostOf(f.url)}`.toLowerCase()
+  return words.every((w) => text.includes(w))
+}
+
+// The kinds on this page with how many match the search: [{id, label, count}].
+function fileGroups(files) {
+  const found = files.filter(matchesQuery)
+  const out = []
+  for (const [id, label] of [...FILE_GROUPS, ['other', 'Other']]) {
+    const all = files.filter((f) => fileGroup(f) === id).length
+    if (all) out.push({ id, label, count: found.filter((f) => fileGroup(f) === id).length })
+  }
+  return out
+}
+
+function shownFiles(files) {
+  return files.filter((f) => (!S.fileType || fileGroup(f) === S.fileType) && matchesQuery(f))
+}
+
+const filesFiltered = () => !!(S.fileType || S.fileQuery.trim())
+
+// ── lenses: the agent's own ──
+
+let lensTimer = 0
+
+// Asks the deck for this agent's lenses; while the agent is still thinking
+// them up the general ones show, and the deck is asked again shortly.
+async function loadLenses(slug = S.agent, { fresh = false } = {}) {
+  if (!slug || !S.conn) return
+  clearTimeout(lensTimer)
+  let tries = 0
+  const ask = async () => {
+    if (S.agent !== slug || !S.conn) return
+    try {
+      const r = await api(S.conn, `/fd/clip/agents/${encodeURIComponent(slug)}/lenses${fresh && tries === 0 ? '?fresh=1' : ''}`)
+      S.lenses[slug] = { ...r, at: Date.now() }
+      setStore({ lenses: S.lenses })
+    } catch (e) {
+      if (e instanceof AuthError) return disconnected(e.message)
+      // A deck without the route (older) or a hiccup: the general ones, no remark.
+      S.lenses[slug] = { ...(S.lenses[slug] || {}), state: 'unavailable', at: Date.now() }
+    }
+    tries += 1
+    keepLensChoice()
+    if (S.view === 'main') render()
+    if (S.lenses[slug]?.state === 'making' && tries < 40) lensTimer = setTimeout(ask, 2500)
+  }
+  await ask()
+}
+
+function agentLenses(slug = S.agent) {
+  const own = S.lenses[slug]
+  return own?.source === 'agent' && Array.isArray(own.lenses) ? own.lenses : []
+}
+
+function lensDef(id = S.perspective) {
+  return [...agentLenses(), ...(S.me?.perspectives || [])].find((x) => x.id === id) || null
+}
+
+// A lens of another agent's (or one made again since) isn't offered: back to Plain.
+function keepLensChoice() {
+  if (S.perspective && S.perspective !== 'custom' && !lensDef()) S.perspective = ''
+}
+
+function viewLenses() {
+  const own = S.lenses[S.agent]
+  const mine = agentLenses()
+  const general = S.me?.perspectives || []
+  const name = agentDef()?.name || own?.agent || 'the agent'
+  const list = mine.length ? [...mine, ...(S.lensMore ? general.map((g) => ({ ...g, general: true })) : [])] : general
+  const chip = (p) => `<button class="chip ${p.id === S.perspective ? 'on' : ''} ${p.general ? 'general' : ''}" data-lens="${esc(p.id)}" aria-pressed="${p.id === S.perspective}"${p.hint ? ` title="${esc(p.hint)}"` : ''}>${esc(p.label)}</button>`
+  const chips = [{ id: '', label: 'Plain' }, ...list, { id: 'custom', label: 'Your own…' }].map(chip).join('')
+  const more = mine.length ? `<button class="chip ghost" data-act="lens-more">${S.lensMore ? 'Fewer' : 'More…'}</button>` : ''
+  let note = ''
+  if (own?.state === 'making') note = `<span class="lens-note"><span class="spinner" style="width:10px;height:10px"></span> asking ${esc(name)} for its own…</span>`
+  else if (mine.length) note = `<span class="lens-note">${esc(name)}'s own</span>`
+  else if (own?.state === 'asleep') note = `<span class="lens-note">${esc(name)}'s own once it's running</span>`
+  else if (own?.state === 'fallback') note = `<span class="lens-note">general — ${esc(name)} couldn't suggest its own</span>`
+  const again = S.agent && own && !['making', 'asleep', 'unavailable'].includes(own.state)
+    ? `<button class="icon-btn" data-act="lens-refresh" title="Ask ${esc(name)} for new lenses" style="width:20px;height:20px">${icon('refresh', 'sm')}</button>` : ''
+  return `
+    <div class="label-row"><span class="label" style="margin:0">Read it as</span>${note}<span class="grow"></span>${again}</div>
+    <div class="chips">${chips}${more}</div>
+    ${S.perspective === 'custom' ? `<input type="text" id="lensText" style="margin-top:6px" placeholder="e.g. a hotel owner in Split" value="${esc(S.perspectiveText)}">` : ''}`
+}
+
 // ── the main view ──
 
 function viewMain() {
@@ -397,9 +541,6 @@ function viewMain() {
       ${icon(x.icon, 'lg')}<span>${esc(x.label)}</span>
     </button>`).join('')
 
-  const lenses = [{ id: '', label: 'Plain' }, ...(S.me.perspectives || []), { id: 'custom', label: 'Your own…' }]
-    .map((p) => `<button class="chip ${p.id === S.perspective ? 'on' : ''}" data-lens="${esc(p.id)}" aria-pressed="${p.id === S.perspective}">${esc(p.label)}</button>`).join('')
-
   const focus = S.focus ? `
     <div class="focus">${icon(S.focus.kind === 'selection' ? 'text' : S.focus.kind === 'image' ? 'image' : 'link', 'sm')}
       <div class="grow">${esc(S.focus.label)}</div>
@@ -428,7 +569,10 @@ function viewMain() {
     pageNotice = `<div class="notice">${esc(S.scanError)}</div>`
   }
 
-  const fileRows = files.map((f) => `
+  const shown = shownFiles(files)
+  const groups = files.length > 1 ? fileGroups(files) : []
+  const hiddenTicked = files.filter((f) => S.checked.has(f.url) && !shown.includes(f)).length
+  const fileRows = shown.map((f) => `
     <label class="file">
       <input type="checkbox" data-file="${esc(f.url)}" ${S.checked.has(f.url) ? 'checked' : ''}>
       <div class="grow">
@@ -467,11 +611,7 @@ function viewMain() {
       <div class="actions">${actions}</div>
       <div class="hint">${esc(a.hint || '')}</div>
     </div>
-    <div>
-      <div class="label">Read it as</div>
-      <div class="chips">${lenses}</div>
-      ${S.perspective === 'custom' ? `<input type="text" id="lensText" style="margin-top:6px" placeholder="e.g. a hotel owner in Split" value="${esc(S.perspectiveText)}">` : ''}
-    </div>
+    <div>${viewLenses()}</div>
     <div>
       <textarea id="note" placeholder="${esc(placeholder)}" rows="${needsText ? 3 : 2}">${esc(S.note)}</textarea>
     </div>
@@ -485,8 +625,16 @@ function viewMain() {
         ${scan?.tables?.length ? `<label class="opt"><input type="checkbox" data-inc="tables" ${S.include.tables ? 'checked' : ''}><div>Tables as CSV<div class="sub">${plural(scan.tables.length, 'table')}</div></div></label>` : ''}
         ${files.length ? `
           <div class="row" style="margin-top:6px"><div class="grow"><b>Files on the page</b> <span class="dim">${nChecked} of ${files.length} ticked</span></div></div>
-          <div class="links-row"><button data-act="files-docs">Documents</button><button data-act="files-all">All</button><button data-act="files-none">None</button></div>
-          <div class="files">${fileRows}</div>` : '<div class="dim" style="margin-top:4px">No files linked on this page.</div>'}
+          ${files.length >= 5 ? `
+            <div class="search">${icon('search', 'sm')}<input type="search" id="fileSearch" placeholder="Search ${files.length} files" value="${esc(S.fileQuery)}" autocomplete="off" spellcheck="false"></div>` : ''}
+          ${groups.length > 1 ? `
+            <div class="chips types">${[{ id: '', label: 'All', count: files.filter(matchesQuery).length }, ...groups].map((g) => `
+              <button class="chip sm ${S.fileType === g.id ? 'on' : ''}" data-ftype="${esc(g.id)}" aria-pressed="${S.fileType === g.id}" ${g.count || g.id === S.fileType ? '' : 'disabled'}>${esc(g.label)} <span class="n">${g.count}</span></button>`).join('')}</div>` : ''}
+          <div class="links-row">${filesFiltered()
+            ? `<button data-act="files-shown-on" ${shown.length ? '' : 'disabled'}>Tick these ${shown.length}</button><button data-act="files-shown-off" ${shown.length ? '' : 'disabled'}>Untick these</button><button data-act="files-unfilter">Show all</button>`
+            : '<button data-act="files-docs">Documents</button><button data-act="files-all">All</button><button data-act="files-none">None</button>'}</div>
+          <div class="files" id="fileList">${fileRows || `<div class="dim" style="padding:8px">No file matches${S.fileQuery.trim() ? ` “${esc(S.fileQuery.trim())}”` : ''}.</div>`}</div>
+          ${hiddenTicked ? `<div class="dim" style="margin-top:4px">${plural(hiddenTicked, 'ticked file')} not shown here</div>` : ''}` : '<div class="dim" style="margin-top:4px">No files linked on this page.</div>'}
       </div>
     </details>
     ${S.sendError ? `<div class="notice err">${esc(S.sendError)}</div>` : ''}
@@ -738,7 +886,7 @@ async function send(asked) {
     const pageMd = pageMarkdown(cap, saved, unfetched, unticked, tablesSent)
     const m = cap.meta || {}
     const meta = {
-      agent: ag.slug, action: a.id, perspective: S.perspective, perspective_text: S.perspectiveText, note,
+      agent: ag.slug, action: a.id, perspective: S.perspective, perspective_label: lensDef()?.label || '', perspective_text: S.perspectiveText, note,
       selection_only: !!(S.focus?.kind === 'selection' && cap.selection && S.include.selection),
       browser: browserLabel(), version: VERSION, captured_at: new Date().toISOString(),
       page: { url: m.url || tab.url, title: m.title || tab.title || '', site_name: m.site_name || '', author: m.author || '',
@@ -781,6 +929,7 @@ async function send(asked) {
 function startRun(run) {
   S.run = { ...run, status: 'starting', events: [], next: 0, result: '', live: '', error: '', files: [], done: false, at: Date.now() }
   S.followUp = ''
+  S.follow = true
   S.view = 'run'
   remember(S.run)
   render()
@@ -791,6 +940,7 @@ async function pollRun(run) {
   if (run.polling) return
   run.polling = true
   let misses = 0
+  let drawn = ''
   while (S.run === run && !run.done) {
     try {
       const r = await api(S.conn, `/fd/clip/runs/${encodeURIComponent(run.clip_id)}?since=${run.next}`)
@@ -798,6 +948,9 @@ async function pollRun(run) {
       run.status = r.status
       run.events.push(...(r.events || []))
       run.next = r.next ?? run.next
+      // What it did last, for the working bar: a step, or writing the answer.
+      if ((r.events || []).length) run.doing = 'step'
+      else if ((r.live || '').length > (run.live || '').length) run.doing = 'writing'
       run.live = r.live || ''
       if (r.result) run.result = r.result
       if (r.error) run.error = r.error
@@ -819,12 +972,57 @@ async function pollRun(run) {
         run.status = 'error'
       }
     }
-    if (S.view === 'run' && S.run === run) render()
+    // Drawn again only when something changed: a redraw every poll would
+    // drop a selection in the answer and jump the lists.
+    const now = [run.status, run.events.length, run.live.length, run.result.length, run.error, run.done].join('|')
+    if (now !== drawn && S.view === 'run' && S.run === run) { drawn = now; render() }
     if (!run.done) await sleep(1200)
   }
   run.polling = false
   if (S.view === 'run' && S.run === run) render()
 }
+
+function elapsed(at) {
+  const s = Math.max(0, Math.round((Date.now() - (at || Date.now())) / 1000))
+  return s < 3600 ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`
+}
+
+// While the agent works the view follows it: the newest step and the answer
+// as it's written stay in sight, the working bar at the bottom. Scrolling up
+// stops that (the bar offers the way back); scrolling to the end starts it again.
+function followRun() {
+  const run = S.run
+  if (!run || !S.follow) return
+  if (!run.done) {
+    window.scrollTo({ top: document.documentElement.scrollHeight })
+    return
+  }
+  if (run.followedEnd) return
+  run.followedEnd = true
+  // Done: a long answer from its start, a short one with what comes after it.
+  const card = document.getElementById('answerCard')
+  if (card && card.offsetHeight > window.innerHeight - 140) card.scrollIntoView({ block: 'start' })
+  else window.scrollTo({ top: document.documentElement.scrollHeight })
+}
+
+let userScrollAt = 0
+for (const type of ['wheel', 'touchmove', 'mousedown', 'keydown']) {
+  window.addEventListener(type, () => { userScrollAt = Date.now() }, { passive: true, capture: true })
+}
+window.addEventListener('scroll', () => {
+  if (S.view !== 'run' || !S.run || S.run.done) return
+  const atEnd = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 40
+  const was = S.follow
+  if (atEnd) S.follow = true
+  else if (Date.now() - userScrollAt < 1000) S.follow = false
+  if (was !== S.follow) render()
+}, { passive: true })
+
+setInterval(() => {
+  if (S.view !== 'run' || !S.run || S.run.done) return
+  const el = document.getElementById('elapsed')
+  if (el) el.textContent = elapsed(S.run.at)
+}, 1000)
 
 function statusPill(run) {
   const map = {
@@ -863,7 +1061,16 @@ function viewRun() {
     </div>
     ${steps ? `<div class="card"><div class="label">Steps</div><div class="steps" id="steps">${steps}</div></div>` : ''}
     ${run.error ? `<div class="notice err">${esc(run.error)}</div>` : ''}
-    <div class="card">${answer || '<div class="dim">No answer.</div>'}</div>
+    <div class="card" id="answerCard">${answer || '<div class="dim">No answer.</div>'}</div>
+    ${working ? `
+      <div class="working-bar" id="workingBar">
+        <div class="spinner"></div>
+        <div class="grow ellipsis">${esc(run.doing === 'writing' ? `${run.agent} is writing the answer…`
+          : run.events.length ? run.events[run.events.length - 1].text
+            : run.status === 'starting' ? `Sending to ${run.agent}…` : `${run.agent} is working…`)}</div>
+        <span class="elapsed" id="elapsed">${esc(elapsed(run.at))}</span>
+        ${S.follow ? '' : `<button class="icon-btn" data-act="follow" title="Show the latest">${icon('chevron', 'sm')}</button>`}
+      </div>` : ''}
     ${files ? `<div class="card"><div class="label">In the clip folder</div><div class="out-files">${files}</div>
       <div class="dim" style="margin-top:6px">${esc(run.vfs || '')}</div></div>` : ''}
     ${run.done ? `
@@ -942,7 +1149,8 @@ function viewHistory() {
 function openHistory(i) {
   const h = S.history[i]
   if (!h) return
-  S.run = { ...h, events: [], next: 0, live: '', done: !['starting', 'thinking'].includes(h.status) }
+  S.run = { ...h, events: [], next: 0, live: '', done: !['starting', 'thinking'].includes(h.status), followedEnd: true }
+  S.follow = true
   S.view = 'run'
   render()
   if (!S.run.done) pollRun(S.run)
@@ -962,6 +1170,13 @@ function viewSettings() {
     </div>
     ${agents ? `<div class="card"><label class="label" for="setAgent">Agent</label><select class="select" id="setAgent">${agents}</select></div>` : ''}
     <div class="card">
+      <div class="label" id="textSizeLabel">Text size</div>
+      <div class="seg" role="radiogroup" aria-labelledby="textSizeLabel">${TEXT_SIZES.map(([id, label, scale]) => `
+        <button class="seg-btn ${textSize() === id ? 'on' : ''}" data-text-size="${id}" role="radio" aria-checked="${textSize() === id}">
+          <span class="seg-a" style="font-size:${Math.round(13 * scale)}px">A</span>${esc(label)}
+        </button>`).join('')}</div>
+    </div>
+    <div class="card">
       <div class="label">Every time</div>
       <label class="switch"><input type="checkbox" id="prefAll" ${S.allSites ? 'checked' : ''}><div>Work on every site without asking<div class="dim">Reads pages and fetches their files anywhere; also lets screenshots work.</div></div></label>
       <label class="switch"><input type="checkbox" id="prefSnapshot" ${S.prefs.snapshot ? 'checked' : ''}><div>Always send the whole page (.mhtml)</div></label>
@@ -972,6 +1187,21 @@ function viewSettings() {
     <div class="foot">Captain for Chrome ${esc(VERSION)}</div>`
 }
 
+// ── text size ──
+
+const TEXT_SIZES = [['small', 'Small', 1], ['medium', 'Medium', 1.15], ['large', 'Large', 1.3]]
+
+function textSize() {
+  return TEXT_SIZES.some(([id]) => id === S.prefs.textSize) ? S.prefs.textSize : 'small'
+}
+
+// Small is the panel as it always was; the stylesheet scales from data-size.
+function applyTextSize() {
+  const size = textSize()
+  if (size === 'small') delete document.documentElement.dataset.size
+  else document.documentElement.dataset.size = size
+}
+
 async function refreshAllSites() {
   try { S.allSites = await chrome.permissions.contains({ origins: ['<all_urls>'] }) } catch { S.allSites = false }
 }
@@ -979,7 +1209,11 @@ async function refreshAllSites() {
 // ── events ──
 
 $view.addEventListener('click', (ev) => {
-  const el = ev.target.closest('[data-act],[data-action],[data-lens],[data-history],[data-file-path]')
+  // Opened or closed now, not when the (later) toggle event comes: a redraw
+  // in between would draw it the old way.
+  const summary = ev.target.closest('details.include > summary')
+  if (summary) { S.includeOpen = !summary.parentElement.open; return }
+  const el = ev.target.closest('[data-act],[data-action],[data-lens],[data-history],[data-file-path],[data-ftype],[data-text-size]')
   if (!el) return
   if (el.dataset.action) {
     S.action = el.dataset.action
@@ -994,13 +1228,25 @@ $view.addEventListener('click', (ev) => {
     if (S.perspective === 'custom') document.getElementById('lensText')?.focus()
     return
   }
+  if (el.dataset.textSize) {
+    S.prefs = { ...S.prefs, textSize: el.dataset.textSize }
+    applyTextSize()
+    setStore({ prefs: S.prefs })
+    render()
+    return
+  }
+  if (el.dataset.ftype !== undefined) {
+    S.fileType = S.fileType === el.dataset.ftype ? '' : el.dataset.ftype
+    render()
+    return
+  }
   if (el.dataset.history !== undefined) return openHistory(Number(el.dataset.history))
   if (el.dataset.filePath) return saveRunFile(el.dataset.filePath)
   const act = el.dataset.act
   if (act === 'connect') startPairing()
   else if (act === 'reopen' && S.pairing) chrome.tabs.create({ url: S.pairing.url })
   else if (act === 'cancel-pair') { S.pairing = null; render() }
-  else if (act === 'retry-me') loadMe().then(() => { applyDefaults(); render() })
+  else if (act === 'retry-me') loadMe().then(() => { applyDefaults(); render(); loadLenses() })
   else if (act === 'rescan') scan()
   else if (act === 'grant') {
     chrome.permissions.request({ origins: [`${S.needsPermission}/*`] }).then((ok) => { if (ok) scan() }).catch(() => {})
@@ -1010,7 +1256,18 @@ $view.addEventListener('click', (ev) => {
     S.checked = new Set(act === 'files-none' ? [] : files.filter((f) => act === 'files-all' || DOC_KINDS.has(f.kind)).map((f) => f.url))
     S.touchedFiles = true
     render()
-  } else if (act === 'clear-focus') { S.focus = null; render() }
+  } else if (act === 'files-shown-on' || act === 'files-shown-off') {
+    for (const f of shownFiles(allFiles())) {
+      if (act === 'files-shown-on') S.checked.add(f.url)
+      else S.checked.delete(f.url)
+    }
+    S.touchedFiles = true
+    render()
+  } else if (act === 'files-unfilter') { S.fileQuery = ''; S.fileType = ''; render() }
+  else if (act === 'lens-more') { S.lensMore = !S.lensMore; render() }
+  else if (act === 'lens-refresh') loadLenses(S.agent, { fresh: true })
+  else if (act === 'clear-focus') { S.focus = null; render() }
+  else if (act === 'follow') { S.follow = true; render() }
   else if (act === 'back') { S.view = 'main'; render(); scheduleScan(0) }
   else if (act === 'stop' && S.run) {
     api(S.conn, `/fd/clip/runs/${encodeURIComponent(S.run.clip_id)}/stop`, { method: 'POST' }).catch((e) => toast(e.message))
@@ -1029,8 +1286,11 @@ $view.addEventListener('change', (ev) => {
   const el = ev.target
   if (el.id === 'agent' || el.id === 'setAgent') {
     S.agent = el.value
+    S.lensMore = false
     setStore({ agent: S.agent })
+    keepLensChoice()
     if (el.id === 'agent') render()
+    loadLenses(S.agent)
   } else if (el.dataset.file) {
     if (el.checked) S.checked.add(el.dataset.file)
     else S.checked.delete(el.dataset.file)
@@ -1040,7 +1300,7 @@ $view.addEventListener('change', (ev) => {
     S.include[el.dataset.inc] = el.checked
     render()
   } else if (el.id === 'prefSnapshot' || el.id === 'prefShot') {
-    S.prefs = { snapshot: document.getElementById('prefSnapshot').checked, screenshot: document.getElementById('prefShot').checked }
+    S.prefs = { ...S.prefs, snapshot: document.getElementById('prefSnapshot').checked, screenshot: document.getElementById('prefShot').checked }
     setStore({ prefs: S.prefs })
     applyDefaults()
   } else if (el.id === 'prefAll') {
@@ -1056,11 +1316,13 @@ $view.addEventListener('input', (ev) => {
   else if (el.id === 'lensText') S.perspectiveText = el.value
   else if (el.id === 'followUp') S.followUp = el.value
   else if (el.id === 'deckUrl') S.deckInput = el.value
+  else if (el.id === 'fileSearch') { S.fileQuery = el.value; render() }
 })
 
 $view.addEventListener('keydown', (ev) => {
-  if (ev.key !== 'Enter') return
   const el = ev.target
+  if (ev.key === 'Escape' && el.id === 'fileSearch' && S.fileQuery) { ev.preventDefault(); S.fileQuery = ''; render(); return }
+  if (ev.key !== 'Enter') return
   if (el.id === 'deckUrl') { ev.preventDefault(); startPairing() }
   else if ((ev.metaKey || ev.ctrlKey) && el.id === 'note') { ev.preventDefault(); onSend() }
   else if ((ev.metaKey || ev.ctrlKey) && el.id === 'followUp') { ev.preventDefault(); sendFollowUp() }
@@ -1122,17 +1384,25 @@ async function takeFocus() {
 }
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && changes.focus?.newValue) takeFocus()
+  // A size picked in another window's panel applies here too.
+  if (area === 'local' && changes.prefs?.newValue && changes.prefs.newValue.textSize !== S.prefs.textSize) {
+    S.prefs = { ...S.prefs, textSize: changes.prefs.newValue.textSize }
+    applyTextSize()
+    if (S.view === 'settings') render()
+  }
 })
 
 // ── start ──
 
 async function start() {
   try { S.windowId = (await chrome.windows.getCurrent()).id } catch { S.windowId = null }
-  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me'])
+  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses'])
   S.agent = stored.agent || ''
-  S.prefs = { snapshot: false, screenshot: false, ...(stored.prefs || {}) }
+  S.prefs = { snapshot: false, screenshot: false, textSize: 'small', ...(stored.prefs || {}) }
+  applyTextSize()
   S.history = Array.isArray(stored.history) ? stored.history : []
   S.deckInput = stored.lastDeck || ''
+  S.lenses = stored.lenses && typeof stored.lenses === 'object' ? stored.lenses : {}
   await refreshAllSites()
   S.conn = await loadConn()
   if (!S.conn) {
@@ -1146,6 +1416,7 @@ async function start() {
   await loadMe()
   applyDefaults()
   render()
+  loadLenses()
   await scan()
   takeFocus()
 }
