@@ -1,5 +1,5 @@
 import { useState, type ComponentType, type ReactNode } from 'react'
-import { Plug, Mail, LayoutGrid, Sparkles, MessageCircle, Database, Scale, Send, Mic, Cable, Smartphone, Bell } from 'lucide-react'
+import { Plug, Mail, LayoutGrid, Sparkles, MessageCircle, Database, Scale, Send, Mic, Cable, Smartphone, Bell, Globe } from 'lucide-react'
 import GoogleConnection from '../components/connections/GoogleConnection'
 import MicrosoftConnection from '../components/connections/MicrosoftConnection'
 import CodexConnection from '../components/connections/CodexConnection'
@@ -7,6 +7,7 @@ import AntigravityConnection from '../components/connections/AntigravityConnecti
 import MCPConnection from '../components/connections/MCPConnection'
 import MCPAgentAccess from '../components/connections/MCPAgentAccess'
 import AgentLinksConnection, { type LinksStatus } from '../components/connections/AgentLinksConnection'
+import BrowserConnection, { type BrowsersStatus } from '../components/connections/BrowserConnection'
 import TypesenseConnection from '../components/connections/TypesenseConnection'
 import WhatsAppNudgeConnection from '../components/connections/WhatsAppNudgeConnection'
 import NotificationsConnection from '../components/connections/NotificationsConnection'
@@ -22,7 +23,7 @@ import { useMCPStore } from '../stores/mcpStore'
 import { useJevStore } from '../stores/jevStore'
 import { useSonioxStore } from '../stores/sonioxStore'
 
-export type TabId = 'google' | 'microsoft' | 'telegram' | 'whatsapp_web' | 'codex' | 'antigravity' | 'mcp' | 'systems' | 'jev' | 'soniox' | 'notify' | 'whatsapp' | 'typesense'
+export type TabId = 'google' | 'microsoft' | 'telegram' | 'whatsapp_web' | 'codex' | 'antigravity' | 'mcp' | 'systems' | 'browser' | 'jev' | 'soniox' | 'notify' | 'whatsapp' | 'typesense'
 
 interface TabDef {
   id: TabId
@@ -44,6 +45,8 @@ const TABS: TabDef[] = [
   { id: 'mcp', label: 'MCP Servers', icon: Plug },
   // Other systems linked to the person's own agents (agent links), each with its own key.
   { id: 'systems', label: 'Systems', icon: Cable },
+  // Captain for Chrome: the person's own browsers, each with a token of its own.
+  { id: 'browser', label: 'Browser', icon: Globe },
   // The user's own Jev key (the deck's when sign-in is off) — kiosk users add theirs too.
   { id: 'jev', label: 'Jev', icon: Scale },
   // Speech-to-text / voice — the user's own key (else the team's); kiosk users connect theirs too.
@@ -69,7 +72,7 @@ function saveTab(id: TabId): void {
 // A small dot on the tab for the connections whose state is already loaded:
 // green connected, amber configured but not connected (Google / Microsoft) or
 // a Jev / Soniox key saved but not verified; green for Systems while one is connected.
-function useTabDots(telegram: MyTelegram | null, systemsConnected: number): Partial<Record<TabId, 'on' | 'pending'>> {
+function useTabDots(telegram: MyTelegram | null, systemsConnected: number, browsers: number): Partial<Record<TabId, 'on' | 'pending'>> {
   const google = useGoogleAuthStore((s) => s.status)
   const microsoft = useMicrosoftAuthStore((s) => s.status)
   const codex = useCodexAuthStore((s) => s.status)
@@ -84,6 +87,7 @@ function useTabDots(telegram: MyTelegram | null, systemsConnected: number): Part
     codex: codex?.connected && !codex.stale ? 'on' : undefined,
     mcp: mcpServers > 0 ? 'on' : undefined,
     systems: systemsConnected > 0 ? 'on' : undefined,
+    browser: browsers > 0 ? 'on' : undefined,
     jev: jev?.key_set ? (jev.verified === false ? 'pending' : 'on') : undefined,
     soniox: soniox?.key_set ? (soniox.verified === false ? 'pending' : 'on') : undefined,
     telegram: telegram?.link && telegram.link.status !== 'rejected'
@@ -109,7 +113,8 @@ export default function ConnectionsPage({ kiosk = false, initialTab }: { kiosk?:
   })
   const [telegram, setTelegram] = useState<MyTelegram | null>(null)
   const [systems, setSystems] = useState<LinksStatus | null>(null)
-  const dots = useTabDots(telegram, systems?.connected ?? 0)
+  const [browsers, setBrowsers] = useState<BrowsersStatus | null>(null)
+  const dots = useTabDots(telegram, systems?.connected ?? 0, browsers?.connected ?? 0)
 
   const select = (id: TabId) => {
     setActive(id)
@@ -191,6 +196,7 @@ export default function ConnectionsPage({ kiosk = false, initialTab }: { kiosk?:
         {panel('antigravity', <AntigravityConnection />)}
         {panel('mcp', <><MCPConnection /><MCPAgentAccess /></>)}
         {panel('systems', <AgentLinksConnection active={active === 'systems'} onStatus={setSystems} />)}
+        {panel('browser', <BrowserConnection active={active === 'browser'} onStatus={setBrowsers} />)}
         {panel('jev', <JevConnection />)}
         {panel('soniox', <SonioxConnection />)}
         {panel('notify', <NotificationsConnection kiosk={kiosk} />)}

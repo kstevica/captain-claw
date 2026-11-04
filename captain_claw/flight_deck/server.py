@@ -1808,6 +1808,8 @@ from captain_claw.flight_deck.app_code_routes import router as app_code_router
 from captain_claw.flight_deck.glasses_bridge import router as glasses_router
 from captain_claw.flight_deck.agent_link import router as agent_link_router
 from captain_claw.flight_deck.agent_link_http import router as agent_link_http_router
+from captain_claw.flight_deck.browser_clip import owner_router as browser_owner_router
+from captain_claw.flight_deck.browser_clip import router as browser_clip_router
 from captain_claw.flight_deck.device_bridge import router as device_router
 from captain_claw.flight_deck.device_firmware import router as device_firmware_router
 from captain_claw.flight_deck.device_backgrounds import router as device_backgrounds_router
@@ -1930,6 +1932,9 @@ app.include_router(device_router)
 # or over HTTP and a webhook, and the agent sends it messages (/fd/agent-links).
 app.include_router(agent_link_router)
 app.include_router(agent_link_http_router)
+# Captain for Chrome: pages from the person's browser to their agents.
+app.include_router(browser_clip_router)
+app.include_router(browser_owner_router)
 # Over-the-air firmware for the devices (docs/device-ota-plan.md).
 app.include_router(device_firmware_router)
 # A picture behind the StopWatch's screens, sent by the owner's agent.
