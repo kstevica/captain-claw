@@ -14,9 +14,28 @@ RETRY_HINT = "Please try again or simplify the task."
 MSG_RETRIES_EXHAUSTED = (
     f"I wasn't able to complete the request — retries exhausted. {RETRY_HINT}"
 )
+# Running out of steps is not a failure of the work: the turn stopped while it
+# was still going. Say so, and say how to go on ("continue" picks the work up
+# from the session) — not "try again or simplify", which made users restart
+# from nothing. "budget exhausted" stays in both texts: STUCK_MARKERS and the
+# Council auto-nudge key on it.
+CONTINUE_HINT = "Reply **continue** and I'll pick up where I left off."
 MSG_BUDGET_EXHAUSTED = (
-    f"I wasn't able to complete the request — iteration budget exhausted. {RETRY_HINT}"
+    "I reached this message's step limit (iteration budget exhausted) before "
+    f"finishing. {CONTINUE_HINT}"
 )
+
+
+def budget_partial(partial: str, steps: int | None = None) -> str:
+    """The reply when the step limit ends a turn that has something to show."""
+    used = f" ({steps} steps)" if steps else ""
+    return (
+        f"⏸️ I reached this message's step limit{used} before finishing (iteration "
+        f"budget exhausted). Here's where it stands — {CONTINUE_HINT[0].lower()}"
+        f"{CONTINUE_HINT[1:]}\n\n{partial}"
+    )
+
+
 MSG_STUCK = (
     f"I got stuck and couldn't make further progress. {RETRY_HINT}"
 )

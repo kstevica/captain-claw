@@ -252,44 +252,61 @@ def _gate_steps(outputs: list[dict]) -> list[dict]:
             and str(o["args"].get("step", "")).startswith("iteration_budget")]
 
 
-async def test_jev_yes_gives_a_working_agent_more_steps(jev):
+async def test_progress_alone_gives_a_working_agent_more_steps(jev):
+    # Up to twice the planned budget a turn that keeps making progress is
+    # extended with no judge — no Jev call, no "budget exhausted".
     outputs: list[dict] = []
     agent = _agent(WorkingProvider(steps=5), outputs)
     result = await agent.complete("find the open tenders over 1M")
     assert result.endswith("Found it: 7 open tenders over 1M across the probed sources.")
     assert "budget exhausted" not in result
+    assert jev.calls == []
+    ext = _gate_steps(outputs)
+    assert ext[0]["step"] == "iteration_budget_extended" and ext[0]["judge"] == "progress"
+    assert ext[0]["previous_limit"] == 3 and ext[0]["new_limit"] == 9
+
+
+async def test_jev_yes_gives_a_long_running_agent_more_steps(jev):
+    # Past twice the planned budget Jev judges each extension.
+    outputs: list[dict] = []
+    agent = _agent(WorkingProvider(steps=10), outputs)
+    result = await agent.complete("find the open tenders over 1M")
+    assert result.endswith("Found it: 7 open tenders over 1M across the probed sources.")
     assert len(jev.calls) == 1
     st, _q = jev.calls[0]
     assert st["request"] == "find the open tenders over 1M"
-    assert 'probe({"source": "s3"})' in st["recent_steps"]
+    assert 'probe({"source": "s9"})' in st["recent_steps"]
     ext = _gate_steps(outputs)
-    assert ext[0]["step"] == "iteration_budget_extended"
-    assert ext[0]["judge"] == "jev" and ext[0]["p_progressing"] == 0.9
-    assert ext[0]["previous_limit"] == 3 and ext[0]["new_limit"] == 6
+    assert [e["judge"] for e in ext] == ["progress", "jev"]
+    assert ext[1]["p_progressing"] == 0.9 and ext[1]["new_limit"] == 12
     assert _asked_jev_status(outputs)
 
 
-async def test_jev_no_stops_the_turn_as_before(jev):
+async def test_jev_no_stops_a_long_turn_and_says_how_to_go_on(jev):
     jev.answers = [_answer(0.2)]
     outputs: list[dict] = []
-    agent = _agent(WorkingProvider(steps=5), outputs)
+    agent = _agent(WorkingProvider(steps=10), outputs)
     result = await agent.complete("find the open tenders over 1M")
-    assert "iteration budget exhausted" in result
+    assert "iteration budget exhausted" in result and "step limit" in result
+    assert "continue" in result and "simplify the task" not in result
+    # The landing is written fresh from what the turn gathered, not an old
+    # mid-run narration.
+    assert "Found it: 7 open tenders" in result
     assert len(jev.calls) == 1
     stop = _gate_steps(outputs)[-1]
     assert stop["step"] == "iteration_budget_exhausted"
     assert stop["judge"] == "jev" and stop["p_progressing"] == 0.2
 
 
-async def test_without_jev_the_turn_stops_and_nothing_is_asked(jev, monkeypatch):
+async def test_without_jev_progress_runs_to_the_hard_ceiling(jev, monkeypatch):
     monkeypatch.setattr(get_config().tools.jev, "check_progress", False)
     outputs: list[dict] = []
-    agent = _agent(WorkingProvider(steps=5), outputs)
+    agent = _agent(WorkingProvider(steps=10), outputs)
     result = await agent.complete("find the open tenders over 1M")
-    assert "iteration budget exhausted" in result
+    # Most decks have no Jev: a working turn is not cut off at the soft limit.
+    assert result.endswith("Found it: 7 open tenders over 1M across the probed sources.")
     assert jev.calls == []
-    stop = _gate_steps(outputs)[-1]
-    assert stop["step"] == "iteration_budget_exhausted" and "judge" not in stop
+    assert all(e["judge"] == "progress" for e in _gate_steps(outputs))
     # No "asking Jev" status on a deck where Jev isn't asked.
     assert not _asked_jev_status(outputs)
 
@@ -298,8 +315,43 @@ async def test_the_hard_ceiling_still_holds_and_ships_what_the_turn_has(jev):
     outputs: list[dict] = []
     agent = _agent(WorkingProvider(steps=50), outputs)
     result = await agent.complete("find the open tenders over 1M")
-    # Jev keeps saying yes, but 6 steps is the ceiling: one extension, then
-    # the turn ends with what it has instead of a bare "Max iterations".
+    # Progress, then Jev, extend to 12 = 4x the planned 3; then the turn ends
+    # with a written landing instead of a bare "Max iterations".
     assert len(jev.calls) == 1
-    assert "iteration budget exhausted" in result and "Source 6" in result
+    assert "iteration budget exhausted" in result and "(12 steps)" in result
+    assert "Found it: 7 open tenders" in result
     assert "Max iterations reached" not in result
+
+
+class IdleProvider(WorkingProvider):
+    """Repeats the same probe: no new progress after the first call."""
+
+    async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
+        if tools:
+            return LLMResponse(content="Checking again.", tool_calls=[
+                ToolCall(id=f"c{len(messages)}", name="probe", arguments={"source": "s1"})])
+        return LLMResponse(content="Found it: 7 open tenders over 1M across the probed sources.")
+
+
+async def test_without_progress_and_without_jev_the_turn_stops_at_the_soft_limit(jev, monkeypatch):
+    monkeypatch.setattr(get_config().tools.jev, "check_progress", False)
+    outputs: list[dict] = []
+    agent = _agent(IdleProvider(steps=50), outputs)
+    agent.max_iterations = 8
+    await agent.complete("find the open tenders over 1M")
+    # Repeating the same call is not progress: no extra steps (the stuck
+    # detector or the soft limit ends it).
+    assert not any(e.get("step") == "iteration_budget_extended" for e in _gate_steps(outputs))
+
+
+def test_budget_extension_rule():
+    from captain_claw.agent_orchestration_mixin import _budget_extends as ext
+
+    # No progress: never free steps.
+    assert not ext(False, True, 3, 6, judge_available=False)
+    # Progress below twice the plan: always.
+    assert ext(True, False, 3, 6, judge_available=True)
+    # Beyond it: open work, or no judge on the deck.
+    assert ext(True, True, 9, 6, judge_available=True)
+    assert ext(True, False, 9, 6, judge_available=False)
+    assert not ext(True, False, 9, 6, judge_available=True)  # Jev decides
