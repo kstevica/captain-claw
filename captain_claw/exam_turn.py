@@ -39,7 +39,7 @@ EXAM_TOOLS: dict[str, frozenset[str] | None] = {
     "knowledge": frozenset({"search", "section", "outline", "list"}),
     "read": None, "workspace_read": None, "glob": None, "grep": None, "history": None,
     "pdf_extract": None, "docx_extract": None, "xlsx_extract": None, "pptx_extract": None,
-    "image_ocr": None, "image_vision": None,
+    "image_ocr": None, "image_vision": None, "ocr_pdf": None, "ocr_image": None,
     "topics": frozenset({"recall", "search", "list", "get"}),
     "insights": frozenset({"search", "list"}),
     "playbooks": frozenset({"list", "search", "info"}),

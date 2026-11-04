@@ -132,7 +132,7 @@ _WORKER_EXTRACT_SEARCH_TOOLS = (
     "read", "glob", "grep",
     "web_search", "web_fetch",
     "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
-    "image_ocr", "image_vision",
+    "image_ocr", "image_vision", "ocr_pdf", "ocr_image",
     "summarize_files",
 )
 

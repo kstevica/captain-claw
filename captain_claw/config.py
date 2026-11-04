@@ -334,6 +334,27 @@ class ImageOcrToolConfig(BaseModel):
     preprocess_enhance: bool = False  # also CLAHE-enhance (can hurt clean images; off by default)
 
 
+class OcrToolConfig(BaseModel):
+    """ocr_pdf / ocr_image: local OCR engines only, never a language model."""
+
+    # Engine order for engine=auto (a `lang` Tesseract has goes to Tesseract
+    # first). rapidocr comes with Captain (core dependency); tesseract is the
+    # system binary.
+    engines: list[str] = ["rapidocr", "tesseract"]
+    lang: str = "eng"  # Tesseract's language when the call names none
+    tesseract_path: str = ""  # empty = found on PATH (or Program Files on Windows)
+    tessdata_dir: str = ""  # a folder of .traineddata models; empty = Tesseract's own
+    tesseract_psm: int = 3  # page segmentation: 3 = automatic, 6 = one block, 4 = columns
+    rapidocr_threads: int = 2
+    dpi: int = 300  # PDF pages are rendered at this resolution for OCR
+    max_pages: int = 100  # per call; later pages are named in the result
+    min_text_chars: int = 25  # a PDF page with less text than this is OCR'd
+    low_confidence: float = 70.0  # pages under this mean confidence are flagged
+    workers: int = 0  # Tesseract pages at once; 0 = min(4, CPUs)
+    pdf_timeout_seconds: int = 1200
+    image_timeout_seconds: int = 300
+
+
 class ImageVisionToolConfig(BaseModel):
     """Image vision tool configuration."""
 
@@ -625,6 +646,8 @@ class ToolsConfig(BaseModel):
         "web_fetch",
         "web_search",
         "pdf_extract",
+        "ocr_pdf",
+        "ocr_image",
         "docx_extract",
         "docx",
         "xlsx",
@@ -676,6 +699,7 @@ class ToolsConfig(BaseModel):
     image_gen: ImageGenToolConfig = Field(default_factory=ImageGenToolConfig)
     image_ocr: ImageOcrToolConfig = Field(default_factory=ImageOcrToolConfig)
     image_vision: ImageVisionToolConfig = Field(default_factory=ImageVisionToolConfig)
+    ocr: OcrToolConfig = Field(default_factory=OcrToolConfig)
     send_mail: SendMailToolConfig = Field(default_factory=SendMailToolConfig)
     google_mail: GoogleMailToolConfig = Field(default_factory=GoogleMailToolConfig)
     microsoft_mail: MicrosoftMailToolConfig = Field(default_factory=MicrosoftMailToolConfig)
@@ -722,6 +746,9 @@ class ToolsConfig(BaseModel):
         # web_fetch also registers web_get and web_fetch_batch.
         "shell", "glob", "web_fetch", "web_search",
         "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
+        # Scanned PDFs and pictures of documents, read by a local OCR engine:
+        # without them a worker rendered pages and OCR'd them with scripts.
+        "ocr_pdf", "ocr_image",
         "insights", "contacts", "apis", "todo",
         # Word documents are made and changed with the docx tool (tracked
         # changes), never with scripts; and every agent can test what it is

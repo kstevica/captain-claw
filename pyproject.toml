@@ -54,6 +54,24 @@ dependencies = [
     "bcrypt>=4.0.0",
     "cryptography>=42.0",
     "python-multipart>=0.0.7",
+    # ocr_pdf / ocr_image work out of the box: scanned PDFs and pictures read by
+    # a local engine, never a model. RapidOCR (Apache-2.0) carries its PP-OCR
+    # models in the wheel and reads Latin diacritics with no language pack;
+    # pypdfium2 renders PDF pages. ~90 MB download, ~240 MB installed (most of it
+    # RapidOCR's opencv-python-headless). Where a piece has no wheel (and no
+    # sdist) RapidOCR is skipped and OCR falls back to Tesseract: 32-bit ARM (no
+    # ONNX Runtime) and Windows on ARM (no opencv-python-headless).
+    # macOS pins: the desktop lock is universal — one version per platform, not
+    # per macOS release — and the newest ONNX Runtime / OpenCV / pdfium wheels
+    # need macOS 13-14, while the app installs on macOS 12. These are the last
+    # versions with macOS 11+ wheels (ONNX Runtime 1.19 is universal2, so Intel
+    # Macs too); RapidOCR reads the same text with them.
+    "pypdfium2>=4; sys_platform != 'darwin'",
+    "pypdfium2>=4,<5.1; sys_platform == 'darwin'",
+    "rapidocr>=3.4; platform_machine != 'armv7l' and platform_machine != 'armv6l' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
+    "onnxruntime>=1.17; sys_platform != 'darwin' and platform_machine != 'armv7l' and platform_machine != 'armv6l' and (sys_platform != 'win32' or platform_machine != 'ARM64')",
+    "onnxruntime>=1.17,<1.20; sys_platform == 'darwin'",
+    "opencv-python-headless>=4.5,<4.11; sys_platform == 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -79,6 +97,10 @@ pdf = [
     # agent adds to its knowledge). PyMuPDF is AGPL-3.0, so it stays optional:
     # without it PDFs are read page by page.
     "pymupdf4llm>=0.3",
+]
+ocr = [
+    # Included in core deps since 0.8.10; kept so `captain-claw[ocr]` still
+    # installs. Tesseract, the other engine, is a system binary.
 ]
 cv = [
     # Deterministic local computer-vision ops (the `vision` tool). CPU-only,

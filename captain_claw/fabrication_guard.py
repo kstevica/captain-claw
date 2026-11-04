@@ -600,7 +600,7 @@ def sent_message_ids(steps: Iterable[ToolStep]) -> frozenset[str]:
 _CHAT_DELIVERY_TOOLS = frozenset({"write", "edit", "image_gen", "visualize", "pocket_tts", "audio"})
 _READ_ONLY_TOOLS = frozenset({
     "read", "glob", "grep", "ls", "web_search", "web_fetch", "web_fetch_batch", "web_get",
-    "document_extract", "image_ocr", "summarize_files", "session_history", "codemap",
+    "document_extract", "image_ocr", "ocr_pdf", "ocr_image", "summarize_files", "session_history", "codemap",
     "researchmap", "screen_capture", "video_vision", "stt", "cv", "clipboard",
 })
 _READ_ACTION_RE = re.compile(

@@ -734,7 +734,33 @@ Extract PDF content to markdown.
 | `max_chars` | number | no | Max output chars (default: 120000) |
 | `max_pages` | number | no | Max pages to extract (default: 100) |
 
-Uses `pypdf`. Output includes `## Page N` headers.
+Uses `pypdf`. Output includes `## Page N` headers. Pages with little or no text layer are named at the end, with a pointer to `ocr_pdf`.
+
+### ocr_pdf — new in 0.8.10
+
+Read a scanned or image-only PDF with a **local OCR engine — no AI model**, so the same file gives the same text every time.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `path` | string | yes | Path to the PDF |
+| `lang` | string | no | Tesseract language codes, `+`-joined: `eng`, `hrv`, `deu`, `hrv+eng` |
+| `pages` | string | no | Pages to read, e.g. `1-3,7` (default: all, up to `tools.ocr.max_pages`) |
+| `mode` | string | no | `auto` (default): OCR only the pages without a usable text layer · `ocr`: every page |
+| `dpi` | number | no | Render resolution, 100–600 (default 300) |
+| `engine` | string | no | `auto` (default), `tesseract`, `rapidocr` |
+| `refresh` | boolean | no | Read again instead of reusing the stored result |
+
+**How a page is read (fixed rules, recorded per page):** its own text layer when it has at least `min_text_chars` (25) of ordinary text; OCR when it has none (`no_text_layer`), when the text is mostly replacement, private-use or `(cid:N)` characters (`garbled_text_layer`), or when pictures cover ≥ 60 % of the page and the text is under 200 characters (`scan_with_thin_text` — a stamp or footer on a scan). A page that reads empty, below the confidence bar, or with its lines standing on end is turned upright and read again.
+
+**Engines.** `rapidocr` — comes with Captain (a core dependency since 0.8.10: about 90 MB to download, 240 MB installed; not on 32-bit ARM), any 64-bit OS, its multilingual model is in the wheel and reads č ć đ š ž without a language pack. `tesseract` — the system binary (`brew install tesseract tesseract-lang`, `apt install tesseract-ocr tesseract-ocr-hrv`, or the UB Mannheim installer on Windows), one model per language. `engine=auto`: a `lang` Tesseract has goes to Tesseract; otherwise the first installed engine in `tools.ocr.engines` (`rapidocr`, `tesseract`). With neither available (a partial install, or a 32-bit Pi without Tesseract) the tool says how to install one; it never falls back to a model.
+
+**Output.** The text page by page (`## Page 2 · OCR · confidence 94%`, low-confidence pages flagged) and, under `saved/ocr/<session>/<name>-<sha8>/`, `<name>.md` plus a hidden `.ocr.json` with every line's box and confidence. The result is stored under the file's sha256 and the settings in `saved/.ocr-cache/`, so a later call — in any session — returns the same text without reading again.
+
+### ocr_image — new in 0.8.10
+
+The same for a picture: `.png .jpg .jpeg .webp .bmp .gif .tif .tiff` (each page of a multi-page TIFF). Parameters `path`, `lang`, `engine`, `pages` (TIFF), `preprocess` (deskew first, OpenCV), `refresh`. Photos are turned upright by their EXIF data. Prefer it to `image_ocr` for printed text; `image_ocr` (a vision model) is for handwriting, or when this tool's confidence is low and the user agrees.
+
+Settings live in `tools.ocr`: `engines`, `lang`, `tesseract_path`, `tessdata_dir`, `tesseract_psm`, `rapidocr_threads`, `dpi`, `max_pages`, `min_text_chars`, `low_confidence` (70), `workers`, `pdf_timeout_seconds`, `image_timeout_seconds`.
 
 ### docx_extract
 
@@ -965,7 +991,7 @@ Requires a model with `model_type: "image"` in `model.allowed`. Output saved to 
 
 ### image_ocr
 
-Extract text from images using OCR via a vision-capable LLM.
+Extract text from images using OCR via a vision-capable LLM. For printed text use [`ocr_image`](#ocr_image--new-in-0810) first — a local engine, the same text every time.
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|

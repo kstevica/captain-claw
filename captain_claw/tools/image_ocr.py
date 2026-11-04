@@ -510,7 +510,10 @@ class ImageOcrTool(_BaseImageLLMTool):
     name = "image_ocr"
     timeout_seconds = 120.0
     description = (
-        "Extract text from an image file using OCR via a vision-capable model. "
+        "Read text in an image with a vision MODEL (an AI reads it — the text can differ "
+        "between runs). For printed text — scans, photos of documents, receipts, screenshots — "
+        "use ocr_image (local OCR, no model) first; use this for handwriting, or when "
+        "ocr_image's confidence is low and the user agrees. "
         "Provide the path to a local image file (.png, .jpg, .jpeg, .webp, .gif, .bmp)."
     )
     parameters = {

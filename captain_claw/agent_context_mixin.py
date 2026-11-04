@@ -108,6 +108,8 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "web_get": "Fetch a URL and return raw HTML source (only for scraping/DOM inspection). The FIRST call on a URL returns readable text instead — call it twice on the same URL if you truly need the markup.",
     "web_search": "Search the web for up-to-date sources",
     "pdf_extract": "Extract a single .pdf file into markdown. ONLY for .pdf files. For multiple files in a folder use summarize_files instead.",
+    "ocr_pdf": "Read a scanned / image-only PDF with a local OCR engine (no AI model, same text every time): pages with a good text layer are read as text, the rest OCR'd; text page by page with confidence, saved under saved/ocr/. Use it when pdf_extract finds pages without text. Never OCR with scripts.",
+    "ocr_image": "Read the printed text in a picture (scan, photo of a document, receipt, screenshot) with a local OCR engine (no AI model, same text every time), with confidence; saved under saved/ocr/. image_ocr (a vision model) only for handwriting or when the user agrees to a model reading it.",
     "docx_extract": "Extract a single .docx file into markdown. ONLY for .docx files — never use on .pdf/.xlsx/.pptx. For multiple files in a folder use summarize_files instead.",
     "docx": "Word documents: create a .docx from Markdown (optional template), read it as numbered paragraphs with tracked changes and comments, edit it as Word tracked changes (replace/delete/insert/insert_paragraphs/format/set_style/comment), list changes and comments, accept/reject only when asked. NEVER make or change a .docx with a script, write or edit.",
     "xlsx": "Excel workbooks: create from sheets and rows (=… is a formula; optional template), read cells with formulas and results, edit them (set/fill/clear/append_rows/insert and delete rows and columns/format/width/freeze/merge/sheets/names/tables/charts/notes; references follow, every affected formula is recalculated and each changed cell reported), check a model for errors, stale results, broken patterns and SUMs that stop short. NEVER make or change a workbook with a script, write or edit.",
@@ -155,6 +157,8 @@ _TOOL_PROMPT_DESCRIPTIONS_NANO: dict[str, str] = {
     "web_fetch": "url→text",
     "web_search": "web search",
     "pdf_extract": "pdf→md",
+    "ocr_pdf": "scanned pdf→text (local OCR)",
+    "ocr_image": "picture→text (local OCR)",
     "docx_extract": "docx→md",
     "docx": "word docs",
     "xlsx": "excel workbooks",
@@ -182,6 +186,8 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "web_get": "raw HTML from URL (1st call per URL returns text; call twice for HTML)",
     "web_search": "web search",
     "pdf_extract": "single .pdf → markdown (for multiple files use summarize_files)",
+    "ocr_pdf": "scanned .pdf → text by local OCR (no model; same text every time; pages with a good text layer kept); never OCR with scripts",
+    "ocr_image": "picture of a document → text by local OCR (no model; confidence per page); image_ocr only for handwriting / with the user's OK",
     "docx_extract": "single .docx → markdown (ONLY .docx, never .pdf; for multiple files use summarize_files)",
     "docx": "Word .docx: create from Markdown, read numbered paragraphs, edit as tracked changes, accept/reject when asked; never via scripts",
     "xlsx": "Excel .xlsx: create from rows, read cells + formulas, edit (references follow; results recalculated and reported), check a model; never via scripts",
@@ -2466,6 +2472,8 @@ class AgentContextMixin:
         "image_gen": ["image_gen"],
         "visualize": ["visualize"],
         "image_ocr": ["image_ocr"],
+        "ocr_pdf": ["ocr_pdf"],
+        "ocr_image": ["ocr_image"],
         "image_vision": ["image_vision"],
         "send_mail": ["send_mail"],
         "google_drive": ["google_drive"],
@@ -2636,6 +2644,12 @@ class AgentContextMixin:
                 self.tools.register(VisualizeTool())
             elif tool_name == "image_ocr":
                 self.tools.register(ImageOcrTool())
+            elif tool_name == "ocr_pdf":
+                from captain_claw.tools.ocr import OcrPdfTool
+                self.tools.register(OcrPdfTool())
+            elif tool_name == "ocr_image":
+                from captain_claw.tools.ocr import OcrImageTool
+                self.tools.register(OcrImageTool())
             elif tool_name == "image_vision":
                 self.tools.register(ImageVisionTool())
             elif tool_name == "send_mail":

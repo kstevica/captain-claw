@@ -32,6 +32,7 @@ _TOOL_RISK: dict[str, str] = {
     "read": "read", "glob": "read", "grep": "read", "web_search": "read", "web_fetch": "read",
     "web_fetch_batch": "read", "web_get": "read", "pdf_extract": "read", "docx_extract": "read",
     "pptx_extract": "read", "xlsx_extract": "read", "image_ocr": "read", "image_vision": "read",
+    "ocr_pdf": "read", "ocr_image": "read",
     "video_vision": "read", "summarize_files": "read", "history": "read", "knowledge": "read", "sessions": "read",
     "workspace_read": "read", "codemap": "read", "cv": "read", "screen_capture": "read",
     "telegram_inbox": "read", "self_check": "read", "activity": "read", "researchmap": "read", "watch_background": "read",

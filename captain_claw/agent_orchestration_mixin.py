@@ -225,7 +225,10 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
      frozenset({"web_search", "web_fetch"})),
     # Documents
     (_re.compile(r"\.pdf\b|pdf\b", _re.I),
-     frozenset({"pdf_extract", "summarize_files"})),
+     frozenset({"pdf_extract", "ocr_pdf", "summarize_files"})),
+    # Scans and OCR (EN / HR): read by the local OCR engine, never a script.
+    (_re.compile(r"\bscan\w*|\bocr\b|\breceipt|\binvoice|\bskenira\w*|\bsken\w*|\bra[čc]un\w*", _re.I),
+     frozenset({"ocr_pdf", "ocr_image", "pdf_extract"})),
     (_re.compile(r"\.docx?\b|word\s+doc", _re.I),
      frozenset({"docx_extract", "docx", "summarize_files"})),
     # Word documents to make or change (EN / HR): redlines, tracked changes,
@@ -254,7 +257,7 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
      frozenset({"summarize_files", "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract"})),
     # Images
     (_re.compile(r"\bimage\b|\bphoto\b|\bpicture\b|\bscreenshot\b|\bdraw\b|\bgenerate\s+(?:an?\s+)?image", _re.I),
-     frozenset({"image_gen", "image_ocr", "image_vision", "screen_capture"})),
+     frozenset({"image_gen", "image_ocr", "ocr_image", "image_vision", "screen_capture"})),
     # Charts and other visuals (EN / HR): HTML rendered to a page + PNG.
     (_re.compile(r"\bchart|\bgraph|\bplot\b|\bdiagram|\bvisuali[sz]|\bdashboard|\binfographic"
                  r"|\bhistogram|\bheatmap|\bgantt|\bflowchart|\bmind\s?map"

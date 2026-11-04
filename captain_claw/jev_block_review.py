@@ -114,7 +114,7 @@ _NEXT_STEP: dict[str, str] = {
 READ_ONLY_TOOLS = frozenset({
     "read", "glob", "grep", "web_fetch", "web_get", "web_search",
     "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract",
-    "image_vision", "image_ocr", "summarize_files",
+    "image_vision", "image_ocr", "ocr_pdf", "ocr_image", "summarize_files",
 })
 READ_ONLY_ACTIONS = frozenset({
     "list", "search", "get", "read", "view", "show", "status", "info", "check",
