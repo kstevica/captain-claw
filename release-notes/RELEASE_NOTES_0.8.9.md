@@ -4,9 +4,10 @@
 **Release date:** 2026-11-04
 
 A patch for the desktop app, the same day as 0.8.8. On Windows it creates and runs agents, and on
-macOS a downloaded copy is no longer called damaged.
+macOS a downloaded copy is no longer called damaged. **Captain for Windows** has its first download:
+`Captain-Setup-0.8.9-x64.exe` on this release.
 
-2 pull requests.
+3 pull requests: #421 and #422 in the tag, and #424 in the Windows installer, merged after it.
 
 ## Fixed
 
@@ -23,6 +24,9 @@ macOS a downloaded copy is no longer called damaged.
   console window.
 - **The desktop app on Windows reads and writes text as UTF-8.** Windows' default text encoding,
   cp1252, can't hold characters like "—".
+- **Opening an agent's chat on Windows.** The window went blank. The Windows build left out Chromium's
+  language file (`en-US.pak`), and without it the page crashed. The installer on this release has it.
+  If the page ever crashes again, the app goes back to the start page and writes why to its log.
 - **A downloaded Mac app isn't "damaged".** Without a Developer ID certificate, Captain.app was only
   partly signed. A copy downloaded in a browser got "Captain is damaged and can't be opened", with no
   way past it. The app is now signed ad hoc as a whole, so macOS only asks the first time: **System
@@ -32,11 +36,13 @@ On macOS and Linux, Flight Deck runs and stops agents as before.
 
 ## Upgrading
 
-1. **The desktop app**: **Check for Updates…** (it also offers 0.8.9 within a minute of starting). On
-   Windows that's all the agent fixes need. A new installer is needed only for a new install, and it
-   also brings the UTF-8 setting for Flight Deck itself. There's no Windows download yet: build it
-   with `./build-desktop.sh --platform win --arch x64`.
-2. **Each Flight Deck**: nothing changes on macOS and Linux. Pull and restart whenever suits you, or
+1. **The desktop app**: **Check for Updates…** (it also offers 0.8.9 within a minute of starting).
+2. **On Windows**: install
+   [`Captain-Setup-0.8.9-x64.exe`](https://github.com/kstevica/captain-claw/releases/download/v0.8.9/Captain-Setup-0.8.9-x64.exe).
+   It isn't signed, so SmartScreen asks first: **More info → Run anyway**. A Windows app you built
+   yourself before this needs it too, over the one you have (your agents and data stay): only the
+   installer brings the chat fix and the UTF-8 setting.
+3. **Each Flight Deck**: nothing changes on macOS and Linux. Pull and restart whenever suits you, or
    use **Console → Updates**.
 
 Devices need nothing: firmware stays **0.20.4** / PaperColor B **1.0.31**. BotPort hubs need nothing:
@@ -46,4 +52,5 @@ Devices need nothing: firmware stays **0.20.4** / PaperColor B **1.0.31**. BotPo
 ## Pull requests
 
 #421 The desktop app is signed ad hoc as a whole, so a download isn't "damaged" · #422 Flight Deck
-creates and runs agents on Windows
+creates and runs agents on Windows · #424 Windows keeps its en-US locale; a crashed page is logged and
+reloaded (in the Windows installer, merged after the tag)
