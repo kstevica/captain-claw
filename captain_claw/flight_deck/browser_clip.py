@@ -59,7 +59,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
 
 from captain_claw.flight_deck.auth import (
@@ -928,7 +928,7 @@ async def list_browsers(user: dict = Depends(get_current_user)):
         name = str(r.get("name") or "")[len(TOKEN_PREFIXES[kind]):]
         out.append({"id": r["id"], "kind": kind, "name": name or ("Mac" if kind == "desktop" else "Browser"),
                     "created_at": r.get("created_at"), "last_used_at": r.get("last_used_at")})
-    return {"browsers": out, "mac_app": mac_app_zip() is not None}
+    return {"browsers": out, "mac_app": mac_app_zip() is not None or bool(mac_app_url())}
 
 
 @owner_router.delete("/{token_id}")
@@ -1761,6 +1761,20 @@ def extension_dir() -> Path | None:
     return None
 
 
+# Captain for Mac as published on GitHub (its own release, never "latest": the
+# desktop app reads latest for its updates). A new app version moves this.
+MAC_APP_RELEASE_URL = "https://github.com/kstevica/captain-claw/releases/download/mac-v0.1.0/Captain-for-Mac.zip"
+
+
+def mac_app_url() -> str:
+    """Where a deck without its own build sends people for the app:
+    ``FD_MAC_APP_URL`` (empty = nowhere), else the GitHub release."""
+    import os
+
+    url = os.environ.get("FD_MAC_APP_URL", MAC_APP_RELEASE_URL).strip()
+    return url if url.startswith("https://") else ""
+
+
 def mac_app_zip() -> Path | None:
     """Captain for Mac, zipped by ``captain-for-mac/build.sh`` in this checkout."""
     here = Path(__file__).resolve()
@@ -1773,11 +1787,15 @@ def mac_app_zip() -> Path | None:
 
 @router.get("/mac-app.zip")
 async def mac_app_download():
-    """Captain for Mac for this deck's people: unzip, move to Applications."""
+    """Captain for Mac for this deck's people: unzip, move to Applications.
+    This checkout's own build when it has one, else the GitHub release."""
     src = mac_app_zip()
-    if src is None:
-        raise HTTPException(404, "This deck has no build of Captain for Mac — run captain-for-mac/build.sh on it.")
-    return FileResponse(src, media_type="application/zip", filename="Captain-for-Mac.zip")
+    if src is not None:
+        return FileResponse(src, media_type="application/zip", filename="Captain-for-Mac.zip")
+    url = mac_app_url()
+    if url:
+        return RedirectResponse(url, status_code=302)
+    raise HTTPException(404, "This deck has no build of Captain for Mac — run captain-for-mac/build.sh on it.")
 
 
 @router.get("/extension.zip")

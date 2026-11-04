@@ -60,6 +60,14 @@ Like the extension: `POST /fd/clip/pair {kind: "desktop"}` → the app opens
 token is a PAT named `Desktop · Captain for Mac on <Mac>`, kept in the Keychain
 per deck address, listed in Connections → Browser beside browsers.
 
+## Where it's published
+
+GitHub release [`mac-v0.1.0`](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.0)
+(prerelease, not latest, so the desktop app's update check never sees it):
+`Captain-for-Mac-0.1.0.zip`, its `.sha256`, and `Captain-for-Mac.zip` under a
+fixed name. `/fd/clip/mac-app.zip` serves the checkout's own build, else
+redirects to `MAC_APP_RELEASE_URL` (`FD_MAC_APP_URL` overrides; empty = none).
+
 ## Known limits
 
 - Unsigned/ad-hoc build: Gatekeeper needs Open Anyway the first time, and
