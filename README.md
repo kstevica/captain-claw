@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENCE)
-[![Version](https://img.shields.io/badge/version-0.8.6-purple)](release-notes/RELEASE_NOTES_0.8.6.md)
+[![Version](https://img.shields.io/badge/version-0.8.7-purple)](release-notes/RELEASE_NOTES_0.8.7.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](docs/guide/getting-started.md)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](docs/guide/agents.md#multi-model-support)
 
@@ -16,7 +16,7 @@
 
 **[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://cohort001.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)** · **[🧭 Guides](docs/guide/README.md)** · **[📝 What's new](docs/guide/whats-new.md)**
 
-**New in 0.8.6 — Ship's Log:** one timeline for everything your agents did on their own, agents improved by measurement rather than hope, 131 archetypes and your company's own, and a 75 MB desktop app that updates itself. **[Release notes](release-notes/RELEASE_NOTES_0.8.6.md)**
+**New in 0.8.6 — Ship's Log:** one timeline for everything your agents did on their own, agents improved by measurement rather than hope, 131 archetypes and your company's own, and a 75 MB desktop app that updates itself. **[Release notes](release-notes/RELEASE_NOTES_0.8.6.md)** · **0.8.7** fixes a fresh install's first agent turn and builds the command-line binaries again: **[notes](release-notes/RELEASE_NOTES_0.8.7.md)**
 
 <p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>70 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>131 ready-made archetypes</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
 

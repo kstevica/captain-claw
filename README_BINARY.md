@@ -355,8 +355,16 @@ native binaries, so:
 - Build on Windows for `.exe`
 - Build on Linux for `.AppImage` / `.deb`
 
-For CI/CD, use a matrix of GitHub Actions runners (or similar) to build all
-three platforms in parallel.
+`.github/workflows/build-binaries.yml` does that for the command-line binaries:
+macOS, Windows, Linux x64 and Linux arm64, each checked with `captain-claw
+--version`. On a `v*` tag it waits for the release you publish and attaches the
+four archives to it; it never creates, renames or drafts a release. To build
+without a release, run it by hand (the binaries stay as the run's artifacts for
+30 days):
+
+```bash
+gh workflow run build-binaries.yml --ref main -f version=test
+```
 
 ### macOS
 
