@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENCE)
-[![Version](https://img.shields.io/badge/version-0.8.7-purple)](release-notes/RELEASE_NOTES_0.8.7.md)
+[![Version](https://img.shields.io/badge/version-0.8.8-purple)](release-notes/RELEASE_NOTES_0.8.8.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](docs/guide/getting-started.md)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](docs/guide/agents.md#multi-model-support)
 
@@ -12,13 +12,13 @@
   <a href="docs/guide/whats-new.md#whats-new-in-082"><img src="docs/screenshots/hero-0.8.2.webp" width="100%" alt="Captain Claw 0.8.2: the BotPort hub's live network map, the kiosk's Share on network dialog on a phone, a StopWatch speaking an answer and a PaperColor e-paper dashboard"></a>
 </p>
 
-> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**. Since **0.8.5** your agents run **Claude Code, Codex, OpenCode, Crush and Pi as their crew**, and you can **say what you need and get a whole team**, with its schedules and its software. Since **0.8.6** everything they do on their own is on **one Line**, **Captain Swarm** makes them measurably better at your real work, and **Captain** for your desktop is a 75 MB download that updates itself.
+> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**. Since **0.8.5** your agents run **Claude Code, Codex, OpenCode, Crush and Pi as their crew**, and you can **say what you need and get a whole team**, with its schedules and its software. Since **0.8.6** everything they do on their own is on **one Line**, **Captain Swarm** makes them measurably better at your real work, and **Captain** for your desktop is a 75 MB download that updates itself. Since **0.8.8** they see what you see: **Captain for Chrome** sends the page you're on, and **Captain for Mac** sends what's on your screen from any app.
 
 **[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://cohort001.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)** · **[🧭 Guides](docs/guide/README.md)** · **[📝 What's new](docs/guide/whats-new.md)**
 
-**New in 0.8.6 — Ship's Log:** one timeline for everything your agents did on their own, agents improved by measurement rather than hope, 131 archetypes and your company's own, and a 75 MB desktop app that updates itself. **[Release notes](release-notes/RELEASE_NOTES_0.8.6.md)** · **0.8.7** fixes a fresh install's first agent turn and builds the command-line binaries again: **[notes](release-notes/RELEASE_NOTES_0.8.7.md)**
+**New in 0.8.8 — Spyglass:** Captain for Chrome sends the page you're on to one of your agents, Captain for Mac sends what's on your screen from any app (hold fn, or click), and a round of fixes from watching real users. **[Release notes](release-notes/RELEASE_NOTES_0.8.8.md)** · Earlier: **[0.8.7](release-notes/RELEASE_NOTES_0.8.7.md)** · **[0.8.6 — Ship's Log](release-notes/RELEASE_NOTES_0.8.6.md)**
 
-<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>70 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>131 ready-made archetypes</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
+<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>Captain for Chrome and for Mac</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>70 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>131 ready-made archetypes</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
 
 ## Why Captain Claw
 
@@ -43,7 +43,37 @@ flight-deck          # the multi-agent dashboard: http://localhost:25080
 
 First run starts onboarding. For a single agent in the terminal or the browser, Docker, a deck for your team or a voice device, see **[Getting started](docs/guide/getting-started.md)**.
 
-## 📜 New in 0.8.6 — ship's log
+## 🔭 New in 0.8.8 — spyglass
+
+**Captain for Chrome** sends the page you're on to one of your agents. It reads the page **in your own browser**, signed in and as you see it, and fetches the files it links to with your session. That covers a portal, an intranet, a paywalled article or a dashboard drawn by JavaScript, where an agent's own web tools would hit a sign-in or a bot wall.
+
+- **Twelve actions:** Summarize, Grab files, Extract data, Fact-check, Draft a reply, Watch it (a check in Flight Deck's Scheduled tasks that says what changed), and more.
+- **Read it as** gives any action a lens: the agent suggests its own from who it is, or you type yours.
+- **Alt+Shift+C** or right-click opens it, in Chrome, Edge, Brave and Arc.
+
+**Captain for Mac** does the same for **any app**. Hold **fn** for three seconds, or click its menu-bar icon:
+
+- **It reads** the window's text through Accessibility, **your selection first** as what you mean, what's under the pointer, and a screenshot if you want one.
+- **Say or type the task**, or pick Explain, Draft a reply, Improve, Translate or What's wrong?.
+- **Paste into <app>** puts the answer back where you were.
+
+<p align="center">
+  <img src="docs/screenshots/captain-for-mac-0.8.8.webp" width="100%" alt="Captain for Mac's panel beside Mail: the selection, the screen text and what's under the pointer as chips, a typed task, then the drafted reply with Copy and Paste into Mail">
+</p>
+
+Both land in a shared folder (**web-clips**, **screen-clips**) and in the agent's own chat, as your words. Get them from **Flight Deck → Connections → Browser**; Captain for Mac is also on [GitHub](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.0).
+
+- **Fixes from real users:**
+  - Agents run the script they just fixed, and read past a long report's first section.
+  - A card for every file a turn made, and progress lines in your language.
+  - No reports of hand-offs or schedule changes that never happened.
+  - One shared Chromium per deck.
+  - One more message past a spent allowance, so a job isn't cut off one step from the end.
+  - Public links that expire.
+
+**→ [Release notes](release-notes/RELEASE_NOTES_0.8.8.md)** · **[Captain for Chrome](docs/guide/devices-and-channels.md#captain-for-chrome)** · **[Captain for Mac](docs/guide/devices-and-channels.md#captain-for-mac)**
+
+## 📜 Ship's log `since 0.8.6`
 
 **The Line** is one timeline for everything the deck and your agents did on their own: scheduled tasks, Autonomous Work, finished runs, proposals, fleet changes. The bell keeps only what needs you.
 

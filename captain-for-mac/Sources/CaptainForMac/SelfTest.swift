@@ -163,3 +163,144 @@ enum SelfTest {
         return ScreenImage.png(img)
     }
 }
+
+// --demo <dir>: the panel with a fictional scene (Velora, a small insurance
+// consultancy) for the website — nothing is read from the screen and no deck
+// is called. Dark and light shots of composing, working and the answer.
+@MainActor
+enum Demo {
+    static let actions: [ScreenAction] = [
+        ("explain", "Explain", "lightbulb"), ("summarize", "Summarize", "summary"), ("reply", "Draft a reply", "reply"),
+        ("rewrite", "Improve", "pen"), ("translate", "Translate", "languages"), ("troubleshoot", "What's wrong?", "wrench"),
+        ("tasks", "Make tasks", "checklist"), ("remember", "Remember", "brain"), ("save", "Save it", "bookmark"),
+    ].map { ScreenAction(id: $0.0, label: $0.1, icon: $0.2, hint: nil, needs_text: nil) }
+
+    static let me = MeInfo(
+        user: DeckUser(name: "Maya Horvat", email: "maya@velora.example"),
+        deck: MeInfo.Deck(name: "Velora"),
+        agents: [
+            Agent(name: "Inbox Assistant", slug: "inbox-assistant", description: nil, status: "running"),
+            Agent(name: "Policy Analyst", slug: "policy-analyst", description: nil, status: "running"),
+            Agent(name: "Researcher", slug: "researcher", description: nil, status: "asleep"),
+        ],
+        screen: MeInfo.Screen(folder: "screen-clips", actions: actions))
+
+    struct Scene {
+        let name: String
+        let agent: String
+        let capture: ScreenCapture
+        let task: String
+        let asked: String
+        let step: String
+        let live: String
+        let answer: String
+        var shot = false
+    }
+
+    static func mail() -> Scene {
+        var c = ScreenCapture()
+        c.appName = "Mail"; c.bundleID = "com.apple.mail"
+        c.windowTitle = "Re: Fleet policy renewal — Harbour Logistics"
+        c.selection = "Before we sign, can you confirm two things: does the €2,500 excess stay the same if we add the four new vans, and is the telematics discount still available if the vans join mid-year?"
+        c.selectionFrom = "accessibility"
+        c.visibleText = String(repeating: "x", count: 3412)
+        c.pointer = PointerInfo(x: 640, y: 380, app: "Mail", role: "text", text: "does the €2,500 excess stay the same")
+        return Scene(
+            name: "mail", agent: "inbox-assistant", capture: c,
+            task: "Yes to both — telematics from the month they join. Friendly, short.",
+            asked: "Draft a reply: Yes to both — telematics from the month they join. Friendly, short.",
+            step: "Reading: selection.md",
+            live: "Hi Tomas,\n\nThanks for checking before you sign. Yes on both counts: the €2,500 excess",
+            answer: """
+            Hi Tomas,
+
+            Thanks for checking before you sign. Yes on both counts:
+
+            - **The excess stays at €2,500** with the four new vans on the policy.
+            - **The telematics discount applies** to each van from the month it joins — no need to wait for the renewal date.
+
+            I'll send the updated schedule once the vans' registrations are in. Anything else before you sign?
+
+            Best,
+            Maya
+            """)
+    }
+
+    static func clause() -> Scene {
+        var c = ScreenCapture()
+        c.appName = "Preview"; c.bundleID = "com.apple.Preview"
+        c.windowTitle = "Harbour Logistics — Commercial Motor Wording 2026.pdf"
+        c.selection = "4.3 Unattended vehicle. We will not pay for theft of or from the vehicle while it is left unattended unless all doors, windows and other openings are closed and locked and the keys are removed and kept out of sight."
+        c.selectionFrom = "accessibility"
+        c.visibleText = String(repeating: "x", count: 5820)
+        c.moreText = String(repeating: "x", count: 41_200)
+        c.screenshot = Data([0])
+        c.screenshotPixels = CGSize(width: 2400, height: 1500)
+        c.pointer = PointerInfo(x: 520, y: 610, app: "Preview", role: "text", text: "4.3 Unattended vehicle")
+        return Scene(
+            name: "clause", agent: "policy-analyst", capture: c, task: "", asked: "Explain",
+            step: "Comparing with section 7, Exclusions",
+            live: "**In short:** a theft from an unlocked van, or with the keys left in it",
+            answer: """
+            **In short:** a theft from an unlocked van, or one with the keys left in it, isn't covered — even for a minute.
+
+            - **What counts as unattended:** nobody in or right beside the van who can see it.
+            - **All four conditions** must hold: doors, windows and other openings closed *and* locked, keys removed *and* out of sight.
+            - **Watch for:** couriers leaving the engine running at drops — that alone voids a theft claim.
+
+            Section 7.2 adds the same rule for tools left in the van overnight. Worth a line in Harbour's driver briefing.
+            """, shot: true)
+    }
+
+    static func run(out: URL) {
+        try? FileManager.default.createDirectory(at: out, withIntermediateDirectories: true)
+        let captain = Captain.shared
+        let savedAgent = UserDefaults.standard.object(forKey: "agentSlug")
+        Task { @MainActor in
+            captain.demoMode = true
+            captain.me = me
+            for scene in [mail(), clause()] {
+                for look in ["dark", "light"] {
+                    NSApp.appearance = NSAppearance(named: look == "dark" ? .darkAqua : .aqua)
+                    Prefs.shared.agentSlug = scene.agent
+                    captain.capture = scene.capture
+                    captain.useSelection = true
+                    captain.useScreen = true
+                    captain.usePointer = true
+                    captain.useShot = scene.shot
+                    captain.task = scene.task
+                    captain.error = nil
+                    captain.history = []
+                    captain.phase = .compose
+                    captain.showPanel?(CGPoint(x: 300, y: 300))
+                    captain.focusPanel?()
+                    await shot(out, "\(scene.name)-1-compose-\(look)")
+                    captain.asked = scene.asked
+                    captain.events = [RunEvent(kind: "status", text: scene.step, tool: nil)]
+                    captain.startedAt = Date().addingTimeInterval(-6)
+                    captain.answer = ""
+                    captain.live = scene.live
+                    captain.phase = .running
+                    await shot(out, "\(scene.name)-2-working-\(look)")
+                    captain.live = ""
+                    captain.answer = scene.answer
+                    captain.phase = .finished
+                    await shot(out, "\(scene.name)-3-answer-\(look)")
+                    captain.hidePanel?()
+                }
+            }
+            // The person's own choice back as it was.
+            if let savedAgent { UserDefaults.standard.set(savedAgent, forKey: "agentSlug") }
+            else { UserDefaults.standard.removeObject(forKey: "agentSlug") }
+            print(out.path)
+            exit(0)
+        }
+    }
+
+    static func shot(_ out: URL, _ name: String) async {
+        try? await Task.sleep(nanoseconds: 900_000_000)
+        if let png = await SelfTest.panelPNG() {
+            try? png.write(to: out.appendingPathComponent("\(name).png"))
+        }
+    }
+}

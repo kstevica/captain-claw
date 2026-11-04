@@ -578,9 +578,9 @@ struct RunView: View {
                     Button {
                         captain.pasteBack()
                     } label: {
-                        Label("Paste into \(captain.appForPaste?.localizedName ?? "the app")", systemImage: "arrow.down.doc")
+                        Label("Paste into \(captain.pasteAppName)", systemImage: "arrow.down.doc")
                     }
-                    .disabled(captain.answer.isEmpty || captain.appForPaste == nil)
+                    .disabled(!captain.canPaste)
                     .help("Back to the app you were in, with the answer pasted where you were")
                 }
                 Spacer()
