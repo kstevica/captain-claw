@@ -901,3 +901,26 @@ async def test_a_screen_clip_goes_to_screen_clips_and_the_agents_chat(deck):
     # The page's actions are not the screen's.
     bad = await c.post("/fd/clip/send", headers=pat, files=_form(dict(meta, action="watch")))
     assert bad.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_the_mac_app_comes_from_the_deck_or_else_from_github(deck, tmp_path, monkeypatch):
+    c, jwt = deck["client"], deck["jwt"]
+    built = tmp_path / "Captain-for-Mac.zip"
+    built.write_bytes(b"PK-local")
+    monkeypatch.setattr(bc, "mac_app_zip", lambda: built)
+    got = await c.get("/fd/clip/mac-app.zip")
+    assert got.status_code == 200 and got.content == b"PK-local"
+
+    monkeypatch.setattr(bc, "mac_app_zip", lambda: None)
+    monkeypatch.delenv("FD_MAC_APP_URL", raising=False)
+    got = await c.get("/fd/clip/mac-app.zip", follow_redirects=False)
+    assert got.status_code == 302 and got.headers["location"] == bc.MAC_APP_RELEASE_URL
+    assert bc.MAC_APP_RELEASE_URL.startswith("https://github.com/kstevica/captain-claw/releases/download/mac-v")
+    assert (await c.get("/fd/browsers", headers=jwt)).json()["mac_app"] is True
+
+    monkeypatch.setenv("FD_MAC_APP_URL", "")   # a deck that hands out nothing
+    assert (await c.get("/fd/clip/mac-app.zip")).status_code == 404
+    assert (await c.get("/fd/browsers", headers=jwt)).json()["mac_app"] is False
+    monkeypatch.setenv("FD_MAC_APP_URL", "javascript:alert(1)")
+    assert (await c.get("/fd/clip/mac-app.zip")).status_code == 404
