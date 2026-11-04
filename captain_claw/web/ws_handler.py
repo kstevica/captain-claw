@@ -232,6 +232,15 @@ async def _fleet_notice_to_automation_lane(server, text: str) -> bool:
     return True
 
 
+def notification_origin(text: str) -> str:
+    """The origin of a notification frame's text, as clients label it: a
+    fleet notice, a relayed result (delegated_result) … else "notification"."""
+    from captain_claw import msg_origin
+
+    found = msg_origin.detect_literal(text)
+    return found[0] if found else "notification"
+
+
 def _build_replay_batch(session) -> list[dict]:
     """The ``replay_batch`` messages that rebuild *session*'s transcript in a
     freshly connected client (chat, rephrase panels, monitor cards)."""
@@ -676,10 +685,12 @@ async def handle_ws_message(
                 "content": notif_content,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "notification": True,
+                "origin": notification_origin(notif_content),
             })
             return
 
-        # Broadcast to UI so the inbound message appears in the chat.
+        # Broadcast to UI so the inbound message appears in the chat — as a
+        # note (``origin``), never as something the user typed.
         from datetime import datetime, timezone
         server._broadcast({
             "type": "chat_message",
@@ -687,6 +698,7 @@ async def handle_ws_message(
             "content": notif_content,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "notification": True,
+            "origin": notification_origin(notif_content),
         })
 
         if trigger and not _pub_sid:

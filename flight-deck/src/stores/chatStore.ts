@@ -9,6 +9,7 @@ import { useQuotaStore } from './quotaStore'
 import type { QuotaStatus } from '../services/profile'
 import type { TraceSpan } from '../types'
 import { sanitizeAgentContent } from '../utils/sanitizeAgentContent'
+import { asNote, injectedAs, markLegacyNarration, notificationOrigin } from '../utils/chatOrigin'
 import { scrubUserText } from '../utils/cardScrub'
 import { SHARED_PREFIX, sharedContainerId, sharedSliceId } from '../utils/sharedAgent'
 import { clampLevel, parsePick, parseProfile, type ReasoningProfile } from '../utils/reasoningEffort'
@@ -44,7 +45,10 @@ const HISTORY_PAGE = 500
 const WINDOW_MAX = 2000
 const WINDOW_SLACK = 100
 
-interface LogRow { id: number; role: string; content: string; metadata: string; created_at: string }
+/** A row of the lane's log. `origin`: the log's reading of a user row the
+ *  runtime wrote (a guard's corrective, a relayed result) that an earlier
+ *  client stored as the user's own. */
+interface LogRow { id: number; role: string; content: string; metadata: string; created_at: string; origin?: string }
 
 /** Rows of this lane's Flight Deck chat log, oldest first: the newest page,
  *  the page before `before`, or everything from row `since` on. Null when
@@ -63,7 +67,7 @@ async function serverFetchMessages(
     })
     if (!res.ok) return null
     const rows = await res.json() as LogRow[]
-    return rows.map(logRowToMessage)
+    return markLegacyNarration(rows.map(logRowToMessage))
   } catch { return null }
 }
 
@@ -78,7 +82,7 @@ function logRowToMessage(r: LogRow): ChatMessage {
   try { meta = JSON.parse(r.metadata || '{}') } catch { /* ignore */ }
   const role = r.role as ChatMessage['role']
   const topic = meta.topic && typeof meta.topic === 'object' ? meta.topic as TopicMark : undefined
-  return {
+  const msg: ChatMessage = {
     id: `hist-${r.id}`,
     rowId: r.id,
     role,
@@ -94,7 +98,16 @@ function logRowToMessage(r: LogRow): ChatMessage {
     ...(meta.source_label ? { sourceLabel: String(meta.source_label) } : {}),
     ...(taskMark(meta.task) ? { task: taskMark(meta.task) } : {}),
     ...(meta.automation ? { automation: String(meta.automation) } : {}),
+    ...(meta.narration ? { narration: true } : {}),
+    ...(meta.note ? { note: String(meta.note) } : {}),
+    ...(typeof meta.file_size === 'number' ? { fileSize: meta.file_size } : {}),
+    // A system row stored before its kind was recorded: narration or not is
+    // told by where it sits (markLegacyNarration).
+    ...(role === 'system' && Object.keys(meta).length === 0 ? { legacy: true } : {}),
   }
+  // A runtime message an earlier client stored as the user's own.
+  if (role === 'user' && r.origin && injectedAs(r.origin)) return asNote(msg, r.origin)
+  return msg
 }
 
 /** A scheduled task's marker from a frame or a log row, or undefined. */
@@ -390,6 +403,12 @@ async function _flushMessages() {
               ...(m.sourceLabel ? { source_label: m.sourceLabel } : {}),
               ...(m.task ? { task: m.task } : {}),
               ...(m.automation ? { automation: m.automation } : {}),
+              ...(m.narration ? { narration: true } : {}),
+              ...(m.note ? { note: m.note } : {}),
+              ...(m.fileSize !== undefined ? { file_size: m.fileSize } : {}),
+              // Any other system row says it is one, so a reload never takes
+              // it for narration stored before the flag was kept.
+              ...(m.role === 'system' && !m.narration && !m.note && !m.topic ? { plain: true } : {}),
             }),
           })),
         }),
@@ -2018,6 +2037,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     ws.on('chat_message', (data) => {
       const rawContent = (data.content as string) || ''
+      // A message the runtime put in the agent's session as "user" (a relayed
+      // result, a fleet notice): a muted note, or nothing — never the user's
+      // own bubble.
+      const origin = String(data.origin || (data.notification ? notificationOrigin(rawContent) : ''))
+      const injected = data.role === 'user' ? injectedAs(origin) : null
+      if (injected === 'hide') return
+      if (injected === 'note') {
+        addMessage(key, asNote({
+          id: nextId(), role: 'user', content: rawContent,
+          timestamp: (data.timestamp as string) || new Date().toISOString(),
+          replay: !!data.replay,
+        }, origin))
+        return
+      }
       let via = ''
       let sourceLabel = ''
       if (data.role === 'user' && !data.replay) {
@@ -2051,6 +2084,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ...(sourceLabel ? { sourceLabel } : {}),
         ...(taskMark(data.task) ? { task: taskMark(data.task) } : {}),
         ...(data.automation_lane ? { automation: String(data.automation_label || '') || 'Automated turn' } : {}),
+        ...(data.role === 'file' && typeof data.size === 'number' ? { fileSize: data.size } : {}),
       }
       addMessage(key, msg)
       // A result the automation lane mirrored here is a note: it ends no turn
@@ -3614,7 +3648,7 @@ function replayToMessage(d: Record<string, unknown>): ChatMessage {
     const head = nl < 0 ? '' : content.slice(0, nl)
     if (head.startsWith(`[${automation} — `) && head.endsWith(']')) content = content.slice(nl + 1)
   }
-  return {
+  const msg: ChatMessage = {
     id: nextId(),
     role: role as ChatMessage['role'],
     content: role === 'assistant' ? sanitizeAgentContent(content) : content,
@@ -3624,6 +3658,11 @@ function replayToMessage(d: Record<string, unknown>): ChatMessage {
     ...(taskMark(d.task) ? { task: taskMark(d.task) } : {}),
     ...(automation ? { automation } : {}),
   }
+  // A guard's corrective, a relayed result, an automated turn's opener: the
+  // agent's session holds them as "user", the chat as a note (never merged
+  // into the log as the user's words).
+  if (role === 'user' && injectedAs(d.origin)) return asNote(msg, String(d.origin))
+  return msg
 }
 
 /** Index of the last divider, or of the last divider for `agentSessionId`

@@ -184,6 +184,22 @@ def detect_literal(text: str) -> tuple[str, str] | None:
     return None
 
 
+# Literal shapes too plain to take a person's message for synthetic text in a
+# chat transcript (someone may paste a "## Project: …" brief, or that prompt).
+_TRANSCRIPT_KEEP_DETAILS = frozenset({"project", "sister", "vision"})
+
+
+def transcript_origin(text: str) -> str:
+    """Where a chat transcript's *user* row came from, for showing it: the
+    origin of a synthetic message the runtime wrote with role "user" (a
+    corrective, a fleet notice, a relayed result, an automated turn's
+    opener…), or "" when it reads as the person's own words."""
+    found = detect_literal(text)
+    if not found or found[1] in _TRANSCRIPT_KEEP_DETAILS:
+        return ""
+    return found[0]
+
+
 def classify_legacy(msg: Any) -> str:
     """Origin of a message stored before origins were recorded."""
     if not isinstance(msg, dict):

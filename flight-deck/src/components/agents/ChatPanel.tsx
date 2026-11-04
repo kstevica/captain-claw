@@ -45,6 +45,7 @@ import {
   Globe,
   ExternalLink,
   GraduationCap,
+  Download,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
@@ -96,6 +97,12 @@ import { usePersistedSize } from '../../hooks/usePersistedSize'
 import { touchKeyboard, useIsMobile } from '../../hooks/useMediaQuery'
 import { fmtTokens } from '../../utils/format'
 import { agentFileViewUrl } from '../../utils/agentFileUrl'
+import { injectedAs, noteSummary, tidyServerPaths } from '../../utils/chatOrigin'
+import { belowSaved } from '../../utils/chatFiles'
+import { formatSize, getDownloadUrl, getFileTypeGroup, isViewable, type AgentFile } from '../../services/fileTransfer'
+import { sharedFileUrl } from '../../services/sharedWorkspace'
+import { FileIcon } from './AgentFilesPanel'
+import { FileViewer } from './FileViewer'
 import { useQuotaStore } from '../../stores/quotaStore'
 import { PlanUsageBar } from '../common/PlanUsage'
 import type { ChatMessage, TokenUsage } from '../../services/agentChat'
@@ -869,8 +876,10 @@ function ChatContent({
   // turn_usage) reuse the SAME visibleMessages/groups arrays. That stable
   // identity is what lets the memoized MessageBubble/ActivityGroup children
   // skip re-rendering when only status/usage changed.
+  // A runtime message the user never sees (a guard's corrective, a fleet
+  // notice the log kept) is no row of the transcript at all.
   const visibleMessages = useMemo(
-    () => session.messages.filter((m) => m.role !== 'tool' || m.tool_name),
+    () => session.messages.filter((m) => (m.role !== 'tool' || m.tool_name) && injectedAs(m.note) !== 'hide'),
     [session.messages],
   )
   const groups = useMemo(() => groupActivity(visibleMessages), [visibleMessages])
@@ -1884,7 +1893,22 @@ function processImagePaths(content: string, agentHost?: string, agentPort?: numb
     (_m, _pre, filePath) => `![](${proxyUrl(filePath)})`,
   )
 
+  // A link to a file in the agent's saved/ folder by its full path
+  // ([r.pdf](/home/…/workspace/saved/…/r.pdf)) opens it through Flight Deck.
+  out = out.replace(/(^|[^!])\[([^\]]*)\]\(([^)\s]+)\)/g, (match, pre, text, src) => {
+    if (src.startsWith('/fd/')) return match
+    const filePath = /^file:\/\/\//i.test(src) ? '/' + src.replace(/^file:\/\/\//i, '') : src
+    if (!filePath.startsWith('/') || belowSaved(filePath) === null) return match
+    return `${pre}[${text}](${proxyUrl(filePath)})`
+  })
+
   return out
+}
+
+/** A reply as the chat shows it: the agent's file paths made openable, and
+ *  every server path written as just its file name. */
+function replyMarkdown(content: string, conn: { host: string; port: number; auth: string } | null): string {
+  return tidyServerPaths(processImagePaths(content, conn?.host, conn?.port, conn?.auth))
 }
 
 // memo: finished messages keep a stable object identity in the store (addMessage
@@ -1989,7 +2013,7 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
   const handlePin = useCallback(() => {
     if (!agentId || pinned) return
     pin({ agentId, agentName: sourceName || 'Agent', content: message.content,
-      role: message.role === 'rephrase' || message.role === 'image' || message.role === 'html_file'
+      role: message.role === 'rephrase' || message.role === 'image' || message.role === 'html_file' || message.role === 'file'
         ? 'assistant' : message.role, model: message.model })
   }, [agentId, pinned, pin, sourceName, message])
 
@@ -2155,6 +2179,11 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
         </div>
       )
     }
+    // A message the runtime wrote for the agent (a relayed result, an
+    // automated turn's opener): a muted line, its text on request.
+    if (message.note) {
+      return injectedAs(message.note) === 'hide' ? null : <InjectedNote message={message} />
+    }
     // Live between-step narration blurb — subtle, in the flow.
     if (message.narration) {
       return (
@@ -2215,8 +2244,8 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     )
   }
 
-  if (message.role === 'image' || message.role === 'html_file') {
-    return <ChatFileCard message={message} conn={agentConn} large={large} />
+  if (message.role === 'image' || message.role === 'html_file' || message.role === 'file') {
+    return <ChatFileCard message={message} conn={agentConn} agentId={agentId} large={large} />
   }
 
   // Assistant — strip trailing suggestions/rating prompts
@@ -2229,7 +2258,7 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     return (
       <CompactMessage
         message={message}
-        content={processImagePaths(cleanContent, agentConn?.host, agentConn?.port, agentConn?.auth)}
+        content={replyMarkdown(cleanContent, agentConn)}
         actions={actionButtons('left')}
       />
     )
@@ -2239,7 +2268,7 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     <div id={`fd-msg-${message.id}`} className="group mb-3 flex flex-col items-start gap-0.5">
       <div className={`max-w-[85%] rounded-bl-sm bg-zinc-800/60 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'} ${message.replay ? 'opacity-60' : ''}`}>
         <div className={`fd-markdown ${bodyText} text-zinc-300`}>
-          <MarkdownMessage content={processImagePaths(cleanContent, agentConn?.host, agentConn?.port, agentConn?.auth)} />
+          <MarkdownMessage content={replyMarkdown(cleanContent, agentConn)} />
         </div>
         <div className="mt-1 flex items-center gap-2 text-[10px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>
@@ -2252,20 +2281,87 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
   )
 })
 
+/** A note for a runtime message the agent's session holds as "user" — a
+ *  result relayed to it, an automated turn's opener. Not the user's words:
+ *  one muted line saying what it is, its text on request. */
+const InjectedNote = memo(function InjectedNote({ message }: { message: ChatMessage }) {
+  const [open, setOpen] = useState(false)
+  const { label, preview } = useMemo(() => noteSummary(message.note || '', message.content), [message.note, message.content])
+  return (
+    <div id={`fd-msg-${message.id}`} data-note={message.note} className="mb-2 flex flex-col items-center">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        title="A message for the agent — not something you wrote"
+        className="flex max-w-[90%] min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-zinc-500 transition-colors hover:bg-zinc-800/50 hover:text-zinc-400"
+      >
+        <Info className="h-3 w-3 shrink-0 text-zinc-600" />
+        <span className="shrink-0 font-medium">{label}</span>
+        {preview && !open && <span className="min-w-0 truncate text-zinc-600">· {preview}</span>}
+        <span className="shrink-0 text-zinc-600">{formatTime(message.timestamp)}</span>
+        {open ? <ChevronDown className="h-3 w-3 shrink-0" /> : <ChevronRight className="h-3 w-3 shrink-0" />}
+      </button>
+      {open && (
+        <div className="mt-1 max-h-72 w-full max-w-[85%] overflow-auto rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2">
+          <div className="fd-markdown text-xs text-zinc-400">
+            <MarkdownMessage content={message.content} />
+          </div>
+        </div>
+      )}
+    </div>
+  )
+})
+
+/** What a file is, as the card names it. */
+function fileKind(group: string, ext: string): string {
+  if (group === 'pdf') return 'PDF'
+  if (group === 'html') return 'Page'
+  if (group === 'image') return 'Picture'
+  if (group === 'audio') return 'Audio'
+  if (group === 'video') return 'Video'
+  if (group === 'markdown' || group === 'text') return 'Text'
+  if (group === 'data') return ext === '.csv' || ext === '.tsv' ? 'Table' : 'Data'
+  if (group === 'archive') return 'Archive'
+  if (['.doc', '.docx', '.odt'].includes(ext)) return 'Word document'
+  if (['.xls', '.xlsx', '.ods'].includes(ext)) return 'Spreadsheet'
+  if (['.ppt', '.pptx'].includes(ext)) return 'Presentation'
+  return 'File'
+}
+
 /** A picture the turn made (image_gen, visualize, a chart the reply hands
- *  over) shown in the chat, or a page it wrote (`html_file`) — each opens full
- *  size in a new tab. A picture that won't load (the agent is off, the file
- *  is gone) falls back to its name, never an empty bubble. */
-const ChatFileCard = memo(function ChatFileCard({ message, conn, large }: {
+ *  over) shown in the chat, a page it wrote (`html_file`), or any other file
+ *  it made (`file`: a script's output, a document, a spreadsheet) — named,
+ *  never by its path on the server, with Open (a picture, a page or a PDF in
+ *  a new tab, text in the viewer) and Download. A picture that won't load
+ *  (the agent is off, the file is gone) falls back to its name, never an
+ *  empty bubble. A shared agent's file opens through the member routes. */
+const ChatFileCard = memo(function ChatFileCard({ message, conn, agentId, large }: {
   message: ChatMessage
   conn: { host: string; port: number; auth: string } | null
+  agentId?: string
   large: boolean
 }) {
   const [failed, setFailed] = useState(false)
+  const [viewing, setViewing] = useState(false)
   const path = message.content.trim()
   const name = path.split(/[\\/]/).pop() || path
-  const url = conn?.port ? agentFileViewUrl(path, conn.host, conn.port, conn.auth) : ''
+  const rel = belowSaved(path)
+  const dot = name.lastIndexOf('.')
+  const ext = dot > 0 ? name.slice(dot).toLowerCase() : ''
+  const sharedRef = agentId?.startsWith('shared:') ? agentId.slice('shared:'.length) : ''
+  const urls = sharedRef
+    ? (rel ? { view: sharedFileUrl(sharedRef, rel, 'view'), download: sharedFileUrl(sharedRef, rel, 'download') } : null)
+    : conn?.port
+      ? { view: agentFileViewUrl(path, conn.host, conn.port, conn.auth), download: getDownloadUrl(conn.host, conn.port, path, conn.auth) }
+      : null
+  const file: AgentFile = useMemo(() => ({
+    logical: rel ?? name, physical: path, filename: name, extension: ext, exists: true,
+    size: message.fileSize ?? 0, modified: 0, mime_type: '', is_text: false,
+    source: sharedRef ? 'shared' : 'chat',
+  }), [rel, name, path, ext, message.fileSize, sharedRef])
+  const group = getFileTypeGroup(file)
   const picture = message.role === 'image'
+  const url = urls?.view ?? ''
   if (picture && url && !failed) {
     return (
       <div id={`fd-msg-${message.id}`} className="mb-3 flex flex-col items-start gap-0.5">
@@ -2292,29 +2388,52 @@ const ChatFileCard = memo(function ChatFileCard({ message, conn, large }: {
       </div>
     )
   }
-  const Icon = picture ? ImageIcon : Globe
+  // Text, data and code read best in the viewer; the rest in the browser.
+  const inViewer = ['markdown', 'text', 'code', 'data'].includes(group)
+  const openable = !!urls && (message.role !== 'file' || isViewable(file))
+  const kind = picture ? (failed ? "Picture can't be shown here" : 'Picture')
+    : message.role === 'html_file' ? 'Page' : fileKind(group, ext)
+  const btn = 'flex shrink-0 items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100'
   return (
-    <div id={`fd-msg-${message.id}`} className="mb-3 flex flex-col items-start">
-      <div className="flex max-w-[85%] items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2">
-        <Icon className="h-4 w-4 shrink-0 text-zinc-500" />
-        <div className="min-w-0">
-          <div className="truncate text-sm text-zinc-300" title={path}>{name}</div>
+    <div id={`fd-msg-${message.id}`} data-file-card={message.role} className="mb-3 flex flex-col items-start">
+      {/* A phone gives the card the whole width: the name keeps its room beside the buttons. */}
+      <div className="flex w-full items-center gap-2 rounded-lg border border-zinc-800 bg-zinc-900/40 px-3 py-2 sm:w-auto sm:max-w-[85%]">
+        {message.role === 'file'
+          ? <FileIcon file={file} />
+          : picture ? <ImageIcon className="h-4 w-4 shrink-0 text-zinc-500" /> : <Globe className="h-4 w-4 shrink-0 text-zinc-500" />}
+        <div className="min-w-0 flex-1">
+          <div className={`truncate text-zinc-300 ${large ? 'text-[15px]' : 'text-sm'}`} title={rel ?? name}>{name}</div>
           <div className="text-[10px] text-zinc-600">
-            {picture ? (failed ? "Picture can't be shown here" : 'Picture') : 'Page'} · {formatTime(message.timestamp)}
+            {kind}
+            {message.fileSize !== undefined && message.fileSize > 0 && <> · {formatSize(message.fileSize)}</>}
+            {' · '}{formatTime(message.timestamp)}
           </div>
         </div>
-        {url && (
-          <a
-            href={url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-1 flex shrink-0 items-center gap-1 rounded-md border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-zinc-800 hover:text-zinc-100"
-          >
-            <ExternalLink className="h-3 w-3" />
-            Open
+        {urls && openable && (
+          inViewer ? (
+            <button type="button" onClick={() => setViewing(true)} className={`ml-1 ${btn}`}>
+              <ExternalLink className="h-3 w-3" />
+              Open
+            </button>
+          ) : (
+            <a href={urls.view} target="_blank" rel="noopener noreferrer" className={`ml-1 ${btn}`}>
+              <ExternalLink className="h-3 w-3" />
+              Open
+            </a>
+          )
+        )}
+        {urls && !picture && (
+          <a href={urls.download} download={name} className={openable ? btn : `ml-1 ${btn}`} title={`Download ${name}`}>
+            <Download className="h-3 w-3" />
+            Download
           </a>
         )}
       </div>
+      {viewing && urls && (sharedRef ? (
+        <FileViewer file={file} urls={urls} readOnly onClose={() => setViewing(false)} />
+      ) : conn && (
+        <FileViewer file={file} host={conn.host} port={conn.port} auth={conn.auth} onClose={() => setViewing(false)} />
+      ))}
     </div>
   )
 })

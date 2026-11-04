@@ -8,6 +8,7 @@ import os
 import re
 import unicodedata
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from aiohttp import web
@@ -217,35 +218,110 @@ async def _send_device_media(
         log.warning("Device media listing failed", error=str(exc))
 
 
+# Tool outputs that already put a card in the web chat as the turn ran
+# (web_server's tool-output callbacks): pictures, and the pages write and
+# visualize made.
+_CARDED_IMAGE_TOOLS = ("image_gen", "visualize", "termux", "browser")
+_WRITTEN_PAGE_RE = re.compile(r"to\s+(\S+\.(?:html|htm|svg))")
+_VISUALIZE_PAGE_RE = re.compile(r"^HTML:\s*(\S+\.html?)\s*$", re.M)
+_CARD_IMAGE_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
+_CARD_PAGE_EXT = frozenset({".html", ".htm", ".svg"})
+
+
+def _carded_this_turn(messages: list[dict], base: Path | None) -> set[str]:
+    """Resolved paths of the files the turn's tool outputs already showed in
+    the web chat (relative ones are read against the agent's runtime base)."""
+    from captain_claw.platform_adapter import extract_image_paths_from_tool_output
+
+    raw: list[str] = []
+    for msg in messages:
+        if str(msg.get("role", "")) != "tool":
+            continue
+        tool = str(msg.get("tool_name", "")).strip().lower()
+        content = str(msg.get("content", "") or "")
+        if content.strip().lower().startswith("error"):
+            continue
+        if tool in _CARDED_IMAGE_TOOLS:
+            raw.extend(str(p) for p in extract_image_paths_from_tool_output(content))
+        if tool == "write":
+            m = _WRITTEN_PAGE_RE.search(content)
+            if m:
+                raw.append(m.group(1).strip())
+        elif tool == "visualize":
+            raw.extend(m.group(1) for m in _VISUALIZE_PAGE_RE.finditer(content))
+    return {_resolved(path, base) for path in raw}
+
+
+def _resolved(path: Any, base: Path | None) -> str:
+    p = Path(str(path))
+    if not p.is_absolute() and base is not None:
+        p = base / p
+    try:
+        return str(p.resolve())
+    except OSError:
+        return str(p)
+
+
+def file_card_frame(path: Path) -> dict[str, Any]:
+    """The web chat's card for a file a turn made: a picture, a page, or any
+    other file (``role`` "file", with its name and size). ``content`` is the
+    path on the agent — the client opens it through the file routes and shows
+    only the name."""
+    ext = path.suffix.lower()
+    role = "image" if ext in _CARD_IMAGE_EXT else "html_file" if ext in _CARD_PAGE_EXT else "file"
+    frame: dict[str, Any] = {
+        "type": "chat_message", "role": role, "content": str(path),
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+    if role == "file":
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = 0
+        frame.update({"name": path.name, "size": size})
+    return frame
+
+
 async def _send_reply_images(
     send: Any, agent: Any, turn_start_idx: int, reply: str, started_at: float,
+    *, own_session_only: bool = False,
 ) -> None:
     """After the reply: show in the web chat the pictures it hands the person
     that no tool output put there already (:mod:`captain_claw.reply_images`
-    finds them; Jev decides when the reply names no file). Never raises."""
+    finds them; Jev decides when the reply names no file), then a card for
+    every other file the turn made in ``saved/`` — by a script, a shell
+    command, the docx/xlsx/pdf tools — so the person can open or download
+    it instead of reading a server path. *own_session_only*: a member's or a
+    public session's turn sees only its session's folders. Never raises."""
     from captain_claw import reply_images
-    from captain_claw.platform_adapter import (
-        effective_turn_start_idx,
-        extract_image_paths_from_tool_output,
-    )
+    from captain_claw import turn_deliverables as _deliverables
+    from captain_claw.platform_adapter import effective_turn_start_idx
 
     try:
         session = getattr(agent, "session", None)
         start = effective_turn_start_idx(agent, turn_start_idx)
-        # The web chat already showed every picture these tools reported.
-        shown = {
-            str(path)
-            for msg in (session.messages[start:] if session is not None else [])
-            if str(msg.get("role", "")) == "tool"
-            and str(msg.get("tool_name", "")).strip().lower() in ("image_gen", "visualize", "termux", "browser")
-            for path in extract_image_paths_from_tool_output(str(msg.get("content", "") or ""))
-        }
+        root = _deliverables.saved_root_of(agent)
+        base = root.parent if root is not None else None
+        # Read before the first await: the next turn may start meanwhile.
+        turn_messages = list(session.messages[start:]) if session is not None else []
+        shown = _carded_this_turn(turn_messages, base)
         for path in await reply_images.find(agent, reply, turn_start_idx, started_at):
-            if str(path) not in shown:
+            key = _resolved(path, base)
+            if key not in shown:
+                shown.add(key)
                 send({"type": "chat_message", "role": "image", "content": str(path),
                       "timestamp": datetime.now(UTC).isoformat()})
+        made = await asyncio.to_thread(
+            _deliverables.new_files_this_turn, agent, started_at,
+            own_session_only=own_session_only)
+        for path in made:
+            key = _resolved(path, base)
+            if key in shown:
+                continue
+            shown.add(key)
+            send(file_card_frame(path))
     except Exception as exc:
-        log.warning("Reply pictures not shown", error=str(exc))
+        log.warning("Reply pictures and file cards not shown", error=str(exc))
 
 
 def automation_lane_for(server: Any, automation: Any, lane: str, is_public: bool) -> str:
@@ -1866,7 +1942,8 @@ async def _run_agent(
             _images_task: asyncio.Task | None = None
             if not no_broadcast and not _is_fd_spawned_worker():
                 _images_task = asyncio.create_task(_send_reply_images(
-                    send, agent, _wa_turn_start, str(response or ""), _wa_started_at))
+                    send, agent, _wa_turn_start, str(response or ""), _wa_started_at,
+                    own_session_only=bool(is_public or speaker_key)))
             if turn_channel == "device":
                 asyncio.create_task(_send_device_media(
                     send, agent, _wa_turn_start, str(response or ""), _wa_started_at))
