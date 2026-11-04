@@ -2084,6 +2084,8 @@ class FlightDeckDB:
                 dividers.append((int(r["id"]), topic, str(r.get("created_at") or "")))
         if not dividers:
             return []
+        from captain_claw import msg_origin
+
         async with self._db.execute(
             "SELECT id, role, content FROM chat_messages"
             " WHERE session_id = ? AND role IN ('user', 'assistant') AND id > ?"
@@ -2106,6 +2108,10 @@ class FlightDeckDB:
                 # A typed slash command (/clear, /session switch …) is a
                 # control line, not a turn: it names no topic and counts for none.
                 if t.get("role") == "user" and content.lstrip().startswith("/"):
+                    continue
+                # Nor is a runtime message an earlier client stored as the
+                # user's (a guard's "[system] STOP …", a relayed result).
+                if t.get("role") == "user" and msg_origin.transcript_origin(content):
                     continue
                 count += 1
                 if not first_user and t.get("role") == "user":

@@ -17,9 +17,10 @@ export interface TokenUsage {
 export interface ChatMessage {
   id: string
   /** `rephrase`: the agent's restatement of your request (task_rephrase),
-   *  shown as a small preview like an automated result. `image` / `html_file`:
-   *  a picture or a page the turn made — `content` is its path on the agent. */
-  role: 'user' | 'assistant' | 'system' | 'tool' | 'rephrase' | 'image' | 'html_file'
+   *  shown as a small preview like an automated result. `image` / `html_file`
+   *  / `file`: a picture, a page or any other file the turn made — `content`
+   *  is its path on the agent (the card shows its name, never the path). */
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'rephrase' | 'image' | 'html_file' | 'file'
   content: string
   timestamp: string
   replay?: boolean
@@ -31,8 +32,18 @@ export interface ChatMessage {
   approval_category?: string
   approval_resolved?: boolean
   peer_name?: string
-  /** Live between-step narration blurb (rendered as a subtle system line). */
+  /** Live between-step narration blurb: part of the turn's activity, folded
+   *  away with it once the turn ends. */
   narration?: boolean
+  /** A message the runtime wrote into the agent's session as "user" (a
+   *  relayed result, an automated turn's opener): its origin. Shown as a
+   *  muted note, never as the user's bubble (role is `system`). */
+  note?: string
+  /** A log row stored before its kind was recorded (a bare system row):
+   *  narration is told by where it sits (utils/chatOrigin.markLegacyNarration). */
+  legacy?: boolean
+  /** A `file` card: the file's size in bytes, when the agent said. */
+  fileSize?: number
   /** Frozen cumulative turn token usage, stamped onto the last tool message
    *  of an activity group when the turn ends. */
   usage?: TokenUsage

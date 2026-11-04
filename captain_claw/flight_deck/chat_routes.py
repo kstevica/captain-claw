@@ -72,9 +72,23 @@ async def get_messages(
     """The newest page of the lane's log (or the page before ``before``), or
     with ``since_id`` the log from that row on — oldest first either way."""
     db = get_db()
-    return await db.get_chat_messages(
+    rows = await db.get_chat_messages(
         _store_id(session_id, user["id"]), user["id"],
         limit=limit, before_id=before, since_id=since_id)
+    return [_with_origin(r) for r in rows]
+
+
+def _with_origin(row: dict) -> dict:
+    """A log row, with ``origin`` on a user row the runtime wrote (a guard's
+    "[system] STOP …", a relayed result, a fleet notice) that an earlier
+    client stored as the user's own message: the chat shows it as a note, or
+    not at all, instead of as something the user typed."""
+    if row.get("role") != "user":
+        return row
+    from captain_claw import msg_origin
+
+    origin = msg_origin.transcript_origin(str(row.get("content") or ""))
+    return {**row, "origin": origin} if origin else row
 
 
 @router.get("/sessions/{session_id}/topics")

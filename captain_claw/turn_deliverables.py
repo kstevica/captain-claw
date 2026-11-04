@@ -56,17 +56,18 @@ def turn_started_at(session: Any, turn_start_idx: int) -> float:
     return stamp.timestamp()
 
 
-def _is_working_dir(root: Path, name: str) -> bool:
-    """Is ``root/name`` one of the WORKING_DIRS? By spelling (NFC, casefold)
-    and by identity: a case-insensitive file system opens "Downloads/" or
-    "downloadſ/" (long s) as downloads/, and realpath keeps the spelling."""
-    if unicodedata.normalize("NFC", name).casefold() in WORKING_DIRS:
+def _is_working_dir(root: Path, name: str, dirs: tuple[str, ...] = WORKING_DIRS) -> bool:
+    """Is ``root/name`` one of *dirs* (the WORKING_DIRS)? By spelling (NFC,
+    casefold) and by identity: a case-insensitive file system opens
+    "Downloads/" or "downloadſ/" (long s) as downloads/, and realpath keeps
+    the spelling."""
+    if unicodedata.normalize("NFC", name).casefold() in dirs:
         return True
     try:
         st = (root / name).stat()
     except OSError:
         return True  # can't tell: not a deliverable
-    for wd in WORKING_DIRS:
+    for wd in dirs:
         try:
             wst = (root / wd).stat()
         except OSError:
@@ -142,3 +143,76 @@ def named_new_files(agent: Any, reply: str, since: float, extensions: set[str]) 
                 found.append((mtime, path))
     found.sort()
     return [p for _m, p in found]
+
+
+# saved/ folders whose new files get no card in the web chat: working code and
+# inputs (WORKING_DIRS), scratch (tmp/), video frames, and media/ — the user's
+# uploads and the browser's screenshots land there; the tools that make
+# pictures there show them themselves.
+CARD_SKIP_DIRS = WORKING_DIRS + ("tmp", "media", "video_frames")
+# A turn that wrote more than this gets cards for its newest files only.
+TURN_FILES_MAX = 12
+# Bound on the entries one scan looks at (a saved/ folder of months of work).
+_SCAN_MAX_ENTRIES = 20000
+
+
+def new_files_this_turn(
+    agent: Any, since: float, *, own_session_only: bool = False, limit: int = TURN_FILES_MAX,
+) -> list[Path]:
+    """Every file the turn made or changed in the agent's ``saved/`` area —
+    by any tool, a shell command or a script — oldest first, at most *limit*
+    (the newest). Not in CARD_SKIP_DIRS, nothing hidden, nothing reached
+    through a link leaving the area, modified at or after *since*.
+
+    *own_session_only* (a shared agent's member, a public session): only the
+    session's own folders (``saved/<category>/<session>/``), never what
+    another person's turn wrote meanwhile."""
+    if since <= 0:
+        return []
+    root = saved_root_of(agent)
+    if root is None or not root.is_dir():
+        return []
+    slug = ""
+    if own_session_only:
+        try:
+            slug = str(agent._current_session_slug() or "")
+        except Exception:
+            slug = ""
+        if not slug:
+            return []
+    found: list[tuple[float, Path]] = []
+    seen = 0
+    try:
+        categories = sorted(root.iterdir())
+    except OSError:
+        return []
+    for category in categories:
+        name = category.name
+        if name.startswith(".") or _is_working_dir(root, name, CARD_SKIP_DIRS):
+            continue
+        base = category / slug if slug else category
+        try:
+            if not base.is_dir():
+                continue
+        except OSError:
+            continue
+        for dirpath, dirnames, filenames in os.walk(base):
+            dirnames[:] = sorted(d for d in dirnames if not d.startswith("."))
+            for fname in sorted(filenames):
+                seen += 1
+                if seen > _SCAN_MAX_ENTRIES:
+                    break
+                if fname.startswith("."):
+                    continue
+                path = Path(dirpath) / fname
+                try:
+                    st = path.lstat()
+                except OSError:
+                    continue
+                if st.st_mtime < since or not is_deliverable(path, root, since=since):
+                    continue
+                found.append((st.st_mtime, path))
+            if seen > _SCAN_MAX_ENTRIES:
+                break
+    found.sort(key=lambda item: (item[0], str(item[1])))
+    return [p for _m, p in found[-max(0, int(limit)):]] if limit else []
