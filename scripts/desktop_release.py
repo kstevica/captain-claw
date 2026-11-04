@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
 import tomllib
@@ -88,8 +90,20 @@ def find_uv(given: str | None) -> str:
 
 
 def build_wheel(uv: str, out: Path) -> Path:
-    print("Building the wheel (with the Flight Deck bundle as committed)...")
-    run(uv, "build", "--wheel", "--out-dir", str(out))
+    """The wheel of the commit checked out, built from a clean export of it. setuptools reuses
+    ./build/lib without emptying it, so a wheel built in the checkout carried files later commits
+    had deleted (0.8.6's first build had the bundle's pruned chunks in it, 18.5 MB instead of 15),
+    and it would carry uncommitted edits too."""
+    head = run("git", "rev-parse", "--short", "HEAD").strip()
+    print(f"Building the wheel from a clean export of {head} (the Flight Deck bundle as committed)...")
+    if run("git", "status", "--porcelain", "--untracked-files=no").strip():
+        print("  (uncommitted changes aren't in it)")
+    src = out / "src"
+    src.mkdir()
+    archive = subprocess.run(["git", "archive", "--format=tar", "HEAD"], cwd=ROOT, capture_output=True, check=True)  # noqa: S603, S607
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        tar.extractall(src, filter="data")
+    run(uv, "build", "--wheel", "--out-dir", str(out), cwd=src)
     wheels = sorted(out.glob("captain_claw-*.whl"))
     if len(wheels) != 1:
         sys.exit(f"Expected one wheel in {out}, found {[w.name for w in wheels]}")
