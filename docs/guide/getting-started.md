@@ -29,6 +29,10 @@ First run starts onboarding automatically. For Ollama, no key needed — set `pr
 
 **Optional extras:** `pip install 'captain-claw[cv]'` for local OpenCV vision, `pip install 'captain-claw[pdf]'` for PDFs read with their headings and tables (PyMuPDF, AGPL-3.0), `pip install 'captain-claw[whatsapp-web]'` to let users link their own WhatsApp (experimental; see [WhatsApp Web](devices-and-channels.md#whatsapp-web--your-own-whatsapp)).
 
+## The desktop app
+
+**Captain** for macOS (and, untested so far, Windows and Linux) is a 75 MB download: the window, without Python inside. Its first start installs everything else from the newest release, about 200 MB, in half a minute on a fast line, with a page that shows each step. After that it starts in seconds, and **Check for Updates…** (the Captain menu on a Mac, Help elsewhere) installs each new release beside the running one, test-starts it and switches on a restart, going back by itself if the new version doesn't come up (0.8.6). It runs its own Flight Deck with sign-in off, for one person. Building it and publishing a release for it: [README_BINARY.md](../../README_BINARY.md#2-desktop-app-electron).
+
 ## A deck for a team
 
 Before the second person logs in, turn on auth, fix the JWT secret and tell the deck its public address:
@@ -45,7 +49,7 @@ Once it's running from a git checkout, **Console → Updates** updates the deck 
 
 ## Coding agents as your crew
 
-To have Claude Code, Codex, OpenCode or Pi work for you, install the CLI on the deck's host and open **Crew**, which lists what's there and the command for what isn't (0.8.5). OpenCode's free models need no key. An admin can always use Crew; everyone else needs an admin's tick, and that tick trusts them with the server. See [Crew](flight-deck.md#crew).
+To have Claude Code, Codex, OpenCode, Crush (0.8.6) or Pi work for you, install the CLI on the deck's host and open **Crew**, which lists what's there and the command for what isn't (0.8.5). OpenCode's free models need no key. An admin can always use Crew; everyone else needs an admin's tick, and that tick trusts them with the server. See [Crew](flight-deck.md#crew).
 
 ## A voice device on your desk
 
@@ -108,4 +112,4 @@ Full reference: [USAGE.md](../../USAGE.md#configuration-reference) (23 config se
 
 - [Flight Deck](flight-deck.md) — what to do once the dashboard is open
 - [BotPort and MCP](botport-and-mcp.md) — connect your decks to each other and to Claude
-- [Inside an agent](agents.md) — every supported model and the 68 built-in tools
+- [Inside an agent](agents.md) — every supported model and the 70 built-in tools

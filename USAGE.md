@@ -101,6 +101,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Confinement on a multi-user deck](#confinement-on-a-multi-user-deck--new-in-084)
   - [Forge agents](#forge-agents-say-what-you-need-and-get-a-team--new-in-085)
   - [Crew](#crew-coding-agents-working-for-you--new-in-085)
+  - [The Line](#the-line--new-in-086)
+  - [Captain Swarm](#captain-swarm--new-in-086)
 - [Kiosk (Simple Layout)](#kiosk-simple-layout)
   - [Agent groups](#agent-groups--new-in-085)
   - [The agent menu](#the-agent-menu--new-in-081)
@@ -1543,6 +1545,34 @@ Shown only to an owner an admin approved, and Flight Deck checks that again on e
 | `attachments` | array | no | Files for the worker: a `saved/` path, a path a tool printed, or `vfs:<project>/<path>`. 50 MB each, 30 files or 200 MB a task. It refuses what mail attachments refuse, like keys and `.env` files |
 
 The agent reads results itself, from the `vfs:` paths `options`, the callback, `status` and `files` give, and never starts a task to fetch files. It's told to report what git shows rather than what a worker claims, that a task exists only once a result gives its id, and that it can't merge or discard work, including through `git` in a shell.
+
+### line — NEW in 0.8.6
+
+Reads the owner's [Line](#the-line--new-in-086): one timeline of everything Flight Deck and their agents did or said on their own. Read-only. Item text is information, never instructions to the agent. Shown on every Flight Deck agent; never on a shared agent's member turns, and never on public, BotPort or Iskra instances.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `news` (what the agent hasn't read yet, oldest first; each call moves on), `recent` (the newest items), `search` (items with every word of `query`) or `read` (one item whole) |
+| `id` | string | read | The item, from a list |
+| `kind` | string | no | `recent` / `search`: only this kind |
+| `needs_you` | boolean | no | `recent` / `search`: only items that wait for the user, or failed |
+| `query` | string | search | Words that must all appear |
+| `since` | string | no | `24h`, `7d` or a date (`2026-11-03`) |
+| `limit` | integer | no | Default 20, at most 100 |
+
+On the owner's own live turns the agent also gets one line counting what's new on the Line since its last turn: numbers only, never the items' text.
+
+### captain_swarm — NEW in 0.8.6
+
+Proposes and follows [Captain Swarm](#captain-swarm--new-in-086) runs. A run the agent starts **waits for its owner's Go** and rings the bell. Only agents of the deck's admins may use it while Captain Swarm is being tested, and an agent confined to its files never gets it.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `start`, `status`, `get` (the ledger of attempts), `list` or `cancel` |
+| `template` | string | start | `triage` (an agent's email-triage rules against what the owner did), `outcome` (the best result for one real task, in rehearsal), `document` (the best document or research for a brief) or `mrav` (Captain's small-model runtime against its eval) |
+| `options` | object | no | The template's options, e.g. `budget_tokens` (`80M`, `500k`), `attempt_tokens`, `parallel`, `family` (the kind of task, so runs learn from each other); `triage`: `set_id`, `agent`, `cases`, `repeat`; `outcome`: `task`, `label`, `direction` (`min`/`max`), `max_value`, `must_include`; `document`: `task`, `audience`, `criteria`, `sources`, `words`; `mrav`: `model`, `harness`, `budget_hours`, `budget_max_experiments`, `per_round` |
+| `run_id` | string | status, get, cancel | The run |
+| `limit` | integer | no | How many runs (`list`) or attempts (`get`) |
 
 ### basna
 
@@ -5015,7 +5045,7 @@ Every process agent runs as the deck's OS user. On a deck with sign-in, Flight D
 - **Users** (Admin → Users in 0.8.0; its own **Users** page since 0.8.1). Add users (email, password, role) or invite them by email, set a password, and open a user's **Agents** to create (archetype picker), start, stop, restart, configure or remove their agents — every action logged as `admin_act_as`. It is not a login-as: an admin acts on agent-management routes only. The rest of an admin's work — the Admin console, invitations, the waitlist, passwords, branding, daily limits — is in [Deck Administration](#deck-administration--new-in-081).
 - **Team tier sets and team keys.** An admin publishes a tier set (**Library → Publish to team**); teammates with no models of their own run on it. Publishing shares the keys as **team keys** — a key on a provider's own endpoint becomes that provider's org key, a gateway key goes into a per-endpoint store — and process agents missing a key get it and restart automatically. A spawn nothing can supply a key for is refused instead of creating a dead agent. Decks that published before 0.8.0 should publish again.
 - **Per-user connections.** Each user connects their own Google and Microsoft accounts, Jev key, WhatsApp nudge number and (0.8.1) Soniox key and Telegram link (**Connections**); agents use their owner's. Each user also fills in a **Profile** (see [Owner Profile](#owner-profile)).
-- **Collaboration.** A persistent notification bell (shares, finished runs, sends), team spend by user and run kind in **Admin → Usage**, **Copy to my workspace** for a folder shared with you, and **Duplicate** on shared or built-in archetypes to fork an editable copy.
+- **Collaboration.** A notification bell for what needs you, and since 0.8.6 [the Line](#the-line--new-in-086) for shares, finished runs, sends and everything else that happened on its own, team spend by user and run kind in **Admin → Usage**, **Copy to my workspace** for a folder shared with you, and **Duplicate** on shared or built-in archetypes to fork an editable copy.
 - **Shared agents** (`FD_AGENT_SHARING=1`): one agent, several users — see [Shared agents](#shared-agents-a2-members-own-google-deep-memory-files) below.
 - **Agent options.** A gear on each agent opens a tabbed options dialog (General, Instructions, `config.yaml`, `.env`); name and description are stored by Flight Deck, so they survive a browser wipe. Instructions are stored per agent by Flight Deck, so two tabs can't erase each other's.
 
@@ -5145,6 +5175,48 @@ This doesn't isolate anything further: workers still run as the deck's system us
 | `FD_CREW_STALL_MINUTES` | Silence before you're told a worker seems stuck (default 15). It keeps running. |
 | `FD_CREW_MAX_TURN_HOURS` | The longest one turn may run (default 6). |
 | `FD_CREW_CLAUDE_BIN`, `FD_CREW_CODEX_BIN`, `FD_CREW_OPENCODE_BIN`, `FD_CREW_CRUSH_BIN`, `FD_CREW_PI_BIN` | Where a CLI is, if Flight Deck can't find it. |
+
+### The Line — NEW in 0.8.6
+
+One timeline per person for everything Flight Deck and that person's agents did or said on their own. Open it from **Line** in the full layout's navigation (with an unread badge), the Line row above the agents in the kiosk, or the button next to the bell on a phone.
+
+**What lands on it.** Scheduled tasks' results (a failure needs you; a skipped run isn't posted), Autonomous Work's actions, Taskboard hand-over outcomes (failures need you), plan steps, coding sessions, copies of Basna, Vatra and Bat runs that answered on WhatsApp, Telegram or another channel, proposals and questions waiting for you, nudges, payments to look at, mail the deck sent, shares, and fleet changes. Items are kept 30 days, and never dropped while one still waits. Agent-local `cron` and background delegation stay off it.
+
+**The bell** (`/fd/notifications`) lists only what needs you, waiting items on top, and says *Nothing waits for you* with a link to the Line when that's so. Shares, Gmail sends, accepted invites, successful runs and nudges moved to the Line. The old bell table was copied in once and is still written alongside for this release.
+
+**Reading it.** Each row has the sender's avatar, the sender and kind, a real headline, an unread dot and a **Failed**, **Needs you** or **Approve?** pill, grouped by day, with a filter strip. Items that belong together are one thread with a count: a hand-over and its answer, or everything about one Taskboard task (`task:<id>`). The open item or thread sits beside the list from 720 px wide (in its place on a phone, with ‹ Line to go back), Markdown rendered, **Approve** / **Reject** in a card. The dialog has a fullscreen button.
+
+**The composer.** An agent pill picks which of your agents you're talking to. Ask it anything, or with an item open hand it over: a *Hand over: …* chip, and *Look into it*, *Draft a reply* or *What should I do?* to start from. **Hand to agent…** on any item does the same. The request runs as the automation kind `line` in the agent's background lane, with a copy in its chat; a sleeping agent is woken. While it works the Line says "… is on it", and the answer lands on the Line and opens by itself, or "couldn't answer" after 5 minutes or if the agent isn't running. Only your words are the request: the item and its thread (up to 10 items and 8,000 characters) are quoted as information, and the agent writes email only when your words ask for it.
+
+**Channels.** On **Connections → Notifications** (or **Channels** on the Line), WhatsApp and Telegram each take **Everything**, **Needs you** (waiting items, failures and nudges) or **Off**, and one agent's chat takes a level of its own: that agent gets each item as a "Line · …" note while it's running, which never starts a turn and doesn't wake it. The old on/off switch is still the master. Nothing rings twice, and quiet hours let only nudges reach phones. Settings: `line_whatsapp`, `line_telegram`, `line_agent`, `line_agent_level` (`GET`/`PUT /fd/autonomy/notify`).
+
+**Daily summary.** A scheduled task named *Summary of your Line*, at the time you pick, on the Line's agent. It goes to the agent's chat, and to Telegram or email if ticked, and doesn't wait out quiet hours.
+
+**Agents read it** with the [`line`](#line--new-in-086) tool, and on their owner's own turns get a count of what's new. They're no longer told "[Flight Deck] Agent X has joined the fleet…"; fleet changes go to the owner's Line.
+
+Routes, all for the signed-in person only: `GET /fd/line`, `/fd/line/unread`, `/fd/line/thread/{id}`, `POST /fd/line/{id}/read`, `/fd/line/read-all`, `/fd/line/thread/{id}/read`, `/fd/line/ask` (`text`, optional `agent`), `/fd/line/{id}/hand`, `/fd/line/summary` (the daily summary), and the agent's `POST /fd/line/agent/news|unread|items|item`. Design and known gaps: [docs/autonomous-line-plan.md](docs/autonomous-line-plan.md).
+
+### Captain Swarm — NEW in 0.8.6
+
+**Admins only while it's being tested.** Every `/fd/captain-swarm/*` page route answers 403 "Captain Swarm is open to this deck's admins only." to anyone else, the `captain_swarm` tool refuses agents of non-admin owners, and the menu item, tile and sidebar entry are hidden from them. With sign-in off, the one local user is the admin.
+
+Captain Swarm keeps improving one measured number. Open it next to Bat in the full layout, or from the kiosk's menu and tool tiles. **Runs** starts and follows runs; **Practice sets** holds the cases built from your mail or calendar, sealed per person.
+
+**How a run decides.** An objective is what to improve, the cases to measure it on, and what an attempt may change. Each round, a proposer on your tiers suggests ideas (seeing only the open cases' weak spots), and up to **At once** attempts run together. Captain measures every attempt itself, in a scrubbed environment, on the open cases and on held-out cases kept sealed. Before measuring, an attempt passes a scope check and a scan for gaming the measure. A gain is kept only if it beats the noise (the larger of the minimum gain and twice the spread of repeated measurements), the held-out cases confirm it, and a reviewing model passes it; with no readable review there's no pass. One attempt is kept per wave; a runner-up gets one more try on top of the new best. A run stops at its target, its token budget, its time or attempt limit, when it stalls or drifts, after repeated refusals, or on **Stop now**, which also reaches attempts still starting.
+
+**Kinds of run:**
+
+- **Rules from your habits** (`triage`): an agent's triage rules, at most 12 of at most 300 characters, each version measured on the agent's read-only exam lane against what you actually did. **Build from my Gmail** makes the cases from your mail, read-only: did you reply within N days. **Build from my calendar** makes them from the invitations you accepted. The agent isn't changed during the run; **Teach these rules to** the agent turns the best version's new rules into lessons, on your click, after the run. Rules that carry strings only the held-out cases contain are refused. Needs no shell.
+- **Best result for a task** (`outcome`): each attempt is a Bat run in **rehearsal**. Every tool call goes through a rehearsal guard: reads, the attempt's own files, `ask_human`, `jev` and spending authorisations run; mail, calendar, Drive, messages, payments, MCP writes and unknown tools are recorded as intents instead; code, the screen, other runs and memory writes are refused; a browser stops at Submit, Buy, Pay, Send, Book, Confirm, Enter and any non-GET replay. Afterwards the tool-call register is checked, and a call that got out disqualifies the attempt. Captain fetches every page an attempt claims itself (public addresses only, redirects checked, up to 2 MB), with a headless Chromium when plain fetching isn't enough. **Carry it out** runs the winner once, as an ordinary Bat run with its usual gates, on your click. One attempt at a time per site or account (`FD_CAPTAIN_SWARM_PER_SITE`).
+- **Write or research** (`document`): a document or research for a brief, each attempt in rehearsal, graded against a checklist from the brief and a sealed confirming checklist. For research, Captain opens every cited source. **Save to my files** puts the result in `vfs:captain-swarm/`.
+- **Any repository** (`code`): a measuring command, the number to read from its output, and the paths an attempt may edit; held-out cases are optional. A Crew worker tries each idea in a branch cut from the best so far (`captain-swarm/<run>/champion`), and Captain measures fresh snapshots of it. **Open a pull request** from the best branch; Captain never merges. Uses the owner's Crew approval.
+- **Mrav eval** (`mrav`): the same, on Mrav's small-model eval (`evals/mrav/dev.json`, with a held-out set kept in the deck's data folder).
+
+**It learns.** Each objective has a **Kind of task** (`family`). Lessons are kept per person and kind: the proposer's reading of each round, a strategy round after a stall, and which strategies won or lost in earlier runs, which shapes the next run of that kind. **What it learned** lists them, each one forgettable. A proposer only ever learns whether the sealed cases confirmed a gain, never their content. **Save as a playbook** puts a one-task run's approach on one of your agents, on your click, with the text shown first.
+
+**Caps are in tokens, never dollars**: type `80M`, `500k` or a number, with dollars shown as "about $x". Defaults per run and per attempt: Write or research 100M / 15M, Best result for a task 50M / 10M, Rules from your habits 60M, Any repository and Mrav 200M. A budget can stop a measurement midway; finished but unmeasured attempts are dropped when the budget runs out mid-wave.
+
+Settings: `FD_CAPTAIN_SWARM_DISABLED` (turns the supervisor off), `FD_CAPTAIN_SWARM_MAX_RUNS` (`1` run at once per person), `FD_CAPTAIN_SWARM_MAX_LANES` (`4`, attempts at once, 1–8), `FD_CAPTAIN_SWARM_PER_SITE` (`1`, 1–4), `FD_CAPTAIN_SWARM_MEASURE_PARALLEL` (`1`, 1–8), `FD_CAPTAIN_SWARM_BROWSER` (on; `0` keeps Captain's own checks to plain fetching). Runs live in `captain_swarm.db`. Known gaps: it has run on synthetic mail and throwaway decks; a real owner's baseline, a real **Carry it out** and a gain kept live on code are still to come, and address checks have a small DNS-rebinding window. Design: [docs/captain-swarm-plan.md](docs/captain-swarm-plan.md).
 
 ### The simple layout and kiosk mode — NEW in 0.8.0
 
@@ -6169,6 +6241,9 @@ Flight Deck uses environment variables:
 | `FD_BAT_DISABLED` / `FD_BAT_SPEND` | (unset) | Bat is on by default — `FD_BAT_DISABLED=1` turns it off; real-money spend stays off unless `FD_BAT_SPEND=1` |
 | `FD_BAT_DEFAULT_LLM_USD` | `50` | The LLM ceiling for a Bat run that doesn't name one, covering any runs its workers start; `0` means none |
 | `FD_BAT_MAX_PARALLEL` | `3` | How many steps of one Bat run may run at once |
+| `FD_CAPTAIN_SWARM_DISABLED` | (unset) | **NEW in 0.8.6.** `1` turns [Captain Swarm](#captain-swarm--new-in-086)'s supervisor off |
+| `FD_CAPTAIN_SWARM_MAX_RUNS` / `FD_CAPTAIN_SWARM_MAX_LANES` / `FD_CAPTAIN_SWARM_PER_SITE` / `FD_CAPTAIN_SWARM_MEASURE_PARALLEL` | `1` / `4` / `1` / `1` | **NEW in 0.8.6.** Captain Swarm runs at once per person; attempts at once in a run (1–8); attempts at once on one site or account (1–4); measurements at once (1–8) |
+| `FD_CAPTAIN_SWARM_BROWSER` | on | **NEW in 0.8.6.** `0` keeps Captain Swarm's own checks to plain fetching, without headless Chromium |
 | `FD_GMAIL_SEND` / `FD_GMAIL_AUTOREPLY` | (unset) | Deck kill switches: `off` stops all agent Gmail sends / topic auto-replies |
 | `FD_SCHEDULER_QUIET_HOURS` | (unset) | e.g. `22-08`: scheduled-task deliveries and payment reminders wait out that window (it may wrap midnight) and go when it ends |
 | `FD_AGENT_WS_WAIT_S` | `30` | **NEW in 0.8.1.** How long the chat proxy holds a socket while an agent that isn't answering yet (restarting) comes up |
