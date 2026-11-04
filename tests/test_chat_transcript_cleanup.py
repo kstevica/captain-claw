@@ -213,3 +213,66 @@ async def test_a_members_turn_gets_cards_for_its_own_files_only(world):
     await _send_reply_images(frames.append, world.agent, 0, "Here.", world.started,
                              own_session_only=True)
     assert [(f["role"], f["content"]) for f in frames] == [("file", str(mine))]
+
+
+# ── Progress lines in the user's language ───────────────────────────────
+
+
+@pytest.mark.parametrize("line, user, hidden", [
+    ("Starting to collect the renewals from the CRM export…",
+     "Napravi mi tablicu obnova polica za studeni.", True),
+    ("Now let me check the EOJN tenders for this week.",
+     "Pogledaj mi natječaje na EOJN-u za ovaj tjedan i javi što je novo.", True),
+    # The model listened: a Croatian line stays.
+    ("Prikupljam obnove iz izvoza CRM-a…", "Napravi mi tablicu obnova polica za studeni.", False),
+    # The person writes English.
+    ("Starting to collect the renewals now.", "Make me the renewals table for November please.", False),
+    # Too short to judge, either side.
+    ("Checking…", "Napravi mi tablicu obnova polica za studeni.", False),
+    ("Starting to collect the renewals from the CRM export…", "Hvala!", False),
+    # Croatian words that are English-looking ("i", "a", "to", "on", "data") don't make it English.
+    ("Starting to collect the renewals from the CRM export…",
+     "I to je on rekao, a data je i ponuda za studeni", True),
+])
+def test_out_of_language(line, user, hidden):
+    from captain_claw import narration_language as nl
+
+    assert nl.out_of_language(line, user) is hidden
+
+
+def test_the_reference_is_the_persons_last_message():
+    from captain_claw import narration_language as nl
+
+    session = Session(id="s1", name="t")
+    session.add_message("user", "Napravi mi tablicu obnova polica za studeni.", origin="human")
+    session.add_message("assistant", "Gotovo.")
+    session.add_message("user", "[SCHEDULED TASK — cron job 'tenders'] Check the EOJN tenders now",
+                        origin="cron")
+    assert nl.last_human_text(session) == "Napravi mi tablicu obnova polica za studeni."
+    assert nl.last_human_text(Session(id="s2", name="t")) == ""
+
+
+def _narrating_agent(user_text: str):
+    from captain_claw.agent import Agent
+
+    agent = Agent.__new__(Agent)
+    agent.session = Session(id="s1", name="t")
+    agent.session.add_message("user", user_text, origin="human")
+    shown: list[str] = []
+    agent.narration_callback = lambda text, iteration=0: shown.append(text)
+    return agent, shown
+
+
+def test_an_english_line_in_a_croatian_chat_is_handled_but_not_shown():
+    agent, shown = _narrating_agent("Napravi mi tablicu obnova polica za studeni.")
+    # Handled (True): the caller must not fold it into the answer instead.
+    assert agent._emit_narration("Starting to collect the renewals from the CRM export…") is True
+    assert shown == []
+    assert agent._emit_narration("Prikupljam obnove iz izvoza CRM-a…") is True
+    assert shown == ["Prikupljam obnove iz izvoza CRM-a…"]
+
+
+def test_an_english_chat_keeps_its_progress_lines():
+    agent, shown = _narrating_agent("Make me the renewals table for November please.")
+    assert agent._emit_narration("Starting to collect the renewals from the CRM export…") is True
+    assert shown == ["Starting to collect the renewals from the CRM export…"]

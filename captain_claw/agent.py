@@ -440,6 +440,18 @@ class Agent(
         cb = getattr(self, "narration_callback", None)
         if not cb:
             return False
+        # A line in English for a person who writes another language is not
+        # shown ("Starting to collect…" in a Croatian chat). It still counts
+        # as handled: folded into the answer it would land there instead.
+        try:
+            from captain_claw import narration_language
+
+            hidden = narration_language.out_of_language(
+                text, narration_language.last_human_text(self.session))
+        except Exception:
+            hidden = False
+        if hidden:
+            return True
         try:
             cb(text, iteration)
         except Exception:
