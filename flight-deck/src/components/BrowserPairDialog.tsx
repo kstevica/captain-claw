@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { AlertTriangle, Check, Globe, Loader2, X } from 'lucide-react'
+import { AlertTriangle, Check, Globe, Loader2, Monitor, X } from 'lucide-react'
 import { decidePair, pairCodeFromLocation, pairInfo, PAIR_PATH, type PairInfo } from '../services/browserClip'
 
-// <deck>/connect-browser#<code>: Captain for Chrome asks to be connected to
-// this account. The person checks the code matches the one in the extension
+// <deck>/connect-browser#<code>: Captain for Chrome (or Captain for Mac)
+// asks to be connected to this account. The person checks the code matches the one in the extension
 // and approves (or turns it away). Read at load, so a sign-in in between
 // doesn't lose it.
 
@@ -26,6 +26,9 @@ export default function BrowserPairDialog() {
   }, [])
 
   if (!open) return null
+
+  const mac = info?.kind === 'desktop'
+  const product = mac ? 'Captain for Mac' : 'Captain for Chrome'
 
   const close = () => {
     setOpen(false)
@@ -50,9 +53,9 @@ export default function BrowserPairDialog() {
       <div className="w-full max-w-md rounded-xl border border-zinc-800 bg-zinc-900 shadow-2xl">
         <div className="flex items-center gap-3 border-b border-zinc-800 px-5 py-4">
           <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-violet-500/10 text-violet-600 dark:text-violet-400">
-            <Globe className="h-5 w-5" />
+            {mac ? <Monitor className="h-5 w-5" /> : <Globe className="h-5 w-5" />}
           </div>
-          <h2 id="browser-pair-title" className="flex-1 text-base font-semibold text-zinc-100">Connect Captain for Chrome?</h2>
+          <h2 id="browser-pair-title" className="flex-1 text-base font-semibold text-zinc-100">Connect {product}?</h2>
           <button onClick={close} className="rounded-md p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200" aria-label="Close">
             <X className="h-4 w-4" />
           </button>
@@ -64,11 +67,15 @@ export default function BrowserPairDialog() {
               <Check className="mt-0.5 h-5 w-5 text-emerald-500" />
               <div>
                 <div className="font-medium text-zinc-100">Connected</div>
-                <p className="text-zinc-400">Go back to the page you were on — Captain is ready in the side panel. You can close this tab.</p>
+                <p className="text-zinc-400">
+                  {mac
+                    ? 'Go back to Captain for Mac — it is ready: hold fn or click its menu-bar icon. You can close this tab.'
+                    : 'Go back to the page you were on — Captain is ready in the side panel. You can close this tab.'}
+                </p>
               </div>
             </div>
           ) : done === 'denied' ? (
-            <p className="text-zinc-400">Turned away — that browser was not connected.</p>
+            <p className="text-zinc-400">Turned away — {mac ? 'that Mac' : 'that browser'} was not connected.</p>
           ) : error && !info ? (
             <div className="flex items-start gap-2 text-red-600 dark:text-red-400"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{error}</div>
           ) : !info ? (
@@ -76,11 +83,21 @@ export default function BrowserPairDialog() {
           ) : (
             <>
               <p className="text-zinc-300">
-                <b className="text-zinc-100">{info.browser}</b> wants to send pages to your agents. It will be able to list your agents,
-                send them pages and files, and read their answers — as you.
+                {mac ? (
+                  <>
+                    <b className="text-zinc-100">{info.browser}</b> wants to send what's on that Mac's screen to your agents — the text of
+                    the app you're in, your selection and, if you turn it on, a screenshot. It will be able to list your agents, send them
+                    that, and read their answers — as you.
+                  </>
+                ) : (
+                  <>
+                    <b className="text-zinc-100">{info.browser}</b> wants to send pages to your agents. It will be able to list your agents,
+                    send them pages and files, and read their answers — as you.
+                  </>
+                )}
               </p>
               <div className="rounded-lg border border-zinc-800 bg-zinc-950/60 px-4 py-3 text-center">
-                <div className="text-[11px] uppercase tracking-wider text-zinc-500">The extension shows</div>
+                <div className="text-[11px] uppercase tracking-wider text-zinc-500">{mac ? 'The app shows' : 'The extension shows'}</div>
                 <div className="mt-1 font-mono text-2xl font-semibold tracking-[0.2em] text-violet-700 dark:text-violet-300">{info.code}</div>
               </div>
               <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
@@ -92,7 +109,7 @@ export default function BrowserPairDialog() {
               {!info.same_network && (
                 <div className="flex items-start gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                  This request came from another network than yours. Only approve it if you just pressed Connect in your own browser.
+                  This request came from another network than yours. Only approve it if you just pressed Connect {mac ? 'in Captain for Mac' : 'in your own browser'}.
                 </div>
               )}
               {error && <div className="text-xs text-red-600 dark:text-red-400">{error}</div>}

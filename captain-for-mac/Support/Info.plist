@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Captain for Mac</string>
+	<key>CFBundleDisplayName</key>
+	<string>Captain for Mac</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.captainclaw.formac</string>
+	<key>CFBundleExecutable</key>
+	<string>CaptainForMac</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>__VERSION__</string>
+	<key>CFBundleVersion</key>
+	<string>__BUILD__</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Captain listens when you say your task, and only then.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Captain turns what you say into the task it sends to your agent.</string>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Stevica Kuharski</string>
+</dict>
+</plist>

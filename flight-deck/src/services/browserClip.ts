@@ -4,6 +4,8 @@
 // <deck>/connect-browser#<code>; the signed-in person approves it here and
 // the extension gets a personal access token named "Browser · <browser>".
 // Connected browsers are listed (and disconnected) in Connections → Browser.
+// Captain for Mac pairs the same way (kind "desktop", token "Desktop · <Mac>")
+// and is listed beside them.
 
 import { useAuthStore, refreshAccessToken } from '../stores/authStore'
 
@@ -35,8 +37,11 @@ async function fdFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json()
 }
 
+export type ClipKind = 'browser' | 'desktop'
+
 export interface ConnectedBrowser {
   id: string
+  kind?: ClipKind
   name: string
   created_at: string
   last_used_at: string | null
@@ -45,6 +50,7 @@ export interface ConnectedBrowser {
 export interface PairInfo {
   code: string
   browser: string
+  kind?: ClipKind
   ip: string
   user_agent: string
   created_at: string
@@ -53,9 +59,15 @@ export interface PairInfo {
 }
 
 export const EXTENSION_ZIP = '/fd/clip/extension.zip'
+export const MAC_APP_ZIP = '/fd/clip/mac-app.zip'
 export const PAIR_PATH = '/connect-browser'
 
 export const listBrowsers = () => fdFetch<{ browsers: ConnectedBrowser[] }>('/fd/browsers').then((r) => r.browsers)
+
+/** The connected browsers and Macs, and whether this deck has Captain for Mac to hand out. */
+export const listConnections = () =>
+  fdFetch<{ browsers: ConnectedBrowser[]; mac_app?: boolean }>('/fd/browsers')
+    .then((r) => ({ browsers: r.browsers, macApp: !!r.mac_app }))
 
 export const removeBrowser = (id: string) =>
   fdFetch<{ ok: boolean }>(`/fd/browsers/${encodeURIComponent(id)}`, { method: 'DELETE' })

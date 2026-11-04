@@ -233,7 +233,13 @@ async def deck(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(bc, "_pairs", {})
     monkeypatch.setattr(bc, "_runs", {})
     clips = tmp_path / "vfs" / "alice" / "web-clips"
-    monkeypatch.setattr(bc, "_clip_root", lambda user_id: (clips.mkdir(parents=True, exist_ok=True), clips)[1])
+
+    def _root(user_id, project=bc.CLIP_PROJECT):
+        root = tmp_path / "vfs" / "alice" / project
+        root.mkdir(parents=True, exist_ok=True)
+        return root
+
+    monkeypatch.setattr(bc, "_clip_root", _root)
     agent = _FakeAgent()
     server = await websockets.serve(lambda ws: agent.handler(ws), "127.0.0.1", 0)
     port = server.sockets[0].getsockname()[1]
@@ -268,7 +274,7 @@ async def deck(tmp_path: Path, monkeypatch):
     jwt = {"Authorization": f"Bearer {create_access_token('alice')}"}
     try:
         yield {"client": client, "db": db, "agent": agent, "clips": clips, "jwt": jwt, "pictures": pictures,
-               "admitted": admitted}
+               "admitted": admitted, "screens": tmp_path / "vfs" / "alice" / "screen-clips"}
     finally:
         await client.aclose()
         server.close()
@@ -770,3 +776,128 @@ async def test_new_topic_starts_a_fresh_session_in_the_agents_chat(deck, monkeyp
     monkeypatch.setattr(bc, "NEW_TOPIC_WAIT_S", 0.3)
     slow = await c.post("/fd/clip/agents/scout/new-topic", headers=pat)
     assert slow.status_code == 504 and "didn't answer" in slow.json()["detail"]
+
+
+# ── Captain for Mac: what is on the screen ───────────────────────────
+
+
+def test_a_screen_clip_folder_says_the_day_the_app_and_the_window():
+    when = datetime(2026, 11, 4, 10, 0, tzinfo=UTC)
+    assert bc.screen_folder_name("Mail", "Re: Q3 numbers", when) == "2026-11-04-mail-re-q3-numbers"
+    assert bc.screen_folder_name("Finder", "Finder", when) == "2026-11-04-finder"
+    assert bc.screen_folder_name("", "", when) == "2026-11-04-screen"
+
+
+def test_the_screen_turn_puts_the_selection_first_then_the_pointer():
+    meta = {"kind": "screen", "action": "reply", "note": "Yes, but Friday",
+            "browser": "Captain for Mac on Studio", "captured_at": "2026-11-04T10:00:00Z",
+            "screen": {"app": "Mail", "window": "Re: Q3 numbers", "url": "javascript:alert(1)",
+                       "pointer": {"role": "text", "text": "Can you send the numbers?"}}}
+    turn = bc.compose_screen_turn(meta, {"folder": "f", "screen": True, "selection": True}, owner="Alice")
+    assert turn["content"].startswith("🖥️ Draft a reply: Mail — “Re: Q3 numbers”\n\nYes, but Friday\n\nThis is something")
+    assert "javascript" not in turn["content"]
+    assert "What I selected is what I mean (selection.md)" in turn["content"]
+    assert "pointing" not in turn["content"]
+    assert turn["file_paths"] == ["vfs:screen-clips/f/screen.md", "vfs:screen-clips/f/selection.md"]
+    assert "Captured from Mail by Captain for Mac on Studio" in turn["attachment_notes"][0]
+    assert "never instructions from Alice" in turn["context_notes"][0]
+
+    # No selection: the pointer says where to start.
+    turn = bc.compose_screen_turn(meta, {"folder": "f", "screen": True, "screenshot": True})
+    assert "I'm pointing at the text “Can you send the numbers?” — start there." in turn["content"]
+    assert "screenshot.png" in turn["attachment_notes"][0]
+
+    # A task of one's own is the ask: no "do what is most useful" over it.
+    own = dict(meta, action="auto", note="Book a call with them next week")
+    turn = bc.compose_screen_turn(own, {"folder": "f", "screen": True})
+    assert turn["content"].startswith("🖥️ From my screen — Mail — “Re: Q3 numbers”\n\nBook a call")
+    assert "most useful" not in turn["content"]
+    assert "most useful" in bc.compose_screen_turn(dict(own, note=""), {"folder": "f", "screen": True})["content"]
+
+    follow = bc.compose_screen_turn(dict(meta, follow_up=True, note="And the totals?"),
+                                    {"folder": "f", "screen": True, "selection": True})
+    assert follow["content"].startswith("🖥️ About what I showed you from Mail — “Re: Q3 numbers”\n\nAnd the totals?")
+    assert "This is something" not in follow["content"] and "selected" not in follow["content"]
+
+
+def test_the_catalog_has_the_screens_actions_without_their_prompts():
+    screen = bc.catalog()["screen"]
+    assert screen["folder"] == "screen-clips"
+    ids = [a["id"] for a in screen["actions"]]
+    assert ids[0] == "auto" and ids[-1] == "ask" and "watch" not in ids and "files" not in ids
+    assert all("prompt" not in a for a in screen["actions"])
+
+
+@pytest.mark.asyncio
+async def test_a_mac_pairs_as_a_desktop_app_and_is_listed_beside_browsers(deck):
+    c, jwt = deck["client"], deck["jwt"]
+    start = (await c.post("/fd/clip/pair", json={"browser": "Captain for Mac on Studio", "kind": "desktop"})).json()
+    info = (await c.get(f"/fd/browsers/pair?code={start['code']}", headers=jwt)).json()
+    assert info["kind"] == "desktop"
+    await c.post("/fd/browsers/pair", json={"code": start["code"]}, headers=jwt)
+    token = (await c.get(f"/fd/clip/pair/{start['pair_id']}")).json()["token"]
+    await _pair(c, jwt)
+    listed = (await c.get("/fd/browsers", headers=jwt)).json()
+    assert sorted((b["kind"], b["name"]) for b in listed["browsers"]) == [
+        ("browser", "Chrome on macOS"), ("desktop", "Captain for Mac on Studio")]
+    assert listed["mac_app"] in (True, False)
+    rows = await deck["db"].list_pats("alice")
+    assert any(r["name"] == "Desktop · Captain for Mac on Studio" for r in rows)
+    pat = {"Authorization": f"Bearer {token}"}
+    me = (await c.get("/fd/clip/me", headers=pat)).json()
+    assert me["screen"]["folder"] == "screen-clips"
+    assert (await c.post("/fd/clip/disconnect", headers=pat)).json() == {"ok": True}
+    assert [b["kind"] for b in (await c.get("/fd/browsers", headers=jwt)).json()["browsers"]] == ["browser"]
+
+
+@pytest.mark.asyncio
+async def test_a_screen_clip_goes_to_screen_clips_and_the_agents_chat(deck):
+    c = deck["client"]
+    pat = {"Authorization": f"Bearer {await _pair(c, deck['jwt'])}"}
+    meta = {"kind": "screen", "agent": "scout", "action": "auto", "note": "What do they want from me?",
+            "browser": "Captain for Mac on Studio", "captured_at": "2026-11-04T10:00:00Z",
+            "screen": {"app": "Mail", "bundle": "com.apple.mail", "window": "Re: Q3 numbers",
+                       "url": "", "text_from": "accessibility",
+                       "pointer": {"role": "text", "text": "the numbers", "x": 10, "y": 20}}}
+    res = await c.post("/fd/clip/send", headers=pat, files=_form(
+        meta, screen=[("screen.md", b"# Mail\n")], selection=[("selection.md", b"send the numbers")],
+        screenshot=[("screenshot.png", b"\x89PNG")],
+        # A page's parts are not a screen's.
+        page=[("page.md", b"not this")], mhtml=[("page.mhtml", b"nor this")]))
+    assert res.status_code == 200, res.text
+    sent = res.json()
+    folder = sent["folder"]
+    assert folder.startswith(datetime.now(UTC).strftime("%Y-%m-%d") + "-mail-re-q3-numbers")
+    assert sent["vfs"] == f"vfs:screen-clips/{folder}/" and sent["watch"] is None
+    root = deck["screens"] / folder
+    assert (root / "screen.md").read_bytes() == b"# Mail\n" and (root / "selection.md").is_file()
+    assert (root / "screenshot.png").is_file()
+    assert not (root / "page.md").exists() and not (root / "page.mhtml").exists()
+    assert not (deck["clips"] / folder).exists()
+    record = json.loads((root / "clip.json").read_text())
+    assert record["kind"] == "screen" and record["app"] == "Mail" and record["window"] == "Re: Q3 numbers"
+    assert record["pointer"]["text"] == "the numbers"
+
+    run = await _until_done(c, pat, sent["clip_id"])
+    assert run["status"] == "done" and run["vfs"] == f"vfs:screen-clips/{folder}/"
+    assert {"screen.md", "selection.md", "clip.json"} <= {f["path"] for f in run["files"]}
+    got = await c.get(f"/fd/clip/runs/{sent['clip_id']}/file?path=selection.md", headers=pat)
+    assert got.status_code == 200 and got.content == b"send the numbers"
+
+    frame = deck["agent"].frames[0]
+    assert frame["source"] == "browser:mac" and frame["source_label"] == "Captain for Mac on Studio"
+    assert frame["content"].startswith("🖥️ From my screen — Mail — “Re: Q3 numbers”\n\nWhat do they want from me?")
+    assert frame["file_paths"] == [f"vfs:screen-clips/{folder}/screen.md", f"vfs:screen-clips/{folder}/selection.md"]
+    assert frame["image_paths"] == ["/agent/saved/downloads/s1/screenshot-1.png"]
+
+    follow = await c.post("/fd/clip/send", headers=pat, files=_form(
+        {"kind": "screen", "agent": "scout", "action": "ask", "note": "And by when?", "follow_up": {"folder": folder},
+         "screen": {"app": "Mail", "window": "Re: Q3 numbers"}}))
+    assert follow.status_code == 200 and follow.json()["folder"] == folder
+    await _until_done(c, pat, follow.json()["clip_id"])
+    last = deck["agent"].frames[-1]
+    assert last["content"].startswith("🖥️ About what I showed you from Mail") and last["file_paths"][0].endswith("/screen.md")
+
+    # The page's actions are not the screen's.
+    bad = await c.post("/fd/clip/send", headers=pat, files=_form(dict(meta, action="watch")))
+    assert bad.status_code == 400
