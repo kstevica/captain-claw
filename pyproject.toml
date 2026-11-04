@@ -18,7 +18,10 @@ classifiers = [
 ]
 
 dependencies = [
-    "litellm>=1.40.0",
+    # The `mcp` extra: LiteLLM 1.108 imports the mcp package on every call with
+    # tools (every agent turn) but lists it only as an extra, so without it each
+    # turn failed with "No module named 'mcp'" (the 0.8.6 desktop app's first chat).
+    "litellm[mcp]>=1.40.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
     "aiosqlite>=0.19.0",
