@@ -566,11 +566,19 @@ class WriteTool(Tool):
             # saved picture by its original URL.
             content, _images_note = await self._report_images(content, file_path, suffix, kwargs)
 
+            # Line endings (write_guard.eol_for_write): the file keeps its own,
+            # a new .bat/.cmd gets CRLF, anything else lands exactly as sent.
+            # newline="" below writes these bytes on every OS — text mode on
+            # Windows turned each "\n" into "\r\n", so the readback saw a size
+            # mismatch and the model re-issued the same write, again and again.
+            content = write_guard.to_eol(
+                content, write_guard.eol_for_write(file_path, exists=file_path.is_file()))
+
             # Write file
             mode = "a" if append else "w"
 
             def _write_once() -> None:
-                with open(file_path, mode, encoding="utf-8") as f:
+                with open(file_path, mode, encoding="utf-8", newline="") as f:
                     f.write(content)
                     f.flush()
                     try:
@@ -609,15 +617,23 @@ class WriteTool(Tool):
                     _retries -= 1
                 if not rb["ok"]:
                     log.error("Write verify failed", path=str(file_path), reason=rb.get("reason"))
+                    # Already re-written verify_retries times: the same write
+                    # again lands the same way, so say what to do instead.
                     return ToolResult(
                         success=False,
                         error="write_verify_failed",
                         content=(
                             f"❌ The write to {path} could not be verified on disk "
-                            f"({rb.get('reason', 'unknown')}). The file may be "
-                            "truncated or missing — re-issue the write."
+                            f"({rb.get('reason', 'unknown')}) — it was re-written and "
+                            "checked again with the same result. The file may be "
+                            "truncated or missing. Do not repeat this write unchanged: "
+                            "read the file to see what landed, or tell the user the "
+                            "disk may be full or the folder not writable."
                         ),
                     )
+                if rb.get("note"):
+                    log.warning("Write readback: line endings differ", path=str(file_path),
+                                note=rb.get("note"))
                 _verify_receipt = f" · verified {rb['bytes']} bytes"
                 if rb.get("sha8"):
                     _verify_receipt += f" sha={rb['sha8']}"
