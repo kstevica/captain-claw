@@ -55,6 +55,7 @@ from captain_claw.flight_deck import (
     crew_store,
     crew_vfs,
 )
+from captain_claw.flight_deck import proc_compat
 from captain_claw.flight_deck.crew_access import Grant
 from captain_claw.flight_deck.crew_harness import HARNESSES, RunSpec, TurnState
 from captain_claw.flight_deck.crew_store import CrewStore
@@ -564,9 +565,7 @@ def _alive(task: dict) -> bool:
     if proc is not None and proc.poll() is not None:
         _PROCS.pop(task["id"], None)
         return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError):
+    if not proc_compat.pid_alive(pid):  # never os.kill(pid, 0): Windows ends it
         return False
     started, recorded = _proc_start(pid), task.get("pid_start") or ""
     # Can't tell, and the pid exists: it's alive. Calling it dead would start a
@@ -626,11 +625,8 @@ def _descendants(root: int) -> set[int]:
 def _still_running(pids: set[int] | list[int]) -> list[int]:
     out = []
     for pid in pids:
-        try:
-            os.kill(pid, 0)
+        if proc_compat.pid_alive(pid):
             out.append(pid)
-        except (ProcessLookupError, PermissionError):
-            continue
     return out
 
 

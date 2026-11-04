@@ -305,6 +305,8 @@ function spawnFlightDeck() {
     // This app's own deck: one local user on loopback, so Google and Microsoft
     // connect there — their sign-in in the system browser (openSignIn).
     FD_DESKTOP: "1",
+    // Text as UTF-8 on Windows too (runtime.js pythonFor), for a deck from source.
+    PYTHONUTF8: "1",
   };
   fdTail = [];
 

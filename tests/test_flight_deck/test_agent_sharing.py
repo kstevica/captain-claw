@@ -838,7 +838,7 @@ class TestAgentRefRows:
 
         class _FakePopen:
             def __init__(self, args, cwd=None, env=None, stdout=None, stderr=None,
-                         start_new_session=None):
+                         start_new_session=None, creationflags=0):
                 self.pid = 434343
                 if stdout is not None:
                     stdout.close()

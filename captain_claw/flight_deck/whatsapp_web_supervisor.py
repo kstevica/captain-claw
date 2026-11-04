@@ -34,6 +34,7 @@ from typing import Any
 
 import httpx
 
+from captain_claw.flight_deck import proc_compat
 from captain_claw.flight_deck.whatsapp_web import DIR_NAME, kept_history
 from captain_claw.flight_deck.whatsapp_web.link_state import LinkState
 from captain_claw.logging import get_logger
@@ -91,6 +92,8 @@ async def save_config(db: Any, *, allowed: bool) -> dict[str, Any]:
 def _alive(pid: int) -> bool:
     if pid <= 0:
         return False  # 0 / -1 would address a whole process group
+    if proc_compat.IS_WINDOWS:
+        return proc_compat.pid_alive(pid)  # os.kill(pid, 0) would end it there
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
