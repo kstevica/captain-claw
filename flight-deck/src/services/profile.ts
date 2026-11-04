@@ -495,7 +495,9 @@ export interface QuotaStatus {
   messages: QuotaAllowance
   tokens: QuotaAllowance
   blocked: 'messages' | 'tokens' | null
-  warning: 'messages' | 'tokens' | null
+  // 'finish': spent, but one more message goes through so the job in hand can end.
+  warning: 'messages' | 'tokens' | 'finish' | null
+  finish?: 'messages' | 'tokens' | null  // which allowance is spent then
   resets_left: number       // free resets an admin gave them
   byok?: boolean            // on their own API keys: no daily limits
   byok_allowed?: boolean    // the deck lets them switch to their own keys

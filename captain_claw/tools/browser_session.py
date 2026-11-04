@@ -8,6 +8,8 @@ between tool calls.  Handles startup, page management, and cleanup.
 from __future__ import annotations
 
 import asyncio
+import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -45,10 +47,149 @@ def has_playwright() -> bool:
     return _HAS_PLAYWRIGHT
 
 
+# ---------- shared browser cache ----------------------------------------------
+# Every agent runs with its own HOME, so Playwright's default cache (under HOME)
+# would download a separate ~700 MB Chromium per agent. Flight Deck pins one
+# deck-wide PLAYWRIGHT_BROWSERS_PATH for the agents it starts; this is where it
+# points by default — the host's own Playwright cache for Flight Deck's user.
+
+
+def host_browsers_path(environ: dict[str, str] | None = None) -> str:
+    """Where Playwright keeps its browsers for this host's user: an explicit
+    ``PLAYWRIGHT_BROWSERS_PATH`` (made absolute), else Playwright's own default
+    for the platform, computed from ``environ`` (default: this process's)."""
+    env = dict(environ if environ is not None else os.environ)
+    explicit = str(env.get("PLAYWRIGHT_BROWSERS_PATH") or "").strip()
+    if explicit == "0":
+        return "0"  # Playwright's "inside the package" — shared by one venv already
+    if explicit:
+        return str(Path(explicit).expanduser().resolve())
+    home = Path(env.get("HOME") or env.get("USERPROFILE") or Path.home())
+    if sys.platform == "darwin":
+        return str(home / "Library" / "Caches" / "ms-playwright")
+    if sys.platform.startswith("win"):
+        local = env.get("LOCALAPPDATA") or str(home / "AppData" / "Local")
+        return str(Path(local) / "ms-playwright")
+    cache = str(env.get("XDG_CACHE_HOME") or "").strip() or str(home / ".cache")
+    return str(Path(cache) / "ms-playwright")
+
+
+# ---------- missing system libraries -----------------------------------------
+# The binary can be installed yet unable to start: a bare server lacks the
+# shared libraries Chromium links against (libnspr4, libnss3, libgbm …). Only
+# the host's admin can install those (`playwright install-deps`, which needs
+# root). Agents used to be told to `pip install playwright` and retried every
+# call, burning minutes; now they get one plain answer and a fallback.
+
+_LIB_RE = re.compile(r"\b(lib[\w+-]+(?:[.-][\w+]+)*?\.so(?:\.\d+)*)")
+_LIBS_RECHECK_SECONDS = 600.0
+_libs_missing: list[str] | None = None
+_libs_missing_at: float = 0.0
+
+
+class BrowserUnavailable(RuntimeError):
+    """Chromium can't run on this host: a setup problem only its admin can fix."""
+
+    def __init__(self, message: str, libraries: list[str] | None = None) -> None:
+        super().__init__(message)
+        self.libraries = list(libraries or [])
+
+
+def missing_system_libraries(exc: BaseException | str) -> list[str]:
+    """The shared libraries a failed Chromium launch named as missing, ``[]``
+    when the failure is something else."""
+    text = str(exc)
+    low = text.lower()
+    if not ("error while loading shared libraries" in low
+            or "cannot open shared object file" in low
+            or "host system is missing dependencies" in low
+            or "missing libraries" in low):
+        return []
+    libs = sorted(set(_LIB_RE.findall(text)))
+    return libs or ["system libraries"]
+
+
+def install_deps_command() -> str:
+    return f"sudo {sys.executable} -m playwright install-deps chromium"
+
+
+def browser_unavailable_message(libs: list[str]) -> str:
+    named = ", ".join(libs[:6]) + (" and more" if len(libs) > 6 else "")
+    return (
+        f"The browser can't start on this server: system libraries it needs are missing ({named}). "
+        "This is a server setup problem only the server's admin can fix, so don't try sudo, apt "
+        "or pip install from here, and don't retry the browser this turn. For pages that show "
+        "their text without scripts, use web_fetch with deep_fetch=false; tell the user which "
+        "pages needed the browser and that the admin has to fix it. "
+        f"Admin fix (on the server): {install_deps_command()}"
+    )
+
+
+def browser_unavailable_reason() -> str | None:
+    """The plain answer while this process knows Chromium can't start, else None."""
+    if _libs_missing is None or time.time() - _libs_missing_at > _LIBS_RECHECK_SECONDS:
+        return None
+    return browser_unavailable_message(_libs_missing)
+
+
+def _note_missing_libs(libs: list[str]) -> None:
+    global _libs_missing, _libs_missing_at
+    first = _libs_missing is None
+    _libs_missing, _libs_missing_at = libs, time.time()
+    if first:
+        log.error("Chromium can't start: system libraries missing",
+                  libraries=", ".join(libs[:10]), fix=install_deps_command())
+
+
+async def launch_chromium(browser_type: Any, *, headless: bool = True,
+                          auto_install: bool = True, install_timeout: int = 300,
+                          **kwargs: Any) -> Any:
+    """``browser_type.launch(...)`` with the two host problems handled: a
+    missing binary is installed once (into the shared cache) and retried; a
+    host without Chromium's system libraries raises :class:`BrowserUnavailable`
+    with a message the agent can act on — remembered for a while, so later
+    calls answer at once instead of failing slowly again."""
+    known = browser_unavailable_reason()
+    if known:
+        raise BrowserUnavailable(known, _libs_missing)
+    try:
+        return await browser_type.launch(headless=headless, **kwargs)
+    except Exception as exc:
+        libs = missing_system_libraries(exc)
+        if libs:
+            _note_missing_libs(libs)
+            raise BrowserUnavailable(browser_unavailable_message(libs), libs) from exc
+        if not _is_missing_browser_error(exc):
+            raise
+        if not auto_install:
+            raise RuntimeError(
+                "Chromium browser binary is not installed. Run "
+                "`playwright install chromium` (or set "
+                "tools.browser.auto_install_browser = true)."
+            ) from exc
+        log.warning("Chromium binary missing — auto-installing", error=str(exc)[:200])
+        ok, detail = await ensure_chromium_installed(timeout_seconds=install_timeout)
+        if not ok:
+            raise RuntimeError(
+                f"Chromium binary is missing and installing it failed ({detail}). "
+                "The server's admin has to run `playwright install chromium`."
+            ) from exc
+    log.info("Chromium installed — retrying launch")
+    try:
+        return await browser_type.launch(headless=headless, **kwargs)
+    except Exception as exc:
+        libs = missing_system_libraries(exc)
+        if libs:
+            _note_missing_libs(libs)
+            raise BrowserUnavailable(browser_unavailable_message(libs), libs) from exc
+        raise
+
+
 # ---------- lazy Chromium binary install -------------------------------------
 # The Playwright *package* can be importable while the *browser binary* is
 # absent (a fresh host that never ran `playwright install`). The binary lives in
-# a host-wide cache, so installing it once serves every agent on the machine.
+# PLAYWRIGHT_BROWSERS_PATH, which Flight Deck pins to one deck-wide cache for
+# its agents (see host_browsers_path), so one install serves all of them.
 # We install lazily on first launch failure, guarded so only one install runs
 # per process and we don't retry a hopeless install on every browser call.
 _install_lock = asyncio.Lock()
@@ -200,28 +341,11 @@ class BrowserSession:
 
     async def _launch_chromium(self, headless: bool) -> Any:
         """Launch Chromium, auto-installing the binary once if it's missing."""
-        try:
-            return await self._playwright.chromium.launch(headless=headless)
-        except Exception as exc:
-            if not _is_missing_browser_error(exc):
-                raise
-            if not getattr(self._config, "auto_install_browser", True):
-                raise RuntimeError(
-                    "Chromium browser binary is not installed. Run "
-                    "`playwright install chromium` (or set "
-                    "tools.browser.auto_install_browser = true)."
-                ) from exc
-            log.warning("Chromium binary missing — auto-installing", error=str(exc)[:200])
-            ok, detail = await ensure_chromium_installed(
-                timeout_seconds=getattr(self._config, "auto_install_timeout_seconds", 300),
-            )
-            if not ok:
-                raise RuntimeError(
-                    f"Chromium binary is missing and auto-install failed ({detail}). "
-                    "Run `playwright install chromium` on the host."
-                ) from exc
-            log.info("Chromium installed — retrying launch")
-            return await self._playwright.chromium.launch(headless=headless)
+        return await launch_chromium(
+            self._playwright.chromium, headless=headless,
+            auto_install=getattr(self._config, "auto_install_browser", True),
+            install_timeout=getattr(self._config, "auto_install_timeout_seconds", 300),
+        )
 
     @property
     def network(self) -> NetworkInterceptor:

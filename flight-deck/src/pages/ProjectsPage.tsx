@@ -5,6 +5,7 @@ import {
   FileText, Activity, ArrowRight, Pause, Archive,
 } from 'lucide-react'
 import { useUIStore } from '../stores/uiStore'
+import { fdFetch } from '../services/notifications'
 
 // ── Types ──
 
@@ -320,7 +321,7 @@ function ProjectDetail({
   }, [project.id])
 
   const fetchFleet = () => {
-    fetch('/fd/fleet').then((r) => r.json()).then(setFleet).catch(() => {})
+    fdFetch('/fd/fleet').then((r) => r.json()).then(setFleet).catch(() => {})
   }
 
   useEffect(() => {

@@ -56,6 +56,7 @@ class LinkConfigUpdate(BaseModel):
     expose: list[str] | None = None
     accept_from: list[str] | None = None
     allow_outbound: bool | None = None
+    outbound_users: bool | None = None
     max_concurrent: int | None = None
     max_inbound_timeout: float | None = None
     deny_tools: list[str] | None = None
@@ -99,14 +100,17 @@ async def botport_status(user: dict = Depends(get_current_user)):
     full = link.status()
     if user.get("role") == "admin":
         return full
+    # The other decks are the admins' unless they let every user's agents reach them.
+    reach = bool(link.settings.outbound_users)
     return {
         "enabled": full["enabled"],
         "state": full["state"],
         "deck_name": full["deck_name"],
-        "remote_agents": [r["name"] for r in link.remote_agents()],
+        "remote_agents": [r["name"] for r in link.remote_agents()] if reach else [],
         # The decks those agents run on, by what the hub's operator calls them.
         "decks": [{"name": d.get("name", ""), "label": str(d.get("label") or "")}
-                  for d in full["network"].get("decks", []) if d.get("status") == "connected"],
+                  for d in full["network"].get("decks", []) if d.get("status") == "connected"]
+        if reach else [],
     }
 
 

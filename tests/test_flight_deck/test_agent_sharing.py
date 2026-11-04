@@ -1305,12 +1305,15 @@ class TestMemberSocketFrames:
         finally:
             cm.__exit__(None, None, None)
 
-    def test_member_daily_allowance(self, ws_deck):
+    def test_member_daily_allowance(self, ws_deck, monkeypatch):
         """A member's chat counts against THEIR plan's daily allowance; over
         it, the turn is refused before it reaches the agent."""
         import functools
 
         from captain_claw.flight_deck import usage_quota
+
+        # Refused at once: the one finishing message is test_usage_quota's.
+        monkeypatch.setenv("FD_USAGE_FINISH_MINUTES", "0")
 
         cm, s, _ = _open(ws_deck)
         try:

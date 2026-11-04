@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -23,6 +24,8 @@ LOOPBACK = ("127.0.0.1", 40001)
 def _auth_on(monkeypatch):
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setattr(usage_quota, "STANDALONE_MODE", False)
+    # The limits refuse at once here; the finishing message has its own tests.
+    monkeypatch.setenv("FD_USAGE_FINISH_MINUTES", "0")
 
 
 @pytest.fixture
@@ -467,3 +470,140 @@ async def test_agent_reports_only_uncached_tokens(tmp_path, monkeypatch):
     await sm.record_llm_usage(provider="openai", prompt_tokens=100, completion_tokens=20,
                               total_tokens=120, byok=True)
     assert reported == [(2_300, False), (120, True)]
+
+
+# ── The spend ledger as the meter's floor (cohort001, 2026-11) ─────────
+
+
+def _spend(day: str, *, fresh: int, out: int = 0, written: int = 0, cached: int = 0, byok: int = 0):
+    return {"day": day, "model": "deepseek-flash", "byok": byok, "input_tokens": fresh,
+            "output_tokens": out, "cache_write_tokens": written, "cache_read_tokens": cached,
+            "calls": 3}
+
+
+async def test_ledger_floors_a_meter_the_agents_never_reported_to(fd_db):
+    u = await _user(fd_db, messages_per_day=0, tokens_per_day=100_000)
+    day = usage_quota.today()
+    await usage_quota.record_tokens(fd_db, u["id"], 4_298)
+    # What the agent's own llm_usage holds: cache reads never count.
+    await fd_db.add_usage_spend("osman", u["id"], [
+        _spend(day, fresh=240_000, out=80_000, cached=2_600_000),
+        _spend(day, fresh=50_000, byok=1),
+    ], 63)
+    st = await usage_quota.status(fd_db, u["id"])
+    assert st["tokens"]["used"] == 320_000 and st["blocked"] == "tokens"
+
+
+async def test_reports_win_while_the_ledger_lags(fd_db):
+    u = await _user(fd_db, messages_per_day=0, tokens_per_day=0)
+    day = usage_quota.today()
+    await usage_quota.record_tokens(fd_db, u["id"], 9_000)
+    await fd_db.add_usage_spend("a", u["id"], [_spend(day, fresh=1_000)], 1)
+    assert (await usage_quota.status(fd_db, u["id"]))["tokens"]["used"] == 9_000
+
+
+async def test_a_reset_starts_the_ledger_floor_over(fd_db):
+    u = await _user(fd_db, messages_per_day=0, tokens_per_day=100_000)
+    day = usage_quota.today()
+    await fd_db.add_usage_spend("a", u["id"], [_spend(day, fresh=150_000)], 5)
+    assert (await usage_quota.status(fd_db, u["id"]))["blocked"] == "tokens"
+    await fd_db.reset_daily_usage(u["id"], day)
+    st = await usage_quota.status(fd_db, u["id"])
+    assert st["tokens"]["used"] == 0 and st["blocked"] is None
+    await fd_db.add_usage_spend("a", u["id"], [_spend(day, fresh=7_000)], 6)
+    assert (await usage_quota.status(fd_db, u["id"]))["tokens"]["used"] == 7_000
+    # A free reset keeps the base too.
+    await fd_db.set_usage_resets(u["id"], 1)
+    assert await fd_db.use_usage_reset(u["id"], day)
+    assert (await usage_quota.status(fd_db, u["id"]))["tokens"]["used"] == 0
+
+
+async def test_admin_usage_today_shows_the_floor(fd_db):
+    admin = await _user(fd_db, role="admin")
+    u = await _user(fd_db)
+    await fd_db.add_usage_spend("a", u["id"], [_spend(usage_quota.today(), fresh=12_000, out=3_000)], 2)
+    async with _client(_app(admin)) as client:
+        body = (await client.get("/fd/admin/usage/today")).json()
+    assert body["usage"][u["id"]]["tokens"] == 15_000
+
+
+async def test_the_first_refusal_of_the_day_goes_on_the_line(fd_db, monkeypatch):
+    from captain_claw.flight_deck import line
+
+    posted = []
+
+    async def fake_post(user_id, kind, title, body="", **kw):
+        posted.append((user_id, title, body, kw.get("needs_you")))
+        return "id"
+
+    monkeypatch.setattr(line, "post", fake_post)
+    monkeypatch.setattr(usage_quota, "_REFUSAL_TOLD", {})
+    u = await _user(fd_db, messages_per_day=1, tokens_per_day=0)
+    assert (await usage_quota.admit_message(u["id"], "hello"))[0]
+    for _ in range(3):
+        assert not (await usage_quota.admit_message(u["id"], "approve the last step"))[0]
+    assert len(posted) == 1
+    user_id, title, body, needs_you = posted[0]
+    assert user_id == u["id"] and "wasn't sent" in title and "resets at midnight UTC" in body
+    assert needs_you
+
+
+# ── One message past the cap so a job can finish (cohort001: jack) ─────
+
+
+@pytest.fixture
+def _quiet_line(monkeypatch):
+    from captain_claw.flight_deck import line
+
+    posted = []
+
+    async def fake_post(user_id, kind, title, body="", **kw):
+        posted.append(title)
+        return "id"
+
+    monkeypatch.setattr(line, "post", fake_post)
+    monkeypatch.setattr(usage_quota, "_REFUSAL_TOLD", {})
+    monkeypatch.setenv("FD_USAGE_FINISH_MINUTES", "30")
+    return posted
+
+
+async def test_one_message_past_the_cap_finishes_a_job(fd_db, _quiet_line):
+    u = await _user(fd_db, messages_per_day=0, tokens_per_day=1000)
+    await usage_quota.record_tokens(fd_db, u["id"], 1200)  # the agent just worked
+    st = await usage_quota.status(fd_db, u["id"])
+    assert st["blocked"] is None and st["warning"] == "finish" and st["finish"] == "tokens"
+    ok, st = await usage_quota.admit_message(u["id"], "yes, do the last step")
+    assert ok and st["blocked"] == "tokens" and st["finish"] is None
+    ok, _ = await usage_quota.admit_message(u["id"], "and one more")
+    assert not ok
+    assert _quiet_line[0] == "One message past today's limit went through"
+    assert "wasn't sent" in _quiet_line[1]
+    # Scheduled tasks never get it.
+    assert (await usage_quota.automation_blocked(u["id"]))["blocked"] == "tokens"
+
+
+async def test_no_finishing_message_after_a_quiet_spell(fd_db, _quiet_line):
+    u = await _user(fd_db, messages_per_day=1, tokens_per_day=0)
+    assert (await usage_quota.admit_message(u["id"], "hi"))[0]
+    old = (datetime.now(UTC) - timedelta(minutes=45)).isoformat()
+    await fd_db._db.execute("UPDATE daily_usage SET updated_at = ? WHERE user_id = ?", (old, u["id"]))
+    await fd_db._db.commit()
+    ok, st = await usage_quota.admit_message(u["id"], "back after lunch")
+    assert not ok and st["blocked"] == "messages"
+
+
+async def test_the_finishing_message_can_be_turned_off(fd_db, _quiet_line, monkeypatch):
+    monkeypatch.setenv("FD_USAGE_FINISH_MINUTES", "0")
+    u = await _user(fd_db, messages_per_day=1, tokens_per_day=0)
+    assert (await usage_quota.admit_message(u["id"], "hi"))[0]
+    assert not (await usage_quota.admit_message(u["id"], "again"))[0]
+
+
+async def test_a_reset_gives_the_finishing_message_back(fd_db, _quiet_line):
+    u = await _user(fd_db, messages_per_day=1, tokens_per_day=0)
+    for text in ("one", "finish"):
+        assert (await usage_quota.admit_message(u["id"], text))[0]
+    assert not (await usage_quota.admit_message(u["id"], "three"))[0]
+    await fd_db.reset_daily_usage(u["id"], usage_quota.today())
+    for text in ("one", "finish"):
+        assert (await usage_quota.admit_message(u["id"], text))[0]

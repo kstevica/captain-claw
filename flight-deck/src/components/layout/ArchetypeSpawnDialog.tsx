@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  ArrowLeft, ArrowRight, Bot, Brain, Calendar, ChartColumn, Check, Clock, Code2, Contact,
+  ArrowLeft, ArrowRight, Bot, Brain, Calendar, ChartColumn, Check, Clock, Code2, Contact, FolderUp, Link2,
   Database, Eye, FileSpreadsheet, FileText, Gauge, Globe, Hammer, HeartPulse, Image as ImageIcon, LayoutGrid, Library, Lightbulb, ListTodo,
   Mail, Map as MapIcon, Mic, Monitor, Presentation, Scale, Search, SearchX, ScanText, Sparkles, Star,
   TerminalSquare, Wand2, X, Zap,
@@ -23,6 +23,7 @@ import { MODES } from '../../services/cognitiveModes'
 import { spawnArchetypeProcess } from '../../services/docker'
 import type { Archetype, ArchetypeCategory, ArchetypeRegistry } from '../../services/tierConfig'
 import { useProcessStore } from '../../stores/processStore'
+import { probeGoogle, probeMicrosoft } from '../../stores/connectionsStore'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 
 // ── Kiosk "New agent" picker ─────────────────────────────────────────
@@ -155,7 +156,7 @@ function matchesQuery(a: Archetype, q: string): boolean {
 /** What a caller needs to open AgentSetupDialog on the new agent. */
 export interface SetupRequest { slug: string; name: string; role: string; readDocs?: string[] }
 
-export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, asUser, ownerLabel }: {
+export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, asUser, ownerLabel, onConnect }: {
   /** Slugs of the agents this user can see — the default name avoids them. */
   takenSlugs: Set<string>
   onClose: () => void
@@ -167,6 +168,10 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
    *  their tier set and plan. */
   asUser?: string
   ownerLabel?: string
+  /** Open Connections on that service (the kiosk passes it): an archetype that
+   *  works in mail or a calendar says so before it's created, not on its first
+   *  turn ("Triage my inbox" → blocked, cohort001). */
+  onConnect?: (service: 'google' | 'microsoft') => void
 }) {
   const [registry, setRegistry] = useState<ArchetypeRegistry | null>(null)
   const [loadErr, setLoadErr] = useState('')
@@ -189,6 +194,19 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
   const archetypes = registry?.archetypes ?? null
   const fullscreenHost = useMemo(() => (isMobile ? null : { fullscreen, toggle: () => setFullscreen((v) => !v) }), [isMobile, fullscreen])
   const big = fullscreen && !isMobile
+  // Are the person's mail accounts connected? Only their own count: an admin
+  // creating for someone else can't see theirs, so no note then. null = unknown.
+  const [mail, setMail] = useState<{ connected: boolean; microsoft: boolean } | null>(null)
+  useEffect(() => {
+    if (asUser) return
+    let live = true
+    Promise.all([probeGoogle(), probeMicrosoft()]).then(([g, m]) => {
+      if (!live || g.health === 'gray') return  // sign-in off: no accounts to connect
+      const up = (c: { health: string } | null) => !!c && (c.health === 'green' || c.health === 'yellow')
+      setMail({ connected: up(g) || up(m), microsoft: m !== null })
+    }).catch(() => {})
+    return () => { live = false }
+  }, [asUser])
 
   useEffect(() => {
     listArchetypes(asUser, true)
@@ -540,7 +558,9 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
             {(phoneDetail || !isMobile) && (
               <div className={`flex min-h-0 flex-1 flex-col ${isMobile ? '' : 'wide:w-80 wide:flex-none wide:border-l wide:border-zinc-800 xl:w-[22rem]'}`}>
                 {current ? (
-                  <ArchetypeDetail key={current.id} a={current} registry={registry} />
+                  <ArchetypeDetail key={current.id} a={current} registry={registry}
+                    needsConnection={mail?.connected === false && worksInMail(current)}
+                    microsoft={!!mail?.microsoft} onConnect={onConnect} />
                 ) : !loadErr && archetypes === null ? (
                   <div role="presentation" className="flex-1 space-y-3 p-5">
                     <div className="fd-shimmer h-12 w-12 rounded-2xl" />
@@ -748,7 +768,26 @@ function ArchetypeCard({ a, active, disabled, tier, onPick, onShow }: {
   )
 }
 
-function ArchetypeDetail({ a, registry }: { a: Archetype; registry: ArchetypeRegistry | null }) {
+const MAIL_TOOLS = new Set(['google_mail', 'google_calendar', 'microsoft_mail', 'microsoft_calendar'])
+
+/** It does its work in someone's mail or calendar. */
+function worksInMail(a: Archetype): boolean {
+  return (a.tools || []).some((t) => MAIL_TOOLS.has(t))
+}
+
+/** It works on code (people asked hosted ones to "explore the repository"). */
+function worksOnCode(a: Archetype): boolean {
+  return a.family === 'Engineering' || (a.tools || []).includes('codemap')
+}
+
+function ArchetypeDetail({ a, registry, needsConnection, microsoft, onConnect }: {
+  a: Archetype
+  registry: ArchetypeRegistry | null
+  needsConnection?: boolean
+  /** Microsoft is set up on this deck (otherwise only Google is offered). */
+  microsoft?: boolean
+  onConnect?: (service: 'google' | 'microsoft') => void
+}) {
   const look = archetypeLook(a.id, a.family || 'Other')
   const Icon = look.icon
   const kind = kindLook(archetypeKind(a))
@@ -780,6 +819,29 @@ function ArchetypeDetail({ a, registry }: { a: Archetype; registry: ArchetypeReg
       </div>
 
       <div className="space-y-4 px-4 pb-5 wide:px-5">
+        {needsConnection && (
+          <div role="note" className="rounded-xl border border-sky-500/30 bg-sky-500/5 px-3 py-2.5 text-xs leading-relaxed text-sky-800 dark:text-sky-200">
+            <p className="flex items-start gap-2">
+              <Link2 className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              <span className="min-w-0">
+                It works in your mail and calendar, and {microsoft ? 'neither Google nor Microsoft is' : 'Google isn\'t'} connected
+                yet. Connect {microsoft ? 'one' : 'it'} first, or it can't read your inbox.
+              </span>
+            </p>
+            {onConnect && (
+              <div className="mt-2 flex flex-wrap gap-2 pl-5">
+                <Button className="!px-2.5 !py-1 !text-xs" onClick={() => onConnect('google')}>Connect Google</Button>
+                {microsoft && <Button className="!px-2.5 !py-1 !text-xs" onClick={() => onConnect('microsoft')}>Connect Microsoft</Button>}
+              </div>
+            )}
+          </div>
+        )}
+        {worksOnCode(a) && (
+          <p role="note" className="flex items-start gap-2 rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2.5 text-xs leading-relaxed text-zinc-400">
+            <FolderUp className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0">It works on code you give it: attach files or a .zip to a chat message. For a folder on your own computer, use the Captain desktop app.</span>
+          </p>
+        )}
         {disclaimer && (
           <p role="note" className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/5 px-3 py-2.5 text-xs leading-relaxed text-amber-800 dark:text-amber-200">
             {a.disclaimer === 'legal' ? <Scale className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <HeartPulse className="mt-0.5 h-3.5 w-3.5 shrink-0" />}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Loader2, Users, RefreshCw, Check, X as XIcon, AlertCircle } from 'lucide-react'
+import { fdFetch } from '../../services/notifications'
 
 interface FleetAgent {
   name: string
@@ -45,7 +46,8 @@ export function AgentAllowlistPicker({
     setLoading(true)
     setError(null)
     try {
-      const resp = await fetch('/fd/fleet', { credentials: 'include' })
+      // Signed in: the deck lists only the caller's own agents.
+      const resp = await fdFetch('/fd/fleet')
       if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`)
       const data: FleetAgent[] = await resp.json()
       // Stable sort: running first, then by name.

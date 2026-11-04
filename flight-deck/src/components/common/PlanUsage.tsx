@@ -186,6 +186,19 @@ export function PlanUsageBar({ simple }: { simple: boolean }) {
     )
   }
 
+  if (s.warning === 'finish') {
+    return (
+      <div role="status" className="flex items-start gap-2.5 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+        <Hourglass className="mt-px h-3.5 w-3.5 shrink-0" />
+        <span className="min-w-0 flex-1">
+          {s.finish === 'tokens' ? "Today's AI usage is used up." : `Today's ${plural(s.messages.limit, 'message')} are used up.`}{' '}
+          Your next message still goes through, so your agent can finish what it's doing. After that, chat waits until {resetClock(s.resets_at)}.
+        </span>
+        <FreeReset s={s} compact tone="border-amber-500/40 hover:bg-amber-500/10" />
+      </div>
+    )
+  }
+
   if (!simple && !s.warning) return null
   const parts: string[] = []
   if (s.messages.limit > 0) {

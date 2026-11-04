@@ -54,19 +54,9 @@ def _slot() -> asyncio.Semaphore:
 
 
 async def _launch(pw):
-    from captain_claw.tools.browser_session import (
-        _is_missing_browser_error,
-        ensure_chromium_installed,
-    )
-    try:
-        return await pw.chromium.launch(headless=True)
-    except Exception as exc:
-        if not _is_missing_browser_error(exc):
-            raise
-        ok, detail = await ensure_chromium_installed()
-        if not ok:
-            raise RuntimeError(f"no browser on this deck: {detail}") from exc
-        return await pw.chromium.launch(headless=True)
+    from captain_claw.tools.browser_session import launch_chromium
+
+    return await launch_chromium(pw.chromium, headless=True)
 
 
 async def rendered_text(url: str) -> tuple[str, str]:

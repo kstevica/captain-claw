@@ -327,7 +327,7 @@ async def _launch(playwright: Any) -> Any:
     """Headless Chromium whose own network goes nowhere: every request the
     page makes is answered by the router, so a dead proxy (loopback
     included) only catches what the router can't see."""
-    from captain_claw.tools.browser_session import _is_missing_browser_error, ensure_chromium_installed
+    from captain_claw.tools.browser_session import launch_chromium
 
     args = [
         "--proxy-server=http://127.0.0.1:9",
@@ -336,18 +336,7 @@ async def _launch(playwright: Any) -> Any:
         "--disable-background-networking",
         "--no-first-run",
     ]
-    try:
-        return await playwright.chromium.launch(headless=True, args=args)
-    except Exception as exc:
-        if not _is_missing_browser_error(exc):
-            raise
-        ok, detail = await ensure_chromium_installed()
-        if not ok:
-            raise RuntimeError(
-                f"Chromium isn't installed and installing it failed ({detail}). "
-                "Run `playwright install chromium` on the host."
-            ) from exc
-        return await playwright.chromium.launch(headless=True, args=args)
+    return await launch_chromium(playwright.chromium, headless=True, args=args)
 
 
 class VisualizeTool(Tool):

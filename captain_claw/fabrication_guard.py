@@ -67,6 +67,8 @@ NARRATED_LOOKUP = "narrated_lookup"   # no tool call, yet narrates lookups
 FABRICATED_ID = "fabricated_id"       # quotes a tool-style ID nothing showed
 PAYMENT_CLAIM = "false_payment"       # says something was paid; the ledger doesn't say so
 WHATSAPP_CLAIM = "false_whatsapp_send"  # says a WhatsApp message went out; no send did
+DELEGATION_CLAIM = "false_delegation"  # says other agents did work; none was contacted
+SCHEDULE_CLAIM = "false_schedule_change"  # says a scheduled job changed; none did (or another did)
 
 
 # ── Tool results ─────────────────────────────────────────────────────
@@ -1761,6 +1763,281 @@ def whatsapp_corrective() -> str:
 WHATSAPP_BACKSTOP = "Note: no WhatsApp message was sent."
 
 
+# ── Work other agents did ────────────────────────────────────────────
+#
+# A lead agent wrote six "phases" of team results — "Development Lead
+# returned a full package claiming five direct contacts", "Quality Reviewer
+# returned …", "Development Lead independently contacted all five
+# specialists" — in turns that made no flight_deck call at all, and once an
+# invented delegation failure the user then spent an hour fixing. Another
+# agent's work is real only when a hand-off answered in this turn, or the
+# turn carries that agent's message or result.
+
+DELEGATION_TOOLS = frozenset({"flight_deck", "consult_peer", "captain_swarm"})
+
+# The agent nouns names of agents end in ("Development Lead", "Quality
+# Reviewer", "Deep Researcher"), and plain words for other agents.
+_AGENT_WORD = (
+    r"(?:agents?|sub-?agents?|specialists?|teammates?|team\s*mates?|peers?|workers?|"
+    r"agent[a-z]*|specijalist\w*|kolega|kolegica|suradni[kc]\w*)"
+)
+_ROLE_NOUN = (
+    r"(?i:" + _AGENT_WORD + r"|(?:lead|reviewer|architect|engineer|developer|researcher|"
+    r"analyst|writer|editor|coordinator|designer|tester|auditor|planner|strategist|"
+    r"assistant|bot)s?)"
+)
+_NOT_A_NAME = (r"(?!(?:The|A|An|My|Our|Your|This|That|These|Those|Each|Every|All|Both|Then|And|"
+               r"But|So|Once|When|After|If|Until|Unless|Since|While|Before|Now|Here|Today|"
+               r"Kad|Kada|Nakon|Ako|Dok|Čim|Sada|Sad|Ovdje)\b)")
+_AGENT_SUBJECT = (
+    r"(?:(?i:\b(?:all|both|each|every\s+one\s+of\s+the|two|three|four|five|six|seven|eight|"
+    r"nine|ten|\d+)\s+(?:[\w-]+\s+){0,2})" + _ROLE_NOUN + r"\b"
+    r"|\b(?:" + _NOT_A_NAME + r"[A-Z][\w-]*\s+){1,3}" + _ROLE_NOUN + r"\b"
+    r"|(?i:\b(?:the\s+|my\s+|our\s+|your\s+|other\s+|another\s+)?" + _AGENT_WORD + r"\b))"
+)
+_DELEGATED_VERB = (
+    r"(?i:returned|reported(?:\s+back)?|replied|responded|answered|confirmed|came\s+back|"
+    r"sent\s+(?:back|over)|delivered|acknowledged|completed|finished|contacted|consulted|"
+    r"delegated|reached|produced|submitted|approved|reviewed|found|flagged|signed\s+off|"
+    r"vratio|vratila|vratili|javio|javila|javili|odgovorio|odgovorila|odgovorili|"
+    r"potvrdio|potvrdila|potvrdili|dostavio|dostavila|dostavili|zavr[šs]io|zavr[šs]ila|"
+    r"zavr[šs]ili|kontaktirao|kontaktirala|kontaktirali)"
+)
+_HAS = (r"(?i:(?:(?:has|have|had|je|su)\s+)?(?:(?:now|already|independently|also|just|"
+        r"sve|ve[ćc])\s+)?)")
+_OTHERS_DID_TAIL = r"(?:\s*\([^)\n]{0,30}\))?[ \t,]+" + _HAS + _DELEGATED_VERB + r"\b"
+_OTHERS_DID_RE = re.compile(_AGENT_SUBJECT + _OTHERS_DID_TAIL)
+_I_HANDED_RE = re.compile(
+    r"\bI(?i:(?:'ve|\s+have|\s+had)?\s+(?:now\s+|just\s+|also\s+|already\s+)?"
+    r"(?:delegated|assigned|handed(?:\s+off)?|forwarded|dispatched|briefed|consulted|"
+    r"instructed|contacted|messaged|pinged|tasked|asked)\b[^.\n?]{0,50}?)" + _AGENT_SUBJECT
+    + r"|(?i:\b(?:delegirao|delegirala|proslijedio|proslijedila|kontaktirao|kontaktirala|"
+    r"zadu[žz]io|zadu[žz]ila)\s+sam\b)"
+)
+_HANDOFF_FAILED_RE = re.compile(
+    r"(?i)\b(?:delegation|hand-?off|consult(?:ation)?|the\s+call|(?:message|request))"
+    r"(?:\s+(?:to|with)\s+[\w\s-]{1,40}?)?\s+(?:has\s+|had\s+)?"
+    r"(?:failed|timed\s+out|errored|bounced|was\s+(?:refused|rejected|blocked))\b"
+)
+_DELEG_NOT_RE = re.compile(
+    r"(?i)\b(?:not|never|no|nobody|none|neither|nije|nisu|nisam|nitko|without)\b|n't\b"
+)
+_DELEG_EARLIER_RE = re.compile(
+    r"(?i)\b(?:earlier|previously|before|last\s+(?:time|turn|run|phase|week|night)|"
+    r"yesterday|in\s+(?:the\s+)?(?:previous|last|earlier)\b|(?:\d+|a\s+few|several)\s+"
+    r"(?:minutes?|hours?|days?)\s+ago|ranije|prije|ju[čc]er|pro[šs]li\s+put|pro[šs]l\w+)"
+)
+_DELEG_IF_RE = re.compile(
+    r"(?i)\b(?:once|when|whenever|after|if|until|unless|as\s+soon\s+as|kad|kada|nakon|ako|"
+    r"dok|čim|cim)\b[^.\n]{0,60}$"
+)
+_RECALL_REQUEST_RE = re.compile(
+    r"(?i)\b(?:what\s+did|what\s+has|what\s+have|did\s+\w+\s+(?:say|reply|answer|return|report)|"
+    r"summari[sz]e|recap|remind\s+me|repeat|again|[šs]to\s+je|[šs]ta\s+je|je\s+li|jesu\s+li|"
+    r"ponovi|podsjeti)\b"
+)
+
+
+@dataclass(frozen=True)
+class _DelegationClaim:
+    line_index: int
+    sentence: str
+    failure: bool = False
+
+
+def _sentence_around(text: str, start: int, end: int) -> tuple[str, str]:
+    """(what precedes the match in its sentence, the whole sentence)."""
+    left = max(text.rfind(c, 0, start) for c in ".!?\n") + 1
+    rights = [i for i in (text.find(c, end) for c in ".!?\n") if i >= 0]
+    right = min(rights) if rights else len(text)
+    return text[left:start], text[left:right]
+
+
+def _delegation_claims(reply: str, names: Iterable[str] = ()) -> list[_DelegationClaim]:
+    """The places *reply* (its own words) says other agents did work, or a
+    hand-off failed — not negated, questioned, conditional, or dated before
+    this turn. *names*: agents this session has handed work to, whatever
+    they are called ("Mira returned …")."""
+    text = _own_words(reply)
+    found: list[_DelegationClaim] = []
+    seen: set[int] = set()
+    named = [re.compile(p.pattern + _OTHERS_DID_TAIL) for p in map(_name_re, names) if p]
+    for regex, failure in ((_OTHERS_DID_RE, False), (_I_HANDED_RE, False),
+                           (_HANDOFF_FAILED_RE, True), *((p, False) for p in named)):
+        for m in regex.finditer(text):
+            before, sentence = _sentence_around(text, m.start(), m.end())
+            span = before + m.group()
+            if (_DELEG_NOT_RE.search(m.group()) or _DELEG_NOT_RE.search(before[-25:])
+                    or _DELEG_EARLIER_RE.search(sentence) or _DELEG_IF_RE.search(before)
+                    or _is_question(text, m.end()) or _RETRACTION_RE.search(sentence)):
+                continue
+            line = text.count("\n", 0, m.start())
+            if line in seen:
+                continue
+            seen.add(line)
+            found.append(_DelegationClaim(line, span.strip()[:160], failure))
+    return found
+
+
+def _handoffs_tried(steps: Iterable[ToolStep]) -> bool:
+    """Any call to a peer this turn, answered or not (not a fleet listing)."""
+    return any(s.name in DELEGATION_TOOLS and s.action not in ("list_agents", "spawn_agent")
+               for s in steps)
+
+
+def _delegation_claim(reply: str, request: str, facts: TurnFacts) -> tuple[bool, str]:
+    """(whether *reply* reports other agents' work no hand-off in this turn
+    shows, the first such claim) — see :func:`judge_reply`."""
+    if not facts.delegation_tools or facts.others_turn or not reply.strip():
+        return False, ""
+    steps = facts.turn_steps
+    if any(_is_handoff(s) for s in steps):
+        return False, ""
+    if _RECALL_REQUEST_RE.search(request) or _OTHERS_DID_RE.search(request):
+        return False, ""
+    names = {str(s.arguments.get("agent_name") or "") for s in facts.session_steps
+             if s.name in DELEGATION_TOOLS} - {""}
+    claims = _delegation_claims(reply, sorted(names))
+    if not claims:
+        return False, ""
+    tried = _handoffs_tried(steps)
+    # A call that did go out and failed: saying it failed is true.
+    claims = [c for c in claims if not (c.failure and tried)]
+    if not claims:
+        return False, ""
+    return True, claims[0].sentence
+
+
+def delegation_corrective(claim: str) -> str:
+    return (f'Your reply says other agents did work in this turn ("{_quote(claim)}"), but no '
+            "flight_deck or consult_peer call answered in this turn: no agent was contacted and "
+            "nothing came back. Don't describe results, contacts or failures you don't have. If "
+            "the task needs another agent, call flight_deck now and report only what it actually "
+            "returns; if you are retelling an earlier result, say when it came back.")
+
+
+DELEGATION_BACKSTOP = ("Note: no other agent was contacted in this turn — the team work described "
+                       "above did not happen.")
+
+
+# ── Scheduled jobs ───────────────────────────────────────────────────
+#
+# Asked for a daily 06:00 run, an agent created it, then removed job "1" —
+# by then the new daily job — and told the user "I cancelled the weekly
+# Monday job". The cron tool now acts by ID only and names the job it
+# changed; this check holds a reply to what this turn's cron calls did.
+
+SCHEDULE_TOOLS = frozenset({"cron"})
+_CRON_WRITES = frozenset({"create", "remove", "pause", "resume"})
+_SCHED_WORD = (
+    r"(?:cron|schedul\w*|recurring|daily|weekly|hourly|monthly|every\s+(?:day|morning|"
+    r"evening|week|month|hour|mon\w*|tue\w*|wed\w*|thu\w*|fri\w*|sat\w*|sun\w*|\d+)|"
+    r"jobs?|reminders?|raspored\w*|zakazan\w*|dnevn\w*|tjedn\w*|mjese[čc]n\w*|"
+    r"svak\w*\s+(?:dan|jutro|ve[čc]er|tjedan|mjesec|ponedjeljak|utorak|srijed\w*|"
+    r"[čc]etvrtak|petak|subot\w*|nedjelj\w*|sat)|ponavlja\w*|podsjetni\w*|zadatak|posao)"
+)
+_SCHED_VERB_I = (
+    r"(?:scheduled|set\s+up|created|added|cancel+ed|removed|deleted|paused|stopped|disabled|"
+    r"turned\s+off|resumed|re-?enabled|replaced|moved|rescheduled|changed|switched)"
+)
+_SCHED_REMOVE_WORD = re.compile(
+    r"(?i)\b(?:cancel+ed|removed|deleted|stopped|disabled|turned\s+off|replaced|"
+    r"ukinu[oa]|otkaza[oa]|obrisa[oa]|ukloni[oa]|zaustavi[oa]|ugasi[oa]|maknu[oa])\b"
+)
+_SCHED_I_CLAIM_RE = re.compile(
+    r"(?i)\bI(?:'ve|\s+have|\s+had)?\s+(?:also\s+|now\s+|just\s+|already\s+)?" + _SCHED_VERB_I
+    + r"\b[^.\n?]{0,70}?\b" + _SCHED_WORD + r"\b"
+    r"|\b(?:zakaza[oa]|postavi[oa]|ukinu[oa]|otkaza[oa]|obrisa[oa]|ukloni[oa]|pauzira[oa]|"
+    r"zaustavi[oa]|promijeni[oa]|premjesti[oa]|ugasi[oa]|maknu[oa])\s+sam\b"
+    r"|\bsam\s+(?:zakaza[oa]|postavi[oa]|ukinu[oa]|otkaza[oa]|obrisa[oa]|ukloni[oa]|pauzira[oa]|"
+    r"zaustavi[oa]|promijeni[oa]|premjesti[oa]|ugasi[oa]|maknu[oa])\b"
+)
+_SCHED_STATE_CLAIM_RE = re.compile(
+    r"(?i)\b(?:the\s+|your\s+)?(?:new\s+)?" + _SCHED_WORD + r"(?:\s+[\w-]+){0,2}\s+"
+    r"(?:has\s+been|is\s+now|was\s+just|now)\s+(?:scheduled|set\s+up|set|created|cancel+ed|"
+    r"removed|deleted|paused|stopped|replaced|active|live)\b"
+    r"|^[ \t>*_•-]*(?:scheduled|done|set\s+up|postavljeno|zakazano|gotovo)\b\**[ \t]*[—–:-]"
+    r"[^.\n]{0,60}?\b" + _SCHED_WORD + r"\b"
+)
+_SCHED_FREQ = (
+    ("weekly", re.compile(r"(?i)\bweekly\b|\btjedn\w*|\bevery\s+(?:week|mon|tue|wed|thu|fri|sat|sun)\w*"
+                          r"|\bsvak\w*\s+(?:tjedan|ponedjeljak|utorak|srijed\w*|[čc]etvrtak|petak|"
+                          r"subot\w*|nedjelj\w*)|\bponedjelj\w*")),
+    ("daily", re.compile(r"(?i)\bdaily\b|\bdnevn\w*|\bevery\s+(?:day|morning|evening)\b"
+                         r"|\bsvak\w*\s+(?:dan|jutro|ve[čc]er)\b")),
+    ("every", re.compile(r"(?i)\bhourly\b|\bevery\s+\d+\s*(?:m|h|min\w*|hours?)\b|\bsvak\w*\s+sat\b")),
+)
+_REMOVED_JOB_RE = re.compile(r"(?m)^Job \S+ removed \((\w+)")
+
+
+def _schedule_claims(reply: str) -> list[tuple[str, bool]]:
+    """(sentence, whether it reports a removal) for each place *reply* says a
+    scheduled job was created or changed — not negated, questioned, or dated
+    before this turn."""
+    text = _own_words(reply)
+    out: list[tuple[str, bool]] = []
+    seen: set[int] = set()
+    for regex in (_SCHED_I_CLAIM_RE, _SCHED_STATE_CLAIM_RE):
+        for m in regex.finditer(text):
+            before, sentence = _sentence_around(text, m.start(), m.end())
+            if regex is _SCHED_I_CLAIM_RE and not re.search(r"(?i)\b" + _SCHED_WORD, sentence):
+                continue
+            if (_DELEG_NOT_RE.search(before[-25:]) or _DELEG_NOT_RE.search(m.group())
+                    or _DELEG_EARLIER_RE.search(sentence) or _DELEG_IF_RE.search(before)
+                    or _is_question(text, m.end())):
+                continue
+            line = text.count("\n", 0, m.start())
+            if line in seen:
+                continue
+            seen.add(line)
+            out.append((sentence.strip()[:200], bool(_SCHED_REMOVE_WORD.search(sentence))))
+    return out
+
+
+def _schedule_claim(reply: str, request: str, facts: TurnFacts) -> tuple[bool, str, str]:
+    """(whether *reply* misreports this turn's schedule changes, the claim,
+    what was really removed when it names another job) — see
+    :func:`judge_reply`."""
+    if not facts.schedule_tools or not reply.strip():
+        return False, "", ""
+    claims = _schedule_claims(reply)
+    if not claims:
+        return False, "", ""
+    writes = [s for s in facts.turn_steps
+              if s.name in SCHEDULE_TOOLS and s.action in _CRON_WRITES and s.ok]
+    if not writes:
+        return True, claims[0][0], ""
+    removed = [m.group(1).lower() for s in writes if s.action == "remove"
+               for m in _REMOVED_JOB_RE.finditer(s.content)]
+    if not removed:
+        return False, "", ""
+    for sentence, removal in claims:
+        if not removal:
+            continue
+        said = [kind for kind, regex in _SCHED_FREQ if regex.search(sentence)]
+        if said and not any(kind == got or (kind == "every" and got == "every")
+                            for kind in said for got in removed):
+            real = next((s.content.split("\n", 1)[0] for s in writes if s.action == "remove"), "")
+            return True, sentence, real
+    return False, "", ""
+
+
+def schedule_corrective(claim: str, removed: str = "") -> str:
+    if removed:
+        return (f'Your reply says "{_quote(claim)}", but the job removed in this turn was a '
+                f'different one — the tool answered: "{removed}" Call cron action=list, then tell '
+                "the user exactly which jobs are scheduled now; if the wrong job went, recreate it.")
+    return (f'Your reply says a scheduled job was created or changed ("{_quote(claim)}"), but no '
+            "cron create, remove, pause or resume went through in this turn. Don't claim it: make "
+            "the change with the cron tool now (check cron action=list first), or say plainly that "
+            "nothing was changed.")
+
+
+SCHEDULE_BACKSTOP = "Note: no scheduled job was created or changed in this turn."
+SCHEDULE_BACKSTOP_OTHER = ("Note: the scheduled job removed in this turn is not the one described "
+                           "above — check the list of scheduled jobs.")
+
+
 # ── One decision for a reply ─────────────────────────────────────────
 
 
@@ -1801,6 +2078,13 @@ class TurnFacts:
     payment_tools: frozenset[str] = frozenset()
     # The WhatsApp send tool, when this turn offers it: none, no WhatsApp check.
     whatsapp_tools: frozenset[str] = frozenset()
+    # The hand-off tools this turn offers (none: no delegation check), and
+    # whether the turn carries another agent's message or result (its
+    # report of that agent's work is then true).
+    delegation_tools: frozenset[str] = frozenset()
+    others_turn: bool = False
+    # The cron tool, when this turn offers it: none, no schedule check.
+    schedule_tools: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -1857,7 +2141,8 @@ def has_backstop(text: str) -> bool:
     text = text or ""
     return (MAIL_BACKSTOP.rstrip(".") in text or CALENDAR_BACKSTOP.rstrip(".") in text
             or LOOKUP_BACKSTOP in text or (_ID_BACKSTOP_TAIL in text and "Note: `" in text)
-            or PAYMENT_BACKSTOP in text)
+            or PAYMENT_BACKSTOP in text or DELEGATION_BACKSTOP in text
+            or SCHEDULE_BACKSTOP in text or SCHEDULE_BACKSTOP_OTHER in text)
 
 
 def _quote(text: str) -> str:
@@ -2059,12 +2344,16 @@ def judge_reply(raw: str, reply: str, facts: TurnFacts) -> Verdict:
     _pay_lines, pay_false = _payment_claim(reply, facts)
     wa_lines, wa_false = _whatsapp_claim(reply, facts)
     lines |= wa_lines
+    deleg_false, deleg_claim = _delegation_claim(reply, request, facts)
+    sched_false, sched_claim, sched_removed = _schedule_claim(reply, request, facts)
     narrated = (narrated_lookups(reply, has_pasted_content(request))
                 if facts.no_tool_call and not _HOW_TO_RE.match(request) else ())
     fabricated = () if facts.known is None else fabricated_ids(raw, facts.known, request)
     kinds = tuple(kind for kind, on in (
         (MAIL_CLAIM, mail_false), (CALENDAR_CLAIM, cal_false), (PAYMENT_CLAIM, pay_false),
-        (WHATSAPP_CLAIM, wa_false), (NARRATED_LOOKUP, bool(narrated)), (FABRICATED_ID, bool(fabricated)),
+        (WHATSAPP_CLAIM, wa_false), (DELEGATION_CLAIM, deleg_false),
+        (SCHEDULE_CLAIM, sched_false), (NARRATED_LOOKUP, bool(narrated)),
+        (FABRICATED_ID, bool(fabricated)),
     ) if on)
     if not kinds:
         return Verdict(claim_lines=lines)
@@ -2094,6 +2383,16 @@ def judge_reply(raw: str, reply: str, facts: TurnFacts) -> Verdict:
                      "Also: your reply says a WhatsApp message was sent, but no whatsapp_web send shows "
                      "it — don't claim one.")
         backstop.append(WHATSAPP_BACKSTOP)
+    if deleg_false:
+        parts.append(delegation_corrective(deleg_claim) if not parts else
+                     f'Also: your reply says other agents did work ("{_quote(deleg_claim)}"), but no '
+                     "agent was contacted in this turn — don't describe results you don't have.")
+        backstop.append(DELEGATION_BACKSTOP)
+    if sched_false:
+        parts.append(schedule_corrective(sched_claim, sched_removed) if not parts else
+                     f'Also: your reply says "{_quote(sched_claim)}", but this turn\'s cron calls '
+                     "don't show that change — check cron action=list and say what is scheduled now.")
+        backstop.append(SCHEDULE_BACKSTOP_OTHER if sched_removed else SCHEDULE_BACKSTOP)
     if narrated:
         parts.append(lookup_corrective(narrated, facts.tools) if not parts else
                      f"Also: your reply describes lookups ({_lookup_quotes(narrated)}) that never "

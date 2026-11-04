@@ -52,7 +52,11 @@ owner_router = APIRouter(tags=["public-file-links"])
 public_router = APIRouter(tags=["public-file-links-public"])
 
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{20,64}$")
-_EXPIRY_DAYS = (0, 1, 7, 30)        # 0 = no expiry
+# Every link expires: new ones after FD_PUBLIC_FILE_LINK_DAYS (7), at most
+# FD_PUBLIC_FILE_LINK_MAX_DAYS (30). A max of 0 lets links never expire, as
+# they all once did — and test users' client files and medical reports sat on
+# links nobody remembered (cohort001). 0 in a request means "never".
+_EXPIRY_CHOICES = (1, 7, 30)
 _PREVIEW_MAX_BYTES = 2 * 1024 * 1024  # text/markdown rendered inline up to this
 
 _data_dir: Path | None = None
@@ -71,6 +75,41 @@ def configure(*, data_dir: Path, resolve_auth: Callable[..., str],
     _resolve_auth = resolve_auth
     if resolve_agent_endpoint is not None:
         _resolve_agent_endpoint = resolve_agent_endpoint
+
+
+def _env_days(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.environ.get(name, "").strip() or default))
+    except ValueError:
+        return default
+
+
+def max_days() -> int:
+    """The longest a link may live; 0 = links may never expire."""
+    return _env_days("FD_PUBLIC_FILE_LINK_MAX_DAYS", 30)
+
+
+def default_days() -> int:
+    """How long a new link lives unless its owner picks otherwise."""
+    days, cap = _env_days("FD_PUBLIC_FILE_LINK_DAYS", 7), max_days()
+    if cap and (not days or days > cap):
+        return cap
+    return days
+
+
+def expiry_options() -> list[int]:
+    """The expiries a link may be given, in days (0 = never, only uncapped)."""
+    cap = max_days()
+    out = [d for d in _EXPIRY_CHOICES if not cap or d <= cap]
+    for extra in (cap, default_days()):
+        if extra and extra not in out:
+            out.append(extra)
+    out.sort()
+    return out + ([0] if not cap else [])
+
+
+def _until(days: int, now: datetime) -> str | None:
+    return (now + timedelta(days=days)).isoformat() if days else None
 
 
 def enabled() -> bool:
@@ -262,6 +301,49 @@ async def _sweep(db) -> None:
             pass
 
 
+async def cap_open_links(db) -> int:
+    """Give every link that never expires an end date, once the deck caps them
+    (``max_days``): its creation plus the cap, but at least a week from now so
+    nobody's link vanishes unannounced. Each owner is told on the Line, with
+    the date. Returns how many links got a date."""
+    cap = max_days()
+    if not cap or not enabled():
+        return 0
+    now = _utcnow()
+    floor = now + timedelta(days=min(7, cap))
+    told: dict[str, list[tuple[str, str]]] = {}
+    for row in await db.list_public_file_shares():
+        if row.get("expires_at"):
+            continue
+        try:
+            created = datetime.fromisoformat(row["created_at"])
+        except (TypeError, ValueError):
+            created = now
+        until = max(created + timedelta(days=cap), floor).isoformat()
+        await db.save_public_file_share({**row, "expires_at": until})
+        told.setdefault(row["owner_id"], []).append((row["filename"], until))
+    for owner, links in told.items():
+        try:
+            from captain_claw.flight_deck import line
+
+            first = min(u for _, u in links)[:10]
+            names = ", ".join(f for f, _ in links[:5]) + (" and more" if len(links) > 5 else "")
+            await line.post(
+                owner, "deck",
+                f"Your {len(links)} public link{'s' if len(links) != 1 else ''} now expire",
+                f"Public links on this deck now expire after at most {cap} days. Yours ({names}) "
+                f"stop working from {first}. To keep one, open it under Share and pick how long; "
+                "to end one now, choose Stop sharing.",
+                bell_type="info",
+            )
+        except Exception as exc:
+            log.debug("Public link owner not told", error=type(exc).__name__)
+    n = sum(len(v) for v in told.values())
+    if n:
+        log.info("Public links that never expired got an end date", links=n, cap_days=cap)
+    return n
+
+
 # ── Owner API ────────────────────────────────────────────────────────
 
 class ShareRequest(BaseModel):
@@ -269,12 +351,13 @@ class ShareRequest(BaseModel):
     agent_auth: str = ""       # the agent's web auth, as the download proxy takes it
     agent_ref: str = ""        # the client's agent id — lets the owner find the link again
     agent_name: str = ""
-    expires_days: int | None = None   # None: keep the link's current expiry (new: never)
+    expires_days: int | None = None   # None: keep the link's expiry (new: default_days())
 
 
 def _config() -> dict:
     return {"enabled": enabled(), "max_mb": round(_max_bytes() / (1024 * 1024)),
-            "public_base": _public_base(), "expiry_days": list(_EXPIRY_DAYS)}
+            "public_base": _public_base(), "expiry_days": expiry_options(),
+            "default_days": default_days()}
 
 
 def _require_enabled() -> None:
@@ -347,8 +430,9 @@ async def _publish(*, owner: str, agent_ref: str, agent_name: str, host: str, po
     path = path.strip()
     if not path:
         raise HTTPException(400, "Missing path")
-    if expires_days is not None and expires_days not in _EXPIRY_DAYS:
-        raise HTTPException(400, f"expires_days must be one of {list(_EXPIRY_DAYS)}")
+    if expires_days is not None and expires_days not in expiry_options():
+        raise HTTPException(400, f"expires_days must be one of {expiry_options()} "
+                                 "(0 = never, where this deck allows it)")
     db = get_db()
     await _sweep(db)
 
@@ -359,9 +443,11 @@ async def _publish(*, owner: str, agent_ref: str, agent_name: str, host: str, po
 
     now = _utcnow()
     if expires_days is None:
-        expires = existing["expires_at"] if existing else None
+        expires = existing["expires_at"] if existing else _until(default_days(), now)
+        if existing and not expires and max_days():
+            expires = _until(default_days(), now)  # a link from before every link expired
     else:
-        expires = (now + timedelta(days=expires_days)).isoformat() if expires_days else None
+        expires = _until(expires_days, now)
     row = await db.save_public_file_share({
         "token": token,
         "owner_id": owner,

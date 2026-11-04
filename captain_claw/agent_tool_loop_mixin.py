@@ -643,6 +643,13 @@ class AgentToolLoopMixin:
                 )
             )
 
+        # Pattern 0: DeepSeek's own markup (<｜DSML｜invoke name="read">…),
+        # written as text instead of a tool call (see captain_claw/dsml.py).
+        from captain_claw.dsml import dsml_calls
+
+        for _dsml_name, _dsml_args in dsml_calls(content):
+            _append_tool_call(_dsml_name, _dsml_args)
+
         # Pattern 1: @tool\ncommand: value
         pattern1 = r'@(\w+)\s*\n\s*command:\s*(.+?)(?:\n\n|\n\*|$)'
 

@@ -683,10 +683,22 @@ async def _browser(deep: bool) -> Check:
         return Check("connections", "Browser", "off", "Playwright isn't installed")
     if not deep:
         return Check("connections", "Browser", "ok", "Playwright installed (run deep=true to launch it)")
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True)
-        version = browser.version
-        await browser.close()
+    from captain_claw.tools.browser_session import (
+        BrowserUnavailable,
+        install_deps_command,
+        launch_chromium,
+    )
+
+    try:
+        async with async_playwright() as pw:
+            browser = await launch_chromium(pw.chromium, headless=True)
+            version = browser.version
+            await browser.close()
+    except BrowserUnavailable as exc:
+        libs = exc.libraries or ["system libraries"]
+        return Check("connections", "Browser", "fail",
+                     "can't start: missing " + ", ".join(libs[:4]),
+                     fix=f"the server's admin runs: {install_deps_command()}")
     return Check("connections", "Browser", "ok", f"Chromium {version} starts")
 
 

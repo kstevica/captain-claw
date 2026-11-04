@@ -55,7 +55,7 @@ async function fetchJson(url: string, init?: RequestInit): Promise<any> {
   return resp.json()
 }
 
-async function probeGoogle(): Promise<ConnectionStatus> {
+export async function probeGoogle(): Promise<ConnectionStatus> {
   const base: Omit<ConnectionStatus, 'health' | 'detail'> = {
     id: 'google',
     kind: 'google',
@@ -82,7 +82,7 @@ async function probeGoogle(): Promise<ConnectionStatus> {
 
 // Microsoft only shows once an admin configured it (most decks never do —
 // a permanent red row would be noise).
-async function probeMicrosoft(): Promise<ConnectionStatus | null> {
+export async function probeMicrosoft(): Promise<ConnectionStatus | null> {
   const base: Omit<ConnectionStatus, 'health' | 'detail'> = {
     id: 'microsoft',
     kind: 'microsoft',

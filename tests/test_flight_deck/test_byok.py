@@ -38,6 +38,8 @@ def _env(monkeypatch, tmp_path):
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setattr(byok, "STANDALONE_MODE", False)
     monkeypatch.setattr(usage_quota, "STANDALONE_MODE", False)
+    # Limits refuse at once here; the finishing message is test_usage_quota's.
+    monkeypatch.setenv("FD_USAGE_FINISH_MINUTES", "0")
     monkeypatch.setenv("FD_DATA_KEY_FILE", str(tmp_path / "data_key"))
     fd_crypto.reset_for_tests()
     # Agents live on disk under DATA_DIR — never the developer's real ones.
