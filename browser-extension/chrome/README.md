@@ -36,7 +36,7 @@ selection, a link or a picture. Pick an agent and what it should do:
 | Fact-check | Each key claim: true, doubtful or false, with a source |
 | Draft a reply | What you'd send or fill in — never sent |
 | Make tasks | Next steps with dates and owners |
-| Watch it | A daily check that tells you when it changes |
+| Watch it | A check in Flight Deck's Scheduled tasks (every hour, 6 hours, day or week) that tells you what changed |
 | Remember | The facts kept in the agent's memory |
 | Ask | Your own question |
 
@@ -51,6 +51,17 @@ own.
 **Files on the page** can be searched (name, type, link text, site) and
 filtered by kind — PDF, Docs, Sheets, Slides, Archives, Data, Images, Audio &
 video — with **Tick these** / **Untick these** for what's shown.
+
+**Watch it** never uses the agent's own cron: Flight Deck puts the check in
+its **Scheduled tasks** itself — one task per page and agent (watching the
+same page again updates it), running on that agent, its results in the
+agent's chat. The panel shows the task and opens it in Flight Deck to change
+or stop it. Each check compares the page with `watch/latest.md` in the clip
+folder and says only what changed.
+
+**New topic** (by the agent picker, and under an answer): the agent's chat
+starts a fresh session, as `/new` does in Flight Deck — the last one is kept
+in its history. Not while that agent is still answering a clip.
 
 **Text size** (Settings): Small, Medium or Large — the whole panel, kept for
 next time and in every window.

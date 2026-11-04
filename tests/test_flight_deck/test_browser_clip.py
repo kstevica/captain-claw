@@ -187,12 +187,20 @@ class _FakeAgent:
     def __init__(self, busy_first: bool = False):
         self.frames: list[dict] = []
         self.busy_first = busy_first
+        self.answers_commands = True
 
     async def handler(self, ws):
         await ws.send(json.dumps({"type": "welcome", "session": {"id": "s1"}}))
         async for raw in ws:
             frame = json.loads(raw)
             self.frames.append(frame)
+            if frame.get("type") == "command" and self.answers_commands:
+                # As the web chat's /new answers: the session it's on now.
+                await ws.send(json.dumps({"type": "session_info", "session": {"id": "s2"}}))
+                await ws.send(json.dumps({"type": "command_result", "command": frame["command"],
+                                          "content": "New session created: **Topic 2** (`s2`)",
+                                          "session": {"id": "s2", "name": "Topic 2"}}))
+                continue
             if frame.get("type") != "chat":
                 continue
             mid = frame.get("client_msg_id")
@@ -648,3 +656,117 @@ async def test_read_it_as_falls_back_to_the_general_lenses(deck, lens_agent):
     # Only the caller's own agents, only with the browser's token.
     assert (await c.get("/fd/clip/agents/nobody/lenses", headers=pat)).status_code == 404
     assert (await c.get("/fd/clip/agents/scout/lenses")).status_code == 401
+
+
+# ── "Watch it": a task in the deck's Scheduled tasks ─────────────────
+
+
+def test_watch_it_asks_the_deck_scheduler_never_the_agents_cron():
+    assert bc.watch_schedule("6h") == ("6h", "every 6h", "every 6 hours")
+    assert bc.watch_schedule("weekly")[1] == "weekly mon 09:00"
+    assert bc.watch_schedule("whenever") == ("daily", "daily 09:00", "every day at 09:00")
+    assert bc.watch_task_name("Acme pricing", "https://www.acme.vc/pricing") == "Watch: acme.vc — Acme pricing"
+    prompt = bc.watch_prompt("https://acme.vc/pricing", "Acme pricing", "2026-11-04-acme-vc-acme-pricing",
+                             note="the enterprise tier")
+    assert prompt.startswith("Watch check for https://acme.vc/pricing (")
+    assert "vfs:web-clips/2026-11-04-acme-vc-acme-pricing/watch/latest.md" in prompt
+    assert "No change on acme.vc." in prompt and "What I care about: the enterprise tier" in prompt
+    # The clip's own turn says it's scheduled already — and not to make another.
+    saved = {"folder": "2026-11-04-acme-vc-acme-pricing", "page": True}
+    meta = {"action": "watch", "page": {"title": "Acme pricing", "url": "https://acme.vc/pricing"}}
+    text = bc.compose_turn(meta, saved, watch={"name": "Watch: acme.vc — Acme pricing", "when": "every 6 hours"})["content"]
+    assert "Scheduled tasks — “Watch: acme.vc — Acme pricing”, every 6 hours — so don't schedule anything yourself" in text
+    assert "watch/latest.md" in text and "scheduling tool" not in text
+    assert "scheduling tool" not in bc.compose_turn(meta, saved)["content"]
+
+
+@pytest.fixture
+def scheduler(tmp_path, monkeypatch):
+    from captain_claw.flight_deck import fd_scheduler
+
+    store = fd_scheduler.SchedulerStore(tmp_path / "scheduler.db")
+    monkeypatch.setattr(fd_scheduler, "get_store", lambda: store)
+    return store
+
+
+@pytest.mark.asyncio
+async def test_watch_it_puts_one_check_per_page_in_scheduled_tasks(deck, scheduler):
+    c = deck["client"]
+    pat = {"Authorization": f"Bearer {await _pair(c, deck['jwt'])}"}
+    page = {"url": "https://acme.vc/pricing", "title": "Acme pricing"}
+    res = await c.post("/fd/clip/send", headers=pat, files=_form(
+        {"agent": "scout", "action": "watch", "note": "the enterprise tier", "page": page,
+         "watch": {"every": "6h", "tz": "Europe/Zagreb"}}, page=[("page.md", b"# Pricing\n")]))
+    assert res.status_code == 200, res.text
+    watch = res.json()["watch"]
+    assert watch["made"] == "created" and watch["schedule"] == "every 6h" and watch["when"] == "every 6 hours"
+    jobs = scheduler.list()
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job["id"] == watch["id"] and job["owner_id"] == "alice" and job["agent_slug"] == "scout"
+    assert job["delivery_kind"] == "agent" and json.loads(job["delivery"])["chat"] is True
+    assert job["tz"] == "Europe/Zagreb" and job["enabled"] == 1 and job["prompt_author"] == "human"
+    assert job["prompt"].startswith("Watch check for https://acme.vc/pricing (") and job["next_run_at"]
+    assert "the enterprise tier" in job["prompt"]
+    await _until_done(c, pat, res.json()["clip_id"])
+    assert "so don't schedule anything yourself" in deck["agent"].frames[-1]["content"]
+    record = json.loads((deck["clips"] / res.json()["folder"] / "clip.json").read_text())
+    assert record["watch_task"]["id"] == watch["id"]
+
+    # The same page watched again: that task, brought up to date — not a second one.
+    again = await c.post("/fd/clip/send", headers=pat, files=_form(
+        {"agent": "scout", "action": "watch", "page": page, "watch": {"every": "weekly", "tz": "Mars/Olympus"}},
+        page=[("page.md", b"# Pricing v2\n")]))
+    assert again.status_code == 200, again.text
+    assert again.json()["watch"]["made"] == "updated" and again.json()["watch"]["id"] == watch["id"]
+    [job] = scheduler.list()
+    assert job["schedule"] == "weekly mon 09:00" and job["tz"] == ""   # a zone the deck doesn't know: its own time
+    assert again.json()["folder"] in job["prompt"]                     # compares with the newest clip
+    await _until_done(c, pat, again.json()["clip_id"])
+
+    # Another action schedules nothing.
+    other = await c.post("/fd/clip/send", headers=pat, files=_form(
+        {"agent": "scout", "action": "summarize", "page": {"url": "https://acme.vc/blog", "title": "Blog"}},
+        page=[("page.md", b"# Blog\n")]))
+    assert other.status_code == 200 and other.json()["watch"] is None and len(scheduler.list()) == 1
+    await _until_done(c, pat, other.json()["clip_id"])
+
+
+@pytest.mark.asyncio
+async def test_a_watch_the_scheduler_turns_away_keeps_nothing(deck, scheduler, monkeypatch):
+    c = deck["client"]
+    pat = {"Authorization": f"Bearer {await _pair(c, deck['jwt'])}"}
+
+    def _refuse(**kw):
+        raise ValueError("the scheduler is full")
+
+    monkeypatch.setattr(scheduler, "create", _refuse)
+    res = await c.post("/fd/clip/send", headers=pat, files=_form(
+        {"agent": "scout", "action": "watch", "page": {"url": "https://acme.vc/jobs", "title": "Jobs"}},
+        page=[("page.md", b"# Jobs\n")]))
+    assert res.status_code == 500 and "Scheduled tasks" in res.json()["detail"]
+    assert not any(deck["clips"].iterdir()) and deck["agent"].frames == []
+
+
+
+# ── A new topic ──────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_new_topic_starts_a_fresh_session_in_the_agents_chat(deck, monkeypatch):
+    c = deck["client"]
+    pat = {"Authorization": f"Bearer {await _pair(c, deck['jwt'])}"}
+    r = await c.post("/fd/clip/agents/scout/new-topic", headers=pat)
+    assert r.status_code == 200, r.text
+    assert r.json() == {"ok": True, "agent": "Scout", "session": {"id": "s2", "name": "Topic 2"},
+                        "text": "New session created: **Topic 2** (`s2`)"}
+    assert deck["agent"].frames == [{"type": "command", "command": "/new"}]   # as /new in Flight Deck
+    # Only the caller's own running agents, only with the browser's token.
+    assert (await c.post("/fd/clip/agents/ledger/new-topic", headers=pat)).status_code == 409
+    assert (await c.post("/fd/clip/agents/nobody/new-topic", headers=pat)).status_code == 404
+    assert (await c.post("/fd/clip/agents/scout/new-topic")).status_code == 401
+    # An agent that never answers: said so, not waited on forever.
+    deck["agent"].answers_commands = False
+    monkeypatch.setattr(bc, "NEW_TOPIC_WAIT_S", 0.3)
+    slow = await c.post("/fd/clip/agents/scout/new-topic", headers=pat)
+    assert slow.status_code == 504 and "didn't answer" in slow.json()["detail"]

@@ -51,7 +51,7 @@ const S = {
   pairing: null,
   connectError: '',
   deckInput: '',
-  prefs: { snapshot: false, screenshot: false, textSize: 'small' },
+  prefs: { snapshot: false, screenshot: false, textSize: 'small', watchEvery: 'daily' },
   allSites: false,
   history: [],
   follow: true,        // the run view keeps the newest activity in sight
@@ -59,6 +59,7 @@ const S = {
   fileType: '',
   lenses: {},          // agent slug → {state, lenses, general, agent, at}
   lensMore: false,     // the general lenses shown beside the agent's own
+  newTopic: false,     // a new topic being started
 }
 
 // ── small helpers ──
@@ -503,6 +504,66 @@ function viewLenses() {
     ${S.perspective === 'custom' ? `<input type="text" id="lensText" style="margin-top:6px" placeholder="e.g. a hotel owner in Split" value="${esc(S.perspectiveText)}">` : ''}`
 }
 
+// ── a new topic: the agent's chat starts a fresh session (/new) ──
+
+function newTopicButton(slug = S.agent) {
+  const ag = agentDef(slug)
+  if (!ag) return ''
+  const working = S.run && !S.run.done && S.run.agentSlug === slug
+  const why = working ? `Wait for ${ag.name}'s answer first` : `Start a new topic with ${ag.name}: a fresh session in its chat (the last one is kept in its history)`
+  return `<button class="link-btn" data-act="new-topic" data-slug="${esc(slug)}" title="${esc(why)}" ${S.newTopic || working ? 'disabled' : ''}>
+    ${S.newTopic ? '<span class="spinner" style="width:10px;height:10px"></span>' : icon('newtopic', 'sm')} New topic</button>`
+}
+
+async function newTopic(slug) {
+  const ag = agentDef(slug)
+  if (!ag || S.newTopic) return
+  S.newTopic = true
+  render()
+  try {
+    await api(S.conn, `/fd/clip/agents/${encodeURIComponent(slug)}/new-topic`, { method: 'POST' })
+    toast(`New topic with ${ag.name} — the last one is kept in its history.`)
+  } catch (e) {
+    if (e instanceof AuthError) { S.newTopic = false; return disconnected(e.message) }
+    toast(e.message)
+  }
+  S.newTopic = false
+  render()
+}
+
+// ── "Watch it": how often the deck's Scheduled task checks ──
+
+const WATCH_EVERY = [['hourly', 'Every hour'], ['6h', 'Every 6 hours'], ['daily', 'Daily'], ['weekly', 'Weekly']]
+
+function watchEvery() {
+  return WATCH_EVERY.some(([id]) => id === S.prefs.watchEvery) ? S.prefs.watchEvery : 'daily'
+}
+
+function browserZone() {
+  try { return Intl.DateTimeFormat().resolvedOptions().timeZone || '' } catch { return '' }
+}
+
+function viewWatchTask(w) {
+  if (!w) return ''
+  let next = ''
+  if (w.next_run_at) {
+    try {
+      next = new Date(w.next_run_at * 1000).toLocaleString([], { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' })
+    } catch { /* no date */ }
+  }
+  return `
+    <div class="card watch-card">
+      <div class="row" style="align-items:flex-start">${icon('eye')}
+        <div class="grow">
+          <div class="label" style="margin-bottom:2px">${w.made === 'updated' ? 'Updated in Scheduled tasks' : 'Added to Scheduled tasks'}</div>
+          <div style="font-weight:600" class="ellipsis">${esc(w.name)}</div>
+          <div class="dim">${esc(w.when)}${next ? ` · next ${esc(next)}` : ''}</div>
+        </div>
+      </div>
+      <button class="btn block" data-act="open-task" style="margin-top:8px">${icon('external', 'sm')} Change or stop it in Flight Deck</button>
+    </div>`
+}
+
 // ── the main view ──
 
 function viewMain() {
@@ -600,7 +661,7 @@ function viewMain() {
   return `
     ${agents.length ? `
       <div>
-        <label class="label" for="agent">Agent</label>
+        <div class="label-row"><label class="label" for="agent" style="margin:0">Agent</label><span class="grow"></span>${newTopicButton()}</div>
         <select class="select" id="agent">${agentOptions}</select>
       </div>` : `<div class="notice">No agents yet — create or start one in Flight Deck, then <button class="btn" data-act="retry-me" style="padding:2px 8px">reload</button></div>`}
     <div class="card">${pageBlock}</div>
@@ -610,6 +671,11 @@ function viewMain() {
       <div class="label">What should it do?</div>
       <div class="actions">${actions}</div>
       <div class="hint">${esc(a.hint || '')}</div>
+      ${a.id === 'watch' ? `
+        <div class="label-row" style="margin-top:8px"><span class="label" style="margin:0">How often</span></div>
+        <div class="chips">${WATCH_EVERY.map(([id, label]) => `
+          <button class="chip ${watchEvery() === id ? 'on' : ''}" data-watch="${id}" aria-pressed="${watchEvery() === id}">${esc(label)}</button>`).join('')}</div>
+        <div class="hint">Flight Deck runs it in Scheduled tasks — change or stop it there.</div>` : ''}
     </div>
     <div>${viewLenses()}</div>
     <div>
@@ -886,6 +952,7 @@ async function send(asked) {
     const pageMd = pageMarkdown(cap, saved, unfetched, unticked, tablesSent)
     const m = cap.meta || {}
     const meta = {
+      ...(a.id === 'watch' ? { watch: { every: watchEvery(), tz: browserZone() } } : {}),
       agent: ag.slug, action: a.id, perspective: S.perspective, perspective_label: lensDef()?.label || '', perspective_text: S.perspectiveText, note,
       selection_only: !!(S.focus?.kind === 'selection' && cap.selection && S.include.selection),
       browser: browserLabel(), version: VERSION, captured_at: new Date().toISOString(),
@@ -912,7 +979,7 @@ async function send(asked) {
     })
     startRun({ clip_id: res.clip_id, folder: res.folder, vfs: res.vfs, agent: res.agent || ag.name, agentSlug: ag.slug,
                title: m.title || tab.title || tab.url, url: m.url || tab.url, action: a.id, actionLabel: a.label,
-               sentFiles: saved.length, unfetched: unfetched.length })
+               sentFiles: saved.length, unfetched: unfetched.length, watch: res.watch || null })
     S.sending = null
     S.note = ''
     S.focus = null
@@ -1056,6 +1123,7 @@ function viewRun() {
         <div class="dim ellipsis">${esc(run.agent)} · ${esc(hostOf(run.url))}</div>
       </div>
     </div>
+    ${viewWatchTask(run.watch)}
     <div class="row">${statusPill(run)}<span class="grow"></span>
       ${working ? `<button class="btn" data-act="stop" style="padding:4px 10px">${icon('stop', 'sm')} Stop</button>` : ''}
     </div>
@@ -1078,6 +1146,7 @@ function viewRun() {
         ${run.result ? `<button class="btn grow" data-act="copy">${icon('copy', 'sm')} Copy answer</button>` : ''}
         <button class="btn grow" data-act="open-deck">${icon('external', 'sm')} Open Flight Deck</button>
       </div>
+      <div class="row" style="justify-content:center">${newTopicButton(run.agentSlug)}</div>
       <div>
         <textarea id="followUp" rows="2" placeholder="Ask a follow-up about this page…">${esc(S.followUp)}</textarea>
         <button class="btn primary block" data-act="follow-up" style="margin-top:6px">${icon('send', 'sm')} Ask ${esc(run.agent)}</button>
@@ -1127,7 +1196,7 @@ async function saveRunFile(path) {
 async function remember(run) {
   const item = {
     clip_id: run.clip_id, title: run.title, url: run.url, agent: run.agent, agentSlug: run.agentSlug, action: run.action,
-    actionLabel: run.actionLabel, folder: run.folder, vfs: run.vfs, status: run.status, at: run.at || Date.now(),
+    actionLabel: run.actionLabel, folder: run.folder, vfs: run.vfs, status: run.status, at: run.at || Date.now(), watch: run.watch || null,
     result: String(run.result || '').slice(0, 8000), error: run.error || '', files: run.files || [],
   }
   S.history = [item, ...S.history.filter((h) => h.clip_id !== item.clip_id)].slice(0, HISTORY_MAX)
@@ -1213,7 +1282,7 @@ $view.addEventListener('click', (ev) => {
   // in between would draw it the old way.
   const summary = ev.target.closest('details.include > summary')
   if (summary) { S.includeOpen = !summary.parentElement.open; return }
-  const el = ev.target.closest('[data-act],[data-action],[data-lens],[data-history],[data-file-path],[data-ftype],[data-text-size]')
+  const el = ev.target.closest('[data-act],[data-action],[data-lens],[data-history],[data-file-path],[data-ftype],[data-text-size],[data-watch]')
   if (!el) return
   if (el.dataset.action) {
     S.action = el.dataset.action
@@ -1226,6 +1295,12 @@ $view.addEventListener('click', (ev) => {
     S.perspective = el.dataset.lens
     render()
     if (S.perspective === 'custom') document.getElementById('lensText')?.focus()
+    return
+  }
+  if (el.dataset.watch) {
+    S.prefs = { ...S.prefs, watchEvery: el.dataset.watch }
+    setStore({ prefs: S.prefs })
+    render()
     return
   }
   if (el.dataset.textSize) {
@@ -1268,6 +1343,8 @@ $view.addEventListener('click', (ev) => {
   else if (act === 'lens-refresh') loadLenses(S.agent, { fresh: true })
   else if (act === 'clear-focus') { S.focus = null; render() }
   else if (act === 'follow') { S.follow = true; render() }
+  else if (act === 'new-topic') newTopic(el.dataset.slug || S.agent)
+  else if (act === 'open-task' && S.conn && S.run?.watch?.id) chrome.tabs.create({ url: `${S.conn.url}/#task=${encodeURIComponent(S.run.watch.id)}` })
   else if (act === 'back') { S.view = 'main'; render(); scheduleScan(0) }
   else if (act === 'stop' && S.run) {
     api(S.conn, `/fd/clip/runs/${encodeURIComponent(S.run.clip_id)}/stop`, { method: 'POST' }).catch((e) => toast(e.message))
@@ -1398,7 +1475,7 @@ async function start() {
   try { S.windowId = (await chrome.windows.getCurrent()).id } catch { S.windowId = null }
   const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses'])
   S.agent = stored.agent || ''
-  S.prefs = { snapshot: false, screenshot: false, textSize: 'small', ...(stored.prefs || {}) }
+  S.prefs = { snapshot: false, screenshot: false, textSize: 'small', watchEvery: 'daily', ...(stored.prefs || {}) }
   applyTextSize()
   S.history = Array.isArray(stored.history) ? stored.history : []
   S.deckInput = stored.lastDeck || ''

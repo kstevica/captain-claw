@@ -194,12 +194,14 @@ ACTIONS: list[dict[str, Any]] = [
     },
     {
         "id": "watch", "label": "Watch it", "icon": "eye",
-        "hint": "A daily check that tells you what changed",
+        "hint": "A check in Scheduled tasks that tells you what changed",
         "files": "none", "snapshot": True,
+        # Flight Deck puts the check in Scheduled tasks itself (watch_task):
+        # this is the turn's text only when that couldn't be said in detail.
         "prompt": (
-            "Watch this page for me: set up a daily check with your scheduling tool that opens the "
-            "address, compares it with the saved copy (page.md in the clip folder) and tells me only "
-            "when something meaningful changes. Tell me what you scheduled."
+            "Watch this page for me. Flight Deck has put the check in my Scheduled tasks — don't schedule "
+            "anything yourself. Now tell me in two or three lines what you'll watch for, and save the page's "
+            "text as watch/latest.md in the clip folder: the next check compares against it."
         ),
     },
     {
@@ -353,7 +355,7 @@ def browser_label(text: Any) -> str:
 
 
 def compose_turn(meta: dict, saved: dict, *, owner: str = "",
-                 lenses: list[dict] | None = None) -> dict[str, Any]:
+                 lenses: list[dict] | None = None, watch: dict | None = None) -> dict[str, Any]:
     """The chat frame's words for a clip: ``content`` (what the person asked
     — the action, their note, the lens), ``file_paths`` (the page as text),
     ``attachment_notes`` (what else is in the clip folder) and
@@ -364,6 +366,7 @@ def compose_turn(meta: dict, saved: dict, *, owner: str = "",
     ``selection`` / ``mhtml`` / ``screenshot`` (bools), ``tables`` (count),
     ``files`` ([{name, size}]), ``unfetched`` ([{name, url, why}]).
     *lenses*: the agent's own lenses (``parse_lenses``), looked up first.
+    *watch*: the Scheduled task Flight Deck made for "Watch it" ({name, when}).
     """
     action = _ACTIONS.get(str(meta.get("action") or "")) or _ACTIONS["auto"]
     wanted_lens = str(meta.get("perspective") or "")
@@ -391,6 +394,13 @@ def compose_turn(meta: dict, saved: dict, *, owner: str = "",
     if note:
         lines += ["", note]
     asks = [] if follow_up else [action["prompt"]] if action["prompt"] else []
+    if watch and action["id"] == "watch" and not follow_up:
+        asks = [
+            f"Watch this page for me. Flight Deck has put the check in my Scheduled tasks — "
+            f"“{watch.get('name')}”, {watch.get('when')} — so don't schedule anything yourself. Now tell me "
+            "in two or three lines what you'll watch for, and save the page's text as "
+            f"{folder}watch/latest.md: the next check compares against it."
+        ]
     if lens:
         asks.append(lens["prompt"])
     elif custom_lens:
@@ -530,6 +540,54 @@ def parse_lenses(text: Any) -> list[dict[str, str]]:
 def lens_view(lenses: list[dict]) -> list[dict[str, str]]:
     """What the extension draws: the label, and the prompt as its hint."""
     return [{"id": x["id"], "label": x["label"], "hint": x.get("prompt", "")} for x in lenses]
+
+
+# ── "Watch it": a task in the deck's Scheduled tasks (pure parts, tested) ──
+#
+# Flight Deck makes the check itself, in its own scheduler (fd_scheduler: the
+# kiosk's Scheduled tasks), never the agent's private cron: the person sees
+# it, changes or stops it there, and each run lands in the agent's chat.
+
+WATCH_EVERY: dict[str, tuple[str, str]] = {
+    "hourly": ("every 1h", "every hour"),
+    "6h": ("every 6h", "every 6 hours"),
+    "daily": ("daily 09:00", "every day at 09:00"),
+    "weekly": ("weekly mon 09:00", "every Monday at 09:00"),
+}
+WATCH_DEFAULT = "daily"
+WATCH_MARK = "Watch check for "   # the task's prompt starts so: one task per page and agent
+
+
+def watch_schedule(every: Any) -> tuple[str, str, str]:
+    """The extension's "how often" → (key, scheduler schedule, in words)."""
+    key = str(every or "").strip().lower()
+    key = key if key in WATCH_EVERY else WATCH_DEFAULT
+    return key, *WATCH_EVERY[key]
+
+
+def watch_task_name(title: str, url: str) -> str:
+    return one_line(f"Watch: {site_of(url) or 'page'} — {title or site_of(url) or 'page'}", 60)
+
+
+def watch_prompt(url: str, title: str, folder: str, note: str = "") -> str:
+    """What each scheduled check asks the agent."""
+    where = f"vfs:{CLIP_PROJECT}/{folder}/"
+    site = site_of(url) or "the page"
+    lines = [
+        f"{WATCH_MARK}{url} (“{one_line(title, MAX_TITLE_CHARS) or site}”), sent from my browser into {where}.",
+        f"Open the page now and compare it with the last version you saw: {where}watch/latest.md "
+        f"(before the first check, {where}page.md).",
+        "- Something meaningful changed — prices, dates, terms, items added or gone, new files: say what, "
+        "old → new, in a few lines, with the address.",
+        f"- Nothing meaningful (layout, ads, counters, timestamps): reply only “No change on {site}.”",
+        "- You can't open it (a sign-in, a block): say so in one line — it may need my browser; I can send "
+        "it again with Captain for Chrome.",
+        f"Then save the page's text as {where}watch/latest.md, and when it changed, a dated copy "
+        f"{where}watch/<YYYY-MM-DD-HHMM>.md.",
+    ]
+    if note.strip():
+        lines.append(f"What I care about: {one_line(note, 600)}")
+    return "\n".join(lines)
 
 
 # ── Pairing ──────────────────────────────────────────────────────────
@@ -838,6 +896,96 @@ async def _make_lenses(key: str, user_id: str, agent: dict, host: str, port: int
         _lens_jobs.pop(key, None)
 
 
+def _schedule_watch(user_id: str, agent: dict, meta: dict, folder: str, title: str, url: str) -> dict:
+    """The "Watch it" check as a task in the deck's Scheduled tasks — made, or
+    the same page's on the same agent brought up to date (never two). Its
+    runs land in the agent's chat (and the person's Line)."""
+    from captain_claw.flight_deck import fd_scheduler
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    watch = meta.get("watch") if isinstance(meta.get("watch"), dict) else {}
+    key, schedule, when = watch_schedule(watch.get("every"))
+    tz = one_line(watch.get("tz"), 64)
+    try:
+        fd_scheduler._zone(tz)   # the browser's zone; one the deck doesn't know → the deck's time
+    except fd_scheduler.ScheduleError:
+        tz = ""
+    owner = user_id if _fd_auth_enabled() else ""   # as the kiosk makes them
+    slug = str(agent.get("slug") or "")
+    fields = {
+        "name": watch_task_name(title, url), "schedule": schedule, "tz": tz, "agent_slug": slug,
+        "prompt": watch_prompt(url, title, folder, str(meta.get("note") or "")),
+        "delivery_kind": "agent", "delivery": {"chat": True}, "enabled": True,
+    }
+    store = fd_scheduler.get_store()
+    mark = f"{WATCH_MARK}{url} "
+    same = next((j for j in store.list(owner_id=owner)
+                 if j.get("agent_slug") == slug and str(j.get("prompt") or "").startswith(mark)), None)
+    if same is not None:
+        row = store.update(same["id"], prompt_author="human", **fields) or same
+        made = "updated"
+    else:
+        row = store.create(owner_id=owner, prompt_author="human", **fields)
+        made = "created"
+    return {"id": row["id"], "name": row["name"], "every": key, "schedule": schedule, "when": when,
+            "tz": tz, "next_run_at": row.get("next_run_at"), "made": made}
+
+
+NEW_TOPIC_WAIT_S = 20.0
+
+
+@router.post("/agents/{slug}/new-topic")
+async def clip_new_topic(slug: str, user: dict = Depends(get_clip_user)):
+    """A new topic with this agent: its chat starts a fresh session, as /new
+    does in Flight Deck (the last one is kept in its history). Sent over the
+    agent's own /ws as a ``command`` frame; answered by its ``command_result``."""
+    import websockets
+
+    from captain_claw.flight_deck import agent_idle
+    from captain_claw.flight_deck.mcp_server_routes import _user_agents
+
+    agent = next((a for a in _user_agents(str(user["id"])) if a.get("slug") == slug), None)
+    if agent is None:
+        raise HTTPException(404, "That agent isn't one of yours.")
+    if not agent.get("port") or str(agent.get("status") or "").lower() not in ("running", "created", "asleep", "up"):
+        raise HTTPException(409, f"{agent.get('name')} isn't running — start it in Flight Deck.")
+    host, port = str(agent.get("host") or "localhost"), int(agent["port"])
+    try:
+        await agent_idle.wake_port(port, host)
+    except Exception:
+        log.debug("browser clip: wake before a new topic failed", exc_info=True)
+    auth = _agent_auth(port)
+    url = f"ws://{host}:{port}/ws" + (f"?token={auth}" if auth else "")
+
+    async def _ask() -> dict:
+        async with websockets.connect(url, max_size=8 * 1024 * 1024) as ws:
+            await ws.send(json.dumps({"type": "command", "command": "/new"}))
+            async for raw in ws:
+                try:
+                    frame = json.loads(raw)
+                except ValueError:
+                    continue
+                kind = frame.get("type")
+                if kind == "command_result" and str(frame.get("command") or "").startswith("/new"):
+                    return frame
+                if kind == "error" and not frame.get("client_msg_id"):
+                    raise HTTPException(409, one_line(frame.get("message"), 300) or "The agent said no.")
+        raise HTTPException(502, "The agent closed the connection.")
+
+    try:
+        frame = await asyncio.wait_for(_ask(), NEW_TOPIC_WAIT_S)
+    except HTTPException:
+        raise
+    except TimeoutError:
+        raise HTTPException(504, f"{agent.get('name')} didn't answer — try again.")
+    except Exception as exc:
+        raise HTTPException(502, f"Couldn't reach {agent.get('name')}: {exc}")
+    session = frame.get("session") if isinstance(frame.get("session"), dict) else {}
+    agent_idle.touch(slug)
+    return {"ok": True, "agent": agent.get("name"), "session": {"id": session.get("id"), "name": session.get("name")},
+            "text": one_line(frame.get("content"), 300)}
+
+
 @router.get("/agents/{slug}/lenses")
 async def clip_lenses(slug: str, fresh: bool = False, user: dict = Depends(get_clip_user)):
     """"Read it as" for this agent: its own lenses (``state`` "ready"), or the
@@ -1138,6 +1286,26 @@ async def clip_send(request: Request, user: dict = Depends(get_clip_user)):
 
             shutil.rmtree(root / folder, ignore_errors=True)  # nothing kept for a turn that didn't go
         raise HTTPException(429, usage_quota.limit_text(quota or {}))
+    watch_task = None
+    if action == "watch" and not follow:
+        # The deck's own Scheduled tasks, never the agent's cron.
+        try:
+            watch_task = _schedule_watch(user_id, agent, meta, folder, title, url)
+        except Exception as exc:
+            import shutil
+
+            shutil.rmtree(root / folder, ignore_errors=True)
+            log.warning("browser clip: couldn't schedule the watch: %s", exc)
+            raise HTTPException(500, f"Couldn't put the check in Scheduled tasks: {exc}")
+        turn = compose_turn(meta, saved, owner=owner, watch=watch_task,
+                            lenses=stored_lenses(user_id, str(agent.get("slug") or "")))
+        try:
+            record_path = root / folder / "clip.json"
+            record = json.loads(record_path.read_text("utf-8"))
+            record["watch_task"] = {k: watch_task[k] for k in ("id", "name", "schedule", "tz")}
+            _write(root, folder, "clip.json", json.dumps(record, indent=2, ensure_ascii=False).encode("utf-8"), user_id)
+        except Exception:
+            log.debug("browser clip: watch task not noted in clip.json", exc_info=True)
 
     _prune_runs()
     run = _ClipRun(id=secrets.token_hex(12), user_id=user_id, agent=agent, folder=folder,
@@ -1152,7 +1320,7 @@ async def clip_send(request: Request, user: dict = Depends(get_clip_user)):
     except Exception:
         pass
     return {"clip_id": run.id, "folder": folder, "vfs": f"vfs:{CLIP_PROJECT}/{folder}/", "agent": agent.get("name"),
-            "files": saved["files"]}
+            "files": saved["files"], "watch": watch_task}
 
 
 _QUIET_STATUSES = {"", "thinking", "ready", "idle", "done", "completed", "agent_connected",
