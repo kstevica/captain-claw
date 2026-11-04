@@ -54,6 +54,7 @@ KIND_LABELS: dict[str, str] = {
     "glasses:rokid-lumen": "Rokid glasses",
     "app:android": "Captain Claw app (Android)",
     "app:browser": "Captain Claw app (browser)",
+    "browser:mac": "Captain for Mac",
 }
 
 # The groups the agent settings show, in order: (title, sources). Web chat is

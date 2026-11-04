@@ -69,3 +69,7 @@ models/lupa-data/
 
 # The Android app lives in its own private repo until it is published.
 android/
+
+# Captain for Mac: SwiftPM's build folder and the built app (captain-for-mac/build.sh)
+captain-for-mac/.build/
+captain-for-mac/out/

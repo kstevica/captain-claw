@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from 'react'
-import { AlertCircle, Check, Copy, Download, Globe, Loader2, Trash2 } from 'lucide-react'
-import { EXTENSION_ZIP, listBrowsers, removeBrowser, type ConnectedBrowser } from '../../services/browserClip'
+import { AlertCircle, Check, Copy, Download, Globe, Loader2, Monitor, Trash2 } from 'lucide-react'
+import { EXTENSION_ZIP, MAC_APP_ZIP, listConnections, removeBrowser, type ConnectedBrowser } from '../../services/browserClip'
 
-// Connections → Browser: Captain for Chrome — how to put it in Chrome, and the
-// browsers connected to this account (each holds a token of its own).
+// Connections → Browser: Captain for Chrome — how to put it in Chrome — and
+// Captain for Mac (the same for any app on a Mac), with the browsers and Macs
+// connected to this account (each holds a token of its own).
 
 export interface BrowsersStatus {
   connected: number
@@ -27,6 +28,7 @@ const ACTIONS: [string, string][] = [
 
 export default function BrowserConnection({ active = true, onStatus }: { active?: boolean; onStatus?: (s: BrowsersStatus) => void }) {
   const [browsers, setBrowsers] = useState<ConnectedBrowser[] | null>(null)
+  const [macApp, setMacApp] = useState(false)
   const [error, setError] = useState('')
   const [copied, setCopied] = useState(false)
   const [removing, setRemoving] = useState('')
@@ -34,8 +36,9 @@ export default function BrowserConnection({ active = true, onStatus }: { active?
 
   const load = useCallback(async () => {
     try {
-      const list = await listBrowsers()
+      const { browsers: list, macApp: hasMac } = await listConnections()
       setBrowsers(list)
+      setMacApp(hasMac)
       setError('')
       onStatus?.({ connected: list.length })
     } catch (e) {
@@ -59,7 +62,8 @@ export default function BrowserConnection({ active = true, onStatus }: { active?
   }
 
   const remove = async (b: ConnectedBrowser) => {
-    if (!confirm(`Disconnect “${b.name}”? It will need to be connected again to send pages.`)) return
+    const what = b.kind === 'desktop' ? 'send what is on its screen' : 'send pages'
+    if (!confirm(`Disconnect “${b.name}”? It will need to be connected again to ${what}.`)) return
     setRemoving(b.id)
     try {
       await removeBrowser(b.id)
@@ -140,8 +144,44 @@ export default function BrowserConnection({ active = true, onStatus }: { active?
           </p>
         </section>
 
+        <section className="space-y-2 rounded-md border border-zinc-800 bg-zinc-950/40 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <Monitor className="h-4 w-4 text-zinc-300" />
+            <h4 className="text-sm font-semibold text-zinc-100">Captain for Mac</h4>
+            <span className="text-[10px] uppercase tracking-wider text-zinc-500">any app, not just the browser</span>
+          </div>
+          <p className="text-xs text-zinc-400">
+            A menu-bar app: hold <b className="text-zinc-200">fn</b> for a few seconds (or click its icon) and it reads what's on screen —
+            the app's text through Accessibility, your selection first, what's under the pointer, a screenshot if you turn it on — and
+            sends it, with what you type or say, to one of your agents. It lands in your <b className="text-zinc-300">screen-clips</b> shared
+            folder and in the agent's chat; the answer can be pasted back where you were.
+          </p>
+          <ol className="space-y-1.5 text-sm text-zinc-300 list-decimal pl-5">
+            <li>
+              {macApp ? (
+                <>
+                  <a
+                    href={MAC_APP_ZIP}
+                    download
+                    className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 bg-zinc-800 px-2.5 py-1 text-xs font-medium text-zinc-100 hover:bg-zinc-700"
+                  >
+                    <Download className="h-3.5 w-3.5" /> Download Captain for Mac
+                  </a>
+                  <span className="text-zinc-500"> — unzip it and move it to Applications. It isn't notarized yet: if macOS won't open it, go to System Settings → Privacy &amp; Security and press <b>Open Anyway</b>.</span>
+                </>
+              ) : (
+                <span className="text-zinc-400">
+                  This deck has no build of it yet — on a Mac, run{' '}
+                  <code className="rounded bg-zinc-800 px-1 py-0.5 text-xs">captain-for-mac/build.sh</code> in the Captain checkout.
+                </span>
+              )}
+            </li>
+            <li>Open it, allow <b>Accessibility</b> (and Screen Recording or the microphone if you want them), type this deck's address, press <b>Connect</b> and approve the code here.</li>
+          </ol>
+        </section>
+
         <section className="space-y-2">
-          <h4 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Connected browsers</h4>
+          <h4 className="text-[11px] font-semibold uppercase tracking-wider text-zinc-500">Connected browsers and Macs</h4>
           {browsers === null ? (
             <div className="flex items-center gap-2 text-xs text-zinc-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Loading…</div>
           ) : browsers.length === 0 ? (
@@ -150,7 +190,9 @@ export default function BrowserConnection({ active = true, onStatus }: { active?
             <ul className="divide-y divide-zinc-800 rounded-md border border-zinc-800">
               {browsers.map((b) => (
                 <li key={b.id} className="flex items-center gap-3 px-3 py-2">
-                  <Globe className="h-4 w-4 text-zinc-500 shrink-0" />
+                  {b.kind === 'desktop'
+                    ? <Monitor className="h-4 w-4 text-zinc-500 shrink-0" />
+                    : <Globe className="h-4 w-4 text-zinc-500 shrink-0" />}
                   <div className="min-w-0 flex-1">
                     <div className="text-sm text-zinc-200 truncate">{b.name}</div>
                     <div className="text-[11px] text-zinc-500">Connected {when(b.created_at)} · last used {when(b.last_used_at)}</div>
