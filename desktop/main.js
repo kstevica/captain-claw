@@ -542,6 +542,22 @@ function createWindow() {
     return { action: "deny" };
   });
 
+  // The page's errors, and a crash of its renderer, reach the log. A crash
+  // otherwise leaves a blank window, with nothing anywhere saying why.
+  mainWindow.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    if (level >= 3) log.warn(`[page] ${message} (${sourceId}:${line})`);
+  });
+  let pageCrashes = [];
+  mainWindow.webContents.on("render-process-gone", (_event, details) => {
+    log.error(`The window's page crashed: ${details.reason} (exit code ${details.exitCode})`);
+    if (details.reason === "clean-exit" || !mainWindow || mainWindow.isDestroyed()) return;
+    // Back to the start page, not a reload of the one that crashed; and not
+    // forever if every load crashes (the log says why).
+    const now = Date.now();
+    pageCrashes = pageCrashes.filter((t) => now - t < 60_000).concat(now);
+    if (pageCrashes.length <= 3) mainWindow.loadURL(getAppUrl());
+  });
+
   mainWindow.on("closed", () => {
     mainWindow = null;
   });

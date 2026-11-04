@@ -93,7 +93,8 @@
       ]
     },
     "electronLanguages": [
-      "en"
+      "en",
+      "en-US"
     ]
   }
 }
