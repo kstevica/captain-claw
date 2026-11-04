@@ -233,7 +233,7 @@ def test_pick_engine_none_installed(stub_engines):
     with pytest.raises(EngineError) as err:
         engines.pick_engine("auto", "", None)
     msg = str(err.value)
-    assert "pip install 'captain-claw[ocr]'" in msg and "brew install tesseract" in msg
+    assert "pip install -U captain-claw" in msg and "brew install tesseract" in msg
     assert "only if the user agrees" in msg
 
 
@@ -360,7 +360,7 @@ async def test_tool_without_an_engine_says_how_to_install(tmp_path: Path, stub_e
     stub_engines(_Stub("tesseract", False), _Stub("rapidocr", False))
     pdf = _scanned_pdf(tmp_path / "s.pdf", [["x"]])
     res = await OcrPdfTool().execute(path=str(pdf), **_kw(tmp_path))
-    assert not res.success and "captain-claw[ocr]" in res.error
+    assert not res.success and "pip install -U captain-claw" in res.error
 
 
 def test_pdf_extract_points_scans_to_ocr_pdf(tmp_path: Path):

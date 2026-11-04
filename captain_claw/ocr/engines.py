@@ -450,8 +450,9 @@ def reset_engines() -> None:
 
 INSTALL_HELP = (
     "No local OCR engine is installed, so the scanned text can't be read without a model. "
-    "Install one of these, then call this tool again:\n"
-    "  • RapidOCR — any OS, through pip: pip install 'captain-claw[ocr]' "
+    "RapidOCR comes with Captain, so this install is missing it (or runs on 32-bit ARM, "
+    "which it doesn't support). Install one of these, then call this tool again:\n"
+    "  • RapidOCR — any 64-bit OS, through pip: pip install -U captain-claw "
     "(or: pip install rapidocr onnxruntime pypdfium2)\n"
     "  • Tesseract — macOS: brew install tesseract tesseract-lang · Debian/Ubuntu: "
     "apt install tesseract-ocr tesseract-ocr-hrv (one package per language) · Windows: the "
@@ -524,6 +525,6 @@ def missing_lang_help(lang: str, have: frozenset[str]) -> str:
         f"{', '.join(sorted(have)) or 'none'}). Install the language — macOS: brew install "
         "tesseract-lang · Debian/Ubuntu: apt install " + " ".join(f"tesseract-ocr-{c}" for c in missing)
         + " · or put <code>.traineddata from github.com/tesseract-ocr/tessdata_fast into "
-        "tools.ocr.tessdata_dir — or install RapidOCR (pip install 'captain-claw[ocr]'), whose "
-        "one model reads Latin-script languages without a language pack."
+        "tools.ocr.tessdata_dir — or use RapidOCR (it comes with Captain: engine='rapidocr'), "
+        "whose one model reads Latin-script languages without a language pack."
     )

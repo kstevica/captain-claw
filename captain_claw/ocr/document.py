@@ -191,7 +191,7 @@ def renderer_name() -> str | None:
 
 RENDER_HELP = (
     "Scanned PDF pages have to be turned into pictures before OCR, and nothing here can "
-    "do that. Install pypdfium2 (pip install pypdfium2, or pip install 'captain-claw[ocr]') "
+    "do that. pypdfium2 comes with Captain, so this install is missing it: pip install pypdfium2 "
     "or poppler (brew install poppler · apt install poppler-utils)."
 )
 

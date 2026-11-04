@@ -338,7 +338,8 @@ class OcrToolConfig(BaseModel):
     """ocr_pdf / ocr_image: local OCR engines only, never a language model."""
 
     # Engine order for engine=auto (a `lang` Tesseract has goes to Tesseract
-    # first). rapidocr: pip install 'captain-claw[ocr]'; tesseract: the binary.
+    # first). rapidocr comes with Captain (core dependency); tesseract is the
+    # system binary.
     engines: list[str] = ["rapidocr", "tesseract"]
     lang: str = "eng"  # Tesseract's language when the call names none
     tesseract_path: str = ""  # empty = found on PATH (or Program Files on Windows)
