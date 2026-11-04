@@ -17,7 +17,7 @@ from captain_claw.agent_stuck import (
     MSG_RETRIES_EXHAUSTED,
     MSG_STUCK,
 )
-from captain_claw import fabrication_guard, jev_progress, mail_authority, msg_origin
+from captain_claw import fabrication_guard, jev_progress, loop_guards, mail_authority, msg_origin
 from captain_claw.config import get_config
 from captain_claw.exceptions import GuardBlockedError, LLMAPIError, LLMError
 from captain_claw.llm import Message, is_reasoning_backfill_placeholder
@@ -1190,6 +1190,9 @@ class AgentOrchestrationMixin:
         # detect the LLM re-requesting the exact same tool call and stop it
         # before wasting resources on an infinite re-fetch loop.
         self._turn_tool_call_counts: dict[str, int] = {}
+        # ...and the state of the files each of those calls touched, after its
+        # last run (loop_guards.fingerprint): a changed file makes a repeat new.
+        self._turn_tool_call_fps: dict[str, tuple] = {}
         # Reset blind-rewrite tracker — a full write in a PREVIOUS turn must
         # not block a rewrite the user explicitly asked for in this turn.
         self._blind_write_paths: set[str] = set()
@@ -2687,8 +2690,12 @@ class AgentOrchestrationMixin:
                         _narration_streamed = True
 
                 # ── Write-loop detection ───────────────────────────
-                # If the agent keeps rewriting the same file(s), it's
-                # stuck in a loop.  Inject a nudge to finalize.
+                # If the agent keeps rewriting the same whole file(s), it's
+                # stuck in a loop.  Inject a nudge to finalize.  Only
+                # whole-file writes count (loop_guards.full_rewrite_path):
+                # an edit or an append is progress, and two targeted edits
+                # to a script before running it is ordinary debugging — the
+                # STOP firing there made agents claim results they never ran.
                 if _tool_results and not _write_loop_nudged:
                     # A rewrite the guards refused never touched the file, and
                     # its refusal already says what to do: an iteration of
@@ -2704,29 +2711,11 @@ class AgentOrchestrationMixin:
                     _all_refused = bool(_refused_ids) and all(
                         str(_tc_orig.id) in _refused_ids for _tc_orig in response.tool_calls)
                     _loop_at = 3 if _all_refused else 2
-                    _write_tools_this_iter = []
-                    for _tc_orig in response.tool_calls:
-                        _tn = str(_tc_orig.name).lower()
-                        if _tn in ("write", "edit", "file_write", "file_edit"):
-                            _tc_args = _tc_orig.arguments
-                            if isinstance(_tc_args, str):
-                                try:
-                                    _tc_args = json.loads(_tc_args)
-                                except (json.JSONDecodeError, TypeError):
-                                    _tc_args = {}
-                            if isinstance(_tc_args, dict):
-                                _wp = str(_tc_args.get("path", "") or _tc_args.get("file_path", ""))
-                                if _wp:
-                                    _write_tools_this_iter.append(_wp)
-                    for _wp in _write_tools_this_iter:
-                        _write_path_counts[_wp] = _write_path_counts.get(_wp, 0) + 1
-                    # If ALL tool calls this iteration are rewrites of
-                    # already-written files (2+ times), break the loop.
-                    if (
-                        _write_tools_this_iter
-                        and len(_write_tools_this_iter) == len(response.tool_calls)
-                        and all(_write_path_counts.get(p, 0) >= _loop_at for p in _write_tools_this_iter)
-                    ):
+                    # If ALL tool calls this iteration rewrite whole files
+                    # already written (2+ times), break the loop.
+                    _write_tools_this_iter = loop_guards.write_loop_paths(
+                        response.tool_calls, _write_path_counts, _loop_at)
+                    if _write_tools_this_iter:
                         _write_loop_nudged = True
                         log.info(
                             "Write-loop detected: agent rewrote same file(s)",

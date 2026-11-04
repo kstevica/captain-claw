@@ -646,7 +646,8 @@ class AgentContextGovernorMixin:
                 if not path:
                     continue
                 base = f"read|path={os.path.abspath(path)}"
-                for sig in [k for k in counts if k == base or k.startswith(base + "|offset=")]:
+                # Any section of it: `|offset=…`, `|limit=…` (loop_guards.range_signature).
+                for sig in [k for k in counts if k == base or k.startswith(base + "|")]:
                     counts.pop(sig, None)
 
     def _context_pressure_note(self) -> str:

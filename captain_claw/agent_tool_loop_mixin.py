@@ -13,7 +13,7 @@ import os
 import re
 from typing import Any
 
-from captain_claw import exam_turn, jev_block_review, mail_authority
+from captain_claw import exam_turn, jev_block_review, loop_guards, mail_authority
 from captain_claw.config import get_config
 from captain_claw.context_spill import SPILL_TOOLS as _SPILL_TOOLS
 from captain_claw.context_spill import governor_enabled as _governor_enabled
@@ -1110,8 +1110,10 @@ class AgentToolLoopMixin:
             # the Nth call and return a warning instead.
             # For path-based tools (read, pdf_extract, etc.) and URL-based
             # tools (web_fetch, web_get), the key dimension is the path/URL
-            # — not the full args.  Re-reading the same file with different
-            # limits is still a duplicate.
+            # — not the full args.  Re-extracting the same file with a
+            # different max_chars is still a duplicate; a different section
+            # (read offset/limit) is not.  A call is new again once a file
+            # it touches has changed (see loop_guards).
             _dup_max = max(1, int(get_config().tools.duplicate_call_max))
             # Datastore actions that change the table (see the write-invalidates
             # -reads rule below).
@@ -1177,18 +1179,13 @@ class AgentToolLoopMixin:
                 # references to the same file share one dup-counter.
                 if _sig_key:
                     _sig_key = os.path.abspath(_sig_key)
-                _dup_sig = f"{tc.name}|path={_sig_key}"
-                # Governed: paging through a spilled source (or the read
-                # tool's own "continue with offset=" hint) is not a repeat —
-                # a different start line is a different page. The limit is
-                # left out, so nudging it can't dodge the guard.
-                if _tool_lower == "read" and _governor_enabled():
-                    try:
-                        _page = int(arguments.get("offset") or 1)
-                    except (TypeError, ValueError):
-                        _page = 1
-                    if _page > 1:
-                        _dup_sig += f"|offset={_page}"
+                # A different section of the file is a different call: the
+                # next lines of a script, the next part of a long report,
+                # the read tool's own "continue with offset=" hint. Only the
+                # range arguments the tool declares count, so one it ignores
+                # (pdf_extract has no page range) can't dodge the guard.
+                _dup_sig = f"{tc.name}|path={_sig_key}" + loop_guards.range_signature(
+                    arguments, loop_guards.declared_params(getattr(self, "tools", None), tc.name))
             elif _tool_lower in _URL_TOOLS and isinstance(arguments, dict):
                 _sig_key = str(arguments.get("url", "")).strip()
                 _dup_sig = f"{tc.name}|url={_sig_key}"
@@ -1203,6 +1200,27 @@ class AgentToolLoopMixin:
                 _dup_sig = f"{tc.name}|{_sig_args}"
             _dup_counts: dict[str, int] = getattr(self, "_turn_tool_call_counts", {})
             _dup_count = _dup_counts.get(_dup_sig, 0)
+            # The files the call reads or runs: a file changed since the last
+            # identical call (by a script, `sed -i`, a regenerated output) means
+            # the answer may differ, so the call is new. The state is taken
+            # AFTER each run, so a command that rewrites its own output file
+            # and is repeated with nothing changed in between is still caught.
+            _dup_fps: dict[str, tuple] = getattr(self, "_turn_tool_call_fps", None) or {}
+            self._turn_tool_call_fps = _dup_fps
+            _dup_files = loop_guards.touched_files(
+                _tool_lower, arguments,
+                getattr(getattr(self, "tools", None), "runtime_base_path", None),
+                path_tools=_PATH_TOOLS,
+            )
+            if (
+                _dup_count
+                and _dup_files
+                and _dup_sig in _dup_fps
+                and loop_guards.fingerprint(_dup_files) != _dup_fps[_dup_sig]
+            ):
+                log.info("Repeat call is new: a file it touches changed",
+                         tool=tc.name, call_id=tc.id)
+                _dup_count = 0
             # Stateful tools (index→search, CRUD operations) get a higher
             # threshold — repeated calls with *different* args are normal,
             # but identical args 3+ times is almost certainly a loop.
@@ -1744,6 +1762,26 @@ class AgentToolLoopMixin:
                     _dc = getattr(self, "_turn_tool_call_counts", {})
                     for _k in [k for k in _dc if k.startswith("datastore|")]:
                         _dc.pop(_k, None)
+
+                # ── A file change makes the re-run and the re-read new ──
+                # edit → run again is how a fix gets tested; blocking the
+                # run as "the content has not changed" made agents report
+                # results of a script they never ran. The same command with
+                # nothing changed in between is still a repeat.
+                if result.success:
+                    if _dup_files or _tool_lower in loop_guards.RUN_TOOLS:
+                        # After the run: a file the command just created counts.
+                        _dup_fps[_dup_sig] = loop_guards.fingerprint(loop_guards.touched_files(
+                            _tool_lower, arguments,
+                            getattr(getattr(self, "tools", None), "runtime_base_path", None),
+                            path_tools=_PATH_TOOLS,
+                        ))
+                    if _tool_lower in loop_guards.FILE_CHANGE_TOOLS and isinstance(arguments, dict):
+                        loop_guards.forget_repeats_after_change(
+                            getattr(self, "_turn_tool_call_counts", {}),
+                            str(arguments.get("path", "") or arguments.get("file_path", "") or ""),
+                            path_tools=_PATH_TOOLS,
+                        )
 
                 # ── The team board is live ──────────────────────
                 # `vatra map/read/search/inbox/wait` answer differently once
