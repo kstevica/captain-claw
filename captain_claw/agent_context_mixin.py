@@ -267,6 +267,14 @@ def _being_body() -> bool:
     return str(os.environ.get("CLAW_BEING_WORKER", "")).strip().lower() in ("1", "true", "yes")
 
 
+
+def in_desktop_app() -> bool:
+    """Whether this runs inside the desktop app: its deck passes FD_DESKTOP to
+    its agents, and the slim app sets CAPTAIN_CLAW_DESKTOP_RUNTIME on everything
+    it starts."""
+    return (os.environ.get("FD_DESKTOP", "").lower() in ("1", "true", "yes")
+            or bool(os.environ.get("CAPTAIN_CLAW_DESKTOP_RUNTIME")))
+
 class AgentContextMixin:
     """Build system/context/tool messages for model calls."""
     @staticmethod
@@ -2783,10 +2791,13 @@ class AgentContextMixin:
             from captain_claw.tools.bat import BatTool
             self.tools.register(BatTool())
             # Captain Swarm — proposes a run that keeps improving a measured number.
-            # Always registered; a run it proposes waits for the owner's Go, and it
-            # refuses from inside any run.
-            from captain_claw.tools.captain_swarm import CaptainSwarmTool
-            self.tools.register(CaptainSwarmTool())
+            # A run it proposes waits for the owner's Go, and it refuses from inside
+            # any run. Not in the desktop app, which has no Captain Swarm: its deck
+            # passes FD_DESKTOP to its agents, and the slim app also sets
+            # CAPTAIN_CLAW_DESKTOP_RUNTIME on everything it starts.
+            if not in_desktop_app():
+                from captain_claw.tools.captain_swarm import CaptainSwarmTool
+                self.tools.register(CaptainSwarmTool())
             # Bat worker's capped real-money spend. Always registered; refuses
             # outside a Bat run (CLAW_BAT_SESSION unset), so it's inert elsewhere.
             from captain_claw.tools.bat_spend import SpendTool

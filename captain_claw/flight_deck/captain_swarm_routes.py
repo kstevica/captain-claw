@@ -47,12 +47,22 @@ _MAX_REPEAT = 5
 
 
 ADMINS_ONLY = "Captain Swarm is open to this deck's admins only."
+NOT_ON_DESKTOP = "Captain Swarm isn't part of the desktop app."
+
+
+def _refuse_on_desktop() -> None:
+    """Not in the desktop app (the owner's call, 2026-11-04): its deck doesn't
+    start the supervisor, and its agents don't get the tool."""
+    from captain_claw.flight_deck.auth import _fd_desktop_deck
+    if _fd_desktop_deck():
+        raise HTTPException(403, NOT_ON_DESKTOP)
 
 
 async def admin_user(user: dict = Depends(get_current_user)) -> dict:
     """Captain Swarm is for the deck's admins (owner's call, 2026-11-03): a run
     spends on the deck's tiers and starts workers. A deck with sign-in off has
     one user, its local admin."""
+    _refuse_on_desktop()
     if user.get("role") != "admin":
         raise HTTPException(403, ADMINS_ONLY)
     return user
@@ -61,6 +71,7 @@ async def admin_user(user: dict = Depends(get_current_user)) -> dict:
 async def _agent_admin(body: AgentReq) -> str:
     """The asking agent's owner, who must be one of this deck's admins."""
     from captain_claw.flight_deck import crew_runner
+    _refuse_on_desktop()
     owner = _agent_owner(body)
     user = await crew_runner._user_of(owner)
     if not user or user.get("role") != "admin":

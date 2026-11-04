@@ -101,7 +101,7 @@ Instructions are longer, with the hard limits first. **23 carry a disclaimer** (
 
 ## Captain Swarm
 
-New in 0.8.6, **for admins only while it's being tested** (with sign-in off, the one local user is the admin). Captain Swarm keeps improving one number. Open it next to Bat in the full layout, or from the kiosk's menu and tool tiles.
+New in 0.8.6, **for admins only while it's being tested** (with sign-in off, the one local user is the admin), and not part of the desktop app. Captain Swarm keeps improving one number. Open it next to Bat in the full layout, or from the kiosk's menu and tool tiles.
 
 A run has an objective: what to improve, the cases to measure it on, and what an attempt may change. Each round it tries several ideas at once (**At once**, up to `FD_CAPTAIN_SWARM_MAX_LANES`), **measures every attempt itself** on the open cases and on held-out cases it keeps sealed, and keeps a gain only if it beats the noise, the held-out cases confirm it and a reviewing model passes it. It stops at its target, its budget, its time or attempt limit, when it stalls, or when you press **Stop now**.
 

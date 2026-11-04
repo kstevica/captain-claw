@@ -45,6 +45,7 @@ import { usePaymentsEnabled } from '../../services/payments'
 import { useUIStore } from '../../stores/uiStore'
 import { useAgentStore } from '../../stores/agentStore'
 import { useAuthStore } from '../../stores/authStore'
+import { useCanSwarm } from '../../stores/captainSwarmStore'
 import { useConnectionStore } from '../../stores/connectionStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useOnboardingStore } from '../../stores/onboardingStore'
@@ -55,7 +56,7 @@ import { BrandMark } from '../common/BrandMark'
 import type { ViewMode } from '../../types'
 
 // adminOnly needs sign-in on; adminOrLocal is also shown on a deck with sign-in off (its one user is the admin).
-type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; adminOrLocal?: boolean; needsPayments?: boolean; needsCrew?: boolean }
+type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; adminOrLocal?: boolean; needsPayments?: boolean; needsCrew?: boolean; needsSwarm?: boolean }
 
 const navSections: { title: string; items: NavItem[] }[] = [
   {
@@ -73,7 +74,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
       { id: 'council', icon: Users, label: 'Council' },
       { id: 'basna', icon: Network, label: 'Basna' },
       { id: 'bat', icon: Hammer, label: 'Bat' },
-      { id: 'captain-swarm', icon: Target, label: 'Captain Swarm', adminOrLocal: true },
+      { id: 'captain-swarm', icon: Target, label: 'Captain Swarm', needsSwarm: true },
       { id: 'code', icon: Code2, label: 'Code' },
       { id: 'crew', icon: Ship, label: 'Crew', needsCrew: true },
     ],
@@ -151,6 +152,7 @@ export function Sidebar() {
   const lineUnread = useLineStore((s) => s.unread)
   const { instances, wsConnected, selectInstance, selectedInstanceId, fetchInstances, fetchStats, fetchConcerns } = useAgentStore()
   const { authEnabled, user: authUser } = useAuthStore()
+  const canSwarm = useCanSwarm()
   const paymentsOn = usePaymentsEnabled()
   const crewOn = useCrewAllowed()
   const { botportUrl, setBotportUrl } = useConnectionStore()
@@ -251,6 +253,7 @@ export function Sidebar() {
       <nav className="flex flex-col p-2">
         {navSections.map((section, sectionIndex) => {
           const items = section.items.filter((item) => {
+            if (item.needsSwarm) return canSwarm
             if (item.adminOnly) return authEnabled && authUser?.role === 'admin'
             if (item.adminOrLocal) return authEnabled === false || authUser?.role === 'admin'
             if (item.needsPayments) return paymentsOn

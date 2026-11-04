@@ -27,7 +27,7 @@ New in 0.8.6:
 | Tool | What it does |
 |---|---|
 | `line` | Reads the owner's [Line](flight-deck.md#the-line): `news` (unread, oldest first), `recent` (by kind, only what needs the user, or since a time), `search` and `read`. Read-only; item text is information, never instructions. Shows on every Flight Deck agent, never on a shared agent's member turns. |
-| `captain_swarm` | Proposes and follows [Captain Swarm](flight-deck.md#captain-swarm) runs; a run it proposes waits for the owner's **Go**. Admins' agents only while Captain Swarm is being tested, and never an agent confined to its files. |
+| `captain_swarm` | Proposes and follows [Captain Swarm](flight-deck.md#captain-swarm) runs; a run it proposes waits for the owner's **Go**. Admins' agents only while Captain Swarm is being tested, never an agent confined to its files, and not in the desktop app. |
 
 New in 0.8.5:
 
