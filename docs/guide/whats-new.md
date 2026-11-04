@@ -8,9 +8,9 @@ Every release from the newest back to 0.4.29. The full notes for each, with upgr
 
 ## What's New in 0.8.9
 
-**Porthole.** A patch for the desktop app, the same day as 0.8.8. 2 merged PRs.
+**Porthole.** A patch for the desktop app, the same day as 0.8.8. 3 merged PRs.
 
-- **Agents on Windows**: **New agent → Create** no longer answers "Internal Server Error", agents stay running, and each one reads its own settings. **Check for Updates…** brings it to an installed app.
+- **Captain for Windows**: its first download, `Captain-Setup-0.8.9-x64.exe` on the [release](https://github.com/kstevica/captain-claw/releases/tag/v0.8.9). Agents are created, stay running and read their own settings, and their chat opens (the build had left out Chromium's language file).
 - **A downloaded Mac app isn't "damaged"**: Captain.app is signed ad hoc as a whole, so macOS only asks once (**Open Anyway** in System Settings → Privacy & Security).
 
 See [RELEASE_NOTES_0.8.9.md](../../release-notes/RELEASE_NOTES_0.8.9.md).
