@@ -5,6 +5,7 @@ import { MobileNav } from './components/layout/MobileNav'
 import { SimpleLayout } from './components/layout/SimpleLayout'
 import { ConsoleLayout } from './components/console/ConsoleLayout'
 import { DeckUpdateNotice } from './components/layout/DeckUpdateNotice'
+import BrowserPairDialog from './components/BrowserPairDialog'
 import { ChatPanel } from './components/agents/ChatPanel'
 import { DirectorPanel } from './components/agents/DirectorPanel'
 import { PinnedMessages } from './components/common/PinnedMessages'
@@ -798,6 +799,7 @@ function App() {
     <>
       <AppContent />
       <DeckUpdateNotice />
+      <BrowserPairDialog />
     </>
   )
 }

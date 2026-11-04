@@ -45,6 +45,7 @@ import os
 import re
 import socket
 import time
+from contextvars import ContextVar
 from typing import NamedTuple
 from urllib.parse import urlsplit
 
@@ -289,6 +290,21 @@ def browser_refusal(method: str, headers: Headers) -> str | None:
     return None
 
 
+# A browser extension (Captain for Chrome, browser_clip.py) calls Flight Deck
+# from its own origin with a personal access token in ``Authorization`` — no
+# cookie rides on it, so no page can forge such a call. Only the clip API takes
+# that origin; every other route still refuses it.
+EXTENSION_SCHEMES = frozenset({"chrome-extension", "moz-extension", "safari-web-extension"})
+EXTENSION_PATH_PREFIX = "/fd/clip/"
+
+
+def extension_route(path: str, headers: Headers) -> bool:
+    """A browser extension's call to the clip API (allowed past the origin check)."""
+    origin = (headers.get("origin") or "").strip().lower()
+    scheme = origin.split("://", 1)[0] if "://" in origin else ""
+    return scheme in EXTENSION_SCHEMES and str(path or "").startswith(EXTENSION_PATH_PREFIX)
+
+
 def may_expose_agent_secrets(headers: Headers) -> bool:
     """Whether a response may carry agents' secrets (``web_auth`` tokens, env).
 
@@ -394,7 +410,7 @@ class BrowserGuardMiddleware:
                 kind, value = "host", host_value
         if not kind:
             reason = browser_refusal(method, headers)
-            if reason:
+            if reason and not extension_route(scope.get("path", ""), headers):
                 kind, value = reason, headers.get("origin") or ""
         if not kind:
             await self.app(scope, receive, send)
@@ -418,12 +434,29 @@ class BrowserGuardMiddleware:
         await send({"type": "http.response.body", "body": body})
 
 
+# The path of the request the CORS middleware is answering (its allowlist
+# check gets only the origin).
+_CORS_PATH: ContextVar[str] = ContextVar("fd_cors_path", default="")
+
+
 class FDCORSMiddleware(CORSMiddleware):
     """Starlette's CORS, with the allowlist resolved per request by
     :func:`cors_origin_allowed` (this deck's own origins + FD_CORS_ORIGINS)
     instead of a fixed list — so FD_PUBLIC_URL / FD_ALLOWED_HOSTS set after
     import still apply, and nothing ever mirrors an arbitrary origin unless the
-    operator opted into ``FD_CORS_ORIGINS=*``."""
+    operator opted into ``FD_CORS_ORIGINS=*``. A browser extension's origin
+    is allowed on the clip API only (:func:`extension_route`)."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        token = _CORS_PATH.set(str(scope.get("path", "")) if scope["type"] == "http" else "")
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            _CORS_PATH.reset(token)
 
     def is_allowed_origin(self, origin: str) -> bool:
+        if _CORS_PATH.get().startswith(EXTENSION_PATH_PREFIX):
+            scheme = str(origin or "").strip().lower().split("://", 1)[0]
+            if scheme in EXTENSION_SCHEMES:
+                return True
         return cors_origin_allowed(origin)

@@ -24,6 +24,7 @@ SOURCE_LABELS: dict[str, str] = {
     "web": "Web chat",
     "app": "Captain Claw app",
     "glasses": "Smart glasses",
+    "browser": "Browser extension",
     "whatsapp": "WhatsApp",
     "telegram": "Telegram",
     "messenger": "Messenger",
@@ -59,7 +60,7 @@ KIND_LABELS: dict[str, str] = {
 # not among them — its effort is the chat box's picker.
 SETTINGS_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Messaging", ("whatsapp", "telegram", "messenger", "discord")),
-    ("Apps and devices", ("app", "glasses", "device:sticks3", "device:stopwatch", "device:papercolor",
+    ("Apps and devices", ("app", "browser", "glasses", "device:sticks3", "device:stopwatch", "device:papercolor",
                           "device:epaper154", "device:epaper154_touch")),
     ("Automated", ("scheduled", "flow", "agent", "autonomy", "taskboard", "line", "api", "link")),
     ("Other people", ("member", "public")),
