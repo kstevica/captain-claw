@@ -40,8 +40,25 @@ selection, a link or a picture. Pick an agent and what it should do:
 | Remember | The facts kept in the agent's memory |
 | Ask | Your own question |
 
-**Read it as** gives any action a lens: investor, buyer, legal, skeptic,
-competitor, engineer, newcomer, your team — or your own.
+**Read it as** gives any action a lens. The agent you picked suggests its
+own, from who it is (its personality and description): a VC analyst offers
+"Partner memo" or "Founder red flags", a lawyer "Opposing counsel". They're
+made once and again only when the agent changes (↻ asks for new ones). The
+general lenses — investor, buyer, legal, skeptic, competitor, engineer,
+newcomer, your team — stand in meanwhile and stay under **More…**; or type your
+own.
+
+**Files on the page** can be searched (name, type, link text, site) and
+filtered by kind — PDF, Docs, Sheets, Slides, Archives, Data, Images, Audio &
+video — with **Tick these** / **Untick these** for what's shown.
+
+**Text size** (Settings): Small, Medium or Large — the whole panel, kept for
+next time and in every window.
+
+While the agent works, the panel follows it: the newest step and the answer
+as it's written stay in view, with a working bar (what it's doing, how long)
+pinned at the bottom. Scroll up to read and it stops following; the bar's ⌄
+(or scrolling back down) picks it up again.
 
 **What goes with it**: the page as Markdown (always), the selection, the whole
 page as one `.mhtml`, a screenshot, the tables as CSV, and the files the page

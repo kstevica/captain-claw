@@ -503,3 +503,148 @@ async def test_the_extension_zip_downloads(deck):
     names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
     assert "captain-for-chrome/manifest.json" in names and "captain-for-chrome/sidepanel.js" in names
     assert {f"captain-for-chrome/lib/{m}.js" for m in ("api", "icons", "md")} <= set(names)
+
+
+# ── "Read it as": the agent's own lenses ─────────────────────────────
+
+_PERSONA = {"name": "Vera", "description": "Seed-stage VC analyst for a small fund", "background": "Ex-founder",
+            "expertise": ["Startup diligence", "Term sheets"], "instructions": ""}
+
+_THREE_LENSES = json.dumps([
+    {"label": "Partner memo", "prompt": "Read it as the memo for Monday's partner meeting"},
+    {"label": "Founder red flags", "prompt": "Read it for what the founders gloss over."},
+    {"label": "Cap table", "prompt": "Read it for dilution, the rounds and who owns what."},
+])
+
+
+def test_the_agents_answer_becomes_its_lenses():
+    answer = ("Here you go:\n```json\n" + _THREE_LENSES[:-1]
+              + ', {"label": "partner memo", "prompt": "The first one again, dropped."},'
+              ' {"label": "", "prompt": "No name, dropped."}]\n```')
+    lenses = bc.parse_lenses(answer)
+    assert [x["label"] for x in lenses] == ["Partner memo", "Founder red flags", "Cap table"]
+    assert [x["id"] for x in lenses] == ["a-partner-memo", "a-founder-red-flags", "a-cap-table"]
+    assert lenses[0]["prompt"] == "Read it as the memo for Monday's partner meeting."
+    assert bc.parse_lenses("<think>maybe [a, b]?</think>" + _THREE_LENSES)[2]["label"] == "Cap table"
+    assert bc.parse_lenses('[{"label": "Only one", "prompt": "Read it as the only one."}]') == []
+    assert bc.parse_lenses("no lenses today") == [] and bc.parse_lenses("[not json]") == []
+    assert bc.lens_view(lenses)[1] == {"id": "a-founder-red-flags", "label": "Founder red flags",
+                                       "hint": "Read it for what the founders gloss over."}
+
+
+def test_who_the_agent_is_decides_its_lenses_and_when_to_ask_again():
+    agent = {"name": "Vera", "slug": "vera", "description": "VC analyst"}
+    system, prompt = bc.lens_request(agent, _PERSONA)
+    assert "JSON" in system
+    assert "Seed-stage VC analyst" in prompt and "Startup diligence; Term sheets" in prompt
+    assert "language of the agent's description" in prompt
+    sig = bc.lens_signature(agent, _PERSONA)
+    assert sig == bc.lens_signature(dict(agent), dict(_PERSONA))
+    assert sig != bc.lens_signature(agent, {**_PERSONA, "expertise": ["Real estate"]})
+    assert sig != bc.lens_signature({**agent, "description": "Lawyer"}, _PERSONA)
+
+
+def test_a_clip_is_read_through_the_agents_own_lens():
+    lenses = bc.parse_lenses(_THREE_LENSES)
+    saved = {"folder": "2026-11-04-x-co-t", "page": True}
+    meta = {"action": "summarize", "perspective": "a-cap-table", "page": {"title": "T", "url": "https://x.co"}}
+    assert "Read it for dilution, the rounds and who owns what." in bc.compose_turn(meta, saved, lenses=lenses)["content"]
+    # One made again since: its name still says what was meant.
+    gone = {**meta, "perspective": "a-old-angle", "perspective_label": "Old angle"}
+    assert "Read it as Old angle." in bc.compose_turn(gone, saved, lenses=lenses)["content"]
+    general = {**meta, "perspective": "skeptic"}
+    assert "Read it as a skeptic" in bc.compose_turn(general, saved, lenses=lenses)["content"]
+
+
+@pytest.fixture
+def lens_agent(deck, tmp_path, monkeypatch):
+    persona = dict(_PERSONA)
+    seen: dict = {"asks": [], "tokens": [], "fail": False}
+    monkeypatch.setattr(bc, "_lens_jobs", {})
+    monkeypatch.setattr(bc, "_lens_failed", {})
+    monkeypatch.setattr(bc, "_lens_store_path", lambda: tmp_path / "browser-lenses.json")
+
+    async def _persona(host, port, auth):
+        return dict(persona)
+
+    async def _complete(host, port, auth, system, prompt):
+        seen["asks"].append(prompt)
+        if seen["fail"]:
+            raise RuntimeError("the model is down")
+        return _THREE_LENSES, 321
+
+    async def _count(user_id, slug, tokens):
+        seen["tokens"].append((user_id, slug, tokens))
+
+    monkeypatch.setattr(bc, "_agent_personality", _persona)
+    monkeypatch.setattr(bc, "_agent_complete", _complete)
+    monkeypatch.setattr(bc, "_count_lens_tokens", _count)
+    return {"persona": persona, **seen, "seen": seen}
+
+
+async def _lenses(c, pat, slug="scout", **params) -> dict:
+    """The agent's lenses once it's done thinking them up."""
+    r = (await c.get(f"/fd/clip/agents/{slug}/lenses", headers=pat, params=params)).json()
+    for _ in range(200):
+        if r["state"] != "making":
+            return r
+        await asyncio.sleep(0.01)
+        r = (await c.get(f"/fd/clip/agents/{slug}/lenses", headers=pat)).json()
+    raise AssertionError("the lenses were never made")
+
+
+@pytest.mark.asyncio
+async def test_read_it_as_offers_the_agents_own_lenses(deck, lens_agent):
+    c = deck["client"]
+    pat = {"Authorization": f"Bearer {await _pair(c, deck['jwt'])}"}
+    seen = lens_agent["seen"]
+
+    first = (await c.get("/fd/clip/agents/scout/lenses", headers=pat)).json()
+    assert first["state"] == "making" and first["source"] == "general" and first["lenses"] == []
+    assert [g["id"] for g in first["general"]][:2] == ["investor", "buyer"]   # meanwhile
+    got = await _lenses(c, pat)
+    assert got["state"] == "ready" and got["source"] == "agent" and got["agent"] == "Scout"
+    assert [x["label"] for x in got["lenses"]] == ["Partner memo", "Founder red flags", "Cap table"]
+    assert seen["tokens"] == [("alice", "scout", 321)]   # toward the person's day
+    assert "Seed-stage VC analyst" in seen["asks"][0]
+
+    # Kept: asked once while the agent stays who it is…
+    assert (await _lenses(c, pat))["state"] == "ready" and len(seen["asks"]) == 1
+    # …and again when that changes, or when the person asks for new ones.
+    lens_agent["persona"]["expertise"] = ["Climate hardware"]
+    assert (await c.get("/fd/clip/agents/scout/lenses", headers=pat)).json()["state"] == "making"
+    await _lenses(c, pat)
+    await _lenses(c, pat, fresh="1")
+    assert len(seen["asks"]) == 3
+
+    # A clip sent through one of them asks for it in the agent's words.
+    res = await c.post("/fd/clip/send", headers=pat, files=_form(
+        {"agent": "scout", "action": "summarize", "perspective": "a-founder-red-flags",
+         "perspective_label": "Founder red flags", "page": {"url": "https://acme.vc", "title": "Acme"}},
+        page=[("page.md", b"# Acme\n")]))
+    assert res.status_code == 200, res.text
+    await _until_done(c, pat, res.json()["clip_id"])
+    assert "Read it for what the founders gloss over." in deck["agent"].frames[0]["content"]
+    record = json.loads((deck["clips"] / res.json()["folder"] / "clip.json").read_text())
+    assert record["perspective"] == "a-founder-red-flags" and record["perspective_label"] == "Founder red flags"
+
+
+@pytest.mark.asyncio
+async def test_read_it_as_falls_back_to_the_general_lenses(deck, lens_agent):
+    c = deck["client"]
+    pat = {"Authorization": f"Bearer {await _pair(c, deck['jwt'])}"}
+    seen = lens_agent["seen"]
+
+    # A stopped agent isn't woken to think up lenses.
+    asleep = (await c.get("/fd/clip/agents/ledger/lenses", headers=pat)).json()
+    assert asleep["state"] == "asleep" and asleep["lenses"] == [] and seen["asks"] == []
+    # One that can't say: the general ones, and it isn't asked again for a while…
+    seen["fail"] = True
+    assert (await _lenses(c, pat))["state"] == "fallback"
+    assert (await _lenses(c, pat))["state"] == "fallback" and len(seen["asks"]) == 1
+    # …unless the person asks.
+    seen["fail"] = False
+    assert (await _lenses(c, pat, fresh="1"))["source"] == "agent" and len(seen["asks"]) == 2
+    # Only the caller's own agents, only with the browser's token.
+    assert (await c.get("/fd/clip/agents/nobody/lenses", headers=pat)).status_code == 404
+    assert (await c.get("/fd/clip/agents/scout/lenses")).status_code == 401

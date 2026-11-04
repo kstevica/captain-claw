@@ -44,6 +44,19 @@ The prompts for actions and lenses live on the deck (`ACTIONS`,
 `PERSPECTIVES`); the extension draws what `/fd/clip/me` returns, so a deck
 update improves them for every browser.
 
+**The agent's own lenses.** `GET /fd/clip/agents/<slug>/lenses` answers with
+the lenses the chosen agent suggested for itself: the deck reads the agent's
+`/api/personality`, asks the agent's own model (its `/api/llm/complete`, no
+tools or memory, thinking off) for six lenses that fit its work, and keeps
+them in `<FD_DATA_DIR>/browser-lenses.json` per person and agent, with a
+signature of who the agent is — a changed personality or description has it
+asked again; `?fresh=1` asks anyway. The tokens count toward the person's day.
+While it's being asked the answer is `state: "making"` (the panel shows the
+general ones and asks again shortly); an agent that's asleep or stopped is
+never woken for this (`"asleep"`); one that can't say gets `"fallback"` and
+isn't asked again for ten minutes. A clip names the lens by id (`a-…`) and
+label; the deck turns it into the lens's sentence in the turn.
+
 ## Security
 
 - The extension's origin reaches `/fd/clip/` only (origin guard + CORS);
