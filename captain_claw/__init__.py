@@ -1,6 +1,6 @@
 """Captain Claw: self-hosted framework for orchestrating fleets of specialist AI agents — ensemble reasoning and a full agentic coding pipeline, model-agnostic and local-friendly."""
 
-__version__ = "0.8.7"
+__version__ = "0.8.8"
 __build_date__ = "2026-11-04"
 __author__ = "Stevica Kuharski"
 

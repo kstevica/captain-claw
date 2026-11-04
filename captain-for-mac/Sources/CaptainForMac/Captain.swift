@@ -112,6 +112,10 @@ final class Captain: ObservableObject {
     ]
 
     var appForPaste: NSRunningApplication? { sourceApp }
+    /// The demo's fictional scene has no real app behind it (--demo only).
+    var demoMode = false
+    var pasteAppName: String { sourceApp?.localizedName ?? capture?.appName ?? "the app" }
+    var canPaste: Bool { !answer.isEmpty && (sourceApp != nil || demoMode) }
 
     // ── The deck ──
 

@@ -4,7 +4,36 @@
 
 Every release from the newest back to 0.4.29. The full notes for each, with upgrade steps, are in [release-notes/](../../release-notes/).
 
-**Jump to:** [0.8.7](#whats-new-in-087) · [0.8.6](#whats-new-in-086) · [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+**Jump to:** [0.8.8](#whats-new-in-088) · [0.8.7](#whats-new-in-087) · [0.8.6](#whats-new-in-086) · [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+
+## What's New in 0.8.8
+
+**Spyglass.** Your agents see what you're looking at. 10 merged PRs, the same day as 0.8.7. **Restart Flight Deck, then every agent. [Public file links now expire](../../release-notes/RELEASE_NOTES_0.8.8.md#changed).**
+
+- **[Captain for Chrome](devices-and-channels.md#captain-for-chrome)**: the page you're on, read in your own browser and signed in, with its files, to one of your agents.
+  - Twelve actions, including Summarize, Grab files, Extract data, Fact-check, Draft a reply and **Watch it** (a check in Scheduled tasks).
+  - **Read it as** with the agent's own lenses.
+  - The panel follows the agent's work; **New topic**.
+  - Clips go to **web-clips** and the agent's chat.
+- **[Captain for Mac](devices-and-channels.md#captain-for-mac)**: the same for any app.
+  - Hold **fn** 3 s or click the menu-bar icon.
+  - It reads the window's text through Accessibility, **the selection first**, what's under the pointer, and a screenshot or OCR when asked.
+  - The task can be typed or spoken.
+  - **Paste into <app>** brings the answer back.
+  - Captures go to **screen-clips**. Get it on [GitHub](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.0) or from Connections → Browser.
+- **[Loop guards](agents.md#safety-guards)** let edit → re-run and sectioned reads through. The same write, command or read with nothing changed is still stopped.
+- **The chat:**
+  - Runtime messages are notes, not your words.
+  - A card with Open and Download for every file a turn made.
+  - File names instead of server paths.
+  - Progress lines fold away after the answer and are written in your language.
+- **No made-up reports:** no reported hand-offs or schedule changes that didn't happen. Cron acts by job ID. DeepSeek's text tool calls run.
+- **The browser on every agent:** one shared Chromium per deck, one plain answer (with `install-deps`) where Chromium can't start, and a Line notice for admins.
+- **Usage:** the meter is floored by the spend ledger. One message past a spent allowance goes through when your agents just worked (`FD_USAGE_FINISH_MINUTES`). The first refusal also goes on the Line.
+- **Fleet and links:** `/fd/fleet` lists only your own agents. Other decks' agents are for admins unless **Every user's agents too** is on. Public links expire after 7 days by default (30 at most).
+- **The desktop app** has no Captain Swarm.
+
+See [RELEASE_NOTES_0.8.8.md](../../release-notes/RELEASE_NOTES_0.8.8.md).
 
 ## What's New in 0.8.7
 

@@ -9,7 +9,7 @@ it uses the same deck API (`/fd/clip/*`, `captain_claw/flight_deck/browser_clip.
 Download it from GitHub — [Captain for Mac releases](https://github.com/kstevica/captain-claw/releases?q=mac-v&expanded=true)
 (tags `mac-v*`, e.g. [`mac-v0.1.0`](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.0)), or from your
 deck: Connections → Browser → Download Captain for Mac (the deck's own build when it has one, else that release).
-It needs a deck from main `8e4f99eb` on (the release after 0.8.7).
+It needs a Flight Deck 0.8.8 or newer.
 
 ## Use
 

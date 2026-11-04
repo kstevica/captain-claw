@@ -70,6 +70,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             .store(in: &bag)
 
         let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--demo") {
+            Demo.run(out: URL(fileURLWithPath: i + 1 < args.count ? args[i + 1] : NSTemporaryDirectory()))
+            return
+        }
         if args.contains("--selftest-hold") {
             SelfTest.hold()
             return

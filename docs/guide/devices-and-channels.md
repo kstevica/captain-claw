@@ -4,7 +4,7 @@
 
 The same agents, the same conversation, from wherever you are.
 
-**On this page:** [Voice devices](#voice-devices) · [Four devices, one firmware](#four-devices-one-firmware) · [Smart glasses](#smart-glasses) · [Chat channels](#chat-channels) · [WhatsApp Web](#whatsapp-web--your-own-whatsapp) · [Notifications](#notifications) · [Agents in your inbox](#agents-in-your-inbox)
+**On this page:** [Voice devices](#voice-devices) · [Four devices, one firmware](#four-devices-one-firmware) · [Smart glasses](#smart-glasses) · [Chat channels](#chat-channels) · [WhatsApp Web](#whatsapp-web--your-own-whatsapp) · [Notifications](#notifications) · [Captain for Chrome](#captain-for-chrome) · [Captain for Mac](#captain-for-mac) · [Agents in your inbox](#agents-in-your-inbox)
 
 ## Voice devices
 
@@ -94,6 +94,71 @@ What reaches you elsewhere is set on the **Notifications** card in Connections (
 - **your devices** (on: a beep, a banner and a count).
 
 Nothing rings twice. In quiet hours only nudges reach phones, and devices get the count without the beep. A channel that fails never stops the others. A **Daily summary** of your Line can also go to Telegram or email.
+
+## Captain for Chrome
+
+*New in 0.8.8.* A browser extension (Chrome, Edge, Brave, Arc; Chromium 116+) that sends the page you're on to one of your agents. It reads the page **in your browser**, signed in and as you see it: a portal, an intranet, a paywalled article, a dashboard drawn by JavaScript. It also downloads the files the page links to with your session. An agent's own web tools, fetching from the server, would get a sign-in page or a bot wall instead.
+
+- **Open it** with the toolbar icon, **Alt+Shift+C**, or a right-click on a page, a selection, a link or a picture. Pick an agent and an action:
+
+  | Action | What it does |
+  |---|---|
+  | Handle it | The agent decides what's useful |
+  | Summarize | The gist and the key points |
+  | Save to space | The whole page and its files, with notes |
+  | Grab files | Downloads and names the documents, writes an index |
+  | Extract data | Tables, prices, people and dates as CSV |
+  | Dig deeper | Checks the claims elsewhere, with sources |
+  | Fact-check | Each claim true, doubtful or false |
+  | Draft a reply | What you'd send, never sent |
+  | Make tasks | Next steps |
+  | Watch it | A scheduled check that says what changed |
+  | Remember | Keeps the facts in the agent's memory |
+  | Ask | Your own question |
+
+- **Read it as** adds a lens. The agent suggests its own, from its personality and description, made once and again only when the agent changes. The eight general lenses (investor, buyer, legal, skeptic, competitor, engineer, newcomer, your team) are under **More…**, or type your own.
+- **The page's files** can be searched and filtered by kind, ticked and unticked. Files on other sites are fetched after a site permission you grant in the click. What can't be fetched is listed for the agent, which fetches the public ones itself.
+- **Watch it** makes one check per page and agent in **Flight Deck's Scheduled tasks**, never in the agent's own cron. It runs every hour, 6 hours, day or week, and compares against `watch/latest.md`. Watching the same page again updates the task, and the panel links to it.
+- **While the agent works** the panel follows it: steps, the answer as it's written, a working bar with the elapsed time. Afterwards there are the clip folder's files, follow-ups, **New topic** (a fresh session, like `/new`) and a text size.
+
+The clip goes into the agent's main chat as your own words, counted against your daily allowance. The page is attached as `page.md`, with a note that it is web content, never your instructions. It's saved in `vfs:web-clips/<day>-<site>-<title>/`: `page.md`, `selection.md`, `page.mhtml`, `screenshot.png`, `tables/*.csv`, `files/*` and `clip.json`.
+
+**Connect it:**
+1. In Flight Deck, go to **Connections → Browser → Download the extension**, and unzip it.
+2. Open `chrome://extensions`, turn on **Developer mode** and press **Load unpacked**.
+3. Type your deck's address in the extension, then approve the code the deck shows (`<deck>/connect-browser#CODE`).
+
+The extension keeps a token of its own, `Browser · <browser>`, never a password. Connections → Browser lists it with **Disconnect**. It isn't in the Chrome Web Store yet. [The extension's README](../../browser-extension/chrome/README.md) · [design](../captain-for-chrome.md)
+
+## Captain for Mac
+
+*New in 0.8.8.* A menu-bar app for macOS 14 and later (Apple silicon and Intel) that sends what's on your screen, in **any app**, to one of your agents. It needs a 0.8.8 deck.
+
+- **Ask** by holding **fn** alone for 3 seconds (Settings → Trigger: fn or a right-hand ⌘ ⌥ ⇧ ⌃, 0.5–5 s), or by clicking the menu-bar icon or an optional floating button.
+  - A ring fills by the pointer while the key counts.
+  - Any other key cancels the hold, so fn shortcuts keep working.
+  - The panel opens beside your work, and the app you were in stays active.
+- **What it reads** from the front app, through Accessibility:
+  - **The selection**, sent first and marked as what you mean.
+  - **What's under the pointer** and the line around it.
+  - **The window's text**, what's on screen first and the rest after. A terminal gives the end of its scrollback; Chrome and Electron apps work too.
+  - **A screenshot** of the window or the whole screen, when you turn it on.
+  - **OCR** of the screen image, on the Mac, when an app shares little text.
+
+  Each piece is a chip you can switch off, or open to see what was read. Where an app hides its selection, Captain presses ⌘C and puts your clipboard back (Settings).
+- **Say the task** with the mic, or let it listen whenever Captain opens. *Send when I stop talking* sends on a pause, or when you let go of the held key. You can also type it; left empty, it's *Handle it*.
+- **One-click actions:** Explain, Summarize, Draft a reply, Improve, Translate, What's wrong?, Make tasks, Remember, Save it.
+- **The answer** streams in the panel with the agent's steps and the files it made. **Copy**, or **Paste into <app>** to go back and paste where you were. Follow-ups stay on the same capture.
+
+Captures go to `vfs:screen-clips/<day>-<app>-<title>/` (`screen.md`, `selection.md`, `screenshot.png`, `clip.json`) and into the agent's chat as your words, from the source *Captain for Mac*.
+
+**Get it:**
+1. Download it from the [GitHub release](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.0), or from **Flight Deck → Connections → Browser → Download Captain for Mac** (the deck's own build if it has one, else that release).
+2. Unzip it into Applications. It isn't notarized yet: if macOS won't open it, press **Open Anyway** in System Settings → Privacy & Security.
+3. Allow **Accessibility**. Screen Recording, Microphone and Speech Recognition are needed only for the screenshot, OCR and voice; Settings → Permissions shows each.
+4. In Settings → Flight Deck, type the deck's address, press **Connect** and approve the code. The token, `Desktop · Captain for Mac on <Mac>`, sits in the Keychain.
+
+[The app's README](../../captain-for-mac/README.md) · [design](../captain-for-mac.md)
 
 ## Agents in your inbox
 

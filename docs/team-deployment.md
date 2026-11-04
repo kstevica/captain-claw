@@ -248,6 +248,29 @@ can fetch its owner's Google token and call Gmail directly — as with every
 shell-capable agent. Deploy = backend restart (plus the frontend bundle for the
 Connections panel).
 
+## What 0.8.8 changes for a team deck
+
+- **One Chromium for all agents.** Flight Deck pins one deck-wide `PLAYWRIGHT_BROWSERS_PATH` for the
+  agents it starts. Before, each agent's own HOME got its own ~700 MB download. If the host lacks
+  Chromium's system libraries, agents get one plain answer naming them and pointing at the fix, and
+  admins get a Line notice. Fix it once, as root, with the deck's Python:
+  `sudo <venv>/bin/python -m playwright install-deps chromium`.
+- **Public file links expire**: 7 days by default, 30 at most (`FD_PUBLIC_FILE_LINK_DAYS`,
+  `FD_PUBLIC_FILE_LINK_MAX_DAYS`, where `0` means never). Older links get an end date at start-up, and
+  their owners are told on the Line.
+- **Daily allowances**: the meter is floored by the spend ledger, synced every 5 minutes. A person
+  whose agents worked in the last 30 minutes gets **one message past a spent allowance**
+  (`FD_USAGE_FINISH_MINUTES`, `0` = off).
+- **Fleet and other decks**: `/fd/fleet` lists only the caller's own agents. Agents on the operator's
+  other decks (BotPort) are for admins and their agents unless Console → Network → **Every user's agents
+  too** is on.
+- **Captain for Chrome and Captain for Mac** pair with a code each person approves signed in. Each holds
+  a personal access token of its own (`Browser · …` / `Desktop · …`), listed and revocable in
+  Connections → Browser; it can drive that person's agents, the same reach as an MCP token. Clips go to
+  each person's `web-clips` / `screen-clips` shared folders and count against their allowance. The Mac
+  app's download is the deck's own build (`captain-for-mac/build.sh` on a Mac) or else the GitHub
+  release (`FD_MAC_APP_URL`).
+
 ## Known follow-ups (not blockers)
 
 - Flows and scheduler jobs are authenticated but **not yet per-user isolated**
