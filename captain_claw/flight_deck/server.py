@@ -598,6 +598,11 @@ def _agent_base_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in _FD_ONLY_ENV_VARS}
     if env.get("FD_DATA_DIR", "").strip():
         env["FD_DATA_DIR"] = str(DATA_DIR)
+    # One Chromium for the whole deck. Each agent runs with its own HOME, so
+    # Playwright's default cache (under HOME) downloaded ~700 MB per agent.
+    from captain_claw.tools.browser_session import host_browsers_path
+
+    env["PLAYWRIGHT_BROWSERS_PATH"] = host_browsers_path(dict(os.environ))
     home = env.get("CAPTAIN_CLAW_FD_HOME", "").strip()
     if home:
         env["CAPTAIN_CLAW_FD_HOME"] = str(Path(home).expanduser().resolve())
@@ -1182,6 +1187,12 @@ async def lifespan(app: FastAPI):
     _spend_stop = asyncio.Event()
     app.state.usage_spend_stop = _spend_stop
     app.state.usage_spend_task = asyncio.create_task(usage_spend.sync_loop(_spend_stop))
+    # ── Browser: can Chromium start on this host? Admins told once if not. ──
+    from captain_claw.flight_deck import browser_health
+
+    app.state.browser_health_task = asyncio.create_task(browser_health.check_on_boot(_fd_db, DATA_DIR))
+    # ── Public links: ones made before every link expired get an end date. ──
+    app.state.public_links_cap = asyncio.create_task(public_file_shares.cap_open_links(_fd_db))
     # ── Taskboard: FD's ledgers read into users' boards every 120 s. ──
     taskboard.start()
     # ── Crew: coding CLIs running for approved users, watched from disk. ──
@@ -5947,27 +5958,49 @@ def _fleet_snapshot() -> list[dict[str, Any]]:
     return fleet
 
 
+def _may_reach_other_decks(owner: str, is_admin: bool) -> bool:
+    """BotPort links this deck to its operator's other Flight Decks. On a deck
+    with accounts only its admins — and their agents — see or reach the agents
+    there, unless an admin lets every user's agents (``outbound_users``): a
+    test user's agent once listed and messaged the operator's home deck. A
+    deck without sign-in has one operator."""
+    if not AUTH_ENABLED or is_admin or _owner_is_admin(owner):
+        return True
+    from captain_claw.flight_deck.botport_link import get_link
+
+    return bool(get_link().settings.outbound_users)
+
+
 @app.get("/fd/fleet", response_model=list[FleetAgent])
 async def get_fleet(request: Request, include_remote: bool = False, user: dict | None = _optional_user_dep):
-    """Return all running/known agents across docker, process, and local stores
-    — this deck's only (another deck's containers on this host are not peers).
+    """The caller's own agents across docker and process — this deck's only
+    (another deck's containers on this host are not peers).
+
+    The caller is a signed-in user (their bearer), or one of this deck's agents
+    (transport guard + its own X-Agent-Auth), seeing its owner's agents. On a
+    deck with accounts a caller FD can't name sees none: an agent's call
+    carries no user token, and it used to get the whole deck.
 
     ``include_remote=1`` adds the agents other Flight Decks expose over the
-    BotPort link (kind ``remote``, named ``Agent@deck``, port 0)."""
-    user_id = getattr(request.state, "user_id", "")
+    BotPort link (kind ``remote``, named ``Agent@deck``, port 0) — for the
+    deck's admins and their agents (`_may_reach_other_decks`)."""
+    user = user if isinstance(user, dict) else None  # called directly: the Depends default
+    user_id = str((user or {}).get("id") or getattr(request.state, "user_id", "") or "")
+    is_admin = bool(user_id) and bool(user) and user.get("role") == "admin"
+    caller = None
+    if not user_id and _agent_caller_ok(request):
+        caller = _agent_record_by_auth(request.headers.get("X-Agent-Auth", "").strip())
+    owner = user_id or str((caller or {}).get("owner") or "")
+    if AUTH_ENABLED and not owner:
+        return []
     fleet: list[FleetAgent] = []
-    for a in _fleet_snapshot():
-        if AUTH_ENABLED and user_id and a.get("owner", "") != user_id:
+    for a in await asyncio.to_thread(_fleet_snapshot):
+        if AUTH_ENABLED and a.get("owner", "") != owner:
             continue
         fleet.append(FleetAgent(**{k: v for k, v in a.items() if k != "owner"}))
 
-    # The federation roster only for a caller FD can name: a signed-in user,
-    # or one of its own agents (transport guard + the agent's X-Agent-Auth).
-    if include_remote is True and (
-        (isinstance(user, dict) and user.get("id"))
-        or (_agent_caller_ok(request)
-            and _agent_record_by_auth(request.headers.get("X-Agent-Auth", "").strip()) is not None)
-    ):
+    if include_remote is True and (user_id or caller is not None) \
+            and _may_reach_other_decks(owner, is_admin):
         from captain_claw.flight_deck.botport_link import get_link
 
         for r in get_link().remote_agents():
@@ -7179,6 +7212,12 @@ def _resolve_peer_caller(request: Request, user: dict | None) -> tuple[str, bool
     return agent["owner"], False, agent
 
 
+def _require_other_decks(owner: str, is_admin: bool) -> None:
+    """403 unless the caller may reach agents on the operator's other decks."""
+    if not _may_reach_other_decks(owner, is_admin):
+        raise HTTPException(403, "Agents on other Flight Decks are for this deck's admins only")
+
+
 def _resolve_peer_target(port: int, owner: str, is_admin: bool) -> str:
     """The web_auth FD recorded for its agent on web port ``port`` — once the
     caller (``owner``) is allowed to drive it: 404 when FD has no agent there,
@@ -7521,6 +7560,7 @@ async def consult_peer(req: ConsultPeerRequest, request: Request, user: dict | N
 
     owner, is_admin, caller_agent = _resolve_peer_caller(request, user)
     if req.target_deck or req.target_agent:
+        _require_other_decks(owner, is_admin)
         return _remote_consult_response(req.target_deck, req.target_agent, req.message,
                                         await _remote_caller_name(req.source_name, caller_agent, user),
                                         req.timeout, attach_path=req.attach_path)
@@ -7598,6 +7638,7 @@ async def delegate_peer(req: DelegatePeerRequest, request: Request, user: dict |
         source_auth = _resolve_peer_target(source_port, owner, is_admin)
 
     if remote:
+        _require_other_decks(owner, is_admin)
         return await _remote_delegate(req, source_port, source_auth,
                                       await _remote_caller_name(req.source_name, caller_agent, user))
 

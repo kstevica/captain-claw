@@ -1131,6 +1131,11 @@ class FlightDeckDB:
             ("agent_links", "remote_url", "TEXT NOT NULL DEFAULT ''"),
             ("agent_links", "remote_key", "TEXT NOT NULL DEFAULT ''"),
             ("daily_usage", "byok_tokens", "INTEGER NOT NULL DEFAULT 0"),
+            # The spend ledger's tokens for the day when a reset zeroed it
+            # (usage_quota: what the agents' own records show counts from there).
+            ("daily_usage", "spend_base", "INTEGER NOT NULL DEFAULT 0"),
+            # The day's one message past the allowance, to finish a job (usage_quota).
+            ("daily_usage", "finish_used", "INTEGER NOT NULL DEFAULT 0"),
             ("users", "last_login_at", "TEXT NOT NULL DEFAULT ''"),
             ("users", "feedback_asked_at", "TEXT NOT NULL DEFAULT ''"),
             # The Line's threads (line.py): what an item belongs with.
@@ -2266,21 +2271,78 @@ class FlightDeckDB:
                 "byok_tokens": int(row["byok_tokens"])} if row \
             else {"messages": 0, "tokens": 0, "byok_tokens": 0}
 
+    async def get_daily_usage_meta(self, user_id: str, day: str) -> dict:
+        """The day's bookkeeping beside the counters (usage_quota): the spend
+        ledger's tokens when a reset zeroed the day, whether the finishing
+        message went, and when the counters last moved."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT spend_base, finish_used, updated_at FROM daily_usage WHERE user_id = ? AND day = ?",
+            (user_id, day),
+        ) as cur:
+            row = await cur.fetchone()
+        return {"spend_base": int(row["spend_base"]), "finish_used": bool(row["finish_used"]),
+                "updated_at": row["updated_at"]} if row \
+            else {"spend_base": 0, "finish_used": False, "updated_at": ""}
+
+    async def use_finish_message(self, user_id: str, day: str) -> bool:
+        """Spend *user_id*'s one message past the day's allowance; False when
+        it is gone already (or nothing was counted today)."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "UPDATE daily_usage SET finish_used = 1 WHERE user_id = ? AND day = ? AND finish_used = 0",
+            (user_id, day),
+        )
+        await self._db.commit()
+        return cur.rowcount == 1
+
+    async def _zero_daily_usage(self, user_id: str, day: str) -> None:
+        """Zero the day's counters, keeping where the spend ledger stood so
+        the tokens it shows from before the reset don't come back."""
+        base = await self.get_spend_tokens(user_id, day)
+        await self._db.execute(
+            "DELETE FROM daily_usage WHERE user_id = ? AND day = ?", (user_id, day))
+        await self._db.execute(
+            "INSERT INTO daily_usage (user_id, day, messages, tokens, byok_tokens, spend_base,"
+            " updated_at) VALUES (?, ?, 0, 0, 0, ?, ?)", (user_id, day, base, _utcnow()))
+
     async def reset_daily_usage(self, user_id: str, day: str) -> None:
         """Zero *user_id*'s counters for *day*."""
         assert self._db is not None
-        await self._db.execute(
-            "DELETE FROM daily_usage WHERE user_id = ? AND day = ?", (user_id, day))
+        await self._zero_daily_usage(user_id, day)
         await self._db.commit()
+
+    async def get_spend_tokens(self, user_id: str, day: str) -> int:
+        """The tokens *user_id*'s agents spent on *day* that missed the prompt
+        cache, on the deck's keys, as the spend ledger read them from the
+        agents' own records (fresh input, cache writes and output)."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT COALESCE(SUM(input_tokens + cache_write_tokens + output_tokens), 0) AS t"
+            " FROM usage_spend WHERE user_id = ? AND day = ? AND byok = 0", (user_id, day),
+        ) as cur:
+            row = await cur.fetchone()
+        return int(row["t"] or 0) if row else 0
+
+    async def list_spend_tokens(self, day: str) -> dict[str, int]:
+        """:meth:`get_spend_tokens` for every user on *day*."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT user_id, SUM(input_tokens + cache_write_tokens + output_tokens) AS t"
+            " FROM usage_spend WHERE day = ? AND byok = 0 GROUP BY user_id", (day,),
+        ) as cur:
+            return {r["user_id"]: int(r["t"] or 0) for r in await cur.fetchall()}
 
     async def list_daily_usage(self, day: str) -> dict[str, dict]:
         """Every user's counters for *day*, by user id."""
         assert self._db is not None
         async with self._db.execute(
-            "SELECT user_id, messages, tokens, byok_tokens FROM daily_usage WHERE day = ?", (day,),
+            "SELECT user_id, messages, tokens, byok_tokens, spend_base FROM daily_usage"
+            " WHERE day = ?", (day,),
         ) as cur:
             return {r["user_id"]: {"messages": int(r["messages"]), "tokens": int(r["tokens"]),
-                                   "byok_tokens": int(r["byok_tokens"])}
+                                   "byok_tokens": int(r["byok_tokens"]),
+                                   "spend_base": int(r["spend_base"])}
                     for r in await cur.fetchall()}
 
     async def get_usage_resets(self, user_id: str) -> int:
@@ -2363,8 +2425,7 @@ class FlightDeckDB:
         )
         if cur.rowcount != 1:  # nothing changed (no rollback: the connection is shared)
             return False
-        await self._db.execute(
-            "DELETE FROM daily_usage WHERE user_id = ? AND day = ?", (user_id, day))
+        await self._zero_daily_usage(user_id, day)
         await self._db.commit()
         return True
 

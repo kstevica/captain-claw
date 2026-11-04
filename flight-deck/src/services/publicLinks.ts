@@ -31,7 +31,10 @@ export interface PublicLinkConfig {
   max_mb: number
   /** FD_PUBLIC_URL when the deck sets one; else links use this page's origin. */
   public_base: string
+  /** The expiries the deck allows, in days; 0 = never (only on a deck with no cap). */
   expiry_days: number[]
+  /** How long a new link lasts unless the owner picks otherwise. */
+  default_days?: number
 }
 
 function _authHeaders(): Record<string, string> {

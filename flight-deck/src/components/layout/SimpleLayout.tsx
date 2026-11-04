@@ -920,6 +920,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         <ArchetypeSpawnDialog
           takenSlugs={new Set(processes.map((p) => p.slug))}
           onClose={() => setArchetypeOpen(false)}
+          onConnect={(service) => { setArchetypeOpen(false); openConnections(service) }}
           onSpawned={(slug, setup) => {
             setArchetypeOpen(false)
             startBoot(`proc-${slug}`, true)

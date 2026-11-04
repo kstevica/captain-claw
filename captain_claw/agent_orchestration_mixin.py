@@ -987,6 +987,10 @@ class AgentOrchestrationMixin:
             tools=offered,
             payment_tools=offered & fabrication_guard.PAYMENT_TOOLS,
             whatsapp_tools=offered & fabrication_guard.WHATSAPP_TOOLS,
+            # Held text is judged for mail and calendar only (see above).
+            delegation_tools=frozenset() if held else offered & fabrication_guard.DELEGATION_TOOLS,
+            others_turn=isinstance(turn, tuple) and bool(turn) and turn[0] in ("peer", "delegated_result"),
+            schedule_tools=frozenset() if held else offered & fabrication_guard.SCHEDULE_TOOLS,
         )
         return fabrication_guard.judge_reply(raw, text, facts)
 
@@ -1392,6 +1396,10 @@ class AgentOrchestrationMixin:
             self._last_complete_success = success
             if success:
                 self._record_timing_event("last_assistant_at")
+            if isinstance(text, str):
+                from captain_claw.dsml import strip_dsml
+
+                text = strip_dsml(text)  # DeepSeek's call markup is never an answer
             return text
 
         def _backstopped(text: Any) -> Any:
@@ -3032,7 +3040,10 @@ class AgentOrchestrationMixin:
                     calls=[(c.name, list(c.arguments.keys())) for c in embedded_calls],
                     content_preview=str(response.content or "")[:300],
                 )
-                _emb_text = str(response.content or "").strip()
+                # DeepSeek's tool-call markup is the call, never chat text.
+                from captain_claw.dsml import strip_dsml
+
+                _emb_text = strip_dsml(str(response.content or "").strip())
                 # Judged after the calls, like explicit ones (see above).
                 _held_claim = (_emb_text if self._claims_send(_emb_text, user_input, _offered_tools)
                                else "")
@@ -3043,7 +3054,7 @@ class AgentOrchestrationMixin:
                 _tools_executed_count += len(embedded_calls)
                 self._add_session_message(
                     role="assistant",
-                    content="" if _held_claim else str(response.content or ""),
+                    content="" if _held_claim else _emb_text,
                     tool_calls=self._serialize_tool_calls_for_session(embedded_calls),
                 )
                 _emb_tool_results = await self._handle_tool_calls(

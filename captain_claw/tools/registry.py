@@ -429,6 +429,36 @@ class ToolRegistry:
             del self._tools[name]
         self._tool_metadata.pop(name, None)
 
+    # The accounts a tool needs, by its metadata flag: (flag, module, check,
+    # what the person connects in Flight Deck → Connections).
+    _CONNECTION_GATES = (
+        ("requires_google", "captain_claw.google_oauth_manager", "is_google_connected_cached", "Google"),
+        ("requires_microsoft", "captain_claw.microsoft_oauth_manager",
+         "is_microsoft_connected_cached", "Microsoft"),
+    )
+
+    def _unconnected_reason(self, name: str) -> str:
+        """Why *name* can't run when the answer is an account nobody connected
+        yet, in words the agent can pass on ("" for any other block). The old
+        "Blocked by tool policy chain" read like an admin setting, so an inbox
+        agent sent its user hunting for one instead of to Connections."""
+        import importlib
+
+        meta = self._tool_metadata.get(name, {})
+        for flag, module, check, label in self._CONNECTION_GATES:
+            if not meta.get(flag):
+                continue
+            try:
+                connected = bool(getattr(importlib.import_module(module), check)())
+            except Exception:
+                connected = False
+            if not connected:
+                return (f"{label} isn't connected for this account yet, so {name} can't run. "
+                        f"Tell the user to connect it in Flight Deck → Connections → {label} "
+                        "(it takes a minute), then ask again. Don't retry, and don't reach the "
+                        "account any other way.")
+        return ""
+
     def has_tool(self, name: str) -> bool:
         """Return whether a tool name is currently registered."""
         return name in self._tools
@@ -1040,7 +1070,8 @@ class ToolRegistry:
             )
         })
         if _normalize_tool_name(name) not in allowed_names:
-            raise ToolBlockedError(name, "Blocked by tool policy chain")
+            raise ToolBlockedError(
+                name, self._unconnected_reason(name) or "Blocked by tool policy chain")
 
         # Check if tool is blocked
         config = get_config()

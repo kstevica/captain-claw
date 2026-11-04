@@ -54,6 +54,31 @@ AGENT_USAGE_PATH = "/fd/quota/agent/usage"
 # Share of an allowance after which the person is warned it is running out.
 WARN_AT = 0.8
 
+
+def finish_minutes() -> int:
+    """The one message past a spent allowance, so a job isn't cut off a step
+    before its end (cohort001: a multi-agent demo hit the cap on the approval
+    for its last step): it goes through when the person's agents were at work
+    in the last this-many minutes. FD_USAGE_FINISH_MINUTES (30); 0 turns it off."""
+    try:
+        return max(0, int(os.environ.get("FD_USAGE_FINISH_MINUTES", "").strip() or 30))
+    except ValueError:
+        return 30
+
+
+def _finish_open(meta: dict) -> bool:
+    """Is today's finishing message still there, with work going on lately?"""
+    window = finish_minutes()
+    if not window or meta.get("finish_used") or not meta.get("updated_at"):
+        return False
+    try:
+        last = datetime.fromisoformat(str(meta["updated_at"]))
+    except ValueError:
+        return False
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=UTC)
+    return datetime.now(UTC) - last <= timedelta(minutes=window)
+
 # Commands that never reach a model: not counted, and they still work when the
 # day's allowance is spent. "/new" and "/clear" only without trailing text —
 # "/new <question>" starts the new chat with that question.
@@ -131,6 +156,21 @@ async def _user(db, user_or_id: dict | str) -> dict | None:
         return None
 
 
+async def _tokens_used(db, uid: str, day: str, used: dict, meta: dict) -> int:
+    """Today's tokens: the agents' own reports, or — when more — what the spend
+    ledger read from their records since the last reset. A report an agent
+    never got through (cohort001: one user's meter showed 4,298 tokens against
+    about 320,000 spent) can't hide the spend; the ledger lags by up to a pass
+    (usage_spend.SYNC_EVERY_S), the reports don't. The ledger bills a shared
+    agent's member turns to its owner, so an owner may count them too."""
+    try:
+        ledger = await db.get_spend_tokens(uid, day) - int(meta.get("spend_base") or 0)
+    except Exception as exc:
+        log.debug("Spend ledger not read for the meter", error=type(exc).__name__)
+        ledger = 0
+    return max(int(used.get("tokens") or 0), ledger)
+
+
 async def status(db, user_or_id: dict | str, *, agent_owner: str = "") -> dict:
     """The person's allowances today: plan, used / limit for messages and
     tokens, when they reset, and whether they are spent (``blocked``:
@@ -146,6 +186,8 @@ async def status(db, user_or_id: dict | str, *, agent_owner: str = "") -> dict:
     limits = get_user_limits(user) if user else {}
     day = today()
     used = await db.get_daily_usage(uid, day)
+    meta = await db.get_daily_usage_meta(uid, day)
+    used["tokens"] = await _tokens_used(db, uid, day, used, meta)
     resets_left = await db.get_usage_resets(uid)
     msg_limit = max(0, int(limits.get("messages_per_day") or 0))
     tok_limit = max(0, int(limits.get("tokens_per_day") or 0))
@@ -163,6 +205,11 @@ async def status(db, user_or_id: dict | str, *, agent_owner: str = "") -> dict:
             warning = "messages"
         elif tok_limit and used["tokens"] >= WARN_AT * tok_limit:
             warning = "tokens"
+    # Spent, but the job in hand may finish: one more message, shown as a
+    # warning (the chat keeps its composer open), counted in admit_message.
+    finish = None
+    if blocked and _finish_open(meta):
+        finish, blocked, warning = blocked, None, "finish"
     return {
         "plan": plan,
         "plan_label": plan_label(plan),
@@ -176,6 +223,8 @@ async def status(db, user_or_id: dict | str, *, agent_owner: str = "") -> dict:
         "tokens": _allowance(used["tokens"], tok_limit),
         "blocked": blocked,
         "warning": warning,
+        # Which allowance is spent while the one finishing message is open.
+        "finish": finish,
         "resets_left": resets_left,  # free resets an admin gave them
     }
 
@@ -236,6 +285,43 @@ def short_limit_text(st: dict) -> str:
             + (f" {_resets(left).capitalize()} in the web chat." if left else ""))
 
 
+_REFUSAL_TOLD: dict[str, str] = {}   # user id → the day they were told
+
+
+async def _tell_finished(user_id: str, st: dict) -> None:
+    """Say on the Line that the finishing message went, and what comes next."""
+    what = "AI tokens" if st.get("finish") == "tokens" else "messages"
+    until = _until(st.get("resets_at") or "")
+    try:
+        from captain_claw.flight_deck import line
+
+        await line.post(
+            user_id, "deck", "One message past today's limit went through",
+            f"Today's {what} were used up, so this message went through as the day's one extra, "
+            "so your agent can finish what it was doing. The next one waits until midnight UTC"
+            + (f" (in {until})" if until else "") + ", or a free reset.",
+            bell_type="info")
+    except Exception as exc:
+        log.debug("Finishing message not put on the Line", error=type(exc).__name__)
+
+
+async def _tell_refused_once(user_id: str, st: dict) -> None:
+    """Put the first refused message of the day on the person's Line too. A
+    refusal only in the chat is easy to miss — or gone, when the chat they
+    answered from closed (an approval sent one step before a job's end)."""
+    day = str(st.get("day") or today())
+    if _REFUSAL_TOLD.get(user_id) == day:
+        return
+    _REFUSAL_TOLD[user_id] = day
+    try:
+        from captain_claw.flight_deck import line
+
+        await line.post(user_id, "deck", "Your message wasn't sent: today's allowance is used up",
+                        limit_text(st), bell_type="warning", needs_you=True)
+    except Exception as exc:
+        log.debug("Allowance refusal not put on the Line", error=type(exc).__name__)
+
+
 async def admit_message(user_or_id: dict | str, content: Any = "", *,
                         agent_owner: str = "") -> tuple[bool, dict | None]:
     """May this human message go to an agent? Counts it when it may.
@@ -253,7 +339,13 @@ async def admit_message(user_or_id: dict | str, content: Any = "", *,
         if user is None:
             return True, None
         st = await status(db, user, agent_owner=agent_owner)
+        if st["finish"]:
+            if await db.use_finish_message(str(user["id"]), st["day"]):
+                await _tell_finished(str(user["id"]), st)
+            else:  # another message took it a moment ago
+                st = await status(db, user, agent_owner=agent_owner)
         if st["blocked"]:
+            await _tell_refused_once(str(user["id"]), st)
             return False, st
         await db.add_daily_usage(str(user["id"]), st["day"], messages=1)
         return True, await status(db, user, agent_owner=agent_owner)
@@ -417,8 +509,14 @@ async def usage_today(_admin: dict = Depends(require_admin)) -> dict:
     the deck's cap on them (admin only)."""
     db = get_db()
     day = today()
+    usage = await db.list_daily_usage(day)
+    for uid, tokens in (await db.list_spend_tokens(day)).items():
+        row = usage.setdefault(uid, {"messages": 0, "tokens": 0, "byok_tokens": 0, "spend_base": 0})
+        row["tokens"] = max(row["tokens"], tokens - row.get("spend_base", 0))
+    for row in usage.values():
+        row.pop("spend_base", None)  # bookkeeping, not usage
     return {"day": day, "resets_at": resets_at().isoformat(),
-            "usage": await db.list_daily_usage(day),
+            "usage": usage,
             "resets": await db.list_usage_resets(),
             "reset_cap": await reset_cap(db)}
 

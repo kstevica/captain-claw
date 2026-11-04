@@ -15,6 +15,11 @@ from captain_claw import research_images
 from captain_claw.config import get_config
 from captain_claw.google_ids import google_drive_can_open, google_drive_redirect
 from captain_claw.logging import get_logger
+from captain_claw.tools.browser_session import (
+    BrowserUnavailable,
+    browser_unavailable_reason,
+    launch_chromium,
+)
 from captain_claw.tools.registry import Tool, ToolResult
 
 log = get_logger(__name__)
@@ -362,6 +367,32 @@ _LOAD_MORE_SELECTORS = [
 # deep-fetch need. The triggering call falls back to fast content; subsequent
 # calls get a working browser. Fire-and-forget so we never hang a tool call.
 
+_BROWSER_DOWN_NOTE = (
+    "[Browser: can't start on this server (system libraries missing), so this is the "
+    "plain-HTTP text. Pages that build their content with scripts may be incomplete. "
+    "Don't install anything yourself; tell the user the page needs the browser and the "
+    "server's admin has to fix it.]\n"
+)
+
+
+def _deep_unavailable_note() -> str:
+    """The batch note for URLs that needed the browser and didn't get it."""
+    if browser_unavailable_reason():
+        return ("Some URLs needed a headless browser, which can't start on this server "
+                "(system libraries missing); their fast-HTTP text is shown. Don't install "
+                "anything yourself: tell the user those pages need the browser and the "
+                "server's admin has to fix it.")
+    if not _HAS_PLAYWRIGHT:
+        return ("Some URLs needed a headless browser, which isn't installed with this "
+                "Captain; their fast-HTTP text is shown.")
+    if _browser_install_attempted and not _browser_install_done:
+        return ("Some URLs needed a headless browser (deep mode); a one-time Chromium "
+                "install is running in the background now. The fast-HTTP content is shown "
+                "below — retry web_fetch_batch shortly to deep-fetch them properly.")
+    return ("Some URLs needed a headless browser, which isn't available here; their "
+            "fast-HTTP text is shown. Don't install anything yourself.")
+
+
 _browser_install_attempted = False
 _browser_install_done = False
 _browser_install_task = None  # hold a reference so the task isn't GC'd mid-run
@@ -466,9 +497,12 @@ async def _deep_fetch(url: str, max_scrolls: int = 20, scroll_pause: float = 1.0
         )
 
     pw = await async_playwright().start()
+    browser = None
     try:
         try:
-            browser = await pw.chromium.launch(headless=True)
+            browser = await launch_chromium(pw.chromium, headless=True, auto_install=False)
+        except BrowserUnavailable:
+            raise  # the host lacks Chromium's libraries: an install won't help
         except Exception:
             # Browser binary missing — kick a one-time background install so the
             # next attempt works, then surface the actionable error this time.
@@ -602,11 +636,20 @@ class WebFetchTool(Tool):
             if governed:
                 effective_max_chars = _spill.SPILL_SOURCE_MAX
 
+            browser_note = ""
             if deep_fetch:
                 log.info("Fetching URL (deep_fetch mode)", url=url)
-                raw_html = await _deep_fetch(url)
-                status_code = 200  # Playwright doesn't expose status easily
-                mode = "deep"
+                try:
+                    raw_html = await _deep_fetch(url)
+                    status_code = 200  # Playwright doesn't expose status easily
+                    mode = "deep"
+                except BrowserUnavailable:
+                    # Fall back to the plain fetch below, and say so once.
+                    log.warning("deep_fetch: browser unavailable on this host, using plain HTTP", url=url)
+                    browser_note = _BROWSER_DOWN_NOTE
+                    deep_fetch = False
+            if deep_fetch:
+                pass  # rendered above
             elif member:
                 log.info("Fetching URL (member text mode)", url=url)
                 try:
@@ -644,7 +687,7 @@ class WebFetchTool(Tool):
                 budget_s=_IMAGE_BUDGET_S, member=member)
 
             if governed:
-                return ToolResult(success=True, content=_with_block(_governed_page_output(
+                return ToolResult(success=True, content=browser_note + _with_block(_governed_page_output(
                     url, status_code, mode, len(raw_html), content[:_spill.SPILL_SOURCE_MAX],
                     max_chars, _agent), block))
 
@@ -653,7 +696,7 @@ class WebFetchTool(Tool):
             if saved:
                 return ToolResult(
                     success=True,
-                    content=_with_block(_corpus_output(
+                    content=browser_note + _with_block(_corpus_output(
                         url, status_code, mode, len(raw_html), content, saved,
                         head_chars=effective_max_chars), block),
                 )
@@ -661,7 +704,7 @@ class WebFetchTool(Tool):
             if len(content) > effective_max_chars:
                 content = content[:effective_max_chars] + "\n... [truncated]"
 
-            output = f"[URL: {url}]\n"
+            output = browser_note + f"[URL: {url}]\n"
             output += f"[Status: {status_code}]\n"
             output += f"[Mode: {mode}]\n"
             output += f"[Size: {len(raw_html)} chars]\n"
@@ -1126,8 +1169,7 @@ class WebFetchBatchTool(Tool):
                   "read a pointer with `read` (offset/limit) or `grep` for more than its preview.")
         notes: list[str] = []
         if deep_unavailable:
-            notes.append("Some URLs needed a headless browser, which isn't available here; "
-                         "their fast-HTTP text is shown.")
+            notes.append(_deep_unavailable_note())
         if overflow:
             notes.append(f"{len(overflow)} URL(s) exceeded the per-call cap and were NOT fetched. "
                          f"Call web_fetch_batch again with: {overflow}")
@@ -1146,7 +1188,9 @@ class WebFetchBatchTool(Tool):
         browser = None
         try:
             try:
-                browser = await pw.chromium.launch(headless=True)
+                browser = await launch_chromium(pw.chromium, headless=True, auto_install=False)
+            except BrowserUnavailable:
+                return False  # host lacks Chromium's libraries; the note says so
             except Exception as e:
                 log.warning("web_fetch_batch: browser launch failed (binary not installed?): %s", e)
                 _kick_browser_install()  # background self-heal for next time
@@ -1225,18 +1269,7 @@ class WebFetchBatchTool(Tool):
         header = f"Fetched {ok_count}/{len(targets)} URLs ({deep_count} via deep browser, {fail_count} failed)."
         notes: list[str] = []
         if deep_unavailable:
-            if _browser_install_attempted and not _browser_install_done:
-                notes.append(
-                    "Some URLs needed a headless browser (deep mode); a one-time Chromium "
-                    "install is running in the background now. The fast-HTTP content is shown "
-                    "below — retry web_fetch_batch shortly to deep-fetch them properly."
-                )
-            else:
-                notes.append(
-                    "Some URLs need a headless browser, but Playwright's browser isn't available. "
-                    "Run `pip install playwright && playwright install chromium`, then retry "
-                    "web_fetch_batch for the failed URLs."
-                )
+            notes.append(_deep_unavailable_note())
         if overflow:
             notes.append(
                 f"{len(overflow)} URL(s) exceeded the per-call cap and were NOT fetched. "

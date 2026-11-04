@@ -3135,6 +3135,37 @@ class AgentContextMixin:
                 lines.append(_mcp_policy)
             return "\n".join(lines)
 
+    _MAIL_CAL_TOOLS = ("google_mail", "google_calendar", "microsoft_mail", "microsoft_calendar")
+
+    def _build_connections_block(self) -> str:
+        """The "not connected yet" note (mail and calendar registered, neither
+        Google nor Microsoft connected) and, under Flight Deck, how the user
+        brings files and code. Empty for a shared agent's member."""
+        if getattr(self, "_speaker_scoped", False) is True:
+            return ""
+        out = ""
+        try:
+            if any(self.tools.has_tool(n) for n in self._MAIL_CAL_TOOLS):
+                from captain_claw.google_oauth_manager import is_google_connected_cached
+                from captain_claw.microsoft_oauth_manager import is_microsoft_connected_cached
+
+                if not is_google_connected_cached() and not is_microsoft_connected_cached():
+                    out += "\n\n" + self.instructions.load("section_connections_missing.md")
+        except Exception:
+            pass
+        try:
+            from captain_claw.crew_client import crew_usable, under_flight_deck
+
+            if under_flight_deck():
+                out += "\n\n" + self.instructions.render(
+                    "section_bring_files.md",
+                    crew_line=("- A git repository: clone it with the crew tool (action=clone, its URL)."
+                               if self.tools.has_tool("crew") and crew_usable() else ""),
+                )
+        except Exception:
+            pass
+        return out
+
     def _build_conditional_section(
         self, tool_name: str | tuple[str, ...], section_file: str,
         **variables: object,
@@ -3539,6 +3570,11 @@ class AgentContextMixin:
             ("microsoft_onedrive", "microsoft_calendar", "microsoft_mail"),
             "section_microsoft.md",
         )
+        # What this agent's tools need that nobody connected yet, and how
+        # people bring their own files (cohort001: an inbox agent promised
+        # eight mail features with no mail connected; a developer agent met
+        # "there is no repository"; another told its user to scp to the server).
+        google_block += self._build_connections_block()
         datastore_block = self._build_conditional_section(
             "datastore", "section_datastore.md",
         )

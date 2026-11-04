@@ -48,7 +48,7 @@ log = get_logger(__name__)
 
 router = APIRouter(prefix="/fd/admin/usage", tags=["usage-spend"])
 
-SYNC_EVERY_S = 900.0     # the background pass; an agent removed between two loses that much
+SYNC_EVERY_S = 300.0     # the background pass (the daily meter's floor lags this much); an agent removed between two loses that much
 _FRESH_S = 60.0          # opening the Users page reads the agents again after this long
 _READ_WAIT_S = 5.0       # the page waits this long for a pass; the first can take longer
 _OPEN_TIMEOUT_S = 2.0    # an agent writing its sessions.db holds a read back this long at most

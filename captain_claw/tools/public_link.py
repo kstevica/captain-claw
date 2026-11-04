@@ -67,7 +67,7 @@ class PublicLinkTool(Tool):
         "action='share' (path or filename of the file) returns the URL — give it to the user "
         "exactly as returned and tell them anyone with it can open the file. The link shows a "
         "COPY of the file as it is now; sharing the same file again refreshes that copy and "
-        "keeps the URL. Optional expires_days: 0 (never, default), 1, 7 or 30. "
+        "keeps the URL. Optional expires_days: 1, 7 or 30 (a new link lasts 7 by default; 0 = never, only where the deck allows it). "
         "action='unshare' stops a link (path, or token from list); action='list' shows this "
         "agent's links with their view counts. For a whole folder or website use `hosting` "
         "instead."
@@ -92,8 +92,9 @@ class PublicLinkTool(Tool):
             "expires_days": {
                 "type": "integer",
                 "enum": list(_EXPIRY_DAYS),
-                "description": "share: days until the link stops working; 0 = never. Leave out "
-                               "to keep an existing link's expiry (a new link never expires).",
+                "description": "share: days until the link stops working (0 = never, only where "
+                               "the deck allows it). Leave out to keep an existing link's expiry "
+                               "(a new link gets the deck's default, usually 7 days).",
             },
             "token": {
                 "type": "string",
@@ -156,7 +157,7 @@ class PublicLinkTool(Tool):
             except (TypeError, ValueError):
                 days = -1
             if days not in _EXPIRY_DAYS:
-                return ToolResult(success=False, error="expires_days must be 0 (never), 1, 7 or 30.")
+                return ToolResult(success=False, error="expires_days must be 1, 7 or 30 (0 = never, where the deck allows it).")
             body["expires_days"] = days
 
         data, err = await self._post(base, headers, "/fd/public-shares/agent/share", body)

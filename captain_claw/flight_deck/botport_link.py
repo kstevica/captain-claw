@@ -97,6 +97,7 @@ _ENV = {
     "max_concurrent": "FD_BOTPORT_MAX_CONCURRENT",
     "deny_tools": "FD_BOTPORT_DENY_TOOLS",
     "user_sharing": "FD_BOTPORT_USER_SHARING",
+    "outbound_users": "FD_BOTPORT_OUTBOUND_USERS",
 }
 
 
@@ -130,6 +131,9 @@ class LinkSettings:
     expose: list[str] = field(default_factory=list)       # agent names/slugs, or ["*"]
     accept_from: list[str] = field(default_factory=lambda: ["*"])  # deck names, or ["*"]
     allow_outbound: bool = True   # this deck's agents may consult remote agents
+    # ...every user's agents, not only the admins' (on a deck with accounts):
+    # the other decks on the hub are usually the operator's own.
+    outbound_users: bool = False
     max_concurrent: int = 4       # inbound tasks run at once
     max_inbound_timeout: float = 900.0
     # Extra tools remote turns may not use (e.g. shell, scripts, write) — on
@@ -150,6 +154,7 @@ class LinkSettings:
         s.expose = _as_list(d.get("expose", []))
         s.accept_from = _as_list(d.get("accept_from", ["*"])) or []
         s.allow_outbound = _as_bool(d.get("allow_outbound", True))
+        s.outbound_users = _as_bool(d.get("outbound_users", False))
         try:
             s.max_concurrent = max(1, min(int(d.get("max_concurrent", 4)), 64))
         except (TypeError, ValueError):

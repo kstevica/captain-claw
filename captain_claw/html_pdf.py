@@ -62,10 +62,7 @@ async def _chromium_pdf(html: str) -> bytes:
         raise RuntimeError(
             f"Can't make a PDF here: WeasyPrint can't load ({_weasyprint_error}) and Playwright isn't installed."
         ) from exc
-    from captain_claw.tools.browser_session import (
-        _is_missing_browser_error,
-        ensure_chromium_installed,
-    )
+    from captain_claw.tools.browser_session import launch_chromium
 
     async def only_the_web(route: Any) -> None:
         parts = urlsplit(route.request.url)
@@ -77,15 +74,7 @@ async def _chromium_pdf(html: str) -> bytes:
             await route.abort()
 
     async with async_playwright() as pw:
-        try:
-            browser = await pw.chromium.launch(headless=True)
-        except Exception as exc:
-            if not _is_missing_browser_error(exc):
-                raise
-            ok, detail = await ensure_chromium_installed()
-            if not ok:
-                raise RuntimeError(f"Chromium isn't installed and installing it failed ({detail}).") from exc
-            browser = await pw.chromium.launch(headless=True)
+        browser = await launch_chromium(pw.chromium, headless=True)
         try:
             context = await browser.new_context(java_script_enabled=False)
             await context.route("**/*", only_the_web)

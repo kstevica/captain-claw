@@ -66,7 +66,8 @@ export function PublicLinkDialog({ agent, file, onClose }: {
   const [busy, setBusy] = useState<'save' | 'revoke' | null>(null)
   const [error, setError] = useState('')
   // -1: keep the link's current expiry (only offered once a link exists).
-  const [expiry, setExpiry] = useState(0)
+  // A new link starts at the deck's default: every link expires (cohort001).
+  const [expiry, setExpiry] = useState(7)
   const [justCreated, setJustCreated] = useState(false)
   const [confirmStop, setConfirmStop] = useState(false)
   const [copied, setCopied] = useState(false)
@@ -77,7 +78,7 @@ export function PublicLinkDialog({ agent, file, onClose }: {
       .then(({ share, ...cfg }) => {
         if (!live) return
         setConfig(cfg); setLink(share)
-        if (share) setExpiry(-1)
+        setExpiry(share ? -1 : cfg.default_days ?? 7)
       })
       .catch((e) => { if (live) setError(e instanceof Error ? e.message : String(e)) })
       .finally(() => { if (live) setLoading(false) })
@@ -118,7 +119,7 @@ export function PublicLinkDialog({ agent, file, onClose }: {
     setBusy('revoke'); setError('')
     try {
       await revokeLink(link.token)
-      setLink(null); setConfirmStop(false); setJustCreated(false); setExpiry(0)
+      setLink(null); setConfirmStop(false); setJustCreated(false); setExpiry(config?.default_days ?? 7)
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -280,7 +281,7 @@ export function PublicLinkDialog({ agent, file, onClose }: {
 
           {error && <Banner tone="danger" icon={AlertCircle}>{error}</Banner>}
 
-          {!loading && <MyLinks current={link?.token} config={config} onStopped={(t) => { if (t === link?.token) { setLink(null); setExpiry(0) } }} />}
+          {!loading && <MyLinks current={link?.token} config={config} onStopped={(t) => { if (t === link?.token) { setLink(null); setExpiry(config?.default_days ?? 7) } }} />}
         </div>
 
         {/* Footer */}
@@ -294,7 +295,7 @@ export function PublicLinkDialog({ agent, file, onClose }: {
                 className="rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-1 text-xs text-zinc-200 focus:border-violet-500/60 focus:outline-none"
               >
                 {link && <option value={-1}>Keep current</option>}
-                {(config?.expiry_days || [0, 1, 7, 30]).map((d) => (
+                {(config?.expiry_days || [1, 7, 30]).map((d) => (
                   <option key={d} value={d}>{EXPIRY_LABELS[d] || `After ${d} days`}</option>
                 ))}
               </select>

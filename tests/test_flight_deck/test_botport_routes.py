@@ -58,7 +58,10 @@ async def deck(tmp_path: Path, monkeypatch):
     fd_crypto.reset_for_tests()
 
     link = bl.BotPortLink()
-    link.settings = bl.LinkSettings.from_dict({"enabled": True, "url": "hub:23180", "deck_name": "vps1"})
+    # Every user's agents may reach other decks here; the admin-only default
+    # has its own tests (test_other_decks_are_the_admins_by_default).
+    link.settings = bl.LinkSettings.from_dict({"enabled": True, "url": "hub:23180", "deck_name": "vps1",
+                                               "outbound_users": True})
     link.state, link._ws = "connected", object()
     link.network = {"decks": [{"name": "pi", "label": "Kitchen Pi", "status": "connected", "agents": [
         {"name": "Researcher", "slug": "researcher", "description": "Finds things", "status": "running"}]}],
@@ -178,7 +181,7 @@ async def test_config_is_admin_only_and_secret_never_returned(deck):
         bad_url = await c.put("/fd/botport/config", headers=_bearer(deck.admin), json={"url": "ftp://x"})
         ok = await c.put("/fd/botport/config", headers=_bearer(deck.admin), json={
             "enabled": True, "url": "pi.local:23180", "deck_name": "vps1", "key": "k",
-            "secret": "very-secret-value", "expose": ["researcher"]})
+            "secret": "very-secret-value", "expose": ["researcher"], "outbound_users": True})
         got = await c.get("/fd/botport/config", headers=_bearer(deck.admin))
         keep = await c.put("/fd/botport/config", headers=_bearer(deck.admin), json={"secret": ""})
         status_user = await c.get("/fd/botport/status", headers=_bearer(deck.alice))
@@ -349,3 +352,48 @@ async def test_an_exact_slug_wins_over_another_agents_name(deck, fleet):
     assert r.status_code == 200
     assert await _ads(deck.link) == ["Beta"]
     assert list(bl.parse_shares(await deck.db.get_system_setting(bl.SHARES_KEY))) == [f"process:beta|{deck.alice['id']}"]
+
+
+# ── Other decks are the admins' unless they say otherwise (cohort001) ──
+
+
+async def test_other_decks_are_the_admins_by_default(deck, monkeypatch):
+    deck.link.settings.outbound_users = False
+    registry = fd_server._load_process_registry()
+    registry["admin-agent"] = {"name": "Ops", "web_port": 24112, "web_auth": "tok-admin",
+                               "owner": deck.admin["id"]}
+    monkeypatch.setattr(fd_server, "_owner_is_admin", lambda owner: owner == deck.admin["id"])
+    async with _client(LOOPBACK) as c:
+        users = (await c.get("/fd/fleet?include_remote=1", headers=_bearer(deck.alice))).json()
+        users_agent = (await c.get("/fd/fleet?include_remote=1", headers={"X-Agent-Auth": "tok-alice"})).json()
+        admins = (await c.get("/fd/fleet?include_remote=1", headers=_bearer(deck.admin))).json()
+        admins_agent = (await c.get("/fd/fleet?include_remote=1", headers={"X-Agent-Auth": "tok-admin"})).json()
+        consult = await c.post("/fd/consult-peer", headers={"X-Agent-Auth": "tok-alice"}, json={
+            "target_deck": "pi", "target_agent": "researcher", "message": "hi"})
+        delegate = await c.post("/fd/delegate-peer", headers={"X-Agent-Auth": "tok-alice"}, json={
+            "target_deck": "pi", "target_agent": "researcher", "message": "dig"})
+        admin_consult = await c.post("/fd/consult-peer", headers={"X-Agent-Auth": "tok-admin"}, json={
+            "target_deck": "pi", "target_agent": "researcher", "message": "hi"})
+        status_user = (await c.get("/fd/botport/status", headers=_bearer(deck.alice))).json()
+    assert all(a["kind"] != "remote" for a in users + users_agent)
+    assert any(a["kind"] == "remote" for a in admins) and any(a["kind"] == "remote" for a in admins_agent)
+    assert consult.status_code == 403 and delegate.status_code == 403
+    assert "admins only" in consult.text
+    assert admin_consult.status_code == 200
+    assert status_user["remote_agents"] == [] and status_user["decks"] == []
+
+
+async def test_an_agent_sees_only_its_owners_agents(deck, monkeypatch):
+    registry = fd_server._load_process_registry()
+    registry["bob-agent"] = {"name": "Bob's", "web_port": 24113, "web_auth": "tok-bob", "owner": "bob-id"}
+    async with _client(LOOPBACK) as c:
+        as_alice_agent = (await c.get("/fd/fleet", headers={"X-Agent-Auth": "tok-alice"})).json()
+        as_bob_agent = (await c.get("/fd/fleet", headers={"X-Agent-Auth": "tok-bob"})).json()
+        nameless = (await c.get("/fd/fleet")).json()
+        forged = (await c.get("/fd/fleet", headers={"X-Agent-Auth": "not-a-token"})).json()
+    async with _client(REMOTE) as c:
+        # Off loopback without the agent secret the token alone doesn't count.
+        remote_alice = (await c.get("/fd/fleet", headers={"X-Agent-Auth": "tok-alice"})).json()
+    assert [a["name"] for a in as_alice_agent] == ["Planner"]
+    assert [a["name"] for a in as_bob_agent] == ["Bob's"]
+    assert nameless == [] and forged == [] and remote_alice == []

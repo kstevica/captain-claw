@@ -158,7 +158,10 @@ def test_snapshot_is_independent_of_the_agent(env):
     assert client.get(share["path"] + "/raw").content == b"version two with a new secret"
     # No expiry given: the refresh keeps the one the link has.
     assert _share(client, SRC + "a.txt")["expires_at"] == again["expires_at"]
-    assert _share(client, SRC + "a.txt", expires_days=0)["expires_at"] is None
+    # "Never" only where the deck allows it (FD_PUBLIC_FILE_LINK_MAX_DAYS=0).
+    r = client.post(AGENT, json={"path": SRC + "a.txt", "agent_ref": "proc-secret-agent",
+                                 "agent_name": "Secret Agent", "expires_days": 0})
+    assert r.status_code == 400
 
 
 def test_revoke_and_expiry_take_effect_at_once(env):
@@ -355,3 +358,73 @@ def test_link_base_fallbacks(agents, monkeypatch):
     monkeypatch.setenv("FD_ALLOWED_HOSTS", "*.example.com, deck.example.org")
     share = _agent(client, "tok-A", "share", path=SRC + "a.md").json()["share"]
     assert share["url"].startswith("https://deck.example.org/s/")
+
+
+# ── Every link expires (cohort001: client files on links nobody remembered) ──
+
+
+def test_new_links_expire_by_default_and_never_is_off(env, monkeypatch):
+    client, files, *_ = env
+    for name in ("FD_PUBLIC_FILE_LINK_DAYS", "FD_PUBLIC_FILE_LINK_MAX_DAYS"):
+        monkeypatch.delenv(name, raising=False)
+    files[SRC + "a.txt"] = b"hello"
+    cfg = client.get("/fd/public-shares/config").json()
+    assert cfg["expiry_days"] == [1, 7, 30] and cfg["default_days"] == 7
+    share = _share(client, SRC + "a.txt")
+    left = datetime.fromisoformat(share["expires_at"]) - datetime.now(timezone.utc)
+    assert timedelta(days=6, hours=23) < left <= timedelta(days=7)
+    r = client.post(AGENT, json={"path": SRC + "a.txt", "agent_ref": "proc-secret-agent", "expires_days": 0})
+    assert r.status_code == 400 and "never" in r.text
+
+
+def test_a_deck_may_let_links_never_expire(env, monkeypatch):
+    client, files, *_ = env
+    monkeypatch.setenv("FD_PUBLIC_FILE_LINK_MAX_DAYS", "0")
+    monkeypatch.setenv("FD_PUBLIC_FILE_LINK_DAYS", "0")
+    files[SRC + "a.txt"] = b"hello"
+    assert client.get("/fd/public-shares/config").json()["expiry_days"] == [1, 7, 30, 0]
+    assert _share(client, SRC + "a.txt")["expires_at"] is None
+
+
+def test_a_cap_below_the_default_wins(monkeypatch):
+    monkeypatch.setenv("FD_PUBLIC_FILE_LINK_MAX_DAYS", "3")
+    monkeypatch.delenv("FD_PUBLIC_FILE_LINK_DAYS", raising=False)
+    assert pfs.default_days() == 3 and pfs.expiry_options() == [1, 3]
+
+
+def test_old_links_that_never_expired_get_a_date_and_owners_are_told(env, monkeypatch):
+    client, files, _seen, _current, db, _tmp = env
+    from captain_claw.flight_deck import line
+
+    posted = []
+
+    async def fake_post(user_id, kind, title, body="", **kw):
+        posted.append((user_id, title, body))
+        return "id"
+
+    monkeypatch.setattr(line, "post", fake_post)
+    # Made while the deck let links live for ever.
+    monkeypatch.setenv("FD_PUBLIC_FILE_LINK_MAX_DAYS", "0")
+    monkeypatch.setenv("FD_PUBLIC_FILE_LINK_DAYS", "0")
+    files[SRC + "old.md"] = b"# old"
+    files[SRC + "new.md"] = b"# new"
+    old = _share(client, SRC + "old.md")
+    new = _share(client, SRC + "new.md")
+    async def age(token: str, days: int) -> None:
+        await db._db.execute("UPDATE public_file_shares SET created_at = ? WHERE token = ?",
+                             ((datetime.now(timezone.utc) - timedelta(days=days)).isoformat(), token))
+        await db._db.commit()
+
+    asyncio.run(age(old["token"], 60))
+    monkeypatch.delenv("FD_PUBLIC_FILE_LINK_MAX_DAYS")
+    monkeypatch.delenv("FD_PUBLIC_FILE_LINK_DAYS")
+    assert asyncio.run(pfs.cap_open_links(db)) == 2
+    now = datetime.now(timezone.utc)
+    old_until = datetime.fromisoformat(asyncio.run(db.get_public_file_share(old["token"]))["expires_at"])
+    new_until = datetime.fromisoformat(asyncio.run(db.get_public_file_share(new["token"]))["expires_at"])
+    # 60 days old: past the 30-day cap, so it gets the week's notice.
+    assert timedelta(days=6, hours=23) < old_until - now <= timedelta(days=7)
+    assert timedelta(days=29) < new_until - now <= timedelta(days=30)
+    assert len(posted) == 1 and posted[0][0] == OWNER["id"]
+    assert "2 public links" in posted[0][1] and "old.md" in posted[0][2]
+    assert asyncio.run(pfs.cap_open_links(db)) == 0  # once only

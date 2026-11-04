@@ -164,6 +164,8 @@ export interface BotportConfig {
   // Decks that may send requests; ['*'] = any deck on the hub.
   accept_from: string[]
   allow_outbound: boolean
+  // Every user's agents may consult other decks, not only the admins'.
+  outbound_users: boolean
   max_concurrent: number
   max_inbound_timeout: number
   deny_tools: string[]
@@ -189,6 +191,7 @@ export interface BotportConfigPatch {
   expose?: string[]
   accept_from?: string[]
   allow_outbound?: boolean
+  outbound_users?: boolean
   max_concurrent?: number
   max_inbound_timeout?: number
   deny_tools?: string[]

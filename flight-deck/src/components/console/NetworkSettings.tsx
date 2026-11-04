@@ -136,10 +136,12 @@ interface ConnDraft {
   key: string
   secret: string
   allow_outbound: boolean
+  outbound_users: boolean
 }
 
 const connDraft = (c: BotportConfig): ConnDraft => ({
   enabled: c.enabled, url: c.url, deck_name: c.deck_name, key: c.key, secret: '', allow_outbound: c.allow_outbound,
+  outbound_users: c.outbound_users ?? false,
 })
 
 function ConnectionCard({ config, save }: { config: BotportConfig; save: Save }) {
@@ -182,6 +184,7 @@ function ConnectionCard({ config, save }: { config: BotportConfig; save: Save })
   if (d.key.trim() !== config.key) patch.key = d.key.trim()
   if (d.secret.trim()) patch.secret = d.secret.trim()
   if (d.allow_outbound !== config.allow_outbound) patch.allow_outbound = d.allow_outbound
+  if (d.outbound_users !== (config.outbound_users ?? false)) patch.outbound_users = d.outbound_users
   const dirty = Object.keys(patch).length > 0
   const badName = d.deck_name.trim() !== '' && !DECK_NAME_RE.test(d.deck_name.trim())
 
@@ -282,6 +285,22 @@ function ConnectionCard({ config, save }: { config: BotportConfig; save: Save })
               onToggle={() => set('allow_outbound', !d.allow_outbound)}
             />
           </SettingRow>
+          {d.allow_outbound && (
+            <SettingRow
+              title="Every user's agents too"
+              hint={locked('outbound_users') ? <LockHint field="outbound_users" />
+                : d.outbound_users
+                  ? 'Every user\'s agents can see and consult the agents other decks share.'
+                  : 'Off: only admins and their agents reach other decks — usually your own decks, which other users shouldn\'t see.'}
+            >
+              <Switch
+                on={d.outbound_users}
+                disabled={locked('outbound_users')}
+                label="Every user's agents too"
+                onToggle={() => set('outbound_users', !d.outbound_users)}
+              />
+            </SettingRow>
+          )}
         </div>
 
         <Field

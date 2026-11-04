@@ -91,8 +91,9 @@ class CronTool(Tool):
             "job_id": {
                 "type": "string",
                 "description": (
-                    "Job ID or #index (required for pause/resume/remove/run).  "
-                    "Use 'list' first to find the ID."
+                    "The job's ID (required for pause/resume/remove/run), as 'list' "
+                    "shows it; the start of an ID is enough when it is unique. Not a "
+                    "position: positions change when jobs are added or removed."
                 ),
             },
         },
@@ -144,6 +145,59 @@ class CronTool(Tool):
         if self._agent and self._agent.session:
             return str(self._agent.session.id)
         raise RuntimeError("No active session — cannot create cron job.")
+
+    @staticmethod
+    def _brief(jobs: list[Any]) -> str:
+        """Every job on one line each: ID, schedule, start of its task."""
+        if not jobs:
+            return "  (none)"
+        rows = []
+        for job in jobs:
+            task_text = " ".join(str(job.payload.get("text") or "").split())[:70]
+            state = "" if job.enabled else " [paused]"
+            rows.append(f"  - ID {job.id}: {schedule_to_text(job.schedule)}{state} — {task_text}")
+        return "\n".join(rows)
+
+    async def _jobs_now(self) -> str:
+        """The list after a change, so the agent sees what is scheduled now
+        (it never re-checked on its own). Best-effort: "" when unreadable."""
+        try:
+            jobs = await self._get_session_manager().list_cron_jobs(limit=50)
+        except Exception as exc:
+            log.debug("Cron list after a change failed", error=str(exc))
+            return ""
+        return f"Scheduled jobs now ({len(jobs)}):\n{self._brief(jobs)}"
+
+    async def _find_job(self, job_id: str | None) -> tuple[Any, str]:
+        """``(job, "")`` for a job ID or a unique start of one, else
+        ``(None, why)``. A position ("1", "#2") is refused: positions follow
+        the next run time, so creating a job moves the others (an agent once
+        removed its brand-new daily job as "1" while meaning the weekly one)."""
+        key = str(job_id or "").strip()
+        if not key:
+            return None, "Missing 'job_id'. Use 'list' to find it."
+        sm = self._get_session_manager()
+        job = await sm.load_cron_job(key)
+        if job:
+            return job, ""
+        jobs = await sm.list_cron_jobs(limit=200)
+        if len(key) >= 4:
+            matches = [j for j in jobs if str(j.id).startswith(key)]
+            if len(matches) == 1:
+                return matches[0], ""
+            if len(matches) > 1:
+                return None, f"'{key}' is the start of {len(matches)} job IDs — give more of the ID."
+        if key.lstrip("#").isdigit():
+            return None, (
+                f"Give the job's ID, not its position ('{key}'): positions change when jobs are "
+                f"added or removed. Jobs now:\n{self._brief(jobs)}"
+            )
+        return None, f"Job '{key}' not found. Jobs now:\n{self._brief(jobs)}"
+
+    @staticmethod
+    def _what(job: Any) -> str:
+        task_text = " ".join(str(job.payload.get("text") or "").split())[:70]
+        return f"{schedule_to_text(job.schedule)} — {task_text}"
 
     # ── actions ────────────────────────────────────────────────────
 
@@ -222,7 +276,8 @@ class CronTool(Tool):
                 f"  Task:     {task.strip()}\n"
                 f"  Next run: {job.next_run_at}\n"
                 f"  Session:  {session_id}"
-                f"{_mail_note}"
+                f"{_mail_note}\n\n"
+                f"{await self._jobs_now()}"
             ),
         )
 
@@ -239,7 +294,7 @@ class CronTool(Tool):
             sched_text = schedule_to_text(job.schedule)
             task_text = (job.payload.get("text") or json.dumps(job.payload))[:80]
             lines.append(
-                f"\n  #{i}  {job.id[:12]}\n"
+                f"\n  #{i}  ID {job.id}\n"
                 f"      Schedule: {sched_text}  |  {status}\n"
                 f"      Task:     {task_text}\n"
                 f"      Last run: {job.last_run_at or 'never'}  |  Next: {job.next_run_at}\n"
@@ -248,56 +303,43 @@ class CronTool(Tool):
         return ToolResult(success=True, content="\n".join(lines))
 
     async def _pause(self, job_id: str | None) -> ToolResult:
-        if not job_id:
-            return ToolResult(success=False, error="Missing 'job_id'. Use 'list' to find it.")
-
-        sm = self._get_session_manager()
-        job = await sm.select_cron_job(job_id)
+        job, why = await self._find_job(job_id)
         if not job:
-            return ToolResult(success=False, error=f"Job '{job_id}' not found.")
+            return ToolResult(success=False, error=why)
 
-        await sm.update_cron_job(job.id, enabled=False)
-        return ToolResult(success=True, content=f"Job {job.id[:12]} paused.")
+        await self._get_session_manager().update_cron_job(job.id, enabled=False)
+        return ToolResult(success=True, content=(
+            f"Job {job.id} paused ({self._what(job)}).\n\n{await self._jobs_now()}"))
 
     async def _resume(self, job_id: str | None) -> ToolResult:
-        if not job_id:
-            return ToolResult(success=False, error="Missing 'job_id'. Use 'list' to find it.")
-
-        sm = self._get_session_manager()
-        job = await sm.select_cron_job(job_id)
+        job, why = await self._find_job(job_id)
         if not job:
-            return ToolResult(success=False, error=f"Job '{job_id}' not found.")
+            return ToolResult(success=False, error=why)
+        sm = self._get_session_manager()
 
         # Recompute next_run so it doesn't fire immediately for stale jobs.
         next_run = compute_next_run(job.schedule)
         await sm.update_cron_job(job.id, enabled=True, next_run_at=to_utc_iso(next_run))
         return ToolResult(
             success=True,
-            content=f"Job {job.id[:12]} resumed. Next run: {to_utc_iso(next_run)}",
+            content=f"Job {job.id} resumed ({self._what(job)}). Next run: {to_utc_iso(next_run)}",
         )
 
     async def _remove(self, job_id: str | None) -> ToolResult:
-        if not job_id:
-            return ToolResult(success=False, error="Missing 'job_id'. Use 'list' to find it.")
-
-        sm = self._get_session_manager()
-        job = await sm.select_cron_job(job_id)
+        job, why = await self._find_job(job_id)
         if not job:
-            return ToolResult(success=False, error=f"Job '{job_id}' not found.")
+            return ToolResult(success=False, error=why)
 
-        deleted = await sm.delete_cron_job(job.id)
+        deleted = await self._get_session_manager().delete_cron_job(job.id)
         if deleted:
-            return ToolResult(success=True, content=f"Job {job.id[:12]} removed.")
+            return ToolResult(success=True, content=(
+                f"Job {job.id} removed ({self._what(job)}).\n\n{await self._jobs_now()}"))
         return ToolResult(success=False, error=f"Failed to remove job {job_id}.")
 
     async def _run(self, job_id: str | None) -> ToolResult:
-        if not job_id:
-            return ToolResult(success=False, error="Missing 'job_id'. Use 'list' to find it.")
-
-        sm = self._get_session_manager()
-        job = await sm.select_cron_job(job_id)
+        job, why = await self._find_job(job_id)
         if not job:
-            return ToolResult(success=False, error=f"Job '{job_id}' not found.")
+            return ToolResult(success=False, error=why)
 
         # Trigger execution via the dispatch system.
         import asyncio
@@ -314,5 +356,5 @@ class CronTool(Tool):
         asyncio.create_task(execute_cron_job(ctx, job, trigger="manual"))
         return ToolResult(
             success=True,
-            content=f"Job {job.id[:12]} triggered (running in background).",
+            content=f"Job {job.id} triggered ({self._what(job)}), running in the background.",
         )
