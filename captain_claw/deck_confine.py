@@ -114,6 +114,8 @@ PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "image_gen": (("output_path", "write"),),
     "visualize": (("output_path", "write"),),
     "image_ocr": (("path", "read"),),
+    "ocr_pdf": (("path", "read"),),
+    "ocr_image": (("path", "read"),),
     "image_vision": (("path", "read"),),
     "video_vision": (("path", "read"),),
     "linked_system": (("files", "read"),),

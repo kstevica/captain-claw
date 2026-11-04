@@ -177,6 +177,10 @@ class AgentToolLoopMixin:
         if name == "visualize":
             title = str(arguments.get("title", "")).strip()
             return f"Drawing {title[:50]}" if title else "Drawing a visual"
+        if name in ("ocr_pdf", "ocr_image"):
+            path = str(arguments.get("path", "")).strip()
+            fname = path.replace("\\", "/").rsplit("/", 1)[-1]
+            return f"Reading scan: {fname[:50]}" if fname else "Reading a scan"
         if name == "image_ocr":
             path = str(arguments.get("path", "")).strip()
             fname = path.rsplit("/", 1)[-1] if "/" in path else path

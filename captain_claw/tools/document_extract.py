@@ -448,8 +448,12 @@ def _extract_pdf_markdown(path: Path, max_pages: int) -> tuple[str | None, str |
         return "\n".join(lines), None
 
     extracted_any = False
+    textless: list[int] = []
     for idx, page in enumerate(pages, start=1):
-        text = _normalize_text(page.extract_text() or "")
+        try:
+            text = _normalize_text(page.extract_text() or "")
+        except Exception:  # noqa: BLE001 — one broken page must not lose the rest
+            text = ""
         lines.append(f"## Page {idx}")
         lines.append("")
         if text:
@@ -457,10 +461,24 @@ def _extract_pdf_markdown(path: Path, max_pages: int) -> tuple[str | None, str |
             extracted_any = True
         else:
             lines.append("_(no extractable text)_")
+        if len(re.sub(r"\s+", "", text)) < 25:
+            textless.append(idx)
         lines.append("")
 
     if not extracted_any:
         lines.append("_(No extractable text found in selected pages.)_")
+    if textless:
+        # A scan: say how to read it, so the model doesn't render pages and OCR
+        # them with a script (or guess the contents).
+        which = "Every page" if len(textless) == len(pages) else (
+            f"Page{'s' if len(textless) > 1 else ''} {', '.join(map(str, textless[:30]))}"
+            + ("…" if len(textless) > 30 else ""))
+        lines.append("")
+        verb = "have" if 1 < len(textless) < len(pages) else "has"
+        lines.append(
+            f"> {which} of this PDF {verb} little or no text layer — it looks scanned. Read it with "
+            f"the ocr_pdf tool (local OCR, the same text every time); never OCR with scripts, and "
+            f"never guess what those pages say.")
     return "\n".join(lines).strip(), None
 
 
