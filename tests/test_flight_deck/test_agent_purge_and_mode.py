@@ -196,7 +196,8 @@ async def test_purge_drops_that_agents_library_rows(deck, tmp_path, monkeypatch)
 class _FakePopen:
     spawned: list[str] = []
 
-    def __init__(self, args, cwd=None, env=None, stdout=None, stderr=None, start_new_session=None):
+    def __init__(self, args, cwd=None, env=None, stdout=None, stderr=None, start_new_session=None,
+                 creationflags=0):
         _FakePopen.spawned.append(Path(cwd).name)
         self.pid = 434343
         if stdout is not None:

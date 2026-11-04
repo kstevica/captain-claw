@@ -333,7 +333,8 @@ class _FakePopen:
 
     calls: list[dict] = []
 
-    def __init__(self, args, cwd=None, env=None, stdout=None, stderr=None, start_new_session=None):
+    def __init__(self, args, cwd=None, env=None, stdout=None, stderr=None, start_new_session=None,
+                 creationflags=0):
         slug = Path(cwd).name
         _FakePopen.calls.append({"slug": slug, "env": dict(env or {})})
         self.pid = 424242
@@ -490,6 +491,34 @@ class TestSpawnProcessRoute:
                              headers={"Authorization": f"Bearer {tok}"})
         assert r.status_code == 200, r.text
         assert _FakePopen.calls[-1]["env"]["FD_URL"] == "http://127.0.0.1:26000"
+
+    async def test_spawn_on_windows(self, spawn_env, users, monkeypatch):
+        """The kiosk's Create on the Windows desktop app ended in a bare 500: the
+        first registry save imported fcntl. Simulated Windows: no fcntl, no
+        os.kill probe (it would end the agent there), the agent's own home in
+        USERPROFILE, and UTF-8 mode for its config."""
+        from captain_claw.flight_deck import proc_compat
+
+        def _no_signals(pid, sig):
+            raise AssertionError(f"os.kill({pid}, {sig}) on Windows")
+
+        monkeypatch.setattr(proc_compat, "_fcntl", None)
+        monkeypatch.setattr(proc_compat, "IS_WINDOWS", True)
+        monkeypatch.setattr(proc_compat, "_win_pid_alive", lambda pid: False)
+        monkeypatch.setattr(proc_compat.os, "kill", _no_signals)
+        async with _client(REMOTE) as c:
+            r = await c.post("/fd/spawn-process", json={
+                "name": "Deep Researcher", "web_port": 24550,
+                "description": "Runs multi-source research — cited, fact-checked."},
+                headers={"Authorization": f"Bearer {create_access_token(BOB)}"})
+        assert r.status_code == 200, r.text
+        entry = server._load_process_registry()["deep-researcher"]
+        assert entry["owner"] == BOB and entry["pid"] == 424242
+        env = _FakePopen.calls[-1]["env"]
+        assert env["USERPROFILE"] == env["HOME"]
+        assert env["HOME"].endswith("home-config-parent")
+        assert env["PYTHONUTF8"] == "1"
+        assert (spawn_env / "deep-researcher" / "config.yaml").is_file()
 
     async def test_docker_spawn_refused_before_docker_is_touched(self, spawn_env, users):
         """/fd/spawn resolves the owner first — an unattributable caller can't

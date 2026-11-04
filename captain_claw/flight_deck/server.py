@@ -8,7 +8,6 @@ import json
 import hashlib
 import re
 import secrets
-import signal
 import asyncio
 import subprocess
 import shutil
@@ -50,6 +49,7 @@ from captain_claw.flight_deck.auth import (
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.flight_deck.endpoints import same_endpoint as _same_endpoint
 from captain_claw.flight_deck import deck_update
+from captain_claw.flight_deck import proc_compat
 from captain_claw.flight_deck import origin_guard
 from captain_claw.flight_deck import agent_ws_quiet
 from captain_claw.flight_deck import tenant_profile
@@ -366,12 +366,8 @@ def _load_process_registry() -> dict[str, dict]:
     if not PROCESS_REGISTRY_FILE.is_file():
         return {}
     try:
-        import fcntl as _fcntl
-        with PROCESS_REGISTRY_FILE.open("r") as _f:
-            try:
-                _fcntl.flock(_f.fileno(), _fcntl.LOCK_SH)
-            except OSError:
-                pass  # flock unsupported on some FSes (NFS, etc.) — best effort
+        with PROCESS_REGISTRY_FILE.open("r", encoding="utf-8") as _f:
+            proc_compat.lock_shared(_f)  # none on Windows, which has no flock
             data = _f.read()
         return json.loads(data) if data else {}
     except (json.JSONDecodeError, OSError) as exc:
@@ -385,12 +381,8 @@ def _load_process_registry_strict() -> dict[str, dict]:
     destructively on "no such agent" can tell a missing agent from a failed read."""
     if not PROCESS_REGISTRY_FILE.is_file():
         return {}
-    import fcntl as _fcntl
-    with PROCESS_REGISTRY_FILE.open("r") as _f:
-        try:
-            _fcntl.flock(_f.fileno(), _fcntl.LOCK_SH)
-        except OSError:
-            pass
+    with PROCESS_REGISTRY_FILE.open("r", encoding="utf-8") as _f:
+        proc_compat.lock_shared(_f)
         data = _f.read()
     return json.loads(data) if data else {}
 
@@ -407,12 +399,8 @@ def _save_process_registry(registry: dict[str, dict]):
     payload = json.dumps(registry, indent=2)
     tmp_path = PROCESS_REGISTRY_FILE.with_suffix(PROCESS_REGISTRY_FILE.suffix + ".tmp")
     try:
-        import fcntl as _fcntl
-        with tmp_path.open("w") as _f:
-            try:
-                _fcntl.flock(_f.fileno(), _fcntl.LOCK_EX)
-            except OSError:
-                pass
+        with tmp_path.open("w", encoding="utf-8") as _f:
+            proc_compat.lock_exclusive(_f)
             _f.write(payload)
             _f.flush()
             try:
@@ -433,34 +421,24 @@ def _process_is_alive(slug: str) -> bool:
     # Also check by PID from registry
     registry = _load_process_registry()
     entry = registry.get(slug)
-    if entry and entry.get("pid"):
-        try:
-            os.kill(entry["pid"], 0)
-            return True
-        except (OSError, ProcessLookupError):
-            pass
-    return False
+    # Never os.kill(pid, 0): on Windows that ends the process it asks about.
+    return bool(entry) and proc_compat.pid_alive(entry.get("pid"))
 
 
 def _kill_pid(pid: int, timeout: float = 5.0):
-    """Send SIGTERM to a PID and wait for it to die; SIGKILL if needed."""
+    """Send SIGTERM to a PID and wait for it to die; SIGKILL if needed.
+    (Windows: its whole tree ends at once — proc_compat.terminate.)"""
     import time
-    try:
-        os.kill(pid, signal.SIGTERM)
-    except (OSError, ProcessLookupError):
+    if not proc_compat.pid_alive(pid):
         return
+    proc_compat.terminate(pid)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-            time.sleep(0.3)
-        except (OSError, ProcessLookupError):
+        if proc_compat.reaped(pid) or not proc_compat.pid_alive(pid):
             return
+        time.sleep(0.3)
     # Still alive — force kill
-    try:
-        os.kill(pid, signal.SIGKILL)
-    except (OSError, ProcessLookupError):
-        pass
+    proc_compat.kill(pid)
 
 
 def _stop_all_processes():
@@ -477,31 +455,18 @@ def _stop_all_processes():
     if pids_to_kill:
         # Send SIGTERM to all at once
         for pid in pids_to_kill:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (OSError, ProcessLookupError):
-                pass
+            proc_compat.terminate(pid)
 
         # Wait for all in parallel threads
         def _wait_and_kill(pid: int, timeout: float = 5.0):
             import time
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
-                try:
-                    # A child of ours stays "alive" as a zombie until it's reaped.
-                    if os.waitpid(pid, os.WNOHANG)[0]:
-                        return
-                except ChildProcessError:
-                    pass  # not ours: an agent from before a deck restart
-                try:
-                    os.kill(pid, 0)
-                    time.sleep(0.2)
-                except (OSError, ProcessLookupError):
+                # A child of ours stays "alive" as a zombie until it's reaped.
+                if proc_compat.reaped(pid) or not proc_compat.pid_alive(pid):
                     return
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except (OSError, ProcessLookupError):
-                pass
+                time.sleep(0.2)
+            proc_compat.kill(pid)
 
         threads = [threading.Thread(target=_wait_and_kill, args=(pid,)) for pid in pids_to_kill]
         for t in threads:
@@ -557,6 +522,17 @@ def _pin_fd_url(environment: dict[str, str]) -> None:
     """
     environment["FD_URL"] = _fd_self_url()
     environment.pop("CLAW_GOOGLE_OAUTH__FLIGHT_DECK_URL", None)
+
+
+def _pin_windows_home(environment: dict[str, str]) -> None:
+    """Windows Python finds the home folder in USERPROFILE and never reads HOME,
+    so the agent's own HOME (its folder's home-config-parent) needs USERPROFILE
+    too — or every agent shares the real user's ~/.captain-claw. And UTF-8 mode:
+    its config, written as UTF-8, would otherwise be read as cp1252."""
+    if not proc_compat.IS_WINDOWS:
+        return
+    environment["USERPROFILE"] = environment["HOME"]
+    environment.setdefault("PYTHONUTF8", "1")
 
 
 # FD's own secrets, never handed to a process agent. Agents inherit FD's
@@ -790,7 +766,7 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
     environment = dict(base_env)
     env_file = agent_dir / ".env"
     if env_file.is_file():
-        content = env_file.read_text().strip()
+        content = env_file.read_text(encoding="utf-8").strip()
         if content:
             for line in content.split("\n"):
                 if "=" in line:
@@ -800,6 +776,7 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
     _share_fd_secrets(environment)
 
     environment["HOME"] = str(agent_dir / "data" / "home-config-parent")
+    _pin_windows_home(environment)
     # Slug + URL for port-fallback callbacks. Without FD_URL the agent can't
     # announce a drifted port back to Flight Deck and the registry goes stale
     # (chat panel then 401s because FD proxies to the old port). Always THIS
@@ -821,13 +798,14 @@ def _start_registered_process(slug: str, entry: dict) -> bool:
 
     log_file = agent_dir / "process.log"
     try:
-        log_fh = open(log_file, "a")
+        log_fh = open(log_file, "a", encoding="utf-8")
         proc = subprocess.Popen(
             [_resolve_cc_web_bin(), "--port", str(web_port)],
             cwd=str(agent_dir),
             env=environment,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
+            creationflags=proc_compat.NO_WINDOW,
             start_new_session=True,
         )
         _processes[slug] = proc
@@ -855,12 +833,8 @@ def _reattach_processes():
             skipped.append(slug)
             continue
         pid = entry.get("pid")
-        if pid:
-            try:
-                os.kill(pid, 0)  # Still alive — just track it
-                continue
-            except (OSError, ProcessLookupError):
-                pass
+        if pid and proc_compat.pid_alive(pid):
+            continue  # Still alive — just track it
         # Process was registered but is dead — restart it. Stagger the
         # launches so concurrent port probes don't race and pick the same
         # fallback port.
@@ -9612,11 +9586,11 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
 
     # Write config files with local paths
     config_yaml = _build_process_config_yaml(config, agent_dir)
-    (agent_dir / "config.yaml").write_text(config_yaml)
-    (agent_dir / "data" / "home-config" / "config.yaml").write_text(config_yaml)
+    (agent_dir / "config.yaml").write_text(config_yaml, encoding="utf-8")
+    (agent_dir / "data" / "home-config" / "config.yaml").write_text(config_yaml, encoding="utf-8")
 
     env_content = _build_env(config)
-    (agent_dir / ".env").write_text(env_content)
+    (agent_dir / ".env").write_text(env_content, encoding="utf-8")
 
     # Build environment variables (FD's env minus its own secrets)
     base_env = _agent_base_env()
@@ -9655,6 +9629,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     # Set HOME to the agent's home-config directory so captain-claw
     # picks up ~/.captain-claw/config.yaml from there
     environment["HOME"] = str(agent_dir / "data" / "home-config-parent")
+    _pin_windows_home(environment)
     home_cc_dir = agent_dir / "data" / "home-config-parent" / ".captain-claw"
     home_cc_dir.mkdir(parents=True, exist_ok=True)
     # Symlink or copy home-config -> ~/.captain-claw
@@ -9686,7 +9661,7 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
 
     # Open log file
     log_file = agent_dir / "process.log"
-    log_fh = open(log_file, "a")
+    log_fh = open(log_file, "a", encoding="utf-8")
 
     # Resolve captain-claw-web binary: bundled (PyInstaller) or PATH
     cc_web_bin = _resolve_cc_web_bin()
@@ -9750,7 +9725,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
             env=environment,
             stdout=log_fh,
             stderr=subprocess.STDOUT,
-            start_new_session=True,  # Detach from parent
+            start_new_session=True,  # Detach from parent (Unix; Windows ignores it)
+            creationflags=proc_compat.NO_WINDOW,
         )
     except FileNotFoundError:
         log_fh.close()

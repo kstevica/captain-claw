@@ -49,7 +49,8 @@ _ARCH = {"id": "analyst", "role": "Data Analyst", "tier": "balanced",
 class _FakePopen:
     calls: list[str] = []
 
-    def __init__(self, args, cwd=None, env=None, stdout=None, stderr=None, start_new_session=None):
+    def __init__(self, args, cwd=None, env=None, stdout=None, stderr=None, start_new_session=None,
+                 creationflags=0):
         _FakePopen.calls.append(Path(cwd).name)
         self.pid = 424242
         if stdout is not None:

@@ -148,6 +148,9 @@ function pythonFor(version) {
   env.PATH = [envBin(version), env.PATH || ""].filter(Boolean).join(path.delimiter);
   env.CAPTAIN_CLAW_DESKTOP_RUNTIME = version;
   env.PYTHONNOUSERSITE = "1";
+  // UTF-8 mode: on Windows Python otherwise reads and writes text as cp1252,
+  // and the first "—" in a file it writes ends the request. Agents inherit it.
+  env.PYTHONUTF8 = "1";
   return { cmd: envPython(version), env };
 }
 
@@ -442,6 +445,7 @@ async function rehearse(version, progress = () => {}, timeoutMs = 180_000) {
     FD_DESKTOP: "1",
     PYTHONNOUSERSITE: "1",
     PYTHONDONTWRITEBYTECODE: "1",
+    PYTHONUTF8: "1", // as pythonFor: the test start runs the deck as it will run
   });
   let child = null;
   const said = [];
