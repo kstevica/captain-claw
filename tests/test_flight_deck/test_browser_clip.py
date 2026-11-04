@@ -447,6 +447,52 @@ def test_the_extension_ships_with_the_deck():
     assert manifest["side_panel"]["default_path"] == "sidepanel.html"
 
 
+def _extension_files(src: Path) -> set[str]:
+    """Every file the extension loads: what the manifest names, the pages'
+    scripts and styles, the modules those import, the scripts injected."""
+    import re
+
+    manifest = json.loads((src / "manifest.json").read_text())
+    wanted = {manifest["background"]["service_worker"], manifest["side_panel"]["default_path"],
+              *manifest["icons"].values(), *manifest["action"]["default_icon"].values()}
+    for page in [p for p in wanted if p.endswith(".html")]:
+        wanted |= set(re.findall(r'(?:src|href)="([^":#?]+)"', (src / page).read_text()))
+    todo, seen = [p for p in wanted if p.endswith(".js")], set()
+    while todo:
+        rel = todo.pop()
+        if rel in seen or not (src / rel).is_file():
+            continue
+        seen.add(rel)
+        text = (src / rel).read_text()
+        found = re.findall(r"""\bfrom\s*['"](\.{1,2}/[^'"]+)['"]""", text)
+        found += re.findall(r"""\bimport\s*\(\s*['"](\.{1,2}/[^'"]+)['"]""", text)
+        found += re.findall(r"""\bfiles:\s*\[\s*['"]([^'"]+\.js)['"]""", text)
+        for f in found:
+            target = (src / rel).parent / f if f.startswith(".") else src / f
+            todo.append(target.resolve().relative_to(src.resolve()).as_posix())
+        wanted |= set(todo)
+    return wanted
+
+
+def test_every_file_the_extension_loads_is_there_and_kept_by_git():
+    """One missing module leaves the side panel blank: lib/ once fell under the
+    repo's Python ``lib/`` ignore rule and never reached git."""
+    import subprocess
+
+    src = bc.extension_dir()
+    wanted = _extension_files(src)
+    assert {"lib/api.js", "lib/icons.js", "lib/md.js", "capture.js", "sidepanel.css"} <= wanted
+    missing = sorted(p for p in wanted if not (src / p).is_file())
+    assert not missing, f"the extension loads files that aren't there: {missing}"
+    try:
+        out = subprocess.run(["git", "check-ignore", "--no-index", *sorted(wanted)], cwd=src,
+                             capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return   # no git here (an installed deck): the files being there is the check
+    if out.returncode != 128:   # 128 = not a checkout
+        assert out.stdout.strip() == "", f"git ignores files the extension needs:\n{out.stdout}"
+
+
 @pytest.mark.asyncio
 async def test_the_extension_zip_downloads(deck):
     r = await deck["client"].get("/fd/clip/extension.zip")
@@ -456,3 +502,4 @@ async def test_the_extension_zip_downloads(deck):
 
     names = zipfile.ZipFile(io.BytesIO(r.content)).namelist()
     assert "captain-for-chrome/manifest.json" in names and "captain-for-chrome/sidepanel.js" in names
+    assert {f"captain-for-chrome/lib/{m}.js" for m in ("api", "icons", "md")} <= set(names)
