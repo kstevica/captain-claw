@@ -36,7 +36,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import tomllib
+import urllib.error
 import urllib.request
 from datetime import UTC, datetime
 from pathlib import Path
@@ -117,17 +119,45 @@ def compile_lock(uv: str, wheel: Path, python: str, dest: Path) -> None:
     )
 
 
+def fetch_text(url: str, attempts: int = 5) -> str:
+    """*url*'s body. GitHub's release downloads now and then answer 502 or time
+    out for a moment: those are tried again, with a growing pause; a 404 isn't."""
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310
+                return resp.read().decode()
+        except urllib.error.HTTPError as exc:
+            if exc.code < 500 and exc.code != 429:
+                sys.exit(f"Couldn't read {url}: HTTP {exc.code}. Is that uv version on GitHub?")
+            why = f"HTTP {exc.code}"
+        except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+            why = str(getattr(exc, "reason", exc))
+        if attempt == attempts:
+            sys.exit(f"Couldn't read {url} after {attempts} tries ({why}). GitHub may be having trouble: try again in a minute.")
+        pause = 2 ** attempt
+        print(f"    {why} from GitHub, trying again in {pause} s")
+        time.sleep(pause)
+    raise AssertionError("unreachable")
+
+
 def uv_platforms(version: str) -> dict[str, dict[str, str]]:
     print(f"Reading uv {version}'s checksums...")
     base = f"https://github.com/astral-sh/uv/releases/download/{version}/"
     out: dict[str, dict[str, str]] = {}
     for platform, asset in UV_ASSETS.items():
-        with urllib.request.urlopen(base + asset + ".sha256", timeout=60) as resp:  # noqa: S310
-            digest = resp.read().decode().split()[0].lower()
+        digest = fetch_text(base + asset + ".sha256").split()[0].lower()
         if not re.fullmatch(r"[0-9a-f]{64}", digest):
             sys.exit(f"Odd checksum for {asset}: {digest!r}")
         out[platform] = {"url": base + asset, "sha256": digest, "archive": "zip" if asset.endswith(".zip") else "tar.gz"}
     return out
+
+
+def commits_past_tag(version: str) -> int | None:
+    """How far this checkout is past the tag v<version>; None when there's no such tag yet."""
+    done = subprocess.run(  # noqa: S603
+        ["git", "rev-list", "--count", f"v{version}..HEAD"], cwd=ROOT, capture_output=True, text=True,  # noqa: S607
+    )
+    return int(done.stdout.strip()) if done.returncode == 0 else None
 
 
 def summary(version: str, notes_file: Path | None) -> str:
@@ -157,6 +187,8 @@ def main() -> None:
     args = parser.parse_args()
 
     uv = find_uv(args.uv)
+    # First, so that GitHub being unreachable costs no build.
+    uv_info = {"version": args.uv_version, "platforms": uv_platforms(args.uv_version)}
     with tempfile.TemporaryDirectory() as tmp:
         wheel = args.wheel.resolve() if args.wheel else build_wheel(uv, Path(tmp))
         if not wheel.is_file():
@@ -188,7 +220,7 @@ def main() -> None:
         "notes_url": f"https://github.com/{REPO}/releases/tag/v{version}",
         "wheel": {"url": base + shipped_wheel.name, "sha256": sha256(shipped_wheel), "size": shipped_wheel.stat().st_size},
         "lock": {"url": base + lock.name, "sha256": sha256(lock), "size": lock.stat().st_size},
-        "uv": {"version": args.uv_version, "platforms": uv_platforms(args.uv_version)},
+        "uv": uv_info,
     }
     (out / "desktop-manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
@@ -198,8 +230,16 @@ def main() -> None:
         print(f"  {name}  ({(out / name).stat().st_size / 1e6:.1f} MB)")
     print(f"  {packages} dependencies locked; uv {args.uv_version}; Python {args.python}")
     if not args.base_url:
-        print("\nUpload them to the release (it must be the one GitHub calls latest):")
-        print(f"  gh release upload v{version} '{shipped_wheel}' '{lock}' '{out / 'desktop-manifest.json'}' --clobber")
+        upload = f"  gh release upload v{version} '{shipped_wheel}' '{lock}' '{out / 'desktop-manifest.json'}' --clobber"
+        past = None if args.wheel else commits_past_tag(version)
+        if past:
+            # The wheel says <version> but carries everything since: every app would install it as that.
+            print(f"\nNot for v{version}: this checkout is {past} commit{'s' if past != 1 else ''} past that tag, so the wheel "
+                  f"isn't what v{version} shipped. Bump the version and tag the release first, then run this again.")
+        else:
+            when = "" if past == 0 else f" (once v{version} is tagged and published)"
+            print(f"\nUpload them to the release{when}; it must be the one GitHub calls latest:")
+            print(upload)
 
 
 if __name__ == "__main__":

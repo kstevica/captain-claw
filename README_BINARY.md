@@ -183,7 +183,10 @@ reads uv's checksums, and writes `dist/desktop-release/<version>/`:
 `captain_claw-<version>-py3-none-any.whl`, `desktop-lock-<version>.txt` and
 `desktop-manifest.json`, whose summary is the first paragraph of
 `release-notes/RELEASE_NOTES_<version>.md`. It prints the `gh release upload`
-command for the three files. The app reads
+command for the three files, unless the checkout has moved past the tag
+`v<version>`: a wheel built from later commits would still say `<version>`, so
+bump the version and tag first. uv's checksums are read first, and a GitHub
+hiccup (a 502, a timeout) is tried again a few times. The app reads
 `https://github.com/kstevica/captain-claw/releases/latest/download/desktop-manifest.json`,
 so they have to be on the release GitHub calls *latest*.
 
