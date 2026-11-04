@@ -32,7 +32,7 @@ The fifth mode is **💻 Code** (below) — a plan-gated, independently-reviewed
 - **Basna** — A network-source ensemble. Describe a task and a router picks the smallest set of specialist archetypes, spawns them fresh, runs them blind and in parallel, and merges their answers weighted by each archetype's learned reliability (synthesizing only on disagreement). Attach files/images, edit each agent before the run, watch a live progress log, and download generated files. Reliability is learned per-archetype so routing improves over time.
 - **Vatra** — A collaborative team on a shared blackboard: a lead splits the work, each agent owns sections, reads what the others wrote, and improves it over review rounds; a reporter assembles the deliverable. Since 0.8.0 workers run until they're done, under an in-turn context governor, reading a rule-built run map.
 - **Code** — An agentic coding studio. A router sizes each request; big jobs run plan → your approval → build → three independent reviewers → triage → capped fix loop, each phase a git commit with diff timeline and rollback. Agents query a persistent Code Map instead of re-reading the tree; runs work on VFS folders or your own linked local repos, with per-turn token costs in chat and full process export.
-- **Bat** (0.8.0) — A durable "stubborn finisher": plans, runs checkpointed steps with retries, survives restarts, and stops only when an independent judge says the task is done — behind a hard safety floor and a start gate for email, spending and accounts.
+- **Bat** (0.8.0) — A durable "stubborn finisher": plans, runs checkpointed steps with retries, survives restarts, and stops only when an independent judge says the task is done — behind a hard safety floor and a start gate for email, spending and accounts. Since 0.8.6 it **finishes for real**: it pins an acceptance contract and runs the checks itself (commands and tests for admins' runs), turns a refusal into fix steps for the next round (8 rounds at most, and two rounds failing the same check stop it), asks you at a stalemate, runs independent steps in parallel (`FD_BAT_MAX_PARALLEL`, 3), and counts the whole run's spend, child runs included. **A run with no cap stops at $50** (`FD_BAT_DEFAULT_LLM_USD`, 0 for none).
 
 ## Code
 
@@ -42,7 +42,7 @@ Cursor and Claude Code give you one very good agent that plans, writes, reviews,
 
 ## Crew
 
-New in 0.8.5: Crew lets Captain run **Claude Code, Codex, OpenCode and Pi** for you. Code above is Captain's own pipeline, with its own agents. Crew is the other way round: your agent is the first mate, and those CLIs do the work. Talk to your agent ("have Codex fix the login test and Claude add dark mode") or open **Crew** from the sidebar, or in the kiosk from the agent column or **Settings**.
+New in 0.8.5: Crew lets Captain run **Claude Code, Codex, OpenCode and Pi** for you, and since 0.8.6 **Crush** too (an admin installs it, and someone already approved for Crew needs it ticked; its steps show a few seconds late and its licence is FSL-1.1-MIT). Code above is Captain's own pipeline, with its own agents. Crew is the other way round: your agent is the first mate, and those CLIs do the work. Talk to your agent ("have Codex fix the login test and Claude add dark mode") or open **Crew** from the sidebar, or in the kiosk from the agent column or **Settings**.
 
 <p align="center">
   <img src="../screenshots/crew-0.8.5.webp" width="100%" alt="Crew's Overview: 1 task needs you, a Codex task waiting on a decision, a Claude Code task ready to look at, OpenCode and Pi tasks working, and two projects in the side rail">
@@ -76,14 +76,48 @@ New in 0.8.5, in the kiosk and the simple layout: **New agent → Forge agents**
   <img src="../screenshots/forge-0.8.5.webp" width="100%" alt="Forge agents: the plan to review, with the agents Captain proposes, their jobs and its questions">
 </p>
 
-1. **Describe.** Your request in your own words, and up to 10 files of 25 MB each. **Plan my team** starts it.
-2. **Review.** Vatra's planner opens your files, picks the fewest standing agents that cover the request, writes each one's job and may ask you questions. Rename, rewrite or leave out an agent; **Update the plan** starts from your edits. Nothing exists until you press **Create N agents**.
+1. **Describe.** Your request in your own words, and up to 10 files of 25 MB each. **Team size** is **Captain decides, up to 8** or **At most 1** to **At most 12** (0.8.6); a number you write in the request wins too. **Plan my team** starts it.
+2. **Review.** Vatra's planner opens your files, picks the fewest standing agents that cover the request, writes each one's job and may ask you questions. Rename, rewrite or leave out an agent; **Update the plan** starts from your edits, or from a new team size. When the size left work out, Review says how many agents Captain would have added. Nothing exists until you press **Create N agents**.
 3. **Create.** Each agent gets its archetype's way of working, its job and its teammates. The team shares a folder (`vfs:<team>/`) and one set of data tables, and reaches each other with `consult_peer`.
 4. **Finish.** Captain recommends what should run by itself and what software is worth building, with why. Only what you keep gets made. **What runs by itself** becomes scheduled tasks, under Scheduled tasks. **Software to build** goes to [Crew](#crew) as ordinary tasks, built to a [fixed contract](../../captain_claw/instructions/forge/app_contract.md): an HTTP API under `/api/agent/` with a bearer key and a manifest, a WebSocket at `/agent/ws`, or both. **Connect your agents** then reads the app's manifest, registers its API on the agents you choose and links them to its socket; the key is never in the plan or their instructions.
 
 An agent now knows its job with no one in its chat: Flight Deck tells it before each scheduled turn and before a linked system's first turn after it starts, on a deck with accounts.
 
 Known gaps: a team's tables aren't in the Data library, a non-admin can't host a runnable app (so Connect needs an admin or another host), and it isn't in an admin's dialog for a user's agents. Details in [USAGE.md](../../USAGE.md#forge-agents-say-what-you-need-and-get-a-team--new-in-085).
+
+## Archetypes
+
+An archetype is what a new agent starts from: its way of working, its tools and its limits. Since 0.8.6 there are **131**, in three kinds, as tabs in **New agent**, the **Library** and **Console → Archetypes** (All · Company · Generalists · Specialists):
+
+- **Generalists** (31): research, writing, coding, data, operations, finance, multimedia.
+- **Specialists** (100): 76 for work across 17 families, and 24 for your own life.
+- **Company**: your deck's own, first in every list once an admin has published some.
+
+Instructions are longer, with the hard limits first. **23 carry a disclaimer** (legal 12, health 6, clinical 5), shown in the picker, under the agent's chat (a shared agent's too) and in the Console, where an admin can edit an archetype's **Kind** and **Disclaimer**. No lawyer or clinician has reviewed the new instructions yet.
+
+**Generate a group** (admins, Console → Archetypes): say who it's for, attach documents if you have them, and choose how many (up to 12, or let Captain decide). Captain drafts a group with its family, icon and colour, then writes each archetype's instructions in a call of its own, on the admin's Reason tier. Edit anything, disclaimers included; nothing reaches anyone until **Publish to everyone**, and **Remove this group for everyone** takes it back. Up to 300 per deck; the deck adds its own crisis and disclaimer rules under the hard limits.
+
+**New agent** (0.8.6) shows families in a side rail with counts, an icon per archetype and a detail pane that's never empty, with **Forge agents** as a card. Type to search, Enter for the name, Enter again to create.
+
+## Captain Swarm
+
+New in 0.8.6, **for admins only while it's being tested** (with sign-in off, the one local user is the admin). Captain Swarm keeps improving one number. Open it next to Bat in the full layout, or from the kiosk's menu and tool tiles.
+
+A run has an objective: what to improve, the cases to measure it on, and what an attempt may change. Each round it tries several ideas at once (**At once**, up to `FD_CAPTAIN_SWARM_MAX_LANES`), **measures every attempt itself** on the open cases and on held-out cases it keeps sealed, and keeps a gain only if it beats the noise, the held-out cases confirm it and a reviewing model passes it. It stops at its target, its budget, its time or attempt limit, when it stalls, or when you press **Stop now**.
+
+| Kind of run | What improves | What you do with the winner |
+|---|---|---|
+| **Rules from your habits** | An agent's triage rules (up to 12), measured on its read-only exam lane against what you did: the mail you answered (**Build from my Gmail**), the invitations you accepted (**Build from my calendar**). The agent isn't changed during the run | **Teach these rules to** the agent, as lessons |
+| **Best result for a task** | The answer to a real task, tried in **rehearsal**: reads and your own files run, mail, messages, bookings and payments are recorded as intents, code and the screen are refused, and a browser stops at Submit, Buy, Pay, Send. Captain opens every page an attempt claims, and a leaked call disqualifies the attempt | **Carry it out** once, as an ordinary Bat run with its usual start gate |
+| **Write or research** | A document or research for a brief, graded against a checklist from the brief and a sealed one; Captain opens every cited source | **Save to my files** (`vfs:captain-swarm/`) |
+| **Any repository** | A number a command prints; a Crew worker tries each idea in its own branch, inside the paths you allow | **Open a pull request** from the best branch; Captain never merges |
+| **Mrav eval** | Mrav's small-model scores | A branch, as above |
+
+**It learns.** Every objective has a **Kind of task**. What won and lost in earlier runs of that kind shapes the next run, **What it learned** shows those lessons and lets you forget one, and a one-task run's approach can be **saved as a playbook** on one of your agents. An idea-maker only hears whether the sealed cases confirmed a gain, never what's in them.
+
+**Caps are in tokens** (`80M`, `500k`), with dollars shown as "about $x". **Practice sets** keeps the cases built from your Gmail or calendar, sealed per person. An agent with the `captain_swarm` tool can propose a run; it waits for your **Go**.
+
+Settings: `FD_CAPTAIN_SWARM_DISABLED`, `FD_CAPTAIN_SWARM_MAX_RUNS` (1 per person), `FD_CAPTAIN_SWARM_MAX_LANES` (4), `FD_CAPTAIN_SWARM_PER_SITE` (1), `FD_CAPTAIN_SWARM_MEASURE_PARALLEL` (1), `FD_CAPTAIN_SWARM_BROWSER` (on). Known gaps: it has run on synthetic mail and throwaway decks; a real **Carry it out** and a gain kept live on code are still to come. The design: [docs/captain-swarm-plan.md](../captain-swarm-plan.md).
 
 ## Plan and Deep mode
 
@@ -119,7 +153,7 @@ Flows are written as code or in a visual Builder, compiled from plain English, s
 - **Fleet Communication** — Agents discover peers automatically. Consult (synchronous ask) or delegate (asynchronous queue) tasks to specialist agents. Shared workspace and file transfer across the fleet.
 - **Director Panel** — Unified overview of all agents. Broadcast messages fleet-wide. Per-agent token/cost analytics, trace timelines, datastore browser, file browser, config editor.
 - **Shared Virtual File System** — a host-sandboxed, per-user workspace the whole fleet reads and writes, with per-file authorship.
-- **31 ready-made specialists** — an editable archetype library spanning research, writing, engineering (a full coding family: planners, implementers, debugger, reviewers, QA, git operator, cartographer), data, ops, finance, and multimedia.
+- **131 ready-made archetypes** (0.8.6) — an editable library of 31 Generalists (research, writing, a full coding family, data, ops, finance, multimedia) and 100 Specialists, plus your company's own; see [Archetypes](#archetypes).
 
 ## The kiosk and simple layout
 
@@ -196,6 +230,21 @@ New in 0.8.4: everything your agents were asked and sent, on every channel, in l
 </p>
 
 Plan and known gaps: [docs/taskboard-plan.md](../taskboard-plan.md). `FD_TASKBOARD_DISABLED=true` stops the sweep and triage; `CLAW_TURN_REGISTER=off` stops an agent reporting its turns.
+
+## The Line
+
+New in 0.8.6: one timeline per person for everything the deck and your agents did on their own. **Line** in the full layout's navigation, a Line row above the agents in the kiosk, and a button next to the bell on a phone.
+
+- **What's on it**: scheduled tasks' results, Autonomous Work's actions, Taskboard hand-overs, plan steps, coding sessions, Basna, Vatra and Bat runs that answered on another channel, proposals and questions waiting for you, nudges, payments to look at and fleet changes. Failures need you; a skipped scheduled run isn't posted. Kept 30 days, never while something still waits.
+- **The bell is what needs you**, waiting items on top; *Nothing waits for you* links to the Line. Shares, sends, accepted invites and successful runs live on the Line only.
+- **Reading it**: day groups, real headlines, an unread dot, **Failed**, **Needs you** and **Approve?** pills and a filter strip. The open item sits beside the list (from 720 px) with Markdown rendered and **Approve** / **Reject** in a card. A hand-over, its answer and everything about one Taskboard task are one **thread**. A fullscreen button gives it the window.
+- **One composer**: pick any of your agents and ask, or hand it the open item with *Look into it*, *Draft a reply* or *What should I do?*, or **Hand to agent** on any item. A sleeping agent is woken; the answer lands on the Line and opens by itself, or "couldn't answer" after 5 minutes. Only your words are the request; the item is quoted as information, and the agent writes email only when you ask.
+- **Channels** (on the Line, or **Connections → Notifications**): WhatsApp and Telegram each at **Everything**, **Needs you** (waiting items, failures, nudges) or **Off**, and one agent's chat at its own level, as a note that never starts a turn and doesn't wake a sleeping agent. Nothing rings twice; quiet hours let only nudges reach phones.
+- **Daily summary**: a scheduled task, *Summary of your Line*, at the time you pick, on the Line's agent, to its chat and Telegram or email if ticked.
+- **Agents read it**: the read-only `line` tool (`news`, `recent`, `search`, `read`), and on your own turns a one-line count of what's new, numbers only. Never on a shared agent's member turns.
+- Agents no longer get "[Flight Deck] Agent X has joined the fleet" in the middle of their work; fleet changes go to the owner's Line.
+
+Design and known gaps: [docs/autonomous-line-plan.md](../autonomous-line-plan.md).
 
 ## Your own AI keys and Profile
 

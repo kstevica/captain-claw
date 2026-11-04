@@ -85,12 +85,15 @@ New in 0.8.3, **experimental and opt-in**.
 
 ## Notifications
 
-Since 0.8.3, Autonomous Work's nudges and the proposals waiting for your approval reach you wherever you choose on the **Notifications** card in Connections (also in the kiosk's Settings and the admin console):
+Since 0.8.6 everything the deck and your agents did on their own is on your [Line](flight-deck.md#the-line), and **the bell is only what needs you**: proposals and questions waiting for an answer, failures and nudges, waiting items on top, with **Approve / Reject** on each proposal. Nudges and proposals render as Markdown, with pictures dropped and links shown as text.
 
-- **WhatsApp** (on), **Telegram** (off until you turn it on) and **your devices** (on: a beep, a banner and a count);
-- **the bell** in Flight Deck, always, with **Approve / Reject** on each proposal and a ⤢ bigger view. Nudges and proposals render as Markdown, with pictures dropped and links shown as text.
+What reaches you elsewhere is set on the **Notifications** card in Connections (also in the kiosk's Settings, the admin console, and **Channels** on the Line):
 
-Quiet hours send the count without the beep. A channel that fails never stops the others.
+- **WhatsApp** and **Telegram**, each at **Everything**, **Needs you** or **Off** (0.8.6; before, nudges and proposals only, on or off);
+- **one agent's chat**, at a level of its own: the item arrives as a note while the agent runs and never starts a turn;
+- **your devices** (on: a beep, a banner and a count).
+
+Nothing rings twice. In quiet hours only nudges reach phones, and devices get the count without the beep. A channel that fails never stops the others. A **Daily summary** of your Line can also go to Telegram or email.
 
 ## Agents in your inbox
 

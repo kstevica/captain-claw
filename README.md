@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENCE)
-[![Version](https://img.shields.io/badge/version-0.8.5-purple)](release-notes/RELEASE_NOTES_0.8.5.md)
+[![Version](https://img.shields.io/badge/version-0.8.6-purple)](release-notes/RELEASE_NOTES_0.8.6.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](docs/guide/getting-started.md)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](docs/guide/agents.md#multi-model-support)
 
@@ -12,13 +12,13 @@
   <a href="docs/guide/whats-new.md#whats-new-in-082"><img src="docs/screenshots/hero-0.8.2.webp" width="100%" alt="Captain Claw 0.8.2: the BotPort hub's live network map, the kiosk's Share on network dialog on a phone, a StopWatch speaking an answer and a PaperColor e-paper dashboard"></a>
 </p>
 
-> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**. Since **0.8.5** your agents run **Claude Code, Codex, OpenCode, Crush and Pi as their crew**, and you can **say what you need and get a whole team**, with its schedules and its software.
+> Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**. Since **0.8.5** your agents run **Claude Code, Codex, OpenCode, Crush and Pi as their crew**, and you can **say what you need and get a whole team**, with its schedules and its software. Since **0.8.6** everything they do on their own is on **one Line**, **Captain Swarm** makes them measurably better at your real work, and **Captain** for your desktop is a 75 MB download that updates itself.
 
 **[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://cohort001.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)** · **[🧭 Guides](docs/guide/README.md)** · **[📝 What's new](docs/guide/whats-new.md)**
 
-**New in 0.8.5 — All Hands on Deck:** coding CLIs working for you in worktrees of their own, a team forged from a plain request, a Taskboard that hands over many tasks at once, and a deck that updates itself. **[Release notes](release-notes/RELEASE_NOTES_0.8.5.md)**
+**New in 0.8.6 — Ship's Log:** one timeline for everything your agents did on their own, agents improved by measurement rather than hope, 131 archetypes and your company's own, and a 75 MB desktop app that updates itself. **[Release notes](release-notes/RELEASE_NOTES_0.8.6.md)**
 
-<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>68 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>31 ready-made specialists</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
+<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>70 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>131 ready-made archetypes</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
 
 ## Why Captain Claw
 
@@ -43,34 +43,37 @@ flight-deck          # the multi-agent dashboard: http://localhost:25080
 
 First run starts onboarding. For a single agent in the terminal or the browser, Docker, a deck for your team or a voice device, see **[Getting started](docs/guide/getting-started.md)**.
 
-## 🚢 New in 0.8.5 — all hands on deck
+## 📜 New in 0.8.6 — ship's log
+
+**The Line** is one timeline for everything the deck and your agents did on their own: scheduled tasks, Autonomous Work, finished runs, proposals, fleet changes. The bell keeps only what needs you.
+
+- **Talk to it.** Ask any of your agents about an item, or hand it over with *Look into it*, *Draft a reply* or *What should I do?*. Approve or reject a proposal right there. A hand-over and its answer stay together as a thread.
+- **Choose what reaches you.** WhatsApp and Telegram at **Everything**, **Needs you** or **Off**, one agent's chat, and a daily summary at the time you pick.
+- **Agents read it too**, with a `line` tool and a count of what's new on each of your turns.
+
+**Captain Swarm** keeps improving one number you care about. It tries several ideas at once, measures every attempt itself on cases it keeps sealed, and keeps only a gain bigger than the noise: triage rules learned from what you really did with your mail, the best result for a real task found in **rehearsal** where nothing is sent or bought, the best document or research for a brief, or any repository with a measuring command. You carry the winner out, teach it to your agent or open a pull request. **Admins only, while it's being tested.**
+
+- **131 archetypes.** 31 Generalists and 100 Specialists, for work and for your own life, with disclaimers where the advice is legal or medical, and an admin can **generate your company's own** and publish them to everyone.
+- **Bat finishes for real.** Checks it runs itself, fix rounds, parallel steps, a question for you at a stalemate, and one budget for the whole run.
+- **And:** Forge agents builds the team size you ask for, a quicker New agent, **Crush** as a fifth Crew worker, **Keenable** search with no key, and PDF export without Pango.
 
 <p align="center">
-  <img src="docs/screenshots/crew-0.8.5.webp" width="100%" alt="Crew's Overview: 1 task needs you, a Codex task waiting on a decision, a Claude Code task ready to look at, OpenCode and Pi tasks working, and two projects in the side rail">
+  <img src="docs/screenshots/desktop-0.8.6.webp" width="100%" alt="Captain's first start: six install steps ticking off beside a tour of the kiosk's file library">
 </p>
 
-**Crew** puts coding CLIs to work for you. Talk to your agent ("have Codex fix the login test and Claude add dark mode") or use the Crew page, and each task gets its CLI in a git worktree of its own.
+**Captain on your desktop: 75 MB, down from 2.5 GB.** The first start installs the rest, and from then on **Check for Updates…** installs each release beside the running one, test-starts it, switches on a restart and goes back by itself if it doesn't come up. macOS tested; Windows and Linux written, not yet tried.
 
-**Ask → say where and on what model → its own worktree → Flight Deck watches, spending no tokens → your agent is called back → results in your files → a person lands it.**
+**→ [Release notes](release-notes/RELEASE_NOTES_0.8.6.md)** · **[The Line](docs/guide/flight-deck.md#the-line)** · **[Captain Swarm](docs/guide/flight-deck.md#captain-swarm)** · **[Archetypes](docs/guide/flight-deck.md#archetypes)** · **[The desktop app](docs/guide/getting-started.md#the-desktop-app)**
 
-- **Run it on what you like.** The CLI's own login, OpenCode's free models, one of your agents' models, a deck tier, or a server you type in. Through the deck, the worker gets a key good for one turn and never sees the real one.
-- **Give it what it needs.** Paste a screenshot, attach files, tick folders of your own files, and prepare an environment once, for any project: by hand in a terminal in the browser, or with a worker that works it out.
-- **Step in when you want.** **Send now** stops what it's doing and it goes on with your message. A dropped connection is retried by itself, and a line says what a quiet worker is waiting on.
-- **A person lands it.** Every task stays on its own branch. Merge is a button or an Approve in the bell, Captain pushes and opens pull requests with your token, and a page or an app it made goes online from **Live sites**.
-- **Approved per user, by an admin.** Approving someone trusts them with the server, because no OS sandbox holds a worker yet. **[Read this first](release-notes/RELEASE_NOTES_0.8.5.md#before-you-approve-anyone-for-crew).**
+## 🚢 All hands on deck `since 0.8.5`
 
-<p align="center">
-  <img src="docs/screenshots/forge-0.8.5.webp" width="100%" alt="Forge agents: the plan to review, with the agents Captain proposes, their jobs and its questions">
-</p>
+- **Crew.** Claude Code, Codex, OpenCode and Pi work for you, each in a git worktree of its own, from a chat or the Crew page. Flight Deck watches them without spending tokens, calls your agent back when one finishes, and a person lands the work. **[Approving someone trusts them with the server](release-notes/RELEASE_NOTES_0.8.5.md#before-you-approve-anyone-for-crew).**
+- **Forge agents.** Say what you need in your own words, attach your files, and Captain plans a team of standing agents with their schedules and the software worth building.
+- **The Taskboard takes many at once.** Tick tasks as in Gmail and give one instruction for all; the agent works through them one at a time.
+- **A deck that updates itself.** **Console → Updates** tries the new version on a spare port, warns everyone, restarts in place and goes back by itself if it doesn't come up.
+- **And:** real Excel and PowerPoint with no scripts (`xlsx`, `pptx`), agent groups in the kiosk, last login and tokens on the Users page, and a new look for the devices.
 
-**Forge agents** is for when you know what you need but not which agents would do it. **New agent → Forge agents**: say it in your own words and attach your files. Captain plans the fewest standing agents that cover it, you approve them, and it recommends what should run on a schedule and what software is worth building. Crew builds those apps to a fixed contract, and your agents connect to them.
-
-- **The Taskboard takes many at once.** Tick tasks as in Gmail and give one instruction for all ("thank them and politely decline"). The agent works through them one at a time, each with its own details, and you can stop the rest whenever you like.
-- **A deck that updates itself.** **Console → Updates** tries the new version on a spare port, warns everyone with a two-minute countdown, stops the agents, pulls, restarts in place, and goes back by itself if it doesn't come up.
-- **Real Excel and PowerPoint, no scripts.** `xlsx` keeps charts, pivots and macros, with live formulas compared against Excel. `pptx` builds on a firm's own template and says what doesn't fit.
-- **And:** agent groups in the kiosk, last login and tokens on the Users page, and a new look for the devices.
-
-**→ [Release notes](release-notes/RELEASE_NOTES_0.8.5.md)** · **[Crew](docs/guide/flight-deck.md#crew)** · **[Forge agents](docs/guide/flight-deck.md#forge-agents)** · **[The Taskboard](docs/guide/flight-deck.md#the-taskboard)** · **[Updating the deck](docs/guide/flight-deck.md#updating-the-deck)**
+**→ [Release notes](release-notes/RELEASE_NOTES_0.8.5.md)** · **[Crew](docs/guide/flight-deck.md#crew)** · **[Forge agents](docs/guide/flight-deck.md#forge-agents)** · **[Updating the deck](docs/guide/flight-deck.md#updating-the-deck)**
 
 ## 🎓 Onboarded, on the board `since 0.8.4`
 
@@ -191,7 +194,7 @@ The fifth mode is **💻 Code** (above). The sixth is **Flight Deck** itself —
 | **[BotPort, MCP and agent links](docs/guide/botport-and-mcp.md)** | Flight Decks that work together, Flight Deck as an MCP server for Claude, MCP servers for your agents, connecting your own systems |
 | **[Devices and channels](docs/guide/devices-and-channels.md)** | StopWatch, PaperColor, StickS3 and Waveshare, the smart-glasses HUD, WhatsApp (and your own WhatsApp), Telegram, notifications, agents in your inbox |
 | **[Memory and cognition](docs/guide/memory.md)** | Six memory layers, the context engine, dreaming, the Brain Graph |
-| **[Inside an agent](docs/guide/agents.md)** | Every supported model, the 68 built-in tools, safety guards, the agent web UI |
+| **[Inside an agent](docs/guide/agents.md)** | Every supported model, the 70 built-in tools, safety guards, the agent web UI |
 | **[Architecture](docs/guide/architecture.md)** | Where each component lives in the code |
 | **[What's new](docs/guide/whats-new.md)** | Every release, newest first |
 

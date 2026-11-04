@@ -172,6 +172,21 @@ These are code changes already in this build; the env vars above turn them on.
   tier without seeing its key, and those tokens count toward that person's daily limit.
 - **Users page** (0.8.5). Last login, tokens used this month and all time, and **Ask
   for feedback**, an email from your own connected Gmail or Outlook.
+- **The Line** (0.8.6). Every user has their own, and it only ever shows the
+  signed-in person's items: an admin doesn't see anyone else's. Each person sets
+  their own channels, and a shared agent's members never get the `line` tool or the
+  count of what's new.
+- **Company archetypes** (0.8.6). **Console → Archetypes → Generate a group** drafts
+  archetypes for your organisation on your own Reason tier; nobody sees them until
+  **Publish to everyone**, and they come first in everyone's New agent. Read what
+  Captain wrote before publishing: it has no web search, and no practitioner has
+  reviewed the built-in legal and health archetypes either.
+- **Captain Swarm** (0.8.6) is for admins only while it's tested: its pages answer 403
+  to anyone else, and a non-admin's agent never gets the `captain_swarm` tool.
+  `FD_CAPTAIN_SWARM_DISABLED=1` turns it off for the deck.
+- **Bat's ceiling** (0.8.6). A Bat run that names no cap stops at $50
+  (`FD_BAT_DEFAULT_LLM_USD`; `0` for none), counting the runs it starts. Its own
+  check commands and the project's tests run only for admins' runs.
 
 ## Connect Claude to your agents (inbound MCP)
 

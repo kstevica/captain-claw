@@ -4,7 +4,24 @@
 
 Every release from the newest back to 0.4.29. The full notes for each, with upgrade steps, are in [release-notes/](../../release-notes/).
 
-**Jump to:** [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+**Jump to:** [0.8.6](#whats-new-in-086) · [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+
+## What's New in 0.8.6
+
+**Ship's Log.** One timeline for everything your agents did on their own, agents improved by measurement, 131 archetypes and your company's own, and a 75 MB desktop app that updates itself. 27 merged PRs in the two days after 0.8.5. **Restart Flight Deck, then every agent. [Bat runs with no cap now stop at $50](../../release-notes/RELEASE_NOTES_0.8.6.md#changed).**
+
+- **[The Line](flight-deck.md#the-line)**: one timeline per person for scheduled tasks, Autonomous Work, hand-overs, finished runs, proposals and fleet changes; the bell keeps only what needs you.
+  - **Talk to it:** ask any of your agents, or hand one the open item (*Look into it*, *Draft a reply*, *What should I do?*); Approve / Reject in place; threads; fullscreen.
+  - **Channels:** WhatsApp and Telegram at Everything, Needs you or Off, one agent's chat, and a daily *Summary of your Line*.
+  - **Agents:** the read-only `line` tool and a count of what's new on each of your turns. They no longer get "has joined the fleet" notices.
+- **[Captain Swarm](flight-deck.md#captain-swarm)** *(admins only, while it's tested)*: keeps improving one number, several attempts at once, each measured by Captain on open and sealed cases, a gain kept only above the noise. Rules from your habits (Gmail, calendar) → **Teach these rules**; the best result for a task, found in **rehearsal** → **Carry it out**; Write or research → **Save to my files**; any repository → **Open a pull request**. It learns across runs of the same kind; caps are in tokens.
+- **[Archetypes](flight-deck.md#archetypes)**: 131 (31 Generalists, 100 Specialists), in Company · Generalists · Specialists tabs, 23 with legal, health or clinical disclaimers; admins **Generate a group** and **Publish to everyone**; planners see a shortlist.
+- **Bat finishes for real**: checks it runs itself, fix rounds (8 at most), a question at a stalemate, parallel steps (`FD_BAT_MAX_PARALLEL`), and the whole run's spend under one cap, $50 by default.
+- **[Forge agents](flight-deck.md#forge-agents)** builds the team size you ask for (Captain decides up to 8, or at most 1–12), and **New agent** is redesigned with a families rail and a keyboard path to Create.
+- **[The desktop app](getting-started.md#the-desktop-app)**: **Captain**, 75 MB instead of 2.5 GB; the first start installs the rest, and **Check for Updates…** installs, test-starts and switches, going back by itself.
+- **And**: **Crush** as a fifth Crew worker; **Keenable** web search with no key; a roomier Profile; PDF export without Pango; `line` and `captain_swarm` make **70 built-in tools**.
+
+See [RELEASE_NOTES_0.8.6.md](../../release-notes/RELEASE_NOTES_0.8.6.md).
 
 ## What's New in 0.8.5
 
