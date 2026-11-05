@@ -5,7 +5,7 @@ import {
 } from 'lucide-react'
 import { useAuthStore, DEFAULT_INSTANCE_NAME } from '../../stores/authStore'
 import { useConsoleStore, leaveConsole, enterKioskView, type ConsolePage, type ConsoleIntent } from '../../stores/consoleStore'
-import { hasTierSets, TIER_SETS_EVENT } from '../../services/tierConfig'
+import { hasTierSets, tierSetKeyCount, TIER_SETS_EVENT } from '../../services/tierConfig'
 import { fetchSharedTierSets } from '../../services/sharedTierSets'
 import { getOAuthClientConfig, getAdminTelegram } from '../../services/sharedIntegrations'
 import { getSystemProcesses, type SystemProcessResponse } from '../../services/system'
@@ -49,8 +49,10 @@ export function OverviewPage() {
   const [loading, setLoading] = useState(true)
   // No tier set yet: nothing else works until there is one.
   const [models, setModels] = useState(hasTierSets)
+  // Keys a set brought with it (Quick start puts the key on its tiers).
+  const [setKeys, setSetKeys] = useState(tierSetKeyCount)
   useEffect(() => {
-    const check = () => setModels(hasTierSets())
+    const check = () => { setModels(hasTierSets()); setSetKeys(tierSetKeyCount()) }
     window.addEventListener(TIER_SETS_EVENT, check)
     return () => window.removeEventListener(TIER_SETS_EVENT, check)
   }, [])
@@ -93,9 +95,12 @@ export function OverviewPage() {
       detail: f.teamModels ? `The team runs on “${f.teamModels}”.` : 'Publish a tier set — everyone without models of their own runs on it.',
     },
     {
-      done: (f.teamKeys ?? 0) > 0, page: 'models',
+      // On a deck without accounts a key in your own tier set is enough; a
+      // team needs the team's keys (publishing a set fills them in).
+      done: (f.teamKeys ?? 0) > 0 || (!accounts && setKeys > 0), page: 'models',
       title: accounts ? 'Add the team\'s API keys' : 'Add your API keys',
       detail: f.teamKeys ? `${f.teamKeys} provider key${f.teamKeys === 1 ? '' : 's'} set.`
+        : !accounts && setKeys ? (setKeys === 1 ? 'Your tier set carries its own key.' : `Your tier sets carry ${setKeys} keys.`)
         : accounts ? 'One key per provider, so people never handle keys themselves.' : 'One key per provider, for every agent you start.',
     },
     {

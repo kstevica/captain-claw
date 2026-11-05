@@ -1,0 +1,128 @@
+{
+  "_meta": {
+    "about": "Quick start tier sets: a person picks a provider, pastes its API key, and gets a set named after the provider with that provider's CURRENT models on every tier. Served by captain_claw/flight_deck/tier_presets.py (GET /fd/tier-presets); the console's New tier set and the Library's setup wizard read it. A model release is an edit here, no frontend build. Keep model_prices.json in step when a model changes.",
+    "checked": "2026-11-05",
+    "key_prefixes": "How a pasted key names its provider: the form picks that provider, or says the key looks like another one. Leave it out when a provider's keys look like everyone else's (DeepSeek's plain sk-).",
+    "recheck": "Monthly, and after any provider launch. Look at each provider's own model list (sources below), swap retired or superseded ids, keep input_ctx under the provider's long-prompt price step, and update 'checked'.",
+    "sources": {
+      "anthropic": "https://platform.claude.com/docs/en/about-claude/models/overview",
+      "openai": "https://developers.openai.com/api/docs/models",
+      "gemini": "https://aistudio.google.com/docs/models",
+      "xai": "https://docs.x.ai/docs/models",
+      "deepseek": "https://api-docs.deepseek.com/quick_start/pricing"
+    },
+    "notes": {
+      "anthropic": "Haiku 5.5 costs 5x above 100k-token prompts, so its tiers read up to 100k.",
+      "openai": "Long-context price above 272k input tokens; standard tiers stay at 256k. gpt-6-luna turns reasoning off on calls with tools (llm/__init__.py self-heals).",
+      "gemini": "gemini-2.5-* retired 2026-10-20. Argon's introductory price ends 2026-12-01, 3.8 Flash's 2027-01-01.",
+      "xai": "Prompts of 200k tokens or more cost more; grok-4.7 tiers read up to 160k. grok-4, grok-3 and grok-4-fast retired 2026-05-15.",
+      "deepseek": "OpenAI-compatible endpoint. deepseek-flash (V4.1-Flash) takes images, deepseek-v4-pro does not, so the vision tier is on Flash with vision on. deepseek-v4-flash is a retired alias of deepseek-flash."
+    }
+  },
+  "presets": [
+    {
+      "id": "anthropic",
+      "label": "Anthropic",
+      "set_name": "Anthropic",
+      "blurb": "Claude Opus, Sonnet and Haiku 5.5",
+      "provider": "anthropic",
+      "base_url": "",
+      "key_placeholder": "sk-ant-…",
+      "key_prefixes": ["sk-ant-"],
+      "key_url": "https://platform.claude.com/settings/keys",
+      "check": { "url": "https://api.anthropic.com/v1/models?limit=1000", "auth": "x-api-key" },
+      "tiers": {
+        "reason":   { "model": "claude-opus-5-5",   "input_ctx": 262144,  "output_ctx": 32768 },
+        "balanced": { "model": "claude-sonnet-5-5", "input_ctx": 262144,  "output_ctx": 32768 },
+        "fast":     { "model": "claude-haiku-5-5",  "input_ctx": 100000,  "output_ctx": 16384 },
+        "longctx":  { "model": "claude-sonnet-5-5", "input_ctx": 1048576, "output_ctx": 32768 },
+        "coding":   { "model": "claude-opus-5-5",   "input_ctx": 262144,  "output_ctx": 65536 },
+        "vision":   { "model": "claude-sonnet-5-5", "input_ctx": 262144,  "output_ctx": 32768 },
+        "micro":    { "model": "claude-haiku-5-5",  "input_ctx": 8192,    "output_ctx": 1024 }
+      }
+    },
+    {
+      "id": "openai",
+      "label": "OpenAI",
+      "set_name": "OpenAI",
+      "blurb": "GPT-6.1 Sol and Terra, GPT-6 Luna",
+      "provider": "openai",
+      "base_url": "",
+      "key_placeholder": "sk-…",
+      "key_prefixes": ["sk-proj-", "sk-svcacct-"],
+      "key_url": "https://platform.openai.com/api-keys",
+      "check": { "url": "https://api.openai.com/v1/models", "auth": "bearer" },
+      "tiers": {
+        "reason":   { "model": "gpt-6.1-sol",   "input_ctx": 262144,  "output_ctx": 32768 },
+        "balanced": { "model": "gpt-6.1-terra", "input_ctx": 262144,  "output_ctx": 32768 },
+        "fast":     { "model": "gpt-6-luna",    "input_ctx": 131072,  "output_ctx": 16384 },
+        "longctx":  { "model": "gpt-6.1-terra", "input_ctx": 1048576, "output_ctx": 32768 },
+        "coding":   { "model": "gpt-6.1-sol",   "input_ctx": 262144,  "output_ctx": 65536 },
+        "vision":   { "model": "gpt-6.1-terra", "input_ctx": 262144,  "output_ctx": 32768 },
+        "micro":    { "model": "gpt-6-luna",    "input_ctx": 8192,    "output_ctx": 1024 }
+      }
+    },
+    {
+      "id": "gemini",
+      "label": "Gemini",
+      "set_name": "Gemini",
+      "blurb": "Gemini 4 Argon, 3.8 Flash and 3.5 Flash-Lite",
+      "provider": "gemini",
+      "base_url": "",
+      "key_placeholder": "AIza…",
+      "key_prefixes": ["AIza"],
+      "key_url": "https://aistudio.google.com/apikey",
+      "check": { "url": "https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000", "auth": "x-goog-api-key" },
+      "tiers": {
+        "reason":   { "model": "gemini-4-argon",        "input_ctx": 262144,  "output_ctx": 32768 },
+        "balanced": { "model": "gemini-3.8-flash",      "input_ctx": 262144,  "output_ctx": 32768 },
+        "fast":     { "model": "gemini-3.5-flash-lite", "input_ctx": 131072,  "output_ctx": 16384 },
+        "longctx":  { "model": "gemini-3.8-flash",      "input_ctx": 1048576, "output_ctx": 32768 },
+        "coding":   { "model": "gemini-4-argon",        "input_ctx": 262144,  "output_ctx": 65536 },
+        "vision":   { "model": "gemini-3.8-flash",      "input_ctx": 262144,  "output_ctx": 32768 },
+        "micro":    { "model": "gemini-3.5-flash-lite", "input_ctx": 8192,    "output_ctx": 1024 }
+      }
+    },
+    {
+      "id": "xai",
+      "label": "Grok",
+      "set_name": "Grok",
+      "blurb": "Grok 4.7, 4.3 and 4.20",
+      "provider": "xai",
+      "base_url": "",
+      "key_placeholder": "xai-…",
+      "key_prefixes": ["xai-"],
+      "key_url": "https://console.x.ai",
+      "check": { "url": "https://api.x.ai/v1/models", "auth": "bearer" },
+      "tiers": {
+        "reason":   { "model": "grok-4.7",                     "input_ctx": 160000,  "output_ctx": 32768 },
+        "balanced": { "model": "grok-4.7",                     "input_ctx": 160000,  "output_ctx": 32768 },
+        "fast":     { "model": "grok-4.20-0309-non-reasoning", "input_ctx": 131072,  "output_ctx": 16384 },
+        "longctx":  { "model": "grok-4.3",                     "input_ctx": 1048576, "output_ctx": 32768 },
+        "coding":   { "model": "grok-4.7",                     "input_ctx": 160000,  "output_ctx": 32768 },
+        "vision":   { "model": "grok-4.7",                     "input_ctx": 160000,  "output_ctx": 32768 },
+        "micro":    { "model": "grok-4.20-0309-non-reasoning", "input_ctx": 8192,    "output_ctx": 1024 }
+      }
+    },
+    {
+      "id": "deepseek",
+      "label": "DeepSeek",
+      "set_name": "DeepSeek",
+      "blurb": "DeepSeek V4 Pro and Flash",
+      "provider": "openai",
+      "base_url": "https://api.deepseek.com",
+      "key_placeholder": "sk-…",
+      "key_url": "https://platform.deepseek.com/api_keys",
+      "check": { "url": "https://api.deepseek.com/models", "auth": "bearer" },
+      "tiers": {
+        "reason":   { "model": "deepseek-v4-pro", "input_ctx": 262144,  "output_ctx": 32768 },
+        "balanced": { "model": "deepseek-v4-pro", "input_ctx": 262144,  "output_ctx": 32768 },
+        "fast":     { "model": "deepseek-flash",  "input_ctx": 131072,  "output_ctx": 16384 },
+        "longctx":  { "model": "deepseek-v4-pro", "input_ctx": 1048576, "output_ctx": 32768 },
+        "coding":   { "model": "deepseek-v4-pro", "input_ctx": 262144,  "output_ctx": 65536 },
+        "vision":   { "model": "deepseek-flash",  "input_ctx": 262144,  "output_ctx": 32768, "vision": true },
+        "micro":    { "model": "deepseek-flash",  "input_ctx": 8192,    "output_ctx": 1024 }
+      }
+    }
+  ]
+}
