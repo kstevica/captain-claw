@@ -4,7 +4,17 @@
 
 Every release from the newest back to 0.4.29. The full notes for each, with upgrade steps, are in [release-notes/](../../release-notes/).
 
-**Jump to:** [0.8.10](#whats-new-in-0810) · [0.8.9](#whats-new-in-089) · [0.8.8](#whats-new-in-088) · [0.8.7](#whats-new-in-087) · [0.8.6](#whats-new-in-086) · [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+**Jump to:** [0.8.11](#whats-new-in-0811) · [0.8.10](#whats-new-in-0810) · [0.8.9](#whats-new-in-089) · [0.8.8](#whats-new-in-088) · [0.8.7](#whats-new-in-087) · [0.8.6](#whats-new-in-086) · [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+
+## What's New in 0.8.11
+
+**Hold.** 3 merged PRs. **Restart Flight Deck, then every agent, and hard-refresh the browsers.**
+
+- **Messages wait while the agent is busy**: what you write during a turn waits under the transcript (*Sends when ‹agent› is free*, **Don't send**) instead of being refused, and goes when the agent is free, one turn each. **Send at next step** hands it to the running turn instead. Kept across reloads.
+- **A reply that came while your phone was away arrives when you're back**: chats check their connection when the page returns and replace a dead one; the replay no longer shows tool-calling steps as empty answers.
+- **A clearer agent column in the kiosk**: labelled **New agent** and **New group** buttons, initials with a state dot, one-word states (Asleep, Off, Offline), and row buttons that take no width until you hover.
+
+See [RELEASE_NOTES_0.8.11.md](../../release-notes/RELEASE_NOTES_0.8.11.md).
 
 ## What's New in 0.8.10
 
