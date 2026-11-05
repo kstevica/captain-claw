@@ -281,6 +281,24 @@ class FlightDeckDB:
             CREATE UNIQUE INDEX IF NOT EXISTS idx_invites_token
                 ON invites(token_hash);
 
+            -- Each time an admin got in touch with a user (user_activity):
+            -- an email the deck sent from the admin's own account (kind
+            -- feedback | message) or one the admin noted they sent some
+            -- other way (kind noted: WhatsApp, a call…). channel = google |
+            -- microsoft for a sent email, else what the admin named.
+            CREATE TABLE IF NOT EXISTS user_contacts (
+                id         TEXT PRIMARY KEY,
+                user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                admin_id   TEXT NOT NULL DEFAULT '',
+                kind       TEXT NOT NULL,
+                channel    TEXT NOT NULL DEFAULT '',
+                subject    TEXT NOT NULL DEFAULT '',
+                note       TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_user_contacts_user
+                ON user_contacts(user_id, created_at);
+
             CREATE TABLE IF NOT EXISTS chat_sessions (
                 id         TEXT PRIMARY KEY,
                 user_id    TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -1156,6 +1174,23 @@ class FlightDeckDB:
             " (SELECT MAX(s.created_at) FROM user_sessions s WHERE s.user_id = users.id)"
             " WHERE last_login_at = ''"
             " AND EXISTS (SELECT 1 FROM user_sessions s WHERE s.user_id = users.id)")
+        # Feedback requests sent before user_contacts existed (or by a build
+        # without it): one contact per usage_logs row, under an id named for
+        # that row, so taking them in twice changes nothing.
+        try:
+            await self._db.execute(
+                "INSERT OR IGNORE INTO user_contacts"
+                " (id, user_id, admin_id, kind, channel, subject, note, created_at)"
+                " SELECT 'ul-' || l.id, l.target, l.user_id, 'feedback', l.via, '', '', l.created_at"
+                " FROM (SELECT id, user_id, created_at,"
+                "  CASE WHEN json_valid(detail) THEN json_extract(detail, '$.user_id') END AS target,"
+                "  CASE WHEN json_valid(detail) THEN COALESCE(json_extract(detail, '$.via'), '') END AS via"
+                "  FROM usage_logs WHERE event_type = 'feedback_requested') l"
+                " WHERE l.target IN (SELECT id FROM users)")
+        except Exception as exc:  # a deck must start even if this can't be read
+            from captain_claw.logging import get_logger
+            get_logger(__name__).warning(
+                "Earlier feedback requests not taken into user_contacts", error=str(exc))
         await self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_line_items_thread ON line_items(user_id, thread_id)")
         await self._copy_bell_into_line()
@@ -2519,6 +2554,92 @@ class FlightDeckDB:
             "UPDATE users SET feedback_asked_at = ? WHERE id = ?", (now, user_id))
         await self._db.commit()
         return now
+
+    # ── Admins getting in touch with users (user_activity) ──────────
+
+    async def add_user_contact(
+        self, user_id: str, admin_id: str, kind: str, channel: str, *,
+        subject: str = "", note: str = "", contact_id: str = "", at: str = "",
+    ) -> dict:
+        """Record that *admin_id* got in touch with *user_id*; the row."""
+        assert self._db is not None
+        row = {"id": contact_id or _uuid(), "user_id": user_id, "admin_id": admin_id,
+               "kind": kind, "channel": channel, "subject": subject, "note": note,
+               "created_at": at or _utcnow()}
+        await self._db.execute(
+            "INSERT OR IGNORE INTO user_contacts"
+            " (id, user_id, admin_id, kind, channel, subject, note, created_at)"
+            " VALUES (:id, :user_id, :admin_id, :kind, :channel, :subject, :note, :created_at)", row)
+        await self._db.commit()
+        return row
+
+    async def list_user_contacts(self) -> list[dict]:
+        """Every contact on record, newest first, with the admin's name."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT c.*, COALESCE(NULLIF(a.display_name, ''), a.email, '') AS admin_name"
+            " FROM user_contacts c LEFT JOIN users a ON a.id = c.admin_id"
+            " ORDER BY c.created_at DESC",
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def get_user_contact(self, contact_id: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM user_contacts WHERE id = ?", (contact_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def delete_user_contact(self, contact_id: str) -> bool:
+        assert self._db is not None
+        cur = await self._db.execute("DELETE FROM user_contacts WHERE id = ?", (contact_id,))
+        await self._db.commit()
+        return cur.rowcount > 0
+
+    async def list_message_days(self, since: str) -> list[dict]:
+        """The messages each user typed per UTC day from *since* on (days
+        with none left out): what the daily allowance counted."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT user_id, day, messages FROM daily_usage WHERE day >= ? AND messages > 0",
+            (since,),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def message_day_bounds(self) -> dict[str, dict]:
+        """Per user, all time: the first and last day they typed a message,
+        on how many days, and how many messages."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT user_id, MIN(day) AS first_day, MAX(day) AS last_day,"
+            " COUNT(*) AS days, SUM(messages) AS messages"
+            " FROM daily_usage WHERE messages > 0 GROUP BY user_id",
+        ) as cur:
+            return {r["user_id"]: {"first_day": r["first_day"], "last_day": r["last_day"],
+                                   "days": int(r["days"]), "messages": int(r["messages"] or 0)}
+                    for r in await cur.fetchall()}
+
+    async def list_agent_work_days(self, since: str) -> list[dict]:
+        """The tokens each user's agents spent per UTC day from *since* on,
+        on any key, missing the prompt cache (the spend ledger)."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT user_id, day, SUM(input_tokens + cache_write_tokens + output_tokens) AS tokens"
+            " FROM usage_spend WHERE day >= ? GROUP BY user_id, day HAVING tokens > 0",
+            (since,),
+        ) as cur:
+            return [{"user_id": r["user_id"], "day": r["day"], "tokens": int(r["tokens"] or 0)}
+                    for r in await cur.fetchall()]
+
+    async def agent_work_last_days(self) -> dict[str, str]:
+        """Per user, all time: the last day their agents spent any tokens."""
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT user_id, MAX(day) AS last_day FROM usage_spend"
+            " WHERE input_tokens + cache_write_tokens + output_tokens > 0 GROUP BY user_id",
+        ) as cur:
+            return {r["user_id"]: r["last_day"] for r in await cur.fetchall()}
 
     async def list_users(self, limit: int = 100, offset: int = 0) -> list[dict]:
         assert self._db is not None
