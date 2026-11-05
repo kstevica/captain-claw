@@ -46,6 +46,7 @@ import {
   ExternalLink,
   GraduationCap,
   Download,
+  Clock,
 } from 'lucide-react'
 import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
@@ -63,7 +64,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { useShallow } from 'zustand/react/shallow'
-import { useChatStore, PLAN_LEVELS, LANE_MAIN, LANE_AUTO, LANES, laneKey, type PlanLevel, type NextStepOption } from '../../stores/chatStore'
+import { useChatStore, PLAN_LEVELS, LANE_MAIN, LANE_AUTO, LANES, laneKey, type PlanLevel, type NextStepOption, type HeldMessage } from '../../stores/chatStore'
 import { useLocalAgentStore } from '../../stores/localAgentStore'
 import { useContainerStore } from '../../stores/containerStore'
 import { useProcessStore } from '../../stores/processStore'
@@ -743,7 +744,7 @@ function ChatContent({
   onQueue,
   onCancel,
 }: {
-  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null; closed?: { code: number; reason: string } | null; unreachable?: string | null; asleep?: boolean; waking?: boolean; hasOlder?: boolean; hasNewer?: boolean; holdScrollUntil?: number; reasoning?: ReasoningProfile | null }
+  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null; closed?: { code: number; reason: string } | null; unreachable?: string | null; asleep?: boolean; waking?: boolean; hasOlder?: boolean; hasNewer?: boolean; holdScrollUntil?: number; reasoning?: ReasoningProfile | null; held?: HeldMessage[] }
   /** This lane's store key — for anything that reads or writes session state.
    *  The agent id lives on `session.containerId`. */
   sessionKey: string
@@ -771,6 +772,7 @@ function ChatContent({
   const loadOlder = useChatStore((s) => s.loadOlder)
   const loadNewer = useChatStore((s) => s.loadNewer)
   const wakeAgent = useChatStore((s) => s.wakeAgent)
+  const cancelHeld = useChatStore((s) => s.cancelHeld)
   // Asleep for being idle (or waking): what is written waits for the agent.
   const sleeping = !session.connected && (!!session.asleep || !!session.waking)
 
@@ -784,7 +786,7 @@ function ChatContent({
     if (Date.now() < (session.holdScrollUntil ?? 0)) return
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.messages.length])
+  }, [session.messages.length, session.held?.length])
 
   // Focus input when panel opens
   useEffect(() => {
@@ -915,8 +917,12 @@ function ChatContent({
   const last = visibleMessages[visibleMessages.length - 1]
   const fresh = simple && session.connected && !session.busy && !session.hasNewer && (
     !last || (last.role === 'system' && (last.topic?.action === 'new' || last.topic?.action === 'clear')))
-  const sendDisabled = (!input.trim() && attachments.filter((a) => a.status === 'uploaded').length === 0)
+  const hasDraft = !!input.trim() || attachments.some((a) => a.status === 'uploaded')
+  const sendDisabled = !hasDraft
     || (!session.connected && !sleeping) || closed || pendingUploads > 0 || quotaSpent
+  // While the agent is busy, what you send waits and goes once it is free.
+  const sendTitle = pendingUploads > 0 ? 'Waiting for uploads...'
+    : session.busy ? `Send when ${session.containerName} is free` : null
   const placeholder = closed ? 'Disconnected'
     : sleeping ? (session.waking ? 'Waking up…' : 'Asleep — write to wake it…')
     : !session.connected ? 'Connecting...' : quotaSpent ? 'Daily limit reached'
@@ -1045,6 +1051,18 @@ function ChatContent({
             <span>{session.statusText || 'Working...'}</span>
           </div>
         )}
+
+        {/* Written while the agent was busy: each goes by itself once it is free. */}
+        {session.held?.map((h, i) => (
+          <HeldBubble
+            key={h.id}
+            held={h}
+            next={i === 0}
+            agentName={session.containerName}
+            large={simple}
+            onCancel={() => cancelHeld(sessionKey, h.id)}
+          />
+        ))}
 
         <div ref={messagesEndRef} data-fd-chat-end />
         </div>
@@ -1188,7 +1206,7 @@ function ChatContent({
                   </p>
                 )}
               </div>
-              {session.busy ? (
+              {session.busy && (
                 <button
                   onClick={onCancel}
                   className="flex h-9 items-center gap-1.5 rounded-xl bg-red-600/20 px-3 text-sm font-medium text-red-400 hover:bg-red-600/30"
@@ -1196,13 +1214,15 @@ function ChatContent({
                   <StopCircle className="h-4 w-4" />
                   Stop
                 </button>
-              ) : (
+              )}
+              {/* Busy: shown once something is written — it waits for the agent. */}
+              {(!session.busy || hasDraft) && (
                 <button
                   onClick={handleSend}
                   disabled={sendDisabled}
-                  className="flex h-9 w-9 items-center justify-center rounded-xl bg-violet-600 text-white hover:bg-violet-500 disabled:bg-zinc-700 disabled:text-zinc-400"
-                  title={pendingUploads > 0 ? 'Waiting for uploads...' : 'Send'}
-                  aria-label="Send"
+                  className={`flex h-9 w-9 items-center justify-center rounded-xl bg-violet-600 text-white hover:bg-violet-500 disabled:bg-zinc-700 disabled:text-zinc-400 ${session.busy ? 'ml-1' : ''}`}
+                  title={sendTitle ?? 'Send'}
+                  aria-label={session.busy ? 'Send when free' : 'Send'}
                 >
                   {pendingUploads > 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : <ArrowUp className="h-5 w-5" />}
                 </button>
@@ -1250,7 +1270,7 @@ function ChatContent({
               el.style.height = Math.min(el.scrollHeight, 128) + 'px'
             }}
           />
-          {session.busy ? (
+          {session.busy && (
             <button
               onClick={onCancel}
               className="flex h-[38px] items-center gap-1.5 rounded-lg bg-red-600/20 px-3 text-xs font-medium text-red-400 hover:bg-red-600/30"
@@ -1258,12 +1278,15 @@ function ChatContent({
               <StopCircle className="h-4 w-4" />
               Stop
             </button>
-          ) : (
+          )}
+          {/* Busy: shown once something is written — it waits for the agent. */}
+          {(!session.busy || hasDraft) && (
             <button
               onClick={handleSend}
               disabled={sendDisabled}
               className="flex h-[38px] items-center gap-1.5 rounded-lg bg-violet-600 px-3 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-40"
-              title={pendingUploads > 0 ? 'Waiting for uploads...' : `Send (Enter) · ${QUEUE_CHORD} adds it to the queue`}
+              title={sendTitle ?? `Send (Enter) · ${QUEUE_CHORD} adds it to the queue`}
+              aria-label={session.busy ? 'Send when free' : 'Send'}
             >
               {pendingUploads > 0 ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             </button>
@@ -1934,6 +1957,38 @@ function replyBefore(messageId: string): string {
     return ''
   }
   return ''
+}
+
+/** A message written while the agent was busy (or away): it waits under the
+ *  transcript, dashed, and goes by itself once the agent is free — the first
+ *  one next, the rest one turn each after it. "Don't send" withdraws it. */
+function HeldBubble({ held, next, agentName, large, onCancel }: {
+  held: HeldMessage
+  next: boolean
+  agentName: string
+  large: boolean
+  onCancel: () => void
+}) {
+  return (
+    <div className="mb-3 flex flex-col items-end gap-0.5" data-fd-held>
+      <div className={`max-w-[85%] rounded-br-sm border border-dashed border-violet-500/40 bg-violet-600/10 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'}`}>
+        <div className={`fd-markdown ${large ? 'text-base leading-relaxed' : 'text-sm'} text-zinc-300`}>
+          <MarkdownMessage content={held.content} />
+        </div>
+        <span className="mt-1 flex items-center justify-end gap-1 text-[10px] text-zinc-500">
+          <Clock className="h-3 w-3" />
+          {next ? `Sends when ${agentName} is free` : 'Waiting its turn'}
+        </span>
+      </div>
+      <button
+        type="button"
+        onClick={onCancel}
+        className="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
+      >
+        Don't send
+      </button>
+    </div>
+  )
 }
 
 const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId, large = false }: { message: ChatMessage; sourceName?: string; agentId?: string; large?: boolean }) {

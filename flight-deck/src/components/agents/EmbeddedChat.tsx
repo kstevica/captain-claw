@@ -18,7 +18,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, type HeldMessage } from '../../stores/chatStore'
 import { uploadFileToAgent } from '../../services/fileTransfer'
 import { imageRef, type ChatMessage } from '../../services/agentChat'
 import { injectedAs, noteSummary, tidyServerPaths } from '../../utils/chatOrigin'
@@ -126,7 +126,7 @@ function EmbeddedChatBody({
   onCancel,
 }: {
   containerId: string
-  session: { messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string } | undefined
+  session: { messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; held?: HeldMessage[] } | undefined
   host: string
   port: number
   auth: string
@@ -142,6 +142,7 @@ function EmbeddedChatBody({
   const connected = session?.connected ?? false
   const busy = session?.busy ?? false
   const messages = session?.messages ?? []
+  const cancelHeld = useChatStore((s) => s.cancelHeld)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -273,6 +274,21 @@ function EmbeddedChatBody({
             <span>{session?.statusText || 'Working...'}</span>
           </div>
         )}
+
+        {/* Written while the agent was busy: each goes once it is free. */}
+        {session?.held?.map((h) => (
+          <div key={h.id} className="mb-2 flex flex-col items-end gap-0.5">
+            <div className="max-w-[85%] whitespace-pre-wrap rounded-lg border border-dashed border-violet-500/40 bg-violet-600/10 px-2.5 py-1.5 text-xs text-zinc-300">
+              {h.content}
+            </div>
+            <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
+              Sends when free
+              <button type="button" onClick={() => cancelHeld(containerId, h.id)} className="text-zinc-500 underline-offset-2 hover:text-zinc-300 hover:underline">
+                Don't send
+              </button>
+            </span>
+          </div>
+        ))}
 
         <div ref={messagesEndRef} />
       </div>

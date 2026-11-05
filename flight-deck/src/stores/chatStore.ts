@@ -173,19 +173,27 @@ function dropCueEcho(key: string, rest: string) {
     if (m.role !== 'user' || m.replay || m.via) continue
     const stripped = stripCue(m.content)
     if (stripped === null || foldSpace(stripped) !== want) continue
-    _dropped.add(m.id)
-    useChatStore.setState((state) => {
-      const cur = state.sessions.get(key)
-      if (!cur) return state
-      const sessions = new Map(state.sessions)
-      sessions.set(key, { ...cur, messages: cur.messages.filter((x) => x.id !== m.id) })
-      return { sessions }
-    })
-    if (m.rowId !== undefined) {
-      _dropped.delete(m.id)
-      void serverDeleteMessage(key, m.rowId)
-    }
+    withdrawMessage(key, m.id)
     return
+  }
+}
+
+/** Take a row out of the transcript and out of Flight Deck's chat log
+ *  (written already, or still on its way there). */
+function withdrawMessage(key: string, id: string) {
+  const m = useChatStore.getState().sessions.get(key)?.messages.find((x) => x.id === id)
+  if (!m) return
+  _dropped.add(m.id)
+  useChatStore.setState((state) => {
+    const cur = state.sessions.get(key)
+    if (!cur) return state
+    const sessions = new Map(state.sessions)
+    sessions.set(key, { ...cur, messages: cur.messages.filter((x) => x.id !== m.id) })
+    return { sessions }
+  })
+  if (m.rowId !== undefined) {
+    _dropped.delete(m.id)
+    void serverDeleteMessage(key, m.rowId)
   }
 }
 
@@ -309,6 +317,48 @@ function loadQueueSlice(containerId: string): LoadedQueueSlice | null {
   }
 }
 
+// ── Held messages ──
+//
+// A message written while the agent is still on a turn (or away) is not sent
+// into it: the agent would only refuse it ("busy"). It waits on the lane,
+// shown under the transcript as queued, and goes by itself once the agent is
+// free — oldest first, one turn each. Kept in localStorage like the queue, so
+// a reload (a phone that dropped the page) doesn't lose it.
+
+export interface HeldMessage {
+  id: string
+  content: string
+  /** When it was written (ms). */
+  at: number
+}
+
+let _heldCounter = 0
+function nextHeldId() { return `h-${Date.now()}-${++_heldCounter}` }
+
+function _heldLSKey(containerId: string): string {
+  return `fd.held.${_sliceId(containerId)}`
+}
+
+function saveHeld(containerId: string, held: HeldMessage[]): void {
+  try {
+    if (held.length === 0) window.localStorage.removeItem(_heldLSKey(containerId))
+    else window.localStorage.setItem(_heldLSKey(containerId), JSON.stringify(held))
+  } catch { /* quota / private mode — ignore */ }
+}
+
+function loadHeld(containerId: string): HeldMessage[] {
+  try {
+    const raw = window.localStorage.getItem(_heldLSKey(containerId))
+    const parsed = raw ? JSON.parse(raw) as unknown : null
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter((h): h is HeldMessage => !!h && typeof h.content === 'string' && h.content.trim() !== '')
+      .map((h) => ({ id: String(h.id || nextHeldId()), content: h.content, at: Number(h.at) || Date.now() }))
+  } catch {
+    return []
+  }
+}
+
 // A shared agent is used alike by every member of it, and several members may
 // use this browser — unlike a queue on an agent only you own. So a shared
 // chat's slices are kept per deck user (`fd.queue.shared:<ref>[::lane]@<uid>`,
@@ -322,7 +372,7 @@ function _sliceId(chatKey: string): string {
 // …and they still go when the session does.
 function purgeSharedSlices(): void {
   try {
-    const prefixes = [`fd.queue.${SHARED_PREFIX}`, `fd.plan.${SHARED_PREFIX}`]
+    const prefixes = [`fd.queue.${SHARED_PREFIX}`, `fd.plan.${SHARED_PREFIX}`, `fd.held.${SHARED_PREFIX}`]
     const doomed: string[] = []
     for (let i = 0; i < window.localStorage.length; i++) {
       const k = window.localStorage.key(i)
@@ -338,7 +388,7 @@ export function clearSharedSlices(agentRef: string): void {
   clearAgentSlices(sharedContainerId(agentRef))
 }
 
-/** Drop the queue and plan slices of one agent, every lane — for an agent
+/** Drop the queue, plan and held-message slices of one agent, every lane — for an agent
  *  gone for good (a later one of the same name starts clean). */
 export function clearAgentSlices(agentId: string): void {
   for (const lane of LANES) {
@@ -346,6 +396,7 @@ export function clearAgentSlices(agentId: string): void {
     try {
       window.localStorage.removeItem(_queueLSKey(key))
       window.localStorage.removeItem(_planLSKey(key))
+      window.localStorage.removeItem(_heldLSKey(key))
     } catch { /* storage blocked — nothing persisted */ }
   }
 }
@@ -650,6 +701,10 @@ interface SentFrame {
   /** The first send of a task that was in flight when the page loaded (a
    *  reload, the chat opened again): that task's run may still be going. */
   resumed: boolean
+  /** What was sent, and the bubble it made: a message you typed that the
+   *  agent refuses as busy goes back on hold with them (holdRefused). */
+  content: string
+  msgId: string
   at: number
 }
 /** Frames sent and not yet taken or refused, oldest first. */
@@ -729,15 +784,17 @@ function noteTurnEnd(key: string) {
   _holdRefusals.delete(key)
 }
 
-type SendOpts = { fromQueue?: boolean; forced?: boolean }
+/** `released`: a held message going now that the agent is free (it is not
+ *  held again behind the ones still waiting). */
+type SendOpts = { fromQueue?: boolean; forced?: boolean; released?: boolean }
 
 // A message written while the agent sleeps: Flight Deck wakes it, and the
 // frame goes once its welcome arrives (one sent before would be forgotten
 // with the old socket's frames — forgetFrames).
-const _sendOnWake = new Map<string, { content: string; opts?: SendOpts; wasBusy: boolean }[]>()
+const _sendOnWake = new Map<string, { content: string; opts?: SendOpts; wasBusy: boolean; msgId: string }[]>()
 
-/** The frame for a message (its bubble is the caller's), tracked as sent. */
-function sendFrame(key: string, content: string, opts: SendOpts | undefined, wasBusy: boolean) {
+/** The frame for a message (its bubble, `msgId`, is the caller's), tracked as sent. */
+function sendFrame(key: string, content: string, opts: SendOpts | undefined, wasBusy: boolean, msgId: string) {
   const session = useChatStore.getState().sessions.get(key)
   if (!session) return
   // Attached pictures go as image_paths; the bubble keeps their refs.
@@ -759,6 +816,8 @@ function sendFrame(key: string, content: string, opts: SendOpts | undefined, was
     cmd: isSlashCommand(content),
     wasBusy,
     resumed,
+    content,
+    msgId,
     at: Date.now(),
   })
 }
@@ -815,6 +874,57 @@ function requeueRefused(key: string, frame: SentFrame) {
   })
 }
 
+/** The agent refused a message you typed as busy, so it never ran: its
+ *  bubble leaves the transcript, and it waits on the lane again (in the order
+ *  it was written) until the agent is free. */
+function holdRefused(key: string, frame: SentFrame) {
+  withdrawMessage(key, frame.msgId)
+  const s = useChatStore.getState().sessions.get(key)
+  if (!s) return
+  const back: HeldMessage = { id: nextHeldId(), content: frame.content, at: frame.at }
+  const at = s.held.findIndex((h) => h.at > frame.at)
+  updateSession(key, { held: at < 0 ? [...s.held, back] : [...s.held.slice(0, at), back, ...s.held.slice(at)] })
+}
+
+// The agent went free: shortly after (its turn's trailing frames land first),
+// the oldest held message goes — before the queue's next task, whose kick
+// comes later and then finds the agent busy with it.
+const HELD_FLUSH_MS = 300
+const _heldFlushes = new Map<string, ReturnType<typeof setTimeout>>()
+
+function scheduleHeldFlush(key: string, ms = HELD_FLUSH_MS) {
+  if (!useChatStore.getState().sessions.get(key)?.held.length) return
+  const prev = _heldFlushes.get(key)
+  if (prev) clearTimeout(prev)
+  _heldFlushes.set(key, setTimeout(() => {
+    _heldFlushes.delete(key)
+    flushHeld(key)
+  }, ms))
+}
+
+function cancelHeldFlush(key: string) {
+  const t = _heldFlushes.get(key)
+  if (!t) return
+  clearTimeout(t)
+  _heldFlushes.delete(key)
+}
+
+/** Send the oldest held message, if the agent can take it now (connected,
+ *  free, a Stop not still landing, today's allowance left). One per turn: the
+ *  next goes when that turn ends. True when one went. */
+function flushHeld(key: string): boolean {
+  const state = useChatStore.getState()
+  const s = state.sessions.get(key)
+  if (!s?.held.length || !s.connected || s.busy || s.stopping) return false
+  const q = useQuotaStore.getState().status
+  if (q?.blocked && !q.exempt) return false
+  cancelHeldFlush(key)
+  const [next, ...rest] = s.held
+  updateSession(key, { held: rest })
+  state.sendMessage(key, next.content, { released: true })
+  return true
+}
+
 // A task the agent keeps refusing as busy (another surface keeps it busy, or
 // something answers our frames oddly) is not sent again and again: every try
 // counts against today's allowance. The third refusal in a minute holds it.
@@ -858,10 +968,12 @@ function takeRefusalReady(key: string): boolean {
 }
 
 /** What an error frame means for the lane: which frame it refused (or whose
- *  turn failed), what that does to the queue, and whether the agent is free. */
-function settleError(key: string, data: Record<string, unknown>) {
+ *  turn failed), what that does to the queue, and whether the agent is free.
+ *  True when the refusal is taken care of without a line in the chat: a
+ *  message you typed, refused as busy, is held again (holdRefused). */
+function settleError(key: string, data: Record<string, unknown>): boolean {
   const s = useChatStore.getState().sessions.get(key)
-  if (!s) return
+  if (!s) return false
   const quota = data.code === 'quota_exceeded'
   if (data.client_msg_id) _echoes.add(key)
   // "Busy": the agent is on another turn and never took the frame. The agent
@@ -881,7 +993,7 @@ function settleError(key: string, data: Record<string, unknown>) {
       creditDispatchedItem(key, () => ({ halted: { kind: 'error', message, at: Date.now() } }))
     }
     updateSession(key, { busy: false })
-    return
+    return false
   }
   // Otherwise it refuses a frame of ours. A busy refusal names it; Flight
   // Deck's allowance refusal (and older agents, and shared chats) don't, so it
@@ -895,7 +1007,7 @@ function settleError(key: string, data: Record<string, unknown>) {
   if (busy) {
     // A shared chat also says "busy" to a note (`btw`) sent too soon. No chat
     // frame of ours is waiting for an answer then, and nothing changes.
-    if (!frame && data.retryable !== true) return
+    if (!frame && data.retryable !== true) return false
     // The turn that refused it ended since (its "ready" came after the frame
     // went out, and no turn began after): the agent is free now.
     const ended = !!frame && !turnKnown && (_idleAt.get(key) ?? 0) > frame.at
@@ -906,7 +1018,7 @@ function settleError(key: string, data: Record<string, unknown>) {
     const ownRun = mine && !!frame?.resumed && !turnKnown && !ended
     // Otherwise the queue's own task never ran, so it waits for the agent
     // rather than holding as an error (a task you stopped stays stopped, one
-    // refused again and again holds). A typed message is yours to send again.
+    // refused again and again holds). A typed message is held (below).
     if (mine && frame && !ownRun) {
       if (d.halted?.kind === 'stopped') {
         creditDispatchedItem(key, (prev) => ({ halted: prev.halted && { ...prev.halted, refused: true } }))
@@ -918,9 +1030,15 @@ function settleError(key: string, data: Record<string, unknown>) {
         requeueRefused(key, frame)
       }
     }
+    // A message you typed never ran either: it waits on the lane again and
+    // goes by itself once the agent is free — not a "busy" line to send it
+    // again yourself.
+    const typed = !!frame && frame.itemId === null && !frame.cmd && !!frame.content.trim()
+    if (typed && frame) holdRefused(key, frame)
     if (ended) {
+      scheduleHeldFlush(key)
       scheduleQueueKick(key)
-      return
+      return typed
     }
     // Either way the agent is busy, whatever we thought: the lane waits for
     // that turn to end. Its reply and "ready" reach this socket too.
@@ -935,7 +1053,7 @@ function settleError(key: string, data: Record<string, unknown>) {
     // Only when we never saw that turn start (or a Stop is still landing) is
     // there a fallback, and each refusal makes its quiet stretch longer.
     if (!turnKnown || _busyHolds.has(key)) holdBusy(key)
-    return
+    return typed
   }
   // Refused outright (over the allowance, or the agent couldn't open the
   // turn): the queue's own task holds here, and no reply that comes in later
@@ -952,9 +1070,10 @@ function settleError(key: string, data: Record<string, unknown>) {
   // agent isn't free.
   if (frame ? frame.wasBusy : turnKnown || s.stopping) {
     if (owesReady) expectRefusalReady(key)
-    return
+    return false
   }
   updateSession(key, { busy: false })
+  return false
 }
 
 // ── Busy on our word ──
@@ -1548,6 +1667,10 @@ interface ChatSession {
   /** Runtime only: a forced run (Run now, Try again) began with a step (the
    *  fresh start), so the task behind it follows even on a paused lane. */
   queueForceThrough?: boolean
+  /** Messages written while the agent was busy (or away), oldest first: shown
+   *  as queued under the transcript, each sent by itself once the agent is
+   *  free. Persisted (see HeldMessage). */
+  held: HeldMessage[]
   /** An agent another deck user shared with you (containerId `shared:<ref>`):
    *  reached through Flight Deck's member route, chat only. */
   shared?: { agentRef: string; ownerName: string }
@@ -1625,9 +1748,13 @@ interface ChatStore {
    *  instructions (or name) changed, so they apply without a reconnect. */
   resendFleetIdentity: (agentId: string) => void
   /** `fromQueue` marks a turn the queue dispatched: no next-step suggestions
-   *  (`forced`: a start you forced, Run now / Try again). Returns the user
-   *  bubble's message id (undefined when nothing was sent). */
+   *  (`forced`: a start you forced, Run now / Try again). Any other message
+   *  written while the agent is busy or away is held (ChatSession.held) and
+   *  sent once it is free. Returns the user bubble's message id (undefined
+   *  when nothing was sent — held too). */
   sendMessage: (containerId: string, content: string, opts?: SendOpts) => string | undefined
+  /** Withdraw a held message before it goes. */
+  cancelHeld: (key: string, id: string) => void
   /** Wake the agent of a chat that is held asleep (see ChatSession.asleep). */
   wakeAgent: (key: string) => void
   sendBtw: (containerId: string, content: string) => void
@@ -1803,6 +1930,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       queuePaused: persistedQueue?.queuePaused ?? false,
       queueParked: persistedQueue?.parked ?? false,
       queueStartWhenFree: false,
+      // Messages written while the agent was busy, from before a reload.
+      held: loadHeld(key),
       ...(shared ? { shared: { ...shared }, closed: null, speaker: null } : {}),
     }
 
@@ -1874,7 +2003,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // What was written while the agent slept goes now that it is awake.
       const wakeSends = _sendOnWake.get(key)
       _sendOnWake.delete(key)
-      for (const w of wakeSends ?? []) sendFrame(key, w.content, w.opts, w.wasBusy)
+      for (const w of wakeSends ?? []) sendFrame(key, w.content, w.opts, w.wasBusy, w.msgId)
+      // Messages held while the agent was busy or away: the oldest goes in a
+      // moment (a turn the agent reports meanwhile holds it back; one it is
+      // still on refuses it, and it waits again).
+      scheduleHeldFlush(key)
       // If we hydrated a queue with pending items and auto-mode is on, kick
       // off the first dispatch now that the socket is live — and the same
       // for a task the user asked to start while the agent was away.
@@ -1921,7 +2054,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const quota = useQuotaStore.getState().status
       const queued = !!cur && !cur.queuePaused && !cur.queueParked && (cur.queueAutoMode || cur.queueStartWhenFree)
         && cur.queue.some((q) => q.status === 'pending') && !(quota?.blocked && !quota.exempt)
-      const waking = !!data.waking || _sendOnWake.has(key) || queued
+      const waking = !!data.waking || _sendOnWake.has(key) || !!cur?.held.length || queued
       if (waking && !data.waking) ws.wake()
       updateSession(key, { asleep: !waking, waking, unreachable: null })
     })
@@ -2315,21 +2448,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         updateSession(key, { unreachable: String(data.message || 'Connection failed') })
         return
       }
-      const msg: ChatMessage = {
+      const line = () => addMessage(key, {
         id: nextId(),
         role: 'system',
         content: data.message as string || 'Unknown error',
         timestamp: new Date().toISOString(),
-      }
-      addMessage(key, msg)
+      })
       // A frame that isn't a turn was refused (session settings, a model
       // change): nothing about the turn or the queue changes.
-      if (data.code === 'not_allowed') return
+      if (data.code === 'not_allowed') {
+        line()
+        return
+      }
       // The queued task's turn failed, or a frame was refused: hold the queue
       // on the task when it was the queue's own (and say why), put a task the
-      // busy agent never took back to wait, and keep the lane busy while a
-      // turn still runs (see settleError).
-      settleError(key, data)
+      // busy agent never took back to wait, hold a message you typed until the
+      // agent is free (no line: its queued bubble says so), and keep the lane
+      // busy while a turn still runs (see settleError).
+      if (!settleError(key, data)) line()
     })
 
     ws.on('command_result', (data) => {
@@ -2869,6 +3005,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   disconnectChat: (containerId) => {
     const session = get().sessions.get(containerId)
     _sendOnWake.delete(containerId)
+    // What's held stays saved: it goes when the chat is open again.
+    cancelHeldFlush(containerId)
     if (session) {
       session.ws.disconnect()
       const sessions = new Map(get().sessions)
@@ -2893,6 +3031,22 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // A card number / CVV never reaches the bubble, Flight Deck's chat log or
     // the agent (utils/cardScrub — Captain never needs one).
     content = scrubUserText(content)
+    // Asleep (or waking): the frame goes once the agent's welcome is in.
+    const sleeping = !session.connected && (session.asleep || session.waking)
+    // Busy on a turn (a Stop still landing too), or the socket down: the
+    // agent would refuse it, or never get it. A message (not the queue's
+    // task, not a slash command — the agent runs those at once) waits on the
+    // lane instead, and so does one written behind others still waiting.
+    const hold = !opts?.fromQueue && !opts?.released && !isSlashCommand(content) && !session.closed
+      && (session.held.length > 0 || (!sleeping && (session.busy || session.stopping || !session.connected)))
+    if (hold) {
+      updateSession(containerId, { held: [...session.held, { id: nextHeldId(), content, at: Date.now() }] })
+      // Asleep: waking it is asking for it (the oldest goes on its welcome).
+      if (session.asleep && !session.connected) get().wakeAgent(containerId)
+      // Free already (only behind others waiting): it goes in a moment.
+      else scheduleHeldFlush(containerId)
+      return undefined
+    }
     // An answer ends the hold — the agent's next reply is re-evaluated fresh.
     cancelQuestionWatch(containerId)
     // (A message typed in the chat also resumes a task the queue is holding
@@ -2905,8 +3059,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       timestamp: new Date().toISOString(),
     }
     addMessage(containerId, msg)
-    // Asleep (or waking): the frame goes once the agent's welcome is in.
-    const sleeping = !session.connected && (session.asleep || session.waking)
     updateSession(containerId, {
       busy: true,
       statusText: sleeping ? 'Waking up…' : session.stopping ? 'Stopping…' : 'Thinking...',
@@ -2916,12 +3068,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       ...(sleeping ? { asleep: false, waking: true } : {}),
     })
     if (sleeping) {
-      _sendOnWake.set(containerId, [...(_sendOnWake.get(containerId) ?? []), { content, opts, wasBusy: session.busy }])
+      _sendOnWake.set(containerId, [...(_sendOnWake.get(containerId) ?? []), { content, opts, wasBusy: session.busy, msgId: msg.id }])
       session.ws.wake()
       return msg.id
     }
-    sendFrame(containerId, content, opts, session.busy)
+    sendFrame(containerId, content, opts, session.busy, msg.id)
     return msg.id
+  },
+
+  cancelHeld: (key, id) => {
+    const session = get().sessions.get(key)
+    if (!session?.held.some((h) => h.id === id)) return
+    updateSession(key, { held: session.held.filter((h) => h.id !== id) })
   },
 
   wakeAgent: (key) => {
@@ -3427,8 +3585,12 @@ function tryDispatchNext(containerId: string, opts?: { force?: boolean }) {
   const blocked = !!quota?.blocked && !quota.exempt
   // (`stopping` keeps `busy` on already; named so a stop still landing is
   // plainly a reason to wait.)
-  if (session.busy || session.stopping || !session.connected || blocked) {
+  // A message you wrote while the agent was busy goes before the next task:
+  // that waits for its turn to end, as for any other turn.
+  const heldFirst = session.held.length > 0
+  if (session.busy || session.stopping || !session.connected || blocked || heldFirst) {
     if (!session.queueStartWhenFree) updateSession(containerId, { queueStartWhenFree: true })
+    if (heldFirst) scheduleHeldFlush(containerId)
     // Asleep (stopped for being idle): a task to run wakes it; it starts on the welcome.
     if (session.asleep && !session.connected && !blocked) state.wakeAgent(containerId)
     // Busy with no turn known to run (a stray status or tool frame after the
@@ -3473,6 +3635,8 @@ const _queueKicks = new Map<string, ReturnType<typeof setTimeout>>()
 /** The agent said it is free: the queue's next task goes now when it would
  *  go on the kick (Auto, or a start you asked for), and the kick is dropped. */
 function startQueueNow(key: string) {
+  // A message held for the agent goes first (and the queue then waits).
+  if (flushHeld(key)) return
   const s = useChatStore.getState().sessions.get(key)
   if (!s || !s.connected || s.busy || s.queueDispatchedId) return
   if (!(s.queueStartWhenFree || (!s.queuePaused && s.queueAutoMode))) return
@@ -3544,10 +3708,13 @@ function updateSession(containerId: string, patch: Partial<ChatSession>) {
         parked: updated.queueParked,
       })
     }
+    if ('held' in patch) saveHeld(containerId, updated.held)
     return { sessions }
   })
   // Free by the agent's word: the fallback for "busy on our word" is moot.
   if (freed) releaseBusyHold(containerId)
+  // A message held for the agent goes first, the queue's next task after it.
+  if (freed) scheduleHeldFlush(containerId)
   if (kick) scheduleQueueKick(containerId)
 }
 
@@ -3571,6 +3738,8 @@ useQuotaStore.subscribe((st) => {
   _quotaWasBlocked = blocked
   if (blocked) return
   for (const [key, s] of useChatStore.getState().sessions) {
+    // A message held while the allowance was spent goes first.
+    if (lifted && flushHeld(key)) continue
     if (!s.queueDispatchedId) {
       if (lifted && (s.queueStartWhenFree || (!s.queuePaused && s.queueAutoMode))) {
         tryDispatchNext(key, { force: s.queueStartWhenFree })
