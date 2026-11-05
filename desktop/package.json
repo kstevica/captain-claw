@@ -26,7 +26,6 @@
   "build": {
     "appId": "com.captainclaw.desktop",
     "productName": "Captain",
-    "copyright": "Copyright © 2025 Stevica Kuharski",
     "afterPack": "./adhoc-sign.js",
     "directories": {
       "output": "../dist/desktop",
