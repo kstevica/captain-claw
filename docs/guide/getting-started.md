@@ -31,7 +31,7 @@ First run starts onboarding automatically. For Ollama, no key needed — set `pr
 
 ## The desktop app
 
-**Captain** for macOS (and, untested so far, Windows and Linux) is a 75 MB download: the window, without Python inside. Its first start installs everything else from the newest release, about 200 MB, in half a minute on a fast line, with a page that shows each step. After that it starts in seconds, and **Check for Updates…** (the Captain menu on a Mac, Help elsewhere) installs each new release beside the running one, test-starts it and switches on a restart, going back by itself if the new version doesn't come up (0.8.6). It runs its own Flight Deck with sign-in off, for one person. **The first time you open it:** Captain isn't notarized yet, so macOS says it can't verify the app. Press **Done**, then **Open Anyway** in System Settings → Privacy & Security, and confirm. A download from 0.8.8's first hour that macOS calls *damaged* had no full signature; download it again. Building it and publishing a release for it: [README_BINARY.md](../../README_BINARY.md#2-desktop-app-electron).
+**Captain** for macOS and Windows (Linux untested so far) is a 75 MB download from [captain-claw.com/download](https://captain-claw.com/download): the window, without Python inside. Its first start installs everything else from the newest release, about 200 MB, in half a minute on a fast line, with a page that shows each step. After that it starts in seconds, and **Check for Updates…** (the Captain menu on a Mac, Help elsewhere) installs each new release beside the running one, test-starts it and switches on a restart, going back by itself if the new version doesn't come up (0.8.6). It runs its own Flight Deck with sign-in off, for one person. To add your models, **Console → Models → New tier set → Quick start**: pick a provider and paste its key, and every tier gets its current models (0.8.10). **The first time you open it:** Captain isn't notarized yet, so macOS says it can't verify the app. Press **Done**, then **Open Anyway** in System Settings → Privacy & Security, and confirm. A download from 0.8.8's first hour that macOS calls *damaged* had no full signature; download it again. Building it and publishing a release for it: [README_BINARY.md](../../README_BINARY.md#2-desktop-app-electron).
 
 ## A deck for a team
 
@@ -112,4 +112,4 @@ Full reference: [USAGE.md](../../USAGE.md#configuration-reference) (23 config se
 
 - [Flight Deck](flight-deck.md) — what to do once the dashboard is open
 - [BotPort and MCP](botport-and-mcp.md) — connect your decks to each other and to Claude
-- [Inside an agent](agents.md) — every supported model and the 70 built-in tools
+- [Inside an agent](agents.md) — every supported model and the 72 built-in tools

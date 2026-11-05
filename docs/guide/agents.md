@@ -18,9 +18,16 @@ Mix providers freely — each session independently selects its model.
 | LiteRT (on-device) | `.litertlm` Gemma models running locally via an isolated subprocess worker |
 | OpenRouter | 200+ models via meta-router |
 
-## 70 built-in tools
+## 72 built-in tools
 
 Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), Microsoft 365 (Outlook mail, Calendar, OneDrive), Jev calibrated judgments (TypeSafe AI), Soniox speech in and out (`audio`), public file links, topic switching by asking (`sessions`), a read-only Telegram inbox, the StopWatch's background picture, bill payments (opt-in), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), Basna (read and start multi-agent ensemble runs), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
+
+New in 0.8.10:
+
+| Tool | What it does |
+|---|---|
+| `ocr_pdf` | Reads a PDF's scanned pages with a local OCR engine, never a model: `mode=auto` keeps each page's own text when it's good and reads only the rest, `mode=ocr` re-reads every page. The same file and settings give the same text (cached by hash in `saved/.ocr-cache/`); the result is `saved/ocr/<session>/<name>-<hash>/<name>.md`, page by page. See [USAGE](../../USAGE.md). |
+| `ocr_image` | The same for png, jpg, webp, bmp, gif and tif (each page of a multi-page TIFF); photos are turned upright first. RapidOCR comes with Captain; Tesseract is used when installed and asked for a language it has. |
 
 New in 0.8.6:
 
