@@ -744,7 +744,7 @@ function ChatContent({
   onQueue,
   onCancel,
 }: {
-  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null; closed?: { code: number; reason: string } | null; unreachable?: string | null; asleep?: boolean; waking?: boolean; hasOlder?: boolean; hasNewer?: boolean; holdScrollUntil?: number; reasoning?: ReasoningProfile | null; held?: HeldMessage[] }
+  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null; closed?: { code: number; reason: string } | null; unreachable?: string | null; asleep?: boolean; waking?: boolean; hasOlder?: boolean; hasNewer?: boolean; holdScrollUntil?: number; reasoning?: ReasoningProfile | null; held?: HeldMessage[]; stopping?: boolean }
   /** This lane's store key — for anything that reads or writes session state.
    *  The agent id lives on `session.containerId`. */
   sessionKey: string
@@ -773,6 +773,7 @@ function ChatContent({
   const loadNewer = useChatStore((s) => s.loadNewer)
   const wakeAgent = useChatStore((s) => s.wakeAgent)
   const cancelHeld = useChatStore((s) => s.cancelHeld)
+  const sendHeldInTurn = useChatStore((s) => s.sendHeldInTurn)
   // Asleep for being idle (or waking): what is written waits for the agent.
   const sleeping = !session.connected && (!!session.asleep || !!session.waking)
 
@@ -1060,6 +1061,8 @@ function ChatContent({
             next={i === 0}
             agentName={session.containerName}
             large={simple}
+            canInsert={session.busy && !session.stopping && session.connected}
+            onInsert={() => sendHeldInTurn(sessionKey, h.id)}
             onCancel={() => cancelHeld(sessionKey, h.id)}
           />
         ))}
@@ -1961,14 +1964,20 @@ function replyBefore(messageId: string): string {
 
 /** A message written while the agent was busy (or away): it waits under the
  *  transcript, dashed, and goes by itself once the agent is free — the first
- *  one next, the rest one turn each after it. "Don't send" withdraws it. */
-function HeldBubble({ held, next, agentName, large, onCancel }: {
+ *  one next, the rest one turn each after it. "Send at next step" hands it to
+ *  the running turn instead (the agent reads it at its next step); "Don't
+ *  send" withdraws it. */
+function HeldBubble({ held, next, agentName, large, canInsert, onInsert, onCancel }: {
   held: HeldMessage
   next: boolean
   agentName: string
   large: boolean
+  /** A turn is on that can take it now. */
+  canInsert: boolean
+  onInsert: () => void
   onCancel: () => void
 }) {
+  const action = 'rounded px-1.5 py-0.5 text-[11px] transition-colors pointer-coarse:px-2.5 pointer-coarse:py-1.5'
   return (
     <div className="mb-3 flex flex-col items-end gap-0.5" data-fd-held>
       <div className={`max-w-[85%] rounded-br-sm border border-dashed border-violet-500/40 bg-violet-600/10 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'}`}>
@@ -1980,13 +1989,25 @@ function HeldBubble({ held, next, agentName, large, onCancel }: {
           {next ? `Sends when ${agentName} is free` : 'Waiting its turn'}
         </span>
       </div>
-      <button
-        type="button"
-        onClick={onCancel}
-        className="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300"
-      >
-        Don't send
-      </button>
+      <div className="flex items-center gap-1">
+        {canInsert && (
+          <button
+            type="button"
+            onClick={onInsert}
+            title={`Hand it to ${agentName}'s running turn now — read at its next step, without waiting for the turn to end`}
+            className={`${action} text-violet-700 hover:bg-violet-500/10 dark:text-violet-300`}
+          >
+            Send at next step
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onCancel}
+          className={`${action} text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300`}
+        >
+          Don't send
+        </button>
+      </div>
     </div>
   )
 }

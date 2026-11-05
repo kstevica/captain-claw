@@ -143,6 +143,7 @@ function EmbeddedChatBody({
   const busy = session?.busy ?? false
   const messages = session?.messages ?? []
   const cancelHeld = useChatStore((s) => s.cancelHeld)
+  const sendHeldInTurn = useChatStore((s) => s.sendHeldInTurn)
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -283,6 +284,13 @@ function EmbeddedChatBody({
             </div>
             <span className="flex items-center gap-1.5 text-[10px] text-zinc-500">
               Sends when free
+              {busy && connected && (
+                <button type="button" onClick={() => sendHeldInTurn(containerId, h.id)}
+                  title="Hand it to the running turn now — read at its next step"
+                  className="text-violet-300 underline-offset-2 hover:underline">
+                  Send at next step
+                </button>
+              )}
               <button type="button" onClick={() => cancelHeld(containerId, h.id)} className="text-zinc-500 underline-offset-2 hover:text-zinc-300 hover:underline">
                 Don't send
               </button>

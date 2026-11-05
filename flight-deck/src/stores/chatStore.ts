@@ -714,11 +714,14 @@ const _lastFrame = new Map<string, SentFrame>()
 /** When the turn running on each lane began, as far as we know: when its
  *  frame went out (one of ours), or when the agent said it started. */
 const _turns = new Map<string, number>()
-/** Per lane, the waiting tasks handed to the running turn (Insert now), in
- *  the order sent, until the agent's /btw command_result answers each: taken
- *  (`busy`), or refused because that turn had just ended — then the task
- *  goes back to the front of the queue and runs on its own. */
-const _inserts = new Map<string, QueuedMessage[]>()
+/** Per lane, what was handed to the running turn as a note, in the order
+ *  sent: a waiting task (the queue's Insert now) or a held message (its "Send
+ *  at next step"), until the agent's /btw command_result answers each: taken
+ *  (`busy`), or refused because that turn had just ended — then the task goes
+ *  back to the front of the queue, the message back on hold, and it runs on
+ *  its own. */
+type TurnInsert = { kind: 'queue'; item: QueuedMessage } | { kind: 'held'; held: HeldMessage }
+const _inserts = new Map<string, TurnInsert[]>()
 /** When each lane last went idle by the agent's word (its "ready"). */
 const _idleAt = new Map<string, number>()
 /** The task each lane had in flight when the page loaded, until the lane's
@@ -1755,6 +1758,11 @@ interface ChatStore {
   sendMessage: (containerId: string, content: string, opts?: SendOpts) => string | undefined
   /** Withdraw a held message before it goes. */
   cancelHeld: (key: string, id: string) => void
+  /** Hand a held message to the running turn now, as a note the agent reads
+   *  at its next step (instead of waiting for the turn to end). False when no
+   *  turn is on to take it. If the turn ends as it goes, it is held again and
+   *  sent as its own message. */
+  sendHeldInTurn: (key: string, id: string) => boolean
   /** Wake the agent of a chat that is held asleep (see ChatSession.asleep). */
   wakeAgent: (key: string) => void
   sendBtw: (containerId: string, content: string) => void
@@ -2481,9 +2489,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (data.busy === false) {
           const s = insert && useChatStore.getState().sessions.get(key)
           if (!insert || !s) return
+          // A held message: back on hold in its place, and — the turn having
+          // ended — it goes as its own message now.
+          if (insert.kind === 'held') {
+            const at = s.held.findIndex((h) => h.at > insert.held.at)
+            updateSession(key, { held: at < 0 ? [...s.held, insert.held] : [...s.held.slice(0, at), insert.held, ...s.held.slice(at)] })
+            scheduleHeldFlush(key)
+            return
+          }
           // Back in front of the first waiting task (behind a fresh-start
           // step ahead of it), whether or not it was cleared meanwhile.
-          const back: QueuedMessage = { ...insert, status: 'pending', completedAt: undefined, endedHow: undefined }
+          const back: QueuedMessage = { ...insert.item, status: 'pending', completedAt: undefined, endedHow: undefined }
           const rest = s.queue.filter((q) => q.id !== back.id)
           const at = rest.findIndex((q) => q.status === 'pending' && !isSlashCommand(q.content))
           updateSession(key, { queue: at < 0 ? [...rest, back] : [...rest.slice(0, at), back, ...rest.slice(at)] })
@@ -3082,6 +3098,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     updateSession(key, { held: session.held.filter((h) => h.id !== id) })
   },
 
+  sendHeldInTurn: (key, id) => {
+    const session = get().sessions.get(key)
+    const held = session?.held.find((h) => h.id === id)
+    if (!session || !held) return false
+    // Only a turn that is on can take it. (`stopping`: the turn is ending on
+    // your word — a note for its remaining steps would be lost.)
+    if (!session.busy || session.stopping || !session.connected) return false
+    session.ws.sendBtw(held.content, { runningOnly: true })
+    _inserts.set(key, [...(_inserts.get(key) ?? []), { kind: 'held', held }])
+    updateSession(key, { held: session.held.filter((h) => h.id !== id) })
+    return true
+  },
+
   wakeAgent: (key) => {
     const session = get().sessions.get(key)
     if (!session || session.connected || !session.asleep) return
@@ -3525,7 +3554,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // on the user's word — a note for its remaining steps would be lost.)
     if (!session.busy || session.stopping || !session.connected) return false
     session.ws.sendBtw(item.content, { runningOnly: true })
-    _inserts.set(key, [...(_inserts.get(key) ?? []), item])
+    _inserts.set(key, [...(_inserts.get(key) ?? []), { kind: 'queue', item }])
     get().markQueueItemDone(key, id, { how: 'inserted' })
     return true
   },
