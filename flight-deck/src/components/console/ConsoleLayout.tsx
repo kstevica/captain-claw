@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import {
   LayoutGrid, Gauge, Library, Plug, Network, UserCog, BarChart3, Settings2, LayoutDashboard, MessagesSquare, ScrollText,
-  RefreshCw, Sun, Moon, LogOut, Loader2, Menu, X, type LucideIcon,
+  RefreshCw, Activity, Sun, Moon, LogOut, Loader2, Menu, X, type LucideIcon,
 } from 'lucide-react'
 import { useAuthStore, logoutUser, DEFAULT_LOGO } from '../../stores/authStore'
 import { useThemeStore } from '../../stores/themeStore'
@@ -19,6 +19,7 @@ import { ArchetypesPage } from './ArchetypesPage'
 import { ConnectionsConsole } from './ConnectionsConsole'
 import { NetworkConsole } from './NetworkConsole'
 import { UsersConsole } from './UsersConsole'
+import { ActivityConsole } from './ActivityConsole'
 import { UsageConsole } from './UsageConsole'
 import { AuditConsole } from './AuditConsole'
 import { UpdatesConsole } from './UpdatesConsole'
@@ -29,8 +30,9 @@ import { SettingsConsole } from './SettingsConsole'
 // else — the agents and their chats stay in Flight Deck, one click away.
 
 // `accounts`: only on a deck with sign-in — without it (the desktop app)
-// there is one user, no plans and no one to invite.
-type NavItem = { id: ConsolePage; icon: LucideIcon; label: string; hint: string; accounts?: boolean; soloHint?: string }
+// there is one user, no plans and no one to invite. `web`: not in the apps
+// (desktop, Android), only in a browser on the multi-user deck.
+type NavItem = { id: ConsolePage; icon: LucideIcon; label: string; hint: string; accounts?: boolean; web?: boolean; soloHint?: string }
 
 const NAV: NavItem[] = [
   { id: 'overview', icon: LayoutGrid, label: 'Overview', hint: 'How the deck is doing' },
@@ -39,6 +41,7 @@ const NAV: NavItem[] = [
   { id: 'connections', icon: Plug, label: 'Connections', hint: 'Google, Telegram, MCP…' },
   { id: 'network', icon: Network, label: 'BotPort', hint: 'Connect this deck to other Flight Decks' },
   { id: 'users', icon: UserCog, label: 'Users', hint: 'Accounts, invitations, waitlist', accounts: true },
+  { id: 'activity', icon: Activity, label: 'Activity', hint: 'Who is active, who you wrote to', accounts: true, web: true },
   { id: 'usage', icon: BarChart3, label: 'Usage & limits', hint: 'Today, spend and plans', accounts: true },
   { id: 'audit', icon: ScrollText, label: 'Audit', hint: 'Every tool call agents made' },
   { id: 'updates', icon: RefreshCw, label: 'Updates', hint: 'Pull a new version and restart' },
@@ -64,7 +67,7 @@ export function ConsoleLayout() {
     window.addEventListener(TIER_SETS_EVENT, check)
     return () => window.removeEventListener(TIER_SETS_EVENT, check)
   }, [])
-  const nav = NAV.filter((n) => accounts || !n.accounts).map((n) => (!accounts && n.soloHint ? { ...n, hint: n.soloHint } : n))
+  const nav = NAV.filter((n) => (accounts || !n.accounts) && !(n.web && isAppShell())).map((n) => (!accounts && n.soloHint ? { ...n, hint: n.soloHint } : n))
   const current = nav.find((n) => n.id === asked) || nav[0]
   const page = current.id
 
@@ -129,6 +132,7 @@ export function ConsoleLayout() {
           {page === 'connections' && <ConnectionsConsole />}
           {page === 'network' && <NetworkConsole />}
           {page === 'users' && <UsersConsole onWaitlistCount={setWaitlist} />}
+          {page === 'activity' && <ActivityConsole />}
           {page === 'usage' && <UsageConsole />}
           {page === 'audit' && <AuditConsole />}
           {page === 'updates' && <UpdatesConsole />}

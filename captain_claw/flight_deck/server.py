@@ -1765,6 +1765,7 @@ from captain_claw.flight_deck.branding_routes import router as branding_router
 from captain_claw.flight_deck.invite_routes import admin_router as invite_admin_router
 from captain_claw.flight_deck.invite_routes import public_router as invite_public_router
 from captain_claw.flight_deck.feedback_request_routes import router as feedback_request_router
+from captain_claw.flight_deck.user_activity import router as user_activity_router
 from captain_claw.flight_deck.info_routes import router as info_router
 from captain_claw.flight_deck.codex_oauth_routes import router as codex_oauth_router
 from captain_claw.flight_deck.antigravity_routes import router as antigravity_router
@@ -1881,6 +1882,7 @@ app.include_router(branding_router)
 app.include_router(invite_admin_router)
 app.include_router(invite_public_router)
 app.include_router(feedback_request_router)
+app.include_router(user_activity_router)
 app.include_router(info_router)
 app.include_router(codex_oauth_router)
 app.include_router(antigravity_router)

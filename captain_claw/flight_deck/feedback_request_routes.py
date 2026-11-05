@@ -124,7 +124,15 @@ async def send_feedback_request(user_id: str, body: SendFeedbackRequest,
         log.warning("Feedback request failed", user=user_id, via=body.send_via, error=mail["error"][:200])
         return {"ok": False, "email": mail, "asked_at": user.get("feedback_asked_at") or ""}
     asked_at = await db.set_feedback_asked(user_id)
-    await db.log_usage(str(admin["id"]), "feedback_requested",
-                       json.dumps({"user_id": user_id, "via": body.send_via}))
+    log_id = await db.log_usage(str(admin["id"]), "feedback_requested",
+                                json.dumps({"user_id": user_id, "via": body.send_via}))
+    # Activity → "you wrote to them"; the id is the one db's catch-up gives
+    # this log row, so the two never count one email twice. The email went
+    # out either way, so a record that can't be kept doesn't say otherwise.
+    try:
+        await db.add_user_contact(user_id, str(admin["id"]), "feedback", body.send_via,
+                                  subject=subject, contact_id=f"ul-{log_id}", at=asked_at)
+    except Exception as exc:
+        log.warning("Feedback request not recorded for Activity", user=user_id, error=str(exc))
     log.info("Feedback request emailed", user=user_id, via=body.send_via)
     return {"ok": True, "email": mail, "asked_at": asked_at}
