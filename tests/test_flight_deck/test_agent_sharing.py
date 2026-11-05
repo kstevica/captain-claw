@@ -1466,6 +1466,18 @@ class TestMemberSocketSession:
         finally:
             cm.__exit__(None, None, None)
 
+    def test_fd_ping_is_answered_here_and_never_forwarded(self, ws_deck):
+        """A member's chat back from the lock screen checks its socket."""
+        cm, s, _ = _open(ws_deck)
+        try:
+            s.send_json({"type": "fd_ping"})
+            assert _recv_json(s) == {"type": "fd_pong"}
+            s.send_json({"type": "chat", "content": "after the ping"})
+            frames = ws_deck.agent.wait_frames(2)
+            assert [f["type"] for f in frames] == ["fd_speaker_context", "chat"]
+        finally:
+            cm.__exit__(None, None, None)
+
     def test_fd_auth_of_another_user_is_refused(self, ws_deck, monkeypatch):
         monkeypatch.setattr(sharing, "RECHECK_INTERVAL_S", 0.1)
         monkeypatch.setattr(sharing, "JWT_GRACE_S", 0)

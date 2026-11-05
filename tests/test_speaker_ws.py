@@ -541,6 +541,7 @@ async def test_welcome_ack_and_member_only_replay(server, monkeypatch, sm):
     assert welcome["models"] == [] and welcome["personalities"] == []
     assert welcome["commands"] == speaker_commands()
     assert welcome["is_public"] is False
+    assert welcome["busy"] is False   # no turn of the member's is on
     assert welcome["speaker"] == {"id": "u-member", "name": "Ana",
                                   "owner_name": "Olga", "lane": "A"}
     assert welcome["session"]["id"] == mine.id
@@ -555,6 +556,54 @@ async def test_welcome_ack_and_member_only_replay(server, monkeypatch, sm):
     replayed = json.dumps(frames[1])
     assert "MEMBER EARLIER QUESTION" in replayed
     assert "OWNER PRIVATE MESSAGE" not in "".join(ws.sent)
+    await disconnect(ws)
+
+
+async def _owner_socket(server, monkeypatch):
+    """An owner's socket (no speaker header) through the real ws_handler."""
+    ws = FakeWS()
+    monkeypatch.setattr(aiohttp.web, "WebSocketResponse", lambda *a, **k: ws)
+    # The session payload's details (skills, tools…) are not what these test.
+    monkeypatch.setattr(server, "_session_info", lambda agent=None: {"id": "owner", "name": "owner-main"},
+                        raising=False)
+    request = types.SimpleNamespace(headers={}, query={}, cookies={})
+    ws.task = asyncio.create_task(ws_handler(server, request))
+    server.test_sockets.append(ws)
+    await wait_for(lambda: ws.closed or ws.task.done() or bool(ws.of_type("replay_done")))
+    if ws.task.done() and ws.task.exception():
+        raise ws.task.exception()
+    return ws
+
+
+async def test_a_socket_back_mid_turn_hears_the_turn_is_on(server, monkeypatch):
+    """A phone back from the lock screen reconnects while the agent still
+    works: the welcome says so, and the replay's end is not the turn's."""
+    server._busy = True
+    ws = await _owner_socket(server, monkeypatch)
+    assert ws.of_type("welcome")[0]["busy"] is True
+    await disconnect(ws)
+    server._busy = False
+    ws = await _owner_socket(server, monkeypatch)
+    assert ws.of_type("welcome")[0]["busy"] is False
+    await disconnect(ws)
+
+
+async def test_replay_marks_the_steps_of_a_turn(server, monkeypatch):
+    """The model's tool-calling steps (no words, or a line of narration) are
+    activity, not replies: the replay says so, so a client catching up after
+    a lost socket never shows them as empty or extra answers."""
+    sess = server.agent.session
+    sess.add_message("user", "what's new on index.hr")
+    call = [{"id": "c1", "type": "function", "function": {"name": "web_fetch", "arguments": "{}"}}]
+    sess.add_message("assistant", "", tool_calls=call)
+    sess.add_message("tool", "<html>", tool_call_id="c1", tool_name="web_fetch")
+    sess.add_message("assistant", "Checking bug.hr too.", tool_calls=call)
+    sess.add_message("assistant", "Here is what's new.")
+    ws = await _owner_socket(server, monkeypatch)
+    batch = ws.of_type("replay_batch")[0]["messages"]
+    replies = [(m["content"], m.get("step", False)) for m in batch
+               if m.get("type") == "chat_message" and m["role"] == "assistant"]
+    assert replies == [("", True), ("Checking bug.hr too.", True), ("Here is what's new.", False)]
     await disconnect(ws)
 
 

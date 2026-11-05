@@ -118,6 +118,42 @@ def test_a_stale_port_goes_straight_to_the_agent(deck):
     assert _run(scenario) == ["fd_agent_endpoint", "welcome"]
 
 
+def test_a_ping_is_answered_by_flight_deck_never_the_agent(deck):
+    """A chat back from the lock screen checks its socket with fd_ping:
+    Flight Deck answers, whether the agent is up or not answering yet, and
+    the agent never sees it (it would only echo it, or refuse it)."""
+    dead, live = _free_port(), _free_port()
+    deck["helper"] = {"name": "helper", "web_port": dead, "web_auth": "secret"}
+
+    async def scenario(fd_port):
+        got = []
+        url = f"ws://127.0.0.1:{fd_port}/fd/agent-ws/localhost/{dead}?agent=proc-helper"
+        async with websockets.connect(url) as c:
+            got.append((await _recv(c))["type"])          # fd_agent_waiting
+            await c.send(json.dumps({"type": "fd_ping"}))
+            got.append(await _recv(c))                    # while it is away
+        url = f"ws://127.0.0.1:{fd_port}/fd/agent-ws/localhost/{live}?agent=proc-helper"
+        deck["helper"]["web_port"] = live
+        agent = await websockets.serve(_fake_agent, "127.0.0.1", live)
+        try:
+            async with websockets.connect(url) as c:
+                got.append((await _recv(c))["type"])      # welcome
+                await c.send(json.dumps({"type": "fd_ping"}))
+                await c.send(json.dumps({"type": "chat", "content": "hi"}))
+                got.append(await _recv(c))
+                got.append(await _recv(c))
+        finally:
+            agent.close()
+            await agent.wait_closed()
+        return got
+
+    got = _run(scenario)
+    assert got[:3] == ["fd_agent_waiting", {"type": "fd_pong"}, "welcome"]
+    # The pong first, then the agent's echo of the chat frame — and no echo
+    # of the ping: it never reached the agent.
+    assert got[3:] == [{"type": "fd_pong"}, {"type": "echo", "got": {"type": "chat", "content": "hi"}}]
+
+
 def test_an_agent_that_stays_away_is_logged_once(deck, caplog):
     dead = _free_port()
     deck["helper"] = {"name": "helper", "web_port": dead, "web_auth": "secret"}

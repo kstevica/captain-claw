@@ -780,6 +780,20 @@ function noteTurnStart(key: string, id: string) {
   }
 }
 
+/** The welcome says a turn is on (the socket came back mid-turn: a phone
+ *  unlocked while the agent worked): the lane is busy until that turn's
+ *  "ready", and nothing is sent into it meanwhile. An agent that doesn't say
+ *  leaves things as they were. */
+function turnOnAtWelcome(key: string, data: Record<string, unknown>) {
+  if (data.busy !== true) return
+  noteTurnStart(key, '')
+  const s = useChatStore.getState().sessions.get(key)
+  updateSession(key, {
+    busy: true, statusText: 'Working…',
+    ...(s && !s.busy ? { _busyStartedAt: Date.now() } : {}),
+  })
+}
+
 /** The agent said the lane is free ("ready"): the turn is over. */
 function noteTurnEnd(key: string) {
   _turns.delete(key)
@@ -928,6 +942,39 @@ function flushHeld(key: string): boolean {
   return true
 }
 
+// ── Back from the background ──
+//
+// A phone locked, the app switched away, a laptop asleep: the page stops,
+// and its sockets may die without the page hearing of it. What the agent
+// sent meanwhile — a turn's reply — never arrived. So when the page comes
+// back, every chat checks its socket (AgentChatWS.probe): a dead one is
+// replaced, the agent replays the session, and what the chat is missing is
+// folded in (mergeReplay) — the reply lands as if it had come live.
+const RESUME_AFTER_HIDDEN_MS = 3000
+let _hiddenSince = 0
+
+function probeChats() {
+  for (const s of useChatStore.getState().sessions.values()) {
+    if (!s.closed) void s.ws.probe()
+  }
+}
+
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') {
+      _hiddenSince = Date.now()
+      return
+    }
+    const away = _hiddenSince ? Date.now() - _hiddenSince : 0
+    _hiddenSince = 0
+    if (away >= RESUME_AFTER_HIDDEN_MS) probeChats()
+  })
+  // Back from the back/forward cache, the network back, a frozen page thawed.
+  window.addEventListener('pageshow', (e) => { if (e.persisted) probeChats() })
+  window.addEventListener('online', probeChats)
+  document.addEventListener('resume', probeChats)
+}
+
 // A task the agent keeps refusing as busy (another surface keeps it busy, or
 // something answers our frames oddly) is not sent again and again: every try
 // counts against today's allowance. The third refusal in a minute holds it.
@@ -968,6 +1015,83 @@ function takeRefusalReady(key: string): boolean {
   owed.n -= 1
   if (owed.n <= 0) _refusalReadies.delete(key)
   return true
+}
+
+/** A reply of the lane's agent ended its turn (live, or found in the replay
+ *  after the page lost its socket): the lane is free, the dispatched task
+ *  is credited, and on Auto the queue decides what the reply means. */
+function settleReply(key: string, cleanContent: string) {
+  // Whose reply this is, read before anything moves on. Not the queued
+  // task's when the agent refused its frame, or when the turn began
+  // before the task went out (the turn you stopped ends with "Request
+  // cancelled by user."; a message you sent earlier gets its answer).
+  const own = turnItemId(key)
+  const onScreen = useChatStore.getState().activeChatId === key
+  updateSession(key, {
+    busy: false, statusText: '', ...(onScreen ? {} : { unread: true }),
+  })
+  // The dispatched item got a reply ("Your turn" in step-by-step). A
+  // reply also means an errored turn went through after all.
+  if (own) {
+    creditDispatchedItem(key, (prev) => ({
+      repliedAt: Date.now(),
+      ...(prev.halted?.kind === 'error' ? { halted: undefined } : {}),
+    }))
+  }
+  // Queue auto-mode: decide what this reply means for the dispatched
+  // queue item.
+  //
+  //   (a) Stall (intent without action / sanitized-to-empty): send a
+  //       "Continue." nudge so the agent advances. Capped at
+  //       MAX_STALL_NUDGES — after that, accept the result.
+  //   (b) Clarifying question: do nothing. The user answers in chat,
+  //       and the agent's next reply gets re-evaluated.
+  //   (c) Real completion: arm the auto-complete watcher (which fires
+  //       on the next_steps event or a fallback timer) so we don't
+  //       race the agent's post-turn work.
+  const cur = useChatStore.getState().sessions.get(key)
+  // A task the user stopped holds: its trailing reply isn't judged.
+  const stopped = cur?.queue.find((q) => q.id === cur.queueDispatchedId)?.halted?.kind === 'stopped'
+  if (cur && cur.queueAutoMode && own && cur.queueDispatchedId === own && !stopped) {
+    const dispatchedId = cur.queueDispatchedId
+    if (isStuckReply(cleanContent)) {
+      // The agent gave up. This item is NOT done — re-run it rather
+      // than completing it and marching past unfinished work.
+      cancelAutoCompleteWatch(key)
+      cancelQuestionWatch(key)
+      retryStuckItem(key, dispatchedId, cleanContent)
+    } else if (isLikelyStall(cleanContent)) {
+      const entry = _stallNudges.get(key)
+      const used = entry && entry.itemId === dispatchedId ? entry.count : 0
+      if (used < MAX_STALL_NUDGES) {
+        _stallNudges.set(key, { itemId: dispatchedId, count: used + 1 })
+        // Small delay so the nudge lands after any trailing events
+        // (next_steps, status) from the same turn.
+        setTimeout(() => {
+          const s = useChatStore.getState().sessions.get(key)
+          // Bail if user already moved on (toggled auto off, removed
+          // the item, or marked it done manually).
+          if (!s || !s.queueAutoMode) return
+          if (s.queueDispatchedId !== dispatchedId) return
+          if (s.busy) return
+          // Stopped or errored meanwhile: the queue holds, no nudge.
+          if (s.queue.find((q) => q.id === dispatchedId)?.halted) return
+          useChatStore.getState().sendMessage(key, 'Continue the task.', { fromQueue: true })
+        }, 800)
+      } else {
+        // Out of nudges — treat as completion so the queue moves on.
+        armAutoCompleteWatch(key, dispatchedId)
+      }
+    } else if (isLikelyTaskComplete(cleanContent)) {
+      resetStallNudges(key)
+      cancelQuestionWatch(key)
+      armAutoCompleteWatch(key, dispatchedId)
+    } else {
+      // A question. Hold for the user — but bounded and visible, never
+      // the silent forever-park this used to be.
+      armQuestionWatch(key, dispatchedId)
+    }
+  }
 }
 
 /** What an error frame means for the lane: which frame it refused (or whose
@@ -2020,19 +2144,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // off the first dispatch now that the socket is live — and the same
       // for a task the user asked to start while the agent was away.
       // (A start the user asked for while paused is a Run now: it still runs.)
-      const cur = useChatStore.getState().sessions.get(key)
-      if (cur && !cur.queueDispatchedId && (cur.queueAutoMode || cur.queueStartWhenFree)) {
-        tryDispatchNext(key, { force: cur.queueStartWhenFree })
-      }
-      // A task the allowance refused (held across a reload, or the reset came
-      // while the socket was down): an Auto lane runs it again once the
-      // allowance reads as back. Unknown yet: the quota subscriber does it.
-      if (cur?.queueDispatchedId && cur.queueAutoMode && !cur.queuePaused && useQuotaStore.getState().status) {
-        retryQuotaHold(key)
-      }
-      // Only the send just above can be a copy of a run still going from
-      // before the page loaded; a later start is a start.
-      _resumed.delete(key)
+      // Once the welcome is read (it comes in the same frame, right after
+      // this): it may say a turn is on, and then the task waits for it.
+      queueMicrotask(() => {
+        const cur = useChatStore.getState().sessions.get(key)
+        if (cur?.connected && !cur.queueDispatchedId && (cur.queueAutoMode || cur.queueStartWhenFree)) {
+          tryDispatchNext(key, { force: cur.queueStartWhenFree })
+        }
+        // A task the allowance refused (held across a reload, or the reset
+        // came while the socket was down): an Auto lane runs it again once
+        // the allowance reads as back. Unknown yet: the quota subscriber does.
+        if (cur?.connected && cur.queueDispatchedId && cur.queueAutoMode && !cur.queuePaused
+            && useQuotaStore.getState().status) {
+          retryQuotaHold(key)
+        }
+        // Only the send just above can be a copy of a run still going from
+        // before the page loaded; a later start is a start.
+        _resumed.delete(key)
+      })
     })
 
     ws.on('_disconnected', () => {
@@ -2144,6 +2273,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         if (name) patch.statusText = `Session: ${name}`
         updateSession(key, patch)
+        turnOnAtWelcome(key, data)
         reconcileTopic(key)
         return
       }
@@ -2153,6 +2283,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const patch: Partial<ChatSession> = { models, personalities, agentSessionId, reasoning }
       if (name) patch.statusText = `Session: ${name}`
       updateSession(key, patch)
+      turnOnAtWelcome(key, data)
       reconcileTopic(key)
 
       // Send peer agent awareness to the connected agent
@@ -2231,91 +2362,24 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // A result the automation lane mirrored here is a note: it ends no turn
       // of this lane and is no queued item's reply.
       if (data.automation_lane) return
-      if (data.role === 'assistant' && !data.replay) {
-        // Whose reply this is, read before anything moves on. Not the queued
-        // task's when the agent refused its frame, or when the turn began
-        // before the task went out (the turn you stopped ends with "Request
-        // cancelled by user."; a message you sent earlier gets its answer).
-        const own = turnItemId(key)
-        const onScreen = useChatStore.getState().activeChatId === key
-        updateSession(key, {
-          busy: false, statusText: '', ...(onScreen ? {} : { unread: true }),
-        })
-        // The dispatched item got a reply ("Your turn" in step-by-step). A
-        // reply also means an errored turn went through after all.
-        if (own) {
-          creditDispatchedItem(key, (prev) => ({
-            repliedAt: Date.now(),
-            ...(prev.halted?.kind === 'error' ? { halted: undefined } : {}),
-          }))
-        }
-        // Queue auto-mode: decide what this reply means for the dispatched
-        // queue item.
-        //
-        //   (a) Stall (intent without action / sanitized-to-empty): send a
-        //       "Continue." nudge so the agent advances. Capped at
-        //       MAX_STALL_NUDGES — after that, accept the result.
-        //   (b) Clarifying question: do nothing. The user answers in chat,
-        //       and the agent's next reply gets re-evaluated.
-        //   (c) Real completion: arm the auto-complete watcher (which fires
-        //       on the next_steps event or a fallback timer) so we don't
-        //       race the agent's post-turn work.
-        const cur = useChatStore.getState().sessions.get(key)
-        // A task the user stopped holds: its trailing reply isn't judged.
-        const stopped = cur?.queue.find((q) => q.id === cur.queueDispatchedId)?.halted?.kind === 'stopped'
-        if (cur && cur.queueAutoMode && own && cur.queueDispatchedId === own && !stopped) {
-          const dispatchedId = cur.queueDispatchedId
-          if (isStuckReply(cleanContent)) {
-            // The agent gave up. This item is NOT done — re-run it rather
-            // than completing it and marching past unfinished work.
-            cancelAutoCompleteWatch(key)
-            cancelQuestionWatch(key)
-            retryStuckItem(key, dispatchedId, cleanContent)
-          } else if (isLikelyStall(cleanContent)) {
-            const entry = _stallNudges.get(key)
-            const used = entry && entry.itemId === dispatchedId ? entry.count : 0
-            if (used < MAX_STALL_NUDGES) {
-              _stallNudges.set(key, { itemId: dispatchedId, count: used + 1 })
-              // Small delay so the nudge lands after any trailing events
-              // (next_steps, status) from the same turn.
-              setTimeout(() => {
-                const s = useChatStore.getState().sessions.get(key)
-                // Bail if user already moved on (toggled auto off, removed
-                // the item, or marked it done manually).
-                if (!s || !s.queueAutoMode) return
-                if (s.queueDispatchedId !== dispatchedId) return
-                if (s.busy) return
-                // Stopped or errored meanwhile: the queue holds, no nudge.
-                if (s.queue.find((q) => q.id === dispatchedId)?.halted) return
-                useChatStore.getState().sendMessage(key, 'Continue the task.', { fromQueue: true })
-              }, 800)
-            } else {
-              // Out of nudges — treat as completion so the queue moves on.
-              armAutoCompleteWatch(key, dispatchedId)
-            }
-          } else if (isLikelyTaskComplete(cleanContent)) {
-            resetStallNudges(key)
-            cancelQuestionWatch(key)
-            armAutoCompleteWatch(key, dispatchedId)
-          } else {
-            // A question. Hold for the user — but bounded and visible, never
-            // the silent forever-park this used to be.
-            armQuestionWatch(key, dispatchedId)
-          }
-        }
-      }
+      if (data.role === 'assistant' && !data.replay) settleReply(key, cleanContent)
     })
 
     ws.on('replay_batch', (data) => {
       const messages = (data.messages as Array<Record<string, unknown>>) || []
       if (messages.length === 0) return
-      const replayed = messages.map(replayToMessage)
+      const replayed = messages.map(replayToMessage).filter((m): m is ChatMessage => m !== null)
       // With the lane's log loaded, the log is the transcript: fold in only
       // what it is missing (a reply that finished while no tab was open, a
       // turn from another channel) instead of showing the session twice.
       const cur = useChatStore.getState().sessions.get(key)
       if (cur?.historyLoaded) {
-        mergeReplay(key, replayed)
+        const added = mergeReplay(key, replayed)
+        // A reply that came while this socket was gone (a phone locked, the
+        // app in the background) and no turn on now: it ended that turn, as
+        // if it had come live — the lane is free, the queue goes on.
+        const reply = [...added].reverse().find((m) => m.role === 'assistant' && !m.automation)
+        if (reply && !_turns.has(key)) settleReply(key, reply.content)
         return
       }
       replaySid = cur?.agentSessionId ?? ''
@@ -2332,6 +2396,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     })
 
     ws.on('replay_done', () => {
+      // The replay is over, not a turn: one the welcome said is on (a phone
+      // back mid-turn), or a frame of ours still unanswered, keeps the lane
+      // busy until its own end.
+      if (_turns.has(key) || (_sent.get(key)?.length ?? 0) > 0) return
       updateSession(key, { busy: false, statusText: '' })
     })
 
@@ -3820,10 +3888,25 @@ function clearMessages(containerId: string) {
 
 /** A replayed session message (user/assistant turn or a monitor card) as a
  *  transcript message flagged `replay`. */
-function replayToMessage(d: Record<string, unknown>): ChatMessage {
+/** A replayed row as the chat shows it, or null to leave it out: a draft
+ *  the agent threw away (`rejected`), an answer with no words. A step of a
+ *  turn (`step`: the model calling tools) was activity live — its words, if
+ *  any, come back as narration, never as a reply. */
+function replayToMessage(d: Record<string, unknown>): ChatMessage | null {
   const type = d.type as string
   const role = d.role as string || ''
   const rawContent = (d.content as string) || ''
+  if (type !== 'monitor' && role === 'assistant') {
+    if (d.origin === 'rejected') return null
+    const words = sanitizeAgentContent(rawContent).trim()
+    if (!words) return null
+    if (d.step) {
+      return {
+        id: nextId(), role: 'system', content: words, narration: true, replay: true,
+        timestamp: (d.timestamp as string) || new Date().toISOString(),
+      }
+    }
+  }
   if (type === 'monitor') {
     return {
       id: nextId(),
@@ -4039,8 +4122,10 @@ function replayTurnsToAdd(key: string, replayed: ChatMessage[], sid?: string): C
 
 /** Fold the agent's replay of its current session into the loaded log: the
  *  turns it is missing are appended as persisted rows, so the log heals. */
-function mergeReplay(key: string, replayed: ChatMessage[], sid?: string) {
-  for (const m of replayTurnsToAdd(key, replayed, sid)) addMessage(key, { ...m, replay: false })
+function mergeReplay(key: string, replayed: ChatMessage[], sid?: string): ChatMessage[] {
+  const added = replayTurnsToAdd(key, replayed, sid)
+  for (const m of added) addMessage(key, { ...m, replay: false })
+  return added
 }
 
 export interface TopicInfo {

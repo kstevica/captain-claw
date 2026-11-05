@@ -121,6 +121,10 @@ export function splitImageRefs(content: string): { text: string; imagePaths: str
   return imagePaths.length ? { text: kept.join('\n').trim(), imagePaths } : { text: content, imagePaths }
 }
 
+/** How long a socket has to answer `fd_ping` before it counts as dead. A
+ *  phone's radio can take a moment to come back after the lock screen. */
+const PROBE_TIMEOUT_MS = 5000
+
 export class AgentChatWS {
   private ws: WebSocket | null = null
   private handlers = new Map<string, Set<EventHandler>>()
@@ -158,6 +162,8 @@ export class AgentChatWS {
   // (connect) wakes it at once; one that only reconnected leaves it asleep.
   private _wakeOnAsleep = false
   private _asleep = false
+  // A liveness check in flight (probe), shared by callers meanwhile.
+  private _probe: Promise<boolean> | null = null
 
   constructor(agentId: string, host: string, port: number, auth: string, lane: string = '', opts?: { sharedRef?: string }) {
     this.agentId = agentId
@@ -348,6 +354,69 @@ export class AgentChatWS {
         // ignore non-JSON messages
       }
     }
+  }
+
+  /** Is this socket still alive? A page back from the background (a phone
+   *  unlocked, the app switched back to) can hold a socket that died
+   *  meanwhile and still reads as open: what the agent sent then never
+   *  arrived, and nothing would say so. Flight Deck answers `fd_ping` itself
+   *  (the agent never sees it); with no answer in `timeoutMs` the socket is
+   *  replaced at once — the agent replays its session on connect, so the
+   *  chat catches up. A socket already closed and waiting out its backoff
+   *  reconnects now. True when the socket answered. */
+  probe(timeoutMs = PROBE_TIMEOUT_MS): Promise<boolean> {
+    // Disconnected on purpose, or closed for good (shared): nothing to check.
+    if (!this._shouldReconnect) return Promise.resolve(false)
+    const ws = this.ws
+    if (!ws) {
+      this._reconnectNow()
+      return Promise.resolve(false)
+    }
+    // Still opening: it gets its welcome, or closes and reconnects.
+    if (ws.readyState !== WebSocket.OPEN) return Promise.resolve(false)
+    if (this._probe) return this._probe
+    this._probe = new Promise<boolean>((resolve) => {
+      const finish = (alive: boolean) => {
+        clearTimeout(timer)
+        off()
+        this._probe = null
+        resolve(alive)
+      }
+      const off = this.on('fd_pong', () => finish(true))
+      const timer = setTimeout(() => {
+        // The same socket, and silent: it is dead. (One replaced meanwhile
+        // is someone else's business.)
+        if (this.ws === ws) this._replaceDeadSocket(ws)
+        finish(false)
+      }, timeoutMs)
+      try { ws.send(JSON.stringify({ type: 'fd_ping' })) } catch { /* the timer replaces it */ }
+    })
+    return this._probe
+  }
+
+  /** A closed socket waiting out its backoff: open the next one now. */
+  private _reconnectNow() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer)
+      this._reconnectTimer = null
+    }
+    this._reconnectAttempt = 0
+    this._wakeOnAsleep = false
+    this._openSocket()
+  }
+
+  /** A socket that reads as open but no longer carries anything: dropped as
+   *  if it had closed (the chat forgets what it was waiting on), and a fresh
+   *  one opened right away. */
+  private _replaceDeadSocket(ws: WebSocket) {
+    try { ws.onclose = null; ws.onmessage = null; ws.onerror = null } catch { /* ignore */ }
+    try { ws.close() } catch { /* ignore */ }
+    this.ws = null
+    const wasConnected = this._connected
+    this._connected = false
+    this._asleep = false
+    this.emit('_disconnected', { wasConnected })
+    this._reconnectNow()
   }
 
   private _scheduleReconnect() {

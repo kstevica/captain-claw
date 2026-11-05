@@ -120,6 +120,8 @@ async def speaker_ws_session(
             "personalities": [],
             "playbooks": playbook_list,
             "is_public": False,
+            # A turn of this member's is on (they reconnected mid-turn).
+            "busy": bool(getattr(agent, "_lane_busy", False)),
             "public_code": "",
             "session_settings": {
                 "session_name": sess_meta.get("session_display_name", ""),

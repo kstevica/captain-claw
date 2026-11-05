@@ -147,6 +147,7 @@ Sent immediately after WebSocket connection is established.
     "id": "abc123",
     "name": "My Session"
   },
+  "busy": false,
   "models": [
     {
       "id": "default",
@@ -187,6 +188,10 @@ Sent immediately after WebSocket connection is established.
 - `commands` — slash commands available. Used for autocompletion when user types `/`.
 - `personalities` — user profiles. Show in a persona selector.
 - `playbooks` — behavioral playbooks. Show in a playbook override selector.
+- `busy` — a turn is running on this socket's lane right now. A client that
+  reconnects mid-turn (a phone back from the lock screen) keeps its "working"
+  state until that turn's `status: ready`, rather than reading `replay_done`
+  as the turn's end. Absent on older agents.
 - In **public mode**, `commands` and `playbooks` are empty arrays.
 
 ### 3.3 Session Replay (Server → Client)
@@ -194,7 +199,11 @@ Sent immediately after WebSocket connection is established.
 After the welcome message, the server replays all messages from the active session. Each replayed message has `"replay": true`.
 
 **Replayed message types:**
-- `chat_message` with `role: "user"` or `role: "assistant"` — historical chat messages
+- `chat_message` with `role: "user"` or `role: "assistant"` — historical chat messages.
+  An assistant message with `"step": true` is a step of a turn (the model
+  calling tools — often with no words, or a line of narration): live it was
+  activity, not a reply, so don't show it as an answer. `origin: "rejected"`
+  marks a draft the agent threw away.
 - `chat_message` with `role: "rephrase"` — task rephrasing from the `task_rephrase` tool
 - `monitor` — historical tool executions (tool name, arguments, output)
 
@@ -204,6 +213,14 @@ After the welcome message, the server replays all messages from the active sessi
 ```
 
 **Implementation tip:** During replay, batch DOM updates. After `replay_done`, scroll to bottom and mark UI as ready for interaction.
+
+**Catching up after a lost connection.** The agent replays on every connect,
+so a client that missed frames (its socket died while the page was in the
+background) catches up by reconnecting and folding in what its transcript
+lacks. A socket can die without the page hearing of it: Flight Deck's proxy
+answers `{"type": "fd_ping"}` with `{"type": "fd_pong"}` itself (the agent
+never sees it), so a page coming back to the foreground can check its socket
+and reconnect when no pong comes.
 
 ### 3.4 Client → Server Messages
 

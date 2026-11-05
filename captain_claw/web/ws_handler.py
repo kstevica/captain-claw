@@ -97,6 +97,10 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         for p in _pb_entries
     ]
 
+    # Whether a turn is on for this socket's agent right now: a client that
+    # (re)connects mid-turn — a phone back from the lock screen — keeps the
+    # lane busy instead of reading the replay's end as the turn's.
+    _turn_on = False
     # For public users, build session info from their specific session.
     if public_session_id:
         pub_session = await _sm.load_session(public_session_id)
@@ -111,6 +115,8 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         # model and entire history.
         _welcome_agent = await server.resolve_agent(ws)
         session_info = server._session_info(_welcome_agent)
+        if _welcome_agent is not None:
+            _turn_on = turn_in_flight(server, ws, _welcome_agent)
         _sess_meta = {}
         if _welcome_agent and _welcome_agent.session:
             _sess_meta = _welcome_agent.session.metadata or {}
@@ -123,6 +129,7 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         "personalities": personalities,
         "playbooks": _playbook_list,
         "is_public": bool(public_session_id),
+        "busy": _turn_on,
         "public_code": _sess_meta.get("public_code", ""),
         "session_settings": {
             "session_name": _sess_meta.get("session_display_name", ""),
@@ -262,6 +269,12 @@ def _build_replay_batch(session) -> list[dict]:
                 "timestamp": timestamp,
                 "model": model,
             }
+            if role == "assistant" and msg.get("tool_calls"):
+                # A step of a turn (the model calling tools, often with no
+                # words, or a line of narration) — live it was activity, not
+                # the reply: a client merging the replay into a transcript it
+                # already has must not show it as one.
+                payload["step"] = True
             if isinstance(msg.get("task"), dict):
                 # A scheduled task's result mirrored here: the client shows
                 # (and matches) the result itself, with the task's label —
