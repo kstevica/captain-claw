@@ -55,10 +55,25 @@ export interface ImapSuggestion {
   microsoft: boolean
 }
 
+// The other standard port, tried when the typed one didn't answer.
+export interface ImapAlternative {
+  port: number
+  security: ImapSecurity
+  ok: boolean
+  error?: string
+}
+
+export interface ImapServerCheck {
+  ok: boolean
+  error?: string
+  unreachable?: boolean
+  alternative?: ImapAlternative
+}
+
 export interface ImapTestResult {
   ok: boolean
-  imap: { ok: boolean; error?: string; folders?: number; roles?: string[] }
-  smtp: { ok: boolean; error?: string; skipped?: boolean }
+  imap: ImapServerCheck & { folders?: number; roles?: string[] }
+  smtp: ImapServerCheck & { skipped?: boolean }
 }
 
 export interface ImapSend {
@@ -111,8 +126,9 @@ interface ImapMailStore {
   refresh: () => Promise<void>
   suggest: (email: string) => Promise<ImapSuggestion | null>
   test: (body: ImapAccountPatch) => Promise<{ result?: ImapTestResult; error?: string }>
-  add: (body: ImapAccountPatch) => Promise<{ account?: ImapAccount; error?: string }>
-  update: (id: string, patch: ImapAccountPatch) => Promise<{ account?: ImapAccount; error?: string }>
+  // adjusted: a port Flight Deck switched because the typed one didn't answer.
+  add: (body: ImapAccountPatch) => Promise<{ account?: ImapAccount; error?: string; adjusted?: string[] }>
+  update: (id: string, patch: ImapAccountPatch) => Promise<{ account?: ImapAccount; error?: string; adjusted?: string[] }>
   remove: (id: string) => Promise<string | null>
   fetchSends: (accountId: string, limit?: number) => Promise<void>
 }
@@ -193,7 +209,7 @@ export const useImapMailStore = create<ImapMailStore>((set, get) => ({
       const data = await r.json()
       const account = data?.account as ImapAccount
       set({ accounts: [...(get().accounts || []), account] })
-      return { account }
+      return { account, adjusted: Array.isArray(data?.adjusted) ? data.adjusted : [] }
     } catch (exc) {
       return { error: exc instanceof Error ? exc.message : String(exc) }
     }
@@ -206,7 +222,7 @@ export const useImapMailStore = create<ImapMailStore>((set, get) => ({
       const data = await r.json()
       const account = data?.account as ImapAccount
       set({ accounts: (get().accounts || []).map((a) => (a.id === id ? account : a)) })
-      return { account }
+      return { account, adjusted: Array.isArray(data?.adjusted) ? data.adjusted : [] }
     } catch (exc) {
       return { error: exc instanceof Error ? exc.message : String(exc) }
     }

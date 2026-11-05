@@ -238,7 +238,7 @@ def account_from_settings(data: dict[str, Any], *, account_id: str, password: st
 # providers that put SMTP sends into Sent themselves.
 _PRESETS: list[dict[str, Any]] = [
     {"name": "Gmail", "domains": ["gmail.com", "googlemail.com"],
-     "imap_host": "imap.gmail.com", "smtp_host": "smtp.gmail.com", "save_sent": False,
+     "imap_host": "imap.gmail.com", "smtp_host": "smtp.gmail.com", "smtp_port": 587, "smtp_security": "starttls", "save_sent": False,
      "hint": "Gmail needs an app password (Google Account → Security → 2-Step Verification "
              "→ App passwords). The Google tab connects Gmail without a password."},
     {"name": "iCloud Mail", "domains": ["icloud.com", "me.com", "mac.com"],
@@ -248,16 +248,16 @@ _PRESETS: list[dict[str, Any]] = [
              "Security). The username is the part before @icloud.com."},
     {"name": "Yahoo Mail", "domains": ["yahoo.com", "ymail.com", "rocketmail.com", "yahoo.co.uk",
                                        "yahoo.de", "yahoo.fr", "yahoo.it", "yahoo.es"],
-     "imap_host": "imap.mail.yahoo.com", "smtp_host": "smtp.mail.yahoo.com", "save_sent": False,
+     "imap_host": "imap.mail.yahoo.com", "smtp_host": "smtp.mail.yahoo.com", "smtp_port": 587, "smtp_security": "starttls", "save_sent": False,
      "hint": "Yahoo needs an app password (Account security → Generate app password)."},
     {"name": "AOL Mail", "domains": ["aol.com"],
-     "imap_host": "imap.aol.com", "smtp_host": "smtp.aol.com", "save_sent": False,
+     "imap_host": "imap.aol.com", "smtp_host": "smtp.aol.com", "smtp_port": 587, "smtp_security": "starttls", "save_sent": False,
      "hint": "AOL needs an app password (Account security → Generate app password)."},
     {"name": "Fastmail", "domains": ["fastmail.com", "fastmail.fm", "messagingengine.com"],
-     "imap_host": "imap.fastmail.com", "smtp_host": "smtp.fastmail.com",
+     "imap_host": "imap.fastmail.com", "smtp_host": "smtp.fastmail.com", "smtp_port": 587, "smtp_security": "starttls",
      "hint": "Fastmail needs an app password (Settings → Privacy & Security → App passwords)."},
     {"name": "Zoho Mail", "domains": ["zoho.com", "zohomail.com", "zoho.eu"],
-     "imap_host": "imap.zoho.com", "smtp_host": "smtp.zoho.com",
+     "imap_host": "imap.zoho.com", "smtp_host": "smtp.zoho.com", "smtp_port": 587, "smtp_security": "starttls",
      "hint": "Turn IMAP on in Zoho Mail settings; with two-factor sign-in use an app password. "
              "Zoho EU accounts use imap.zoho.eu / smtp.zoho.eu."},
     {"name": "GMX", "domains": ["gmx.com", "gmx.net", "gmx.de", "gmx.at", "gmx.ch"],
@@ -403,6 +403,58 @@ def _check_target(host: str, port: int) -> None:
             continue
         if any(ip in net for net in _BLOCKED_NETS):
             raise MailError(f"{host} resolves to {ip}, which is not a mail server address.", 400)
+
+
+# How long a setup test waits for a TCP connection before calling a port
+# unreachable (every address of the host at once). The real connection after it
+# keeps the longer TIMEOUT.
+PROBE_TIMEOUT = 8.0
+
+
+def reachable(host: str, port: int, timeout: float = PROBE_TIMEOUT) -> bool:
+    """Whether any address of *host*:*port* takes a TCP connection within
+    *timeout* — all addresses tried at once, so a host whose IPv6 (or one
+    address) is black-holed doesn't cost a timeout per address."""
+    import selectors
+
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return False
+    sel = selectors.DefaultSelector()
+    socks: list[socket.socket] = []
+    try:
+        for family, kind, proto, _name, addr in infos:
+            try:
+                sock = socket.socket(family, kind, proto)
+            except OSError:
+                continue
+            sock.setblocking(False)
+            socks.append(sock)
+            err = sock.connect_ex(addr)
+            if err == 0:
+                return True
+            sel.register(sock, selectors.EVENT_WRITE)
+        deadline = time.monotonic() + timeout
+        pending = len(sel.get_map())
+        while pending:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return False
+            for key, _ev in sel.select(left):
+                sock = key.fileobj
+                if sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR) == 0:  # type: ignore[union-attr]
+                    return True
+                sel.unregister(sock)
+                pending -= 1
+        return False
+    finally:
+        sel.close()
+        for sock in socks:
+            try:
+                sock.close()
+            except OSError:
+                pass
 
 
 def _tls(host: str) -> ssl.SSLContext:
@@ -945,8 +997,15 @@ class Session:
             else:
                 raise MailError("This IMAP server can't take a password with non-ASCII characters.", 400)
         except imaplib.IMAP4.error as exc:
+            text = _server_text(exc)
+            if re.search(r"application-specific password|app password", text, re.I):
+                raise MailError(
+                    f"{a.username} needs an app password, not the account's normal password — the "
+                    f"provider said: {text}. Make one in the account's security settings (for Gmail: "
+                    "Google Account → Security → 2-Step Verification → App passwords) and use it "
+                    "here.", 401) from None
             raise MailError(
-                f"The IMAP server refused the login for {a.username}: {_server_text(exc)}. Check "
+                f"The IMAP server refused the login for {a.username}: {text}. Check "
                 "the username and password — many providers need an app password.", 401) from None
         except (OSError, imaplib.IMAP4.abort) as exc:
             raise _net_error(exc, "IMAP server", a.imap_host, a.imap_port) from None
@@ -1716,26 +1775,113 @@ def test_smtp(account: Account) -> None:
     _close(_smtp_connect(account))
 
 
-def test_account(account: Account) -> dict[str, Any]:
-    """Log in to IMAP (and SMTP when set) — nothing is sent or changed."""
-    out: dict[str, Any] = {}
-    try:
+# The other standard way in when the typed one can't be reached: implicit TLS
+# and STARTTLS ports (many hosts block outgoing 465 and 25, few block 587).
+_ALTERNATIVES = {
+    "imap": [(993, "ssl"), (143, "starttls")],
+    "smtp": [(587, "starttls"), (465, "ssl")],
+}
+
+
+def _unreachable(kind: str, host: str, port: int) -> str:
+    what = "IMAP" if kind == "imap" else "SMTP"
+    return (f"{what} server {host}:{port} can't be reached from this Flight Deck (no answer within "
+            f"{PROBE_TIMEOUT:.0f} s). The server or port may be wrong, or this deck's hosting "
+            "provider blocks the port — many block outgoing 465 and 25.")
+
+
+def _login_check(kind: str, account: Account) -> dict[str, Any]:
+    if kind == "imap":
         with Session(account) as s:
             fs = s.folders()
-            out["imap"] = {"ok": True, "folders": len(fs),
-                           "roles": sorted({f.role for f in fs if f.role})}
+            return {"ok": True, "folders": len(fs), "roles": sorted({f.role for f in fs if f.role})}
+    test_smtp(account)
+    return {"ok": True}
+
+
+def _with(account: Account, kind: str, port: int, security: str) -> Account:
+    import dataclasses
+
+    if kind == "imap":
+        return dataclasses.replace(account, imap_port=port, imap_security=security)
+    return dataclasses.replace(account, smtp_port=port, smtp_security=security)
+
+
+def _check_server(kind: str, account: Account) -> dict[str, Any]:
+    """Probe, then log in, to one server. When the typed port can't be
+    reached, the other standard port is tried too: ``alternative`` says how
+    that went (``{"port", "security", "ok", "error"?}``)."""
+    host = account.imap_host if kind == "imap" else account.smtp_host
+    port = account.imap_port if kind == "imap" else account.smtp_port
+    try:
+        _check_target(host, port)
     except MailError as exc:
-        out["imap"] = {"ok": False, "error": exc.message}
-    if account.smtp_host:
-        try:
-            test_smtp(account)
-            out["smtp"] = {"ok": True}
-        except MailError as exc:
-            out["smtp"] = {"ok": False, "error": exc.message}
-    else:
-        out["smtp"] = {"ok": True, "skipped": True}
+        return {"ok": False, "error": exc.message}
+    # The typed port and the other standard ones are probed at the same time,
+    # so a blocked port costs one PROBE_TIMEOUT, not one per port.
+    alts = [] if is_loopback(host) else [
+        (p, sec) for p, sec in _ALTERNATIVES[kind] if p != port]
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=1 + len(alts)) as pool:
+        probes = {p: pool.submit(reachable, host, p) for p in [port] + [a[0] for a in alts]}
+        answers = {p: f.result() for p, f in probes.items()}
+    if not answers[port]:
+        out: dict[str, Any] = {"ok": False, "error": _unreachable(kind, host, port), "unreachable": True}
+        for alt_port, alt_sec in alts:
+            if not answers.get(alt_port):
+                continue
+            alt: dict[str, Any] = {"port": alt_port, "security": alt_sec}
+            try:
+                alt.update(_login_check(kind, _with(account, kind, alt_port, alt_sec)))
+            except MailError as exc:
+                alt.update(ok=False, error=exc.message)
+            out["alternative"] = alt
+            label = "SSL/TLS" if alt_sec == "ssl" else "STARTTLS"
+            out["error"] += (f" Port {alt_port} with {label} does answer"
+                             + (" and works — use that." if alt.get("ok") else "."))
+            break
+        return out
+    try:
+        return _login_check(kind, account)
+    except MailError as exc:
+        return {"ok": False, "error": exc.message}
+
+
+def test_account(account: Account) -> dict[str, Any]:
+    """Log in to IMAP and SMTP (when set) at the same time — nothing is
+    sent or changed. A port that doesn't answer fails within
+    :data:`PROBE_TIMEOUT`, with the other standard port tried for it."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    out: dict[str, Any] = {}
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        imap = pool.submit(_check_server, "imap", account)
+        smtp = pool.submit(_check_server, "smtp", account) if account.smtp_host else None
+        out["imap"] = imap.result()
+        out["smtp"] = smtp.result() if smtp else {"ok": True, "skipped": True}
     out["ok"] = bool(out["imap"]["ok"] and out["smtp"]["ok"])
     return out
+
+
+def apply_alternatives(account: Account, result: dict[str, Any]) -> tuple[Account, list[str]]:
+    """*account* with each server switched to the working ``alternative``
+    the test found for it (the typed port unreachable, the other one logged
+    in), and a line per switch for the person."""
+    notes: list[str] = []
+    for kind in ("imap", "smtp"):
+        r = result.get(kind) or {}
+        alt = r.get("alternative") or {}
+        if r.get("ok") or not alt.get("ok"):
+            continue
+        old_port = account.imap_port if kind == "imap" else account.smtp_port
+        account = _with(account, kind, int(alt["port"]), str(alt["security"]))
+        label = "SSL/TLS" if alt["security"] == "ssl" else "STARTTLS"
+        notes.append(f"{kind.upper()}: port {old_port} doesn't answer from this Flight Deck, so port "
+                     f"{alt['port']} with {label} is used.")
+        result[kind] = {k: v for k, v in alt.items() if k not in ("port", "security")}
+    result["ok"] = bool(result["imap"].get("ok") and result["smtp"].get("ok"))
+    return account, notes
 
 
 def after_send(account: Account, data: bytes, *, answered: Ref | None,
