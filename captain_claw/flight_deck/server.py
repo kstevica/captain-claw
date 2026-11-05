@@ -1756,6 +1756,7 @@ from captain_claw.flight_deck.google_oauth_routes import router as google_oauth_
 from captain_claw.flight_deck.gmail_send_routes import router as gmail_send_router
 from captain_claw.flight_deck.gmail_autoreply_routes import router as gmail_autoreply_router
 from captain_claw.flight_deck.microsoft_oauth_routes import router as microsoft_oauth_router
+from captain_claw.flight_deck.imap_routes import router as imap_router
 from captain_claw.flight_deck.jev_routes import router as jev_router
 from captain_claw.flight_deck.soniox_routes import router as soniox_router
 from captain_claw.flight_deck.telegram_shared_routes import router as telegram_shared_router
@@ -1873,6 +1874,7 @@ app.include_router(google_oauth_router)
 app.include_router(gmail_send_router)
 app.include_router(gmail_autoreply_router)
 app.include_router(microsoft_oauth_router)
+app.include_router(imap_router)
 app.include_router(jev_router)
 app.include_router(soniox_router)
 app.include_router(telegram_shared_router)
@@ -10573,7 +10575,7 @@ OLD_MAN_TOOLS = [
     "scripts", "playbooks", "personality", "datastore", "insights",
     "cron", "summarize_files", "direct_api",
     "google_drive", "google_calendar", "google_mail",
-    "microsoft_onedrive", "microsoft_calendar", "microsoft_mail",
+    "microsoft_onedrive", "microsoft_calendar", "microsoft_mail", "imap_mail",
     "jev",
     "flight_deck",
 ]

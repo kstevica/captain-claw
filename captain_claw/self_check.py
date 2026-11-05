@@ -49,6 +49,7 @@ _STARTED = time.time()
 HIDDEN_BECAUSE = {
     "requires_google": "Google not connected (Flight Deck → Connections → Google)",
     "requires_microsoft": "Microsoft 365 not connected (Flight Deck → Connections → Microsoft)",
+    "requires_imap": "No email inbox connected (Flight Deck → Connections → Email (IMAP))",
     "requires_jev": "no Jev key (Flight Deck → Connections → Jev)",
     "requires_soniox": "no Soniox key (Flight Deck → Connections → Soniox)",
     "requires_payments": "payments are off on this Flight Deck",

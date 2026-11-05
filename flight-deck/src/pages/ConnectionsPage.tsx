@@ -1,7 +1,8 @@
 import { useState, type ComponentType, type ReactNode } from 'react'
-import { Plug, Mail, LayoutGrid, Sparkles, MessageCircle, Database, Scale, Send, Mic, Cable, Smartphone, Bell, Globe } from 'lucide-react'
+import { Plug, Mail, LayoutGrid, Sparkles, MessageCircle, Database, Scale, Send, Mic, Cable, Smartphone, Bell, Globe, AtSign } from 'lucide-react'
 import GoogleConnection from '../components/connections/GoogleConnection'
 import MicrosoftConnection from '../components/connections/MicrosoftConnection'
+import ImapConnection from '../components/connections/ImapConnection'
 import CodexConnection from '../components/connections/CodexConnection'
 import AntigravityConnection from '../components/connections/AntigravityConnection'
 import MCPConnection from '../components/connections/MCPConnection'
@@ -18,12 +19,13 @@ import WhatsAppWebConnection from '../components/connections/WhatsAppWebConnecti
 import type { MyTelegram } from '../services/sharedIntegrations'
 import { useGoogleAuthStore } from '../stores/googleAuthStore'
 import { useMicrosoftAuthStore } from '../stores/microsoftAuthStore'
+import { useImapMailStore } from '../stores/imapMailStore'
 import { useCodexAuthStore } from '../stores/codexAuthStore'
 import { useMCPStore } from '../stores/mcpStore'
 import { useJevStore } from '../stores/jevStore'
 import { useSonioxStore } from '../stores/sonioxStore'
 
-export type TabId = 'google' | 'microsoft' | 'telegram' | 'whatsapp_web' | 'codex' | 'antigravity' | 'mcp' | 'systems' | 'browser' | 'jev' | 'soniox' | 'notify' | 'whatsapp' | 'typesense'
+export type TabId = 'google' | 'microsoft' | 'email' | 'telegram' | 'whatsapp_web' | 'codex' | 'antigravity' | 'mcp' | 'systems' | 'browser' | 'jev' | 'soniox' | 'notify' | 'whatsapp' | 'typesense'
 
 interface TabDef {
   id: TabId
@@ -36,6 +38,8 @@ interface TabDef {
 const TABS: TabDef[] = [
   { id: 'google', label: 'Google', icon: Mail },
   { id: 'microsoft', label: 'Microsoft', icon: LayoutGrid },
+  // Any IMAP/SMTP inboxes (several) with a username and password — the person's own.
+  { id: 'email', label: 'Email (IMAP)', icon: AtSign },
   // The deck's shared bot — a person's own link to it, so the kiosk shows it too.
   { id: 'telegram', label: 'Telegram', icon: Send },
   // The person's own WhatsApp, linked as a device — the kiosk shows it too.
@@ -75,6 +79,7 @@ function saveTab(id: TabId): void {
 function useTabDots(telegram: MyTelegram | null, systemsConnected: number, browsers: number): Partial<Record<TabId, 'on' | 'pending'>> {
   const google = useGoogleAuthStore((s) => s.status)
   const microsoft = useMicrosoftAuthStore((s) => s.status)
+  const imapInboxes = useImapMailStore((s) => s.accounts?.length ?? 0)
   const codex = useCodexAuthStore((s) => s.status)
   const mcpServers = useMCPStore((s) => s.servers.length)
   const jev = useJevStore((s) => s.status)
@@ -84,6 +89,7 @@ function useTabDots(telegram: MyTelegram | null, systemsConnected: number, brows
   return {
     google: dot(google),
     microsoft: dot(microsoft),
+    email: imapInboxes > 0 ? 'on' : undefined,
     codex: codex?.connected && !codex.stale ? 'on' : undefined,
     mcp: mcpServers > 0 ? 'on' : undefined,
     systems: systemsConnected > 0 ? 'on' : undefined,
@@ -190,6 +196,7 @@ export default function ConnectionsPage({ kiosk = false, initialTab }: { kiosk?:
 
         {panel('google', <GoogleConnection />)}
         {panel('microsoft', <MicrosoftConnection />)}
+        {panel('email', <ImapConnection />)}
         {panel('telegram', <TelegramConnection onStatus={setTelegram} />)}
         {panel('whatsapp_web', <WhatsAppWebConnection />)}
         {panel('codex', <CodexConnection />)}

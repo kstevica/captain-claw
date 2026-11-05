@@ -132,6 +132,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "microsoft_onedrive": "OneDrive — list, search, read (content inline: PDF/DOCX/XLSX/PPTX extracted), info, download (local copy), upload, create, create_folder, update (same file id); file ID, path or OneDrive/SharePoint share URL — never web_fetch a OneDrive link.",
     "microsoft_calendar": "Outlook Calendar — list_events, search_events, get_event, create_event, update_event, delete_event, respond_event, list_calendars; changes that email attendees need notify_attendees=true (only when the user asked).",
     "microsoft_mail": "Outlook mail — list_messages, search, read_message, get_thread, list_folders, get_attachment; create_draft / update_draft / list_drafts only when the user asked for that email (attachments=[file paths], ≤25 MB); never sends (drafts wait in Outlook); no repeat drafts. archive / move / create_folder / add_categories / remove_categories (thread_ids / message_ids from list_messages or search) only when the user asked to organize those emails — triaging never implies it, suggest instead; moving changes a message's ID — use the new one it prints.",
+    "imap_mail": "Email in the user's IMAP/SMTP inboxes (several; account=<id> or all) — list_accounts, list_messages, search, read_message, get_thread, list_folders, list_drafts, get_attachment; create_draft / update_draft / send / send_draft only when the user asked (send only with sending on for that inbox); no repeats; archive / move / mark_read / mark_unread / create_folder only when asked; a moved email gets a new ID.",
     "jev": "Jev — calibrated judgments about text; use it WHENEVER you'd otherwise judge content yourself (never writes text): one call answers several typed questions about the same state (noul yes/no → p(yes); choice → option + probabilities; score → rubric level). Triage, routing, classification, relevance filtering, claim-vs-source checks, rubric rating, yes/no checks before acting. Literal, specific questions; not for math, counting, dates or writing.",
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
     "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
@@ -213,6 +214,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "microsoft_onedrive": "OneDrive: list, search, read (content inline), info, download, upload, create, create_folder, update",
     "microsoft_calendar": "Outlook Calendar: list/search/get/create/update/delete/respond events; notify_attendees=true only when asked",
     "microsoft_mail": "Outlook mail: list/search/read/thread, folders, attachments; drafts only when asked; never sends; no repeats; archive/move/create_folder/add_categories/remove_categories only when asked to organize (triage = suggest; a moved message gets a new ID)",
+    "imap_mail": "IMAP/SMTP inboxes (several, account=<id>|all): list/search/read/thread, folders, attachments; drafts/sends only when asked (sends only with sending on); no repeats; archive/move/mark_read only when asked",
     "jev": "use WHENEVER you'd judge content yourself: several yes/no (noul), choice or score questions about one state per call; triage/classify/filter/check claims; no math, no writing",
     "datastore": "persistent relational tables",
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
@@ -2418,6 +2420,12 @@ class AgentContextMixin:
             await MicrosoftOAuthManager().is_connected()
         except Exception as _exc:
             log.debug("Microsoft connection priming failed: %s", _exc)
+        # And the IMAP/SMTP inboxes (Flight Deck only; owner-only).
+        try:
+            from captain_claw.imap_mail_manager import ImapMailClient
+            await ImapMailClient().is_connected()
+        except Exception as _exc:
+            log.debug("IMAP connection priming failed: %s", _exc)
         # And Jev: whether the owner has a Jev key in Flight Deck (standalone:
         # whether one is configured).
         try:
@@ -2482,6 +2490,7 @@ class AgentContextMixin:
         "microsoft_onedrive": ["microsoft_onedrive"],
         "microsoft_calendar": ["microsoft_calendar"],
         "microsoft_mail": ["microsoft_mail"],
+        "imap_mail": ["imap_mail"],
         "jev": ["jev"],
         "todo": ["todo"],
         "contacts": ["contacts"],
@@ -2666,6 +2675,9 @@ class AgentContextMixin:
                 self.tools.register(MicrosoftCalendarTool(), metadata={"requires_microsoft": True})
             elif tool_name == "microsoft_mail":
                 self.tools.register(MicrosoftMailTool(), metadata={"requires_microsoft": True})
+            elif tool_name == "imap_mail":
+                from captain_claw.tools.imap_mail import ImapMailTool
+                self.tools.register(ImapMailTool(), metadata={"requires_imap": True})
             elif tool_name == "jev":
                 self.tools.register(JevTool(), metadata={"requires_jev": True})
             elif tool_name == "audio":
@@ -3149,7 +3161,7 @@ class AgentContextMixin:
                 lines.append(_mcp_policy)
             return "\n".join(lines)
 
-    _MAIL_CAL_TOOLS = ("google_mail", "google_calendar", "microsoft_mail", "microsoft_calendar")
+    _MAIL_CAL_TOOLS = ("google_mail", "google_calendar", "microsoft_mail", "microsoft_calendar", "imap_mail")
 
     def _build_connections_block(self) -> str:
         """The "not connected yet" note (mail and calendar registered, neither
@@ -3161,9 +3173,11 @@ class AgentContextMixin:
         try:
             if any(self.tools.has_tool(n) for n in self._MAIL_CAL_TOOLS):
                 from captain_claw.google_oauth_manager import is_google_connected_cached
+                from captain_claw.imap_mail_manager import is_imap_connected_cached
                 from captain_claw.microsoft_oauth_manager import is_microsoft_connected_cached
 
-                if not is_google_connected_cached() and not is_microsoft_connected_cached():
+                if (not is_google_connected_cached() and not is_microsoft_connected_cached()
+                        and not is_imap_connected_cached()):
                     out += "\n\n" + self.instructions.load("section_connections_missing.md")
         except Exception:
             pass
@@ -3583,6 +3597,8 @@ class AgentContextMixin:
         ) + self._build_conditional_section(
             ("microsoft_onedrive", "microsoft_calendar", "microsoft_mail"),
             "section_microsoft.md",
+        ) + self._build_conditional_section(
+            "imap_mail", "section_imap_mail.md",
         )
         # What this agent's tools need that nobody connected yet, and how
         # people bring their own files (cohort001: an inbox agent promised

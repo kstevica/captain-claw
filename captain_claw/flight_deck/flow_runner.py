@@ -312,7 +312,7 @@ _MAIL_WRITE_ACTIONS = frozenset({"create_draft", "update_draft", "send", "send_d
 # in a person's flow is that person asking for it, like a literal write.
 _MAIL_ORGANIZE_ACTIONS = frozenset({
     "archive", "move", "add_labels", "remove_labels", "create_label",
-    "create_folder", "add_categories", "remove_categories",
+    "create_folder", "add_categories", "remove_categories", "mark_read", "mark_unread",
 })
 
 
@@ -397,7 +397,7 @@ def _flow_automation(
             name = str(step.get("tool") or "").strip()
             if name == "send_mail":
                 mode = "allow"
-            elif name in ("google_mail", "microsoft_mail"):
+            elif name in ("google_mail", "microsoft_mail", "imap_mail"):
                 raw_args = step.get("args") if isinstance(step.get("args"), dict) else {}
                 action = raw_args.get("action")
                 if (isinstance(action, str) and "{{" not in action

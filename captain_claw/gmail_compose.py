@@ -141,9 +141,16 @@ def build_message_bytes(
     references: str = "",
     attachments: list[Any] | None = None,
     extra_headers: Mapping[str, str] | None = None,
+    from_addr: str = "",
+    date: str = "",
+    message_id: str = "",
 ) -> bytes:
     """Build an RFC-822 message: the text and HTML bodies, plus
     *attachments* (:class:`mail_attachments.Attachment`) as file parts.
+
+    *from_addr*, *date* and *message_id* become the From, Date and
+    Message-ID headers when given — an IMAP/SMTP send composes them itself
+    (Gmail and Graph fill them in, so their callers leave them empty).
 
     *extra_headers* go on after the standard ones — only the names in
     :data:`EXTRA_HEADER_NAMES` (anything else raises :class:`ValueError`).
@@ -157,6 +164,12 @@ def build_message_bytes(
     """
     extra = _extra_header_items(extra_headers)
     msg = EmailMessage(policy=email.policy.SMTP)
+    if from_addr:
+        msg["From"] = from_addr
+    if date:
+        msg["Date"] = date
+    if message_id:
+        msg["Message-ID"] = message_id
     if to:
         msg["To"] = to
     if cc:

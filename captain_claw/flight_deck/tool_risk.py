@@ -51,7 +51,7 @@ _TOOL_RISK: dict[str, str] = {
     "app_runner": "exec", "code": "exec", "termux": "exec", "pinchtab": "exec", "browser": "exec",
     "vatra": "exec", "basna": "exec", "bat": "exec", "crew": "exec", "captain_swarm": "exec",
     # out
-    "send_mail": "send", "google_mail": "write", "microsoft_mail": "write",
+    "send_mail": "send", "google_mail": "write", "microsoft_mail": "write", "imap_mail": "write",
     "whatsapp_send_file": "send", "whatsapp_web": "send", "linked_system": "send",
     "botport": "send", "consult_peer": "send", "flight_deck": "send", "twitter": "send",
     "hosting": "write", "public_link": "send", "direct_api": "send", "jev": "send",
@@ -75,6 +75,7 @@ _READ_PREFIXES = ("list_", "get_", "search_", "read_")
 _SEND_ACTIONS: dict[str, frozenset[str]] = {
     "google_mail": frozenset({"send", "send_draft", "reply", "forward"}),
     "microsoft_mail": frozenset({"send", "send_draft", "reply", "forward"}),
+    "imap_mail": frozenset({"send", "send_draft"}),
     "hosting": frozenset({"publish"}),
     "google_calendar": frozenset(),  # invites go out with a create, but it is the user's calendar
 }

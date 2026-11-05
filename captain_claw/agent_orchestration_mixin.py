@@ -176,6 +176,7 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     "web_fetch", "web_search",
     "google_mail", "google_drive", "google_calendar",
     "microsoft_mail", "microsoft_onedrive", "microsoft_calendar",
+    "imap_mail",
     "whatsapp_send_file", "intentions",
     # Memory: "remember that…" comes in any language ("zapamti to"). Without
     # the schema the agent told the user it had no memory tool, or claimed
@@ -284,11 +285,11 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
      frozenset({"visualize"})),
     # Email
     (_re.compile(r"\bemail\b|\bmail\b|\bgmail\b|\boutlook\b|\bdraft\b|\bsend\s+(?:a\s+)?message\b", _re.I),
-     frozenset({"send_mail", "google_mail", "microsoft_mail"})),
+     frozenset({"send_mail", "google_mail", "microsoft_mail", "imap_mail"})),
     # Attachments (EN / HR): google_mail / google_drive name the reader for a
     # saved file — the extract tools and image_vision must be in the schema.
     (_re.compile(r"\battach\w*|\bprilo[gzž]\w*|\bprivi[tc]\w*", _re.I),
-     frozenset({"google_mail", "microsoft_mail", "pdf_extract", "docx_extract",
+     frozenset({"google_mail", "microsoft_mail", "imap_mail", "pdf_extract", "docx_extract",
                 "xlsx_extract", "xlsx", "pptx_extract", "pptx", "image_vision"})),
     # Calendar
     (_re.compile(r"\bcalendar\b|\bschedule\b|\bmeeting\b|\bagenda\b|\bevent\b", _re.I),
@@ -2344,6 +2345,12 @@ class AgentOrchestrationMixin:
                     await MicrosoftOAuthManager().is_connected()
                 except Exception:
                     pass
+                # The IMAP/SMTP inboxes are owner-only too.
+                try:
+                    from captain_claw.imap_mail_manager import ImapMailClient
+                    await ImapMailClient().is_connected()
+                except Exception:
+                    pass
                 # Jev is owner-only too: does the owner have a key in Flight
                 # Deck (rate-limited inside; standalone: a configured key)?
                 try:
@@ -2422,6 +2429,7 @@ class AgentOrchestrationMixin:
                     "shell", "write", "read", "edit", "glob",
                     "google_drive", "google_calendar", "google_mail",
                     "microsoft_onedrive", "microsoft_calendar", "microsoft_mail",
+                    "imap_mail",
                 }
                 _before = len(tool_defs)
                 tool_defs = [

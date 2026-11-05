@@ -109,6 +109,7 @@ PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "google_drive": (("local_path", "read"), ("output_path", "write")),
     "google_mail": (("attachments", "read"),),
     "microsoft_mail": (("attachments", "read"),),
+    "imap_mail": (("attachments", "read"),),
     "microsoft_onedrive": (("local_path", "read"), ("output_path", "write")),
     "send_mail": (("attachments", "read"),),
     "image_gen": (("output_path", "write"),),
@@ -141,6 +142,7 @@ NON_PATH_PARAMS: dict[str, frozenset[str]] = {
     # which attachment of a message / draft (a number or a name); a mail folder
     "google_mail": frozenset({"attachment", "remove_attachments"}),
     "microsoft_mail": frozenset({"attachment", "remove_attachments", "folder"}),
+    "imap_mail": frozenset({"attachment", "remove_attachments", "folder"}),
     "microsoft_onedrive": frozenset({"path"}),       # a path inside OneDrive
     "whatsapp_send_file": frozenset({"filename"}),   # a name it looks up in saved/
     "payments": frozenset({"merchant_url"}),
