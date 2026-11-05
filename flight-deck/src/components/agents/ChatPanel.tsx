@@ -882,7 +882,10 @@ function ChatContent({
   // A runtime message the user never sees (a guard's corrective, a fleet
   // notice the log kept) is no row of the transcript at all.
   const visibleMessages = useMemo(
-    () => session.messages.filter((m) => (m.role !== 'tool' || m.tool_name) && injectedAs(m.note) !== 'hide'),
+    // An answer with no words (a tool step a reconnect once merged in from
+    // the agent's replay) is no row either.
+    () => session.messages.filter((m) => (m.role !== 'tool' || m.tool_name) && injectedAs(m.note) !== 'hide'
+      && !(m.role === 'assistant' && !m.content.trim())),
     [session.messages],
   )
   const groups = useMemo(() => groupActivity(visibleMessages), [visibleMessages])

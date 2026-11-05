@@ -5603,6 +5603,21 @@ def _is_wake_frame(text: str) -> bool:
         return False
 
 
+def _is_ping_frame(text: str) -> bool:
+    """``{"type": "fd_ping"}``: the chat checks its socket is still alive (a
+    phone back from the lock screen). Flight Deck answers ``fd_pong`` itself;
+    the agent never sees it, and it keeps no sleeping agent awake."""
+    if '"fd_ping"' not in text:
+        return False
+    try:
+        return json.loads(text).get("type") == "fd_ping"
+    except (ValueError, AttributeError):
+        return False
+
+
+_FD_PONG = json.dumps({"type": "fd_pong"})
+
+
 def _client_frame(data: str) -> str:
     """A frame from a person's chat socket as the agent may read it. Only
     Flight Deck's own bridges (on their own sockets) say a turn came from a
@@ -5739,6 +5754,14 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
             text = msg.get("text")
             if text is None:
                 continue
+            if _is_ping_frame(text):
+                # The socket is alive; the agent sleeps on.
+                try:
+                    await ws.send_text(_FD_PONG)
+                except Exception:
+                    from_client.cancel()
+                    return False
+                continue
             if not _is_wake_frame(text):
                 held.append(text)
             break
@@ -5805,7 +5828,12 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
                 return
             if msg.get("type") == "websocket.disconnect":
                 return
-            if msg.get("text") is not None and not _is_wake_frame(msg["text"]):
+            if msg.get("text") is not None and _is_ping_frame(msg["text"]):
+                try:
+                    await ws.send_text(_FD_PONG)
+                except Exception:
+                    return
+            elif msg.get("text") is not None and not _is_wake_frame(msg["text"]):
                 held.append(msg["text"])
             from_client = asyncio.create_task(ws.receive())
         # The agent may have announced a new port meanwhile.
@@ -5829,6 +5857,9 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
         async def forward(data: str) -> None:
             if _is_wake_frame(data):
                 return  # Flight Deck's own (hold_while_asleep): not the agent's
+            if _is_ping_frame(data):
+                await ws.send_text(_FD_PONG)  # answered here, never the agent's
+                return
             agent_idle.touch(slug)
             # A chat message counts against the speaker's plan allowance for
             # today; over it, the turn is refused and the client told why.

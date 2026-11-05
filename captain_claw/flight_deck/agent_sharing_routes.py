@@ -476,8 +476,11 @@ async def _client_to_agent(conn: _MemberConn, db, rec: sharing.AgentRecord,
         if not isinstance(data, dict):
             await conn.send({"type": "error", "code": "invalid", "message": "Malformed message"})
             continue
-        agent_idle.touch(rec.slug)  # a member at work keeps it up
         ftype = data.get("type")
+        if ftype == "fd_ping":  # the chat checking its socket; answered here, keeps nothing awake
+            await conn.send({"type": "fd_pong"})
+            continue
+        agent_idle.touch(rec.slug)  # a member at work keeps it up
 
         if ftype == "fd_auth":  # a rotated FD token; consumed here, never forwarded
             fresh = _decode_jwt(data.get("fd_token"))

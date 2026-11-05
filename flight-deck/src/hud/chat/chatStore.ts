@@ -391,6 +391,7 @@ function replayRow(o: Data): Omit<HudMsg, 'id'> | null {
   const ts = toMs(o.timestamp)
   if (role === 'assistant') {
     if (origin === 'rejected') return null // a draft the agent threw away
+    if (o.step) return null // a step of a turn (tools called): activity live, not a reply
     const text = capReply(cleanAssistantText(o.content))
     return text ? { role, text, ts, replay: true } : null
   }
