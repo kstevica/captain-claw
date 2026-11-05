@@ -1,106 +1,72 @@
-# Captain Claw v0.8.10 Release Notes
+# Captain Claw v0.8.11 Release Notes
 
-**Release title:** Provisions
+**Release title:** Hold
 **Release date:** 2026-11-05
 
-Pick an AI provider, paste its key, and Captain fills every model tier with that provider's current
-models. This is the quick start the desktop app was missing. Also in this release: agents read scanned
-PDFs and photos with a local OCR engine (no model involved), a turn that is still making progress no
-longer stops at 40 steps, and on Windows files keep their own line endings.
+A message you write while the agent is still busy now waits and goes when the agent is free. It's no
+longer refused and lost. A reply that comes while your phone is locked arrives when you come back,
+and the kiosk's agent column is easier to read, with labelled **New agent** and **New group** buttons.
 
-4 pull requests: #426, #427, #428 and #430. **Captain for Mac 0.1.1** came out the same day on its
-own release, [`mac-v0.1.1`](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.1) (#429).
+3 pull requests: #432, #433 and #434.
 
 ## New
 
-- **Quick start tier sets.** **Console → Models → New tier set** and the Library's first-run wizard
-  now open on **Quick start**. Pick Anthropic, OpenAI, Gemini, Grok or DeepSeek and paste the API key.
-  Captain makes a tier set named after the provider (a second one becomes "Anthropic 2"), with that
-  provider's current models on every tier:
-
-  | Provider | Reasoning / Coding | Balanced / Long context / Vision | Fast |
-  |---|---|---|---|
-  | Anthropic | `claude-opus-5-5` | `claude-sonnet-5-5` | `claude-haiku-5-5` |
-  | OpenAI | `gpt-6.1-sol` | `gpt-6.1-terra` | `gpt-6-luna` |
-  | Gemini | `gemini-4-argon` | `gemini-3.8-flash` | `gemini-3.5-flash-lite` |
-  | Grok | `grok-4.7` | `grok-4.7` (long context `grok-4.3`) | `grok-4.20-0309-non-reasoning` |
-  | DeepSeek | `deepseek-v4-pro` | `deepseek-v4-pro` (vision `deepseek-flash`) | `deepseek-flash` |
-
-  - A pasted key picks its provider by its prefix, and a key that looks like another provider's is
-    flagged.
-  - Before the set is made, the key is checked against the provider's list of models. If the provider
-    can't be reached, or the key can't use one of the models, you can still **Create anyway**. The key
-    is used for that check and kept only in your tier set.
-  - Context sizes stay under each provider's price jump: Haiku 100k, Grok 160k, OpenAI 256k.
-  - The list lives in `captain_claw/instructions/tier_presets.json`, with the date it was checked
-    (5 November 2026). A new model is an edit there, with no frontend build. The new models also have
-    prices, so their runs aren't counted at $0.
-- **`ocr_pdf` and `ocr_image`: scans read without a model.** A scanned PDF used to have no fixed way
-  through: `pdf_extract` found no text, and agents improvised with scripts, shell tools or a vision
-  model that gives different text each time. Now:
-  - `ocr_pdf` keeps each page's own text when it's good and reads only the rest (`mode=auto`), or
-    re-reads every page (`mode=ocr`). `ocr_image` reads png, jpg, webp, bmp, gif and tif (each page of
-    a multi-page TIFF) and turns photos upright first.
-  - **The same file gives the same text, every time.** Each page's rule is fixed and recorded, the
-    engine choice is fixed, and results are kept by file hash and settings in `saved/.ocr-cache/`.
-  - **Engines:** RapidOCR comes with Captain (a new core dependency; it reads č ć đ š ž without a
-    language pack, and doesn't install on 32-bit ARM). Tesseract is used when it's installed and you
-    ask for a language it has. With neither, the tool says how to install one and never falls back to
-    a model.
-  - The text lands in `saved/ocr/<session>/<name>-<hash>/<name>.md`, page by page, with how each page
-    was read and the pages it wasn't sure of. `pdf_extract` now names the pages that have no text and
-    points to `ocr_pdf`.
-  - That makes **72 built-in tools** per agent (71 in the desktop app, which has no Captain Swarm).
+- **Messages wait while the agent is busy.** A message sent while the agent was still on a turn (one
+  started from the glasses, WhatsApp, another tab, or a Stop still landing) used to be refused with
+  "Agent is busy processing another request. Please wait." and dropped. On a phone you couldn't send
+  at all while busy, because the composer showed only Stop. Now:
+  - The message waits under the transcript as a dashed bubble, *Sends when ‹agent› is free*, with
+    **Don't send**. The send button stays next to Stop once something is written.
+  - When the agent is free, the oldest waiting message goes as a normal message, one turn each, ahead
+    of the queue's next task. Slash commands still go at once.
+  - Waiting messages are kept in the browser, so a reload or a phone dropping the page doesn't lose
+    them. The chat on an agent card shows them too.
+  - **Send at next step** hands a waiting message to the running turn as a note, which the agent reads
+    at its next step (the same path as the queue's **Insert now**). If the turn ends just as it goes,
+    the message waits again and goes on its own.
+- **A clearer agent column in the kiosk.**
+  - The header has two labelled buttons: **New agent** and **New group**. In a narrow column they
+    shorten to **Agent** and **Group**. While you drag an agent, its row becomes the drop target,
+    *Drop here for a new group*.
+  - Each row has the agent's initials with its state dot on the corner. At rest the only control is
+    the power switch. Settings, ⋯ and Leave take no width until you hover or focus the row, so names
+    get the full width (on touch screens they're always shown).
+  - States are one word under the name: **Asleep**, **Off**, **Offline**. A busy agent reads
+    *Working…* in amber. Off agents are dimmed.
+  - Search has a clear (×) button, and Esc clears it. Group headers are bigger, and so are their
+    colour dots and chevrons.
+  - On a phone, the header has a **New group** button, and rows use the same one-word states.
 
 ## Fixed
 
-- **A turn that's working keeps going.** At 40 steps, an ordinary request used to stop mid-job with
-  "iteration budget exhausted" unless a plan or Jev said work was left, and most decks have no Jev.
-  Now:
-  - A turn whose last steps made progress gets more steps, with no judge, up to twice its budget.
-  - Past that, it keeps going while a plan or requirement says work is open. Otherwise Jev decides
-    where it's set up, and without Jev, progress alone is enough.
-  - The hard ceiling is 4× the budget, at most 300 steps (160 for the default 40). A turn that only
-    repeats itself still stops.
-  - When the limit does end a turn, the agent writes where the work stands (done, left, next), and the
-    reply ends with: reply **continue** and I'll pick up where I left off.
-
-  Long turns can now cost more: a working turn can run to 160 steps where it used to stop at 40–80.
-- **Files keep their own line endings, on Windows too.** On Windows, `write` turned every line ending
-  into CRLF. Its own check then saw a different size and asked the agent to write the file again, which
-  landed the same way: a loop. Now:
-  - The bytes on disk are the bytes sent.
-  - A file that already exists keeps the line ending most of its lines use, and a new `.bat` or `.cmd`
-    gets CRLF.
-  - `edit` no longer flattens CRLF files to LF on macOS and Linux, or LF files to CRLF on Windows.
-  - A file that differs only in line endings passes the check, and a check that still fails no longer
-    asks for the same write again.
-- **The first-launch wizard saves its tier set.** It moved on to Quick chat in the same click, before
-  the set was saved, so the untouched "Default" set stayed. That was also true of the one-model wizard.
-- **The Overview checklist** on a deck without accounts ticks *Add your API keys* when your own tier set
-  carries a key.
+- **A reply that came while your phone was away arrives when you're back.** A locked or backgrounded
+  phone stops the page, and its chat connection could die without the page knowing. A reply sent
+  meanwhile never arrived, and nothing reconnected. Now:
+  - Back after 3 seconds or more, every chat checks its connection, and a dead one is replaced at
+    once. The agent replays the session, and the reply lands once, freeing the lane, marking it
+    unread and moving the queue on.
+  - A connection that comes back mid-turn keeps the lane busy until that turn ends, and a message you
+    write meanwhile waits.
+  - The replay no longer turns each tool-calling step into an empty answer bubble. The glasses HUD
+    skips those steps too, and empty answer rows already in a log no longer show.
+  - The connection check is answered by Flight Deck itself and doesn't wake an agent that is asleep.
 
 ## Upgrading
 
-1. **The desktop app**: **Check for Updates…** (it also offers 0.8.10 within a minute of starting).
-   Quick start is in **Console → Models → New tier set**. New installers are on this release, but you
-   need one only for a fresh install: `Captain-0.8.10-arm64.dmg` (Apple silicon), `Captain-0.8.10-x64.dmg`
-   (Intel) and `Captain-Setup-0.8.10-x64.exe` (Windows). They aren't signed, so macOS asks first
-   (System Settings → Privacy & Security → **Open Anyway**), and so does Windows (**More info → Run
-   anyway**).
-2. **Each Flight Deck**: **Console → Updates**, or pull and reinstall by hand. RapidOCR and pypdfium2
-   are new core dependencies, about 90 MB to download, so `pip install -e .` (or `uv sync`) in the deck's
-   environment. Then restart Flight Deck, then every agent: agents need the restart for the two OCR
-   tools and the new step budget. Hard-refresh every browser for the Quick start form.
-3. **Optional:** install Tesseract for more languages (`brew install tesseract tesseract-lang`,
-   `apt install tesseract-ocr tesseract-ocr-hrv`, or the UB Mannheim installer on Windows).
-   `tools.ocr` in `config.yaml` sets the engine order and the page cap; see USAGE.md.
+1. **The desktop app**: **Check for Updates…** (it also offers 0.8.11 within a minute of starting).
+   New installers are on this release, but you need one only for a fresh install:
+   `Captain-0.8.11-arm64.dmg` (Apple silicon), `Captain-0.8.11-x64.dmg` (Intel) and
+   `Captain-Setup-0.8.11-x64.exe` (Windows). They aren't signed, so macOS asks first (System
+   Settings → Privacy & Security → **Open Anyway**), and so does Windows (**More info → Run anyway**).
+2. **Each Flight Deck**: **Console → Updates**, or pull by hand. No new dependencies. Restart Flight
+   Deck, then every agent: agents need the restart to tell a reconnecting chat that a turn is on, and
+   to mark tool-calling steps in the replay. Hard-refresh every browser.
 
 Devices need nothing: firmware stays **0.20.4** / PaperColor B **1.0.31**. BotPort hubs need nothing:
-0.8.10 keeps protocol 2. Captain for Chrome and Captain for Mac need nothing from this release.
+0.8.11 keeps protocol 2. Captain for Chrome and Captain for Mac need nothing from this release.
 
 ## Pull requests
 
-#426 A file keeps its own line endings; CRLF is not truncation · #427 `ocr_pdf` and `ocr_image`, scans
-read by a local engine, no model · #428 A working turn keeps its steps; the limit lands with "continue" ·
-#430 Quick start tier sets: provider + API key, its current models
+#432 Kiosk: clearer agent column — labelled New agent / New group, calmer rows · #433 Hold messages
+sent while the agent is busy; "Send at next step" · #434 A reply that came while the phone was away
+lands when it's back
