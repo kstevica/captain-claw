@@ -1763,7 +1763,7 @@ def extension_dir() -> Path | None:
 
 # Captain for Mac as published on GitHub (its own release, never "latest": the
 # desktop app reads latest for its updates). A new app version moves this.
-MAC_APP_RELEASE_URL = "https://github.com/kstevica/captain-claw/releases/download/mac-v0.1.0/Captain-for-Mac.zip"
+MAC_APP_RELEASE_URL = "https://github.com/kstevica/captain-claw/releases/download/mac-v0.1.1/Captain-for-Mac.zip"
 
 
 def mac_app_url() -> str:

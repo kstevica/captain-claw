@@ -29,7 +29,7 @@ See [RELEASE_NOTES_0.8.9.md](../../release-notes/RELEASE_NOTES_0.8.9.md).
   - It reads the window's text through Accessibility, **the selection first**, what's under the pointer, and a screenshot or OCR when asked.
   - The task can be typed or spoken.
   - **Paste into <app>** brings the answer back.
-  - Captures go to **screen-clips**. Get it on [GitHub](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.0) or from Connections → Browser.
+  - Captures go to **screen-clips**. Get it on [GitHub](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.1) or from Connections → Browser.
 - **[Loop guards](agents.md#safety-guards)** let edit → re-run and sectioned reads through. The same write, command or read with nothing changed is still stopped.
 - **The chat:**
   - Runtime messages are notes, not your words.

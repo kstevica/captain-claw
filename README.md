@@ -61,7 +61,7 @@ First run starts onboarding. For a single agent in the terminal or the browser, 
   <img src="docs/screenshots/captain-for-mac-0.8.8.webp" width="100%" alt="Captain for Mac's panel beside Mail: the selection, the screen text and what's under the pointer as chips, a typed task, then the drafted reply with Copy and Paste into Mail">
 </p>
 
-Both land in a shared folder (**web-clips**, **screen-clips**) and in the agent's own chat, as your words. Get them from **Flight Deck → Connections → Browser**; Captain for Mac is also on [GitHub](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.0).
+Both land in a shared folder (**web-clips**, **screen-clips**) and in the agent's own chat, as your words. Get them from **Flight Deck → Connections → Browser**; Captain for Mac is also on [GitHub](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.1).
 
 - **Fixes from real users:**
   - Agents run the script they just fixed, and read past a long report's first section.

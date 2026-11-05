@@ -4,7 +4,7 @@
 #   SIGN_ID="Developer ID Application: …" ./build.sh   signed with that identity
 set -euo pipefail
 cd "$(dirname "$0")"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.1.1}"
 BUILD="$(date +%Y%m%d%H%M)"
 APP="out/Captain for Mac.app"
 
