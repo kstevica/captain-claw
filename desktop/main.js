@@ -779,15 +779,26 @@ async function firstInstall() {
   }
 }
 
+// The macOS About panel. Each call replaces every option, so the addresses go
+// in every time. macOS shows the credits as plain text, not links.
+const ABOUT_CREDITS = "captain-claw.com\ngithub.com/kstevica/captain-claw";
+
+function setAboutPanel(version) {
+  if (process.platform !== "darwin") return;
+  app.setAboutPanelOptions({
+    applicationName: "Captain",
+    ...(version ? { applicationVersion: version, version: `app ${app.getVersion()}` } : {}),
+    credits: ABOUT_CREDITS,
+  });
+}
+
 // After the deck is up: what an installed version does in the background.
 function afterStart() {
   if (getBackendMode() !== "runtime") return;
   const version = runtime.currentVersion();
   // It runs now, so it's no longer one that failed here.
   if (runtime.readState().failed === version) runtime.writeState({ failed: null });
-  if (process.platform === "darwin") {
-    app.setAboutPanelOptions({ applicationName: "Captain", applicationVersion: version, version: `app ${app.getVersion()}` });
-  }
+  setAboutPanel(version);
   runtime.prune();
   runtime.ensureChromium();
   if (!updateTimer) {
@@ -956,6 +967,7 @@ app.whenReady().then(async () => {
   if (getBackendMode() === "runtime") log.info(`Runtime: ${runtime.runtimeDir()} (releases: ${runtime.manifestUrl()})`);
 
   hadPageStorage = fs.existsSync(path.join(app.getPath("userData"), "Local Storage"));
+  setAboutPanel();
   buildMenu();
   createWindow();
 
