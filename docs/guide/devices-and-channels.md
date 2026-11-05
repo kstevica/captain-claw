@@ -153,7 +153,7 @@ The extension keeps a token of its own, `Browser · <browser>`, never a password
 Captures go to `vfs:screen-clips/<day>-<app>-<title>/` (`screen.md`, `selection.md`, `screenshot.png`, `clip.json`) and into the agent's chat as your words, from the source *Captain for Mac*.
 
 **Get it:**
-1. Download it from the [GitHub release](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.0), or from **Flight Deck → Connections → Browser → Download Captain for Mac** (the deck's own build if it has one, else that release).
+1. Download it from the [GitHub release](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.1), or from **Flight Deck → Connections → Browser → Download Captain for Mac** (the deck's own build if it has one, else that release).
 2. Unzip it into Applications. It isn't notarized yet: if macOS won't open it, press **Open Anyway** in System Settings → Privacy & Security.
 3. Allow **Accessibility**. Screen Recording, Microphone and Speech Recognition are needed only for the screenshot, OCR and voice; Settings → Permissions shows each.
 4. In Settings → Flight Deck, type the deck's address, press **Connect** and approve the code. The token, `Desktop · Captain for Mac on <Mac>`, sits in the Keychain.

@@ -62,9 +62,9 @@ per deck address, listed in Connections → Browser beside browsers.
 
 ## Where it's published
 
-GitHub release [`mac-v0.1.0`](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.0)
+GitHub release [`mac-v0.1.1`](https://github.com/kstevica/captain-claw/releases/tag/mac-v0.1.1)
 (prerelease, not latest, so the desktop app's update check never sees it):
-`Captain-for-Mac-0.1.0.zip`, its `.sha256`, and `Captain-for-Mac.zip` under a
+`Captain-for-Mac-<version>.zip`, its `.sha256`, and `Captain-for-Mac.zip` under a
 fixed name. `/fd/clip/mac-app.zip` serves the checkout's own build, else
 redirects to `MAC_APP_RELEASE_URL` (`FD_MAC_APP_URL` overrides; empty = none).
 
