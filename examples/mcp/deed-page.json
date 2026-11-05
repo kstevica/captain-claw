@@ -3,7 +3,7 @@
   "transport": "http",
   "url": "https://deed.page/mcp",
   "headers": {
-    "User-Agent": "captain-claw-flight-deck/0.8.9"
+    "User-Agent": "captain-claw-flight-deck/0.8.10"
   },
   "enabled": true,
   "allowed_agents": []

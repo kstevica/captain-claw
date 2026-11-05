@@ -4,7 +4,19 @@
 
 Every release from the newest back to 0.4.29. The full notes for each, with upgrade steps, are in [release-notes/](../../release-notes/).
 
-**Jump to:** [0.8.9](#whats-new-in-089) · [0.8.8](#whats-new-in-088) · [0.8.7](#whats-new-in-087) · [0.8.6](#whats-new-in-086) · [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+**Jump to:** [0.8.10](#whats-new-in-0810) · [0.8.9](#whats-new-in-089) · [0.8.8](#whats-new-in-088) · [0.8.7](#whats-new-in-087) · [0.8.6](#whats-new-in-086) · [0.8.5](#whats-new-in-085) · [0.8.4](#whats-new-in-084) · [0.8.3](#whats-new-in-083) · [0.8.2](#whats-new-in-082) · [0.8.1](#whats-new-in-081) · [0.8.0](#whats-new-in-080) · [0.7.8](#whats-new-in-078) · [0.7.6](#whats-new-in-076) · [0.7.5](#whats-new-in-075) · [0.7.4](#whats-new-in-074) · [0.7.3](#whats-new-in-073) · [0.7.2](#whats-new-in-072) · [0.7.1](#whats-new-in-071) · [0.7.0](#whats-new-in-070) · [0.6.5](#whats-new-in-065) · [0.6.4](#whats-new-in-064) · [0.6.3](#whats-new-in-063) · [0.6.2](#whats-new-in-062) · [0.6.1](#whats-new-in-061) · [0.6.0](#whats-new-in-060) · [0.5.7](#whats-new-in-057) · [0.5.6](#whats-new-in-056) · [0.5.5](#whats-new-in-055) · [0.5.4](#whats-new-in-054) · [0.5.3](#whats-new-in-053) · [0.5.2](#whats-new-in-052) · [0.5.1](#whats-new-in-051) · [0.5.0](#whats-new-in-050) · [0.4.33](#whats-new-in-0433) · [0.4.32](#whats-new-in-0432) · [0.4.31](#whats-new-in-0431) · [0.4.30](#whats-new-in-0430) · [0.4.29](#whats-new-in-0429)
+
+## What's New in 0.8.10
+
+**Provisions.** 4 merged PRs. **Restart Flight Deck, then every agent; a deck needs `pip install -e .` for the new OCR dependencies.**
+
+- **Quick start tier sets**: **Console → Models → New tier set** and the Library's first-run wizard open on **Quick start**. Pick Anthropic, OpenAI, Gemini, Grok or DeepSeek, paste the key (checked before the set is made), and every tier gets that provider's current models. The list is `captain_claw/instructions/tier_presets.json`.
+- **`ocr_pdf` and `ocr_image`**: scanned PDFs and pictures read by a local engine (RapidOCR, which comes with Captain, or Tesseract), never a model, and the same file gives the same text every time. **72 built-in tools** (71 in the desktop app).
+- **A working turn keeps going**: progress earns more steps without a judge, up to 4× the budget (160 for the default 40); when the limit lands, reply **continue**.
+- **Line endings**: `write` and `edit` keep a file's own line endings, so Windows no longer loops on a "size mismatch".
+- **The first-launch wizard saves its tier set** (it used to leave "Default").
+
+See [RELEASE_NOTES_0.8.10.md](../../release-notes/RELEASE_NOTES_0.8.10.md).
 
 ## What's New in 0.8.9
 
