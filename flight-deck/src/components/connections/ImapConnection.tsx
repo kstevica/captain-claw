@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import {
   AtSign,
   Loader2,
@@ -21,6 +21,7 @@ import {
   type ImapAccount,
   type ImapAccountPatch,
   type ImapSecurity,
+  type ImapAlternative,
   type ImapTestResult,
 } from '../../stores/imapMailStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -133,13 +134,26 @@ function SecuritySelect({ value, onChange, disabled }: {
   )
 }
 
-function TestResult({ result }: { result: ImapTestResult }) {
-  const row = (name: string, ok: boolean, text: string) => (
+function secLabel(s: ImapSecurity): string {
+  return s === 'ssl' ? 'SSL/TLS' : s === 'starttls' ? 'STARTTLS' : 'no encryption'
+}
+
+function TestResult({ result, onUse }: {
+  result: ImapTestResult
+  onUse: (kind: 'imap' | 'smtp', alt: ImapAlternative) => void
+}) {
+  const use = (kind: 'imap' | 'smtp', alt?: ImapAlternative) => alt?.ok && (
+    <button type="button" onClick={() => onUse(kind, alt)}
+            className="ml-1 inline-flex items-center rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[11px] text-violet-500 hover:bg-violet-500/20">
+      Use port {alt.port} ({secLabel(alt.security)})
+    </button>
+  )
+  const row = (name: string, ok: boolean, text: string, extra?: ReactNode) => (
     <div className="flex items-start gap-2">
       {ok ? <Check className="h-3.5 w-3.5 text-emerald-500 shrink-0 mt-0.5" />
         : <AlertCircle className="h-3.5 w-3.5 text-red-500 shrink-0 mt-0.5" />}
       <span className={ok ? 'text-zinc-300' : 'text-red-500'}>
-        <span className="font-medium">{name}:</span> {text}
+        <span className="font-medium">{name}:</span> {text}{extra}
       </span>
     </div>
   )
@@ -147,9 +161,9 @@ function TestResult({ result }: { result: ImapTestResult }) {
     <div className="rounded-md border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-xs space-y-1">
       {row('IMAP', result.imap.ok, result.imap.ok
         ? `signed in — ${result.imap.folders ?? 0} folders${result.imap.roles?.length ? ` (${result.imap.roles.join(', ')})` : ''}`
-        : result.imap.error || 'failed')}
+        : result.imap.error || 'failed', use('imap', result.imap.alternative))}
       {row('SMTP', result.smtp.ok, result.smtp.skipped ? 'none (receive-only)'
-        : result.smtp.ok ? 'signed in' : result.smtp.error || 'failed')}
+        : result.smtp.ok ? 'signed in' : result.smtp.error || 'failed', use('smtp', result.smtp.alternative))}
     </div>
   )
 }
@@ -157,7 +171,7 @@ function TestResult({ result }: { result: ImapTestResult }) {
 function ConnectionForm({ initial, editing, onDone, onCancel }: {
   initial: FormState
   editing?: ImapAccount
-  onDone: (account: ImapAccount) => void
+  onDone: (account: ImapAccount, adjusted: string[]) => void
   onCancel?: () => void
 }) {
   const { suggest, test, add, update } = useImapMailStore()
@@ -227,7 +241,14 @@ function ConnectionForm({ initial, editing, onDone, onCancel }: {
       setError(r.error)
       return
     }
-    if (r.account) onDone(r.account)
+    if (r.account) onDone(r.account, r.adjusted || [])
+  }
+
+  const useAlternative = (kind: 'imap' | 'smtp', alt: ImapAlternative) => {
+    setF((s) => (kind === 'imap'
+      ? { ...s, imap_port: String(alt.port), imap_security: alt.security }
+      : { ...s, smtp_port: String(alt.port), smtp_security: alt.security }))
+    setResult((r) => r && { ...r, [kind]: { ok: true }, ok: kind === 'imap' ? r.smtp.ok : r.imap.ok })
   }
 
   return (
@@ -380,7 +401,7 @@ function ConnectionForm({ initial, editing, onDone, onCancel }: {
           <span className="break-words">{error}</span>
         </div>
       )}
-      {result && <TestResult result={result} />}
+      {result && <TestResult result={result} onUse={useAlternative} />}
 
       <div className="flex items-center gap-2 flex-wrap">
         <button onClick={save} disabled={!valid || !!busy} className={btnPrimary}>
@@ -398,10 +419,20 @@ function ConnectionForm({ initial, editing, onDone, onCancel }: {
           </button>
         )}
         <span className="text-[11px] text-zinc-500">
-          {busy === 'save' ? 'Signing in to check the settings…'
+          {busy === 'save' || busy === 'test' ? 'Signing in to IMAP and SMTP — a port that doesn’t answer takes up to ~20 s…'
             : 'Flight Deck signs in before saving. The password is stored encrypted and never shown to agents.'}
         </span>
       </div>
+    </div>
+  )
+}
+
+// A port Flight Deck switched on save because the typed one didn't answer.
+function AdjustedNotice({ notes }: { notes: string[] }) {
+  return (
+    <div className="flex items-start gap-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-600">
+      <Info className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+      <div className="space-y-0.5">{notes.map((n) => <div key={n}>{n}</div>)}</div>
     </div>
   )
 }
@@ -589,6 +620,7 @@ function AccountRow({ account }: { account: ImapAccount }) {
   const [tab, setTab] = useState<'use' | 'settings'>('use')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [notes, setNotes] = useState<string[]>([])
 
   const handleRemove = async () => {
     if (!confirm(`Disconnect ${account.email}?\n\nFlight Deck forgets its settings and password; your agents lose access to it. Its send history stays.`)) return
@@ -643,9 +675,10 @@ function AccountRow({ account }: { account: ImapAccount }) {
             </button>
           </div>
           {error && <div className="text-xs text-red-500">{error}</div>}
+          {notes.length > 0 && <AdjustedNotice notes={notes} />}
           {tab === 'use' ? <SendingSection key={account.updated_at} account={account} />
             : <ConnectionForm key={account.updated_at} initial={formFrom(account)} editing={account}
-                              onDone={() => setTab('use')} />}
+                              onDone={(_a, adjusted) => { setNotes(adjusted); setTab('use') }} />}
         </div>
       )}
     </div>
@@ -660,6 +693,7 @@ export default function ImapConnection() {
   const desktopDeck = useAuthStore((s) => s.desktopDeck)
   const unavailable = authEnabled === false && !desktopDeck
   const [adding, setAdding] = useState(false)
+  const [notes, setNotes] = useState<string[]>([])
 
   useEffect(() => {
     if (!unavailable) refresh()
@@ -724,6 +758,7 @@ export default function ImapConnection() {
                 <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
               </div>
             )}
+            {notes.length > 0 && <AdjustedNotice notes={notes} />}
             {accounts && accounts.length > 0 && (
               <div className="space-y-2">
                 {accounts.map((a) => <AccountRow key={a.id} account={a} />)}
@@ -739,7 +774,8 @@ export default function ImapConnection() {
             {adding ? (
               <div className="rounded-md border border-violet-500/30 bg-zinc-950/40 p-3">
                 <div className="text-xs font-medium text-zinc-200 mb-3">Connect an inbox</div>
-                <ConnectionForm initial={blankForm()} onDone={() => setAdding(false)} onCancel={() => setAdding(false)} />
+                <ConnectionForm initial={blankForm()} onCancel={() => setAdding(false)}
+                                onDone={(_a, adjusted) => { setNotes(adjusted); setAdding(false) }} />
               </div>
             ) : (
               accounts && cryptoAvailable && count < maxAccounts && (

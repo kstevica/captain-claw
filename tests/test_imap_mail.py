@@ -415,3 +415,100 @@ def test_receive_only_account_cannot_connect_smtp():
     with pytest.raises(m.MailError) as exc:
         m._smtp_connect(_acct(smtp_host=""))
     assert exc.value.status == 400 and "receive only" in exc.value.message
+
+
+# ── setup test: fast probe, other standard port, both servers at once ──
+
+
+def test_reachable_open_closed_and_black_holed():
+    import time as _t
+
+    srv = socket.socket()
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(1)
+    port = srv.getsockname()[1]
+    try:
+        assert m.reachable("127.0.0.1", port, timeout=2)
+    finally:
+        srv.close()
+    assert not m.reachable("127.0.0.1", port, timeout=2)  # closed now: refused, at once
+    t = _t.monotonic()
+    assert not m.reachable("10.255.255.1", 465, timeout=1.0)  # no answer at all
+    assert _t.monotonic() - t < 2.5
+
+
+def _gmail_like():
+    return m.account_from_settings({"email": "me@gmail.com", "imap_host": "imap.gmail.com",
+                                    "smtp_host": "smtp.gmail.com", "smtp_port": 465,
+                                    "smtp_security": "ssl"}, account_id="g", password="app-pw")
+
+
+def test_blocked_465_finds_587(monkeypatch):
+    monkeypatch.setattr(m, "_check_target", lambda h, p: None)
+    monkeypatch.setattr(m, "reachable", lambda h, p, timeout=m.PROBE_TIMEOUT: (h, p) != ("smtp.gmail.com", 465))
+    tried = []
+
+    def login(kind, acct):
+        tried.append((kind, acct.smtp_port if kind == "smtp" else acct.imap_port))
+        return {"ok": True}
+
+    monkeypatch.setattr(m, "_login_check", login)
+    res = m.test_account(_gmail_like())
+    assert res["imap"]["ok"] and not res["smtp"]["ok"] and res["smtp"]["unreachable"]
+    assert res["smtp"]["alternative"] == {"port": 587, "security": "starttls", "ok": True}
+    assert "can't be reached" in res["smtp"]["error"] and "587 with STARTTLS" in res["smtp"]["error"]
+    assert ("smtp", 465) not in tried and ("smtp", 587) in tried
+    acct, notes = m.apply_alternatives(_gmail_like(), res)
+    assert (acct.smtp_port, acct.smtp_security) == (587, "starttls")
+    assert res["ok"] and notes and "port 465 doesn't answer" in notes[0]
+
+
+def test_alternative_that_answers_but_refuses_the_login_is_not_applied(monkeypatch):
+    monkeypatch.setattr(m, "_check_target", lambda h, p: None)
+    monkeypatch.setattr(m, "reachable", lambda h, p, timeout=m.PROBE_TIMEOUT: p != 465)
+
+    def login(kind, acct):
+        if kind == "smtp":
+            raise m.MailError("needs an app password", 401)
+        return {"ok": True}
+
+    monkeypatch.setattr(m, "_login_check", login)
+    res = m.test_account(_gmail_like())
+    assert res["smtp"]["alternative"]["ok"] is False
+    acct, notes = m.apply_alternatives(_gmail_like(), res)
+    assert acct.smtp_port == 465 and notes == [] and not res["ok"]
+
+
+def test_both_servers_checked_at_once(monkeypatch):
+    import time as _t
+
+    monkeypatch.setattr(m, "_check_target", lambda h, p: None)
+    monkeypatch.setattr(m, "reachable", lambda *a, **k: True)
+    monkeypatch.setattr(m, "_login_check", lambda kind, acct: (_t.sleep(0.4), {"ok": True})[1])
+    t = _t.monotonic()
+    assert m.test_account(_gmail_like())["ok"]
+    assert _t.monotonic() - t < 0.75
+
+
+def test_presets_prefer_587_for_smtp():
+    for addr in ("a@gmail.com", "a@yahoo.com", "a@aol.com", "a@fastmail.com", "a@zoho.com"):
+        s = m.suggest_settings(addr)
+        assert (s["smtp_port"], s["smtp_security"]) == (587, "starttls"), addr
+
+
+def test_app_password_refusal_in_plain_words(monkeypatch):
+    import imaplib
+
+    class Conn:
+        capabilities = ("IMAP4REV1",)
+
+        def login(self, u, p):
+            raise imaplib.IMAP4.error(b"[ALERT] Application-specific password required: "
+                                      b"https://support.google.com/accounts/answer/185833 (Failure)")
+
+    s = m.Session(_gmail_like())
+    s.conn = Conn()
+    with pytest.raises(m.MailError) as exc:
+        s._login()
+    assert exc.value.status == 401 and "needs an app password" in exc.value.message
+    assert "App passwords" in exc.value.message

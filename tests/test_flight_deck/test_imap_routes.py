@@ -375,3 +375,15 @@ def test_ids_from_two_inboxes_in_one_call_refused():
     assert "different inboxes" in str(getattr(exc.value, "detail", exc.value))
 
 
+
+
+async def test_add_keeps_the_port_that_works(db, core):
+    core.test = {"ok": False, "imap": {"ok": True, "folders": 3, "roles": ["inbox"]},
+                 "smtp": {"ok": False, "unreachable": True, "error": "465 can't be reached",
+                          "alternative": {"port": 587, "security": "starttls", "ok": True}}}
+    r = _client().post("/fd/imap/accounts", json={**WORK, "smtp_port": 465, "smtp_security": "ssl"},
+                       headers=_bearer(ALICE))
+    assert r.status_code == 200, r.text
+    acct = r.json()["account"]
+    assert (acct["smtp_port"], acct["smtp_security"]) == (587, "starttls")
+    assert "port 465 doesn't answer" in r.json()["adjusted"][0]

@@ -413,6 +413,9 @@ async def imap_account_add(body: AccountBody, _user: dict = Depends(get_current_
     settings = _settings_of(body)
     acct = _test_account(settings, password, smtp_password, "new")
     result = await _run(acct, imap_mail.test_account, acct)
+    # A typed port this deck can't reach, with the other standard one working
+    # (a host blocking outgoing 465 …): keep the one that works, and say so.
+    acct, adjusted = imap_mail.apply_alternatives(acct, result)
     _check_result(result)
     async with _lock(_locks, uid):
         recs = await _load(db, uid)
@@ -444,7 +447,7 @@ async def imap_account_add(body: AccountBody, _user: dict = Depends(get_current_
         recs.append(rec)
         await _save(db, uid, recs)
     log.info("IMAP inbox connected", account=new_id, host=acct.imap_host)
-    return {"account": await _view(db, uid, rec), "test": result}
+    return {"account": await _view(db, uid, rec), "test": result, "adjusted": adjusted}
 
 
 @router.put("/accounts/{account_id}")
@@ -467,6 +470,7 @@ async def imap_account_update(account_id: str, body: AccountBody,
             getattr(body, k) is not None and str(getattr(body, k)).strip() != str(rec.get(k) or "").strip()
             for k in _CONNECTION_FIELDS)
         result = None
+        adjusted: list[str] = []
         if changed or any(getattr(body, k) is not None for k in ("label", "display_name", "save_sent")):
             old: Account | None = None
             try:
@@ -480,6 +484,7 @@ async def imap_account_update(account_id: str, body: AccountBody,
             acct = _test_account(settings, new_pw or (old.password if old else ""), keep_smtp_pw, account_id)
             if changed:
                 result = await _run(acct, imap_mail.test_account, acct)
+                acct, adjusted = imap_mail.apply_alternatives(acct, result)
                 _check_result(result)
                 rec["last_check"] = {"ok": True, "at": _now(), "roles": result["imap"].get("roles", [])}
             rec.update(
@@ -504,6 +509,7 @@ async def imap_account_update(account_id: str, body: AccountBody,
     out: dict[str, Any] = {"account": await _view(db, uid, rec)}
     if result is not None:
         out["test"] = result
+        out["adjusted"] = adjusted
     return out
 
 
