@@ -8,9 +8,10 @@ import { GROUP_COLORS, OTHER_SECTION, agentSections, groupTone, isFolder, nextGr
 //
 // Folders for agents: a section with a name and a colour that folds away, the
 // agents in no group below them under "Other agents". Off a phone an agent is
-// dragged onto a group (onto "New group" to start one) and a group dragged up
-// or down; everywhere an agent's "⋯" → Group, or a group's "⋯" with its tick
-// list, does the same. With no groups the list is the plain list it always was.
+// dragged onto a group (onto the column's "New group", which turns into a drop
+// target meanwhile, to start one) and a group dragged up or down; everywhere an
+// agent's "⋯" → Group, or a group's "⋯" with its tick list, does the same. With
+// no groups the list is the plain list it always was.
 // What a folded group holds still shows on its header: an agent working or with
 // a new reply, and the one whose chat is open stays in view. One group can be
 // pinned to the top of the list, and any number of agents to the top of their
@@ -63,7 +64,10 @@ function folded(section: AgentSection<GroupableAgent>, sessionInfo: SessionInfo)
   return { busy: infos.some((x) => x?.busy), unread: infos.some((x) => x?.unread) }
 }
 
-export function AgentSections<A extends GroupableAgent>({ agents, query, activeAgentId, sessionInfo, renderRow, onEdit, onNew, phone = false }: {
+/** What an agent's drag carries: its id. The column's "New group" takes it too. */
+export const AGENT_DRAG_TYPE = 'application/x-fd-agent'
+
+export function AgentSections<A extends GroupableAgent>({ agents, query, activeAgentId, sessionInfo, renderRow, onEdit, onAgentDrag, phone = false }: {
   agents: A[]
   /** The search box: an agent's name or description, or its group's name. */
   query: string
@@ -71,8 +75,8 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
   sessionInfo: SessionInfo
   renderRow: (a: A, parts: RowParts) => ReactNode
   onEdit: (groupId: string) => void
-  /** Start a group, with these agents in it. */
-  onNew: (agentIds?: string[]) => void
+  /** An agent is being dragged (or no longer is): the column's "New group" becomes a drop target. */
+  onAgentDrag?: (dragging: boolean) => void
   phone?: boolean
 }) {
   const groups = useGroupStore((s) => s.groups)
@@ -85,7 +89,8 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
 
   const [dragging, setDragging] = useState<Dragging | null>(null)
   const [over, setOver] = useState<{ id: string; above: boolean } | null>(null)
-  const [overNew, setOverNew] = useState(false)
+  const agentDragging = dragging?.kind === 'agent'
+  useEffect(() => { onAgentDrag?.(agentDragging) }, [agentDragging, onAgentDrag])
   // The section that just took an agent or the pin, to say so.
   const [landed, setLanded] = useState<string | null>(null)
   const landedTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
@@ -99,7 +104,6 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
   const endDrag = useCallback(() => {
     setDragging(null)
     setOver(null)
-    setOverNew(false)
   }, [])
   // The row a drop moves is gone before its dragend would fire.
   useEffect(() => {
@@ -121,7 +125,6 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
 
   const grouped = groups.some(isFolder)
   const pinnedName = groups.find((g) => g.pinned && isFolder(g))?.name
-  const agentDrag = dragging?.kind === 'agent'
   const canDrag = !phone
 
   // Set after the event: Chrome ends a drag whose start changes the page under it.
@@ -132,7 +135,7 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
   }
   const rowDrag = (a: A, from: string): RowDrag => (canDrag ? {
     draggable: true,
-    onDragStart: (e) => startDrag(e, { kind: 'agent', id: a.id, from }, 'application/x-fd-agent'),
+    onDragStart: (e) => startDrag(e, { kind: 'agent', id: a.id, from }, AGENT_DRAG_TYPE),
     onDragEnd: endDrag,
     ...(dragging?.kind === 'agent' && dragging.id === a.id ? { style: { opacity: 0.4 } } : {}),
   } : {})
@@ -195,152 +198,121 @@ export function AgentSections<A extends GroupableAgent>({ agents, query, activeA
     },
   } : {})
 
-  const listClass = phone ? 'flex flex-col gap-2' : 'flex flex-col gap-0.5'
-
-  const newGroup = !searching && (grouped || agents.length > 1) && (
-    <button
-      onClick={() => onNew()}
-      {...(canDrag && agentDrag ? {
-        onDragOver: (e: DragEvent<HTMLElement>) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setOverNew(true) },
-        onDragLeave: () => setOverNew(false),
-        onDrop: (e: DragEvent<HTMLElement>) => {
-          e.preventDefault()
-          const id = dragging?.id
-          endDrag()
-          if (id) onNew([id])
-        },
-      } : {})}
-      className={`flex w-full items-center gap-2 rounded-lg border border-dashed text-left transition-colors ${phone ? 'mt-3 h-11 px-3 text-sm' : 'mt-1.5 px-2 py-1.5 text-xs'} ${
-        agentDrag
-          ? overNew ? 'border-violet-400 bg-violet-500/10 text-zinc-100' : 'border-zinc-600 text-zinc-300'
-          : 'border-transparent text-zinc-500 hover:bg-zinc-800/50 hover:text-zinc-300'
-      }`}
-    >
-      <FolderPlus className={phone ? 'h-4 w-4 shrink-0' : 'h-3.5 w-3.5 shrink-0'} />
-      {agentDrag ? 'Drop here for a new group' : 'New group'}
-    </button>
-  )
+  const listClass = phone ? 'flex flex-col gap-2' : 'flex flex-col gap-px'
 
   if (searching && sections.length === 0) {
-    return <p className={phone ? 'py-8 text-center text-sm text-zinc-500' : 'px-2.5 py-6 text-center text-xs text-zinc-600'}>No agents match your search.</p>
+    return <p className={phone ? 'py-8 text-center text-sm text-zinc-500' : 'px-2.5 py-6 text-center text-xs text-zinc-500'}>No agents match your search.</p>
   }
 
   // No groups yet: the plain list.
   if (!grouped) {
     const only = sections[0]?.agents ?? []
-    return (
-      <>
-        <ul className={listClass}>{only.map((a) => renderRow(a, { drag: rowDrag(a, OTHER_SECTION) }))}</ul>
-        {newGroup}
-      </>
-    )
+    return <ul className={listClass}>{only.map((a) => renderRow(a, { drag: rowDrag(a, OTHER_SECTION) }))}</ul>
   }
 
   return (
-    <>
-      <div className={`flex flex-col ${phone ? 'gap-3' : 'gap-1'}`}>
-        {sections.map((s) => {
-          if (!s.group && s.agents.length === 0 && !agentDrag) return null
-          const isCollapsed = !searching && collapsed.includes(s.id)
-          const tone = s.group ? groupTone(s.group.color) : null
-          const isOver = over?.id === s.id
-          // Only somewhere else: an agent already here isn't going anywhere.
-          const taking = isOver && dragging?.kind === 'agent' && dragging.from !== s.id
-          const signals = isCollapsed ? folded(s, sessionInfo) : null
-          const stillShown = isCollapsed ? s.agents.filter((a) => a.id === activeAgentId) : []
-          const running = s.agents.filter((a) => a.state === 'running' || a.asleep).length
-          const rail = `${phone ? 'ml-3 pl-2' : 'ml-[11px]'} border-l ${tone ? tone.rail : 'border-transparent'}`
-          return (
-            <section
-              key={s.id}
-              data-section={s.name}
-              aria-label={s.name}
-              {...sectionDrop(s)}
-              className={`relative rounded-lg transition-colors ${taking ? `ring-1 ring-inset ${tone ? tone.over : 'bg-zinc-500/10 ring-zinc-500/40'}` : ''}`}
+    <div className={`flex flex-col ${phone ? 'gap-3' : 'gap-2'}`}>
+      {sections.map((s) => {
+        if (!s.group && s.agents.length === 0 && !agentDragging) return null
+        const isCollapsed = !searching && collapsed.includes(s.id)
+        const tone = s.group ? groupTone(s.group.color) : null
+        const isOver = over?.id === s.id
+        // Only somewhere else: an agent already here isn't going anywhere.
+        const taking = isOver && dragging?.kind === 'agent' && dragging.from !== s.id
+        const signals = isCollapsed ? folded(s, sessionInfo) : null
+        const stillShown = isCollapsed ? s.agents.filter((a) => a.id === activeAgentId) : []
+        const running = s.agents.filter((a) => a.state === 'running' || a.asleep).length
+        // Lines up under the chevron: what's in the group hangs off its header.
+        const rail = `${phone ? 'ml-3 pl-2' : 'ml-[13px] pl-1'} border-l ${tone ? tone.rail : 'border-transparent'}`
+        return (
+          <section
+            key={s.id}
+            data-section={s.name}
+            aria-label={s.name}
+            {...sectionDrop(s)}
+            className={`relative rounded-lg transition-colors ${taking ? `ring-1 ring-inset ${tone ? tone.over : 'bg-zinc-500/10 ring-zinc-500/40'}` : ''}`}
+          >
+            {isOver && dragging?.kind === 'group' && (
+              <span className={`pointer-events-none absolute inset-x-1 h-0.5 rounded-full bg-violet-500 ${over?.above && s.group ? '-top-[3px]' : '-bottom-[3px]'}`} />
+            )}
+            <div
+              className={`group/head flex items-center gap-0.5 rounded-md ${landed === s.id ? 'fd-group-landed' : ''}`}
+              {...(canDrag && s.group && !s.group.pinned && !searching ? {
+                draggable: true,
+                onDragStart: (e: DragEvent<HTMLElement>) => startDrag(e, { kind: 'group', id: s.id }, 'application/x-fd-group'),
+                onDragEnd: endDrag,
+              } : {})}
+              style={dragging?.kind === 'group' && dragging.id === s.id ? { opacity: 0.4 } : undefined}
             >
-              {isOver && dragging?.kind === 'group' && (
-                <span className={`pointer-events-none absolute inset-x-1 h-0.5 rounded-full bg-violet-500 ${over?.above && s.group ? '-top-[3px]' : '-bottom-[3px]'}`} />
-              )}
-              <div
-                className={`group/head flex items-center gap-0.5 rounded-md ${landed === s.id ? 'fd-group-landed' : ''}`}
-                {...(canDrag && s.group && !s.group.pinned && !searching ? {
-                  draggable: true,
-                  onDragStart: (e: DragEvent<HTMLElement>) => startDrag(e, { kind: 'group', id: s.id }, 'application/x-fd-group'),
-                  onDragEnd: endDrag,
-                } : {})}
-                style={dragging?.kind === 'group' && dragging.id === s.id ? { opacity: 0.4 } : undefined}
+              <button
+                onClick={() => toggleCollapsed(s.id)}
+                aria-expanded={!isCollapsed}
+                title={`${s.name} — ${headCount(s.agents.length)}, ${running} on`}
+                className={`flex min-w-0 flex-1 items-center gap-2 rounded-md text-left transition-colors hover:bg-zinc-800/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 ${phone ? 'h-11 px-2' : 'h-8 px-1.5'}`}
               >
+                <ChevronRight className={`shrink-0 text-zinc-500 transition-transform duration-200 motion-reduce:transition-none ${isCollapsed ? '' : 'rotate-90'} ${phone ? 'h-4 w-4' : 'h-3.5 w-3.5'}`} />
+                {tone && <span className={`shrink-0 rounded-full ${tone.dot} ${phone ? 'h-2.5 w-2.5' : 'h-2 w-2'}`} />}
+                <span className={`min-w-0 truncate font-semibold ${phone ? 'text-sm' : 'text-[13px]'} ${s.group ? 'text-zinc-200' : 'text-zinc-400'}`}>{s.name}</span>
+                <span className={`shrink-0 rounded-full bg-zinc-800 px-1.5 font-medium tabular-nums text-zinc-400 ${phone ? 'text-xs leading-5' : 'text-[10px] leading-4'}`}>{s.agents.length}</span>
+                {/* Off a phone its pin button says so. */}
+                {phone && s.group?.pinned && <Pin className="h-3 w-3 shrink-0 fill-current text-violet-600 dark:text-violet-400" aria-label="Pinned to the top" />}
+                {signals?.busy && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500 dark:bg-amber-400" title="An agent here is working" />}
+                {signals?.unread && !signals.busy && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" title="A new reply here" />}
+              </button>
+              {s.group && !phone && (
                 <button
-                  onClick={() => toggleCollapsed(s.id)}
-                  aria-expanded={!isCollapsed}
-                  title={`${s.name} — ${headCount(s.agents.length)}, ${running} on`}
-                  className={`flex min-w-0 flex-1 items-center gap-1.5 rounded-md text-left transition-colors hover:bg-zinc-800/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 ${phone ? 'h-11 px-2' : 'h-7 px-1.5'}`}
+                  onClick={() => togglePinned(s.group!)}
+                  aria-pressed={!!s.group.pinned}
+                  aria-label={`${s.group.pinned ? 'Unpin' : 'Pin'} group ${s.name}`}
+                  title={s.group.pinned ? `Unpin ${s.name}` : pinnedName ? `Pin to the top, in place of ${pinnedName}` : 'Pin to the top'}
+                  className={`shrink-0 rounded p-1.5 transition-colors hover:bg-zinc-800 ${s.group.pinned
+                    ? 'text-violet-600 dark:text-violet-400'
+                    : 'text-zinc-500 opacity-0 hover:text-zinc-200 focus:opacity-100 group-hover/head:opacity-100 pointer-coarse:opacity-100'}`}
                 >
-                  <ChevronRight className={`shrink-0 text-zinc-500 transition-transform duration-200 motion-reduce:transition-none ${isCollapsed ? '' : 'rotate-90'} ${phone ? 'h-4 w-4' : 'h-3 w-3'}`} />
-                  {tone && <span className={`shrink-0 rounded-[3px] ${tone.dot} ${phone ? 'h-2.5 w-2.5' : 'h-2 w-2'}`} />}
-                  <span className={`min-w-0 truncate font-semibold ${phone ? 'text-sm' : 'text-xs'} ${s.group ? 'text-zinc-300' : 'text-zinc-500'}`}>{s.name}</span>
-                  <span className={`shrink-0 tabular-nums text-zinc-500 ${phone ? 'text-xs' : 'text-[10px]'}`}>{s.agents.length}</span>
-                  {/* Off a phone its pin button says so. */}
-                  {phone && s.group?.pinned && <Pin className="h-3 w-3 shrink-0 fill-current text-violet-600 dark:text-violet-400" aria-label="Pinned to the top" />}
-                  {signals?.busy && <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-amber-500 dark:bg-amber-400" title="An agent here is working" />}
-                  {signals?.unread && !signals.busy && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" title="A new reply here" />}
+                  <Pin className={`h-3.5 w-3.5 ${s.group.pinned ? 'fill-current' : ''}`} />
                 </button>
-                {s.group && !phone && (
-                  <button
-                    onClick={() => togglePinned(s.group!)}
-                    aria-pressed={!!s.group.pinned}
-                    aria-label={`${s.group.pinned ? 'Unpin' : 'Pin'} group ${s.name}`}
-                    title={s.group.pinned ? `Unpin ${s.name}` : pinnedName ? `Pin to the top, in place of ${pinnedName}` : 'Pin to the top'}
-                    className={`shrink-0 rounded p-1.5 transition-colors hover:bg-zinc-800 ${s.group.pinned
-                      ? 'text-violet-600 dark:text-violet-400'
-                      : 'text-zinc-500 opacity-0 hover:text-zinc-200 focus:opacity-100 group-hover/head:opacity-100 pointer-coarse:opacity-100'}`}
-                  >
-                    <Pin className={`h-3.5 w-3.5 ${s.group.pinned ? 'fill-current' : ''}`} />
-                  </button>
-                )}
-                {s.group && (
-                  <button
-                    onClick={() => onEdit(s.id)}
-                    aria-label={`Edit group ${s.name}`}
-                    title={`Edit ${s.name}`}
-                    className={phone
-                      ? 'flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-zinc-500 active:bg-zinc-800'
-                      : 'shrink-0 rounded p-1.5 text-zinc-500 opacity-0 transition-colors hover:bg-zinc-800 hover:text-zinc-200 focus:opacity-100 group-hover/head:opacity-100 pointer-coarse:opacity-100'}
-                  >
-                    <MoreHorizontal className={phone ? 'h-5 w-5' : 'h-3.5 w-3.5'} />
-                  </button>
-                )}
-              </div>
+              )}
+              {s.group && (
+                <button
+                  onClick={() => onEdit(s.id)}
+                  aria-label={`Edit group ${s.name}`}
+                  title={`Edit ${s.name}`}
+                  className={phone
+                    ? 'flex h-11 w-11 shrink-0 items-center justify-center rounded-lg text-zinc-500 active:bg-zinc-800'
+                    : 'shrink-0 rounded p-1.5 text-zinc-500 opacity-0 transition-colors hover:bg-zinc-800 hover:text-zinc-200 focus:opacity-100 group-hover/head:opacity-100 pointer-coarse:opacity-100'}
+                >
+                  <MoreHorizontal className={phone ? 'h-5 w-5' : 'h-3.5 w-3.5'} />
+                </button>
+              )}
+            </div>
 
-              {/* Rows of 0fr → 1fr: folds to nothing without knowing its height. */}
-              <div className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${isCollapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'}`}>
-                <div className="min-h-0 overflow-hidden" inert={isCollapsed}>
-                  <div className={`${rail} ${phone ? 'pb-1 pt-1' : 'pb-0.5 pt-0.5'}`}>
-                    <ul className={listClass}>{s.agents.map((a) => renderRow(a, rowParts(a, s)))}</ul>
-                    {s.group && s.agents.length === 0 && (
-                      <button
-                        onClick={() => onEdit(s.id)}
-                        className={`flex w-full items-center gap-1.5 rounded-md text-left text-zinc-500 transition-colors hover:bg-zinc-800/50 hover:text-zinc-300 ${phone ? 'h-11 px-2 text-sm' : 'px-2 py-1.5 text-[11px]'}`}
-                      >
-                        <Plus className="h-3 w-3 shrink-0" />
-                        {phone ? 'Add agents' : 'Drag agents here, or add them'}
-                      </button>
-                    )}
-                    {!s.group && s.agents.length === 0 && (
-                      <p className={`text-zinc-500 ${phone ? 'px-2 py-2 text-sm' : 'px-2 py-1.5 text-[11px]'}`}>Drop here to take it out of its group</p>
-                    )}
-                  </div>
+            {/* Rows of 0fr → 1fr: folds to nothing without knowing its height. */}
+            <div className={`grid transition-[grid-template-rows] duration-200 ease-out motion-reduce:transition-none ${isCollapsed ? 'grid-rows-[0fr]' : 'grid-rows-[1fr]'}`}>
+              <div className="min-h-0 overflow-hidden" inert={isCollapsed}>
+                <div className={`${rail} ${phone ? 'pb-1 pt-1' : 'pb-0.5 pt-0.5'}`}>
+                  <ul className={listClass}>{s.agents.map((a) => renderRow(a, rowParts(a, s)))}</ul>
+                  {s.group && s.agents.length === 0 && (
+                    <button
+                      onClick={() => onEdit(s.id)}
+                      className={`flex w-full items-center gap-1.5 rounded-md text-left text-zinc-500 transition-colors hover:bg-zinc-800/50 hover:text-zinc-300 ${phone ? 'h-11 px-2 text-sm' : 'px-2 py-1.5 text-[11px]'}`}
+                    >
+                      <Plus className="h-3 w-3 shrink-0" />
+                      {phone ? 'Add agents' : 'Drag agents here, or add them'}
+                    </button>
+                  )}
+                  {!s.group && s.agents.length === 0 && (
+                    <p className={`text-zinc-500 ${phone ? 'px-2 py-2 text-sm' : 'px-2 py-1.5 text-[11px]'}`}>Drop here to take it out of its group</p>
+                  )}
                 </div>
               </div>
-              {stillShown.length > 0 && (
-                <div className={rail}><ul className={listClass}>{stillShown.map((a) => renderRow(a, rowParts(a, s)))}</ul></div>
-              )}
-            </section>
-          )
-        })}
-      </div>
-      {newGroup}
-    </>
+            </div>
+            {stillShown.length > 0 && (
+              <div className={rail}><ul className={listClass}>{stillShown.map((a) => renderRow(a, rowParts(a, s)))}</ul></div>
+            )}
+          </section>
+        )
+      })}
+    </div>
   )
 }
 

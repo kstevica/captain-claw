@@ -6,9 +6,6 @@ import {
   LayoutDashboard,
   Search,
   Plus,
-  Box,
-  Cpu,
-  Server,
   Power,
   Loader2,
   Sun,
@@ -110,7 +107,7 @@ import {
   AgentDialog, AgentMenu, KioskAgentInfoDialog, KioskAgentInstructionsDialog, KioskAgentSettingsDialog, KioskRemoveAgentDialog,
   type AgentMenuItem,
 } from './KioskAgentDialogs'
-import { AgentGroupDialog, AgentGroupPicker, AgentSections, RailGroupMark, type RowParts } from './KioskAgentGroups'
+import { AGENT_DRAG_TYPE, AgentGroupDialog, AgentGroupPicker, AgentSections, RailGroupMark, type RowParts } from './KioskAgentGroups'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import { NetworkBadge, networkShareAction } from '../agents/NetworkShare'
 import { dockerShareKey, processShareKey, useNetworkShareStore } from '../../stores/networkShareStore'
@@ -183,6 +180,13 @@ function stateLabel(a: SimpleAgent): string {
   return a.kind === 'local' ? 'Checking…' : 'Unknown'
 }
 
+/** Under an agent's name in the list: one word for its state (the tooltip says more). */
+function rowState(a: SimpleAgent): string {
+  if (a.asleep) return 'Asleep'
+  if (a.state === 'stopped') return a.kind === 'local' ? 'Offline' : 'Off'
+  return stateLabel(a)
+}
+
 function initials(name: string): string {
   const words = name.trim().split(/[\s_-]+/).filter(Boolean)
   if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
@@ -219,6 +223,8 @@ function useAgentPanels(agentId: string): AgentPanels {
 }
 
 const iconBtn = 'rounded p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300'
+/** A button on an agent's row in the column: one size for all of them, so they line up. */
+const rowBtn = 'flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors'
 
 // The Getting started guide opened by itself this page load (the desktop
 // admin comes back to the kiosk without a reload: it doesn't open again).
@@ -1648,6 +1654,14 @@ function AgentsColumn({
   const groups = useGroupStore((s) => s.groups)
   const collapsedGroups = useGroupStore((s) => s.collapsed)
   const railSections = useMemo(() => agentSections(agents, groups), [agents, groups])
+  const canGroup = agents.length > 1 || groups.some(isFolder)
+  // An agent being dragged: "New group" becomes where it can be dropped.
+  const [agentDrag, setAgentDragState] = useState(false)
+  const [overNew, setOverNew] = useState(false)
+  const setAgentDrag = useCallback((on: boolean) => {
+    setAgentDragState(on)
+    if (!on) setOverNew(false)
+  }, [])
 
   // ── Collapsed rail ──
   if (!open) {
@@ -1858,42 +1872,89 @@ function AgentsColumn({
         <KioskLineRow />
       </div>
 
-      {/* List header */}
-      <div className="flex items-center justify-between px-3 pt-3 pb-1">
-        <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">
-          Agents ({agents.length})
-        </span>
-        <div className="flex items-center gap-0.5">
-          {agents.length > 1 && (
-            <button onClick={() => onGroup({})} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300" title="New group" aria-label="New group">
-              <FolderPlus className="h-3.5 w-3.5" />
-            </button>
-          )}
-          <button onClick={onSpawn} className="rounded p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-300" title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}>
-            <Plus className="h-3.5 w-3.5" />
-          </button>
+      {/* List header: what's here, the two ways to add to it, and the search */}
+      <div className="@container space-y-2 px-3 pb-2 pt-3">
+        <div className="flex items-center gap-2 px-0.5">
+          <h2 className="text-[13px] font-semibold text-zinc-200">Agents</h2>
+          <span className="rounded-full bg-zinc-800 px-1.5 text-[10px] font-medium leading-4 tabular-nums text-zinc-400">{agents.length}</span>
         </div>
-      </div>
-
-      {/* Search (only once the list is long enough to need it) */}
-      {searchable && (
-        <div className="px-2 pb-1.5">
+        {/* While an agent is dragged the row is one drop target, the same height: nothing below moves. */}
+        {agentDrag && canGroup ? (
+          <button
+            onClick={() => onGroup({})}
+            aria-label="Drop here for a new group"
+            onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setOverNew(true) }}
+            onDragLeave={() => setOverNew(false)}
+            onDrop={(e) => {
+              e.preventDefault()
+              setOverNew(false)
+              const id = e.dataTransfer.getData(AGENT_DRAG_TYPE)
+              if (id) onGroup({ agentIds: [id] })
+            }}
+            className={`flex h-9 w-full items-center justify-center gap-1.5 rounded-lg border border-dashed px-2 text-xs font-medium transition-colors ${
+              overNew ? 'border-violet-400 bg-violet-500/10 text-zinc-100' : 'border-zinc-600 text-zinc-300'}`}
+          >
+            <FolderPlus className="h-4 w-4 shrink-0" />
+            <span className="truncate @max-[14rem]:hidden">Drop here for a new group</span>
+            <span className="hidden truncate @max-[14rem]:inline">Drop for a new group</span>
+          </button>
+        ) : (
+          <div className="flex gap-1.5">
+            <button
+              onClick={onSpawn}
+              aria-label="New agent"
+              title={locked ? 'New agent from an archetype' : 'Spawn a new agent'}
+              className="flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg bg-violet-600 px-2 text-xs font-medium text-white shadow-sm shadow-black/10 transition-colors hover:bg-violet-500 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400/60"
+            >
+              <Plus className="h-4 w-4 shrink-0" />
+              {/* A narrow column keeps the word that matters, not "New …". */}
+              <span className="truncate @max-[14rem]:hidden">New agent</span>
+              <span className="hidden truncate @max-[14rem]:inline">Agent</span>
+            </button>
+            {canGroup && (
+              <button
+                onClick={() => onGroup({})}
+                aria-label="New group"
+                title="New group"
+                className="flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg border border-zinc-700 px-2 text-xs font-medium text-zinc-300 transition-colors hover:border-zinc-600 hover:bg-zinc-800 hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
+              >
+                <FolderPlus className="h-4 w-4 shrink-0 text-zinc-400" />
+                <span className="truncate @max-[14rem]:hidden">New group</span>
+                <span className="hidden truncate @max-[14rem]:inline">Group</span>
+              </button>
+            )}
+          </div>
+        )}
+        {/* Search (only once the list is long enough to need it) */}
+        {searchable && (
           <div className="relative">
-            <Search className="absolute left-2 top-1/2 h-3 w-3 -translate-y-1/2 text-zinc-600" />
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-zinc-500" />
             <input
               value={search}
               onChange={(e) => setSearch(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Escape' && search) { e.stopPropagation(); setSearch('') } }}
               placeholder="Search agents…"
-              className="w-full rounded-md border border-zinc-700 bg-zinc-950 py-1 pl-7 pr-2 text-[11px] text-zinc-200 placeholder-zinc-600 focus:border-violet-500/60 focus:outline-none"
+              aria-label="Search agents"
+              className="h-8 w-full rounded-lg border border-zinc-800 bg-zinc-950/60 pl-8 pr-7 text-xs text-zinc-200 placeholder-zinc-500 transition-colors focus:border-violet-500/60 focus:outline-none"
             />
+            {search && (
+              <button
+                onClick={() => setSearch('')}
+                aria-label="Clear the search"
+                title="Clear the search"
+                className="absolute right-1 top-1/2 -translate-y-1/2 rounded-md p-1 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-zinc-200"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Agents */}
       <div className="flex-1 overflow-y-auto px-2 pb-2">
         {agents.length === 0 && (
-          <p className="px-2.5 py-6 text-center text-xs text-zinc-600">No agents yet.</p>
+          <p className="px-2.5 py-6 text-center text-xs text-zinc-500">No agents yet.</p>
         )}
         <AgentSections
           agents={agents}
@@ -1901,12 +1962,11 @@ function AgentsColumn({
           activeAgentId={activeAgentId}
           sessionInfo={sessionInfo}
           onEdit={(id) => onGroup({ id })}
-          onNew={(agentIds) => onGroup({ agentIds })}
+          onAgentDrag={setAgentDrag}
           renderRow={(a: SimpleAgent, { drag, pin }: RowParts) => {
             const info = sessionInfo.get(a.id)
             const active = a.id === activeAgentId
             const busy = !!info?.busy
-            const KindIcon = a.kind === 'docker' ? Box : a.kind === 'process' ? Cpu : a.kind === 'shared' ? Users : Server
             const shared = a.kind === 'shared'
             const hasChat = sessionInfo.has(a.id)
             const isBooting = booting.has(a.id) && a.state !== 'stopped'
@@ -1918,85 +1978,86 @@ function AgentsColumn({
             const canPower = a.kind !== 'local' && !shared && !a.managed && (powered || a.state === 'stopped')
             const canRecheck = a.kind === 'local' && a.state !== 'running' && !locked
             const menu = menuFor?.(a) ?? []
+            const unread = !!info?.unread && !active && !busy
+            const subtitle = isBooting ? 'Starting…'
+              : busy ? 'Working…'
+                : shared && a.state === 'running' ? `Shared by ${a.ownerName || 'another user'}`
+                  : a.state === 'running' && a.reachable && a.description ? a.description : rowState(a)
+            const pinButton = pin && (
+              <button
+                onClick={pin.onToggle}
+                aria-pressed={pin.pinned}
+                aria-label={`${pin.pinned ? 'Unpin' : 'Pin'} ${a.name}`}
+                title={pin.pinned ? `Back among the others in ${pin.groupName}` : `Pin to the top of ${pin.groupName}`}
+                className={`${rowBtn} ${pin.pinned ? 'text-violet-600 hover:bg-zinc-700/60 dark:text-violet-400' : 'text-zinc-500 hover:bg-zinc-700/60 hover:text-zinc-200'}`}
+              >
+                <Pin className={`h-3.5 w-3.5 ${pin.pinned ? 'fill-current' : ''}`} />
+              </button>
+            )
             return (
-              <li key={a.id} {...drag} className="group flex items-center gap-0.5">
-                <div className="relative flex min-w-0 flex-1">
+              <li
+                key={a.id}
+                {...drag}
+                className={`group/row group relative flex items-center gap-0.5 rounded-lg pr-1 transition-colors ${active ? 'bg-zinc-800' : 'hover:bg-zinc-800/60'}`}
+              >
                 <button
                   onClick={() => onOpen(a)}
                   disabled={!openable}
-                  title={openable ? `Chat with ${a.name}` : `${a.name} — ${isBooting ? 'Starting…' : stateLabel(a)}`}
-                  className={`flex min-w-0 flex-1 items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
-                    active
-                      ? 'bg-zinc-800 text-zinc-100'
-                      : busy
-                        ? 'bg-amber-500/10 text-zinc-100 hover:bg-amber-500/20'
-                        : openable
-                          ? 'text-zinc-300 hover:bg-zinc-800/50 hover:text-zinc-100'
-                          : 'text-zinc-500'
-                  }`}
+                  title={openable
+                    ? a.asleep ? `Chat with ${a.name} — asleep, it wakes when you open it` : `Chat with ${a.name}`
+                    : `${a.name} — ${isBooting ? 'Starting…' : stateLabel(a)}`}
+                  className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg py-1.5 pl-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
                 >
-                  <StateDot agent={a} className="shrink-0" />
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-center gap-1.5">
-                      <span className="min-w-0 truncate font-medium">{a.name}</span>
-                      {busy && (
-                        <span
-                          className="flex shrink-0 items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium leading-none text-amber-700 dark:text-amber-400"
-                          title="Working"
-                        >
-                          <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-500 dark:bg-amber-400" />
-                          Busy
-                        </span>
-                      )}
-                      {info?.unread && !active && !busy && (
-                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-sky-400" title="New reply" />
-                      )}
+                  {/* Its picture: initials, its state on the corner, working or a new reply on top. */}
+                  <span className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold transition-colors ${
+                    active ? 'bg-violet-600/20 text-violet-700 dark:text-violet-300'
+                      : powered ? 'bg-zinc-700/50 text-zinc-200' : 'bg-zinc-800/70 text-zinc-500'}`}
+                  >
+                    {working || isBooting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(a.name)}
+                    <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
+                    {busy && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" title="Working" />}
+                    {unread && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-sky-400 ring-2 ring-zinc-900" title="New reply" />}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex items-center gap-1.5">
+                      <span className={`min-w-0 truncate text-[13px] font-medium ${active || unread ? 'text-zinc-100' : openable ? 'text-zinc-200' : 'text-zinc-400'}`}>{a.name}</span>
                       {shared && (
                         <span
-                          className="flex shrink-0 items-center gap-0.5 rounded border border-sky-500/25 bg-sky-500/15 px-1 py-0.5 text-[9px] font-medium leading-none text-sky-700 dark:text-sky-300"
+                          className="flex shrink-0 items-center gap-0.5 rounded border border-sky-500/25 bg-sky-500/15 px-1 py-0.5 text-[9px] leading-none text-sky-700 dark:text-sky-300"
                           title={`Shared by ${a.ownerName || 'another user'}`}
                         >
                           <Users className="h-2.5 w-2.5" />shared
                         </span>
                       )}
                       {shareKeyOf(a) && <NetworkBadge shareKey={shareKeyOf(a)} />}
-                    </div>
-                    <div className="truncate text-[11px] text-zinc-500">
-                      {isBooting
-                        ? 'Starting…'
-                        : shared && a.state === 'running'
-                          ? `Shared by ${a.ownerName || 'another user'}`
-                          : a.state === 'running' && a.reachable && a.description ? a.description : stateLabel(a)}
-                    </div>
-                  </div>
-                  {/* In a group its pin takes this spot: on hover, and for good once pinned. */}
-                  <KindIcon className={`h-3.5 w-3.5 shrink-0 text-zinc-600 ${
-                    pin ? (pin.pinned ? 'opacity-0' : 'group-focus-within:opacity-0 group-hover:opacity-0 pointer-coarse:opacity-0') : ''}`} />
+                    </span>
+                    <span className={`block truncate text-[11px] ${busy ? 'text-amber-700 dark:text-amber-400' : 'text-zinc-500'}`}>{subtitle}</span>
+                  </span>
                 </button>
-                {pin && (
-                  <button
-                    onClick={pin.onToggle}
-                    aria-pressed={pin.pinned}
-                    aria-label={`${pin.pinned ? 'Unpin' : 'Pin'} ${a.name}`}
-                    title={pin.pinned ? `Back among the others in ${pin.groupName}` : `Pin to the top of ${pin.groupName}`}
-                    className={`absolute right-1 top-1/2 -translate-y-1/2 rounded p-1.5 transition-colors hover:bg-zinc-700/60 ${pin.pinned
-                      ? 'text-violet-600 dark:text-violet-400'
-                      : 'text-zinc-500 opacity-0 hover:text-zinc-200 focus:opacity-100 group-focus-within:opacity-100 group-hover:opacity-100 pointer-coarse:opacity-100'}`}
-                  >
-                    <Pin className={`h-3.5 w-3.5 ${pin.pinned ? 'fill-current' : ''}`} />
-                  </button>
-                )}
+                {/* What else there is to do with it: out of the way (no width at all)
+                    until the row is pointed at or focused; always there on a touch screen. */}
+                <div className="flex max-w-0 shrink-0 items-center overflow-hidden transition-[max-width] duration-150 group-focus-within/row:max-w-32 group-hover/row:max-w-32 motion-reduce:transition-none pointer-coarse:max-w-none">
+                  {!locked && !shared && (
+                    <button onClick={() => onOptions(a)} title={`Options — ${a.name}`} aria-label={`Options — ${a.name}`} className={`${rowBtn} text-zinc-500 hover:bg-zinc-700/60 hover:text-zinc-200`}>
+                      <Settings className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                  {menu.length > 0 && <AgentMenu agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} shown />}
+                  {shared && (
+                    <button
+                      onClick={() => onLeave(a)}
+                      title={`Leave ${a.name}`}
+                      aria-label={`Leave ${a.name}`}
+                      className={`${rowBtn} text-zinc-500 hover:bg-zinc-700/60 hover:text-red-600 dark:hover:text-red-400`}
+                    >
+                      <LogOut className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                  {/* Last, where it stays once pinned: it doesn't jump when clicked. */}
+                  {pin && !pin.pinned && pinButton}
                 </div>
-                {!locked && !shared && (
-                  <button
-                    onClick={() => onOptions(a)}
-                    title={`Options — ${a.name}`}
-                    className="shrink-0 rounded p-1.5 text-zinc-500 opacity-0 transition-colors hover:bg-zinc-800 hover:text-zinc-200 focus:opacity-100 group-hover:opacity-100"
-                  >
-                    <Settings className="h-3.5 w-3.5" />
-                  </button>
-                )}
-                {menu.length > 0 && <AgentMenu agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} />}
+                {/* Pinned: the pin stays, so it says so. */}
+                {pin?.pinned && pinButton}
                 {canPower && (
                   <button
                     onClick={() => onPower(a, !powered)}
@@ -2004,24 +2065,14 @@ function AgentsColumn({
                     role="switch"
                     aria-checked={powered}
                     aria-label={`${a.name} power`}
-                    title={working ? (powered ? 'Powering off…' : 'Powering on…') : powered ? `Power off ${a.name}` : `Power on ${a.name}`}
-                    className={`shrink-0 rounded p-1.5 transition-colors hover:bg-zinc-800 disabled:opacity-60 ${
+                    title={working ? (powered ? 'Powering off…' : 'Powering on…') : powered ? `On — power off ${a.name}` : `Off — power on ${a.name}`}
+                    className={`${rowBtn} disabled:opacity-60 ${
                       powered
-                        ? 'text-emerald-600 hover:text-red-600 dark:text-emerald-400 dark:hover:text-red-400'
-                        : 'text-zinc-500 hover:text-emerald-600 dark:hover:text-emerald-400'
+                        ? 'text-emerald-600 hover:bg-red-500/10 hover:text-red-600 dark:text-emerald-400 dark:hover:text-red-400'
+                        : 'text-zinc-600 hover:bg-emerald-500/10 hover:text-emerald-600 group-hover/row:text-zinc-400 dark:hover:text-emerald-400'
                     }`}
                   >
                     {working ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Power className="h-3.5 w-3.5" />}
-                  </button>
-                )}
-                {shared && (
-                  <button
-                    onClick={() => onLeave(a)}
-                    title={`Leave ${a.name}`}
-                    aria-label={`Leave ${a.name}`}
-                    className="shrink-0 rounded p-1.5 text-zinc-500 opacity-0 transition-colors hover:bg-zinc-800 hover:text-red-600 focus:opacity-100 group-hover:opacity-100 dark:hover:text-red-400"
-                  >
-                    <LogOut className="h-3.5 w-3.5" />
                   </button>
                 )}
                 {canRecheck && (
@@ -2029,7 +2080,8 @@ function AgentsColumn({
                     onClick={() => onPower(a, true)}
                     disabled={working}
                     title="Check again"
-                    className="shrink-0 rounded p-1.5 text-zinc-500 transition-colors hover:bg-zinc-800 hover:text-emerald-600 dark:hover:text-emerald-400 disabled:opacity-60"
+                    aria-label={`Check ${a.name} again`}
+                    className={`${rowBtn} text-zinc-500 hover:bg-zinc-700/60 hover:text-emerald-600 disabled:opacity-60 dark:hover:text-emerald-400`}
                   >
                     {working ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
                   </button>
@@ -2415,6 +2467,7 @@ function PhoneLayout({
 }) {
   const wsConnected = useAgentStore((s) => s.wsConnected)
   const activeChatId = useChatStore((s) => s.activeChatId)
+  const groups = useGroupStore((s) => s.groups)
   const [search, setSearch] = useState('')
   const [filesOpen, setFilesOpen] = useState(false)
   // Back to the list keeps the chat open; opening any chat shows it again: a
@@ -2492,6 +2545,7 @@ function PhoneLayout({
   }, [unwound])
 
   const searchable = agents.length > 6
+  const canGroup = agents.length > 1 || groups.some(isFolder)
 
   const phoneBtn = 'flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors active:bg-zinc-800 hover:bg-zinc-800 hover:text-zinc-100'
   // The agent list's header carries every tool: a little narrower, so seven
@@ -2602,11 +2656,17 @@ function PhoneLayout({
 
       <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-3 pb-4 pt-3">
         <KioskLineRow phone />
-        <div className="mb-2 flex h-8 items-center justify-between px-1">
-          <span className="text-xs font-medium uppercase tracking-wider text-zinc-500">Agents ({agents.length})</span>
-          {agents.length > 1 && (
-            <button onClick={() => onGroup({})} className="-mr-1 flex h-8 items-center gap-1.5 rounded-lg px-2 text-xs font-medium text-zinc-500 transition-colors active:bg-zinc-800" aria-label="New group">
-              <FolderPlus className="h-4 w-4" />
+        <div className="mb-3 flex items-center justify-between gap-2 px-1">
+          <div className="flex min-w-0 items-center gap-2">
+            <h2 className="text-base font-semibold text-zinc-100">Agents</h2>
+            <span className="rounded-full bg-zinc-800 px-2 text-xs font-medium leading-5 tabular-nums text-zinc-400">{agents.length}</span>
+          </div>
+          {canGroup && (
+            <button
+              onClick={() => onGroup({})}
+              className="flex h-10 shrink-0 items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900 px-3.5 text-sm font-medium text-zinc-200 transition-colors active:bg-zinc-800"
+            >
+              <FolderPlus className="h-[18px] w-[18px] text-zinc-400" />
               New group
             </button>
           )}
@@ -2641,7 +2701,6 @@ function PhoneLayout({
           activeAgentId={activeAgentId}
           sessionInfo={sessionInfo}
           onEdit={(id) => onGroup({ id })}
-          onNew={(agentIds) => onGroup({ agentIds })}
           renderRow={(a: SimpleAgent, { pin }: RowParts) => {
             const info = sessionInfo.get(a.id)
             const busy = !!info?.busy
@@ -2681,7 +2740,7 @@ function PhoneLayout({
                       {isBooting ? 'Starting…'
                         : busy ? 'Working…'
                           : shared && a.state === 'running' ? `Shared by ${a.ownerName || 'another user'}`
-                            : a.state === 'running' && a.reachable && a.description ? a.description : stateLabel(a)}
+                            : a.state === 'running' && a.reachable && a.description ? a.description : rowState(a)}
                     </span>
                   </span>
                 </button>
