@@ -1838,6 +1838,7 @@ from captain_claw.flight_deck.mcp_oauth_routes import router as mcp_oauth_router
 from captain_claw.flight_deck.costs_routes import router as costs_router
 from captain_claw.flight_deck.usage_quota import router as usage_quota_router
 from captain_claw.flight_deck.byok import router as byok_router
+from captain_claw.flight_deck.tier_presets import router as tier_presets_router
 from captain_claw.flight_deck.llm_routes import router as llm_router
 from captain_claw.flight_deck.being_routes import router as being_router
 from captain_claw.flight_deck.being_public_routes import router as being_public_router
@@ -1989,6 +1990,7 @@ app.include_router(costs_router)
 app.include_router(usage_quota_router)
 app.include_router(usage_spend.router)
 app.include_router(byok_router)
+app.include_router(tier_presets_router)
 app.include_router(llm_router)
 app.include_router(being_router)
 app.include_router(being_public_router)

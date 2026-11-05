@@ -9,10 +9,12 @@ import {
   type TierSet, type TierConfig, type TierDef, type EnvVar,
 } from '../../services/tierConfig'
 import { publishSharedTierSets, type PublishResult } from '../../services/sharedTierSets'
+import { fetchTierPresets, type TierPresetCatalog } from '../../services/tierPresets'
 import { useAuthStore } from '../../stores/authStore'
 import { useConsoleStore } from '../../stores/consoleStore'
 import { Switch } from '../admin/Switch'
 import { TEAM_KEY_PROVIDERS, fetchProviderKeys, saveProviderKey } from './consoleApi'
+import { QuickStartForm } from './QuickStartForm'
 import {
   Page, PageHeader, Card, Pill, Button, Sheet, Dialog, Field, ChipPicker, Notice, Segmented,
   inputCls, type Tone,
@@ -70,7 +72,7 @@ export function ModelsPage() {
   // The console never makes a starting set: the admin creates the first one.
   const tc = useTierConfig({ seed: false })
   const {
-    tiers, setTiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, updateTier, setupSet, bootstrapped,
+    tiers, setTiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, updateTier, setupSet, setupPresetSet, bootstrapped,
     sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet, sharedSets, adoptSharedSet,
   } = tc
 
@@ -93,6 +95,9 @@ export function ModelsPage() {
     })
   }, [])
   const [oneModelOpen, setOneModelOpen] = useState(false)
+  // Quick starts (provider + key → its current models). null while loading.
+  const [catalog, setCatalog] = useState<TierPresetCatalog | null>(null)
+  useEffect(() => { fetchTierPresets().then(setCatalog) }, [])
   const [publishing, setPublishing] = useState(false)
   const [publishNote, setPublishNote] = useState<PublishResult | null>(null)
   const [publishErr, setPublishErr] = useState('')
@@ -184,8 +189,8 @@ export function ModelsPage() {
             </span>
             <h2 className="mt-4 text-lg font-semibold text-zinc-100">Create your first tier set</h2>
             <p className="mt-1.5 max-w-md text-sm leading-relaxed text-zinc-500">
-              Agents need models before they can work. A tier set gives each kind of work a model — start with one
-              model for everything and fine-tune each tier later.
+              Agents need models before they can work. Pick your AI provider and paste its API key: every kind of work
+              gets that provider's current models. Fine-tune each tier later.
             </p>
             <Button variant="primary" icon={Plus} className="mt-5" onClick={() => setNewOpen(true)}>Create a tier set</Button>
           </section>
@@ -310,7 +315,11 @@ export function ModelsPage() {
       {newOpen && (
         <NewSetDialog
           copyName={active?.name || ''}
+          catalog={catalog}
+          tierLabel={(k) => registry?.tiers[k]?.label || k}
+          existingNames={sets.map((s) => s.name)}
           onClose={() => setNewOpen(false)}
+          onQuick={(name, perTier) => { setupPresetSet(name, perTier, { replaceSeed: false }); setNewOpen(false) }}
           onOneModel={(name, apply) => { setupSet(name, apply, { replaceSeed: false }); setNewOpen(false) }}
           onDefaults={(name) => { addSet(name); setNewOpen(false) }}
           onCopy={(name) => {
@@ -662,18 +671,27 @@ function OneModelForm({ initial, submitLabel, onSubmit, name }: {
   )
 }
 
-type NewKind = 'one' | 'defaults' | 'copy'
+type NewKind = 'quick' | 'one' | 'defaults' | 'copy'
 
-function NewSetDialog({ copyName, onClose, onOneModel, onDefaults, onCopy }: {
+function NewSetDialog({ copyName, catalog, tierLabel, existingNames, onClose, onQuick, onOneModel, onDefaults, onCopy }: {
   copyName: string
+  // Quick starts; null while they load.
+  catalog: TierPresetCatalog | null
+  tierLabel: (tier: string) => string
+  existingNames: string[]
   onClose: () => void
+  onQuick: (name: string, perTier: Record<string, Partial<TierConfig>>) => void
   onOneModel: (name: string, apply: OneModel) => void
   onDefaults: (name: string) => void
   onCopy: (name: string) => void
 }) {
-  const [kind, setKind] = useState<NewKind>('one')
+  // No quick starts on this deck: start on One model.
+  const noQuick = catalog !== null && catalog.presets.length === 0
+  const [picked, setKind] = useState<NewKind>('quick')
+  const kind: NewKind = picked === 'quick' && noQuick ? 'one' : picked
   const [name, setName] = useState('')
   const options: { value: NewKind; label: string }[] = [
+    ...(noQuick ? [] : [{ value: 'quick' as const, label: 'Quick start' }]),
     { value: 'one', label: 'One model' },
     { value: 'defaults', label: 'Built-in defaults' },
     ...(copyName ? [{ value: 'copy' as const, label: 'Copy current' }] : []),
@@ -684,7 +702,17 @@ function NewSetDialog({ copyName, onClose, onOneModel, onDefaults, onCopy }: {
     <Dialog title="New tier set" icon={Layers} onClose={onClose}>
       <div className="space-y-5">
         <Segmented value={kind} options={options} onChange={setKind} label="How to start" />
-        {kind === 'one' ? (
+        {kind === 'quick' ? (
+          <>
+            <p className="text-xs leading-relaxed text-zinc-500">
+              Pick your AI provider and paste its API key. Every tier gets that provider's current models, and the set
+              is named after it.
+            </p>
+            {catalog
+              ? <QuickStartForm presets={catalog.presets} checked={catalog.checked} tierLabel={tierLabel} existingNames={existingNames} onCreate={onQuick} />
+              : <p className="text-sm text-zinc-500">Loading the providers…</p>}
+          </>
+        ) : kind === 'one' ? (
           <>
             <p className="text-xs leading-relaxed text-zinc-500">One model powers every tier. Fine-tune each tier afterwards.</p>
             <OneModelForm

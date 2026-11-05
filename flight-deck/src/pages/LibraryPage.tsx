@@ -9,7 +9,7 @@ import { useUIStore } from '../stores/uiStore'
 import { spawnProcess, type SpawnConfig } from '../services/docker'
 import {
   useTierConfig, tierVision, PROVIDERS, TIER_ORDER, isSetUnconfigured,
-  INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS, fmtCtxTokens, type Archetype,
+  INPUT_CTX_OPTIONS, OUTPUT_CTX_OPTIONS, fmtCtxTokens, type Archetype, type TierConfig,
   REASONING_EFFORTS, REASONING_EFFORT_PROVIDERS, splitReasoningEffort, withReasoningEffort,
 } from '../services/tierConfig'
 import { CATEGORIES, archetypeCategory, archetypeKind, rememberTeamLooks, type ArchetypeKind } from '../components/layout/archetypeLook'
@@ -22,6 +22,9 @@ import {
 import { ForgeArchetypesModal } from '../components/library/ForgeArchetypesModal'
 import { useAuthStore } from '../stores/authStore'
 import { publishSharedTierSets, type PublishResult } from '../services/sharedTierSets'
+import { fetchTierPresets, type TierPresetCatalog } from '../services/tierPresets'
+import { QuickStartForm } from '../components/console/QuickStartForm'
+import { Segmented } from '../components/console/parts'
 
 type SpawnState = 'spawning' | 'done' | 'error'
 
@@ -58,7 +61,7 @@ function slugify(s: string): string {
 
 export function LibraryPage() {
   const {
-    tiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, updateTier, setupSet,
+    tiers, forgeTier, setForgeTier, envVars, setEnvVars, registry, refreshRegistry, updateTier, setupSet, setupPresetSet,
     sets, activeSetId, setActiveSet, addSet, duplicateSet, renameSet, deleteSet, bootstrapped,
     sharedSets, adoptSharedSet,
   } = useTierConfig()
@@ -98,11 +101,21 @@ export function LibraryPage() {
 
   const openWizard = () => { setWizardFirstLaunch(false); setWizardOpen(true) }
   const closeWizard = () => { localStorage.setItem(WIZARD_SEEN_KEY, '1'); setWizardOpen(false) }
+  // Quick starts for the wizard (provider + key → its current models).
+  const [catalog, setCatalog] = useState<TierPresetCatalog | null>(null)
+  useEffect(() => { fetchTierPresets().then(setCatalog) }, [])
   const submitWizard = (v: WizardValues) => {
     setupSet(v.name.trim() || 'My models', {
       provider: v.provider, model: v.model.trim(), api_key: v.apiKey,
       base_url: v.baseUrl.trim(), input_ctx: v.inputCtx, output_ctx: v.outputCtx,
     })
+    wizardDone()
+  }
+  const submitQuick = (name: string, perTier: Record<string, Partial<TierConfig>>) => {
+    setupPresetSet(name, perTier)
+    wizardDone()
+  }
+  const wizardDone = () => {
     localStorage.setItem(WIZARD_SEEN_KEY, '1')
     setWizardOpen(false)
     // On first launch, saving tiers means setup is done — move on to Quick chat.
@@ -855,7 +868,17 @@ export function LibraryPage() {
       )}
 
       {/* ── Tier setup wizard ── */}
-      {wizardOpen && <TierSetupWizard onSubmit={submitWizard} onClose={closeWizard} />}
+      {wizardOpen && (
+        <TierSetupWizard
+          catalog={catalog}
+          tierLabel={(k) => registry?.tiers[k]?.label || k}
+          // The untouched starting set gets replaced, so its name is free.
+          existingNames={sets.filter((s) => !(sets.length === 1 && isSetUnconfigured(s))).map((s) => s.name)}
+          onQuick={submitQuick}
+          onSubmit={submitWizard}
+          onClose={closeWizard}
+        />
+      )}
 
       {/* ── Forge archetypes (batch, from instructions + documents) ── */}
       {forgeOpen && (
@@ -1113,10 +1136,19 @@ function CtxRow({ opts, value, onChange }: { opts: number[]; value: number; onCh
 }
 
 // ── Setup wizard: collect one model + context and apply it to every tier. ──
-function TierSetupWizard({ onSubmit, onClose }: {
+function TierSetupWizard({ catalog, tierLabel, existingNames, onQuick, onSubmit, onClose }: {
+  // Quick starts; null while they load.
+  catalog: TierPresetCatalog | null
+  tierLabel: (tier: string) => string
+  existingNames: string[]
+  onQuick: (name: string, perTier: Record<string, Partial<TierConfig>>) => void
   onSubmit: (v: WizardValues) => void
   onClose: () => void
 }) {
+  // No quick starts on this deck: the one-model form.
+  const noQuick = catalog !== null && catalog.presets.length === 0
+  const [picked, setMode] = useState<'quick' | 'one'>('quick')
+  const mode = noQuick ? 'one' : picked
   const [name, setName] = useState('My models')
   const [provider, setProvider] = useState(PROVIDERS[0])
   const [model, setModel] = useState('')
@@ -1143,13 +1175,35 @@ function TierSetupWizard({ onSubmit, onClose }: {
           </span>
           <div>
             <h3 className="text-sm font-semibold text-zinc-200">Set up your models</h3>
-            <p className="text-[11px] text-zinc-500">One model powers every tier — fine-tune per tier later.</p>
+            <p className="text-[11px] text-zinc-500">
+              {mode === 'quick'
+                ? 'Your provider\'s current models on every tier — fine-tune per tier later.'
+                : 'One model powers every tier — fine-tune per tier later.'}
+            </p>
           </div>
           <button onClick={onClose} className="ml-auto rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
             <X className="h-4 w-4" />
           </button>
         </div>
 
+        {!noQuick && (
+          <div className="px-4 pt-4">
+            <Segmented
+              value={mode}
+              options={[{ value: 'quick', label: 'Quick start' }, { value: 'one', label: 'Pick a model' }]}
+              onChange={setMode}
+              label="How to set up"
+            />
+          </div>
+        )}
+
+        {mode === 'quick' ? (
+          <div className="p-4">
+            {catalog
+              ? <QuickStartForm presets={catalog.presets} checked={catalog.checked} tierLabel={tierLabel} existingNames={existingNames} onCreate={onQuick} />
+              : <p className="text-sm text-zinc-500">Loading the providers…</p>}
+          </div>
+        ) : (
         <div className="space-y-4 p-4">
           <div>
             <label className={labelCls}>Tier set name</label>
@@ -1189,18 +1243,21 @@ function TierSetupWizard({ onSubmit, onClose }: {
             <CtxRow opts={OUTPUT_CTX_OPTS} value={outputCtx} onChange={setOutputCtx} />
           </div>
         </div>
+        )}
 
         <div className="flex items-center justify-end gap-2 border-t border-zinc-800 px-4 py-3">
           <button onClick={onClose} className="rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs text-zinc-300 hover:text-zinc-100">
             Skip
           </button>
-          <button
-            onClick={submit}
-            disabled={!valid}
-            className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50"
-          >
-            <Check className="h-3.5 w-3.5" /> Create tier set
-          </button>
+          {mode === 'one' && (
+            <button
+              onClick={submit}
+              disabled={!valid}
+              className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-violet-500 disabled:opacity-50"
+            >
+              <Check className="h-3.5 w-3.5" /> Create tier set
+            </button>
+          )}
         </div>
       </div>
     </div>
