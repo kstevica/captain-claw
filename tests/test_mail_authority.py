@@ -1308,7 +1308,7 @@ ORGANIZE_AND_EMAIL = [
     ("arhiviraj newslettere i pošalji mi sažetak mailom", "self"),
 ]
 MAILBOX_CHANGES = ["archive", "move", "add_labels", "remove_labels", "create_label",
-                   "create_folder", "add_categories", "remove_categories"]
+                   "create_folder", "add_categories", "remove_categories", "mark_read", "mark_unread"]
 
 
 @pytest.mark.parametrize("text", ORGANIZE_TRUE)
@@ -1487,6 +1487,7 @@ def test_mailbox_verbs_by_action():
         "archive": "archived", "move": "moved", "add_labels": "labeled",
         "remove_labels": "changed", "add_categories": "categorized",
         "remove_categories": "changed", "create_label": "created", "create_folder": "created",
+        "mark_read": "marked as read", "mark_unread": "marked as unread",
     }
     assert set(verbs) == ma.MAILBOX_CHANGE_ACTIONS
     with ma.bound(ma.automated("flow", "", "deny")):

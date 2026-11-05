@@ -435,6 +435,8 @@ class ToolRegistry:
         ("requires_google", "captain_claw.google_oauth_manager", "is_google_connected_cached", "Google"),
         ("requires_microsoft", "captain_claw.microsoft_oauth_manager",
          "is_microsoft_connected_cached", "Microsoft"),
+        ("requires_imap", "captain_claw.imap_mail_manager",
+         "is_imap_connected_cached", "Email (IMAP)"),
     )
 
     def _unconnected_reason(self, name: str) -> str:
@@ -591,6 +593,7 @@ class ToolRegistry:
                     t for t in tools
                     if not self._tool_metadata.get(t.name, {}).get("requires_google")
                     and not self._tool_metadata.get(t.name, {}).get("requires_microsoft")
+                    and not self._tool_metadata.get(t.name, {}).get("requires_imap")
                     and not self._tool_metadata.get(t.name, {}).get("requires_jev")
                     and not self._tool_metadata.get(t.name, {}).get("requires_payments")
                     and not self._tool_metadata.get(t.name, {}).get("requires_crew")
@@ -634,6 +637,19 @@ class ToolRegistry:
                 tools = [
                     t for t in tools
                     if not self._tool_metadata.get(t.name, {}).get("requires_microsoft")
+                ]
+        except Exception:
+            pass
+
+        # And the IMAP/SMTP inboxes: shown only while the owner has one this
+        # agent may use (refreshed per turn by ``ImapMailClient.is_connected()``).
+        try:
+            from captain_claw.imap_mail_manager import is_imap_connected_cached
+
+            if not is_imap_connected_cached():
+                tools = [
+                    t for t in tools
+                    if not self._tool_metadata.get(t.name, {}).get("requires_imap")
                 ]
         except Exception:
             pass

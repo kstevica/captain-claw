@@ -34,9 +34,11 @@ PROVIDER_KEYS_SETTING = "fd:provider-keys"
 # own provider keys (sealed) and the switch that runs their agents on them —
 # written only through /fd/byok, which moves their agents with it. ``crew:*`` is
 # the logins their coding CLIs run on (sealed), written only through /fd/crew.
+# ``imap_mail:*`` is the user's IMAP/SMTP inboxes (passwords sealed), their
+# sending policies and signatures — written only through /fd/imap.
 _SERVER_OWNED_PREFIXES = (
     "google_oauth:", "microsoft_oauth:", "fd:tenant-profile", "fd:shared-agent-",
-    "jev:", "soniox:", "byok:", "crew:",
+    "jev:", "soniox:", "byok:", "crew:", "imap_mail:",
 )
 
 

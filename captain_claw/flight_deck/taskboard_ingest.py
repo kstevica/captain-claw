@@ -122,7 +122,7 @@ _RULE_EFFECTS = ("not_task", "mute", "always_task")
 # Sends out by its risk class, but reaches nobody a task is about.
 _NOT_DELIVERIES = frozenset({"jev"})
 # Where a send went, by its tool.
-_SEND_CHANNELS = {"google_mail": "gmail", "send_mail": "email", "microsoft_mail": "email",
+_SEND_CHANNELS = {"google_mail": "gmail", "send_mail": "email", "microsoft_mail": "email", "imap_mail": "email",
                   "whatsapp_send_file": "whatsapp", "whatsapp_web": "waweb", "linked_system": "link"}
 _CALL_OUTCOMES = {"ok": "ok", "error": "failed", "blocked": "blocked", "timeout": "timed out",
                   "aborted": "stopped", "interrupted": "interrupted"}

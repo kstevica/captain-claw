@@ -18,6 +18,8 @@ interface AgentAllowlistPickerProps {
   onChange: (next: string[]) => void
   /** Optional class name on the outer wrapper. */
   className?: string
+  /** What the selection means here (default: the MCP server wording). */
+  hint?: string
 }
 
 /**
@@ -31,6 +33,7 @@ export function AgentAllowlistPicker({
   value,
   onChange,
   className,
+  hint = 'Pick the agents that may see and call this server. Leave empty to allow every agent in the fleet.',
 }: AgentAllowlistPickerProps) {
   const [fleet, setFleet] = useState<FleetAgent[]>([])
   const [loading, setLoading] = useState(false)
@@ -140,10 +143,7 @@ export function AgentAllowlistPicker({
         </div>
       </div>
 
-      <p className="text-[11px] text-zinc-500 mb-2">
-        Pick the agents that may see and call this server. Leave empty to allow
-        every agent in the fleet.
-      </p>
+      <p className="text-[11px] text-zinc-500 mb-2">{hint}</p>
 
       {error && (
         <div className="flex items-start gap-2 rounded-md border border-red-500/30 bg-red-500/10 px-2.5 py-1.5 text-[11px] text-red-400 mb-2">

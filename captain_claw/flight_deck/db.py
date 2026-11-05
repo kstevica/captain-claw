@@ -799,6 +799,30 @@ class FlightDeckDB:
             );
             CREATE INDEX IF NOT EXISTS idx_gmail_sends_owner
                 ON gmail_sends(owner_id, created_at);
+            -- IMAP/SMTP sends made through Flight Deck (/fd/imap/agent/send …):
+            -- one row per email an inbox's SMTP server accepted ('sent') or
+            -- took without confirming ('unknown'). Per inbox (account_id): its
+            -- daily limit, duplicate check and history read these.
+            CREATE TABLE IF NOT EXISTS imap_sends (
+                id               TEXT PRIMARY KEY,
+                owner_id         TEXT NOT NULL,
+                account_id       TEXT NOT NULL DEFAULT '',
+                account_email    TEXT NOT NULL DEFAULT '',
+                agent            TEXT NOT NULL DEFAULT '',
+                to_addrs         TEXT NOT NULL DEFAULT '',
+                cc_addrs         TEXT NOT NULL DEFAULT '',
+                bcc_addrs        TEXT NOT NULL DEFAULT '',
+                subject          TEXT NOT NULL DEFAULT '',
+                message_id       TEXT NOT NULL DEFAULT '',
+                in_reply_to      TEXT NOT NULL DEFAULT '',
+                draft_id         TEXT NOT NULL DEFAULT '',
+                content_hash     TEXT NOT NULL DEFAULT '',
+                status           TEXT NOT NULL DEFAULT 'sent',
+                attachments      TEXT NOT NULL DEFAULT '',
+                created_at       TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_imap_sends_owner
+                ON imap_sends(owner_id, account_id, created_at);
             -- Gmail topic auto-replies (gmail_autoreply.py). Per-owner poll
             -- state: a row exists ONLY while the owner has auto-replies on —
             -- the enabling PUT creates it (the history baseline), turning off
@@ -5135,6 +5159,67 @@ class FlightDeckDB:
             "SELECT * FROM gmail_sends WHERE owner_id = ? AND content_hash = ?"
             " AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
             (owner_id, content_hash, since_iso),
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    # ── imap_sends (IMAP/SMTP inboxes) ──────────────────────────────
+
+    async def add_imap_send(
+        self, owner_id: str, *, account_id: str, account_email: str = "", agent: str = "",
+        to_addrs: str = "", cc_addrs: str = "", bcc_addrs: str = "", subject: str = "",
+        message_id: str = "", in_reply_to: str = "", draft_id: str = "",
+        content_hash: str = "", status: str = "sent", attachments: str = "",
+    ) -> str:
+        """Record one email an inbox's SMTP server accepted ('sent') or took
+        without confirming ('unknown'); returns the row id."""
+        assert self._db is not None
+        sid = _uuid()
+        await self._db.execute(
+            "INSERT INTO imap_sends (id, owner_id, account_id, account_email, agent, to_addrs,"
+            " cc_addrs, bcc_addrs, subject, message_id, in_reply_to, draft_id, content_hash,"
+            " status, attachments, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (sid, owner_id, account_id, account_email, agent, to_addrs, cc_addrs, bcc_addrs,
+             subject, message_id, in_reply_to, draft_id, content_hash, status, attachments,
+             _utcnow()),
+        )
+        await self._db.commit()
+        return sid
+
+    async def count_imap_sends_since(self, owner_id: str, account_id: str, since_iso: str) -> int:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT COUNT(*) FROM imap_sends WHERE owner_id = ? AND account_id = ? AND created_at >= ?",
+            (owner_id, account_id, since_iso),
+        ) as cur:
+            row = await cur.fetchone()
+            return int(row[0]) if row else 0
+
+    async def list_imap_sends(
+        self, owner_id: str, limit: int = 20, account_id: str | None = None,
+    ) -> list[dict]:
+        assert self._db is not None
+        q = "SELECT * FROM imap_sends WHERE owner_id = ?"
+        args: list = [owner_id]
+        if account_id:
+            q += " AND account_id = ?"
+            args.append(account_id)
+        q += " ORDER BY created_at DESC LIMIT ?"
+        args.append(limit)
+        rows = await self._db.execute_fetchall(q, tuple(args))
+        return [dict(r) for r in rows]
+
+    async def find_imap_send_by_hash(
+        self, owner_id: str, account_id: str, content_hash: str, since_iso: str,
+    ) -> dict | None:
+        assert self._db is not None
+        if not content_hash:
+            return None
+        async with self._db.execute(
+            "SELECT * FROM imap_sends WHERE owner_id = ? AND account_id = ? AND content_hash = ?"
+            " AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
+            (owner_id, account_id, content_hash, since_iso),
         ) as cur:
             row = await cur.fetchone()
             return dict(row) if row else None

@@ -67,7 +67,7 @@ _TIMEOUT_S = 10.0
 _GMAIL = "https://gmail.googleapis.com/gmail/v1/users/me/messages"
 _CALENDAR = "https://www.googleapis.com/calendar/v3/calendars"
 
-_MAIL_TOOLS = ("google_mail", "microsoft_mail")
+_MAIL_TOOLS = ("google_mail", "microsoft_mail", "imap_mail")
 _MAIL_SENDS = ("send", "send_draft", "reply", "forward")
 _MAIL_DRAFTS = ("create_draft", "update_draft")
 _CHAT_TOOLS = ("whatsapp_web", "whatsapp_send_file")

@@ -62,13 +62,14 @@ AUTOMATION_KINDS = frozenset({
     "exam", "taskboard", "line", "unknown",
 })
 MAIL_WRITE_ACTIONS = frozenset({"create_draft", "update_draft", "send", "send_draft"})
-# google_mail / microsoft_mail actions that change the mailbox without writing
-# an email (archive, move, labels / categories, new label / folder). A separate
+# google_mail / microsoft_mail / imap_mail actions that change the mailbox without
+# writing an email (archive, move, labels / categories, new label / folder, read
+# state). A separate
 # class: email intent never grants them, and they never grant email.
 # Flight Deck mirrors this set by string (action_catalog.py, flow_runner.py).
 MAILBOX_CHANGE_ACTIONS = frozenset({
     "archive", "move", "add_labels", "remove_labels", "create_label",
-    "create_folder", "add_categories", "remove_categories",
+    "create_folder", "add_categories", "remove_categories", "mark_read", "mark_unread",
 })
 MAIL_REFUSAL_TAG = "[not-authorized: mail-write]"
 JOB_TEXT_MAX = 4000
@@ -499,7 +500,7 @@ _EN_SEND_NOUN_RE = re.compile(
 )
 _EN_SEND_BY_RE = re.compile(
     r"\bsend\b(?P<mid>.{0,60}?)\b(?:by|via|over|per|through|using)\s+"
-    r"(?:e-?mail|mail|gmail|google_mail|send_mail|outlook|microsoft_mail)\b"
+    r"(?:e-?mail|mail|gmail|google_mail|send_mail|outlook|microsoft_mail|imap_mail|imap)\b"
 )
 # "send / forward / mail … to ana@x.co" (an address, an address-like
 # placeholder, or "to my inbox")
@@ -512,7 +513,7 @@ _EN_SEND_TO_RE = re.compile(
 # tool together with a write verb
 _EN_TOOL_WRITE_RE = re.compile(
     r"\b(?:use|using|call|via|with|through)\s+(?:the\s+)?"
-    r"(?:google_mail|microsoft_mail|send_mail|gmail|outlook)\b"
+    r"(?:google_mail|microsoft_mail|imap_mail|send_mail|gmail|outlook|imap)\b"
     r"(?:\s+tool)?(?:\s+action)?[\s=:'\",]*(?:to\s+)?"
     r"(?:create_draft|send_draft|send|draft|reply|compose|write)\b"
 )
@@ -1099,7 +1100,7 @@ def _keep_shared_addresses(text: str, other: str) -> str:
 
 # Mailbox tools with create_draft / update_draft / send / send_draft actions
 # (and the MAILBOX_CHANGE_ACTIONS).
-DRAFTING_MAIL_TOOLS = frozenset({"google_mail", "microsoft_mail"})
+DRAFTING_MAIL_TOOLS = frozenset({"google_mail", "microsoft_mail", "imap_mail"})
 
 
 def is_mail_write(tool: str, action: str | None) -> bool:
@@ -1312,7 +1313,7 @@ _ORG_VERBS = (
 # "use google_mail to archive …", "via outlook action=move" — naming the tool
 _ORG_TOOL_RE = re.compile(
     r"\b(?:use|using|call|via|with|through)\s+(?:the\s+)?"
-    r"(?:google_mail|microsoft_mail|gmail|outlook)\b"
+    r"(?:google_mail|microsoft_mail|imap_mail|gmail|outlook|imap)\b"
     r"(?:\s+tool)?(?:\s+action)?[\s=:'\",]*(?:to\s+)?"
     r"(?:(?:un)?archive|label|tag|move|file|sort|star|mark|categori[sz]e|organi[sz]e"
     r"|create_label|create_folder|add_labels|remove_labels|add_categories|remove_categories)\b"
@@ -1578,6 +1579,7 @@ def _mailbox_verb(action: str | None) -> str:
         "archive": "archived", "move": "moved",
         "add_labels": "labeled", "add_categories": "categorized",
         "create_label": "created", "create_folder": "created",
+        "mark_read": "marked as read", "mark_unread": "marked as unread",
     }.get(str(action or ""), "changed")
 
 

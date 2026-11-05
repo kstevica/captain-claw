@@ -142,7 +142,7 @@ MAIL_WRITE_ACTIONS = frozenset({"create_draft", "update_draft", "send", "send_dr
 # MAIL_WRITE_ACTIONS; a test pins the two sets equal).
 MAIL_ORGANIZE_ACTIONS = frozenset({
     "archive", "move", "add_labels", "remove_labels", "create_label",
-    "create_folder", "add_categories", "remove_categories",
+    "create_folder", "add_categories", "remove_categories", "mark_read", "mark_unread",
 })
 
 
@@ -179,7 +179,7 @@ def is_mail_write(spec: dict[str, Any] | None) -> bool:
         return True
     if _is_mcp_mail_write(tool):
         return True
-    if tool not in ("google_mail", "microsoft_mail"):
+    if tool not in ("google_mail", "microsoft_mail", "imap_mail"):
         return False
     if "action" in list(spec.get("required") or []) + list(spec.get("optional") or []):
         return True
@@ -195,7 +195,7 @@ def is_mail_organize(spec: dict[str, Any] | None) -> bool:
         return False
     tool = str(spec.get("tool") or "").strip().lower()
     action = str((spec.get("base_args") or {}).get("action") or "").strip().lower()
-    return tool in ("google_mail", "microsoft_mail") and action in MAIL_ORGANIZE_ACTIONS
+    return tool in ("google_mail", "microsoft_mail", "imap_mail") and action in MAIL_ORGANIZE_ACTIONS
 
 
 def may_propose(spec: dict[str, Any] | None) -> bool:

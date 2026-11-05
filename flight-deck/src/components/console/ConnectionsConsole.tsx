@@ -1,9 +1,11 @@
 import { useEffect, useState, type ComponentType, type ReactNode } from 'react'
 import {
-  Plug, Mail, LayoutGrid, Send, Scale, Mic, Sparkles, MessageCircle, Database, ChevronRight, ChevronLeft, Cable, Smartphone, Bell, Globe,
+  Plug, Mail, LayoutGrid, Send, Scale, Mic, Sparkles, MessageCircle, Database, ChevronRight, ChevronLeft, Cable, Smartphone, Bell, Globe, AtSign,
 } from 'lucide-react'
 import GoogleConnection from '../connections/GoogleConnection'
 import MicrosoftConnection from '../connections/MicrosoftConnection'
+import ImapConnection from '../connections/ImapConnection'
+import { useImapMailStore } from '../../stores/imapMailStore'
 import TelegramConnection from '../connections/TelegramConnection'
 import WhatsAppWebConnection from '../connections/WhatsAppWebConnection'
 import CodexConnection from '../connections/CodexConnection'
@@ -34,7 +36,7 @@ import { Page, PageHeader, Dot } from './parts'
 // own connection. The same cards as Connections and Admin → Integrations; all
 // stay mounted so sign-in popups and half-typed forms survive switching.
 
-type ServiceId = 'google' | 'microsoft' | 'telegram' | 'whatsapp_web' | 'mcp' | 'systems' | 'browser' | 'jev' | 'soniox' | 'codex' | 'antigravity' | 'notify' | 'whatsapp' | 'typesense'
+type ServiceId = 'google' | 'microsoft' | 'email' | 'telegram' | 'whatsapp_web' | 'mcp' | 'systems' | 'browser' | 'jev' | 'soniox' | 'codex' | 'antigravity' | 'notify' | 'whatsapp' | 'typesense'
 
 interface Service {
   id: ServiceId
@@ -48,6 +50,7 @@ interface Service {
 const SERVICES: Service[] = [
   { id: 'google', label: 'Google', hint: 'Gmail, Calendar and Drive — each person signs in with their own account', icon: Mail, everyone: true },
   { id: 'microsoft', label: 'Microsoft 365', hint: 'Outlook, Calendar and OneDrive — each person signs in', icon: LayoutGrid, everyone: true },
+  { id: 'email', label: 'Email (IMAP)', hint: 'Any IMAP/SMTP mailbox with a username and password — each person connects their own, as many as they need', icon: AtSign, everyone: true },
   { id: 'telegram', label: 'Telegram', hint: 'One team bot people talk to their agents through', icon: Send, everyone: true },
   { id: 'whatsapp_web', label: 'WhatsApp Web', hint: 'Each person links their own WhatsApp as a device (unofficial client)', icon: Smartphone, everyone: true },
   { id: 'mcp', label: 'MCP servers', hint: 'Extra tools for agents from MCP servers', icon: Plug, everyone: true },
@@ -75,6 +78,7 @@ function useStatuses(accounts: boolean, oauth: boolean): Partial<Record<ServiceI
   const [out, setOut] = useState<Partial<Record<ServiceId, Status>>>({})
   const mcpShared = useMCPStore((s) => s.servers.filter((x) => x.deck_wide).length)
   const codex = useCodexAuthStore((s) => s.status)
+  const inboxes = useImapMailStore((s) => s.accounts)
 
   useEffect(() => {
     let cancelled = false
@@ -121,6 +125,9 @@ function useStatuses(accounts: boolean, oauth: boolean): Partial<Record<ServiceI
     ...out,
     ...(accounts ? { mcp } : {}),
     ...(codex?.connected && !codex.stale ? { codex: { tone: 'on' as const, text: 'Connected' } } : {}),
+    email: !oauth ? { tone: 'off', text: 'Needs sign-in' }
+      : inboxes?.length ? { tone: 'on', text: `${inboxes.length} of yours connected` }
+        : { tone: 'off', text: 'Available — none of yours yet' },
   }
 }
 
@@ -235,6 +242,7 @@ export function ConnectionsConsole() {
 
           {panel('google', null, <GoogleConnection />)}
           {panel('microsoft', null, <MicrosoftConnection />)}
+          {panel('email', null, <ImapConnection />)}
           {panel('telegram', accounts ? <SharedTelegramBotAdmin /> : null, <TelegramConnection />)}
           {panel('whatsapp_web', null, <WhatsAppWebConnection />)}
           {panel('mcp', accounts ? <SharedMCPServers refreshTick={0} inline /> : null, <><MCPConnection /><MCPAgentAccess /></>)}

@@ -52,7 +52,7 @@ from captain_claw import msg_origin
 from captain_claw.gmail_compose import is_sent_repeat_refusal
 from captain_claw.mail_authority import strip_automated_prefix
 
-MAIL_TOOLS = frozenset({"google_mail", "microsoft_mail"})
+MAIL_TOOLS = frozenset({"google_mail", "microsoft_mail", "imap_mail"})
 SEND_ACTIONS = frozenset({"send", "send_draft"})
 # Correctives per turn for a reply this module turns down, shared by every
 # kind. Bounded like the stall retries, on its own counter: a long false
@@ -2123,6 +2123,7 @@ _ID_BACKSTOP_TAIL = " returned by any tool."
 _LOOKUP_CALLS = (
     ("google_mail", "google_mail search / read_message"),
     ("microsoft_mail", "microsoft_mail search / read_message"),
+    ("imap_mail", "imap_mail search / read_message"),
     ("google_calendar", "google_calendar list_events"),
     ("microsoft_calendar", "microsoft_calendar list_events"),
     ("google_drive", "google_drive search / read"),

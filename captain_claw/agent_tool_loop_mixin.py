@@ -326,7 +326,7 @@ class AgentToolLoopMixin:
         for msg in self.session.messages[turn_start_idx:]:
             if msg.get("role") != "tool":
                 continue
-            if str(msg.get("tool_name", "")).strip().lower() not in ("google_mail", "microsoft_mail"):
+            if str(msg.get("tool_name", "")).strip().lower() not in ("google_mail", "microsoft_mail", "imap_mail"):
                 continue
             args = msg.get("tool_arguments") or {}
             if str(args.get("action", "")).strip().lower() not in (
@@ -1155,6 +1155,7 @@ class AgentToolLoopMixin:
                     "doc_replace_text", "doc_append_text", "doc_insert_text",
                 },
                 "microsoft_mail": {"create_draft", "update_draft"},
+                "imap_mail": {"send", "send_draft", "create_draft", "update_draft"},
                 "microsoft_calendar": {
                     "create_event", "update_event", "delete_event", "respond_event",
                 },
@@ -1175,7 +1176,7 @@ class AgentToolLoopMixin:
             _STATEFUL_TOOLS = {
                 "typesense", "todo", "contacts", "scripts", "apis", "send_mail",
                 "browser", "google_drive", "google_calendar", "google_mail",
-                "microsoft_onedrive", "microsoft_calendar", "microsoft_mail",
+                "microsoft_onedrive", "microsoft_calendar", "microsoft_mail", "imap_mail",
                 "datastore", "crew",
             }
             # During scale-progress tasks, give extra headroom so the LLM
@@ -1657,7 +1658,7 @@ class AgentToolLoopMixin:
                         # action tools whose output is not "data to embed".
                         _DATA_FETCH_TOOLS = frozenset({
                             "google_drive", "google_mail", "google_calendar",
-                            "microsoft_onedrive", "microsoft_mail", "microsoft_calendar",
+                            "microsoft_onedrive", "microsoft_mail", "microsoft_calendar", "imap_mail",
                             "read_file", "scrape", "scrape_url",
                             "web_fetch", "fetch_url", "read", "curl",
                         })
