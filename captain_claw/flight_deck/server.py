@@ -835,6 +835,14 @@ def _reattach_processes():
         pid = entry.get("pid")
         if pid and proc_compat.pid_alive(pid):
             continue  # Still alive — just track it
+        if entry.get("on_for_task"):
+            # Its owner had it off; a scheduled task had it on when Flight
+            # Deck went down. Off it stays — the next task starts it again.
+            entry.pop("on_for_task", None)
+            entry["stopped"] = True
+            entry["pid"] = None
+            skipped.append(slug)
+            continue
         # Process was registered but is dead — restart it. Stagger the
         # launches so concurrent port probes don't race and pick the same
         # fallback port.
@@ -858,6 +866,9 @@ def _reattach_processes():
             fresh[slug] = entry
         else:
             f["pid"] = entry.get("pid")
+            if entry.get("stopped") and f.get("on_for_task"):
+                f.pop("on_for_task", None)
+                f["stopped"] = True
     _save_process_registry(fresh)
     if restarted:
         print(f"Flight Deck: restarted {len(restarted)} process agent(s): {', '.join(restarted)}")
@@ -9944,33 +9955,49 @@ def _do_stop_process(slug: str) -> ProcessActionResult:
     if slug in registry:
         registry[slug]["pid"] = None
         registry[slug]["stopped"] = True
-        # Off is off: no longer asleep (nothing wakes it).
+        # Off is off: no longer asleep (nothing wakes it), nor on for a task.
         registry[slug].pop("asleep", None)
         registry[slug].pop("asleep_at", None)
+        registry[slug].pop("on_for_task", None)
         _save_process_registry(registry)
 
     _processes.pop(slug, None)
     return ProcessActionResult(ok=True, slug=slug, message="Stopped")
 
 
-def _do_start_process(slug: str) -> ProcessActionResult:
-    """Internal helper to start a process agent (no auth check)."""
+def _do_start_process(slug: str, *, for_task: bool = False) -> ProcessActionResult:
+    """Internal helper to start a process agent (no auth check).
+
+    ``for_task``: a scheduled task starts an agent its owner left off, just
+    for its run — marked ``on_for_task`` so the agent controller turns it off
+    again after (agent_idle.release_after_task). Any other start is the
+    owner's: it stays on."""
     registry = _load_process_registry()
     entry = registry.get(slug)
     if not entry:
         raise HTTPException(404, f"Process '{slug}' not found in registry")
 
     if _process_is_alive(slug):
+        if not for_task and entry.get("on_for_task"):
+            # Turned on by its owner while a task had it: it stays on now.
+            entry.pop("on_for_task", None)
+            _save_process_registry(registry)
         return ProcessActionResult(ok=True, slug=slug, message="Already running")
 
     if not (DATA_DIR / slug).is_dir():
         raise HTTPException(404, f"Agent directory not found: {DATA_DIR / slug}")
 
     # Clear stopped flag — user is intentionally starting this agent (or the
-    # idle controller is waking it).
+    # idle controller is waking it, or a scheduled task needs it).
     entry.pop("stopped", None)
     entry.pop("asleep", None)
     entry.pop("asleep_at", None)
+    if for_task:
+        import time as _time
+
+        entry["on_for_task"] = _time.time()
+    else:
+        entry.pop("on_for_task", None)
 
     if not _start_registered_process(slug, entry):
         raise HTTPException(500, "Failed to start process (captain-claw-web not found?)")
@@ -9986,6 +10013,10 @@ def _do_start_process(slug: str) -> ProcessActionResult:
         f.pop("stopped", None)
         f.pop("asleep", None)
         f.pop("asleep_at", None)
+        if "on_for_task" in entry:
+            f["on_for_task"] = entry["on_for_task"]
+        else:
+            f.pop("on_for_task", None)
     _save_process_registry(fresh)
     agent_idle.touch(slug)
 

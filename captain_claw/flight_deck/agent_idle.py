@@ -19,7 +19,9 @@ It wakes:
 * ``WAKE_LEAD_S`` (5 minutes) before something scheduled for it is due: a
   scheduled task of Flight Deck's that prompts it, or a job of its own cron
   (read from its sessions.db). An agent with one due that soon is not put to
-  sleep either;
+  sleep either. A scheduled task never fails for its agent being down: one
+  its owner turned off is started for the run and turned off again after
+  (``ready_for_task`` / ``release_after_task``), one that crashed is started;
 * when something needs it (``wake`` / ``wake_port``): its chat opened or
   written to, a message on a channel bound to it, a member of a shared agent,
   a peer agent, a scheduled run, a team-bot Telegram message.
@@ -53,6 +55,9 @@ log = get_logger(__name__)
 WAKE_LEAD_S = float(os.environ.get("FD_AGENT_IDLE_WAKE_LEAD_S", "300") or 300)
 # How long a woken agent gets to answer on its port.
 WAKE_TIMEOUT_S = 120.0
+# One a scheduled task turned on goes off again once nothing reached it this
+# long (the run's own end turns it off at once, see release_after_task).
+_RELEASE_QUIET_S = 120.0
 # The admin's setting, bounds in minutes (0 = off).
 MIN_IDLE_MINUTES = 10
 MAX_IDLE_MINUTES = 7 * 24 * 60
@@ -206,6 +211,13 @@ async def _wake(slug: str, timeout: float) -> bool:
             log.warning("agent-idle: wake failed", slug=slug, error=str(exc)[:200])
             return False
         touch(slug)
+    return await _until_it_answers(slug, timeout)
+
+
+async def _until_it_answers(slug: str, timeout: float) -> bool:
+    """Wait for a just-started ``slug`` to answer on its port."""
+    srv = _srv()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
     while loop.time() < deadline:
         # Re-read: one whose port was taken comes back on another and announces it.
@@ -262,6 +274,134 @@ def wake_soon(slug: str) -> None:
         return
     try:
         task = asyncio.ensure_future(wake(slug))
+    except RuntimeError:
+        return
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+
+
+# ── On for a scheduled task ───────────────────────────────────────────
+#
+# A scheduled task never fails for its agent being down. Asleep, it is woken;
+# down without being turned off (it crashed, or didn't come back), it is
+# started; turned off by its owner, it is started for the run — marked
+# ``on_for_task`` in the registry — and turned off again once the run is over
+# and nothing else is due soon. Its owner turning it on meanwhile keeps it on.
+
+
+def is_on_for_task(slug: str, entry: dict | None = None) -> bool:
+    """Running only because a scheduled task needs it (its owner left it off)."""
+    if entry is None:
+        entry = _srv()._load_process_registry().get(slug)
+    return bool(entry and entry.get("on_for_task") and not entry.get("stopped"))
+
+
+async def _start_for_task(slug: str, timeout: float) -> bool:
+    srv = _srv()
+    loop = asyncio.get_running_loop()
+    async with _lock(slug):
+        entry = srv._load_process_registry().get(slug)
+        if not entry:
+            return False
+        if not srv._process_is_alive(slug):
+            off = bool(entry.get("stopped"))
+            log.info("agent-idle: starting for a scheduled task", slug=slug,
+                     was="off" if off else ("asleep" if entry.get("asleep") else "down"))
+            try:
+                await loop.run_in_executor(
+                    None, lambda: srv._do_start_process(slug, for_task=off))
+            except Exception as exc:
+                log.warning("agent-idle: start for a task failed", slug=slug, error=str(exc)[:200])
+                return False
+        touch(slug)
+    return await _until_it_answers(slug, timeout)
+
+
+async def ready_for_task(slug: str, timeout: float = WAKE_TIMEOUT_S) -> bool:
+    """Make sure ``slug`` answers before a scheduled task prompts it: woken if
+    asleep, started if down — for the run only if its owner turned it off.
+    True when it answers on its port."""
+    if not slug:
+        return False
+    if slug in _sleeping:
+        async with _lock(slug):
+            pass
+    srv = _srv()
+    if slug in _waking or is_asleep(slug):
+        if await wake(slug, timeout):
+            return True
+    if srv._process_is_alive(slug):
+        entry = srv._load_process_registry().get(slug) or {}
+        port = int(entry.get("web_port") or 0)
+        if port and await _answers(port, str(entry.get("web_auth") or "")):
+            touch(slug)
+            return True
+        # Up but not answering yet (just started by someone else): wait for it.
+        return await _until_it_answers(slug, timeout)
+    task = _waking.get(slug)
+    if task is None:
+        task = asyncio.ensure_future(_start_for_task(slug, timeout))
+        _waking[slug] = task
+        task.add_done_callback(lambda _t, s=slug: _waking.pop(s, None))
+    try:
+        return await asyncio.shield(task)
+    except Exception:
+        return False
+
+
+def _turn_off_after_task(slug: str) -> bool:
+    """Back to off, as its owner left it (blocking: the kill waits)."""
+    srv = _srv()
+    if not is_on_for_task(slug):
+        return False
+    srv._do_stop_process(slug)
+    return True
+
+
+async def release_after_task(slug: str, quiet_s: float = 0.0, now: float | None = None) -> bool:
+    """A scheduled task started ``slug`` while its owner had it off; turn it
+    off again — unless another scheduled run is in flight or due within
+    ``WAKE_LEAD_S``, it is mid-turn, or (``quiet_s``) something reached it
+    that recently. True when it went off."""
+    if not slug or not is_on_for_task(slug):
+        return False
+    now = time.time() if now is None else now
+    if quiet_s and now - last_active(slug) < quiet_s:
+        return False
+    if _scheduler_run_in_flight(slug):
+        return False
+    due = _scheduler_next_runs().get(slug)
+    if due is not None and due - now <= WAKE_LEAD_S + _tick_seconds():
+        return False
+    entry = _srv()._load_process_registry().get(slug) or {}
+    activity = await _agent_activity(entry)
+    if activity is not None and activity.get("busy"):
+        touch(slug)
+        return False
+    async with _lock(slug):
+        if _scheduler_run_in_flight(slug):
+            return False
+        # A run arriving now waits for it to be down, then starts it again.
+        _sleeping.add(slug)
+        loop = asyncio.get_running_loop()
+        try:
+            done = await loop.run_in_executor(None, _turn_off_after_task, slug)
+        except Exception as exc:
+            log.warning("agent-idle: turning off after a task failed", slug=slug, error=str(exc)[:200])
+            return False
+        finally:
+            _sleeping.discard(slug)
+    if done:
+        log.info("agent-idle: off again after its scheduled task", slug=slug)
+    return done
+
+
+def release_after_task_soon(slug: str) -> None:
+    """``release_after_task`` without waiting for it (a run just ended)."""
+    if not is_on_for_task(slug):
+        return
+    try:
+        task = asyncio.ensure_future(release_after_task(slug))
     except RuntimeError:
         return
     _BACKGROUND.add(task)
@@ -385,7 +525,8 @@ def _scheduler_run_in_flight(slug: str) -> bool:
         from captain_claw.flight_deck.fd_scheduler import _AGENT_LOCKS
 
         lock = _AGENT_LOCKS.get(slug)
-        return bool(lock and lock.locked())
+        # Waiters too: another run is next in line for it.
+        return bool(lock and (lock.locked() or getattr(lock, "_waiters", None)))
     except Exception:
         return False
 
@@ -481,26 +622,45 @@ async def _agent_activity(entry: dict) -> dict | None:
 
 
 async def tick(now: float | None = None) -> dict[str, list[str]]:
-    """One pass: wake who is due, put the idle to sleep. Returns what it did."""
+    """One pass: wake or start who is due, put the idle to sleep, turn off
+    again who a scheduled task had on. Returns what it did."""
     srv = _srv()
     now = time.time() if now is None else now
-    done: dict[str, list[str]] = {"woke": [], "slept": []}
+    done: dict[str, list[str]] = {"woke": [], "slept": [], "started": [], "off": []}
     idle_s = await idle_seconds()
-    if idle_s is None:
-        return done
     registry = srv._load_process_registry()
     scheduled = _scheduler_next_runs()
-    for slug, entry in registry.items():
+    for slug, entry in list(registry.items()):
         if entry.get("stopped"):
+            # Off by its owner, with a scheduled task due: on for the run.
+            due = scheduled.get(slug)
+            if due is not None and due - now <= WAKE_LEAD_S and not srv._process_is_alive(slug):
+                if await ready_for_task(slug):
+                    done["started"].append(slug)
+            continue
+        if is_on_for_task(slug, entry):
+            if srv._process_is_alive(slug) and await release_after_task(
+                    slug, quiet_s=_RELEASE_QUIET_S, now=now):
+                done["off"].append(slug)
             continue
         if is_asleep(slug, entry):
+            if idle_s is None:
+                continue  # the setting couldn't be read: nothing changes now
             due = next_due(slug, scheduled)
             # Turned off: what it put to sleep runs again.
             if not idle_s or (due is not None and due - now <= WAKE_LEAD_S):
                 if await wake(slug):
                     done["woke"].append(slug)
             continue
-        if not idle_s or not srv._process_is_alive(slug) or exempt(slug, entry):
+        if not srv._process_is_alive(slug):
+            # Down without being turned off (it crashed, or didn't come back
+            # after a restart), with a scheduled task due: up again for it.
+            due = scheduled.get(slug)
+            if due is not None and due - now <= WAKE_LEAD_S and entry.get("web_port"):
+                if await ready_for_task(slug):
+                    done["started"].append(slug)
+            continue
+        if not idle_s or exempt(slug, entry):
             continue
         if now - last_active(slug) < idle_s or slug in _waking:
             continue

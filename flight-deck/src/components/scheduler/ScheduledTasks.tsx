@@ -21,6 +21,7 @@ import {
   Play,
   Plug,
   Plus,
+  Power,
   Search,
   Send,
   Sparkles,
@@ -118,7 +119,8 @@ export function ScheduledTasks({
 
   const agents: AgentChoice[] = useMemo(() => processes
     .filter((p) => !isManagedAgent(p.slug, p.description || ''))
-    .map((p) => ({ slug: p.slug, name: p.name || p.slug, running: p.status === 'running' }))
+    // Asleep is on: it wakes for its runs.
+    .map((p) => ({ slug: p.slug, name: p.name || p.slug, running: p.status === 'running' || !!p.asleep }))
     .sort((a, b) => Number(b.running) - Number(a.running) || a.name.localeCompare(b.name)), [processes])
   const agentName = useCallback((slug: string) => agents.find((a) => a.slug === slug)?.name || slug, [agents])
 
@@ -687,7 +689,7 @@ function TaskDetail({ job, agentName, agentRunning, query, onEdit, onDeleted, on
             onClick={() => act('run', () => schedulerApi.runNow(job.id), 'Could not run the task')}
             disabled={!!busy || job.running}
             className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm font-medium text-zinc-200 transition-colors hover:border-violet-500/50 hover:bg-zinc-800 disabled:opacity-50"
-            title={agentRunning ? 'Run it once now (the schedule stays as it is)' : 'The agent is off — power it on first'}
+            title={agentRunning ? 'Run it once now (the schedule stays as it is)' : 'Run it once now — the agent is turned on for the run and off again after'}
           >
             {busy === 'run' || job.running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
             {job.running ? 'Running…' : 'Run now'}
@@ -727,9 +729,9 @@ function TaskDetail({ job, agentName, agentRunning, query, onEdit, onDeleted, on
       </div>
 
       {!agentRunning && !paused && (
-        <p className="mt-3 flex items-start gap-2 rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-300">
-          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          {agentName} is off. Tasks only run while their agent is on — power it on in the agent list.
+        <p className="mt-3 flex items-start gap-2 rounded-lg bg-zinc-800/60 px-3 py-2 text-xs text-zinc-400">
+          <Power className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {agentName} is off. It is turned on a few minutes before each run and off again after.
         </p>
       )}
 
@@ -892,7 +894,7 @@ function TaskEditor({ job, template, agents, defaultAgent, options, onOpenConnec
             </div>
           )}
           {agent && !agents.find((a) => a.slug === agent)?.running && agents.length > 0 && (
-            <p className="mt-1.5 text-[11px] text-amber-700 dark:text-amber-400">This agent is off — it has to be on when the task runs.</p>
+            <p className="mt-1.5 text-[11px] text-zinc-500">This agent is off — it is turned on for each run and off again after.</p>
           )}
         </section>
 

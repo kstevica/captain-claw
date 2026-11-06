@@ -1276,13 +1276,15 @@ async def execute_job(job: dict[str, Any], *, force: bool = False) -> tuple[str,
     slug = str(job.get("agent_slug") or "")
     if not await _owner_may_use_agent(str(job.get("owner_id") or ""), slug):
         return ("error:agent-not-yours", f"agent '{slug}' belongs to someone else")
-    # Asleep for being idle and not woken ahead (the task was made or run just
-    # now, or Flight Deck restarted): wake it for the run (agent_idle).
+    # Never fails for its agent being down (agent_idle): asleep, it is woken;
+    # off by its owner, it is started for this run and goes off again after;
+    # crashed, it is started. Usually done 5 minutes ahead — this covers a
+    # task made or run just now, and a Flight Deck restart.
     agent_idle.touch(slug)
-    await agent_idle.wake(slug)
+    await agent_idle.ready_for_task(slug)
     host, port, auth = resolve_agent_by_slug(slug, str(job.get("agent_auth") or ""))
     if not port:
-        return ("error:agent-not-running", f"agent slug '{slug}' not running")
+        return ("error:agent-not-running", f"agent '{slug}' could not be started for the run")
 
     # The turn is automated: it may write email only when the job's own
     # human-written prompt asks for it (judged on the raw prompt, no preamble).
@@ -1391,6 +1393,9 @@ async def run_job(
     finally:
         _RUN_REPORT.reset(token)
         _IN_FLIGHT.discard(jid)
+        if job.get("agent_slug") and not job.get("flow_id"):
+            # Started just for this run (its owner had it off): off again.
+            agent_idle.release_after_task_soon(str(job["agent_slug"]))
         session_id = str(report.get("session_id") or "")
         store.finish_run(run_id, status=status, result=result,
                          deliveries=report.get("deliveries") or [], session_id=session_id)

@@ -287,7 +287,7 @@ export function runTone(status: string): RunTone {
 
 /** A failed run's status as the person would want to read it. */
 export function explainStatus(status: string): string {
-  if (status.startsWith('error:agent-not-running')) return 'The agent was off, so the task could not run. Power it on, then use Run now.'
+  if (status.startsWith('error:agent-not-running')) return 'The agent could not be started for this run. Check it in the agent list, then use Run now.'
   if (status.startsWith('error:agent-not-yours')) return 'This agent belongs to someone else.'
   if (status.startsWith('error:no-reply')) return 'The agent did not answer in time.'
   if (status.startsWith('error:interrupted')) return 'Flight Deck restarted while this ran.'
