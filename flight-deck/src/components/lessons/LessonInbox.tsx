@@ -306,6 +306,9 @@ const LEARNED_SHOWN = 5
 export function LessonInboxDialog() {
   const data = useLessonInbox((s) => s.data)
   const focus = useLessonInbox((s) => s.focus)
+  // Opened from one agent's menu: its lessons only, until "See every agent's".
+  const scopeName = useLessonInbox((s) => s.scopeName)
+  const widen = useLessonInbox((s) => s.widen)
   const hide = useLessonInbox((s) => s.hide)
   const refresh = useLessonInbox((s) => s.refresh)
   // Settled here and not refreshed yet: hidden right away, so the list never jumps back.
@@ -318,9 +321,12 @@ export function LessonInboxDialog() {
   const [allLearned, setAllLearned] = useState(false)
   const sections = useRef<Record<string, HTMLElement | null>>({})
 
-  const agents = useMemo(() => (data?.agents ?? []).map((a) => ({
+  const every = useMemo(() => (data?.agents ?? []).map((a) => ({
     ...a, waiting: a.waiting.filter((p) => !settled.has(`${a.slug}/${p.id}`)),
   })), [data, settled])
+  const agents = useMemo(() => (scopeName ? every.filter((a) => a.slug === focus) : every), [every, scopeName, focus])
+  // Waiting on the other agents, while only one agent's show.
+  const elsewhere = scopeName ? every.filter((a) => a.slug !== focus).reduce((n, a) => n + a.waiting.length, 0) : 0
   const withWaiting = agents.filter((a) => a.waiting.length)
   const waiting = withWaiting.reduce((n, a) => n + a.waiting.length, 0)
   const learned = useMemo(() => agents.flatMap((a) => a.learned.map((p) => ({ agent: a, p })))
@@ -386,8 +392,13 @@ export function LessonInboxDialog() {
             <GraduationCap className="h-[18px] w-[18px]" />
           </span>
           <div className="min-w-0 flex-1">
-            <h3 className="truncate text-base font-semibold text-zinc-100">Lessons to approve</h3>
-            <p className="truncate text-xs text-zinc-500">What your agents noticed in your chats. Nothing is learned until you approve it.</p>
+            <h3 className="truncate text-base font-semibold text-zinc-100">
+              Lessons to approve{scopeName ? <span className="font-normal text-zinc-500"> · {scopeName}</span> : null}
+            </h3>
+            <p className="truncate text-xs text-zinc-500">
+              {scopeName ? `What ${scopeName} noticed in your chats.` : 'What your agents noticed in your chats.'} Nothing is learned
+              until you approve it.
+            </p>
           </div>
           <button onClick={hide} aria-label="Close" title="Close" className="rounded-lg p-2 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
             <X className="h-5 w-5" />
@@ -445,10 +456,12 @@ export function LessonInboxDialog() {
               <span className="flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
                 <CheckCheck className="h-6 w-6" />
               </span>
-              <p className="text-base font-semibold text-zinc-100">You’re all caught up</p>
+              <p className="text-base font-semibold text-zinc-100">
+                {scopeName ? `Nothing from ${scopeName} waits for you` : 'You’re all caught up'}
+              </p>
               <p className="text-sm leading-relaxed text-zinc-500">
-                When you correct an agent in a chat — “too long”, “always CC Marko”, “ask me before booking” — it suggests a
-                lesson here. Approve it, and it follows it from then on.
+                When you correct {scopeName || 'an agent'} in a chat — “too long”, “always CC Marko”, “ask me before booking” —
+                it suggests a lesson here. Approve it, and it follows it from then on.
               </p>
             </div>
           ) : (
@@ -478,6 +491,15 @@ export function LessonInboxDialog() {
                   </section>
                 )
               })}
+            </div>
+          )}
+
+          {scopeName && elsewhere > 0 && (
+            <div className="mt-6 flex justify-center">
+              <button onClick={widen}
+                className="rounded-lg border border-zinc-700 px-3.5 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800">
+                See every agent’s · {lessonsWord(elsewhere)} more
+              </button>
             </div>
           )}
 
