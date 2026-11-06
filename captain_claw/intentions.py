@@ -285,7 +285,10 @@ class IntentionsManager:
         marks = ", ".join("?" for _ in row)
         await db.execute(f"INSERT INTO intentions ({cols}) VALUES ({marks})", tuple(row.values()))
         await db.commit()
-        return _row_to_dict(row)
+        out = _row_to_dict(row)
+        if out.get("status") == "active":
+            _mirror_intention(out)
+        return out
 
     async def get(self, intention_id: str) -> dict[str, Any] | None:
         db = await self._ensure_db()
@@ -381,6 +384,10 @@ class IntentionsManager:
             f"UPDATE intentions SET {', '.join(sets)} WHERE id = ?", params
         )
         await db.commit()
+        if cur.rowcount > 0 and fields.get("status") == "active":
+            row = await self.get(intention_id)
+            if row:
+                _mirror_intention(row)
         return cur.rowcount > 0
 
     async def set_status(self, intention_id: str, status: str, **extra: Any) -> bool:
@@ -464,6 +471,27 @@ class IntentionsManager:
 
 
 # ── row parsing ───────────────────────────────────────────────────────
+
+
+def _mirror_intention(it: dict[str, Any]) -> None:
+    """An intention that is now active goes into the owner's external memory
+    (when one is connected in Flight Deck) — once per intention."""
+    try:
+        from captain_claw import external_memory_client
+
+        trigger = ""
+        spec = it.get("trigger_spec")
+        if isinstance(spec, dict):
+            trigger = str(spec.get("at") or spec.get("when") or spec.get("cron") or "")
+        external_memory_client.mirror(
+            "intention", str(it.get("id") or ""), str(it.get("title") or ""),
+            tags=it.get("tags") or "", created_at=str(it.get("created_at") or ""),
+            meta={"category": str(it.get("category") or ""), "why": str(it.get("why") or ""),
+                  "body": str(it.get("body") or ""), "status": trigger and f"active, {trigger}" or "active",
+                  "source": "the person" if it.get("origin") == "user" else "proposed by the agent, approved"},
+        )
+    except Exception:
+        log.debug("intention mirror not scheduled", exc_info=True)
 
 
 def _parse_json_fields(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:

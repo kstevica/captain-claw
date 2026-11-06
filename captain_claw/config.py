@@ -672,6 +672,7 @@ class ToolsConfig(BaseModel):
         "microsoft_mail",
         "imap_mail",
         "jev",
+        "external_memory",
         "audio",
         "telegram_inbox",
         "whatsapp_web",
@@ -774,6 +775,9 @@ class ToolsConfig(BaseModel):
         # be silently unable to see its own long-term memory; when Flight Deck
         # has no connection configured, FD says so in the tool's error instead.
         "typesense",
+        # The person's external memory (Membase, …) lives in Flight Deck and is
+        # shared by all of their agents; hidden until they connect one.
+        "external_memory",
     })
 
     @model_validator(mode="after")

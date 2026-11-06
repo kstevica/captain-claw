@@ -231,6 +231,13 @@ class NervousSystemManager:
         await self._db.commit()
         log.debug("Intuition stored", id=intuition_id, thread_type=thread_type,
                    maturation=maturation_state)
+        # Into the owner's external memory too, only if they turned intuitions on.
+        from captain_claw import external_memory_client
+
+        external_memory_client.mirror(
+            "intuition", intuition_id, content, tags=tags, created_at=now,
+            meta={"category": thread_type, "status": f"confidence {confidence:.2f}"},
+        )
 
         # Record metric for tensions.
         if thread_type == "unresolved":

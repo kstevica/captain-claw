@@ -608,6 +608,11 @@ async def handle_ws_message(
             except Exception:
                 pass
             try:
+                from captain_claw import external_memory_client
+                await external_memory_client.refresh()
+            except Exception:
+                pass
+            try:
                 from captain_claw import soniox_client
                 await soniox_client.available()
             except Exception:

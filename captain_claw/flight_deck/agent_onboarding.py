@@ -176,7 +176,35 @@ async def teach_one(slug: str, user: dict, request: Request, kind: str, text: st
     else:
         record, _ = agent_lessons.taught(record, "fact", text, taught_by=taught_by, layer=layer)
     log.info("agent lessons: one added", agent=slug, kind=kind, layer=layer or "own", taught_by=taught_by)
-    return await _save(slug, owner_id, agent_dir, workspace, record, locked)
+    out = await _save(slug, owner_id, agent_dir, workspace, record, locked)
+    await _mirror_lessons(owner_id, slug, [(kind, text)], taught_by)
+    return out
+
+
+async def _mirror_lessons(owner_id: str, slug: str, lessons: list[tuple[str, str]], taught_by: str) -> None:
+    """Copy newly taught lessons into the owner's external memory (when one
+    is connected and lessons are mirrored). Never fails the teaching."""
+    try:
+        from datetime import UTC, datetime
+
+        from captain_claw.flight_deck import server as srv
+        from captain_claw.flight_deck.external_memory import service as em
+        from captain_claw.flight_deck.external_memory.base import MemoryItem
+
+        name = str((srv._load_process_registry().get(slug) or {}).get("name") or slug)
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        labels = {"rule": "rule", "ask_first": "ask first", "fact": "fact"}
+        for kind, text in lessons:
+            await em.mirror_for_owner(owner_id, MemoryItem(
+                kind="lesson",
+                source_id=f"{slug}:{agent_lessons.lesson_id(kind, text)}",
+                content=text,
+                agent=name,
+                created_at=now,
+                meta={"category": labels.get(kind, kind), "source": f"taught by {taught_by}"},
+            ))
+    except Exception:
+        log.debug("agent lessons: external memory mirror failed", exc_info=True)
 
 
 async def teach_rules(slug: str, user: dict, request: Request, rules: list[str], *, source: str) -> dict:
@@ -198,7 +226,10 @@ async def teach_rules(slug: str, user: dict, request: Request, rules: list[str],
     if not added:
         return {"added": 0}
     log.info("agent lessons: rules taught from a Captain Swarm run", agent=slug, added=added)
-    return {**await _save(slug, owner_id, agent_dir, workspace, record, locked), "added": added}
+    out = {**await _save(slug, owner_id, agent_dir, workspace, record, locked), "added": added}
+    taught = [("rule", str(i.get("text") or "")) for i in (record.get(_GROUP["rule"]) or [])[:added]]
+    await _mirror_lessons(owner_id, slug, [t for t in taught if t[1]], "swarm")
+    return out
 
 
 class LessonPatch(BaseModel):

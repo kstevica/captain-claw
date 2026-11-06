@@ -202,6 +202,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     # Jev-first: judgments come up in any task and any language, so the schema
     # is always sent; the registry still hides jev until the owner has a key.
     "jev",
+    # "Remember that" / "what do you know about…" come in any language, and the
+    # memory is shared by all of the owner's agents; hidden until one is connected.
+    "external_memory",
     # The owner's Telegram: "what's new?" comes in any language. Hidden by the
     # registry unless the owner keeps a Telegram inbox.
     "telegram_inbox",
@@ -2359,6 +2362,12 @@ class AgentOrchestrationMixin:
                 try:
                     from captain_claw import jev_client
                     await jev_client.refresh_connected()
+                except Exception:
+                    pass
+                # The external memory too (owner-only; rate-limited inside).
+                try:
+                    from captain_claw import external_memory_client
+                    await external_memory_client.refresh()
                 except Exception:
                     pass
                 # Soniox: is there a key for the audio tool (the owner's in

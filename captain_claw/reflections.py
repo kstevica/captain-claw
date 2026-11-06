@@ -182,6 +182,20 @@ def save_reflection(r: Reflection) -> Path:
     except OSError:
         _cached_mtime = 0.0
 
+    # Into the owner's external memory too, when one is connected and
+    # reflections are mirrored (off unless the person turns them on).
+    try:
+        from captain_claw import external_memory_client
+
+        external_memory_client.mirror(
+            "reflection", r.timestamp or filename, r.summary,
+            title=f"how to work better ({(r.timestamp or '')[:10]})".strip(),
+            created_at=r.timestamp,
+            meta={"source": ("topics: " + ", ".join(r.topics_reviewed[:8])) if r.topics_reviewed else ""},
+        )
+    except Exception:
+        pass
+
     return path
 
 
