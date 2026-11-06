@@ -29,6 +29,7 @@ import {
   ListChecks,
   SlidersHorizontal,
   Trash2,
+  BookCheck,
   BookOpen,
   GraduationCap,
   ShieldCheck,
@@ -47,6 +48,7 @@ import { useUIStore } from '../../stores/uiStore'
 import { openConsole, leaveKioskView, selectConsoleAdmin } from '../../stores/consoleStore'
 import { isAppShell, hasAndroidAppSettings, openAndroidAppSettings } from '../../services/desktopShell'
 import { useAgentStore } from '../../stores/agentStore'
+import { useLessonInbox } from '../../stores/lessonInboxStore'
 import { useAuthStore, logoutUser } from '../../stores/authStore'
 import { useChatStore, parseLaneKey, clearAgentSlices } from '../../stores/chatStore'
 import { useNotificationStore } from '../../stores/notificationStore'
@@ -278,6 +280,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // An agent's knowledge, to browse (its ⋯ menu → Knowledge).
   // An agent's onboarding page; Way of working opened from it comes back to it when it closes.
   const [onboardingFor, setOnboardingFor] = useState<{ slug: string; name: string; tab: OnboardingTab } | null>(null)
+  // Lessons to approve: what each agent noticed in the owner's chats (its menu shows its count).
+  const lessonInbox = useLessonInbox((s) => s.data)
+  const showLessons = useLessonInbox((s) => s.show)
   const [setupBack, setSetupBack] = useState<{ slug: string; name: string; tab: OnboardingTab } | null>(null)
   // Agents just spawned or powered on: Flight Deck lists one as running the
   // moment it launches, seconds before its web server binds — a chat opened
@@ -749,6 +754,12 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       if (a.kind === 'process') {
         items.push({ icon: GraduationCap, label: 'Onboarding', hint: 'Its documents, the lessons it was taught, and how well it knows them',
           tone: 'fuchsia', onSelect: () => setOnboardingFor({ slug: a.startKey, name: a.name, tab: 'overview' }) })
+        // What it noticed in your chats, waiting for your yes — only its own (Lessons to approve, scoped).
+        const waitingLessons = lessonInbox?.agents.find((x) => x.slug === a.startKey)?.waiting.length ?? 0
+        items.push({ icon: BookCheck, label: 'Lessons to approve', tone: waitingLessons ? 'amber' : 'violet',
+          hint: waitingLessons ? `${waitingLessons} ${waitingLessons === 1 ? 'lesson waits' : 'lessons wait'} for you — noticed in your chats`
+            : 'What it noticed in your chats, for you to approve',
+          onSelect: () => showLessons(a.startKey, { name: a.name }) })
       }
       items.push(
         { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', tone: 'zinc', onSelect: () => setAgentSettingsId(a.id) },
