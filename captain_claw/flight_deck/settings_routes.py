@@ -38,7 +38,7 @@ PROVIDER_KEYS_SETTING = "fd:provider-keys"
 # sending policies and signatures — written only through /fd/imap.
 _SERVER_OWNED_PREFIXES = (
     "google_oauth:", "microsoft_oauth:", "fd:tenant-profile", "fd:shared-agent-",
-    "jev:", "soniox:", "byok:", "crew:", "imap_mail:",
+    "jev:", "soniox:", "byok:", "crew:", "imap_mail:", "external_memory:",
 )
 
 

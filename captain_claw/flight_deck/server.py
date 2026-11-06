@@ -1168,6 +1168,11 @@ async def lifespan(app: FastAPI):
     _audit_stop = asyncio.Event()
     app.state.tool_audit_stop = _audit_stop
     app.state.tool_audit_task = asyncio.create_task(tool_audit_routes.retention_loop(_audit_stop))
+    # ── External memory: mirrored insights / intentions / lessons are written
+    # to each user's provider (Membase, …) from a durable outbox. ──
+    _em_stop = asyncio.Event()
+    app.state.external_memory_stop = _em_stop
+    app.state.external_memory_task = asyncio.create_task(external_memory_service.drain_loop(_em_stop))
     # ── Spend ledger: the agents' LLM calls read in every 15 min (usage_spend). ──
     _spend_stop = asyncio.Event()
     app.state.usage_spend_stop = _spend_stop
@@ -1519,6 +1524,16 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(app.state.usage_spend_task, timeout=5.0)
         except Exception:
             pass
+    if hasattr(app.state, "external_memory_stop"):
+        app.state.external_memory_stop.set()
+        try:
+            await asyncio.wait_for(app.state.external_memory_task, timeout=5.0)
+        except (TimeoutError, asyncio.CancelledError, Exception):
+            pass
+    try:
+        await external_memory_service.close()
+    except Exception:
+        pass
     if hasattr(app.state, "tool_audit_stop"):
         app.state.tool_audit_stop.set()
         try:
@@ -1769,6 +1784,8 @@ from captain_claw.flight_deck.gmail_autoreply_routes import router as gmail_auto
 from captain_claw.flight_deck.microsoft_oauth_routes import router as microsoft_oauth_router
 from captain_claw.flight_deck.imap_routes import router as imap_router
 from captain_claw.flight_deck.jev_routes import router as jev_router
+from captain_claw.flight_deck.external_memory.routes import router as external_memory_router
+from captain_claw.flight_deck.external_memory import service as external_memory_service
 from captain_claw.flight_deck.soniox_routes import router as soniox_router
 from captain_claw.flight_deck.telegram_shared_routes import router as telegram_shared_router
 from captain_claw.flight_deck.telegram_inbox_routes import router as telegram_inbox_router
@@ -1811,6 +1828,7 @@ from captain_claw.flight_deck.delivery_routes import router as delivery_router
 from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.file_library import router as file_library_router
 from captain_claw.flight_deck.data_library import router as data_library_router
+from captain_claw.flight_deck import colleagues as colleagues_routes
 from captain_claw.flight_deck import (
     taskboard,
     taskboard_backfill,
@@ -1888,6 +1906,7 @@ app.include_router(gmail_autoreply_router)
 app.include_router(microsoft_oauth_router)
 app.include_router(imap_router)
 app.include_router(jev_router)
+app.include_router(external_memory_router)
 app.include_router(soniox_router)
 app.include_router(telegram_shared_router)
 app.include_router(telegram_inbox_router)
@@ -1956,6 +1975,9 @@ app.include_router(taskboard_handover.router)
 app.include_router(taskboard_nextsteps.router)
 app.include_router(taskboard_threads.router)
 app.include_router(taskboard_backfill.router)
+# Colleagues: agents' identities and own inboxes, and handing each other work
+# on the Taskboard (colleagues.py; the mail watcher is agent_mail.py).
+app.include_router(colleagues_routes.router)
 app.include_router(agent_skills_router)
 app.include_router(agent_preset.router)
 app.include_router(agent_knowledge.router)
@@ -1994,6 +2016,7 @@ app.include_router(payments_routes.router)
 app.include_router(payments_routes.public_router)
 # Tool-call register: every tool call the agents make (tool_audit_routes.py).
 tool_audit_routes.configure(data_dir=DATA_DIR)
+external_memory_service.configure(data_dir=DATA_DIR)
 app.include_router(tool_audit_routes.router)
 app.include_router(agent_sharing_router)
 app.include_router(context_pack_router)
@@ -5881,10 +5904,18 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
             # A chat message counts against the speaker's plan allowance for
             # today; over it, the turn is refused and the client told why.
             ok, reply = await usage_quota.screen_chat_frame(speaker_id, data)
-            if reply is not None:
-                await ws.send_text(json.dumps(reply))
+            # The agent first: a message the person wrote goes even when their
+            # socket closes right after it (the chat drops its held copy once
+            # the replay shows the agent took it).
             if ok:
                 await agent_ws.send(_client_frame(data))
+            if reply is not None:
+                try:
+                    await ws.send_text(json.dumps(reply))
+                except Exception:
+                    pass  # the chat is gone; the next receive ends the socket
+
+        who = agent or f"{host}:{port}"
 
         async def client_to_agent():
             nonlocal from_client
@@ -5898,16 +5929,25 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
                     if msg.get("text") is not None:
                         await forward(msg["text"])
                     from_client = asyncio.create_task(ws.receive())
-            except Exception:
-                pass
+            except Exception as exc:
+                # The chat's frame didn't reach the agent and the socket closes:
+                # the chat holds what it sent and sends it again on its next
+                # socket. Said once per socket, so a lost message has a reason.
+                log.info("agent-ws: a chat frame couldn't go to the agent — closing the chat socket",
+                         agent=who, error=f"{type(exc).__name__}: {exc}"[:200])
 
         async def agent_to_client():
             try:
                 async for msg in agent_ws:
                     agent_idle.touch(slug)
                     await ws.send_text(msg if isinstance(msg, str) else msg.decode())
-            except Exception:
-                pass
+            except Exception as exc:
+                log.info("agent-ws: the chat link to the agent broke — closing the chat socket",
+                         agent=who, error=f"{type(exc).__name__}: {exc}"[:200])
+                return
+            # The agent closed it (a restart, sleep): the chat reconnects.
+            log.info("agent-ws: the agent closed the chat link — closing the chat socket",
+                     agent=who, code=getattr(agent_ws, "close_code", None))
 
         done, pending = await asyncio.wait(
             [asyncio.create_task(client_to_agent()), asyncio.create_task(agent_to_client())],

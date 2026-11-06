@@ -12,6 +12,7 @@ import {
   Info,
   LibraryBig,
   Loader2,
+  Mail,
   MoreHorizontal,
   RotateCw,
   SlidersHorizontal,
@@ -22,6 +23,7 @@ import {
   X,
 } from 'lucide-react'
 import { IntentionsPanel } from '../agents/IntentionsPanel'
+import { AgentMailSetting } from '../agents/AgentMailSetting'
 import { KioskInsightsPanel } from './KioskAgentInsights'
 import { MenuSheet, type MenuItem } from './KioskMenuSheet'
 import { KioskSkillsPanel } from './KioskAgentSkills'
@@ -145,6 +147,9 @@ const DIALOG_SIZE = {
   lg: 'h-[100dvh] wide:h-[88vh] wide:max-w-5xl wide:border wide:border-zinc-800',
 }
 
+// The open AgentDialogs, oldest first: Esc goes to the last one.
+const ESC_STACK: symbol[] = []
+
 export function AgentDialog({ title, icon: Icon, agentName, size = 'sm', onClose, children }: {
   title: string
   icon: typeof Info
@@ -153,16 +158,26 @@ export function AgentDialog({ title, icon: Icon, agentName, size = 'sm', onClose
   onClose: () => void
   children: ReactNode
 }) {
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
   useEffect(() => {
+    // One Esc closes one dialog: the one opened last (a dialog opened from
+    // inside another, e.g. Identity & email from Agent settings → Email).
+    const me = Symbol('agent-dialog')
+    ESC_STACK.push(me)
     const onKey = (e: KeyboardEvent) => {
-      if (e.key !== 'Escape') return
+      if (e.key !== 'Escape' || ESC_STACK[ESC_STACK.length - 1] !== me) return
       // Wait for every listener: a file viewer, public link dialog or table
       // open inside (Files & data) marks the Esc it used to close itself.
-      setTimeout(() => { if (!e.defaultPrevented) onClose() }, 0)
+      setTimeout(() => { if (!e.defaultPrevented) closeRef.current() }, 0)
     }
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      const i = ESC_STACK.indexOf(me)
+      if (i >= 0) ESC_STACK.splice(i, 1)
+    }
+  }, [])
 
   return createPortal(
     <div
@@ -552,6 +567,13 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                 </div>
                 <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">{current.description}</p>
               </section>
+              {kind === 'process' && (
+                // The email meant for it (colleagues.py): saved at once, no restart.
+                <section>
+                  <SectionTitle icon={Mail} title="Email" saving={false} />
+                  <AgentMailSetting slug={key} agentName={agent.name} compact />
+                </section>
+              )}
             </div>
           </div>
         )}

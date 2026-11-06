@@ -60,7 +60,11 @@ CHANNEL_LABELS = {
     "tg_inbox": "Telegram inbox", "gmail": "Gmail", "email": "Email", "device": "Device", "link": "Linked systems",
     "scheduled": "Scheduled tasks", "autonomy": "Autonomous work", "member": "Shared-agent members",
     "api": "API", "mcp": "MCP", "glasses": "Smart glasses", "messenger": "Messenger", "crew": "Crew",
+    "colleague": "Colleagues", "outlook": "Outlook",
 }
+# The line's batches agents make (a colleague's hand-over, its answer going
+# back, an email for an agent): one task each, never on the user's banner.
+AGENT_BATCH_PREFIX = "ah_"
 
 # Writing one of these is writing the status: a lock on "status" covers them.
 _LOCK_GROUP = {"closed_at": "status", "closed_by": "status", "closed_by_party": "status", "result": "status"}
@@ -1531,14 +1535,16 @@ class TaskboardStore:
         return True
 
     def hand_over_started(self, user_id: str, task_id: str, action_id: str, agent: dict, words: str,
-                          actor: str = "", *, batch_id: str = "") -> dict | None:
+                          actor: str = "", *, batch_id: str = "", actor_kind: str = "me",
+                          summary: str = "") -> dict | None:
         """The user handed the task to *agent* (``slug``, ``name``) with their
         *words*: the next move is the agent's and it is the task's agent now — a
         maybe is a task now, they said so — and the timeline says what they asked.
         The turn comes back here by the action's key (``autonomy:<id>``). The
         move isn't locked: it moves on when the agent is done. With *batch_id* it
         takes its place in that agent's line, in the same step. The task, or None
-        when it isn't this user's."""
+        when it isn't this user's. An agent's hand-over (a colleague's,
+        an email for it) says who with *actor_kind* and *summary*."""
         key = f"autonomy:{action_id}"
         with self._lock:
             if self._owned(user_id, task_id) is None:
@@ -1555,8 +1561,8 @@ class TaskboardStore:
                        # What was said of the last try is old news: the agent is on it now.
                        "flags": {**{k: False for k in (*_OLD_NEWS, "came_back")}, "proof": None}},
                 event={"source": "taskboard_handover", "source_ref": f"{action_id}:handed", "at": time.time(),
-                       "kind": "status", "actor_kind": "me", "actor": actor,
-                       "summary": f"Handed to {agent['name']}: {' '.join(str(words).split())}",
+                       "kind": "status", "actor_kind": actor_kind, "actor": actor,
+                       "summary": summary or f"Handed to {agent['name']}: {' '.join(str(words).split())}",
                        "refs": {"autonomy_id": action_id, "agent": agent["slug"], "words": str(words)[:1000]}})
             return self._owned(user_id, task_id)
 
@@ -1589,7 +1595,7 @@ class TaskboardStore:
         return True
 
     def hand_over_ended(self, user_id: str, action_id: str, *, agent_name: str, text: str | None, why: str = "",
-                        session_key: str = "") -> str | None:
+                        session_key: str = "", what: str = "what you handed over") -> str | None:
         """The agent is done with what it was handed: *text* its reply, None when
         it gave none (*why*). The next move is the user's, to look it over, if it
         was still the agent's; an open task keeps the reply as its result, and
@@ -1611,18 +1617,19 @@ class TaskboardStore:
             self.ingest(user_id, keys=[key], patch=patch, event={
                 "source": "taskboard_handover", "source_ref": f"{action_id}:ended", "at": time.time(), "kind": "status",
                 "actor_kind": "agent", "actor": agent_name, "outcome": "ok" if text is not None else "error",
-                "summary": f"{agent_name} finished what you handed over" if text is not None
-                           else f"{agent_name} didn't finish what you handed over: {why}",
+                "summary": f"{agent_name} finished {what}" if text is not None
+                           else f"{agent_name} didn't finish {what}: {why}",
                 "refs": {"autonomy_id": action_id}})
         return task_id
 
     # ── Hand-overs in line (taskboard_handover) ───────────────────────
 
-    def hand_over_turn_came(self, user_id: str, action_id: str, agent_name: str) -> None:
+    def hand_over_turn_came(self, user_id: str, action_id: str, agent_name: str,
+                            what: str = "what you handed over") -> None:
         """A hand-over that waited in line: the timeline says when the agent got to it."""
         self.ingest(user_id, keys=[f"autonomy:{action_id}"], event={
             "source": "taskboard_handover", "source_ref": f"{action_id}:turn", "at": time.time(), "kind": "status",
-            "actor_kind": "agent", "actor": agent_name, "summary": f"{agent_name} started on what you handed over",
+            "actor_kind": "agent", "actor": agent_name, "summary": f"{agent_name} started on {what}",
             "refs": {"autonomy_id": action_id}})
 
     def line_next(self, user_id: str, slug: str) -> dict | None:
@@ -1699,8 +1706,8 @@ class TaskboardStore:
             rows = self._conn.execute(
                 "SELECT l.*, COALESCE(t.title, '') AS title FROM handover_line l LEFT JOIN tasks t ON t.id = l.task_id "
                 "WHERE l.user_id = ? AND l.batch_id IN (SELECT batch_id FROM handover_line WHERE user_id = ? "
-                "AND (state IN ('waiting', 'running') OR ended_at >= ?)) ORDER BY l.id",
-                (user_id, user_id, ended_since)).fetchall()
+                "AND (state IN ('waiting', 'running') OR ended_at >= ?)) AND l.batch_id NOT LIKE ? ORDER BY l.id",
+                (user_id, user_id, ended_since, AGENT_BATCH_PREFIX + "%")).fetchall()
         batches: dict[str, dict] = {}
         for r in rows:
             b = batches.setdefault(r["batch_id"], {
@@ -1718,6 +1725,23 @@ class TaskboardStore:
             if b["waiting"] or b["on"]:
                 b["ended_at"] = None
         return sorted(batches.values(), key=lambda b: -float(b["created_at"]))
+
+    def add_note(self, user_id: str, task_id: str, event: dict, patch: dict | None = None) -> bool:
+        """*event* on the task *task_id* (by id, not by a source's key), and
+        *patch* with it the way a source writes (never a field the user
+        locked). Whether the event was new; False when the task isn't this
+        user's. Idempotent by the event's ``(source, source_ref)``."""
+        at = float(event.get("at") or time.time())
+        with self._lock:
+            if self._owned(user_id, task_id) is None:
+                return False
+            new = self._add_event(user_id, task_id, {**event, "at": at}, evidence_on=task_id)
+            if new and patch:
+                self._machine_write(task_id, patch, at)
+            if new:
+                self._refresh(task_id)
+            self._conn.commit()
+        return new
 
     def line_forget(self, before: float) -> None:
         """What ended before *before*: the board's timeline keeps the story."""

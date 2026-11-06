@@ -1,5 +1,5 @@
 import { useState, type ComponentType, type ReactNode } from 'react'
-import { Plug, Mail, LayoutGrid, Sparkles, MessageCircle, Database, Scale, Send, Mic, Cable, Smartphone, Bell, Globe, AtSign } from 'lucide-react'
+import { Plug, Mail, LayoutGrid, Sparkles, MessageCircle, Database, Scale, Send, Mic, Cable, Smartphone, Bell, Globe, AtSign, Brain } from 'lucide-react'
 import GoogleConnection from '../components/connections/GoogleConnection'
 import MicrosoftConnection from '../components/connections/MicrosoftConnection'
 import ImapConnection from '../components/connections/ImapConnection'
@@ -14,6 +14,7 @@ import WhatsAppNudgeConnection from '../components/connections/WhatsAppNudgeConn
 import NotificationsConnection from '../components/connections/NotificationsConnection'
 import JevConnection from '../components/connections/JevConnection'
 import SonioxConnection from '../components/connections/SonioxConnection'
+import ExternalMemoryConnection from '../components/connections/ExternalMemoryConnection'
 import TelegramConnection from '../components/connections/TelegramConnection'
 import WhatsAppWebConnection from '../components/connections/WhatsAppWebConnection'
 import type { MyTelegram } from '../services/sharedIntegrations'
@@ -24,8 +25,9 @@ import { useCodexAuthStore } from '../stores/codexAuthStore'
 import { useMCPStore } from '../stores/mcpStore'
 import { useJevStore } from '../stores/jevStore'
 import { useSonioxStore } from '../stores/sonioxStore'
+import { useExternalMemoryStore } from '../stores/externalMemoryStore'
 
-export type TabId = 'google' | 'microsoft' | 'email' | 'telegram' | 'whatsapp_web' | 'codex' | 'antigravity' | 'mcp' | 'systems' | 'browser' | 'jev' | 'soniox' | 'notify' | 'whatsapp' | 'typesense'
+export type TabId = 'google' | 'microsoft' | 'email' | 'telegram' | 'whatsapp_web' | 'codex' | 'antigravity' | 'mcp' | 'systems' | 'browser' | 'jev' | 'soniox' | 'memory' | 'notify' | 'whatsapp' | 'typesense'
 
 interface TabDef {
   id: TabId
@@ -55,6 +57,8 @@ const TABS: TabDef[] = [
   { id: 'jev', label: 'Jev', icon: Scale },
   // Speech-to-text / voice — the user's own key (else the team's); kiosk users connect theirs too.
   { id: 'soniox', label: 'Soniox', icon: Mic },
+  // The person's own external memory (Membase, …), shared by all of their agents — kiosk too.
+  { id: 'memory', label: 'External memory', icon: Brain },
   // Where Autonomous Work's nudges and waiting proposals reach the user — and
   // the number WhatsApp sends them to. The person's own, so the kiosk shows them too.
   { id: 'notify', label: 'Notifications', icon: Bell },
@@ -84,6 +88,7 @@ function useTabDots(telegram: MyTelegram | null, systemsConnected: number, brows
   const mcpServers = useMCPStore((s) => s.servers.length)
   const jev = useJevStore((s) => s.status)
   const soniox = useSonioxStore((s) => s.status)
+  const memory = useExternalMemoryStore((s) => s.status)
   const dot = (st: { configured?: boolean; connected?: boolean } | null) =>
     st?.connected ? 'on' as const : st?.configured ? 'pending' as const : undefined
   return {
@@ -96,6 +101,7 @@ function useTabDots(telegram: MyTelegram | null, systemsConnected: number, brows
     browser: browsers > 0 ? 'on' : undefined,
     jev: jev?.key_set ? (jev.verified === false ? 'pending' : 'on') : undefined,
     soniox: soniox?.key_set ? (soniox.verified === false ? 'pending' : 'on') : undefined,
+    memory: memory?.connected ? (memory.verified === false ? 'pending' : 'on') : undefined,
     telegram: telegram?.link && telegram.link.status !== 'rejected'
       ? (telegram.link.status === 'approved' && telegram.link.linked ? 'on' : 'pending')
       : undefined,
@@ -206,6 +212,7 @@ export default function ConnectionsPage({ kiosk = false, initialTab }: { kiosk?:
         {panel('browser', <BrowserConnection active={active === 'browser'} onStatus={setBrowsers} />)}
         {panel('jev', <JevConnection />)}
         {panel('soniox', <SonioxConnection />)}
+        {panel('memory', <ExternalMemoryConnection />)}
         {panel('notify', <NotificationsConnection kiosk={kiosk} />)}
         {panel('whatsapp', <WhatsAppNudgeConnection kiosk={kiosk} />)}
         {panel('typesense', <TypesenseConnection />)}

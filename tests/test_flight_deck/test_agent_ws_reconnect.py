@@ -154,6 +154,45 @@ def test_a_ping_is_answered_by_flight_deck_never_the_agent(deck):
     assert got[3:] == [{"type": "fd_pong"}, {"type": "echo", "got": {"type": "chat", "content": "hi"}}]
 
 
+def test_a_chat_frame_reaches_the_agent_when_the_chat_closes_right_after(deck, monkeypatch):
+    """The frame goes to the agent before Flight Deck writes its allowance
+    reply back: a chat whose socket closes right after sending (it died, a
+    reload) doesn't lose the message — the chat holds a copy and drops it
+    once the agent's replay shows it was taken."""
+    live = _free_port()
+    deck["helper"] = {"name": "helper", "web_port": live, "web_auth": "secret"}
+
+    async def screen(_user, _text):
+        await asyncio.sleep(0.3)  # the chat's socket is gone by the time the reply is written
+        return True, {"type": "fd_quota", "quota": {}}
+    monkeypatch.setattr(srv.usage_quota, "screen_chat_frame", screen)
+
+    got: list[dict] = []
+
+    async def agent_handler(ws):
+        await ws.send(json.dumps({"type": "welcome"}))
+        async for m in ws:
+            got.append(json.loads(m))
+
+    async def scenario(fd_port):
+        agent = await websockets.serve(agent_handler, "127.0.0.1", live)
+        try:
+            url = f"ws://127.0.0.1:{fd_port}/fd/agent-ws/localhost/{live}?agent=proc-helper"
+            async with websockets.connect(url) as c:
+                assert (await _recv(c))["type"] == "welcome"
+                await c.send(json.dumps({"type": "chat", "content": "sent as the socket died"}))
+            for _ in range(40):
+                if got:
+                    break
+                await asyncio.sleep(0.05)
+        finally:
+            agent.close()
+            await agent.wait_closed()
+
+    _run(scenario)
+    assert got == [{"type": "chat", "content": "sent as the socket died"}]
+
+
 def test_an_agent_that_stays_away_is_logged_once(deck, caplog):
     dead = _free_port()
     deck["helper"] = {"name": "helper", "web_port": dead, "web_auth": "secret"}

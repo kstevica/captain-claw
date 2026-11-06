@@ -595,6 +595,7 @@ class ToolRegistry:
                     and not self._tool_metadata.get(t.name, {}).get("requires_microsoft")
                     and not self._tool_metadata.get(t.name, {}).get("requires_imap")
                     and not self._tool_metadata.get(t.name, {}).get("requires_jev")
+                    and not self._tool_metadata.get(t.name, {}).get("requires_external_memory")
                     and not self._tool_metadata.get(t.name, {}).get("requires_payments")
                     and not self._tool_metadata.get(t.name, {}).get("requires_crew")
                     and not self._tool_metadata.get(t.name, {}).get("requires_telegram_inbox")
@@ -665,6 +666,18 @@ class ToolRegistry:
                     tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_jev")]
         except Exception:
             tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_jev")]
+
+        # External memory: shown only while the owner has one connected in
+        # Flight Deck (refreshed per turn by ``external_memory_client.refresh()``).
+        # Owner-only; fails closed.
+        try:
+            if any(self._tool_metadata.get(t.name, {}).get("requires_external_memory") for t in tools):
+                from captain_claw import external_memory_client
+
+                if not external_memory_client.usable() or self._is_speaker_call(session_id):
+                    tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_external_memory")]
+        except Exception:
+            tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_external_memory")]
 
         # Payments: shown only while the owner's Flight Deck has payments on
         # (refreshed per turn by ``payments_client.refresh()``). Fails closed.

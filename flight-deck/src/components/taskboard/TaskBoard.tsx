@@ -3,7 +3,7 @@ import {
   AlarmClock, AlertTriangle, ArrowLeft, ArrowRight, Ban, BellOff, Check, Clock, Download, GitMerge, Hand, HelpCircle,
   Keyboard, Layers, ListChecks, Loader2, Lock, Maximize2, MessageSquare, Minimize2, Pencil, RotateCcw, RotateCw, Search,
   Settings2, SlidersHorizontal,
-  Split, Undo2, Wrench, X,
+  Split, Undo2, Users, Wrench, X,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { useNotificationStore } from '../../stores/notificationStore'
@@ -46,7 +46,7 @@ import {
 import { WhyThisHere } from './TaskWhy'
 import {
   BATCH_MAX, DIRECTION_LABEL, EVENT_LABEL, EVIDENCE_LABEL, KIND_LABEL, NO_DATES, OWES_LABEL, RESULT_LABEL, ROLE_LABEL, SNOOZES, STATUS_DOT,
-  GO_KEYS, GO_WAIT_MS, STATUS_LABEL, TASK_KEYS, agoRelative, answeredInChat, batchSaid, boardKey, channelLabel, dateBounds,
+  GO_KEYS, GO_WAIT_MS, MAIL_WHY, STATUS_LABEL, TASK_KEYS, agoRelative, answeredInChat, batchSaid, boardKey, channelLabel, dateBounds,
   distinctParties, foldText, handleChannel, isSnoozed, movableEvents, partyFacetLabel, partyName, peopleRows, pickedAfter,
   proposalLabel, snoozeUntil, stepTo, taskNotes, type BoardUser, type DateRange,
 } from './taskboardText'
@@ -1683,6 +1683,10 @@ function TaskDetailPane({
         )}
         {canSuggest && <SuggestNextStep taskId={task.id} phone={phone} kinds={suggestKinds} covered={covered} askRef={askNextStep} onProposed={onNextStep} />}
 
+        {(flags.colleague || flags.agent_mail) && (
+          <AgentsOnIt task={task} onOpenTask={onOpenTask} />
+        )}
+
         {task.ask && (
           <section className="mt-4">
             <h4 className={sectionTitle}>What was asked</h4>
@@ -2057,5 +2061,50 @@ function HeldReply({ task, detail, detailFailed, onDone, onOpenConnections }: {
         </p>
       )}
     </div>
+  )
+}
+
+
+// ── Between your agents ──
+//
+// One of your agents handed this to another (the chain, and the task it is
+// part of), or an email went to one of them (and how it knew it was for it).
+
+function AgentsOnIt({ task, onOpenTask }: { task: TaskItem; onOpenTask: (id: string) => Promise<void> }) {
+  const col = task.flags?.colleague
+  const mail = task.flags?.agent_mail
+  const chain = col ? [...(col.via || []), col.from_name || col.from, col.to_name || col.to] : []
+  return (
+    <section className="mt-4 rounded-lg border border-violet-500/20 bg-violet-500/5 px-3 py-2.5">
+      <h4 className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-violet-300">
+        <Users className="h-3.5 w-3.5" />{col ? 'Between your agents' : 'Email for an agent'}
+      </h4>
+      {col && (
+        <div className="mt-1.5 text-sm text-zinc-200">
+          <div className="flex flex-wrap items-center gap-1">
+            {chain.map((name, i) => (
+              <span key={`${name}-${i}`} className="flex items-center gap-1">
+                {i > 0 && <ArrowRight className="h-3 w-3 text-zinc-500" />}
+                <span className={i === chain.length - 1 ? 'font-medium text-zinc-100' : 'text-zinc-400'}>{name}</span>
+              </span>
+            ))}
+          </div>
+          <p className="mt-1 text-xs text-zinc-500">
+            {col.from_name || col.from} handed it to {col.to_name || col.to}; the answer goes back to {col.from_name || col.from}.
+            {col.parent && (
+              <> {' '}<button className="text-violet-300 underline-offset-2 hover:underline" onClick={() => void onOpenTask(col.parent)}>
+                Open the task it is part of
+              </button></>
+            )}
+          </p>
+        </div>
+      )}
+      {mail && !col && (
+        <p className="mt-1.5 text-sm text-zinc-200">
+          It went to <span className="font-medium text-zinc-100">{task.agent_name || mail.agent}</span>
+          {' '}<span className="text-zinc-400">— {MAIL_WHY[mail.why] || mail.why}.</span>
+        </p>
+      )}
+    </section>
   )
 }

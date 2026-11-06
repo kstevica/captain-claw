@@ -202,6 +202,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     # Jev-first: judgments come up in any task and any language, so the schema
     # is always sent; the registry still hides jev until the owner has a key.
     "jev",
+    # "Remember that" / "what do you know about…" come in any language, and the
+    # memory is shared by all of the owner's agents; hidden until one is connected.
+    "external_memory",
     # The owner's Telegram: "what's new?" comes in any language. Hidden by the
     # registry unless the owner keeps a Telegram inbox.
     "telegram_inbox",
@@ -216,6 +219,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     # "Have Codex fix the login test" comes in any language too. Hidden by the
     # registry unless an admin approved the owner for Crew.
     "crew",
+    # "Ask the researcher to dig into this" comes in any language: the team
+    # has to be reachable. Hidden without a deck and on a member's turn.
+    "colleagues",
 })
 
 # ── Nano-mode: barebone tool allowlist for tiny local models. ──
@@ -2358,6 +2364,12 @@ class AgentOrchestrationMixin:
                     await jev_client.refresh_connected()
                 except Exception:
                     pass
+                # The external memory too (owner-only; rate-limited inside).
+                try:
+                    from captain_claw import external_memory_client
+                    await external_memory_client.refresh()
+                except Exception:
+                    pass
                 # Soniox: is there a key for the audio tool (the owner's in
                 # Flight Deck — or the team's — or the agent's own)?
                 try:
@@ -3609,6 +3621,8 @@ class AgentOrchestrationMixin:
                 # A crew task runs on its own and calls back: "it's under way"
                 # is the whole answer, and forcing a tool only makes it poll.
                 or self._turn_has_successful_tool(turn_start_idx, "crew")
+                # So does a hand-over to a colleague: the answer comes back on its own.
+                or self._turn_has_successful_tool(turn_start_idx, "colleagues")
             ):
                 _turn_produced_deliverable = True
             if (

@@ -41,6 +41,10 @@ Rules:
 
 6. Output [] if nothing new worth extracting. Max 5 insights per extraction.
 
+7. Save only what the conversation shows — a user message or a tool result you can point to. Never infer the user's traits, role, skill level, mood or preferences from the topic, the tone or the tools used. A one-off request is not a standing preference unless the user marked it general ("always", "from now on", "remember") or stated a standing like or dislike ("I hate X", "stop doing Y"). If unsure, leave it out — a wrong insight misleads every future conversation.
+
+8. One lesson, one insight. When a known insight is wrong or out of date, write the corrected one with the SAME `entity_key` (shown in brackets in "Known insights") so it replaces the old one — never save a second insight that repeats or contradicts it.
+
 What NOT to save (these will rot and mislead future conversations):
 
 - The current task's in-progress state, drafts, or step-by-step progress. That's ephemeral.
@@ -48,6 +52,10 @@ What NOT to save (these will rot and mislead future conversations):
 - Volatile rosters: peer-agent lists, fleet membership, "available agents include X, Y, Z" — these are supplied each session via the system prompt and storing them creates stale cross-session leakage.
 - Activity summaries ("user sent 3 emails today", "we had a long chat about pricing"). If something was *surprising* or *non-obvious* in that activity, save THAT — not the activity itself.
 - Anything the user told you to forget, or that they've since contradicted.
+- Claims that a tool or feature doesn't work ("the browser tool is broken", "web_fetch can't open X"). They harden into refusals the agent cites against itself long after the problem was fixed. When a tool failed because of its setup and the conversation found the fix (a setting, a key, a step), save the fix — never that the tool doesn't work.
+- Failures caused by setup or the environment: a missing program, a key that isn't set, a service that was down, a path that moved. The owner can fix these; they are not lasting rules.
+- Errors that went away before the conversation ended. If trying again worked, there is nothing to save.
+- Attempts that never worked. If the conversation ended without a working method, save nothing about it — never write the dead ends up as a `workflow`.
 
 Style for `content`:
 

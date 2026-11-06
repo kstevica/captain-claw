@@ -121,6 +121,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "pptx_extract": "Extract a single .pptx file into markdown. ONLY for .pptx files — never use on .pdf/.docx/.xlsx. For multiple files in a folder use summarize_files instead.",
     "pocket_tts": "Convert text to local speech audio and save as MP3",
     "audio": "Speech-to-text and text-to-speech (Soniox): transcribe an audio/video file (voice note, recording, meeting) to text, optionally with timestamps; speak text as an MP3 voice recording the chat sends to the user automatically; list voices.",
+    "colleagues": "Your owner's other agents — your colleagues: list who is on the team (role, what they do, email), hand_over a piece of work to one of them on the Taskboard (they start at once and you get their answer back), handed = what you handed out.",
     "line": "Read the user's Line in Flight Deck (read-only): what the deck and their agents did or said on their own — results, finished runs, proposals and questions waiting for the user, payments, fleet changes. news (unread), recent, search, read one item.",
     "telegram_inbox": "Read the user's Telegram (read-only): their connected private chats and groups with the team bot — list chats, read one chat, recent messages, search. Never sends or replies.",
     "whatsapp_web": "The user's own WhatsApp: every chat on their linked account — status, list chats, read one chat, recent messages, search, look up a contact, save a file or voice note (transcribed). Sends a text only when the user turned sending on, only to chats on their whitelist, only what they asked to send.",
@@ -133,6 +134,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "microsoft_calendar": "Outlook Calendar — list_events, search_events, get_event, create_event, update_event, delete_event, respond_event, list_calendars; changes that email attendees need notify_attendees=true (only when the user asked).",
     "microsoft_mail": "Outlook mail — list_messages, search, read_message, get_thread, list_folders, get_attachment; create_draft / update_draft / list_drafts only when the user asked for that email (attachments=[file paths], ≤25 MB); never sends (drafts wait in Outlook); no repeat drafts. archive / move / create_folder / add_categories / remove_categories (thread_ids / message_ids from list_messages or search) only when the user asked to organize those emails — triaging never implies it, suggest instead; moving changes a message's ID — use the new one it prints.",
     "imap_mail": "Email in the user's IMAP/SMTP inboxes (several; account=<id> or all) — list_accounts, list_messages, search, read_message, get_thread, list_folders, list_drafts, get_attachment; create_draft / update_draft / send / send_draft only when the user asked (send only with sending on for that inbox); no repeats; archive / move / mark_read / mark_unread / create_folder only when asked; a moved email gets a new ID.",
+    "external_memory": "The person's external memory (e.g. Membase), shared by ALL of their agents: remember (save one lasting fact) / search (look up what any of their agents saved) + the provider's own actions; follow its rules (in the tool description; they also say what is copied in automatically).",
     "jev": "Jev — calibrated judgments about text; use it WHENEVER you'd otherwise judge content yourself (never writes text): one call answers several typed questions about the same state (noul yes/no → p(yes); choice → option + probabilities; score → rubric level). Triage, routing, classification, relevance filtering, claim-vs-source checks, rubric rating, yes/no checks before acting. Literal, specific questions; not for math, counting, dates or writing.",
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
     "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
@@ -201,6 +203,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "pocket_tts": "text-to-speech MP3",
     "audio": "Soniox: transcribe an audio/video file to text (timestamps optional); speak text as an MP3 sent to the user; list voices",
     "line": "read-only Line: what ran or was said on its own — news / recent / search / read",
+    "colleagues": "owner's other agents: list / hand_over work on the Taskboard (answer comes back) / handed",
     "telegram_inbox": "read-only Telegram: chats / read one chat / recent / search; never sends",
     "whatsapp_web": "own WhatsApp: status / chats / read / recent / search / contact / attachment; send only to the user's whitelist, only when asked",
     "send_mail": "send emails via SMTP (only when asked)",
@@ -215,6 +218,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "microsoft_calendar": "Outlook Calendar: list/search/get/create/update/delete/respond events; notify_attendees=true only when asked",
     "microsoft_mail": "Outlook mail: list/search/read/thread, folders, attachments; drafts only when asked; never sends; no repeats; archive/move/create_folder/add_categories/remove_categories only when asked to organize (triage = suggest; a moved message gets a new ID)",
     "imap_mail": "IMAP/SMTP inboxes (several, account=<id>|all): list/search/read/thread, folders, attachments; drafts/sends only when asked (sends only with sending on); no repeats; archive/move/mark_read only when asked",
+    "external_memory": "shared memory of all the person's agents: remember / search (+ provider actions; follow its rules)",
     "jev": "use WHENEVER you'd judge content yourself: several yes/no (noul), choice or score questions about one state per call; triage/classify/filter/check claims; no math, no writing",
     "datastore": "persistent relational tables",
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
@@ -2433,6 +2437,13 @@ class AgentContextMixin:
             await jev_client.refresh_connected()
         except Exception as _exc:
             log.debug("Jev connection priming failed: %s", _exc)
+        # And the external memory: is one connected in Flight Deck, and what
+        # does its provider offer (the tool's schema)?
+        try:
+            from captain_claw import external_memory_client
+            await external_memory_client.refresh()
+        except Exception as _exc:
+            log.debug("External memory priming failed: %s", _exc)
         # And Soniox: whether the owner's audio tool can work.
         try:
             from captain_claw import soniox_client
@@ -2492,6 +2503,7 @@ class AgentContextMixin:
         "microsoft_mail": ["microsoft_mail"],
         "imap_mail": ["imap_mail"],
         "jev": ["jev"],
+        "external_memory": ["external_memory"],
         "todo": ["todo"],
         "contacts": ["contacts"],
         "scripts": ["scripts"],
@@ -2680,6 +2692,11 @@ class AgentContextMixin:
                 self.tools.register(ImapMailTool(), metadata={"requires_imap": True})
             elif tool_name == "jev":
                 self.tools.register(JevTool(), metadata={"requires_jev": True})
+            elif tool_name == "external_memory":
+                # The person's external memory in Flight Deck: hidden until they
+                # connect one there; its schema follows the provider (see the registry).
+                from captain_claw.tools.external_memory import ExternalMemoryTool
+                self.tools.register(ExternalMemoryTool(), metadata={"requires_external_memory": True})
             elif tool_name == "audio":
                 # Hidden until a Soniox key is usable (the owner's in Flight
                 # Deck, or SONIOX_API_KEY standalone) — see the registry.
@@ -2866,6 +2883,11 @@ class AgentContextMixin:
             # per turn — see the registry. Flight Deck checks it again on every call.
             from captain_claw.tools.crew import CrewTool
             self.tools.register(CrewTool(), metadata={"requires_crew": True})
+            # Colleagues — the owner's other agents, and handing them work on
+            # the Taskboard. Under Flight Deck on the owner's own turns only,
+            # the Line's gate (requires_line).
+            from captain_claw.tools.colleagues import ColleaguesTool
+            self.tools.register(ColleaguesTool(), metadata={"requires_line": True})
             # Code-app authoring — always registered; calls return a clear error
             # if FD_URL isn't available, so registration cost is negligible.
             from captain_claw.tools.app_runner import AppRunnerTool

@@ -195,7 +195,13 @@ export class AgentChatWS {
   }
 
   connect() {
+    // A socket replaced while connected: the chat hears it went (what was
+    // unanswered on it is sent again), and the new one's welcome counts.
+    const wasConnected = this._connected
     if (this.ws) this._teardownSocket()
+    this._connected = false
+    this._asleep = false
+    if (wasConnected) this.emit('_disconnected', { wasConnected })
     this._shouldReconnect = true
     this._wakeOnAsleep = true
     // An explicit (re)connect is a fresh start for the one-refresh budget.

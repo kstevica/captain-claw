@@ -135,6 +135,11 @@ class AgentToolLoopMixin:
             step = str(arguments.get("step", "")).strip()
             return f"Session procreation: {step}" if step else "Procreating session"
         # ── LLM tracing ────────────────────────────────────
+        if name == "colleagues":
+            action = str(arguments.get("action", "")).strip().lower()
+            if action == "hand_over":
+                return f"Handing work to {str(arguments.get('to', '')).strip() or 'a colleague'}"
+            return "Checking on what I handed out" if action == "handed" else "Looking at the team"
         if name == "line":
             action = str(arguments.get("action", "")).strip().lower()
             if action == "search":

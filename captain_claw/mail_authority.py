@@ -59,7 +59,7 @@ from typing import Any
 AUTOMATION_KINDS = frozenset({
     "autonomy", "autonomy_tool", "plan", "fd_scheduler", "flow", "flow_tool", "cron",
     "peer", "peer_relay", "sister", "botport", "fd_worker", "being", "mcp_task", "bat", "link",
-    "exam", "taskboard", "line", "unknown",
+    "exam", "taskboard", "line", "colleague", "inbox", "unknown",
 })
 MAIL_WRITE_ACTIONS = frozenset({"create_draft", "update_draft", "send", "send_draft"})
 # google_mail / microsoft_mail / imap_mail actions that change the mailbox without
@@ -94,6 +94,8 @@ KIND_LABELS: dict[str, str] = {
     "exam": "an onboarding exam",
     "taskboard": "your Taskboard",
     "line": "your Line",
+    "colleague": "a colleague (another of your owner's agents) on your owner's Taskboard",
+    "inbox": "an email that came to you",
     "unknown": "an automation",
 }
 
@@ -104,7 +106,17 @@ OWNER_REQUEST_PREFIX = "[From your owner, handed to you on their Taskboard: this
 # A question the owner typed on their Line in Flight Deck: their own words too.
 LINE_REQUEST_PREFIX = "[From your owner, asked on their Line in Flight Deck: this is their own question.]"
 
-_MAIL_WRITE_MODES = frozenset({"intent", "allow", "deny"})
+# "draft": email only as a draft (create / update), except a send from the one
+# inbox in ``send_from`` — the turn of an email that came to the agent's own
+# inbox, where Flight Deck's per-inbox send gate (off by default, allowlist,
+# daily limit) still decides.
+_MAIL_WRITE_MODES = frozenset({"intent", "allow", "deny", "draft"})
+_SEND_FROM_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+# "draft" only: the one Gmail message a reply may be sent to, and the one
+# address it may go to — an email that came to the agent, from a sender Gmail
+# verified, when its owner let it send Gmail replies (Flight Deck decides).
+_REPLY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+_REPLY_TO_RE = re.compile(r"^[^@\s<>,;\"]+@[^@\s<>,;\"]+\.[^@\s<>,;\"]+$")
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +129,10 @@ class Authority:
     mode: str                   # "human" | "automated"
     kind: str = ""              # one of AUTOMATION_KINDS when automated
     job_text: str = ""          # human-written text the decision is judged on
-    mail_write: str = "intent"  # "intent" | "allow" | "deny"
+    mail_write: str = "intent"  # "intent" | "allow" | "deny" | "draft"
+    send_from: str = ""         # "draft" only: the IMAP inbox id a send may go from
+    reply_id: str = ""          # "draft" only: the Gmail message a reply may be sent to …
+    reply_to: str = ""          # … and the one address it may go to
 
 
 HUMAN = Authority(mode="human")
@@ -135,13 +150,29 @@ _WORKER_ENVS = ("CLAW_BASNA_WORKER", "CLAW_VATRA_WORKER", "CLAW_COUNCIL_WORKER",
                 "CLAW_CODE_AGENT", "CLAW_BAT_WORKER")
 
 
-def automated(kind: str, job_text: str = "", mail_write: str = "intent") -> Authority:
+def automated(kind: str, job_text: str = "", mail_write: str = "intent", send_from: str = "",
+              reply_id: str = "", reply_to: str = "") -> Authority:
     """An automated-turn authority (unknown kinds / modes fail closed)."""
     if kind not in AUTOMATION_KINDS:
         kind, mail_write = "unknown", "deny"
     if mail_write not in _MAIL_WRITE_MODES:
         mail_write = "deny"
-    return Authority("automated", kind, str(job_text or "")[:JOB_TEXT_MAX], mail_write)
+    return Authority("automated", kind, str(job_text or "")[:JOB_TEXT_MAX], mail_write,
+                     _send_from(send_from, mail_write), *_reply(reply_id, reply_to, mail_write))
+
+
+def _send_from(raw: Any, mail_write: str) -> str:
+    """The inbox a "draft" turn may send from: a well-formed id, else none."""
+    value = str(raw or "").strip().lower()
+    return value if mail_write == "draft" and _SEND_FROM_RE.match(value) else ""
+
+
+def _reply(reply_id: Any, reply_to: Any, mail_write: str) -> tuple[str, str]:
+    """The one Gmail reply a "draft" turn may send: both well-formed, else neither."""
+    rid, to = str(reply_id or "").strip(), str(reply_to or "").strip().lower()
+    if mail_write == "draft" and _REPLY_ID_RE.match(rid) and _REPLY_TO_RE.match(to):
+        return rid, to
+    return "", ""
 
 
 def human(text: str) -> Authority:
@@ -235,7 +266,8 @@ def from_wire(raw: Any, *, default_kind: str) -> Authority | None:
     if kind not in AUTOMATION_KINDS:
         kind, mail_write = "unknown", "deny"
     job_text = str(raw.get("job_text") or "")[:JOB_TEXT_MAX]
-    return Authority("automated", kind, job_text, mail_write)
+    return Authority("automated", kind, job_text, mail_write, _send_from(raw.get("send_from"), mail_write),
+                     *_reply(raw.get("reply_id"), raw.get("reply_to"), mail_write))
 
 
 # ---------------------------------------------------------------------------
@@ -1161,6 +1193,24 @@ def refusal_text(kind: str, verb: str) -> str:
     return head + "say in your answer that no email was written because this run wasn't asked to write one."
 
 
+def draft_only_refusal(kind: str, verb: str, send_from: str = "", reply_to: str = "", reply_id: str = "") -> str:
+    """A "draft" turn's refusal: it may write a draft, never send one —
+    except from its own inbox (*send_from*), or the one Gmail reply its owner
+    allowed (*reply_to* / *reply_id*)."""
+    own = (f" The one exception is your own inbox: imap_mail action=send (or send_draft) with "
+           f"account={send_from} — it goes out only if that inbox's sending allows it."
+           if send_from else "")
+    if reply_to and reply_id:
+        own += (f" You may send one reply in Gmail: google_mail action=send to={reply_to} "
+                f"reply_to_message_id={reply_id}, with no cc or bcc — only to them, only that reply.")
+    return (
+        f"{MAIL_REFUSAL_TAG} Not {verb}: this turn was started by {_label(kind)}, not by the user, and on "
+        "such a turn email is only written as a draft, for the user to look over and send."
+        f"{own} Nothing was sent. Save it with action=create_draft instead (reply_to_message_id for a "
+        "reply), and say in your answer that the draft is waiting."
+    )
+
+
 def refusal_text_self(kind: str, verb: str) -> str:
     return (
         f"{MAIL_REFUSAL_TAG} Not {verb}: this turn was started by {_label(kind)}, and its "
@@ -1180,8 +1230,16 @@ def check_mail_write(
     *,
     recipients: list[str] | None = None,
     own_addresses: set[str] | None = None,
+    account: str | None = None,
+    reply_message_id: str | None = None,
+    reply_recipients: list[str] | None = None,
 ) -> str | None:
-    """``None`` to proceed, else the refusal text for this mail write."""
+    """``None`` to proceed, else the refusal text for this mail write.
+
+    *account* is the IMAP inbox an ``imap_mail`` write goes from (its id), for
+    a "draft" turn's ``send_from``. *reply_message_id* and *reply_recipients*
+    (every address in to / cc / bcc) are a ``google_mail`` send's, for a
+    "draft" turn's one Gmail reply (``reply_id`` / ``reply_to``)."""
     if not is_mail_write(tool, action):
         return None
     a = current()
@@ -1190,6 +1248,17 @@ def check_mail_write(
     if a.mail_write == "allow":
         return None
     verb = _verb(action if tool in DRAFTING_MAIL_TOOLS else None)
+    if a.mail_write == "draft":
+        if tool in DRAFTING_MAIL_TOOLS and action in ("create_draft", "update_draft"):
+            return None
+        if (tool == "imap_mail" and action in ("send", "send_draft") and a.send_from
+                and str(account or "").strip().lower() == a.send_from):
+            return None
+        if (tool == "google_mail" and action == "send" and a.reply_id
+                and str(reply_message_id or "").strip() == a.reply_id
+                and reply_recipients is not None and [r.strip().lower() for r in reply_recipients] == [a.reply_to]):
+            return None
+        return draft_only_refusal(a.kind, verb, a.send_from, a.reply_to, a.reply_id)
     if a.mail_write != "intent":
         return refusal_text(a.kind, verb)
     sc = intent_scope(a.job_text)

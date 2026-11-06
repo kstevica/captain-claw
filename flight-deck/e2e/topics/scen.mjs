@@ -167,5 +167,67 @@ S.reconnectOtherSessionAuthOff = async () => {
   done()
 }
 
+// ── A message sent as the socket dies (held again, sent once) ──
+//
+// Not dividers, but the same store and fake socket: a frame the agent never
+// took goes back on hold when the socket goes, and is sent again once the
+// chat is connected — unless the reconnect's replay shows the agent took it.
+
+/** A connected lane whose socket takes frames (they are recorded). */
+async function liveLane() {
+  const h = await setup({ auth: true, holdHistory: false })
+  await h.release()
+  h.ev.connected(); h.ev.welcome('s1'); h.ev.replay([['user', 'u1'], ['assistant', 'a1']]); h.ev.replayDone()
+  await h.flush()
+  const sent = []
+  h.ws.send = (content) => { sent.push(content); return `web_${sent.length}` }
+  return { h, sent }
+}
+
+// The frame died with the socket (an agent woke from sleep, a dropped link).
+S.heldFrameDiedWithSocket = async () => {
+  const { h, sent } = await liveLane()
+  h.st().sendMessage(h.key, 'thank you')
+  await settle()
+  check('sent once', same(sent, ['thank you']), sent)
+  h.ev.disconnected(); await settle()
+  check('back on hold, bubble gone', h.ses().held.length === 1 && count(h.view(), 'user:thank you') === 0, { held: h.ses().held, view: h.view() })
+  h.ev.connected(); h.ev.welcome('s1'); h.ev.replay([['user', 'u1'], ['assistant', 'a1']]); h.ev.replayDone()
+  await h.flush()
+  check('sent again on the new socket', same(sent, ['thank you', 'thank you']), sent)
+  check('nothing left on hold, one bubble', h.ses().held.length === 0 && count(h.view(), 'user:thank you') === 1, { held: h.ses().held, view: h.view() })
+  done()
+}
+
+// The agent took it, but the socket went before its "thinking" came back.
+S.heldFrameTakenBeforeDrop = async () => {
+  const { h, sent } = await liveLane()
+  h.st().sendMessage(h.key, 'hello?')
+  await settle()
+  h.ev.disconnected(); await settle()
+  h.ev.connected(); h.ev.welcome('s1')
+  h.ev.replay([['user', 'u1'], ['assistant', 'a1'], ['user', 'hello?'], ['assistant', 'hi']]); h.ev.replayDone()
+  await h.flush()
+  check('not sent twice', same(sent, ['hello?']), sent)
+  check('nothing left on hold', h.ses().held.length === 0, h.ses().held)
+  check('the turn shows once', count(h.view(), 'user:hello?') === 1 && count(h.view(), 'assistant:hi') === 1, h.view())
+  done()
+}
+
+// The socket wasn't open after all when the message went (closing).
+S.heldWhenSocketNotOpen = async () => {
+  const { h, sent } = await liveLane()
+  h.ws.send = () => undefined
+  h.st().sendMessage(h.key, 'are you there')
+  await settle()
+  check('held, not busy, no bubble', h.ses().held.length === 1 && !h.ses().busy && count(h.view(), 'user:are you there') === 0,
+    { held: h.ses().held, busy: h.ses().busy, view: h.view() })
+  h.ws.send = (content) => { sent.push(content); return `web_${sent.length}` }
+  h.ev.disconnected(); h.ev.connected(); h.ev.welcome('s1'); h.ev.replay([['user', 'u1'], ['assistant', 'a1']]); h.ev.replayDone()
+  await h.flush()
+  check('sent once connected', same(sent, ['are you there']), sent)
+  done()
+}
+
 if (!S[name]) { console.log('scenarios:', Object.keys(S).join(' ')); process.exit(name ? 1 : 0) }
 await S[name]()

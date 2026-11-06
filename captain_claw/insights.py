@@ -356,6 +356,18 @@ class InsightsManager:
         await self._db.commit()
         log.debug("Insight stored", id=insight_id, category=category,
                   supersedes=supersedes_id, project_id=project_id)
+        # Into the owner's external memory too, when one is connected in
+        # Flight Deck (background; never fails the store).
+        from captain_claw import external_memory_client
+
+        external_memory_client.mirror(
+            "insight", insight_id, content, tags=tags, created_at=now,
+            meta={"category": category, "why": why, "how_to_apply": how_to_apply,
+                  "source": _source_text(source_file, 500),
+                  # What the fact is ABOUT: a provider that can replace a
+                  # document (Hindsight) replaces the superseded one.
+                  "entity_key": entity_key},
+        )
         return insight_id
 
     async def search(
@@ -1188,6 +1200,14 @@ _ATTR_LAST_TIME = "_insights_last_extraction_time"
 _ATTR_RUNNING = "_insights_extraction_running"
 
 
+def _known_insight_line(item: dict[str, Any]) -> str:
+    """One "Known insights" line for the extractor. The entity_key is shown so
+    the model can correct a known insight in place — the same key makes add()
+    supersede the old row instead of storing a rival beside it."""
+    key = item.get("entity_key")
+    return f"- [{item.get('category')}]" + (f" [{key}]" if key else "") + f" {item.get('content')}"
+
+
 async def extract_insights(
     agent: Agent,
     *,
@@ -1235,8 +1255,7 @@ async def extract_insights(
     existing = await mgr.list_recent(limit=20)
     existing_text = ""
     if existing:
-        lines = [f"- [{i['category']}] {i['content']}" for i in existing]
-        existing_text = "\n".join(lines)
+        existing_text = "\n".join(_known_insight_line(i) for i in existing)
 
     # 4. Build LLM messages.
     system_prompt = agent.instructions.load("insight_extraction_system_prompt.md")

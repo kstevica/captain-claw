@@ -1371,3 +1371,51 @@ def test_turn_user_text_is_set_by_complete_and_stream():
         source = inspect.getsource(fn)
         assert 'self._absorb_surface_block(\n            str(user_input or ""), surface=channel or self._hinted_channel())' in source
         assert "self._turn_user_text = user_input" in source
+
+
+@pytest.mark.usefixtures("_no_real_session_manager")
+class TestGmailReplyOnAnEmailTurn:
+    """An email that came to the agent, its owner letting it send Gmail replies:
+    the one reply, to that sender, on that message — through Flight Deck."""
+
+    def _fd(self, monkeypatch):
+        _set_mode(monkeypatch, fd=True)
+        seen: list = []
+        monkeypatch.setattr(
+            httpx, "AsyncClient",
+            lambda **kw: _RealAsyncClient(
+                transport=httpx.MockTransport(lambda r: seen.append(r) or httpx.Response(
+                    200, json={"to": "ana@x.co", "subject": "Re: s", "message_id": "m2", "thread_id": "t1"})),
+                **kw),
+        )
+        return seen
+
+    async def test_the_allowed_reply_goes_to_flight_deck(self, monkeypatch):
+        seen = self._fd(monkeypatch)
+        with ma.bound(ma.automated("inbox", "", "draft", reply_id="m1", reply_to="ana@x.co")):
+            res = await _gmail_tool(_Gmail({})).execute("send", to="Ana <ANA@x.co>", subject="Re: s", body="b",
+                                                        reply_to_message_id="m1")
+        assert res.success, res.error
+        assert len(seen) == 1 and seen[0].url.path.endswith("/fd/google/gmail/send")
+        assert json.loads(seen[0].content)["reply_to_message_id"] == "m1"
+
+    @pytest.mark.parametrize("kw", [
+        {"to": "mallory@evil.co", "reply_to_message_id": "m1"},
+        {"to": "ana@x.co", "cc": "mallory@evil.co", "reply_to_message_id": "m1"},
+        {"to": "ana@x.co", "bcc": "mallory@evil.co", "reply_to_message_id": "m1"},
+        {"to": "ana@x.co", "reply_to_message_id": "m-other"},
+        {"to": "ana@x.co"},
+        {"reply_to_message_id": "m1"},
+    ])
+    async def test_anything_else_is_refused_before_flight_deck(self, monkeypatch, kw):
+        seen = self._fd(monkeypatch)
+        with ma.bound(ma.automated("inbox", "", "draft", reply_id="m1", reply_to="ana@x.co")):
+            res = await _gmail_tool(_Gmail({})).execute("send", subject="Re: s", body="b", **kw)
+        assert not res.success and ma.is_refusal(res.error) and "to=ana@x.co" in res.error
+        assert seen == []
+
+    async def test_send_draft_stays_refused(self, monkeypatch):
+        seen = self._fd(monkeypatch)
+        with ma.bound(ma.automated("inbox", "", "draft", reply_id="m1", reply_to="ana@x.co")):
+            res = await _gmail_tool(_Gmail({})).execute("send_draft", draft_id="d1")
+        assert not res.success and ma.is_refusal(res.error) and seen == []

@@ -1,7 +1,6 @@
 import { useEffect, useState, type ComponentType, type ReactNode } from 'react'
 import {
-  Plug, Mail, LayoutGrid, Send, Scale, Mic, Sparkles, MessageCircle, Database, ChevronRight, ChevronLeft, Cable, Smartphone, Bell, Globe, AtSign,
-} from 'lucide-react'
+  Plug, Mail, LayoutGrid, Send, Scale, Mic, Sparkles, MessageCircle, Database, ChevronRight, ChevronLeft, Cable, Smartphone, Bell, Globe, AtSign, Brain } from 'lucide-react'
 import GoogleConnection from '../connections/GoogleConnection'
 import MicrosoftConnection from '../connections/MicrosoftConnection'
 import ImapConnection from '../connections/ImapConnection'
@@ -16,6 +15,8 @@ import AgentLinksConnection, { type LinksStatus } from '../connections/AgentLink
 import BrowserConnection, { type BrowsersStatus } from '../connections/BrowserConnection'
 import JevConnection from '../connections/JevConnection'
 import SonioxConnection from '../connections/SonioxConnection'
+import ExternalMemoryConnection from '../connections/ExternalMemoryConnection'
+import ExternalMemoryDeckConnection from '../connections/ExternalMemoryDeckConnection'
 import WhatsAppNudgeConnection from '../connections/WhatsAppNudgeConnection'
 import NotificationsConnection from '../connections/NotificationsConnection'
 import TypesenseConnection from '../connections/TypesenseConnection'
@@ -36,7 +37,7 @@ import { Page, PageHeader, Dot } from './parts'
 // own connection. The same cards as Connections and Admin → Integrations; all
 // stay mounted so sign-in popups and half-typed forms survive switching.
 
-type ServiceId = 'google' | 'microsoft' | 'email' | 'telegram' | 'whatsapp_web' | 'mcp' | 'systems' | 'browser' | 'jev' | 'soniox' | 'codex' | 'antigravity' | 'notify' | 'whatsapp' | 'typesense'
+type ServiceId = 'google' | 'microsoft' | 'email' | 'telegram' | 'whatsapp_web' | 'mcp' | 'systems' | 'browser' | 'jev' | 'soniox' | 'memory' | 'codex' | 'antigravity' | 'notify' | 'whatsapp' | 'typesense'
 
 interface Service {
   id: ServiceId
@@ -60,6 +61,7 @@ const SERVICES: Service[] = [
   { id: 'browser', label: 'Browser', hint: 'Captain for Chrome — send the page you are on to an agent', icon: Globe, everyone: true },
   { id: 'jev', label: 'Jev', hint: 'Legal research (TypeSafe) — a team key or each person\'s own', icon: Scale, everyone: true },
   { id: 'soniox', label: 'Soniox', hint: 'Speech-to-text and voices — a team key or each person\'s own', icon: Mic, everyone: true },
+  { id: 'memory', label: 'External memory', hint: 'Membase, Hindsight — one server for everyone (a bank per person) or each person their own; all of their agents share it', icon: Brain, everyone: true },
   { id: 'codex', label: 'ChatGPT', hint: 'A ChatGPT subscription as a model provider', icon: Sparkles, everyone: false },
   { id: 'antigravity', label: 'Antigravity', hint: 'A Google subscription as a model provider', icon: Sparkles, everyone: false },
   { id: 'notify', label: 'Notifications', hint: 'Where your nudges and waiting proposals reach you — WhatsApp, Telegram, devices', icon: Bell, everyone: false },
@@ -250,6 +252,7 @@ export function ConnectionsConsole() {
           {panel('browser', null, <BrowserConnection active={active === 'browser'} onStatus={setBrowsers} />)}
           {panel('jev', accounts ? <JevTeamKey refreshTick={0} /> : null, <JevConnection />)}
           {panel('soniox', accounts ? <SonioxTeamKey refreshTick={0} /> : null, <SonioxConnection />)}
+          {panel('memory', accounts ? <ExternalMemoryDeckConnection /> : null, <ExternalMemoryConnection />)}
           {panel('codex', null, <CodexConnection />)}
           {panel('antigravity', null, <AntigravityConnection />)}
           {panel('notify', null, <NotificationsConnection />)}
