@@ -595,3 +595,236 @@ def test_a_channel_send_wakes_a_sleeping_agent(deck, monkeypatch):
 
     assert _loop_run(scenario()) is True
     assert calls == ["helper"]
+
+
+# ── On for a scheduled task ───────────────────────────────────────────
+
+
+def _starter(monkeypatch, alive, starts):
+    def start(slug, entry):
+        starts.append(slug)
+        entry["pid"] = 1
+        alive.add(slug)
+        return True
+
+    monkeypatch.setattr(srv, "_start_registered_process", start)
+
+
+def test_a_task_starts_an_agent_its_owner_turned_off_and_turns_it_off_after(deck, monkeypatch, tmp_path):
+    registry, alive = deck
+    port = _free_port()
+    registry["glasses"] = {"name": "glasses", "web_port": port, "web_auth": "mine", "stopped": True}
+    (tmp_path / "glasses").mkdir()
+    starts: list[str] = []
+    _starter(monkeypatch, alive, starts)
+    kills: list[int] = []
+
+    def kill(pid, timeout=5.0):
+        kills.append(pid)
+        alive.discard("glasses")
+
+    monkeypatch.setattr(srv, "_kill_pid", kill)
+
+    async def scenario():
+        server = await asyncio.start_server(_http_agent("mine"), "127.0.0.1", port)
+        async with server:
+            up = await agent_idle.ready_for_task("glasses")
+            during = dict(registry["glasses"])
+            off = await agent_idle.release_after_task("glasses")
+            return up, during, off
+
+    up, during, off = _loop_run(scenario())
+    assert up and starts == ["glasses"]
+    assert during.get("on_for_task") and not during.get("stopped")
+    assert off and kills == [1]
+    # Off again, as its owner left it: nothing but the next task starts it.
+    assert registry["glasses"]["stopped"] is True and "on_for_task" not in registry["glasses"]
+
+
+def test_a_crashed_agent_is_started_for_its_task_and_stays_on(deck, monkeypatch, tmp_path):
+    registry, alive = deck
+    port = _free_port()
+    registry["helper"] = {"name": "helper", "web_port": port, "web_auth": "mine", "pid": 99}
+    (tmp_path / "helper").mkdir()
+    starts: list[str] = []
+    _starter(monkeypatch, alive, starts)
+
+    async def scenario():
+        server = await asyncio.start_server(_http_agent("mine"), "127.0.0.1", port)
+        async with server:
+            return await agent_idle.ready_for_task("helper"), await agent_idle.release_after_task("helper")
+
+    assert _loop_run(scenario()) == (True, False)
+    assert starts == ["helper"] and "on_for_task" not in registry["helper"]
+
+
+def test_a_running_agent_is_ready_as_it_is(deck, monkeypatch):
+    registry, alive = deck
+    port = _free_port()
+    registry["up"] = {"name": "up", "web_port": port, "web_auth": "mine"}
+    alive.add("up")
+    starts: list[str] = []
+    _starter(monkeypatch, alive, starts)
+
+    async def scenario():
+        server = await asyncio.start_server(_http_agent("mine"), "127.0.0.1", port)
+        async with server:
+            return await agent_idle.ready_for_task("up")
+
+    assert _loop_run(scenario()) is True and starts == []
+
+
+def test_it_stays_on_while_needed_or_once_its_owner_turns_it_on(deck, actions, monkeypatch):
+    from captain_claw.flight_deck import fd_scheduler
+
+    registry, alive = deck
+    registry["glasses"] = {"name": "glasses", "web_port": 24101, "on_for_task": 1.0}
+    alive.add("glasses")
+    turned_off: list[str] = []
+    monkeypatch.setattr(srv, "_do_stop_process", lambda slug: turned_off.append(slug))
+
+    # Another of its tasks is due in two minutes.
+    now = time.time()
+    monkeypatch.setattr(agent_idle, "_scheduler_next_runs", lambda: {"glasses": now + 120})
+    assert not _loop_run(agent_idle.release_after_task("glasses"))
+    monkeypatch.setattr(agent_idle, "_scheduler_next_runs", lambda: {})
+
+    # Another run has it, or is waiting for it.
+    async def held():
+        lock = fd_scheduler._AGENT_LOCKS.setdefault("glasses", asyncio.Lock())
+        async with lock:
+            return await agent_idle.release_after_task("glasses")
+
+    try:
+        assert not _loop_run(held())
+    finally:
+        fd_scheduler._AGENT_LOCKS.pop("glasses", None)
+
+    # Someone is in a turn with it.
+    async def busy(entry):
+        return {"busy": True, "last_active_at": time.time()}
+
+    monkeypatch.setattr(agent_idle, "_agent_activity", busy)
+    assert not _loop_run(agent_idle.release_after_task("glasses"))
+
+    async def idle(entry):
+        return None
+
+    monkeypatch.setattr(agent_idle, "_agent_activity", idle)
+    # Its owner turned it on meanwhile: on it stays.
+    srv._do_start_process("glasses")
+    assert "on_for_task" not in registry["glasses"]
+    assert not _loop_run(agent_idle.release_after_task("glasses"))
+    assert turned_off == []
+
+
+def test_powering_it_off_during_the_task_is_off_for_good(deck, monkeypatch):
+    registry, alive = deck
+    registry["glasses"] = {"name": "glasses", "web_port": 24101, "on_for_task": 1.0, "pid": 5}
+    alive.add("glasses")
+    monkeypatch.setattr(srv, "_kill_pid", lambda pid, timeout=5.0: alive.discard("glasses"))
+    srv._do_stop_process("glasses")
+    assert registry["glasses"]["stopped"] is True and "on_for_task" not in registry["glasses"]
+    assert not agent_idle.is_on_for_task("glasses")
+
+
+def test_the_tick_starts_an_off_agent_before_its_task_and_turns_it_off_after(deck, actions, monkeypatch):
+    registry, alive = deck
+    now = time.time()
+    registry["soon"] = {"name": "soon", "web_port": 24101, "stopped": True}
+    registry["later"] = {"name": "later", "web_port": 24102, "stopped": True}
+    registry["cron-only"] = {"name": "cron-only", "web_port": 24103, "stopped": True}
+    registry["done"] = {"name": "done", "web_port": 24104, "on_for_task": now - 900}
+    registry["fresh"] = {"name": "fresh", "web_port": 24105, "on_for_task": now - 30}
+    registry["crashed"] = {"name": "crashed", "web_port": 24106}
+    alive.update({"done", "fresh"})
+    _idle("done", 900)
+    agent_idle.touch("fresh")
+    monkeypatch.setattr(agent_idle, "_scheduler_next_runs", lambda: {
+        "soon": now + 200, "later": now + 3 * 3600, "crashed": now + 60})
+    monkeypatch.setattr(agent_idle, "_agent_cron_next", lambda slug: now + 60 if slug == "cron-only" else None)
+    readied: list[str] = []
+    released: list[str] = []
+
+    async def ready(slug, timeout=0):
+        readied.append(slug)
+        return True
+
+    monkeypatch.setattr(agent_idle, "ready_for_task", ready)
+    monkeypatch.setattr(agent_idle, "_turn_off_after_task", lambda slug: released.append(slug) or True)
+
+    done = _loop_run(agent_idle.tick(now))
+    # Off by its owner: only a scheduled task of Flight Deck's turns it on,
+    # not the agent's own cron.
+    assert readied == ["soon", "crashed"] and done["started"] == ["soon", "crashed"]
+    assert released == ["done"] and done["off"] == ["done"]
+    # One a task has on is turned off, never put to sleep.
+    assert actions["slept"] == [] and actions["woke"] == []
+
+
+def test_a_restart_turns_off_what_a_task_had_on(deck, monkeypatch):
+    registry, _alive = deck
+    registry["glasses"] = {"name": "glasses", "web_port": 24101, "on_for_task": 1.0, "pid": None}
+    started: list[str] = []
+    monkeypatch.setattr(srv, "_start_registered_process", lambda slug, e: started.append(slug) or True)
+    srv._reattach_processes()
+    assert started == []
+    assert registry["glasses"]["stopped"] is True and "on_for_task" not in registry["glasses"]
+
+
+def test_a_scheduled_run_readies_its_agent_and_lets_it_go_after(deck, monkeypatch, tmp_path):
+    from captain_claw.flight_deck import fd_scheduler, usage_quota
+
+    registry, alive = deck
+    registry["glasses"] = {"name": "glasses", "web_port": 24101, "web_auth": "t"}
+    calls: list[tuple] = []
+
+    async def ready(slug, timeout=0):
+        calls.append(("ready", slug))
+        alive.add(slug)
+        return True
+
+    def release(slug):
+        calls.append(("release", slug, fd_scheduler._AGENT_LOCKS[slug].locked()))
+
+    async def capture(**kw):
+        calls.append(("prompt", kw["port"]))
+        return "done"
+
+    async def not_blocked(owner):
+        return False
+
+    async def no_line(*a, **k):
+        return None
+
+    monkeypatch.setattr(agent_idle, "ready_for_task", ready)
+    monkeypatch.setattr(agent_idle, "release_after_task_soon", release)
+    monkeypatch.setattr(fd_scheduler, "run_prompt_and_capture", capture)
+    monkeypatch.setattr(fd_scheduler, "_to_line", no_line)
+    monkeypatch.setattr(fd_scheduler, "_in_quiet_hours", lambda *a: False)
+    monkeypatch.setattr(usage_quota, "automation_blocked", not_blocked)
+    store = fd_scheduler.SchedulerStore(db_path=tmp_path / "scheduler.db")
+    monkeypatch.setattr(fd_scheduler, "_STORE", store)
+    job = store.create(schedule="daily 08:00", agent_slug="glasses", prompt="hi",
+                       delivery_kind="agent", delivery={"chat": True})
+
+    status, result, _ = _loop_run(fd_scheduler.run_job(job, trigger="manual"))
+    assert (status, result) == ("ok", "done")
+    # Readied before the prompt; let go once the run no longer holds it.
+    assert calls == [("ready", "glasses"), ("prompt", 24101), ("release", "glasses", False)]
+
+
+def test_a_run_whose_agent_cannot_start_says_so(deck, monkeypatch):
+    from captain_claw.flight_deck import fd_scheduler, usage_quota
+
+    async def ready(slug, timeout=0):
+        return False
+
+    async def not_blocked(owner):
+        return False
+
+    monkeypatch.setattr(agent_idle, "ready_for_task", ready)
+    monkeypatch.setattr(fd_scheduler, "_in_quiet_hours", lambda *a: False)
+    monkeypatch.setattr(usage_quota, "automation_blocked", not_blocked)
+    status, text = _loop_run(fd_scheduler.execute_job({"agent_slug": "gone", "prompt": "hi"}))
+    assert status == "error:agent-not-running" and "could not be started" in text
