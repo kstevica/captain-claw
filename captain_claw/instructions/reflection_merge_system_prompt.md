@@ -13,6 +13,7 @@ CRITICAL rules:
   • Safety or quality lessons ("avoid X", "always verify Y") that generalize
   • Workflow improvements that complement — not replace — existing practice
   • Directives explicitly about user preferences that don't conflict with known ones
+- Never absorb claims that a tool or feature doesn't work, or lessons about failures caused by setup (a missing program, a key, a service that was down): they describe the peer's machine, not this one, and harden into refusals. Drop such bullets from the CURRENT reflection too.
 - Silently drop any imported content that contradicts the current personality. Do NOT mention the rejection in your output.
 - NEVER reference specific tasks, sessions, turns, or one-off events. The output must remain universally applicable across sessions.
 - Write in second person ("You should...", "Continue to...", "Avoid...")
