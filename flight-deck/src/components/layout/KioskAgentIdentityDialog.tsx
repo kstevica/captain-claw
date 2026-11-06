@@ -2,7 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import { AtSign, Check, IdCard, Inbox, Loader2, Mail, Users } from 'lucide-react'
 import { AgentDialog } from './KioskAgentDialogs'
 import { SwitchTrack } from '../common/SwitchTrack'
-import { colleaguesApi, type ColleagueAgent, type ColleaguesView } from '../../services/colleaguesApi'
+import { colleaguesApi, type ColleagueAgent, type ColleaguesView, type GmailReplies } from '../../services/colleaguesApi'
+import { GmailReplyChoice } from '../agents/AgentMailSetting'
 import { useNotificationStore } from '../../stores/notificationStore'
 
 // ── Identity & email: one agent as a colleague ───────────────────────
@@ -34,6 +35,7 @@ export function KioskAgentIdentityDialog({ slug, agentName, onClose }: {
   const [addresses, setAddresses] = useState('')
   const [inbox, setInbox] = useState('')
   const [pickUp, setPickUp] = useState(false)
+  const [gmailReplies, setGmailReplies] = useState<GmailReplies>('off')
   const [handsAll, setHandsAll] = useState(true)
   const [handsTo, setHandsTo] = useState<string[]>([])
 
@@ -56,6 +58,7 @@ export function KioskAgentIdentityDialog({ slug, agentName, onClose }: {
     setAddresses(me.addresses.join(', '))
     setInbox(me.inbox)
     setPickUp(me.pick_up_mail)
+    setGmailReplies(me.gmail_replies || 'off')
     setHandsAll(me.hands_to === 'all')
     setHandsTo(me.hands_to === 'all' ? [] : me.hands_to)
   }
@@ -72,7 +75,7 @@ export function KioskAgentIdentityDialog({ slug, agentName, onClose }: {
     setError('')
     try {
       const { agent } = await colleaguesApi.save(slug, {
-        role, about, names: answersTo, addresses: splitList(addresses), inbox, pick_up_mail: pickUp,
+        role, about, names: answersTo, addresses: splitList(addresses), inbox, pick_up_mail: pickUp, gmail_replies: gmailReplies,
         hands_to: handsAll ? 'all' : handsTo,
       })
       setView((v) => v && { ...v, agents: v.agents.map((a) => (a.slug === slug ? { ...a, ...agent } : a)) })
@@ -156,10 +159,16 @@ export function KioskAgentIdentityDialog({ slug, agentName, onClose }: {
                     {watched
                       ? `It starts on what comes to its own inbox and its addresses, and on mail in ${watched} that names it. Each one is a task on your Taskboard.`
                       : 'Connect Gmail, Outlook or an IMAP inbox under Connections first.'}
-                    {' '}Replies from its own inbox go out only if that inbox may send; anywhere else they wait as drafts for you.
+                    {' '}Replies from its own inbox go out only if that inbox may send; replies in Gmail go as you choose below;
+                    anywhere else they wait as drafts for you.
                   </span>
                 </span>
               </button>
+              {pickUp && view.mail.gmail && (
+                <div className="mt-3">
+                  <GmailReplyChoice value={gmailReplies} onChange={setGmailReplies} />
+                </div>
+              )}
             </section>
 
             <section>

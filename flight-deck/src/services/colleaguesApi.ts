@@ -20,10 +20,14 @@ export interface ColleagueAgent {
   /** Its own inbox's address, else its first alias. */
   email: string
   pick_up_mail: boolean
+  /** Replies to email that came to it in your Gmail: drafts, sent to you only, or sent to any sender Gmail verified. */
+  gmail_replies: GmailReplies
   hands_to: 'all' | string[]
   asleep: boolean
   on?: boolean
 }
+
+export type GmailReplies = 'off' | 'me' | 'verified'
 
 export interface ColleagueInbox {
   id: string
@@ -48,6 +52,7 @@ export interface IdentityPatch {
   addresses?: string[]
   inbox?: string
   pick_up_mail?: boolean
+  gmail_replies?: GmailReplies
   hands_to?: 'all' | string[]
 }
 

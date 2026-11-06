@@ -2,8 +2,48 @@ import { useEffect, useState } from 'react'
 import { IdCard, Loader2, Mail } from 'lucide-react'
 import { SwitchTrack } from '../common/SwitchTrack'
 import { KioskAgentIdentityDialog } from '../layout/KioskAgentIdentityDialog'
-import { colleaguesApi, type ColleagueAgent, type ColleaguesView } from '../../services/colleaguesApi'
+import { colleaguesApi, type ColleagueAgent, type ColleaguesView, type GmailReplies } from '../../services/colleaguesApi'
 import { useNotificationStore } from '../../stores/notificationStore'
+
+// ── Replies in your Gmail ─────────────────────────────────────────────
+//
+// Email that came to the agent in your Gmail: its reply is a draft you send
+// (off), or it sends the reply itself — only to you, or to any sender whose
+// address Gmail verified. Always the one reply, to that sender, on that email,
+// within Connections → Google → Email sending (on/off, allowlist, daily limit).
+
+export const GMAIL_REPLY_CHOICES: { id: GmailReplies; label: string; hint: string }[] = [
+  { id: 'off', label: 'Drafts', hint: 'It saves its reply as a draft; you send it.' },
+  { id: 'me', label: 'Send to you', hint: 'When you email it, it sends its reply to you. Anyone else gets a draft.' },
+  { id: 'verified', label: 'Send to anyone', hint: 'It sends its reply to whoever wrote, when Gmail verified their address. Their reply can carry what it found — keep an allowlist in Connections → Google → Email sending.' },
+]
+
+export function GmailReplyChoice({ value, onChange, disabled = false, compact = false }: {
+  value: GmailReplies
+  onChange: (v: GmailReplies) => void
+  disabled?: boolean
+  compact?: boolean
+}) {
+  const current = GMAIL_REPLY_CHOICES.find((c) => c.id === value) ?? GMAIL_REPLY_CHOICES[0]
+  return (
+    <div>
+      <div className={`font-medium text-zinc-300 ${compact ? 'text-[11px]' : 'text-xs'}`}>Replies in your Gmail</div>
+      <div role="radiogroup" aria-label="Replies in your Gmail" className="mt-1.5 grid grid-cols-3 rounded-lg bg-zinc-900 p-0.5">
+        {GMAIL_REPLY_CHOICES.map((c) => (
+          <button
+            key={c.id} type="button" role="radio" aria-checked={value === c.id} disabled={disabled}
+            onClick={() => onChange(c.id)}
+            className={`rounded-md px-2 py-1.5 text-xs font-medium transition-colors disabled:cursor-wait ${
+              value === c.id ? 'bg-zinc-700 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'}`}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+      <p className={`mt-1 leading-relaxed text-zinc-500 ${compact ? 'text-[11px]' : 'text-xs'}`}>{current.hint}</p>
+    </div>
+  )
+}
 
 // ── One agent's email setting ─────────────────────────────────────────
 //
@@ -38,17 +78,17 @@ export function AgentMailSetting({ slug, agentName, compact = false }: {
     return () => { live = false }
   }, [slug, rev])
 
-  const toggle = async () => {
+  const save = async (patch: { pick_up_mail?: boolean; gmail_replies?: GmailReplies }) => {
     if (!me || saving) return
-    const next = !me.pick_up_mail
+    const before = me
     setSaving(true)
     setError('')
-    setMe({ ...me, pick_up_mail: next })
+    setMe({ ...me, ...patch })
     try {
-      const { agent } = await colleaguesApi.save(slug, { pick_up_mail: next })
+      const { agent } = await colleaguesApi.save(slug, patch)
       setMe(agent)
     } catch (e) {
-      setMe({ ...me, pick_up_mail: !next })
+      setMe(before)
       const msg = String((e as Error)?.message || e)
       setError(msg)
       useNotificationStore.getState().add('error', 'Email setting not saved', msg)
@@ -56,6 +96,7 @@ export function AgentMailSetting({ slug, agentName, compact = false }: {
       setSaving(false)
     }
   }
+  const toggle = () => save({ pick_up_mail: !me?.pick_up_mail })
 
   if (error && !me) return <p className="text-[11px] text-red-400">{error}</p>
   if (!view || !me) {
@@ -88,10 +129,17 @@ export function AgentMailSetting({ slug, agentName, compact = false }: {
             {me.pick_up_mail && !sources.length && !me.inbox_email && ' Connect Gmail, Outlook or an IMAP inbox under Connections first.'}
           </span>
           <span className={`mt-1 block leading-relaxed text-zinc-600 ${text}`}>
-            Replies from its own inbox go out only if that inbox may send; anywhere else they wait as drafts for you.
+            {me.pick_up_mail && view.mail.gmail
+              ? 'Replies from its own inbox go out only if that inbox may send; in Gmail, as set below; anywhere else they wait as drafts for you.'
+              : 'Replies from its own inbox go out only if that inbox may send; anywhere else they wait as drafts for you.'}
           </span>
         </span>
       </button>
+      {me.pick_up_mail && view.mail.gmail && (
+        <div className="mt-2.5 px-1">
+          <GmailReplyChoice value={me.gmail_replies} onChange={(v) => void save({ gmail_replies: v })} disabled={saving} compact={compact} />
+        </div>
+      )}
       <button
         type="button" onClick={() => setIdentityOpen(true)}
         className={`mt-1.5 flex items-center gap-1.5 rounded-md px-1 py-0.5 text-violet-300 hover:text-violet-200 ${text}`}

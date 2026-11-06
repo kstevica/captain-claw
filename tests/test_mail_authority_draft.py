@@ -49,3 +49,28 @@ def test_the_new_kinds_have_their_own_words():
         assert ma.check_mail_write("google_mail", "create_draft") is not None
     with _with(ma.automated("inbox", "", "draft")):
         assert "an email that came to you" in ma.automated_prefix()
+
+
+def test_the_one_gmail_reply_an_email_turn_may_send():
+    a = ma.automated("inbox", "", "draft", reply_id="m1", reply_to="Ana@X.co")
+    assert (a.reply_id, a.reply_to) == ("m1", "ana@x.co")
+    with _with(a):
+        assert ma.check_mail_write("google_mail", "send", reply_message_id="m1", reply_recipients=["ana@x.co"]) is None
+        for rid, rcpt in (("m2", ["ana@x.co"]), ("m1", ["mallory@evil.co"]), ("m1", ["ana@x.co", "bob@x.co"]),
+                          ("m1", []), ("", ["ana@x.co"])):
+            assert ma.check_mail_write("google_mail", "send", reply_message_id=rid, reply_recipients=rcpt), (rid, rcpt)
+        assert ma.check_mail_write("google_mail", "send_draft", reply_message_id="m1", reply_recipients=["ana@x.co"])
+        assert ma.check_mail_write("microsoft_mail", "send", reply_message_id="m1", reply_recipients=["ana@x.co"])
+        refusal = ma.check_mail_write("google_mail", "send")
+        assert "google_mail action=send to=ana@x.co reply_to_message_id=m1" in refusal
+
+
+def test_a_reply_needs_draft_mode_and_both_parts():
+    assert ma.automated("inbox", "", "allow", reply_id="m1", reply_to="a@x.co").reply_id == ""
+    assert ma.automated("inbox", "", "draft", reply_id="m1", reply_to="").reply_id == ""
+    assert ma.automated("inbox", "", "draft", reply_id="bad id!", reply_to="a@x.co").reply_to == ""
+    a = ma.from_wire({"kind": "inbox", "mail_write": "draft", "reply_id": "m1", "reply_to": "a@x.co"}, default_kind="x")
+    assert (a.reply_id, a.reply_to) == ("m1", "a@x.co")
+    a = ma.from_wire({"kind": "colleague", "mail_write": "intent", "reply_id": "m1", "reply_to": "a@x.co"},
+                     default_kind="x")
+    assert (a.reply_id, a.reply_to) == ("", "")

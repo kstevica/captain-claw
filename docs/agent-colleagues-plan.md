@@ -94,6 +94,34 @@ an identity with mail:
   IMAP inbox when it came there: an `imap_mail` send from that inbox goes to
   Flight Deck, where that inbox's own gate decides.
 
+## Sending replies from the owner's Gmail (2026-11-06, after staging)
+
+Decision #2 kept replies in the owner's inbox as drafts. After the glasses
+agent answered a real email with a Gmail draft, the user asked for a way to
+send. Per agent, `gmail_replies`:
+
+- `off` (default): a draft, as before.
+- `me`: the reply is sent when the email came from the owner — the deck
+  account's address, the Gmail mailbox's own addresses (its send-as aliases),
+  or a connected IMAP inbox's address.
+- `verified`: the reply is sent to whoever wrote.
+
+Either way only when Gmail verified the sender (`gmail_inbound.sender_authenticated`,
+so a forged From never counts), and only the one reply: the turn carries
+`reply_id` (the Gmail message) and `reply_to` (the sender), and
+`mail_authority.check_mail_write` lets a `google_mail` `send` through only with
+that `reply_to_message_id`, `to` exactly that address and no cc / bcc
+(`send_draft` stays refused). The send still goes through Flight Deck's Gmail
+gate (Connections → Google → Email sending: on/off, allowlist, daily limit).
+The reply never passes to a colleague; it does come back to the same agent
+with a colleague's answer. UI: the "Replies in your Gmail" choice under the
+Email switch (agent settings) and in Identity & email, shown when Gmail is
+connected.
+
+Agent-made hand-overs (colleague, answer back, email) carry the `handover`
+mark, so the board's ledger reader no longer shows them as a proposal and an
+approval.
+
 ## Agent-side changes
 
 - `mail_authority`: kinds `colleague` and `inbox` (labels, prefixes), mode

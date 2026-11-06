@@ -74,11 +74,14 @@ async def _post(path: str, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def _authority() -> dict[str, str]:
-    """This turn's mail authority as the colleague inherits it: a person's own
-    words stay the words a mail write is judged on; an automation passes as it is.
-    An email's own inbox (``send_from``) never passes on."""
+    """This turn's mail authority, for the colleague and for this agent's own
+    turn when the answer comes back: a person's own words stay the words a mail
+    write is judged on; an automation passes as it is. Flight Deck never passes
+    an email turn's own inbox or its one Gmail reply to a colleague — only back
+    to this agent."""
     a = mail_authority.current()
-    return {"mode": a.mode, "kind": a.kind, "job_text": a.job_text, "mail_write": a.mail_write}
+    return {"mode": a.mode, "kind": a.kind, "job_text": a.job_text, "mail_write": a.mail_write,
+            "send_from": a.send_from, "reply_id": a.reply_id, "reply_to": a.reply_to}
 
 
 def _board_task(agent: Any) -> tuple[str, str]:

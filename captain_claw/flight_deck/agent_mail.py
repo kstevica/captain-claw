@@ -50,6 +50,7 @@ _OVERLAP_S = 120          # Gmail's after: is whole seconds and its index lags a
 _IMAP_TIMEOUT_S = 90.0
 _HTTP_TIMEOUT_S = 30.0
 SOURCE = "agent_mail"
+_OWN_ADDRESSES_S = 6 * 3600.0  # how long the Gmail mailbox's own addresses are kept before asking again
 _CHANNEL = {"gmail": "gmail", "outlook": "outlook", "imap": "email"}
 _WHERE = {"gmail": "your owner's Gmail", "outlook": "your owner's Outlook", "imap": "your owner's inbox"}
 _GRAPH = "https://graph.microsoft.com/v1.0"
@@ -240,11 +241,18 @@ async def _gmail_read(owner: str, cursor: dict) -> tuple[list[Email], dict] | No
     if not token:
         return None
     now = time.time()
-    if not cursor.get("after"):
-        return [], {"after": now}
-    after = float(cursor["after"])
-    q = f"in:inbox after:{max(0, int(after) - _OVERLAP_S)} -in:chats"
     async with httpx.AsyncClient(timeout=_HTTP_TIMEOUT_S) as client:
+        # The mailbox's own addresses (its address and send-as aliases): one of
+        # the ways the owner is "me" for an agent that may send Gmail replies.
+        own = {"own": [str(a) for a in cursor.get("own") or []], "own_at": float(cursor.get("own_at") or 0)}
+        if not own["own"] or now - own["own_at"] > _OWN_ADDRESSES_S:
+            mailbox = await ar._mailbox(client, token)
+            if mailbox is not None:
+                own = {"own": [str(a).lower() for a in mailbox.own], "own_at": now}
+        if not cursor.get("after"):
+            return [], {"after": now, **own}
+        after = float(cursor["after"])
+        q = f"in:inbox after:{max(0, int(after) - _OVERLAP_S)} -in:chats"
         st, data = await ar._gmail_get(client, token, "/messages", {"q": q, "maxResults": 50})
         if st != 200:
             raise RuntimeError(f"Gmail answered {st or 'nothing'}")
@@ -273,7 +281,7 @@ async def _gmail_read(owner: str, cursor: dict) -> tuple[list[Email], dict] | No
                                                              "list-post", "x-autoreply", "x-autorespond")},
                 at=inb.internal_ms / 1000.0, verified=gmail_inbound.sender_authenticated(inb)[0],
                 date=heads.get("date", "")))
-    return out, {"after": max(newest, after) if fresh else after}
+    return out, {"after": max(newest, after) if fresh else after, **own}
 
 
 async def _outlook_read(owner: str, cursor: dict) -> tuple[list[Email], dict] | None:
@@ -356,8 +364,13 @@ async def owner_pass(owner: str) -> int:
     store = _store()
     agents = _agents_for_match(team)
     theirs = _agent_addresses(team)
+    recs = await imap_routes._load(get_db(), owner)
+    # The owner's own addresses — "me" for an agent allowed to send Gmail
+    # replies to its owner: the deck account's, the connected inboxes', and
+    # (below) the Gmail mailbox's own.
+    mine = {str(r.get("email") or "").lower() for r in recs} | await _account_addresses(owner)
     n = 0
-    for rec in await imap_routes._load(get_db(), owner):
+    for rec in recs:
         key = f"imap:{rec['id']}"
         try:
             got, cur = await asyncio.wait_for(asyncio.to_thread(_imap_read, rec, store.cursor(owner, key)),
@@ -378,9 +391,35 @@ async def owner_pass(owner: str) -> int:
             store.drop_cursor(owner, source)  # connected again later: a fresh baseline
             continue
         got, cur = res
-        n += await _take(owner, got, team, agents, theirs)
+        n += await _take(owner, got, team, agents, theirs,
+                         mine=mine | {str(a).lower() for a in cur.get("own") or []})
         store.save_cursor(owner, source, cur)
     return n
+
+
+async def _account_addresses(owner: str) -> set[str]:
+    """The owner's deck account's email ({} when there is none to read)."""
+    from captain_claw.flight_deck.auth import get_db
+
+    try:
+        user = await get_db().get_user_by_id(owner)
+    except Exception:  # noqa: BLE001 — an auth-off deck has no accounts
+        return set()
+    address = str((user or {}).get("email") or "").strip().lower()
+    return {address} if "@" in address else set()
+
+
+def gmail_reply_for(em: Email, agent: dict, mine: set[str]) -> dict | None:
+    """``{message_id, to}`` when the agent may send its reply to *em* from the
+    owner's Gmail: the agent's setting allows it (``me``: the sender is the
+    owner; ``verified``: anyone), and Gmail verified the sender, so the From
+    isn't forged. The one reply, to that sender only. None: a draft."""
+    policy = str(agent.get("gmail_replies") or "off")
+    if em.source != "gmail" or not em.verified or "@" not in em.sender or policy not in ("me", "verified"):
+        return None
+    if policy == "me" and em.sender.lower() not in {m for m in mine if m}:
+        return None
+    return {"message_id": em.ref, "to": em.sender.lower()}
 
 
 def _can_send(rec: dict) -> bool:
@@ -388,7 +427,7 @@ def _can_send(rec: dict) -> bool:
 
 
 async def _take(owner: str, emails: list[Email], team: list[dict], agents: list[Agent], theirs: set[str], *,
-                own_slug: str = "", own_email: str = "", send_ok: bool = False) -> int:
+                own_slug: str = "", own_email: str = "", send_ok: bool = False, mine: set[str] | None = None) -> int:
     store = _store()
     n = 0
     for em in emails:
@@ -406,7 +445,8 @@ async def _take(owner: str, emails: list[Email], team: list[dict], agents: list[
             continue
         try:
             task_id = await dispatch(owner, em, agent, hit, own_email=own_email,
-                                     send_from=em.account if own_slug and send_ok else "")
+                                     send_from=em.account if own_slug and send_ok else "",
+                                     gmail_reply=gmail_reply_for(em, agent, mine or set()))
         except Exception as exc:  # noqa: BLE001
             log.warning("Agent mail: not handed over", owner=owner, agent=hit.slug, error=str(exc)[:200])
             continue
@@ -417,7 +457,7 @@ async def _take(owner: str, emails: list[Email], team: list[dict], agents: list[
 
 
 async def dispatch(owner: str, em: Email, agent: dict, hit: mail_match.Match, *, own_email: str = "",
-                   send_from: str = "") -> str:
+                   send_from: str = "", gmail_reply: dict | None = None) -> str:
     """The email on the owner's board, assigned to *agent*, and its turn in the
     agent's line: the task's id ("" when it was already with the agent)."""
     from captain_claw.flight_deck import taskboard_handover
@@ -452,8 +492,8 @@ async def dispatch(owner: str, em: Email, agent: dict, hit: mail_match.Match, *,
         autonomy_store().add_action, owner, kind="run_prompt", title=f"Email for {agent['name']}: {subject}"[:200],
         rationale=f"An email came to {agent['name']} ({hit.why.replace('_', ' ')}).", source=TASKBOARD_SOURCE,
         risk="normal", domain="taskboard", status="dispatched", target=agent["slug"], ref_id=task_id,
-        payload={"inbox": True, "task_id": task_id, "source": em.source, "account": em.account,
-                 "send_from": send_from, "why": why, "agent_name": agent["name"], "agent_role": agent.get("role") or "",
+        payload={"inbox": True, "handover": True, "task_id": task_id, "source": em.source, "account": em.account,
+                 "send_from": send_from, "gmail_reply": gmail_reply, "why": why, "agent_name": agent["name"], "agent_role": agent.get("role") or "",
                  "message": {"from": em.sender, "from_name": em.sender_name, "to": ", ".join(em.to),
                              "cc": ", ".join(em.cc), "subject": subject, "date": em.date, "body": body[:BODY_KEPT],
                              "body_cut": len(body) > BODY_KEPT, "reply_ref": em.reply_ref, "thread": em.thread,
@@ -499,6 +539,7 @@ def turn_spec(uid: str, action: dict, view_: dict, words: str, slug: str) -> dic
     tool = _REPLY_TOOL.get(src, "imap_mail")
     ref = str(m.get("reply_ref") or "")
     send_from = str(p.get("send_from") or "")
+    gmail_reply = p.get("gmail_reply") if isinstance(p.get("gmail_reply"), dict) else None
     nonce = new_nonce()
     name, role = str(p.get("agent_name") or "an agent"), str(p.get("agent_role") or "")
     me = f"You are {name}" + (f", {role}," if role and role.casefold() != name.casefold() else ",")
@@ -506,6 +547,11 @@ def turn_spec(uid: str, action: dict, view_: dict, words: str, slug: str) -> dic
         reply = (f"Reply from your own inbox: {tool} action=send account={send_from} reply_to_message_id={ref}. It goes "
                  "out only if that inbox's sending allows the address; if it is refused, save the reply as a draft "
                  "(action=create_draft) instead.")
+    elif gmail_reply:
+        reply = (f"Your owner lets you send this reply yourself: google_mail action=send to={gmail_reply['to']} "
+                 f"reply_to_message_id={gmail_reply['message_id']} — to them only, with no cc or bcc. It goes out "
+                 "within your owner's Gmail sending settings; if it is refused, save it as a draft "
+                 "(action=create_draft) instead and say so.")
     else:
         acct = f" account={p['account']}" if src == "imap" and p.get("account") else ""
         reply = (f"Save your reply as a draft: {tool} action=create_draft{acct} reply_to_message_id={ref}. Don't send "
@@ -534,6 +580,7 @@ def turn_spec(uid: str, action: dict, view_: dict, words: str, slug: str) -> dic
     automation = {
         "kind": "inbox", "job_text": "", "mail_write": "draft", "ref": str(action["id"]), "fd_delivers": True,
         **({"send_from": send_from} if send_from else {}),
+        **({"reply_id": gmail_reply["message_id"], "reply_to": gmail_reply["to"]} if gmail_reply else {}),
         "task": {"id": task["id"], "name": " ".join(str(task.get("title") or "").split()) or "Email",
                  "session_id": taskboard_handover._session_of(uid, task["id"], slug), "board": True},
     }
