@@ -115,6 +115,7 @@ class DispatchBody(BaseModel):
     folder: str = ""
     repo_url: str = ""
     repo_path: str = ""
+    tool: str = ""  # a custom tool of the caller's (external_tools.py): its own repository
     model: str = ""
     effort: str = ""
     attachments: list[str] = []

@@ -267,5 +267,6 @@ def test_a_rehearsal_runs_no_tool():
 
 
 def test_the_tool_schema_has_no_path_arguments():
-    assert set(CustomToolsTool.parameters["properties"]) == {"action", "tool", "input"}
+    assert set(CustomToolsTool.parameters["properties"]) == {"action", "tool", "input", "title", "what", "harness",
+                                                             "model"}
     assert json.dumps(CustomToolsTool.parameters)

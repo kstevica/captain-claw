@@ -54,8 +54,8 @@ from captain_claw.flight_deck import (
     crew_model,
     crew_store,
     crew_vfs,
+    proc_compat,
 )
-from captain_claw.flight_deck import proc_compat
 from captain_claw.flight_deck.crew_access import Grant
 from captain_claw.flight_deck.crew_harness import HARNESSES, RunSpec, TurnState
 from captain_claw.flight_deck.crew_store import CrewStore
@@ -312,11 +312,13 @@ def _place_of(body: dict[str, Any]) -> tuple[str, str, str]:
     project = str(body.get("project") or "").strip()
     url = str(body.get("repo_url") or "").strip()
     path = str(body.get("repo_path") or "").strip()
+    tool = str(body.get("tool") or "").strip()
     folder = str(body.get("folder") or "").strip()
     # An address makes its own project, named after it, so these two say the same thing.
     if url and project.lower() == _repo_slug(url).lower() and not folder:
         project = ""
-    named = [word for word, value in (("project", project), ("repo_url", url), ("repo_path", path)) if value]
+    named = [word for word, value in (("project", project), ("repo_url", url), ("repo_path", path), ("tool", tool))
+             if value]
     if len(named) > 1:
         raise HTTPException(400, f"Name one place to work, not {' and '.join(named)}. A repo_url makes its own project, "
                                  "named after the repository, so send it alone.")
@@ -325,7 +327,29 @@ def _place_of(body: dict[str, Any]) -> tuple[str, str, str]:
                                  "address, which Crew clones itself) or repo_path (a folder here, admins only).")
     if folder and not project:
         raise HTTPException(400, "A folder goes with a project: it's a folder in that project.")
-    return project, url, path
+    return project, url, path  # a custom tool is none of these: _resolve_repo reads body["tool"]
+
+
+def _tool_place(uid: str, name: str) -> dict[str, Any]:
+    """A custom tool's own repository (external_tools.py). It's the caller's when it's
+    under their folder, so no admin's trust is needed: Flight Deck made it."""
+    from captain_claw.flight_deck import external_tools as xt
+
+    try:
+        slug = xt.check_slug(name)
+    except xt.ToolError as exc:
+        raise HTTPException(400, exc.message) from None
+    if not xt.exists(uid, slug):
+        raise HTTPException(404, f"You have no custom tool called {slug}.")
+    return {"repo": str(xt.repo_dir(uid, slug)), "repo_label": f"custom tool {slug}", "repo_kind": "tool",
+            "remote_base": False}
+
+
+def tool_of(task: dict) -> str:
+    """The custom tool a task works on, "" for any other task."""
+    if task.get("repo_kind") != "tool" or not task.get("repo"):
+        return ""
+    return Path(task["repo"]).parent.name
 
 
 def _kill_clone(proc: asyncio.subprocess.Process) -> None:
@@ -376,6 +400,8 @@ async def _resolve_repo(user: dict, grant: Grant, body: dict[str, Any], *, progr
     a repository address, or (for those with a shell here) a path on this computer."""
     uid = user["id"]
     project, url, path = _place_of(body)
+    if str(body.get("tool") or "").strip():
+        return _tool_place(uid, str(body["tool"]))
     if project:
         from captain_claw.flight_deck import code_routes
 
@@ -734,8 +760,12 @@ def _first_prompt(task: dict) -> str:
     if task["kind"] == "setup":
         return crew_env.setup_prompt(task, state)
     duty = _SCOUT_DUTY if task["kind"] == "scout" else _SHIP_DUTY
-    contract = _CONTRACT.format(cwd=task["worktree"], branch=task["branch"], duty=duty,
-                                environment=crew_env.contract_block(state, task.get("repo") or ""))
+    environment = crew_env.contract_block(state, task.get("repo") or "")
+    if task.get("repo_kind") == "tool":
+        from captain_claw.flight_deck import external_tools as xt
+
+        environment = f"{environment}\n\n{xt.WORKER_CONTRACT}".strip()
+    contract = _CONTRACT.format(cwd=task["worktree"], branch=task["branch"], duty=duty, environment=environment)
     return contract + task["brief"]
 
 
@@ -1744,10 +1774,72 @@ async def merge(user: dict, grant: Grant, task_id: str, *, expect_head: str = ""
         fresh = await _keep_results(_get(user["id"], task_id))
         _say(fresh, "status", note, status="delivered")
         _sync_board(fresh)
+        if fresh.get("repo_kind") == "tool" and delivery.get("kind") == "merge":
+            _spawn_tool_publish(fresh)
         # An Approve answers the agent that asked, which is still waiting to hear.
         if expect_head:
             _spawn_notify(fresh)
         return fresh
+
+
+def _spawn_tool_publish(task: dict) -> None:
+    job = asyncio.create_task(_publish_tool(task))
+    _TASKS.add(job)
+    job.add_done_callback(_TASKS.discard)
+
+
+async def _publish_tool(task: dict) -> dict[str, Any]:
+    """What merged into a custom tool goes live only once its tests and every example
+    pass (external_tools.publish), run as the tool's owner with their secrets.
+    The result goes on the task and to the owner and the agent that asked."""
+    from captain_claw.flight_deck import external_tools as xt
+    from captain_claw.flight_deck import external_tools_routes as xr
+
+    uid, slug, sha = task["user_id"], tool_of(task), (task.get("delivery") or {}).get("sha") or ""
+    try:
+        state = await xt.publish(uid, slug, sha=sha, by=uid, secret_values=await xr.secret_values(uid, uid, slug))
+    except xt.ToolError as exc:
+        state = {"state": "failed", "error": exc.message, "steps": []}
+    except Exception as exc:  # noqa: BLE001 — the owner hears about it either way
+        log.warning("Crew: publishing a custom tool failed", task=task.get("id"), error=str(exc))
+        state = {"state": "failed", "error": f"{type(exc).__name__}: {exc}", "steps": []}
+    failed_step = next((s for s in reversed(state.get("steps") or []) if not s.get("ok")), None)
+    summary = {"state": state.get("state"), "version": state.get("version", ""), "error": state.get("error", ""),
+               "step": (failed_step or {}).get("step", ""), "detail": ((failed_step or {}).get("detail") or "")[-1500:]}
+    try:
+        current = _store().get(uid, task["id"]) or task
+        _store().update(task["id"], delivery={**(current.get("delivery") or {}), "publish": summary})
+        task = _store().get(uid, task["id"]) or task
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Crew: couldn't keep a custom tool's publish result", task=task.get("id"), error=str(exc))
+    await _tell_published(task, slug, summary)
+    return summary
+
+
+async def _tell_published(task: dict, slug: str, summary: dict) -> None:
+    from captain_claw.flight_deck import agent_notify, owner_notify
+
+    ok = summary.get("state") == "passed"
+    verb = "is live" if ok else "wasn't published"
+    title = f"Custom tool {slug} {verb}"
+    if ok:
+        text = (f"Version {summary.get('version')} of {slug} passed its tests and examples and is live: agents can run "
+                f"it now (custom_tools action=run tool={slug}).")
+    else:
+        where = f" at {summary['step']}" if summary.get("step") else ""
+        text = (f"It merged, but publishing stopped{where}: {summary.get('error')}\n{summary.get('detail') or ''}".strip()
+                + f"\n\nThe version that was live stays live. To fix it: custom_tools action=improve tool={slug}.")
+    host, port = _agent_address(task)
+    try:
+        await owner_notify._to_bell(task["user_id"], "crew_task", title, text[:1800])
+        if port:
+            await agent_notify.notify_source_agent(
+                source_host=host, source_port=port, origin=task.get("origin") or {},
+                kind="custom tool", title=slug, run_ref=f"custom tool {slug}", ok=ok, summary=text[:6000], verb=verb,
+                no_restart_hint="Do NOT start another crew task for this unless the user asks, and ",
+            )
+    except Exception as exc:  # noqa: BLE001 — telling is best-effort
+        log.warning("Crew: telling about a custom tool failed", task=task.get("id"), error=str(exc))
 
 
 async def _remove_worktree(task: dict, *, force: bool) -> None:
@@ -2226,6 +2318,9 @@ _PR_STEP = ("To push this and open a pull request: crew action=pr. Captain does 
 _PR_AGAIN = "Its pull request is open: crew action=pr pushes anything new to it."
 _MERGE_STEP = ("Merging is the user's call. Only if they ask for it: crew action=request_merge, and they Approve it in the "
                "bell. Never run git merge yourself, in a shell or any other way.")
+_TOOL_MERGE_STEP = ("This is a custom tool: it goes live when it's merged, after Flight Deck runs its tests and examples. "
+                    "When the user wants it live: crew action=request_merge, and they Approve it in the bell. There's no "
+                    "pull request for a custom tool, and never run git merge yourself.")
 
 
 def next_steps(task: dict) -> list[str]:
@@ -2235,6 +2330,8 @@ def next_steps(task: dict) -> list[str]:
         return []
     if task["status"] in (*crew_store.ACTIVE, *crew_store.FINISHED):
         return []
+    if task.get("repo_kind") == "tool":
+        return [_TOOL_MERGE_STEP]
     has_pr = bool((task.get("delivery") or {}).get("pr"))
     steps = [_PR_AGAIN if has_pr else _PR_STEP]
     # What came from an address only lands through its pull request.
@@ -2250,6 +2347,15 @@ def _result_lines(task: dict, *, for_agent: bool) -> list[str]:
     lines = []
     if task["status"] == "delivered" and task.get("repo_kind") == "project":
         lines.append(f"The project itself, with this merged: {_vfs_path(task['user_id'], task['repo'])}")
+    if task["status"] == "delivered" and task.get("repo_kind") == "tool":
+        published = (task.get("delivery") or {}).get("publish") or {}
+        if not published:
+            lines.append("Flight Deck is publishing this custom tool now: its tests and examples run first, and you'll "
+                         "hear when it's live or why it isn't.")
+        elif published.get("state") == "passed":
+            lines.append(f"Custom tool {tool_of(task)} is live (version {published.get('version')}).")
+        else:
+            lines.append(f"Custom tool {tool_of(task)} wasn't published: {published.get('error')}")
     if results.get("files_path"):
         what = "the whole project" if results.get("whole") else "only what it changed"
         lines.append(f"Files: {results['count']} copied to {results['files_path']} ({what})."

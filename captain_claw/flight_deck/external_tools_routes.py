@@ -428,3 +428,156 @@ async def agent_run(body: AgentRunBody, runner: Runner = Depends(_agent_enabled)
                                  resolve_file=_file_resolver(runner.user_id), deliver=_deliverer(runner.user_id, slug))
     except xt.ToolError as exc:
         raise _http(exc) from None
+
+
+# ── Building and improving: a Crew task in the tool's own repository ─────
+
+
+def build_brief(slug: str, title: str, what: str) -> str:
+    return (f"Build the custom tool “{slug}” ({title}).\n\nWhat it should do:\n{what.strip()}\n\n"
+            "The repository already holds a working starter (an echo tool): replace it with the real tool, and make "
+            "tool.json, the tests and the examples match what it now does.")
+
+
+def improve_brief(slug: str, what: str) -> str:
+    return f"Change the custom tool “{slug}”.\n\n{what.strip()}"
+
+
+async def _build_target(uid: str, slug: str, *, new: bool, title: str, what: str) -> tuple[str, bool]:
+    """Check (and for a new tool, make) the tool a task will work on: ``(slug, made)``."""
+    if len(what.strip()) < 10:
+        raise HTTPException(422, "Say what the tool should do (its input, what it returns, an example), in a few sentences.")
+    try:
+        slug = xt.check_slug(slug)
+    except xt.ToolError as exc:
+        raise _http(exc) from None
+    if not new:
+        if not xt.exists(uid, slug):
+            raise HTTPException(404, f"You have no custom tool called {slug}.")
+        return slug, False
+    if xt.exists(uid, slug):
+        raise HTTPException(409, f"You already have a tool called {slug}: improve it, or pick another name.")
+    first = re.split(r"(?<=[.!?])\s", " ".join(what.split()), maxsplit=1)[0][:600]
+    try:
+        await xt.create_tool(uid, slug, title=title or slug, description=first)
+    except xt.ToolError as exc:
+        raise _http(exc) from None
+    return slug, True
+
+
+async def _drop_if_made(uid: str, slug: str, made: bool) -> None:
+    """A tool made for a task that then couldn't start goes again, so asking twice works."""
+    if made:
+        try:
+            await xt.delete_tool(uid, slug)
+        except xt.ToolError:
+            pass
+
+
+def _task_out(task: dict[str, Any]) -> dict[str, Any]:
+    keys = ("id", "title", "status", "harness", "harness_label", "branch", "repo_label", "kind")
+    return {k: task.get(k) for k in keys}
+
+
+class BuildBody(BaseModel):
+    slug: str = Field(..., max_length=48)
+    title: str = Field("", max_length=200)
+    what: str = Field(..., max_length=8000)
+    harness: str = Field(..., max_length=40)
+    model: str = Field("", max_length=200)
+
+
+class ImproveBody(BaseModel):
+    what: str = Field(..., max_length=8000)
+    harness: str = Field(..., max_length=40)
+    model: str = Field("", max_length=200)
+
+
+async def _person_dispatch(user: dict, slug: str, brief: str, title: str, harness: str, model: str) -> dict[str, Any]:
+    from captain_claw.flight_deck import crew_routes, crew_runner
+
+    row, grant = await crew_routes._approved(user)
+    task = await crew_runner.dispatch(row, grant, {"harness": harness, "brief": brief, "title": title, "kind": "ship",
+                                                   "deliver": "branch", "tool": slug, "model": model})
+    return crew_runner.view(task, full=True)
+
+
+@router.post("/build")
+async def build(body: BuildBody, user: dict = Depends(_enabled)) -> dict[str, Any]:
+    """A new tool from what it should do: its repository, then a Crew task that writes it."""
+    await _require_builder(user)
+    uid = _uid(user)
+    title = " ".join(body.title.split())[:80]
+    slug, made = await _build_target(uid, body.slug, new=True, title=title, what=body.what)
+    try:
+        task = await _person_dispatch(user, slug, build_brief(slug, title or slug, body.what),
+                                      f"Build custom tool {slug}", body.harness, body.model)
+    except BaseException:
+        await _drop_if_made(uid, slug, made)
+        raise
+    return {"tool": xt.summary(uid, slug), "task": _task_out(task)}
+
+
+@router.post("/{slug}/improve")
+async def improve(slug: str, body: ImproveBody, user: dict = Depends(_enabled)) -> dict[str, Any]:
+    await _require_builder(user)
+    uid = _uid(user)
+    slug, _ = await _build_target(uid, slug, new=False, title="", what=body.what)
+    task = await _person_dispatch(user, slug, improve_brief(slug, body.what), f"Improve custom tool {slug}",
+                                  body.harness, body.model)
+    return {"tool": xt.summary(uid, slug), "task": _task_out(task)}
+
+
+class AgentBuildBody(BaseModel):
+    tool: str = Field(..., max_length=48)
+    title: str = Field("", max_length=200)
+    what: str = Field(..., max_length=8000)
+    harness: str = Field(..., max_length=40)
+    model: str = Field("", max_length=200)
+    source_host: str = "localhost"
+    origin_platform: str = "web"
+    origin_user_id: str = ""
+    origin_chat_id: int = 0
+
+
+async def _agent_dispatch(request: Request, body: AgentBuildBody, brief: str, title: str) -> dict[str, Any]:
+    """Through Crew's own agent route, so the task is the agent's (callback, budget, origin)."""
+    from captain_claw.flight_deck import crew_routes
+
+    return await crew_routes.agent_dispatch(crew_routes.AgentDispatchBody(
+        harness=body.harness, brief=brief, title=title, kind="ship", deliver="branch", tool=body.tool,
+        model=body.model, source_host=body.source_host or "localhost", origin_platform=body.origin_platform,
+        origin_user_id=body.origin_user_id, origin_chat_id=body.origin_chat_id,
+    ), request)
+
+
+async def _agent_builder(request: Request) -> Runner:
+    runner = await _agent_enabled(request)
+    if runner.member:
+        raise HTTPException(403, "Only the agent's owner can have custom tools made or changed.")
+    if not await _can_build({"id": runner.user_id}):
+        raise HTTPException(403, NEEDS_CREW)
+    return runner
+
+
+@agent_router.post("/build")
+async def agent_build(body: AgentBuildBody, request: Request) -> dict[str, Any]:
+    runner = await _agent_builder(request)
+    title = " ".join(body.title.split())[:80]
+    slug, made = await _build_target(runner.user_id, body.tool, new=True, title=title, what=body.what)
+    body.tool = slug
+    try:
+        task = await _agent_dispatch(request, body, build_brief(slug, title or slug, body.what), f"Build custom tool {slug}")
+    except BaseException:
+        await _drop_if_made(runner.user_id, slug, made)
+        raise
+    return {"tool": xt.summary(runner.user_id, slug), "task": _task_out(task)}
+
+
+@agent_router.post("/improve")
+async def agent_improve(body: AgentBuildBody, request: Request) -> dict[str, Any]:
+    runner = await _agent_builder(request)
+    slug, _ = await _build_target(runner.user_id, body.tool, new=False, title="", what=body.what)
+    body.tool = slug
+    task = await _agent_dispatch(request, body, improve_brief(slug, body.what), f"Improve custom tool {slug}")
+    return {"tool": xt.summary(runner.user_id, slug), "task": _task_out(task)}
