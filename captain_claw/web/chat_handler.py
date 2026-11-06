@@ -2068,6 +2068,16 @@ async def _run_agent(
             except Exception:
                 pass
 
+            # A lesson from what the owner just wrote ("too long", "always CC
+            # Marko"), drafted for them to approve in Flight Deck. Only the
+            # owner's own words: no member, public chat, automation or relay.
+            if automation is None and not is_public and not speaker_key and not no_broadcast:
+                try:
+                    from captain_claw.lesson_proposals import maybe_propose_lesson
+                    _post_turn(maybe_propose_lesson(agent, channel=turn_channel or ""))
+                except Exception:
+                    pass
+
         # Proactive intentions — a BEING's autonomous nervous system: the way it
         # surfaces observations/proposals to its parent on its own. Kept for
         # beings (and normal agents) but NOT other FD task workers. Internally

@@ -53,8 +53,9 @@ router = APIRouter(prefix="/fd/agent-lessons", tags=["agent-lessons"])
 
 _GROUP = {"rule": "rules", "ask_first": "escalation"}     # where a setup record keeps these kinds
 _TEXT_MAX = 400
-_TAUGHT_BY = ("you", "chat", "practice", "member")        # who teaches by hand: the page, a chat, a practice run,
-                                                          # a member's suggestion its owner took
+_TAUGHT_BY = ("you", "chat", "practice", "member", "noticed")  # who teaches by hand: the page, a chat, a practice
+                                                          # run, a member's suggestion its owner took, a lesson
+                                                          # the agent noticed in a chat (lesson_proposals)
 _DRAFT_PROMPT = Path(__file__).parent.parent / "instructions" / "agent_lesson_draft_prompt.md"
 _DRAFT_TOKENS = 600
 _SUGGESTIONS = "lesson-suggestions.json"
@@ -152,22 +153,29 @@ async def add_lesson(slug: str, body: LessonBody, request: Request, user: dict =
     """A lesson its owner gives by hand — on this page (``taught_by: you``),
     from a chat, after a practice answer, or from a member's suggestion. An
     admin giving it for its user gives the base."""
+    return await teach_one(slug, user, request, body.kind, body.text, body.always, body.taught_by)
+
+
+async def teach_one(slug: str, user: dict, request: Request, kind: str, text: str, always: bool,
+                    taught_by: str) -> dict:
+    """Teach the caller's agent one lesson (409 when it has it already) —
+    by hand, or approved from Lessons to approve (lesson_proposals)."""
     owner_id, agent_dir, workspace = _place(slug, user)
     layer, locked = _teaching(request, user)
-    if body.kind not in agent_lessons.KINDS:
+    if kind not in agent_lessons.KINDS:
         raise HTTPException(400, "A lesson is a rule, something to ask you first, or a fact.")
-    taught_by = body.taught_by if body.taught_by in _TAUGHT_BY else "you"
-    text = _clean(body.text)
+    taught_by = taught_by if taught_by in _TAUGHT_BY else "you"
+    text = _clean(text)
     record = await asyncio.to_thread(ap.earlier_setup, agent_dir, workspace)
-    if _taken(record, body.kind, text):
+    if _taken(record, kind, text):
         raise HTTPException(409, "It has that lesson already.")
-    if body.kind in _GROUP:
-        item = {"text": text, "always": body.always, "source": {"doc": "instructions", "section": ""},
+    if kind in _GROUP:
+        item = {"text": text, "always": always, "source": {"doc": "instructions", "section": ""},
                 "taught_by": taught_by, "added": time.time(), **({"layer": layer} if layer else {})}
-        record = {**record, _GROUP[body.kind]: [item, *(record.get(_GROUP[body.kind]) or [])]}
+        record = {**record, _GROUP[kind]: [item, *(record.get(_GROUP[kind]) or [])]}
     else:
         record, _ = agent_lessons.taught(record, "fact", text, taught_by=taught_by, layer=layer)
-    log.info("agent lessons: one added", agent=slug, kind=body.kind, layer=layer or "own")
+    log.info("agent lessons: one added", agent=slug, kind=kind, layer=layer or "own", taught_by=taught_by)
     return await _save(slug, owner_id, agent_dir, workspace, record, locked)
 
 
@@ -231,6 +239,12 @@ async def change_lesson(slug: str, lesson_id: str, body: LessonPatch, request: R
 
 @router.delete("/{slug}/{lesson_id}")
 async def remove_lesson(slug: str, lesson_id: str, request: Request, user: dict = Depends(get_managed_user)) -> dict:
+    return await remove_one(slug, user, request, lesson_id)
+
+
+async def remove_one(slug: str, user: dict, request: Request, lesson_id: str) -> dict:
+    """Take one lesson away from the caller's agent (404 when it's gone; the
+    base's only by an admin)."""
     owner_id, agent_dir, workspace = _place(slug, user)
     _, locked = _teaching(request, user)
     record = await asyncio.to_thread(ap.earlier_setup, agent_dir, workspace)
@@ -309,10 +323,23 @@ def _write_suggestions(agent_dir: Path, items: list[dict]) -> None:
     tmp.replace(agent_dir / _SUGGESTIONS)
 
 
+_SHOWN = ("id", "origin", "kind", "text", "always", "quote", "said", "reply", "channel", "by_name", "created",
+          "state", "lesson", "settled")
+
+
+def shown(s: dict) -> dict:
+    """One suggestion as the pages list it: a member's (their words; drafted
+    when its owner takes it) or one the agent noticed (``origin: auto``,
+    drafted already, with the words it came from)."""
+    return {**{k: s.get(k) for k in _SHOWN}, "origin": s.get("origin") or "member",
+            "kind": s.get("kind") or "", "text": s.get("text") or "", "always": bool(s.get("always")),
+            "quote": s.get("quote") or "", "channel": s.get("channel") or "", "by_name": s.get("by_name") or ""}
+
+
 def _waiting(agent_dir: Path) -> list[dict]:
-    """What members suggested that its owner hasn't taken or declined, newest first."""
-    return [{k: s.get(k) for k in ("id", "said", "reply", "by_name", "created")}
-            for s in _load_suggestions(agent_dir) if s.get("state") == "waiting"]
+    """What members suggested, and the agent noticed, that its owner hasn't
+    taken or declined, newest first."""
+    return [shown(s) for s in _load_suggestions(agent_dir) if s.get("state") == "waiting"]
 
 
 class SuggestBody(BaseModel):

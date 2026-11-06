@@ -1822,6 +1822,7 @@ from captain_claw.flight_deck import (
     agent_package,
     agent_practice,
     agent_preset,
+    lesson_proposals,
 )
 from captain_claw.flight_deck.captain_swarm_routes import router as captain_swarm_router
 from captain_claw.flight_deck.deck_update_routes import router as deck_update_router
@@ -1953,6 +1954,7 @@ app.include_router(agent_preset.router)
 app.include_router(agent_knowledge.router)
 app.include_router(agent_exam.router)
 app.include_router(agent_onboarding.router)
+app.include_router(lesson_proposals.router)
 app.include_router(agent_package.router)
 app.include_router(agent_practice.router)
 app.include_router(captain_swarm_router)

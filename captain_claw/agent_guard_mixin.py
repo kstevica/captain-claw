@@ -33,6 +33,7 @@ _BACKGROUND_MAINTENANCE_LABELS = {
     "reflection",
     "reflection_merge",
     "insight_extraction",
+    "lesson_proposal",
     "nervous_system_dream",
     "conversation_topics",
     # Naming the session just left behind (/new): the user is already typing

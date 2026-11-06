@@ -24,14 +24,48 @@ export interface Lesson {
   layer: '' | 'base'
 }
 
-/** What a member of a shared agent suggested it learn, waiting for its owner. */
+/** A lesson waiting for its owner: one the agent noticed in their chat (``origin: auto``, drafted already, with the
+ *  words it came from), or what a member of a shared agent suggested (their words; drafted when its owner takes it). */
 export interface LessonSuggestion {
   id: string
-  /** The member's words, and the answer they corrected. */
+  origin: 'auto' | 'member'
+  /** The drafted lesson ("" for a member's suggestion not drafted yet). */
+  kind: LessonKind | ''
+  text: string
+  always: boolean
+  /** The owner's words it came from, copied from their message. */
+  quote: string
+  /** The whole message, and the answer it followed. */
   said: string
   reply: string
+  /** Where the owner wrote it: web | whatsapp | telegram | device | … ("" unknown). */
+  channel: string
+  /** The member who suggested it ("" for one the agent noticed). */
   by_name: string
   created: number
+  state: 'waiting' | 'taken' | 'declined'
+  /** The lesson it became, once approved. */
+  lesson: string
+  settled: number
+}
+
+/** One agent's lessons to approve, and those it learned lately (Undo takes one away). */
+export interface AgentProposals {
+  slug: string
+  name: string
+  waiting: LessonSuggestion[]
+  learned: LessonSuggestion[]
+}
+
+export interface ProposalsOverview {
+  agents: AgentProposals[]
+  waiting: number
+}
+
+/** What approving or undoing did: the lessons' change (null when it changed nothing), and the proposal now. */
+export interface ProposalSettled {
+  changed: LessonsChanged | null
+  proposal: LessonSuggestion
 }
 
 export interface LessonsView {
@@ -97,4 +131,19 @@ export const agentLessonsApi = {
   suggest: (agentRef: string, said: string, reply: string) =>
     call<{ ok: boolean; already: boolean }>('/fd/agent-lessons/shared/suggest',
       { method: 'POST', body: JSON.stringify({ agent_ref: agentRef, said, reply }) }),
+}
+
+const proposals = '/fd/lesson-proposals'
+const one = (slug: string, id: string) => `${proposals}/${encodeURIComponent(slug)}/${encodeURIComponent(id)}`
+
+/** Lessons to approve, across every agent of the caller's (/fd/lesson-proposals). Approving teaches it — as edited,
+ *  else as drafted — from the agent's next message; Undo takes it away and puts it back. */
+export const lessonProposalsApi = {
+  list: () => call<ProposalsOverview>(proposals),
+  approve: (slug: string, id: string, edits: { kind?: LessonKind; text?: string; always?: boolean } = {}) =>
+    call<ProposalSettled>(`${one(slug, id)}/approve`, { method: 'POST', body: JSON.stringify(edits) }),
+  dismiss: (slug: string, id: string) =>
+    call<{ proposal: LessonSuggestion }>(`${one(slug, id)}/dismiss`, { method: 'POST', body: '{}' }),
+  undo: (slug: string, id: string) =>
+    call<ProposalSettled>(`${one(slug, id)}/undo`, { method: 'POST', body: '{}' }),
 }
