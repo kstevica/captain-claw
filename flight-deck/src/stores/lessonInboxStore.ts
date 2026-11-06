@@ -2,7 +2,8 @@ import { create } from 'zustand'
 import { lessonProposalsApi, type ProposalsOverview } from '../services/agentLessons'
 
 /** Lessons to approve: what the owner's agents noticed in their chats (and members suggested), across every
- *  agent. One dialog for the whole app (LessonInboxHost); the bell's rows and the badge beside it open it. */
+ *  agent. One dialog for the app (LessonInboxHost); the badge beside the bell, the bell's lesson rows and an
+ *  agent's kiosk menu open it. */
 interface LessonInboxState {
   data: ProposalsOverview | null
   /** How many wait, for the badge (0 until the first load). */
@@ -10,8 +11,13 @@ interface LessonInboxState {
   open: boolean
   /** The agent to bring into view when it opens ("" for none). */
   focus: string
+  /** Opened from one agent's menu: only its lessons show, under its name ("" = every agent's). */
+  scopeName: string
   refresh: () => Promise<void>
-  show: (focus?: string) => void
+  /** Open it — at *focus*, or (with *scope*) showing only that agent's. */
+  show: (focus?: string, scope?: { name: string }) => void
+  /** From one agent's lessons to every agent's. */
+  widen: () => void
   hide: () => void
 }
 
@@ -22,6 +28,7 @@ export const useLessonInbox = create<LessonInboxState>((set, get) => ({
   waiting: 0,
   open: false,
   focus: '',
+  scopeName: '',
   refresh: () => {
     if (inFlight) return inFlight
     inFlight = lessonProposalsApi.list()
@@ -30,9 +37,10 @@ export const useLessonInbox = create<LessonInboxState>((set, get) => ({
       .finally(() => { inFlight = null })
     return inFlight
   },
-  show: (focus = '') => {
-    set({ open: true, focus })
+  show: (focus = '', scope) => {
+    set({ open: true, focus, scopeName: focus && scope ? scope.name || focus : '' })
     void get().refresh()
   },
-  hide: () => set({ open: false, focus: '' }),
+  widen: () => set({ scopeName: '' }),
+  hide: () => set({ open: false, focus: '', scopeName: '' }),
 }))

@@ -34,3 +34,5 @@ Rules:
 - If the session trace contains notable shell commands, tool call patterns, or reusable code snippets, include them in the `examples` field. Make them generic — replace specific paths, filenames, URLs, and user data with placeholders (e.g., `<input_dir>`, `<output_file>`). Omit the field if nothing is worth reusing.
 - Keep the `trigger_description` generic enough to match similar future tasks, but specific enough to not match unrelated ones.
 - Never include specific file names, URLs, or user data in the patterns — keep them abstract.
+- For a "bad" session, write a `do_pattern` only from what the trace shows working or from an approach you are confident works — never a guess dressed up as the recommended way. If there is none, say so in `do_pattern` ("no proven approach yet — ask the user how they want it done").
+- The `dont_pattern` is about orchestration choices. Never put in it that a tool or feature doesn't work, or failures caused by setup (a missing program, a key that isn't set, a service that was down): the owner fixes setup, and such claims harden into refusals the agent cites against itself after the problem is fixed.
