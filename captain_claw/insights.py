@@ -1188,6 +1188,14 @@ _ATTR_LAST_TIME = "_insights_last_extraction_time"
 _ATTR_RUNNING = "_insights_extraction_running"
 
 
+def _known_insight_line(item: dict[str, Any]) -> str:
+    """One "Known insights" line for the extractor. The entity_key is shown so
+    the model can correct a known insight in place — the same key makes add()
+    supersede the old row instead of storing a rival beside it."""
+    key = item.get("entity_key")
+    return f"- [{item.get('category')}]" + (f" [{key}]" if key else "") + f" {item.get('content')}"
+
+
 async def extract_insights(
     agent: Agent,
     *,
@@ -1235,8 +1243,7 @@ async def extract_insights(
     existing = await mgr.list_recent(limit=20)
     existing_text = ""
     if existing:
-        lines = [f"- [{i['category']}] {i['content']}" for i in existing]
-        existing_text = "\n".join(lines)
+        existing_text = "\n".join(_known_insight_line(i) for i in existing)
 
     # 4. Build LLM messages.
     system_prompt = agent.instructions.load("insight_extraction_system_prompt.md")
