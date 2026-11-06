@@ -5893,10 +5893,18 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
             # A chat message counts against the speaker's plan allowance for
             # today; over it, the turn is refused and the client told why.
             ok, reply = await usage_quota.screen_chat_frame(speaker_id, data)
-            if reply is not None:
-                await ws.send_text(json.dumps(reply))
+            # The agent first: a message the person wrote goes even when their
+            # socket closes right after it (the chat drops its held copy once
+            # the replay shows the agent took it).
             if ok:
                 await agent_ws.send(_client_frame(data))
+            if reply is not None:
+                try:
+                    await ws.send_text(json.dumps(reply))
+                except Exception:
+                    pass  # the chat is gone; the next receive ends the socket
+
+        who = agent or f"{host}:{port}"
 
         async def client_to_agent():
             nonlocal from_client
@@ -5910,16 +5918,25 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
                     if msg.get("text") is not None:
                         await forward(msg["text"])
                     from_client = asyncio.create_task(ws.receive())
-            except Exception:
-                pass
+            except Exception as exc:
+                # The chat's frame didn't reach the agent and the socket closes:
+                # the chat holds what it sent and sends it again on its next
+                # socket. Said once per socket, so a lost message has a reason.
+                log.info("agent-ws: a chat frame couldn't go to the agent — closing the chat socket",
+                         agent=who, error=f"{type(exc).__name__}: {exc}"[:200])
 
         async def agent_to_client():
             try:
                 async for msg in agent_ws:
                     agent_idle.touch(slug)
                     await ws.send_text(msg if isinstance(msg, str) else msg.decode())
-            except Exception:
-                pass
+            except Exception as exc:
+                log.info("agent-ws: the chat link to the agent broke — closing the chat socket",
+                         agent=who, error=f"{type(exc).__name__}: {exc}"[:200])
+                return
+            # The agent closed it (a restart, sleep): the chat reconnects.
+            log.info("agent-ws: the agent closed the chat link — closing the chat socket",
+                     agent=who, code=getattr(agent_ws, "close_code", None))
 
         done, pending = await asyncio.wait(
             [asyncio.create_task(client_to_agent()), asyncio.create_task(agent_to_client())],

@@ -330,6 +330,10 @@ export interface HeldMessage {
   content: string
   /** When it was written (ms). */
   at: number
+  /** When it went out on a socket that dropped before the agent said it took
+   *  it (ms): the agent may have it after all, and a replay that shows it
+   *  drops this one (dropTakenHeld) instead of sending it twice. */
+  sentAt?: number
 }
 
 let _heldCounter = 0
@@ -353,7 +357,10 @@ function loadHeld(containerId: string): HeldMessage[] {
     if (!Array.isArray(parsed)) return []
     return parsed
       .filter((h): h is HeldMessage => !!h && typeof h.content === 'string' && h.content.trim() !== '')
-      .map((h) => ({ id: String(h.id || nextHeldId()), content: h.content, at: Number(h.at) || Date.now() }))
+      .map((h) => ({
+        id: String(h.id || nextHeldId()), content: h.content, at: Number(h.at) || Date.now(),
+        ...(Number(h.sentAt) > 0 ? { sentAt: Number(h.sentAt) } : {}),
+      }))
   } catch {
     return []
   }
@@ -824,6 +831,14 @@ function sendFrame(key: string, content: string, opts: SendOpts | undefined, was
   // Whose frame this is (the queue's, for the item in flight, or yours),
   // for the agent's answer to it: taken, or refused.
   const itemId = opts?.fromQueue ? session.queueDispatchedId ?? null : null
+  // The socket wasn't open after all (closing, or a new one still opening):
+  // nothing went. A message you typed waits on the lane, as when the chat
+  // is away, and goes once it is connected again.
+  if (clientMsgId === undefined && !itemId && !isSlashCommand(content) && content.trim()) {
+    holdRefused(key, { id: '', itemId: null, forced: false, cmd: false, wasBusy, resumed: false, content, msgId, at: Date.now() })
+    updateSession(key, wasBusy ? {} : { busy: false, statusText: '' })
+    return
+  }
   const resumed = !!itemId && _resumed.get(key) === itemId
   if (resumed) _resumed.delete(key)
   noteSent(key, {
@@ -894,13 +909,51 @@ function requeueRefused(key: string, frame: SentFrame) {
 /** The agent refused a message you typed as busy, so it never ran: its
  *  bubble leaves the transcript, and it waits on the lane again (in the order
  *  it was written) until the agent is free. */
-function holdRefused(key: string, frame: SentFrame) {
+function holdRefused(key: string, frame: SentFrame, opts?: { mayHaveGone?: boolean }) {
   withdrawMessage(key, frame.msgId)
   const s = useChatStore.getState().sessions.get(key)
   if (!s) return
-  const back: HeldMessage = { id: nextHeldId(), content: frame.content, at: frame.at }
+  const back: HeldMessage = {
+    id: nextHeldId(), content: frame.content, at: frame.at,
+    ...(opts?.mayHaveGone ? { sentAt: frame.at } : {}),
+  }
   const at = s.held.findIndex((h) => h.at > frame.at)
   updateSession(key, { held: at < 0 ? [...s.held, back] : [...s.held.slice(0, at), back, ...s.held.slice(at)] })
+}
+
+/** The socket is gone (or replaced) with messages you typed still unanswered:
+ *  the agent never said it took them — the frame died with the socket, as
+ *  after an agent woke from sleep — so they go back on hold, in the order
+ *  written, and the chat sends them once it is connected again instead of
+ *  losing them. One the agent did take shows in the replay that follows the
+ *  reconnect, and is dropped there (dropTakenHeld). */
+function reholdUnanswered(key: string) {
+  const list = _sent.get(key)
+  if (!list?.length) return
+  const now = Date.now()
+  for (const f of list) {
+    if (f.itemId !== null || f.cmd || !f.content.trim() || now - f.at > FRAME_TTL_MS) continue
+    holdRefused(key, f, { mayHaveGone: true })
+  }
+}
+
+/** A reconnect's replay shows what the agent took: a held message that went
+ *  out on the dropped socket and is there was taken after all — it is not
+ *  sent again. `rows`: what the replay added to the transcript (`whole`
+ *  false: the log has the rest, so the same words there are this message),
+ *  or, with no log loaded, the whole replay — then only a row from when it
+ *  went or later counts (a few seconds for the agent's clock), not the same
+ *  words said earlier. */
+function dropTakenHeld(key: string, rows: ChatMessage[], whole: boolean) {
+  const s = useChatStore.getState().sessions.get(key)
+  if (!s?.held.some((h) => h.sentAt)) return
+  const said = rows
+    .filter((m) => m.role === 'user')
+    .map((m) => ({ text: foldSpace(m.content), at: Date.parse(m.timestamp) || 0 }))
+  const taken = (h: HeldMessage) => !!h.sentAt
+    && said.some((m) => m.text === foldSpace(h.content) && (!whole || m.at >= h.sentAt! - 10_000))
+  const keep = s.held.filter((h) => !taken(h))
+  if (keep.length !== s.held.length) updateSession(key, { held: keep })
 }
 
 // The agent went free: shortly after (its turn's trailing frames land first),
@@ -2128,7 +2181,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     // Wire up event handlers
     ws.on('_connected', () => {
-      // A fresh socket: nothing sent before it will be answered on it.
+      // A fresh socket: nothing sent before it will be answered on it. What
+      // you typed that the agent never took goes again (below, held).
+      reholdUnanswered(key)
       forgetFrames(key)
       updateSession(key, shared ? { connected: true, closed: null }
         : { connected: true, unreachable: null, asleep: false, waking: false })
@@ -2166,7 +2221,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
     ws.on('_disconnected', () => {
       // Frames still unanswered won't be now, and the turn we knew of is out
-      // of sight.
+      // of sight. A message you typed that the agent never took waits on the
+      // lane and goes once the chat is back (reholdUnanswered).
+      reholdUnanswered(key)
       forgetFrames(key)
       updateSession(key, { connected: false, busy: false, statusText: '', asleep: false, waking: false })
       // A dropped socket means we won't see the next_steps event. Cancel
@@ -2375,6 +2432,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const cur = useChatStore.getState().sessions.get(key)
       if (cur?.historyLoaded) {
         const added = mergeReplay(key, replayed)
+        // A message held after the socket dropped that the agent took anyway.
+        dropTakenHeld(key, added, false)
         // A reply that came while this socket was gone (a phone locked, the
         // app in the background) and no turn on now: it ended that turn, as
         // if it had come live — the lane is free, the queue goes on.
@@ -2383,6 +2442,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         return
       }
       replaySid = cur?.agentSessionId ?? ''
+      dropTakenHeld(key, replayed, true)
       // Clear old replay messages before adding new batch (prevents piling on reconnect)
       useChatStore.setState((state) => {
         const s = state.sessions.get(key)
