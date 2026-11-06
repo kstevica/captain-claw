@@ -8,15 +8,16 @@ import {
 import { agentExamApi, type ExamOverview } from '../../services/agentExam'
 import { agentKnowledgeApi, type KnowledgeOverview } from '../../services/agentKnowledge'
 import {
-  agentLessonsApi, type Lesson, type LessonKind, type LessonSuggestion, type LessonsChanged, type LessonsView,
+  agentLessonsApi, type Lesson, type LessonKind, type LessonsChanged, type LessonsView,
 } from '../../services/agentLessons'
 import { passOn, type PassedOn } from '../../services/agentPackage'
 import { agentPracticeApi, type PracticeTask } from '../../services/agentPractice'
 import { onboardingAs } from '../../services/onboardingAs'
 import { KnowledgeBrowser } from '../library/KnowledgeBrowser'
 import { AgentExamPanel, ScoreRing } from './AgentExamDialog'
-import { LessonDraftForm } from './LessonDraft'
 import { syncInstructions } from './lessonSync'
+import { ProposalCard } from '../lessons/LessonInbox'
+import { useLessonInbox } from '../../stores/lessonInboxStore'
 import { PracticePanel } from './PracticePanel'
 
 // ── An agent's onboarding, in one place ──────────────────────────────
@@ -61,7 +62,7 @@ const KIND: Record<LessonKind, { label: string; badge: string; icon: typeof Book
 }
 const TAUGHT: Record<string, string> = {
   setup: 'from a setup', exam: 'taught after an exam', you: 'added by you', chat: 'taught in a chat', practice: 'taught in practice',
-  member: 'suggested by a member',
+  member: 'suggested by a member', noticed: 'noticed in a chat',
 }
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
@@ -237,7 +238,7 @@ function Overview({ slug, name, knowledge, lessons, exams, practice, onTab, onSe
   const steps: Step[] = []
   if (waiting) {
     steps.push({ key: 'suggested', icon: MessageSquarePlus, action: 'See them', go: () => onTab('lessons'),
-      text: `${plural(waiting, 'suggestion')} from the people who use ${name} ${waiting === 1 ? 'waits' : 'wait'} for you: take ${waiting === 1 ? 'it' : 'them'} as lessons, or decline.` })
+      text: `${plural(waiting, 'lesson')} ${waiting === 1 ? 'waits' : 'wait'} for your approval — noticed by ${name} in your chats, or suggested by the people who use it: approve, edit or dismiss ${waiting === 1 ? 'it' : 'them'}.` })
   }
   if (ready && !running) {
     steps.push({ key: 'ready', icon: GraduationCap, action: 'Ask them', go: () => onTab('exams'),
@@ -570,11 +571,14 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
       {data.suggestions?.length > 0 && (
         <section>
           <h4 className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-zinc-200">
-            <MessageSquarePlus className="h-4 w-4 text-amber-500" /> Suggested by the people who use {name}
+            <MessageSquarePlus className="h-4 w-4 text-amber-500" /> Waiting for your approval
           </h4>
           <ul className="flex flex-col gap-2">
             {data.suggestions.map((s) => (
-              <SuggestionRow key={s.id} slug={slug} s={s} onSettled={() => setTick((n) => n + 1)} />
+              <ProposalCard key={s.id} slug={slug} p={s} onSettled={() => {
+                setTick((n) => n + 1)
+                void useLessonInbox.getState().refresh()
+              }} />
             ))}
           </ul>
         </section>
@@ -637,54 +641,6 @@ function LessonsPanel({ slug, name, initial, onChanged }: {
         </div>
       )}
     </div>
-  )
-}
-
-function SuggestionRow({ slug, s, onSettled }: { slug: string; s: LessonSuggestion; onSettled: () => void }) {
-  const [taking, setTaking] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [err, setErr] = useState('')
-  const settle = async (state: 'taken' | 'declined', lesson = '') => {
-    setBusy(true)
-    setErr('')
-    try {
-      await agentLessonsApi.settle(slug, s.id, state, lesson)
-      onSettled()
-    } catch (e) {
-      setErr(message(e))
-    } finally {
-      setBusy(false)
-    }
-  }
-  return (
-    <li className="rounded-xl border border-amber-500/30 bg-amber-500/[0.04] px-3 py-2.5">
-      <p className="text-[11px] text-zinc-500"><span className="font-medium text-zinc-400">{s.by_name}</span> suggested · {ago(s.created)}</p>
-      <p className="mt-1 whitespace-pre-wrap text-sm text-zinc-200">{s.said}</p>
-      {s.reply && (
-        <details className="mt-1">
-          <summary className="cursor-pointer text-[11px] text-zinc-500 hover:text-zinc-300">The answer it corrects</summary>
-          <p className="mt-1 line-clamp-6 whitespace-pre-wrap border-l-2 border-zinc-700 pl-2 text-xs text-zinc-400">{s.reply}</p>
-        </details>
-      )}
-      {taking ? (
-        <div className="mt-2 rounded-lg border border-zinc-800 p-2.5">
-          <LessonDraftForm slug={slug} said={s.said} reply={s.reply} taughtBy="member"
-            onDone={(id) => void settle('taken', id)} onCancel={() => setTaking(false)} />
-        </div>
-      ) : (
-        <div className="mt-2 flex flex-wrap gap-2">
-          <button onClick={() => setTaking(true)} disabled={busy}
-            className="flex items-center gap-1.5 rounded-lg bg-violet-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-violet-500 disabled:opacity-50">
-            <GraduationCap className="h-3.5 w-3.5" /> Make it a lesson
-          </button>
-          <button onClick={() => void settle('declined')} disabled={busy}
-            className="flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800 disabled:opacity-50">
-            {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <X className="h-3.5 w-3.5" />} Decline
-          </button>
-        </div>
-      )}
-      {err && <p className="mt-1.5 text-xs text-red-500">{err}</p>}
-    </li>
   )
 }
 

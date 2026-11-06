@@ -1089,6 +1089,20 @@ class InsightsConfig(BaseModel):
     db_path: str = "~/.captain-claw/insights.db"
 
 
+class LessonProposalsConfig(BaseModel):
+    """Lessons the agent proposes from its owner's corrections (lesson_proposals.py).
+
+    After an owner's turn whose message reads like a correction or a standing
+    rule ("too long", "always CC Marko"), the agent drafts ONE lesson with its
+    own model and hands it to Flight Deck, where it waits for the owner to
+    approve, edit or dismiss. Nothing is taught without the owner's yes.
+    """
+
+    enabled: bool = True
+    cooldown_seconds: int = 20  # between two drafts
+    max_per_day: int = 12  # drafts a day (UTC), whatever the owner does with them
+
+
 class SisterSessionConfig(BaseModel):
     """Sister session — proactive autonomous work triggered by insights and dreams."""
 
@@ -1672,6 +1686,7 @@ class Config(BaseSettings):
     deep_memory: DeepMemoryConfig = Field(default_factory=DeepMemoryConfig)
     datastore: DatastoreConfig = Field(default_factory=DatastoreConfig)
     insights: InsightsConfig = Field(default_factory=InsightsConfig)
+    lesson_proposals: LessonProposalsConfig = Field(default_factory=LessonProposalsConfig)
     intentions: IntentionsConfig = Field(default_factory=IntentionsConfig)
     nervous_system: NervousSystemConfig = Field(default_factory=NervousSystemConfig)
     conversation_topics: ConversationTopicsConfig = Field(default_factory=ConversationTopicsConfig)

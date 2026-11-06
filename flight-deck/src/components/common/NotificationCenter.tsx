@@ -18,6 +18,8 @@ import { OPEN_PROFILE_EVENT } from '../../utils/profileSources'
 import { AgentSetupDialog } from '../layout/AgentSetupDialog'
 import { ForgeAgentsDialog } from '../forge/ForgeAgentsDialog'
 import { OnboardingDialog } from '../layout/OnboardingDialog'
+import { LessonInboxBadge } from '../lessons/LessonInbox'
+import { useLessonInbox } from '../../stores/lessonInboxStore'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import {
   SHARED_SECTION_ID, sharedNotificationAction, type SharedNotificationAction,
@@ -84,43 +86,48 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
   const openSetup = (slug: string, kind: SetupKind = 'setup') => {
     setOpen(false)
     setBig(false)
+    // A lesson an agent noticed, or a member suggested: Lessons to approve, at that agent.
+    if (kind === 'lessons') { useLessonInbox.getState().show(slug); return }
     const proc = useProcessStore.getState().processes.find((p) => p.slug === slug)
     if (kind === 'setup') setSetupFor({ slug, name: proc?.name || slug })
-    else setExamFor({ slug, name: proc?.name || slug, tab: kind === 'lessons' ? 'lessons' : 'exams' })
+    else setExamFor({ slug, name: proc?.name || slug, tab: 'exams' })
   }
 
   return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen(!open)}
-        className={`relative rounded p-1.5 transition-colors ${
-          open ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
-        }`}
-        title="Notifications"
-      >
-        <Bell className="h-4 w-4" />
-        {unreadCount > 0 && (
-          <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-bold text-white">
-            {unreadCount > 9 ? '9+' : unreadCount}
-          </span>
-        )}
-      </button>
+    <div className="flex items-center">
+      <LessonInboxBadge />
+      <div className="relative">
+        <button
+          onClick={() => setOpen(!open)}
+          className={`relative rounded p-1.5 transition-colors ${
+            open ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
+          }`}
+          title="Notifications"
+        >
+          <Bell className="h-4 w-4" />
+          {unreadCount > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-[9px] font-bold text-white">
+              {unreadCount > 9 ? '9+' : unreadCount}
+            </span>
+          )}
+        </button>
 
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
-          <div className={`fixed left-2 right-2 top-14 z-50 sm:absolute sm:top-full sm:mt-1 sm:w-[360px] rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl ${align === 'left' ? 'sm:right-auto sm:left-0' : 'sm:left-auto sm:right-0'}`}>
-            <NotificationDropdown onClose={() => setOpen(false)} onEnlarge={() => { setOpen(false); setBig(true) }} onOpenSetup={openSetup} onOpenForge={openForge} />
-          </div>
-        </>
-      )}
-      {big && <NotificationDialog onClose={() => setBig(false)} onOpenSetup={openSetup} onOpenForge={openForge} />}
-      {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
-      {forgeFor && <ForgeAgentsDialog key={forgeFor} initialPlanId={forgeFor} onClose={() => setForgeFor('')} />}
-      {examFor && (
-        <OnboardingDialog agent={examFor} initialTab={examFor.tab} phone={phone} onClose={() => setExamFor(null)}
-          onSetup={(readDocs) => { setSetupFor({ ...examFor, readDocs }); setExamFor(null) }} />
-      )}
+        {open && (
+          <>
+            <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+            <div className={`fixed left-2 right-2 top-14 z-50 sm:absolute sm:top-full sm:mt-1 sm:w-[360px] rounded-xl border border-zinc-800 bg-zinc-950 shadow-2xl ${align === 'left' ? 'sm:right-auto sm:left-0' : 'sm:left-auto sm:right-0'}`}>
+              <NotificationDropdown onClose={() => setOpen(false)} onEnlarge={() => { setOpen(false); setBig(true) }} onOpenSetup={openSetup} onOpenForge={openForge} />
+            </div>
+          </>
+        )}
+        {big && <NotificationDialog onClose={() => setBig(false)} onOpenSetup={openSetup} onOpenForge={openForge} />}
+        {setupFor && <AgentSetupDialog agent={setupFor} onClose={() => setSetupFor(null)} />}
+        {forgeFor && <ForgeAgentsDialog key={forgeFor} initialPlanId={forgeFor} onClose={() => setForgeFor('')} />}
+        {examFor && (
+          <OnboardingDialog agent={examFor} initialTab={examFor.tab} phone={phone} onClose={() => setExamFor(null)}
+            onSetup={(readDocs) => { setSetupFor({ ...examFor, readDocs }); setExamFor(null) }} />
+        )}
+      </div>
     </div>
   )
 }
@@ -310,7 +317,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
               notification={n}
               large={large}
               action={setup || profile || forge ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
-              hint={forge ? 'Click to open the plan.' : setup ? (exam ? 'Click to see the exam.' : lessons ? 'Click to take it, or decline.'
+              hint={forge ? 'Click to open the plan.' : setup ? (exam ? 'Click to see the exam.' : lessons ? 'Click to approve it, or dismiss it.'
                 : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.')
                 : profile ? (n.type === 'error' ? 'Click to open your Profile and try again.' : 'Click to review it in your Profile.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
