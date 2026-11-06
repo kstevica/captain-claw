@@ -67,6 +67,10 @@ GRANT_AWARE_PATHS = frozenset({
     "/fd/deep-memory/agent/delete",
     "/fd/context-packs/agent/vfs",
     "/fd/quota/agent/usage",
+    # Custom tools run as the member, with the member's tools, secrets and files
+    # (external_tools_routes.GRANT_AWARE; a test keeps the two equal).
+    "/fd/external-tools/agent/tools", "/fd/external-tools/agent/describe",
+    "/fd/external-tools/agent/run",
 })  # exact match on the path with root_path removed, rstrip("/")
 
 NO_TURN_DETAIL = "No active shared-agent turn for this request"

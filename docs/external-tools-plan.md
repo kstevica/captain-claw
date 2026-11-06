@@ -205,9 +205,9 @@ call in v1.
 
 ## What the agent sees
 
-One tool, `external_tools`, added to `_ECO_CORE_TOOLS`
-(`agent_orchestration_mixin.py`) when the deck has external tools on, so it
-isn't dropped by eco mode. Crew's note applies: without that, agents never get
+One tool, `custom_tools` (the name the model sees), added to `_ECO_CORE_TOOLS`
+(`agent_orchestration_mixin.py`) and shown by the registry only while the deck
+has custom tools on, so it isn't dropped by eco mode. Crew's note applies: without that, agents never get
 its schema.
 
 | action | who | what |
@@ -359,12 +359,23 @@ kiosk reaches it through Settings.
   CSV tool, changed it in its repo as a worker would, published, ran it on a
   VFS file; the summary landed in `vfs:custom-tools/`.
 
-### Phase 1: the agent tool
+### Phase 1: the agent tool — built 2026-11-07
 
-- `tools/external_tools.py` with `list`, `describe`, `run`; agent routes under
-  `/fd/external-tools/agent/*`; prompt listing; `_ECO_CORE_TOOLS`; audit.
-- Tests: the real tool class over HTTP against a throwaway deck, as Crew's tests
-  do.
+- Agent: `captain_claw/custom_tools_client.py` (status refreshed per turn on the
+  owner's turns, the owner's tools for the prompt, calls with the member grant
+  on a member's turn) and `tools/custom_tools.py` (`list`, `describe`, `run`),
+  registered with `requires_custom_tools`, in `_ECO_CORE_TOOLS`, listed in the
+  prompt (up to 20, owner's turns), refused in rehearsals, probed by self-check.
+- Deck: `external_tools_routes.agent_router` (`/fd/external-tools/agent/status`,
+  `tools`, `describe`, `run`), included before the main router; tool names
+  `agent`, `status`, … are reserved. The runner is the agent's owner on Flight
+  Deck's record, or the member through `speaker_grants.acting_member` (the three
+  routes are grant-aware). A member gets `custom_tools` in the member allowlist
+  (list / describe / run only) and runs their own tools with their own secrets.
+- Audit: every tool call is already recorded by the agent's tool-call register.
+- Tests: `tests/test_flight_deck/test_external_tools_agent.py` (14), including
+  the real tool class over HTTP into the deck app, and a member's turn running
+  the member's tool with the member's secret.
 
 ### Phase 2: Crew builds tools
 
@@ -433,9 +444,6 @@ is approved by an admin. Decks that can't accept this leave Custom tools off
 
 ## Still open
 
-- **Shared agents, Phase 1**: running as the member on their turn needs the
-  member's id on the agent route (what `require_agent_caller` gives is the
-  owner). Find where a member turn is known before building the agent route.
 - **Windows desktop**: the launcher passes the exit code on, but no limits apply
   there and the process-group kill is `proc.kill()` only. Untested.
 

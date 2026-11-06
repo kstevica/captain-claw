@@ -51,7 +51,8 @@ MEMORY_WRITES = frozenset({"insights", "topics", "intentions", "facts", "persona
 SEND_ALLOWED = frozenset({"ask_human", "jev"})
 # Code, the screen, and other runs.
 EXEC_REFUSED_TOOLS = frozenset({"shell", "terminal", "desktop_action", "scripts", "app_runner", "code", "termux",
-                                "pinchtab", "vatra", "basna", "bat", "crew", "captain_swarm", "screen_capture"})
+                                "pinchtab", "vatra", "basna", "bat", "crew", "captain_swarm", "screen_capture",
+                                "custom_tools"})
 
 _COMMIT_RE = re.compile(
     r"\b(submit|buy|purchase|order|check ?out|pay|payment|place (my |the )?order|send|post|publish|delete|remove|"

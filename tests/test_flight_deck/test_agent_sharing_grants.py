@@ -88,9 +88,13 @@ DM_ROUTES = [("POST", "/fd/deep-memory/agent/search"), ("POST", "/fd/deep-memory
              ("POST", "/fd/deep-memory/agent/delete")]
 ALL_ROUTES = GOOGLE_ROUTES + DM_ROUTES
 # PR B added the context-pack VFS route (pinned in test_context_packs.py), the
-# daily allowances the token-usage report (pinned in test_usage_quota.py).
+# daily allowances the token-usage report (pinned in test_usage_quota.py), and
+# custom tools their three agent routes (pinned in test_external_tools_agent.py).
 assert {p for _, p in ALL_ROUTES} | {"/fd/context-packs/agent/vfs",
-                                     "/fd/quota/agent/usage"} == sg.GRANT_AWARE_PATHS
+                                     "/fd/quota/agent/usage",
+                                     "/fd/external-tools/agent/tools",
+                                     "/fd/external-tools/agent/describe",
+                                     "/fd/external-tools/agent/run"} == sg.GRANT_AWARE_PATHS
 BODIES = {
     "/fd/google/gmail/send": {"to": "Bob <bob@x.co>", "subject": "Hello", "body": "Hi Bob"},
     "/fd/deep-memory/agent/search": {"query": "q"},

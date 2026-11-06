@@ -2462,6 +2462,12 @@ class AgentContextMixin:
             await crew_client.refresh(force=True)
         except Exception as _exc:
             log.debug("Crew priming failed: %s", _exc)
+        # And custom tools: whether the deck has them on, and the owner's.
+        try:
+            from captain_claw import custom_tools_client
+            await custom_tools_client.refresh(force=True)
+        except Exception as _exc:
+            log.debug("Custom tools priming failed: %s", _exc)
 
         self._initialized = True
         log.info("Agent initialized", session_id=self.session.id)
@@ -2887,6 +2893,11 @@ class AgentContextMixin:
             # per turn — see the registry. Flight Deck checks it again on every call.
             from captain_claw.tools.crew import CrewTool
             self.tools.register(CrewTool(), metadata={"requires_crew": True})
+            # Custom tools — the person's own programs that Flight Deck runs (Crew
+            # writes them). Hidden unless the deck has custom tools on, refreshed
+            # per turn — see the registry. Flight Deck checks every call.
+            from captain_claw.tools.custom_tools import CustomToolsTool
+            self.tools.register(CustomToolsTool(), metadata={"requires_custom_tools": True})
             # Colleagues — the owner's other agents, and handing them work on
             # the Taskboard. Under Flight Deck on the owner's own turns only,
             # the Line's gate (requires_line).
@@ -3218,7 +3229,26 @@ class AgentContextMixin:
                 )
         except Exception:
             pass
+        out += self._custom_tools_lines()
         return out
+
+    def _custom_tools_lines(self) -> str:
+        """The owner's custom tools, so the agent knows they exist without listing
+        them (a member's turn lists its own with custom_tools action=list)."""
+        try:
+            from captain_claw import custom_tools_client
+
+            if not self.tools.has_tool("custom_tools") or custom_tools_client.member_call():
+                return ""
+            tools = custom_tools_client.owner_tools()
+            if not tools:
+                return ""
+            lines = [f"- {t['ref']}: {t['title']}. {t['description']}"[:240] for t in tools[:20]]
+            more = f"\n(and {len(tools) - 20} more: custom_tools action=list)" if len(tools) > 20 else ""
+            return ("\n\nThe user's custom tools (run one with custom_tools; describe it before its first run):\n"
+                    + "\n".join(lines) + more)
+        except Exception:
+            return ""
 
     def _build_conditional_section(
         self, tool_name: str | tuple[str, ...], section_file: str,

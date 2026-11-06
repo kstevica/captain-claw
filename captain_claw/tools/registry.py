@@ -701,6 +701,17 @@ class ToolRegistry:
         except Exception:
             tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_crew")]
 
+        # Custom tools: shown only while the owner's Flight Deck has them on
+        # (refreshed per turn by ``custom_tools_client.refresh()``). Fails closed.
+        try:
+            if any(self._tool_metadata.get(t.name, {}).get("requires_custom_tools") for t in tools):
+                from captain_claw import custom_tools_client
+
+                if not custom_tools_client.usable():
+                    tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_custom_tools")]
+        except Exception:
+            tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_custom_tools")]
+
         # Soniox (the audio tool): shown only while a key is usable — the
         # owner's (or team's) in Flight Deck, refreshed per turn by
         # ``soniox_client.available()``, or the agent's own SONIOX_API_KEY.
