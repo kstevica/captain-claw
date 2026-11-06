@@ -79,6 +79,10 @@ _AUTOMATION_SOURCES = {
     "exam": "exam",
     "taskboard": "taskboard",
     "line": "line",
+    # Handed over by another of the owner's agents, or an email that came to
+    # the agent: both are Taskboard work.
+    "colleague": "taskboard",
+    "inbox": "taskboard",
 }
 # A turn's channel (the surface or the entry point) → its source.
 _CHANNEL_SOURCES = {

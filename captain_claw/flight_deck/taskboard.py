@@ -140,9 +140,12 @@ def start() -> None:
     when someone opens it, and nothing is triaged. Hand-overs still in line go
     on either way: the user asked for them."""
     global _loop_task, _loop_stop
-    from captain_claw.flight_deck import taskboard_handover
+    from captain_claw.flight_deck import agent_mail, taskboard_handover
 
     taskboard_handover.resume_lines()
+    # Email for agents (their own inboxes, the owner's mail that names them):
+    # the agents were asked, so it goes on with the sweep off too (FD_AGENT_MAIL=off stops it).
+    agent_mail.start()
     if os.environ.get("FD_TASKBOARD_DISABLED", "").lower() in ("true", "1", "yes") or _loop_task is not None:
         return
     _loop_stop = asyncio.Event()
@@ -152,8 +155,9 @@ def start() -> None:
 
 async def stop() -> None:
     global _loop_task, _loop_stop
-    from captain_claw.flight_deck import taskboard_handover
+    from captain_claw.flight_deck import agent_mail, taskboard_handover
 
+    await agent_mail.stop()
     await taskboard_handover.stop_lines()
     await taskboard_triage.stop()
     # v2 history: a backfill still reading stops (it starts again on the next open).

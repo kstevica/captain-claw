@@ -83,7 +83,7 @@ _SOURCE_CHANNELS = {
 _AUTOMATIONS = {
     "fd_scheduler": "scheduled", "cron": "scheduled",
     "autonomy": "autonomy", "autonomy_tool": "autonomy", "plan": "autonomy", "taskboard": "autonomy",
-    "line": "autonomy",
+    "line": "autonomy", "colleague": "autonomy", "inbox": "autonomy",
     "link": "link",
 }
 # What an automation's own id may look like (an Autonomous Work action's, a

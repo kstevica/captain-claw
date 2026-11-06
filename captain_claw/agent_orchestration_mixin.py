@@ -216,6 +216,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     # "Have Codex fix the login test" comes in any language too. Hidden by the
     # registry unless an admin approved the owner for Crew.
     "crew",
+    # "Ask the researcher to dig into this" comes in any language: the team
+    # has to be reachable. Hidden without a deck and on a member's turn.
+    "colleagues",
 })
 
 # ── Nano-mode: barebone tool allowlist for tiny local models. ──
@@ -3609,6 +3612,8 @@ class AgentOrchestrationMixin:
                 # A crew task runs on its own and calls back: "it's under way"
                 # is the whole answer, and forcing a tool only makes it poll.
                 or self._turn_has_successful_tool(turn_start_idx, "crew")
+                # So does a hand-over to a colleague: the answer comes back on its own.
+                or self._turn_has_successful_tool(turn_start_idx, "colleagues")
             ):
                 _turn_produced_deliverable = True
             if (

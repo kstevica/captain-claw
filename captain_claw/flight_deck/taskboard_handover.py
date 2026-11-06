@@ -163,7 +163,8 @@ async def _relay(agent: dict, prompt: str, automation: dict) -> tuple[str | None
     return reply, meta
 
 
-async def _run(uid: str, task_id: str, action: dict, agent: dict, prompt: str, automation: dict) -> bool:
+async def _run(uid: str, task_id: str, action: dict, agent: dict, prompt: str, automation: dict,
+               what: str = "") -> bool:
     """The hand-over's turn, off the request: its end on the ledger and the task.
     Whether the agent answered. Never raises."""
     aid, name = str(action["id"]), str(agent.get("name") or agent["slug"])
@@ -180,16 +181,56 @@ async def _run(uid: str, task_id: str, action: dict, agent: dict, prompt: str, a
             outcome_note=(reply or "")[:500] if reply is not None else why)
         await asyncio.to_thread(
             _board().hand_over_ended, uid, aid, agent_name=name, text=reply, why=why,
-            session_key=f"session:{agent['slug']}:{session['id']}" if session.get("id") else "")
+            session_key=f"session:{agent['slug']}:{session['id']}" if session.get("id") else "",
+            what=what or _DEFAULT_WHAT)
         log.info("Taskboard hand-over ended", task=task_id, agent=agent["slug"], ok=reply is not None)
     except Exception as exc:  # noqa: BLE001
         log.warning("Taskboard hand-over end not recorded", task=task_id, error=str(exc)[:200])
     finally:
         _RUNNING.pop((uid, task_id), None)
+    await _after(uid, aid, agent, reply, str(meta.get("error") or _FAILED_NOTE) if reply is None else "")
     check = asyncio.create_task(_say_if_unrecorded(uid, aid))
     _CHECKS.add(check)
     check.add_done_callback(_CHECKS.discard)
     return reply is not None
+
+
+_DEFAULT_WHAT = "what you handed over"
+
+
+def _spec_for(uid: str, action_id: str, view: dict, words: str, slug: str) -> dict:
+    """What the agent is sent for this hand-over and how the timeline words it:
+    ``{prompt, automation, what}`` — the owner's own request, unless an agent
+    made it (a colleague's hand-over, its answer going back, an email that came
+    for the agent: ``colleagues``, ``agent_mail``)."""
+    from captain_claw.flight_deck import agent_mail, colleagues
+
+    action = autonomy_store().get_action(action_id) or {}
+    for special in (colleagues, agent_mail):
+        spec = special.turn_spec(uid, action, view, words, slug)
+        if spec:
+            return spec
+    return {"prompt": prompt_for(view, words, new_nonce()),
+            "automation": _automation(uid, view["task"], action_id, words, slug), "what": _DEFAULT_WHAT}
+
+
+def _what_for(action_id: str) -> str:
+    """How the timeline words this hand-over (``_DEFAULT_WHAT`` for the owner's own)."""
+    from captain_claw.flight_deck import agent_mail, colleagues
+
+    action = autonomy_store().get_action(action_id) or {}
+    return colleagues.what_of(action) or agent_mail.what_of(action) or _DEFAULT_WHAT
+
+
+async def _after(uid: str, action_id: str, agent: dict, reply: str | None, why: str) -> None:
+    """A hand-over ended (or won't run): what an agent-made one does next — the
+    colleague's answer goes back to who handed it over. Never raises."""
+    from captain_claw.flight_deck import colleagues
+
+    try:
+        await colleagues.after_turn(uid, action_id, agent, reply, why)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("Taskboard hand-over follow-up failed", action=action_id, error=str(exc)[:200])
 
 
 async def _say_if_unrecorded(uid: str, action_id: str) -> None:
@@ -369,11 +410,10 @@ async def _take_turn(uid: str, item: dict) -> None:
             await _not_run(uid, item, "skipped", why)
             return
         view = await asyncio.to_thread(board.triage_view, uid, task_id)
-        task = view["task"]
-        prompt = prompt_for(view, words, new_nonce())
-        await asyncio.to_thread(board.hand_over_turn_came, uid, aid, agent["name"])
-        automation = await asyncio.to_thread(_automation, uid, task, aid, words, slug)
-        run = asyncio.create_task(_run(uid, task_id, {"id": aid}, agent, prompt, automation))
+        spec = await asyncio.to_thread(_spec_for, uid, aid, view, words, slug)
+        await asyncio.to_thread(board.hand_over_turn_came, uid, aid, agent["name"], spec["what"])
+        run = asyncio.create_task(_run(uid, task_id, {"id": aid}, agent, spec["prompt"], spec["automation"],
+                                       what=spec["what"]))
         _RUNNING[(uid, task_id)] = run
         ok = await run
         await asyncio.to_thread(board.line_end, item["id"], "done" if ok else "failed")
@@ -405,10 +445,14 @@ async def _not_run(uid: str, item: dict, state: str, why: str) -> None:
     Never raises."""
     try:
         autonomy_store().update_status(str(item["action_id"]), "done", outcome="fail", outcome_note=why)
+        what = await asyncio.to_thread(_what_for, str(item["action_id"]))
         await asyncio.to_thread(_board().hand_over_ended, uid, str(item["action_id"]),
-                                agent_name=str(item["agent_name"] or item["agent_slug"]), text=None, why=why)
+                                agent_name=str(item["agent_name"] or item["agent_slug"]), text=None, why=why,
+                                what=what)
     except Exception as exc:  # noqa: BLE001
         log.warning("Taskboard hand-over in line not closed", task=item["task_id"], error=str(exc)[:200])
+    await _after(uid, str(item["action_id"]), {"slug": str(item["agent_slug"]), "name": str(item["agent_name"] or "")},
+                 None, why)
     try:
         await asyncio.to_thread(_board().line_end, item["id"], state, why)
     except Exception as exc:  # noqa: BLE001

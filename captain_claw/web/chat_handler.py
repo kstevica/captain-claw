@@ -163,7 +163,7 @@ async def _generate_task_name(
 # on a conversation (or a flow step) that lives in the main chat.
 REROUTED_AUTOMATION_KINDS = frozenset({
     "fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan", "peer", "botport", "mcp_task", "link", "taskboard",
-    "line",
+    "line", "colleague", "inbox",
 })
 MIRRORED_AUTOMATION_KINDS = frozenset({"fd_scheduler", "cron", "autonomy", "autonomy_tool", "plan", "taskboard", "line"})
 
