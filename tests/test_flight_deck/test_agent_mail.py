@@ -292,3 +292,50 @@ async def test_outlook_reader_takes_graph_messages(monkeypatch):
     assert asked["params"]["$filter"] == "receivedDateTime gt 2026-11-06T09:00:00Z"
     assert got[0].sender == "ana@client.co" and got[0].thread == "conv1" and got[0].headers == {"precedence": "bulk"}
     assert cur == {"after": "2026-11-06T10:00:00Z"}
+
+
+# ── Sending the reply from the owner's Gmail ──────────────────────────
+
+
+def test_a_gmail_reply_needs_the_setting_a_verified_sender_and_for_me_the_owner():
+    mine = {"alice@firm.co", "alice@gmail.com"}
+    me = {"gmail_replies": "me"}
+    assert agent_mail.gmail_reply_for(_gmail(sender="alice@gmail.com", verified=True), me, mine) == {
+        "message_id": "m1", "to": "alice@gmail.com"}
+    assert agent_mail.gmail_reply_for(_gmail(sender="alice@gmail.com", verified=False), me, mine) is None, "forged?"
+    assert agent_mail.gmail_reply_for(_gmail(sender="ana@client.co", verified=True), me, mine) is None
+    anyone = {"gmail_replies": "verified"}
+    assert agent_mail.gmail_reply_for(_gmail(sender="ana@client.co", verified=True), anyone, mine)["to"] == "ana@client.co"
+    assert agent_mail.gmail_reply_for(_gmail(sender="ana@client.co", verified=True), {}, mine) is None, "off by default"
+    assert agent_mail.gmail_reply_for(_imap("rita-box", sender="alice@firm.co", verified=True), anyone, mine) is None
+
+
+async def test_with_send_to_you_the_agent_is_told_to_send_and_may(board, ledger, relay, mail, team):  # noqa: F811
+    team.save_identity(ALICE, "researcher", {**team.identity(ALICE, "researcher"), "gmail_replies": "me"})
+    mail.gmail = [_gmail(sender="alice@firm.co", verified=True)]
+    assert await agent_mail.owner_pass(ALICE) == 1
+    await _settle()
+    call = relay.calls[0]
+    auto = call["automation"]
+    assert (auto["mail_write"], auto["reply_id"], auto["reply_to"]) == ("draft", "m1", "alice@firm.co")
+    head = call["prompt"].partition("<<<EMAIL")[0]
+    assert "google_mail action=send to=alice@firm.co reply_to_message_id=m1" in head and "Don't send" not in head
+
+
+async def test_with_send_to_you_an_outsider_still_gets_a_draft(board, ledger, relay, mail, team):  # noqa: F811
+    team.save_identity(ALICE, "researcher", {**team.identity(ALICE, "researcher"), "gmail_replies": "me"})
+    mail.gmail = [_gmail(sender="ana@client.co", verified=True)]
+    await agent_mail.owner_pass(ALICE)
+    await _settle()
+    auto = relay.calls[0]["automation"]
+    assert "reply_id" not in auto and "google_mail action=create_draft" in relay.calls[0]["prompt"]
+
+
+async def test_an_email_hand_over_stays_off_the_boards_ledger_reading(board, ledger, relay, mail):  # noqa: F811
+    mail.gmail = [_gmail()]
+    await agent_mail.owner_pass(ALICE)
+    await _settle()
+    action = next(a for a in ledger.list_actions(ALICE) if a["payload"].get("inbox"))
+    assert action["payload"]["handover"] is True
+    task = relay.calls[0]["automation"]["task"]["id"]
+    assert not any(e["kind"] in ("proposal", "approval") for e in board.events(ALICE, task))

@@ -667,7 +667,15 @@ class GoogleMailTool(Tool):
                     "google_mail", action, recipients=_rcpt, own_addresses=_own,
                 )
             else:
-                _refusal = mail_authority.check_mail_write("google_mail", action)
+                # An email's turn may send the one reply its owner allowed:
+                # to that sender only, on that message (mail_authority).
+                _refusal = mail_authority.check_mail_write(
+                    "google_mail", action,
+                    reply_message_id=str(kwargs.get("reply_to_message_id") or ""),
+                    reply_recipients=mail_authority.parse_recipients(
+                        kwargs.get("to"), kwargs.get("cc"), kwargs.get("bcc"),
+                    ),
+                )
             if _refusal:
                 log.info(
                     "google_mail write refused (automated turn)",

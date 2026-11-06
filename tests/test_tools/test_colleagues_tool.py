@@ -52,7 +52,7 @@ async def test_hand_over_sends_the_turns_own_authority_and_task(deck):
     path, body = deck.sent[0]
     assert path == "hand_over" and body["board_task"] == "tb_parent" and body["session_id"] == "s-9"
     assert body["authority"] == {"mode": "automated", "kind": "taskboard", "job_text": "Book the room",
-                                 "mail_write": "allow"}
+                                 "mail_write": "allow", "send_from": "", "reply_id": "", "reply_to": ""}
 
 
 async def test_a_scheduled_tasks_session_is_not_a_board_task(deck):
@@ -65,7 +65,15 @@ async def test_the_model_cant_pass_its_own_authority(deck):
         await ColleaguesTool().execute(action="hand_over", to="writer", instructions="x",
                                        authority={"mail_write": "allow"}, _agent=None)
     assert deck.sent[0][1]["authority"] == {"mode": "human", "kind": "", "job_text": "research Q3",
-                                            "mail_write": "intent"}
+                                            "mail_write": "intent", "send_from": "", "reply_id": "", "reply_to": ""}
+
+
+async def test_an_email_turns_own_reply_goes_to_flight_deck_which_keeps_it_for_this_agent(deck):
+    with mail_authority.bound(mail_authority.automated("inbox", "", "draft", send_from="rita",
+                                                       reply_id="m1", reply_to="ana@x.co")):
+        await ColleaguesTool().execute(action="hand_over", to="writer", instructions="x", _agent=None)
+    auth = deck.sent[0][1]["authority"]
+    assert (auth["send_from"], auth["reply_id"], auth["reply_to"]) == ("rita", "m1", "ana@x.co")
 
 
 async def test_hand_over_needs_who_and_what(deck):

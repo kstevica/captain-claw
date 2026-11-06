@@ -72,6 +72,10 @@ SOURCE = "colleagues"
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _INBOX_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 _SLUG_RE = re.compile(r"^[A-Za-z0-9._-]{1,80}$")
+_REPLY_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# Replies to email that came to the agent in the owner's Gmail: drafts (off),
+# sent to the owner's own addresses only (me), or to any sender Gmail verified.
+GMAIL_REPLIES = ("off", "me", "verified")
 # mail_authority's kinds and modes, mirrored by string (that module never imports Flight Deck).
 _KINDS = frozenset({
     "autonomy", "autonomy_tool", "plan", "fd_scheduler", "flow", "flow_tool", "cron", "peer", "peer_relay",
@@ -328,6 +332,11 @@ def clean_identity(raw: Any, base: dict | None = None) -> dict:
         out["inbox"] = inbox
     if "pick_up_mail" in raw:
         out["pick_up_mail"] = bool(raw.get("pick_up_mail"))
+    if "gmail_replies" in raw:
+        value = str(raw.get("gmail_replies") or "off")
+        if value not in GMAIL_REPLIES:
+            raise ValueError("Gmail replies are off, me or verified.")
+        out["gmail_replies"] = value
     if "hands_to" in raw:
         hands = raw.get("hands_to")
         if hands in (None, "", "all"):
@@ -356,7 +365,8 @@ def view(agent: dict, ident: dict | None, inboxes: dict[str, str] | None = None)
         "about": str(ident.get("about") or ""), "names": [str(n) for n in ident.get("names") or []] or [name],
         "names_set": bool(ident.get("names")), "addresses": addresses, "inbox": inbox if inbox_email else "",
         "inbox_email": inbox_email, "email": inbox_email or (addresses[0] if addresses else ""),
-        "pick_up_mail": picks_up_mail(ident), "hands_to": ident.get("hands_to") or "all",
+        "pick_up_mail": picks_up_mail(ident), "gmail_replies": gmail_replies(ident),
+        "hands_to": ident.get("hands_to") or "all",
         "asleep": bool(agent.get("asleep")),
     }
 
@@ -366,6 +376,13 @@ def picks_up_mail(ident: dict | None) -> bool:
     switched it off."""
     value = (ident or {}).get("pick_up_mail")
     return PICK_UP_MAIL_DEFAULT if value is None else bool(value)
+
+
+def gmail_replies(ident: dict | None) -> str:
+    """How the agent answers email that came to it in the owner's Gmail:
+    ``off`` (a draft, the default), ``me`` or ``verified``."""
+    value = str((ident or {}).get("gmail_replies") or "off")
+    return value if value in GMAIL_REPLIES else "off"
 
 
 def may_hand_to(ident: dict | None, slug: str) -> bool:
@@ -426,9 +443,13 @@ def authority_in(raw: Any) -> dict:
     if mode == "automated" and (kind not in _KINDS or mail_write not in _MODES):
         kind, mail_write = "unknown", "deny"
     send_from = str(raw.get("send_from") or "").strip().lower()
+    reply_id, reply_to = str(raw.get("reply_id") or "").strip(), str(raw.get("reply_to") or "").strip().lower()
+    draft = mode == "automated" and mail_write == "draft"
+    reply = draft and bool(_REPLY_ID_RE.match(reply_id)) and bool(_EMAIL_RE.match(reply_to))
     return {"mode": mode, "kind": kind if mode == "automated" else "", "job_text": str(raw.get("job_text") or "")[:_JOB_TEXT_MAX],
             "mail_write": "intent" if mode == "human" else mail_write,
-            "send_from": send_from if mail_write == "draft" and _INBOX_RE.match(send_from) else ""}
+            "send_from": send_from if draft and _INBOX_RE.match(send_from) else "",
+            "reply_id": reply_id if reply else "", "reply_to": reply_to if reply else ""}
 
 
 def colleague_marker(auth: dict) -> dict:
@@ -441,12 +462,12 @@ def colleague_marker(auth: dict) -> dict:
 
 def back_marker(auth: dict) -> dict:
     """What the delegating agent's own turn with the answer may do: what it
-    could when it handed over, its own inbox included."""
+    could when it handed over, its own inbox and its one Gmail reply included."""
     kind = "inbox" if auth.get("kind") == "inbox" else "colleague"
     marker = {"kind": kind, "job_text": auth.get("job_text") or "",
               "mail_write": auth.get("mail_write") if auth.get("mail_write") in _MODES else "deny"}
-    if marker["mail_write"] == "draft" and auth.get("send_from"):
-        marker["send_from"] = auth["send_from"]
+    if marker["mail_write"] == "draft":
+        marker.update({k: auth[k] for k in ("send_from", "reply_id", "reply_to") if auth.get(k)})
     return marker
 
 
@@ -538,7 +559,7 @@ async def hand_over(owner: str, from_slug: str, body: dict) -> dict:
         autonomy_store().add_action, owner, kind="run_prompt", title=f"{me['name']} → {target['name']}: {title}"[:200],
         rationale=f"{me['name']} handed this to {target['name']} on the Taskboard.", source=TASKBOARD_SOURCE,
         risk="normal", domain="taskboard", status="dispatched", target=target["slug"], ref_id=task_id,
-        payload={"colleague": True, "task_id": task_id, "parent_task": parent, "from": from_slug,
+        payload={"colleague": True, "handover": True, "task_id": task_id, "parent_task": parent, "from": from_slug,
                  "from_name": me["name"], "from_role": me["role"], "to": target["slug"], "to_name": target["name"],
                  "to_role": target["role"], "title": title, "instructions": words, "authority": auth,
                  "origin": {k: origin.get(k) for k in ("platform", "user_id", "chat_id")},
@@ -688,7 +709,7 @@ async def _colleague_ended(uid: str, action_id: str, p: dict, reply: str | None,
             title=f"{to_name}'s answer back to {from_name}: {p.get('title') or ''}"[:200],
             rationale=f"{to_name} finished what {from_name} handed over.", source=TASKBOARD_SOURCE, risk="normal",
             domain="taskboard", status="dispatched", target=delegator["slug"], ref_id=parent,
-            payload={"colleague_back": True, "task_id": parent, "child": child, "from": p.get("to"),
+            payload={"colleague_back": True, "handover": True, "task_id": parent, "child": child, "from": p.get("to"),
                      "from_name": to_name, "to": delegator["slug"], "to_name": delegator["name"],
                      "title": p.get("title") or "", "reply": (reply or "")[:REPLY_KEPT] if ok else None,
                      "why": "" if ok else why, "authority": p.get("authority") or {},

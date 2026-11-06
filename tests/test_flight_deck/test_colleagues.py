@@ -159,6 +159,17 @@ async def test_the_answer_closes_its_task_and_goes_back_into_the_parents_session
     assert chat == [], "it was on a board task: no chat notification"
 
 
+async def test_agent_hand_overs_stay_off_the_boards_ledger_reading(board, ledger, relay, team, chat):  # noqa: F811
+    """They carry the hand-over mark, so the board never shows them as a proposal and an approval."""
+    parent = _task(board, flags={}, pending=False)
+    await _hand(board_task=parent, session_id="s-parent")
+    await _settle()
+    marks = [a["payload"].get("handover") for a in ledger.list_actions(ALICE)
+             if a["payload"].get("colleague") or a["payload"].get("colleague_back")]
+    assert marks == [True, True]
+    assert not any(e["kind"] in ("proposal", "approval") for e in board.events(ALICE, parent))
+
+
 async def test_without_a_board_task_the_answer_comes_to_its_chat(board, ledger, relay, team, chat):  # noqa: F811
     res = await _hand(title="Copy")
     await _settle()
@@ -225,6 +236,13 @@ def test_authority_passes_on_and_never_grows():
     draft = colleagues.authority_in({"mode": "automated", "kind": "inbox", "mail_write": "draft", "send_from": "rita"})
     assert "send_from" not in colleagues.colleague_marker(draft), "an inbox never passes to a colleague"
     assert colleagues.back_marker(draft) == {"kind": "inbox", "job_text": "", "mail_write": "draft", "send_from": "rita"}
+    reply = colleagues.authority_in({"mode": "automated", "kind": "inbox", "mail_write": "draft",
+                                     "reply_id": "m1", "reply_to": "Ana@X.co"})
+    assert (reply["reply_id"], reply["reply_to"]) == ("m1", "ana@x.co")
+    assert not {"reply_id", "reply_to"} & set(colleagues.colleague_marker(reply)), "a Gmail reply never passes on"
+    assert colleagues.back_marker(reply)["reply_to"] == "ana@x.co", "only back to the agent it was for"
+    assert colleagues.authority_in({"mode": "automated", "kind": "inbox", "mail_write": "allow",
+                                    "reply_id": "m1", "reply_to": "a@x.co"})["reply_id"] == ""
     bad = colleagues.authority_in({"mode": "automated", "kind": "made-up", "mail_write": "allow"})
     assert colleagues.colleague_marker(bad)["mail_write"] == "deny"
     assert colleagues.authority_in(None)["mail_write"] == "deny"
@@ -308,6 +326,10 @@ def test_identity_keeps_what_it_was_not_sent():
     assert more["role"] == "Researcher of things" and more["about"] == "Finds numbers"
     with pytest.raises(ValueError, match="isn't an email address"):
         colleagues.clean_identity({"addresses": ["nope"]})
+    assert colleagues.clean_identity({"gmail_replies": "me"})["gmail_replies"] == "me"
+    with pytest.raises(ValueError, match="Gmail replies"):
+        colleagues.clean_identity({"gmail_replies": "always"})
+    assert colleagues.gmail_replies(None) == "off" and colleagues.gmail_replies({"gmail_replies": "x"}) == "off"
     assert colleagues.clean_identity({"hands_to": "all"})["hands_to"] == "all"
 
 
