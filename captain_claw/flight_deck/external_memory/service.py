@@ -4,17 +4,24 @@ The connection lives ONLY in Flight Deck, like Jev's key:
 
 * Per user in ``user_settings`` — ``external_memory:connection`` (JSON
   ``{provider, credentials, info, verified, verify_error, verified_at,
-  updated_at, checked_at}``; the credentials sealed with ``fd_crypto`` when it
-  is usable) and ``external_memory:mirror`` (which kinds are mirrored).
-  ``external_memory:`` is server-owned: ``/fd/settings`` never returns it and
-  refuses to write it. An auth-disabled deck keeps one connection for the deck
-  in ``system_settings``.
-* There is no team connection on purpose: an external memory is a person's
-  own (Membase: "each end user gets their own account and key"); one shared
-  key would pour every user's facts into one memory.
+  updated_at, checked_at, private_ok}``; the credentials sealed with
+  ``fd_crypto`` when it is usable) and ``external_memory:mirror`` (which kinds
+  are mirrored). ``external_memory:`` is server-owned: ``/fd/settings`` never
+  returns it and refuses to write it. An auth-disabled deck keeps one
+  connection for the deck in ``system_settings``.
+* The deck's connection: an admin may connect one *scoped* provider
+  (Hindsight: one server, a bank per person) for everyone —
+  ``external_memory:deck_connection`` in ``system_settings``. A user with no
+  connection of their own uses it, in a scope of their own
+  (:func:`base.scope_id`); their own connection, once saved, wins. A *key*
+  provider (Membase: one account per person) can't be the deck's — one key
+  would pour every user's facts into one memory.
 * Every agent of the user shares it — that is the point. Agents never hold the
   credentials; they reach it through ``/fd/external-memory/agent/*``, the owner
   resolved from this deck's records, never from the agent's word.
+* A user who isn't an admin can't point their own connection at this machine
+  or its network (:func:`base.private_address`) — Flight Deck would make those
+  requests for them. The deck's connection, set by an admin, can.
 
 Two ways things get in:
 
@@ -31,6 +38,7 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -47,6 +55,8 @@ from captain_claw.flight_deck.external_memory.base import (
     ProviderAuthError,
     ProviderError,
     ProviderInputError,
+    private_address,
+    scope_id,
 )
 from captain_claw.flight_deck.external_memory.outbox import Outbox
 from captain_claw.logging import get_logger
@@ -55,10 +65,15 @@ log = get_logger(__name__)
 
 _K_CONN = "external_memory:connection"
 _K_MIRROR = "external_memory:mirror"
+_K_DECK = "external_memory:deck_connection"
 
 NOT_CONNECTED = (
     "No external memory is connected — the person connects one in Flight Deck → Connections → "
     "External memory."
+)
+PRIVATE_REFUSED = (
+    "That address is on this machine or its network, which only an admin may connect (for the whole "
+    "deck, under Connections → External memory). Use a public address, or ask your admin."
 )
 # How old a connection's stored capabilities may get before an agent's status
 # call re-checks them in the background (reach and access change in the
@@ -71,11 +86,26 @@ SEND_GAP_S = 0.25
 RATE_LIMIT_HOLD_S = 60.0
 HOLD_S = 3600.0
 PRUNE_EVERY_S = 6 * 3600
+_HOST_CHECK_TTL_S = 60.0
 
 
 class NotConnected(LookupError):  # noqa: N818 — reads as the condition
     def __init__(self, message: str = NOT_CONNECTED) -> None:
         super().__init__(message)
+
+
+@dataclass
+class Resolved:
+    """The connection a user's memory goes through: their own, or the deck's
+    (``source``), and their scope on it ("" for a key provider)."""
+
+    conn: dict[str, Any]
+    source: str
+    scope: str
+
+    @property
+    def provider_name(self) -> str:
+        return str(self.conn["provider"])
 
 
 def _now() -> str:
@@ -91,7 +121,7 @@ def _deck_scope() -> bool:
 
 
 def owner_key(owner: str) -> str:
-    """The id the outbox and usage log file things under."""
+    """The id the outbox, scopes and usage log file things under."""
     return _LOCAL_USER["id"] if _deck_scope() else owner
 
 
@@ -147,11 +177,10 @@ def _unseal(stored: Any) -> dict[str, str]:
     return {str(k): str(v) for k, v in plain.items()} if isinstance(plain, dict) else {}
 
 
-async def load_connection(owner: str) -> dict[str, Any] | None:
-    """The stored connection with its credentials opened, or None. A
-    connection to a provider this deck no longer knows, or whose credentials
-    can't be opened (the data key changed), reads as none."""
-    raw = await _read(owner, _K_CONN)
+def _parse(raw: str) -> dict[str, Any] | None:
+    """A stored connection with its credentials opened, or None. One to a
+    provider this deck no longer knows, or whose credentials can't be opened
+    (the data key changed), reads as none."""
     if not raw:
         return None
     try:
@@ -168,20 +197,56 @@ async def load_connection(owner: str) -> dict[str, Any] | None:
     return conn
 
 
-async def _store_connection(owner: str, conn: dict[str, Any]) -> None:
+def _dump(conn: dict[str, Any]) -> str:
     out = dict(conn)
     out["credentials"] = _seal(conn.get("credentials") or {})
     info = conn.get("info")
     out["info"] = info.to_dict() if isinstance(info, ConnectionInfo) else (info or {})
-    await _write(owner, _K_CONN, json.dumps(out, ensure_ascii=True))
+    return json.dumps(out, ensure_ascii=True)
 
 
-async def _update_connection(owner: str, **fields: Any) -> None:
-    conn = await load_connection(owner)
+async def load_connection(owner: str) -> dict[str, Any] | None:
+    """*owner*'s OWN connection (the deck's one with sign-in off), or None."""
+    return _parse(await _read(owner, _K_CONN))
+
+
+async def load_deck_connection() -> dict[str, Any] | None:
+    """The admin's connection for everyone, or None (always None with sign-in
+    off — that deck's one connection is already everyone's)."""
+    if _deck_scope():
+        return None
+    return _parse((await get_db().get_system_setting(_K_DECK)) or "")
+
+
+async def _store(owner: str, source: str, conn: dict[str, Any]) -> None:
+    if source == "deck":
+        await get_db().set_system_setting(_K_DECK, _dump(conn))
+    else:
+        await _write(owner, _K_CONN, _dump(conn))
+
+
+async def _update(owner: str, source: str, **fields: Any) -> None:
+    conn = await (load_deck_connection() if source == "deck" else load_connection(owner))
     if not conn:
         return
     conn.update(fields)
-    await _store_connection(owner, conn)
+    await _store(owner, source, conn)
+
+
+async def resolve(owner: str) -> Resolved | None:
+    """The connection *owner*'s memory goes through: their own, else the
+    deck's (scoped providers only), else None."""
+    own = await load_connection(owner)
+    if own:
+        cls = providers.provider_class(str(own["provider"]))
+        scope = ""
+        if cls is not None and cls.tenancy == "scoped":
+            scope = str(own["credentials"].get("bank") or "") or scope_id(owner_key(owner))
+        return Resolved(own, "own", scope)
+    deck = await load_deck_connection()
+    if deck:
+        return Resolved(deck, "deck", scope_id(owner_key(owner)))
+    return None
 
 
 async def load_mirror(owner: str) -> dict[str, bool]:
@@ -222,16 +287,65 @@ def mirror_rule(mirror: dict[str, bool]) -> str:
     return "Copied here automatically — never save these again by hand: " + ", ".join(kinds) + "."
 
 
-def provider_for(conn: dict[str, Any], **kwargs: Any) -> ExternalMemoryProvider:
-    return providers.build(str(conn["provider"]), conn["credentials"], conn.get("info"), **kwargs)
+# ── building a provider ─────────────────────────────────────────────
+
+_host_checks: dict[str, tuple[bool, float]] = {}
+
+
+async def _is_private(url: str) -> bool:
+    hit = _host_checks.get(url)
+    if hit and time.time() - hit[1] < _HOST_CHECK_TTL_S:
+        return hit[0]
+    private = await asyncio.to_thread(private_address, url)
+    _host_checks[url] = (private, time.time())
+    return private
+
+
+async def provider_for(res: Resolved, **kwargs: Any) -> ExternalMemoryProvider:
+    """The provider for one call. A user's own connection that may not reach
+    private addresses is checked again here (names can change what they
+    point at)."""
+    cls = providers.provider_class(res.provider_name)
+    if res.source == "own" and cls is not None and cls.url_field and not res.conn.get("private_ok"):
+        url = str(res.conn["credentials"].get(cls.url_field) or "")
+        if url and await _is_private(url):
+            raise ProviderError(PRIVATE_REFUSED, status=403, code="private_address")
+    return providers.build(res.provider_name, res.conn["credentials"], res.conn.get("info"),
+                           scope=res.scope, **kwargs)
+
+
+def _plain_provider(res: Resolved) -> ExternalMemoryProvider:
+    """For views only (no network): actions, rules, hints."""
+    return providers.build(res.provider_name, res.conn["credentials"], res.conn.get("info"), scope=res.scope)
 
 
 # ── views ───────────────────────────────────────────────────────────
 
 
+def _conn_view(conn: dict[str, Any], provider: ExternalMemoryProvider) -> dict[str, Any]:
+    verify_error = conn.get("verify_error")
+    return {
+        "provider": provider.name,
+        "label": provider.label,
+        "credential_hints": provider.credential_hints(),
+        "verified": conn.get("verified") if isinstance(conn.get("verified"), bool) else None,
+        "verify_error": verify_error if verify_error in ("refused", "unreachable") else None,
+        "verified_at": conn.get("verified_at") or None,
+        "updated_at": conn.get("updated_at") or None,
+    }
+
+
+async def _deck_offer() -> dict[str, Any] | None:
+    deck = await load_deck_connection()
+    if not deck:
+        return None
+    cls = providers.provider_class(str(deck["provider"]))
+    return {"provider": str(deck["provider"]), "label": cls.label if cls else str(deck["provider"])}
+
+
 async def status_for_owner(owner: str) -> dict[str, Any]:
     """The connection as the dashboard shows it — never a credential."""
-    conn = await load_connection(owner)
+    res = await resolve(owner)
     mirror = await load_mirror(owner)
     base: dict[str, Any] = {
         "connected": False,
@@ -240,70 +354,88 @@ async def status_for_owner(owner: str) -> dict[str, Any]:
         "mirror_kinds": list(MIRROR_KINDS),
         "scope": "deck" if _deck_scope() else "user",
         "auth_enabled": _fd_auth_enabled(),
+        "deck_connection": await _deck_offer(),
     }
-    if not conn:
+    if not res:
         return base
-    provider = provider_for(conn)
+    provider = _plain_provider(res)
     try:
         counts = await outbox().counts(owner_key(owner))
     except Exception as exc:  # the dashboard still shows the connection
         log.debug("external memory: outbox counts failed", error=type(exc).__name__)
         counts = {}
-    verify_error = conn.get("verify_error")
+    view = _conn_view(res.conn, provider)
+    if res.source == "deck":
+        view["credential_hints"] = {}  # the admin's, not this user's to see
     return {
         **base,
+        **view,
         "connected": True,
-        "provider": provider.name,
-        "label": provider.label,
-        "credential_hints": provider.credential_hints(),
-        "verified": conn.get("verified") if isinstance(conn.get("verified"), bool) else None,
-        "verify_error": verify_error if verify_error in ("refused", "unreachable") else None,
-        "verified_at": conn.get("verified_at") or None,
-        "updated_at": conn.get("updated_at") or None,
-        "reaches": list(provider.info.reaches),
+        "source": res.source,
+        "tenancy": provider.tenancy,
+        "scope_label": provider.scope_label,
+        "scope_id": res.scope,
+        "reaches": provider.reaches(),
         "actions": [a.to_dict() for a in provider.actions()],
         "rules": [*provider.rules(), mirror_rule(mirror)],
         "outbox": counts,
     }
 
 
+async def deck_status() -> dict[str, Any]:
+    """The deck's connection, as the admin sees it (never a credential)."""
+    deck = await load_deck_connection()
+    out: dict[str, Any] = {
+        "available": not _deck_scope(),
+        "connected": False,
+        "providers": [p for p in providers.catalog() if p.get("tenancy") == "scoped"],
+    }
+    if not deck:
+        return out
+    provider = providers.build(str(deck["provider"]), deck["credentials"], deck.get("info"))
+    return {**out, **_conn_view(deck, provider), "connected": True,
+            "scope_label": provider.scope_label, "scope_example": scope_id("<user id>")}
+
+
 _refreshing: set[str] = set()
 
 
 async def _refresh_info(owner: str) -> None:
-    """Re-learn what the connection may do (background, at most one per owner)."""
-    if owner in _refreshing:
+    """Re-learn what the connection may do (background, at most one per
+    connection)."""
+    res = await resolve(owner)
+    if not res:
         return
-    _refreshing.add(owner)
+    key = "deck" if res.source == "deck" else owner
+    if key in _refreshing:
+        return
+    _refreshing.add(key)
     try:
-        conn = await load_connection(owner)
-        if not conn:
-            return
         try:
-            info = await provider_for(conn, max_retries=0).verify()
+            info = await (await provider_for(res, max_retries=0)).verify()
         except ProviderAuthError:
-            await _update_connection(owner, verified=False, verify_error="refused", checked_at=time.time())
+            await _update(owner, res.source, verified=False, verify_error="refused", checked_at=time.time())
             return
         except ProviderError:
-            await _update_connection(owner, checked_at=time.time())
+            await _update(owner, res.source, checked_at=time.time())
             return
-        await _update_connection(owner, info=info, verified=True, verify_error=None,
-                                 verified_at=_now(), checked_at=time.time())
+        await _update(owner, res.source, info=info, verified=True, verify_error=None,
+                      verified_at=_now(), checked_at=time.time())
     except Exception as exc:
         log.debug("external memory: background re-check failed", error=type(exc).__name__)
     finally:
-        _refreshing.discard(owner)
+        _refreshing.discard(key)
 
 
 async def manifest_for_owner(owner: str) -> dict[str, Any]:
     """What an agent needs (no network): whether a memory is connected, its
     actions and rules, and which kinds to mirror."""
-    conn = await load_connection(owner)
-    if not conn:
+    res = await resolve(owner)
+    if not res:
         return {"connected": False}
-    if time.time() - float(conn.get("checked_at") or 0) > INFO_MAX_AGE_S:
+    if time.time() - float(res.conn.get("checked_at") or 0) > INFO_MAX_AGE_S:
         asyncio.create_task(_refresh_info(owner))
-    provider = provider_for(conn)
+    provider = _plain_provider(res)
     mirror = await load_mirror(owner)
     manifest = provider.manifest()
     manifest["rules"] = [*manifest["rules"], mirror_rule(mirror)]
@@ -312,27 +444,31 @@ async def manifest_for_owner(owner: str) -> dict[str, Any]:
         **manifest,
         # The ones an AGENT sends (lessons are mirrored here, by Flight Deck).
         "mirror": [k for k in MIRROR_KINDS if mirror.get(k) and k != "lesson"],
-        "refused": conn.get("verify_error") == "refused",
+        "refused": res.conn.get("verify_error") == "refused",
     }
 
 
 # ── connecting ──────────────────────────────────────────────────────
 
 
-async def connect(owner: str, provider_name: str, raw_credentials: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    """Check the credentials with the provider and save them: ``(status,
-    warning)``. Credentials the provider refuses raise
-    :class:`ProviderAuthError` (nothing saved); a provider that couldn't be
-    asked leaves them saved unverified, with a warning."""
+async def _checked_conn(provider_name: str, raw_credentials: dict[str, Any], *, private_ok: bool,
+                        scope: str = "") -> tuple[dict[str, Any], str, ExternalMemoryProvider]:
+    """Clean and check credentials: ``(conn, warning, provider)``. Refused
+    credentials raise :class:`ProviderAuthError` (nothing to save); a provider
+    that couldn't be asked gives an unverified connection and a warning."""
     cls = providers.provider_class(provider_name)
     if cls is None:
         raise ProviderInputError(f"Unknown external memory '{provider_name}'")
     credentials = cls.clean_credentials(raw_credentials)
-    provider = providers.build(cls.name, credentials)
+    url = str(credentials.get(cls.url_field) or "") if cls.url_field else ""
+    if url and not private_ok and await asyncio.to_thread(private_address, url):
+        raise ProviderInputError(PRIVATE_REFUSED + " Nothing was saved.")
+    provider = providers.build(cls.name, credentials, scope=scope)
     now = _now()
     conn: dict[str, Any] = {
         "provider": cls.name, "credentials": credentials, "info": ConnectionInfo(),
         "verified": None, "verify_error": None, "verified_at": None, "updated_at": now, "checked_at": 0,
+        "private_ok": bool(private_ok),
     }
     warning = ""
     try:
@@ -343,17 +479,28 @@ async def connect(owner: str, provider_name: str, raw_credentials: dict[str, Any
     except ProviderError as exc:
         conn.update(verified=False, verify_error="unreachable")
         warning = f"Saved, but couldn't check it with {cls.label}: {exc}"
-    previous = await load_connection(owner)
-    if previous and previous.get("provider") != cls.name:
+    return conn, warning, provider
+
+
+async def connect(owner: str, provider_name: str, raw_credentials: dict[str, Any],
+                  *, private_ok: bool = False) -> tuple[dict[str, Any], str]:
+    """Check *owner*'s own credentials with the provider and save them:
+    ``(status, warning)``. *private_ok*: may point at this machine or its
+    network (admins, and a deck with sign-in off)."""
+    conn, warning, _provider = await _checked_conn(provider_name, raw_credentials, private_ok=private_ok)
+    previous = await resolve(owner)
+    if previous and previous.provider_name != conn["provider"]:
         # A different service: what was queued for the old one won't go there.
         await outbox().drop_owner(owner_key(owner))
-    await _store_connection(owner, conn)
+    await _store(owner, "own", conn)
     await outbox().retry_owner(owner_key(owner))
     wake()
     return await status_for_owner(owner), warning
 
 
 async def disconnect(owner: str) -> dict[str, Any]:
+    """Forget *owner*'s own connection (and what was still queued for it).
+    With a deck connection, they fall back to it."""
     await _erase(owner, _K_CONN)
     try:
         await outbox().drop_owner(owner_key(owner))
@@ -362,22 +509,61 @@ async def disconnect(owner: str) -> dict[str, Any]:
     return await status_for_owner(owner)
 
 
-async def test(owner: str) -> dict[str, Any]:
-    """A live check with the saved connection; updates what it may do."""
-    conn = await load_connection(owner)
-    if not conn:
-        raise NotConnected()
+async def deck_connect(provider_name: str, raw_credentials: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """The admin connects one scoped provider for everyone."""
+    if _deck_scope():
+        raise ProviderInputError("Sign-in is off on this deck, so its one connection is already everyone's.")
+    cls = providers.provider_class(provider_name)
+    if cls is None:
+        raise ProviderInputError(f"Unknown external memory '{provider_name}'")
+    if not cls.shareable():
+        raise ProviderInputError(
+            f"A {cls.label} key is one person's memory — each person connects their own. "
+            "Only a memory that keeps people apart itself can be the deck's."
+        )
+    conn, warning, _provider = await _checked_conn(provider_name, raw_credentials, private_ok=True,
+                                                   scope=scope_id("check"))
+    conn["credentials"].pop("bank", None)  # every person gets their own
+    await _store("", "deck", conn)
+    wake()
+    return await deck_status(), warning
+
+
+async def deck_disconnect() -> dict[str, Any]:
+    if not _deck_scope():
+        await get_db().set_system_setting(_K_DECK, "")
+    return await deck_status()
+
+
+async def _verify(owner: str, res: Resolved) -> dict[str, Any]:
     t0 = time.monotonic()
     try:
-        info = await provider_for(conn).verify()
+        info = await (await provider_for(res)).verify()
     except ProviderAuthError:
-        await _update_connection(owner, verified=False, verify_error="refused", checked_at=time.time())
+        await _update(owner, res.source, verified=False, verify_error="refused", checked_at=time.time())
         raise
-    await _update_connection(owner, info=info, verified=True, verify_error=None,
-                             verified_at=_now(), checked_at=time.time())
+    await _update(owner, res.source, info=info, verified=True, verify_error=None,
+                  verified_at=_now(), checked_at=time.time())
+    return {"ok": True, "latency_ms": int((time.monotonic() - t0) * 1000)}
+
+
+async def test(owner: str) -> dict[str, Any]:
+    """A live check with the connection *owner* uses; updates what it may do."""
+    res = await resolve(owner)
+    if not res:
+        raise NotConnected()
+    out = await _verify(owner, res)
     await outbox().retry_owner(owner_key(owner))
     wake()
-    return {"ok": True, "latency_ms": int((time.monotonic() - t0) * 1000), **await status_for_owner(owner)}
+    return {**out, **await status_for_owner(owner)}
+
+
+async def deck_test() -> dict[str, Any]:
+    deck = await load_deck_connection()
+    if not deck:
+        raise NotConnected("No memory is connected for the deck.")
+    out = await _verify("", Resolved(deck, "deck", scope_id("check")))
+    return {**out, **await deck_status()}
 
 
 # ── actions ─────────────────────────────────────────────────────────
@@ -397,15 +583,15 @@ async def _log_call(owner: str, *, source: str, agent: str, provider: str, actio
 
 async def run_for_owner(owner: str, action: str, args: dict[str, Any], *, source: str,
                         agent: str = "") -> ActionResult:
-    """Run one provider action with *owner*'s connection. Raises
-    :class:`NotConnected`, :class:`ProviderInputError` (incl. an action the
-    connection doesn't offer) or :class:`ProviderError`."""
-    conn = await load_connection(owner)
-    if not conn:
+    """Run one provider action with the connection *owner* uses, in their
+    scope. Raises :class:`NotConnected`, :class:`ProviderInputError` (incl. an
+    action the connection doesn't offer) or :class:`ProviderError`."""
+    res = await resolve(owner)
+    if not res:
         raise NotConnected()
-    provider = provider_for(conn)
     action = (action or "").strip().lower()
-    provider.action(action)  # UnknownAction before anything is sent or logged
+    _plain_provider(res).action(action)  # UnknownAction before anything is sent or logged
+    provider = await provider_for(res)
     t0 = time.monotonic()
     ok, status = False, 0
     try:
@@ -413,7 +599,7 @@ async def run_for_owner(owner: str, action: str, args: dict[str, Any], *, source
         ok, status = True, 200
     except ProviderAuthError as exc:
         status = exc.status
-        await _update_connection(owner, verified=False, verify_error="refused")
+        await _update(owner, res.source, verified=False, verify_error="refused")
         raise
     except ProviderError as exc:
         status = exc.status
@@ -421,11 +607,11 @@ async def run_for_owner(owner: str, action: str, args: dict[str, Any], *, source
     finally:
         await _log_call(owner, source=source, agent=agent, provider=provider.name, action=action,
                         ok=ok, status=status, latency_ms=int((time.monotonic() - t0) * 1000))
-    if action == "capabilities":
-        await _update_connection(owner, info=provider.info, verified=True, verify_error=None,
-                                 verified_at=_now(), checked_at=time.time())
-    elif conn.get("verified") is not True:
-        await _update_connection(owner, verified=True, verify_error=None, verified_at=_now())
+    if action == "capabilities" and provider.info.allowed:
+        await _update(owner, res.source, info=provider.info, verified=True, verify_error=None,
+                      verified_at=_now(), checked_at=time.time())
+    elif res.conn.get("verified") is not True:
+        await _update(owner, res.source, verified=True, verify_error=None, verified_at=_now())
     return result
 
 
@@ -443,13 +629,13 @@ async def mirror_for_owner(owner: str, item: MemoryItem) -> dict[str, Any]:
     if not item.content or not item.source_id:
         raise ProviderInputError("A mirrored item needs content and a source_id")
     item.content = item.content[:MAX_MIRROR_CONTENT]
-    conn = await load_connection(owner)
-    if not conn:
+    res = await resolve(owner)
+    if not res:
         return {"queued": False, "reason": "not_connected"}
     if not (await load_mirror(owner)).get(item.kind):
         return {"queued": False, "reason": "kind_off"}
     queued = await outbox().enqueue(
-        owner_key(owner), str(conn["provider"]), item.kind, item.source_id, item.to_dict(),
+        owner_key(owner), res.provider_name, item.kind, item.source_id, item.to_dict(),
         agent=item.agent, title=item.title or item.content[:120],
     )
     if queued:
@@ -462,19 +648,20 @@ def _backoff(attempts: int) -> float:
 
 
 async def drain_once(limit: int = DRAIN_BATCH) -> int:
-    """Write what is due; returns how many rows were looked at."""
+    """Write what is due; returns how many rows were looked at. Each row goes
+    to the connection its owner uses NOW, in their scope."""
     box = outbox()
     rows = await box.due(limit)
-    conns: dict[str, dict[str, Any] | None] = {}
+    resolved: dict[str, Resolved | None] = {}
     held: set[str] = set()
     for row in rows:
         owner_id = str(row["owner_id"])
         if owner_id in held:
             continue
-        if owner_id not in conns:
-            conns[owner_id] = await load_connection(owner_id)
-        conn = conns[owner_id]
-        if not conn or conn.get("provider") != row["provider"]:
+        if owner_id not in resolved:
+            resolved[owner_id] = await resolve(owner_id)
+        res = resolved[owner_id]
+        if not res or res.provider_name != row["provider"]:
             await box.mark_failed(int(row["id"]), "No longer connected to this external memory.")
             continue
         try:
@@ -483,11 +670,11 @@ async def drain_once(limit: int = DRAIN_BATCH) -> int:
             await box.mark_failed(int(row["id"]), "Unreadable queued item.")
             continue
         try:
-            remote_id = await provider_for(conn, max_retries=0).mirror(item)
+            remote_id = await (await provider_for(res, max_retries=0)).mirror(item)
         except ProviderAuthError as exc:
             held.add(owner_id)
             await box.defer_owner(owner_id, HOLD_S, str(exc))
-            await _update_connection(owner_id, verified=False, verify_error="refused")
+            await _update(owner_id, res.source, verified=False, verify_error="refused")
             continue
         except ProviderError as exc:
             if exc.code in ("rate_limited",) or (exc.status == 429 and exc.retryable):
@@ -495,8 +682,8 @@ async def drain_once(limit: int = DRAIN_BATCH) -> int:
                 await box.defer_owner(owner_id, RATE_LIMIT_HOLD_S, str(exc))
             elif exc.retryable:
                 await box.mark_retry(int(row["id"]), str(exc), _backoff(int(row["attempts"])))
-            elif exc.code in ("quota_exceeded", "write_target_required") or exc.status == 403:
-                # Fixable by the person in the service itself: hold, don't fail.
+            elif exc.code in ("quota_exceeded", "write_target_required", "private_address") or exc.status == 403:
+                # Fixable by the person (or the admin): hold, don't fail.
                 held.add(owner_id)
                 await box.defer_owner(owner_id, HOLD_S, str(exc))
             else:

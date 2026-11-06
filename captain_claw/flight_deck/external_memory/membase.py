@@ -52,6 +52,7 @@ from captain_claw.flight_deck.external_memory.base import (
     ProviderAuthError,
     ProviderError,
     ProviderInputError,
+    mirror_text,
 )
 from captain_claw.logging import get_logger
 
@@ -64,14 +65,6 @@ MAX_CONTENT = 20_000
 MAX_TITLE = 200
 MAX_PROFILE_FACT = 2_000
 MAX_QUESTION = 4_000
-
-_KIND_LABEL = {
-    "insight": "Insight",
-    "intention": "Intention",
-    "reflection": "Reflection",
-    "lesson": "Lesson",
-    "intuition": "Intuition",
-}
 
 # ID prefix → (collection, the verb that removes it, the action name Membase lists).
 _FORGET = {
@@ -163,9 +156,13 @@ class MembaseProvider(ExternalMemoryProvider):
         ),
     )
 
+    tenancy = "key"
+    url_field = "base_url"
+
     def __init__(self, credentials: dict[str, str], info: ConnectionInfo | None = None,
-                 *, transport: httpx.AsyncBaseTransport | None = None, max_retries: int = 2) -> None:
-        super().__init__(credentials, info)
+                 *, scope: str = "", transport: httpx.AsyncBaseTransport | None = None,
+                 max_retries: int = 2) -> None:
+        super().__init__(credentials, info, scope=scope)
         self._transport = transport
         self.max_retries = max(0, int(max_retries))
 
@@ -646,27 +643,8 @@ class MembaseProvider(ExternalMemoryProvider):
 
     # ── mirroring ───────────────────────────────────────────────────
 
-    @staticmethod
-    def mirror_text(item: MemoryItem) -> tuple[str, str]:
-        """``(title, content)`` for one mirrored item."""
-        label = _KIND_LABEL.get(item.kind, item.kind.title() or "Note")
-        category = str(item.meta.get("category") or "").strip()
-        title = label + (f" · {category}" if category else "") + (f": {item.title}" if item.title else "")
-        lines = [item.content.strip()]
-        for key, name in (("why", "Why"), ("how_to_apply", "How to apply"), ("body", "Details"),
-                          ("status", "Status"), ("source", "Source")):
-            value = str(item.meta.get(key) or "").strip()
-            if value:
-                lines.append(f"{name}: {value}")
-        if item.tags:
-            lines.append("Tags: " + ", ".join(item.tags))
-        by = f"Captain agent “{item.agent}”" if item.agent else "Captain"
-        when = f" on {item.created_at[:10]}" if item.created_at else ""
-        lines.append(f"(Kept by {by}{when}.)")
-        return _clip(title, MAX_TITLE), _clip("\n".join(lines), MAX_CONTENT)
-
     async def mirror(self, item: MemoryItem) -> str:
-        title, content = self.mirror_text(item)
+        title, content = mirror_text(item, limit=MAX_CONTENT)
         if item.kind == "reflection":
             # Long, and rewritten as a whole: a document, kept once per id.
             data = await self._request("POST", "/v1/documents/add", json={

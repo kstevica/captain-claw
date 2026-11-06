@@ -13,6 +13,14 @@ User routes (Connections → External memory)::
     GET    /outbox            recent mirrored items and their state
     POST   /outbox/retry      failed and held items go again now
 
+Admin routes (the deck's connection — a scoped provider such as Hindsight, one
+scope per person; users without a connection of their own use it)::
+
+    GET    /deck              the deck's connection — never a credential
+    PUT    /deck-connection   {provider, credentials} — checked, then saved
+    DELETE /deck-connection   stop sharing it (users' own connections are untouched)
+    POST   /deck-test         a live check
+
 Agent routes — owner resolved from this deck's own records (``X-Agent-Auth``),
 the same gate as Jev; owner-only (not grant-aware, so the speaker-grant
 middleware refuses a shared-agent member's request)::
@@ -32,6 +40,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from captain_claw.flight_deck import google_oauth_routes as _g
+from captain_claw.flight_deck.admin_routes import require_admin
 from captain_claw.flight_deck.agent_identity import require_agent_caller
 from captain_claw.flight_deck.auth import _LOCAL_USER, _fd_auth_enabled, get_current_user
 from captain_claw.flight_deck.external_memory import providers
@@ -94,9 +103,13 @@ async def em_connect(request: Request, _user: dict = Depends(get_current_user)) 
     data = await _json_body(request)
     provider = str(data.get("provider") or "").strip().lower()
     creds = data.get("credentials")
+    # Only an admin (or the one person of a deck with sign-in off) may point
+    # Flight Deck at this machine or its network.
+    private_ok = not _fd_auth_enabled() or str((_user or {}).get("role") or "") == "admin"
     try:
         out, warning = await svc.connect(
             _g._effective_owner(_user), provider, creds if isinstance(creds, dict) else {},
+            private_ok=private_ok,
         )
     except ProviderAuthError as exc:
         raise HTTPException(status_code=400, detail=f"{exc} Nothing was saved.") from None
@@ -158,6 +171,44 @@ async def em_outbox_retry(_user: dict = Depends(get_current_user)) -> dict[str, 
     n = await svc.outbox().retry_owner(svc.owner_key(_g._effective_owner(_user)))
     svc.wake()
     return {"requeued": n}
+
+
+# ── admin routes (the deck's connection) ────────────────────────────
+
+
+@router.get("/deck")
+async def em_deck_status(_admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    return await svc.deck_status()
+
+
+@router.put("/deck-connection")
+async def em_deck_connect(request: Request, _admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    data = await _json_body(request)
+    creds = data.get("credentials")
+    try:
+        out, warning = await svc.deck_connect(
+            str(data.get("provider") or "").strip().lower(), creds if isinstance(creds, dict) else {},
+        )
+    except ProviderAuthError as exc:
+        raise HTTPException(status_code=400, detail=f"{exc} Nothing was saved.") from None
+    except ProviderInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    if warning:
+        out["warning"] = warning
+    return out
+
+
+@router.delete("/deck-connection")
+async def em_deck_disconnect(_admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    return await svc.deck_disconnect()
+
+
+@router.post("/deck-test")
+async def em_deck_test(_admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        return await svc.deck_test()
+    except (svc.NotConnected, ProviderError) as exc:
+        raise http_error(exc) from None
 
 
 # ── agent routes ────────────────────────────────────────────────────

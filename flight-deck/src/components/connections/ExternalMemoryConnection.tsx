@@ -73,11 +73,14 @@ export default function ExternalMemoryConnection() {
   useEffect(() => { refresh() }, [refresh])
 
   const connected = !!status?.connected
+  // On the deck's connection (an admin's, a bank of your own on it) rather than your own.
+  const onDeck = connected && status?.source === 'deck'
+  const own = connected && !onDeck
   const providers = status?.providers ?? []
   const chosen = useMemo(() => {
-    const name = connected ? status?.provider : providerName || providers[0]?.name
+    const name = own ? status?.provider : providerName || (onDeck ? status?.provider : '') || providers[0]?.name
     return providers.find((p) => p.name === name) ?? providers[0]
-  }, [connected, status?.provider, providerName, providers])
+  }, [own, onDeck, status?.provider, providerName, providers])
   const actions = status?.actions ?? []
   const canRemember = actions.some((a) => a.name === 'remember')
   const canSearch = actions.some((a) => a.name === 'search')
@@ -114,10 +117,13 @@ export default function ExternalMemoryConnection() {
 
   const onRemove = async () => {
     if (busy) return
+    const deckOffer = status?.deck_connection
     const ok = window.confirm(
       `Disconnect ${status?.label ?? 'the external memory'}?\n\n` +
-      (deckScope ? "This deck's agents" : 'Your agents') +
-      ' stop saving to it and searching it. What is already in it stays there; anything still waiting to be copied in is dropped.',
+      (deckOffer
+        ? `Your agents switch to the ${deckOffer.label} your admin connected for everyone, in a bank of your own.`
+        : (deckScope ? "This deck's agents" : 'Your agents') + ' stop saving to it and searching it.') +
+      ' What is already in it stays there; anything still waiting to be copied in is dropped.',
     )
     if (!ok) return
     setBusy('remove'); setNotice(null)
@@ -174,7 +180,7 @@ export default function ExternalMemoryConnection() {
   } else if (connected && status.verified === false) {
     statusPill = <span className={`${pill} bg-amber-500/15 text-amber-600 dark:text-amber-500 border-amber-500/30`}><AlertCircle className="h-3 w-3" /> Saved, not verified</span>
   } else if (connected) {
-    statusPill = <span className={`${pill} bg-emerald-500/15 text-emerald-600 dark:text-emerald-500 border-emerald-500/30`}><Check className="h-3 w-3" /> {status.label}</span>
+    statusPill = <span className={`${pill} bg-emerald-500/15 text-emerald-600 dark:text-emerald-500 border-emerald-500/30`}><Check className="h-3 w-3" /> {status.label}{onDeck ? ' · deck' : ''}</span>
   } else {
     statusPill = <span className={`${pill} bg-zinc-800 text-zinc-400 border-zinc-700`}>Not connected</span>
   }
@@ -229,9 +235,18 @@ export default function ExternalMemoryConnection() {
           </div>
         )}
 
+        {onDeck && status && (
+          <div className="rounded-md border border-zinc-800 bg-zinc-950 px-3 py-2 text-xs leading-relaxed text-zinc-400">
+            Your agents use the <span className="text-zinc-200">{status.label}</span> your admin connected for
+            everyone, in a {status.scope_label || 'space'} of your own
+            {status.scope_id ? <> (<code className="text-zinc-300">{status.scope_id}</code>)</> : null} — nobody
+            else's agents see it. To use a memory of your own instead, connect it below.
+          </div>
+        )}
+
         {status && chosen && (
           <form onSubmit={onSave} className="space-y-3">
-            {!connected && providers.length > 1 && (
+            {!own && providers.length > 1 && (
               <div>
                 <label htmlFor={`${baseId}-provider`} className="block text-xs font-medium text-zinc-400 mb-1">Service</label>
                 <select
@@ -251,13 +266,13 @@ export default function ExternalMemoryConnection() {
 
             {chosen.credential_fields.map((f) => {
               const id = `${baseId}-${f.name}`
-              const hint = status.credential_hints?.[f.name]
+              const hint = own ? status.credential_hints?.[f.name] : undefined
               return (
                 <div key={f.name} className="space-y-1">
                   <label htmlFor={id} className="block text-xs font-medium text-zinc-400">
                     {f.label}
                     {!f.required && <span className="ml-1 text-zinc-600">(optional)</span>}
-                    {connected && hint && f.secret && <span className="ml-2 text-[10px] text-emerald-600 dark:text-emerald-500">(saved)</span>}
+                    {own && hint && f.secret && <span className="ml-2 text-[10px] text-emerald-600 dark:text-emerald-500">(saved)</span>}
                   </label>
                   <div className="relative">
                     <input
@@ -265,7 +280,7 @@ export default function ExternalMemoryConnection() {
                       type={f.secret && !reveal ? 'password' : 'text'}
                       value={drafts[f.name] || ''}
                       onChange={(e) => setDrafts((d) => ({ ...d, [f.name]: e.target.value }))}
-                      placeholder={connected && hint ? (f.secret ? `•••• saved (${hint}) — paste a new one to replace` : hint) : f.placeholder}
+                      placeholder={own && hint ? (f.secret ? `•••• saved (${hint}) — paste a new one to replace` : hint) : f.placeholder}
                       autoComplete="off"
                       spellCheck={false}
                       disabled={busy === 'save'}
@@ -296,7 +311,7 @@ export default function ExternalMemoryConnection() {
                 title={`Flight Deck checks it with ${chosen.label} before saving it`}
               >
                 {busy === 'save' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-                {busy === 'save' ? 'Checking…' : connected ? 'Replace' : 'Connect'}
+                {busy === 'save' ? 'Checking…' : own ? 'Replace' : onDeck ? 'Connect my own' : 'Connect'}
               </button>
               {connected && (
                 <>
@@ -304,15 +319,17 @@ export default function ExternalMemoryConnection() {
                     {busy === 'test' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Server className="h-3 w-3" />}
                     Test
                   </button>
-                  <button
-                    type="button"
-                    onClick={onRemove}
-                    disabled={busy !== null}
-                    className="inline-flex items-center gap-1.5 rounded-md border border-red-500/30 hover:bg-red-500/10 px-3 py-1.5 text-xs text-red-600 dark:text-red-500 disabled:opacity-50"
-                  >
-                    {busy === 'remove' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
-                    Disconnect
-                  </button>
+                  {own && (
+                    <button
+                      type="button"
+                      onClick={onRemove}
+                      disabled={busy !== null}
+                      className="inline-flex items-center gap-1.5 rounded-md border border-red-500/30 hover:bg-red-500/10 px-3 py-1.5 text-xs text-red-600 dark:text-red-500 disabled:opacity-50"
+                    >
+                      {busy === 'remove' ? <Loader2 className="h-3 w-3 animate-spin" /> : <Trash2 className="h-3 w-3" />}
+                      Disconnect
+                    </button>
+                  )}
                 </>
               )}
               {chosen.credentials_url && (
@@ -327,7 +344,7 @@ export default function ExternalMemoryConnection() {
                 {status.verified === true
                   ? <>Checked{status.verified_at ? ` ${when(status.verified_at)}` : ''}.</>
                   : status.verify_error === 'refused'
-                    ? <span className="text-red-600 dark:text-red-400">{status.label} refused the key — paste a new one above. Nothing is copied in until then; what is waiting stays queued.</span>
+                    ? <span className="text-red-600 dark:text-red-400">{status.label} refused the key — {onDeck ? 'tell your admin.' : 'paste a new one above.'} Nothing is copied in until then; what is waiting stays queued.</span>
                     : status.verified === false
                       ? <>Not verified — {status.label} couldn't be reached. Test checks it again.</>
                       : <>Not checked yet.</>}

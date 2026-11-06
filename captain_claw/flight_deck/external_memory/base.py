@@ -22,13 +22,36 @@ with them, so neither is fixed here:
 What a connection can do is learned once, when its credentials are checked
 (:meth:`verify` → :class:`ConnectionInfo`), and kept with the connection, so
 listing actions and rules never needs the network.
+
+Providers also differ in how they keep people apart (:attr:`tenancy`):
+
+* ``"key"`` — one credential IS one person's memory (Membase: every end user
+  has their own account and key). Each person connects their own.
+* ``"scoped"`` — one credential serves many people, and every call names whose
+  memory it is (Hindsight: a bank per person). An admin can connect one for the
+  whole deck; Flight Deck then gives each user a scope of their own
+  (:attr:`ExternalMemoryProvider.scope`) and the provider puts it in every call.
+  The agent never chooses it — no action takes a scope.
 """
 
 from __future__ import annotations
 
+import ipaddress
+import re
+import socket
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
+
+TENANCIES = ("key", "scoped")
+_KIND_LABEL = {
+    "insight": "Insight",
+    "intention": "Intention",
+    "reflection": "Reflection",
+    "lesson": "Lesson",
+    "intuition": "Intuition",
+}
 
 # What Captain mirrors into an external memory on its own. ``lesson`` is
 # written by Flight Deck (lessons are approved there); the rest come from the
@@ -214,10 +237,20 @@ class ExternalMemoryProvider(ABC):
     # Where the user gets the credentials.
     credentials_url: ClassVar[str] = ""
     credential_fields: ClassVar[tuple[CredentialField, ...]] = ()
+    # "key": a credential is one person's memory; "scoped": one credential
+    # serves many people, each call scoped to one (see the module docstring).
+    tenancy: ClassVar[str] = "key"
+    # The credential field holding the server's address, if the provider has
+    # one (checked against private addresses for users who aren't admins).
+    url_field: ClassVar[str] = ""
+    # What one person's scope is called in the UI ("bank").
+    scope_label: ClassVar[str] = ""
 
-    def __init__(self, credentials: dict[str, str], info: ConnectionInfo | None = None) -> None:
+    def __init__(self, credentials: dict[str, str], info: ConnectionInfo | None = None,
+                 *, scope: str = "") -> None:
         self.credentials = {k: str(v) for k, v in (credentials or {}).items() if v is not None}
         self.info = info or ConnectionInfo()
+        self.scope = scope
 
     # ── catalog ─────────────────────────────────────────────────────
 
@@ -230,7 +263,14 @@ class ExternalMemoryProvider(ABC):
             "docs_url": cls.docs_url,
             "credentials_url": cls.credentials_url,
             "credential_fields": [asdict(f) for f in cls.credential_fields],
+            "tenancy": cls.tenancy,
+            "scope_label": cls.scope_label,
         }
+
+    @classmethod
+    def shareable(cls) -> bool:
+        """Whether an admin can connect it once for the whole deck."""
+        return cls.tenancy == "scoped"
 
     @classmethod
     def clean_credentials(cls, raw: dict[str, Any]) -> dict[str, str]:
@@ -285,6 +325,10 @@ class ExternalMemoryProvider(ABC):
         """Everything the agent is told to follow with this connection."""
         return [*COMMON_RULES, *self.provider_rules(), *self.info.rules]
 
+    def reaches(self) -> list[str]:
+        """What this connection reaches, as the agent and the UI are told."""
+        return list(self.info.reaches)
+
     def provider_rules(self) -> list[str]:
         return []
 
@@ -315,5 +359,71 @@ class ExternalMemoryProvider(ABC):
             "label": self.label,
             "actions": [a.to_dict() for a in self.actions()],
             "rules": self.rules(),
-            "reaches": list(self.info.reaches),
+            "reaches": self.reaches(),
         }
+
+
+# ── shared helpers ──────────────────────────────────────────────────
+
+
+def clip(text: Any, limit: int) -> str:
+    text = str(text or "").strip()
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def mirror_text(item: MemoryItem, *, limit: int = 20_000) -> tuple[str, str]:
+    """``(title, content)`` for one mirrored item, the same for every
+    provider: the item, then what Captain knows about it, then who kept it."""
+    label = _KIND_LABEL.get(item.kind, item.kind.title() or "Note")
+    category = str(item.meta.get("category") or "").strip()
+    title = label + (f" · {category}" if category else "") + (f": {item.title}" if item.title else "")
+    lines = [item.content.strip()]
+    for key, name in (("why", "Why"), ("how_to_apply", "How to apply"), ("body", "Details"),
+                      ("status", "Status"), ("source", "Source")):
+        value = str(item.meta.get(key) or "").strip()
+        if value:
+            lines.append(f"{name}: {value}")
+    if item.tags:
+        lines.append("Tags: " + ", ".join(item.tags))
+    by = f"Captain agent “{item.agent}”" if item.agent else "Captain"
+    when = f" on {item.created_at[:10]}" if item.created_at else ""
+    lines.append(f"(Kept by {by}{when}.)")
+    return clip(title, 200), clip("\n".join(lines), limit)
+
+
+def scope_id(owner: str, prefix: str = "captain-") -> str:
+    """A person's scope (bank, namespace…) on a shared connection: their Flight
+    Deck id, in the characters any service takes."""
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "-", str(owner or "")).strip("-") or "local"
+    return (prefix + safe)[:64]
+
+
+def _private_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return bool(ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
+                or ip.is_multicast or ip.is_unspecified)
+
+
+def private_address(url: str) -> bool:
+    """Whether *url* points into this machine or its network (by name or by any
+    address the name resolves to). An unresolvable name counts as private:
+    nothing can be checked about it."""
+    host = (urlsplit(url).hostname or "").strip("[]").lower()
+    if not host:
+        return True
+    if host in ("localhost", "host.docker.internal") or host.endswith((".localhost", ".local", ".internal")):
+        return True
+    try:
+        return _private_ip(ipaddress.ip_address(host))
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return True
+    for info in infos:
+        try:
+            if _private_ip(ipaddress.ip_address(info[4][0].split("%")[0])):
+                return True
+        except ValueError:
+            return True
+    return False

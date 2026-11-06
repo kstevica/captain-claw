@@ -8,10 +8,12 @@ from __future__ import annotations
 from typing import Any
 
 from captain_claw.flight_deck.external_memory.base import ConnectionInfo, ExternalMemoryProvider
+from captain_claw.flight_deck.external_memory.hindsight import HindsightProvider
 from captain_claw.flight_deck.external_memory.membase import MembaseProvider
 
 PROVIDERS: dict[str, type[ExternalMemoryProvider]] = {
     MembaseProvider.name: MembaseProvider,
+    HindsightProvider.name: HindsightProvider,
 }
 
 # Tests swap a provider's construction (to hand it a mock transport).
