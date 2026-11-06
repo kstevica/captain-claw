@@ -22,6 +22,10 @@ export interface ProviderInfo {
   docs_url: string
   credentials_url: string
   credential_fields: CredentialField[]
+  // "key": one key is one person's memory (each connects their own);
+  // "scoped": one server keeps people apart (an admin can connect it for the deck).
+  tenancy: 'key' | 'scoped'
+  scope_label: string
 }
 
 export interface ActionParam {
@@ -68,6 +72,27 @@ export interface ExternalMemoryStatus {
   actions?: ProviderAction[]
   rules?: string[]
   outbox?: OutboxCounts
+  // Whose connection this is: the person's own, or the one an admin set up
+  // for the deck (then scope_id is the person's own bank on it).
+  source?: 'own' | 'deck'
+  tenancy?: 'key' | 'scoped'
+  scope_label?: string
+  scope_id?: string
+  deck_connection?: { provider: string; label: string } | null
+}
+
+export interface ExternalMemoryDeckStatus {
+  available: boolean
+  connected: boolean
+  providers: ProviderInfo[]
+  provider?: string
+  label?: string
+  credential_hints?: Record<string, string>
+  verified?: boolean | null
+  verify_error?: 'refused' | 'unreachable' | null
+  verified_at?: string | null
+  scope_label?: string
+  scope_example?: string
 }
 
 export interface OutboxItem {
@@ -97,6 +122,14 @@ interface ExternalMemoryStore {
   run: (action: string, args: Record<string, unknown>) => Promise<{ text: string } | { error: string }>
   outbox: (state?: string) => Promise<OutboxItem[]>
   retryOutbox: () => Promise<number | null>
+
+  // Admin: the deck's connection (a scoped provider, a bank per person).
+  deck: ExternalMemoryDeckStatus | null
+  deckError: string | null
+  refreshDeck: () => Promise<void>
+  connectDeck: (provider: string, credentials: Record<string, string>) => Promise<{ ok: boolean; warning?: string }>
+  disconnectDeck: () => Promise<boolean>
+  testDeck: () => Promise<{ ok: boolean; latency_ms?: number }>
 }
 
 const _OLD_DECK = "This Flight Deck has no external memory yet — it needs an update and a restart."
@@ -136,10 +169,12 @@ const errText = (exc: unknown) =>
 
 type WithWarning = ExternalMemoryStatus & { warning?: string }
 
-export const useExternalMemoryStore = create<ExternalMemoryStore>((set) => ({
+export const useExternalMemoryStore = create<ExternalMemoryStore>((set, get) => ({
   status: null,
   loading: false,
   error: null,
+  deck: null,
+  deckError: null,
 
   // Flight Deck's record only — no call to the provider.
   refresh: async () => {
@@ -237,6 +272,59 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set) => ({
     }
   },
 
+  refreshDeck: async () => {
+    set({ deckError: null })
+    try {
+      set({ deck: await fetchJson<ExternalMemoryDeckStatus>('/fd/external-memory/deck') })
+    } catch (exc) {
+      set({ deckError: errText(exc) })
+    }
+  },
+
+  connectDeck: async (provider, credentials) => {
+    set({ deckError: null })
+    try {
+      const data = await fetchJson<ExternalMemoryDeckStatus & { warning?: string }>(
+        '/fd/external-memory/deck-connection',
+        { method: 'PUT', body: JSON.stringify({ provider, credentials }) },
+      )
+      const { warning, ...deck } = data
+      set({ deck })
+      get().refresh()  // the admin's own view may now fall back to it
+      return { ok: true, ...(warning ? { warning } : {}) }
+    } catch (exc) {
+      set({ deckError: errText(exc) })
+      return { ok: false }
+    }
+  },
+
+  disconnectDeck: async () => {
+    set({ deckError: null })
+    try {
+      set({ deck: await fetchJson<ExternalMemoryDeckStatus>('/fd/external-memory/deck-connection', { method: 'DELETE' }) })
+      get().refresh()
+      return true
+    } catch (exc) {
+      set({ deckError: errText(exc) })
+      return false
+    }
+  },
+
+  testDeck: async () => {
+    set({ deckError: null })
+    try {
+      const data = await fetchJson<ExternalMemoryDeckStatus & { ok: boolean; latency_ms: number }>(
+        '/fd/external-memory/deck-test', { method: 'POST', body: '{}' },
+      )
+      const { ok, latency_ms, ...deck } = data
+      set({ deck })
+      return { ok, latency_ms }
+    } catch (exc) {
+      set({ deckError: errText(exc) })
+      return { ok: false }
+    }
+  },
+
   retryOutbox: async () => {
     set({ error: null })
     try {
@@ -254,5 +342,5 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set) => ({
 
 // The next person at a shared screen must not see the outgoing user's connection.
 registerSignOutTeardown(() => {
-  useExternalMemoryStore.setState({ status: null, loading: false, error: null })
+  useExternalMemoryStore.setState({ status: null, loading: false, error: null, deck: null, deckError: null })
 })

@@ -286,7 +286,7 @@ class TestConnection:
         assert r.status_code == 200
         body = r.json()
         assert body["connected"] is False and body["scope"] == "user"
-        assert [p["name"] for p in body["providers"]] == ["membase"]
+        assert [p["name"] for p in body["providers"]] == ["membase", "hindsight"]
         assert body["mirror"] == {"insight": True, "intention": True, "lesson": True,
                                   "reflection": False, "intuition": False}
 

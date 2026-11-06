@@ -363,7 +363,10 @@ class InsightsManager:
         external_memory_client.mirror(
             "insight", insight_id, content, tags=tags, created_at=now,
             meta={"category": category, "why": why, "how_to_apply": how_to_apply,
-                  "source": _source_text(source_file, 500)},
+                  "source": _source_text(source_file, 500),
+                  # What the fact is ABOUT: a provider that can replace a
+                  # document (Hindsight) replaces the superseded one.
+                  "entity_key": entity_key},
         )
         return insight_id
 
