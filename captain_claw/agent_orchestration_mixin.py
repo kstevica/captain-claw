@@ -283,7 +283,15 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
      frozenset({"summarize_files", "pdf_extract", "docx_extract", "xlsx_extract", "pptx_extract"})),
     # Images
     (_re.compile(r"\bimage\b|\bphoto\b|\bpicture\b|\bscreenshot\b|\bdraw\b|\bgenerate\s+(?:an?\s+)?image", _re.I),
-     frozenset({"image_gen", "image_ocr", "ocr_image", "image_vision", "screen_capture"})),
+     frozenset({"image_gen", "image_ocr", "ocr_image", "image_vision", "screen_capture", "image_manipulation"})),
+    # Pictures to change (EN / HR): resize, crop, join, stamp, convert — the
+    # image_manipulation tool, never a Pillow or ImageMagick script.
+    (_re.compile(r"\b(?:images|photos|pictures|pics?|screenshots|logos?|thumbnails?|stickers?|memes?|banners?)\b"
+                 r"|\.(?:png|jpe?g|webp|gif|bmp|tiff?|ico|avif)\b|\bresiz\w*|\bcrop\w*|\brotat\w*|\bcollage"
+                 r"|\bwatermark\w*|\bside[\s-]by[\s-]side\b|\banimated\s+gif|\bgrayscale|\bgreyscale"
+                 r"|\bslik\w*|\bfotografij\w*|\bfotk\w*|\bkola[žz]\w*|\bvodeni\w*\s+[žz]ig\w*|\bizre[žz]\w*"
+                 r"|\bobreži\w*|\brotiraj\w*|\bzarotiraj\w*", _re.I),
+     frozenset({"image_manipulation", "image_vision"})),
     # Charts and other visuals (EN / HR): HTML rendered to a page + PNG.
     (_re.compile(r"\bchart|\bgraph|\bplot\b|\bdiagram|\bvisuali[sz]|\bdashboard|\binfographic"
                  r"|\bhistogram|\bheatmap|\bgantt|\bflowchart|\bmind\s?map"

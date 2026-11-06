@@ -113,6 +113,7 @@ PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "microsoft_onedrive": (("local_path", "read"), ("output_path", "write")),
     "send_mail": (("attachments", "read"),),
     "image_gen": (("output_path", "write"),),
+    "image_manipulation": (("path", "read"), ("paths", "read"), ("output_path", "write")),
     "visualize": (("output_path", "write"),),
     "image_ocr": (("path", "read"),),
     "ocr_pdf": (("path", "read"),),

@@ -182,6 +182,19 @@ class AgentToolLoopMixin:
         if name == "visualize":
             title = str(arguments.get("title", "")).strip()
             return f"Drawing {title[:50]}" if title else "Drawing a visual"
+        if name == "image_manipulation":
+            action = str(arguments.get("action", "") or "edit").strip().lower()
+            fname = str(arguments.get("path", "") or "").strip().replace("\\", "/").rsplit("/", 1)[-1]
+            paths = arguments.get("paths")
+            count = len(paths) if isinstance(paths, list) else 0
+            if action in ("combine", "animate", "pdf") and count:
+                verb = {"combine": "Combining", "animate": "Animating", "pdf": "Making a PDF of"}[action]
+                return f"{verb} {count} images"
+            if action == "create":
+                return "Drawing a picture"
+            verb = {"info": "Inspecting", "convert": "Converting", "overlay": "Placing images on",
+                    "frames": "Taking frames from", "split": "Splitting"}.get(action, "Editing")
+            return f"{verb} {fname[:50]}" if fname else f"{verb} image"
         if name in ("ocr_pdf", "ocr_image"):
             path = str(arguments.get("path", "")).strip()
             fname = path.replace("\\", "/").rsplit("/", 1)[-1]

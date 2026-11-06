@@ -1,13 +1,13 @@
 """Pictures a reply hands the person — so the web chat shows them and the
 channel the message came from (WhatsApp, Telegram, a device) gets them.
 
-Picture-making tools (image_gen, visualize, termux, payments) report their
-files on a ``Path:`` line, and every surface already shows those. A reply can
-also hand over a picture made some other way: a plotting script the agent ran
-wrote ``saved/charts/q3.png`` and the reply says "here's the chart: q3.png",
-or the reply says "the chart is ready" and names no file at all. The web chat
-showed nothing then, and channels found only files under
-``saved/<category>/<session>/`` named by their whole name.
+Picture-making tools (image_gen, image_manipulation, visualize, termux,
+payments) report their files on a ``Path:`` line, and every surface already
+shows those. A reply can also hand over a picture made some other way: a
+plotting script the agent ran wrote ``saved/charts/q3.png`` and the reply says
+"here's the chart: q3.png", or the reply says "the chart is ready" and names
+no file at all. The web chat showed nothing then, and channels found only
+files under ``saved/<category>/<session>/`` named by their whole name.
 
 Two steps, cheapest first, over the pictures this turn wrote under ``saved/``
 that no picture-making tool reported:
@@ -49,7 +49,7 @@ log = get_logger(__name__)
 IMAGE_EXTENSIONS: frozenset[str] = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp"})
 
 # Tools that report pictures made FOR the person; every surface handles those.
-_PICTURE_TOOLS = frozenset({"image_gen", "visualize", "termux", "payments"})
+_PICTURE_TOOLS = frozenset({"image_gen", "image_manipulation", "visualize", "termux", "payments"})
 
 # How many pictures one reply may hand over, and how many new pictures Jev
 # chooses among (the newest).

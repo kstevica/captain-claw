@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { KeyboardEvent as ReactKeyboardEvent, ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  ArrowLeft, ArrowRight, Bot, Brain, Calendar, ChartColumn, Check, Clock, Code2, Contact, FolderUp, Link2,
+  ArrowLeft, ArrowRight, Bot, Brain, Calendar, ChartColumn, Check, Clock, Code2, Contact, Crop, FolderUp, Link2,
   Database, Eye, FileSpreadsheet, FileText, Gauge, Globe, Hammer, HeartPulse, Image as ImageIcon, LayoutGrid, Library, Lightbulb, ListTodo,
   Mail, Map as MapIcon, Mic, Monitor, Presentation, Scale, Search, SearchX, ScanText, Sparkles, Star,
   TerminalSquare, Wand2, X, Zap,
@@ -107,6 +107,7 @@ const CAPABILITIES: Record<string, { icon: LucideIcon; label: string }> = {
   microsoft_calendar: { icon: Calendar, label: 'Outlook calendar' },
   microsoft_onedrive: { icon: FileText, label: 'OneDrive' },
   image_gen: { icon: Wand2, label: 'Generate images' },
+  image_manipulation: { icon: Crop, label: 'Edit images' },
   image_vision: { icon: ImageIcon, label: 'Look at images' },
   image_ocr: { icon: ScanText, label: 'Read text in images' },
   cv: { icon: Eye, label: 'Local vision' },

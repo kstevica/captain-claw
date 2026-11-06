@@ -29,6 +29,7 @@ from captain_claw.tools.pocket_tts import PocketTTSTool
 from captain_claw.tools.audio import AudioTool
 from captain_claw.tools.image_gen import ImageGenTool
 from captain_claw.tools.image_ocr import ImageOcrTool, ImageVisionTool
+from captain_claw.tools.image_manipulation import ImageManipulationTool
 from captain_claw.tools.ocr import OcrImageTool, OcrPdfTool
 from captain_claw.tools.visualize import VisualizeTool
 from captain_claw.tools.send_mail import SendMailTool
@@ -123,6 +124,7 @@ __all__ = [
     "PptxExtractTool",
     "PocketTTSTool",
     "ImageGenTool",
+    "ImageManipulationTool",
     "ImageOcrTool",
     "OcrImageTool",
     "OcrPdfTool",

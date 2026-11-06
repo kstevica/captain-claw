@@ -310,6 +310,7 @@ _CC_TOOL_DESCRIPTIONS: dict[str, str] = {
     "pptx_extract": "Extract a .pptx file into markdown",
     "pocket_tts": "Convert text to speech audio (MP3)",
     "image_gen": "Generate images from text prompts",
+    "image_manipulation": "Edit, combine and convert images: resize, crop, rotate, collage, overlay/watermark, text, filters, GIF, PDF",
     "image_ocr": "OCR — extract text from images",
     "image_vision": "Vision analysis on images (describe, analyze)",
     "send_mail": "Send emails via SMTP (to, cc, bcc, subject, body, attachments)",
