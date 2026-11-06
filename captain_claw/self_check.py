@@ -51,6 +51,7 @@ HIDDEN_BECAUSE = {
     "requires_microsoft": "Microsoft 365 not connected (Flight Deck → Connections → Microsoft)",
     "requires_imap": "No email inbox connected (Flight Deck → Connections → Email (IMAP))",
     "requires_jev": "no Jev key (Flight Deck → Connections → Jev)",
+    "requires_external_memory": "no external memory connected (Flight Deck → Connections → External memory)",
     "requires_soniox": "no Soniox key (Flight Deck → Connections → Soniox)",
     "requires_payments": "payments are off on this Flight Deck",
     "requires_crew": "Crew isn't approved for this account (an admin approves it on the Users page)",

@@ -356,6 +356,15 @@ class InsightsManager:
         await self._db.commit()
         log.debug("Insight stored", id=insight_id, category=category,
                   supersedes=supersedes_id, project_id=project_id)
+        # Into the owner's external memory too, when one is connected in
+        # Flight Deck (background; never fails the store).
+        from captain_claw import external_memory_client
+
+        external_memory_client.mirror(
+            "insight", insight_id, content, tags=tags, created_at=now,
+            meta={"category": category, "why": why, "how_to_apply": how_to_apply,
+                  "source": _source_text(source_file, 500)},
+        )
         return insight_id
 
     async def search(
