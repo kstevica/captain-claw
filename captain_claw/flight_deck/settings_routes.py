@@ -36,9 +36,11 @@ PROVIDER_KEYS_SETTING = "fd:provider-keys"
 # the logins their coding CLIs run on (sealed), written only through /fd/crew.
 # ``imap_mail:*`` is the user's IMAP/SMTP inboxes (passwords sealed), their
 # sending policies and signatures — written only through /fd/imap.
+# ``xtool:*`` is their values for custom tools' secrets (sealed), written only
+# through /fd/external-tools.
 _SERVER_OWNED_PREFIXES = (
     "google_oauth:", "microsoft_oauth:", "fd:tenant-profile", "fd:shared-agent-",
-    "jev:", "soniox:", "byok:", "crew:", "imap_mail:", "external_memory:",
+    "jev:", "soniox:", "byok:", "crew:", "imap_mail:", "external_memory:", "xtool:",
 )
 
 

@@ -27,6 +27,9 @@ dependencies = [
     "aiosqlite>=0.19.0",
     "tiktoken>=0.5.0",
     "httpx>=0.25.0",
+    # Custom tools check tool.json and every call against JSON Schema
+    # (flight_deck/external_tools.py); it used to arrive only through litellm.
+    "jsonschema>=4.0",
     "beautifulsoup4>=4.12.0",
     "pypdf>=4.0.0",
     "aiofiles>=23.0.0",

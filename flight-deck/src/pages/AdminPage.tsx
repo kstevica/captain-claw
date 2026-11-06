@@ -12,6 +12,7 @@ import {
   MessageSquare,
   ClipboardList,
   UserCog,
+  Wrench,
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { DeckProfileDefaults } from '../components/profile/DeckProfileDefaults'
@@ -21,6 +22,9 @@ import { BrandingAdmin } from '../components/admin/BrandingAdmin'
 import { Switch } from '../components/admin/Switch'
 import { IdleAgentsSetting, IDLE_AGENTS_HINT, IDLE_AGENTS_TITLE } from '../components/admin/IdleAgentsSetting'
 import { ByokSetting } from '../components/admin/ByokSetting'
+import {
+  CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE,
+} from '../components/admin/customTools'
 import {
   adminHeaders, CONFIG_DEFAULTS, fetchConfig, fetchPlans, openUsersTab, saveConfig, waitlistName,
   type KioskMode, type PlanLimits, type SystemConfig,
@@ -519,6 +523,36 @@ export function AdminPage() {
                   }}
                 />
               </div>
+            </div>
+
+            {/* Custom tools (external_tools) */}
+            <div className="rounded-lg border border-zinc-800 bg-zinc-900/50 p-4 space-y-4">
+              <h3 className="flex items-center gap-2 text-sm font-semibold text-zinc-200">
+                <Wrench className="h-4 w-4 text-violet-400" />
+                {CUSTOM_TOOLS_TITLE}
+              </h3>
+              {([
+                ['external_tools_enabled', CUSTOM_TOOLS_TITLE, CUSTOM_TOOLS_HINT],
+                ['external_tools_everybody_approval', EVERYBODY_APPROVAL_TITLE, EVERYBODY_APPROVAL_HINT],
+              ] as const).map(([key, title, hint]) => (
+                <div key={key} className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="text-sm text-zinc-300">{title}</div>
+                    <div className="text-xs text-zinc-500 mt-0.5">{hint}</div>
+                  </div>
+                  <Switch
+                    on={config[key]}
+                    label={title}
+                    onToggle={async () => {
+                      try {
+                        setConfig(await saveConfig({ [key]: !config[key] }))
+                      } catch (e) {
+                        setError(e instanceof Error ? e.message : 'Failed to save config')
+                      }
+                    }}
+                  />
+                </div>
+              ))}
             </div>
 
             {/* Kiosk mode (simple chat) */}
