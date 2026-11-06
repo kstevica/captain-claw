@@ -6,6 +6,7 @@ import { SimpleLayout } from './components/layout/SimpleLayout'
 import { ConsoleLayout } from './components/console/ConsoleLayout'
 import { DeckUpdateNotice } from './components/layout/DeckUpdateNotice'
 import BrowserPairDialog from './components/BrowserPairDialog'
+import { LessonInboxHost } from './components/lessons/LessonInbox'
 import TaskDeepLink from './components/TaskDeepLink'
 import { ChatPanel } from './components/agents/ChatPanel'
 import { DirectorPanel } from './components/agents/DirectorPanel'
@@ -801,6 +802,7 @@ function App() {
       <AppContent />
       <DeckUpdateNotice />
       <BrowserPairDialog />
+      <LessonInboxHost />
       <TaskDeepLink />
     </>
   )

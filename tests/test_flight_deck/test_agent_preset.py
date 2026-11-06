@@ -2774,6 +2774,124 @@ async def test_a_member_suggests_a_lesson_its_owner_takes(deck, monkeypatch):
     assert kept[0]["state"] == "taken" and kept[0]["lesson"] == lesson["id"]
 
 
+# ── Lessons the agent noticed, for its owner to approve (/fd/lesson-proposals) ──
+
+
+def _as_agent(monkeypatch, slug: str, owner: str = BOB) -> None:
+    """The proposal comes from this deck's agent *slug* (its X-Agent-Auth, resolved)."""
+    from captain_claw.flight_deck import lesson_proposals as lp
+    from captain_claw.flight_deck.agent_identity import AgentCaller
+    monkeypatch.setattr(lp, "require_agent_caller", lambda request, what: AgentCaller(slug=slug, owner=owner))
+
+
+async def _lp(uid: str, method: str, path: str = "", **kw) -> httpx.Response:
+    async with _client() as c:
+        return await c.request(method, f"/fd/lesson-proposals{path}", headers=_auth(uid) if uid else {}, **kw)
+
+
+_NOTICED = {"kind": "rule", "text": "Keep answers to three short paragraphs.", "always": True, "quote": "Too long",
+            "said": "Too long — keep it to three short paragraphs from now on.", "reply": "A very long answer.",
+            "channel": "web", "session_id": "s1"}
+
+
+async def test_an_agent_proposes_a_lesson_its_owner_approves_edits_and_undoes(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24411)
+    assert (await _apply(BOB, slug, _setup(BOB, [], rules=[{"text": "Answer in Croatian.", "always": True}]))).status_code == 200
+    _as_agent(monkeypatch, slug)
+
+    r = await _lp("", "POST", "/agent", json=_NOTICED)
+    assert r.status_code == 200 and r.json()["kept"] is True, r.text
+    # The same again (reworded a little), or a lesson it has already: not kept.
+    again = await _lp("", "POST", "/agent", json={**_NOTICED, "text": "Keep answers to three short paragraphs"})
+    assert again.json() == {"ok": True, "kept": False, "why": "waiting"}
+    known = await _lp("", "POST", "/agent", json={**_NOTICED, "text": "Answer in Croatian."})
+    assert known.json() == {"ok": True, "kept": False, "why": "known"}
+    second = await _lp("", "POST", "/agent", json={**_NOTICED, "text": "Sign emails as Bob from the helpdesk.",
+                                                   "always": False, "quote": "sign as Bob"})
+    assert second.json()["kept"] is True
+    # One bell for its owner while it's unread, however many wait.
+    bell = [n for n in await deck.list_notifications(BOB) if n["ref_type"] == "agent_lessons"]
+    assert len(bell) == 1 and bell[0]["ref_id"] == slug and "noticed a lesson" in bell[0]["title"]
+
+    # Its owner sees every agent's waiting lessons; nobody else does.
+    got = (await _lp(BOB, "GET")).json()
+    assert got["waiting"] == 2 and [a["slug"] for a in got["agents"]] == [slug] and got["agents"][0]["name"] == "Helpdesk"
+    first = next(p for p in got["agents"][0]["waiting"] if p["text"].startswith("Keep"))
+    assert (first["origin"], first["kind"], first["always"], first["quote"], first["channel"]) == (
+        "auto", "rule", True, "Too long", "web")
+    assert first["said"] == _NOTICED["said"] and first["reply"] == _NOTICED["reply"]
+    assert (await _lp(CAROL, "GET")).json() == {"agents": [], "waiting": 0}
+    assert (await _lp(CAROL, "POST", f"/{slug}/{first['id']}/approve", json={})).status_code == 404
+    # The Onboarding Lessons tab lists them too.
+    assert {s["id"] for s in (await _ls(BOB, "GET", slug)).json()["suggestions"]} == {
+        p["id"] for p in got["agents"][0]["waiting"]}
+
+    # Approved as drafted: taught (noticed in a chat), always in mind — in its instructions at once.
+    r = await _lp(BOB, "POST", f"/{slug}/{first['id']}/approve", json={})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    lesson = next(x for x in body["changed"]["lessons"] if x["text"] == _NOTICED["text"])
+    assert lesson["taught_by"] == "noticed" and lesson["always"] is True
+    assert body["proposal"]["state"] == "taken" and body["proposal"]["lesson"] == lesson["id"]
+    assert _NOTICED["text"] in json.loads(await deck.get_setting(BOB, INSTR))[slug]
+    assert (await _lp(BOB, "POST", f"/{slug}/{first['id']}/approve", json={})).status_code == 404
+
+    # Edited, then approved.
+    other = next(p for p in got["agents"][0]["waiting"] if p["text"].startswith("Sign"))
+    r = await _lp(BOB, "POST", f"/{slug}/{other['id']}/approve",
+                  json={"kind": "rule", "text": "Sign emails as Bob, Helpdesk.", "always": True})
+    assert any(x["text"] == "Sign emails as Bob, Helpdesk." and x["always"] for x in r.json()["changed"]["lessons"])
+    # Nothing waits: the bell is answered; both are under Just learned.
+    assert all(n["resolved"] for n in await deck.list_notifications_by_ref(BOB, "agent_lessons", [slug]))
+    got = (await _lp(BOB, "GET")).json()
+    assert got["waiting"] == 0 and [p["text"] for p in got["agents"][0]["learned"]] == [
+        "Sign emails as Bob, Helpdesk.", _NOTICED["text"]]
+
+    # Undo: the lesson goes (and out of its instructions), and it waits again.
+    r = await _lp(BOB, "POST", f"/{slug}/{first['id']}/undo")
+    assert r.status_code == 200 and r.json()["proposal"]["state"] == "waiting"
+    assert all(x["text"] != _NOTICED["text"] for x in r.json()["changed"]["lessons"])
+    assert _NOTICED["text"] not in json.loads(await deck.get_setting(BOB, INSTR))[slug]
+    assert (await _lp(BOB, "GET")).json()["waiting"] == 1
+    assert (await _lp(BOB, "POST", f"/{slug}/{first['id']}/undo")).status_code == 404
+
+
+async def test_a_dismissed_proposal_is_not_proposed_again(deck, monkeypatch):
+    slug = await _spawn(BOB, "Helpdesk", 24412)
+    _as_agent(monkeypatch, slug)
+    noticed = {"kind": "rule", "text": "Never promise delivery dates.", "said": "never promise delivery dates"}
+    pid = (await _lp("", "POST", "/agent", json=noticed)).json()["id"]
+    r = await _lp(BOB, "POST", f"/{slug}/{pid}/dismiss")
+    assert r.status_code == 200 and r.json()["proposal"]["state"] == "declined"
+    assert (await _lp("", "POST", "/agent", json=noticed)).json() == {"ok": True, "kept": False, "why": "dismissed"}
+    assert (await _lp(BOB, "GET")).json() == {"agents": [], "waiting": 0}
+    assert (await _lp(BOB, "POST", f"/{slug}/{pid}/dismiss")).status_code == 404
+    assert (await _lp("", "POST", "/agent", json={**noticed, "text": "  "})).status_code == 400
+
+
+async def test_a_members_suggestion_is_written_then_approved_from_lessons_to_approve(deck, monkeypatch):
+    from captain_claw.flight_deck import agent_onboarding as ob
+    slug = await _spawn(BOB, "Helpdesk", 24413)
+    agent_dir = server.DATA_DIR / slug
+    ob._write_suggestions(agent_dir, [{"id": "m1", "said": "Zone B is 11.40 EUR.", "reply": "9 EUR.", "by": CAROL,
+                                       "by_name": "Carol", "created": time.time(), "state": "waiting"}])
+    [waiting] = (await _lp(BOB, "GET")).json()["agents"][0]["waiting"]
+    assert (waiting["origin"], waiting["text"], waiting["by_name"]) == ("member", "", "Carol") and "by" not in waiting
+    assert (await _lp(BOB, "POST", f"/{slug}/m1/approve", json={})).status_code == 400        # written first
+    r = await _lp(BOB, "POST", f"/{slug}/m1/approve", json={"kind": "fact", "text": "Shipping to Zone B is 11.40 EUR."})
+    assert r.status_code == 200 and next(x for x in r.json()["changed"]["lessons"] if x["kind"] == "fact")["taught_by"] == "member"
+    assert any("learned what you suggested" in n["title"] for n in await deck.list_notifications(CAROL))
+
+
+async def test_only_the_decks_own_agents_propose_lessons(deck):
+    async with _client() as c:
+        r = await c.post("/fd/lesson-proposals/agent", json={"text": "Always CC Marko."})
+        assert r.status_code in (401, 403)
+        r = await c.post("/fd/lesson-proposals/agent", json={"text": "Always CC Marko."},
+                         headers={"Origin": "http://fd.test", "X-Agent-Auth": "x"})
+        assert r.status_code == 403
+
+
 # ── Passing an onboarded agent on, with an archetype ──
 
 
