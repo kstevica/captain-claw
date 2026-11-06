@@ -16,7 +16,7 @@ log = get_logger(__name__)
 # Tools that hand a picture to an agent whose own model sees images
 # (``_look_inline``): it rides on the next call as an image part.
 _SHOWS_PICTURES_TOOLS = frozenset({
-    "image_vision", "image_ocr", "browser", "pinchtab", "screen_capture", "cv",
+    "image_vision", "image_ocr", "browser", "pinchtab", "screen_capture", "cv", "image_manipulation",
 })
 
 # A context-note block inside a prompt message (body in group 1). Notes in the

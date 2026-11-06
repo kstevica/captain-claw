@@ -70,8 +70,8 @@ def _known_tools(registry: dict) -> tuple[list[str], set[str]]:
     known = set(base) | {"knowledge"} | {t for a in registry.get("archetypes", []) for t in a.get("tools") or []}
     known |= {"docx", "xlsx", "pptx", "visualize", "datastore", "summarize_files", "browser", "cron", "image_ocr",
               "ocr_pdf", "ocr_image",
-              "image_vision", "image_gen", "audio", "google_mail", "microsoft_mail", "imap_mail", "google_calendar",
-              "microsoft_calendar"}
+              "image_vision", "image_gen", "image_manipulation", "audio", "google_mail", "microsoft_mail",
+              "imap_mail", "google_calendar", "microsoft_calendar"}
     return base, known
 
 

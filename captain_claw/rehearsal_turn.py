@@ -43,7 +43,7 @@ _TAG_RE = re.compile(r"^cs_[0-9a-f]{6,32}:exp_[0-9a-f]{6,32}$")
 
 # Writes that stay in the worker's own workspace.
 LOCAL_WRITES = frozenset({"write", "edit", "workspace_write", "docx", "xlsx", "pptx", "visualize", "image_gen",
-                          "pocket_tts"})
+                          "image_manipulation", "pocket_tts"})
 # Memory: a rehearsal keeps nothing.
 MEMORY_WRITES = frozenset({"insights", "topics", "intentions", "facts", "personality", "playbooks",
                            "project_memory", "todo", "reasoning_effort"})

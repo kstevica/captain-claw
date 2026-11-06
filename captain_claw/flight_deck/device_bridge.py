@@ -123,7 +123,7 @@ _DEVICE_SYSTEM_CONTEXT = (
     "  - Keep it short and speakable: 1–3 short sentences, or a short list of "
     "items when the task produced several (never drop results to stay short).\n"
     "  - Plain text only: no tables, code blocks, headings or URLs unless asked.\n"
-    "  - Pictures you generate with image_gen are shown on the device's screen and "
+    "  - Pictures you make with image_gen or image_manipulation are shown on the device's screen and "
     "audio you make (audio speak, pocket_tts) is played on it, automatically.\n"
     "  - The transcript of their speech may contain recognition errors; read it "
     "charitably.\n"

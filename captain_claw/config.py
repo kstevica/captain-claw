@@ -656,6 +656,7 @@ class ToolsConfig(BaseModel):
         "pptx_extract",
         "pocket_tts",
         "image_gen",
+        "image_manipulation",
         "visualize",
         "image_ocr",
         "image_vision",
@@ -769,6 +770,10 @@ class ToolsConfig(BaseModel):
         # Charts, diagrams and dashboards come from HTML rendered to a page
         # and a PNG, not from plotting scripts that often leave nothing.
         "visualize",
+        # Pictures are resized, cropped, joined, stamped and converted with
+        # image_manipulation (Pillow, in-process), not with Pillow or
+        # ImageMagick scripts that need a shell and often leave nothing.
+        "image_manipulation",
         # Deep memory is reached through Flight Deck, which owns the Typesense
         # connection and the credentials — so from an agent's side the archive
         # is simply always there. A per-agent opt-in would mean an agent could
@@ -974,9 +979,10 @@ class WhatsAppConfig(BaseModel):
 
     # After a turn that answers a WhatsApp chat (it came from one, or it is a
     # Flight Deck scheduled job delivering to an allowlisted, unmuted
-    # number), send what it made for the user there: pictures from image_gen
-    # or the phone camera, audio from pocket_tts, and files written during the
-    # turn under saved/<category>/<session>/ that the reply names (not
+    # number), send what it made for the user there: pictures from image_gen,
+    # image_manipulation, visualize or the phone camera, audio from
+    # pocket_tts, and files written during the turn under
+    # saved/<category>/<session>/ that the reply names (not
     # scripts/tools/skills/downloads). Browser screenshots are not sent.
     auto_send_media: bool = True
     max_media_per_turn: int = 6

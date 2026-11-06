@@ -87,7 +87,7 @@ const ALL_TOOLS = [
   'shell', 'read', 'write', 'glob', 'edit',
   'web_fetch', 'web_search', 'browser',
   'pdf_extract', 'docx_extract', 'xlsx_extract', 'pptx_extract',
-  'image_gen', 'image_ocr', 'image_vision',
+  'image_gen', 'image_manipulation', 'image_ocr', 'image_vision',
   'pocket_tts', 'send_mail',
   'google_drive', 'google_calendar', 'google_mail',
   'microsoft_onedrive', 'microsoft_calendar', 'microsoft_mail',

@@ -166,14 +166,19 @@ def extract_image_paths_from_tool_output(content: str) -> list[Path]:
     return paths
 
 
+# Tools whose Path: lines are pictures made this turn (browser: screenshots).
+_PICTURE_MAKERS = ("image_gen", "image_manipulation", "visualize", "termux", "browser", "payments")
+
+
 def collect_turn_generated_image_paths(
     session: Any, turn_start_idx: int, *, saved_root: Path | None = None, since: float = 0.0,
     agent: Any = None, reply: str = "",
 ) -> list[Path]:
-    """Pictures the current turn made for the user: what image_gen, visualize,
-    termux and browser screenshots reported, plus pictures the session wrote this turn
-    that the reply names. Only deliverables — a ``Path:`` line in a web page
-    or its vision description can't send a local file (:mod:`turn_deliverables`)."""
+    """Pictures the current turn made for the user: what image_gen,
+    image_manipulation, visualize, termux and browser screenshots reported,
+    plus pictures the session wrote this turn that the reply names. Only
+    deliverables — a ``Path:`` line in a web page or its vision description
+    can't send a local file (:mod:`turn_deliverables`)."""
     if not session:
         return []
     paths: list[Path] = []
@@ -181,7 +186,7 @@ def collect_turn_generated_image_paths(
     for msg in session.messages[max(0, int(turn_start_idx)):]:
         if str(msg.get("role", "")).strip().lower() != "tool":
             continue
-        if str(msg.get("tool_name", "")).strip().lower() not in ("image_gen", "visualize", "termux", "browser", "payments"):
+        if str(msg.get("tool_name", "")).strip().lower() not in _PICTURE_MAKERS:
             continue
         if str(msg.get("content", "")).strip().lower().startswith("error:"):
             continue

@@ -221,7 +221,7 @@ async def _send_device_media(
 # Tool outputs that already put a card in the web chat as the turn ran
 # (web_server's tool-output callbacks): pictures, and the pages write and
 # visualize made.
-_CARDED_IMAGE_TOOLS = ("image_gen", "visualize", "termux", "browser")
+_CARDED_IMAGE_TOOLS = ("image_gen", "image_manipulation", "visualize", "termux", "browser")
 _WRITTEN_PAGE_RE = re.compile(r"to\s+(\S+\.(?:html|htm|svg))")
 _VISUALIZE_PAGE_RE = re.compile(r"^HTML:\s*(\S+\.html?)\s*$", re.M)
 _CARD_IMAGE_EXT = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})

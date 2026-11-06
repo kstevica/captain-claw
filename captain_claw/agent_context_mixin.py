@@ -2489,6 +2489,7 @@ class AgentContextMixin:
         "pocket_tts": ["pocket_tts"],
         "audio": ["audio"],
         "image_gen": ["image_gen"],
+        "image_manipulation": ["image_manipulation"],
         "visualize": ["visualize"],
         "image_ocr": ["image_ocr"],
         "ocr_pdf": ["ocr_pdf"],
@@ -2660,6 +2661,9 @@ class AgentContextMixin:
                 self.tools.register(PocketTTSTool())
             elif tool_name == "image_gen":
                 self.tools.register(ImageGenTool())
+            elif tool_name == "image_manipulation":
+                from captain_claw.tools.image_manipulation import ImageManipulationTool
+                self.tools.register(ImageManipulationTool())
             elif tool_name == "visualize":
                 from captain_claw.tools.visualize import VisualizeTool
                 self.tools.register(VisualizeTool())
@@ -4738,7 +4742,7 @@ class AgentContextMixin:
                     "pictures there (no WhatsApp credentials) — say where the file is instead.")
         if get_config().whatsapp.auto_send_media and answering:
             return (
-                "Your reply goes to a WhatsApp chat. Pictures you generate (image_gen), phone "
+                "Your reply goes to a WhatsApp chat. Pictures you make (image_gen, image_manipulation), phone "
                 "photos and audio you speak (audio speak, pocket_tts) are sent there automatically after your "
                 "reply. A file you write in this turn (a document, spreadsheet, chart…) is sent when "
                 "your reply names it by its file name, e.g. report.docx. For anything else — an "

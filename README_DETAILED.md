@@ -309,6 +309,7 @@ Captain Claw ships with 33 built-in tools. The agent picks the right tool for ea
 | `pptx` | Create, read, edit and check PowerPoint decks on the deck's own layouts: native tables and charts, pictures from any path or link, and every result says what doesn't fit |
 | `pptx_extract` | Extract PowerPoint slides to markdown |
 | `image_gen` | Generate images from text prompts (DALL-E 3, gpt-image-1) |
+| `image_manipulation` | Edit, combine and convert pictures locally: resize, crop, rotate, collages, overlays and watermarks, text and shapes, filters, animated GIFs, PDFs |
 | `image_ocr` | Extract text from images via vision-capable LLMs |
 | `image_vision` | Analyze and describe images via vision-capable LLMs |
 | `pocket_tts` | Generate speech audio (MP3) locally with 8 built-in voices |

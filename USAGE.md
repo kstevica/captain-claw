@@ -1529,6 +1529,38 @@ HTML in, the page and a PNG of it out, for charts, diagrams and dashboards inste
 
 The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a `.docx` or `.md` as `![caption](path)`. Script errors, failed loads, empty canvases and a blank picture come back for the agent to fix. The page never touches the host: it's served from an address that doesn't exist, every request goes through the public-only client, and WebSockets are closed.
 
+### image_manipulation — NEW
+
+Pictures changed in-process with Pillow: resized, cropped, joined, stamped, annotated and converted, instead of Pillow or ImageMagick scripts in the shell that often leave nothing. No model, no network. Always on.
+
+Inputs are never changed. Each result is a new file in `saved/media/<session>/` (or `output_path`, `vfs:<project>/…` for the shared folders), reported on a `Path:` line, so it reaches the web chat, Telegram, WhatsApp, a device's screen and the Files menu like a picture from `image_gen`. An existing file is never replaced unless `overwrite` is set: the result takes a free name (`photo-edited-2.png`). A phone photo is turned upright from its EXIF orientation when opened, and results carry no EXIF (camera, GPS) unless `keep_metadata` is set.
+
+| Action | What it does |
+|---|---|
+| `info` | Size, format, frames, transparency, EXIF (date, camera, GPS) and main colours of `path` / `paths` |
+| `edit` | `operations` applied in order to `path`, or to each of `paths`. Animated GIF/WebP stay animated |
+| `convert` | Another format: `format`, or `output_path`'s extension (png, jpg, webp, gif, bmp, tiff, ico, avif, pdf); `quality` |
+| `combine` | `paths` as one picture: `layout` horizontal (side by side), vertical (one above another), grid (`columns`) or stack (on top of each other). `gap`, `padding`, `background`, `align`, `labels` under each; sizes are matched to the middle one unless `width` / `height` / `match` say otherwise |
+| `overlay` | `paths` stuck onto `path`: `position` (top-left … bottom-right, center) or `x` / `y`, `scale` (share of the base width), `opacity`, `angle`, `blend` (multiply, screen, overlay, …), `tile`, `remove_background` (a logo on white). `layers` place each one its own way |
+| `animate` | `paths` as an animated GIF, WebP or PNG: `duration` (ms) or `durations`, `loop`, `bounce` |
+| `frames` | An animation's frames as files (`every`, `max_frames`) |
+| `split` | One picture as `rows` × `columns` tiles, or tiles of `tile_width` × `tile_height` |
+| `create` | A blank canvas (`width`, `height`, `background`) to draw on with `operations` |
+| `pdf` | Pictures as one PDF, a page each: `page_size` a4, letter, a3, a5, legal or fit; `dpi` |
+
+`combine`, `overlay`, `animate`, `create` and `pdf` also take `operations`, applied to the result (to each picture, for `pdf`).
+
+**Operations** (each `{"op": …, …}`):
+
+- Geometry: `resize` (`width` / `height` / `scale`, `fit` contain, cover, fill or pad, `shrink_only`), `crop` (`x`, `y`, `width`, `height`; `box`; `aspect` like `16:9` with `gravity`; or `top` / `right` / `bottom` / `left` to cut off), `rotate` (`angle` clockwise), `flip`, `pad`, `border`, `trim`, `round_corners`, `circle`, `perspective` (`corners` of a photographed page or screen → straightened).
+- Tone and colour: `adjust` (`brightness`, `contrast`, `saturation`, `sharpness` as factors, `gamma`, `hue`, `warmth`), or `brightness` / `contrast` / … with `amount`; `grayscale`, `sepia`, `invert`, `autocontrast`, `equalize`, `posterize`, `solarize`, `threshold`, `tint`, `duotone`, `quantize`, `opacity`, `transparent` (a plain background made see-through, followed from the edges so the subject keeps its own white), `flatten`, `mode`, `vignette`, `noise`, `gradient`.
+- Filters: `blur`, `sharpen`, `median`, `pixelate`, `edges`, `edge_enhance`, `emboss`, `contour`, `detail`, `smooth`.
+- Drawing: `text` and `watermark` (`font`, `size`, `color`, `bold`, `stroke`, `shadow`, a `background` box, `max_width` to wrap, `angle`, `tile`), `rectangle`, `ellipse`, `line`, `arrow`, `polygon`.
+
+Colour and filter operations take `region` `{x, y, width, height}` (or `box`) to change part of the picture only: blur a face, pixelate a number plate. Lengths are pixels or a percentage (`"25%"`); angles are degrees clockwise; colours are names, `#rrggbb`, `#rrggbbaa` or `transparent`. When no colour is given, text is dark or light against what is under it. Text is set in an installed font that has every character (č, ć, đ, š, ž and the rest); a missing font or character is named in the result.
+
+On a sign-in Flight Deck, `path`, `paths` and `output_path` follow the agent's file rules, and a font given as a file must be one of its own files. When the agent's model sees images, it gets the results to check.
+
 ### crew — NEW in 0.8.5
 
 Run coding CLIs as your crew: Claude Code, Codex, OpenCode, Crush or Pi, each in its own git worktree on Flight Deck, several at once. The agent supervises and the CLI does the work. `dispatch` returns at once and the agent is called back when a task finishes or needs a decision, so it doesn't poll. How it all works is under [Crew](#crew-coding-agents-working-for-you--new-in-085).
