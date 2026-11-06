@@ -16,6 +16,10 @@ back, so the agent's replay can land before or after the log. It covers:
   loads, a reconnect while paged back, and switches elsewhere or here.
 - **No sign-in (the desktop app):** a reload (the transcript is the replay, so
   a turn's end marks nothing), switches, and a reconnect onto another session.
+- **A message sent as the socket dies** (`held…`, same store and fake socket):
+  a frame the agent never took goes back on hold and is sent again once the
+  chat reconnects; one the agent took (the replay shows it) is not sent twice;
+  a send on a socket that wasn't open is held, not lost.
 
 ```bash
 flight-deck/e2e/topics/run.sh
