@@ -1800,6 +1800,7 @@ from captain_claw.flight_deck.delivery_routes import router as delivery_router
 from captain_claw.flight_deck.agents_fs_routes import router as agents_fs_router
 from captain_claw.flight_deck.file_library import router as file_library_router
 from captain_claw.flight_deck.data_library import router as data_library_router
+from captain_claw.flight_deck import colleagues as colleagues_routes
 from captain_claw.flight_deck import (
     taskboard,
     taskboard_backfill,
@@ -1945,6 +1946,9 @@ app.include_router(taskboard_handover.router)
 app.include_router(taskboard_nextsteps.router)
 app.include_router(taskboard_threads.router)
 app.include_router(taskboard_backfill.router)
+# Colleagues: agents' identities and own inboxes, and handing each other work
+# on the Taskboard (colleagues.py; the mail watcher is agent_mail.py).
+app.include_router(colleagues_routes.router)
 app.include_router(agent_skills_router)
 app.include_router(agent_preset.router)
 app.include_router(agent_knowledge.router)

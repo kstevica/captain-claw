@@ -104,6 +104,7 @@ import { useLineStore } from '../../stores/lineStore'
 import { BrandMark } from '../common/BrandMark'
 import { KioskInfoDialog, type InfoAgent } from './KioskInfoDialog'
 import { KioskOnboardingDialog, type OnboardingAction } from './KioskOnboardingDialog'
+import { KioskAgentIdentityDialog } from './KioskAgentIdentityDialog'
 import { MenuSheet, type MenuSection } from './KioskMenuSheet'
 import {
   AgentDialog, AgentMenu, KioskAgentInfoDialog, KioskAgentInstructionsDialog, KioskAgentSettingsDialog, KioskRemoveAgentDialog,
@@ -328,6 +329,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [agentInstructionsId, setAgentInstructionsId] = useState<string | null>(null)
   const [agentSettingsId, setAgentSettingsId] = useState<string | null>(null)
   const [agentRemoveId, setAgentRemoveId] = useState<string | null>(null)
+  // …its identity as a colleague: role, own inbox, the email it picks up, who it hands work to.
+  const [agentIdentityId, setAgentIdentityId] = useState<string | null>(null)
   // …and its files and data, read live from the agent (see agentMenuItems).
   const [filesDataId, setFilesDataId] = useState<string | null>(null)
   // Agent groups: a group being made or edited, and the agent whose "⋯" → Group is open.
@@ -709,6 +712,12 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       onSelect: () => toggleAgentPin(g.id, a.id),
     }]
   }
+  // A process agent of yours as a colleague: who it is to the team and its email.
+  const identityMenuItems = (a: SimpleAgent): AgentMenuItem[] => (a.kind === 'process' && !a.managed ? [{
+    icon: IdCard, label: 'Identity & email', tone: 'cyan',
+    hint: 'Its role, its own inbox, the email it picks up, who it hands work to',
+    onSelect: () => setAgentIdentityId(a.id),
+  }] : [])
   const agentMenuItems = (a: SimpleAgent): AgentMenuItem[] => {
     if (a.kind === 'shared') {
       return [
@@ -762,6 +771,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onSelect: () => showLessons(a.startKey, { name: a.name }) })
       }
       items.push(
+        ...identityMenuItems(a),
         { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', tone: 'zinc', onSelect: () => setAgentSettingsId(a.id) },
       )
       const net = networkShareAction(netAgents[shareKeyOf(a)], {
@@ -781,12 +791,13 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     return items
   }
   // Off the kiosk its "⋯" holds only the agent's group and pin (the gear has the rest).
-  const menuFor = locked ? agentMenuItems : (a: SimpleAgent) => [groupMenuItem(a), ...pinMenuItems(a)]
+  const menuFor = locked ? agentMenuItems : (a: SimpleAgent) => [groupMenuItem(a), ...identityMenuItems(a), ...pinMenuItems(a)]
   const groupPickerAgent = groupPickerId ? agents.find((a) => a.id === groupPickerId) : undefined
   const agentInfo = agentInfoId ? agents.find((a) => a.id === agentInfoId) : undefined
   const agentInstructions = agentInstructionsId ? agents.find((a) => a.id === agentInstructionsId) : undefined
   const agentSettings = agentSettingsId ? agents.find((a) => a.id === agentSettingsId) : undefined
   const agentRemove = agentRemoveId ? agents.find((a) => a.id === agentRemoveId) : undefined
+  const agentIdentity = agentIdentityId ? agents.find((a) => a.id === agentIdentityId) : undefined
   const filesData = filesDataId ? agents.find((a) => a.id === filesDataId) : undefined
 
   const refresh = () => { fetchContainers(); fetchProcesses(); fetchShared(); probeAll() }
@@ -1103,6 +1114,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onRestart={() => handleRestart(agentSettings)}
           onClose={() => setAgentSettingsId(null)}
         />
+      )}
+      {agentIdentity && agentIdentity.kind === 'process' && (
+        <KioskAgentIdentityDialog slug={agentIdentity.startKey} agentName={agentIdentity.name} onClose={() => setAgentIdentityId(null)} />
       )}
       {locked && agentRemove && (
         <KioskRemoveAgentDialog

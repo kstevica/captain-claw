@@ -50,6 +50,16 @@ const CHANNELS: Record<string, { label: string; Icon: typeof Mail; tone: string 
   glasses: { label: 'Glasses', Icon: Glasses, tone: 'text-orange-600 dark:text-orange-400' },
   messenger: { label: 'Messenger', Icon: MessageCircle, tone: 'text-blue-600 dark:text-blue-400' },
   agent: { label: 'Agent', Icon: Bot, tone: 'text-violet-600 dark:text-violet-400' },
+  colleague: { label: 'Colleagues', Icon: Users, tone: 'text-violet-600 dark:text-violet-400' },
+  outlook: { label: 'Outlook', Icon: Mail, tone: 'text-sky-600 dark:text-sky-400' },
+}
+
+/** How an email reached the agent it went to (agent_mail). */
+export const MAIL_WHY: Record<string, string> = {
+  own_inbox: 'its own inbox',
+  address: 'one of its addresses',
+  subject: 'its name in the subject',
+  body: 'the email addressing it',
 }
 
 // The devices by their own names (turn_source.KIND_LABELS, without the maker).

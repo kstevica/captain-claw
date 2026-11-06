@@ -125,6 +125,11 @@ export interface TaskFlags {
   low_confidence?: boolean
   /** Why it is here, in a few words. */
   why?: string
+  /** One of your agents handed it to another (colleagues): who to whom, the
+   *  agents before them on the chain, and the task it is part of. */
+  colleague?: { from: string; from_name: string; to: string; to_name: string; via: string[]; parent: string }
+  /** An email that went to one of your agents: which, and how it was told it was for it. */
+  agent_mail?: { agent: string; why: 'own_inbox' | 'address' | 'subject' | 'body' | string; source: string }
 }
 
 export interface TaskItem {

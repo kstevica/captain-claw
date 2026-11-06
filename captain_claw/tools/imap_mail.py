@@ -60,6 +60,25 @@ def _human(n: int) -> str:
     return mail_attachments.human_size(int(n or 0))
 
 
+def _write_account(kwargs: dict[str, Any]) -> str:
+    """The inbox id a write goes from: the one an id names (a reply's message,
+    a draft), else ``account`` matched to a connected inbox by id, address or
+    label; "" when it can't be told. Only the mail guard reads it (an email's
+    turn may send from its own inbox): Flight Deck still picks and checks."""
+    for key in ("reply_to_message_id", "draft_id"):
+        ref = str(kwargs.get(key) or "")
+        if ":" in ref:
+            return ref.split(":", 1)[0].strip().lower()
+    spec = str(kwargs.get("account") or "").strip().casefold()
+    if not spec:
+        accounts = cached_accounts()
+        return str(accounts[0].get("id") or "").lower() if len(accounts) == 1 else ""
+    for acct in cached_accounts():
+        if spec in {str(acct.get(k) or "").casefold() for k in ("id", "email", "label")}:
+            return str(acct.get("id") or "").lower()
+    return spec
+
+
 class ImapMailTool(Tool):
     """The owner's IMAP/SMTP inboxes, through Flight Deck."""
 
@@ -183,14 +202,15 @@ class ImapMailTool(Tool):
             return ToolResult(success=False, error=f"Unknown action '{action}'. Use one of: {', '.join(_ACTIONS)}")
 
         if action in _WRITE_ACTIONS:
+            account = _write_account(kwargs)
             if mail_authority.needs_recipient_check():
                 rcpt = (None if action not in ("create_draft", "send") or kwargs.get("reply_to_message_id")
                         else mail_authority.parse_recipients(kwargs.get("to"), kwargs.get("cc"), kwargs.get("bcc")))
                 own = {str(a.get("email") or "").lower() for a in cached_accounts()}
                 refusal = mail_authority.check_mail_write(self.name, action, recipients=rcpt,
-                                                          own_addresses=own)
+                                                          own_addresses=own, account=account)
             else:
-                refusal = mail_authority.check_mail_write(self.name, action)
+                refusal = mail_authority.check_mail_write(self.name, action, account=account)
             if refusal:
                 log.info("imap_mail write refused (automated turn)", action=action,
                          kind=mail_authority.current().kind)
