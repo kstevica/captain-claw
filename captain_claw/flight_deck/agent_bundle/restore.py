@@ -45,10 +45,12 @@ def inspect(path: Path) -> dict[str, Any]:
     agent = bundle.read_json("fd/agent.json")
     if not isinstance(agent, dict) or not str(agent.get("name") or "").strip():
         raise archive.BundleError("The bundle doesn't say which agent it holds.")
+    from captain_claw.flight_deck.agent_bundle import signing
     return {**export.summary(bundle.manifest),
             "model": _model_line(agent.get("settings") if isinstance(agent.get("settings"), dict) else {}),
             "model_tier": str(agent.get("model_tier") or ""),
-            "has_secrets": bundle.has("secrets.enc")}
+            "has_secrets": bundle.has("secrets.enc"),
+            "signature": signing.verify(bundle.manifest_bytes, bundle.signature)}
 
 
 def _model_line(settings: dict[str, Any]) -> dict[str, str]:

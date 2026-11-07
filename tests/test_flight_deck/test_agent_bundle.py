@@ -103,6 +103,8 @@ async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(rate_limiter, "_spawn_limiter", rate_limiter._SlidingWindow())
     monkeypatch.setattr(rate_limiter, "_api_limiter", rate_limiter._SlidingWindow())
     monkeypatch.setattr(sched, "_STORE", sched.SchedulerStore(db_path=tmp_path / "scheduler.db"))
+    from captain_claw.flight_deck.agent_bundle import signing as _signing
+    monkeypatch.setattr(_signing, "_key_path", lambda: tmp_path / "signing" / "bundle_signing_key")
 
     server._save_process_registry({
         "bob-agent": {"slug": "bob-agent", "name": "Bob's agent", "description": "Does the books",
@@ -875,3 +877,116 @@ async def test_an_update_leaves_instructions_the_client_changed(deck, monkeypatc
     assert r.status_code == 200, r.text
     assert (await server._owner_agent_instructions(CAROL, "process"))["books"] == "Carol's own words."
     assert any("instructions were changed here" in n for n in r.json()["notes"])
+
+
+# ── phase 5: signing, scheduled backups ─────────────────────────────────────
+
+from captain_claw.flight_deck.agent_bundle import backups, signing  # noqa: E402
+
+
+def _rewrite(data: bytes, *, drop: set[str] = frozenset(), manifest_edit=None, signature: dict | None = None) -> bytes:
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(out, "w") as dst:
+        for info in src.infolist():
+            if info.filename in drop:
+                continue
+            body = src.read(info.filename)
+            if info.filename == "manifest.json" and manifest_edit:
+                m = json.loads(body)
+                manifest_edit(m)
+                body = json.dumps(m, indent=1).encode()
+            if info.filename == "signature.json" and signature is not None:
+                body = json.dumps(signature).encode()
+            dst.writestr(info.filename, body)
+    return out.getvalue()
+
+
+@pytest.mark.asyncio
+async def test_bundles_are_signed_and_a_changed_one_is_refused(deck, tmp_path, monkeypatch):
+    async with _client() as c:
+        data = await _export(c, {"preset": "template"})
+        assert "signature.json" in _names(data)
+        up = await _upload(c, data)
+        assert up["signature"]["state"] == "valid" and up["signature"]["own"] is True
+        mine = (await c.get("/fd/agent-bundle/signing", headers=_hdr(BOB))).json()
+        assert up["signature"]["fingerprint"] == mine["fingerprint"] and mine["admin"] is False
+
+        def tamper(m):
+            m["made_by"] = "Someone else"
+        r = await c.post("/fd/agent-bundle/upload", headers=_hdr(BOB),
+                         files={"file": ("x.captain", _rewrite(data, manifest_edit=tamper), "application/zip")})
+        assert r.status_code == 400 and "changed after it was signed" in r.json()["detail"]
+        unsigned = _rewrite(data, drop={"signature.json"})
+        assert (await _upload(c, unsigned))["signature"]["state"] == "unsigned"
+
+        # another deck's bundle: valid, not ours; refused once only trusted ones are taken
+        monkeypatch.setattr(signing, "_key_path", lambda: tmp_path / "other-deck" / "key")
+        other = await _export(c, {"preset": "template"})
+        theirs = signing.own_fingerprint()
+        monkeypatch.setattr(signing, "_key_path", lambda: tmp_path / "signing" / "bundle_signing_key")
+        got = await _upload(c, other)
+        assert got["signature"]["state"] == "valid" and got["signature"]["own"] is False
+        assert got["signature"]["trusted"] is False
+        r = await c.put("/fd/agent-bundle/signing", json={"require_trusted": True}, headers=_hdr(BOB))
+        assert r.status_code == 403                                     # admins decide
+        await signing.save_trust([], True)
+        for refused in (unsigned, other):
+            r = await c.post("/fd/agent-bundle/upload", headers=_hdr(BOB),
+                             files={"file": ("x.captain", refused, "application/zip")})
+            assert r.status_code == 400 and "only takes bundles signed by a deck its admin trusts" in r.json()["detail"]
+        assert (await _upload(c, data))["signature"]["trusted"] is True  # our own always
+        await signing.save_trust([{"fingerprint": theirs.replace(" ", "").upper(), "label": "Consultant"}], True)
+        got = await _upload(c, other)
+        assert got["signature"]["trusted"] is True and got["signature"]["label"] == "Consultant"
+
+
+def test_backup_settings_are_clamped_and_due_once_a_period():
+    s = backups.clean({"enabled": True, "hour": 99, "keep": 0, "frequency": "hourly", "agents": ["ok-1", "../x"],
+                       "folder": "vfs:/backups/../etc"})
+    assert (s["hour"], s["keep"], s["frequency"], s["agents"], s["folder"]) == (23, 1, "daily", ["ok-1"], "")
+    import time as _t
+    at = _t.mktime((2026, 11, 7, 4, 0, 0, 0, 0, -1))
+    daily = backups.clean({"enabled": True, "hour": 3})
+    assert backups.due(daily, at) and not backups.due({**daily, "last_run": at - 3600}, at)
+    assert not backups.due(backups.clean({"enabled": True, "hour": 5}), at)
+    weekly = backups.clean({"enabled": True, "hour": 3, "frequency": "weekly", "weekday": _t.localtime(at).tm_wday})
+    assert backups.due(weekly, at) and not backups.due({**weekly, "weekday": (weekly["weekday"] + 1) % 7}, at)
+    assert not backups.due(backups.clean({"enabled": False}), at)
+
+
+@pytest.mark.asyncio
+async def test_scheduled_backups_are_kept_copied_and_restored(deck, tmp_path, monkeypatch):
+    monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path / "vfs"))
+    async with _client() as c:
+        r = await c.put("/fd/agent-bundle/backups/settings", headers=_hdr(BOB),
+                        json={"enabled": True, "hour": 0, "keep": 2, "folder": "backups/agents"})
+        assert r.status_code == 200 and r.json()["settings"]["keep"] == 2
+        await backups._tick()                                          # due: hour 0, never run
+        await backups._tick()                                          # ran just now: not due again
+        listed = (await c.get("/fd/agent-bundle/backups", headers=_hdr(BOB))).json()
+        assert len(listed["backups"]) == 1 and listed["backups"][0]["name"] == "Bob's agent"
+        assert listed["settings"]["last_run"] > 0 and listed["settings"]["last_error"] == ""
+        copies = list((tmp_path / "vfs").rglob("*.captain"))
+        assert len(copies) == 1 and copies[0].parent.name == "agents"
+        for _ in range(2):
+            assert (await c.post("/fd/agent-bundle/backups/run", json={}, headers=_hdr(BOB))).status_code == 200
+        listed = (await c.get("/fd/agent-bundle/backups", headers=_hdr(BOB))).json()["backups"]
+        assert len(listed) == 2                                        # keep 2: the oldest went
+        assert (await c.get("/fd/agent-bundle/backups", headers=_hdr(CAROL))).json()["backups"] == []
+        newest = listed[0]["id"]
+        assert (await c.get(f"/fd/agent-bundle/backups/{newest}/download", headers=_hdr(CAROL))).status_code == 404
+        r = await c.post("/fd/agent-bundle/backups/run", json={"slugs": ["carol-agent"]}, headers=_hdr(BOB))
+        assert r.status_code == 404
+        # learn something after the backup, then put the agent back as it was then
+        hc = server.DATA_DIR / "bob-agent" / HC
+        insights = InsightsManager(hc / "insights.db")
+        await insights.add("Learned after the backup", "fact")
+        await insights.close()
+        r = await c.post(f"/fd/agent-bundle/backups/{newest}/restore", headers=_hdr(BOB))
+        assert r.status_code == 200, r.text
+        assert r.json()["safety_backup"]["id"]
+    insights = InsightsManager(hc / "insights.db")
+    try:
+        assert await insights.count() == 2 and not await insights.search("after the backup")
+    finally:
+        await insights.close()

@@ -1173,6 +1173,11 @@ async def lifespan(app: FastAPI):
     _em_stop = asyncio.Event()
     app.state.external_memory_stop = _em_stop
     app.state.external_memory_task = asyncio.create_task(external_memory_service.drain_loop(_em_stop))
+    # ── Agent backups: each person's scheduled backups of their agents (agent_bundle.backups). ──
+    from captain_claw.flight_deck.agent_bundle import backups as _agent_backups
+    _backups_stop = asyncio.Event()
+    app.state.agent_backups_stop = _backups_stop
+    app.state.agent_backups_task = asyncio.create_task(_agent_backups.backup_loop(_backups_stop))
     # ── Spend ledger: the agents' LLM calls read in every 15 min (usage_spend). ──
     _spend_stop = asyncio.Event()
     app.state.usage_spend_stop = _spend_stop
@@ -1534,6 +1539,12 @@ async def lifespan(app: FastAPI):
         await external_memory_service.close()
     except Exception:
         pass
+    if hasattr(app.state, "agent_backups_stop"):
+        app.state.agent_backups_stop.set()
+        try:
+            await asyncio.wait_for(app.state.agent_backups_task, timeout=5.0)
+        except (TimeoutError, asyncio.CancelledError, Exception):
+            pass
     if hasattr(app.state, "tool_audit_stop"):
         app.state.tool_audit_stop.set()
         try:

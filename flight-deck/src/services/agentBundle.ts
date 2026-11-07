@@ -72,6 +72,18 @@ export interface UploadResult extends BundleSummary {
   has_secrets: boolean
   /** Your agents holding an earlier version of its package. */
   updates: { slug: string; name: string; from_version: number }[]
+  /** Which deck signed it, and whether this deck trusts that one. */
+  signature: Signature
+}
+
+export interface Signature {
+  state: 'valid' | 'invalid' | 'unsigned'
+  fingerprint: string
+  deck: string
+  own: boolean
+  trusted: boolean
+  /** The admin's name for a trusted deck. */
+  label: string
 }
 
 export type MergeMode = 'append' | 'reset' | 'update'
@@ -245,4 +257,63 @@ export function countChips(counts: Record<string, number>): string[] {
   return Object.keys(COUNT_LABELS)
     .filter((k) => (counts[k] ?? 0) > 0)
     .map((k) => `${counts[k]} ${counts[k] === 1 ? COUNT_LABELS[k][0] : COUNT_LABELS[k][1]}`)
+}
+
+// ── scheduled backups ───────────────────────────────────────────────────────
+
+export interface BackupSettings {
+  enabled: boolean
+  frequency: 'daily' | 'weekly'
+  /** The deck's local hour, 0–23. */
+  hour: number
+  /** 0 = Monday … 6 = Sunday. */
+  weekday: number
+  keep: number
+  /** Empty: all your agents. */
+  agents: string[]
+  /** A folder in your files that also gets a copy ('' for none). */
+  folder: string
+  last_run: number
+  last_error: string
+}
+
+export interface BackupRecord { id: string; slug: string; name: string; file_name: string; size: number; made: number }
+
+export async function listBackups(asUser?: string): Promise<{ settings: BackupSettings; backups: BackupRecord[] }> {
+  return (await send('/fd/agent-bundle/backups', {}, asUser)).json()
+}
+
+export async function saveBackupSettings(settings: Partial<BackupSettings>, asUser?: string): Promise<BackupSettings> {
+  const res = await send('/fd/agent-bundle/backups/settings', { method: 'PUT', body: JSON.stringify(settings) }, asUser)
+  return ((await res.json()) as { settings: BackupSettings }).settings
+}
+
+export async function runBackups(slugs?: string[], asUser?: string): Promise<{ made: BackupRecord[]; problems: string[] }> {
+  return (await send('/fd/agent-bundle/backups/run', json(slugs ? { slugs } : {}), asUser)).json()
+}
+
+export async function downloadBackup(b: BackupRecord, asUser?: string): Promise<void> {
+  const res = await send(`/fd/agent-bundle/backups/${b.id}/download`, {}, asUser)
+  saveBlob(await res.blob(), b.file_name)
+}
+
+export async function restoreBackup(id: string, asUser?: string): Promise<IntoResult> {
+  return (await send(`/fd/agent-bundle/backups/${id}/restore`, { method: 'POST' }, asUser)).json()
+}
+
+export async function deleteBackup(id: string, asUser?: string): Promise<void> {
+  await send(`/fd/agent-bundle/backups/${id}`, { method: 'DELETE' }, asUser)
+}
+
+// ── signing ─────────────────────────────────────────────────────────────────
+
+export interface Trusted { fingerprint: string; label: string }
+export interface SigningInfo { fingerprint: string; deck: string; trusted: Trusted[]; require_trusted: boolean; admin: boolean }
+
+export async function signingInfo(): Promise<SigningInfo> {
+  return (await send('/fd/agent-bundle/signing')).json()
+}
+
+export async function saveTrust(trusted: Trusted[], requireTrusted: boolean): Promise<{ trusted: Trusted[]; require_trusted: boolean }> {
+  return (await send('/fd/agent-bundle/signing', { method: 'PUT', body: JSON.stringify({ trusted, require_trusted: requireTrusted }) })).json()
 }

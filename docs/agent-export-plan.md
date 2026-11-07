@@ -158,13 +158,23 @@ stores/<name>.db       each SQLite store, as a consistent snapshot
 
 ### Phase 5 — scheduled backups, destinations, signing
 
-- **Scheduled backups** per agent or for all of a user's agents: daily or
-  weekly, keep the last N, taken when the agent is asleep or idle where it can.
-- **Destinations**: the deck's own folder (default), or a folder in the
-  user's files (VFS), which can be a Google Drive mount.
-- **Signing**: each deck has an Ed25519 key; bundles are signed, and import
-  shows "Signed by <deck> (fingerprint)" or "Unsigned". Optional list of
-  trusted fingerprints.
+- **Scheduled backups** per person (kiosk Settings → Agent backups): daily or
+  weekly from an hour (the deck's local time), keep the last N per agent,
+  all their agents or the ones they pick. A backup is a full bundle without
+  keys; the agent keeps running (its stores are snapshotted through SQLite's
+  backup API). "Back up now", download, restore (a reset with undo) and
+  delete per backup. Flight Deck's `backup_loop` looks every 5 minutes.
+- **Destinations**: the deck's own folder (`agent-bundles/backups/<agent>/`),
+  plus optionally a folder in the person's files (VFS). A linked folder
+  there can be a synced disk; a Google Drive mount is read-only in the VFS,
+  so it is refused with a note.
+- **Signing**: each deck has an Ed25519 key (beside its agent secret); every
+  bundle carries `signature.json`, a signature over `manifest.json`'s exact
+  bytes (which hold every file's sha256). Import shows "Signed by this
+  deck", "Signed by <name>, a deck you trust", "Signed by … — not trusted"
+  or "Unsigned"; a changed file is refused. Admins list trusted fingerprints
+  and can switch on "only take files signed by this deck or a trusted one"
+  (console → Settings → Agent files).
 
 ## Not in scope
 

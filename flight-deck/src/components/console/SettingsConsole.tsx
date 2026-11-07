@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
-import { Settings2, ClipboardList, MessageSquare, Boxes, Save, Wrench } from 'lucide-react'
+import { Settings2, ClipboardList, MessageSquare, Boxes, Save, Wrench, Archive } from 'lucide-react'
+import { AgentFilesSigning } from '../layout/AgentBackupsDialog'
 import { useAuthStore } from '../../stores/authStore'
 import { useConsoleStore } from '../../stores/consoleStore'
 import { BrandingAdmin } from '../admin/BrandingAdmin'
@@ -217,6 +218,11 @@ export function SettingsConsole() {
             onToggle={() => save('xtools-sandbox', { external_tools_require_sandbox: !config.external_tools_require_sandbox })}
           />
         </SettingRow>
+      </Card>
+
+      <Card icon={Archive} title="Agent files"
+        hint="Agents exported from this deck are signed. Choose which other decks' files people here may import.">
+        <AgentFilesSigning />
       </Card>
 
       {/* What every user's agents know about the company — loads on its own. */}
