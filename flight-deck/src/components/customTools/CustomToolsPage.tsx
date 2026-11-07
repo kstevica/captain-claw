@@ -34,6 +34,14 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
   const [selected, setSelected] = useState<Selected | null>(null)
   const [making, setMaking] = useState(false)
   const [notice, setNotice] = useState('')
+  // In the kiosk's dialog, Escape closes the page, as it does the libraries.
+  // A tool's sheet or New tool is open on top: that one closes itself first.
+  useEffect(() => {
+    if (!onClose || selected || making) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [onClose, selected, making])
 
   const load = useCallback(async () => {
     setError('')
