@@ -860,6 +860,18 @@ handles it directly; the agent isn't needed.
   the questions, time left, whose tool, "Later", "Don't answer", "Send", and
   the line about never typing passwords; the bell brings a hidden one back.
   Tests: `test_external_tool_asks.py` (8).
+- **Agents ask too (2026-11-07, after 7d):** the questions became the
+  deck's own, shared by custom tools and agents. The store is
+  `person_asks.py` (was `external_tool_asks.py`); the browser's routes moved
+  to `GET /fd/asks` and `POST /fd/asks/<id>` (`ask_routes.py`), not gated on
+  custom tools; the dialog is `components/common/PersonAsks.tsx`. An agent's
+  new `ask_user` tool asks the person its turn is for (`POST /fd/asks/agent`,
+  then `/follow`; `/cancel` when the turn is stopped, also before the
+  question opened). A turn from a schedule or other automatic start has
+  nobody to ask; one from Telegram, WhatsApp or another channel is told to
+  ask in its reply. Questions are their own Needs-you type on the Line
+  (`person_ask`, kind "ask"), answered in their dialog, not by reading the
+  bell.
 - **Live check (2026-11-07):** a throwaway deck with a real process agent
   (Helper, on a stand-in model) and four published tools. Through the agent's
   own `custom_tools` tool (its `/api/tool`): `fetch-title` asked the agent to

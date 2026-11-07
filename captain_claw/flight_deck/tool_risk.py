@@ -37,6 +37,8 @@ _TOOL_RISK: dict[str, str] = {
     "workspace_read": "read", "codemap": "read", "cv": "read", "screen_capture": "read",
     "telegram_inbox": "read", "self_check": "read", "activity": "read", "researchmap": "read", "watch_background": "read",
     "audio": "read", "line": "read",
+    # asks the person the turn is for, in their Flight Deck: nothing changes, nothing leaves
+    "ask_user": "read",
     # keep
     "write": "write", "edit": "write", "workspace_write": "write", "datastore": "write",
     "google_drive": "write", "microsoft_onedrive": "write", "google_calendar": "write",

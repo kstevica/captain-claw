@@ -7,9 +7,6 @@ import { customToolsApi, type ToolStatus } from '../services/customToolsApi'
 
 export type ToolsTab = 'mine' | 'shared' | 'catalog' | 'approvals'
 
-// Brings a custom tool's question (Phase 7d) back after "Later" (the bell sends it).
-export const SHOW_ASKS_EVENT = 'fd:custom-tool-asks'
-
 export interface ToolsFocus {
   tab?: ToolsTab
   owner?: string

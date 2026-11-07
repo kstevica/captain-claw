@@ -701,6 +701,16 @@ class ToolRegistry:
         except Exception:
             tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_crew")]
 
+        # ask_user: its dialog is Flight Deck's, so it's shown only under one.
+        try:
+            if any(self._tool_metadata.get(t.name, {}).get("requires_flight_deck") for t in tools):
+                from captain_claw.fd_client import flight_deck_base
+
+                if not flight_deck_base():
+                    tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_flight_deck")]
+        except Exception:
+            tools = [t for t in tools if not self._tool_metadata.get(t.name, {}).get("requires_flight_deck")]
+
         # Custom tools: shown only while the owner's Flight Deck has them on
         # (refreshed per turn by ``custom_tools_client.refresh()``). Fails closed.
         try:

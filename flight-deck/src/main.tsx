@@ -4,12 +4,12 @@ import './index.css'
 import 'katex/dist/katex.min.css'
 import App from './App'
 import { NetworkShareDialog } from './components/agents/NetworkShareDialog'
-import { CustomToolAsks } from './components/customTools/CustomToolAsks'
+import { PersonAsks } from './components/common/PersonAsks'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />
     <NetworkShareDialog />
-    <CustomToolAsks />
+    <PersonAsks />
   </StrictMode>,
 )

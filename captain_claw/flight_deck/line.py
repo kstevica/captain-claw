@@ -84,6 +84,8 @@ _TYPES: dict[str, tuple[str, bool]] = {
     "bat_done": ("run", False),
     "bat_error": ("run", True),
     "bat_ask": ("ask", True),
+    # A custom tool or an agent asks the person, in a Flight Deck dialog (person_asks).
+    "person_ask": ("ask", True),
     # A Crew task waits for a decision, an approval, or is stuck or failed.
     "crew_task": ("run", True),
     "fleet": ("fleet", False),
@@ -122,7 +124,7 @@ _NEEDS_YOU_REFS = frozenset({"agent_lessons", "purchase", "telegram_link"})
 # Generic types that are about an agent.
 _AGENT_REFS = frozenset({"agent_lessons", "agent_exam", "agent_setup", "agent_forge", "profile"})
 # Items answered somewhere else, not by being read.
-ANSWERED_REFS = frozenset({"autonomy_action"})
+ANSWERED_REFS = frozenset({"autonomy_action", "person_ask"})
 # Whose words an item's text is: the deck's own, an agent's, or someone
 # else's (an email, a WhatsApp chat) — what a reader may trust of it.
 _TRUST: dict[str, str] = {

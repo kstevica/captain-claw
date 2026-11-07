@@ -261,7 +261,7 @@ class Manifest:
     raw: dict = field(repr=False, compare=False)
     # Phase 7: what it may ask the agent that ran it for (external_tool_uses).
     uses: tuple[dict, ...] = ()
-    # Phase 7d: it may stop and ask the person running it (external_tool_asks).
+    # Phase 7d: it may stop and ask the person running it (person_asks).
     asks: bool = False
 
     def public(self) -> dict[str, Any]:
@@ -1040,7 +1040,7 @@ async def _answer(ctx: CallContext, link: Link | None, req: dict) -> dict[str, A
 async def _ask(ctx: CallContext, link: Link, req: dict) -> dict[str, Any]:
     """The tool asks the person running it (7d). Its time stops while it waits,
     and so does the time of every run above it."""
-    from captain_claw.flight_deck import external_tool_asks as asks
+    from captain_claw.flight_deck import person_asks as asks
 
     if not ctx.manifest.asks:
         return _refuse('Asking the person needs "asks": true in tool.json.')
@@ -1229,9 +1229,9 @@ async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest
             finally:
                 _RUNS.pop(call_id, None)
                 if manifest.asks:
-                    from captain_claw.flight_deck import external_tool_asks
+                    from captain_claw.flight_deck import person_asks
 
-                    external_tool_asks.close_call(call_id)
+                    person_asks.close_call(call_id)
             base = {"call_id": call_id, "version": version, "seconds": round(res.seconds, 3), "exit_code": res.code}
 
             def failed(kind: str, message: str) -> dict[str, Any]:
