@@ -454,16 +454,30 @@ kiosk reaches it through Settings.
   their own secret, a run on their own file; phone width (no sideways scroll,
   bottom sheet).
 
-### Phase 5: agents propose tools
+### Phase 5: agents propose tools — built 2026-11-07
 
-- After a turn in which the agent did the same kind of job by hand that it has
-  done before, or a long chain of steps that could be one program, it may draft
-  a proposal (owner turns only, the same gates as `lesson_proposals.py`: no
-  automation, member, relay, private or exam turns; cooldown; daily cap).
-- `propose` from the agent tool goes the same way.
-- Proposals land in the owner's inbox with a bell; Approve starts the Crew task.
-  Nothing is built without that click: every build spends Crew time and the
-  user's coding-agent limits.
+- Agent: `captain_claw/tool_proposals.py`, after the owner's turns only (the
+  same gate as lesson proposals in `chat_handler`: no automation, public,
+  member or relay turns, no workers, no private or exam turns). A cheap gate
+  first: a turn of 8+ tool calls (`min_tool_calls`), or words that read like a
+  repeated mechanical job plus 3+ tool calls. Then the agent's own model with
+  `instructions/tool_proposal_prompt.md` drafts one tool (name, title, what,
+  why) or none. Only when the deck has custom tools on and the owner can
+  build. Config `tool_proposals` (enabled, cooldown 600 s, 4 a day);
+  interaction label `tool_proposal` is background.
+- `custom_tools action=propose` sends a draft the same way (source "asked").
+- Deck: `flight_deck/external_tool_proposals.py`, stored per owner in
+  `external_tools/<owner>/.proposals.json`; drops a draft whose name is an
+  existing tool, or like one waiting or dismissed (`retrieval.same_fact`),
+  at most 20 waiting; one unread bell per owner, settled when nothing waits.
+  `POST /fd/external-tools/agent/propose` (owners only, who can build),
+  `GET /fd/external-tools/proposals`, `POST /proposals/{id}/build` (makes the
+  tool and starts Crew as the agent that proposed it, so it hears back) and
+  `/dismiss`.
+- Page: "Your agents suggest" at the top of Mine, with Build it (coding agent
+  picker) and Dismiss; the bell opens the page.
+- Tests: `tests/test_tool_proposals.py` (10) and
+  `test_flight_deck/test_external_tool_proposals.py` (5).
 
 ### Phase 6: the OS sandbox
 

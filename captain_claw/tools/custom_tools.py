@@ -66,18 +66,21 @@ class CustomToolsTool(Tool):
         "action=options lists) and improve (tool, what = what to change or the failure to fix, harness). Both start "
         "a Crew task and return at once: tell the user it's under way and end your turn. You're called back when the "
         "worker finishes; the tool goes live only after the user approves the merge (crew action=request_merge) and "
-        "its tests and examples pass, and you're told when it does."
+        "its tests and examples pass, and you're told when it does. "
+        "propose (tool, title, what, why): suggest a tool to the user without building it, when you notice a job you "
+        "keep doing by hand that code would do better; it waits on their Custom tools page for them to build or dismiss."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["list", "describe", "run", "build", "improve"],
+            "action": {"type": "string", "enum": ["list", "describe", "run", "build", "improve", "propose"],
                        "description": "What to do."},
             "tool": {"type": "string", "description": "The tool's name, as list shows it (or a new name for build)."},
             "input": {"type": "object", "description": "run: the tool's input fields, as describe lists them."},
             "title": {"type": "string", "description": "build: a short title, like 'Read an invoice PDF'."},
             "what": {"type": "string", "description": "build: what it should do, its input, what it returns and an "
                                                        "example. improve: what to change, or the failure to fix."},
+            "why": {"type": "string", "description": "propose: one sentence on why a tool beats doing it by hand."},
             "harness": {"type": "string", "description": "build, improve: the coding CLI (crew action=options lists them)."},
             "model": {"type": "string", "description": "build, improve: the CLI's model, only if the user named one."},
         },
@@ -98,6 +101,8 @@ class CustomToolsTool(Tool):
                 return await self._run(str(kwargs.get("tool") or ""), kwargs.get("input"))
             if action in ("build", "improve"):
                 return await self._make(action, kwargs)
+            if action == "propose":
+                return await self._propose(kwargs)
             return ToolResult(success=False, error=f"Unknown action '{action}'. Use list, describe, run, build or improve.")
         except httpx.TimeoutException:
             return ToolResult(success=False, error=(
@@ -134,6 +139,28 @@ class CustomToolsTool(Tool):
             f"{slug} in its own repository. Nothing is done yet: tell the user it's on its way and end your turn. "
             "You'll be called back when the worker finishes. It goes live after the user approves the merge "
             f"(crew action=request_merge task_id={task.get('id')}) and its tests and examples pass."))
+
+    async def _propose(self, kwargs: dict[str, Any]) -> ToolResult:
+        if custom_tools_client.member_call():
+            return ToolResult(success=False, error="Only the agent's owner gets tool proposals.")
+        tool = str(kwargs.get("tool") or "").strip()
+        what = str(kwargs.get("what") or "").strip()
+        if not tool or len(what) < 20:
+            return ToolResult(success=False, error="propose needs tool (a short lowercase-dashed name) and what (what it "
+                                                   "should do: its input, what it returns, an example).")
+        body = {"name": tool, "title": str(kwargs.get("title") or ""), "what": what, "why": str(kwargs.get("why") or ""),
+                "source": "asked"}
+        status, data = await custom_tools_client.call("POST", "propose", body)
+        if (bad := _refused(status, data)) is not None:
+            return bad
+        if not data.get("kept"):
+            reason = {"exists": "the user already has a tool with that name",
+                      "waiting": "a proposal like it is already waiting for the user",
+                      "dismissed": "the user dismissed a proposal like it before",
+                      "full": "too many proposals are waiting already"}.get(str(data.get("why")), str(data.get("why")))
+            return ToolResult(content=f"Not proposed: {reason}.")
+        return ToolResult(content=(f"Proposed {tool} to the user: it waits on their Custom tools page, where they build it "
+                                   "or dismiss it. Tell them, in a sentence, what it would do and why."))
 
     async def _list(self) -> ToolResult:
         status, data = await custom_tools_client.call("GET", "tools")

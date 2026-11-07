@@ -130,6 +130,23 @@ export interface Approval {
   requested_at: string
 }
 
+export interface Proposal {
+  id: string
+  agent: string
+  agent_name: string
+  name: string
+  title: string
+  what: string
+  why: string
+  said?: string
+  source: 'noticed' | 'asked'
+  created: number
+  state: 'waiting' | 'built' | 'dismissed'
+  settled?: number
+  task_id?: string
+  tool?: string
+}
+
 export interface TaskStarted {
   tool: ToolSummary
   task: { id: string; title: string; status: string; harness_label: string; branch: string }
@@ -164,6 +181,10 @@ export const customToolsApi = {
   unadd: (owner: string, slug: string) =>
     api<{ added: boolean }>(`${base}/added?owner=${encodeURIComponent(owner)}&slug=${encodeURIComponent(slug)}`, { method: 'DELETE' }),
   approvals: () => api<{ approvals: Approval[]; needs_approval: boolean }>(`${base}/approvals`),
+  proposals: () => api<{ waiting: Proposal[]; recent: Proposal[] }>(`${base}/proposals`),
+  buildProposal: (id: string, body: { harness: string; name?: string; title?: string; what?: string }) =>
+    api<TaskStarted & { proposal: Proposal }>(`${base}/proposals/${id}/build`, json('POST', body)),
+  dismissProposal: (id: string) => api<{ proposal: Proposal }>(`${base}/proposals/${id}/dismiss`, json('POST', {})),
   decide: (owner: string, slug: string, approve: boolean) =>
     api<unknown>(`${base}/approvals/${encodeURIComponent(owner)}/${slug}`, json('POST', { approve })),
 }
