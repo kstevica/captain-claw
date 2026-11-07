@@ -2262,6 +2262,79 @@ def _registry_tier_fits_the_caller(config: AgentConfig, tier: str) -> bool:
     return False
 
 
+def _apply_tier_config(config: AgentConfig, tcfg: dict, eff_tier: str) -> None:
+    """Put the model of a resolved tier (*tcfg*, the owner's Library tier config) on
+    *config*: provider, model, endpoint and key, context sizes and vision where the
+    caller didn't set its own. Archetype spawns and agent-bundle imports use it."""
+    new_provider = tcfg.get("provider", config.provider)
+    provider_changed = new_provider != config.provider
+    tier_key = str(tcfg.get("api_key") or "").strip()
+    tier_base_url = str(tcfg.get("base_url") or "").strip()
+    # Where the child runs. A caller that is itself an agent sends its
+    # own key and endpoint as a baseline (flight_deck tool), and a key
+    # belongs to its endpoint — so the two travel together:
+    #   * the tier names an endpoint            → that one;
+    #   * the tier carries a key but no endpoint → the provider's own
+    #     (the key — or the team key behind "@system" — is that
+    #     endpoint's, never the caller's gateway's);
+    #   * the tier is just a model on the caller's provider (no key, no
+    #     endpoint) → the caller's endpoint AND key, as one — unless one
+    #     of the two signs in through ChatGPT and the other with a key:
+    #     those are different places too.
+    if tier_base_url:
+        child_base_url = tier_base_url
+    elif (provider_changed or tier_key
+          or _signs_in_through_chatgpt(new_provider, tcfg["model"])
+          != _signs_in_through_chatgpt(config.provider, config.model)):
+        child_base_url = ""
+    else:
+        child_base_url = config.base_url
+    # The tier's key verbatim, as the Library spawn sends it: "@system"
+    # (team-default sets) is swapped for the org key by
+    # _resolve_spawn_provider_key; a blank one stays blank, so the set's
+    # own env var (below) or the caller's key applies — never the
+    # provider's org key by default (a custom endpoint's own team key
+    # is the one exception, see there). A caller key for another
+    # provider, or another endpoint, is no use here.
+    if tier_key:
+        config.provider_api_key = tcfg["api_key"]
+    elif not _same_endpoint(new_provider, child_base_url, config.provider, config.base_url):
+        config.provider_api_key = ""
+    config.provider = new_provider
+    config.model = tcfg["model"]
+    config.base_url = child_base_url
+    # The tier's context sizes, where the caller didn't set its own (a
+    # model whose output cap is below the 32768 default would 400).
+    if "max_tokens" not in config.model_fields_set and int(tcfg.get("output_ctx") or 0) > 0:
+        config.max_tokens = int(tcfg["output_ctx"])
+    if "max_context" not in config.model_fields_set and int(tcfg.get("input_ctx") or 0) > 0:
+        config.max_context = int(tcfg["input_ctx"])
+    # The tier's model sees images (Library "Sees images"), unless the
+    # caller said otherwise.
+    if "vision" not in config.model_fields_set and _vision_switch(tcfg.get("vision")) is not None:
+        config.vision = "on" if _vision_switch(tcfg.get("vision")) else "off"
+    config.tier = ""  # pinned now — don't let _resolve_tier re-map it
+    config._model_tier = eff_tier
+    config._byok = bool(tcfg.get("byok"))
+
+
+def _apply_owner_env(config: AgentConfig, owner_env: list) -> None:
+    """The tier set's own keys (BRAVE_API_KEY, …) as env vars the spawn hasn't set."""
+    from captain_claw.flight_deck.basna_routes import _effective_key
+    have = {str(ev.get("key") or "") for ev in config.env_vars}
+    llm_key = (config.provider_api_key or "").strip()
+    if llm_key == "@system":
+        llm_key = _effective_key(config.provider, llm_key, config.base_url) or ""
+    llm_envs = _provider_key_env_names(config.provider) if llm_key else ()
+    for ev in owner_env or []:
+        if not isinstance(ev, dict):  # settings are free-form; never fail the spawn
+            continue
+        name = str(ev.get("key") or "").strip()
+        if name and name not in have and name not in llm_envs and str(ev.get("value") or ""):
+            config.env_vars.append({"key": name, "value": str(ev["value"])})
+            have.add(name)
+
+
 async def _resolve_archetype(config: AgentConfig, request: Request, user: dict | None) -> None:
     """Resolve `config.archetype` (`id` or `id@tier`) into a concrete spawn config.
 
@@ -2354,7 +2427,7 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
     # the caller-inherited model when we actually resolve one; otherwise leave it
     # and let `_resolve_tier` try the central registry table as a last resort.
     eff_tier = explicit_tier or str(arch.get("tier") or "")
-    from captain_claw.flight_deck.basna_routes import _effective_key, _load_owner_tiers
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
     tiers_map: dict = {}
     owner_env: list = []
     try:
@@ -2364,56 +2437,7 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
     if eff_tier:
         tcfg: dict = (tiers_map or {}).get(eff_tier) or {}
         if tcfg.get("model"):
-            new_provider = tcfg.get("provider", config.provider)
-            provider_changed = new_provider != config.provider
-            tier_key = str(tcfg.get("api_key") or "").strip()
-            tier_base_url = str(tcfg.get("base_url") or "").strip()
-            # Where the child runs. A caller that is itself an agent sends its
-            # own key and endpoint as a baseline (flight_deck tool), and a key
-            # belongs to its endpoint — so the two travel together:
-            #   * the tier names an endpoint            → that one;
-            #   * the tier carries a key but no endpoint → the provider's own
-            #     (the key — or the team key behind "@system" — is that
-            #     endpoint's, never the caller's gateway's);
-            #   * the tier is just a model on the caller's provider (no key, no
-            #     endpoint) → the caller's endpoint AND key, as one — unless one
-            #     of the two signs in through ChatGPT and the other with a key:
-            #     those are different places too.
-            if tier_base_url:
-                child_base_url = tier_base_url
-            elif (provider_changed or tier_key
-                  or _signs_in_through_chatgpt(new_provider, tcfg["model"])
-                  != _signs_in_through_chatgpt(config.provider, config.model)):
-                child_base_url = ""
-            else:
-                child_base_url = config.base_url
-            # The tier's key verbatim, as the Library spawn sends it: "@system"
-            # (team-default sets) is swapped for the org key by
-            # _resolve_spawn_provider_key; a blank one stays blank, so the set's
-            # own env var (below) or the caller's key applies — never the
-            # provider's org key by default (a custom endpoint's own team key
-            # is the one exception, see there). A caller key for another
-            # provider, or another endpoint, is no use here.
-            if tier_key:
-                config.provider_api_key = tcfg["api_key"]
-            elif not _same_endpoint(new_provider, child_base_url, config.provider, config.base_url):
-                config.provider_api_key = ""
-            config.provider = new_provider
-            config.model = tcfg["model"]
-            config.base_url = child_base_url
-            # The tier's context sizes, where the caller didn't set its own (a
-            # model whose output cap is below the 32768 default would 400).
-            if "max_tokens" not in config.model_fields_set and int(tcfg.get("output_ctx") or 0) > 0:
-                config.max_tokens = int(tcfg["output_ctx"])
-            if "max_context" not in config.model_fields_set and int(tcfg.get("input_ctx") or 0) > 0:
-                config.max_context = int(tcfg["input_ctx"])
-            # The tier's model sees images (Library "Sees images"), unless the
-            # caller said otherwise.
-            if "vision" not in config.model_fields_set and _vision_switch(tcfg.get("vision")) is not None:
-                config.vision = "on" if _vision_switch(tcfg.get("vision")) else "off"
-            config.tier = ""  # pinned now — don't let _resolve_tier re-map it
-            config._model_tier = eff_tier
-            config._byok = bool(tcfg.get("byok"))
+            _apply_tier_config(config, tcfg, eff_tier)
         elif not config.tier and _registry_tier_fits_the_caller(config, eff_tier):
             config.tier = eff_tier  # last resort: central registry tier table
     # The tier set's own keys (BRAVE_API_KEY, TAVILY_API_KEY, …) — what the
@@ -2422,18 +2446,7 @@ async def _resolve_archetype(config: AgentConfig, request: Request, user: dict |
     # resolved LLM key (_build_env writes env_vars after provider_api_key) —
     # unless that key is an "@system" with no org key behind it, where the
     # set's own var is the only key there is.
-    have = {str(ev.get("key") or "") for ev in config.env_vars}
-    llm_key = (config.provider_api_key or "").strip()
-    if llm_key == "@system":
-        llm_key = _effective_key(config.provider, llm_key, config.base_url) or ""
-    llm_envs = _provider_key_env_names(config.provider) if llm_key else ()
-    for ev in owner_env or []:
-        if not isinstance(ev, dict):  # settings are free-form; never fail the spawn
-            continue
-        name = str(ev.get("key") or "").strip()
-        if name and name not in have and name not in llm_envs and str(ev.get("value") or ""):
-            config.env_vars.append({"key": name, "value": str(ev["value"])})
-            have.add(name)
+    _apply_owner_env(config, owner_env)
     log.info("Resolved archetype spawn", archetype=aid, tier=eff_tier or "(default)",
              cognitive_mode=config.cognitive_mode, provider=config.provider, model=config.model)
 

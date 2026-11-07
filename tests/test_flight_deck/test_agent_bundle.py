@@ -61,6 +61,8 @@ def _sessions_db(path: Path) -> None:
             CREATE TABLE apis (id TEXT PRIMARY KEY, name TEXT, base_url TEXT, credentials TEXT);
             CREATE TABLE browser_credentials (id TEXT PRIMARY KEY, site TEXT, password_encrypted TEXT);
             CREATE TABLE playbooks (id TEXT PRIMARY KEY, name TEXT, body TEXT);
+            CREATE TABLE contacts (id TEXT PRIMARY KEY, name TEXT, email TEXT);
+            INSERT INTO contacts VALUES ('c1', 'Ana', 'ana@client.example');
             INSERT INTO sessions VALUES ('s1', 'Monday', '[{"role":"user","content":"hello"}]');
             INSERT INTO apis VALUES ('a1', 'CRM', 'https://crm.example', 'TOPSECRET-API-KEY');
             INSERT INTO browser_credentials VALUES ('b1', 'bank', 'TOPSECRET-PASSWORD');
@@ -133,7 +135,7 @@ async def deck(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         "model": {"provider": "openai", "model": "gpt-x", "api_key": "sk-bob-secret", "vision": True,
                   "temperature": 0.3, "max_tokens": 4096},
         "context": {"max_tokens": 100000},
-        "tools": {"enabled": ["read", "write", "insights"]},
+        "tools": {"enabled": ["read", "write", "insights", "google_mail"]},
         "web": {"port": 24101, "auth_token": "bob-tok"},
         "telegram": {"enabled": True, "bot_token": "tg-secret"},
     }))
@@ -222,7 +224,7 @@ async def test_full_backup_restores_a_working_copy_of_the_agent(deck, tmp_path):
     assert "sk-bob-secret" not in (new / ".env").read_text()
     cfg = yaml.safe_load((new / "config.yaml").read_text())
     assert cfg["model"]["model"] == "gpt-x" and cfg["model"]["api_key"] == "" and cfg["model"]["vision"] is True
-    assert cfg["context"]["max_tokens"] == 100000 and cfg["tools"]["enabled"] == ["read", "write", "insights"]
+    assert cfg["context"]["max_tokens"] == 100000 and cfg["tools"]["enabled"] == ["read", "write", "insights", "google_mail"]
     assert cfg["web"]["auth_token"] == entry["web_auth"] and cfg["telegram"]["bot_token"] == ""
 
     # memory: the insights and their search index work in the restored store
@@ -292,7 +294,7 @@ def test_keep_only_drops_tables_blanks_secrets_and_leaves_no_trace(tmp_path):
     db = tmp_path / "s.db"
     _sessions_db(db)
     stores.keep_only(db, {"sessions", "apis"}, blank={"apis": ("credentials",)})
-    assert stores.counts(db) == {"apis": 1, "browser_credentials": 0, "playbooks": 0, "sessions": 1}
+    assert stores.counts(db) == {"apis": 1, "browser_credentials": 0, "contacts": 0, "playbooks": 0, "sessions": 1}
     assert b"TOPSECRET" not in db.read_bytes() and b"Check the VAT" not in db.read_bytes()
 
 
@@ -424,3 +426,165 @@ async def test_an_upload_that_isnt_a_bundle_is_refused_and_not_kept(deck):
                          headers=_hdr(BOB))
     assert r.status_code == 400 and "isn't an agent bundle" in r.json()["detail"]
     assert not any((export.bundles_dir() / "uploads").glob("*.captain"))
+
+
+# ── phase 2: presets, review, sealed keys, model choice, someone else's import ──
+
+from captain_claw.flight_deck import basna_routes  # noqa: E402
+
+
+async def _export(c, body: dict, uid: str = BOB) -> bytes:
+    made = await c.post("/fd/agent-bundle/export/bob-agent", json=body, headers=_hdr(uid))
+    assert made.status_code == 200, made.text
+    got = await c.get(f"/fd/agent-bundle/exports/{made.json()['id']}/download", headers=_hdr(uid))
+    return got.content
+
+
+async def _upload(c, data: bytes, uid: str = BOB) -> dict:
+    up = await c.post("/fd/agent-bundle/upload", files={"file": ("x.captain", data, "application/zip")},
+                      headers=_hdr(uid))
+    assert up.status_code == 200, up.text
+    return up.json()
+
+
+def _names(data: bytes) -> set[str]:
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        return set(zf.namelist())
+
+
+def _store_rows(data: bytes, store: str, sql: str, tmp_path: Path) -> list:
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        target = tmp_path / f"{store}.db"
+        target.write_bytes(zf.read(f"stores/{store}.db"))
+    with sqlite3.connect(target) as c:
+        return c.execute(sql).fetchall()
+
+
+@pytest.mark.asyncio
+async def test_a_template_carries_who_it_is_and_what_it_was_taught_only(deck):
+    async with _client() as c:
+        data = await _export(c, {"preset": "template"})
+    names = _names(data)
+    assert f"agent/{HC}/personality.md" in names and f"agent/{HC}/skills/vat-check/SKILL.md" in names
+    assert "agent/data/workspace/knowledge/handbook.md" in names and f"agent/{HC}/lessons.json" in names
+    assert not any(n.startswith("stores/") for n in names)
+    assert "agent/data/workspace/Izvješće.md" not in names and "fd/chats.json" not in names
+    assert "fd/schedules.json" not in names and "fd/connections.json" in names
+
+
+@pytest.mark.asyncio
+async def test_trained_leaves_out_what_is_about_the_person_unless_ticked(deck, tmp_path):
+    async with _client() as c:
+        r = await c.get("/fd/agent-bundle/review/bob-agent", headers=_hdr(BOB))
+        assert r.status_code == 200
+        cats = {x["id"]: x for x in r.json()["insights"]}
+        assert cats["workflow"]["default"] is True and cats["preference"]["default"] is False
+        assert cats["preference"]["items"][0]["content"] == "Bob prefers short answers"
+        assert r.json()["contacts"] == 1
+        assert (await c.get("/fd/agent-bundle/review/bob-agent", headers=_hdr(CAROL))).status_code == 404
+        defaults = [x["id"] for x in r.json()["insights"] if x["default"]]
+        data = await _export(c, {"preset": "trained", "insight_categories": defaults})
+        assert _store_rows(data, "insights", "SELECT content FROM insights", tmp_path) == [
+            ("The client's books close on the 5th in Zagreb",)]
+        tables = {t for (t,) in _store_rows(data, "sessions", "SELECT name FROM sqlite_master WHERE type='table'",
+                                            tmp_path)}
+        assert "playbooks" in tables
+        assert _store_rows(data, "sessions", "SELECT count(*) FROM sessions", tmp_path) == [(0,)]
+        assert _store_rows(data, "sessions", "SELECT count(*) FROM contacts", tmp_path) == [(0,)]
+        assert b"ana@client.example" not in data and b"Bob prefers" not in data
+        # one insight left out by hand, contacts ticked
+        workflow_id = cats["workflow"]["items"][0]["id"]
+        data = await _export(c, {"preset": "trained", "insight_categories": None, "exclude_insights": [workflow_id],
+                                 "contacts": True})
+        assert _store_rows(data, "insights", "SELECT content FROM insights", tmp_path) == [("Bob prefers short answers",)]
+        assert _store_rows(data, "sessions", "SELECT name FROM contacts", tmp_path) == [("Ana",)]
+
+
+@pytest.mark.asyncio
+async def test_a_full_backup_seals_its_keys_with_a_passphrase(deck, monkeypatch):
+    async def no_limit(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(server, "check_agent_count_limit", no_limit)   # Bob makes two agents here
+    pw = "correct horse battery"
+    async with _client() as c:
+        r = await c.post("/fd/agent-bundle/export/bob-agent", json={"preset": "trained", "passphrase": pw},
+                         headers=_hdr(BOB))
+        assert r.status_code == 400 and "Only a full backup" in r.json()["detail"]
+        r = await c.post("/fd/agent-bundle/export/bob-agent", json={"preset": "full", "passphrase": "short"},
+                         headers=_hdr(BOB))
+        assert r.status_code == 400 and "at least 8" in r.json()["detail"]
+        data = await _export(c, {"preset": "full", "passphrase": pw})
+        assert "secrets.enc" in _names(data)
+        assert b"sk-bob-secret" not in data and b"TOPSECRET-API-KEY" not in data
+        up = await _upload(c, data)
+        assert up["has_secrets"] is True and up["secrets"] is True
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import", json={"passphrase": "wrong one!"},
+                         headers=_hdr(BOB))
+        assert r.status_code == 400 and "passphrase" in r.json()["detail"]
+        assert _FakePopen.calls == []
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"name": "Keyed", "passphrase": pw}, headers=_hdr(BOB))
+        assert r.status_code == 200, r.text
+        assert r.json()["keys_restored"] is True and r.json()["needs_key"] is False
+        new = server.DATA_DIR / "keyed"
+        assert "OPENAI_API_KEY=sk-bob-secret" in (new / ".env").read_text()
+        with sqlite3.connect(new / "data" / "sessions" / "sessions.db") as s:
+            assert s.execute("SELECT credentials FROM apis").fetchone() == ("TOPSECRET-API-KEY",)
+        # without the passphrase it comes without them, and says so
+        up = await _upload(c, data)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import", json={"name": "Keyless"},
+                         headers=_hdr(BOB))
+        assert r.status_code == 200, r.text
+        assert r.json()["keys_restored"] is False
+        assert any("keys stayed in the file" in n for n in r.json()["notes"])
+        assert "sk-bob-secret" not in (server.DATA_DIR / "keyless" / ".env").read_text()
+
+
+@pytest.mark.asyncio
+async def test_an_import_can_run_on_one_of_the_importers_tiers(deck, monkeypatch):
+    async def tiers(_db, owner):
+        assert owner == CAROL
+        return ({"balanced": {"provider": "anthropic", "model": "claude-tier", "api_key": "carol-tier-key",
+                              "input_ctx": 90000, "output_ctx": 8000}}, [{"key": "BRAVE_API_KEY", "value": "brave-c"}])
+
+    monkeypatch.setattr(basna_routes, "_load_owner_tiers", tiers)
+    async with _client() as c:
+        data = await _export(c, {"preset": "trained"})
+        up = await _upload(c, data, CAROL)
+        assert up["model_tier"] == "balanced"
+        r = await c.get("/fd/agent-bundle/tiers", headers=_hdr(CAROL))
+        assert r.json()["tiers"] == [{"tier": "balanced", "provider": "anthropic", "model": "claude-tier"}]
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"name": "Books", "model": {"mode": "tier", "tier": "reason"}}, headers=_hdr(CAROL))
+        assert r.status_code == 400 and "reason" in r.json()["detail"]
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"name": "Books", "model": {"mode": "tier", "tier": "balanced"}}, headers=_hdr(CAROL))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    cfg = yaml.safe_load((server.DATA_DIR / "books" / "config.yaml").read_text())
+    assert cfg["model"]["provider"] == "anthropic" and cfg["model"]["model"] == "claude-tier"
+    assert cfg["context"]["max_tokens"] == 90000 and cfg["model"]["max_tokens"] == 8000
+    env = (server.DATA_DIR / "books" / ".env").read_text()
+    assert "carol-tier-key" in env and "BRAVE_API_KEY=brave-c" in env
+    entry = server._load_process_registry()["books"]
+    assert entry["owner"] == CAROL and entry["model_tier"] == "balanced"
+    # someone else's: the scheduled task delivers to the agent's chat only, and what to connect is listed
+    jobs = [j for j in sched.get_store().list(CAROL) if j["agent_slug"] == "books"]
+    assert len(jobs) == 1 and jobs[0]["delivery_kind"] == "agent" and jobs[0]["enabled"] == 0
+    assert json.loads(jobs[0]["delivery"]) == {"chat": True, "email": False, "telegram": False, "email_to": ""}
+    assert {"kind": "google", "label": "Google account (mail, calendar, Drive)"} in body["connections"]
+    # the trained bundle had no conversations: no chat log for Carol
+    assert (await deck.export_chat_log(CAROL, "proc-books"))["sessions"] == []
+
+
+def test_sealed_keys_open_only_with_their_passphrase():
+    from captain_claw.flight_deck.agent_bundle import secrets_box
+    blob = secrets_box.seal({"env": {"A": "1"}}, "a long passphrase")
+    assert secrets_box.open_sealed(blob, "a long passphrase") == {"env": {"A": "1"}}
+    with pytest.raises(archive.BundleError, match="passphrase"):
+        secrets_box.open_sealed(blob, "another passphrase")
+    box = json.loads(blob)
+    box["kdf"]["n"] = 2 ** 30
+    with pytest.raises(archive.BundleError, match="doesn't read"):
+        secrets_box.open_sealed(json.dumps(box).encode(), "a long passphrase")

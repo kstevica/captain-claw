@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
+import tempfile
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
-from captain_claw.flight_deck.agent_bundle import archive, catalog, export, stores
+from captain_claw.flight_deck.agent_bundle import archive, catalog, export, secrets_box, stores
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -34,7 +38,9 @@ def inspect(path: Path) -> dict[str, Any]:
     if not isinstance(agent, dict) or not str(agent.get("name") or "").strip():
         raise archive.BundleError("The bundle doesn't say which agent it holds.")
     return {**export.summary(bundle.manifest),
-            "model": _model_line(agent.get("settings") if isinstance(agent.get("settings"), dict) else {})}
+            "model": _model_line(agent.get("settings") if isinstance(agent.get("settings"), dict) else {}),
+            "model_tier": str(agent.get("model_tier") or ""),
+            "has_secrets": bundle.has("secrets.enc")}
 
 
 def _model_line(settings: dict[str, Any]) -> dict[str, str]:
@@ -63,11 +69,15 @@ def _vision(value: Any) -> str:
     return "auto"
 
 
-def spawn_config(agent: dict[str, Any], name: str):
-    """The spawn request for a new agent from the bundle's ``fd/agent.json``."""
+def spawn_config(agent: dict[str, Any], name: str, *, keep_model: bool = True):
+    """The spawn request for a new agent from the bundle's ``fd/agent.json``.
+    Not *keep_model*: one of the importer's tiers gives the model, its context
+    sizes and vision (``apply_tier``)."""
     from captain_claw.flight_deck.server import AgentConfig
 
     s = agent.get("settings") if isinstance(agent.get("settings"), dict) else {}
+    if not keep_model:
+        s = {k: v for k, v in s.items() if k in ("tools", "runtime")}
     fields: dict[str, Any] = {
         "name": name,
         "description": str(agent.get("description") or "")[:2000],
@@ -75,9 +85,10 @@ def spawn_config(agent: dict[str, Any], name: str):
         "fleet_instructions": str(agent.get("fleet_instructions") or "")[:64_000],
         "grid_memory_tags": [str(t) for t in agent.get("grid_tags") or []][:20],
         "grid_recall_mode": str(agent.get("grid_recall") or ""),
-        "vision": _vision(s.get("vision")),
         "runtime": "mrav" if s.get("runtime") == "mrav" else "",
     }
+    if keep_model:
+        fields["vision"] = _vision(s.get("vision"))
     for key, cast in (("provider", str), ("model", str), ("base_url", str),
                       ("temperature", float), ("max_tokens", int), ("max_context", int)):
         if s.get(key) not in (None, ""):
@@ -149,6 +160,80 @@ def unpack(path: Path, agent_dir: Path) -> list[str]:
     return notes
 
 
+async def tiers(owner_id: str) -> list[dict[str, str]]:
+    """The importer's model tiers (no keys): what "use one of your models" offers."""
+    from captain_claw.flight_deck.auth import get_db
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    try:
+        tiers_map, _ = await _load_owner_tiers(get_db(), owner_id)
+    except Exception:
+        return []
+    return [{"tier": str(t), "provider": str(c.get("provider") or ""), "model": str(c.get("model") or "")}
+            for t, c in (tiers_map or {}).items() if isinstance(c, dict) and c.get("model")]
+
+
+async def apply_tier(config, owner_id: str, tier: str) -> None:
+    """Run the new agent on the importer's *tier* — as an archetype spawn on that tier would."""
+    from captain_claw.flight_deck import server as srv
+    from captain_claw.flight_deck.auth import get_db
+    from captain_claw.flight_deck.basna_routes import _load_owner_tiers
+    tiers_map, owner_env = await _load_owner_tiers(get_db(), owner_id)
+    tcfg = (tiers_map or {}).get(tier) or {}
+    if not tcfg.get("model"):
+        raise archive.BundleError(f"You have no “{tier}” model set up — pick another, or keep its own.")
+    srv._apply_tier_config(config, tcfg, tier)
+    srv._apply_owner_env(config, owner_env)
+
+
+def open_secrets(bundle: archive.Bundle, passphrase: str) -> dict[str, Any]:
+    """The bundle's sealed keys ({} when it has none or no passphrase is given)."""
+    if not passphrase or not bundle.has("secrets.enc"):
+        return {}
+    with bundle_tmp(bundle, "secrets.enc") as path:
+        return secrets_box.open_sealed(path.read_bytes(), passphrase)
+
+
+@contextmanager
+def bundle_tmp(bundle: archive.Bundle, name: str) -> Iterator[Path]:
+    """An entry of the bundle, unpacked (checked) to a temporary file for a moment."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "entry"
+        bundle.extract(name, path)
+        yield path
+
+
+def apply_secrets(config, keys: dict[str, Any]) -> None:
+    """The model key and .env keys on the spawn; the APIs' credentials wait for the unpack."""
+    from captain_claw.flight_deck import server as srv
+    model_key = str(keys.get("model_api_key") or "")
+    env = keys.get("env") if isinstance(keys.get("env"), dict) else {}
+    own = set(srv._provider_key_env_names(config.provider) or ())
+    if not (config.provider_api_key or "").strip():
+        config.provider_api_key = model_key or next((str(env[n]) for n in own if env.get(n)), "")
+    have = {str(ev.get("key") or "") for ev in config.env_vars}
+    for name, value in env.items():
+        if name not in have and name not in own and str(value):
+            config.env_vars.append({"key": str(name), "value": str(value)})
+
+
+def restore_columns(agent_dir: Path, columns: dict[str, Any]) -> int:
+    """Put the APIs' credentials back into the restored sessions.db."""
+    db = agent_dir / catalog.BY_KEY["sessions"].path
+    if not columns or not db.is_file():
+        return 0
+    allowed = {f"{t}.{c}" for t, cols in catalog.BY_KEY["sessions"].secret_columns.items() for c in cols}
+    n = 0
+    with closing(sqlite3.connect(db)) as c:
+        for key, values in columns.items():
+            if key not in allowed or not isinstance(values, dict):
+                continue
+            table, col = key.split(".", 1)
+            for row_id, value in values.items():
+                n += c.execute(f'UPDATE "{table}" SET "{col}" = ? WHERE id = ?', (str(value), str(row_id))).rowcount
+        c.commit()
+    return n
+
+
 def write_eco(agent_dir: Path, value: str) -> None:
     if value not in ("on", "off"):
         return
@@ -162,6 +247,8 @@ async def unpack_on_spawn(ref: dict[str, Any], slug: str, agent_dir: Path, owner
     """The spawn's hook: the bundle in *ref* into the new agent's folder, before it starts."""
     notes = await asyncio.to_thread(unpack, Path(ref["path"]), agent_dir)
     write_eco(agent_dir, str(ref.get("eco_mode") or ""))
+    if ref.get("columns"):
+        await asyncio.to_thread(restore_columns, agent_dir, ref["columns"])
     ref.setdefault("notes", []).extend(notes)
     log.info("agent bundle unpacked", agent=slug, owner=owner_id or "-", notes=len(notes))
 
@@ -190,12 +277,18 @@ async def after_spawn(path: Path, slug: str, name: str, owner_id: str, agent: di
                 out["notes"].append("Its chat log couldn't be brought back.")
     jobs = bundle.read_json("fd/schedules.json") if bundle.has("fd/schedules.json") else None
     if isinstance(jobs, list):
-        out["schedules"] = _schedules(jobs, slug, owner_id, out["notes"])
+        same = str(bundle.manifest.get("owner_ref") or "") == export.person_ref(owner_id)
+        out["schedules"] = _schedules(jobs, slug, owner_id, out["notes"], same_person=same)
+    links = bundle.read_json("fd/connections.json") if bundle.has("fd/connections.json") else None
+    out["connections"] = [{"kind": str(c.get("kind") or ""), "label": str(c.get("label") or "")}
+                          for c in links or [] if isinstance(c, dict)][:30] if isinstance(links, list) else []
     return out
 
 
-def _schedules(jobs: list, slug: str, owner_id: str, notes: list[str]) -> int:
-    """Its scheduled tasks, switched off — its owner turns them back on."""
+def _schedules(jobs: list, slug: str, owner_id: str, notes: list[str], *, same_person: bool = True) -> int:
+    """Its scheduled tasks, switched off — its owner turns them back on. For
+    someone else they deliver to the agent's chat only: the phone numbers,
+    chats and addresses they went to were the other person's."""
     from captain_claw.flight_deck import fd_scheduler
 
     made = 0
@@ -203,6 +296,9 @@ def _schedules(jobs: list, slug: str, owner_id: str, notes: list[str]) -> int:
         if not isinstance(job, dict):
             continue
         fields = {k: job.get(k) for k in export._JOB_FIELDS if k not in ("enabled", "prompt_author")}
+        if not same_person:
+            fields.update({"delivery_kind": "agent", "delivery_target": "",
+                           "delivery": {"chat": True, "email": False, "telegram": False, "email_to": ""}})
         try:
             fd_scheduler.get_store().create(
                 owner_id=owner_id, prompt_author=str(job.get("prompt_author") or "human"),

@@ -1,11 +1,13 @@
 """Agent bundles over HTTP: export (and back up) an agent, import one.
 
+    GET    /fd/agent-bundle/review/{slug}           what it learned, per category, to look over first
     POST   /fd/agent-bundle/export/{slug}           make a bundle of one of your agents
     GET    /fd/agent-bundle/exports/{id}/download   fetch it (yours only)
     DELETE /fd/agent-bundle/exports/{id}            throw it away
     POST   /fd/agent-bundle/upload                  upload a .captain file → what is in it
     POST   /fd/agent-bundle/uploads/{id}/import     make a new agent of it
     DELETE /fd/agent-bundle/uploads/{id}            throw the upload away
+    GET    /fd/agent-bundle/tiers                   your model tiers (no keys), for an import
 
 An admin acting for a user (``X-FD-Act-As``) works on that user's agents, as
 on the other agent routes. Made bundles and uploads are swept after a day.
@@ -23,7 +25,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from captain_claw.flight_deck.agent_bundle import archive, catalog, export, restore
+from captain_claw.flight_deck.agent_bundle import archive, catalog, export, restore, review
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.logging import get_logger
 
@@ -62,6 +64,23 @@ def _record(sub: str, bundle_id: str, owner_id: str) -> tuple[Path, dict[str, An
 class ExportBody(BaseModel):
     preset: str = "full"
     categories: list[str] = Field(default_factory=list)
+    # The review: insight categories that go (None: all), single insights left
+    # out, its contacts (None: only in a full backup).
+    insight_categories: list[str] | None = None
+    exclude_insights: list[str] = Field(default_factory=list, max_length=20000)
+    contacts: bool | None = None
+    # A full backup with a passphrase carries the agent's keys, sealed.
+    passphrase: str = Field(default="", max_length=500)
+
+
+@router.get("/review/{slug}")
+async def review_agent(slug: str, user: dict = Depends(get_managed_user)) -> dict:
+    """What the agent learned, per insight category, and its contacts — for the
+    person exporting it to decide what goes."""
+    from captain_claw.flight_deck import server as srv
+
+    srv._verify_process_owner(slug, _owner(user))
+    return await asyncio.to_thread(review.review, srv.DATA_DIR / slug)
 
 
 @router.post("/export/{slug}")
@@ -74,10 +93,15 @@ async def export_agent(slug: str, body: ExportBody, request: Request,
     entry = srv._verify_process_owner(slug, owner_id)
     preset = body.preset if body.preset in export.PRESETS else "full"
     categories = set(body.categories) if body.categories else set(export.PRESETS[preset])
+    options = export.Options(
+        insight_categories=set(body.insight_categories) if body.insight_categories is not None else None,
+        exclude_insights=set(body.exclude_insights),
+        contacts=(preset == "full") if body.contacts is None else body.contacts,
+        passphrase=body.passphrase)
     _sweep()
     try:
         made = await export.build(slug, owner_id, entry, categories=categories, preset=preset,
-                                  made_by=str(user.get("display_name") or user.get("email") or ""))
+                                  made_by=str(user.get("display_name") or user.get("email") or ""), options=options)
     except archive.BundleError as exc:
         raise HTTPException(400, str(exc))
     log.info("agent exported", agent=slug, owner=owner_id or "-", size=made["size"], preset=preset)
@@ -121,8 +145,22 @@ async def upload_bundle(file: UploadFile = File(...), user: dict = Depends(get_m
     return {"upload_id": upload_id, "suggested_name": restore.free_name(summary["agent"]["name"]), **summary}
 
 
+class ModelChoice(BaseModel):
+    mode: str = "keep"          # "keep": its own model · "tier": one of the importer's tiers
+    tier: str = ""
+
+
 class ImportBody(BaseModel):
     name: str = ""
+    model: ModelChoice = Field(default_factory=ModelChoice)
+    # Opens the keys a full backup was sealed with; empty: it comes without them.
+    passphrase: str = Field(default="", max_length=500)
+
+
+@router.get("/tiers")
+async def import_tiers(user: dict = Depends(get_managed_user)) -> dict:
+    """The caller's model tiers (no keys) — an import may run on one of them."""
+    return {"tiers": await restore.tiers(_owner(user))}
 
 
 @router.post("/uploads/{upload_id}/import")
@@ -140,10 +178,17 @@ async def import_bundle(upload_id: str, body: ImportBody, request: Request,
         if not isinstance(agent, dict):
             raise archive.BundleError("The bundle doesn't say which agent it holds.")
         name = restore.free_name(body.name.strip() or str(agent.get("name") or "Agent"))
-        config = restore.spawn_config(agent, name)
+        keep = body.model.mode != "tier"
+        config = restore.spawn_config(agent, name, keep_model=keep)
+        if not keep:
+            await restore.apply_tier(config, owner_id, body.model.tier.strip())
+        keys = await asyncio.to_thread(restore.open_secrets, bundle, body.passphrase)
+        if keys:
+            restore.apply_secrets(config, keys)
     except archive.BundleError as exc:
         raise HTTPException(400, str(exc))
-    ref: dict[str, Any] = {"path": str(path), "eco_mode": str(agent.get("eco_mode") or "")}
+    ref: dict[str, Any] = {"path": str(path), "eco_mode": str(agent.get("eco_mode") or ""),
+                           "columns": keys.get("columns") or {} if keys else {}}
     config._bundle = ref
     async with srv._get_spawn_lock():
         result = await srv._spawn_process_locked(config, request, user)
@@ -151,7 +196,7 @@ async def import_bundle(upload_id: str, body: ImportBody, request: Request,
     try:
         extra = await restore.after_spawn(path, slug, name, owner_id, agent)
     except archive.BundleError as exc:
-        extra = {"chat_messages": 0, "schedules": 0, "notes": [str(exc)]}
+        extra = {"chat_messages": 0, "schedules": 0, "connections": [], "notes": [str(exc)]}
     path.unlink(missing_ok=True)
     path.with_suffix(".json").unlink(missing_ok=True)
     notes = [*ref.get("notes", []), *extra["notes"]]
@@ -160,10 +205,13 @@ async def import_bundle(upload_id: str, body: ImportBody, request: Request,
     if extra["schedules"]:
         notes.append(f"{extra['schedules']} scheduled task(s) came with it, switched off — turn them on "
                      "in Scheduled tasks.")
+    if bundle.has("secrets.enc") and not keys:
+        notes.append("Its keys stayed in the file (no passphrase was given).")
     log.info("agent imported", agent=slug, owner=owner_id or "-", notes=len(notes))
     return {"ok": True, "slug": slug, "name": name, "web_auth": result.web_auth,
             "fleet_instructions": result.fleet_instructions, "chat_messages": extra["chat_messages"],
-            "schedules": extra["schedules"], "notes": notes}
+            "schedules": extra["schedules"], "connections": extra.get("connections", []),
+            "keys_restored": bool(keys), "needs_key": restore.needs_key(config), "notes": notes}
 
 
 @router.delete("/uploads/{upload_id}")
@@ -178,4 +226,6 @@ async def delete_upload(upload_id: str, user: dict = Depends(get_managed_user)) 
 async def bundle_catalog(user: dict = Depends(get_managed_user)) -> dict:
     """The categories an export picks from, and the presets."""
     return {"categories": [{"id": c, "label": catalog.CATEGORY_LABELS[c]} for c in catalog.CATEGORIES],
-            "presets": {k: list(v) for k, v in export.PRESETS.items()}}
+            "presets": {k: list(v) for k, v in export.PRESETS.items()},
+            "insight_categories": [{"id": c, "label": label, "default": on}
+                                   for c, label, on in review.INSIGHT_CATEGORIES]}
