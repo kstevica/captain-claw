@@ -2077,6 +2077,13 @@ async def _run_agent(
                     _post_turn(maybe_propose_lesson(agent, channel=turn_channel or ""))
                 except Exception:
                     pass
+                # And a custom tool, when the job looked like code's: drafted
+                # for the owner to build or dismiss on the Custom tools page.
+                try:
+                    from captain_claw.tool_proposals import maybe_propose_tool
+                    _post_turn(maybe_propose_tool(agent, channel=turn_channel or ""))
+                except Exception:
+                    pass
 
         # Proactive intentions — a BEING's autonomous nervous system: the way it
         # surfaces observations/proposals to its parent on its own. Kept for

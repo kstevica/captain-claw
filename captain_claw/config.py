@@ -1113,6 +1113,21 @@ class LessonProposalsConfig(BaseModel):
     max_per_day: int = 12  # drafts a day (UTC), whatever the owner does with them
 
 
+class ToolProposalsConfig(BaseModel):
+    """Custom tools the agent proposes when a job looks like code's (tool_proposals.py).
+
+    After an owner's turn that took a long chain of tool calls, or whose words
+    read like a repeated mechanical job, the agent drafts ONE custom tool with
+    its own model and hands it to Flight Deck, where it waits for the owner to
+    build or dismiss it. Nothing is built without the owner's click.
+    """
+
+    enabled: bool = True
+    cooldown_seconds: int = 600  # between two drafts
+    max_per_day: int = 4  # drafts a day (UTC)
+    min_tool_calls: int = 8  # a turn this long is worth asking about by itself
+
+
 class SisterSessionConfig(BaseModel):
     """Sister session — proactive autonomous work triggered by insights and dreams."""
 
@@ -1697,6 +1712,7 @@ class Config(BaseSettings):
     datastore: DatastoreConfig = Field(default_factory=DatastoreConfig)
     insights: InsightsConfig = Field(default_factory=InsightsConfig)
     lesson_proposals: LessonProposalsConfig = Field(default_factory=LessonProposalsConfig)
+    tool_proposals: ToolProposalsConfig = Field(default_factory=ToolProposalsConfig)
     intentions: IntentionsConfig = Field(default_factory=IntentionsConfig)
     nervous_system: NervousSystemConfig = Field(default_factory=NervousSystemConfig)
     conversation_topics: ConversationTopicsConfig = Field(default_factory=ConversationTopicsConfig)

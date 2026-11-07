@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
-  Wrench, Plus, RefreshCw, X, Users, Check, Ban, Inbox, Store, ShieldCheck,
+  Wrench, Plus, RefreshCw, X, Users, Check, Ban, Inbox, Store, ShieldCheck, Lightbulb, Hammer,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { useCustomToolsStore, type ToolsTab } from '../../stores/customToolsStore'
-import { customToolsApi, type Approval, type Offer, type ToolSummary } from '../../services/customToolsApi'
+import { customToolsApi, type Approval, type Offer, type Proposal, type ToolSummary } from '../../services/customToolsApi'
 import { Page, PageHeader, Card, Button, Segmented, Notice, EmptyState, Pill } from '../console/parts'
 import { DeclaresLine, statusPill } from './toolParts'
 import { ToolSheet } from './ToolSheet'
-import { NewToolDialog } from './NewToolDialog'
+import { NewToolDialog, HarnessPicker } from './NewToolDialog'
 
 // Custom tools: the person's own (made by Crew, published once their tests and
 // examples pass), the ones others offered them (Shared with me, Catalog), and
@@ -27,6 +27,7 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
   const [shared, setShared] = useState<Offer[]>([])
   const [catalog, setCatalog] = useState<Offer[]>([])
   const [approvals, setApprovals] = useState<Approval[]>([])
+  const [proposals, setProposals] = useState<Proposal[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
@@ -41,6 +42,7 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
       const own = await customToolsApi.mine()
       setMine(own.tools)
       setCanBuild(own.can_build)
+      setProposals((await customToolsApi.proposals()).waiting)
       if (authEnabled) {
         const [s, c] = await Promise.all([customToolsApi.shared(), customToolsApi.catalog()])
         setShared(s.tools)
@@ -135,7 +137,17 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
         {loading ? (
           <p className="text-sm text-zinc-500">Loading…</p>
         ) : tab === 'mine' ? (
-          mine.length === 0 ? (
+          <div className="space-y-4">
+          {proposals.length > 0 && (
+            <Card icon={Lightbulb} title="Your agents suggest" hint="Tools an agent thought would do a job better than doing it by hand. Nothing is built until you say so.">
+              <div className="space-y-3">
+                {proposals.map((p) => (
+                  <ProposalRow key={p.id} p={p} canBuild={canBuild} onDone={(msg) => { if (msg) setNotice(msg); load() }} onError={setError} />
+                ))}
+              </div>
+            </Card>
+          )}
+          {mine.length === 0 ? (
             <EmptyState icon={Wrench} title="No custom tools yet">
               {canBuild
                 ? 'Ask an agent to build one (“make me a tool that totals a CSV column”), or start one here with New tool.'
@@ -157,7 +169,8 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
                 </button>
               ))}
             </div>
-          )
+          )}
+          </div>
         ) : tab === 'approvals' ? (
           approvals.length === 0 ? (
             <EmptyState icon={ShieldCheck} title="Nothing waits for approval">
@@ -233,6 +246,56 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
           onStarted={(msg) => { setMaking(false); setNotice(msg); load() }}
         />
       )}
+    </div>
+  )
+}
+
+function ProposalRow({ p, canBuild, onDone, onError }: {
+  p: Proposal
+  canBuild: boolean
+  onDone: (message: string) => void
+  onError: (message: string) => void
+}) {
+  const [harness, setHarness] = useState('')
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState('')
+  const run = async (key: string, fn: () => Promise<string>) => {
+    setBusy(key)
+    try {
+      onDone(await fn())
+    } catch (e) {
+      onError(e instanceof Error ? e.message : 'Failed')
+    } finally {
+      setBusy('')
+    }
+  }
+  return (
+    <div className="rounded-xl border border-zinc-800 bg-zinc-950/50 p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="text-sm font-medium text-zinc-100">{p.title} <span className="font-mono text-[11px] text-zinc-500">{p.name}</span></div>
+          <div className="text-[11px] text-zinc-500">{p.agent_name || p.agent} · {p.source === 'asked' ? 'asked to' : 'noticed'}</div>
+        </div>
+      </div>
+      {p.why && <p className="mt-2 text-xs text-zinc-300">{p.why}</p>}
+      <p className={`mt-1 text-xs leading-relaxed text-zinc-500 ${open ? '' : 'line-clamp-3'}`}>{p.what}</p>
+      {p.what.length > 220 && (
+        <button className="mt-1 text-[11px] text-zinc-500 underline-offset-2 hover:underline" onClick={() => setOpen(!open)}>{open ? 'Less' : 'More'}</button>
+      )}
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        {canBuild && <HarnessPicker value={harness} onChange={setHarness} />}
+        {canBuild && (
+          <Button variant="primary" icon={Hammer} busy={busy === 'build'} disabled={!harness}
+            onClick={() => run('build', async () => {
+              const r = await customToolsApi.buildProposal(p.id, { harness })
+              return `${r.task.harness_label || 'A coding agent'} is building “${r.tool.slug}”. Approve its merge on the Crew page when it’s done.`
+            })}>Build it</Button>
+        )}
+        <Button variant="ghost" icon={X} busy={busy === 'dismiss'} onClick={() => run('dismiss', async () => {
+          await customToolsApi.dismissProposal(p.id)
+          return ''
+        })}>Dismiss</Button>
+      </div>
     </div>
   )
 }

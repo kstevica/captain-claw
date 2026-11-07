@@ -245,7 +245,8 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
     onClose()
     const [owner, slug] = refId.split('/')
     const focus = refType === 'custom_tool_approval' ? { tab: 'approvals' as const }
-      : slug ? { owner, slug, tab: 'shared' as const } : {}
+      : refType === 'custom_tool_proposal' ? { tab: 'mine' as const }
+        : slug ? { owner, slug, tab: 'shared' as const } : {}
     useCustomToolsStore.getState().openTools(focus)
     if (layout === 'full') useUIStore.getState().setView('custom-tools')
   }
@@ -320,7 +321,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
               && n.refId && onOpenSetup ? n.refId : ''
             const forge = n.refType === 'agent_forge' && n.refId && onOpenForge ? n.refId : ''
             const profile = n.refType === 'profile'
-            const tools = (n.refType === 'custom_tool' || n.refType === 'custom_tool_approval') ? n.refType : ''
+            const tools = (n.refType === 'custom_tool' || n.refType === 'custom_tool_approval' || n.refType === 'custom_tool_proposal') ? n.refType : ''
             const task = taskOf(n)
             const exam = n.refType === 'agent_exam'
             const lessons = n.refType === 'agent_lessons'
