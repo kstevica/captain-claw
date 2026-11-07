@@ -109,8 +109,9 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
   ]
 
   return (
-    <div className="h-full overflow-y-auto">
-      <Page>
+    <div className="@container h-full overflow-y-auto">
+      {/* In a kiosk dialog the page takes the dialog's whole width. */}
+      <Page full={!!onClose}>
         <PageHeader
           icon={Wrench}
           title="Custom tools"
@@ -154,7 +155,7 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
                 : 'Making tools needs Crew, the coding agents: an admin approves it on the Users page. Tools others offer you show under Shared with me.'}
             </EmptyState>
           ) : (
-            <div className="grid gap-3 wide:grid-cols-2">
+            <div className="grid gap-3 @2xl:grid-cols-2 @6xl:grid-cols-3">
               {mine.map((t) => (
                 <button key={t.slug} onClick={() => setSelected({ slug: t.slug, mine: true })}
                   className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4 text-left transition hover:border-zinc-700 hover:bg-zinc-900/70">
@@ -205,7 +206,7 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
               )
             }
             return (
-              <div className="grid gap-3 wide:grid-cols-2">
+              <div className="grid gap-3 @2xl:grid-cols-2 @6xl:grid-cols-3">
                 {list.map((o) => (
                   <div key={`${o.owner}/${o.slug}`} className="flex flex-col rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
                     <div className="flex items-start justify-between gap-3">
@@ -242,6 +243,7 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
       )}
       {making && (
         <NewToolDialog
+          taken={mine.map((t) => t.slug)}
           onClose={() => setMaking(false)}
           onStarted={(msg) => { setMaking(false); setNotice(msg); load() }}
         />

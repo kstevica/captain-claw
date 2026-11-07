@@ -105,7 +105,7 @@ def root() -> Path:
 
 # Names a route already uses under /fd/external-tools/ (or will): a tool can't take them.
 RESERVED_SLUGS = frozenset({"agent", "status", "admin", "catalog", "shared", "proposals", "approvals", "build",
-                            "added"})
+                            "added", "review"})
 
 
 def check_slug(slug: str) -> str:

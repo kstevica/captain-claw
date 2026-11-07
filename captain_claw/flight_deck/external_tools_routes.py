@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
+from captain_claw.flight_deck import external_tool_review as xtr
 from captain_claw.flight_deck import external_tools as xt
 from captain_claw.flight_deck.auth import get_current_user, get_db
 
@@ -700,6 +701,42 @@ async def build(body: BuildBody, user: dict = Depends(_enabled)) -> dict[str, An
         await _drop_if_made(uid, slug, made)
         raise
     return {"tool": xt.summary(uid, slug), "task": _task_out(task)}
+
+
+class ReviewBody(BaseModel):
+    slug: str = Field("", max_length=48)
+    title: str = Field("", max_length=200)
+    what: str = Field(..., max_length=xtr.MAX_SPEC)
+
+
+@router.post("/review")
+async def review_spec(body: ReviewBody, user: dict = Depends(_enabled)) -> dict[str, Any]:
+    """Step two of New tool: the person's model reads the spec with what Captain
+    is and their tools, and answers with a fuller spec and why. Nothing is kept.
+    A name or a spec Flight Deck refuses is an HTTP error (fixed in step one);
+    a check that gave no spec is ``{"error": ...}``: the person can still build
+    what they wrote."""
+    await _require_builder(user)
+    uid = _uid(user)
+    what = body.what.strip()
+    if len(what) < 10:
+        raise HTTPException(422, "Say what the tool should do (its input, what it returns, an example), in a few sentences.")
+    slug = body.slug.strip()
+    if slug:
+        try:
+            slug = xt.check_slug(slug)
+        except xt.ToolError as exc:
+            raise _http(exc) from None
+        if slug in xt.RESERVED_SLUGS:
+            raise HTTPException(400, f"“{slug}” is a name Flight Deck uses itself: pick another.")
+        if xt.exists(uid, slug):
+            raise HTTPException(409, f"You already have a tool called {slug}: improve it, or pick another name.")
+    own = xt.list_tools(uid)
+    added = [t for t in await usable_tools(uid) if t.get("owner") != uid]
+    try:
+        return await xtr.review(uid, slug, " ".join(body.title.split())[:80], what, own, added)
+    except xtr.ReviewError as exc:
+        return {"error": exc.message}
 
 
 @router.post("/{slug}/improve")

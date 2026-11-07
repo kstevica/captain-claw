@@ -14,8 +14,10 @@ export const labelCls = 'mb-1.5 block text-xs font-medium text-zinc-400'
 
 // ── Page ──
 
-export function Page({ children }: { children: ReactNode }) {
-  return <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6 wide:px-8 wide:py-8">{children}</div>
+/** A console page: centred and at most 5xl wide, or ``full`` the width of
+ *  whatever holds it (a kiosk dialog). */
+export function Page({ children, full = false }: { children: ReactNode; full?: boolean }) {
+  return <div className={`w-full space-y-6 px-4 py-6 wide:px-8 wide:py-8 ${full ? '' : 'mx-auto max-w-5xl'}`}>{children}</div>
 }
 
 export function PageHeader({ icon: Icon, title, description, actions }: {
@@ -345,26 +347,32 @@ export function Sheet({ title, subtitle, icon: Icon, onClose, footer, children, 
   )
 }
 
-/** A centred dialog for short choices. */
-export function Dialog({ title, icon: Icon, onClose, footer, children }: {
+/** A centred dialog for short choices; ``large`` for writing (most of the
+ *  screen, and its body can fill the height). ``keepOpen`` ignores Escape and
+ *  a click outside, so typed work isn't lost by accident. */
+export function Dialog({ title, icon: Icon, onClose, footer, children, large = false, keepOpen = false }: {
   title: ReactNode
   icon?: LucideIcon
   onClose: () => void
   footer?: ReactNode
   children: ReactNode
+  large?: boolean
+  keepOpen?: boolean
 }) {
   useEffect(() => {
+    if (keepOpen) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [onClose])
+  }, [onClose, keepOpen])
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 wide:items-center wide:p-4" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 wide:items-center wide:p-4" onClick={keepOpen ? undefined : onClose}>
       <div
         role="dialog"
         aria-modal="true"
-        className="flex max-h-[92dvh] w-full max-w-lg flex-col rounded-t-2xl border border-zinc-800 bg-zinc-950 shadow-2xl wide:rounded-2xl"
+        className={`flex w-full flex-col rounded-t-2xl border border-zinc-800 bg-zinc-950 shadow-2xl wide:rounded-2xl ${
+          large ? 'h-[94dvh] wide:h-[90dvh] wide:max-w-6xl' : 'max-h-[92dvh] max-w-lg'}`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 border-b border-zinc-800 px-5 py-4">
@@ -378,7 +386,7 @@ export function Dialog({ title, icon: Icon, onClose, footer, children }: {
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="flex-1 overflow-y-auto px-5 py-5">{children}</div>
+        <div className={`min-h-0 flex-1 overflow-y-auto px-5 py-5 ${large ? 'flex flex-col' : ''}`}>{children}</div>
         {footer && (
           <div className="flex flex-wrap items-center justify-end gap-2 border-t border-zinc-800 px-5 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
             {footer}

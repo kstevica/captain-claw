@@ -166,6 +166,13 @@ const base = '/fd/external-tools'
 const q = (owner?: string) => (owner ? `?owner=${encodeURIComponent(owner)}` : '')
 const json = (method: string, body: unknown): RequestInit => ({ method, body: JSON.stringify(body) })
 
+/** The deck's check of a new tool's spec (New tool, step two): a fuller spec
+ *  and why, or ``error`` when the check gave none (the person can still build
+ *  what they wrote). */
+export type SpecReview =
+  | { spec: string; title: string; suggestions: { change: string; why: string }[]; overlap: string; unchanged: boolean; model: string; error?: undefined }
+  | { error: string; spec?: undefined }
+
 export const customToolsApi = {
   status: () => api<ToolStatus>(`${base}/status`),
   mine: () => api<{ tools: ToolSummary[]; can_build: boolean }>(base),
@@ -180,6 +187,8 @@ export const customToolsApi = {
   publishState: (slug: string) => api<{ publish: PublishState | null }>(`${base}/${slug}/publish`),
   makeLive: (slug: string, version: string) => api<unknown>(`${base}/${slug}/live`, json('POST', { version })),
   remove: (slug: string) => api<{ ok: boolean }>(`${base}/${slug}`, { method: 'DELETE' }),
+  review: (body: { slug: string; title: string; what: string }) =>
+    api<SpecReview>(`${base}/review`, json('POST', body)),
   build: (body: { slug: string; title: string; what: string; harness: string; model?: string }) =>
     api<TaskStarted>(`${base}/build`, json('POST', body)),
   improve: (slug: string, body: { what: string; harness: string; model?: string }) =>
