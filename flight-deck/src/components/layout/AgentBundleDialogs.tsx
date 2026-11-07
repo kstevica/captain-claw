@@ -8,8 +8,8 @@ import {
 } from 'lucide-react'
 import { AgentDialog } from './KioskAgentDialogs'
 import {
-  countChips, discardUpload, downloadExport, downloadSafety, exportAgent, formatBytes, importUpload, myTiers,
-  reviewAgent, undoImport, uploadBundle,
+  agentPackages, countChips, discardUpload, downloadExport, downloadSafety, exportAgent, formatBytes, importUpload,
+  myTiers, reviewAgent, undoImport, uploadBundle,
   type AgentReview, type BundleCategory, type Connection, type ExportResult, type ImportResult, type IntoResult,
   type MergeMode, type ModelTier, type Preset, type UploadResult,
 } from '../../services/agentBundle'
@@ -124,6 +124,10 @@ export function AgentBackupDialog({ agent, asUser, onClose, onBringIn }: {
   const [busy, setBusy] = useState<'' | 'packing' | 'saving'>('')
   const [made, setMade] = useState<ExportResult | null>(null)
   const [err, setErr] = useState('')
+  const [pkg, setPkg] = useState('')
+  const [pkgs, setPkgs] = useState<{ name: string; version: number }[]>([])
+  useEffect(() => { agentPackages(agent.slug, asUser).then(setPkgs).catch(() => setPkgs([])) }, [agent.slug, asUser])
+  const nextVersion = (pkgs.find((p) => p.name.trim().toLowerCase() === pkg.trim().toLowerCase())?.version ?? 0) + 1
 
   const full = preset === 'full'
   const reviewing = !full && cats.has('memory')
@@ -160,6 +164,7 @@ export function AgentBackupDialog({ agent, asUser, onClose, onBringIn }: {
         categories: [...cats],
         ...(reviewing && review ? { insight_categories: [...insightCats], exclude_insights: [...excluded], contacts } : {}),
         ...(full && withKeys ? { passphrase: pass } : {}),
+        ...(!full && pkg.trim() ? { package: pkg.trim() } : {}),
       }, asUser)
       setMade(m)
       setBusy('saving')
@@ -192,7 +197,8 @@ export function AgentBackupDialog({ agent, asUser, onClose, onBringIn }: {
                 </p>
               </div>
             </div>
-            <Chips items={countChips(made.manifest.counts)} />
+            <Chips items={[...(made.manifest.package ? [`${made.manifest.package.name} · version ${made.manifest.package.version}`] : []),
+              ...countChips(made.manifest.counts)]} />
             <Notes notes={made.manifest.notes} />
             <Connections items={made.manifest.connections} title="Whoever brings it in sets these up again:" />
           </div>
@@ -271,6 +277,22 @@ export function AgentBackupDialog({ agent, asUser, onClose, onBringIn }: {
                       hint="Its contacts — names and addresses" />
                   </div>
                 )}
+              </div>
+            )}
+
+            {!full && (
+              <div className="space-y-2">
+                <SectionTitle>Updates later</SectionTitle>
+                <label className="block">
+                  <input value={pkg} onChange={(e) => setPkg(e.target.value)} maxLength={80} list={`pkgs-${agent.slug}`}
+                    placeholder="Package name, e.g. Bookkeeper for Acme (optional)" className={field} />
+                  <datalist id={`pkgs-${agent.slug}`}>{pkgs.map((p) => <option key={p.name} value={p.name} />)}</datalist>
+                </label>
+                <p className="text-xs leading-relaxed text-zinc-500">
+                  {pkg.trim()
+                    ? <>This will be <span className="font-medium text-zinc-300">version {nextVersion}</span>. An agent made from an earlier version can be updated from it — what it learned since stays.</>
+                    : 'Name it to send updates later: the agent made from it is updated without losing what it learned since.'}
+                </p>
               </div>
             )}
 
@@ -390,6 +412,12 @@ export function AgentImportDialog({ asUser, ownerLabel, agents = [], into, onClo
       setBusy('')
     }
   }
+  // A newer version of a package one of their agents holds: offer to update it.
+  useEffect(() => {
+    const u = upload?.updates?.[0]
+    if (u && agents.some((a) => a.slug === u.slug)) { setTarget(u.slug); setMerge('update') }
+  }, [upload, agents])
+  const updateOf = (slug: string) => upload?.updates?.find((u) => u.slug === slug)
   // Its own tier where this person has it; else its own model.
   useEffect(() => {
     if (!upload) return
@@ -446,7 +474,9 @@ export function AgentImportDialog({ asUser, ownerLabel, agents = [], into, onClo
               <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" />
               <p className="text-sm text-zinc-100">
                 {undone ? <><span className="font-medium">{done.name}</span> is back as it was before the import.</>
-                  : <><span className="font-medium">{done.name}</span> {done.mode === 'append' ? 'has what the file added' : 'was replaced by what the file holds'}{done.restarted ? ' and is starting again' : ''}.</>}
+                  : <><span className="font-medium">{done.name}</span> {done.mode === 'update' && done.package
+                    ? `is on version ${done.package.version} now (was ${done.from_version})`
+                    : done.mode === 'append' ? 'has what the file added' : 'was replaced by what the file holds'}{done.restarted ? ' and is starting again' : ''}.</>}
               </p>
             </div>
             {!undone && Object.keys(done.counts).length > 0 && (
@@ -459,6 +489,12 @@ export function AgentImportDialog({ asUser, ownerLabel, agents = [], into, onClo
                 ))}
               </ul>
             )}
+            {!undone && done.mode === 'update' && done.taken_out && (done.taken_out.gone || done.taken_out.kept) ? (
+              <p className="text-xs text-zinc-500">
+                {done.taken_out.gone ?? 0} of the earlier version's items swapped out
+                {done.taken_out.kept ? ` · ${done.taken_out.kept} kept because they were changed here` : ''}.
+              </p>
+            ) : null}
             {!undone && <Notes notes={done.notes} />}
             {!undone && done.safety_backup && (
               <div className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 text-xs text-zinc-400">
@@ -511,7 +547,8 @@ export function AgentImportDialog({ asUser, ownerLabel, agents = [], into, onClo
               <p className="text-base font-semibold text-zinc-100">{upload.agent.name}</p>
               {upload.agent.description && <p className="mt-0.5 text-sm text-zinc-400">{upload.agent.description}</p>}
               <p className="mt-2 text-xs text-zinc-500">
-                {[PRESETS.find((p) => p.id === upload.preset)?.label, madeOn(upload.made), upload.made_by && `by ${upload.made_by}`,
+                {[upload.package ? `${upload.package.name} · version ${upload.package.version}` : PRESETS.find((p) => p.id === upload.preset)?.label,
+                  madeOn(upload.made), upload.made_by && `by ${upload.made_by}`,
                   formatBytes(upload.size)].filter(Boolean).join(' · ')}
               </p>
             </div>
@@ -520,14 +557,23 @@ export function AgentImportDialog({ asUser, ownerLabel, agents = [], into, onClo
             {agents.length > 0 && (
               <div className="space-y-1.5">
                 <span className="text-xs font-medium text-zinc-400">Where</span>
-                <select value={target} onChange={(e) => setTarget(e.target.value)} className={field} aria-label="Where it goes">
+                <select value={target} className={field} aria-label="Where it goes" onChange={(e) => {
+                  setTarget(e.target.value)
+                  // Update only where that agent holds an earlier version.
+                  setMerge(updateOf(e.target.value) ? 'update' : merge === 'update' ? 'append' : merge)
+                }}>
                   <option value="">A new agent</option>
-                  {agents.map((a) => <option key={a.slug} value={a.slug}>Into {a.name}</option>)}
+                  {agents.map((a) => <option key={a.slug} value={a.slug}>
+                    {updateOf(a.slug) ? `${a.name} — has version ${updateOf(a.slug)!.from_version}` : `Into ${a.name}`}</option>)}
                 </select>
                 {target && (
-                  <div className="grid gap-1.5 sm:grid-cols-2" role="radiogroup">
-                    {([['append', 'Add to what it has', 'What it already knows stays; the file only adds what it hasn\'t got.'],
-                      ['reset', 'Replace it', 'What the file carries replaces its own: memory, files, conversations, tasks. Its model and keys stay.']] as const).map(([id, label, hint]) => (
+                  <div className={`grid gap-1.5 ${updateOf(target) ? 'sm:grid-cols-3' : 'sm:grid-cols-2'}`} role="radiogroup">
+                    {([
+                      ...(updateOf(target) && upload.package ? [['update', `Update to version ${upload.package.version}`,
+                        `Version ${updateOf(target)!.from_version}'s items are swapped for the new ones. What it learned since, and what was changed here, stays.`] as const] : []),
+                      ['append', 'Add to what it has', 'What it already knows stays; the file only adds what it hasn\'t got.'] as const,
+                      ['reset', 'Replace it', 'What the file carries replaces its own: memory, files, conversations, tasks. Its model and keys stay.'] as const,
+                    ]).map(([id, label, hint]) => (
                       <button key={id} role="radio" aria-checked={merge === id} onClick={() => setMerge(id)}
                         className={`rounded-xl border p-3 text-left ${merge === id
                           ? (id === 'reset' ? 'border-red-500/60 bg-red-500/5' : 'border-violet-500 bg-violet-500/10') : 'border-zinc-800 hover:bg-zinc-900/60'}`}>
@@ -588,7 +634,8 @@ export function AgentImportDialog({ asUser, ownerLabel, agents = [], into, onClo
               <button className={primary} onClick={make} disabled={!!busy || (!target && (!name.trim() || (mode === 'tier' && !tier)))}>
                 {busy === 'making' ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
                 {busy === 'making' ? (target ? 'Bringing it in…' : 'Making it…')
-                  : target ? (merge === 'reset' ? `Replace ${intoName}` : `Add to ${intoName}`) : 'Create agent'}
+                  : target ? (merge === 'reset' ? `Replace ${intoName}` : merge === 'update' ? `Update ${intoName}` : `Add to ${intoName}`)
+                    : 'Create agent'}
               </button>
             )}
           </>

@@ -138,14 +138,23 @@ stores/<name>.db       each SQLite store, as a consistent snapshot
 
 ### Phase 4 — versions and updates
 
-- Every exported item carries the bundle's **package id** and **version**
-  (insight and intention tags, lesson fields, skill and document records).
-- Export asks for a package name; the version goes up by one per export of the
-  same package.
-- Import into an agent that already holds an earlier version of the same
-  package offers **Update**: the package's earlier items are replaced by the
-  new ones, everything the client added stays. Imported lessons are the base
-  layer (`layer: "base"`), so the client adds on top but can't change them.
+- Export takes an optional **package name**; each export of the same package
+  is its next version (the counter lives in the exporting agent's folder,
+  `.bundle-packages.json`).
+- The importing agent keeps what each package put in
+  (`.bundle-imports.json` in its folder): the ids of the rows added with
+  their `updated_at`, the files written with their sha256, the onboarding
+  items added, the scheduled tasks made, and the instructions it set (a
+  hash). Tagging rows inside the agent's own tables was considered; a
+  record beside them changes no schema and can't be lost in an edit.
+- Import of a newer version into an agent that holds an earlier one offers
+  **Update**: the earlier version's items are taken out — except those
+  changed here since (an insight edited, a file rewritten, a task switched on,
+  instructions rewritten) — and the new version is appended. Everything the
+  client added stays.
+- A package imported by someone else: its onboarding items become the base
+  layer (`layer: "base"`, as an agent made from a passed-on archetype), so
+  the client adds on top but can't change them.
 
 ### Phase 5 — scheduled backups, destinations, signing
 

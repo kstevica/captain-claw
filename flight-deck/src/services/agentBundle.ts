@@ -22,7 +22,11 @@ export interface BundleSummary {
   secrets: boolean
   /** What it was connected to on the deck it came from — by name; none of it travels. */
   connections: Connection[]
+  /** A named package's version: an agent holding an earlier one can be updated from it. */
+  package: Package | null
 }
+
+export interface Package { id: string; name: string; version: number }
 
 export interface Connection { kind: string; label: string }
 
@@ -39,6 +43,8 @@ export interface ExportOptions {
   contacts?: boolean
   /** A full backup with a passphrase carries its keys, sealed. */
   passphrase?: string
+  /** Name it to send updates later: this export is the package's next version. */
+  package?: string
 }
 
 export interface ReviewItem { id: string; content: string; importance: number }
@@ -64,9 +70,11 @@ export interface UploadResult extends BundleSummary {
   model_tier: string
   /** Its keys are in the file, sealed with a passphrase. */
   has_secrets: boolean
+  /** Your agents holding an earlier version of its package. */
+  updates: { slug: string; name: string; from_version: number }[]
 }
 
-export type MergeMode = 'append' | 'reset'
+export type MergeMode = 'append' | 'reset' | 'update'
 
 export interface ImportOptions {
   name: string
@@ -93,6 +101,10 @@ export interface IntoResult {
   /** The backup taken just before — kept a week, to undo. */
   safety_backup: { id: string; file_name: string; size: number } | null
   undone?: boolean
+  package?: Package | null
+  /** An update: the earlier version's items taken out, and those kept because they were changed here. */
+  taken_out?: { gone?: number; kept?: number }
+  from_version?: number
 }
 
 export interface ImportResult {
@@ -139,6 +151,12 @@ export async function reviewAgent(slug: string, asUser?: string): Promise<AgentR
 /** Make a bundle of one of your agents (it stays on the deck for a day, or until downloaded and deleted). */
 export async function exportAgent(slug: string, options: ExportOptions, asUser?: string): Promise<ExportResult> {
   return (await send(`/fd/agent-bundle/export/${encodeURIComponent(slug)}`, json(options), asUser)).json()
+}
+
+/** The packages an agent was exported as, with their last version. */
+export async function agentPackages(slug: string, asUser?: string): Promise<{ name: string; version: number }[]> {
+  return ((await send(`/fd/agent-bundle/packages/${encodeURIComponent(slug)}`, {}, asUser)).json() as
+    Promise<{ packages: { name: string; version: number }[] }>).then((r) => r.packages)
 }
 
 /** Your model tiers (no keys): what an import can run on. */
