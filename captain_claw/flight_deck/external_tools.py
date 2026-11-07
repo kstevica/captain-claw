@@ -1133,13 +1133,41 @@ class RecordedLink(Link):
                 "error": reply.get("error")}
 
     async def ask(self, ctx: CallContext, questions: list[dict], wait_s: float) -> dict[str, Any]:
-        reply = self._next("ask", ",".join(q["id"] for q in questions)).get("reply")
+        """A recorded answer, checked the way a real one is: keyed by the
+        questions' ids (a question asked as plain text has the id "answer"),
+        each answer one the question takes. A recording that couldn't come
+        from the dialog fails the example and says how to record it."""
+        from captain_claw.flight_deck import person_asks
+
+        ids = [q["id"] for q in questions]
+        recorded = self._next("ask", ",".join(ids))
+        listed = recorded.get("ask")
+        if isinstance(listed, list) and [str(x) for x in listed] != ids:
+            return self._bad_recording(f"it asked {ids}, but the recorded call lists {listed}: list the questions' "
+                                       f"ids (a question asked as plain text has the id \"answer\")")
+        reply = recorded.get("reply")
         reply = reply if isinstance(reply, dict) else {}
         if reply.get("declined"):
             return {"ok": False, "declined": True, "error": "They chose not to answer."}
-        if reply.get("no_answer") or "answers" not in reply:
+        if reply.get("no_answer"):
             return {"ok": False, "no_answer": True, "error": "No answer in time."}
-        return {"ok": True, "answers": reply["answers"]}
+        answers = reply.get("answers")
+        if not isinstance(answers, dict):
+            return self._bad_recording('the recorded reply to ask needs "answers" (by question id), '
+                                       '{"declined": true} or {"no_answer": true}')
+        unknown = [k for k in answers if k not in ids]
+        if unknown:
+            return self._bad_recording(f"the recorded answers name {unknown}, which aren't question ids: key them "
+                                       f"by {ids} (a question asked as plain text has the id \"answer\")")
+        try:
+            return {"ok": True, "answers": person_asks.check_answers(questions, answers)}
+        except person_asks.AskError as exc:
+            return self._bad_recording(f"the recorded answers couldn't come from the dialog ({exc}); for no answer "
+                                       'at all, record {"no_answer": true} or {"declined": true}')
+
+    def _bad_recording(self, why: str) -> dict[str, Any]:
+        self.problems.append(why)
+        return {"ok": False, "no_answer": True, "error": f"Bad recording: {why}"}
 
     def left_over(self) -> str:
         return f"{len(self.calls)} recorded call(s) weren't asked for" if self.calls else ""
@@ -1390,7 +1418,7 @@ WORKER_CONTRACT = """This repository is a Captain custom tool: a small Python pr
 - Keep it deterministic and small: no network unless the task needs it, nothing left running when it exits.
 - Using the agent (only when the task needs it): the tool can ask the agent that ran it to use one of the agent's tools, through `captain.py` (Flight Deck's helper, already in the repository; don't change it): `captain.tool("web_fetch", url=...)` returns {"ok", "content", "error"}; `captain.vfs_file("vfs:folder/file")` brings in one of the person's files; `captain.file(path)` hands a file the tool wrote to a tool. Declare each in tool.json "uses", with a "why": {"tool": "web_fetch", "hosts": ["api.example.com"], "why": "..."} (web fetching must name its hosts), {"tool": "google_mail", "actions": ["search", "read"], "why": "..."}, {"tool": "read", "why": "..."} for vfs_file. Allowed: the agent's read and write tools; sending (mail, messages, calendar invitations) only works when the tool's owner runs it; never shell, code, payments, scheduling or changing the agent. Anything not declared is refused.
 - Asking the person (only when the task needs a choice or a decision only they can make): set "asks": true in tool.json and call `captain.ask("Which account?", choices=[...])` (or confirm=True, multiple=True, or a list of question objects with ids for a set shown in one dialog). It waits for the answer in Flight Deck (the tool's time stops meanwhile) and raises captain.Declined or captain.NoAnswer when there is none (always so when nobody is there, like a scheduled run): handle both. Never ask for passwords or keys: those are secrets.
-- A tool with "uses" or "asks" can't reach an agent or a person while publishing, so each example records the replies it gets, in order, under "calls": [{"tool": "web_fetch", "reply": {"ok": true, "content": "..."}}] ({"file": "vfs:...", "path": "fixtures/x.csv"} for vfs_file, {"ask": ["answer"], "reply": {"answers": {"answer": "Business"}}} for ask). Tests do the same: write such a list to a JSON file and set XT_FAKE_CALLS to its path before running the entry file. Results from the web or a model-backed tool change from run to run: say so in the description."""
+- A tool with "uses" or "asks" can't reach an agent or a person while publishing, so each example records the replies it gets, in order, under "calls": [{"tool": "web_fetch", "reply": {"ok": true, "content": "..."}}] ({"file": "vfs:...", "path": "fixtures/x.csv"} for vfs_file, {"ask": ["answer"], "reply": {"answers": {"answer": "Business"}}} for ask). Answers are keyed by question id, never by the question's text: a question asked as plain text (`captain.ask("What is your name?")`) has the id "answer"; for a list, use the ids you gave. A recorded answer must be one the dialog could give (a choice from the list, true/false for confirm, text for a required question); for no answer record {"ask": [...], "reply": {"no_answer": true}} or {"declined": true}. Publishing checks recordings this way. Tests do the same: write such a list to a JSON file and set XT_FAKE_CALLS to its path before running the entry file. Results from the web or a model-backed tool change from run to run: say so in the description."""
 
 _IDENTITY = ("-c", "user.name=Captain", "-c", "user.email=tools@captain-claw.local")
 
@@ -1565,6 +1593,28 @@ def _lock(owner: str, slug: str) -> asyncio.Lock:
     return lock
 
 
+_PYTEST_OWN = (("pytest.ini", ""), (".pytest.ini", ""), ("pyproject.toml", "[tool.pytest"),
+               ("tox.ini", "[pytest]"), ("setup.cfg", "[tool:pytest]"))
+
+
+def _pin_pytest_root(folder: Path) -> bool:
+    """A tool without a pytest configuration of its own gets an empty pytest.ini,
+    so its tests never pick up one from the folders above: on a deck whose data
+    sits inside a Captain checkout that would be Captain's own (its asyncio
+    mode, and testpaths = tests: a bare `pytest` would run Captain's suite).
+    True when it put one in."""
+    for name, marker in _PYTEST_OWN:
+        path = folder / name
+        try:
+            if path.is_file() and (not marker or marker in path.read_text(encoding="utf-8", errors="replace")):
+                return False
+        except OSError:
+            return False
+    (folder / "pytest.ini").write_text("# Put in by Flight Deck: this tool's tests use pytest's defaults, not a\n"
+                                       "# configuration found in the folders above it.\n[pytest]\n", encoding="utf-8")
+    return True
+
+
 def _base_python() -> str:
     """The Python venvs are made from: Flight Deck's own (the desktop app's is a
     real, uv-installed Python), unless this is a frozen build."""
@@ -1726,6 +1776,7 @@ async def publish(owner: str, slug: str, *, sha: str = "", by: str = "",
                     await asyncio.to_thread(crew_runner._write_blobs, str(repo), tree, building)
                     # Flight Deck's own helper, whatever copy the repository has.
                     shutil.copyfile(_HELPER, building / HELPER_NAME)
+                    _pin_pytest_root(building)
                     step("copy", True, f"{len(tree)} files")
                     try:
                         manifest = load_manifest(building, slug=slug)

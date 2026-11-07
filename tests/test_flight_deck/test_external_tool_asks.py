@@ -238,3 +238,81 @@ async def test_publishing_answers_from_recorded_answers(data):
     assert declares["asks"] is True
     assert "to ask you questions while it runs" in xr.declares_more({**declares, "asks": False}, declares)
     assert "captain.ask" in xt.WORKER_CONTRACT and json.dumps(xt._HELPER.read_text()).count("def ask(") == 1
+
+
+GREET = """import json, captain
+try:
+    name = captain.ask("What is your name?")
+except (captain.Declined, captain.NoAnswer):
+    name = None
+print(json.dumps({"greeting": f"Hello, {(name or '').strip() or 'stranger'}!"}))
+"""
+
+
+@pytest.mark.parametrize("recorded, words", [
+    # Keyed by the question's text (what a Crew worker wrote on the Pi), not its id.
+    ({"ask": ["answer"], "reply": {"answers": {"What is your name?": "Alice"}}}, "aren't question ids"),
+    ({"ask": ["What is your name?"], "reply": {"answers": {"answer": "Alice"}}}, "list the questions' ids"),
+    ({"ask": ["answer"], "reply": {"answers": {"answer": None}}}, 'record {"no_answer": true}'),
+    ({"ask": ["answer"], "reply": {"name": "Alice"}}, 'needs "answers"'),
+])
+async def test_a_recorded_answer_the_dialog_couldnt_give_fails_and_says_why(data, recorded, words):
+    await xt.create_tool("u1", "greet", title="Greet", description="A test tool.")
+    example = {"input": {}, "expect": {"greeting": "Hello, Alice!"}, "calls": [recorded]}
+    _commit("u1", "greet", {"main.py": GREET, "tool.json": _manifest("greet", asks=True, examples=[example]),
+                            "tests/test_main.py": None})
+    state = await xt.publish("u1", "greet", by="u1")
+    assert state["state"] == "failed"
+    assert words in state["steps"][-1]["detail"], state["steps"][-1]["detail"]
+
+
+async def test_no_answer_is_recorded_as_such(data):
+    examples = [{"input": {}, "expect": {"greeting": "Hello, Alice!"},
+                 "calls": [{"ask": ["answer"], "reply": {"answers": {"answer": "Alice"}}}]},
+                {"input": {}, "expect": {"greeting": "Hello, stranger!"},
+                 "calls": [{"ask": ["answer"], "reply": {"no_answer": True}}]}]
+    await _publish("u1", "greet", GREET, examples=examples)
+
+
+def test_the_helper_checks_recorded_answers_in_tests_too(tmp_path):
+    def run(calls):
+        fake = tmp_path / "calls.json"
+        fake.write_text(json.dumps(calls))
+        tool = tmp_path / "tool"
+        tool.mkdir(exist_ok=True)
+        (tool / "captain.py").write_text(xt._HELPER.read_text())
+        (tool / "main.py").write_text(GREET.replace("except (captain.Declined, captain.NoAnswer):",
+                                                    "except (captain.Declined, captain.NoAnswer):  # noqa"))
+        import subprocess
+        return subprocess.run([sys.executable, str(tool / "main.py")], input="{}", capture_output=True, text=True,
+                              env={"PATH": "/usr/bin:/bin", "XT_FAKE_CALLS": str(fake)}, cwd=tool)
+
+    good = run([{"ask": ["answer"], "reply": {"answers": {"answer": "Alice"}}}])
+    assert json.loads(good.stdout) == {"greeting": "Hello, Alice!"}
+    for calls, words in [([{"ask": ["answer"], "reply": {"answers": {"What is your name?": "Alice"}}}], "aren't question ids"),
+                         ([{"ask": ["What is your name?"], "reply": {"answers": {"answer": "Alice"}}}], "list the questions' ids"),
+                         ([{"ask": ["answer"], "reply": {"answers": {"answer": None}}}], "no_answer")]:
+        bad = run(calls)
+        assert bad.returncode != 0 and words in bad.stderr, bad.stderr
+
+
+def test_a_tools_tests_dont_pick_up_the_decks_pytest_settings(tmp_path):
+    assert xt._pin_pytest_root(tmp_path) is True
+    assert "[pytest]" in (tmp_path / "pytest.ini").read_text()
+    own = tmp_path / "own"
+    own.mkdir()
+    (own / "pyproject.toml").write_text("[tool.pytest.ini_options]\naddopts = '-q'\n")
+    assert xt._pin_pytest_root(own) is False and not (own / "pytest.ini").exists()
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "pyproject.toml").write_text("[project]\nname = 'x'\n")  # no pytest table: still pinned
+    assert xt._pin_pytest_root(other) is True
+
+
+async def test_a_published_version_has_its_own_pytest_root(data):
+    state = await _publish("u1", "greet", GREET, examples=[{"input": {}, "expect": {"greeting": "Hello, Alice!"},
+                                                             "calls": [{"ask": ["answer"],
+                                                                        "reply": {"answers": {"answer": "Alice"}}}]}])
+    assert state is None
+    live = xt.read_live("u1", "greet")["version"]
+    assert (xt.versions_dir("u1", "greet") / live / "pytest.ini").is_file()

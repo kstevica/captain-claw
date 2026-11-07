@@ -76,6 +76,13 @@ def _fake_calls() -> list[dict] | None:
     return None if _line["fake"] is False else _line["fake"]
 
 
+def _ids(questions: list) -> list[str]:
+    """The questions' ids, as Flight Deck sets them: a lone question without
+    one (any question asked as plain text) has the id "answer"."""
+    return [str((q or {}).get("id") or ("answer" if len(questions) == 1 else "")).strip().lower()
+            for q in questions]
+
+
 def _what(req: dict) -> str:
     """What a request names, as a recorded call does: the tool, or the file."""
     return str(req.get("ref") if req["op"] == "file" else req.get("name") or "")
@@ -90,6 +97,11 @@ def _from_fake(calls: list[dict], req: dict) -> dict:
     if want is None or (op != "ask" and str(want) != _what(req)):
         shown = json.dumps({k: v for k, v in nxt.items() if k != "reply"}) if isinstance(nxt, dict) else repr(nxt)
         raise CaptainError(f"The next recorded call is {shown}, but the tool asked for {op} {_what(req)}".rstrip() + ".")
+    if op == "ask" and isinstance(want, list):
+        asked = _ids(req.get("questions") or [])
+        if [str(x) for x in want] != asked:
+            raise CaptainError(f"The tool asked {asked}, but the recorded call lists {want}: list the questions' ids "
+                               '(a question asked as plain text has the id "answer").')
     reply = nxt.get("reply")
     if not isinstance(reply, dict):
         reply = {"ok": True, "output": reply}
@@ -185,6 +197,17 @@ def ask(question: str | list[dict], *, choices: list[str] | None = None, multipl
     if not reply.get("ok", "answers" in reply):  # a recorded reply may give only the answers
         raise NoAnswer(str(reply.get("error") or "No answer."))
     answers = reply.get("answers") or {}
+    # A real answer always fits the questions; a recorded one (XT_FAKE_CALLS)
+    # is checked the same way, so a wrong recording fails here, not quietly.
+    ids = _ids(questions)
+    unknown = [k for k in answers if k not in ids]
+    if unknown:
+        raise CaptainError(f"The answers name {unknown}, which aren't question ids {ids} "
+                           '(a question asked as plain text has the id "answer").')
+    for qid, q in zip(ids, questions):
+        if answers.get(qid) is None and not q.get("optional"):
+            raise CaptainError(f'No answer for the question {qid!r}: a real reply always has one. For no answer, '
+                               'record {"no_answer": true} or {"declined": true}.')
     return answers.get("answer") if single else answers
 
 
