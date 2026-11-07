@@ -25,6 +25,8 @@ FORMAT = "captain-agent"
 FORMAT_VERSION = 1
 EXTENSION = ".captain"
 MANIFEST = "manifest.json"
+SIGNATURE = "signature.json"      # signing.py: the deck's signature over manifest.json's bytes
+_MAX_SIGNATURE = 64 << 10
 
 _CHUNK = 1 << 20
 _MAX_MANIFEST = 8 << 20
@@ -62,8 +64,9 @@ def safe_name(name: str) -> bool:
     return not any(ord(ch) < 32 or ch == "\x7f" for ch in name)
 
 
-def write(staging: Path, manifest: dict[str, Any], out: Path) -> dict[str, Any]:
-    """Zip *staging* into *out* with *manifest* (its ``files`` filled in here)."""
+def write(staging: Path, manifest: dict[str, Any], out: Path, signer=None) -> dict[str, Any]:
+    """Zip *staging* into *out* with *manifest* (its ``files`` filled in here);
+    ``signer(manifest_bytes) -> dict`` adds ``signature.json``."""
     files: list[dict[str, Any]] = []
     for path in sorted(p for p in staging.rglob("*") if p.is_file() and not p.is_symlink()):
         rel = path.relative_to(staging).as_posix()
@@ -71,8 +74,11 @@ def write(staging: Path, manifest: dict[str, Any], out: Path) -> dict[str, Any]:
     manifest = {**manifest, "files": files, "size": sum(f["size"] for f in files)}
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_name(out.name + ".part")
+    manifest_bytes = json.dumps(manifest, ensure_ascii=False, indent=1, default=str).encode("utf-8")
     with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True) as zf:
-        zf.writestr(MANIFEST, json.dumps(manifest, ensure_ascii=False, indent=1, default=str))
+        zf.writestr(MANIFEST, manifest_bytes)
+        if signer is not None:
+            zf.writestr(SIGNATURE, json.dumps(signer(manifest_bytes)))
         for f in files:
             zf.write(staging / f["path"], f["path"])
     tmp.replace(out)
@@ -84,6 +90,8 @@ class Bundle:
     path: Path
     manifest: dict[str, Any]
     _files: dict[str, dict[str, Any]]
+    manifest_bytes: bytes = b""
+    signature: Any = None
 
     def has(self, name: str) -> bool:
         return name in self._files
@@ -156,10 +164,19 @@ def open_bundle(path: Path) -> Bundle:
             raise BundleError("This isn't an agent bundle: it has no manifest.")
         if by_name[MANIFEST].file_size > _MAX_MANIFEST:
             raise BundleError("The bundle's manifest is too big.")
+        manifest_bytes = zf.read(MANIFEST)
         try:
-            manifest = json.loads(zf.read(MANIFEST).decode("utf-8"))
+            manifest = json.loads(manifest_bytes.decode("utf-8"))
         except (UnicodeDecodeError, ValueError) as exc:
             raise BundleError("The bundle's manifest isn't readable.") from exc
+        signature = None
+        if SIGNATURE in by_name:
+            if by_name[SIGNATURE].file_size > _MAX_SIGNATURE:
+                raise BundleError("The bundle's signature is too big.")
+            try:
+                signature = json.loads(zf.read(SIGNATURE).decode("utf-8"))
+            except (UnicodeDecodeError, ValueError):
+                signature = {"alg": "unreadable"}
     if not isinstance(manifest, dict) or manifest.get("format") != FORMAT:
         raise BundleError("This isn't an agent bundle.")
     version = manifest.get("format_version")
@@ -185,10 +202,10 @@ def open_bundle(path: Path) -> Bundle:
     if total > max_bytes():
         raise BundleError(f"The bundle unpacks to {total >> 20} MB, more than this deck takes "
                           f"({max_bytes() >> 20} MB).")
-    extra = set(by_name) - set(files) - {MANIFEST}
+    extra = set(by_name) - set(files) - {MANIFEST, SIGNATURE}
     if extra:
         raise BundleError(f"The bundle holds files its manifest doesn't list ({sorted(extra)[0][:120]}).")
-    return Bundle(path=path, manifest=manifest, _files=files)
+    return Bundle(path=path, manifest=manifest, _files=files, manifest_bytes=manifest_bytes, signature=signature)
 
 
 def save_stream(src: BinaryIO, dest: Path) -> int:

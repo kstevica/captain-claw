@@ -95,6 +95,7 @@ import { AgentSetupDialog } from './AgentSetupDialog'
 import { OnboardingDialog, type OnboardingTab } from './OnboardingDialog'
 import { ArchetypeSpawnDialog, type SetupRequest } from './ArchetypeSpawnDialog'
 import { AgentBackupDialog, AgentImportDialog } from './AgentBundleDialogs'
+import { AgentBackupsDialog } from './AgentBackupsDialog'
 import { ForgeAgentsDialog } from '../forge/ForgeAgentsDialog'
 import { KioskByokDialog } from './KioskByokDialog'
 import { useByokStore } from '../../stores/byokStore'
@@ -285,6 +286,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [backupFor, setBackupFor] = useState<{ slug: string; name: string } | null>(null)
   // Open: '' for a new agent, or the slug of the agent a file goes into.
   const [importOpen, setImportOpen] = useState<string | null>(null)
+  // Settings → Agent backups (schedule, backups kept, signed files).
+  const [backupsOpen, setBackupsOpen] = useState(false)
   // A new agent whose "way of working" setup opens right after it is created.
   const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   // An agent's knowledge, to browse (its ⋯ menu → Knowledge).
@@ -994,7 +997,18 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       )}
       {backupFor && (
         <AgentBackupDialog agent={backupFor} onClose={() => setBackupFor(null)}
-          onBringIn={() => { setImportOpen(backupFor.slug); setBackupFor(null) }} />
+          onBringIn={() => { setImportOpen(backupFor.slug); setBackupFor(null) }}
+          onSchedule={() => { setBackupFor(null); setBackupsOpen(true) }} />
+      )}
+      {backupsOpen && (
+        <AgentBackupsDialog
+          agents={agents.filter((a) => a.kind === 'process' && !a.managed).map((a) => ({ slug: a.startKey, name: a.name }))}
+          onClose={() => setBackupsOpen(false)}
+          onRestored={(slug, restarted) => {
+            useProcessStore.getState().fetchProcesses()
+            if (restarted) startBoot(`proc-${slug}`, false)
+          }}
+        />
       )}
       {forgeOpen && (
         <ForgeAgentsDialog
@@ -1039,6 +1053,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onFolders={() => { setSettingsOpen(false); openFolders() }}
           onActivity={() => { setSettingsOpen(false); openActivity() }}
           onByok={() => { setSettingsOpen(false); openByok() }}
+          onBackups={() => { setSettingsOpen(false); setBackupsOpen(true) }}
         />
       )}
       {locked && byokOpen && <KioskByokDialog onClose={closeByok} />}
@@ -1310,7 +1325,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
 // the Getting started guide — and sign-out (how a shared kiosk hands the screen
 // to the next person).
 
-function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onTaskboard, onScheduled, onLibrary, onData, onFolders, onActivity, onByok }: {
+function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onTaskboard, onScheduled, onLibrary, onData, onFolders, onActivity, onByok, onBackups }: {
   /** The phone layout: two tiles to a row, not three. */
   phone: boolean
   /** The desktop app's admin in the users' kiosk: back to the Admin console. */
@@ -1327,6 +1342,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
   onFolders: () => void
   onActivity: () => void
   onByok: () => void
+  onBackups: () => void
 }) {
   const { theme, toggle: toggleTheme } = useThemeStore()
   // Offered where the deck allows own keys (the plan status says so).
@@ -1360,6 +1376,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
         ...(toolsOn ? [{ icon: Wrench, label: 'Custom tools', hint: 'Programs your agents run, yours and ones offered to you', onSelect: () => { onClose(); openTools() }, tone: 'violet' as const }] : []),
         ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: () => { onClose(); openSwarm() }, tone: 'amber' as const }] : []),
         { icon: AlarmClock, label: 'Scheduled tasks', hint: 'On a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
+        { icon: Archive, label: 'Agent backups', hint: 'Your agents backed up on a schedule, and restored', onSelect: onBackups, tone: 'teal' },
         { icon: Activity, label: 'Activity', hint: 'Every tool they used, and how it went', onSelect: onActivity, tone: 'emerald' },
       ],
     },

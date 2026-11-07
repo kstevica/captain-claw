@@ -103,12 +103,14 @@ function Check({ checked, onChange, disabled, label, hint, right }: {
   )
 }
 
-export function AgentBackupDialog({ agent, asUser, onClose, onBringIn }: {
+export function AgentBackupDialog({ agent, asUser, onClose, onBringIn, onSchedule }: {
   agent: { slug: string; name: string }
   asUser?: string
   onClose: () => void
   /** "Bring a file into it": the import dialog, with this agent picked. */
   onBringIn?: () => void
+  /** "Back up on a schedule": Settings → Agent backups. */
+  onSchedule?: () => void
 }) {
   const [preset, setPreset] = useState<Preset>('full')
   const [cats, setCats] = useState<Set<BundleCategory>>(() => new Set(PRESETS[2].categories))
@@ -328,9 +330,13 @@ export function AgentBackupDialog({ agent, asUser, onClose, onBringIn }: {
       <div className="flex shrink-0 justify-end gap-2 border-t border-zinc-800 p-3">
         {!made ? (
           <>
-            {onBringIn && (
-              <button className="mr-auto text-xs font-medium text-violet-700 hover:underline disabled:opacity-50 dark:text-violet-300"
-                onClick={onBringIn} disabled={!!busy}>Bring a file into it…</button>
+            {(onBringIn || onSchedule) && (
+              <span className="mr-auto flex flex-wrap gap-x-3 gap-y-1">
+                {onBringIn && <button className="text-xs font-medium text-violet-700 hover:underline disabled:opacity-50 dark:text-violet-300"
+                  onClick={onBringIn} disabled={!!busy}>Bring a file into it…</button>}
+                {onSchedule && <button className="text-xs font-medium text-violet-700 hover:underline disabled:opacity-50 dark:text-violet-300"
+                  onClick={onSchedule} disabled={!!busy}>Back up on a schedule…</button>}
+              </span>
             )}
             <button className={quiet} onClick={onClose} disabled={!!busy}>Cancel</button>
             <button className={primary} onClick={make} disabled={!!busy || !passOk || (reviewing && !review && !reviewErr)}>
@@ -356,6 +362,20 @@ export function AgentBackupDialog({ agent, asUser, onClose, onBringIn }: {
 function madeOn(ts: number): string {
   if (!ts) return ''
   return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+function SignatureBadge({ sig }: { sig?: UploadResult['signature'] }) {
+  if (!sig) return null
+  const ok = sig.state === 'valid' && (sig.own || sig.trusted)
+  const text = sig.state !== 'valid' ? 'Unsigned — you can\'t tell which deck made it'
+    : sig.own ? 'Signed by this deck'
+      : sig.trusted ? `Signed by ${sig.label || sig.deck}, a deck you trust`
+        : `Signed by “${sig.deck}” · ${sig.fingerprint} — not one of your trusted decks`
+  return (
+    <p className={`mt-2 flex items-start gap-1.5 text-xs ${ok ? 'text-emerald-700 dark:text-emerald-300' : 'text-amber-700 dark:text-amber-300'}`}>
+      {ok ? <ShieldCheck className="mt-0.5 h-3.5 w-3.5 shrink-0" /> : <TriangleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />}{text}
+    </p>
+  )
 }
 
 const COUNT_NAMES: Record<string, string> = {
@@ -546,6 +566,7 @@ export function AgentImportDialog({ asUser, ownerLabel, agents = [], into, onClo
             <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
               <p className="text-base font-semibold text-zinc-100">{upload.agent.name}</p>
               {upload.agent.description && <p className="mt-0.5 text-sm text-zinc-400">{upload.agent.description}</p>}
+              <SignatureBadge sig={upload.signature} />
               <p className="mt-2 text-xs text-zinc-500">
                 {[upload.package ? `${upload.package.name} · version ${upload.package.version}` : PRESETS.find((p) => p.id === upload.preset)?.label,
                   madeOn(upload.made), upload.made_by && `by ${upload.made_by}`,

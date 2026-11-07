@@ -12,6 +12,14 @@
     DELETE /fd/agent-bundle/uploads/{id}            throw the upload away
     GET    /fd/agent-bundle/tiers                   your model tiers (no keys), for an import
     GET    /fd/agent-bundle/packages/{slug}         the packages an agent was exported as (their last version)
+    GET    /fd/agent-bundle/backups                 your scheduled-backup settings and your agents' backups
+    PUT    /fd/agent-bundle/backups/settings        save them
+    POST   /fd/agent-bundle/backups/run             back up now (all, or {"slugs": [...]})
+    GET    /fd/agent-bundle/backups/{id}/download   fetch one
+    POST   /fd/agent-bundle/backups/{id}/restore    put the agent back as it was then (a reset, with undo)
+    DELETE /fd/agent-bundle/backups/{id}            throw one away
+    GET    /fd/agent-bundle/signing                 this deck's signing fingerprint and the trusted ones
+    PUT    /fd/agent-bundle/signing                 (admin) the trusted fingerprints, and "only trusted"
 
 An admin acting for a user (``X-FD-Act-As``) works on that user's agents, as
 on the other agent routes. Made bundles and uploads are swept after a day.
@@ -31,12 +39,14 @@ from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck.agent_bundle import (
     archive,
+    backups,
     catalog,
     export,
     merge,
     provenance,
     restore,
     review,
+    signing,
 )
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.logging import get_logger
@@ -162,6 +172,9 @@ async def upload_bundle(file: UploadFile = File(...), user: dict = Depends(get_m
     try:
         await asyncio.to_thread(archive.save_stream, file.file, path)
         summary = await asyncio.to_thread(restore.inspect, path)
+        summary["signature"] = await signing.judge(summary["signature"])
+        if summary["signature"]["refused"]:
+            raise archive.BundleError(summary["signature"]["refused"])
     except archive.BundleError as exc:
         path.unlink(missing_ok=True)
         raise HTTPException(400, str(exc))
@@ -366,3 +379,112 @@ async def restore_safety(bundle_id: str, user: dict = Depends(get_managed_user))
     out = await _into_existing(path, agent if isinstance(agent, dict) else {}, str(record.get("slug") or ""),
                                "reset", owner_id, {}, safety=False)
     return {**out, "undone": True}
+
+
+# ── scheduled backups ───────────────────────────────────────────────────────
+
+class BackupSettings(BaseModel):
+    enabled: bool = False
+    frequency: str = "daily"
+    hour: int = Field(default=3, ge=0, le=23)
+    weekday: int = Field(default=6, ge=0, le=6)
+    keep: int = Field(default=7, ge=1, le=60)
+    agents: list[str] = Field(default_factory=list, max_length=200)
+    folder: str = Field(default="", max_length=300)
+
+
+@router.get("/backups")
+async def list_backups(user: dict = Depends(get_managed_user)) -> dict:
+    owner_id = _owner(user)
+    names = {slug: name for slug, name, _ in _own_agents(owner_id)}
+    return {"settings": await backups.load(owner_id),
+            "backups": [{**r, "name": names.get(str(r.get("slug")), str(r.get("slug")))}
+                        for r in backups.records(owner_id)]}
+
+
+@router.put("/backups/settings")
+async def save_backup_settings(body: BackupSettings, user: dict = Depends(get_managed_user)) -> dict:
+    owner_id = _owner(user)
+    kept = await backups.load(owner_id)
+    return {"settings": await backups.save(owner_id, {**kept, **body.model_dump()})}
+
+
+class RunBody(BaseModel):
+    slugs: list[str] | None = None
+
+
+@router.post("/backups/run")
+async def run_backups(body: RunBody, user: dict = Depends(get_managed_user)) -> dict:
+    """Back up the caller's agents now — the ones named, else those the schedule names (else all)."""
+    owner_id = _owner(user)
+    if body.slugs:
+        own = {slug for slug, _, _ in _own_agents(owner_id)}
+        if any(s not in own for s in body.slugs):
+            raise HTTPException(404, "Not found")
+    return await backups.run(owner_id, slugs=body.slugs)
+
+
+def _backup(owner_id: str, bundle_id: str) -> tuple[Path, dict[str, Any]]:
+    got = backups.find(owner_id, bundle_id)
+    if got is None:
+        raise HTTPException(404, "Not found")
+    return got
+
+
+@router.get("/backups/{bundle_id}/download")
+async def download_backup(bundle_id: str, user: dict = Depends(get_managed_user)) -> FileResponse:
+    path, record = _backup(_owner(user), bundle_id)
+    return FileResponse(path, media_type="application/zip",
+                        filename=str(record.get("file_name") or f"agent{archive.EXTENSION}"))
+
+
+@router.delete("/backups/{bundle_id}")
+async def delete_backup(bundle_id: str, user: dict = Depends(get_managed_user)) -> dict:
+    path, _ = _backup(_owner(user), bundle_id)
+    path.unlink(missing_ok=True)
+    path.with_suffix(".json").unlink(missing_ok=True)
+    return {"ok": True}
+
+
+@router.post("/backups/{bundle_id}/restore")
+async def restore_backup(bundle_id: str, user: dict = Depends(get_managed_user)) -> dict:
+    """The agent back as this backup holds it (a reset of everything; a backup
+    of it now is taken first, to undo). For an agent that is gone, download the
+    backup and make a new agent of it."""
+    owner_id = _owner(user)
+    path, record = _backup(owner_id, bundle_id)
+    slug = str(record.get("slug") or "")
+    if slug not in {s for s, _, _ in _own_agents(owner_id)}:
+        raise HTTPException(400, "That agent is gone — download the backup and use New agent → From a file.")
+    try:
+        bundle = await asyncio.to_thread(archive.open_bundle, path)
+        agent = bundle.read_json("fd/agent.json") or {}
+    except archive.BundleError as exc:
+        raise HTTPException(400, str(exc))
+    return await _into_existing(path, agent if isinstance(agent, dict) else {}, slug, "reset", owner_id, {})
+
+
+# ── signing ─────────────────────────────────────────────────────────────────
+
+class TrustBody(BaseModel):
+    trusted: list[dict[str, str]] = Field(default_factory=list, max_length=100)
+    require_trusted: bool = False
+
+
+@router.get("/signing")
+async def signing_info(user: dict = Depends(get_managed_user)) -> dict:
+    from captain_claw.flight_deck import server as srv
+    return {"fingerprint": await asyncio.to_thread(signing.own_fingerprint),
+            "deck": str((await srv._get_system_config()).get("instance_name") or "Captain"),
+            **await signing.trust(), "admin": str(user.get("role") or "") == "admin"}
+
+
+@router.put("/signing")
+async def save_signing(body: TrustBody, user: dict = Depends(get_managed_user)) -> dict:
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+    if _fd_auth_enabled() and str(user.get("role") or "") != "admin":
+        raise HTTPException(403, "Only an admin decides which decks' bundles are trusted.")
+    bad = [t.get("fingerprint") for t in body.trusted if not signing.norm(t.get("fingerprint"))]
+    if bad:
+        raise HTTPException(400, f"Not a fingerprint: {str(bad[0])[:60]}")
+    return await signing.save_trust(body.trusted, body.require_trusted)

@@ -31,6 +31,7 @@ from captain_claw.flight_deck.agent_bundle import (
     provenance,
     review,
     secrets_box,
+    signing,
     stores,
 )
 from captain_claw.logging import get_logger
@@ -343,7 +344,9 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
             "contacts": options.contacts,
             "package": provenance.next_version(agent_dir, options.package) if options.package.strip() else None,
         }
-        manifest = await asyncio.to_thread(archive.write, staging, manifest, out)
+        deck = str((await srv._get_system_config()).get("instance_name") or "Captain")
+        manifest = await asyncio.to_thread(archive.write, staging, manifest, out,
+                                           lambda raw: signing.sign(raw, deck))
     finally:
         shutil.rmtree(staging, ignore_errors=True)
     record = {"id": bundle_id, "owner": owner_id, "slug": slug,
