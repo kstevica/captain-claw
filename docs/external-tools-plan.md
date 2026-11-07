@@ -814,6 +814,21 @@ handles it directly; the agent isn't needed.
   Tests: `test_external_tool_uses.py` (25), `test_external_tools_calls.py`
   (11), and the sandbox check (the line works under Landlock with `--no-net`,
   container, ABI 6).
+- **7b (2026-11-07):** `{"custom_tool": "<name>", "why": ...}` in `uses` (one
+  of the owner's own tools; not itself). `captain.custom_tool()` goes to the
+  agent (`op: "custom_tool"`), which runs it with its own `custom_tools` tool,
+  naming the run that asked (`via`) and handing back Flight Deck's result as
+  JSON. Flight Deck keeps each running call that can ask for more
+  (`external_tools._RUNS`); a run with `via` must be that call's own runner,
+  declared in its uses, not already in the chain, at most `MAX_DEPTH` (3)
+  deep, and it gets the outer run's time left less 5 s; the 50-request budget
+  is shared. The inner tool's files come into the outer run's `in/`
+  (`captain.last_files`). People need the tools it runs: `depends_on` on a
+  tool's view (yours, added, offered, not offered) with Add on its sheet, a
+  line on the card, and for the owner "Offer them too"
+  (`POST /fd/external-tools/<slug>/offer-dependencies`: the same people, and
+  everybody if it's offered to everybody). Tests:
+  `test_external_tools_nested.py` (5).
 
 #### Build order (one PR each)
 

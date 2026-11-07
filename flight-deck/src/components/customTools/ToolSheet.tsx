@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Wrench, Play, KeyRound, UploadCloud, History, Share2, BarChart3, Trash2, Hammer, ChevronDown, ChevronRight, X } from 'lucide-react'
+import { Wrench, Play, KeyRound, UploadCloud, History, Share2, BarChart3, Trash2, Hammer, ChevronDown, ChevronRight, X, Workflow, Plus } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import {
   customToolsApi, type JsonSchema, type RunResult, type Sharing, type ToolDetail, type Usage,
@@ -162,6 +162,30 @@ export function ToolSheet({ slug, owner, mine, onClose, onChanged, onDeleted }: 
           <Notice tone="amber">Add it first to let your agents use it: it runs as you, with your secrets and files.</Notice>
         )}
 
+        {(tool.depends_on || []).length > 0 && (
+          <Section icon={Workflow} title="Tools it runs">
+            <p className="text-xs text-zinc-500">
+              {mine ? 'It runs these of your tools while it works. People you offer it to need them too.'
+                : 'It runs these tools while it works, as you. Add them too, or it stops when it reaches one.'}
+            </p>
+            <ul className="space-y-1.5">
+              {(tool.depends_on || []).map((d) => (
+                <li key={d.slug} className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 px-3 py-2 text-xs">
+                  <span className="min-w-0"><span className="text-zinc-200">{d.title}</span> <span className="font-mono text-zinc-500">{d.slug}</span></span>
+                  {d.state === 'yours' ? (d.live ? <Pill tone="emerald">Live</Pill> : <Pill tone="amber">Not published</Pill>)
+                    : d.state === 'added' ? <Pill tone="emerald">Added</Pill>
+                      : d.state === 'offered' ? (
+                        <Button icon={Plus} busy={busy === `dep-${d.slug}`} onClick={() => act(`dep-${d.slug}`, () => customToolsApi.add(d.owner, d.slug))}>Add</Button>
+                      ) : <Pill tone="amber">Not offered to you</Pill>}
+                </li>
+              ))}
+            </ul>
+            {!mine && (tool.depends_on || []).some((d) => d.state === 'not_offered') && (
+              <p className="text-xs text-amber-600 dark:text-amber-400">Its maker hasn't offered you every tool it runs, so part of it won't work for you yet.</p>
+            )}
+          </Section>
+        )}
+
         {m && (mine || tool.added) && (
           <Section icon={Play} title="Try it" action={
             <button className="text-xs text-zinc-500 underline-offset-2 hover:underline" onClick={() => {
@@ -313,6 +337,12 @@ export function ToolSheet({ slug, owner, mine, onClose, onChanged, onDeleted }: 
                 onChange={(on) => act('everybody', () => customToolsApi.everybody(slug, on))} />
             </div>
             <p className="text-xs text-zinc-500">{sharing.added_by === 1 ? '1 person has added it.' : `${sharing.added_by} people have added it.`}</p>
+            {(tool.depends_on || []).length > 0 && (sharing.people.length > 0 || !!sharing.everybody) && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-zinc-800 p-3">
+                <span className="min-w-0 text-xs text-zinc-500">It runs {(tool.depends_on || []).map((d) => d.title).join(', ')}: offer {(tool.depends_on || []).length === 1 ? 'it' : 'them'} to the same people so it works for them.</span>
+                <Button icon={Share2} busy={busy === 'deps'} onClick={() => act('deps', () => customToolsApi.offerDependencies(slug), () => setNote('Offered the tools it runs the same way.'))}>Offer them too</Button>
+              </div>
+            )}
           </Section>
         )}
 

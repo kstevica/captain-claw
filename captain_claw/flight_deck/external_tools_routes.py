@@ -237,12 +237,36 @@ async def _person(uid: str) -> dict[str, str]:
     return {"id": uid, "email": row.get("email") or "", "name": row.get("display_name") or row.get("email") or uid}
 
 
+async def dependencies_for(user_id: str, owner: str, slug: str) -> list[dict[str, Any]]:
+    """The other tools of *owner*'s that this one runs, as *user_id* stands with
+    each: their own, added, offered to them, or not offered (Phase 7b)."""
+    out = []
+    for dep in xt.depends_on(owner, slug):
+        try:
+            there = xt.exists(owner, dep)
+        except xt.ToolError:
+            there = False
+        summary = xt.summary(owner, dep) if there else {"title": dep, "live": None}
+        if owner == user_id:
+            state = "yours"
+        elif there and await can_use(user_id, owner, dep):
+            state = "added"
+        elif there and await offered_to(user_id, owner, dep):
+            state = "offered"
+        else:
+            state = "not_offered"
+        out.append({"owner": owner, "slug": dep, "title": summary.get("title") or dep,
+                    "live": bool(summary.get("live")), "state": state})
+    return out
+
+
 async def _offer_view(user_id: str, owner: str, slug: str, how: str) -> dict[str, Any] | None:
     summary = xt.summary(owner, slug)
     if not summary.get("live"):
         return None
     return {**summary, "owner_person": await _person(owner), "offered": how, "declares": _declares(owner, slug),
-            "added": bool(await get_db().get_setting(user_id, added_key(owner, slug)))}
+            "added": bool(await get_db().get_setting(user_id, added_key(owner, slug))),
+            "depends_on": await dependencies_for(user_id, owner, slug)}
 
 
 def _use_target(user: dict, slug: str, owner: str) -> tuple[str, str, str]:
@@ -331,6 +355,7 @@ async def get_one(slug: str, owner: str = Query(""), user: dict = Depends(_enabl
         out = {**{k: detail.get(k) for k in ("owner", "slug", "title", "description", "live", "manifest")},
                "owner_person": await _person(owner), "offered": how, "declares": _declares(owner, slug),
                "added": bool(await get_db().get_setting(uid, added_key(owner, slug)))}
+    out["depends_on"] = await dependencies_for(uid, owner, slug)
     have = await secret_values(uid, owner, slug)
     out["secrets"] = [{**s, "set": s["name"] in have} for s in xt.secret_names(owner, slug)]
     return out
@@ -563,6 +588,8 @@ class AgentRunBody(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
     # Phase 7: the id the agent is waiting under, for the tool's requests.
     callback: str = Field("", max_length=128)
+    # Phase 7b: the run of another tool that asked for this one.
+    via: str = Field("", max_length=32)
 
 
 # ── A tool's requests, passed to the agent that ran it (Phase 7) ─────────
@@ -646,6 +673,35 @@ class AgentLink(xt.Link):
             raise xt.ToolError("files", f"{ref} isn't a file you can read.")
         return await asyncio.to_thread(xt._bring_in, ctx, src, src.name)
 
+    async def custom_tool(self, ctx: xt.CallContext, slug: str, params: dict) -> dict[str, Any]:
+        """Another of the owner's tools, run by the same agent as the same
+        person (Phase 7b); its files come into this run's in/ folder."""
+        import json as _json
+
+        params = await asyncio.to_thread(self._hand_out, ctx, params)
+        left = max(1.0, ctx.remaining())
+        answer = await self._post({"callback": self.callback, "identity": self.identity(ctx), "op": "custom_tool",
+                                   "custom_tool": slug, "via": ctx.call_id, "input": params, "title": ctx.title,
+                                   "timeout_s": int(left)}, left)
+        if not answer.get("ok"):
+            return {"ok": False, "error": str(answer.get("error") or answer.get("content") or f"{slug} didn't run.")}
+        try:
+            result = _json.loads(str(answer.get("content") or ""))
+        except ValueError:
+            return {"ok": False, "error": f"{slug} gave back something that isn't a result."}
+        if not isinstance(result, dict) or not result.get("ok"):
+            err = (result.get("error") or {}) if isinstance(result, dict) else {}
+            return {"ok": False, "error": str(err.get("message") or err or f"{slug} failed.")}
+        resolve = _file_resolver(ctx.caller)
+        files = []
+        for f in result.get("files") or []:
+            try:
+                src = resolve(str(f.get("path") or ""))
+                files.append(str(await asyncio.to_thread(xt._bring_in, ctx, src, str(f.get("name") or src.name))))
+            except (xt.ToolError, OSError, AttributeError) as exc:
+                xt.log.debug("A nested custom tool's file couldn't be brought in", error=str(exc))
+        return {"ok": True, "output": result.get("output"), "files": files}
+
 
 def _agent_link(request: Request, runner: Runner, callback: str) -> AgentLink | None:
     if not callback:
@@ -697,9 +753,40 @@ async def agent_describe(body: AgentToolBody, runner: Runner = Depends(_agent_en
     }
 
 
+async def _nested_target(runner: Runner, body: AgentRunBody) -> tuple[str, str, xt.CallContext]:
+    """Phase 7b: another tool asked for this one. It's that tool's owner's own
+    tool, declared in its uses, run as the same person, inside its time, no
+    deeper than MAX_DEPTH and never one already in the chain."""
+    outer = xt.running(body.via)
+    if outer is None:
+        raise HTTPException(409, "The tool that asked for this one isn't running any more.")
+    if outer.caller != runner.user_id:
+        raise HTTPException(403, "That run belongs to someone else.")
+    try:
+        slug = xt.check_slug(body.tool)
+    except xt.ToolError as exc:
+        raise _http(exc) from None
+    owner = outer.owner
+    if not any(u.get("custom_tool") == slug for u in outer.manifest.uses):
+        raise HTTPException(403, f"{outer.title} didn't declare {slug} in its uses.")
+    if (owner, slug) in (*outer.chain, (outer.owner, outer.slug)):
+        raise HTTPException(409, f"{slug} is already running further up this chain: a tool can't run itself again.")
+    if outer.depth + 1 > xt.MAX_DEPTH:
+        raise HTTPException(409, f"Custom tools can run each other at most {xt.MAX_DEPTH} deep.")
+    if not xt.exists(owner, slug) or not await can_use(runner.user_id, owner, slug):
+        who = (await _person(owner))["name"]
+        raise HTTPException(403, f"{outer.title} runs {slug} by {who}, which you haven't added: add it under "
+                                 "Custom tools → Shared with me.")
+    return owner, slug, outer
+
+
 @agent_router.post("/run")
 async def agent_run(body: AgentRunBody, request: Request, runner: Runner = Depends(_agent_enabled)) -> dict[str, Any]:
-    owner, slug = await resolve_ref(runner.user_id, body.tool)
+    outer = None
+    if body.via:
+        owner, slug, outer = await _nested_target(runner, body)
+    else:
+        owner, slug = await resolve_ref(runner.user_id, body.tool)
     manifest = xt.manifest_of(owner, slug)
     if manifest is not None and manifest.calls_back and not body.callback:
         raise HTTPException(409, TOO_OLD.format(title=manifest.title))
@@ -707,7 +794,7 @@ async def agent_run(body: AgentRunBody, request: Request, runner: Runner = Depen
         return await xt.run_tool(owner, slug, runner.user_id, body.input,
                                  secret_values=await secret_values(runner.user_id, owner, slug),
                                  resolve_file=_file_resolver(runner.user_id), deliver=_deliverer(runner.user_id, slug),
-                                 link=_agent_link(request, runner, body.callback))
+                                 link=_agent_link(request, runner, body.callback), parent=outer)
     except xt.ToolError as exc:
         raise _http(exc) from None
 
@@ -1091,6 +1178,30 @@ async def offer_everybody(slug: str, body: EverybodyBody, user: dict = Depends(_
             except Exception:
                 pass
     return {"everybody": {**listing, "live": listing_live(listing, settings)}}
+
+
+@router.post("/{slug}/offer-dependencies")
+async def offer_dependencies(slug: str, user: dict = Depends(_enabled)) -> dict[str, Any]:
+    """Offer the tools this one runs to the same people it's offered to (and to
+    everybody if it is), so it works for them too (Phase 7b)."""
+    owner, slug = _own(user, slug)
+    db = get_db()
+    people = await db.list_shares_for_resource(SHARE_TYPE, share_id(owner, slug), owner)
+    listing = await db.get_tool_listing(owner, slug)
+    settings = await deck_settings()
+    done = []
+    for dep in xt.depends_on(owner, slug):
+        if not xt.exists(owner, dep) or not xt.read_live(owner, dep):
+            continue
+        for share in people:
+            await db.create_share(SHARE_TYPE, share_id(owner, dep), owner, str(share["grantee_id"]),
+                                  str(share.get("permission") or "view"))
+        if listing and listing.get("status") in ("approved", "pending"):
+            current = await db.get_tool_listing(owner, dep)
+            if not current or current.get("status") == "rejected":
+                await db.set_tool_listing(owner, dep, "pending" if settings["everybody_needs_approval"] else "approved")
+        done.append(dep)
+    return {"offered": done, "people": len(people), "everybody": bool(listing)}
 
 
 @router.get("/{slug}/usage")
