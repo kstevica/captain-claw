@@ -2,7 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { MessageCircleQuestion, Send, X, ShieldAlert } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { asksApi, SHOW_ASKS_EVENT, type AskQuestion, type OpenAsk } from '../../services/asksApi'
-import { Dialog, Button, Notice, inputCls, labelCls } from '../console/parts'
+import { Dialog, Button, Notice, inputCls } from '../console/parts'
+
+// Read at chat size: the question and its answers match the chat around it,
+// not the console's small form text.
+const answerCls = inputCls.replace('text-sm', 'text-base leading-relaxed')
 
 // A question for this person: from a custom tool running for them (captain.ask)
 // or from one of their agents (its ask_user tool). Mounted once beside the app
@@ -34,19 +38,19 @@ function QuestionField({ q, value, onChange }: { q: AskQuestion; value: Answer; 
   const label = <>{q.question}{q.optional && <span className="text-zinc-600"> (optional)</span>}</>
   return (
     <fieldset className="space-y-2">
-      <legend className={labelCls}>{label}</legend>
-      {q.help && <p className="-mt-1 text-[11px] leading-relaxed text-zinc-500">{q.help}</p>}
+      <legend className="mb-1 block text-base font-medium leading-snug text-zinc-100">{label}</legend>
+      {q.help && <p className="text-sm leading-relaxed text-zinc-500">{q.help}</p>}
       {q.kind === 'text' ? (
         (q.lines ?? 1) > 1 ? (
-          <textarea className={inputCls} rows={q.lines} maxLength={4000} value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
+          <textarea className={answerCls} rows={Math.max(3, q.lines ?? 3)} maxLength={4000} value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
         ) : (
-          <input className={inputCls} maxLength={4000} autoComplete="off" value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
+          <input className={answerCls} maxLength={4000} autoComplete="off" value={String(value ?? '')} onChange={(e) => onChange(e.target.value)} />
         )
       ) : q.kind === 'confirm' ? (
         <div className="flex gap-2">
           {[true, false].map((yes) => (
             <button key={String(yes)} type="button" onClick={() => onChange(yes)}
-              className={`rounded-xl border px-4 py-2 text-sm font-medium transition-colors ${value === yes
+              className={`rounded-xl border px-5 py-2 text-base font-medium transition-colors ${value === yes
                 ? 'border-violet-500/60 bg-violet-500/10 text-violet-700 dark:text-violet-300' : 'border-zinc-800 text-zinc-300 hover:border-zinc-700'}`}>
               {yes ? 'Yes' : 'No'}
             </button>
@@ -58,9 +62,9 @@ function QuestionField({ q, value, onChange }: { q: AskQuestion; value: Answer; 
             const multi = q.kind === 'multiple'
             const on = multi ? Array.isArray(value) && value.includes(c) : value === c
             return (
-              <label key={c} className={`flex cursor-pointer items-start gap-2.5 rounded-xl border px-3 py-2 text-sm transition-colors ${on
+              <label key={c} className={`flex cursor-pointer items-start gap-3 rounded-xl border px-3.5 py-2.5 text-base transition-colors ${on
                 ? 'border-violet-500/60 bg-violet-500/5 text-zinc-100' : 'border-zinc-800 text-zinc-300 hover:border-zinc-700'}`}>
-                <input type={multi ? 'checkbox' : 'radio'} name={q.id} className="mt-0.5" checked={on}
+                <input type={multi ? 'checkbox' : 'radio'} name={q.id} className="mt-1.5 shrink-0" checked={on}
                   onChange={() => {
                     if (!multi) return onChange(c)
                     const now = Array.isArray(value) ? value : []
@@ -71,7 +75,7 @@ function QuestionField({ q, value, onChange }: { q: AskQuestion; value: Answer; 
             )
           })}
           {q.kind === 'multiple' && (
-            <p className="text-[11px] text-zinc-500">
+            <p className="text-sm text-zinc-500">
               {q.min === q.max ? `Pick ${q.min}.` : `Pick ${q.min ?? 0}${q.max !== undefined ? `–${q.max}` : ' or more'}.`}
             </p>
           )}
@@ -106,13 +110,13 @@ function AskDialog({ ask, onDone, onLater }: { ask: OpenAsk; onDone: () => void;
   const mins = Math.floor(left / 60)
   const timeLeft = left <= 0 ? 'time is up' : mins >= 1 ? `${mins} min left` : `${left} s left`
   return (
-    <Dialog title={`${ask.title} asks`} icon={MessageCircleQuestion} onClose={onLater} keepOpen footer={<>
+    <Dialog title={`${ask.title} asks`} icon={MessageCircleQuestion} onClose={onLater} keepOpen wide footer={<>
       <Button variant="ghost" className="mr-auto" onClick={onLater}>Later</Button>
       <Button variant="ghost" icon={X} busy={busy === 'decline'} disabled={!!busy} onClick={() => reply(true)}>Don't answer</Button>
       <Button variant="primary" icon={Send} busy={busy === 'send'} disabled={!!busy || problems.length > 0} onClick={() => reply(false)}>Send</Button>
     </>}>
       <div className="space-y-4">
-        <p className="text-xs leading-relaxed text-zinc-500">
+        <p className="text-sm leading-relaxed text-zinc-500">
           {ask.source === 'agent'
             ? <>{ask.agent_name || 'Your agent'} needs your answer to go on · {timeLeft}.</>
             : <>{ask.label || 'A custom tool'}{ask.owner_name ? ` (a tool by ${ask.owner_name})` : ''} is running
@@ -122,7 +126,7 @@ function AskDialog({ ask, onDone, onLater }: { ask: OpenAsk; onDone: () => void;
         {ask.questions.map((q) => (
           <QuestionField key={q.id} q={q} value={values[q.id]} onChange={(v) => setValues((now) => ({ ...now, [q.id]: v }))} />
         ))}
-        <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-zinc-500">
+        <p className="flex items-start gap-1.5 text-xs leading-relaxed text-zinc-500">
           <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           {ask.source === 'agent' ? 'Never type a password or key here.'
             : "Never type a password or key here: a tool's secrets go in its Secrets, on the Custom tools page."}
