@@ -754,16 +754,12 @@ class AgentLink(xt.Link):
 
         owner_name = "" if ctx.owner_runs else (await _person(ctx.owner))["name"]
         label = f"{ctx.title}, used by {ctx.outer.title}" if ctx.outer is not None else ""
+        from captain_claw.flight_deck.agent_names import display_name
+
+        agent_name = ctx.agent_name or await display_name(self.agent_slug, ctx.caller)
         return await asks.ask(ctx.caller, call_id=ctx.call_id, title=ctx.title, owner_name=owner_name,
-                              agent_name=ctx.agent_name or _agent_name(self.agent_slug), label=label,
+                              agent_name=agent_name, label=label,
                               questions=questions, wait_s=wait_s)
-
-
-def _agent_name(slug: str) -> str:
-    from captain_claw.flight_deck import server as srv
-
-    entry = srv._load_process_registry().get(slug) if slug else None
-    return str((entry or {}).get("name") or slug or "")
 
 
 HOST_PATH = "/api/custom-tools/host"
@@ -916,6 +912,7 @@ async def agent_run(body: AgentRunBody, request: Request, runner: Runner = Depen
     if link is None and manifest is not None and manifest.asks:
         link = AgentLink(runner.agent, "", runner)  # it only asks the person
     from captain_claw.flight_deck import person_asks as asks
+    from captain_claw.flight_deck.agent_names import display_name
 
     async def go() -> dict[str, Any]:
         try:
@@ -923,7 +920,8 @@ async def agent_run(body: AgentRunBody, request: Request, runner: Runner = Depen
                                      secret_values=await secret_values(runner.user_id, owner, slug),
                                      resolve_file=_file_resolver(runner.user_id),
                                      deliver=_deliverer(runner.user_id, slug), link=link, parent=outer,
-                                     attended=asks.attended(body.origin), agent_name=_agent_name(runner.agent))
+                                     attended=asks.attended(body.origin),
+                                     agent_name=await display_name(runner.agent, runner.user_id))
         except xt.ToolError as exc:
             raise _http(exc) from None
 
@@ -1230,6 +1228,11 @@ async def my_agents(user: dict = Depends(_enabled)) -> dict[str, Any]:
         alive = srv._process_is_alive(slug)
         status = "running" if alive else "asleep" if (entry.get("asleep") and not entry.get("stopped")) else "stopped"
         out.append({"slug": slug, "name": str(entry.get("name") or slug), "status": status})
+    from captain_claw.flight_deck.agent_names import display_names
+
+    names = await display_names(uid, [a["slug"] for a in out])  # as their own agent list shows them
+    for a in out:
+        a["name"] = names.get(a["slug"]) or a["name"]
     out.sort(key=lambda a: (a["status"] != "running", a["name"].lower()))
     return {"agents": out}
 

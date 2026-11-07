@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { MessageCircleQuestion, Send, X, ShieldAlert } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
-import { asksApi, SHOW_ASKS_EVENT, type AskQuestion, type OpenAsk } from '../../services/asksApi'
+import { asksApi, type AskQuestion, type OpenAsk } from '../../services/asksApi'
 import { Dialog, Button, Notice, inputCls } from '../console/parts'
 
 // Read at chat size: the question and its answers match the chat around it,
@@ -13,7 +13,7 @@ const answerCls = inputCls.replace('text-sm', 'text-base leading-relaxed')
 // (every layout): while signed in, the tab keeps one request waiting on
 // /fd/asks, which answers as soon as a question opens or closes. The first open
 // question shows in a dialog; answered here, it closes in their other tabs too.
-// "Later" hides it in this tab until the bell (or a new question) brings it back.
+// The only ways out are an answer or "Don't answer": the asker waits on it.
 
 type Answer = string | string[] | boolean | null
 
@@ -85,7 +85,7 @@ function QuestionField({ q, value, onChange }: { q: AskQuestion; value: Answer; 
   )
 }
 
-function AskDialog({ ask, onDone, onLater }: { ask: OpenAsk; onDone: () => void; onLater: () => void }) {
+function AskDialog({ ask, onDone }: { ask: OpenAsk; onDone: () => void }) {
   const [values, setValues] = useState<Record<string, Answer>>(() =>
     Object.fromEntries(ask.questions.map((q) => [q.id, startOf(q)])))
   const [busy, setBusy] = useState<'' | 'send' | 'decline'>('')
@@ -110,8 +110,7 @@ function AskDialog({ ask, onDone, onLater }: { ask: OpenAsk; onDone: () => void;
   const mins = Math.floor(left / 60)
   const timeLeft = left <= 0 ? 'time is up' : mins >= 1 ? `${mins} min left` : `${left} s left`
   return (
-    <Dialog title={`${ask.title} asks`} icon={MessageCircleQuestion} onClose={onLater} keepOpen wide footer={<>
-      <Button variant="ghost" className="mr-auto" onClick={onLater}>Later</Button>
+    <Dialog title={`${ask.title} asks`} icon={MessageCircleQuestion} onClose={onDone} keepOpen closable={false} wide footer={<>
       <Button variant="ghost" icon={X} busy={busy === 'decline'} disabled={!!busy} onClick={() => reply(true)}>Don't answer</Button>
       <Button variant="primary" icon={Send} busy={busy === 'send'} disabled={!!busy || problems.length > 0} onClick={() => reply(false)}>Send</Button>
     </>}>
@@ -139,7 +138,6 @@ function AskDialog({ ask, onDone, onLater }: { ask: OpenAsk; onDone: () => void;
 export function PersonAsks() {
   const signedIn = useAuthStore((s) => s.authEnabled === false || !!s.user)
   const [asks, setAsks] = useState<OpenAsk[]>([])
-  const [hidden, setHidden] = useState<Set<string>>(new Set())
   const known = useRef<string[]>([])
 
   useEffect(() => {
@@ -161,18 +159,10 @@ export function PersonAsks() {
     return () => { alive = false }
   }, [signedIn])
 
-  // The bell (or anything else) can bring a hidden question back.
-  useEffect(() => {
-    const show = () => setHidden(new Set())
-    window.addEventListener(SHOW_ASKS_EVENT, show)
-    return () => window.removeEventListener(SHOW_ASKS_EVENT, show)
-  }, [])
-
   const done = useCallback((id: string) => setAsks((now) => now.filter((a) => a.id !== id)), [])
-  const current = signedIn ? asks.find((a) => !hidden.has(a.id)) : undefined
+  const current = signedIn ? asks[0] : undefined
   if (!current) return null
   return (
-    <AskDialog key={current.id} ask={current} onDone={() => done(current.id)}
-      onLater={() => setHidden((now) => new Set([...now, current.id]))} />
+    <AskDialog key={current.id} ask={current} onDone={() => done(current.id)} />
   )
 }

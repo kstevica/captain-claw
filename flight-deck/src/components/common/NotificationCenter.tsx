@@ -21,7 +21,6 @@ import { OnboardingDialog } from '../layout/OnboardingDialog'
 import { LessonInboxBadge } from '../lessons/LessonInbox'
 import { useLessonInbox } from '../../stores/lessonInboxStore'
 import { useCustomToolsStore } from '../../stores/customToolsStore'
-import { SHOW_ASKS_EVENT } from '../../services/asksApi'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import {
   SHARED_SECTION_ID, sharedNotificationAction, type SharedNotificationAction,
@@ -244,11 +243,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
   // Custom tools page, on the tool or the Approvals tab.
   const openTools = (refType: string, refId: string) => {
     onClose()
-    if (refType === 'person_ask') {
-      // A question for the person (a custom tool's or an agent's): its dialog, wherever they are.
-      window.dispatchEvent(new Event(SHOW_ASKS_EVENT))
-      return
-    }
+    if (refType === 'person_ask') return  // its dialog is already open, wherever they are
     const [owner, slug] = refId.split('/')
     const focus = refType === 'custom_tool_approval' ? { tab: 'approvals' as const }
       : refType === 'custom_tool_proposal' ? { tab: 'mine' as const }
@@ -341,7 +336,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
               hint={forge ? 'Click to open the plan.' : setup ? (exam ? 'Click to see the exam.' : lessons ? 'Click to approve it, or dismiss it.'
                 : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.')
                 : profile ? (n.type === 'error' ? 'Click to open your Profile and try again.' : 'Click to review it in your Profile.')
-                : tools ? (tools === 'person_ask' ? 'Click to answer it.' : 'Click to open Custom tools.') : ''}
+                : tools ? (tools === 'person_ask' ? 'Answer it in the open question.' : 'Click to open Custom tools.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
                 ? (waiting.has(n.refId) ? 'waiting' : 'answered') : undefined}
               step={n.refType === 'autonomy_action' && n.refId && waiting?.get(n.refId)?.taskboard

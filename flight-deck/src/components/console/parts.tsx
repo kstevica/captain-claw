@@ -350,8 +350,10 @@ export function Sheet({ title, subtitle, icon: Icon, onClose, footer, children, 
 /** A centred dialog for short choices; ``wide`` for one read at chat size
  *  (a question for the person); ``large`` for writing (most of the screen, and
  *  its body can fill the height). ``keepOpen`` ignores Escape and a click
- *  outside, so typed work isn't lost by accident. */
-export function Dialog({ title, icon: Icon, onClose, footer, children, large = false, wide = false, keepOpen = false }: {
+ *  outside, so typed work isn't lost by accident; ``closable={false}`` has no
+ *  close button either: its footer is the only way out. */
+export function Dialog({ title, icon: Icon, onClose, footer, children, large = false, wide = false, keepOpen = false,
+  closable = true }: {
   title: ReactNode
   icon?: LucideIcon
   onClose: () => void
@@ -360,6 +362,7 @@ export function Dialog({ title, icon: Icon, onClose, footer, children, large = f
   large?: boolean
   wide?: boolean
   keepOpen?: boolean
+  closable?: boolean
 }) {
   useEffect(() => {
     if (keepOpen) return
@@ -384,9 +387,11 @@ export function Dialog({ title, icon: Icon, onClose, footer, children, large = f
             </span>
           )}
           <h2 className="min-w-0 flex-1 truncate text-base font-semibold text-zinc-100">{title}</h2>
-          <button onClick={onClose} aria-label="Close" title="Close" className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
-            <X className="h-4 w-4" />
-          </button>
+          {closable && (
+            <button onClick={onClose} aria-label="Close" title="Close" className="rounded-lg p-1.5 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200">
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
         <div className={`min-h-0 flex-1 overflow-y-auto px-5 py-5 ${large ? 'flex flex-col' : ''}`}>{children}</div>
         {footer && (
