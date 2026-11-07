@@ -433,9 +433,26 @@ kiosk reaches it through Settings.
   secrets for it.
 - Tests: `test_external_tools_sharing.py` (9).
 
-### Phase 4: the page
+### Phase 4: the page — built 2026-11-07
 
-- `components/tools/` with the panes above; kiosk Settings entry; phone width.
+- `components/customTools/`: `CustomToolsPage` (tabs Mine / Shared with me /
+  Everybody / Approvals for an admin), `ToolSheet` (Try it from the input
+  schema or as JSON, your secrets for it, publishing with its steps, versions
+  with Make live, Change it through Crew, Offer it to people (ShareModal) and
+  to everybody, how it's used, delete), `NewToolDialog` (name, title, what it
+  should do, coding agent), `toolParts`. `services/customToolsApi.ts`,
+  `stores/customToolsStore.ts` (deck status, kiosk open state, a focus a
+  bell can set).
+- Full layout: view `custom-tools`, a sidebar entry under Multi-Agent shown
+  only while the deck has custom tools on. Kiosk: Settings → Custom tools
+  opens it in a wide dialog. Bells with `custom_tool` /
+  `custom_tool_approval` open the page (on the Approvals tab for an admin's).
+- Checked on a throwaway deck with sign-in: the admin's page and a tool's
+  sheet (a run on a VFS file with the owner's secret, the report file, the
+  sections), offering to everybody and approving it; a non-admin in kiosk mode
+  without Crew reaching it from Settings, Add, the missing-secret refusal,
+  their own secret, a run on their own file; phone width (no sideways scroll,
+  bottom sheet).
 
 ### Phase 5: agents propose tools
 

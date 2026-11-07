@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import {
   ChevronLeft,
   ChevronRight,
+  Wrench,
   LayoutDashboard,
   Search,
   Plus,
@@ -73,6 +74,8 @@ import { takeTaskboardLink, useTaskboardStore } from '../../stores/taskboardStor
 import { TaskBoard } from '../taskboard/TaskBoard'
 import { CrewBoard } from '../crew/CrewBoard'
 import { useCrewAllowed, useCrewStore } from '../../stores/crewStore'
+import { useCustomToolsOn, useCustomToolsStore } from '../../stores/customToolsStore'
+import { CustomToolsPage } from '../customTools/CustomToolsPage'
 import { useCaptainSwarmStore, useCanSwarm } from '../../stores/captainSwarmStore'
 import { CaptainSwarmPage } from '../../pages/CaptainSwarmPage'
 import { SharedFolders } from '../vfs/SharedFolders'
@@ -392,6 +395,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Crew: coding agents working for this user, when an admin approved it.
   const crewOpen = useCrewStore((s) => s.open)
   const closeCrew = useCrewStore((s) => s.close)
+  // Custom tools: the person's own programs and the ones offered to them.
+  const toolsOpen = useCustomToolsStore((s) => s.open)
+  const closeTools = useCustomToolsStore((s) => s.close)
+  const refreshCustomTools = useCustomToolsStore((s) => s.refreshStatus)
+  useEffect(() => { refreshCustomTools() }, [refreshCustomTools])
   // Captain Swarm: many attempts at one task, documents and research, each checked by Captain.
   const swarmOpen = useCaptainSwarmStore((s) => s.open)
   const closeSwarm = useCaptainSwarmStore((s) => s.close)
@@ -852,7 +860,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     return !!a && a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
-  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen
+  const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen || toolsOpen
     || !!filesData
   const closePhoneOverlays = () => {
     closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null)
@@ -1059,6 +1067,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       {crewOpen && (
         <KioskWideDialog label="Crew" phone={isMobile} onClose={closeCrew} roomy>
           <CrewBoard phone={isMobile} onClose={closeCrew} />
+        </KioskWideDialog>
+      )}
+      {toolsOpen && (
+        <KioskWideDialog label="Custom tools" phone={isMobile} onClose={closeTools} roomy>
+          <CustomToolsPage phone={isMobile} onClose={closeTools} />
         </KioskWideDialog>
       )}
       {swarmOpen && canSwarm && (
@@ -1294,6 +1307,8 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
   const signedIn = authEnabled && authUser
   const crewAllowed = useCrewAllowed()
   const openCrew = useCrewStore((s) => s.openCrew)
+  const toolsOn = useCustomToolsOn()
+  const openTools = useCustomToolsStore((s) => s.openTools)
   const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
   const canSwarm = useCanSwarm()
 
@@ -1312,6 +1327,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
       items: [
         { icon: ListChecks, label: 'Taskboard', hint: 'Asked, sent, and what needs you', onSelect: onTaskboard, tone: 'teal' },
         ...(crewAllowed ? [{ icon: Ship, label: 'Crew', hint: 'Coding agents working for you', onSelect: () => { onClose(); openCrew() }, tone: 'teal' as const }] : []),
+        ...(toolsOn ? [{ icon: Wrench, label: 'Custom tools', hint: 'Programs your agents run, yours and ones offered to you', onSelect: () => { onClose(); openTools() }, tone: 'violet' as const }] : []),
         ...(canSwarm ? [{ icon: Target, label: 'Captain Swarm', hint: 'Many tries at a task, document or research; Captain checks each', onSelect: () => { onClose(); openSwarm() }, tone: 'amber' as const }] : []),
         { icon: AlarmClock, label: 'Scheduled tasks', hint: 'On a timer, results by chat or email', onSelect: onScheduled, tone: 'amber' },
         { icon: Activity, label: 'Activity', hint: 'Every tool they used, and how it went', onSelect: onActivity, tone: 'emerald' },

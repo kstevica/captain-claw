@@ -10,5 +10,5 @@ export const CUSTOM_TOOLS_HINT =
 export const EVERYBODY_APPROVAL_TITLE = 'Approve tools shared with everybody'
 
 export const EVERYBODY_APPROVAL_HINT =
-  'A tool someone shares with everybody waits for an admin before others can add it. Off: everyone is offered it at once. ' +
-  'Sharing isn’t available yet; this applies once it is.'
+  'A tool someone offers to everybody waits for an admin before others can add it. Off: everyone is offered it at once. ' +
+  'Pending ones are under Custom tools → Approvals.'
