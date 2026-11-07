@@ -11,6 +11,7 @@
     POST   /fd/agent-bundle/safety/{id}/restore     undo that import: the agent as it was
     DELETE /fd/agent-bundle/uploads/{id}            throw the upload away
     GET    /fd/agent-bundle/tiers                   your model tiers (no keys), for an import
+    GET    /fd/agent-bundle/packages/{slug}         the packages an agent was exported as (their last version)
 
 An admin acting for a user (``X-FD-Act-As``) works on that user's agents, as
 on the other agent routes. Made bundles and uploads are swept after a day.
@@ -28,7 +29,15 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from captain_claw.flight_deck.agent_bundle import archive, catalog, export, merge, restore, review
+from captain_claw.flight_deck.agent_bundle import (
+    archive,
+    catalog,
+    export,
+    merge,
+    provenance,
+    restore,
+    review,
+)
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.logging import get_logger
 
@@ -76,6 +85,18 @@ class ExportBody(BaseModel):
     contacts: bool | None = None
     # A full backup with a passphrase carries the agent's keys, sealed.
     passphrase: str = Field(default="", max_length=500)
+    # A named package: this export is its next version (an agent holding an
+    # earlier one can be updated from it).
+    package: str = Field(default="", max_length=80)
+
+
+@router.get("/packages/{slug}")
+async def agent_packages(slug: str, user: dict = Depends(get_managed_user)) -> dict:
+    """The packages this agent was exported as, with their last version."""
+    from captain_claw.flight_deck import server as srv
+
+    srv._verify_process_owner(slug, _owner(user))
+    return {"packages": provenance.packages(srv.DATA_DIR / slug)}
 
 
 @router.get("/review/{slug}")
@@ -102,7 +123,7 @@ async def export_agent(slug: str, body: ExportBody, request: Request,
         insight_categories=set(body.insight_categories) if body.insight_categories is not None else None,
         exclude_insights=set(body.exclude_insights),
         contacts=(preset == "full") if body.contacts is None else body.contacts,
-        passphrase=body.passphrase)
+        passphrase=body.passphrase, package=body.package)
     _sweep()
     try:
         made = await export.build(slug, owner_id, entry, categories=categories, preset=preset,
@@ -147,7 +168,18 @@ async def upload_bundle(file: UploadFile = File(...), user: dict = Depends(get_m
     path.with_suffix(".json").write_text(json.dumps({
         "id": upload_id, "owner": owner_id, "file_name": str(file.filename or "")[:200], "made": time.time()}),
         encoding="utf-8")
-    return {"upload_id": upload_id, "suggested_name": restore.free_name(summary["agent"]["name"]), **summary}
+    updates = provenance.updates_for(_own_agents(owner_id), summary["package"]) if summary.get("package") else []
+    return {"upload_id": upload_id, "suggested_name": restore.free_name(summary["agent"]["name"]),
+            "updates": updates, **summary}
+
+
+def _own_agents(owner_id: str) -> list[tuple[str, str, Path]]:
+    """The caller's process agents: (slug, name, folder)."""
+    from captain_claw.flight_deck import server as srv
+
+    return [(slug, str(e.get("name") or slug), srv.DATA_DIR / slug)
+            for slug, e in srv._load_process_registry().items()
+            if not owner_id or str(e.get("owner") or "") == owner_id]
 
 
 class ModelChoice(BaseModel):
@@ -212,7 +244,8 @@ async def import_bundle(upload_id: str, body: ImportBody, request: Request,
     except archive.BundleError as exc:
         raise HTTPException(400, str(exc))
     ref: dict[str, Any] = {"path": str(path), "eco_mode": str(agent.get("eco_mode") or ""),
-                           "columns": keys.get("columns") or {} if keys else {}}
+                           "columns": keys.get("columns") or {} if keys else {},
+                           "same_person": str(bundle.manifest.get("owner_ref") or "") == export.person_ref(owner_id)}
     config._bundle = ref
     async with srv._get_spawn_lock():
         result = await srv._spawn_process_locked(config, request, user)
@@ -267,7 +300,16 @@ async def _into_existing(path: Path, agent: dict[str, Any], slug: str, mode: str
 
     entry = srv._verify_process_owner(slug, owner_id)
     if mode not in merge.MODES:
-        raise HTTPException(400, "Pick reset or append.")
+        raise HTTPException(400, "Pick reset, append or update.")
+    try:
+        manifest = (await asyncio.to_thread(archive.open_bundle, path)).manifest
+    except archive.BundleError as exc:
+        raise HTTPException(400, str(exc))
+    same = str(manifest.get("owner_ref") or "") == export.person_ref(owner_id)
+    package = provenance.bundle_package(manifest)
+    earlier = provenance.imported(srv.DATA_DIR / slug).get(package["id"]) if package else None
+    if mode == "update" and not earlier:
+        raise HTTPException(400, "This agent holds no earlier version of that package — add it or replace instead.")
     was_running = srv._process_is_alive(slug)
     if was_running:
         await asyncio.to_thread(srv._do_stop_process, slug)
@@ -281,8 +323,9 @@ async def _into_existing(path: Path, agent: dict[str, Any], slug: str, mode: str
                 raise HTTPException(400, f"Its backup couldn't be taken, so nothing was changed: {exc}")
         try:
             done = await asyncio.to_thread(restore.apply_to_existing, path, srv.DATA_DIR / slug, mode,
-                                           (keys or {}).get("columns"))
-            fd = await restore.fd_side_into_existing(path, slug, owner_id, agent, mode, _secrets.token_hex(3))
+                                           (keys or {}).get("columns"), same_person=same, owner_id=owner_id)
+            fd = await restore.fd_side_into_existing(path, slug, owner_id, agent, mode, _secrets.token_hex(3),
+                                                     earlier=earlier)
         except archive.BundleError as exc:
             raise HTTPException(400, f"{exc} — undo it from its backup.")
     finally:
@@ -295,9 +338,11 @@ async def _into_existing(path: Path, agent: dict[str, Any], slug: str, mode: str
     if fd["schedules"]:
         notes.append(f"{fd['schedules']} scheduled task(s) came with it, switched off.")
     return {"ok": True, "slug": slug, "name": str(entry.get("name") or slug), "mode": mode, "into": True,
-            "counts": restore.headline(done["stores"]), "files": done["files"],
+            "counts": restore.headline(done["stores"]),
+            "files": {k: done["files"].get(k, 0) for k in ("written", "kept")},
             "chat_messages": fd["chat_messages"], "schedules": fd["schedules"], "connections": fd["connections"],
-            "restarted": was_running, "notes": notes,
+            "restarted": was_running, "notes": notes, "package": done.get("package"),
+            "taken_out": done.get("taken_out") or {}, "from_version": int((earlier or {}).get("version") or 0),
             "safety_backup": {k: backup[k] for k in ("id", "file_name", "size")} if backup else None}
 
 

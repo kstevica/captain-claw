@@ -33,7 +33,7 @@ from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
-MODES = ("reset", "append")
+MODES = ("reset", "append", "update")   # update: append after the package's earlier version is taken out (provenance)
 
 # Never merged: a store's own bookkeeping, which belongs to the agent it is in.
 _SKIP_TABLES = frozenset({"insights_pending", "generator_state", "app_state", "backfill_seen"})
@@ -84,11 +84,14 @@ def _standalone_fts(c: sqlite3.Connection) -> list[str]:
     return out
 
 
-def merge_store(src: Path, dst: Path, tables: list[str], mode: str) -> dict[str, dict[str, int]]:
+def merge_store(src: Path, dst: Path, tables: list[str], mode: str) -> dict[str, dict[str, Any]]:
     """Copy *tables* of the bundled store *src* into the agent's store *dst*;
-    per table, how many rows were added and skipped."""
+    per table, how many rows were added and skipped, and the text ids of the
+    rows added with their ``updated_at`` (``ids``: what an update later takes
+    out again)."""
     if mode not in MODES:
         raise ValueError(mode)
+    mode = "append" if mode == "update" else mode
     stores.check(src)
     result: dict[str, dict[str, int]] = {}
     with closing(sqlite3.connect(f"file:{src}?mode=ro&immutable=1", uri=True)) as s, \
@@ -109,7 +112,7 @@ def merge_store(src: Path, dst: Path, tables: list[str], mode: str) -> dict[str,
     return result
 
 
-def _copy_table(s: sqlite3.Connection, d: sqlite3.Connection, table: str, mode: str) -> dict[str, int]:
+def _copy_table(s: sqlite3.Connection, d: sqlite3.Connection, table: str, mode: str) -> dict[str, Any]:
     src_cols, dst_cols = _columns(s, table), _columns(d, table)
     have = {c[0] for c in dst_cols}
     cols = [c[0] for c in src_cols if c[0] in have]
@@ -119,7 +122,7 @@ def _copy_table(s: sqlite3.Connection, d: sqlite3.Connection, table: str, mode: 
     elif rowid:
         cols = [c for c in cols if c != rowid]          # its own ids; the bundle's could be another row's
     if not cols:
-        return {"added": 0, "skipped": 0}
+        return {"added": 0, "skipped": 0, "ids": {}}
     keys = [k for k in DEDUP.get(table, ()) if k in cols] if mode == "append" else []
     seen: dict[str, set[str]] = {k: {_norm(v) for (v,) in d.execute(f"SELECT {_q(k)} FROM {_q(table)}") if _norm(v)}
                                  for k in keys}
@@ -132,6 +135,9 @@ def _copy_table(s: sqlite3.Connection, d: sqlite3.Connection, table: str, mode: 
     insert = (f"INSERT {'OR IGNORE ' if mode == 'append' else ''}INTO {_q(table)} "
               f"({', '.join(_q(c) for c in cols)}) VALUES ({', '.join('?' * len(cols))})")
     added = skipped = 0
+    ids: dict[str, str] = {}
+    track = "id" in cols and not table.endswith("_fts")
+    stamp = cols.index("updated_at") if "updated_at" in cols else None
     for row in s.execute(f"SELECT {', '.join(_q(c) for c in cols)} FROM {_q(table)}"):
         if keys:
             values = {k: _norm(row[cols.index(k)]) for k in keys}
@@ -152,12 +158,14 @@ def _copy_table(s: sqlite3.Connection, d: sqlite3.Connection, table: str, mode: 
         n = d.execute(insert, tuple(row)).rowcount
         if n:
             added += 1
+            if track:
+                ids[str(row[cols.index("id")])] = str(row[stamp] or "") if stamp is not None else ""
             for k in keys:
                 if values[k]:
                     seen[k].add(values[k])
         else:
             skipped += 1
-    return {"added": added, "skipped": skipped}
+    return {"added": added, "skipped": skipped, "ids": ids}
 
 
 # ── the onboarding record ───────────────────────────────────────────────────
@@ -187,12 +195,24 @@ def merge_record(mine: dict[str, Any], theirs: dict[str, Any]) -> dict[str, Any]
 
 # ── files and folders ───────────────────────────────────────────────────────
 
+def record_identities(record: dict[str, Any]) -> dict[str, list[str]]:
+    """The identities of the items in each list of an onboarding record."""
+    return {k: [_identity(x) for x in v] for k, v in record.items() if isinstance(v, list)}
+
+
 def merge_files(bundle: archive.Bundle, agent_dir: Path, categories: set[str], mode: str,
-                inside) -> dict[str, int]:
+                inside, *, base: bool = False) -> dict[str, Any]:
     """The bundle's files of *categories* into *agent_dir*: reset empties a
-    folder part first; append keeps what exists. ``inside(root, path)`` guards
-    every write. The onboarding record is joined, not overwritten, in append."""
+    folder part first; append (and update) keeps what exists. ``inside(root,
+    path)`` guards every write. The onboarding record is joined, not
+    overwritten, in append; with *base* its items become the base layer (an
+    agent passed on to someone else: they add on top, and can't change it).
+    ``paths``: the files written; ``record``: the record items added."""
+    from captain_claw.flight_deck.agent_package import _as_base
+    mode = "append" if mode == "update" else mode
     written = kept = 0
+    paths: list[str] = []
+    added_items: dict[str, list[str]] = {}
     parts_seen: set[str] = set()
     reflections = agent_dir / catalog.BY_KEY["reflections"].path
     has_reflections = reflections.is_dir() and any(reflections.glob("*.md"))
@@ -218,14 +238,20 @@ def merge_files(bundle: archive.Bundle, agent_dir: Path, categories: set[str], m
         dest = agent_dir / rel
         if not inside(agent_dir, dest.parent):
             continue
-        if part.key == "setup_record" and mode == "append" and dest.is_file():
+        if part.key == "setup_record":
             try:
-                mine = json.loads(dest.read_text(encoding="utf-8"))
                 theirs = bundle.read_json(name)
+                mine = json.loads(dest.read_text(encoding="utf-8")) if mode == "append" and dest.is_file() else {}
             except (OSError, ValueError):
                 continue
             if isinstance(mine, dict) and isinstance(theirs, dict):
-                dest.write_text(json.dumps(merge_record(mine, theirs), ensure_ascii=False), encoding="utf-8")
+                theirs = _as_base(theirs) if base else theirs
+                merged = merge_record(mine, theirs)
+                before = {k: set(v) for k, v in record_identities(mine).items()}
+                added_items = {k: [i for i in v if i not in before.get(k, set())]
+                               for k, v in record_identities(merged).items()}
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(json.dumps(merged, ensure_ascii=False), encoding="utf-8")
                 written += 1
             continue
         if part.key == "lessons":
@@ -238,9 +264,10 @@ def merge_files(bundle: archive.Bundle, agent_dir: Path, categories: set[str], m
             continue
         bundle.extract(name, dest)
         written += 1
+        paths.append(rel)
     if "setup_record" in parts_seen or "lessons" in parts_seen:
         _write_lessons(bundle, agent_dir)
-    return {"written": written, "kept": kept}
+    return {"written": written, "kept": kept, "paths": paths, "record": added_items}
 
 
 def _write_lessons(bundle: archive.Bundle, agent_dir: Path) -> None:

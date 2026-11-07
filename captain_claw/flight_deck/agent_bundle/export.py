@@ -25,7 +25,14 @@ from typing import Any
 
 import yaml
 
-from captain_claw.flight_deck.agent_bundle import archive, catalog, review, secrets_box, stores
+from captain_claw.flight_deck.agent_bundle import (
+    archive,
+    catalog,
+    provenance,
+    review,
+    secrets_box,
+    stores,
+)
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -49,6 +56,9 @@ class Options:
     contacts: bool = True
     # A full backup with this passphrase carries the agent's keys, sealed.
     passphrase: str = ""
+    # A named package: this export is its next version (provenance) — an agent
+    # that holds an earlier one can be updated from it.
+    package: str = ""
 
 # config.yaml: only these travel (never a key, token, port, path or address of this deck).
 _MODEL_FIELDS = ("provider", "model", "temperature", "max_tokens", "base_url", "vision", "allowed")
@@ -331,6 +341,7 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
             "insight_categories": sorted(options.insight_categories) if options.insight_categories is not None else None,
             "excluded_insights": len(options.exclude_insights),
             "contacts": options.contacts,
+            "package": provenance.next_version(agent_dir, options.package) if options.package.strip() else None,
         }
         manifest = await asyncio.to_thread(archive.write, staging, manifest, out)
     finally:
@@ -376,6 +387,7 @@ def summary(manifest: dict[str, Any]) -> dict[str, Any]:
         "secrets": bool(manifest.get("secrets")),
         "connections": [{"kind": str(c.get("kind") or ""), "label": str(c.get("label") or "")}
                         for c in manifest.get("connections") or [] if isinstance(c, dict)][:30],
+        "package": provenance.bundle_package(manifest),
     }
 
 

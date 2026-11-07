@@ -722,7 +722,8 @@ def test_merge_store_appends_rows_without_taking_another_rows_id(tmp_path):
         c.execute("INSERT INTO playbooks VALUES ('p9', ' invoices ', 'theirs')")
         c.execute("INSERT INTO playbooks VALUES ('p2', 'Payroll', 'theirs')")
     got = merge.merge_store(theirs, mine, ["log", "playbooks"], "append")
-    assert got == {"log": {"added": 1, "skipped": 1}, "playbooks": {"added": 1, "skipped": 1}}
+    assert got == {"log": {"added": 1, "skipped": 1, "ids": {}},          # integer ids aren't tracked
+                   "playbooks": {"added": 1, "skipped": 1, "ids": {"p2": ""}}}
     with sqlite3.connect(mine) as c:
         assert c.execute("SELECT id, text FROM log ORDER BY id").fetchall() == [
             (1, "mine one"), (2, "shared"), (3, "theirs one")]
@@ -757,3 +758,120 @@ async def test_append_keeps_the_agents_own_reflection(deck):
                          headers=_hdr(CAROL))
     assert r.status_code == 200, r.text
     assert [p.name for p in (hc / "reflections").iterdir()] == ["2026-01-01T00-00-00+00-00.md"]
+
+
+# ── phase 4: packages, versions, updates ────────────────────────────────────
+
+from captain_claw.flight_deck.agent_bundle import provenance  # noqa: E402
+
+
+def _sql(db: Path, sql: str, args: tuple = ()) -> list:
+    with sqlite3.connect(db) as c:
+        rows = c.execute(sql, args).fetchall()
+        c.commit()
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_each_export_of_a_package_is_its_next_version(deck):
+    async with _client() as c:
+        a = (await c.post("/fd/agent-bundle/export/bob-agent", json={"preset": "trained", "package": "Bookkeeper"},
+                          headers=_hdr(BOB))).json()["manifest"]["package"]
+        b = (await c.post("/fd/agent-bundle/export/bob-agent", json={"preset": "trained", "package": " bookkeeper "},
+                          headers=_hdr(BOB))).json()["manifest"]["package"]
+        r = await c.get("/fd/agent-bundle/packages/bob-agent", headers=_hdr(BOB))
+    assert a["version"] == 1 and b["version"] == 2 and a["id"] == b["id"]
+    assert r.json()["packages"] == [{"name": "Bookkeeper", "version": 2}]
+
+
+@pytest.mark.asyncio
+async def test_a_client_agent_is_updated_without_losing_what_it_learned(deck, monkeypatch):
+    async def no_limit(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(server, "check_agent_count_limit", no_limit)
+    bob = server.DATA_DIR / "bob-agent"
+    (bob / ".owner-setup.json").write_text(json.dumps(
+        {"rules": [{"text": "Two signatures over 1000 EUR", "always": True}], "skills": ["vat-check"]}))
+    v1_body = {"preset": "trained", "package": "Bookkeeper", "insight_categories": None}
+    async with _client() as c:
+        # v1: the consultant passes it on; the client makes an agent of it
+        up = await _upload(c, await _export(c, v1_body), CAROL)
+        assert up["package"]["version"] == 1 and up["updates"] == []
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import", json={"name": "Books"},
+                         headers=_hdr(CAROL))
+        assert r.status_code == 200, r.text
+        books = server.DATA_DIR / "books"
+        rec = json.loads((books / ".owner-setup.json").read_text())
+        assert rec["rules"][0]["layer"] == "base" and rec["base_skills"] == ["vat-check"]   # hers to add on, not change
+        assert provenance.imported(books)[up["package"]["id"]]["version"] == 1
+
+        # the client works with it: learns something, edits one imported insight, adds a rule of her own
+        ins = books / HC / "insights.db"
+        insights = InsightsManager(ins)
+        await insights.add("Carol's client pays by card", "fact")
+        await insights.close()
+        (edited_id,) = _sql(ins, "SELECT id FROM insights WHERE entity_key = 'books-close'")[0]
+        _sql(ins, "UPDATE insights SET content = 'Books close on the 6th now', updated_at = '2026-12-01' WHERE id = ?",
+             (edited_id,))
+        rec["rules"].append({"text": "Carol's own rule"})
+        (books / ".owner-setup.json").write_text(json.dumps(rec))
+
+        # v2: the consultant drops one insight, adds one, rewrites the skill and the instructions
+        bins = bob / HC / "insights.db"
+        _sql(bins, "DELETE FROM insights WHERE category = 'preference'")
+        insights = InsightsManager(bins)
+        await insights.add("Invoices over 5000 EUR need the director", "fact")
+        await insights.close()
+        (bob / HC / "skills" / "vat-check" / "SKILL.md").write_text("# VAT check v2\n")
+        await server._set_owner_agent_instructions(BOB, "process", "bob-agent", "Be brief; cite the invoice.")
+        up2 = await _upload(c, await _export(c, v1_body), CAROL)
+        assert up2["package"]["version"] == 2
+        assert up2["updates"] == [{"slug": "books", "name": "Books", "from_version": 1}]
+        r = await c.post(f"/fd/agent-bundle/uploads/{up2['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "books", "mode": "update"}}, headers=_hdr(CAROL))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["from_version"] == 1 and body["package"]["version"] == 2
+        assert body["taken_out"]["kept"] >= 1              # her edited insight
+
+        contents = {row[0] for row in _sql(ins, "SELECT content FROM insights")}
+        assert "Carol's client pays by card" in contents                # hers
+        assert "Books close on the 6th now" in contents                 # her edit of an imported one
+        assert "Invoices over 5000 EUR need the director" in contents   # new in v2
+        assert "Bob prefers short answers" not in contents              # dropped in v2
+        assert (books / HC / "skills" / "vat-check" / "SKILL.md").read_text() == "# VAT check v2\n"
+        rules = [x["text"] for x in json.loads((books / ".owner-setup.json").read_text())["rules"]]
+        assert sorted(rules) == ["Carol's own rule", "Two signatures over 1000 EUR"]
+        assert (await server._owner_agent_instructions(CAROL, "process"))["books"] == "Be brief; cite the invoice."
+        jobs = [j for j in sched.get_store().list(CAROL) if j["agent_slug"] == "books"]
+        assert len(jobs) == 1 and jobs[0]["enabled"] == 0
+        assert provenance.imported(books)[up["package"]["id"]]["version"] == 2
+
+        # the same version again, and an update into an agent that never had the package
+        up3 = await _upload(c, await _export(c, {**v1_body}), CAROL)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up3['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "carol-agent", "mode": "update"}},
+                         headers=_hdr(CAROL))
+        assert r.status_code == 400 and "no earlier version" in r.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_an_update_leaves_instructions_the_client_changed(deck, monkeypatch):
+    async def no_limit(*_a, **_k):
+        return None
+
+    monkeypatch.setattr(server, "check_agent_count_limit", no_limit)
+    body = {"preset": "template", "package": "Bookkeeper"}
+    async with _client() as c:
+        up = await _upload(c, await _export(c, body), CAROL)
+        assert (await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import", json={"name": "Books"},
+                             headers=_hdr(CAROL))).status_code == 200
+        await server._set_owner_agent_instructions(CAROL, "process", "books", "Carol's own words.")
+        await server._set_owner_agent_instructions(BOB, "process", "bob-agent", "Version two words.")
+        up2 = await _upload(c, await _export(c, body), CAROL)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up2['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "books", "mode": "update"}}, headers=_hdr(CAROL))
+    assert r.status_code == 200, r.text
+    assert (await server._owner_agent_instructions(CAROL, "process"))["books"] == "Carol's own words."
+    assert any("instructions were changed here" in n for n in r.json()["notes"])

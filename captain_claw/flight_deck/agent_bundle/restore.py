@@ -23,7 +23,14 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Any
 
-from captain_claw.flight_deck.agent_bundle import archive, catalog, export, secrets_box, stores
+from captain_claw.flight_deck.agent_bundle import (
+    archive,
+    catalog,
+    export,
+    provenance,
+    secrets_box,
+    stores,
+)
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -250,6 +257,7 @@ async def unpack_on_spawn(ref: dict[str, Any], slug: str, agent_dir: Path, owner
     write_eco(agent_dir, str(ref.get("eco_mode") or ""))
     if ref.get("columns"):
         await asyncio.to_thread(restore_columns, agent_dir, ref["columns"])
+    await asyncio.to_thread(note_package, Path(ref["path"]), agent_dir, "reset", {}, base=not ref.get("same_person"))
     ref.setdefault("notes", []).extend(notes)
     log.info("agent bundle unpacked", agent=slug, owner=owner_id or "-", notes=len(notes))
 
@@ -267,6 +275,9 @@ async def after_spawn(path: Path, slug: str, name: str, owner_id: str, agent: di
 
     bundle = await asyncio.to_thread(archive.open_bundle, path)
     out: dict[str, Any] = {"chat_messages": 0, "schedules": 0, "notes": []}
+    package = provenance.bundle_package(bundle.manifest)
+    if package and agent.get("fleet_instructions"):       # the spawn set them: an update may replace them
+        provenance.note_instructions(srv.DATA_DIR / slug, package["id"], str(agent["fleet_instructions"])[:64_000])
     chats = bundle.read_json("fd/chats.json") if bundle.has("fd/chats.json") else None
     if isinstance(chats, dict) and owner_id:
         from captain_claw.flight_deck.auth import _fd_auth_enabled, get_db
@@ -279,20 +290,23 @@ async def after_spawn(path: Path, slug: str, name: str, owner_id: str, agent: di
     jobs = bundle.read_json("fd/schedules.json") if bundle.has("fd/schedules.json") else None
     if isinstance(jobs, list):
         same = str(bundle.manifest.get("owner_ref") or "") == export.person_ref(owner_id)
-        out["schedules"] = _schedules(jobs, slug, owner_id, out["notes"], same_person=same)
+        made = _schedules(jobs, slug, owner_id, out["notes"], same_person=same)
+        out["schedules"] = len(made)
+        if package and made:
+            provenance.add_schedules(srv.DATA_DIR / slug, package["id"], made)
     links = bundle.read_json("fd/connections.json") if bundle.has("fd/connections.json") else None
     out["connections"] = [{"kind": str(c.get("kind") or ""), "label": str(c.get("label") or "")}
                           for c in links or [] if isinstance(c, dict)][:30] if isinstance(links, list) else []
     return out
 
 
-def _schedules(jobs: list, slug: str, owner_id: str, notes: list[str], *, same_person: bool = True) -> int:
+def _schedules(jobs: list, slug: str, owner_id: str, notes: list[str], *, same_person: bool = True) -> list[str]:
     """Its scheduled tasks, switched off — its owner turns them back on. For
     someone else they deliver to the agent's chat only: the phone numbers,
-    chats and addresses they went to were the other person's."""
+    chats and addresses they went to were the other person's. The ids made."""
     from captain_claw.flight_deck import fd_scheduler
 
-    made = 0
+    made: list[str] = []
     for job in jobs[:200]:
         if not isinstance(job, dict):
             continue
@@ -301,10 +315,10 @@ def _schedules(jobs: list, slug: str, owner_id: str, notes: list[str], *, same_p
             fields.update({"delivery_kind": "agent", "delivery_target": "",
                            "delivery": {"chat": True, "email": False, "telegram": False, "email_to": ""}})
         try:
-            fd_scheduler.get_store().create(
+            row = fd_scheduler.get_store().create(
                 owner_id=owner_id, prompt_author=str(job.get("prompt_author") or "human"),
                 **{**fields, "agent_slug": slug, "agent_auth": "", "enabled": False})
-            made += 1
+            made.append(str(row["id"]))
         except Exception as exc:
             notes.append(f"Scheduled task “{str(job.get('name') or '')[:60]}” left out: {exc}")
     return made
@@ -328,12 +342,23 @@ def needs_key(config) -> bool:
 
 # ── into an agent that already exists (merge.py) ────────────────────────────
 
-def apply_to_existing(path: Path, agent_dir: Path, mode: str, columns: dict[str, Any] | None = None) -> dict[str, Any]:
+def apply_to_existing(path: Path, agent_dir: Path, mode: str, columns: dict[str, Any] | None = None, *,
+                      same_person: bool = True, owner_id: str = "") -> dict[str, Any]:
     """The bundle's stores and files into *agent_dir* (stopped): *mode* is
-    "reset" or "append" (merge.MODES). What was added and kept, per store."""
+    "reset", "append" or "update" (merge.MODES) — update first takes the
+    package's earlier version out (provenance). What was added and kept."""
     from captain_claw.flight_deck.agent_bundle import merge
 
     bundle = archive.open_bundle(path)
+    package = provenance.bundle_package(bundle.manifest)
+    taken_out: dict[str, int] = {}
+    if mode == "update":
+        earlier = provenance.imported(agent_dir).get(package["id"]) if package else None
+        if not earlier:
+            raise archive.BundleError("This agent holds no earlier version of that package — add it or replace instead.")
+        if int(earlier.get("version") or 0) >= package["version"]:
+            raise archive.BundleError(f"It already has version {earlier.get('version')} of this package.")
+        taken_out = provenance.take_out(agent_dir, earlier.get("items") or {}, owner_id=owner_id)
     categories = set(bundle.manifest.get("categories") or []) & set(catalog.CATEGORIES)
     parts = bundle.manifest.get("parts") if isinstance(bundle.manifest.get("parts"), dict) else {}
     stored: dict[str, dict[str, dict[str, int]]] = {}
@@ -359,10 +384,28 @@ def apply_to_existing(path: Path, agent_dir: Path, mode: str, columns: dict[str,
                     stored[key] = {t: {"added": n, "skipped": 0} for t, n in stores.counts(dest).items()}
             except (stores.StoreError, sqlite3.Error) as exc:
                 notes.append(f"{part.label} left as it was: {exc}")
-    files = merge.merge_files(bundle, agent_dir, categories, mode, _inside)
+    files = merge.merge_files(bundle, agent_dir, categories, mode, _inside, base=bool(package) and not same_person)
     if columns:
         restore_columns(agent_dir, columns)
-    return {"stores": stored, "files": files, "notes": notes, "categories": sorted(categories)}
+    done = {"stores": stored, "files": files, "notes": notes, "categories": sorted(categories),
+            "package": package, "taken_out": taken_out}
+    note_package(path, agent_dir, mode, done, base=False)
+    return done
+
+
+def note_package(path: Path, agent_dir: Path, mode: str, done: dict[str, Any], *, base: bool) -> None:
+    """When the bundle is a version of a package: what it put into the agent
+    (provenance), so a later version can update it; for a new agent of
+    someone else's package (*base*), its onboarding becomes the base layer."""
+    bundle = archive.open_bundle(path)
+    package = provenance.bundle_package(bundle.manifest)
+    if not package:
+        return
+    if base:
+        provenance.base_layer_on_new(agent_dir)
+    # a new agent holds all of it; an existing one what this import added (or, reset, replaced)
+    items = provenance.items_of_merge(done, agent_dir) if done else provenance.items_of_new_agent(bundle, agent_dir)
+    provenance.record(agent_dir, package, items, made_by=str(bundle.manifest.get("made_by") or ""))
 
 
 def headline(stored: dict[str, dict[str, dict[str, int]]]) -> dict[str, dict[str, int]]:
@@ -379,7 +422,7 @@ def headline(stored: dict[str, dict[str, dict[str, int]]]) -> dict[str, dict[str
 
 
 async def fd_side_into_existing(path: Path, slug: str, owner_id: str, agent: dict[str, Any], mode: str,
-                                tag: str) -> dict[str, Any]:
+                                tag: str, earlier: dict[str, Any] | None = None) -> dict[str, Any]:
     """Flight Deck's side into an existing agent: instructions (reset: the
     bundle's; append: only when it has none), chat log (reset: replaced;
     append: beside its own, in the lane ``imported-<tag>``), scheduled tasks
@@ -390,11 +433,19 @@ async def fd_side_into_existing(path: Path, slug: str, owner_id: str, agent: dic
 
     bundle = await asyncio.to_thread(archive.open_bundle, path)
     out: dict[str, Any] = {"chat_messages": 0, "schedules": 0, "notes": [], "connections": []}
+    package = provenance.bundle_package(bundle.manifest)
     text = str(agent.get("fleet_instructions") or "")
     if owner_id and text:
         mine = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "")
-        if mode == "reset" or not mine.strip():
+        # update: the package's own instructions, while nobody changed them here
+        set_by_earlier = bool(earlier) and provenance.text_sha(mine) == str(
+            ((earlier or {}).get("items") or {}).get("instructions") or "")
+        if mode == "reset" or not mine.strip() or (mode == "update" and set_by_earlier):
             await srv._set_owner_agent_instructions(owner_id, "process", slug, text[:64_000])
+            if package:
+                provenance.note_instructions(srv.DATA_DIR / slug, package["id"], text[:64_000])
+        elif mode == "update":
+            out["notes"].append("Its instructions were changed here, so the new version's were left out.")
     chats = bundle.read_json("fd/chats.json") if bundle.has("fd/chats.json") else None
     if isinstance(chats, dict) and owner_id and _fd_auth_enabled():
         db = get_db()
@@ -402,7 +453,7 @@ async def fd_side_into_existing(path: Path, slug: str, owner_id: str, agent: dic
             await db.drop_chat_log(owner_id, f"proc-{slug}")
         out["chat_messages"] = await db.import_chat_log(
             owner_id, f"proc-{slug}", str(agent.get("name") or slug), chats,
-            lane="" if mode == "reset" else f"imported-{tag}")
+            lane="" if mode == "reset" else f"imported-{tag}")         # append, update: beside its own
     jobs = bundle.read_json("fd/schedules.json") if bundle.has("fd/schedules.json") else None
     if isinstance(jobs, list):
         store = fd_scheduler.get_store()
@@ -415,7 +466,10 @@ async def fd_side_into_existing(path: Path, slug: str, owner_id: str, agent: dic
                     if str(j.get("agent_slug") or "") == slug}
             jobs = [j for j in jobs if isinstance(j, dict) and (_n(j.get("name")), _n(j.get("prompt"))) not in have]
         same = str(bundle.manifest.get("owner_ref") or "") == export.person_ref(owner_id)
-        out["schedules"] = _schedules(jobs, slug, owner_id, out["notes"], same_person=same)
+        made = _schedules(jobs, slug, owner_id, out["notes"], same_person=same)
+        out["schedules"] = len(made)
+        if package and made:
+            provenance.add_schedules(srv.DATA_DIR / slug, package["id"], made)
     links = bundle.read_json("fd/connections.json") if bundle.has("fd/connections.json") else None
     if isinstance(links, list):
         out["connections"] = [{"kind": str(c.get("kind") or ""), "label": str(c.get("label") or "")}
