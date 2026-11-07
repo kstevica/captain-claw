@@ -26,7 +26,7 @@ log = get_logger(__name__)
 
 router = APIRouter(prefix="/fd/shares", tags=["shares"])
 
-VALID_TYPES = {"archetype", "code", "basna", "council", "vfs"}
+VALID_TYPES = {"archetype", "code", "basna", "council", "vfs", "external_tool"}
 VALID_PERMS = {"view", "edit"}
 
 
@@ -48,6 +48,15 @@ async def owns_resource(db, user_id: str, resource_type: str, resource_id: str) 
         return await db.get_basna_session(resource_id, user_id) is not None
     if resource_type == "council":
         return await db.get_council_session(resource_id, user_id) is not None
+    if resource_type == "external_tool":
+        # "<owner_id>/<slug>": a custom tool is its owner's when it's under their folder.
+        from captain_claw.flight_deck import external_tools as xt
+
+        owner, _, slug = str(resource_id or "").partition("/")
+        try:
+            return owner == user_id and xt.exists(owner, slug)
+        except xt.ToolError:
+            return False
     if resource_type in ("code", "vfs"):
         # A Code project and a VFS folder are the same on-disk resource.
         from captain_claw.flight_deck.vfs_routes import _user_root
@@ -136,8 +145,8 @@ async def create_resource_share(body: ShareCreate, user: dict = Depends(get_curr
         raise HTTPException(400, "Invalid resource_type")
     is_agent = body.resource_type == agent_sharing.AGENT_RESOURCE
     perm = body.permission if body.permission in VALID_PERMS else "view"
-    if body.resource_type == "archetype" or is_agent:
-        perm = "view"  # archetypes are use-only; a shared agent is chat-only
+    if body.resource_type in ("archetype", "external_tool") or is_agent:
+        perm = "view"  # archetypes and custom tools are use-only; a shared agent is chat-only
     if body.grantee_id == user["id"]:
         raise HTTPException(400, "Cannot share with yourself")
     db = get_db()
@@ -179,6 +188,10 @@ async def create_resource_share(body: ShareCreate, user: dict = Depends(get_curr
         if is_agent and rec is not None:
             title = f"{sharer} shared the agent “{rec.name}” with you"
             body_text = rec.name
+        elif body.resource_type == "external_tool":
+            slug = body.resource_id.partition("/")[2]
+            title = f"{sharer} offered you their custom tool “{slug}”"
+            body_text = "Add it under Custom tools → Shared with me to let your agents use it."
         else:
             title = f"{sharer} shared a {body.resource_type} with you"
             body_text = body.resource_id

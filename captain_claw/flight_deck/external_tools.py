@@ -104,7 +104,8 @@ def root() -> Path:
 
 
 # Names a route already uses under /fd/external-tools/ (or will): a tool can't take them.
-RESERVED_SLUGS = frozenset({"agent", "status", "admin", "catalog", "shared", "proposals", "approvals", "build"})
+RESERVED_SLUGS = frozenset({"agent", "status", "admin", "catalog", "shared", "proposals", "approvals", "build",
+                            "added"})
 
 
 def check_slug(slug: str) -> str:
@@ -781,8 +782,65 @@ async def run_tool(owner: str, slug: str, caller: str, data: Any, *, secret_valu
     if vdir is None:
         raise ToolError("not_live", f"{slug} has no published version yet.", status=409)
     manifest = load_manifest(vdir, slug=slug)
-    return await _run_version(owner, slug, live["version"], vdir, manifest, caller, data,
-                              secret_values=secret_values or {}, resolve_file=resolve_file, deliver=deliver)
+    result = await _run_version(owner, slug, live["version"], vdir, manifest, caller, data,
+                                secret_values=secret_values or {}, resolve_file=resolve_file, deliver=deliver)
+    record_call(owner, slug, caller, result)
+    return result
+
+
+# ── Usage: what the owner sees of the calls (counts only) ────────────────
+
+USAGE_DAYS = 30
+
+
+def _usage_file(owner: str, slug: str) -> Path:
+    return tool_dir(owner, slug) / "usage.json"
+
+
+def record_call(owner: str, slug: str, caller: str, result: dict[str, Any]) -> None:
+    """Count one call. The caller is kept as a short hash, only to count people:
+    never their input, output, files or error text."""
+    import hashlib
+
+    try:
+        path = _usage_file(owner, slug)
+        data = _read_json(path) or {}
+        days = data.get("days") if isinstance(data.get("days"), dict) else {}
+        today = time.strftime("%Y-%m-%d", time.gmtime())
+        day = days.setdefault(today, {"calls": 0, "failed": 0, "kinds": {}, "people": [], "versions": {}})
+        day["calls"] += 1
+        if not result.get("ok"):
+            day["failed"] += 1
+            kind = str((result.get("error") or {}).get("kind") or "error")
+            day["kinds"][kind] = day["kinds"].get(kind, 0) + 1
+        who = hashlib.sha256(f"{owner}/{slug}/{caller}".encode()).hexdigest()[:12]
+        if who not in day["people"]:
+            day["people"].append(who)
+        version = str(result.get("version") or "")
+        if version:
+            day["versions"][version] = day["versions"].get(version, 0) + 1
+        for old in sorted(days)[:-USAGE_DAYS]:
+            del days[old]
+        _write_json(path, {"days": days})
+    except (OSError, ToolError) as exc:
+        log.debug("Couldn't count a custom tool call: %s", exc)
+
+
+def usage_summary(owner: str, slug: str) -> dict[str, Any]:
+    data = _read_json(_usage_file(owner, slug)) or {}
+    days = data.get("days") if isinstance(data.get("days"), dict) else {}
+    rows, kinds, versions, people = [], {}, {}, set()
+    for name in sorted(days):
+        d = days[name]
+        rows.append({"day": name, "calls": d.get("calls", 0), "failed": d.get("failed", 0),
+                     "people": len(d.get("people") or [])})
+        for k, n in (d.get("kinds") or {}).items():
+            kinds[k] = kinds.get(k, 0) + n
+        for v, n in (d.get("versions") or {}).items():
+            versions[v] = versions.get(v, 0) + n
+        people.update(d.get("people") or [])
+    return {"days": rows, "failures": kinds, "versions": versions, "people": len(people),
+            "calls": sum(r["calls"] for r in rows), "failed": sum(r["failed"] for r in rows)}
 
 
 # ── Creating a tool ──────────────────────────────────────────────────────
@@ -934,6 +992,9 @@ async def delete_tool(owner: str, slug: str) -> None:
 
 _PUBLISHING: dict[tuple[str, str], asyncio.Task] = {}
 _LOCKS: dict[tuple[str, str], asyncio.Lock] = {}
+# Called after a version goes live: (owner, slug, old version or None, new version).
+# external_tools_routes tells the people who added the tool what it now asks for.
+AFTER_PUBLISH: list[Callable[[str, str, str | None, str], Awaitable[None]]] = []
 
 
 def _lock(owner: str, slug: str) -> asyncio.Lock:
@@ -1153,6 +1214,11 @@ async def publish(owner: str, slug: str, *, sha: str = "", by: str = "",
             _prune(owner, slug, keep={version, *previous})
             step("live", True, version)
             state.update(state="passed", finished_at=time.time())
+            for hook in AFTER_PUBLISH:
+                try:
+                    await hook(owner, slug, (old or {}).get("version"), version)
+                except Exception as exc:  # noqa: BLE001 — a bell must not undo a publish
+                    log.warning("A custom tool's after-publish step failed", owner=owner, slug=slug, error=str(exc))
     except _StepFailedError as exc:
         state.update(state="failed", error=str(exc), finished_at=time.time())
     except ToolError as exc:

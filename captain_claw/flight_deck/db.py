@@ -682,6 +682,20 @@ class FlightDeckDB:
             CREATE INDEX IF NOT EXISTS idx_resource_shares_owner
                 ON resource_shares(owner_id, resource_type, resource_id);
 
+            -- Custom tools offered to everybody on the deck (external_tools_routes):
+            -- one row per tool, 'pending' until an admin approves it (unless the
+            -- admin turned that approval off), 'approved' or 'rejected'. No FK on
+            -- owner_id: a deck without sign-in has the synthetic 'local' owner.
+            CREATE TABLE IF NOT EXISTS external_tool_listings (
+                owner_id     TEXT NOT NULL,
+                slug         TEXT NOT NULL,
+                status       TEXT NOT NULL DEFAULT 'pending',
+                requested_at TEXT NOT NULL,
+                decided_at   TEXT,
+                decided_by   TEXT,
+                PRIMARY KEY (owner_id, slug)
+            );
+
             -- Agents that ever had members (a share row is deleted when the
             -- member is removed; their learnings stay in the agent's commons).
             CREATE TABLE IF NOT EXISTS agent_share_history (
@@ -2021,6 +2035,57 @@ class FlightDeckDB:
         cur = await self._db.execute("DELETE FROM user_settings WHERE key = ?", (key,))
         await self._db.commit()
         return int(cur.rowcount or 0)
+
+    # ── Custom tools offered to everybody (external_tools_routes) ─────
+
+    async def set_tool_listing(self, owner_id: str, slug: str, status: str) -> dict:
+        """Offer (or offer again) a tool to everybody, as *status*."""
+        assert self._db is not None
+        now = _utcnow()
+        await self._db.execute(
+            "INSERT INTO external_tool_listings (owner_id, slug, status, requested_at, decided_at, decided_by)"
+            " VALUES (?, ?, ?, ?, NULL, NULL)"
+            " ON CONFLICT(owner_id, slug) DO UPDATE SET status = excluded.status,"
+            " requested_at = excluded.requested_at, decided_at = NULL, decided_by = NULL",
+            (owner_id, slug, status, now),
+        )
+        await self._db.commit()
+        return await self.get_tool_listing(owner_id, slug) or {}
+
+    async def get_tool_listing(self, owner_id: str, slug: str) -> dict | None:
+        assert self._db is not None
+        async with self._db.execute(
+            "SELECT * FROM external_tool_listings WHERE owner_id = ? AND slug = ?", (owner_id, slug)
+        ) as cur:
+            row = await cur.fetchone()
+            return dict(row) if row else None
+
+    async def list_tool_listings(self, status: str | None = None) -> list[dict]:
+        assert self._db is not None
+        if status:
+            rows = await self._db.execute_fetchall(
+                "SELECT * FROM external_tool_listings WHERE status = ? ORDER BY requested_at", (status,))
+        else:
+            rows = await self._db.execute_fetchall("SELECT * FROM external_tool_listings ORDER BY requested_at")
+        return [dict(r) for r in rows]
+
+    async def decide_tool_listing(self, owner_id: str, slug: str, status: str, by: str) -> bool:
+        """An admin's decision on a pending offer; False when it isn't pending any more."""
+        assert self._db is not None
+        cur = await self._db.execute(
+            "UPDATE external_tool_listings SET status = ?, decided_at = ?, decided_by = ?"
+            " WHERE owner_id = ? AND slug = ? AND status = 'pending'",
+            (status, _utcnow(), by, owner_id, slug),
+        )
+        await self._db.commit()
+        return bool(cur.rowcount)
+
+    async def delete_tool_listing(self, owner_id: str, slug: str) -> bool:
+        assert self._db is not None
+        cur = await self._db.execute(
+            "DELETE FROM external_tool_listings WHERE owner_id = ? AND slug = ?", (owner_id, slug))
+        await self._db.commit()
+        return bool(cur.rowcount)
 
     async def users_with_setting(self, key: str) -> dict[str, str]:
         """Every user holding setting *key*: ``{user_id: value}``."""

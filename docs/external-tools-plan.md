@@ -281,9 +281,8 @@ rewrites `live.json`.
   `<owner_id>/<slug>`, permission always `use` (like archetypes, which are
   use-only).
 - "Everybody" needs a grantee that isn't a person. `resource_shares.grantee_id`
-  references `users(id)`, so add a column `audience` (`person` | `everybody`)
-  and a nullable grantee rather than a fake user id. Requires a small migration
-  in `db.py`.
+  is NOT NULL and references `users(id)`, so offers to everybody live in their
+  own table, `external_tool_listings` (built that way in Phase 3).
 - A share with a person is an offer: it shows up under "Shared with me" with
   "Add". A share with everybody goes to the admin for approval first; once
   approved it shows in the deck's catalog with "Add".
@@ -399,14 +398,40 @@ kiosk reaches it through Settings.
   rules, the contract only for tool tasks) and `test_external_tools_build.py`
   (5: person and agent build/improve, Crew needed, members refused, nothing
   left behind when the task can't start, the tool's arguments).
-### Phase 3: sharing
+### Phase 3: sharing — built 2026-11-07
 
-- `external_tool` share type, `audience` column, offers, Add with consent, admin
-  approval for everybody (when switched on), update bells, owner's view of calls.
-- Tests: user B can't run A's tool before adding it; B can't read, edit or
-  publish; B's call uses B's secret; taking back a share; the approval switch
-  off offers it at once; the owner's view has no inputs.
-- Live check as two non-admin users on a throwaway deck.
+- To a person: the existing share system, `resource_type = "external_tool"`,
+  id `<owner>/<slug>`, always use-only; the bell says to add it under Custom
+  tools → Shared with me.
+- To everybody: a table `external_tool_listings` (owner, slug, status
+  pending / approved / rejected, who decided), not a nullable grantee in
+  `resource_shares`: that table's grantee is NOT NULL with a foreign key, and
+  SQLite can't change that without rebuilding it. Pending waits for an admin
+  (bell to admins, `GET /fd/external-tools/approvals`, `POST
+  /approvals/{owner}/{slug}`); with the admin's approval switched off, pending
+  counts as offered. Only a published tool can be offered.
+- Consent: `POST /fd/external-tools/added` stores what the live version
+  declares in the person's server-owned setting `xtool-added:<owner>/<slug>`;
+  `DELETE /added` removes it and their secrets for the tool. `can_use` = own
+  tool, or added and still offered (a share or a live listing), checked on
+  every call.
+- Use, never change: `GET /{slug}?owner=`, `POST /{slug}/run?owner=`,
+  `GET/PUT /{slug}/secrets?owner=` for someone else's tool (what it does and
+  needs, never its repository, versions or logs); every write route stays
+  owner-only. Agents list own + added tools; an added tool's `ref` is its
+  name, or `<owner>/<name>` when two would share it.
+- `GET /shared`, `GET /catalog`, `GET /{slug}/sharing` (people, the everybody
+  offer, how many added it), `PUT /{slug}/everybody`, `GET /{slug}/usage`
+  (calls and failures per day, failure kinds, versions, how many people;
+  callers kept as a short hash, never inputs or outputs). These fixed paths
+  are on `catalog_router`, included before the main router; `shared`,
+  `catalog`, `approvals`, `added`, `build` are reserved tool names.
+- Updates: `external_tools.AFTER_PUBLISH` tells everyone who added the tool
+  when a new version asks for more (internet, a secret, more time or memory).
+  They follow it automatically.
+- Delete takes the tool's shares, listing, everyone's consent and everyone's
+  secrets for it.
+- Tests: `test_external_tools_sharing.py` (9).
 
 ### Phase 4: the page
 
