@@ -1856,6 +1856,7 @@ from captain_claw.flight_deck import (
     agent_preset,
     lesson_proposals,
 )
+from captain_claw.flight_deck.agent_bundle.routes import router as agent_bundle_router
 from captain_claw.flight_deck.captain_swarm_routes import router as captain_swarm_router
 from captain_claw.flight_deck.deck_update_routes import router as deck_update_router
 from captain_claw.flight_deck.system_routes import router as system_router
@@ -2001,6 +2002,7 @@ app.include_router(agent_exam.router)
 app.include_router(agent_onboarding.router)
 app.include_router(lesson_proposals.router)
 app.include_router(agent_package.router)
+app.include_router(agent_bundle_router)
 app.include_router(agent_practice.router)
 app.include_router(captain_swarm_router)
 app.include_router(system_router)
@@ -2089,6 +2091,8 @@ class AgentConfig(BaseModel):
     _disclaimer: str = PrivateAttr(default="")
     # An archetype passed on from an onboarded agent: its package and whose it is (agent_package).
     _onboarding: dict = PrivateAttr(default_factory=dict)
+    # An agent bundle being imported: where its file is (agent_bundle.restore).
+    _bundle: dict = PrivateAttr(default_factory=dict)
     # Identity
     name: str = ""
     description: str = ""
@@ -9764,6 +9768,10 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
             config._onboarding, slug, agent_dir,
             Path(config.workspace_path) if config.workspace_path else agent_dir / "data" / "workspace",
             config.name or slug, config.fleet_instructions, owner_id or "")
+    # Made from an agent bundle (an import or a restore): its files and memory, before it starts.
+    if config._bundle:
+        from captain_claw.flight_deck.agent_bundle import restore as bundle_restore
+        await bundle_restore.unpack_on_spawn(config._bundle, slug, agent_dir, owner_id or "")
 
     # Open log file
     log_file = agent_dir / "process.log"

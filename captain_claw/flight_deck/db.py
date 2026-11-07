@@ -2154,6 +2154,72 @@ class FlightDeckDB:
         await self._db.commit()
         return int(cur.rowcount or 0)
 
+    async def export_chat_log(self, user_id: str, agent_id: str) -> dict:
+        """*user_id*'s chat log with one agent (every lane), for an agent
+        bundle: ``{"agent_id", "sessions": [...], "messages": [...]}``."""
+        assert self._db is not None
+        lanes = f"{agent_id}::"
+        cur = await self._db.execute(
+            "SELECT id, agent_id, agent_name, created_at, updated_at FROM chat_sessions"
+            " WHERE user_id = ? AND (agent_id = ? OR id = ? OR substr(id, 1, ?) = ?)",
+            (user_id, agent_id, agent_id, len(lanes), lanes),
+        )
+        sessions = [dict(r) for r in await cur.fetchall()]
+        messages: list[dict] = []
+        for s in sessions:
+            cur = await self._db.execute(
+                "SELECT session_id, role, content, metadata, created_at FROM chat_messages"
+                " WHERE session_id = ? ORDER BY id", (s["id"],))
+            messages.extend(dict(r) for r in await cur.fetchall())
+        return {"agent_id": agent_id, "sessions": sessions, "messages": messages}
+
+    async def import_chat_log(self, user_id: str, agent_id: str, agent_name: str, log: dict) -> int:
+        """Put a bundle's chat log (``export_chat_log``'s shape, made for another
+        agent id) in as *user_id*'s log with *agent_id*, times kept. A session
+        id that is taken is skipped. The messages written."""
+        assert self._db is not None
+        old = str(log.get("agent_id") or "")
+        if not old:
+            return 0
+
+        def _renamed(session_id: str) -> str | None:
+            if session_id == old:
+                return agent_id
+            if session_id.startswith(old + "::"):
+                return agent_id + session_id[len(old):]
+            return None
+
+        ids: dict[str, str] = {}
+        now = _utcnow()
+        for s in log.get("sessions") or []:
+            if not isinstance(s, dict):
+                continue
+            new_id = _renamed(str(s.get("id") or ""))
+            if not new_id:
+                continue
+            cur = await self._db.execute("SELECT 1 FROM chat_sessions WHERE id = ?", (new_id,))
+            if await cur.fetchone():
+                continue
+            await self._db.execute(
+                "INSERT INTO chat_sessions (id, user_id, agent_id, agent_name, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (new_id, user_id, agent_id, agent_name, str(s.get("created_at") or now),
+                 str(s.get("updated_at") or now)))
+            ids[str(s["id"])] = new_id
+        written = 0
+        for m in log.get("messages") or []:
+            if not isinstance(m, dict) or str(m.get("session_id") or "") not in ids:
+                continue
+            meta = m.get("metadata")
+            await self._db.execute(
+                "INSERT INTO chat_messages (session_id, role, content, metadata, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (ids[str(m["session_id"])], str(m.get("role") or ""), str(m.get("content") or ""),
+                 meta if isinstance(meta, str) else json.dumps(meta or {}), str(m.get("created_at") or now)))
+            written += 1
+        await self._db.commit()
+        return written
+
     async def get_chat_messages(
         self, session_id: str, user_id: str,
         limit: int = 100, before_id: int | None = None, since_id: int | None = None,
