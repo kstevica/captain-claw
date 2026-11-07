@@ -25,7 +25,7 @@ import {
 import { IntentionsPanel } from '../agents/IntentionsPanel'
 import { AgentMailSetting } from '../agents/AgentMailSetting'
 import { KioskInsightsPanel } from './KioskAgentInsights'
-import { MenuSheet, type MenuItem } from './KioskMenuSheet'
+import { MenuSheet, type MenuItem, type MenuSection } from './KioskMenuSheet'
 import { KioskSkillsPanel } from './KioskAgentSkills'
 import { TopicsPanel } from '../agents/TopicsPanel'
 import { getAgentConfig, getAgentMode, setAgentMode, setAgentModel, setAgentVision } from '../../services/docker'
@@ -62,7 +62,19 @@ export interface KioskAgent {
   startKey: string
 }
 
-export type AgentMenuItem = MenuItem
+/** Which row of an agent's menu a tile sits in. */
+export type AgentMenuGroup = 'work' | 'knows' | 'who' | 'place'
+
+export type AgentMenuItem = MenuItem & { group?: AgentMenuGroup }
+
+// The rows, top to bottom. A menu whose tiles all have one — and more than a
+// few of them — is laid out in these; any other stays one plain grid.
+const AGENT_MENU_GROUPS: { key: AgentMenuGroup; title: string; caption: string }[] = [
+  { key: 'work', title: 'At work', caption: 'What it’s doing, and what it did' },
+  { key: 'knows', title: 'What it knows', caption: 'What it was taught, and what it learned' },
+  { key: 'who', title: 'Who it is', caption: 'Its role, its model, its reach' },
+  { key: 'place', title: 'Its place', caption: 'Where it sits, and a copy of it' },
+]
 
 // ── The "⋯" menu ──
 //
@@ -97,6 +109,13 @@ export function AgentMenu({ agentName, items, subtitle = '', status, phone = fal
       item.onSelect()
     },
   })
+  const tiles = items.filter((x) => !x.danger).map(closing)
+  const grouped = tiles.length > 4 && tiles.every((x) => x.group)
+  const sections: MenuSection[] = grouped
+    ? AGENT_MENU_GROUPS.map(({ key, title, caption }) => ({ title, caption, items: tiles.filter((x) => x.group === key) }))
+    : [{ items: tiles }]
+  // As many columns as the fullest row (three, mostly).
+  const columns = grouped ? Math.min(4, Math.max(2, ...sections.map((s) => s.items.length))) as 2 | 3 | 4 : 2
 
   return (
     <>
@@ -121,8 +140,10 @@ export function AgentMenu({ agentName, items, subtitle = '', status, phone = fal
           status={status}
           title={agentName}
           subtitle={subtitle}
-          sections={[{ items: items.filter((x) => !x.danger).map(closing) }]}
+          sections={sections}
           apart={items.filter((x) => x.danger).map(closing)}
+          columns={columns}
+          aside={grouped}
           phone={phone}
           onClose={close}
         />

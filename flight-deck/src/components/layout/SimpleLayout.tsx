@@ -713,7 +713,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const groupMenuItem = (a: SimpleAgent): AgentMenuItem => {
     const inGroups = groups.filter((g) => isFolder(g) && g.agentIds.includes(a.id))
     return {
-      icon: FolderInput, label: 'Group', tone: 'sky',
+      icon: FolderInput, label: 'Group', tone: 'sky', group: 'place',
       hint: inGroups.length ? `In ${inGroups.map((g) => g.name).join(', ')}` : 'Keep it with others like it',
       onSelect: () => setGroupPickerId(a.id),
     }
@@ -724,14 +724,14 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     if (!g) return []
     const pinned = !!g.pinnedAgentIds?.includes(a.id)
     return [{
-      icon: pinned ? PinOff : Pin, label: pinned ? 'Unpin' : 'Pin', tone: 'violet', direct: true,
+      icon: pinned ? PinOff : Pin, label: pinned ? 'Unpin' : 'Pin', tone: 'violet', direct: true, group: 'place',
       hint: pinned ? `Back among the others in ${g.name}` : `To the top of ${g.name}`,
       onSelect: () => toggleAgentPin(g.id, a.id),
     }]
   }
   // A process agent of yours as a colleague: who it is to the team and its email.
   const identityMenuItems = (a: SimpleAgent): AgentMenuItem[] => (a.kind === 'process' && !a.managed ? [{
-    icon: IdCard, label: 'Identity & email', tone: 'cyan',
+    icon: IdCard, label: 'Identity & email', tone: 'cyan', group: 'who',
     hint: 'Its role, its own inbox, the email it picks up, who it hands work to',
     onSelect: () => setAgentIdentityId(a.id),
   }] : [])
@@ -739,7 +739,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     if (a.kind === 'shared') {
       return [
         ...(agentPanels(a.id, memberWorkspace, sharedAgents).region === 'member'
-          ? [{ icon: FolderOpen, label: 'Files & data', hint: 'What everyone who uses it can open', tone: 'amber' as const, onSelect: () => setFilesDataId(a.id) }]
+          ? [{ icon: FolderOpen, label: 'Files & data', hint: 'What everyone who uses it can open', tone: 'amber' as const, group: 'work' as const, onSelect: () => setFilesDataId(a.id) }]
           : []),
         groupMenuItem(a),
         ...pinMenuItems(a),
@@ -748,62 +748,62 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     const up = a.reachable && !a.asleep && !booting.has(a.id) && !switching.has(a.id)
     const items: AgentMenuItem[] = [{
       icon: Info, label: 'Info', hint: up ? 'Its intentions and topics' : 'Power it on to see its intentions and topics',
-      tone: 'sky', onSelect: () => setAgentInfoId(a.id), disabled: !up,
+      tone: 'sky', group: 'work', onSelect: () => setAgentInfoId(a.id), disabled: !up,
     }]
     // Read from the agent itself: a stopped one has none to show.
     if (!inLibraries(a)) {
       items.push({
-        icon: FolderOpen, label: 'Files & data', tone: 'amber',
+        icon: FolderOpen, label: 'Files & data', tone: 'amber', group: 'work',
         hint: up ? 'Its files and datastore tables' : 'Its files and tables show while it runs',
         onSelect: () => setFilesDataId(a.id), disabled: !up,
       })
     }
     if (a.kind === 'docker' || a.kind === 'process') {
       items.push({
-        icon: Activity, label: 'Activity', hint: 'Every tool it used, and with what', tone: 'emerald',
+        icon: Activity, label: 'Activity', hint: 'Every tool it used, and with what', tone: 'emerald', group: 'work',
         onSelect: () => openActivity(a.kind === 'process' ? { slug: a.startKey } : { ref: a.startKey }),
       })
     }
     // Taskboard v2: its tasks — what it was asked and sent, and what needs you.
     if (a.kind === 'process' && !a.managed) {
       items.push({
-        icon: ListChecks, label: 'Tasks', hint: 'What it was asked and sent, and what needs you', tone: 'teal',
+        icon: ListChecks, label: 'Tasks', hint: 'What it was asked and sent, and what needs you', tone: 'teal', group: 'work',
         onSelect: () => openTaskboard(a.startKey),
       })
     }
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
         { icon: BookOpen, label: 'Instructions, insights & skills', hint: 'What it keeps in mind, has learned, and knows how to do',
-          tone: 'violet', onSelect: () => setAgentInstructionsId(a.id) },
+          tone: 'violet', group: 'knows', onSelect: () => setAgentInstructionsId(a.id) },
       )
       // Your documents and way of working → its rules, skills and knowledge (process agents: FD writes its folder).
       if (a.kind === 'process') {
         items.push({ icon: GraduationCap, label: 'Onboarding', hint: 'Its documents, the lessons it was taught, and how well it knows them',
-          tone: 'fuchsia', onSelect: () => setOnboardingFor({ slug: a.startKey, name: a.name, tab: 'overview' }) })
+          tone: 'fuchsia', group: 'knows', onSelect: () => setOnboardingFor({ slug: a.startKey, name: a.name, tab: 'overview' }) })
         // What it noticed in your chats, waiting for your yes — only its own (Lessons to approve, scoped).
         const waitingLessons = lessonInbox?.agents.find((x) => x.slug === a.startKey)?.waiting.length ?? 0
-        items.push({ icon: BookCheck, label: 'Lessons to approve', tone: waitingLessons ? 'amber' : 'violet',
+        items.push({ icon: BookCheck, label: 'Lessons to approve', tone: waitingLessons ? 'amber' : 'violet', group: 'knows',
           hint: waitingLessons ? `${waitingLessons} ${waitingLessons === 1 ? 'lesson waits' : 'lessons wait'} for you — noticed in your chats`
             : 'What it noticed in your chats, for you to approve',
           onSelect: () => showLessons(a.startKey, { name: a.name }) })
       }
       items.push(
         ...identityMenuItems(a),
-        { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', tone: 'zinc', onSelect: () => setAgentSettingsId(a.id) },
+        { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', tone: 'zinc', group: 'who', onSelect: () => setAgentSettingsId(a.id) },
       )
-      // The whole agent in one file — Flight Deck writes it from the agent's folder (process agents).
-      if (a.kind === 'process') {
-        items.push({ icon: Archive, label: 'Back up / export', hint: 'Save it to a file, to restore it here or on another deck',
-          tone: 'teal', onSelect: () => setBackupFor({ slug: a.startKey, name: a.name }) })
-      }
       const net = networkShareAction(netAgents[shareKeyOf(a)], {
         canShare: netCanShare, admin: netAdmin, deckName: netDeck, displayName: a.name, setShared: netSetShared,
         ask: netAskShare,
         onError: (m) => useNotificationStore.getState().add('error', 'BotPort network', m),
       })
-      if (net.show) items.push({ icon: Globe, label: net.label, hint: net.hint, tone: 'cyan', onSelect: net.onClick, disabled: net.disabled })
+      if (net.show) items.push({ icon: Globe, label: net.label, hint: net.hint, tone: 'cyan', group: 'who', onSelect: net.onClick, disabled: net.disabled })
     }
     items.push(groupMenuItem(a), ...pinMenuItems(a))
+    // The whole agent in one file — Flight Deck writes it from the agent's folder (process agents).
+    if (a.kind === 'process' && !a.managed) {
+      items.push({ icon: Archive, label: 'Back up / export', hint: 'Save it to a file, to restore it here or on another deck',
+        tone: 'teal', group: 'place', onSelect: () => setBackupFor({ slug: a.startKey, name: a.name }) })
+    }
     if ((a.kind === 'docker' || a.kind === 'process') && !a.managed) {
       items.push(
         { icon: Trash2, label: 'Remove agent', hint: 'Delete it and its folder', danger: true,
