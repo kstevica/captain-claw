@@ -561,6 +561,99 @@ class AgentToolBody(BaseModel):
 class AgentRunBody(BaseModel):
     tool: str = Field(..., max_length=120)
     input: dict[str, Any] = Field(default_factory=dict)
+    # Phase 7: the id the agent is waiting under, for the tool's requests.
+    callback: str = Field("", max_length=128)
+
+
+# ── A tool's requests, passed to the agent that ran it (Phase 7) ─────────
+
+CALLBACK_PATH = "/api/custom-tools/callback"
+TOO_OLD = ("{title} uses your agent's tools, and this agent can't answer it yet: restart the agent "
+           "(Flight Deck → the agent → Restart), then try again.")
+
+
+class AgentLink(xt.Link):
+    """Hands a running tool's requests to the agent that ran it: its own
+    registry entry, its own token, the id it is waiting under, and who the run
+    is for (settled #5: the identity comes with every request)."""
+
+    def __init__(self, agent_slug: str, callback: str, runner: Runner, grant: str = "") -> None:
+        self.agent_slug = agent_slug
+        self.callback = callback
+        self.runner = runner
+        self.grant = grant
+
+    def _endpoint(self) -> tuple[str, str]:
+        from captain_claw.flight_deck import server as srv
+
+        entry = srv._load_process_registry().get(self.agent_slug)
+        if not isinstance(entry, dict) or not srv._process_is_alive(self.agent_slug):
+            raise xt.ToolError("agent_gone", "The agent that ran this tool isn't running any more.")
+        port = int(entry.get("web_port") or 0)
+        if not port:
+            raise xt.ToolError("agent_gone", "The agent that ran this tool has no port.")
+        return f"http://127.0.0.1:{port}{CALLBACK_PATH}", str(entry.get("web_auth") or "")
+
+    def identity(self, ctx: xt.CallContext) -> dict[str, Any]:
+        return {"user_id": self.runner.user_id, "member": self.runner.member,
+                "grant": self.grant if self.runner.member else "", "owner_runs": ctx.owner_runs}
+
+    async def _post(self, body: dict[str, Any], timeout: float) -> dict[str, Any]:
+        import httpx
+
+        url, token = self._endpoint()
+        try:
+            async with httpx.AsyncClient(timeout=max(5.0, timeout + 5)) as client:
+                resp = await client.post(url, params={"token": token} if token else None, json=body)
+        except httpx.HTTPError as exc:
+            raise xt.ToolError("agent_gone", f"The agent didn't answer ({type(exc).__name__}).") from None
+        try:
+            data = resp.json()
+        except ValueError:
+            data = {}
+        if resp.status_code != 200 or not isinstance(data, dict):
+            why = data.get("error") if isinstance(data, dict) else ""
+            raise xt.ToolError("agent_refused", str(why or f"The agent answered {resp.status_code}."))
+        return data
+
+    def _hand_out(self, ctx: xt.CallContext, value: Any) -> Any:
+        """Files the tool handed on (captain.file), copied into the runner's
+        folders beside the run's own: the vfs path the agent's tool reads."""
+        from captain_claw.flight_deck import vfs_routes
+
+        if isinstance(value, xt.HandedFile):
+            folder_rel = f"{ctx.slug}/{time.strftime('%Y-%m-%d')}-{ctx.call_id}/work"
+            dest_dir = vfs_routes._user_root(ctx.caller) / DELIVERY_PROJECT / folder_rel
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            name = re.sub(r"[^A-Za-z0-9._-]+", "_", value.path.name).strip("._") or "file"
+            shutil.copyfile(value.path, dest_dir / name)
+            return f"vfs:{DELIVERY_PROJECT}/{folder_rel}/{name}"
+        if isinstance(value, dict):
+            return {k: self._hand_out(ctx, v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [self._hand_out(ctx, v) for v in value]
+        return value
+
+    async def tool(self, ctx: xt.CallContext, name: str, params: dict) -> dict[str, Any]:
+        params = await asyncio.to_thread(self._hand_out, ctx, params)
+        left = max(1.0, ctx.remaining())
+        return await self._post({"callback": self.callback, "identity": self.identity(ctx), "op": "tool",
+                                 "tool": name, "input": params, "title": ctx.title, "timeout_s": int(left)}, left)
+
+    async def file(self, ctx: xt.CallContext, ref: str) -> Path:
+        src = _file_resolver(ctx.caller)(ref)
+        if not src.is_file() or src.is_symlink():
+            raise xt.ToolError("files", f"{ref} isn't a file you can read.")
+        return await asyncio.to_thread(xt._bring_in, ctx, src, src.name)
+
+
+def _agent_link(request: Request, runner: Runner, callback: str) -> AgentLink | None:
+    if not callback:
+        return None
+    from captain_claw.flight_deck import speaker_grants
+
+    grant = request.headers.get(speaker_grants.GRANT_HEADER, "") if runner.member else ""
+    return AgentLink(runner.agent, callback, runner, grant)
 
 
 @agent_router.get("/status")
@@ -605,12 +698,16 @@ async def agent_describe(body: AgentToolBody, runner: Runner = Depends(_agent_en
 
 
 @agent_router.post("/run")
-async def agent_run(body: AgentRunBody, runner: Runner = Depends(_agent_enabled)) -> dict[str, Any]:
+async def agent_run(body: AgentRunBody, request: Request, runner: Runner = Depends(_agent_enabled)) -> dict[str, Any]:
     owner, slug = await resolve_ref(runner.user_id, body.tool)
+    manifest = xt.manifest_of(owner, slug)
+    if manifest is not None and manifest.calls_back and not body.callback:
+        raise HTTPException(409, TOO_OLD.format(title=manifest.title))
     try:
         return await xt.run_tool(owner, slug, runner.user_id, body.input,
                                  secret_values=await secret_values(runner.user_id, owner, slug),
-                                 resolve_file=_file_resolver(runner.user_id), deliver=_deliverer(runner.user_id, slug))
+                                 resolve_file=_file_resolver(runner.user_id), deliver=_deliverer(runner.user_id, slug),
+                                 link=_agent_link(request, runner, body.callback))
     except xt.ToolError as exc:
         raise _http(exc) from None
 

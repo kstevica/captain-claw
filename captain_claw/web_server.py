@@ -2041,6 +2041,23 @@ class WebServer:
             log.warning("api_tool failed", tool=tool, error=str(exc))
             return web.json_response({"success": False, "error": str(exc)}, status=500)
 
+    async def _custom_tool_callback(self, request: web.Request) -> web.Response:
+        """A custom tool this agent ran asks it to use one of its tools
+        (custom_tool_callbacks). Owner-locked like /api/tool: only Flight Deck,
+        with the agent's token, passes these on."""
+        from captain_claw import custom_tool_callbacks
+        from captain_claw.config import get_config as _gc
+        from captain_claw.web.public_auth import _is_admin
+        cfg = _gc()
+        if cfg.web.auth_token and not _is_admin(request, cfg.web):
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=403)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        status, answer = await custom_tool_callbacks.handle(body)
+        return web.json_response(answer, status=status)
+
     async def _api_vision(self, request: web.Request) -> web.Response:
         """Lean vision primitive: describe/answer about an image with a RAW model
         call — no agent loop, no memory/insights, no tools, no session history.
@@ -3225,6 +3242,8 @@ class WebServer:
         app.router.add_get("/api/folder-trees", self._get_folder_trees)
         # ── LLM proxy (for remote agent seats) ──
         app.router.add_post("/api/llm/complete", self._llm_complete)
+        # ── Custom tools (Phase 7): a running tool asks this agent for one of its tools ──
+        app.router.add_post("/api/custom-tools/callback", self._custom_tool_callback)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_post("/api/sessions/bulk-delete", self._bulk_delete_sessions)
         app.router.add_get("/api/sessions/{id}", self._get_session_detail)
