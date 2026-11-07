@@ -377,18 +377,28 @@ kiosk reaches it through Settings.
   the real tool class over HTTP into the deck app, and a member's turn running
   the member's tool with the member's secret.
 
-### Phase 2: Crew builds tools
+### Phase 2: Crew builds tools — built 2026-11-07
 
-- Place kind `tool` in `crew_runner._resolve_repo` and `_place_of`; starter
-  commit; tool block in the brief; publish after merge; callback with the
-  publish result.
-- `build` and `improve` in the agent tool.
-- Tests: fake CLI writes a tool, merge, publish passes; a tool whose example
-  fails stays unpublished and the previous version stays live. Fake CLIs must
-  answer `--version` and fixtures must chdir to tmp (Crew round 7/8 trap).
-- Live check on a throwaway deck: a real CLI builds a small tool from an agent's
-  request, Approve, publish, the agent calls it.
-
+- Crew: a `tool` place (`DispatchBody.tool`, `_place_of`, `_tool_place`):
+  `repo_kind = "tool"`, the caller's own tool only (path = ownership), no
+  admin's trust needed. A tool task's first prompt adds
+  `external_tools.WORKER_CONTRACT` after the environment block (the stored
+  brief stays clean). `next_steps` gives only the merge step (no pull request
+  for a tool). After a local merge, `_spawn_tool_publish` runs
+  `external_tools.publish` in the background as the owner with their secrets,
+  keeps the result in `delivery.publish`, and tells the owner (bell) and the
+  agent that asked ("is live" / "wasn't published", with the failing step).
+- Deck: `POST /fd/external-tools/build` and `/{slug}/improve` for the page;
+  `/fd/external-tools/agent/build` and `/agent/improve` for agents, through
+  Crew's own agent dispatch (callback, budget, origin). A tool made for a task
+  that then can't start is removed again. Members can't build.
+- Agent: `custom_tools` gains `build` and `improve` (tool, title, what,
+  harness, model).
+- Tests: `test_external_tools_crew.py` (4: Crew's fake CLI, a real merge that
+  publishes, a merge with a wrong example that keeps the live version, place
+  rules, the contract only for tool tasks) and `test_external_tools_build.py`
+  (5: person and agent build/improve, Crew needed, members refused, nothing
+  left behind when the task can't start, the tool's arguments).
 ### Phase 3: sharing
 
 - `external_tool` share type, `audience` column, offers, Add with consent, admin

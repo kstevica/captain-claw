@@ -59,14 +59,27 @@ class CustomToolsTool(Tool):
         "into the VFS first with write. Files the tool makes come back in vfs:custom-tools/<tool>/…; read them "
         "with read. "
         "If a run fails, tell the user what it said; don't guess the result. A missing secret is set by the user "
-        "on the Custom tools page, never typed into a chat."
+        "on the Custom tools page, never typed into a chat. "
+        "Making tools (needs Crew, the coding CLIs): build (a new tool when the user asks for one, or when you keep "
+        "doing the same multi-step job by hand and they agree: tool = a short lowercase-dashed name, title, what = "
+        "what it should do, its input, what it returns and an example; harness = a coding CLI that crew "
+        "action=options lists) and improve (tool, what = what to change or the failure to fix, harness). Both start "
+        "a Crew task and return at once: tell the user it's under way and end your turn. You're called back when the "
+        "worker finishes; the tool goes live only after the user approves the merge (crew action=request_merge) and "
+        "its tests and examples pass, and you're told when it does."
     )
     parameters = {
         "type": "object",
         "properties": {
-            "action": {"type": "string", "enum": ["list", "describe", "run"], "description": "What to do."},
-            "tool": {"type": "string", "description": "The tool's name, as list shows it (describe, run)."},
+            "action": {"type": "string", "enum": ["list", "describe", "run", "build", "improve"],
+                       "description": "What to do."},
+            "tool": {"type": "string", "description": "The tool's name, as list shows it (or a new name for build)."},
             "input": {"type": "object", "description": "run: the tool's input fields, as describe lists them."},
+            "title": {"type": "string", "description": "build: a short title, like 'Read an invoice PDF'."},
+            "what": {"type": "string", "description": "build: what it should do, its input, what it returns and an "
+                                                       "example. improve: what to change, or the failure to fix."},
+            "harness": {"type": "string", "description": "build, improve: the coding CLI (crew action=options lists them)."},
+            "model": {"type": "string", "description": "build, improve: the CLI's model, only if the user named one."},
         },
         "required": ["action"],
     }
@@ -83,7 +96,9 @@ class CustomToolsTool(Tool):
                 return await self._describe(str(kwargs.get("tool") or ""))
             if action == "run":
                 return await self._run(str(kwargs.get("tool") or ""), kwargs.get("input"))
-            return ToolResult(success=False, error=f"Unknown action '{action}'. Use list, describe or run.")
+            if action in ("build", "improve"):
+                return await self._make(action, kwargs)
+            return ToolResult(success=False, error=f"Unknown action '{action}'. Use list, describe, run, build or improve.")
         except httpx.TimeoutException:
             return ToolResult(success=False, error=(
                 "Flight Deck didn't answer in time. The tool may still have run; don't say it did or didn't."))
@@ -91,6 +106,34 @@ class CustomToolsTool(Tool):
             why = str(exc) or type(exc).__name__
             log.warning("custom_tools error", action=action, error=why)
             return ToolResult(success=False, error=f"Custom tools request failed: {why}")
+
+    async def _make(self, action: str, kwargs: dict[str, Any]) -> ToolResult:
+        if custom_tools_client.member_call():
+            return ToolResult(success=False, error="Only the agent's owner can have custom tools made or changed.")
+        tool = str(kwargs.get("tool") or "").strip()
+        what = str(kwargs.get("what") or "").strip()
+        harness = str(kwargs.get("harness") or "").strip()
+        if not tool or not what or not harness:
+            return ToolResult(success=False, error=(
+                f"{action} needs tool (its name), what (what it should do or change) and harness (a coding CLI that "
+                "crew action=options lists)."))
+        from captain_claw.tools.crew import CrewTool
+
+        platform, user_id, chat_id = CrewTool._origin_of(kwargs.get("_agent"))
+        body = {"tool": tool, "what": what, "harness": harness, "title": str(kwargs.get("title") or ""),
+                "model": str(kwargs.get("model") or ""), "source_host": "localhost",
+                "origin_platform": platform, "origin_user_id": user_id, "origin_chat_id": chat_id}
+        status, data = await custom_tools_client.call("POST", action, body)
+        if (bad := _refused(status, data)) is not None:
+            return bad
+        task = data.get("task") or {}
+        slug = (data.get("tool") or {}).get("slug") or tool
+        doing = "builds" if action == "build" else "changes"
+        return ToolResult(content=(
+            f"Crew task {task.get('id')} is under way: {task.get('harness_label') or harness} {doing} the custom tool "
+            f"{slug} in its own repository. Nothing is done yet: tell the user it's on its way and end your turn. "
+            "You'll be called back when the worker finishes. It goes live after the user approves the merge "
+            f"(crew action=request_merge task_id={task.get('id')}) and its tests and examples pass."))
 
     async def _list(self) -> ToolResult:
         status, data = await custom_tools_client.call("GET", "tools")

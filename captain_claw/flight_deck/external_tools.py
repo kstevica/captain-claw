@@ -104,7 +104,7 @@ def root() -> Path:
 
 
 # Names a route already uses under /fd/external-tools/ (or will): a tool can't take them.
-RESERVED_SLUGS = frozenset({"agent", "status", "admin", "catalog", "shared", "proposals", "approvals"})
+RESERVED_SLUGS = frozenset({"agent", "status", "admin", "catalog", "shared", "proposals", "approvals", "build"})
 
 
 def check_slug(slug: str) -> str:
@@ -786,6 +786,15 @@ async def run_tool(owner: str, slug: str, caller: str, data: Any, *, secret_valu
 
 
 # ── Creating a tool ──────────────────────────────────────────────────────
+
+# What a Crew worker building or changing a tool is told (crew_runner._first_prompt).
+WORKER_CONTRACT = """This repository is a Captain custom tool: a small Python program Flight Deck runs for agents, one process per call.
+- tool.json describes it and must stay true: name (never change it), title, description, entry (the Python file it runs), test (the arguments after `python` that run the tests), input and output (JSON Schema; input is an object), examples (1 to 10, each an `input` and the `expect` part the output must contain), secrets (environment variables it reads, each with a `why`), network (true only if it uses the internet), timeout_s (at most 300) and memory_mb (at most 4096).
+- The program reads ONE JSON object on stdin and prints ONE JSON value on stdout, and nothing else there; logs go to stderr. A failure is a non-zero exit with the reason on stderr.
+- An input field with "format": "file" arrives as the path of a file to read. Files for the caller go in the folder named by $XT_OUT. Secrets come only from the environment variables listed in `secrets`: never put a key in the repository. When it runs, its own folder is read-only: write only to $XT_OUT or $TMPDIR.
+- Python only. Dependencies go in requirements.txt with pinned versions, test-only ones in requirements-test.txt. If you need them while you work, make a venv in .deps/ (git ignores it).
+- Before you finish, run the tests (what `test` says) and every example (pipe its input JSON into the entry file) and check each output contains its `expect`. Publishing runs exactly these, and a version goes live only if all of them pass. Commit your work.
+- Keep it deterministic and small: no network unless the task needs it, nothing left running when it exits."""
 
 _IDENTITY = ("-c", "user.name=Captain", "-c", "user.email=tools@captain-claw.local")
 
