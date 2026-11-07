@@ -5,10 +5,20 @@ import { api } from './fileLibraryApi'
 // person, or offered to everybody; nobody's agent runs someone else's tool until
 // that person adds it.
 
+export interface SandboxInfo {
+  os: string
+  landlock: number
+  files: boolean
+  network: boolean
+  signals: boolean
+}
+
 export interface ToolStatus {
   enabled: boolean
   everybody_needs_approval: boolean
+  require_sandbox: boolean
   can_build: boolean
+  sandbox?: SandboxInfo
 }
 
 export interface PublishStep { step: string; ok: boolean; detail: string; at: number }

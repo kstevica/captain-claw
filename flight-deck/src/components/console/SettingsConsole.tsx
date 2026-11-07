@@ -7,8 +7,9 @@ import { Switch } from '../admin/Switch'
 import { IdleAgentsSetting, IDLE_AGENTS_HINT, IDLE_AGENTS_TITLE } from '../admin/IdleAgentsSetting'
 import { DeckProfileDefaults } from '../profile/DeckProfileDefaults'
 import {
-  CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE,
+  CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE, SANDBOX_HINT, SANDBOX_TITLE, sandboxLine,
 } from '../admin/customTools'
+import { useCustomToolsStore } from '../../stores/customToolsStore'
 import {
   CONFIG_DEFAULTS, fetchConfig, saveConfig, waitlistName, type KioskMode, type SystemConfig,
 } from '../admin/deckConfig'
@@ -34,6 +35,10 @@ export function SettingsConsole() {
   const [cohort, setCohort] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
+  // What this host offers custom tools (the sandbox), from their status.
+  const toolStatus = useCustomToolsStore((s) => s.status)
+  const refreshToolStatus = useCustomToolsStore((s) => s.refreshStatus)
+  useEffect(() => { refreshToolStatus() }, [refreshToolStatus])
 
   useEffect(() => {
     fetchConfig()
@@ -187,7 +192,7 @@ export function SettingsConsole() {
         </SettingRow>
       </Card>
 
-      <Card icon={Wrench} title={CUSTOM_TOOLS_TITLE} bodyClassName="divide-y divide-zinc-800/80 px-5 py-4">
+      <Card icon={Wrench} title={CUSTOM_TOOLS_TITLE} hint={sandboxLine(toolStatus?.sandbox)} bodyClassName="divide-y divide-zinc-800/80 px-5 py-4">
         <SettingRow title={CUSTOM_TOOLS_TITLE} hint={CUSTOM_TOOLS_HINT}>
           <Switch
             on={config.external_tools_enabled}
@@ -204,6 +209,14 @@ export function SettingsConsole() {
             onToggle={() => save('xtools-approval', { external_tools_everybody_approval: !config.external_tools_everybody_approval })}
           />
         </SettingRow>}
+        <SettingRow title={SANDBOX_TITLE} hint={SANDBOX_HINT}>
+          <Switch
+            on={config.external_tools_require_sandbox}
+            disabled={busy === 'xtools-sandbox'}
+            label={SANDBOX_TITLE}
+            onToggle={() => save('xtools-sandbox', { external_tools_require_sandbox: !config.external_tools_require_sandbox })}
+          />
+        </SettingRow>
       </Card>
 
       {/* What every user's agents know about the company — loads on its own. */}

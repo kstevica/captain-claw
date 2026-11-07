@@ -461,6 +461,7 @@ class UpdateConfigRequest(BaseModel):
     # with everybody waits for an admin.
     external_tools_enabled: bool | None = None
     external_tools_everybody_approval: bool | None = None
+    external_tools_require_sandbox: bool | None = None
 
 
 class ProviderKeysRequest(BaseModel):
@@ -493,6 +494,9 @@ SYSTEM_CONFIG_DEFAULTS = {
     # everybody waits for an admin's approval unless this is turned off.
     "external_tools_enabled": False,
     "external_tools_everybody_approval": True,
+    # Only run custom tools inside the OS sandbox (Landlock on Linux); off: use it
+    # where the host has it, and run without it where it doesn't.
+    "external_tools_require_sandbox": False,
 }
 
 WAITLIST_COHORT_MAX = 60

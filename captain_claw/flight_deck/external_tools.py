@@ -557,10 +557,78 @@ def _tool_env(vdir: Path, call_dir: Path, call_id: str, manifest: Manifest,
     return env
 
 
-def _launch(manifest: Manifest, python: Path, args: list[str], *, cpu_s: int) -> list[str]:
-    """Through the launcher, which sets the limits and then becomes the program."""
-    return [sys.executable, "-E", "-s", str(_LAUNCHER), "--mem", str(manifest.memory_mb),
-            "--cpu", str(cpu_s), "--", str(python), "-E", "-s", "-B", *args]
+# ── The sandbox (Phase 6) ────────────────────────────────────────────────
+#
+# On Linux the launcher puts the tool in a Landlock sandbox: it reads and runs
+# only its version folder, the Python it runs on and the system's folders, and
+# writes only its call folder; no TCP unless tool.json says "network": true;
+# no signals to anything outside. Elsewhere (macOS, Windows, an old kernel) it
+# runs without one, unless the admin asked for tools to run only in a sandbox.
+
+_SANDBOX: dict[str, Any] | None = None
+_SYSTEM_RO = ("/usr", "/lib", "/lib32", "/lib64", "/bin", "/sbin", "/etc")
+
+
+def sandbox_info() -> dict[str, Any]:
+    """What this host offers (the launcher's ``--probe``), asked once."""
+    global _SANDBOX
+    if _SANDBOX is None:
+        import subprocess
+
+        try:
+            done = subprocess.run([sys.executable, "-E", "-s", str(_LAUNCHER), "--probe"], capture_output=True,
+                                  text=True, timeout=15)
+            info = json.loads(done.stdout or "{}")
+        except (OSError, ValueError, subprocess.SubprocessError):
+            info = {}
+        _SANDBOX = {"os": str(info.get("os") or sys.platform), "landlock": int(info.get("landlock") or 0),
+                    "files": bool(info.get("files")), "network": bool(info.get("network")),
+                    "signals": bool(info.get("signals"))}
+    return dict(_SANDBOX)
+
+
+def _system_read_only() -> list[str]:
+    """Where a tool's Python and its libraries live: read and run, never write."""
+    paths = [*_SYSTEM_RO, sys.base_prefix, os.path.dirname(os.path.realpath(sys.executable)),
+             os.path.dirname(os.path.dirname(os.path.realpath(sys.executable)))]
+    return [p for p in dict.fromkeys(paths) if p and p != "/" and os.path.exists(p)] + ["/proc/self"]
+
+
+async def _require_sandbox() -> bool:
+    """The admin's "only run tools in a sandbox" (system config); off when it can't be read."""
+    try:
+        from captain_claw.flight_deck.admin_routes import _load_system_config
+        from captain_claw.flight_deck.auth import get_db
+
+        cfg = _load_system_config(await get_db().get_system_setting("fd:system-config"))
+        return bool(cfg.get("external_tools_require_sandbox"))
+    except Exception:  # noqa: BLE001 — no deck database (tests, tools): the default
+        return False
+
+
+async def _sandbox_gate() -> bool:
+    """Whether this run must be sandboxed; refuses when it must and can't be."""
+    required = await _require_sandbox()
+    if required and not (await asyncio.to_thread(sandbox_info))["files"]:
+        raise ToolError("no_sandbox", "This deck runs custom tools only in a sandbox, and this host has none "
+                                      "(it needs Linux with Landlock).", status=503)
+    return required
+
+
+def _launch(manifest: Manifest, python: Path, args: list[str], *, cpu_s: int, read_only: list[Path],
+            writable: list[Path], require: bool = False) -> list[str]:
+    """Through the launcher, which sets the limits and the sandbox and then becomes
+    the program."""
+    cmd = [sys.executable, "-E", "-s", str(_LAUNCHER), "--mem", str(manifest.memory_mb), "--cpu", str(cpu_s)]
+    for path in [*(str(p) for p in read_only), *_system_read_only()]:
+        cmd += ["--ro", path]
+    for path in writable:
+        cmd += ["--rw", str(path)]
+    if not manifest.network:
+        cmd.append("--no-net")
+    if require:
+        cmd.append("--require-sandbox")
+    return [*cmd, "--", str(python), "-E", "-s", "-B", *args]
 
 
 # ── Running ──────────────────────────────────────────────────────────────
@@ -693,6 +761,7 @@ async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest
         raise ToolError("missing_secret", f"{', '.join(missing)} isn't set: Custom tools → {manifest.title} → Secrets.",
                         status=400)
     _check_owner(caller)
+    require = await _sandbox_gate()
     _sweep_runs()
     call_id = "xc_" + _secrets.token_hex(6)
     call_dir = root() / ".runs" / caller / call_id
@@ -715,7 +784,8 @@ async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest
                 (call_dir / sub).mkdir(parents=True, exist_ok=True)
             data = _copy_inputs(manifest, data, call_dir / "in", resolve_file)
             env = _tool_env(vdir, call_dir, call_id, manifest, secret_values)
-            cmd = _launch(manifest, venv_python(vdir / ".deps"), [manifest.entry], cpu_s=manifest.timeout_s + 5)
+            cmd = _launch(manifest, venv_python(vdir / ".deps"), [manifest.entry], cpu_s=manifest.timeout_s + 5,
+                          read_only=[vdir], writable=[call_dir], require=require)
             res = await _run_proc(cmd, cwd=vdir, env=env, timeout=manifest.timeout_s,
                                   stdin=json.dumps(data, ensure_ascii=False).encode("utf-8"))
             base = {"call_id": call_id, "version": version, "seconds": round(res.seconds, 3), "exit_code": res.code}
@@ -1067,7 +1137,9 @@ async def _run_tests(vdir: Path, manifest: Manifest, home: Path, secret_values: 
     for sub in ("in", "out"):
         (call_dir / sub).mkdir(exist_ok=True)
     env = _tool_env(vdir, call_dir, "xc_tests", manifest, secret_values)
-    cmd = _launch(manifest, venv_python(vdir / ".deps"), list(manifest.test), cpu_s=TEST_TIMEOUT_S + 5)
+    # Not live yet: its tests may write in their own folder (a cache, a fixture).
+    cmd = _launch(manifest, venv_python(vdir / ".deps"), list(manifest.test), cpu_s=TEST_TIMEOUT_S + 5,
+                  read_only=[], writable=[vdir, call_dir], require=await _sandbox_gate())
     res = await _run_proc(cmd, cwd=vdir, env=env, timeout=TEST_TIMEOUT_S, stdout_cap=MAX_STDOUT * 4)
     log_text = _tail(res.stdout.decode("utf-8", "replace") + "\n" + res.stderr)
     if res.timed_out or res.code != 0:

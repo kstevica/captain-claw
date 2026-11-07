@@ -1,6 +1,6 @@
 # External tools — plan
 
-Written 2026-11-06. Status: Phase 0 under way.
+Written 2026-11-06. Status: Phases 0–6 built on 2026-11-07, one stacked PR each (#450–#456).
 
 ### Settled with the user (2026-11-06)
 
@@ -479,12 +479,39 @@ kiosk reaches it through Settings.
 - Tests: `tests/test_tool_proposals.py` (10) and
   `test_flight_deck/test_external_tool_proposals.py` (5).
 
-### Phase 6: the OS sandbox
+### Phase 6: the OS sandbox — built 2026-11-07
 
-- Run tools under the per-agent sandbox from `docs/agent-os-sandbox-plan.md`
-  (Landlock + seccomp on Linux): version folder read-only, call folder
-  read-write, nothing else; network only when `tool.json` says so.
-- Until then, `network` and "only its folder" are declarations, not walls.
+- `xtool_launch.py` puts every run (and a publish's test step) in a Landlock
+  sandbox on Linux before it becomes the tool, with ctypes and the standard
+  library only, no root:
+  - files: read and run only the version folder, the Python it runs on
+    (`sys.base_prefix` and its executable's folder), `/usr`, `/lib*`, `/bin`,
+    `/sbin`, `/etc` and `/proc/self` (the tool's own /proc, so not Flight
+    Deck's environment); read and write only the call's folder (and, for a
+    test step, the not-yet-live version) and a few devices;
+  - network (ABI 4+): no TCP connect or bind unless tool.json says
+    `"network": true`;
+  - signals and abstract sockets (ABI 6+): nothing outside the sandbox.
+- `--probe` says what a host offers; `external_tools.sandbox_info()` asks once
+  and `/fd/external-tools/status` shows it, as does the Custom tools card in
+  Settings.
+- Admin switch `external_tools_require_sandbox` ("Run tools only in the
+  sandbox", off by default): on, a host without the sandbox runs no tools
+  (503 from Flight Deck, and the launcher itself refuses with exit 126).
+- Not sandboxed: installing dependencies at publish (it needs the network and
+  the download cache). That runs the owner's own `requirements.txt`.
+- Not covered by Landlock: UDP, so DNS and other UDP traffic still work with
+  `"network": false`; and reads of world-readable system files under the read
+  paths.
+- Checked in a Linux container (kernel 6.12, Landlock ABI 6) from the Mac,
+  running as root, so the refusals are Landlock's: a file outside unreadable,
+  the tool's own folder unwritable, the call folder writable, another
+  process's `/proc/<pid>/environ` unreadable, no signal to Flight Deck, TCP
+  refused with `--no-net` and allowed without; and a tool running from its own
+  venv under exactly the read-only list Flight Deck passes.
+- Tests: `test_xtool_sandbox.py` (needs Linux with Landlock; skips elsewhere;
+  runs standalone too) and `test_external_tools_sandbox.py` (the flags each run
+  gets, the refusal, the switch and the status).
 
 ## Security
 
@@ -499,19 +526,28 @@ What holds from Phase 0:
 - Nobody's agent runs a tool its owner didn't add; sharing with everybody needs
   an admin unless the admin turned that off.
 
-What doesn't hold until Phase 6, said plainly: a tool process runs as Flight
-Deck's OS user, so deliberate code can read what that user can (other users'
-folders, the deck's database) and reach the network. That is the same reach an
-approved Crew worker has today, and only Crew-approved users can author tools,
-so this adds no new person with that reach. It does mean a tool runs
-unattended, at someone else's call. That's why adding is consent and "everybody"
-is approved by an admin. Decks that can't accept this leave Custom tools off
-(the default) until the sandbox exists.
+What holds since Phase 6, on Linux with Landlock: a tool reads only its own
+files, its Python and the system's folders, writes only its call's folder, has
+no TCP unless it declares it, and can't signal or reach other processes. On a
+host without Landlock (macOS, Windows, an old kernel) a tool still runs as
+Flight Deck's OS user and can reach what that user can (other users' folders,
+the deck's database) — the same reach an approved Crew worker has — unless the
+admin turns on "Run tools only in the sandbox", and then that host runs none.
+Settings says which it is.
 
 ## Still open
 
 - **Windows desktop**: the launcher passes the exit code on, but no limits apply
   there and the process-group kill is `proc.kill()` only. Untested.
+- **Not tried with a real model**: an agent calling `custom_tools` (list,
+  run, build, propose) and drafting a proposal after a turn. The routes and
+  the tool are tested over HTTP; Crew building a tool with a real CLI was
+  checked (Phase 2).
+- **The sandbox on a real deck**: checked in a Linux container, not yet on
+  the Pi or the glasses deck. `python3 tests/test_flight_deck/test_xtool_sandbox.py`
+  there says.
+- **UDP** isn't ruled by Landlock: a tool with `"network": false` can still
+  send UDP (DNS included). seccomp could close that.
 
 ## Existing pieces this reuses
 
