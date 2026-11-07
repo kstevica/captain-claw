@@ -41,7 +41,13 @@ export interface Declares {
   secrets: string[]
   timeout_s: number
   memory_mb: number
+  // Phase 7: the agent's tools it asks for ("web_fetch (api.example.com)"), and other tools it runs.
+  uses?: string[]
+  runs?: string[]
 }
+
+/** One of the person's own agents, for Try it's "Run as". */
+export interface MyAgent { slug: string; name: string; status: 'running' | 'asleep' | 'stopped' }
 
 export interface ToolSummary {
   owner: string
@@ -201,8 +207,9 @@ export const customToolsApi = {
   shared: () => api<{ tools: Offer[] }>(`${base}/shared`),
   catalog: () => api<{ tools: Offer[] }>(`${base}/catalog`),
   get: (slug: string, owner?: string) => api<ToolDetail>(`${base}/${slug}${q(owner)}`),
-  run: (slug: string, input: Record<string, unknown>, owner?: string) =>
-    api<RunResult>(`${base}/${slug}/run${q(owner)}`, json('POST', { input })),
+  run: (slug: string, input: Record<string, unknown>, owner?: string, agent?: string) =>
+    api<RunResult>(`${base}/${slug}/run${q(owner)}`, json('POST', { input, ...(agent ? { agent } : {}) })),
+  agents: () => api<{ agents: MyAgent[] }>(`${base}/agents`),
   setSecrets: (slug: string, values: Record<string, string>, owner?: string) =>
     api<{ secrets: SecretState[] }>(`${base}/${slug}/secrets${q(owner)}`, json('PUT', { values })),
   publish: (slug: string) => api<PublishState>(`${base}/${slug}/publish`, json('POST', {})),

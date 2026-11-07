@@ -67,6 +67,11 @@ enforces this.
 their own, so a shared tool never sees the owner's key.
 - Agents choose a tool by its name, title and description and fill its input from the JSON Schema, so field \
 names and descriptions must say plainly what goes in.
+- It can ask the agent that ran it to use the agent's own read and write tools (search or read the person's mail, \
+read a page from a host it names, write a file) and to run the person's other custom tools, each declared in "uses" \
+with a why. Prefer that to network access and new secrets when the agent already has the connection (Gmail, \
+Drive, calendars): the person's own connection is used and nothing new is stored. Sending (mail, messages, \
+calendar invitations) works only when the tool's owner runs it.
 
 What agents already do without a custom tool:
 {AGENTS_ALREADY}

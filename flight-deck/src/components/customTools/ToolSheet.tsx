@@ -2,11 +2,11 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Wrench, Play, KeyRound, UploadCloud, History, Share2, BarChart3, Trash2, Hammer, ChevronDown, ChevronRight, X, Workflow, Plus } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import {
-  customToolsApi, type JsonSchema, type RunResult, type Sharing, type ToolDetail, type Usage,
+  customToolsApi, type JsonSchema, type MyAgent, type RunResult, type Sharing, type ToolDetail, type Usage,
 } from '../../services/customToolsApi'
 import { Sheet, Button, Notice, Pill, Switch, Field, inputCls } from '../console/parts'
 import { ShareModal } from '../common/ShareModal'
-import { DeclaresLine, statusPill } from './toolParts'
+import { DeclaresLine, statusPill, usesWords } from './toolParts'
 import { HarnessPicker } from './NewToolDialog'
 
 // One tool: try it, set your secrets for it, and for your own tools publish,
@@ -76,6 +76,9 @@ export function ToolSheet({ slug, owner, mine, onClose, onChanged, onDeleted }: 
   const [what, setWhat] = useState('')
   const [harness, setHarness] = useState('')
   const [note, setNote] = useState('')
+  // Phase 7c: a tool that calls back into an agent runs as one of the person's agents.
+  const [agents, setAgents] = useState<MyAgent[] | null>(null)
+  const [runAs, setRunAs] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -100,6 +103,16 @@ export function ToolSheet({ slug, owner, mine, onClose, onChanged, onDeleted }: 
   }, [tool?.publish?.state, load, onChanged])
 
   const fields = useMemo(() => fieldsOf(tool?.manifest?.input), [tool?.manifest?.input])
+  const callsBack = (tool?.manifest?.uses || []).length > 0
+
+  useEffect(() => {
+    if (!callsBack || agents) return
+    customToolsApi.agents().then((r) => {
+      setAgents(r.agents)
+      const first = r.agents.find((a) => a.status !== 'stopped')
+      if (first) setRunAs((v) => v || first.slug)
+    }).catch(() => setAgents([]))
+  }, [callsBack, agents])
 
   const act = async (key: string, fn: () => Promise<unknown>, after?: () => void) => {
     setBusy(key)
@@ -122,7 +135,7 @@ export function ToolSheet({ slug, owner, mine, onClose, onChanged, onDeleted }: 
     setResult(null)
     try {
       const input = asJson ? JSON.parse(jsonText || '{}') : buildInput(fields, values)
-      setResult(await customToolsApi.run(slug, input, mine ? undefined : owner))
+      setResult(await customToolsApi.run(slug, input, mine ? undefined : owner, callsBack ? runAs : undefined))
       if (mine) setUsage(await customToolsApi.usage(slug))
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed')
@@ -155,7 +168,14 @@ export function ToolSheet({ slug, owner, mine, onClose, onChanged, onDeleted }: 
           <div className="flex flex-wrap items-center gap-2">{statusPill(tool)}</div>
           {tool.description && <p className="mt-2 text-sm leading-relaxed text-zinc-400">{tool.description}</p>}
           {m && <DeclaresLine d={{ version: tool.live?.version || '', network: m.network, secrets: m.secrets.map((s) => s.name),
-            timeout_s: m.timeout_s, memory_mb: m.memory_mb }} />}
+            timeout_s: m.timeout_s, memory_mb: m.memory_mb, ...usesWords(m.uses) }} />}
+          {m && (m.uses || []).length > 0 && (
+            <ul className="mt-2 space-y-0.5 text-[11px] text-zinc-500">
+              {(m.uses || []).map((u, i) => (
+                <li key={i}><span className="font-mono text-zinc-400">{u.tool || u.custom_tool}</span> — {u.why}</li>
+              ))}
+            </ul>
+          )}
         </div>
 
         {!mine && !tool.added && (
@@ -221,7 +241,22 @@ export function ToolSheet({ slug, owner, mine, onClose, onChanged, onDeleted }: 
                 ))}
               </div>
             )}
-            <Button variant="primary" icon={Play} busy={busy === 'run'} onClick={run} disabled={!tool.live}>Run</Button>
+            {callsBack && (
+              <Field label="Run as" hint="While it runs it asks this agent to use its tools, as you. Its requests go to a session of their own, not your chat.">
+                {agents && agents.length === 0 ? (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">You have no agent to run it with.</p>
+                ) : (
+                  <select aria-label="Run as" className={inputCls} value={runAs} onChange={(e) => setRunAs(e.target.value)}>
+                    {(agents || []).map((a) => (
+                      <option key={a.slug} value={a.slug} disabled={a.status === 'stopped'}>
+                        {a.name}{a.status === 'asleep' ? ' (asleep: it wakes)' : a.status === 'stopped' ? ' (off)' : ''}
+                      </option>
+                    ))}
+                  </select>
+                )}
+              </Field>
+            )}
+            <Button variant="primary" icon={Play} busy={busy === 'run'} onClick={run} disabled={!tool.live || (callsBack && !runAs)}>Run</Button>
             {result && (
               result.ok ? (
                 <div className="space-y-2">

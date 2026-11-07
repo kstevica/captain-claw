@@ -28,6 +28,8 @@ log = get_logger(__name__)
 
 MAX_CONTENT = 1_000_000
 MAX_WAIT_S = 4_000.0
+# Try it on the Custom tools page has no turn: its requests run in this session.
+TRY_SESSION = "custom-tools-try"
 
 
 @dataclass

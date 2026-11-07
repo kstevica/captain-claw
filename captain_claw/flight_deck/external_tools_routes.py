@@ -199,6 +199,16 @@ async def can_use(user_id: str, owner: str, slug: str) -> bool:
     return bool(await offered_to(user_id, owner, slug))
 
 
+def declares_of(m: xt.Manifest) -> dict[str, Any]:
+    """What a version says it needs, in the words the page and the bells use."""
+    from captain_claw.flight_deck import external_tool_uses as uses_policy
+
+    agent_uses = uses_policy.describe(tuple(u for u in m.uses if "tool" in u))
+    return {"network": m.network, "secrets": [s["name"] for s in m.secrets], "timeout_s": m.timeout_s,
+            "memory_mb": m.memory_mb, "uses": agent_uses,
+            "runs": [u["custom_tool"] for u in m.uses if "custom_tool" in u]}
+
+
 def _declares(owner: str, slug: str) -> dict[str, Any] | None:
     """What the live version says it needs, for consent and update bells."""
     live = xt.read_live(owner, slug)
@@ -209,8 +219,7 @@ def _declares(owner: str, slug: str) -> dict[str, Any] | None:
         m = xt.load_manifest(vdir, slug=slug)
     except xt.ToolError:
         return None
-    return {"version": live["version"], "network": m.network, "secrets": [s["name"] for s in m.secrets],
-            "timeout_s": m.timeout_s, "memory_mb": m.memory_mb}
+    return {"version": live["version"], **declares_of(m)}
 
 
 def declares_more(old: dict | None, new: dict | None) -> list[str]:
@@ -218,6 +227,12 @@ def declares_more(old: dict | None, new: dict | None) -> list[str]:
     if not old or not new:
         return []
     out = []
+    extra_uses = [u for u in new.get("uses") or [] if u not in (old.get("uses") or [])]
+    if extra_uses:
+        out.append("to use your agent's " + ", ".join(extra_uses))
+    extra_runs = [r for r in new.get("runs") or [] if r not in (old.get("runs") or [])]
+    if extra_runs:
+        out.append("to run " + ", ".join(extra_runs))
     if new["network"] and not old["network"]:
         out.append("internet access")
     extra = [n for n in new["secrets"] if n not in old["secrets"]]
@@ -309,6 +324,8 @@ class LiveBody(BaseModel):
 
 class RunBody(BaseModel):
     input: dict[str, Any] = Field(default_factory=dict)
+    # Phase 7c: which of the person's agents runs a tool that calls back into one.
+    agent: str = Field("", max_length=100)
 
 
 class SecretsBody(BaseModel):
@@ -422,14 +439,24 @@ async def make_live(slug: str, body: LiveBody, user: dict = Depends(_enabled)) -
 @router.post("/{slug}/run")
 async def run(slug: str, body: RunBody, owner: str = Query(""), user: dict = Depends(_enabled)) -> dict[str, Any]:
     """Run the live version as the signed-in person, with their secrets: their own
-    tool, or (with *owner*) one offered to them that they added."""
+    tool, or (with *owner*) one offered to them that they added. A tool that
+    calls back into an agent runs as the person's *agent* (Phase 7c)."""
     caller, owner, slug = await _usable(user, slug, owner)
+    manifest = xt.manifest_of(owner, slug)
+    link = None
+    if manifest is not None and manifest.calls_back:
+        if not body.agent:
+            raise HTTPException(409, f"{manifest.title} asks an agent to use its tools: pick which of your agents runs it.")
+        link = await open_host(caller, body.agent, slug, manifest.timeout_s + 60)
     try:
         return await xt.run_tool(owner, slug, caller, body.input,
                                  secret_values=await secret_values(caller, owner, slug),
-                                 resolve_file=_file_resolver(caller), deliver=_deliverer(caller, slug))
+                                 resolve_file=_file_resolver(caller), deliver=_deliverer(caller, slug), link=link)
     except xt.ToolError as exc:
         raise _http(exc) from None
+    finally:
+        if link is not None:
+            await close_host(link)
 
 
 @router.get("/{slug}/secrets")
@@ -701,6 +728,65 @@ class AgentLink(xt.Link):
             except (xt.ToolError, OSError, AttributeError) as exc:
                 xt.log.debug("A nested custom tool's file couldn't be brought in", error=str(exc))
         return {"ok": True, "output": result.get("output"), "files": files}
+
+
+HOST_PATH = "/api/custom-tools/host"
+
+
+def own_agent(uid: str, agent_slug: str) -> dict[str, Any]:
+    """One of *uid*'s own process agents, from the registry; 404 otherwise."""
+    from captain_claw.flight_deck import server as srv
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    entry = srv._load_process_registry().get(str(agent_slug or ""))
+    if not isinstance(entry, dict) or (_fd_auth_enabled() and str(entry.get("owner") or "") != uid):
+        raise HTTPException(404, "You have no agent by that name.")
+    return entry
+
+
+async def _agent_post(agent_slug: str, path: str, body: dict[str, Any]) -> tuple[int, dict]:
+    import httpx
+
+    from captain_claw.flight_deck import server as srv
+
+    entry = srv._load_process_registry().get(agent_slug) or {}
+    port, token = int(entry.get("web_port") or 0), str(entry.get("web_auth") or "")
+    async with httpx.AsyncClient(timeout=15) as client:
+        resp = await client.post(f"http://127.0.0.1:{port}{path}", params={"token": token} if token else None, json=body)
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {}
+    return resp.status_code, data if isinstance(data, dict) else {}
+
+
+async def open_host(uid: str, agent_slug: str, tool: str, ttl: int) -> AgentLink:
+    """Try it, as one of the person's agents (Phase 7c): wake it if it sleeps,
+    and ask it to take this run's requests under a fresh id. There is no turn:
+    its requests run in a session of their own, as the person."""
+    from captain_claw.flight_deck import agent_idle
+    from captain_claw.flight_deck import server as srv
+
+    entry = own_agent(uid, agent_slug)
+    name = str(entry.get("name") or agent_slug)
+    if not srv._process_is_alive(agent_slug):
+        if not (entry.get("asleep") and await agent_idle.wake(agent_slug)):
+            raise HTTPException(409, f"{name} is off. Start it, then try again.")
+    try:
+        status, data = await _agent_post(agent_slug, HOST_PATH, {"tool": tool, "ttl": ttl})
+    except Exception as exc:  # noqa: BLE001 — the agent didn't answer
+        raise HTTPException(502, f"{name} didn't answer ({type(exc).__name__}).") from None
+    callback = str(data.get("callback") or "")
+    if status != 200 or not callback:
+        raise HTTPException(409, f"{name} can't run tools that call back into it yet: restart it, then try again.")
+    return AgentLink(agent_slug, callback, Runner(uid, agent_slug, False))
+
+
+async def close_host(link: AgentLink) -> None:
+    try:
+        await _agent_post(link.agent_slug, HOST_PATH, {"close": link.callback})
+    except Exception:  # noqa: BLE001 — it ends with its time anyway
+        pass
 
 
 def _agent_link(request: Request, runner: Runner, callback: str) -> AgentLink | None:
@@ -1009,6 +1095,24 @@ class DecideBody(BaseModel):
     approve: bool
 
 
+@catalog_router.get("/agents")
+async def my_agents(user: dict = Depends(_enabled)) -> dict[str, Any]:
+    """The person's own agents, for Try it's "Run as" (Phase 7c)."""
+    from captain_claw.flight_deck import server as srv
+    from captain_claw.flight_deck.auth import _fd_auth_enabled
+
+    uid = _uid(user)
+    out = []
+    for slug, entry in srv._load_process_registry().items():
+        if not isinstance(entry, dict) or (_fd_auth_enabled() and str(entry.get("owner") or "") != uid):
+            continue
+        alive = srv._process_is_alive(slug)
+        status = "running" if alive else "asleep" if (entry.get("asleep") and not entry.get("stopped")) else "stopped"
+        out.append({"slug": slug, "name": str(entry.get("name") or slug), "status": status})
+    out.sort(key=lambda a: (a["status"] != "running", a["name"].lower()))
+    return {"agents": out}
+
+
 @catalog_router.get("/shared")
 async def shared_with_me(user: dict = Depends(_enabled)) -> dict[str, Any]:
     """Tools someone offered to this person, live ones only."""
@@ -1227,8 +1331,7 @@ async def after_publish(owner: str, slug: str, old_version: str | None, new_vers
             m = xt.load_manifest(vdir, slug=slug)
         except xt.ToolError:
             return
-        d = {"network": m.network, "secrets": [s["name"] for s in m.secrets], "timeout_s": m.timeout_s,
-             "memory_mb": m.memory_mb, "title": m.title}
+        d = {**declares_of(m), "title": m.title}
         if target == "old":
             old = d
         else:

@@ -829,6 +829,17 @@ handles it directly; the agent isn't needed.
   (`POST /fd/external-tools/<slug>/offer-dependencies`: the same people, and
   everybody if it's offered to everybody). Tests:
   `test_external_tools_nested.py` (5).
+- **7c (2026-11-07):** Try it on a tool with `uses` asks "Run as" (the
+  person's own agents from `GET /fd/external-tools/agents`; an asleep one is
+  woken, one that's off is refused). Flight Deck asks that agent for a hosting
+  slot (`POST /api/custom-tools/host` on the agent, owner-locked; `{"close":
+  id}` ends it when the run does); its requests run as the person in the
+  session `custom-tools-try`. The declares line and the tool sheet show what
+  it asks of the agent ("Calls your agent: write, web_fetch (example.com)",
+  each use with its why) and the tools it runs; the update bell names new
+  uses and tools it now runs. The New tool check knows a tool can use its
+  agent and should prefer that to network access and new secrets. Tests:
+  `test_external_tools_run_as.py` (3).
 
 #### Build order (one PR each)
 
