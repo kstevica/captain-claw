@@ -588,3 +588,172 @@ def test_sealed_keys_open_only_with_their_passphrase():
     box["kdf"]["n"] = 2 ** 30
     with pytest.raises(archive.BundleError, match="doesn't read"):
         secrets_box.open_sealed(json.dumps(box).encode(), "a long passphrase")
+
+
+# ── phase 3: into an agent that already exists — reset, append, undo ────────
+
+from captain_claw.flight_deck.agent_bundle import merge  # noqa: E402
+
+
+async def _carol_agent_with_memory() -> Path:
+    hc = server.DATA_DIR / "carol-agent" / HC
+    hc.mkdir(parents=True, exist_ok=True)
+    (hc / "personality.md").write_text("Carol's own voice.\n")
+    insights = InsightsManager(hc / "insights.db")
+    await insights.add("Books close on the 5th, in Zagreb, for the client", "workflow", entity_key="books-close")
+    await insights.add("Carol's office is in Split", "fact")
+    await insights.close()
+    return hc
+
+
+@pytest.mark.asyncio
+async def test_append_adds_what_the_agent_hasnt_and_keeps_its_own(deck, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(server, "_process_is_alive", lambda slug: slug == "carol-agent")
+    monkeypatch.setattr(server, "_do_stop_process", lambda slug: calls.append(f"stop {slug}"))
+    monkeypatch.setattr(server, "_do_start_process", lambda slug: calls.append(f"start {slug}"))
+    hc = await _carol_agent_with_memory()
+    async with _client() as c:
+        data = await _export(c, {"preset": "trained", "insight_categories": None})
+        up = await _upload(c, data, CAROL)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "bob-agent", "mode": "append"}},
+                         headers=_hdr(CAROL))
+        assert r.status_code == 404                     # not hers
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "carol-agent", "mode": "append"}},
+                         headers=_hdr(CAROL))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert calls == ["stop carol-agent", "start carol-agent"] and body["restarted"] is True
+        # Bob's "books close" has the same entity_key as Carol's: hers stays, his preference comes in
+        assert body["counts"]["insights"] == {"added": 1, "skipped": 1}
+        assert body["safety_backup"]["id"] and _FakePopen.calls == []
+        got = await c.get(f"/fd/agent-bundle/safety/{body['safety_backup']['id']}/download", headers=_hdr(CAROL))
+        assert got.status_code == 200 and "stores/insights.db" in _names(got.content)
+        assert (await c.get(f"/fd/agent-bundle/safety/{body['safety_backup']['id']}/download",
+                            headers=_hdr(BOB))).status_code == 404
+    assert (hc / "personality.md").read_text() == "Carol's own voice.\n"            # hers wins in append
+    assert (hc / "skills" / "vat-check" / "SKILL.md").is_file()                      # his skill added
+    assert (await server._owner_agent_instructions(CAROL, "process"))["carol-agent"] == "Be brief."  # she had none
+    insights = InsightsManager(hc / "insights.db")
+    try:
+        assert await insights.count() == 3
+        assert (await insights.search("short answers"))[0]["content"] == "Bob prefers short answers"
+    finally:
+        await insights.close()
+
+
+@pytest.mark.asyncio
+async def test_reset_replaces_what_the_bundle_carries_and_undo_brings_it_back(deck):
+    hc = server.DATA_DIR / "bob-agent" / HC
+    async with _client() as c:
+        backup = await _export(c, {"preset": "full"})
+        # after the backup, Bob's agent learns something, chats on, and gets a new task
+        insights = InsightsManager(hc / "insights.db")
+        await insights.add("Invoices go out on Fridays", "workflow")
+        await insights.close()
+        await deck.upsert_chat_session("proc-bob-agent::later", BOB, "proc-bob-agent", "Bob's agent")
+        sched.get_store().create(owner_id=BOB, name="Evening", schedule="daily 18:00", agent_slug="bob-agent",
+                                 prompt="Wrap up", delivery_kind="agent", delivery={"chat": True})
+        (server.DATA_DIR / "bob-agent" / "data" / "workspace" / "new-file.md").write_text("made later\n")
+        up = await _upload(c, backup)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "bob-agent", "mode": "reset"}},
+                         headers=_hdr(BOB))
+        assert r.status_code == 200, r.text
+        safety = r.json()["safety_backup"]["id"]
+        insights = InsightsManager(hc / "insights.db")
+        try:
+            assert await insights.count() == 2 and not await insights.search("Fridays")
+        finally:
+            await insights.close()
+        assert not (server.DATA_DIR / "bob-agent" / "data" / "workspace" / "new-file.md").exists()
+        assert (server.DATA_DIR / "bob-agent" / "data" / "workspace" / "knowledge" / "handbook.md").is_file()
+        log = await deck.export_chat_log(BOB, "proc-bob-agent")
+        assert sorted(s["id"] for s in log["sessions"]) == ["proc-bob-agent", "proc-bob-agent::side"]
+        jobs = [j for j in sched.get_store().list(BOB) if j["agent_slug"] == "bob-agent"]
+        assert [j["name"] for j in jobs] == ["Morning books"] and jobs[0]["enabled"] == 0
+        # undo: the agent as it was just before the import
+        r = await c.post(f"/fd/agent-bundle/safety/{safety}/restore", headers=_hdr(BOB))
+        assert r.status_code == 200, r.text
+        assert r.json()["undone"] is True
+    insights = InsightsManager(hc / "insights.db")
+    try:
+        assert await insights.count() == 3 and await insights.search("Fridays")
+    finally:
+        await insights.close()
+    assert (server.DATA_DIR / "bob-agent" / "data" / "workspace" / "new-file.md").read_text() == "made later\n"
+    log = await deck.export_chat_log(BOB, "proc-bob-agent")
+    assert "proc-bob-agent::later" in {s["id"] for s in log["sessions"]}
+    assert {j["name"] for j in sched.get_store().list(BOB) if j["agent_slug"] == "bob-agent"} == {
+        "Morning books", "Evening"}
+
+
+@pytest.mark.asyncio
+async def test_append_puts_its_chat_log_beside_the_agents_own(deck):
+    async with _client() as c:
+        data = await _export(c, {"preset": "full"})
+        up = await _upload(c, data)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "bob-agent", "mode": "append"}},
+                         headers=_hdr(BOB))
+    assert r.status_code == 200, r.text
+    ids = sorted(s["id"] for s in (await deck.export_chat_log(BOB, "proc-bob-agent"))["sessions"])
+    lane = next(i for i in ids if i.startswith("proc-bob-agent::imported-") and not i.endswith("-side"))
+    assert ids == sorted(["proc-bob-agent", "proc-bob-agent::side", lane, f"{lane}-side"])
+    # the same task wasn't added twice
+    assert [j["name"] for j in sched.get_store().list(BOB) if j["agent_slug"] == "bob-agent"] == ["Morning books"]
+    assert r.json()["counts"]["sessions"] == {"added": 0, "skipped": 1}
+
+
+def test_merge_store_appends_rows_without_taking_another_rows_id(tmp_path):
+    def db(path: Path, rows: list[tuple]) -> Path:
+        with sqlite3.connect(path) as c:
+            c.executescript("CREATE TABLE log (id INTEGER PRIMARY KEY AUTOINCREMENT, text TEXT);"
+                            "CREATE TABLE playbooks (id TEXT PRIMARY KEY, name TEXT, body TEXT);")
+            c.executemany("INSERT INTO log (id, text) VALUES (?, ?)", rows)
+        return path
+    mine = db(tmp_path / "mine.db", [(1, "mine one"), (2, "shared")])
+    theirs = db(tmp_path / "theirs.db", [(1, "theirs one"), (2, "shared")])
+    with sqlite3.connect(mine) as c:
+        c.execute("INSERT INTO playbooks VALUES ('p1', 'Invoices', 'mine')")
+    with sqlite3.connect(theirs) as c:
+        c.execute("INSERT INTO playbooks VALUES ('p9', ' invoices ', 'theirs')")
+        c.execute("INSERT INTO playbooks VALUES ('p2', 'Payroll', 'theirs')")
+    got = merge.merge_store(theirs, mine, ["log", "playbooks"], "append")
+    assert got == {"log": {"added": 1, "skipped": 1}, "playbooks": {"added": 1, "skipped": 1}}
+    with sqlite3.connect(mine) as c:
+        assert c.execute("SELECT id, text FROM log ORDER BY id").fetchall() == [
+            (1, "mine one"), (2, "shared"), (3, "theirs one")]
+        assert c.execute("SELECT name, body FROM playbooks ORDER BY name").fetchall() == [
+            ("Invoices", "mine"), ("Payroll", "theirs")]
+    got = merge.merge_store(theirs, mine, ["log"], "reset")
+    with sqlite3.connect(mine) as c:
+        assert c.execute("SELECT id, text FROM log ORDER BY id").fetchall() == [(1, "theirs one"), (2, "shared")]
+        assert c.execute("SELECT count(*) FROM playbooks").fetchone() == (2,)     # not in the list: untouched
+
+
+def test_merge_record_joins_lists_and_keeps_the_agents_own():
+    mine = {"rules": [{"text": "Be exact"}], "facts": 3, "knowledge": [{"doc": "a.md"}]}
+    theirs = {"rules": [{"text": " be  EXACT "}, {"text": "Cite the source"}], "facts": 9,
+              "knowledge": [{"doc": "b.md"}], "glossary": [{"text": "VAT: tax"}]}
+    out = merge.merge_record(mine, theirs)
+    assert [r["text"] for r in out["rules"]] == ["Be exact", "Cite the source"]
+    assert out["facts"] == 3 and [k["doc"] for k in out["knowledge"]] == ["a.md", "b.md"]
+    assert out["glossary"] == [{"text": "VAT: tax"}]
+
+
+@pytest.mark.asyncio
+async def test_append_keeps_the_agents_own_reflection(deck):
+    hc = await _carol_agent_with_memory()
+    (hc / "reflections").mkdir()
+    (hc / "reflections" / "2026-01-01T00-00-00+00-00.md").write_text("- Carol's way.\n")
+    async with _client() as c:
+        data = await _export(c, {"preset": "trained"})
+        up = await _upload(c, data, CAROL)
+        r = await c.post(f"/fd/agent-bundle/uploads/{up['upload_id']}/import",
+                         json={"target": {"kind": "existing", "slug": "carol-agent", "mode": "append"}},
+                         headers=_hdr(CAROL))
+    assert r.status_code == 200, r.text
+    assert [p.name for p in (hc / "reflections").iterdir()] == ["2026-01-01T00-00-00+00-00.md"]

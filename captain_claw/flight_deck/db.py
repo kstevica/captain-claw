@@ -2173,10 +2173,22 @@ class FlightDeckDB:
             messages.extend(dict(r) for r in await cur.fetchall())
         return {"agent_id": agent_id, "sessions": sessions, "messages": messages}
 
-    async def import_chat_log(self, user_id: str, agent_id: str, agent_name: str, log: dict) -> int:
+    async def drop_chat_log(self, user_id: str, agent_id: str) -> int:
+        """*user_id*'s chat log with one agent (every lane) — not its members'."""
+        assert self._db is not None
+        lanes = f"{agent_id}::"
+        cur = await self._db.execute(
+            "DELETE FROM chat_sessions WHERE user_id = ? AND (agent_id = ? OR id = ? OR substr(id, 1, ?) = ?)",
+            (user_id, agent_id, agent_id, len(lanes), lanes))
+        await self._db.commit()
+        return int(cur.rowcount or 0)
+
+    async def import_chat_log(self, user_id: str, agent_id: str, agent_name: str, log: dict,
+                              lane: str = "") -> int:
         """Put a bundle's chat log (``export_chat_log``'s shape, made for another
-        agent id) in as *user_id*'s log with *agent_id*, times kept. A session
-        id that is taken is skipped. The messages written."""
+        agent id) in as *user_id*'s log with *agent_id*, times kept — under
+        the lane *lane* (``agent::lane``) when given, beside the chats it has.
+        A session id that is taken is skipped. The messages written."""
         assert self._db is not None
         old = str(log.get("agent_id") or "")
         if not old:
@@ -2184,9 +2196,10 @@ class FlightDeckDB:
 
         def _renamed(session_id: str) -> str | None:
             if session_id == old:
-                return agent_id
+                return f"{agent_id}::{lane}" if lane else agent_id
             if session_id.startswith(old + "::"):
-                return agent_id + session_id[len(old):]
+                rest = session_id[len(old) + 2:]
+                return f"{agent_id}::{lane}-{rest}" if lane else f"{agent_id}::{rest}"
             return None
 
         ids: dict[str, str] = {}

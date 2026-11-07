@@ -121,10 +121,20 @@ stores/<name>.db       each SQLite store, as a consistent snapshot
 - **Reset**: the agent's memory is replaced by the bundle's. An automatic
   backup of the agent is taken first and offered to restore.
 - **Append**: rows go in through each store's own dedup: insights by
-  `entity_key`, then by matching text; intentions by text;
-  reflections merged with the existing `reflection_merge` prompt when the
-  agent is up, else kept as an older reflection; lessons and skills by name.
-- The agent is stopped for the write and started again.
+  `entity_key`, then by matching text; intentions by title; playbooks,
+  scripts and APIs by name; a row with only an integer id unless an identical
+  one is there. Files that exist stay; the onboarding record's lists are
+  joined and its lessons rewritten. Reflections come only to an agent with
+  none (only the newest is active, so a newer one would replace its own).
+  Merging two reflections with the `reflection_merge` prompt was left out:
+  it needs the agent's model.
+- Chat log: reset replaces the owner's; append puts the file's beside it, in
+  a lane `imported-<tag>`. Scheduled tasks: reset replaces them; append adds
+  the ones it hasn't got. Instructions: reset takes the file's; append only
+  when it has none. Its model and keys stay; a sealed backup's API
+  credentials are put back.
+- The agent is stopped for the write and started again if it was running.
+  Undo restores the backup in reset mode.
 
 ### Phase 4 — versions and updates
 

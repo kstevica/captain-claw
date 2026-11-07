@@ -283,7 +283,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [forgeOpen, setForgeOpen] = useState(false)
   // Agent bundles: an agent's ⋯ → Back up / export, and New agent → From a file.
   const [backupFor, setBackupFor] = useState<{ slug: string; name: string } | null>(null)
-  const [importOpen, setImportOpen] = useState(false)
+  // Open: '' for a new agent, or the slug of the agent a file goes into.
+  const [importOpen, setImportOpen] = useState<string | null>(null)
   // A new agent whose "way of working" setup opens right after it is created.
   const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   // An agent's knowledge, to browse (its ⋯ menu → Knowledge).
@@ -974,20 +975,27 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             else useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
           }}
           onForge={() => { setArchetypeOpen(false); setForgeOpen(true) }}
-          onImport={() => { setArchetypeOpen(false); setImportOpen(true) }}
+          onImport={() => { setArchetypeOpen(false); setImportOpen('') }}
         />
       )}
-      {importOpen && (
+      {importOpen !== null && (
         <AgentImportDialog
-          onClose={() => setImportOpen(false)}
+          agents={agents.filter((a) => a.kind === 'process' && !a.managed).map((a) => ({ slug: a.startKey, name: a.name }))}
+          into={importOpen || undefined}
+          onClose={() => setImportOpen(null)}
           onConnect={() => openConnections()}
           onImported={(r) => {
             useProcessStore.getState().fetchProcesses()
-            startBoot(`proc-${r.slug}`, true)
+            // A new agent opens once it's up; one a file went into restarts if it was running.
+            if (!('into' in r)) startBoot(`proc-${r.slug}`, true)
+            else if (r.restarted) startBoot(`proc-${r.slug}`, false)
           }}
         />
       )}
-      {backupFor && <AgentBackupDialog agent={backupFor} onClose={() => setBackupFor(null)} />}
+      {backupFor && (
+        <AgentBackupDialog agent={backupFor} onClose={() => setBackupFor(null)}
+          onBringIn={() => { setImportOpen(backupFor.slug); setBackupFor(null) }} />
+      )}
       {forgeOpen && (
         <ForgeAgentsDialog
           onClose={() => setForgeOpen(false)}

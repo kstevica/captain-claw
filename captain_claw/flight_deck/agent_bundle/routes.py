@@ -5,7 +5,10 @@
     GET    /fd/agent-bundle/exports/{id}/download   fetch it (yours only)
     DELETE /fd/agent-bundle/exports/{id}            throw it away
     POST   /fd/agent-bundle/upload                  upload a .captain file → what is in it
-    POST   /fd/agent-bundle/uploads/{id}/import     make a new agent of it
+    POST   /fd/agent-bundle/uploads/{id}/import     make a new agent of it — or put it into one of yours
+                                                    (target.kind "existing": reset or append)
+    GET    /fd/agent-bundle/safety/{id}/download    the backup taken before an import into an agent
+    POST   /fd/agent-bundle/safety/{id}/restore     undo that import: the agent as it was
     DELETE /fd/agent-bundle/uploads/{id}            throw the upload away
     GET    /fd/agent-bundle/tiers                   your model tiers (no keys), for an import
 
@@ -25,7 +28,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from captain_claw.flight_deck.agent_bundle import archive, catalog, export, restore, review
+from captain_claw.flight_deck.agent_bundle import archive, catalog, export, merge, restore, review
 from captain_claw.flight_deck.auth import get_managed_user
 from captain_claw.logging import get_logger
 
@@ -35,6 +38,7 @@ router = APIRouter(prefix="/fd/agent-bundle", tags=["agent-bundle"])
 
 _ID = re.compile(r"[0-9a-f]{24}")
 _KEEP_S = 24 * 3600
+_KEEP_SAFETY_S = 7 * 24 * 3600      # the backup taken before an import into an agent
 
 
 def _owner(user: dict) -> str:
@@ -45,6 +49,7 @@ def _owner(user: dict) -> str:
 def _sweep() -> None:
     for sub in ("exports", "uploads", "tmp"):
         archive.sweep(export.bundles_dir() / sub, _KEEP_S)
+    archive.sweep(export.bundles_dir() / "safety", _KEEP_SAFETY_S)
 
 
 def _record(sub: str, bundle_id: str, owner_id: str) -> tuple[Path, dict[str, Any]]:
@@ -150,9 +155,16 @@ class ModelChoice(BaseModel):
     tier: str = ""
 
 
+class Target(BaseModel):
+    kind: str = "new"           # "new": a new agent · "existing": one of the importer's own
+    slug: str = ""
+    mode: str = "append"        # into an existing one: "reset" or "append"
+
+
 class ImportBody(BaseModel):
     name: str = ""
     model: ModelChoice = Field(default_factory=ModelChoice)
+    target: Target = Field(default_factory=Target)
     # Opens the keys a full backup was sealed with; empty: it comes without them.
     passphrase: str = Field(default="", max_length=500)
 
@@ -166,8 +178,10 @@ async def import_tiers(user: dict = Depends(get_managed_user)) -> dict:
 @router.post("/uploads/{upload_id}/import")
 async def import_bundle(upload_id: str, body: ImportBody, request: Request,
                         user: dict = Depends(get_managed_user)) -> dict:
-    """Make a new agent of the upload: its files and memory as they were, its
-    scheduled tasks switched off. The upload is removed once the agent is made."""
+    """Make a new agent of the upload — its files and memory as they were, its
+    scheduled tasks switched off — or, with ``target.kind`` "existing", put it
+    into one of the caller's agents (reset or append, see merge.py). The
+    upload is removed once it is done."""
     from captain_claw.flight_deck import server as srv
 
     owner_id = _owner(user)
@@ -177,6 +191,16 @@ async def import_bundle(upload_id: str, body: ImportBody, request: Request,
         agent = bundle.read_json("fd/agent.json") or {}
         if not isinstance(agent, dict):
             raise archive.BundleError("The bundle doesn't say which agent it holds.")
+        if body.target.kind == "existing":
+            keys = await asyncio.to_thread(restore.open_secrets, bundle, body.passphrase)
+    except archive.BundleError as exc:
+        raise HTTPException(400, str(exc))
+    if body.target.kind == "existing":
+        out = await _into_existing(path, agent, body.target.slug, body.target.mode, owner_id, keys)
+        path.unlink(missing_ok=True)
+        path.with_suffix(".json").unlink(missing_ok=True)
+        return out
+    try:
         name = restore.free_name(body.name.strip() or str(agent.get("name") or "Agent"))
         keep = body.model.mode != "tier"
         config = restore.spawn_config(agent, name, keep_model=keep)
@@ -229,3 +253,71 @@ async def bundle_catalog(user: dict = Depends(get_managed_user)) -> dict:
             "presets": {k: list(v) for k, v in export.PRESETS.items()},
             "insight_categories": [{"id": c, "label": label, "default": on}
                                    for c, label, on in review.INSIGHT_CATEGORIES]}
+
+
+async def _into_existing(path: Path, agent: dict[str, Any], slug: str, mode: str, owner_id: str,
+                         keys: dict[str, Any], *, safety: bool = True) -> dict[str, Any]:
+    """The bundle into one of the caller's agents: it is stopped, backed up
+    (kept a week, to undo), the bundle reset or appended in, and started again
+    if it was running. Its own model and keys stay; the APIs' credentials of a
+    sealed backup are put back."""
+    import secrets as _secrets
+
+    from captain_claw.flight_deck import server as srv
+
+    entry = srv._verify_process_owner(slug, owner_id)
+    if mode not in merge.MODES:
+        raise HTTPException(400, "Pick reset or append.")
+    was_running = srv._process_is_alive(slug)
+    if was_running:
+        await asyncio.to_thread(srv._do_stop_process, slug)
+    backup: dict[str, Any] | None = None
+    try:
+        if safety:
+            try:
+                backup = await export.build(slug, owner_id, entry, categories=set(catalog.CATEGORIES), preset="full",
+                                            made_by="Taken before an import", keep_in="safety")
+            except archive.BundleError as exc:
+                raise HTTPException(400, f"Its backup couldn't be taken, so nothing was changed: {exc}")
+        try:
+            done = await asyncio.to_thread(restore.apply_to_existing, path, srv.DATA_DIR / slug, mode,
+                                           (keys or {}).get("columns"))
+            fd = await restore.fd_side_into_existing(path, slug, owner_id, agent, mode, _secrets.token_hex(3))
+        except archive.BundleError as exc:
+            raise HTTPException(400, f"{exc} — undo it from its backup.")
+    finally:
+        if was_running:
+            await srv._heal_agent_model_key(slug)
+            await srv._prime_deck_routes()
+            await asyncio.to_thread(srv._do_start_process, slug)
+    log.info("agent bundle imported into an agent", agent=slug, owner=owner_id or "-", mode=mode)
+    notes = [*done["notes"], *fd["notes"]]
+    if fd["schedules"]:
+        notes.append(f"{fd['schedules']} scheduled task(s) came with it, switched off.")
+    return {"ok": True, "slug": slug, "name": str(entry.get("name") or slug), "mode": mode, "into": True,
+            "counts": restore.headline(done["stores"]), "files": done["files"],
+            "chat_messages": fd["chat_messages"], "schedules": fd["schedules"], "connections": fd["connections"],
+            "restarted": was_running, "notes": notes,
+            "safety_backup": {k: backup[k] for k in ("id", "file_name", "size")} if backup else None}
+
+
+@router.get("/safety/{bundle_id}/download")
+async def download_safety(bundle_id: str, user: dict = Depends(get_managed_user)) -> FileResponse:
+    path, record = _record("safety", bundle_id, _owner(user))
+    return FileResponse(path, media_type="application/zip",
+                        filename=str(record.get("file_name") or f"agent{archive.EXTENSION}"))
+
+
+@router.post("/safety/{bundle_id}/restore")
+async def restore_safety(bundle_id: str, user: dict = Depends(get_managed_user)) -> dict:
+    """Undo an import into an agent: everything the backup holds back as it was (a reset)."""
+    owner_id = _owner(user)
+    path, record = _record("safety", bundle_id, owner_id)
+    try:
+        bundle = await asyncio.to_thread(archive.open_bundle, path)
+        agent = bundle.read_json("fd/agent.json") or {}
+    except archive.BundleError as exc:
+        raise HTTPException(400, str(exc))
+    out = await _into_existing(path, agent if isinstance(agent, dict) else {}, str(record.get("slug") or ""),
+                               "reset", owner_id, {}, safety=False)
+    return {**out, "undone": True}
