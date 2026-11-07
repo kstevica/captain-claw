@@ -840,6 +840,25 @@ handles it directly; the agent isn't needed.
   uses and tools it now runs. The New tool check knows a tool can use its
   agent and should prefer that to network access and new secrets. Tests:
   `test_external_tools_run_as.py` (3).
+- **7d (2026-11-07):** `"asks": true` and `captain.ask(...)` (text, choice,
+  multiple with min and max, confirm; one question or a set by id;
+  `captain.Declined`, `captain.NoAnswer`). `external_tool_asks.py` keeps the
+  open questions in memory, rings (a Line item, so the bell and Needs-you) and
+  settles the ring when answered; `GET /fd/external-tools/asks?wait&known`
+  answers at once when the open set differs from what the tab shows, and
+  `POST /fd/external-tools/asks/<id>` takes the answers (checked) or
+  "declined". The run's time is a `RunClock` that stops while a question is
+  open, for the run and every run above it. A tool that only asks needs no
+  agent. The agent sends its turn's origin: a scheduled, flow, autonomous,
+  taskboard, API, link or exam run gets `NoAnswer` at once. The agent runs
+  with `wait` and a `follow_id` it chose, then follows with
+  `/agent/follow`; `/agent/stop` (grant-aware like the rest) ends the run and
+  closes its question, also when the stop comes before the run started; its
+  chat says "The tool is waiting for your answer in Flight Deck…". The
+  dialog (`CustomToolAsks.tsx`, mounted once beside the app, every layout):
+  the questions, time left, whose tool, "Later", "Don't answer", "Send", and
+  the line about never typing passwords; the bell brings a hidden one back.
+  Tests: `test_external_tool_asks.py` (8).
 
 #### Build order (one PR each)
 

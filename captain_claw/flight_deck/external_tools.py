@@ -261,18 +261,20 @@ class Manifest:
     raw: dict = field(repr=False, compare=False)
     # Phase 7: what it may ask the agent that ran it for (external_tool_uses).
     uses: tuple[dict, ...] = ()
+    # Phase 7d: it may stop and ask the person running it (external_tool_asks).
+    asks: bool = False
 
     def public(self) -> dict[str, Any]:
         return {"name": self.name, "title": self.title, "description": self.description,
                 "input": self.input, "output": self.output, "examples": list(self.examples),
                 "secrets": [dict(s) for s in self.secrets], "network": self.network,
                 "timeout_s": self.timeout_s, "memory_mb": self.memory_mb,
-                "uses": [dict(u) for u in self.uses]}
+                "uses": [dict(u) for u in self.uses], "asks": self.asks}
 
     @property
     def calls_back(self) -> bool:
-        """Does a run need the line to an agent (Phase 7)?"""
-        return bool(self.uses)
+        """Does a run need its line to Flight Deck (Phase 7)?"""
+        return bool(self.uses) or self.asks
 
 
 def _bad(message: str) -> ToolError:
@@ -407,13 +409,16 @@ def parse_manifest(raw: Any, folder: Path | None = None, *, slug: str | None = N
         uses = uses_policy.parse_uses(raw.get("uses"), parse_other=custom_use)
     except uses_policy.UsesError as exc:
         raise _bad(f"'uses': {exc}") from None
+    asks = raw.get("asks", False)
+    if not isinstance(asks, bool):
+        raise _bad("'asks' must be true or false.")
     return Manifest(
         name=name, title=title.strip(), description=description.strip(), entry=entry,
         test=tuple(test), input=input_schema, output=output_schema, examples=tuple(examples),
         secrets=tuple(secrets_out), network=network,
         timeout_s=_int(raw, "timeout_s", DEFAULT_TIMEOUT_S, 1, MAX_TIMEOUT_S),
         memory_mb=_int(raw, "memory_mb", DEFAULT_MEMORY_MB, MIN_MEMORY_MB, MAX_MEMORY_MB),
-        raw=raw, uses=uses,
+        raw=raw, uses=uses, asks=asks,
     )
 
 
@@ -472,6 +477,33 @@ def _kill_group(proc: asyncio.subprocess.Process) -> None:
 Bridge = Callable[[dict], Awaitable[dict]]
 
 
+class RunClock:
+    """A run's time limit, which stops while the run waits for a person (7d)."""
+
+    def __init__(self, seconds: float) -> None:
+        self.deadline = time.monotonic() + seconds
+        self._paused = 0
+        self._since: float | None = None
+
+    def pause(self) -> None:
+        self._paused += 1
+        if self._paused == 1:
+            self._since = time.monotonic()
+
+    def resume(self) -> None:
+        self._paused = max(0, self._paused - 1)
+        if self._paused == 0 and self._since is not None:
+            self.deadline += time.monotonic() - self._since
+            self._since = None
+
+    def left(self) -> float:
+        now = self._since if self._since is not None else time.monotonic()
+        return self.deadline - now
+
+    def expired(self) -> bool:
+        return self._paused == 0 and self.left() <= 0
+
+
 async def _serve_line(sock: Any, bridge: Bridge) -> None:
     """A tool's line to the agent: one JSON request per line, one answer back,
     in order, until the tool closes it or ends."""
@@ -512,7 +544,7 @@ async def _serve_line(sock: Any, bridge: Bridge) -> None:
 
 async def _run_proc(cmd: list[str], *, cwd: Path, env: dict[str, str], timeout: float,
                     stdin: bytes | None = None, stdout_cap: int = MAX_STDOUT,
-                    bridge: Bridge | None = None) -> ProcResult:
+                    bridge: Bridge | None = None, clock: RunClock | None = None) -> ProcResult:
     """Run *cmd* under *timeout*. With *bridge*, the program also gets a line
     to Flight Deck (Phase 7): one end of a socket pair, its descriptor in
     ``$XT_CAPTAIN_FD``; *bridge* answers what comes on it."""
@@ -581,11 +613,16 @@ async def _run_proc(cmd: list[str], *, cwd: Path, env: dict[str, str], timeout: 
             while err_len - len(err[0]) >= STDERR_TAIL and len(err) > 1:
                 err_len -= len(err.popleft())
 
+    clock = clock or RunClock(timeout)
+
     async def exited() -> None:
         # Not proc.wait(): on 3.11 that returns only once every pipe is closed, so
         # a child the tool left holding stdout would make a finished call look
         # like a timeout. The return code is set the moment the process ends.
+        # The clock, not a fixed timeout: it stops while the tool waits for a person.
         while proc.returncode is None:
+            if clock.expired():
+                raise TimeoutError
             await asyncio.sleep(0.02)
 
     tasks = [asyncio.create_task(feed()), asyncio.create_task(read_out()), asyncio.create_task(read_err())]
@@ -593,7 +630,7 @@ async def _run_proc(cmd: list[str], *, cwd: Path, env: dict[str, str], timeout: 
         tasks.append(asyncio.create_task(_serve_line(ours, bridge)))
     timed_out = False
     try:
-        await asyncio.wait_for(exited(), timeout)
+        await exited()
     except TimeoutError:
         timed_out = True
     except asyncio.CancelledError:
@@ -871,13 +908,25 @@ class CallContext:
     requests: list[int] = field(default_factory=lambda: [0])  # shared with nested runs
     depth: int = 1       # 1 for a run an agent started, 2 for a tool it ran, …
     chain: tuple[tuple[str, str], ...] = ()  # (owner, slug) of the runs above this one
+    clock: RunClock | None = None
+    outer: CallContext | None = None   # the run that asked for this one (7b)
+    attended: bool = True              # someone is there to answer a question (7d)
+    agent_name: str = ""
+    asks: int = 0
 
     @property
     def owner_runs(self) -> bool:
         return self.caller == self.owner
 
     def remaining(self) -> float:
-        return self.deadline - time.monotonic()
+        return self.clock.left() if self.clock is not None else self.deadline - time.monotonic()
+
+    def lineage(self) -> list[CallContext]:
+        out, c = [], self
+        while c is not None:
+            out.append(c)
+            c = c.outer
+        return out
 
 
 @dataclass(frozen=True)
@@ -898,6 +947,9 @@ class Link:
 
     async def custom_tool(self, ctx: CallContext, slug: str, params: dict) -> dict[str, Any]:
         raise ToolError("no_agent", "This run has no agent to ask.")
+
+    async def ask(self, ctx: CallContext, questions: list[dict], wait_s: float) -> dict[str, Any]:
+        raise ToolError("no_agent", "This run has nobody to ask.")
 
 
 MAX_DEPTH = 3                      # an agent's run, a tool it runs, and one more
@@ -938,7 +990,7 @@ async def _answer(ctx: CallContext, link: Link | None, req: dict) -> dict[str, A
     from captain_claw.flight_deck import external_tool_uses as uses_policy
 
     op = req.get("op")
-    if op not in ("tool", "file", "custom_tool"):
+    if op not in ("tool", "file", "custom_tool", "ask"):
         return _refuse(f"Flight Deck doesn't know the request {op!r}.")
     if link is None:
         return _refuse("This run has no agent to ask.")
@@ -948,6 +1000,8 @@ async def _answer(ctx: CallContext, link: Link | None, req: dict) -> dict[str, A
     left = ctx.remaining()
     if left < 1:
         return _refuse("The run has no time left for another request.")
+    if op == "ask":
+        return await _ask(ctx, link, req)
     try:
         if op == "tool":
             name = str(req.get("name") or "").strip().lower()
@@ -981,6 +1035,44 @@ async def _answer(ctx: CallContext, link: Link | None, req: dict) -> dict[str, A
         return {"ok": False, "error": exc.message}
     except TimeoutError:
         return {"ok": False, "error": "The run ran out of time waiting for the answer."}
+
+
+async def _ask(ctx: CallContext, link: Link, req: dict) -> dict[str, Any]:
+    """The tool asks the person running it (7d). Its time stops while it waits,
+    and so does the time of every run above it."""
+    from captain_claw.flight_deck import external_tool_asks as asks
+
+    if not ctx.manifest.asks:
+        return _refuse('Asking the person needs "asks": true in tool.json.')
+    ctx.asks += 1
+    if ctx.asks > asks.MAX_ASKS_PER_RUN:
+        return _refuse(f"A run may ask at most {asks.MAX_ASKS_PER_RUN} times.")
+    try:
+        questions = asks.check_questions(req.get("questions"))
+    except asks.AskError as exc:
+        return _refuse(str(exc))
+    if not ctx.attended:
+        return {"ok": False, "no_answer": True,
+                "error": "No one to ask: this ran on its own (a schedule or another automatic start)."}
+    try:
+        wait_s = float(req.get("wait_s") or asks.DEFAULT_WAIT_S)
+    except (TypeError, ValueError):
+        wait_s = asks.DEFAULT_WAIT_S
+    clocks = [c.clock for c in ctx.lineage() if c.clock is not None]
+    for clock in clocks:
+        clock.pause()
+    try:
+        reply = await link.ask(ctx, questions, wait_s)
+    except ToolError as exc:
+        return {"ok": False, "no_answer": True, "error": exc.message}
+    finally:
+        for clock in clocks:
+            clock.resume()
+    out = {"ok": bool(reply.get("ok"))}
+    for key in ("answers", "declined", "no_answer", "error"):
+        if key in reply:
+            out[key] = reply[key]
+    return out
 
 
 def _bring_in(ctx: CallContext, src: Path, name: str = "") -> Path:
@@ -1040,6 +1132,15 @@ class RecordedLink(Link):
         return {"ok": bool(reply.get("ok", True)), "output": reply.get("output"), "files": [],
                 "error": reply.get("error")}
 
+    async def ask(self, ctx: CallContext, questions: list[dict], wait_s: float) -> dict[str, Any]:
+        reply = self._next("ask", ",".join(q["id"] for q in questions)).get("reply")
+        reply = reply if isinstance(reply, dict) else {}
+        if reply.get("declined"):
+            return {"ok": False, "declined": True, "error": "They chose not to answer."}
+        if reply.get("no_answer") or "answers" not in reply:
+            return {"ok": False, "no_answer": True, "error": "No answer in time."}
+        return {"ok": True, "answers": reply["answers"]}
+
     def left_over(self) -> str:
         return f"{len(self.calls)} recorded call(s) weren't asked for" if self.calls else ""
 
@@ -1047,7 +1148,8 @@ class RecordedLink(Link):
 async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest: Manifest, caller: str,
                        data: Any, *, secret_values: dict[str, str], resolve_file: FileResolver | None,
                        deliver: Deliver | None, link: Link | None = None,
-                       parent: CallContext | None = None) -> dict[str, Any]:
+                       parent: CallContext | None = None, attended: bool = True,
+                       agent_name: str = "") -> dict[str, Any]:
     from jsonschema import Draft202012Validator
 
     timeout_s = manifest.timeout_s
@@ -1103,14 +1205,18 @@ async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest
             cmd = _launch(manifest, venv_python(vdir / ".deps"), [manifest.entry], cpu_s=timeout_s + 5,
                           read_only=[vdir], writable=[call_dir], require=require)
             bridge = None
+            clock = RunClock(timeout_s)
             if manifest.calls_back:
                 ctx = CallContext(owner=owner, slug=slug, title=manifest.title, version=version, caller=caller,
                                   call_id=call_id, call_dir=call_dir, manifest=manifest,
-                                  deadline=time.monotonic() + timeout_s)
+                                  deadline=clock.deadline, clock=clock, attended=attended, agent_name=agent_name)
                 if parent is not None:
                     ctx.requests = parent.requests
                     ctx.depth = parent.depth + 1
                     ctx.chain = (*parent.chain, (parent.owner, parent.slug))
+                    ctx.outer = parent
+                    ctx.attended = parent.attended
+                    ctx.agent_name = parent.agent_name
                 _RUNS[call_id] = ctx
 
                 async def bridge(req: dict) -> dict:
@@ -1118,9 +1224,14 @@ async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest
 
             try:
                 res = await _run_proc(cmd, cwd=vdir, env=env, timeout=timeout_s,
-                                      stdin=json.dumps(data, ensure_ascii=False).encode("utf-8"), bridge=bridge)
+                                      stdin=json.dumps(data, ensure_ascii=False).encode("utf-8"), bridge=bridge,
+                                      clock=clock)
             finally:
                 _RUNS.pop(call_id, None)
+                if manifest.asks:
+                    from captain_claw.flight_deck import external_tool_asks
+
+                    external_tool_asks.close_call(call_id)
             base = {"call_id": call_id, "version": version, "seconds": round(res.seconds, 3), "exit_code": res.code}
 
             def failed(kind: str, message: str) -> dict[str, Any]:
@@ -1194,7 +1305,8 @@ def depends_on(owner: str, slug: str) -> list[str]:
 
 async def run_tool(owner: str, slug: str, caller: str, data: Any, *, secret_values: dict[str, str] | None = None,
                    resolve_file: FileResolver | None = None, deliver: Deliver | None = None,
-                   link: Link | None = None, parent: CallContext | None = None) -> dict[str, Any]:
+                   link: Link | None = None, parent: CallContext | None = None, attended: bool = True,
+                   agent_name: str = "") -> dict[str, Any]:
     """Run the live version for *caller*. A tool that ran and failed is a result
     (``ok: False``); something the caller must change raises :class:`ToolError`.
     Who may run it is the caller's business (the routes check it)."""
@@ -1206,7 +1318,7 @@ async def run_tool(owner: str, slug: str, caller: str, data: Any, *, secret_valu
     manifest = load_manifest(vdir, slug=slug)
     result = await _run_version(owner, slug, live["version"], vdir, manifest, caller, data,
                                 secret_values=secret_values or {}, resolve_file=resolve_file, deliver=deliver,
-                                link=link, parent=parent)
+                                link=link, parent=parent, attended=attended, agent_name=agent_name)
     record_call(owner, slug, caller, result)
     return result
 
@@ -1277,7 +1389,8 @@ WORKER_CONTRACT = """This repository is a Captain custom tool: a small Python pr
 - Before you finish, run the tests (what `test` says) and every example (pipe its input JSON into the entry file) and check each output contains its `expect`. Publishing runs exactly these, and a version goes live only if all of them pass. Commit your work.
 - Keep it deterministic and small: no network unless the task needs it, nothing left running when it exits.
 - Using the agent (only when the task needs it): the tool can ask the agent that ran it to use one of the agent's tools, through `captain.py` (Flight Deck's helper, already in the repository; don't change it): `captain.tool("web_fetch", url=...)` returns {"ok", "content", "error"}; `captain.vfs_file("vfs:folder/file")` brings in one of the person's files; `captain.file(path)` hands a file the tool wrote to a tool. Declare each in tool.json "uses", with a "why": {"tool": "web_fetch", "hosts": ["api.example.com"], "why": "..."} (web fetching must name its hosts), {"tool": "google_mail", "actions": ["search", "read"], "why": "..."}, {"tool": "read", "why": "..."} for vfs_file. Allowed: the agent's read and write tools; sending (mail, messages, calendar invitations) only works when the tool's owner runs it; never shell, code, payments, scheduling or changing the agent. Anything not declared is refused.
-- A tool with "uses" can't reach an agent while publishing, so each example records the replies it gets, in order, under "calls": [{"tool": "web_fetch", "reply": {"ok": true, "content": "..."}}] ({"file": "vfs:...", "path": "fixtures/x.csv"} for vfs_file). Tests do the same: write such a list to a JSON file and set XT_FAKE_CALLS to its path before running the entry file. Results from the web or a model-backed tool change from run to run: say so in the description."""
+- Asking the person (only when the task needs a choice or a decision only they can make): set "asks": true in tool.json and call `captain.ask("Which account?", choices=[...])` (or confirm=True, multiple=True, or a list of question objects with ids for a set shown in one dialog). It waits for the answer in Flight Deck (the tool's time stops meanwhile) and raises captain.Declined or captain.NoAnswer when there is none (always so when nobody is there, like a scheduled run): handle both. Never ask for passwords or keys: those are secrets.
+- A tool with "uses" or "asks" can't reach an agent or a person while publishing, so each example records the replies it gets, in order, under "calls": [{"tool": "web_fetch", "reply": {"ok": true, "content": "..."}}] ({"file": "vfs:...", "path": "fixtures/x.csv"} for vfs_file, {"ask": ["answer"], "reply": {"answers": {"answer": "Business"}}} for ask). Tests do the same: write such a list to a JSON file and set XT_FAKE_CALLS to its path before running the entry file. Results from the web or a model-backed tool change from run to run: say so in the description."""
 
 _IDENTITY = ("-c", "user.name=Captain", "-c", "user.email=tools@captain-claw.local")
 

@@ -72,6 +72,10 @@ read a page from a host it names, write a file) and to run the person's other cu
 with a why. Prefer that to network access and new secrets when the agent already has the connection (Gmail, \
 Drive, calendars): the person's own connection is used and nothing new is stored. Sending (mail, messages, \
 calendar invitations) works only when the tool's owner runs it.
+- It can stop and ask the person running it (a choice, several choices, yes or no, or some text) with \
+"asks": true; the question opens in their Flight Deck and the tool waits. Use it only for what only the person \
+can decide, never for passwords or keys, and say what the tool does when nobody answers (a scheduled run never \
+gets an answer).
 
 What agents already do without a custom tool:
 {AGENTS_ALREADY}

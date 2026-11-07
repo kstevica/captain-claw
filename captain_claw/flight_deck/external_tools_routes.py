@@ -206,7 +206,7 @@ def declares_of(m: xt.Manifest) -> dict[str, Any]:
     agent_uses = uses_policy.describe(tuple(u for u in m.uses if "tool" in u))
     return {"network": m.network, "secrets": [s["name"] for s in m.secrets], "timeout_s": m.timeout_s,
             "memory_mb": m.memory_mb, "uses": agent_uses,
-            "runs": [u["custom_tool"] for u in m.uses if "custom_tool" in u]}
+            "runs": [u["custom_tool"] for u in m.uses if "custom_tool" in u], "asks": m.asks}
 
 
 def _declares(owner: str, slug: str) -> dict[str, Any] | None:
@@ -233,6 +233,8 @@ def declares_more(old: dict | None, new: dict | None) -> list[str]:
     extra_runs = [r for r in new.get("runs") or [] if r not in (old.get("runs") or [])]
     if extra_runs:
         out.append("to run " + ", ".join(extra_runs))
+    if new.get("asks") and not old.get("asks"):
+        out.append("to ask you questions while it runs")
     if new["network"] and not old["network"]:
         out.append("internet access")
     extra = [n for n in new["secrets"] if n not in old["secrets"]]
@@ -444,10 +446,14 @@ async def run(slug: str, body: RunBody, owner: str = Query(""), user: dict = Dep
     caller, owner, slug = await _usable(user, slug, owner)
     manifest = xt.manifest_of(owner, slug)
     link = None
-    if manifest is not None and manifest.calls_back:
+    hosted = False
+    if manifest is not None and manifest.uses:
         if not body.agent:
             raise HTTPException(409, f"{manifest.title} asks an agent to use its tools: pick which of your agents runs it.")
         link = await open_host(caller, body.agent, slug, manifest.timeout_s + 60)
+        hosted = True
+    elif manifest is not None and manifest.asks:
+        link = AgentLink("", "", Runner(caller, "", False))  # it only asks the person on the page
     try:
         return await xt.run_tool(owner, slug, caller, body.input,
                                  secret_values=await secret_values(caller, owner, slug),
@@ -455,7 +461,7 @@ async def run(slug: str, body: RunBody, owner: str = Query(""), user: dict = Dep
     except xt.ToolError as exc:
         raise _http(exc) from None
     finally:
-        if link is not None:
+        if hosted and link is not None:
             await close_host(link)
 
 
@@ -513,7 +519,8 @@ agent_router = APIRouter(prefix="/fd/external-tools/agent", tags=["external-tool
 
 # The routes a member's turn reaches with its grant (speaker_grants.GRANT_AWARE_PATHS).
 GRANT_AWARE = frozenset({"/fd/external-tools/agent/tools", "/fd/external-tools/agent/describe",
-                         "/fd/external-tools/agent/run"})
+                         "/fd/external-tools/agent/run", "/fd/external-tools/agent/follow",
+                         "/fd/external-tools/agent/stop"})
 
 
 @dataclass(frozen=True)
@@ -617,6 +624,18 @@ class AgentRunBody(BaseModel):
     callback: str = Field("", max_length=128)
     # Phase 7b: the run of another tool that asked for this one.
     via: str = Field("", max_length=32)
+    # Phase 7d: where the agent's turn came from (a turn source: "web", "scheduled", …),
+    # and how long to wait before answering "still running" (the agent then follows it).
+    origin: str = Field("", max_length=60)
+    wait: float | None = Field(None, ge=0, le=60)
+    # The id the agent will follow (and can stop) the run by: chosen by the agent,
+    # so a turn stopped before the first answer can still stop it.
+    follow_id: str = Field("", pattern=r"^(xr_[0-9a-f]{16})?$")
+
+
+class FollowBody(BaseModel):
+    run: str = Field(..., max_length=40)
+    wait: float = Field(25, ge=0, le=60)
 
 
 # ── A tool's requests, passed to the agent that ran it (Phase 7) ─────────
@@ -728,6 +747,23 @@ class AgentLink(xt.Link):
             except (xt.ToolError, OSError, AttributeError) as exc:
                 xt.log.debug("A nested custom tool's file couldn't be brought in", error=str(exc))
         return {"ok": True, "output": result.get("output"), "files": files}
+
+    async def ask(self, ctx: xt.CallContext, questions: list[dict], wait_s: float) -> dict[str, Any]:
+        """The person the run is for, in their Flight Deck (7d); the agent isn't needed."""
+        from captain_claw.flight_deck import external_tool_asks as asks
+
+        owner_name = "" if ctx.owner_runs else (await _person(ctx.owner))["name"]
+        label = f"{ctx.title}, used by {ctx.outer.title}" if ctx.outer is not None else ""
+        return await asks.ask(ctx.caller, call_id=ctx.call_id, title=ctx.title, owner_name=owner_name,
+                              agent_name=ctx.agent_name or _agent_name(self.agent_slug), label=label,
+                              questions=questions, wait_s=wait_s)
+
+
+def _agent_name(slug: str) -> str:
+    from captain_claw.flight_deck import server as srv
+
+    entry = srv._load_process_registry().get(slug) if slug else None
+    return str((entry or {}).get("name") or slug or "")
 
 
 HOST_PATH = "/api/custom-tools/host"
@@ -874,15 +910,100 @@ async def agent_run(body: AgentRunBody, request: Request, runner: Runner = Depen
     else:
         owner, slug = await resolve_ref(runner.user_id, body.tool)
     manifest = xt.manifest_of(owner, slug)
-    if manifest is not None and manifest.calls_back and not body.callback:
+    if manifest is not None and manifest.uses and not body.callback:
         raise HTTPException(409, TOO_OLD.format(title=manifest.title))
-    try:
-        return await xt.run_tool(owner, slug, runner.user_id, body.input,
-                                 secret_values=await secret_values(runner.user_id, owner, slug),
-                                 resolve_file=_file_resolver(runner.user_id), deliver=_deliverer(runner.user_id, slug),
-                                 link=_agent_link(request, runner, body.callback), parent=outer)
-    except xt.ToolError as exc:
-        raise _http(exc) from None
+    link = _agent_link(request, runner, body.callback)
+    if link is None and manifest is not None and manifest.asks:
+        link = AgentLink(runner.agent, "", runner)  # it only asks the person
+    from captain_claw.flight_deck import external_tool_asks as asks
+
+    async def go() -> dict[str, Any]:
+        try:
+            return await xt.run_tool(owner, slug, runner.user_id, body.input,
+                                     secret_values=await secret_values(runner.user_id, owner, slug),
+                                     resolve_file=_file_resolver(runner.user_id),
+                                     deliver=_deliverer(runner.user_id, slug), link=link, parent=outer,
+                                     attended=asks.attended(body.origin), agent_name=_agent_name(runner.agent))
+        except xt.ToolError as exc:
+            raise _http(exc) from None
+
+    if body.wait is None:
+        return await go()
+    return await _follow(_start_follow(runner, go(), body.follow_id), runner, body.wait)
+
+
+# ── Following a long run (Phase 7d) ──────────────────────────────────────
+#
+# A run that waits for a person's answer can last an hour. The agent asks with
+# "wait"; if it isn't done by then it gets {"pending": id} and follows it with
+# /agent/follow, so no single request has to stay open that long. /agent/stop
+# ends it (the agent's turn was stopped): the tool is killed, its question closes.
+
+
+@dataclass
+class _Following:
+    runner_id: str
+    task: asyncio.Task
+    started: float
+
+
+_FOLLOWING: dict[str, _Following] = {}
+_STOPPED: dict[str, float] = {}   # stopped before they started: (id → when)
+FOLLOW_KEEP_S = 600
+
+
+def _start_follow(runner: Runner, run: Any, rid: str = "") -> str:
+    import secrets as _secrets
+
+    now = time.time()
+    for k in [k for k, f in _FOLLOWING.items() if f.task.done() and now - f.started > FOLLOW_KEEP_S]:
+        _FOLLOWING.pop(k, None)
+    for k in [k for k, at in _STOPPED.items() if now - at > FOLLOW_KEEP_S]:
+        _STOPPED.pop(k, None)
+    if rid and (_STOPPED.pop(rid, None) is not None or rid in _FOLLOWING):
+        run.close()
+        raise HTTPException(409, "That run was stopped.")
+    rid = rid or "xr_" + _secrets.token_hex(8)
+    _FOLLOWING[rid] = _Following(runner.user_id, asyncio.create_task(run), now)
+    return rid
+
+
+async def _follow(rid: str, runner: Runner, wait: float) -> dict[str, Any]:
+    from captain_claw.flight_deck import external_tool_asks as asks
+
+    f = _FOLLOWING.get(rid)
+    if f is None or f.runner_id != runner.user_id:
+        raise HTTPException(404, "There's no such run (it ended a while ago).")
+    done, _ = await asyncio.wait({f.task}, timeout=max(0.0, wait))
+    if not done:
+        state = "asking" if asks.asking(runner.user_id) else "running"
+        return {"pending": rid, "state": state}
+    _FOLLOWING.pop(rid, None)
+    exc = f.task.exception() if not f.task.cancelled() else None
+    if f.task.cancelled():
+        raise HTTPException(409, "The run was stopped.")
+    if exc is not None:
+        raise exc
+    return f.task.result()
+
+
+@agent_router.post("/follow")
+async def agent_follow(body: FollowBody, runner: Runner = Depends(_agent_enabled)) -> dict[str, Any]:
+    return await _follow(body.run, runner, body.wait)
+
+
+@agent_router.post("/stop")
+async def agent_stop(body: FollowBody, runner: Runner = Depends(_agent_enabled)) -> dict[str, Any]:
+    f = _FOLLOWING.get(body.run)
+    if f is None:
+        if re.fullmatch(r"xr_[0-9a-f]{16}", body.run) and len(_STOPPED) < 10_000:
+            _STOPPED[body.run] = time.time()  # it may still be on its way: it won't start
+        return {"stopped": False}
+    if f.runner_id != runner.user_id:
+        return {"stopped": False}
+    f.task.cancel()
+    _FOLLOWING.pop(body.run, None)
+    return {"stopped": True}
 
 
 # ── Building and improving: a Crew task in the tool's own repository ─────
@@ -1093,6 +1214,36 @@ class EverybodyBody(BaseModel):
 
 class DecideBody(BaseModel):
     approve: bool
+
+
+class AnswerBody(BaseModel):
+    answers: dict[str, Any] | None = None
+    declined: bool = False
+
+
+@catalog_router.get("/asks")
+async def my_asks(wait: float = Query(0, ge=0, le=30), known: str = Query("", max_length=2000),
+                  user: dict = Depends(_enabled)) -> dict[str, Any]:
+    """The custom tools' questions waiting for this person (7d). Every open tab
+    waits here: it answers at once when they differ from *known* (the ids the
+    tab shows), else after *wait* seconds."""
+    from captain_claw.flight_deck import external_tool_asks as asks
+
+    seen = {k for k in known.split(",") if k}
+    return {"asks": await asks.wait_for_change(_uid(user), seen, wait)}
+
+
+@catalog_router.post("/asks/{ask_id}")
+async def answer_ask(ask_id: str, body: AnswerBody, user: dict = Depends(_enabled)) -> dict[str, Any]:
+    from captain_claw.flight_deck import external_tool_asks as asks
+
+    try:
+        asks.answer(ask_id, _uid(user), answers=body.answers, declined=body.declined)
+    except KeyError:
+        raise HTTPException(404, "That question isn't open any more.") from None
+    except asks.AskError as exc:
+        raise HTTPException(422, str(exc)) from None
+    return {"ok": True}
 
 
 @catalog_router.get("/agents")

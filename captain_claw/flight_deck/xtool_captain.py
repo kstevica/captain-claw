@@ -16,10 +16,13 @@ anything else is refused.
     # the other tool's output; its files are in captain.last_files
     local = captain.vfs_file("vfs:reports/march.xlsx")   # a path this tool can read
 
+    account = captain.ask("Which account?", choices=["Business", "Personal"])   # needs "asks": true
+
 Tests: set XT_FAKE_CALLS to a JSON file listing the replies, in order, as
 tool.json's examples record them under "calls":
     [{"tool": "web_fetch", "reply": {"ok": true, "content": "..."}},
-     {"custom_tool": "csv-total", "reply": {"ok": true, "output": {...}}}]
+     {"custom_tool": "csv-total", "reply": {"ok": true, "output": {...}}},
+     {"ask": ["answer"], "reply": {"answers": {"answer": "Business"}}}]
 """
 
 from __future__ import annotations
@@ -29,7 +32,8 @@ import os
 import socket
 from typing import Any
 
-__all__ = ["CaptainError", "NoAgent", "Refused", "custom_tool", "file", "last_files", "tool", "vfs_file"]
+__all__ = ["CaptainError", "Declined", "NoAgent", "NoAnswer", "Refused", "ask", "custom_tool", "file", "last_files",
+           "tool", "vfs_file"]
 
 
 class CaptainError(Exception):
@@ -42,6 +46,14 @@ class Refused(CaptainError):  # noqa: N818 — the name tool authors write
 
 class NoAgent(CaptainError):  # noqa: N818 — the name tool authors write
     """This run has no line to an agent (and XT_FAKE_CALLS isn't set)."""
+
+
+class Declined(CaptainError):  # noqa: N818 — the name tool authors write
+    """The person chose "Don't answer"."""
+
+
+class NoAnswer(CaptainError):  # noqa: N818 — the name tool authors write
+    """No answer in time, or nobody to ask (the run started on its own)."""
 
 
 last_files: list[str] = []
@@ -134,6 +146,46 @@ def custom_tool(name: str, input: dict | None = None) -> Any:
     if not reply.get("ok"):
         raise CaptainError(str(reply.get("error") or f"{name} failed."))
     return reply.get("output")
+
+
+def ask(question: str | list[dict], *, choices: list[str] | None = None, multiple: bool = False,
+        confirm: bool = False, lines: int = 1, help: str | None = None, default: Any = None,
+        optional: bool = False, wait_s: float = 600) -> Any:
+    """Ask the person running the tool, and wait for the answer (at most
+    *wait_s*, an hour at most); the tool's time stops meanwhile. Needs
+    "asks": true in tool.json.
+
+    One question (a string) returns its answer: text, one of *choices*, a list
+    of them (*multiple*), or True/False (*confirm*). A list of question objects
+    ({"id", "question", and "choices"/"multiple"/"min"/"max"/"confirm"/"lines"/
+    "help"/"default"/"optional"}) shows them in one dialog and returns a dict
+    by id. Raises Declined ("Don't answer") or NoAnswer (no answer in time, or
+    nobody to ask)."""
+    single = isinstance(question, str)
+    if single:
+        q: dict[str, Any] = {"id": "answer", "question": question, "optional": optional}
+        if choices is not None:
+            q["choices"] = list(choices)
+            if multiple:
+                q["multiple"] = True
+        elif confirm:
+            q["confirm"] = True
+        else:
+            q["lines"] = lines
+        if help:
+            q["help"] = help
+        if default is not None:
+            q["default"] = default
+        questions: list[dict] = [q]
+    else:
+        questions = list(question)
+    reply = _send({"op": "ask", "questions": questions, "wait_s": wait_s})
+    if reply.get("declined"):
+        raise Declined(str(reply.get("error") or "They chose not to answer."))
+    if not reply.get("ok", "answers" in reply):  # a recorded reply may give only the answers
+        raise NoAnswer(str(reply.get("error") or "No answer."))
+    answers = reply.get("answers") or {}
+    return answers.get("answer") if single else answers
 
 
 def vfs_file(ref: str) -> str:
