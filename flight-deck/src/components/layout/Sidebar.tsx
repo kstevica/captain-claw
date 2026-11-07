@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import {
   Monitor,
   Plus,
@@ -39,8 +39,10 @@ import {
   IdCard,
   Receipt,
   Waypoints,
+  Wrench,
 } from 'lucide-react'
 import { useCrewAllowed } from '../../stores/crewStore'
+import { useCustomToolsOn, useCustomToolsStore } from '../../stores/customToolsStore'
 import { usePaymentsEnabled } from '../../services/payments'
 import { useUIStore } from '../../stores/uiStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -56,7 +58,7 @@ import { BrandMark } from '../common/BrandMark'
 import type { ViewMode } from '../../types'
 
 // adminOnly needs sign-in on; adminOrLocal is also shown on a deck with sign-in off (its one user is the admin).
-type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; adminOrLocal?: boolean; needsPayments?: boolean; needsCrew?: boolean; needsSwarm?: boolean }
+type NavItem = { id: ViewMode; icon: typeof Monitor; label: string; adminOnly?: boolean; adminOrLocal?: boolean; needsPayments?: boolean; needsCrew?: boolean; needsSwarm?: boolean; needsCustomTools?: boolean }
 
 const navSections: { title: string; items: NavItem[] }[] = [
   {
@@ -77,6 +79,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
       { id: 'captain-swarm', icon: Target, label: 'Captain Swarm', needsSwarm: true },
       { id: 'code', icon: Code2, label: 'Code' },
       { id: 'crew', icon: Ship, label: 'Crew', needsCrew: true },
+      { id: 'custom-tools', icon: Wrench, label: 'Custom tools', needsCustomTools: true },
     ],
   },
   {
@@ -155,6 +158,10 @@ export function Sidebar() {
   const canSwarm = useCanSwarm()
   const paymentsOn = usePaymentsEnabled()
   const crewOn = useCrewAllowed()
+  // Custom tools: shown while the deck has them on (Admin → Settings).
+  const customToolsOn = useCustomToolsOn()
+  const refreshCustomTools = useCustomToolsStore((s) => s.refreshStatus)
+  useEffect(() => { refreshCustomTools() }, [refreshCustomTools, authUser?.id])
   const { botportUrl, setBotportUrl } = useConnectionStore()
   // Narrow, not `useChatStore()` — a whole-store read would re-render this
   // always-mounted sidebar on every streaming event. The chat list only needs
@@ -258,6 +265,7 @@ export function Sidebar() {
             if (item.adminOrLocal) return authEnabled === false || authUser?.role === 'admin'
             if (item.needsPayments) return paymentsOn
             if (item.needsCrew) return crewOn
+            if (item.needsCustomTools) return customToolsOn
             return true
           })
           if (items.length === 0) return null

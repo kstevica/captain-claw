@@ -33,6 +33,7 @@ import { BatPage } from './pages/BatPage'
 import { CaptainSwarmPage } from './pages/CaptainSwarmPage'
 import { CodePage } from './pages/CodePage'
 import { CrewBoard } from './components/crew/CrewBoard'
+import { CustomToolsPage } from './components/customTools/CustomToolsPage'
 import { DubinaPage } from './pages/DubinaPage'
 import { TodayPage } from './pages/TodayPage'
 import { SkillsPage } from './pages/SkillsPage'
@@ -407,6 +408,7 @@ function AppContent() {
       {view === 'payments' && <PaymentsPage />}
       {view === 'code' && <CodePage />}
       {view === 'crew' && <CrewBoard phone={isMobile} />}
+      {view === 'custom-tools' && <CustomToolsPage phone={isMobile} />}
       {view === 'dubina' && <DubinaPage />}
       {view === 'vfs' && <VFSPage />}
       {view === 'deep-memory' && <DeepMemoryPage />}
