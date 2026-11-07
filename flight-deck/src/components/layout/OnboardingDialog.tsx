@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import {
   AlertTriangle, BookMarked, BookOpen, Check, CheckCircle2, Dumbbell, FilePlus2, Gift, GraduationCap, Hand, Lightbulb,
-  Loader2, Lock, MessageSquarePlus, Pencil, Pin, PinOff, Plus, RotateCcw, ScrollText, Search, ShieldCheck, Sparkles,
+  Loader2, Lock, MessageSquarePlus, Pencil, Pin, PinOff, Plus, RotateCcw, ScrollText, Search, Share2, ShieldCheck, Sparkles,
   Trash2, X,
 } from 'lucide-react'
+import { ShareModal } from '../common/ShareModal'
+import { useAuthStore } from '../../stores/authStore'
 import { agentExamApi, type ExamOverview } from '../../services/agentExam'
 import { agentKnowledgeApi, type KnowledgeOverview } from '../../services/agentKnowledge'
 import {
@@ -383,6 +385,11 @@ function PassOnDialog({ slug, name, hasExam, onClose }: { slug: string; name: st
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [done, setDone] = useState<PassedOn | null>(null)
+  const [sharing, setSharing] = useState(false)
+  // Sharing is between people, so it needs sign-in. An admin saving it for someone (Users → Agents)
+  // made that person's archetype: theirs to share, not the admin's.
+  const signIn = useAuthStore((s) => s.authEnabled === true)
+  const canShare = signIn && !onboardingAs.get()
   const save = async () => {
     setBusy(true)
     setErr('')
@@ -401,6 +408,7 @@ function PassOnDialog({ slug, name, hasExam, onClose }: { slug: string; name: st
     { key: 'exam', label: 'Its last exam’s questions', off: !hasExam },
   ]
   return createPortal(
+    <>
     <div className="fixed inset-0 z-[60] flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-4" onClick={onClose}>
       <div role="dialog" aria-label="Pass it on" onClick={(e) => e.stopPropagation()}
         className="w-full max-w-lg rounded-t-2xl border border-zinc-800 bg-zinc-900 p-4 shadow-2xl sm:rounded-2xl">
@@ -425,9 +433,17 @@ function PassOnDialog({ slug, name, hasExam, onClose }: { slug: string; name: st
                   done.counts.questions ? plural(done.counts.questions, 'exam question') : ''].filter(Boolean).join(', ')}.</span>
             </p>
             <p className="text-xs text-zinc-500">
-              Pick it when you make a new agent. To let others make one, share it from Library → Archetypes.
+              Pick it when you make a new agent.{canShare ? ' To let others make one too, share it with them.' : ''}
             </p>
-            <button onClick={onClose} className="self-end rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800">Done</button>
+            <div className="flex justify-end gap-2">
+              {canShare && (
+                <button onClick={() => setSharing(true)}
+                  className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800">
+                  <Share2 className="h-3.5 w-3.5" /> Share with people…
+                </button>
+              )}
+              <button onClick={onClose} className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800">Done</button>
+            </div>
           </div>
         ) : (
           <div className="flex flex-col gap-3">
@@ -466,7 +482,13 @@ function PassOnDialog({ slug, name, hasExam, onClose }: { slug: string; name: st
           </div>
         )}
       </div>
-    </div>,
+    </div>
+    {/* A sibling, not a child: a click on its backdrop must not close Pass it on as well. */}
+    {done && sharing && (
+      <ShareModal resourceType="archetype" resourceId={done.archetype.id} resourceName={done.archetype.role}
+        allowEdit={false} onClose={() => setSharing(false)} />
+    )}
+    </>,
     document.body,
   )
 }

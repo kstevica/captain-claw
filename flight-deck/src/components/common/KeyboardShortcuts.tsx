@@ -4,17 +4,28 @@ import { useUIStore } from '../../stores/uiStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useAuthStore, selectKioskLocked } from '../../stores/authStore'
 
-const shortcuts = [
-  { keys: ['Cmd/Ctrl', 'D'], action: 'Toggle Director' },
-  { keys: ['Cmd/Ctrl', 'J'], action: 'Toggle Chat Panel / Queue' },
-  { keys: ['Cmd/Ctrl', 'Enter'], action: 'Queue the chat message (Auto)' },
-  { keys: ['Cmd/Ctrl', 'K'], action: 'Toggle Shortcuts Help' },
-  { keys: ['Cmd/Ctrl', '\\'], action: 'Simple / Full view' },
-  { keys: ['Cmd/Ctrl', '['], action: 'Previous Chat Tab' },
-  { keys: ['Cmd/Ctrl', ']'], action: 'Next Chat Tab' },
-  { keys: ['Escape'], action: 'Close Modals / Panels' },
-  { keys: ['?'], action: 'On the Taskboard: its own shortcuts' },
-]
+/** The shortcuts that do something where the person is: the simple layout (which the kiosk always is,
+ *  whatever layout they last chose) has no Director, its Cmd/Ctrl+J is the queue, and only it has the
+ *  Taskboard; the kiosk can't switch to the full view. */
+function shortcutsFor(simple: boolean, locked: boolean) {
+  return [
+    ...(simple ? [] : [{ keys: ['Cmd/Ctrl', 'D'], action: 'Toggle Director' }]),
+    { keys: ['Cmd/Ctrl', 'J'], action: simple ? 'Show / hide the queue' : 'Toggle Chat Panel' },
+    { keys: ['Cmd/Ctrl', 'Enter'], action: 'Queue the chat message (Auto)' },
+    { keys: ['Cmd/Ctrl', 'K'], action: 'Toggle Shortcuts Help' },
+    ...(locked ? [] : [{ keys: ['Cmd/Ctrl', '\\'], action: 'Simple / Full view' }]),
+    { keys: ['Cmd/Ctrl', '['], action: 'Previous Chat Tab' },
+    { keys: ['Cmd/Ctrl', ']'], action: 'Next Chat Tab' },
+    { keys: ['Escape'], action: 'Close Modals / Panels' },
+    ...(simple ? [{ keys: ['?'], action: 'On the Taskboard: its own shortcuts' }] : []),
+  ]
+}
+
+/** The kiosk shows the simple layout whatever `layoutMode` says (a kiosk user's stored choice is often
+ *  still 'full'), so "is this the simple layout" has to count the lock too. */
+function inSimpleLayout(locked: boolean): boolean {
+  return locked || useUIStore.getState().layoutMode === 'simple'
+}
 
 export function useKeyboardShortcuts(
   _directorOpen: boolean,
@@ -55,14 +66,14 @@ export function useKeyboardShortcuts(
           e.preventDefault()
           // The Director only exists in the full layout; don't flip (and
           // persist) state that nothing in the simple layout renders.
-          if (useUIStore.getState().layoutMode !== 'simple') onToggleDirector()
+          if (!inSimpleLayout(locked)) onToggleDirector()
         }
         break
       case 'j':
         if (mod) {
           e.preventDefault()
           const ui = useUIStore.getState()
-          if (ui.layoutMode === 'simple') {
+          if (inSimpleLayout(locked)) {
             ui.setSimpleQueueOpen(!ui.simpleQueueOpen)
           } else {
             const { chatOpen, activeChatId, closeChat } = useChatStore.getState()
@@ -111,6 +122,9 @@ function switchChatTab(direction: number) {
 }
 
 export function ShortcutsOverlay({ onClose }: { onClose: () => void }) {
+  const locked = useAuthStore(selectKioskLocked)
+  const simple = useUIStore((s) => locked || s.layoutMode === 'simple')
+  const shortcuts = shortcutsFor(simple, locked)
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60" onClick={onClose}>
       <div

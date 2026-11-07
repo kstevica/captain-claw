@@ -97,12 +97,12 @@ interface Step {
 const SHOTS = {
   overview: {
     dark: overviewDark, light: overviewLight, phoneDark: overviewPhoneDark, phoneLight: overviewPhoneLight,
-    alt: 'The deck: agents on the left with Library and Data at the bottom, the chat in the middle',
+    alt: 'The deck: agents on the left with the Line above them and the tools at the bottom, the chat in the middle',
     phoneAlt: 'Your agents, one per row, with New agent at the bottom',
   },
   newAgent: {
     dark: newAgentDark, light: newAgentLight, phoneDark: newAgentPhoneDark, phoneLight: newAgentPhoneLight,
-    alt: 'New agent: pick an archetype, name it, Create agent',
+    alt: 'New agent: pick an archetype, name it, Create',
   },
   chat: {
     dark: chatDark, light: chatLight, phoneDark: chatPhoneDark, phoneLight: chatPhoneLight,
@@ -450,9 +450,9 @@ function buildSteps({ name, phone, authEnabled, sharingEnabled, info }: {
     points: [
       phone
         ? <>Press <B>New agent</B> at the bottom of the screen.</>
-        : <>Press <B>+</B> next to “Agents” on the left (or <B>New agent</B> on an empty deck).</>,
+        : <>Press <B>New agent</B> under “Agents” on the left.</>,
       'Pick an archetype from the list. Search by role or by what it does.',
-      <>Give it a name and press <B>Create agent</B>. It starts in a few seconds, and its chat opens by itself.</>,
+      <>Give it a name and press <B>Create</B>. It starts in a few seconds, and its chat opens by itself.</>,
     ],
     note: <>The power button next to an agent turns it off when you don't need it, and back on later. Its conversations and files are kept.</>,
     shot: SHOTS.newAgent,
@@ -467,8 +467,8 @@ function buildSteps({ name, phone, authEnabled, sharingEnabled, info }: {
     lead: "Write what you need the way you'd brief a colleague: the goal, the context, and what you want back.",
     points: [
       phone
-        ? <><B>Attach files</B> with the paperclip: documents, spreadsheets, photos.</>
-        : <><B>Attach files</B> with the paperclip, or drop or paste them into the message: documents, spreadsheets, images.</>,
+        ? <><B>Attach files</B> with the <B>+</B> under the message: documents, spreadsheets, photos.</>
+        : <><B>Attach files</B> with the <B>+</B> under the message, or drop or paste them into it: documents, spreadsheets, images.</>,
       phone
         ? <><B>Line up several tasks</B> in the queue: the list icon on the row above the chat switches to it. On <B>Auto</B>, the agent works through them one after another.</>
         : <><B>Line up several tasks</B> in the queue beside the chat (the list icon at the top shows it). On <B>Auto</B>, the agent works through them one after another.</>,
