@@ -90,12 +90,16 @@ SPEAKER_FILE_TOOLS = frozenset({"read", "write", "edit", "glob", "grep", "vfs",
 # PR C: the agent's datastore is a commons (members add rows anywhere, change
 # only their own). Not a file tool: it needs no roots unless it names a file.
 SPEAKER_DATASTORE_TOOLS = frozenset({"datastore"})
+# Custom tools: a member lists, describes and runs THEIR OWN tools with their own
+# secrets and files (Flight Deck acts as the member through the turn's grant).
+SPEAKER_CUSTOM_TOOLS = frozenset({"custom_tools"})
+_CUSTOM_TOOLS_ACTIONS = frozenset({"list", "describe", "run"})
 # SPEAKER_TOOL_ALLOWLIST keeps its A1 meaning: the always-available chat tools.
 # The most a member can get (a verified member of a PROCESS agent); docker and
 # unknown runtimes stay at SPEAKER_TOOL_ALLOWLIST (part 0 §1).
 SPEAKER_TOOL_ALLOWLIST_MAX = (SPEAKER_TOOL_ALLOWLIST | SPEAKER_GOOGLE_TOOLS
                               | SPEAKER_DEEP_MEMORY_TOOLS | SPEAKER_FILE_TOOLS
-                              | SPEAKER_DATASTORE_TOOLS)
+                              | SPEAKER_DATASTORE_TOOLS | SPEAKER_CUSTOM_TOOLS)
 # = google_drive._SAVED_CATEGORIES and the write tool's saved/ categories.
 SAVED_CATEGORIES = frozenset({"downloads", "media", "output", "scripts", "showcase",
                               "skills", "summaries", "tmp", "tools"})
@@ -958,6 +962,12 @@ def apply_tool_rules(name: str, arguments: dict, agent: Any) -> tuple[dict, str 
     if name in SPEAKER_FILE_TOOLS:
         return args, None
 
+    if name == "custom_tools":
+        # Flight Deck runs the member's own tools as the member (grant-aware routes).
+        if str(action or "").strip().lower() not in _CUSTOM_TOOLS_ACTIONS:
+            return args, NOT_ALLOWED_MESSAGE
+        return args, None
+
     return args, NOT_ALLOWED_MESSAGE
 
 
@@ -1025,6 +1035,9 @@ SPEAKER_PATH_MAP: dict[str, tuple[PathRule, ...]] = {
     "xlsx_extract": (PathRule("/path", "read", True),),
     "pptx_extract": (PathRule("/path", "read", True),),
     "datastore": (PathRule("/file_path", "ds_file"),),
+    # custom_tools: no host paths. A file inside `input` is a vfs: path that
+    # Flight Deck resolves in the MEMBER's own VFS (external_tools_routes).
+    "custom_tools": (),
 }
 
 # Schema properties that look like paths but aren't.

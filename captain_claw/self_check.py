@@ -722,6 +722,8 @@ def connection_probes(agent: Any, deep: bool, clock: dict[str, float]) -> list[_
             "Payments", "payments_client", "refresh", "payments_usable", "off on this Flight Deck")),
         _Probe("connections", "Crew (coding CLIs)", lambda: _flag(
             "Crew", "crew_client", "refresh", "crew_usable", "not approved for this account")),
+        _Probe("connections", "Custom tools", lambda: _flag(
+            "Custom tools", "custom_tools_client", "refresh", "usable", "off on this Flight Deck")),
         _Probe("connections", "Deep memory", lambda: _deep_memory(agent)),
         _Probe("connections", "MCP servers", _mcp, 40),
         _Probe("connections", "Outgoing mail (send_mail)", _mail, 20),

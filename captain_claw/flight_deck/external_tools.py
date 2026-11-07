@@ -103,6 +103,10 @@ def root() -> Path:
     return Path(DATA_DIR) / "external_tools"
 
 
+# Names a route already uses under /fd/external-tools/ (or will): a tool can't take them.
+RESERVED_SLUGS = frozenset({"agent", "status", "admin", "catalog", "shared", "proposals", "approvals"})
+
+
 def check_slug(slug: str) -> str:
     slug = str(slug or "").strip()
     if not _SLUG_RE.match(slug):
@@ -876,6 +880,8 @@ async def create_tool(owner: str, slug: str, *, title: str, description: str) ->
     from captain_claw.flight_deck import crew_runner
 
     slug = check_slug(slug)
+    if slug in RESERVED_SLUGS:
+        raise ToolError("bad_name", f"“{slug}” is a name Flight Deck uses itself: pick another.")
     title = " ".join(str(title or "").split()) or slug
     description = " ".join(str(description or "").split())
     if not 1 <= len(title) <= 80:

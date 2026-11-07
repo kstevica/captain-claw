@@ -219,6 +219,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     # "Have Codex fix the login test" comes in any language too. Hidden by the
     # registry unless an admin approved the owner for Crew.
     "crew",
+    # "Run my invoice reader on this" comes in any language: the person's own
+    # tools. Hidden by the registry unless the deck has custom tools on.
+    "custom_tools",
     # "Ask the researcher to dig into this" comes in any language: the team
     # has to be reachable. Hidden without a deck and on a member's turn.
     "colleagues",
@@ -2395,6 +2398,12 @@ class AgentOrchestrationMixin:
                 try:
                     from captain_claw import crew_client
                     await crew_client.refresh()
+                except Exception:
+                    pass
+                # Custom tools: on for this deck, and which the owner has?
+                try:
+                    from captain_claw import custom_tools_client
+                    await custom_tools_client.refresh()
                 except Exception:
                     pass
                 # Telegram inbox (owner-only): does the owner keep one?
