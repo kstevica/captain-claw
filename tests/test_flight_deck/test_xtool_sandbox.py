@@ -145,6 +145,43 @@ def test_a_tool_cant_signal_flight_deck():
     assert out["signal_parent"] == "PermissionError", out
 
 
+LINE_PROBE = textwrap.dedent('''
+    import json, os, socket
+    sock = socket.socket(fileno=int(os.environ["XT_CAPTAIN_FD"]))
+    sock.sendall(b'{"op": "tool", "name": "read"}\\n')
+    print(sock.makefile("rb").readline().decode().strip())
+''')
+
+
+@needs_net
+def test_the_line_to_flight_deck_works_in_the_sandbox_without_network():
+    """Phase 7: a tool's line to the agent is an inherited socket pair, which
+    Landlock leaves alone even with TCP shut off."""
+    with tempfile.TemporaryDirectory() as d:
+        version, call = Path(d) / "version", Path(d) / "call"
+        version.mkdir()
+        call.mkdir()
+        (version / "line.py").write_text(LINE_PROBE)
+        ours, theirs = socket.socketpair()
+        cmd = [sys.executable, "-E", "-s", str(LAUNCHER), "--mem", "1024", "--cpu", "30"]
+        for p in [str(version), *_system_ro(), "/proc/self"]:
+            cmd += ["--ro", p]
+        cmd += ["--rw", str(call), "--no-net", "--require-sandbox", "--", sys.executable, "-E", "-s", "-B",
+                str(version / "line.py")]
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, pass_fds=(theirs.fileno(),),
+                                env={"PATH": "/usr/bin:/bin", "XT_CAPTAIN_FD": str(theirs.fileno())})
+        theirs.close()
+        try:
+            asked = ours.makefile("rb").readline()
+            assert json.loads(asked) == {"op": "tool", "name": "read"}
+            ours.sendall(b'{"ok": true, "content": "answered"}\n')
+            out, err = proc.communicate(timeout=30)
+        finally:
+            ours.close()
+        assert proc.returncode == 0, err
+        assert json.loads(out) == {"ok": True, "content": "answered"}
+
+
 def test_the_probe_says_what_this_host_offers():
     done = subprocess.run([sys.executable, "-E", "-s", str(LAUNCHER), "--probe"], capture_output=True, text=True, timeout=30)
     info = json.loads(done.stdout)

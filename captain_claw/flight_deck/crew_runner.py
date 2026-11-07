@@ -533,6 +533,10 @@ async def _make_worktree(user: dict, grant: Grant, where: dict[str, Any], task_s
     rc, out = await _git(repo, "worktree", "add", "--quiet", "-b", branch, str(wt), sha, env=env)
     if rc != 0:
         raise HTTPException(500, f"Couldn't make a worktree: {out[-500:]}")
+    if where.get("repo_kind") == "tool":
+        from captain_claw.flight_deck import external_tools as xt
+
+        xt.place_helper(wt)  # Flight Deck's helper for the worker to use and test
     rc, common = await _git(wt, "rev-parse", "--path-format=absolute", "--git-common-dir", env=env)
     return {"base_branch": base_branch, "base_sha": sha, "branch": branch, "worktree": str(wt),
             "git_common_dir": common if rc == 0 else ""}

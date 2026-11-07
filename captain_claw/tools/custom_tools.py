@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 
-from captain_claw import custom_tools_client
+from captain_claw import custom_tool_callbacks, custom_tools_client
 from captain_claw.logging import get_logger
 from captain_claw.tools.registry import Tool, ToolResult
 
@@ -98,7 +98,8 @@ class CustomToolsTool(Tool):
             if action == "describe":
                 return await self._describe(str(kwargs.get("tool") or ""))
             if action == "run":
-                return await self._run(str(kwargs.get("tool") or ""), kwargs.get("input"))
+                return await self._run(str(kwargs.get("tool") or ""), kwargs.get("input"),
+                                       agent=kwargs.get("_agent"), session_id=str(kwargs.get("_session_id") or ""))
             if action in ("build", "improve"):
                 return await self._make(action, kwargs)
             if action == "propose":
@@ -196,9 +197,18 @@ class CustomToolsTool(Tool):
             lines += ["", "Secrets: " + ", ".join(f"{s['name']} ({'set' if s.get('set') else 'NOT set'})" for s in secrets)]
         lines += ["", f"Limits: {data.get('timeout_s')} s per run."
                   + (" It uses the internet." if data.get("network") else "")]
+        uses = [u for u in data.get("uses") or [] if isinstance(u, dict)]
+        if uses:
+            said = []
+            for u in uses:
+                name = u.get("tool") or (f"custom tool {u['custom_tool']}" if u.get("custom_tool") else "")
+                extra = u.get("actions") or u.get("hosts") or []
+                said.append(f"{name} ({', '.join(extra)})" if extra else str(name))
+            lines.append("While it runs it asks you to use: " + "; ".join(said)
+                         + ". Run it from here and it does; nothing else is needed from you.")
         return ToolResult(content="\n".join(lines))
 
-    async def _run(self, tool: str, data_in: Any) -> ToolResult:
+    async def _run(self, tool: str, data_in: Any, *, agent: Any = None, session_id: str = "") -> ToolResult:
         if not tool.strip():
             return ToolResult(success=False, error="Name the tool: custom_tools action=run tool=<name> input={...}.")
         if data_in is None:
@@ -210,7 +220,16 @@ class CustomToolsTool(Tool):
                 return ToolResult(success=False, error="input must be an object with the tool's fields.")
         if not isinstance(data_in, dict):
             return ToolResult(success=False, error="input must be an object with the tool's fields.")
-        status, data = await custom_tools_client.call("POST", "run", {"tool": tool, "input": data_in})
+        # A tool may ask this agent to use its tools while it runs (Phase 7): wait
+        # for those requests under a fresh id for as long as the run lasts.
+        cb = ""
+        if agent is not None and hasattr(agent, "_execute_tool_with_guard"):
+            cb = custom_tool_callbacks.open_wait(agent, session_id, tool=tool)
+        try:
+            status, data = await custom_tools_client.call(
+                "POST", "run", {"tool": tool, "input": data_in, **({"callback": cb} if cb else {})})
+        finally:
+            custom_tool_callbacks.close_wait(cb)
         if (bad := _refused(status, data)) is not None:
             return bad
         if not data.get("ok"):

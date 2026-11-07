@@ -1,6 +1,7 @@
 # External tools — plan
 
-Written 2026-11-06. Status: Phases 0–6 built on 2026-11-07, one stacked PR each (#450–#456).
+Written 2026-11-06. Status: Phases 0–6 built and merged on 2026-11-07 (#450–#456), the New tool
+spec check too (#457). Phase 7, tools that call the agent, planned 2026-11-07.
 
 ### Settled with the user (2026-11-06)
 
@@ -297,7 +298,8 @@ rewrites `live.json`.
 
 People who added a tool follow its new versions automatically (settled). When a
 version declares more than the one before (network newly on, a new secret, a
-larger timeout or memory), they get a bell saying what changed; nothing waits.
+larger timeout or memory, and from Phase 7 a new `uses` entry or host, or `asks`), they
+get a bell saying what changed; nothing waits.
 
 ### Secrets
 
@@ -531,6 +533,307 @@ kiosk reaches it through Settings.
   runs standalone too) and `test_external_tools_sandbox.py` (the flags each run
   gets, the refusal, the switch and the status).
 
+### Phase 7: tools that call the agent — planned 2026-11-07
+
+A custom tool can use the agent's own tools (read a page, search mail, write a
+spreadsheet) and other custom tools while it runs. It never does that work
+itself: it asks the agent that ran it, and that agent does it, with its own
+connections, keys, folder limits, rules and log.
+
+#### Settled with the user (2026-11-07)
+
+1. A tool may use the agent's **read** and **write** tools. **Send** tools work
+   only when the tool's owner runs it. **Run code**, **money** and anything
+   unclassified are never available.
+2. When a new version of a shared tool uses more, people who added it keep
+   following it; the Phase 3 bell says what it now uses.
+3. Custom tools can call other custom tools, in this phase.
+4. "Try it" on the tool's page asks which of the person's agents runs it.
+5. Who a request runs as comes with the tool's request: Flight Deck sends the
+   run's identity (the runner, and on a shared agent the member and their
+   grant) with every request, and the agent acts as that identity. It doesn't
+   rely on what the turn's context happens to hold.
+6. Writes that reach other people count as send (below).
+7. A tool can ask the person a question, or a set of them, and waits for the
+   answer (Asking the person, below).
+
+Rules that follow from these (the first two proposed with the plan; the third
+settled as #6):
+
+- **Web reads name their hosts.** `web_fetch` and the other web readers are
+  "read", but a URL can carry data out. A tool that uses them lists the hosts it
+  reads from (`"hosts": ["api.frankfurter.app"]`); Flight Deck refuses any
+  other host, and the hosts are shown before anyone adds the tool.
+- **Nothing that changes the agent or sets up later work**, whatever its
+  class: `cron`, `personality`, `playbooks`, `insights`, `facts`,
+  `intentions`, `project_memory`, `reasoning_effort`, `apis`,
+  `synthesize_flow`, `todo`, `topics`. A tool must not leave behind a
+  scheduled job or a new habit in someone's agent.
+- **Writes that reach other people count as send**: creating, changing or
+  deleting a calendar event (invitations and cancellations go out), and
+  answering an invitation. Checked against every action of the allowed tools:
+  the Drive and OneDrive tools have no sharing action. Counted as send for
+  custom tools only (`external_tool_uses`), so the tool-call register's own
+  classes don't change.
+
+#### The rule: the agent that ran the tool does the work
+
+Only the agent whose `custom_tools run` started this call (or, from the page,
+the agent the person picked) answers its requests. Flight Deck already knows
+which agent and whose turn it is (`Runner`: user, agent slug, member), and
+sends that identity with every request (settled #5). So:
+
+- the runner's connections are used: on a shared agent, the member's turn
+  uses the member's Gmail, as their secrets are used today;
+- the agent's guards still apply (`_execute_tool_with_guard`: the script/tool
+  guard, blast radius, folder confinement);
+- every call is in that agent's tool-call log, as "via custom tool <title>";
+- the agent can refuse: a tool it doesn't have, or one its rules block, fails
+  as it would in chat.
+
+#### How a call travels
+
+1. The agent's `custom_tools run` makes a callback id (random, 32 bytes),
+   remembers its waiting run under it (the session, who the turn is for, its
+   abort), and sends the id with the run.
+2. Flight Deck starts the tool with one end of a socket pair as file
+   descriptor 3 (`XT_CAPTAIN_FD=3`; `pass_fds`, kept through the launcher's
+   `execv`) and reads the other end while the tool runs.
+3. The tool asks through a small helper module, `captain`, that Flight Deck
+   puts on its path (standard library only):
+
+   ```python
+   import captain
+   page = captain.tool("web_fetch", url="https://api.frankfurter.app/latest")
+   # → {"ok": True, "content": "...", "files": []}
+   total = captain.custom_tool("csv-total", {"file": captain.file("out/rows.csv"), "column": "amount"})
+   # → the other tool's output JSON
+   ```
+
+   On the socket that is one JSON line per request,
+   `{"id": 1, "op": "tool" | "custom_tool", "name": ..., "input": {...}}`, and
+   one line back, `{"id": 1, "ok": ..., "content" | "output": ..., "files": [...], "error": ...}`.
+   One request at a time in v1. (`op: "ask"` goes to the person, not the
+   agent: Asking the person, below.)
+4. Flight Deck checks the request (below) and passes it to the agent:
+   `POST http://127.0.0.1:<web_port>/api/custom-tools/callback` with the
+   agent's web token, as it calls `/api/llm/complete` today. The body carries
+   the callback id and the run's identity: the runner's user id, whether it is
+   a member, and the member's speaker grant (the one the run came with).
+5. The agent finds the waiting run by its id and refuses any other id, so only
+   a call it is waiting on right now can make it act. It also refuses an
+   identity that isn't the one that run started with. It sets the speaker from
+   the request's identity for this call (as a member's turn sets it), runs the
+   tool through `_execute_tool_with_guard`, and answers. From Try it there is
+   no turn: the identity is the person on the page.
+6. Flight Deck hands files across (below) and writes the answer back.
+
+When the run ends, or the person stops the turn, the agent forgets the id and
+later requests are refused, so the tool fails soon after.
+
+#### What a tool declares: `uses`
+
+```json
+"uses": [
+  {"tool": "web_fetch", "hosts": ["api.frankfurter.app"], "why": "reads today's exchange rates"},
+  {"tool": "google_mail", "actions": ["search", "read"], "why": "finds the invoice mails"},
+  {"custom_tool": "csv-total", "why": "adds up the rows it extracted"}
+]
+```
+
+- Each entry is one of the agent's tools (optionally only some of its actions)
+  or a custom tool, always with a `why`.
+- Publishing refuses an entry that `tool_risk.risk_for` puts in run code,
+  money or other, a tool on the never list, a tool name it doesn't know, and a
+  web tool without `hosts`.
+- At call time Flight Deck refuses anything not declared and classifies the
+  real call with `risk_for(tool, input)`: read and write pass; send passes only
+  when the runner is the tool's owner; the rest never.
+- A tool that needs an interactive approval is refused in v1 ("needs your
+  approval: do it from chat").
+- At most 50 requests per top-level run, counted across nested tools. Each
+  waits only as long as the run has left.
+
+#### Custom tools calling custom tools
+
+- `{"custom_tool": "csv-total"}` names one of the tool owner's own tools.
+- It travels through the agent like any request, so the inner run has the same
+  runner, secrets and files, and shows in the agent's log.
+- It runs only if the runner can use it (their own, or one they added).
+  Adding a tool lists what it depends on, with Add for each one offered to
+  them, and says plainly when one isn't ("won't work for you: csv-total isn't
+  offered to you"). Offering a tool to someone or everybody offers to share
+  its dependencies the same way.
+- Flight Deck keeps each run's record: call id, owner and name, depth,
+  deadline, request count. The agent passes `via: <outer call id>` with the
+  inner run. Refused: depth over 3, a tool already in the chain. The inner run
+  gets its own timeout or what the outer has left less 5 seconds, whichever is
+  smaller.
+
+#### Files across the line
+
+- **To an agent tool:** `captain.file(path)` marks a file the tool wrote in
+  its run folder. Flight Deck copies it into
+  `vfs:custom-tools/<slug>/<day>-<call>/work/` (beside the call's delivered
+  files) and puts that path in the input. Any other path is refused.
+- **From an agent tool:** its answer is text (`content`). A file it saved is
+  brought in with `captain.vfs_file("vfs:<folder>/<path>")`, which copies it
+  into the run's `in/` folder and returns that path; it needs
+  `{"tool": "read"}` in `uses`.
+- **From an inner custom tool (7b):** the files it made are copied into the
+  run's `in/` folder, and the tool gets those paths.
+- The 200 MB per call covers all of it. The tool never gets a path outside its
+  call folder.
+
+#### Try it on the page
+
+- A tool with `uses` asks "Run as": one of the person's own agents. Asleep
+  ones are woken (`agent_idle`).
+- Flight Deck asks that agent for a hosting slot, `POST /api/custom-tools/host`
+  → a callback id valid for the run's timeout. Its requests run in a session
+  of their own (`custom-tools-try`), not in the person's chat.
+- A member of a shared agent tries such a tool from chat in v1.
+- A tool without `uses` runs as today.
+
+#### Publishing and tests
+
+- There's no agent when a version publishes. Examples carry the replies the
+  tool should get, in order:
+  `{"input": ..., "expect": ..., "calls": [{"tool": "web_fetch", "reply": {"ok": true, "content": "..."}}]}`.
+  Flight Deck answers from them. A request that doesn't match the next one
+  fails the example and says which.
+- Tests: when `XT_FAKE_CALLS` names a JSON file of the same shape, the helper
+  answers from it.
+- `WORKER_CONTRACT` and the New tool check prompt explain `uses`, `hosts`, the
+  helper, the recorded replies, and that a tool reading the web or a
+  model-backed tool doesn't give the same answer every time.
+
+#### What people see
+
+- The declares line and the tool page: "Uses your agent: web_fetch
+  (api.frankfurter.app), google_mail (search, read)" and "Uses: csv-total",
+  each with its why, and a "Calls your agent" pill.
+- The update bell (Phase 3) names new `uses` entries; nothing waits (settled
+  #2).
+- The agent's tool-call log has every request; the owner's usage counts
+  include requests per run (counts only, as today).
+- `custom_tools describe` shows `uses`, so the agent knows the tool will call
+  back.
+
+#### Asking the person (settled #7)
+
+A tool can stop and ask the person running it for an answer, a decision or a
+choice (one or several), and carries on with what they answer. Flight Deck
+handles it directly; the agent isn't needed.
+
+- **Declared:** `"asks": true` in tool.json. It is shown before anyone adds the
+  tool ("Asks you questions").
+- **The helper:** one question gives back its answer; a set gives back a dict
+  by id, all shown in one dialog.
+
+  ```python
+  account = captain.ask("Which account?", choices=["Business", "Personal"])
+  answers = captain.ask([
+      {"id": "account", "question": "Which account?", "choices": ["Business", "Personal"]},
+      {"id": "months", "question": "Which months?", "choices": ["Jan", "Feb", "Mar"], "multiple": True, "min": 1},
+      {"id": "send", "question": "Send the summary to the accountant?", "confirm": True},
+      {"id": "note", "question": "Anything to add?", "text": True, "optional": True},
+  ], wait_s=900)
+  # → {"account": "Business", "months": ["Jan", "Feb"], "send": True, "note": ""}
+  ```
+
+  Kinds: **text** (one line, or `"lines": n`), **choice** (one of a list),
+  **multiple** (several, with `min` and `max`), **confirm** (yes or no). Each
+  question can have `help`, `default` and `optional`. On the socket it is
+  `{"op": "ask", "questions": [...], "wait_s": ...}`.
+- **How it ends:** the answers; `captain.Declined` when the person closes it
+  with "Don't answer"; `captain.NoAnswer` when the wait runs out or there's
+  nobody to ask. The tool decides what to do then.
+- **Who is asked:** the runner, from the tool's request (settled #5): on a
+  shared agent, the member whose turn it is; from Try it, the person on the
+  page. Nobody else ever sees the question.
+- **Where:** every open Flight Deck tab of that person opens the dialog (full
+  layout, kiosk, phone width). It is also a Needs-you item in Line and the
+  bell, so someone not looking finds it there. Answered in one tab, it closes
+  in the others. The bell checks every 30 seconds, too slowly for a dialog, so
+  each signed-in tab waits on `GET /fd/external-tools/asks?wait=25` (only
+  while custom tools are on) and gets an open question at once. The answer
+  goes to `POST /fd/external-tools/asks/<id>`, as `{answers}` or
+  `{"declined": true}`. Flight Deck checks the answers against the questions
+  (a choice from the list, how many for multiple, lengths) before the tool
+  gets them.
+- **The dialog:** "<tool title> asks", with "a tool by <owner>" when it isn't
+  the person's own, "csv-total, used by bank-report" for an inner tool, the
+  agent's name and the time left. A fixed line: "Never type a password or key
+  here: a tool's secrets go in its Secrets." No password fields.
+- **Paused:** while a question is open the tool waits on its socket, doing
+  nothing, and Flight Deck stops its time limit. The question's own wait
+  applies instead: `wait_s`, 10 minutes by default, at most an hour. Limits:
+  5 asks per run, 10 questions per ask, 500 characters a question, 50 choices
+  of 200 characters each, 4000 characters an answer.
+- **The agent waits too.** So a long wait isn't cut by an HTTP timeout,
+  `custom_tools run` starts the run and then follows it
+  (`GET /fd/external-tools/agent/runs/<id>?wait=30` until it's done) instead
+  of holding one long request. While a question is open, the run's state says
+  so, and the agent's chat shows "waiting for your answer in Flight Deck".
+  Stopping the turn kills the run and closes the question.
+- **Nobody to ask:** a run from a scheduled task or autonomous work (the agent
+  sends its turn's origin with the run) gets `captain.NoAnswer` at once, with
+  "no one to ask: this ran from a schedule", and no dialog opens.
+- **Chat channels** (Telegram, WhatsApp, the phone app): in v1 the question
+  waits in Flight Deck, and the person finds it there. Asking in the channel
+  the turn came from is later.
+- **Publishing and tests:** examples record answers in `calls` like the
+  agent's replies (`{"ask": ["account"], "reply": {"account": "Business"}}`,
+  in order); `XT_FAKE_CALLS` the same.
+- **Audit:** the questions and the answers are part of the run's record in the
+  runner's audit. The owner of a shared tool sees counts only, as today.
+
+#### Where it runs
+
+- Linux and macOS. On Windows a tool with `uses` or `asks` is refused
+  ("needs Linux or macOS"); later, a loopback socket with a per-run token.
+- Landlock doesn't rule an inherited, already connected socket (it rules TCP
+  connect and bind, and abstract sockets), so `--no-net` stays on. Checked in
+  the Linux container as in Phase 6.
+
+#### Built so far
+
+- **7a (2026-11-07):** `external_tool_uses.py` (the rules: declared uses,
+  classes, never list, hosts, invitations as send); `xtool_captain.py` (the
+  helper, copied into every version as `captain.py`, into new tools' starter
+  and into each Crew worktree of a tool); the line in `_run_proc` (a socket
+  pair, `pass_fds`, `$XT_CAPTAIN_FD`); `CallContext`, `_answer` and
+  `RecordedLink` in `external_tools.py` (examples' `calls`, checked with
+  tool.json); `AgentLink` in the routes (the agent's registry entry and token,
+  the identity with every request, handed files into the VFS, `vfs_file`);
+  on the agent `custom_tool_callbacks.py` and `POST /api/custom-tools/callback`
+  (owner-locked like `/api/tool`; mail authority `custom_tool`, allowed only
+  when the owner runs the tool). An agent too old to send a callback id gets
+  "restart the agent". The page's Try it refuses such a tool until 7c.
+  Tests: `test_external_tool_uses.py` (25), `test_external_tools_calls.py`
+  (11), and the sandbox check (the line works under Landlock with `--no-net`,
+  container, ABI 6).
+
+#### Build order (one PR each)
+
+- **7a: the agent's tools.** The socket and helper, Flight Deck's relay, the
+  agent's callback endpoint and its waiting runs, `uses` with the class gate,
+  hosts and never list, files, recorded replies at publish and
+  `XT_FAKE_CALLS`, the worker contract, the Windows refusal. Tests on both
+  sides; the sandbox check.
+- **7b: custom tools calling custom tools.** The chain, depth, cycles, time,
+  the request budget; dependencies when adding and offering a tool.
+- **7c: the page.** Run as (agent picker and hosting slot), the declares line,
+  the pill, the bell text, and the New tool check prompt.
+- **7d: asking the person.** `asks` and `captain.ask`, the question store and
+  its two routes, the dialog in every layout with the waiting check, the
+  paused time limit, the agent following its run instead of one long request,
+  Needs-you in Line, the nobody-to-ask answer, recorded answers.
+- Then a live check on a throwaway deck with a running agent: a tool that
+  reads a page, calls another custom tool and asks a question, run from chat
+  and from Try it.
+
 ## Security
 
 What holds from Phase 0:
@@ -553,6 +856,27 @@ the deck's database) — the same reach an approved Crew worker has — unless t
 admin turns on "Run tools only in the sandbox", and then that host runs none.
 Settings says which it is.
 
+What Phase 7 adds (planned):
+
+- A tool reaches an agent only through its own run's socket, and an agent acts
+  only for a run it is waiting on. Flight Deck checks every request against
+  what the tool declared and against the risk class of the real call; the
+  agent's own guards check it again.
+- Never: run code, money, unclassified tools, and tools that change the agent
+  or set up later work. Send only when the owner runs the tool. Web reads only
+  from the declared hosts.
+- A shared tool with `uses` acts as the person's agent within what it
+  declared: it can read what those tools read (their mail, if it declares
+  `google_mail` read) and write what they write. Adding the tool is the
+  consent, with each use and its why shown. Because new versions follow
+  automatically (settled), new uses take effect at once and the bell comes
+  after.
+- Requests cost the runner's model tokens when the agent's tool uses a model;
+  the 50-request cap and their daily allowance bound it.
+- A question puts the tool author's words in front of the runner. The dialog
+  says whose tool asks, has no password fields, and warns against typing keys;
+  answers go only to that run.
+
 ## Still open
 
 - **Windows desktop**: the launcher passes the exit code on, but no limits apply
@@ -566,6 +890,10 @@ Settings says which it is.
   there says.
 - **UDP** isn't ruled by Landlock: a tool with `"network": false` can still
   send UDP (DNS included). seccomp could close that.
+- **Phase 7 before building:** whether an agent's turn has a wall-clock limit
+  that a tool waiting for a person's answer (up to an hour) would hit; and
+  which actions of the allowed tools reach other people, for
+  `tool_risk._SEND_ACTIONS`.
 
 ## Existing pieces this reuses
 

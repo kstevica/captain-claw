@@ -69,6 +69,11 @@ SLOT_WAIT_S = 30
 MANIFEST = "tool.json"
 READY = ".xtool-ready"            # written into a version folder once it's built
 LOG_TAIL = 4_000
+HELPER_NAME = "captain.py"        # Flight Deck's helper, put into every version (Phase 7)
+MAX_RECORDED = 50                 # recorded replies per example
+RECORDED_KINDS = ("tool", "custom_tool", "file", "ask")
+MAX_LINE = 4 * 1024 * 1024        # one request or answer on a tool's line to the agent
+MAX_ANSWER = 1_000_000            # characters of an agent tool's answer a tool gets
 
 _SLUG_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$")
 _OWNER_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
@@ -81,6 +86,7 @@ _RESERVED_ENV = frozenset({"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "USERPROFILE
 _RESERVED_PREFIXES = ("XT_", "PYTHON", "LD_", "DYLD_", "FD_", "CLAW_", "CAPTAIN_CLAW", "UV_", "PIP_")
 _PROXY_ENV = ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy")
 _LAUNCHER = Path(__file__).with_name("xtool_launch.py")
+_HELPER = Path(__file__).with_name("xtool_captain.py")
 
 
 class ToolError(Exception):
@@ -253,12 +259,20 @@ class Manifest:
     timeout_s: int
     memory_mb: int
     raw: dict = field(repr=False, compare=False)
+    # Phase 7: what it may ask the agent that ran it for (external_tool_uses).
+    uses: tuple[dict, ...] = ()
 
     def public(self) -> dict[str, Any]:
         return {"name": self.name, "title": self.title, "description": self.description,
                 "input": self.input, "output": self.output, "examples": list(self.examples),
                 "secrets": [dict(s) for s in self.secrets], "network": self.network,
-                "timeout_s": self.timeout_s, "memory_mb": self.memory_mb}
+                "timeout_s": self.timeout_s, "memory_mb": self.memory_mb,
+                "uses": [dict(u) for u in self.uses]}
+
+    @property
+    def calls_back(self) -> bool:
+        """Does a run need the line to an agent (Phase 7)?"""
+        return bool(self.uses)
 
 
 def _bad(message: str) -> ToolError:
@@ -345,6 +359,14 @@ def parse_manifest(raw: Any, folder: Path | None = None, *, slug: str | None = N
         problem = next(iter(checker.iter_errors(ex["input"])), None)
         if problem is not None:
             raise _bad(f"example {i}'s input doesn't fit 'input': {problem.message}")
+        calls = ex.get("calls")
+        if calls is not None:
+            if not isinstance(calls, list) or len(calls) > MAX_RECORDED:
+                raise _bad(f"example {i}: 'calls' lists at most {MAX_RECORDED} recorded replies.")
+            for c in calls:
+                if not isinstance(c, dict) or sum(k in c for k in RECORDED_KINDS) != 1:
+                    raise _bad(f"example {i}: each recorded call names one of {', '.join(RECORDED_KINDS)}, "
+                               "with its 'reply' (or a 'path' for a file).")
     secret_list = raw.get("secrets", [])
     if not isinstance(secret_list, list) or len(secret_list) > MAX_SECRETS:
         raise _bad(f"'secrets' must be a list of at most {MAX_SECRETS}.")
@@ -367,13 +389,19 @@ def parse_manifest(raw: Any, folder: Path | None = None, *, slug: str | None = N
     network = raw.get("network", False)
     if not isinstance(network, bool):
         raise _bad("'network' must be true or false.")
+    from captain_claw.flight_deck import external_tool_uses as uses_policy
+
+    try:
+        uses = uses_policy.parse_uses(raw.get("uses"))
+    except uses_policy.UsesError as exc:
+        raise _bad(f"'uses': {exc}") from None
     return Manifest(
         name=name, title=title.strip(), description=description.strip(), entry=entry,
         test=tuple(test), input=input_schema, output=output_schema, examples=tuple(examples),
         secrets=tuple(secrets_out), network=network,
         timeout_s=_int(raw, "timeout_s", DEFAULT_TIMEOUT_S, 1, MAX_TIMEOUT_S),
         memory_mb=_int(raw, "memory_mb", DEFAULT_MEMORY_MB, MIN_MEMORY_MB, MAX_MEMORY_MB),
-        raw=raw,
+        raw=raw, uses=uses,
     )
 
 
@@ -428,10 +456,63 @@ def _kill_group(proc: asyncio.subprocess.Process) -> None:
         pass
 
 
+# Answers one request a tool made on its line (Phase 7); never raises.
+Bridge = Callable[[dict], Awaitable[dict]]
+
+
+async def _serve_line(sock: Any, bridge: Bridge) -> None:
+    """A tool's line to the agent: one JSON request per line, one answer back,
+    in order, until the tool closes it or ends."""
+    reader, writer = await asyncio.open_unix_connection(sock=sock, limit=MAX_LINE)
+    try:
+        while True:
+            try:
+                line = await reader.readline()
+            except (ValueError, asyncio.LimitOverrunError):
+                return  # a request longer than the line allows: the tool gets EOF
+            if not line:
+                return
+            try:
+                req = json.loads(line)
+                if not isinstance(req, dict):
+                    raise ValueError("not an object")
+            except ValueError:
+                reply: dict[str, Any] = {"ok": False, "refused": True, "error": "A request must be one JSON object."}
+                rid = None
+            else:
+                rid = req.get("id")
+                try:
+                    reply = await bridge(req)
+                except Exception as exc:  # noqa: BLE001 — the tool hears it, the run goes on
+                    log.warning("A custom tool's request failed", error=str(exc))
+                    reply = {"ok": False, "error": f"Flight Deck couldn't answer: {type(exc).__name__}"}
+            data = (json.dumps({**reply, "id": rid}, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+            if len(data) > MAX_LINE:
+                data = (json.dumps({"id": rid, "ok": False, "error": "The answer was too large to hand over."})
+                        + "\n").encode("utf-8")
+            writer.write(data)
+            await writer.drain()
+    except (ConnectionError, BrokenPipeError):
+        return
+    finally:
+        writer.close()
+
+
 async def _run_proc(cmd: list[str], *, cwd: Path, env: dict[str, str], timeout: float,
-                    stdin: bytes | None = None, stdout_cap: int = MAX_STDOUT) -> ProcResult:
+                    stdin: bytes | None = None, stdout_cap: int = MAX_STDOUT,
+                    bridge: Bridge | None = None) -> ProcResult:
+    """Run *cmd* under *timeout*. With *bridge*, the program also gets a line
+    to Flight Deck (Phase 7): one end of a socket pair, its descriptor in
+    ``$XT_CAPTAIN_FD``; *bridge* answers what comes on it."""
     started = time.monotonic()
     kwargs: dict[str, Any] = {"creationflags": NO_WINDOW} if IS_WINDOWS else {"start_new_session": True}
+    ours = theirs = None
+    if bridge is not None:
+        import socket
+
+        ours, theirs = socket.socketpair()
+        env = {**env, "XT_CAPTAIN_FD": str(theirs.fileno())}
+        kwargs["pass_fds"] = (theirs.fileno(),)
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd, cwd=str(cwd), env=env,
@@ -439,7 +520,12 @@ async def _run_proc(cmd: list[str], *, cwd: Path, env: dict[str, str], timeout: 
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, **kwargs,
         )
     except OSError as exc:
+        if ours is not None:
+            ours.close()
         return ProcResult(None, b"", f"couldn't start: {exc}", 0.0)
+    finally:
+        if theirs is not None:
+            theirs.close()  # the tool has its own copy
     out = bytearray()
     err: collections.deque[bytes] = collections.deque()
     err_len = 0
@@ -491,6 +577,8 @@ async def _run_proc(cmd: list[str], *, cwd: Path, env: dict[str, str], timeout: 
             await asyncio.sleep(0.02)
 
     tasks = [asyncio.create_task(feed()), asyncio.create_task(read_out()), asyncio.create_task(read_err())]
+    if ours is not None and bridge is not None:
+        tasks.append(asyncio.create_task(_serve_line(ours, bridge)))
     timed_out = False
     try:
         await asyncio.wait_for(exited(), timeout)
@@ -745,10 +833,185 @@ def _collect_outputs(out_dir: Path) -> tuple[list[tuple[str, Path]], int]:
     return files, skipped
 
 
+# ── A tool's line to the agent (Phase 7) ─────────────────────────────────
+#
+# While it runs, a tool that declares "uses" can ask the agent that ran it to
+# use one of the agent's tools, or bring in a file from the person's folders.
+# Each request is checked here (external_tool_uses) and then handed to a Link:
+# the routes' AgentLink passes it to that agent; when publishing, RecordedLink
+# answers from the example's recorded replies.
+
+
+@dataclass
+class CallContext:
+    """One run, as its requests see it."""
+
+    owner: str
+    slug: str
+    title: str
+    version: str
+    caller: str          # the runner: whose tools, secrets and files
+    call_id: str
+    call_dir: Path
+    manifest: Manifest
+    deadline: float      # time.monotonic() when the run's time is up
+    requests: list[int] = field(default_factory=lambda: [0])  # shared with nested runs
+
+    @property
+    def owner_runs(self) -> bool:
+        return self.caller == self.owner
+
+    def remaining(self) -> float:
+        return self.deadline - time.monotonic()
+
+
+@dataclass(frozen=True)
+class HandedFile:
+    """A file the tool wrote, marked with captain.file() to hand to a tool."""
+
+    path: Path
+
+
+class Link:
+    """Where a run's requests go. Answers ``{"ok", "content", "error"}`` and the like."""
+
+    async def tool(self, ctx: CallContext, name: str, params: dict) -> dict[str, Any]:
+        raise ToolError("no_agent", "This run has no agent to ask.")
+
+    async def file(self, ctx: CallContext, ref: str) -> Path:
+        raise ToolError("no_agent", "This run has no agent to ask.")
+
+
+def _refuse(message: str) -> dict[str, Any]:
+    return {"ok": False, "refused": True, "error": message}
+
+
+def _mark_files(ctx: CallContext, value: Any) -> Any:
+    """captain.file() markers in a request, checked: only a file inside this
+    run's own folder can be handed on."""
+    if isinstance(value, dict):
+        if set(value) == {"$file"}:
+            raw = value["$file"]
+            try:
+                target = Path(str(raw)).resolve()
+                target.relative_to(ctx.call_dir.resolve())
+            except (OSError, ValueError):
+                raise ToolError("files", f"{raw!r}: only a file this run wrote can be handed on.") from None
+            if not target.is_file() or target.is_symlink():
+                raise ToolError("files", f"{raw!r} isn't a file.")
+            return HandedFile(target)
+        return {k: _mark_files(ctx, v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mark_files(ctx, v) for v in value]
+    return value
+
+
+async def _answer(ctx: CallContext, link: Link | None, req: dict) -> dict[str, Any]:
+    """One request from a running tool, checked and handed to *link*."""
+    from captain_claw.flight_deck import external_tool_uses as uses_policy
+
+    op = req.get("op")
+    if op not in ("tool", "file"):
+        return _refuse(f"Flight Deck doesn't know the request {op!r}.")
+    if link is None:
+        return _refuse("This run has no agent to ask.")
+    ctx.requests[0] += 1
+    if ctx.requests[0] > uses_policy.MAX_REQUESTS:
+        return _refuse(f"A run may make at most {uses_policy.MAX_REQUESTS} requests.")
+    left = ctx.remaining()
+    if left < 1:
+        return _refuse("The run has no time left for another request.")
+    try:
+        if op == "tool":
+            name = str(req.get("name") or "").strip().lower()
+            params = req.get("input")
+            why = uses_policy.check_request(ctx.manifest.uses, name, params, owner_runs=ctx.owner_runs)
+            if why:
+                return _refuse(why)
+            params = _mark_files(ctx, params)
+            reply = await asyncio.wait_for(link.tool(ctx, name, params), left)
+            content = str(reply.get("content") or "")
+            if len(content) > MAX_ANSWER:
+                content = content[:MAX_ANSWER] + f"\n… (cut: {len(content)} characters in all)"
+            return {"ok": bool(reply.get("ok")), "content": content, "error": reply.get("error") or None}
+        # op == "file": a file from the person's folders, brought into this run.
+        if not any(u.get("tool") == "read" for u in ctx.manifest.uses):
+            return _refuse('Bringing in your files needs {"tool": "read"} in this tool\'s uses.')
+        path = await asyncio.wait_for(link.file(ctx, str(req.get("ref") or "")), left)
+        return {"ok": True, "path": str(path)}
+    except ToolError as exc:
+        return {"ok": False, "error": exc.message}
+    except TimeoutError:
+        return {"ok": False, "error": "The run ran out of time waiting for the answer."}
+
+
+def _bring_in(ctx: CallContext, src: Path, name: str = "") -> Path:
+    """Copy *src* into the run's in/ folder; the path the tool reads."""
+    in_dir = ctx.call_dir / "in"
+    in_dir.mkdir(parents=True, exist_ok=True)
+    used = sum(p.stat().st_size for p in in_dir.iterdir() if p.is_file())
+    if used + src.stat().st_size > MAX_IN_BYTES:
+        raise ToolError("too_large", f"The run's files would come to more than {MAX_IN_BYTES // 1_048_576} MB.")
+    clean = re.sub(r"[^A-Za-z0-9._-]+", "_", name or src.name).strip("._") or "file"
+    dest = in_dir / f"x{_secrets.token_hex(3)}-{clean[:100]}"
+    shutil.copyfile(src, dest)
+    return dest
+
+
+class RecordedLink(Link):
+    """Publishing: no agent, so an example's recorded replies answer, in order.
+    A request that doesn't match the next one is a problem the example fails on."""
+
+    def __init__(self, calls: Any, vdir: Path) -> None:
+        self.calls: list[dict] = [c for c in calls if isinstance(c, dict)] if isinstance(calls, list) else []
+        self.vdir = vdir
+        self.problems: list[str] = []
+
+    def _next(self, kind: str, what: str) -> dict:
+        if not self.calls:
+            msg = f"it asked for {kind} {what} and there's no recorded reply left for it"
+            self.problems.append(msg)
+            raise ToolError("recorded", msg)
+        nxt = self.calls.pop(0)
+        want = nxt.get(kind)
+        if want is None or (kind != "ask" and str(want) != what):
+            shown = json.dumps({k: v for k, v in nxt.items() if k not in ("reply",)}, ensure_ascii=False)
+            msg = f"it asked for {kind} {what}, but the next recorded call is {shown}"
+            self.problems.append(msg)
+            raise ToolError("recorded", msg)
+        return nxt
+
+    async def tool(self, ctx: CallContext, name: str, params: dict) -> dict[str, Any]:
+        reply = self._next("tool", name).get("reply")
+        reply = reply if isinstance(reply, dict) else {"ok": True, "content": "" if reply is None else str(reply)}
+        return {"ok": bool(reply.get("ok", True)), "content": str(reply.get("content") or ""),
+                "error": reply.get("error")}
+
+    async def file(self, ctx: CallContext, ref: str) -> Path:
+        nxt = self._next("file", ref)
+        src = _inside(self.vdir, str(nxt.get("path") or ""))
+        if src is None or not src.is_file():
+            msg = f"the recorded file for {ref} must be a 'path' to a file in the tool"
+            self.problems.append(msg)
+            raise ToolError("recorded", msg)
+        return _bring_in(ctx, src, Path(ref).name)
+
+    def left_over(self) -> str:
+        return f"{len(self.calls)} recorded call(s) weren't asked for" if self.calls else ""
+
+
 async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest: Manifest, caller: str,
                        data: Any, *, secret_values: dict[str, str], resolve_file: FileResolver | None,
-                       deliver: Deliver | None) -> dict[str, Any]:
+                       deliver: Deliver | None, link: Link | None = None) -> dict[str, Any]:
     from jsonschema import Draft202012Validator
+
+    if manifest.calls_back:
+        if IS_WINDOWS:
+            raise ToolError("windows", f"{manifest.title} calls back into the agent, which needs Linux or macOS.",
+                            status=501)
+        if link is None:
+            raise ToolError("needs_agent", f"{manifest.title} uses your agent's tools, so it runs only from an "
+                                           "agent (ask one in chat).", status=409)
 
     if not isinstance(data, dict):
         raise ToolError("bad_input", "The input must be a JSON object.", status=422)
@@ -786,8 +1049,17 @@ async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest
             env = _tool_env(vdir, call_dir, call_id, manifest, secret_values)
             cmd = _launch(manifest, venv_python(vdir / ".deps"), [manifest.entry], cpu_s=manifest.timeout_s + 5,
                           read_only=[vdir], writable=[call_dir], require=require)
+            bridge = None
+            if manifest.calls_back:
+                ctx = CallContext(owner=owner, slug=slug, title=manifest.title, version=version, caller=caller,
+                                  call_id=call_id, call_dir=call_dir, manifest=manifest,
+                                  deadline=time.monotonic() + manifest.timeout_s)
+
+                async def bridge(req: dict) -> dict:
+                    return await _answer(ctx, link, req)
+
             res = await _run_proc(cmd, cwd=vdir, env=env, timeout=manifest.timeout_s,
-                                  stdin=json.dumps(data, ensure_ascii=False).encode("utf-8"))
+                                  stdin=json.dumps(data, ensure_ascii=False).encode("utf-8"), bridge=bridge)
             base = {"call_id": call_id, "version": version, "seconds": round(res.seconds, 3), "exit_code": res.code}
 
             def failed(kind: str, message: str) -> dict[str, Any]:
@@ -841,8 +1113,21 @@ def _ready(owner: str, slug: str, version: str) -> Path | None:
     return vdir if (vdir / READY).is_file() else None
 
 
+def manifest_of(owner: str, slug: str) -> Manifest | None:
+    """The live version's tool.json, or None."""
+    live = read_live(owner, slug)
+    vdir = _ready(owner, slug, live["version"]) if live else None
+    if vdir is None:
+        return None
+    try:
+        return load_manifest(vdir, slug=slug)
+    except ToolError:
+        return None
+
+
 async def run_tool(owner: str, slug: str, caller: str, data: Any, *, secret_values: dict[str, str] | None = None,
-                   resolve_file: FileResolver | None = None, deliver: Deliver | None = None) -> dict[str, Any]:
+                   resolve_file: FileResolver | None = None, deliver: Deliver | None = None,
+                   link: Link | None = None) -> dict[str, Any]:
     """Run the live version for *caller*. A tool that ran and failed is a result
     (``ok: False``); something the caller must change raises :class:`ToolError`.
     Who may run it is the caller's business (the routes check it)."""
@@ -853,7 +1138,8 @@ async def run_tool(owner: str, slug: str, caller: str, data: Any, *, secret_valu
         raise ToolError("not_live", f"{slug} has no published version yet.", status=409)
     manifest = load_manifest(vdir, slug=slug)
     result = await _run_version(owner, slug, live["version"], vdir, manifest, caller, data,
-                                secret_values=secret_values or {}, resolve_file=resolve_file, deliver=deliver)
+                                secret_values=secret_values or {}, resolve_file=resolve_file, deliver=deliver,
+                                link=link)
     record_call(owner, slug, caller, result)
     return result
 
@@ -922,7 +1208,9 @@ WORKER_CONTRACT = """This repository is a Captain custom tool: a small Python pr
 - An input field with "format": "file" arrives as the path of a file to read. Files for the caller go in the folder named by $XT_OUT. Secrets come only from the environment variables listed in `secrets`: never put a key in the repository. When it runs, its own folder is read-only: write only to $XT_OUT or $TMPDIR.
 - Python only. Dependencies go in requirements.txt with pinned versions, test-only ones in requirements-test.txt. If you need them while you work, make a venv in .deps/ (git ignores it).
 - Before you finish, run the tests (what `test` says) and every example (pipe its input JSON into the entry file) and check each output contains its `expect`. Publishing runs exactly these, and a version goes live only if all of them pass. Commit your work.
-- Keep it deterministic and small: no network unless the task needs it, nothing left running when it exits."""
+- Keep it deterministic and small: no network unless the task needs it, nothing left running when it exits.
+- Using the agent (only when the task needs it): the tool can ask the agent that ran it to use one of the agent's tools, through `captain.py` (Flight Deck's helper, already in the repository; don't change it): `captain.tool("web_fetch", url=...)` returns {"ok", "content", "error"}; `captain.vfs_file("vfs:folder/file")` brings in one of the person's files; `captain.file(path)` hands a file the tool wrote to a tool. Declare each in tool.json "uses", with a "why": {"tool": "web_fetch", "hosts": ["api.example.com"], "why": "..."} (web fetching must name its hosts), {"tool": "google_mail", "actions": ["search", "read"], "why": "..."}, {"tool": "read", "why": "..."} for vfs_file. Allowed: the agent's read and write tools; sending (mail, messages, calendar invitations) only works when the tool's owner runs it; never shell, code, payments, scheduling or changing the agent. Anything not declared is refused.
+- A tool with "uses" can't reach an agent while publishing, so each example records the replies it gets, in order, under "calls": [{"tool": "web_fetch", "reply": {"ok": true, "content": "..."}}] ({"file": "vfs:...", "path": "fixtures/x.csv"} for vfs_file). Tests do the same: write such a list to a JSON file and set XT_FAKE_CALLS to its path before running the entry file. Results from the web or a model-backed tool change from run to run: say so in the description."""
 
 _IDENTITY = ("-c", "user.name=Captain", "-c", "user.email=tools@captain-claw.local")
 
@@ -1001,6 +1289,9 @@ as one JSON object on stdin, and the tool prints one JSON value on stdout.
   files for the caller to the folder in `$XT_OUT`.
 - Nothing else is guaranteed: no network unless `network` is true, and the
   tool's own folder is read-only when it runs.
+- `captain.py` is Flight Deck's helper for asking the agent that ran the tool
+  to use one of its tools (declared under `uses` in tool.json). Don't change
+  it: publishing puts in Flight Deck's own copy.
 """
     return {
         MANIFEST: json.dumps(manifest, indent=2) + "\n",
@@ -1008,7 +1299,26 @@ as one JSON object on stdin, and the tool prints one JSON value on stdout.
         "tests/test_main.py": test_py,
         "README.md": readme,
         ".gitignore": ".deps/\n__pycache__/\n*.pyc\n.pytest_cache/\n",
+        HELPER_NAME: _HELPER.read_text(encoding="utf-8"),
     }
+
+
+def place_helper(folder: Path) -> bool:
+    """Put Flight Deck's current helper into a Crew worktree of a tool, so its
+    worker can use and test it; True when it changed something. Publishing puts
+    in its own copy either way."""
+    target = Path(folder) / HELPER_NAME
+    current = _HELPER.read_text(encoding="utf-8")
+    try:
+        if target.is_file() and not target.is_symlink() and target.read_text(encoding="utf-8") == current:
+            return False
+        if target.is_symlink():
+            target.unlink()
+        target.write_text(current, encoding="utf-8")
+        return True
+    except OSError as exc:
+        log.warning("Couldn't put the custom tool helper in place", folder=str(folder), error=str(exc))
+        return False
 
 
 async def create_tool(owner: str, slug: str, *, title: str, description: str) -> dict[str, Any]:
@@ -1234,6 +1544,8 @@ async def publish(owner: str, slug: str, *, sha: str = "", by: str = "",
                         step("copy", False, "The commit has no files.")
                         raise _StepFailedError("The commit has no files.")
                     await asyncio.to_thread(crew_runner._write_blobs, str(repo), tree, building)
+                    # Flight Deck's own helper, whatever copy the repository has.
+                    shutil.copyfile(_HELPER, building / HELPER_NAME)
                     step("copy", True, f"{len(tree)} files")
                     try:
                         manifest = load_manifest(building, slug=slug)
@@ -1257,13 +1569,17 @@ async def publish(owner: str, slug: str, *, sha: str = "", by: str = "",
                         raise ToolError("files", f"Example file {ref!r} isn't inside the tool.")
                     return target
 
+                recorded = RecordedLink(ex.get("calls"), vdir) if manifest.calls_back else None
                 try:
                     res = await _run_version(owner, slug, version, vdir, manifest, by or owner, ex["input"],
-                                             secret_values=secret_values or {}, resolve_file=from_tool, deliver=None)
+                                             secret_values=secret_values or {}, resolve_file=from_tool, deliver=None,
+                                             link=recorded)
                 except ToolError as exc:
                     failures.append(f"example {i}: {exc.message}")
                     continue
-                if not res["ok"]:
+                if recorded is not None and (recorded.problems or recorded.left_over()):
+                    failures.append(f"example {i}: " + "; ".join([*recorded.problems, recorded.left_over()]).strip("; "))
+                elif not res["ok"]:
                     failures.append(f"example {i}: {res['error']['message']}\n{res.get('stderr', '')}".strip())
                 elif "expect" in ex and not _subset(ex["expect"], res["output"]):
                     got = json.dumps(res["output"], ensure_ascii=False)[:500]
