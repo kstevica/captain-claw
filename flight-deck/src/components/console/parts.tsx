@@ -347,16 +347,18 @@ export function Sheet({ title, subtitle, icon: Icon, onClose, footer, children, 
   )
 }
 
-/** A centred dialog for short choices; ``large`` for writing (most of the
- *  screen, and its body can fill the height). ``keepOpen`` ignores Escape and
- *  a click outside, so typed work isn't lost by accident. */
-export function Dialog({ title, icon: Icon, onClose, footer, children, large = false, keepOpen = false }: {
+/** A centred dialog for short choices; ``wide`` for one read at chat size
+ *  (a question for the person); ``large`` for writing (most of the screen, and
+ *  its body can fill the height). ``keepOpen`` ignores Escape and a click
+ *  outside, so typed work isn't lost by accident. */
+export function Dialog({ title, icon: Icon, onClose, footer, children, large = false, wide = false, keepOpen = false }: {
   title: ReactNode
   icon?: LucideIcon
   onClose: () => void
   footer?: ReactNode
   children: ReactNode
   large?: boolean
+  wide?: boolean
   keepOpen?: boolean
 }) {
   useEffect(() => {
@@ -372,7 +374,7 @@ export function Dialog({ title, icon: Icon, onClose, footer, children, large = f
         role="dialog"
         aria-modal="true"
         className={`flex w-full flex-col rounded-t-2xl border border-zinc-800 bg-zinc-950 shadow-2xl wide:rounded-2xl ${
-          large ? 'h-[94dvh] wide:h-[90dvh] wide:max-w-6xl' : 'max-h-[92dvh] max-w-lg'}`}
+          large ? 'h-[94dvh] wide:h-[90dvh] wide:max-w-6xl' : wide ? 'max-h-[92dvh] max-w-2xl' : 'max-h-[92dvh] max-w-lg'}`}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-3 border-b border-zinc-800 px-5 py-4">
