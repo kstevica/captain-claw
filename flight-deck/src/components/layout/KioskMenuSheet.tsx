@@ -2,6 +2,7 @@ import { useEffect, useRef, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { ChevronRight, X, type LucideIcon } from 'lucide-react'
 import { tileInNextRow } from './tileNav'
+import { useIsMobile } from '../../hooks/useMediaQuery'
 
 // ── A kiosk menu, as a modal ──
 //
@@ -10,6 +11,10 @@ import { tileInNextRow } from './tileNav'
 // opens — and the one thing to be careful with kept apart at the bottom. A card
 // in the middle of a larger screen, a sheet from the bottom on a phone. Arrow
 // keys move between the tiles; Esc closes it.
+//
+// With many tiles (`aside`) it widens into rows: each section's heading on the
+// left, its tiles to the right, every row on the same columns — everything in
+// view, one click away.
 
 export type MenuTone = 'violet' | 'fuchsia' | 'sky' | 'cyan' | 'teal' | 'emerald' | 'amber' | 'zinc'
 
@@ -46,6 +51,8 @@ export interface MenuItem {
 export interface MenuSection {
   /** A small heading over its tiles. */
   title?: string
+  /** A line under the heading, where the headings sit beside their tiles. */
+  caption?: string
   items: MenuItem[]
   /** Small tiles of one line, the hint only a tooltip: the quick things. */
   compact?: boolean
@@ -53,7 +60,11 @@ export interface MenuSection {
 
 const TILE = 'group relative flex min-w-0 border border-zinc-800 bg-zinc-950/40 text-left transition-all hover:-translate-y-px hover:border-zinc-700 hover:bg-zinc-800/60 hover:shadow-lg hover:shadow-black/10 focus-visible:border-violet-500 focus-visible:bg-violet-500/[0.07] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:translate-y-0 disabled:hover:border-zinc-800 disabled:hover:bg-zinc-950/40 disabled:hover:shadow-none'
 
-const GRID: Record<number, string> = { 1: 'grid-cols-1', 2: 'grid-cols-2', 3: 'grid-cols-3' }
+const GRID: Record<number, string> = { 1: 'grid-cols-1', 2: 'grid-cols-2', 3: 'grid-cols-3', 4: 'grid-cols-4' }
+
+// How wide the card is: by tiles to a row, and wider still with the headings beside them.
+const WIDTH: Record<number, string> = { 2: 'wide:max-w-lg', 3: 'wide:max-w-2xl', 4: 'wide:max-w-3xl' }
+const WIDTH_ASIDE: Record<number, string> = { 2: 'wide:max-w-4xl', 3: 'wide:max-w-5xl', 4: 'wide:max-w-6xl' }
 
 function CompactTile({ item, wholeRow }: { item: MenuItem; wholeRow: boolean }) {
   const { icon: Icon, label, hint, onSelect, disabled, tone = 'zinc', on, busy } = item
@@ -104,7 +115,27 @@ function Tile({ item, across, wholeRow }: { item: MenuItem; across: boolean; who
   )
 }
 
-export function MenuSheet({ label, picture, status, title, subtitle, sections, apart = [], columns = 2, phone = false, onClose }: {
+// A row's tile: the icon beside its label, the word more under both — lower
+// than a tile with the icon on top, so four rows fit a laptop's screen.
+function RowTile({ item }: { item: MenuItem }) {
+  const { icon: Icon, label, hint, onSelect, disabled, tone = 'violet', busy, direct } = item
+  return (
+    <button data-tile disabled={disabled} onClick={onSelect} title={hint} className={`${TILE} flex-col rounded-2xl p-3`}>
+      <span className="flex min-w-0 items-center gap-2.5 pr-5">
+        <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ring-1 ${TONE[tone]}`}>
+          <Icon className={`h-[18px] w-[18px] ${busy ? 'animate-spin' : ''}`} />
+        </span>
+        <span className="min-w-0 text-sm font-semibold leading-tight text-zinc-100">{label}</span>
+      </span>
+      {hint && <span className="mt-2 line-clamp-2 text-balance text-xs leading-snug text-zinc-500">{hint}</span>}
+      {!direct && (
+        <ChevronRight className="absolute right-3 top-3 h-4 w-4 text-zinc-600 transition-all group-hover:translate-x-0.5 group-hover:text-zinc-400 group-disabled:opacity-0" />
+      )}
+    </button>
+  )
+}
+
+export function MenuSheet({ label, picture, status, title, subtitle, sections, apart = [], columns = 2, aside = false, phone = false, onClose }: {
   /** What a screen reader calls it. */
   label: string
   /** Inside the coloured square at the top: initials or an icon. */
@@ -117,12 +148,20 @@ export function MenuSheet({ label, picture, status, title, subtitle, sections, a
   /** Kept apart at the bottom, in red. */
   apart?: MenuItem[]
   /** Tiles to a row (three need the wider card). */
-  columns?: 2 | 3
+  columns?: 2 | 3 | 4
+  /** Each section a row on a larger screen: its heading and caption on the
+   *  left, its tiles on the right. A phone keeps the headings over their
+   *  tiles, two to a row. */
+  aside?: boolean
   /** Always a sheet from the bottom: a phone's own row opened it. */
   phone?: boolean
   onClose: () => void
 }) {
   const panelRef = useRef<HTMLDivElement>(null)
+  const { isMobile } = useIsMobile()
+  const beside = aside && !phone && !isMobile
+  const perRow = aside && !beside ? 2 : columns
+  const shown = sections.filter((s) => s.items.length > 0)
   const tiles = () => [...(panelRef.current?.querySelectorAll<HTMLButtonElement>('[data-tile]:not(:disabled)') ?? [])]
 
   // The first tile that can be used takes the focus.
@@ -164,7 +203,7 @@ export function MenuSheet({ label, picture, status, title, subtitle, sections, a
         aria-label={label}
         onClick={(e) => e.stopPropagation()}
         className={`${phone ? 'fd-sheet' : 'fd-sheet fd-card-wide'} relative flex max-h-[88dvh] w-full flex-col wide:max-h-[92dvh] overflow-hidden border border-zinc-800 bg-zinc-900 pb-[env(safe-area-inset-bottom)] shadow-2xl shadow-black/40 ${
-          phone ? 'rounded-t-3xl' : `rounded-t-3xl wide:rounded-3xl wide:pb-0 ${columns === 3 ? 'wide:max-w-2xl' : 'wide:max-w-lg'}`}`}
+          phone ? 'rounded-t-3xl' : `rounded-t-3xl wide:rounded-3xl wide:pb-0 ${(beside ? WIDTH_ASIDE : WIDTH)[columns]}`}`}
       >
         <div className={`mx-auto mt-2.5 h-1 w-10 shrink-0 rounded-full bg-zinc-700 ${phone ? '' : 'wide:hidden'}`} aria-hidden />
         <div className="flex shrink-0 items-center gap-3.5 px-5 pb-4 pt-4 wide:pt-5">
@@ -183,9 +222,28 @@ export function MenuSheet({ label, picture, status, title, subtitle, sections, a
         </div>
 
         <div className="min-h-0 space-y-3 overflow-y-auto overscroll-contain px-4 pb-4 wide:px-5 wide:pb-5">
-          {sections.filter((s) => s.items.length > 0).map(({ title: heading, items, compact }, n) => {
+          {beside && (
+            // Rows, one per section, their tiles on shared columns (so a short
+            // row leaves room rather than stretching). The headings go over
+            // the tiles until there's room for both side by side.
+            <div className="divide-y divide-zinc-800/70">
+              {shown.map(({ title: heading, caption, items }, n) => (
+                <section key={heading ?? n} className="grid gap-x-6 gap-y-2.5 py-3 first:pt-0 lg:grid-cols-[9.5rem_minmax(0,1fr)]">
+                  <div className="px-1 lg:pt-2">
+                    {heading && <h3 className="text-sm font-semibold text-zinc-200">{heading}</h3>}
+                    {caption && <p className="mt-0.5 text-balance text-xs leading-snug text-zinc-500">{caption}</p>}
+                  </div>
+                  <div className={`grid gap-2.5 ${GRID[columns]}`}>
+                    {items.map((item) => <RowTile key={item.label} item={item} />)}
+                  </div>
+                </section>
+              ))}
+            </div>
+          )}
+
+          {!beside && shown.map(({ title: heading, items, compact }, n) => {
             // Two to a row is too narrow for a small tile's label and switch.
-            const cols = compact && columns < 3 ? 1 : Math.min(columns, items.length)
+            const cols = compact && perRow < 3 ? 1 : Math.min(perRow, items.length)
             return (
               <section key={heading ?? n}>
                 {heading && <h3 className="mb-2 px-1 text-[11px] font-semibold uppercase tracking-wider text-zinc-500">{heading}</h3>}
@@ -195,7 +253,7 @@ export function MenuSheet({ label, picture, status, title, subtitle, sections, a
                     // so is every tile of a row with room to spare.
                     const alone = items.length % cols === 1 && i === items.length - 1
                     if (compact) return <CompactTile key={item.label} item={item} wholeRow={alone} />
-                    return <Tile key={item.label} item={item} across={alone || cols < columns} wholeRow={alone} />
+                    return <Tile key={item.label} item={item} across={alone || cols < perRow} wholeRow={alone} />
                   })}
                 </div>
               </section>
