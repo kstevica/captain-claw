@@ -2058,6 +2058,35 @@ class WebServer:
         status, answer = await custom_tool_callbacks.handle(body)
         return web.json_response(answer, status=status)
 
+    async def _custom_tool_host(self, request: web.Request) -> web.Response:
+        """Try it on the Custom tools page, as this agent (Phase 7c): take one
+        run's requests under a fresh id, as the owner, in a session of their
+        own; or ({"close": id}) stop taking them."""
+        from captain_claw import custom_tool_callbacks
+        from captain_claw.config import get_config as _gc
+        from captain_claw.web.public_auth import _is_admin
+        cfg = _gc()
+        if cfg.web.auth_token and not _is_admin(request, cfg.web):
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=403)
+        if not self.agent:
+            return web.json_response({"ok": False, "error": "agent not initialized"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"ok": False, "error": "invalid JSON body"}, status=400)
+        if body.get("close"):
+            custom_tool_callbacks.close_wait(str(body["close"]))
+            return web.json_response({"ok": True})
+        try:
+            ttl = float(body.get("ttl") or 360)
+        except (TypeError, ValueError):
+            ttl = 360.0
+        cb = custom_tool_callbacks.open_wait(self.agent, custom_tool_callbacks.TRY_SESSION,
+                                             tool=str(body.get("tool") or ""), ttl=ttl)
+        return web.json_response({"ok": True, "callback": cb})
+
     async def _api_vision(self, request: web.Request) -> web.Response:
         """Lean vision primitive: describe/answer about an image with a RAW model
         call — no agent loop, no memory/insights, no tools, no session history.
@@ -3244,6 +3273,7 @@ class WebServer:
         app.router.add_post("/api/llm/complete", self._llm_complete)
         # ── Custom tools (Phase 7): a running tool asks this agent for one of its tools ──
         app.router.add_post("/api/custom-tools/callback", self._custom_tool_callback)
+        app.router.add_post("/api/custom-tools/host", self._custom_tool_host)
         app.router.add_get("/api/sessions", self.list_sessions_api)
         app.router.add_post("/api/sessions/bulk-delete", self._bulk_delete_sessions)
         app.router.add_get("/api/sessions/{id}", self._get_session_detail)
