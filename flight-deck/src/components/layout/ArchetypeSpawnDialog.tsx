@@ -6,6 +6,7 @@ import {
   Database, Eye, FileSpreadsheet, FileText, Gauge, Globe, Hammer, HeartPulse, Image as ImageIcon, LayoutGrid, Library, Lightbulb, ListTodo,
   Mail, Map as MapIcon, Mic, Monitor, Presentation, Scale, Search, SearchX, ScanText, Sparkles, Star,
   TerminalSquare, Wand2, X, Zap,
+  FileUp,
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 import {
@@ -157,7 +158,7 @@ function matchesQuery(a: Archetype, q: string): boolean {
 /** What a caller needs to open AgentSetupDialog on the new agent. */
 export interface SetupRequest { slug: string; name: string; role: string; readDocs?: string[] }
 
-export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, asUser, ownerLabel, onConnect }: {
+export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, onImport, asUser, ownerLabel, onConnect }: {
   /** Slugs of the agents this user can see — the default name avoids them. */
   takenSlugs: Set<string>
   onClose: () => void
@@ -165,6 +166,8 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
   onSpawned: (slug: string, setup?: SetupRequest) => void
   /** Say what's needed and let Captain plan the team instead. */
   onForge?: () => void
+  /** "From a file": make it of a .captain backup or export instead (AgentImportDialog). */
+  onImport?: () => void
   /** Admin creating the agent FOR that user: their gallery, their ownership,
    *  their tier set and plan. */
   asUser?: string
@@ -385,6 +388,16 @@ export function ArchetypeSpawnDialog({ takenSlugs, onClose, onSpawned, onForge, 
                 className={`flex shrink-0 items-center gap-1.5 rounded-lg border border-violet-500/40 bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 transition-colors hover:bg-violet-500/20 disabled:opacity-50 dark:text-violet-200 ${isMobile ? '' : 'lg:hidden'}`}
               >
                 <Hammer className="h-3.5 w-3.5" /> Forge agents
+              </button>
+            )}
+            {onImport && !phoneDetail && (
+              <button
+                onClick={onImport}
+                disabled={busy}
+                title="Restore a backup, or bring in an agent someone exported for you (.captain file)"
+                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-700 px-2.5 py-1.5 text-xs font-medium text-zinc-300 transition-colors hover:bg-zinc-800 disabled:opacity-50"
+              >
+                <FileUp className="h-3.5 w-3.5" /> From a file
               </button>
             )}
             <div className="flex shrink-0 items-center gap-0.5">

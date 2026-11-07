@@ -30,6 +30,7 @@ import {
   ListChecks,
   SlidersHorizontal,
   Trash2,
+  Archive,
   BookCheck,
   BookOpen,
   GraduationCap,
@@ -93,6 +94,7 @@ import { AgentConfigEditor } from '../agents/AgentConfigEditor'
 import { AgentSetupDialog } from './AgentSetupDialog'
 import { OnboardingDialog, type OnboardingTab } from './OnboardingDialog'
 import { ArchetypeSpawnDialog, type SetupRequest } from './ArchetypeSpawnDialog'
+import { AgentBackupDialog, AgentImportDialog } from './AgentBundleDialogs'
 import { ForgeAgentsDialog } from '../forge/ForgeAgentsDialog'
 import { KioskByokDialog } from './KioskByokDialog'
 import { useByokStore } from '../../stores/byokStore'
@@ -279,6 +281,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Kiosk "New agent" picker.
   const [archetypeOpen, setArchetypeOpen] = useState(false)
   const [forgeOpen, setForgeOpen] = useState(false)
+  // Agent bundles: an agent's ⋯ → Back up / export, and New agent → From a file.
+  const [backupFor, setBackupFor] = useState<{ slug: string; name: string } | null>(null)
+  const [importOpen, setImportOpen] = useState(false)
   // A new agent whose "way of working" setup opens right after it is created.
   const [setupFor, setSetupFor] = useState<SetupRequest | null>(null)
   // An agent's knowledge, to browse (its ⋯ menu → Knowledge).
@@ -782,6 +787,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         ...identityMenuItems(a),
         { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', tone: 'zinc', onSelect: () => setAgentSettingsId(a.id) },
       )
+      // The whole agent in one file — Flight Deck writes it from the agent's folder (process agents).
+      if (a.kind === 'process') {
+        items.push({ icon: Archive, label: 'Back up / export', hint: 'Save it to a file, to restore it here or on another deck',
+          tone: 'teal', onSelect: () => setBackupFor({ slug: a.startKey, name: a.name }) })
+      }
       const net = networkShareAction(netAgents[shareKeyOf(a)], {
         canShare: netCanShare, admin: netAdmin, deckName: netDeck, displayName: a.name, setShared: netSetShared,
         ask: netAskShare,
@@ -964,8 +974,19 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
             else useNotificationStore.getState().add('info', 'Agent starting', `${slug} will open here as soon as it's up.`)
           }}
           onForge={() => { setArchetypeOpen(false); setForgeOpen(true) }}
+          onImport={() => { setArchetypeOpen(false); setImportOpen(true) }}
         />
       )}
+      {importOpen && (
+        <AgentImportDialog
+          onClose={() => setImportOpen(false)}
+          onImported={(r) => {
+            useProcessStore.getState().fetchProcesses()
+            startBoot(`proc-${r.slug}`, true)
+          }}
+        />
+      )}
+      {backupFor && <AgentBackupDialog agent={backupFor} onClose={() => setBackupFor(null)} />}
       {forgeOpen && (
         <ForgeAgentsDialog
           onClose={() => setForgeOpen(false)}
