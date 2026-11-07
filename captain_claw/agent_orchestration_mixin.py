@@ -222,6 +222,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     # "Run my invoice reader on this" comes in any language: the person's own
     # tools. Hidden by the registry unless the deck has custom tools on.
     "custom_tools",
+    # A decision only the person can make comes up in any task: asking them is
+    # one call. Hidden by the registry without a deck.
+    "ask_user",
     # "Ask the researcher to dig into this" comes in any language: the team
     # has to be reachable. Hidden without a deck and on a member's turn.
     "colleagues",

@@ -93,13 +93,15 @@ SPEAKER_DATASTORE_TOOLS = frozenset({"datastore"})
 # Custom tools: a member lists, describes and runs THEIR OWN tools with their own
 # secrets and files (Flight Deck acts as the member through the turn's grant).
 SPEAKER_CUSTOM_TOOLS = frozenset({"custom_tools"})
+# ask_user: a member's question goes to the MEMBER (Flight Deck reads the turn's grant).
+SPEAKER_ASK_TOOLS = frozenset({"ask_user"})
 _CUSTOM_TOOLS_ACTIONS = frozenset({"list", "describe", "run"})
 # SPEAKER_TOOL_ALLOWLIST keeps its A1 meaning: the always-available chat tools.
 # The most a member can get (a verified member of a PROCESS agent); docker and
 # unknown runtimes stay at SPEAKER_TOOL_ALLOWLIST (part 0 §1).
 SPEAKER_TOOL_ALLOWLIST_MAX = (SPEAKER_TOOL_ALLOWLIST | SPEAKER_GOOGLE_TOOLS
                               | SPEAKER_DEEP_MEMORY_TOOLS | SPEAKER_FILE_TOOLS
-                              | SPEAKER_DATASTORE_TOOLS | SPEAKER_CUSTOM_TOOLS)
+                              | SPEAKER_DATASTORE_TOOLS | SPEAKER_CUSTOM_TOOLS | SPEAKER_ASK_TOOLS)
 # = google_drive._SAVED_CATEGORIES and the write tool's saved/ categories.
 SAVED_CATEGORIES = frozenset({"downloads", "media", "output", "scripts", "showcase",
                               "skills", "summaries", "tmp", "tools"})
@@ -1038,6 +1040,8 @@ SPEAKER_PATH_MAP: dict[str, tuple[PathRule, ...]] = {
     # custom_tools: no host paths. A file inside `input` is a vfs: path that
     # Flight Deck resolves in the MEMBER's own VFS (external_tools_routes).
     "custom_tools": (),
+    # ask_user: no paths at all; the question goes to the member through Flight Deck.
+    "ask_user": (),
 }
 
 # Schema properties that look like paths but aren't.

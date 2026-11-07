@@ -20,7 +20,8 @@ import { ForgeAgentsDialog } from '../forge/ForgeAgentsDialog'
 import { OnboardingDialog } from '../layout/OnboardingDialog'
 import { LessonInboxBadge } from '../lessons/LessonInbox'
 import { useLessonInbox } from '../../stores/lessonInboxStore'
-import { useCustomToolsStore, SHOW_ASKS_EVENT } from '../../stores/customToolsStore'
+import { useCustomToolsStore } from '../../stores/customToolsStore'
+import { SHOW_ASKS_EVENT } from '../../services/asksApi'
 import { useIsMobile } from '../../hooks/useMediaQuery'
 import {
   SHARED_SECTION_ID, sharedNotificationAction, type SharedNotificationAction,
@@ -243,8 +244,8 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
   // Custom tools page, on the tool or the Approvals tab.
   const openTools = (refType: string, refId: string) => {
     onClose()
-    if (refType === 'custom_tool_ask') {
-      // A tool's question: its dialog, wherever the person is.
+    if (refType === 'person_ask') {
+      // A question for the person (a custom tool's or an agent's): its dialog, wherever they are.
       window.dispatchEvent(new Event(SHOW_ASKS_EVENT))
       return
     }
@@ -327,7 +328,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
             const forge = n.refType === 'agent_forge' && n.refId && onOpenForge ? n.refId : ''
             const profile = n.refType === 'profile'
             const tools = (n.refType === 'custom_tool' || n.refType === 'custom_tool_approval' || n.refType === 'custom_tool_proposal'
-              || n.refType === 'custom_tool_ask') ? n.refType : ''
+              || n.refType === 'person_ask') ? n.refType : ''
             const task = taskOf(n)
             const exam = n.refType === 'agent_exam'
             const lessons = n.refType === 'agent_lessons'
@@ -340,7 +341,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
               hint={forge ? 'Click to open the plan.' : setup ? (exam ? 'Click to see the exam.' : lessons ? 'Click to approve it, or dismiss it.'
                 : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.')
                 : profile ? (n.type === 'error' ? 'Click to open your Profile and try again.' : 'Click to review it in your Profile.')
-                : tools ? (tools === 'custom_tool_ask' ? 'Click to answer it.' : 'Click to open Custom tools.') : ''}
+                : tools ? (tools === 'person_ask' ? 'Click to answer it.' : 'Click to open Custom tools.') : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
                 ? (waiting.has(n.refId) ? 'waiting' : 'answered') : undefined}
               step={n.refType === 'autonomy_action' && n.refId && waiting?.get(n.refId)?.taskboard

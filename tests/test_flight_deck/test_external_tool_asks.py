@@ -15,9 +15,10 @@ import pytest
 from fastapi import FastAPI
 
 from captain_claw import custom_tools_client
-from captain_claw.flight_deck import external_tool_asks as asks
+from captain_claw.flight_deck import ask_routes
 from captain_claw.flight_deck import external_tools as xt
 from captain_claw.flight_deck import external_tools_routes as xr
+from captain_claw.flight_deck import person_asks as asks
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.tools.custom_tools import CustomToolsTool
 
@@ -43,6 +44,8 @@ RECORDED = [{"input": {}, "expect": {"got": "Business"},
 
 def _client(user: dict) -> httpx.AsyncClient:
     app = FastAPI()
+    app.include_router(ask_routes.agent_router)
+    app.include_router(ask_routes.router)
     app.include_router(xr.catalog_router)
     app.include_router(xr.router)
     app.dependency_overrides[get_current_user] = lambda: user
@@ -68,7 +71,7 @@ async def _publish(uid: str, slug: str = "pick", main_py: str = ASKS, **manifest
 
 async def _next_question(c: httpx.AsyncClient, known: str = "") -> dict:
     for _ in range(50):
-        found = (await c.get("/fd/external-tools/asks", params={"wait": 1, "known": known})).json()["asks"]
+        found = (await c.get("/fd/asks", params={"wait": 1, "known": known})).json()["asks"]
         if found:
             return found[0]
     raise AssertionError("no question opened")
@@ -107,14 +110,14 @@ async def test_the_person_answers_in_flight_deck_and_the_tools_time_stops(deck):
         q = await _next_question(c)
         assert q["title"] == "Pick" and q["questions"][0]["choices"] == ["Business", "Personal"]
         bells = [n for n in await deck.db.list_notifications(uid) if n.get("ref_type") == asks.BELL_REF]
-        assert bells and "Pick asks you something" in bells[0]["title"]
+        assert bells and "Pick asks you something" in bells[0]["title"] and q["source"] == "tool"
         # Longer than the tool's 2 s: its time doesn't run while it waits.
         await asyncio.sleep(2.5)
         async with _client(deck.other) as other:
-            assert (await other.post(f"/fd/external-tools/asks/{q['id']}", json={"answers": {"answer": "x"}})).status_code == 404
-        bad = await c.post(f"/fd/external-tools/asks/{q['id']}", json={"answers": {"answer": "Neither"}})
+            assert (await other.post(f"/fd/asks/{q['id']}", json={"answers": {"answer": "x"}})).status_code == 404
+        bad = await c.post(f"/fd/asks/{q['id']}", json={"answers": {"answer": "Neither"}})
         assert bad.status_code == 422
-        assert (await c.post(f"/fd/external-tools/asks/{q['id']}", json={"answers": {"answer": "Personal"}})).status_code == 200
+        assert (await c.post(f"/fd/asks/{q['id']}", json={"answers": {"answer": "Personal"}})).status_code == 200
         res = await run
     assert res.status_code == 200, res.text
     assert res.json()["output"] == {"got": "Personal"}
@@ -129,7 +132,7 @@ async def test_dont_answer_and_no_answer_in_time(deck):
     async with _client(deck.user) as c:
         run = asyncio.create_task(c.post("/fd/external-tools/pick/run", json={"input": {}}))
         q = await _next_question(c)
-        await c.post(f"/fd/external-tools/asks/{q['id']}", json={"declined": True})
+        await c.post(f"/fd/asks/{q['id']}", json={"declined": True})
         assert (await run).json()["output"] == {"got": "declined"}
         timed = await c.post("/fd/external-tools/pick/run", json={"input": {"wait": 0.3}})
         assert timed.json()["output"] == {"got": "no answer: No answer in time."}
@@ -139,17 +142,17 @@ async def test_the_wait_returns_when_the_open_questions_change(deck):
     await _switch_on(deck)
     await _publish(deck.user["id"])
     async with _client(deck.user) as c:
-        idle = await c.get("/fd/external-tools/asks", params={"wait": 0.2})
+        idle = await c.get("/fd/asks", params={"wait": 0.2})
         assert idle.json() == {"asks": []}
-        waiting = asyncio.create_task(c.get("/fd/external-tools/asks", params={"wait": 20}))
+        waiting = asyncio.create_task(c.get("/fd/asks", params={"wait": 20}))
         run = asyncio.create_task(c.post("/fd/external-tools/pick/run", json={"input": {}}))
         opened = (await asyncio.wait_for(waiting, 15)).json()["asks"]
         assert len(opened) == 1
         # A tab that already shows it waits until it changes: here, it's answered elsewhere.
-        again = asyncio.create_task(c.get("/fd/external-tools/asks", params={"wait": 20, "known": opened[0]["id"]}))
+        again = asyncio.create_task(c.get("/fd/asks", params={"wait": 20, "known": opened[0]["id"]}))
         await asyncio.sleep(0.2)
         assert not again.done()
-        await c.post(f"/fd/external-tools/asks/{opened[0]['id']}", json={"answers": {"answer": "Business"}})
+        await c.post(f"/fd/asks/{opened[0]['id']}", json={"answers": {"answer": "Business"}})
         assert (await asyncio.wait_for(again, 5)).json() == {"asks": []}
         await run
 
@@ -208,7 +211,7 @@ async def test_the_agent_follows_a_run_that_waits_and_can_stop_it(deck, as_agent
     async with _client(deck.user) as c:
         q = await _next_question(c)
         await asyncio.sleep(0.5)
-        await c.post(f"/fd/external-tools/asks/{q['id']}", json={"answers": {"answer": "Business"}})
+        await c.post(f"/fd/asks/{q['id']}", json={"answers": {"answer": "Business"}})
     result = await asyncio.wait_for(tool, 30)
     assert result.success and '"got": "Business"' in result.content
     # Stopping the turn stops the run and closes its question.

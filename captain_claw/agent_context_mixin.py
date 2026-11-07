@@ -2898,6 +2898,10 @@ class AgentContextMixin:
             # per turn — see the registry. Flight Deck checks every call.
             from captain_claw.tools.custom_tools import CustomToolsTool
             self.tools.register(CustomToolsTool(), metadata={"requires_custom_tools": True})
+            # Ask the person — a question (or a short form) as a dialog in their
+            # Flight Deck, answered before the turn goes on. Hidden without a deck.
+            from captain_claw.tools.ask_user import AskUserTool
+            self.tools.register(AskUserTool(), metadata={"requires_flight_deck": True})
             # Colleagues — the owner's other agents, and handing them work on
             # the Taskboard. Under Flight Deck on the owner's own turns only,
             # the Line's gate (requires_line).

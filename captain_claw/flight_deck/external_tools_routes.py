@@ -750,7 +750,7 @@ class AgentLink(xt.Link):
 
     async def ask(self, ctx: xt.CallContext, questions: list[dict], wait_s: float) -> dict[str, Any]:
         """The person the run is for, in their Flight Deck (7d); the agent isn't needed."""
-        from captain_claw.flight_deck import external_tool_asks as asks
+        from captain_claw.flight_deck import person_asks as asks
 
         owner_name = "" if ctx.owner_runs else (await _person(ctx.owner))["name"]
         label = f"{ctx.title}, used by {ctx.outer.title}" if ctx.outer is not None else ""
@@ -915,7 +915,7 @@ async def agent_run(body: AgentRunBody, request: Request, runner: Runner = Depen
     link = _agent_link(request, runner, body.callback)
     if link is None and manifest is not None and manifest.asks:
         link = AgentLink(runner.agent, "", runner)  # it only asks the person
-    from captain_claw.flight_deck import external_tool_asks as asks
+    from captain_claw.flight_deck import person_asks as asks
 
     async def go() -> dict[str, Any]:
         try:
@@ -969,7 +969,7 @@ def _start_follow(runner: Runner, run: Any, rid: str = "") -> str:
 
 
 async def _follow(rid: str, runner: Runner, wait: float) -> dict[str, Any]:
-    from captain_claw.flight_deck import external_tool_asks as asks
+    from captain_claw.flight_deck import person_asks as asks
 
     f = _FOLLOWING.get(rid)
     if f is None or f.runner_id != runner.user_id:
@@ -1214,36 +1214,6 @@ class EverybodyBody(BaseModel):
 
 class DecideBody(BaseModel):
     approve: bool
-
-
-class AnswerBody(BaseModel):
-    answers: dict[str, Any] | None = None
-    declined: bool = False
-
-
-@catalog_router.get("/asks")
-async def my_asks(wait: float = Query(0, ge=0, le=30), known: str = Query("", max_length=2000),
-                  user: dict = Depends(_enabled)) -> dict[str, Any]:
-    """The custom tools' questions waiting for this person (7d). Every open tab
-    waits here: it answers at once when they differ from *known* (the ids the
-    tab shows), else after *wait* seconds."""
-    from captain_claw.flight_deck import external_tool_asks as asks
-
-    seen = {k for k in known.split(",") if k}
-    return {"asks": await asks.wait_for_change(_uid(user), seen, wait)}
-
-
-@catalog_router.post("/asks/{ask_id}")
-async def answer_ask(ask_id: str, body: AnswerBody, user: dict = Depends(_enabled)) -> dict[str, Any]:
-    from captain_claw.flight_deck import external_tool_asks as asks
-
-    try:
-        asks.answer(ask_id, _uid(user), answers=body.answers, declined=body.declined)
-    except KeyError:
-        raise HTTPException(404, "That question isn't open any more.") from None
-    except asks.AskError as exc:
-        raise HTTPException(422, str(exc)) from None
-    return {"ok": True}
 
 
 @catalog_router.get("/agents")

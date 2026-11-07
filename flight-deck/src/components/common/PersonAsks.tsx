@@ -1,16 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { MessageCircleQuestion, Send, X, ShieldAlert } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
-import { useCustomToolsStore, SHOW_ASKS_EVENT } from '../../stores/customToolsStore'
-import { customToolsApi, type AskQuestion, type OpenAsk } from '../../services/customToolsApi'
+import { asksApi, SHOW_ASKS_EVENT, type AskQuestion, type OpenAsk } from '../../services/asksApi'
 import { Dialog, Button, Notice, inputCls, labelCls } from '../console/parts'
 
-// Custom tools, Phase 7d: a tool running for this person asks them something.
-// Mounted once beside the app (every layout): while signed in and custom tools
-// are on, the tab keeps one request waiting on /fd/external-tools/asks, which
-// answers as soon as a question opens or closes. The first open question shows
-// in a dialog; answered here, it closes in their other tabs too. "Later" hides
-// it in this tab until the bell (or a new question) brings it back.
+// A question for this person: from a custom tool running for them (captain.ask)
+// or from one of their agents (its ask_user tool). Mounted once beside the app
+// (every layout): while signed in, the tab keeps one request waiting on
+// /fd/asks, which answers as soon as a question opens or closes. The first open
+// question shows in a dialog; answered here, it closes in their other tabs too.
+// "Later" hides it in this tab until the bell (or a new question) brings it back.
 
 type Answer = string | string[] | boolean | null
 
@@ -97,7 +96,7 @@ function AskDialog({ ask, onDone, onLater }: { ask: OpenAsk; onDone: () => void;
     setBusy(declined ? 'decline' : 'send')
     setError('')
     try {
-      await customToolsApi.answerAsk(ask.id, declined ? { declined: true } : { answers: values })
+      await asksApi.answer(ask.id, declined ? { declined: true } : { answers: values })
       onDone()
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed')
@@ -114,8 +113,10 @@ function AskDialog({ ask, onDone, onLater }: { ask: OpenAsk; onDone: () => void;
     </>}>
       <div className="space-y-4">
         <p className="text-xs leading-relaxed text-zinc-500">
-          {ask.label || 'A custom tool'}{ask.owner_name ? ` (a tool by ${ask.owner_name})` : ''} is running
-          {ask.agent_name ? ` for ${ask.agent_name}` : ''} and waits for your answer · {timeLeft}.
+          {ask.source === 'agent'
+            ? <>{ask.agent_name || 'Your agent'} needs your answer to go on · {timeLeft}.</>
+            : <>{ask.label || 'A custom tool'}{ask.owner_name ? ` (a tool by ${ask.owner_name})` : ''} is running
+              {ask.agent_name ? ` for ${ask.agent_name}` : ''} and waits for your answer · {timeLeft}.</>}
         </p>
         {error && <Notice tone="red">{error}</Notice>}
         {ask.questions.map((q) => (
@@ -123,31 +124,27 @@ function AskDialog({ ask, onDone, onLater }: { ask: OpenAsk; onDone: () => void;
         ))}
         <p className="flex items-start gap-1.5 text-[11px] leading-relaxed text-zinc-500">
           <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          Never type a password or key here: a tool's secrets go in its Secrets, on the Custom tools page.
+          {ask.source === 'agent' ? 'Never type a password or key here.'
+            : "Never type a password or key here: a tool's secrets go in its Secrets, on the Custom tools page."}
         </p>
       </div>
     </Dialog>
   )
 }
 
-export function CustomToolAsks() {
+export function PersonAsks() {
   const signedIn = useAuthStore((s) => s.authEnabled === false || !!s.user)
-  const enabled = useCustomToolsStore((s) => !!s.status?.enabled)
-  const statusKnown = useCustomToolsStore((s) => s.status !== null)
-  const refreshStatus = useCustomToolsStore((s) => s.refreshStatus)
   const [asks, setAsks] = useState<OpenAsk[]>([])
   const [hidden, setHidden] = useState<Set<string>>(new Set())
   const known = useRef<string[]>([])
 
-  useEffect(() => { if (signedIn && !statusKnown) void refreshStatus() }, [signedIn, statusKnown, refreshStatus])
-
   useEffect(() => {
-    if (!signedIn || !enabled) return
+    if (!signedIn) return
     let alive = true
     const loop = async () => {
       while (alive) {
         try {
-          const r = await customToolsApi.asks(known.current, 25)
+          const r = await asksApi.list(known.current, 25)
           if (!alive) return
           known.current = r.asks.map((a) => a.id)
           setAsks(r.asks)
@@ -158,7 +155,7 @@ export function CustomToolAsks() {
     }
     void loop()
     return () => { alive = false }
-  }, [signedIn, enabled])
+  }, [signedIn])
 
   // The bell (or anything else) can bring a hidden question back.
   useEffect(() => {
@@ -168,7 +165,7 @@ export function CustomToolAsks() {
   }, [])
 
   const done = useCallback((id: string) => setAsks((now) => now.filter((a) => a.id !== id)), [])
-  const current = signedIn && enabled ? asks.find((a) => !hidden.has(a.id)) : undefined
+  const current = signedIn ? asks.find((a) => !hidden.has(a.id)) : undefined
   if (!current) return null
   return (
     <AskDialog key={current.id} ask={current} onDone={() => done(current.id)}

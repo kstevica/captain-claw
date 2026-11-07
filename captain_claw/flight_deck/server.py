@@ -1904,6 +1904,12 @@ app.include_router(code_router)
 app.include_router(crew_router)
 # Agents' routes first: /fd/external-tools/agent/... must never read as a tool called "agent".
 app.include_router(external_tools_agent_router)
+# Questions for the person (custom tools' and agents' ask_user): the agent's
+# /fd/asks/agent first, so it never reads as a question's id.
+from captain_claw.flight_deck import ask_routes as _ask_routes  # noqa: E402
+
+app.include_router(_ask_routes.agent_router)
+app.include_router(_ask_routes.router)
 app.include_router(external_tools_catalog_router)
 app.include_router(external_tool_proposals.agent_router)
 app.include_router(external_tool_proposals.router)
