@@ -11,23 +11,44 @@ off: nothing is asked of the agent itself.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import secrets
 import shutil
+import sqlite3
+import tempfile
 import time
+from contextlib import closing
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from captain_claw.flight_deck.agent_bundle import archive, catalog, stores
+from captain_claw.flight_deck.agent_bundle import archive, catalog, review, secrets_box, stores
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
 
+# Template: who it is and what it was taught. Trained: and what it learned
+# since. Full backup: everything, conversations and files too.
 PRESETS: dict[str, tuple[str, ...]] = {
+    "template": ("identity", "onboarding"),
+    "trained": ("identity", "onboarding", "memory", "data", "schedules"),
     "full": catalog.CATEGORIES,
 }
+
+
+@dataclass
+class Options:
+    """What the export review decided, beyond the categories."""
+    # Insight categories that go (None: all of them); single insights left out.
+    insight_categories: set[str] | None = None
+    exclude_insights: set[str] = field(default_factory=set)
+    # Its contacts (people it knows) — off for anyone else, on in a backup.
+    contacts: bool = True
+    # A full backup with this passphrase carries the agent's keys, sealed.
+    passphrase: str = ""
 
 # config.yaml: only these travel (never a key, token, port, path or address of this deck).
 _MODEL_FIELDS = ("provider", "model", "temperature", "max_tokens", "base_url", "vision", "allowed")
@@ -102,9 +123,11 @@ def _copy_dir(src: Path, dst: Path, part: catalog.Part, notes: list[str]) -> int
     return copied
 
 
-def stage(agent_dir: Path, staging: Path, categories: set[str], *, workspace_moved: bool) -> dict[str, Any]:
+def stage(agent_dir: Path, staging: Path, categories: set[str], *, workspace_moved: bool,
+          options: Options | None = None) -> dict[str, Any]:
     """Copy the agent's parts for *categories* into ``staging/agent`` and
     ``staging/stores``; what was taken, per part."""
+    options = options or Options()
     taken: dict[str, Any] = {}
     notes: list[str] = []
     for part in catalog.PARTS:
@@ -116,6 +139,10 @@ def stage(agent_dir: Path, staging: Path, categories: set[str], *, workspace_mov
             stores.snapshot(src, snap)
             all_tables = stores.tables(snap)
             keep = catalog.wanted_tables(part, all_tables, categories)
+            if part.key == "sessions" and not options.contacts:
+                keep = [t for t in keep if t not in ("contacts", "contact_mentions")]
+            if part.key == "insights" and "insights" in keep:
+                review.filter_insights(snap, categories=options.insight_categories, exclude=options.exclude_insights)
             if not keep:
                 snap.unlink()
                 continue
@@ -174,13 +201,69 @@ def _schedules(owner_id: str, slug: str) -> list[dict[str, Any]]:
     return out
 
 
+def person_ref(owner_id: str) -> str:
+    """Who made a bundle, on which deck — the same value only for the same
+    person on the same deck (a hash; neither is readable from it)."""
+    from captain_claw.flight_deck.agent_secret import get_or_create_agent_secret
+    return hashlib.sha256(f"{get_or_create_agent_secret()}:{owner_id}".encode()).hexdigest()[:24]
+
+
+def _read_config(agent_dir: Path) -> dict[str, Any]:
+    try:
+        cfg = yaml.safe_load((agent_dir / "config.yaml").read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+# .env names that are Flight Deck's wiring, not the agent's own keys.
+_ENV_WIRING = ("FD_", "CLAW_", "OLLAMA_BASE_URL", "HOME", "PATH")
+
+
+def gather_secrets(agent_dir: Path) -> dict[str, Any]:
+    """The agent's own keys: its .env, its model key, and the credentials of
+    the APIs it learned (sessions.db) — for a sealed full backup only."""
+    env: dict[str, str] = {}
+    try:
+        for line in (agent_dir / ".env").read_text(encoding="utf-8").splitlines():
+            key, sep, value = line.partition("=")
+            key = key.strip()
+            if sep and key and value.strip() and not key.startswith(_ENV_WIRING):
+                env[key] = value.strip()
+    except (OSError, UnicodeDecodeError):
+        pass
+    model = _read_config(agent_dir).get("model")
+    model_key = str((model or {}).get("api_key") or "") if isinstance(model, dict) else ""
+    columns: dict[str, dict[str, str]] = {}
+    src = agent_dir / catalog.BY_KEY["sessions"].path
+    if src.is_file():
+        with tempfile.TemporaryDirectory() as tmp:
+            snap = Path(tmp) / "s.db"
+            stores.snapshot(src, snap)
+            with closing(sqlite3.connect(snap)) as c:
+                for table, cols in catalog.BY_KEY["sessions"].secret_columns.items():
+                    have = {r[1] for r in c.execute(f'PRAGMA table_info("{table}")')}
+                    if "id" not in have:
+                        continue
+                    for col in cols:
+                        if col in have:
+                            got = {str(i): str(v) for i, v in c.execute(
+                                f'SELECT id, "{col}" FROM "{table}" WHERE "{col}" IS NOT NULL AND "{col}" != \'\'')}
+                            if got:
+                                columns[f"{table}.{col}"] = got
+    return {"env": env, "model_api_key": model_key, "columns": columns}
+
+
 async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: set[str],
-                preset: str = "", made_by: str = "") -> dict[str, Any]:
+                preset: str = "", made_by: str = "", options: Options | None = None) -> dict[str, Any]:
     """Make the bundle; its record (id, file name, manifest) — the file is
     ``bundles_dir()/exports/<id>.captain`` until it is fetched or swept."""
     from captain_claw.flight_deck import server as srv
 
     categories = catalog.normalize_categories(categories)
+    options = options or Options()
+    if options.passphrase and preset != "full":
+        raise archive.BundleError("Only a full backup carries its keys.")
     agent_dir = srv.DATA_DIR / slug
     if not agent_dir.is_dir():
         raise archive.BundleError("The agent has no folder on this deck.")
@@ -190,7 +273,8 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
     hc = agent_dir / catalog.HC
     workspace_moved = bool(entry.get("workspace"))
     try:
-        staged = await asyncio.to_thread(stage, agent_dir, staging, categories, workspace_moved=workspace_moved)
+        staged = await asyncio.to_thread(stage, agent_dir, staging, categories, workspace_moved=workspace_moved,
+                                         options=options)
         instructions = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "") if owner_id else ""
         agent = {
             "name": str(entry.get("name") or slug),
@@ -209,6 +293,13 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
         fd_dir = staging / "fd"
         fd_dir.mkdir(parents=True, exist_ok=True)
         (fd_dir / "agent.json").write_text(json.dumps(agent, ensure_ascii=False, indent=1), encoding="utf-8")
+        links = review.connections(slug, owner_id, agent["settings"], _read_config(agent_dir))
+        (fd_dir / "connections.json").write_text(json.dumps(links, ensure_ascii=False, indent=1), encoding="utf-8")
+        sealed = False
+        if options.passphrase:
+            payload = await asyncio.to_thread(gather_secrets, agent_dir)
+            (staging / "secrets.enc").write_bytes(secrets_box.seal(payload, options.passphrase))
+            sealed = True
         counts: dict[str, int] = {}
         if "conversations" in categories:
             chats = await _chat_log(owner_id, slug)
@@ -233,7 +324,12 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
             "parts": staged["parts"],
             "counts": counts,
             "notes": staged["notes"],
-            "secrets": False,
+            "secrets": sealed,
+            "connections": links,
+            "owner_ref": person_ref(owner_id),
+            "insight_categories": sorted(options.insight_categories) if options.insight_categories is not None else None,
+            "excluded_insights": len(options.exclude_insights),
+            "contacts": options.contacts,
         }
         manifest = await asyncio.to_thread(archive.write, staging, manifest, out)
     finally:
@@ -247,7 +343,7 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
 def file_name(agent_name: str, preset: str) -> str:
     stem = "".join(ch if ch.isalnum() or ch in " -_" else "-" for ch in agent_name).strip() or "agent"
     day = time.strftime("%Y-%m-%d")
-    kind = {"full": "backup"}.get(preset, preset or "export")
+    kind = {"full": "backup", "template": "template", "trained": "trained"}.get(preset, preset or "export")
     return f"{stem} {kind} {day}{archive.EXTENSION}"
 
 
@@ -277,6 +373,8 @@ def summary(manifest: dict[str, Any]) -> dict[str, Any]:
         "counts": {**_headline(per_category), **(manifest.get("counts") or {})},
         "notes": [str(n) for n in manifest.get("notes") or []][:20],
         "secrets": bool(manifest.get("secrets")),
+        "connections": [{"kind": str(c.get("kind") or ""), "label": str(c.get("label") or "")}
+                        for c in manifest.get("connections") or [] if isinstance(c, dict)][:30],
     }
 
 

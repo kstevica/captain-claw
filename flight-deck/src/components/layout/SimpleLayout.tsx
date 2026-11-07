@@ -980,6 +980,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       {importOpen && (
         <AgentImportDialog
           onClose={() => setImportOpen(false)}
+          onConnect={() => openConnections()}
           onImported={(r) => {
             useProcessStore.getState().fetchProcesses()
             startBoot(`proc-${r.slug}`, true)

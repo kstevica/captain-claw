@@ -20,7 +20,31 @@ export interface BundleSummary {
   counts: Record<string, number>
   notes: string[]
   secrets: boolean
+  /** What it was connected to on the deck it came from — by name; none of it travels. */
+  connections: Connection[]
 }
+
+export interface Connection { kind: string; label: string }
+
+export type Preset = 'template' | 'trained' | 'full'
+
+/** What the export carries beyond the categories — the review's choices. */
+export interface ExportOptions {
+  preset: Preset
+  categories?: BundleCategory[]
+  /** Insight categories that go; `null`: all of them. */
+  insight_categories?: string[] | null
+  exclude_insights?: string[]
+  /** Its contacts; unset: only in a full backup. */
+  contacts?: boolean
+  /** A full backup with a passphrase carries its keys, sealed. */
+  passphrase?: string
+}
+
+export interface ReviewItem { id: string; content: string; importance: number }
+export interface ReviewCategory { id: string; label: string; count: number; default: boolean; items: ReviewItem[] }
+export interface AgentReview { insights: ReviewCategory[]; contacts: number }
+export interface ModelTier { tier: string; provider: string; model: string }
 
 export interface ExportResult {
   id: string
@@ -36,6 +60,16 @@ export interface UploadResult extends BundleSummary {
   upload_id: string
   suggested_name: string
   model: { provider: string; model: string }
+  /** The tier it ran on where it was made ("" when its model was picked by hand). */
+  model_tier: string
+  /** Its keys are in the file, sealed with a passphrase. */
+  has_secrets: boolean
+}
+
+export interface ImportOptions {
+  name: string
+  model?: { mode: 'keep' } | { mode: 'tier'; tier: string }
+  passphrase?: string
 }
 
 export interface ImportResult {
@@ -46,6 +80,9 @@ export interface ImportResult {
   fleet_instructions: string
   chat_messages: number
   schedules: number
+  connections: Connection[]
+  keys_restored: boolean
+  needs_key: boolean
   notes: string[]
 }
 
@@ -71,9 +108,19 @@ async function send(path: string, init: RequestInit = {}, asUser?: string): Prom
 
 const json = (body: unknown): RequestInit => ({ method: 'POST', body: JSON.stringify(body) })
 
+/** What the agent learned, per category, and how many contacts it keeps — to look over before an export. */
+export async function reviewAgent(slug: string, asUser?: string): Promise<AgentReview> {
+  return (await send(`/fd/agent-bundle/review/${encodeURIComponent(slug)}`, {}, asUser)).json()
+}
+
 /** Make a bundle of one of your agents (it stays on the deck for a day, or until downloaded and deleted). */
-export async function exportAgent(slug: string, preset = 'full', asUser?: string): Promise<ExportResult> {
-  return (await send(`/fd/agent-bundle/export/${encodeURIComponent(slug)}`, json({ preset }), asUser)).json()
+export async function exportAgent(slug: string, options: ExportOptions, asUser?: string): Promise<ExportResult> {
+  return (await send(`/fd/agent-bundle/export/${encodeURIComponent(slug)}`, json(options), asUser)).json()
+}
+
+/** Your model tiers (no keys): what an import can run on. */
+export async function myTiers(asUser?: string): Promise<ModelTier[]> {
+  return ((await send('/fd/agent-bundle/tiers', {}, asUser)).json() as Promise<{ tiers: ModelTier[] }>).then((r) => r.tiers)
 }
 
 /** Save a made bundle to the person's computer. */
@@ -104,8 +151,8 @@ export async function uploadBundle(file: File, asUser?: string): Promise<UploadR
 }
 
 /** Make a new agent of an upload. */
-export async function importUpload(uploadId: string, name: string, asUser?: string): Promise<ImportResult> {
-  return (await send(`/fd/agent-bundle/uploads/${uploadId}/import`, json({ name }), asUser)).json()
+export async function importUpload(uploadId: string, options: ImportOptions, asUser?: string): Promise<ImportResult> {
+  return (await send(`/fd/agent-bundle/uploads/${uploadId}/import`, json(options), asUser)).json()
 }
 
 export async function discardUpload(uploadId: string, asUser?: string): Promise<void> {
