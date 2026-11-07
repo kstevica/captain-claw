@@ -4,13 +4,14 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import {
   Archive, Brain, CheckCircle2, ChevronDown, ChevronRight, Download, FileUp, GraduationCap, KeyRound, Loader2,
-  Plug, ShieldCheck, TriangleAlert,
+  Plug, RotateCcw, ShieldCheck, TriangleAlert,
 } from 'lucide-react'
 import { AgentDialog } from './KioskAgentDialogs'
 import {
-  countChips, discardUpload, downloadExport, exportAgent, formatBytes, importUpload, myTiers, reviewAgent, uploadBundle,
-  type AgentReview, type BundleCategory, type Connection, type ExportResult, type ImportResult, type ModelTier,
-  type Preset, type UploadResult,
+  countChips, discardUpload, downloadExport, downloadSafety, exportAgent, formatBytes, importUpload, myTiers,
+  reviewAgent, undoImport, uploadBundle,
+  type AgentReview, type BundleCategory, type Connection, type ExportResult, type ImportResult, type IntoResult,
+  type MergeMode, type ModelTier, type Preset, type UploadResult,
 } from '../../services/agentBundle'
 
 const btn = 'inline-flex h-10 items-center justify-center gap-2 rounded-xl px-4 text-sm font-medium transition-colors disabled:opacity-50'
@@ -102,10 +103,12 @@ function Check({ checked, onChange, disabled, label, hint, right }: {
   )
 }
 
-export function AgentBackupDialog({ agent, asUser, onClose }: {
+export function AgentBackupDialog({ agent, asUser, onClose, onBringIn }: {
   agent: { slug: string; name: string }
   asUser?: string
   onClose: () => void
+  /** "Bring a file into it": the import dialog, with this agent picked. */
+  onBringIn?: () => void
 }) {
   const [preset, setPreset] = useState<Preset>('full')
   const [cats, setCats] = useState<Set<BundleCategory>>(() => new Set(PRESETS[2].categories))
@@ -303,6 +306,10 @@ export function AgentBackupDialog({ agent, asUser, onClose }: {
       <div className="flex shrink-0 justify-end gap-2 border-t border-zinc-800 p-3">
         {!made ? (
           <>
+            {onBringIn && (
+              <button className="mr-auto text-xs font-medium text-violet-700 hover:underline disabled:opacity-50 dark:text-violet-300"
+                onClick={onBringIn} disabled={!!busy}>Bring a file into it…</button>
+            )}
             <button className={quiet} onClick={onClose} disabled={!!busy}>Cancel</button>
             <button className={primary} onClick={make} disabled={!!busy || !passOk || (reviewing && !review && !reviewErr)}>
               {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
@@ -329,11 +336,20 @@ function madeOn(ts: number): string {
   return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
-export function AgentImportDialog({ asUser, ownerLabel, onClose, onImported, onConnect }: {
+const COUNT_NAMES: Record<string, string> = {
+  insights: 'Insights', intentions: 'Intentions', intuitions: 'Intuitions', playbooks: 'Playbooks',
+  contacts: 'Contacts', sessions: 'Sessions', topics: 'Topics',
+}
+
+export function AgentImportDialog({ asUser, ownerLabel, agents = [], into, onClose, onImported, onConnect }: {
   asUser?: string
   ownerLabel?: string
+  /** The person's own agents a file can go into. */
+  agents?: { slug: string; name: string }[]
+  /** Opened from an agent: that one picked. */
+  into?: string
   onClose: () => void
-  onImported: (result: ImportResult) => void
+  onImported: (result: ImportResult | IntoResult) => void
   /** Open the Connections dialog (what the new agent was connected to before). */
   onConnect?: () => void
 }) {
@@ -345,7 +361,11 @@ export function AgentImportDialog({ asUser, ownerLabel, onClose, onImported, onC
   const [pass, setPass] = useState('')
   const [busy, setBusy] = useState<'' | 'reading' | 'making'>('')
   const [err, setErr] = useState('')
-  const [done, setDone] = useState<ImportResult | null>(null)
+  const [done, setDone] = useState<ImportResult | IntoResult | null>(null)
+  // A new agent ('') or one of theirs (its slug); into one: add to it or replace.
+  const [target, setTarget] = useState(into && agents.some((a) => a.slug === into) ? into : '')
+  const [merge, setMerge] = useState<MergeMode>('append')
+  const [undone, setUndone] = useState(false)
   const [drag, setDrag] = useState(false)
   const input = useRef<HTMLInputElement>(null)
   // An upload nobody imported is thrown away when the dialog closes.
@@ -388,6 +408,7 @@ export function AgentImportDialog({ asUser, ownerLabel, onClose, onImported, onC
         name: name.trim(),
         model: mode === 'tier' && tier ? { mode: 'tier', tier } : { mode: 'keep' },
         ...(upload.has_secrets && pass ? { passphrase: pass } : {}),
+        ...(target ? { target: { kind: 'existing' as const, slug: target, mode: merge } } : {}),
       }, asUser)
       pending.current = null
       setDone(r)
@@ -399,11 +420,60 @@ export function AgentImportDialog({ asUser, ownerLabel, onClose, onImported, onC
     }
   }
 
+  const undo = async () => {
+    if (!done || !('into' in done) || !done.safety_backup) return
+    setErr('')
+    setBusy('making')
+    try {
+      const r = await undoImport(done.safety_backup.id, asUser)
+      setUndone(true)
+      onImported(r)
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy('')
+    }
+  }
+  const intoName = agents.find((a) => a.slug === target)?.name ?? target
+
   return (
-    <AgentDialog title={`New agent from a file${asUser && ownerLabel ? ` for ${ownerLabel}` : ''}`} icon={FileUp}
+    <AgentDialog title={`${into ? 'Bring a file in' : 'New agent from a file'}${asUser && ownerLabel ? ` for ${ownerLabel}` : ''}`} icon={FileUp}
       agentName="A .captain backup or export" size={upload && !done ? 'md' : 'sm'} onClose={onClose}>
       <div className="min-h-0 flex-1 space-y-4 overflow-y-auto p-5">
-        {done ? (
+        {done && 'into' in done ? (
+          <div className="space-y-3">
+            <div className="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3">
+              <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" />
+              <p className="text-sm text-zinc-100">
+                {undone ? <><span className="font-medium">{done.name}</span> is back as it was before the import.</>
+                  : <><span className="font-medium">{done.name}</span> {done.mode === 'append' ? 'has what the file added' : 'was replaced by what the file holds'}{done.restarted ? ' and is starting again' : ''}.</>}
+              </p>
+            </div>
+            {!undone && Object.keys(done.counts).length > 0 && (
+              <ul className="divide-y divide-zinc-800 rounded-xl border border-zinc-800 text-sm">
+                {Object.entries(done.counts).map(([k, v]) => (
+                  <li key={k} className="flex items-center justify-between px-3 py-2">
+                    <span className="text-zinc-300">{COUNT_NAMES[k] ?? k}</span>
+                    <span className="text-xs text-zinc-500">{v.added} added{v.skipped ? ` · ${v.skipped} it already had` : ''}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {!undone && <Notes notes={done.notes} />}
+            {!undone && done.safety_backup && (
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-zinc-800 bg-zinc-900/60 p-3 text-xs text-zinc-400">
+                <ShieldCheck className="h-4 w-4 shrink-0 text-emerald-500" />
+                <span className="min-w-0 flex-1">A backup of it was taken first (kept a week).</span>
+                <button onClick={() => void downloadSafety(done.safety_backup!, asUser).catch((e) => setErr(String(e)))}
+                  className="font-medium text-violet-700 hover:underline dark:text-violet-300">Download</button>
+                <button onClick={undo} disabled={!!busy}
+                  className="inline-flex items-center gap-1 font-medium text-red-700 hover:underline disabled:opacity-50 dark:text-red-300">
+                  {busy === 'making' ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RotateCcw className="h-3.5 w-3.5" />}Undo
+                </button>
+              </div>
+            )}
+          </div>
+        ) : done ? (
           <div className="space-y-3">
             <div className="flex items-center gap-3 rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3">
               <CheckCircle2 className="h-5 w-5 shrink-0 text-emerald-500" />
@@ -447,11 +517,34 @@ export function AgentImportDialog({ asUser, ownerLabel, onClose, onImported, onC
             </div>
             <Chips items={countChips(upload.counts)} />
             <Notes notes={upload.notes} />
-            <label className="block">
+            {agents.length > 0 && (
+              <div className="space-y-1.5">
+                <span className="text-xs font-medium text-zinc-400">Where</span>
+                <select value={target} onChange={(e) => setTarget(e.target.value)} className={field} aria-label="Where it goes">
+                  <option value="">A new agent</option>
+                  {agents.map((a) => <option key={a.slug} value={a.slug}>Into {a.name}</option>)}
+                </select>
+                {target && (
+                  <div className="grid gap-1.5 sm:grid-cols-2" role="radiogroup">
+                    {([['append', 'Add to what it has', 'What it already knows stays; the file only adds what it hasn\'t got.'],
+                      ['reset', 'Replace it', 'What the file carries replaces its own: memory, files, conversations, tasks. Its model and keys stay.']] as const).map(([id, label, hint]) => (
+                      <button key={id} role="radio" aria-checked={merge === id} onClick={() => setMerge(id)}
+                        className={`rounded-xl border p-3 text-left ${merge === id
+                          ? (id === 'reset' ? 'border-red-500/60 bg-red-500/5' : 'border-violet-500 bg-violet-500/10') : 'border-zinc-800 hover:bg-zinc-900/60'}`}>
+                        <span className="block text-sm font-medium text-zinc-100">{label}</span>
+                        <span className="mt-0.5 block text-xs leading-relaxed text-zinc-500">{hint}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {target && <p className="text-xs text-zinc-500">{intoName} is stopped for a moment and backed up first — you can undo it.</p>}
+              </div>
+            )}
+            {!target && <label className="block">
               <span className="text-xs font-medium text-zinc-400">Name</span>
               <input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} className={`mt-1 ${field}`} />
-            </label>
-            <div className="space-y-1.5">
+            </label>}
+            {!target && <div className="space-y-1.5">
               <span className="text-xs font-medium text-zinc-400">Model</span>
               <label className={`flex cursor-pointer items-start gap-3 rounded-xl border p-3 ${mode === 'keep' ? 'border-violet-500 bg-violet-500/10' : 'border-zinc-800'}`}>
                 <input type="radio" className="mt-0.5 accent-violet-600" checked={mode === 'keep'} onChange={() => setMode('keep')} />
@@ -471,7 +564,7 @@ export function AgentImportDialog({ asUser, ownerLabel, onClose, onImported, onC
                   ) : <span className="block text-xs text-zinc-500">You have no models set up yet.</span>}
                 </span>
               </label>
-            </div>
+            </div>}
             {upload.has_secrets && (
               <label className="block">
                 <span className="flex items-center gap-1.5 text-xs font-medium text-zinc-400"><KeyRound className="h-3.5 w-3.5 text-amber-500" />Passphrase for its keys</span>
@@ -492,9 +585,10 @@ export function AgentImportDialog({ asUser, ownerLabel, onClose, onImported, onC
             {upload && <button className={quiet} onClick={() => { void discardUpload(upload.upload_id, asUser); pending.current = null; setUpload(null) }} disabled={!!busy}>Another file</button>}
             <button className={quiet} onClick={onClose} disabled={busy === 'making'}>Cancel</button>
             {upload && (
-              <button className={primary} onClick={make} disabled={!!busy || !name.trim() || (mode === 'tier' && !tier)}>
+              <button className={primary} onClick={make} disabled={!!busy || (!target && (!name.trim() || (mode === 'tier' && !tier)))}>
                 {busy === 'making' ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
-                {busy === 'making' ? 'Making it…' : 'Create agent'}
+                {busy === 'making' ? (target ? 'Bringing it in…' : 'Making it…')
+                  : target ? (merge === 'reset' ? `Replace ${intoName}` : `Add to ${intoName}`) : 'Create agent'}
               </button>
             )}
           </>

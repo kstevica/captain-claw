@@ -255,7 +255,8 @@ def gather_secrets(agent_dir: Path) -> dict[str, Any]:
 
 
 async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: set[str],
-                preset: str = "", made_by: str = "", options: Options | None = None) -> dict[str, Any]:
+                preset: str = "", made_by: str = "", options: Options | None = None,
+                keep_in: str = "exports") -> dict[str, Any]:
     """Make the bundle; its record (id, file name, manifest) — the file is
     ``bundles_dir()/exports/<id>.captain`` until it is fetched or swept."""
     from captain_claw.flight_deck import server as srv
@@ -269,7 +270,7 @@ async def build(slug: str, owner_id: str, entry: dict[str, Any], *, categories: 
         raise archive.BundleError("The agent has no folder on this deck.")
     bundle_id = secrets.token_hex(12)
     staging = bundles_dir() / "tmp" / bundle_id
-    out = bundles_dir() / "exports" / f"{bundle_id}{archive.EXTENSION}"
+    out = bundles_dir() / keep_in / f"{bundle_id}{archive.EXTENSION}"
     hc = agent_dir / catalog.HC
     workspace_moved = bool(entry.get("workspace"))
     try:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sqlite3
 import tempfile
 from collections.abc import Iterator
@@ -323,3 +324,104 @@ def needs_key(config) -> bool:
     if not names or (config.base_url or "").strip():
         return False
     return not any(os.environ.get(n) for n in names)
+
+
+# ── into an agent that already exists (merge.py) ────────────────────────────
+
+def apply_to_existing(path: Path, agent_dir: Path, mode: str, columns: dict[str, Any] | None = None) -> dict[str, Any]:
+    """The bundle's stores and files into *agent_dir* (stopped): *mode* is
+    "reset" or "append" (merge.MODES). What was added and kept, per store."""
+    from captain_claw.flight_deck.agent_bundle import merge
+
+    bundle = archive.open_bundle(path)
+    categories = set(bundle.manifest.get("categories") or []) & set(catalog.CATEGORIES)
+    parts = bundle.manifest.get("parts") if isinstance(bundle.manifest.get("parts"), dict) else {}
+    stored: dict[str, dict[str, dict[str, int]]] = {}
+    notes: list[str] = []
+    for name in bundle.names("stores/"):
+        key = name[len("stores/"):].removesuffix(".db")
+        part = catalog.BY_KEY.get(key)
+        if part is None or part.kind != "sqlite" or name != f"stores/{key}.db":
+            continue
+        dest = agent_dir / part.path
+        if not _inside(agent_dir, dest.parent):
+            continue
+        listed = (parts.get(key) or {}).get("tables") if isinstance(parts.get(key), dict) else None
+        tables = [str(t) for t in listed] if isinstance(listed, dict) else []
+        with bundle_tmp(bundle, name) as tmp:
+            try:
+                if dest.is_file():
+                    stored[key] = merge.merge_store(tmp, dest, tables, mode)
+                else:                               # a store it hasn't got yet: the bundle's, as a new agent's
+                    stores.check(tmp)
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(tmp, dest)
+                    stored[key] = {t: {"added": n, "skipped": 0} for t, n in stores.counts(dest).items()}
+            except (stores.StoreError, sqlite3.Error) as exc:
+                notes.append(f"{part.label} left as it was: {exc}")
+    files = merge.merge_files(bundle, agent_dir, categories, mode, _inside)
+    if columns:
+        restore_columns(agent_dir, columns)
+    return {"stores": stored, "files": files, "notes": notes, "categories": sorted(categories)}
+
+
+def headline(stored: dict[str, dict[str, dict[str, int]]]) -> dict[str, dict[str, int]]:
+    """The counts the dialog leads with: insights, intentions, playbooks, sessions… added and already there."""
+    picks = {"insights": ("insights", "insights"), "intentions": ("intentions", "intentions"),
+             "intuitions": ("intuitions", "intuitions"), "playbooks": ("sessions", "playbooks"),
+             "contacts": ("sessions", "contacts"), "sessions": ("sessions", "sessions"), "topics": ("topics", "topics")}
+    out = {}
+    for label, (store, table) in picks.items():
+        got = (stored.get(store) or {}).get(table)
+        if got and (got.get("added") or got.get("skipped")):
+            out[label] = {"added": int(got.get("added") or 0), "skipped": int(got.get("skipped") or 0)}
+    return out
+
+
+async def fd_side_into_existing(path: Path, slug: str, owner_id: str, agent: dict[str, Any], mode: str,
+                                tag: str) -> dict[str, Any]:
+    """Flight Deck's side into an existing agent: instructions (reset: the
+    bundle's; append: only when it has none), chat log (reset: replaced;
+    append: beside its own, in the lane ``imported-<tag>``), scheduled tasks
+    (reset: replaced; append: added unless the same task is there) — all off."""
+    from captain_claw.flight_deck import fd_scheduler
+    from captain_claw.flight_deck import server as srv
+    from captain_claw.flight_deck.auth import _fd_auth_enabled, get_db
+
+    bundle = await asyncio.to_thread(archive.open_bundle, path)
+    out: dict[str, Any] = {"chat_messages": 0, "schedules": 0, "notes": [], "connections": []}
+    text = str(agent.get("fleet_instructions") or "")
+    if owner_id and text:
+        mine = (await srv._owner_agent_instructions(owner_id, "process")).get(slug, "")
+        if mode == "reset" or not mine.strip():
+            await srv._set_owner_agent_instructions(owner_id, "process", slug, text[:64_000])
+    chats = bundle.read_json("fd/chats.json") if bundle.has("fd/chats.json") else None
+    if isinstance(chats, dict) and owner_id and _fd_auth_enabled():
+        db = get_db()
+        if mode == "reset":
+            await db.drop_chat_log(owner_id, f"proc-{slug}")
+        out["chat_messages"] = await db.import_chat_log(
+            owner_id, f"proc-{slug}", str(agent.get("name") or slug), chats,
+            lane="" if mode == "reset" else f"imported-{tag}")
+    jobs = bundle.read_json("fd/schedules.json") if bundle.has("fd/schedules.json") else None
+    if isinstance(jobs, list):
+        store = fd_scheduler.get_store()
+        if mode == "reset":
+            for job in store.list(owner_id or None):
+                if str(job.get("agent_slug") or "") == slug:
+                    store.delete(str(job["id"]))
+        else:
+            have = {(_n(j.get("name")), _n(j.get("prompt"))) for j in store.list(owner_id or None)
+                    if str(j.get("agent_slug") or "") == slug}
+            jobs = [j for j in jobs if isinstance(j, dict) and (_n(j.get("name")), _n(j.get("prompt"))) not in have]
+        same = str(bundle.manifest.get("owner_ref") or "") == export.person_ref(owner_id)
+        out["schedules"] = _schedules(jobs, slug, owner_id, out["notes"], same_person=same)
+    links = bundle.read_json("fd/connections.json") if bundle.has("fd/connections.json") else None
+    if isinstance(links, list):
+        out["connections"] = [{"kind": str(c.get("kind") or ""), "label": str(c.get("label") or "")}
+                              for c in links if isinstance(c, dict)][:30]
+    return out
+
+
+def _n(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()

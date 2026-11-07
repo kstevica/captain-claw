@@ -66,10 +66,33 @@ export interface UploadResult extends BundleSummary {
   has_secrets: boolean
 }
 
+export type MergeMode = 'append' | 'reset'
+
 export interface ImportOptions {
   name: string
   model?: { mode: 'keep' } | { mode: 'tier'; tier: string }
   passphrase?: string
+  /** Into one of your agents instead of a new one: add to what it has, or replace it. */
+  target?: { kind: 'new' } | { kind: 'existing'; slug: string; mode: MergeMode }
+}
+
+/** What an import into an existing agent did. */
+export interface IntoResult {
+  ok: boolean
+  slug: string
+  name: string
+  mode: MergeMode
+  into: true
+  /** insights, intentions, playbooks, sessions…: added, and already there. */
+  counts: Record<string, { added: number; skipped: number }>
+  chat_messages: number
+  schedules: number
+  connections: Connection[]
+  restarted: boolean
+  notes: string[]
+  /** The backup taken just before — kept a week, to undo. */
+  safety_backup: { id: string; file_name: string; size: number } | null
+  undone?: boolean
 }
 
 export interface ImportResult {
@@ -126,11 +149,15 @@ export async function myTiers(asUser?: string): Promise<ModelTier[]> {
 /** Save a made bundle to the person's computer. */
 export async function downloadExport(made: ExportResult, asUser?: string): Promise<void> {
   const res = await send(`/fd/agent-bundle/exports/${made.id}/download`, {}, asUser)
-  const url = URL.createObjectURL(await res.blob())
+  saveBlob(await res.blob(), made.file_name)
+}
+
+function saveBlob(blob: Blob, fileName: string): void {
+  const url = URL.createObjectURL(blob)
   try {
     const a = document.createElement('a')
     a.href = url
-    a.download = made.file_name
+    a.download = fileName
     document.body.appendChild(a)
     a.click()
     a.remove()
@@ -150,9 +177,20 @@ export async function uploadBundle(file: File, asUser?: string): Promise<UploadR
   return (await send('/fd/agent-bundle/upload', { method: 'POST', body: form }, asUser)).json()
 }
 
-/** Make a new agent of an upload. */
-export async function importUpload(uploadId: string, options: ImportOptions, asUser?: string): Promise<ImportResult> {
+/** Make a new agent of an upload — or, with `target`, put it into one of yours. */
+export async function importUpload(uploadId: string, options: ImportOptions, asUser?: string): Promise<ImportResult | IntoResult> {
   return (await send(`/fd/agent-bundle/uploads/${uploadId}/import`, json(options), asUser)).json()
+}
+
+/** Undo an import into an agent: it comes back as it was just before. */
+export async function undoImport(safetyId: string, asUser?: string): Promise<IntoResult> {
+  return (await send(`/fd/agent-bundle/safety/${safetyId}/restore`, { method: 'POST' }, asUser)).json()
+}
+
+/** Save the backup taken before an import into an agent. */
+export async function downloadSafety(backup: { id: string; file_name: string }, asUser?: string): Promise<void> {
+  const res = await send(`/fd/agent-bundle/safety/${backup.id}/download`, {}, asUser)
+  saveBlob(await res.blob(), backup.file_name)
 }
 
 export async function discardUpload(uploadId: string, asUser?: string): Promise<void> {
