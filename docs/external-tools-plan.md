@@ -872,6 +872,19 @@ handles it directly; the agent isn't needed.
   ask in its reply. Questions are their own Needs-you type on the Line
   (`person_ask`, kind "ask"), answered in their dialog, not by reading the
   bell.
+- **Recorded answers checked (2026-11-07, after a failed publish on the Pi):**
+  a Crew worker keyed a recorded answer by the question's text
+  (`{"What is your name?": "Alice"}`), so the tool saw no answer and the
+  example failed with a confusing "Got: Hello, stranger!". Publishing and the
+  helper's test mode now check a recording the way a real answer is checked
+  (the `ask` list must be the questions' ids; answers keyed by id, each one
+  the dialog could give; no answer is `{"no_answer": true}` or
+  `{"declined": true}`) and say exactly what's wrong; the worker contract
+  spells the id rule out. A tool without a pytest configuration of its own
+  gets an empty `pytest.ini` in its version folder, so its tests never pick up
+  Captain's (on the Pi, fd-data sits inside the checkout: its asyncio mode,
+  and `testpaths = tests`, under which a bare `pytest` would run Captain's
+  suite).
 - **Live check (2026-11-07):** a throwaway deck with a real process agent
   (Helper, on a stand-in model) and four published tools. Through the agent's
   own `custom_tools` tool (its `/api/tool`): `fetch-title` asked the agent to
@@ -953,8 +966,13 @@ What Phase 7 adds (planned):
   run, build, propose) and drafting a proposal after a turn. The routes and
   the tool are tested over HTTP; Crew building a tool with a real CLI was
   checked (Phase 2).
-- **The sandbox on a real deck**: checked in a Linux container, not yet on
-  the Pi or the glasses deck. `python3 tests/test_flight_deck/test_xtool_sandbox.py`
+- **The sandbox on a real deck**: checked in a Linux container. The Pi 5
+  (kernel 6.12.47+rpt-rpi-2712, checked 2026-11-07) has no Landlock at all:
+  the Raspberry Pi kernel is built without it (`CONFIG_SECURITY_LANDLOCK is
+  not set`, only the `capability` LSM), so tools there run unsandboxed as
+  Flight Deck's user, and "Run tools only in the sandbox" would stop every
+  tool. Turning it on takes a kernel built with Landlock. The glasses deck
+  isn't checked yet: `python3 tests/test_flight_deck/test_xtool_sandbox.py`
   there says.
 - **UDP** isn't ruled by Landlock: a tool with `"network": false` can still
   send UDP (DNS included). seccomp could close that.
