@@ -38,6 +38,8 @@ export interface SystemConfig {
   // with everybody waits for an admin.
   external_tools_enabled: boolean
   external_tools_everybody_approval: boolean
+  // Only run custom tools inside the OS sandbox (Linux, Landlock).
+  external_tools_require_sandbox: boolean
 }
 
 export const CONFIG_DEFAULTS: SystemConfig = {
@@ -45,7 +47,7 @@ export const CONFIG_DEFAULTS: SystemConfig = {
   waitlist_enabled: true, waitlist_cohort: '',
   instance_name: 'Captain', instance_description: 'Agent Management Console',
   show_powered_by: true, agent_idle_stop_minutes: 0,
-  external_tools_enabled: false, external_tools_everybody_approval: true,
+  external_tools_enabled: false, external_tools_everybody_approval: true, external_tools_require_sandbox: false,
 }
 
 // What applicants join: the waitlist name an admin set, else the instance name.

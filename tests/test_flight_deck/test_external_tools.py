@@ -76,6 +76,14 @@ async def _tool(owner: str, slug: str, main_py: str, *, publish: bool = True, **
     return state
 
 
+async def _as_published(owner: str, slug: str) -> dict:
+    """The starter tool, made and published."""
+    await xt.create_tool(owner, slug, title=slug.title(), description="A test tool.")
+    state = await xt.publish(owner, slug, by=owner)
+    assert state["state"] == "passed", state
+    return state
+
+
 # ── Creating and publishing ──────────────────────────────────────────────
 
 
@@ -414,8 +422,9 @@ async def _published(c: httpx.AsyncClient, slug: str) -> dict:
 
 async def test_off_until_an_admin_turns_it_on(deck):
     async with _client(deck.admin) as c:
-        assert (await c.get("/fd/external-tools/status")).json() == {
-            "enabled": False, "everybody_needs_approval": True, "can_build": False}
+        status = (await c.get("/fd/external-tools/status")).json()
+        assert {k: status[k] for k in ("enabled", "everybody_needs_approval", "can_build", "require_sandbox")} == {
+            "enabled": False, "everybody_needs_approval": True, "can_build": False, "require_sandbox": False}
         resp = await c.get("/fd/external-tools")
         assert resp.status_code == 403 and "Admin → Settings" in resp.json()["detail"]
         config = (await c.get("/fd/admin/config")).json()

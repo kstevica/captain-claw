@@ -23,7 +23,7 @@ import { Switch } from '../components/admin/Switch'
 import { IdleAgentsSetting, IDLE_AGENTS_HINT, IDLE_AGENTS_TITLE } from '../components/admin/IdleAgentsSetting'
 import { ByokSetting } from '../components/admin/ByokSetting'
 import {
-  CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE,
+  CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE, SANDBOX_HINT, SANDBOX_TITLE,
 } from '../components/admin/customTools'
 import {
   adminHeaders, CONFIG_DEFAULTS, fetchConfig, fetchPlans, openUsersTab, saveConfig, waitlistName,
@@ -534,6 +534,7 @@ export function AdminPage() {
               {([
                 ['external_tools_enabled', CUSTOM_TOOLS_TITLE, CUSTOM_TOOLS_HINT],
                 ['external_tools_everybody_approval', EVERYBODY_APPROVAL_TITLE, EVERYBODY_APPROVAL_HINT],
+                ['external_tools_require_sandbox', SANDBOX_TITLE, SANDBOX_HINT],
               ] as const).map(([key, title, hint]) => (
                 <div key={key} className="flex items-center justify-between gap-4">
                   <div>

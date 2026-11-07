@@ -40,6 +40,7 @@ async def deck_settings() -> dict[str, bool]:
     return {
         "enabled": bool(cfg.get("external_tools_enabled")),
         "everybody_needs_approval": bool(cfg.get("external_tools_everybody_approval", True)),
+        "require_sandbox": bool(cfg.get("external_tools_require_sandbox")),
     }
 
 
@@ -293,7 +294,8 @@ class SecretsBody(BaseModel):
 async def status(user: dict = Depends(get_current_user)) -> dict[str, Any]:
     """Whether custom tools are on here, and whether this person can make them."""
     settings = await deck_settings()
-    return {**settings, "can_build": settings["enabled"] and await _can_build(user)}
+    return {**settings, "can_build": settings["enabled"] and await _can_build(user),
+            "sandbox": await asyncio.to_thread(xt.sandbox_info)}
 
 
 @router.get("")
