@@ -104,14 +104,24 @@ async def handle(body: Any) -> tuple[int, dict[str, Any]]:
     identity = body.get("identity") if isinstance(body.get("identity"), dict) else {}
     if not _same_identity(w, identity):
         return 403, {"ok": False, "error": "That run was started for someone else."}
-    if body.get("op") != "tool":
-        return 400, {"ok": False, "error": f"Unknown request {body.get('op')!r}."}
-    name = str(body.get("tool") or "").strip()
+    op = body.get("op")
     args = body.get("input")
-    if not name or not isinstance(args, dict):
-        return 400, {"ok": False, "error": "A request names a tool and gives it an input object."}
-    if name == "custom_tools":
-        return 403, {"ok": False, "error": "A custom tool reaches other custom tools another way."}
+    if op == "custom_tool":
+        # Another custom tool (Phase 7b): this agent runs it with its custom_tools
+        # tool, naming the run that asked, and hands back Flight Deck's result.
+        other = str(body.get("custom_tool") or "").strip()
+        if not other or not isinstance(args, dict):
+            return 400, {"ok": False, "error": "A request names a custom tool and gives it an input object."}
+        name = "custom_tools"
+        args = {"action": "run", "tool": other, "input": args, "_xt_via": str(body.get("via") or ""), "_xt_raw": True}
+    elif op == "tool":
+        name = str(body.get("tool") or "").strip()
+        if not name or not isinstance(args, dict):
+            return 400, {"ok": False, "error": "A request names a tool and gives it an input object."}
+        if name == "custom_tools":
+            return 403, {"ok": False, "error": "A custom tool reaches other custom tools another way."}
+    else:
+        return 400, {"ok": False, "error": f"Unknown request {op!r}."}
     try:
         timeout = max(1.0, min(float(body.get("timeout_s") or 60), MAX_WAIT_S))
     except (TypeError, ValueError):

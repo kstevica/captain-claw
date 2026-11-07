@@ -391,8 +391,20 @@ def parse_manifest(raw: Any, folder: Path | None = None, *, slug: str | None = N
         raise _bad("'network' must be true or false.")
     from captain_claw.flight_deck import external_tool_uses as uses_policy
 
+    def custom_use(entry: dict) -> dict:
+        other = entry.get("custom_tool")
+        if not isinstance(other, str) or not _SLUG_RE.match(other.strip()) or set(entry) - {"custom_tool", "why"}:
+            raise uses_policy.UsesError("each use names a 'tool' (one of the agent's tools) or a 'custom_tool' "
+                                        "(another of your custom tools, by its name).")
+        if other.strip() == name:
+            raise uses_policy.UsesError("a tool can't use itself.")
+        why = entry.get("why")
+        if not isinstance(why, str) or not 1 <= len(why.strip()) <= 200:
+            raise uses_policy.UsesError(f"use of {other!r}: 'why' must say in 1–200 characters why the tool needs it.")
+        return {"custom_tool": other.strip(), "why": why.strip()}
+
     try:
-        uses = uses_policy.parse_uses(raw.get("uses"))
+        uses = uses_policy.parse_uses(raw.get("uses"), parse_other=custom_use)
     except uses_policy.UsesError as exc:
         raise _bad(f"'uses': {exc}") from None
     return Manifest(
@@ -731,6 +743,7 @@ _last_sweep = 0.0
 
 
 def reset_for_tests() -> None:
+    _RUNS.clear()
     _IN_USE.clear()
     _SLOTS.clear()
     _PUBLISHING.clear()
@@ -856,6 +869,8 @@ class CallContext:
     manifest: Manifest
     deadline: float      # time.monotonic() when the run's time is up
     requests: list[int] = field(default_factory=lambda: [0])  # shared with nested runs
+    depth: int = 1       # 1 for a run an agent started, 2 for a tool it ran, …
+    chain: tuple[tuple[str, str], ...] = ()  # (owner, slug) of the runs above this one
 
     @property
     def owner_runs(self) -> bool:
@@ -880,6 +895,18 @@ class Link:
 
     async def file(self, ctx: CallContext, ref: str) -> Path:
         raise ToolError("no_agent", "This run has no agent to ask.")
+
+    async def custom_tool(self, ctx: CallContext, slug: str, params: dict) -> dict[str, Any]:
+        raise ToolError("no_agent", "This run has no agent to ask.")
+
+
+MAX_DEPTH = 3                      # an agent's run, a tool it runs, and one more
+_RUNS: dict[str, CallContext] = {}  # running calls that can ask for more, by call id
+
+
+def running(call_id: str) -> CallContext | None:
+    """A call that is still running and may run other tools (Phase 7b)."""
+    return _RUNS.get(str(call_id or ""))
 
 
 def _refuse(message: str) -> dict[str, Any]:
@@ -911,7 +938,7 @@ async def _answer(ctx: CallContext, link: Link | None, req: dict) -> dict[str, A
     from captain_claw.flight_deck import external_tool_uses as uses_policy
 
     op = req.get("op")
-    if op not in ("tool", "file"):
+    if op not in ("tool", "file", "custom_tool"):
         return _refuse(f"Flight Deck doesn't know the request {op!r}.")
     if link is None:
         return _refuse("This run has no agent to ask.")
@@ -934,6 +961,17 @@ async def _answer(ctx: CallContext, link: Link | None, req: dict) -> dict[str, A
             if len(content) > MAX_ANSWER:
                 content = content[:MAX_ANSWER] + f"\n… (cut: {len(content)} characters in all)"
             return {"ok": bool(reply.get("ok")), "content": content, "error": reply.get("error") or None}
+        if op == "custom_tool":
+            name = str(req.get("name") or "").strip()
+            if not any(u.get("custom_tool") == name for u in ctx.manifest.uses):
+                return _refuse(f"{name} isn't in this tool's uses (tool.json): it can only run the custom tools it "
+                               "declared.")
+            params = req.get("input")
+            if not isinstance(params, dict):
+                return _refuse(f"The input for {name} must be an object.")
+            reply = await asyncio.wait_for(link.custom_tool(ctx, name, _mark_files(ctx, params)), left)
+            return {"ok": bool(reply.get("ok")), "output": reply.get("output"),
+                    "files": [str(f) for f in reply.get("files") or []], "error": reply.get("error") or None}
         # op == "file": a file from the person's folders, brought into this run.
         if not any(u.get("tool") == "read" for u in ctx.manifest.uses):
             return _refuse('Bringing in your files needs {"tool": "read"} in this tool\'s uses.')
@@ -996,14 +1034,29 @@ class RecordedLink(Link):
             raise ToolError("recorded", msg)
         return _bring_in(ctx, src, Path(ref).name)
 
+    async def custom_tool(self, ctx: CallContext, slug: str, params: dict) -> dict[str, Any]:
+        reply = self._next("custom_tool", slug).get("reply")
+        reply = reply if isinstance(reply, dict) else {"ok": True, "output": reply}
+        return {"ok": bool(reply.get("ok", True)), "output": reply.get("output"), "files": [],
+                "error": reply.get("error")}
+
     def left_over(self) -> str:
         return f"{len(self.calls)} recorded call(s) weren't asked for" if self.calls else ""
 
 
 async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest: Manifest, caller: str,
                        data: Any, *, secret_values: dict[str, str], resolve_file: FileResolver | None,
-                       deliver: Deliver | None, link: Link | None = None) -> dict[str, Any]:
+                       deliver: Deliver | None, link: Link | None = None,
+                       parent: CallContext | None = None) -> dict[str, Any]:
     from jsonschema import Draft202012Validator
+
+    timeout_s = manifest.timeout_s
+    if parent is not None:
+        # Run by another tool: inside its time, below it in the chain.
+        timeout_s = min(timeout_s, int(parent.remaining() - 5))
+        if timeout_s < 1:
+            raise ToolError("no_time", f"The tool that asked for {manifest.title} has no time left to run it.",
+                            status=409)
 
     if manifest.calls_back:
         if IS_WINDOWS:
@@ -1047,26 +1100,34 @@ async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest
                 (call_dir / sub).mkdir(parents=True, exist_ok=True)
             data = _copy_inputs(manifest, data, call_dir / "in", resolve_file)
             env = _tool_env(vdir, call_dir, call_id, manifest, secret_values)
-            cmd = _launch(manifest, venv_python(vdir / ".deps"), [manifest.entry], cpu_s=manifest.timeout_s + 5,
+            cmd = _launch(manifest, venv_python(vdir / ".deps"), [manifest.entry], cpu_s=timeout_s + 5,
                           read_only=[vdir], writable=[call_dir], require=require)
             bridge = None
             if manifest.calls_back:
                 ctx = CallContext(owner=owner, slug=slug, title=manifest.title, version=version, caller=caller,
                                   call_id=call_id, call_dir=call_dir, manifest=manifest,
-                                  deadline=time.monotonic() + manifest.timeout_s)
+                                  deadline=time.monotonic() + timeout_s)
+                if parent is not None:
+                    ctx.requests = parent.requests
+                    ctx.depth = parent.depth + 1
+                    ctx.chain = (*parent.chain, (parent.owner, parent.slug))
+                _RUNS[call_id] = ctx
 
                 async def bridge(req: dict) -> dict:
                     return await _answer(ctx, link, req)
 
-            res = await _run_proc(cmd, cwd=vdir, env=env, timeout=manifest.timeout_s,
-                                  stdin=json.dumps(data, ensure_ascii=False).encode("utf-8"), bridge=bridge)
+            try:
+                res = await _run_proc(cmd, cwd=vdir, env=env, timeout=timeout_s,
+                                      stdin=json.dumps(data, ensure_ascii=False).encode("utf-8"), bridge=bridge)
+            finally:
+                _RUNS.pop(call_id, None)
             base = {"call_id": call_id, "version": version, "seconds": round(res.seconds, 3), "exit_code": res.code}
 
             def failed(kind: str, message: str) -> dict[str, Any]:
                 return {**base, "ok": False, "error": {"kind": kind, "message": message}, "stderr": _tail(res.stderr)}
 
             if res.timed_out:
-                return failed("timeout", f"It ran longer than {manifest.timeout_s} s and was stopped.")
+                return failed("timeout", f"It ran longer than {timeout_s} s and was stopped.")
             if res.too_large:
                 return failed("too_large", f"It printed more than {MAX_STDOUT // 1000} KB; put big results in a file in $XT_OUT.")
             if res.code != 0:
@@ -1125,9 +1186,15 @@ def manifest_of(owner: str, slug: str) -> Manifest | None:
         return None
 
 
+def depends_on(owner: str, slug: str) -> list[str]:
+    """The owner's other tools the live version runs (its custom_tool uses)."""
+    m = manifest_of(owner, slug)
+    return [u["custom_tool"] for u in (m.uses if m else ()) if "custom_tool" in u]
+
+
 async def run_tool(owner: str, slug: str, caller: str, data: Any, *, secret_values: dict[str, str] | None = None,
                    resolve_file: FileResolver | None = None, deliver: Deliver | None = None,
-                   link: Link | None = None) -> dict[str, Any]:
+                   link: Link | None = None, parent: CallContext | None = None) -> dict[str, Any]:
     """Run the live version for *caller*. A tool that ran and failed is a result
     (``ok: False``); something the caller must change raises :class:`ToolError`.
     Who may run it is the caller's business (the routes check it)."""
@@ -1139,7 +1206,7 @@ async def run_tool(owner: str, slug: str, caller: str, data: Any, *, secret_valu
     manifest = load_manifest(vdir, slug=slug)
     result = await _run_version(owner, slug, live["version"], vdir, manifest, caller, data,
                                 secret_values=secret_values or {}, resolve_file=resolve_file, deliver=deliver,
-                                link=link)
+                                link=link, parent=parent)
     record_call(owner, slug, caller, result)
     return result
 

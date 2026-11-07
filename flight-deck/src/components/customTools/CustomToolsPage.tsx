@@ -218,6 +218,11 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
                     </div>
                     {o.description && <p className="mt-2 line-clamp-3 text-xs leading-relaxed text-zinc-400">{o.description}</p>}
                     <DeclaresLine d={o.declares} />
+                    {(o.depends_on || []).some((d) => d.state !== 'added') && (
+                      <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
+                        It runs {(o.depends_on || []).filter((d) => d.state !== 'added').map((d) => d.title).join(', ')} too: add {(o.depends_on || []).filter((d) => d.state !== 'added').length === 1 ? 'it' : 'them'} from Details.
+                      </p>
+                    )}
                     <div className="mt-3 flex flex-wrap gap-2">
                       <Button variant={o.added ? 'secondary' : 'primary'} icon={o.added ? X : Plus} busy={busy === `${o.owner}/${o.slug}`}
                         onClick={() => addOrRemove(o)}>{o.added ? 'Remove' : 'Add'}</Button>

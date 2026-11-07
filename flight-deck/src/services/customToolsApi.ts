@@ -73,6 +73,26 @@ export interface Manifest {
   network: boolean
   timeout_s: number
   memory_mb: number
+  // Phase 7: what it asks the agent that ran it for.
+  uses?: ToolUse[]
+}
+
+/** One entry of a tool's uses: one of the agent's tools, or another custom tool. */
+export interface ToolUse {
+  tool?: string
+  custom_tool?: string
+  actions?: string[]
+  hosts?: string[]
+  why: string
+}
+
+/** Another of the owner's tools this one runs, and where the viewer stands with it. */
+export interface Dependency {
+  owner: string
+  slug: string
+  title: string
+  live: boolean
+  state: 'yours' | 'added' | 'offered' | 'not_offered'
 }
 
 export interface SecretState { name: string; why: string; set: boolean }
@@ -90,6 +110,7 @@ export interface ToolDetail extends ToolSummary {
   offered?: 'person' | 'everybody' | ''
   declares?: Declares | null
   added?: boolean
+  depends_on?: Dependency[]
 }
 
 export interface Offer extends ToolSummary {
@@ -97,6 +118,7 @@ export interface Offer extends ToolSummary {
   offered: 'person' | 'everybody'
   declares: Declares | null
   added: boolean
+  depends_on?: Dependency[]
 }
 
 export interface RunResult {
@@ -197,6 +219,8 @@ export const customToolsApi = {
   everybody: (slug: string, on: boolean) => api<{ everybody: Sharing['everybody'] }>(`${base}/${slug}/everybody`, json('PUT', { on })),
   usage: (slug: string) => api<Usage>(`${base}/${slug}/usage`),
   add: (owner: string, slug: string) => api<{ added: boolean }>(`${base}/added`, json('POST', { owner, slug })),
+  offerDependencies: (slug: string) =>
+    api<{ offered: string[]; people: number; everybody: boolean }>(`${base}/${slug}/offer-dependencies`, json('POST', {})),
   unadd: (owner: string, slug: string) =>
     api<{ added: boolean }>(`${base}/added?owner=${encodeURIComponent(owner)}&slug=${encodeURIComponent(slug)}`, { method: 'DELETE' }),
   approvals: () => api<{ approvals: Approval[]; needs_approval: boolean }>(`${base}/approvals`),

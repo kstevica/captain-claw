@@ -99,7 +99,8 @@ class CustomToolsTool(Tool):
                 return await self._describe(str(kwargs.get("tool") or ""))
             if action == "run":
                 return await self._run(str(kwargs.get("tool") or ""), kwargs.get("input"),
-                                       agent=kwargs.get("_agent"), session_id=str(kwargs.get("_session_id") or ""))
+                                       agent=kwargs.get("_agent"), session_id=str(kwargs.get("_session_id") or ""),
+                                       via=str(kwargs.get("_xt_via") or ""), raw=bool(kwargs.get("_xt_raw")))
             if action in ("build", "improve"):
                 return await self._make(action, kwargs)
             if action == "propose":
@@ -208,7 +209,11 @@ class CustomToolsTool(Tool):
                          + ". Run it from here and it does; nothing else is needed from you.")
         return ToolResult(content="\n".join(lines))
 
-    async def _run(self, tool: str, data_in: Any, *, agent: Any = None, session_id: str = "") -> ToolResult:
+    async def _run(self, tool: str, data_in: Any, *, agent: Any = None, session_id: str = "", via: str = "",
+                   raw: bool = False) -> ToolResult:
+        """Run a tool. *via* and *raw* are for a custom tool running another
+        (Phase 7b, custom_tool_callbacks): the run that asked, and Flight Deck's
+        result as JSON for it rather than words for the model."""
         if not tool.strip():
             return ToolResult(success=False, error="Name the tool: custom_tools action=run tool=<name> input={...}.")
         if data_in is None:
@@ -227,11 +232,14 @@ class CustomToolsTool(Tool):
             cb = custom_tool_callbacks.open_wait(agent, session_id, tool=tool)
         try:
             status, data = await custom_tools_client.call(
-                "POST", "run", {"tool": tool, "input": data_in, **({"callback": cb} if cb else {})})
+                "POST", "run", {"tool": tool, "input": data_in, **({"callback": cb} if cb else {}),
+                                **({"via": via} if via else {})})
         finally:
             custom_tool_callbacks.close_wait(cb)
         if (bad := _refused(status, data)) is not None:
             return bad
+        if raw:
+            return ToolResult(content=json.dumps(data, ensure_ascii=False))
         if not data.get("ok"):
             err = data.get("error") or {}
             text = f"{tool} failed ({err.get('kind')}): {err.get('message')}"
