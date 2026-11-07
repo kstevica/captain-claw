@@ -4,9 +4,6 @@ import { api } from './fileLibraryApi'
 // (captain.ask) or an agent's (its ask_user tool). Every signed-in tab waits on
 // GET /fd/asks and shows the first open one (components/common/PersonAsks.tsx).
 
-/** Brings a question back after "Later" (the bell sends it). */
-export const SHOW_ASKS_EVENT = 'fd:person-asks'
-
 export interface AskQuestion {
   id: string
   question: string

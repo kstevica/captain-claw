@@ -112,13 +112,6 @@ async def _runner(request: Request):
     return Runner(owner, caller.slug, False)
 
 
-def _agent_name(slug: str) -> str:
-    from captain_claw.flight_deck import server as srv
-
-    entry = srv._load_process_registry().get(slug) if slug else None
-    return str((entry or {}).get("name") or slug or "Your agent")
-
-
 @agent_router.post("")
 async def agent_ask(body: AgentAskBody, request: Request) -> dict[str, Any]:
     """Ask the person this turn is for; their answer, or ``{"pending": id}``."""
@@ -133,7 +126,9 @@ async def agent_ask(body: AgentAskBody, request: Request) -> dict[str, Any]:
                          "open: ask in your reply instead."}
     try:
         questions = asks.check_questions(body.questions)
-        name = _agent_name(runner.agent)
+        from captain_claw.flight_deck.agent_names import display_name
+
+        name = await display_name(runner.agent, runner.user_id)
         a = await asks.open_ask(runner.user_id, source="agent", title=name, agent_name=name,
                                 questions=questions, wait_s=body.wait_s, ask_id=body.ask_id)
     except asks.AskError as exc:

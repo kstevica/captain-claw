@@ -215,3 +215,28 @@ async def test_a_question_waits_in_the_bell_until_it_is_answered(deck, as_agent)
         await agent.post("/fd/asks/agent/follow", json={"id": first["pending"], "wait": 1})
     rows = [n for n in await deck.db.list_notifications(uid) if n.get("ref_type") == asks.BELL_REF]
     assert rows[0].get("resolved")
+
+
+async def test_the_question_carries_the_agents_name_as_people_call_it(deck, as_agent, monkeypatch):
+    """Not the slug: the person's own rename (their agent card's name), else
+    the owner's (what a member sees it called), else the registry's name."""
+    import json
+
+    from captain_claw.flight_deck import agent_names
+    from captain_claw.flight_deck import server as srv
+
+    owner, member = deck.user["id"], deck.other["id"]
+    registry = {"helper": {"owner": owner, "name": "helper"}}
+    monkeypatch.setattr(srv, "_load_process_registry", lambda: registry)
+    assert await agent_names.display_name("helper", owner) == "helper"
+    await deck.db.set_settings(owner, {agent_names.NAMES_SETTING: json.dumps({"helper": "Haiku"})})
+    as_agent["owner"] = owner
+    async with _client() as agent:
+        first = (await agent.post("/fd/asks/agent", json={**ONE, "wait": 0})).json()
+    q = asks.open_for(owner)[0]
+    assert q["id"] == first["pending"] and q["title"] == "Haiku" and q["agent_name"] == "Haiku"
+    # A member sees the owner's name for it, unless they renamed it themselves.
+    assert await agent_names.display_name("helper", member) == "Haiku"
+    await deck.db.set_settings(member, {agent_names.NAMES_SETTING: json.dumps({"helper": "Research buddy"})})
+    assert await agent_names.display_name("helper", member) == "Research buddy"
+    assert await agent_names.display_names(owner, ["helper", "gone"]) == {"helper": "Haiku", "gone": "gone"}
