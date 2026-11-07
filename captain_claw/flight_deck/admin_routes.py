@@ -457,6 +457,10 @@ class UpdateConfigRequest(BaseModel):
     show_powered_by: bool | None = None
     # Idle process agents are put to sleep after this many minutes (0 = never).
     agent_idle_stop_minutes: int | None = None
+    # Custom tools (external_tools.py): on for this deck, and whether sharing one
+    # with everybody waits for an admin.
+    external_tools_enabled: bool | None = None
+    external_tools_everybody_approval: bool | None = None
 
 
 class ProviderKeysRequest(BaseModel):
@@ -484,6 +488,11 @@ SYSTEM_CONFIG_DEFAULTS = {
     # Agent controller (agent_idle): a process agent idle this many minutes is
     # put to sleep to free its memory, and wakes when needed. 0 = never.
     "agent_idle_stop_minutes": 0,
+    # Custom tools: Python programs Crew writes and Flight Deck runs for agents
+    # (external_tools.py). Off until an admin turns them on; a tool shared with
+    # everybody waits for an admin's approval unless this is turned off.
+    "external_tools_enabled": False,
+    "external_tools_everybody_approval": True,
 }
 
 WAITLIST_COHORT_MAX = 60

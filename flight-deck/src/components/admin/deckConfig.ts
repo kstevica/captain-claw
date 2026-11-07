@@ -34,6 +34,10 @@ export interface SystemConfig {
   show_powered_by: boolean
   // A process agent idle this many minutes is put to sleep (0 = never).
   agent_idle_stop_minutes: number
+  // Custom tools (customTools.ts): on for this deck, and whether a tool shared
+  // with everybody waits for an admin.
+  external_tools_enabled: boolean
+  external_tools_everybody_approval: boolean
 }
 
 export const CONFIG_DEFAULTS: SystemConfig = {
@@ -41,6 +45,7 @@ export const CONFIG_DEFAULTS: SystemConfig = {
   waitlist_enabled: true, waitlist_cohort: '',
   instance_name: 'Captain', instance_description: 'Agent Management Console',
   show_powered_by: true, agent_idle_stop_minutes: 0,
+  external_tools_enabled: false, external_tools_everybody_approval: true,
 }
 
 // What applicants join: the waitlist name an admin set, else the instance name.

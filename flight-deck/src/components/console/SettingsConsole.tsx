@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react'
-import { Settings2, ClipboardList, MessageSquare, Boxes, Save } from 'lucide-react'
+import { Settings2, ClipboardList, MessageSquare, Boxes, Save, Wrench } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
 import { useConsoleStore } from '../../stores/consoleStore'
 import { BrandingAdmin } from '../admin/BrandingAdmin'
 import { Switch } from '../admin/Switch'
 import { IdleAgentsSetting, IDLE_AGENTS_HINT, IDLE_AGENTS_TITLE } from '../admin/IdleAgentsSetting'
 import { DeckProfileDefaults } from '../profile/DeckProfileDefaults'
+import {
+  CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE,
+} from '../admin/customTools'
 import {
   CONFIG_DEFAULTS, fetchConfig, saveConfig, waitlistName, type KioskMode, type SystemConfig,
 } from '../admin/deckConfig'
@@ -182,6 +185,25 @@ export function SettingsConsole() {
             onSave={(m) => save('idle', { agent_idle_stop_minutes: m })}
           />
         </SettingRow>
+      </Card>
+
+      <Card icon={Wrench} title={CUSTOM_TOOLS_TITLE} bodyClassName="divide-y divide-zinc-800/80 px-5 py-4">
+        <SettingRow title={CUSTOM_TOOLS_TITLE} hint={CUSTOM_TOOLS_HINT}>
+          <Switch
+            on={config.external_tools_enabled}
+            disabled={busy === 'xtools'}
+            label={CUSTOM_TOOLS_TITLE}
+            onToggle={() => save('xtools', { external_tools_enabled: !config.external_tools_enabled })}
+          />
+        </SettingRow>
+        {accounts && <SettingRow title={EVERYBODY_APPROVAL_TITLE} hint={EVERYBODY_APPROVAL_HINT}>
+          <Switch
+            on={config.external_tools_everybody_approval}
+            disabled={busy === 'xtools-approval'}
+            label={EVERYBODY_APPROVAL_TITLE}
+            onToggle={() => save('xtools-approval', { external_tools_everybody_approval: !config.external_tools_everybody_approval })}
+          />
+        </SettingRow>}
       </Card>
 
       {/* What every user's agents know about the company — loads on its own. */}

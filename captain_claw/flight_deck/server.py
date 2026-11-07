@@ -1841,6 +1841,7 @@ from captain_claw.flight_deck import (
 from captain_claw.flight_deck import crew_runner
 from captain_claw.flight_deck.agent_forge import router as agent_forge_router
 from captain_claw.flight_deck.crew_routes import router as crew_router
+from captain_claw.flight_deck.external_tools_routes import router as external_tools_router
 from captain_claw.flight_deck.agent_skills import router as agent_skills_router
 from captain_claw.flight_deck import (
     agent_exam,
@@ -1898,6 +1899,7 @@ app.include_router(deep_memory_router)
 app.include_router(hosting_router)
 app.include_router(code_router)
 app.include_router(crew_router)
+app.include_router(external_tools_router)
 app.include_router(agent_forge_router)
 app.include_router(queue_router)
 app.include_router(google_oauth_router)
