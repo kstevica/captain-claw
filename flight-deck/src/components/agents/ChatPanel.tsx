@@ -1023,7 +1023,7 @@ function ChatContent({
               liveTurnUsage={live ? session.liveTurnUsage ?? null : null}
             />
           ) : (
-            <MessageBubble key={grp.items[0].id} message={grp.items[0]} sourceName={session.containerName} agentId={session.containerId} large={simple} />
+            <MessageBubble key={grp.items[0].id} message={grp.items[0]} sourceName={session.containerName} agentId={session.containerId} large={simple} panels={!simple} />
           )
         })}
 
@@ -2015,7 +2015,14 @@ function HeldBubble({ held, next, agentName, large, canInsert, onInsert, onCance
   )
 }
 
-const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId, large = false }: { message: ChatMessage; sourceName?: string; agentId?: string; large?: boolean }) {
+// A message's small actions appear on hover. Where there is no hover (a phone, a tablet), they stay shown,
+// and get a finger-sized hit area.
+const TOUCH_SHOWN = '[@media(hover:none)]:opacity-100'
+const TOUCH_ROOM = '[@media(hover:none)]:p-1.5'
+
+// `panels`: Pin and Add to shared clipboard save to the Pinned and Clipboard panels, which only the full
+// layout has, so the simple layout (and the kiosk) leaves them out rather than save what can't be seen.
+const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId, large = false, panels = true }: { message: ChatMessage; sourceName?: string; agentId?: string; large?: boolean; panels?: boolean }) {
   const bodyText = large ? 'text-base leading-relaxed' : 'text-sm'
   const [toolExpanded, setToolExpanded] = useState(false)
   const [lessonFrom, setLessonFrom] = useState<{ said: string; reply: string } | null>(null)
@@ -2100,42 +2107,45 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     addClipEntry(message.content || '', sourceName || 'Agent')
   }, [addClipEntry, message.content, sourceName])
 
-  // Action buttons (copy + pin + clipboard + forward)
+  // Action buttons (copy + pin + clipboard + forward). A hover shows them; a touch screen has none
+  // (group-hover applies only where hover exists), so there they stay shown, with room for a finger.
   const actionButtons = (align: 'left' | 'right') => (
-    <div className={`flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity ${
+    <div className={`flex items-center gap-0.5 opacity-0 group-hover:opacity-100 ${TOUCH_SHOWN} transition-opacity ${
       align === 'right' ? 'justify-end' : ''
     }`}>
       <button
         onClick={handleCopy}
-        className="rounded p-0.5 text-zinc-600 hover:bg-zinc-700/50 hover:text-zinc-400"
+        className={`rounded p-0.5 ${TOUCH_ROOM} text-zinc-600 hover:bg-zinc-700/50 hover:text-zinc-400`}
         title="Copy"
       >
         {copied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
       </button>
-      {agentId && !pinned && (
+      {panels && agentId && !pinned && (
         <button
           onClick={handlePin}
-          className="rounded p-0.5 text-zinc-600 hover:bg-zinc-700/50 hover:text-amber-400"
+          className={`rounded p-0.5 ${TOUCH_ROOM} text-zinc-600 hover:bg-zinc-700/50 hover:text-amber-400`}
           title="Pin message"
         >
           <Pin className="h-3 w-3" />
         </button>
       )}
-      {agentId && pinned && (
+      {panels && agentId && pinned && (
         <Pin className="h-3 w-3 text-amber-400 mx-0.5" />
       )}
-      <button
-        onClick={handleClip}
-        className="rounded p-0.5 text-zinc-600 hover:bg-zinc-700/50 hover:text-cyan-400"
-        title="Add to shared clipboard"
-      >
-        <ClipboardList className="h-3 w-3" />
-      </button>
+      {panels && (
+        <button
+          onClick={handleClip}
+          className={`rounded p-0.5 ${TOUCH_ROOM} text-zinc-600 hover:bg-zinc-700/50 hover:text-cyan-400`}
+          title="Add to shared clipboard"
+        >
+          <ClipboardList className="h-3 w-3" />
+        </button>
+      )}
       {forwardTargets.length > 0 && (
         <div className="relative">
           <button
             onClick={() => setShowForward(!showForward)}
-            className="rounded p-0.5 text-zinc-600 hover:bg-zinc-700/50 hover:text-zinc-400"
+            className={`rounded p-0.5 ${TOUCH_ROOM} text-zinc-600 hover:bg-zinc-700/50 hover:text-zinc-400`}
             title="Send to another agent"
           >
             <Forward className="h-3 w-3" />
@@ -2191,7 +2201,7 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
           )}
           {teachable && !looksLikeLesson(message.content || '') && (
             <button onClick={saveLesson} title={ownAgent ? 'Save as a lesson' : 'Suggest as a lesson to its owner'}
-              className="rounded p-0.5 text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-700/50 hover:text-violet-400 group-hover:opacity-100">
+              className={`rounded p-0.5 ${TOUCH_ROOM} text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-700/50 hover:text-violet-400 group-hover:opacity-100 ${TOUCH_SHOWN}`}>
               <GraduationCap className="h-3 w-3" />
             </button>
           )}
