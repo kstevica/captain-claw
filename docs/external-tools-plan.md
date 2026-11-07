@@ -323,7 +323,25 @@ kiosk reaches it through Settings.
 
 - **Mine**: each tool with status (building, live vN, publish failed), last
   calls, Share, Versions (with Make live), Secrets, Delete. "New tool" opens a
-  short form (what should it do, inputs, outputs) that starts a Crew task.
+  large dialog in two steps (added 2026-11-07, after the user's first look):
+  1. **Describe it**: name, title, and the spec in a text box that fills the
+     dialog (up to 8000 characters).
+  2. **Check it and build**: `POST /fd/external-tools/review`
+     (`external_tool_review.py`) makes one call to the person's own model
+     (balanced, else reason, else fast). The prompt includes the worker contract, how a tool runs
+     (one process per call, nothing kept between calls, files as vfs paths,
+     limits, sandbox, runner's secrets), what agents already do without a tool,
+     and the person's own and added tools. The model answers with a fuller spec,
+     a list of changes with a reason for each, and any overlap with something
+     that already exists. The person
+     switches between the checked spec and their own, edits it, picks the
+     coding agent and builds. Nothing is kept. A check that fails (no model,
+     an error, no spec in the answer) says why, and the person can still build
+     what they wrote. Escape and clicks outside don't close the dialog while it
+     holds text.
+
+  In the kiosk dialog the page takes the dialog's full width (two or three
+  columns of cards, by width).
 - **Shared with me** and **Catalog** (everybody): Add / Remove, what it declares,
   who made it.
 - **Tool page**: description, input and output schema as a form, "Try it" (runs
