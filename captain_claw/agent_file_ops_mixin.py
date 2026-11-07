@@ -10,10 +10,72 @@ from typing import Any
 
 from captain_claw.llm import Message
 from captain_claw.logging import get_logger
+from captain_claw.tools.write import KEEP_EXISTING_ERROR
 
 log = get_logger(__name__)
 
 _STRUCTURED_RESULT_MARKER = "# captain-claw: structured-result-protocol-v1"
+
+
+# ── What the person asked for in THIS message ────────────────────────
+# A turn's input can carry text that is not the person's words for this
+# message: a conversation forwarded from another agent ("--- Context from
+# "X" --- … --- End of context ---"), a pipeline's upstream output, the
+# previous reply merged in for a clarification follow-up, step results,
+# internal context, quoted text. A file path in there was asked for by
+# someone else, or earlier, and must never steer an auto-save now.
+
+# "--- <words> ---" on a line of its own opens a framed block; "--- End … ---"
+# closes it. Without a closing line the block runs to the end of the text.
+# Bare rules ("---", "-------") and YAML front matter carry no words: kept.
+_FRAME_HEADER_RE = re.compile(r"^[ \t]*-{3,}[ \t]+(.*?[A-Za-z].*?)[ \t]+-{3,}[ \t]*$")
+_FRAME_END_RE = re.compile(r"(?i)^end\b")
+# Everything after these markers is merged-in context, not this message.
+_MERGED_CONTEXT_MARKERS = (
+    "Context from the previous assistant response:",  # clarification merge
+    "Results from previous steps:",                   # orchestrator step outputs
+)
+# The clarification merge's fallback puts the earlier request first and the
+# person's new words between these two.
+_CLARIFICATION_REPLY_RE = re.compile(
+    r"Clarifications/preferences from user:[ \t]*\n(.*?)"
+    r"(?:\n[ \t]*\n[ \t]*Execute the full original request\b|\Z)",
+    re.S,
+)
+_INTERNAL_CONTEXT_RE = re.compile(
+    r"\[INTERNAL CONTEXT.*?(?:\[END INTERNAL CONTEXT\]|\Z)", re.S | re.I)
+_FENCED_RE = re.compile(r"```.*?(?:```|\Z)", re.S)
+_BLOCKQUOTE_LINE_RE = re.compile(r"(?m)^[ \t]*>.*$")
+
+
+def own_request_words(text: str) -> str:
+    """The person's own words in a turn's input, with forwarded, merged,
+    internal and quoted context taken out (see the note above)."""
+    t = str(text or "")
+    if not t.strip():
+        return ""
+    t = _INTERNAL_CONTEXT_RE.sub(" ", t)
+    reply = _CLARIFICATION_REPLY_RE.search(t)
+    if reply:
+        t = reply.group(1)
+    for marker in _MERGED_CONTEXT_MARKERS:
+        idx = t.find(marker)
+        if idx >= 0:
+            t = t[:idx]
+    kept: list[str] = []
+    inside = False
+    for line in t.splitlines():
+        header = _FRAME_HEADER_RE.match(line)
+        if header:
+            inside = not _FRAME_END_RE.match(header.group(1).strip())
+            continue
+        if not inside:
+            kept.append(line)
+    t = "\n".join(kept)
+    t = _FENCED_RE.sub(" ", t)
+    t = _BLOCKQUOTE_LINE_RE.sub(" ", t)
+    return t.strip()
+
 
 class AgentFileOpsMixin:
     @staticmethod
@@ -770,20 +832,32 @@ class AgentFileOpsMixin:
         session_policy: dict[str, Any] | None = None,
         task_policy: dict[str, Any] | None = None,
         session_id_override: str | None = None,
+        keep_existing: bool = False,
     ) -> dict[str, Any]:
-        """Write file, verify it exists, and retry once when not persisted."""
+        """Write file, verify it exists, and retry once when not persisted.
+
+        With *keep_existing* the write tool refuses when the target file is
+        already there (resolved exactly as the write would land), and the
+        result carries ``kept_existing=True``: an auto-save never replaces a
+        file it did not make. The refusal is not retried.
+        """
         attempts = max(1, int(max_attempts))
         last_output = ""
         last_written_path: Path | None = None
 
         for attempt in range(1, attempts + 1):
-            write_args = {"path": path, "content": content}
-            write_args_for_log = {
+            write_args: dict[str, Any] = {"path": path, "content": content}
+            write_args_for_log: dict[str, Any] = {
                 "path": path,
                 "content_chars": len(content),
                 "append": False,
                 "attempt": attempt,
             }
+            # First attempt only: a retry follows a write that went through
+            # (the file wasn't there then), so what it finds is this write's.
+            if keep_existing and attempt == 1:
+                write_args["_keep_existing"] = True
+                write_args_for_log["keep_existing"] = True
             try:
                 result = await self._execute_tool_with_guard(
                     name="write",
@@ -799,6 +873,16 @@ class AgentFileOpsMixin:
                 result = None
                 tool_output = f"Error: {str(e)}"
 
+            kept_existing = bool(
+                write_args.get("_keep_existing")
+                and result is not None
+                and not result.success
+                and getattr(result, "error", None) == KEEP_EXISTING_ERROR
+            )
+            if kept_existing:
+                # "Error:" first, so no turn gate counts it as a write.
+                tool_output = f"Error: {result.content}"
+
             self._add_session_message(
                 role="tool",
                 content=tool_output,
@@ -806,6 +890,15 @@ class AgentFileOpsMixin:
                 tool_arguments=write_args_for_log,
             )
             self._emit_tool_output("write", write_args_for_log, tool_output)
+
+            if kept_existing:
+                return {
+                    "success": False,
+                    "kept_existing": True,
+                    "attempts": attempt,
+                    "output": tool_output,
+                    "path": path,
+                }
 
             parsed_written = self._parse_written_path_from_tool_output(tool_output)
             if parsed_written is not None:
@@ -860,8 +953,16 @@ class AgentFileOpsMixin:
         turn_usage: dict[str, int],
         session_policy: dict[str, Any] | None = None,
         task_policy: dict[str, Any] | None = None,
+        request_text: str | None = None,
     ) -> str:
-        """Auto-run write tool when user explicitly requested file output."""
+        """Auto-run write tool when user explicitly requested file output.
+
+        *request_text* is the person's message for this turn as they sent it
+        (``user_input`` may be the effective input, with the previous reply
+        merged in for a clarification follow-up). Only a file the person asks
+        for in this message's own words counts (:func:`own_request_words`), and
+        an auto-save never replaces a file that is already there.
+        """
         text = (output_text or "").strip()
         if self._is_explicit_script_request(user_input):
             return await self._maybe_auto_script_requested_output(
@@ -872,21 +973,23 @@ class AgentFileOpsMixin:
                 session_policy=session_policy,
                 task_policy=task_policy,
             )
-        requested_paths = self._extract_requested_write_paths(user_input)
+        asked = own_request_words(user_input if request_text is None else request_text)
+        requested_paths = self._extract_requested_write_paths(asked)
         requested_path = requested_paths[-1] if requested_paths else None
-        explicit_file_request = self._is_explicit_file_save_request(user_input)
+        explicit_file_request = self._is_explicit_file_save_request(asked)
 
         file_blocks = self._extract_named_file_blocks(text)
         if (
             not file_blocks
             and explicit_file_request
-            and re.search(r"\b(all|those)\s+files\b", user_input, flags=re.IGNORECASE)
+            and re.search(r"\b(all|those)\s+files\b", asked, flags=re.IGNORECASE)
         ):
             file_blocks = self._collect_recent_file_blocks_from_session()
 
         if file_blocks:
             saved_entries: list[str] = []
             failed_entries: list[str] = []
+            kept_entries: list[str] = []
             for raw_path, raw_content in file_blocks:
                 target_path = raw_path
                 if "/" not in raw_path and "\\" not in raw_path:
@@ -899,18 +1002,29 @@ class AgentFileOpsMixin:
                     max_attempts=2,
                     session_policy=session_policy,
                     task_policy=task_policy,
+                    keep_existing=True,
                 )
                 tool_output = str(write_state.get("output", "")).strip()
                 attempts = int(write_state.get("attempts", 1) or 1)
                 if bool(write_state.get("success", False)):
                     retry_note = " (retried)" if attempts > 1 else ""
                     saved_entries.append(f"{raw_path}: {tool_output}{retry_note}")
+                elif write_state.get("kept_existing"):
+                    kept_entries.append(raw_path)
                 else:
                     failed_entries.append(f"{raw_path}: {tool_output}")
 
+            kept_note = ""
+            if kept_entries:
+                kept_note = (
+                    "\n\nAlready there, left as they were (not saved over):\n"
+                    + "\n".join(f"- {entry}" for entry in kept_entries)
+                )
             if saved_entries and not failed_entries:
                 summary = "\n".join(f"- {entry}" for entry in saved_entries)
-                return f"{text}\n\nSaved {len(saved_entries)} files:\n{summary}".strip()
+                return (
+                    f"{text}\n\nSaved {len(saved_entries)} files:\n{summary}{kept_note}"
+                ).strip()
             if saved_entries or failed_entries:
                 ok_summary = "\n".join(f"- {entry}" for entry in saved_entries) or "- (none)"
                 fail_summary = "\n".join(f"- {entry}" for entry in failed_entries) or "- (none)"
@@ -918,9 +1032,9 @@ class AgentFileOpsMixin:
                     f"{text}\n\n"
                     f"Auto file-save summary:\n"
                     f"Saved ({len(saved_entries)}):\n{ok_summary}\n"
-                    f"Failed ({len(failed_entries)}):\n{fail_summary}"
+                    f"Failed ({len(failed_entries)}):\n{fail_summary}{kept_note}"
                 ).strip()
-            return text
+            return f"{text}{kept_note}".strip()
 
         if not requested_path:
             return text
@@ -935,10 +1049,18 @@ class AgentFileOpsMixin:
             max_attempts=2,
             session_policy=session_policy,
             task_policy=task_policy,
+            keep_existing=True,
         )
         tool_output = str(write_state.get("output", "")).strip()
         if bool(write_state.get("success", False)):
             return f"{text}\n\n{tool_output}".strip()
+        if write_state.get("kept_existing"):
+            # The file is someone's earlier work: never replaced by a reply.
+            return (
+                f"{text}\n\n"
+                f"Note: '{requested_path}' already exists, so it was left as it "
+                f"was — this reply was not saved over it."
+            ).strip()
         return (
             f"{text}\n\n"
             f"Note: requested file save to '{requested_path}' failed.\n"
