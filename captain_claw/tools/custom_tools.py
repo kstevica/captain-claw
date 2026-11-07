@@ -11,6 +11,7 @@ the member's own tools with the member's secrets and files.
 from __future__ import annotations
 
 import json
+import secrets
 from typing import Any
 
 import httpx
@@ -86,7 +87,9 @@ class CustomToolsTool(Tool):
         },
         "required": ["action"],
     }
-    timeout_seconds = 380.0
+    # A run that asks the person can wait up to an hour for the answer (Phase 7d);
+    # the run itself is followed in short requests, so this is only the outer cap.
+    timeout_seconds = 3_960.0
 
     async def execute(self, action: str = "", **kwargs: Any) -> ToolResult:
         if not custom_tools_client.under_flight_deck():
@@ -100,7 +103,8 @@ class CustomToolsTool(Tool):
             if action == "run":
                 return await self._run(str(kwargs.get("tool") or ""), kwargs.get("input"),
                                        agent=kwargs.get("_agent"), session_id=str(kwargs.get("_session_id") or ""),
-                                       via=str(kwargs.get("_xt_via") or ""), raw=bool(kwargs.get("_xt_raw")))
+                                       via=str(kwargs.get("_xt_via") or ""), raw=bool(kwargs.get("_xt_raw")),
+                                       stream=kwargs.get("_stream_callback"))
             if action in ("build", "improve"):
                 return await self._make(action, kwargs)
             if action == "propose":
@@ -209,8 +213,22 @@ class CustomToolsTool(Tool):
                          + ". Run it from here and it does; nothing else is needed from you.")
         return ToolResult(content="\n".join(lines))
 
+    async def _follow(self, status: int, data: Any, stream: Any) -> tuple[int, Any]:
+        """A run still going (it may be waiting for the person's answer, Phase
+        7d): follow it in short requests until it ends. Stopping the turn stops it."""
+        told = False
+        while status == 200 and isinstance(data, dict) and data.get("pending"):
+            if data.get("state") == "asking" and not told and callable(stream):
+                told = True
+                try:
+                    stream("The tool is waiting for your answer in Flight Deck…\n")
+                except Exception:  # noqa: BLE001
+                    pass
+            status, data = await custom_tools_client.call("POST", "follow", {"run": str(data["pending"]), "wait": 25})
+        return status, data
+
     async def _run(self, tool: str, data_in: Any, *, agent: Any = None, session_id: str = "", via: str = "",
-                   raw: bool = False) -> ToolResult:
+                   raw: bool = False, stream: Any = None) -> ToolResult:
         """Run a tool. *via* and *raw* are for a custom tool running another
         (Phase 7b, custom_tool_callbacks): the run that asked, and Flight Deck's
         result as JSON for it rather than words for the model."""
@@ -230,12 +248,24 @@ class CustomToolsTool(Tool):
         cb = ""
         if agent is not None and hasattr(agent, "_execute_tool_with_guard"):
             cb = custom_tool_callbacks.open_wait(agent, session_id, tool=tool)
+        origin = getattr(agent, "_turn_source", None)
+        origin = str(origin[0]) if isinstance(origin, tuple) and origin else ""
+        follow_id = "xr_" + secrets.token_hex(8)
+        finished = False
         try:
             status, data = await custom_tools_client.call(
                 "POST", "run", {"tool": tool, "input": data_in, **({"callback": cb} if cb else {}),
-                                **({"via": via} if via else {})})
+                                **({"via": via} if via else {}), "origin": origin, "wait": 20,
+                                "follow_id": follow_id})
+            status, data = await self._follow(status, data, stream)
+            finished = True
         finally:
             custom_tool_callbacks.close_wait(cb)
+            if not finished:  # the turn was stopped (or the line failed): so is the run
+                try:
+                    await custom_tools_client.call("POST", "stop", {"run": follow_id})
+                except Exception:  # noqa: BLE001
+                    pass
         if (bad := _refused(status, data)) is not None:
             return bad
         if raw:

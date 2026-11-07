@@ -168,7 +168,7 @@ export function ToolSheet({ slug, owner, mine, onClose, onChanged, onDeleted }: 
           <div className="flex flex-wrap items-center gap-2">{statusPill(tool)}</div>
           {tool.description && <p className="mt-2 text-sm leading-relaxed text-zinc-400">{tool.description}</p>}
           {m && <DeclaresLine d={{ version: tool.live?.version || '', network: m.network, secrets: m.secrets.map((s) => s.name),
-            timeout_s: m.timeout_s, memory_mb: m.memory_mb, ...usesWords(m.uses) }} />}
+            timeout_s: m.timeout_s, memory_mb: m.memory_mb, ...usesWords(m.uses), asks: !!m.asks }} />}
           {m && (m.uses || []).length > 0 && (
             <ul className="mt-2 space-y-0.5 text-[11px] text-zinc-500">
               {(m.uses || []).map((u, i) => (

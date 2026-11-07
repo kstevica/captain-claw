@@ -1,4 +1,4 @@
-import { Bot, Globe, KeyRound, Timer, Workflow } from 'lucide-react'
+import { Bot, Globe, KeyRound, MessageCircleQuestion, Timer, Workflow } from 'lucide-react'
 import type { Declares, ToolSummary, ToolUse } from '../../services/customToolsApi'
 import { Pill } from '../console/parts'
 
@@ -31,6 +31,7 @@ export function DeclaresLine({ d }: { d: Declares | null | undefined }) {
       {d.secrets.length > 0 && <Pill icon={KeyRound}>Needs {d.secrets.join(', ')}</Pill>}
       {(d.uses || []).length > 0 && <Pill tone="violet" icon={Bot}>Calls your agent: {(d.uses || []).join(', ')}</Pill>}
       {(d.runs || []).length > 0 && <Pill icon={Workflow}>Runs {(d.runs || []).join(', ')}</Pill>}
+      {d.asks && <Pill tone="violet" icon={MessageCircleQuestion}>Asks you questions</Pill>}
       <Pill icon={Timer}>Up to {d.timeout_s} s</Pill>
     </div>
   )

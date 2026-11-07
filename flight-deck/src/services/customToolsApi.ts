@@ -44,6 +44,32 @@ export interface Declares {
   // Phase 7: the agent's tools it asks for ("web_fetch (api.example.com)"), and other tools it runs.
   uses?: string[]
   runs?: string[]
+  asks?: boolean
+}
+
+/** A custom tool's question to the person running it (Phase 7d). */
+export interface AskQuestion {
+  id: string
+  question: string
+  kind: 'text' | 'choice' | 'multiple' | 'confirm'
+  help?: string
+  optional: boolean
+  choices?: string[]
+  min?: number
+  max?: number
+  lines?: number
+  default?: unknown
+}
+
+export interface OpenAsk {
+  id: string
+  title: string
+  owner_name: string
+  agent_name: string
+  label: string
+  questions: AskQuestion[]
+  created: number
+  seconds_left: number
 }
 
 /** One of the person's own agents, for Try it's "Run as". */
@@ -79,8 +105,9 @@ export interface Manifest {
   network: boolean
   timeout_s: number
   memory_mb: number
-  // Phase 7: what it asks the agent that ran it for.
+  // Phase 7: what it asks the agent that ran it for, and whether it asks the person.
   uses?: ToolUse[]
+  asks?: boolean
 }
 
 /** One entry of a tool's uses: one of the agent's tools, or another custom tool. */
@@ -210,6 +237,10 @@ export const customToolsApi = {
   run: (slug: string, input: Record<string, unknown>, owner?: string, agent?: string) =>
     api<RunResult>(`${base}/${slug}/run${q(owner)}`, json('POST', { input, ...(agent ? { agent } : {}) })),
   agents: () => api<{ agents: MyAgent[] }>(`${base}/agents`),
+  asks: (known: string[], wait: number) =>
+    api<{ asks: OpenAsk[] }>(`${base}/asks?wait=${wait}&known=${encodeURIComponent(known.join(','))}`),
+  answerAsk: (id: string, body: { answers?: Record<string, unknown>; declined?: boolean }) =>
+    api<{ ok: boolean }>(`${base}/asks/${encodeURIComponent(id)}`, json('POST', body)),
   setSecrets: (slug: string, values: Record<string, string>, owner?: string) =>
     api<{ secrets: SecretState[] }>(`${base}/${slug}/secrets${q(owner)}`, json('PUT', { values })),
   publish: (slug: string) => api<PublishState>(`${base}/${slug}/publish`, json('POST', {})),

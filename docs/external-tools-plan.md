@@ -1,7 +1,8 @@
 # External tools — plan
 
 Written 2026-11-06. Status: Phases 0–6 built and merged on 2026-11-07 (#450–#456), the New tool
-spec check too (#457). Phase 7, tools that call the agent, planned 2026-11-07.
+spec check too (#457). Phase 7, tools that call the agent, built 2026-11-07 as four stacked PRs
+(#458–#461) and checked live with a real agent.
 
 ### Settled with the user (2026-11-06)
 
@@ -840,6 +841,35 @@ handles it directly; the agent isn't needed.
   uses and tools it now runs. The New tool check knows a tool can use its
   agent and should prefer that to network access and new secrets. Tests:
   `test_external_tools_run_as.py` (3).
+- **7d (2026-11-07):** `"asks": true` and `captain.ask(...)` (text, choice,
+  multiple with min and max, confirm; one question or a set by id;
+  `captain.Declined`, `captain.NoAnswer`). `external_tool_asks.py` keeps the
+  open questions in memory, rings (a Line item, so the bell and Needs-you) and
+  settles the ring when answered; `GET /fd/external-tools/asks?wait&known`
+  answers at once when the open set differs from what the tab shows, and
+  `POST /fd/external-tools/asks/<id>` takes the answers (checked) or
+  "declined". The run's time is a `RunClock` that stops while a question is
+  open, for the run and every run above it. A tool that only asks needs no
+  agent. The agent sends its turn's origin: a scheduled, flow, autonomous,
+  taskboard, API, link or exam run gets `NoAnswer` at once. The agent runs
+  with `wait` and a `follow_id` it chose, then follows with
+  `/agent/follow`; `/agent/stop` (grant-aware like the rest) ends the run and
+  closes its question, also when the stop comes before the run started; its
+  chat says "The tool is waiting for your answer in Flight Deck…". The
+  dialog (`CustomToolAsks.tsx`, mounted once beside the app, every layout):
+  the questions, time left, whose tool, "Later", "Don't answer", "Send", and
+  the line about never typing passwords; the bell brings a hidden one back.
+  Tests: `test_external_tool_asks.py` (8).
+- **Live check (2026-11-07):** a throwaway deck with a real process agent
+  (Helper, on a stand-in model) and four published tools. Through the agent's
+  own `custom_tools` tool (its `/api/tool`): `fetch-title` asked the agent to
+  `web_fetch` example.com and found the title; `report` ran `total` through the
+  agent and read the file it wrote; `pick` asked twice (one choice, then a set
+  of several choices, yes or no and text) and the dialog opened on the Admin
+  console within seconds, and the tool finished with the answers after 39 s.
+  From the page, Try it on `fetch-title` with Run as Helper went through the
+  agent's hosting slot. The agent's log shows each call; the deck logged no
+  errors.
 
 #### Build order (one PR each)
 
@@ -916,10 +946,12 @@ What Phase 7 adds (planned):
   there says.
 - **UDP** isn't ruled by Landlock: a tool with `"network": false` can still
   send UDP (DNS included). seccomp could close that.
-- **Phase 7 before building:** whether an agent's turn has a wall-clock limit
-  that a tool waiting for a person's answer (up to an hour) would hit; and
-  which actions of the allowed tools reach other people, for
-  `tool_risk._SEND_ACTIONS`.
+- **Phase 7, not tried yet:** a real model choosing to run such a tool in a
+  chat turn (the live check drove the agent's own tool directly); a shared
+  agent's member running one (tested with stand-ins); asking in Telegram,
+  WhatsApp or the phone app (the question waits in Flight Deck); Windows (a
+  tool with `uses` or `asks` is refused there). There is no per-turn time
+  limit to hit; `custom_tools` itself allows 66 minutes for a run that asks.
 
 ## Existing pieces this reuses
 
