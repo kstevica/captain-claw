@@ -199,10 +199,13 @@ export function AgentBackupsDialog({ agents, onClose, onRestored }: {
 export function AgentFilesSigning() {
   const [info, setInfo] = useState<SigningInfo | null>(null)
   useEffect(() => { signingInfo().then(setInfo).catch(() => setInfo(null)) }, [])
-  return info ? <SigningSection info={info} onSaved={setInfo} /> : null
+  // The console's card already says "Agent files": no second heading inside it.
+  return info ? <SigningSection info={info} onSaved={setInfo} untitled /> : null
 }
 
-function SigningSection({ info, onSaved }: { info: SigningInfo; onSaved: (i: SigningInfo) => void }) {
+function SigningSection({ info, onSaved, untitled = false }: {
+  info: SigningInfo; onSaved: (i: SigningInfo) => void; untitled?: boolean
+}) {
   const [trusted, setTrusted] = useState<Trusted[]>(info.trusted)
   const [only, setOnly] = useState(info.require_trusted)
   const [fp, setFp] = useState('')
@@ -228,7 +231,7 @@ function SigningSection({ info, onSaved }: { info: SigningInfo; onSaved: (i: Sig
 
   return (
     <section className="space-y-2">
-      <Title>Signed files</Title>
+      {!untitled && <Title>Signed files</Title>}
       <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-3">
         <p className="flex items-center gap-2 text-xs text-zinc-400"><Fingerprint className="h-4 w-4 text-violet-500" />
           {info.deck} signs every file it exports. Its fingerprint — give it to whoever imports your agents:</p>

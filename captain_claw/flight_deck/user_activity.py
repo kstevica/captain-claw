@@ -4,7 +4,7 @@ The Admin console's Activity page (decks with accounts only). Per user:
 
 * **Typed** — the messages they sent their agents per UTC day, from any
   channel (web, kiosk, Telegram, WhatsApp…), as the daily allowance counted
-  them (``daily_usage``; a free reset an admin grants zeroes that day).
+  them (``daily_usage``, with what a reset zeroed added back: ``typed_before``).
 * **Agents** — the days their agents spent tokens, scheduled work included
   (the spend ledger, ``usage_spend``), so someone whose agents run a weekly
   scan without them typing doesn't look gone.
@@ -14,7 +14,8 @@ The Admin console's Activity page (decks with accounts only). Per user:
   the deck's emails (Ask for feedback, a message from this page) and the ones
   an admin noted they sent another way (WhatsApp, a call). And, for the admin
   looking, their own Gmail: the newest email they sent each person and the
-  newest from them — only dates and subjects, read when asked, never stored.
+  newest from them — only dates and subjects, read when asked, kept in memory
+  for ``MAILBOX_TTL_S`` (10 minutes) and never saved.
 
     GET    /fd/admin/activity                    admin  every user's activity + contacts
     GET    /fd/admin/activity/mailbox            admin  the admin's Gmail, per user

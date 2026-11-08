@@ -11,6 +11,7 @@ import { TeamPackDialog } from './TeamPackDialog'
 import {
   DISCLAIMER_CHOICES,
   createArchetype, updateArchetype, deleteArchetype, deleteTeamArchetype, deleteTeamGroup, generateArchetype, updateTeamArchetype,
+  publishTeamPack,
   type ArchetypeInput,
 } from '../../services/archetypes'
 import { MODES } from '../../services/cognitiveModes'
@@ -63,6 +64,8 @@ export function ArchetypesPage() {
   // The editor: a draft plus the id it saves over (null = a new archetype).
   const [draft, setDraft] = useState<{ input: ArchetypeInput; id: string | null; team?: boolean } | null>(null)
   const [viewing, setViewing] = useState<Archetype | null>(null)
+  // One of the admin's own archetypes, on its way into a company group.
+  const [promoting, setPromoting] = useState<Archetype | null>(null)
   const [forgeOpen, setForgeOpen] = useState(false)
   const [packOpen, setPackOpen] = useState(false)
   const [shareTarget, setShareTarget] = useState<Archetype | null>(null)
@@ -160,7 +163,7 @@ export function ArchetypesPage() {
       <PageHeader
         icon={Library}
         title="Archetypes"
-        description="Ready-made agents: a role, instructions, tools and a model tier. People pick one to start a new agent, so these are what your team can create."
+        description="Ready-made agents people pick to start a new agent: a role, instructions, tools and a model tier. Company archetypes are for everyone on this deck: Generate a group makes them, and any of yours can become one. Until then, yours are only for you."
         actions={<>
           <Button icon={Layers} onClick={() => setPackOpen(true)} disabled={noModels} title={noModels ? 'Create a tier set on Models first.' : 'A new group and family of archetypes, for everyone on this deck'}>Generate a group</Button>
           <Button icon={Wand2} onClick={() => setForgeOpen(true)} disabled={noModels} title={noModels ? 'Create a tier set on Models first — forging uses its model' : 'Draft several archetypes from instructions and documents'}>Forge from documents</Button>
@@ -252,10 +255,19 @@ export function ArchetypesPage() {
               onOpen={() => open(a)}
               onCopy={() => setDraft({ input: copyOf(a), id: null })}
               onShare={accounts ? () => setShareTarget(a) : undefined}
+              onPromote={a.source === 'user' && !a.overrides ? () => setPromoting(a) : undefined}
               onDelete={() => remove(a)}
             />
           ))}
         </div>
+      )}
+
+      {promoting && (
+        <PromoteSheet
+          a={promoting}
+          onClose={() => setPromoting(null)}
+          onDone={() => { setPromoting(null); refreshRegistry() }}
+        />
       )}
 
       {draft && (
@@ -317,12 +329,13 @@ export function ArchetypesPage() {
   )
 }
 
-function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onDelete }: {
+function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onPromote, onDelete }: {
   a: Archetype
   tierLabel: string
   onOpen: () => void
   onCopy: () => void
   onShare?: () => void
+  onPromote?: () => void
   onDelete: () => void
 }) {
   const mine = a.source === 'user' || a.source === 'team'
@@ -354,6 +367,7 @@ function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onDelete }: {
       <div className="flex items-center justify-end gap-0.5 px-3 pb-2.5">
         {mine ? (
           <>
+            {onPromote && <button onClick={onPromote} className={iconBtn} title="Make it a company archetype, for everyone on this deck"><Building2 className="h-4 w-4" /></button>}
             {onShare && a.source === 'user' && <button onClick={onShare} className={iconBtn} title="Share with other users"><Share2 className="h-4 w-4" /></button>}
             <button onClick={onOpen} className={iconBtn} title="Edit"><Pencil className="h-4 w-4" /></button>
             <button onClick={onDelete} className={`${iconBtn} hover:text-red-500`} title={a.overrides ? 'Delete (the built-in comes back)' : 'Delete'}><Trash2 className="h-4 w-4" /></button>
@@ -365,6 +379,71 @@ function ArchetypeCard({ a, tierLabel, onOpen, onCopy, onShare, onDelete }: {
         )}
       </div>
     </div>
+  )
+}
+
+// ── One of yours, made a company archetype ──
+// It joins a company group (an existing one, or a new one named here) through
+// the same publish as Generate a group, and leaves your own archetypes.
+
+const NEW_GROUP = '__new__'
+
+function PromoteSheet({ a, onClose, onDone }: { a: Archetype; onClose: () => void; onDone: () => void }) {
+  const groups = companyShelves()
+  const [group, setGroup] = useState<string>(groups[0]?.id ?? NEW_GROUP)
+  const [label, setLabel] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const ready = group !== NEW_GROUP || !!label.trim()
+
+  const publish = async () => {
+    setBusy(true)
+    setError('')
+    try {
+      const input = toInput(a)
+      await publishTeamPack({
+        group: group === NEW_GROUP ? { label: label.trim() } : { id: group },
+        family: { name: input.family, icon: '', color: '' },
+        archetypes: [{ ...input, archetype_id: input.archetype_id, family: input.family }],
+      })
+      await deleteArchetype(a.id)
+      onDone()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Sheet
+      title="Make it a company archetype"
+      subtitle={a.role}
+      icon={Building2}
+      onClose={onClose}
+      footer={<>
+        <Button variant="ghost" onClick={onClose}>Cancel</Button>
+        <Button variant="primary" icon={Building2} busy={busy} disabled={!ready} onClick={() => { void publish() }}>Publish to everyone</Button>
+      </>}
+    >
+      <div className="space-y-4">
+        <p className="text-sm leading-relaxed text-zinc-400">
+          Everyone on this deck can then start an agent from it, under Company in their New agent picker.
+          It moves out of your own archetypes. Only admins can change it.
+        </p>
+        {error && <Notice tone="red">{error}</Notice>}
+        <Field label="Company group">
+          <select value={group} onChange={(e) => setGroup(e.target.value)} className={inputCls}>
+            {groups.map((g) => <option key={g.id} value={g.id}>{g.label}</option>)}
+            <option value={NEW_GROUP}>A new group</option>
+          </select>
+        </Field>
+        {group === NEW_GROUP && (
+          <Field label="Its name">
+            <input value={label} onChange={(e) => setLabel(e.target.value)} maxLength={40} className={inputCls} autoFocus />
+          </Field>
+        )}
+      </div>
+    </Sheet>
   )
 }
 

@@ -110,7 +110,7 @@ export function InvitesAdmin({ refreshTick, kioskDefault, kioskNote, onOpenCount
   refreshTick: number
   kioskDefault: boolean
   kioskNote: string | null
-  // Invitations not yet accepted, expired ones included.
+  // Invitations still waiting to be used (expired ones left out).
   onOpenCount: (n: number) => void
 }) {
   const [invites, setInvites] = useState<Invite[] | null>(null)
@@ -130,7 +130,8 @@ export function InvitesAdmin({ refreshTick, kioskDefault, kioskNote, onOpenCount
     try {
       const data = await call<{ invites: Invite[]; mail: MailOptions; ttl_days: number }>('/fd/admin/invites?status=all')
       setInvites(data.invites)
-      onOpenCount(data.invites.filter((i) => i.status === 'pending').length)
+      // Waiting to be used, like Overview's count: an expired link isn't.
+      onOpenCount(data.invites.filter((i) => i.status === 'pending' && !i.expired).length)
       setMail(data.mail)
       setTtlDays(data.ttl_days)
       setError('')
@@ -408,7 +409,7 @@ function InviteForm({ mail, kioskDefault, kioskNote, onCancel, onDone }: {
           email: email.trim(),
           display_name: displayName.trim(),
           role,
-          note: note.trim(),
+          note: via === 'link' ? '' : note.trim(),
           send_via: via,
           ...(role === 'admin' ? {} : { kiosk }),
         }),
@@ -463,13 +464,6 @@ function InviteForm({ mail, kioskDefault, kioskNote, onCancel, onDone }: {
             {kioskNote && <p className="mt-1 ml-5 text-[11px] text-zinc-500">{kioskNote}</p>}
           </div>
         )}
-        <div className="wide:col-span-2">
-          <label className="block text-xs font-medium text-zinc-500 mb-1">
-            Personal note <span className="text-zinc-600">(optional, goes in the email)</span>
-          </label>
-          <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} maxLength={1000}
-            placeholder="Welcome aboard — here's your access to our agents." className={`${field} resize-y`} />
-        </div>
         <fieldset className="wide:col-span-2">
           <legend className="block text-xs font-medium text-zinc-500 mb-1.5">Send</legend>
           <div className="space-y-1.5">
@@ -503,6 +497,16 @@ function InviteForm({ mail, kioskDefault, kioskNote, onCancel, onDone }: {
             </label>
           </div>
         </fieldset>
+        {/* Only an email carries it: a link you pass on yourself has no room for a note. */}
+        {via !== 'link' && (
+          <div className="wide:col-span-2">
+            <label className="block text-xs font-medium text-zinc-500 mb-1">
+              Personal note <span className="text-zinc-600">(optional, goes in the email)</span>
+            </label>
+            <textarea value={note} onChange={(e) => setNote(e.target.value)} rows={2} maxLength={1000}
+              placeholder="Welcome aboard — here's your access to our agents." className={`${field} resize-y`} />
+          </div>
+        )}
       </div>
       {err && <p className="text-xs text-red-400">{err}</p>}
       <div className="flex items-center gap-2 pt-1">

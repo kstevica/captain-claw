@@ -32,7 +32,9 @@ class ModeBody(BaseModel):
 
 
 async def _status(*, fetch: bool = False) -> dict[str, Any]:
-    return {**await deck_update.status(fetch=fetch), "mode": await deck_update.get_mode(get_db())}
+    return {**await deck_update.status(fetch=fetch), "mode": await deck_update.get_mode(get_db()),
+            # How long everyone's countdown runs (FD_UPDATE_COUNTDOWN_S): the page says it.
+            "countdown_s": int(deck_update._countdown_s())}
 
 
 @router.get("/notice")

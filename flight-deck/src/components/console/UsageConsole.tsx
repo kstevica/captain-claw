@@ -15,12 +15,13 @@ import { ByokSetting } from '../admin/ByokSetting'
 // spent, the plans' limits, and the latest activity. The Admin page's Usage
 // and Plans tabs, on one page.
 
+// Only what the deck enforces. The plans also store a storage size and
+// requests a minute, but nothing checks the first, and the second only when an
+// agent starts (which "New agents an hour" already limits), so neither is shown.
 const LIMITS: { key: keyof PlanLimits; label: string; hint: string }[] = [
   { key: 'messages_per_day', label: 'Messages a day', hint: '0 = unlimited' },
   { key: 'tokens_per_day', label: 'AI tokens a day', hint: '0 = unlimited' },
   { key: 'max_agents', label: 'Agents', hint: 'most at once' },
-  { key: 'max_storage_mb', label: 'Storage (MB)', hint: '' },
-  { key: 'requests_per_minute', label: 'Requests a minute', hint: '' },
   { key: 'spawns_per_hour', label: 'New agents an hour', hint: '' },
 ]
 

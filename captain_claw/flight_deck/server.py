@@ -3887,8 +3887,14 @@ async def restart_container(container_id: str, request: Request, user: dict | No
 
 @app.delete("/fd/containers/{container_id}", response_model=ContainerActionResult)
 async def remove_container(container_id: str, force: bool = False, purge: bool = False, request: Request = None, user: dict | None = _agent_manager_dep):
-    import asyncio
     c = _find_container(container_id, getattr(request.state, "user_id", ""))
+    return await _remove_container_agent(c, container_id, force=force, purge=purge)
+
+
+async def _remove_container_agent(c, container_id: str, *, force: bool = False,
+                                  purge: bool = False) -> ContainerActionResult:
+    """remove_container past its owner check (also deleting a user's agents)."""
+    import asyncio
     name = c.name
     owner_id, short_id = str((c.labels or {}).get(OWNER_LABEL, "") or ""), c.short_id
     agent_ref = _container_agent_ref(c)
@@ -3904,6 +3910,35 @@ async def remove_container(container_id: str, force: bool = False, purge: bool =
         if problem:
             return ContainerActionResult(ok=False, container_id=container_id, message=f"Removed '{name}', but {problem}")
     return ContainerActionResult(ok=True, container_id=container_id, message=f"Removed '{name}'")
+
+
+async def remove_agents_of(owner_id: str) -> list[str]:
+    """Stop and remove every agent *owner_id* owns, with its folder, chats and
+    scheduled tasks: their account is being deleted. Returns what went."""
+    removed: list[str] = []
+    if not owner_id:
+        return removed
+    for slug, entry in list(_load_process_registry().items()):
+        if str((entry or {}).get("owner") or "") != owner_id:
+            continue
+        try:
+            await _remove_process_agent(slug, purge=True)
+            removed.append(slug)
+        except Exception as exc:
+            log.warning("Could not remove a deleted user's agent", agent=slug, error=type(exc).__name__)
+    try:
+        containers = list(_deck_containers(all=True))
+    except Exception:  # no Docker on this host: no container agents either
+        containers = []
+    for c in containers:
+        if str((c.labels or {}).get(OWNER_LABEL, "") or "") != owner_id:
+            continue
+        try:
+            await _remove_container_agent(c, c.short_id, force=True, purge=True)
+            removed.append(c.name)
+        except Exception as exc:
+            log.warning("Could not remove a deleted user's container", agent=c.name, error=type(exc).__name__)
+    return removed
 
 
 def _remove_agent_dir(slug: str) -> str:
@@ -10197,6 +10232,11 @@ async def remove_process(slug: str, force: bool = False, purge: bool = False, re
     _verify_process_owner(slug, getattr(request.state, "user_id", ""))
     """Remove a process agent from the registry. Stops it first if running.
     With ``purge`` its folder, chat log and scheduled tasks are deleted too."""
+    return await _remove_process_agent(slug, purge=purge)
+
+
+async def _remove_process_agent(slug: str, *, purge: bool = False) -> ProcessActionResult:
+    """remove_process past its owner check (also deleting a user's agents)."""
     if _process_is_alive(slug):
         _do_stop_process(slug)
 
@@ -10415,13 +10455,24 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
     return ProcessActionResult(ok=True, slug=new_slug, message=f"Cloned '{slug}' → '{new_slug}' (port {new_port})")
 
 
+# Settings about other people: on a deck without sign-in (the desktop app's)
+# there is no one else, so these keep their defaults there.
+_PEOPLE_SETTINGS = ("kiosk_mode", "kiosk_mode_from_env", "kiosk_new_users",
+                    "waitlist_enabled", "waitlist_cohort")
+
+
 async def _get_system_config() -> dict:
-    """Load system config from DB. Returns defaults when auth disabled."""
+    """Load system config from DB. A deck without sign-in goes by its admin's
+    settings too (branding, Docker, idle agents …), all but the people ones."""
     from captain_claw.flight_deck.admin_routes import _load_system_config
-    if not AUTH_ENABLED or not hasattr(app.state, "fd_db"):
+    if not hasattr(app.state, "fd_db"):
         return _load_system_config(None)
     raw = await app.state.fd_db.get_system_setting("fd:system-config")
-    return _load_system_config(raw)
+    cfg = _load_system_config(raw)
+    if not AUTH_ENABLED:
+        defaults = _load_system_config(None)
+        cfg.update({k: defaults[k] for k in _PEOPLE_SETTINGS if k in defaults})
+    return cfg
 
 
 @app.get("/fd/auth/status")
@@ -10443,18 +10494,23 @@ async def auth_status():
     # Sign-up: "Create account" while registration is open, else the waitlist
     # (an admin approves applications) when the admin left it on.
     registration_open = False
+    first_run = False
     logo = ""
+    if hasattr(app.state, "fd_db"):
+        from captain_claw.flight_deck.branding_routes import logo_url
+        logo = await logo_url(app.state.fd_db)
     if AUTH_ENABLED and hasattr(app.state, "fd_db"):
         from captain_claw.flight_deck.auth_routes import registration_open as _registration_open
-        from captain_claw.flight_deck.branding_routes import logo_url
         registration_open = await _registration_open(app.state.fd_db)
-        logo = await logo_url(app.state.fd_db)
+        # No account yet: the sign-in page asks for the admin account.
+        first_run = await app.state.fd_db.count_users() == 0
     return {
         "auth_enabled": AUTH_ENABLED,
         "docker_spawn_enabled": cfg.get("docker_spawn_enabled", docker_default),
         "internal_fd_url": internal_fd_url,
         "simple_chat_only": cfg.get("kiosk_mode") == "all",
         "registration_open": registration_open,
+        "first_run": first_run,
         "waitlist_open": AUTH_ENABLED and not registration_open and bool(cfg.get("waitlist_enabled")),
         "waitlist_cohort": waitlist_cohort(cfg),
         # Branding (Admin → Settings): the sign-in page and the panels' title.

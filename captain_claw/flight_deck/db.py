@@ -1192,6 +1192,10 @@ class FlightDeckDB:
             ("daily_usage", "spend_base", "INTEGER NOT NULL DEFAULT 0"),
             # The day's one message past the allowance, to finish a job (usage_quota).
             ("daily_usage", "finish_used", "INTEGER NOT NULL DEFAULT 0"),
+            # The messages typed on the day before a reset zeroed it: Activity's
+            # "Typed" count adds them back (a reset gives the allowance back,
+            # it doesn't undo what was typed).
+            ("daily_usage", "typed_before", "INTEGER NOT NULL DEFAULT 0"),
             ("users", "last_login_at", "TEXT NOT NULL DEFAULT ''"),
             ("users", "feedback_asked_at", "TEXT NOT NULL DEFAULT ''"),
             # The Line's threads (line.py): what an item belongs with.
@@ -2507,13 +2511,21 @@ class FlightDeckDB:
 
     async def _zero_daily_usage(self, user_id: str, day: str) -> None:
         """Zero the day's counters, keeping where the spend ledger stood so
-        the tokens it shows from before the reset don't come back."""
+        the tokens it shows from before the reset don't come back, and how
+        many messages were typed (Activity still counts them)."""
         base = await self.get_spend_tokens(user_id, day)
+        async with self._db.execute(
+            "SELECT messages + typed_before AS typed FROM daily_usage WHERE user_id = ? AND day = ?",
+            (user_id, day),
+        ) as cur:
+            row = await cur.fetchone()
+        typed = int(row["typed"]) if row else 0
         await self._db.execute(
             "DELETE FROM daily_usage WHERE user_id = ? AND day = ?", (user_id, day))
         await self._db.execute(
             "INSERT INTO daily_usage (user_id, day, messages, tokens, byok_tokens, spend_base,"
-            " updated_at) VALUES (?, ?, 0, 0, 0, ?, ?)", (user_id, day, base, _utcnow()))
+            " typed_before, updated_at) VALUES (?, ?, 0, 0, 0, ?, ?, ?)",
+            (user_id, day, base, typed, _utcnow()))
 
     async def reset_daily_usage(self, user_id: str, day: str) -> None:
         """Zero *user_id*'s counters for *day*."""
@@ -2770,7 +2782,8 @@ class FlightDeckDB:
         with none left out): what the daily allowance counted."""
         assert self._db is not None
         async with self._db.execute(
-            "SELECT user_id, day, messages FROM daily_usage WHERE day >= ? AND messages > 0",
+            "SELECT user_id, day, messages + typed_before AS messages FROM daily_usage"
+            " WHERE day >= ? AND messages + typed_before > 0",
             (since,),
         ) as cur:
             return [dict(r) for r in await cur.fetchall()]
@@ -2781,8 +2794,8 @@ class FlightDeckDB:
         assert self._db is not None
         async with self._db.execute(
             "SELECT user_id, MIN(day) AS first_day, MAX(day) AS last_day,"
-            " COUNT(*) AS days, SUM(messages) AS messages"
-            " FROM daily_usage WHERE messages > 0 GROUP BY user_id",
+            " COUNT(*) AS days, SUM(messages + typed_before) AS messages"
+            " FROM daily_usage WHERE messages + typed_before > 0 GROUP BY user_id",
         ) as cur:
             return {r["user_id"]: {"first_day": r["first_day"], "last_day": r["last_day"],
                                    "days": int(r["days"]), "messages": int(r["messages"] or 0)}

@@ -173,13 +173,16 @@ export function UpdatesConsole() {
   const blocked = (status?.blockers || []).length > 0
   const busy = status?.agents_busy || []
   const mode = status?.mode || 'off'
+  // "a 2-minute countdown", "a 90-second countdown": as long as this deck's runs.
+  const cs = status?.countdown_s ?? 120
+  const countdown = cs % 60 === 0 ? `${cs / 60}-minute` : `${cs}-second`
 
   return (
     <Page>
       <PageHeader
         icon={RefreshCw}
         title="Updates"
-        description="Bring this deck up to the newest version on its branch. It tries the new version first, gives everyone a 2-minute countdown, stops the agents, pulls and restarts. If the new version doesn't come up, it goes back by itself. Admins get an email either way."
+        description={`Bring this deck up to the newest version on its branch. It tries the new version first, gives everyone a ${countdown} countdown, stops the agents, pulls and restarts. If the new version doesn't come up, it goes back by itself. Admins get an email either way.`}
         actions={status?.available && !active
           ? <Button icon={RefreshCw} busy={checking} onClick={() => { void check() }}>Check now</Button>
           : undefined}
@@ -272,7 +275,7 @@ export function UpdatesConsole() {
         >
           <div className="space-y-3 text-sm leading-relaxed text-zinc-400">
             <p>
-              Everyone signed in gets a 2-minute countdown first, and this can't be cancelled once it starts.{' '}
+              Everyone signed in gets a {countdown} countdown first, and this can't be cancelled once it starts.{' '}
               {status.agents_running
                 ? `The ${status.agents_running} running agent${status.agents_running === 1 ? '' : 's'} then stop and come back when the deck is up. `
                 : ''}

@@ -38,6 +38,8 @@ export const DEFAULT_LOGO = '/icon-96.png'
 export interface SignUp {
   mode: 'register' | 'waitlist' | 'closed'
   cohort: string
+  // No account on the deck yet: the first one becomes its admin.
+  firstRun?: boolean
 }
 
 export interface AuthStore {
@@ -181,6 +183,7 @@ export async function checkAuthStatus(): Promise<boolean> {
     useAuthStore.getState().setSignUp({
       mode: data.registration_open ? 'register' : data.waitlist_open ? 'waitlist' : 'closed',
       cohort: typeof data.waitlist_cohort === 'string' ? data.waitlist_cohort : '',
+      firstRun: data.first_run === true,
     })
   }
   useAuthStore.getState().setBranding({

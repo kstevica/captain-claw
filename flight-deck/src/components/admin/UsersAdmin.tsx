@@ -71,7 +71,10 @@ function userPlan(user: UserInfo): string {
 // The most the list loads (the server's cap); search and filters work on these.
 const USERS_MAX = 1000
 
-async function fetchUsers(limit = 100, offset = 0): Promise<{ users: UserInfo[]; total: number }> {
+// Whether the deck offers Crew (FD_CREW) and its terminal (FD_CREW_TERMINAL).
+interface DeckCrew { offered: boolean; terminal: boolean }
+
+async function fetchUsers(limit = 100, offset = 0): Promise<{ users: UserInfo[]; total: number; crew?: DeckCrew }> {
   const res = await fetch(`/fd/admin/users?limit=${limit}&offset=${offset}`, {
     headers: adminHeaders(), credentials: 'include',
   })
@@ -370,10 +373,14 @@ function userCrew(user: UserInfo): CrewChoice {
 
 // A worker has a shell of its own, as the deck's OS user: whoever is approved
 // here is trusted with this server, and the dialog says that in those words.
-function CrewApproval({ isAdmin, value, wasApproved, name, understood, onUnderstood, onChange }: {
+function CrewApproval({ isAdmin, value, wasApproved, name, understood, onUnderstood, onChange, deck }: {
   isAdmin: boolean; value: CrewChoice; wasApproved: boolean; name: string
   understood: boolean; onUnderstood: (v: boolean) => void; onChange: (v: CrewChoice) => void
+  deck: DeckCrew
 }) {
+  if (!deck.offered) {
+    return <p className="text-[11px] text-zinc-500">Crew is turned off on this Flight Deck (<code>FD_CREW=off</code>), so there's nothing to approve.</p>
+  }
   if (isAdmin) return <p className="text-[11px] text-zinc-500">Admins can always use Crew.</p>
   const toggle = (id: string) => onChange({
     ...value, harnesses: value.harnesses.includes(id) ? value.harnesses.filter((h) => h !== id) : [...value.harnesses, id],
@@ -409,10 +416,14 @@ function CrewApproval({ isAdmin, value, wasApproved, name, understood, onUnderst
               className="w-14 rounded-md border border-zinc-700 bg-zinc-950 px-1.5 py-0.5 text-xs text-zinc-200"
             />
           </label>
-          <label className="flex items-start gap-2 text-xs text-zinc-400">
-            <input type="checkbox" checked={value.terminal} onChange={(e) => onChange({ ...value, terminal: e.target.checked })} className="mt-0.5 accent-teal-500" />
-            <span>Terminal <span className="text-zinc-500">— they can open a shell on this server from the browser, in their own projects, to set them up by hand. It runs as the same system user as their coding agents.</span></span>
-          </label>
+          {deck.terminal ? (
+            <label className="flex items-start gap-2 text-xs text-zinc-400">
+              <input type="checkbox" checked={value.terminal} onChange={(e) => onChange({ ...value, terminal: e.target.checked })} className="mt-0.5 accent-teal-500" />
+              <span>Terminal <span className="text-zinc-500">— they can open a shell on this server from the browser, in their own projects, to set them up by hand. It runs as the same system user as their coding agents.</span></span>
+            </label>
+          ) : (
+            <p className="text-xs text-zinc-500">The terminal is turned off on this Flight Deck (<code>FD_CREW_TERMINAL=off</code>).</p>
+          )}
           {!wasApproved && (
             <div className="space-y-1.5 rounded-md bg-amber-500/10 p-2 text-xs text-amber-800 dark:text-amber-200">
               <p className="flex items-start gap-1.5">
@@ -491,7 +502,7 @@ function TokenLine({ label, totals }: { label: string; totals: TokenTotals }) {
 }
 
 function UserRow({
-  user, plans, usage, tokenUse, tokensSince, resets, resetCap, selected, onSelect, onUpdate, onDelete, currentUserId, kioskMode,
+  user, plans, usage, tokenUse, tokensSince, resets, resetCap, selected, onSelect, onUpdate, onDelete, currentUserId, kioskMode, deckCrew,
 }: {
   user: UserInfo
   plans: Record<string, PlanLimits>
@@ -506,6 +517,7 @@ function UserRow({
   onDelete: (id: string) => void
   currentUserId: string
   kioskMode: KioskMode
+  deckCrew: DeckCrew
 }) {
   const [expanded, setExpanded] = useState(false)
   const [plan, setPlan] = useState(() => userPlan(user))
@@ -686,6 +698,7 @@ function UserRow({
           )}
 
           <CrewApproval
+            deck={deckCrew}
             isAdmin={role === 'admin'}
             value={crew}
             wasApproved={userCrew(user).approved}
@@ -698,8 +711,6 @@ function UserRow({
           {limits && (
             <div className="text-xs text-zinc-500 grid grid-cols-2 gap-1">
               <span>Max agents: {limits.max_agents}{mark('max_agents')}</span>
-              <span>Storage: {limits.max_storage_mb} MB{mark('max_storage_mb')}</span>
-              <span>Requests/min: {limits.requests_per_minute}{mark('requests_per_minute')}</span>
               <span>Spawns/hour: {limits.spawns_per_hour}{mark('spawns_per_hour')}</span>
               <span>Messages/day: {perDay(limits.messages_per_day)}{mark('messages_per_day')}</span>
               <span>Tokens/day: {perDay(limits.tokens_per_day, fmtTok)}{mark('tokens_per_day')}</span>
@@ -797,7 +808,7 @@ function UserRow({
             )}
             {!isSelf && (
               <button
-                onClick={() => { if (confirm(`Delete user ${user.email}? This cannot be undone.`)) onDelete(user.id) }}
+                onClick={() => { if (confirm(`Delete user ${user.email}? Their agents are stopped and removed, with their folders and chats. This cannot be undone.`)) onDelete(user.id) }}
                 className="rounded-md border border-red-900/50 px-3 py-1.5 text-xs text-red-400 hover:bg-red-950/50"
               >
                 <Trash2 className="h-3 w-3 inline mr-1" />
@@ -1100,6 +1111,8 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
   const [plan, setPlan] = useState('all')
   const [status, setStatus] = useState<StatusFilter>('any')
   const [sort, setSort] = useState<SortKey>('newest')
+  // An older deck sends nothing: assume Crew and its terminal are on.
+  const [deckCrew, setDeckCrew] = useState<DeckCrew>({ offered: true, terminal: true })
 
   const load = useCallback(async () => {
     try {
@@ -1108,6 +1121,7 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
       ])
       setUsers(data.users)
       setTotal(data.total)
+      if (data.crew) setDeckCrew(data.crew)
       onTotal(data.total)
       setPlans(plansData)
       setUsageToday(today.usage)
@@ -1308,6 +1322,7 @@ export function UsersAdmin({ refreshTick, config, onTotal }: {
           onDelete={handleDelete}
           currentUserId={currentUserId}
           kioskMode={config.kiosk_mode}
+          deckCrew={deckCrew}
         />
       ))}
 

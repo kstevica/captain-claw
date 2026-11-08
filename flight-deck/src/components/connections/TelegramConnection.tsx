@@ -1,14 +1,13 @@
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Send, Loader2, Check, AlertCircle, ChevronDown, ExternalLink, Clock, RefreshCw, Users, X } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
-import { useUIStore } from '../../stores/uiStore'
+import { openConsole } from '../../stores/consoleStore'
 import {
   getMyTelegram,
   requestTelegram,
   disconnectTelegram,
   removeTelegramGroup,
   type MyTelegram,
-  ADMIN_TAB_KEY,
 } from '../../services/sharedIntegrations'
 import TelegramInbox from './TelegramInbox'
 
@@ -23,7 +22,6 @@ import TelegramInbox from './TelegramInbox'
 export default function TelegramConnection({ onStatus }: { onStatus?: (s: MyTelegram | null) => void }) {
   // Not in the desktop app's users' kiosk (kioskView): the kiosk user is no admin.
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin' && !s.kioskView)
-  const setView = useUIStore((s) => s.setView)
   const [me, setMe] = useState<MyTelegram | null>(null)
   const [agent, setAgent] = useState('')
   const [collapsed, setCollapsed] = useState(false)
@@ -164,13 +162,10 @@ export default function TelegramConnection({ onStatus }: { onStatus?: (s: MyTele
                     Create a bot with @BotFather and add its token in{' '}
                     <button
                       type="button"
-                      onClick={() => {
-                        try { sessionStorage.setItem(ADMIN_TAB_KEY, 'integrations') } catch { /* storage blocked */ }
-                        setView('admin')
-                      }}
+                      onClick={() => openConsole('connections')}
                       className="text-violet-500 hover:underline"
                     >
-                      Admin → Integrations
+                      Admin console → Connections → Telegram
                     </button>
                     . Everyone on this deck can then ask to use it.
                   </>
