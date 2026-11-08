@@ -70,6 +70,10 @@ _GMAIL_SCOPE_LABELS = {
     "https://www.googleapis.com/auth/cloud-platform": "Vertex AI / Gemini",
     "openid": "OpenID",
     "email": "Email address",
+    "profile": "Basic profile",
+    # How Google reports the two above once granted.
+    "https://www.googleapis.com/auth/userinfo.email": "Email address",
+    "https://www.googleapis.com/auth/userinfo.profile": "Basic profile",
 }
 
 

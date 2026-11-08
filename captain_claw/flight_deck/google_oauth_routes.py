@@ -141,10 +141,15 @@ _K_TOKEN_MODE = "google_oauth:token_mode"
 
 
 _GMAIL_SCOPE_LABELS = {s["scope"]: s["label"] for s in SCOPE_CATALOG}
+# Google reports the email and profile scopes it granted by their long names.
+_SCOPE_ALIASES = {
+    "https://www.googleapis.com/auth/userinfo.email": "email",
+    "https://www.googleapis.com/auth/userinfo.profile": "profile",
+}
 
 
 def _label_scopes(granted: list[str]) -> list[dict[str, str]]:
-    return [{"scope": s, "label": _GMAIL_SCOPE_LABELS.get(s, s)} for s in granted]
+    return [{"scope": s, "label": _GMAIL_SCOPE_LABELS.get(_SCOPE_ALIASES.get(s, s), s)} for s in granted]
 
 
 # ── in-memory PKCE state ────────────────────────────────────────────
