@@ -217,7 +217,7 @@ def test_proposals_dont_count_toward_caps(store):
                      success="s", status="proposed", origin="agent", proposed_by=REF_B)
     assert p["status"] == "proposed" and p["review_at"] is None
     with pytest.raises(c.CourseError, match="most it may hold"):
-        store.set_status(p["id"], "active")
+        store.accept(p["id"])
 
 
 # ── lifecycle and review ─────────────────────────────────────────────

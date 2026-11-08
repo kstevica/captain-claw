@@ -619,3 +619,107 @@ class TestAgentSide:
         assert on_deck.status_code == 400 and on_carol.status_code == 404
         assert bad_kind.status_code == 400 and not_owned.status_code == 404
         assert bad_progress.status_code == 400 and stranger.status_code == 403
+
+
+# ── Phase 3: suggestions ─────────────────────────────────────────────
+
+
+class TestProposals:
+    async def test_an_agent_suggests_and_the_owner_accepts(self, deck, monkeypatch):
+        hdr = _agent(monkeypatch, "bob-tok")
+        async with _client() as cl:
+            r = await cl.post("/fd/course/agent/propose", headers=hdr, json={
+                "scope": "agent", "horizon": "short", "title": "Clear the backlog",
+                "success": "zero open", "rationale": "it keeps growing"})
+            assert r.status_code == 200, r.text
+            gid = r.json()["goal"]["id"]
+            assert r.json()["auto_accepted"] is False
+            page = await cl.get("/fd/course", headers=_hdr(BOB))
+            mine = page.json()["goals"]["agents"][_ref("bob-agent")]
+            assert [(g["status"], g["proposer"]) for g in mine] == [("proposed", "Bob's agent")]
+            assert _file("bob-agent") is None or "Clear the backlog" not in _file("bob-agent")
+            items = await deck.list_line_items(BOB, needs_you=True)
+            assert [i["title"] for i in items] == ["Goal proposed: Clear the backlog"]
+            await deck.mark_line_item_read(items[0]["id"], BOB)                   # reading doesn't answer it
+            assert not (await deck.list_line_items(BOB, needs_you=True))[0]["resolved_at"]
+            acc = await cl.post(f"/fd/course/goals/{gid}/accept", headers=_hdr(BOB))
+        assert acc.status_code == 200 and acc.json()["goal"]["status"] == "active"
+        assert (await deck.list_line_items(BOB, needs_you=True))[0]["resolved_at"]
+        assert "Clear the backlog" in _file("bob-agent")
+
+    async def test_decline_and_its_memory(self, deck, monkeypatch):
+        hdr = _agent(monkeypatch, "bob-tok")
+        async with _client() as cl:
+            gid = (await cl.post("/fd/course/agent/propose", headers=hdr, json={
+                "scope": "user", "horizon": "medium", "title": "Hire a bookkeeper",
+                "success": "hired"})).json()["goal"]["id"]
+            dec = await cl.post(f"/fd/course/goals/{gid}/decline", headers=_hdr(BOB))
+            again = await cl.post("/fd/course/agent/propose", headers=hdr, json={
+                "scope": "user", "horizon": "medium", "title": "Hire a bookkeeper", "success": "hired"})
+            carol = await cl.post(f"/fd/course/goals/{gid}/accept", headers=_hdr(CAROL))
+        assert dec.json()["goal"]["status"] == "declined"
+        assert again.status_code == 400 and "declined recently" in again.json()["detail"]
+        assert carol.status_code == 404
+        assert (await deck.list_line_items(BOB, needs_you=True))[0]["resolved_at"]
+
+    async def test_a_suggested_change(self, deck, monkeypatch):
+        hdr = _agent(monkeypatch, "bob-tok")
+        async with _client() as cl:
+            g = (await _post(cl, BOB, scope="user", horizon="long", title="Ship EU")).json()["goal"]
+            deckg = (await _post(cl, ADMIN, scope="instance", horizon="long", title="Deck")).json()["goal"]
+            r = await cl.post("/fd/course/agent/propose_change", headers=hdr, json={
+                "goal_id": f"G:{g['id']}", "changes": {"title": "Ship EU and UK"}, "rationale": "UK too"})
+            on_deck = await cl.post("/fd/course/agent/propose_change", headers=hdr, json={
+                "goal_id": deckg["id"], "changes": {"title": "Mine now"}})
+            acc = await cl.post(f"/fd/course/goals/{r.json()['goal']['id']}/accept", headers=_hdr(BOB))
+        assert r.status_code == 200, r.text
+        assert on_deck.status_code == 400
+        assert acc.json()["goal"]["title"] == "Ship EU and UK"
+        assert c.get_store().get(g["id"])["status"] == "superseded"
+        assert "Ship EU and UK" in _file("bob-agent")
+
+    async def test_auto_accept_and_prefs(self, deck, monkeypatch):
+        hdr = _agent(monkeypatch, "bob-tok")
+        async with _client() as cl:
+            p0 = await cl.get("/fd/course/prefs", headers=_hdr(BOB))
+            put = await cl.put("/fd/course/prefs", headers=_hdr(BOB), json={"auto_accept_agent_short": True})
+            bad = await cl.put("/fd/course/prefs", headers=_hdr(BOB), json={"auto_accept_agent_short": 1})
+            r = await cl.post("/fd/course/agent/propose", headers=hdr, json={
+                "scope": "agent", "horizon": "short", "title": "Inbox zero", "success": "zero"})
+        assert p0.json() == {"auto_accept_agent_short": False} and put.status_code == 200
+        assert bad.status_code == 400
+        assert r.json()["auto_accepted"] is True and r.json()["goal"]["status"] == "active"
+        items = await deck.list_line_items(BOB)
+        assert [(i["title"], i["needs_you"]) for i in items] == [("Added to Bob's agent's course: Inbox zero", 0)]
+        assert "Inbox zero" in _file("bob-agent")
+
+    async def test_the_admins_switch_and_limits(self, deck, monkeypatch):
+        hdr = _agent(monkeypatch, "bob-tok")
+        async with _client() as cl:
+            put = await cl.put("/fd/admin/course/settings", headers=_hdr(ADMIN),
+                               json={"proposals": {"recommendations": False}})
+            got = await cl.get("/fd/admin/course/settings", headers=_hdr(ADMIN))
+            off = await cl.post("/fd/course/agent/propose", headers=hdr, json={
+                "scope": "agent", "horizon": "short", "title": "x", "success": "y"})
+            page = await cl.get("/fd/course", headers=_hdr(BOB))
+            bad = await cl.put("/fd/admin/course/settings", headers=_hdr(ADMIN),
+                               json={"proposals": {"deck_per_week": -1}})
+        assert put.status_code == 200 and got.json()["proposals"]["recommendations"] is False
+        assert got.json()["per_week_range"] == [0, 20]
+        assert off.status_code == 400 and "switched off" in off.json()["detail"]
+        assert page.json()["recommendations"] is False
+        assert bad.status_code == 400
+
+    async def test_agent_proposal_refusals(self, deck, monkeypatch):
+        hdr = _agent(monkeypatch, "bob-tok")
+        async with _client() as cl:
+            carols = (await _post(cl, CAROL, scope="user", horizon="long", title="C")).json()["goal"]
+            bad_scope = await cl.post("/fd/course/agent/propose", headers=hdr, json={
+                "scope": "instance", "horizon": "long", "title": "x", "success": "y"})
+            other_parent = await cl.post("/fd/course/agent/propose", headers=hdr, json={
+                "scope": "agent", "horizon": "short", "title": "x", "success": "y",
+                "parent_id": carols["id"]})
+            no_success = await cl.post("/fd/course/agent/propose", headers=hdr, json={
+                "scope": "agent", "horizon": "short", "title": "x"})
+        assert bad_scope.status_code == 400 and other_parent.status_code == 404
+        assert no_success.status_code == 400

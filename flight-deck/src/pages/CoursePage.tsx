@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Bot, ChevronDown, Compass, Eye, Loader2, Plus, RefreshCw, UserRound, Users } from 'lucide-react'
+import { Bot, Check, ChevronDown, Compass, Eye, Inbox, Loader2, Pencil, Plus, RefreshCw, UserRound, Users, X } from 'lucide-react'
 import {
   agentsUpdatedLabel,
+  changesOf,
   createGoal,
   draftOf,
   editGoal,
@@ -9,6 +10,7 @@ import {
   getCourse,
   getPreview,
   goalAction,
+  savePrefs,
   shortDate,
   DEFAULT_TEXT_CAPS,
   HORIZON_LABELS,
@@ -37,8 +39,11 @@ import { GoalDrawer } from '../components/course/GoalDrawer'
 type Editing =
   | { mode: 'new'; scope: Scope; agentRef: string }
   | { mode: 'edit'; goal: Goal }
+  | { mode: 'accept'; goal: Goal }   // a suggestion, edited before it's accepted
 
-const OPEN = ['proposed', 'active', 'paused']
+// Suggestions wait in their own strip; the bands show the course itself.
+const OPEN = ['active', 'paused']
+const FINISHED = ['achieved', 'dropped']
 const ACTION_DONE: Record<GoalAction, string> = {
   pause: 'Paused', resume: 'Resumed', achieve: 'Marked done', drop: 'Dropped', reopen: 'Reopened',
   review: 'Still on course', accept: 'Accepted', decline: 'Declined',
@@ -93,10 +98,16 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
     if (!editing) return
     setSaving(true); setFormError(null); setNotice(null)
     try {
-      const r = editing.mode === 'edit'
-        ? await editGoal(editing.goal.id, d)
-        : await createGoal(editing.scope, d, editing.agentRef)
-      setNotice(`${editing.mode === 'edit' ? 'Saved' : 'Added'}: ${r.goal.title} — ${agentsUpdatedLabel(r.agents_updated)}.`)
+      let r
+      if (editing.mode === 'accept') {
+        await editGoal(editing.goal.id, d)
+        r = await goalAction(editing.goal.id, 'accept')
+      } else {
+        r = editing.mode === 'edit'
+          ? await editGoal(editing.goal.id, d)
+          : await createGoal(editing.scope, d, editing.agentRef)
+      }
+      setNotice(`${editing.mode === 'edit' ? 'Saved' : editing.mode === 'accept' ? 'Accepted' : 'Added'}: ${r.goal.title} — ${agentsUpdatedLabel(r.agents_updated)}.`)
       setEditing(null)
       await load()
     } catch (e) {
@@ -107,7 +118,7 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
   }
 
   const form = (scope: Scope, agentRef: string) => {
-    if (!data || !editing) return null
+    if (!data || !editing || editing.mode === 'accept') return null
     const target = editing.mode === 'edit' ? editing.goal : null
     const at = editing.mode === 'edit'
       ? { scope: editing.goal.scope, agentRef: editing.goal.agent_ref }
@@ -131,6 +142,21 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
         onCancel={() => { setEditing(null); setFormError(null) }}
       />
     )
+  }
+
+  const proposals = useMemo(() => all.filter((g) => g.status === 'proposed'), [all])
+  const agentName = useMemo(() => new Map((data?.agents ?? []).map((a) => [a.ref, a.name])), [data])
+  const [prefSaving, setPrefSaving] = useState(false)
+  const setAutoAccept = async (on: boolean) => {
+    setPrefSaving(true); setError(null)
+    try {
+      await savePrefs({ auto_accept_agent_short: on })
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setPrefSaving(false)
+    }
   }
 
   const band = (scope: Scope, goals: Goal[], agentRef = '') => {
@@ -190,6 +216,43 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
 
         {data && (
           <div className="space-y-6">
+            {proposals.length > 0 && (
+              <Section icon={Inbox} title={`Waiting for you (${proposals.length})`}
+                hint="Goals your agents and Flight Deck suggest. Nothing goes on your course until you accept it.">
+                <div className="space-y-2">
+                  {proposals.map((p) => (
+                    <ProposalCard
+                      key={p.id}
+                      goal={p}
+                      old={p.supersedes_id ? byId.get(p.supersedes_id) : undefined}
+                      forWhom={p.scope === 'agent' ? `For ${agentName.get(p.agent_ref) || 'an agent'}` : 'For you'}
+                      titleOf={(id) => byId.get(id)?.title ?? ''}
+                      busy={busy === p.id}
+                      onAccept={() => void act(p, 'accept')}
+                      onDecline={() => void act(p, 'decline')}
+                      onEdit={() => { setFormError(null); setEditing({ mode: 'accept', goal: p }) }}
+                      form={editing?.mode === 'accept' && editing.goal.id === p.id ? (
+                        <GoalForm
+                          scope={p.scope}
+                          agentRef={p.agent_ref}
+                          allowed={data.settings.horizons[p.scope]}
+                          initial={draftOf(p)}
+                          all={all}
+                          selfId={p.id}
+                          caps={caps}
+                          saving={saving}
+                          error={formError}
+                          onSave={(d) => void save(d)}
+                          onCancel={() => { setEditing(null); setFormError(null) }}
+                          submitLabel="Save and accept"
+                        />
+                      ) : null}
+                    />
+                  ))}
+                </div>
+              </Section>
+            )}
+
             <Section
               icon={Users}
               title="The deck"
@@ -205,6 +268,21 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
             </Section>
 
             <Section icon={Bot} title="Your agents" hint="Goals for one agent only. Only that agent gets them.">
+              {data.recommendations && (
+                <label className="mb-3 flex items-start gap-2 text-xs text-zinc-400">
+                  <input
+                    type="checkbox"
+                    checked={data.prefs.auto_accept_agent_short}
+                    disabled={prefSaving}
+                    onChange={(e) => void setAutoAccept(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 accent-violet-600"
+                  />
+                  <span>
+                    Let my agents add their own short-term goals without asking
+                    <span className="block text-[11px] text-zinc-500">You’re told on your Line each time, and can change or drop them here. Everything else they suggest still waits for you.</span>
+                  </span>
+                </label>
+              )}
               {data.agents.length === 0 ? (
                 <p className="text-xs text-zinc-500">You have no agents yet.</p>
               ) : (
@@ -261,7 +339,7 @@ function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onOpen, o
   form: React.ReactNode
 }) {
   const open = goals.filter((g) => OPEN.includes(g.status))
-  const finished = goals.filter((g) => !OPEN.includes(g.status))
+  const finished = goals.filter((g) => FINISHED.includes(g.status))
   return (
     <div className="space-y-2">
       {form}
@@ -459,6 +537,57 @@ function PreviewBlock({ label, text }: { label: string; text: string }) {
       <div className="max-h-80 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-zinc-800 bg-zinc-950 px-2.5 py-2 text-xs leading-relaxed text-zinc-300">
         {text || <span className="text-zinc-600">Nothing: no live goals reach it.</span>}
       </div>
+    </div>
+  )
+}
+
+// A suggestion: what it is, who suggested it and why — for a change, what it
+// changes — with Accept, Edit and accept, and Decline.
+function ProposalCard({ goal: g, old, forWhom, titleOf, busy, onAccept, onDecline, onEdit, form }: {
+  goal: Goal
+  old?: Goal
+  forWhom: string
+  titleOf: (id: string) => string
+  busy: boolean
+  onAccept: () => void
+  onDecline: () => void
+  onEdit: () => void
+  form: React.ReactNode
+}) {
+  const changes = changesOf(g, old, titleOf)
+  const btn = 'inline-flex items-center gap-1 rounded-md px-2.5 py-1 text-xs disabled:opacity-50'
+  return (
+    <div className="rounded-lg border border-sky-500/30 bg-sky-500/[0.05] p-3">
+      <div className="text-[11px] font-medium uppercase tracking-wider text-sky-700 dark:text-sky-300">
+        {forWhom} · {HORIZON_LABELS[g.horizon]} · {old ? 'a change' : 'a new goal'} suggested by {g.proposer || 'an agent'}
+      </div>
+      {form ?? (
+        <>
+          <div className="mt-1 text-sm text-zinc-100">{g.title}</div>
+          {g.success && <p className="mt-0.5 text-xs text-zinc-400"><span className="text-zinc-500">Done when:</span> {g.success}</p>}
+          {changes.length > 0 && (
+            <ul className="mt-1.5 space-y-0.5 text-xs">
+              {changes.map(([label, was, becomes]) => (
+                <li key={label} className="text-zinc-400">
+                  <span className="text-zinc-500">{label}:</span> <span className="line-through decoration-zinc-600">{was}</span> → <span className="text-zinc-200">{becomes}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {g.rationale && <p className="mt-1 text-xs italic text-zinc-500">“{g.rationale}”</p>}
+          <div className="mt-2 flex flex-wrap items-center gap-1.5">
+            <button onClick={onAccept} disabled={busy} className={`${btn} bg-violet-600 text-white hover:bg-violet-500`}>
+              {busy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />} Accept
+            </button>
+            <button onClick={onEdit} disabled={busy} className={`${btn} border border-zinc-700 text-zinc-300 hover:bg-zinc-800`}>
+              <Pencil className="h-3.5 w-3.5" /> Edit and accept
+            </button>
+            <button onClick={onDecline} disabled={busy} className={`${btn} text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300`}>
+              <X className="h-3.5 w-3.5" /> Decline
+            </button>
+          </div>
+        </>
+      )}
     </div>
   )
 }

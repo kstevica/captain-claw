@@ -89,8 +89,14 @@ def _flags(goal: dict[str, Any], settings: dict[str, Any], visible_ids: set[str]
 
 
 def _view(goal: dict[str, Any], *, can_edit: bool, flags: dict[str, bool],
-          moved: str | None = None) -> dict[str, Any]:
+          moved: str | None = None, names: dict[str, str] | None = None) -> dict[str, Any]:
+    proposer = ""
+    if goal.get("origin") == "deck":
+        proposer = "Flight Deck"
+    elif goal.get("origin") == "agent":
+        proposer = (names or {}).get(str(goal.get("proposed_by") or ""), "") or "An agent"
     return {**goal, "can_edit": can_edit, "flags": flags, "last_moved": moved,
+            "proposer": proposer,
             "grace_days": c.grace_days(int(goal.get("review_every_days") or 30))}
 
 
@@ -132,6 +138,7 @@ async def get_course(user: dict = Depends(get_current_user)):
     mine = store.list_goals(scope="user", owner_id=uid, statuses=VISIBLE)
     theirs = store.list_goals(scope="agent", owner_id=uid, agent_refs=refs, statuses=VISIBLE)
     visible = {g["id"] for g in deck + mine + theirs}
+    names = {a["ref"]: a["name"] for a in agents}
     moved = store.last_moved([g["id"] for g in mine + theirs])
     moved.update(store.last_moved([g["id"] for g in deck], owner_id=uid))
     now = datetime.now(UTC)
@@ -139,7 +146,7 @@ async def get_course(user: dict = Depends(get_current_user)):
     for g in theirs:
         by_agent.setdefault(g["agent_ref"], []).append(
             _view(g, can_edit=True, flags=_flags(g, settings, visible, now),
-                  moved=moved.get(g["id"])))
+                  moved=moved.get(g["id"]), names=names))
     return {
         "settings": settings,
         "horizons": list(c.HORIZONS),
@@ -148,13 +155,15 @@ async def get_course(user: dict = Depends(get_current_user)):
         "text_caps": {k: c.TEXT_CAPS[k] for k in ("title", "detail", "success")},
         "is_admin": admin,
         "auth_enabled": carrier._auth_enabled(),
+        "prefs": store.prefs(uid),
+        "recommendations": settings["proposals"]["recommendations"],
         "agents": [{"ref": a["ref"], "name": a["name"], "slug": a["slug"],
                     "runtime": a["runtime"]} for a in agents],
         "goals": {
             "deck": [_view(g, can_edit=admin, flags=_flags(g, settings, visible, now),
-                           moved=moved.get(g["id"])) for g in deck],
+                           moved=moved.get(g["id"]), names=names) for g in deck],
             "mine": [_view(g, can_edit=True, flags=_flags(g, settings, visible, now),
-                           moved=moved.get(g["id"])) for g in mine],
+                           moved=moved.get(g["id"]), names=names) for g in mine],
             "agents": by_agent,
         },
     }
@@ -380,15 +389,37 @@ async def goal_action(goal_id: str, action: str, user: dict = Depends(get_curren
     try:
         if action == "review":
             updated = store.review(goal_id, actor=_actor(user))
+        elif action == "accept":
+            updated = store.accept(goal_id, actor=_actor(user))
         else:
             updated = store.set_status(goal_id, _ACTIONS[action], actor=_actor(user))
     except c.CourseError as exc:
         raise _bad(exc) from None
     except c.CourseNotFoundError:
         raise HTTPException(404, "Goal not found") from None
-    # Its "Still on course?" items are answered, whatever was decided.
+    # Its "Still on course?" / "Goal proposed" items are answered, whatever was decided.
     await carrier.resolve_reviews(get_db(), goal)
+    if action in ("accept", "decline"):
+        from captain_claw.flight_deck import course_proposals
+
+        await course_proposals.resolve(get_db(), goal)
     return {"goal": updated, "agents_updated": await _refresh(updated)}
+
+
+# ── The caller's own preferences ───────────────────────────────────────
+
+
+@router.get("/fd/course/prefs")
+async def get_prefs(user: dict = Depends(get_current_user)):
+    return c.get_store().prefs(_uid(user))
+
+
+@router.put("/fd/course/prefs")
+async def put_prefs(body: Any = Body(...), user: dict = Depends(get_current_user)):
+    try:
+        return c.get_store().set_prefs(_uid(user), body)
+    except c.CourseError as exc:
+        raise _bad(exc) from None
 
 
 # ── The admin's settings ───────────────────────────────────────────────
@@ -398,8 +429,10 @@ async def goal_action(goal_id: str, action: str, user: dict = Depends(get_curren
 async def get_settings(admin: dict = Depends(require_admin)):
     return {
         **c.get_store().settings(),
-        "defaults": {"horizons": c.DEFAULT_HORIZONS, "caps": c.DEFAULT_CAPS},
+        "defaults": {"horizons": c.DEFAULT_HORIZONS, "caps": c.DEFAULT_CAPS,
+                     "proposals": c.DEFAULT_PROPOSALS},
         "cap_range": list(c.CAP_RANGE),
+        "per_week_range": list(c.PER_WEEK_RANGE),
         "scopes": list(c.SCOPES),
         "horizons_all": list(c.HORIZONS),
         "horizon_labels": dict(c.HORIZON_LABELS),
@@ -411,7 +444,8 @@ async def put_settings(body: Any = Body(...), admin: dict = Depends(require_admi
     if not isinstance(body, dict):
         raise HTTPException(400, "Expected a JSON object")
     try:
-        saved = c.get_store().set_settings(horizons=body.get("horizons"), caps=body.get("caps"))
+        saved = c.get_store().set_settings(horizons=body.get("horizons"), caps=body.get("caps"),
+                                           proposals=body.get("proposals"))
     except c.CourseError as exc:
         raise _bad(exc) from None
     # No agent's files change: goals at a horizon a scope no longer uses are
@@ -537,3 +571,62 @@ async def agent_report(request: Request, body: dict = Body(default={})) -> dict:
         asked = bool(item)
     return {"goal": {"id": updated["id"], "title": updated["title"],
                      "progress": updated["progress"]}, "asked_owner": asked}
+
+
+_PROPOSE_FIELDS = ("horizon", "title", "success", "detail", "parent_id", "due_at", "rationale")
+
+
+@router.post("/fd/course/agent/propose")
+async def agent_propose(request: Request, body: dict = Body(default={})) -> dict:
+    """A goal the agent suggests — for itself (``scope="agent"``) or for its
+    owner (``scope="user"``). It waits for the owner (unless they let their
+    agents add their own short-term goals)."""
+    owner, ref, name = await _agent_caller(request)
+    scope = str(body.get("scope") or "agent")
+    if scope not in ("agent", "user"):
+        raise HTTPException(400, "scope must be agent (your own) or user (your owner's)")
+    if scope == "agent" and not ref:
+        raise HTTPException(403, "This Flight Deck can't tell which agent you are")
+    parent = c.goal_ref(body.get("parent_id"))
+    if parent:
+        _agent_goal(owner, ref, parent)   # one it can see: the deck's, its owner's, its own
+    from captain_claw.flight_deck import course_proposals
+
+    fields = {k: body.get(k) for k in _PROPOSE_FIELDS if k in body}
+    fields["parent_id"] = parent
+    try:
+        out = await course_proposals.submit(owner_id=owner, origin="agent", proposed_by=ref,
+                                            proposer=name, scope=scope,
+                                            agent_ref=ref if scope == "agent" else "", **fields)
+    except c.CourseError as exc:
+        raise _bad(exc) from None
+    g = out["goal"]
+    return {"goal": {"id": g["id"], "title": g["title"], "status": g["status"]},
+            "auto_accepted": out["auto_accepted"]}
+
+
+@router.post("/fd/course/agent/propose_change")
+async def agent_propose_change(request: Request, body: dict = Body(default={})) -> dict:
+    """A change to one of the owner's goals or the agent's own, waiting for the owner."""
+    owner, ref, name = await _agent_caller(request)
+    goal = _agent_goal(owner, ref, body.get("goal_id"))
+    if goal["scope"] == "instance":
+        raise HTTPException(400, "Only an admin changes the deck's goals")
+    changes = body.get("changes") if isinstance(body.get("changes"), dict) else {}
+    if "parent_id" in changes:
+        changes = {**changes, "parent_id": c.goal_ref(changes["parent_id"])}
+        if changes["parent_id"]:
+            _agent_goal(owner, ref, changes["parent_id"])
+    from captain_claw.flight_deck import course_proposals
+
+    try:
+        out = await course_proposals.submit(owner_id=owner, origin="agent", proposed_by=ref,
+                                            proposer=name, change_of=goal["id"], changes=changes,
+                                            rationale=body.get("rationale", ""))
+    except c.CourseError as exc:
+        raise _bad(exc) from None
+    except c.CourseNotFoundError:
+        raise HTTPException(404, "No such goal on your course") from None
+    g = out["goal"]
+    return {"goal": {"id": g["id"], "title": g["title"], "status": g["status"]},
+            "auto_accepted": out["auto_accepted"]}

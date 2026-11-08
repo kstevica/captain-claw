@@ -17,7 +17,7 @@ const SCOPE_TAG: Record<Scope, string> = { instance: 'Deck', user: 'You', agent:
 // admin lets this scope use; an existing goal keeps its own even when it was
 // taken away (it can be moved off it, never onto another retired one).
 export function GoalForm({
-  scope, agentRef, allowed, initial, all, selfId = '', caps, saving, error, onSave, onCancel,
+  scope, agentRef, allowed, initial, all, selfId = '', caps, saving, error, onSave, onCancel, submitLabel,
 }: {
   scope: Scope
   agentRef: string
@@ -30,6 +30,7 @@ export function GoalForm({
   error: string | null
   onSave: (d: GoalDraft) => void
   onCancel: () => void
+  submitLabel?: string
 }) {
   const [d, setD] = useState<GoalDraft>(initial)
   const horizons = HORIZONS.filter((h) => allowed.includes(h) || h === initial.horizon)
@@ -164,7 +165,7 @@ export function GoalForm({
           disabled={saving || missing || tooLong}
           className="rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
         >
-          {saving ? 'Saving…' : selfId ? 'Save goal' : 'Add goal'}
+          {saving ? 'Saving…' : submitLabel ?? (selfId ? 'Save goal' : 'Add goal')}
         </button>
         <button type="button" onClick={onCancel} disabled={saving}
           className="rounded-md border border-zinc-700 px-3 py-1.5 text-xs text-zinc-400 hover:bg-zinc-800">

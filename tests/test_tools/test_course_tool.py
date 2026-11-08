@@ -110,3 +110,50 @@ class TestActions:
         monkeypatch.setattr(cc, "view", view)
         out = await CourseTool().execute(action="view")
         assert not out.success and "no Course for agents" in out.error
+
+
+class TestProposals:
+    @pytest.fixture()
+    def sent(self, monkeypatch):
+        seen: list = []
+
+        async def propose(**kw):
+            seen.append(("propose", kw))
+            return {"goal": {"id": "goal_p", "title": kw["title"], "status": "proposed"},
+                    "auto_accepted": kw["horizon"] == "short" and kw["scope"] == "agent"}
+
+        async def propose_change(goal_id, changes, rationale=""):
+            seen.append(("change", goal_id, changes, rationale))
+            return {"goal": {"id": "goal_c", "title": changes.get("title", ""), "status": "proposed"}}
+
+        monkeypatch.setattr(cc, "propose", propose)
+        monkeypatch.setattr(cc, "propose_change", propose_change)
+        return seen
+
+    async def test_propose_waits_for_the_owner(self, sent):
+        out = await CourseTool().execute(action="propose", scope="user", horizon="medium",
+                                         title="Hire a bookkeeper", success="hired", rationale="books pile up")
+        assert out.success and "waits for your owner's answer" in out.content
+        assert sent == [("propose", {"scope": "user", "horizon": "medium", "title": "Hire a bookkeeper",
+                                     "success": "hired", "detail": "", "parent_id": "",
+                                     "rationale": "books pile up"})]
+
+    async def test_an_auto_accepted_goal_says_so(self, sent):
+        out = await CourseTool().execute(action="propose", horizon="short", title="Inbox zero", success="zero")
+        assert out.success and "is on your course now" in out.content
+
+    async def test_propose_change(self, sent):
+        out = await CourseTool().execute(action="propose_change", goal_id="G:goal_u",
+                                         changes={"title": "Ship EU and UK"}, rationale="UK too")
+        assert out.success and "Suggested a change" in out.content
+        assert sent == [("change", "G:goal_u", {"title": "Ship EU and UK"}, "UK too")]
+
+    @pytest.mark.parametrize("kwargs,error", [
+        ({"action": "propose", "horizon": "short"}, "title is required"),
+        ({"action": "propose", "title": "x"}, "horizon is required"),
+        ({"action": "propose_change", "changes": {"title": "x"}}, "goal_id is required"),
+        ({"action": "propose_change", "goal_id": "g"}, "changes is required"),
+    ])
+    async def test_bad_calls(self, sent, kwargs, error):
+        out = await CourseTool().execute(**kwargs)
+        assert not out.success and error in out.error and sent == []

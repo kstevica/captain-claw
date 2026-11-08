@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import sqlite3
 import threading
@@ -47,7 +48,7 @@ LINK_KINDS = ("autonomy_action", "plan", "project", "task", "schedule", "swarm_r
 # Which status may follow which. A goal is never deleted by a person: it is
 # achieved or dropped, and can be reopened.
 _TRANSITIONS: dict[str, tuple[str, ...]] = {
-    "proposed": ("active", "declined"),
+    "proposed": ("declined",),       # becoming active is accept()'s: it may replace a goal
     "active": ("paused", "achieved", "dropped"),
     "paused": ("active", "achieved", "dropped"),
     "achieved": ("active",),
@@ -70,6 +71,15 @@ DEFAULT_HORIZONS: dict[str, list[str]] = {
 }
 DEFAULT_CAPS: dict[str, int] = {"strategic": 3, "long": 5, "medium": 7, "short": 3}
 CAP_RANGE = (1, 20)
+
+# Phase 3: goals the agents and the deck suggest. Every one waits for a person.
+DEFAULT_PROPOSALS: dict[str, Any] = {"recommendations": True, "agent_per_week": 2, "deck_per_week": 2}
+PER_WEEK_RANGE = (0, 20)
+WAITING_MAX = 5              # waiting proposals per scope (one user's, one agent's)
+DECLINE_MEMORY_DAYS = 90     # a declined title isn't suggested again in that scope for this long
+PROPOSAL_ORIGINS = ("agent", "deck")
+DEFAULT_PREFS: dict[str, Any] = {"auto_accept_agent_short": False}
+CHANGEABLE = ("horizon", "title", "success", "detail", "parent_id", "due_at")
 
 REVIEW_DAYS: dict[str, int] = {"short": 7, "medium": 30, "long": 90, "strategic": 365}
 REVIEW_RANGE = (1, 730)
@@ -180,6 +190,37 @@ def _check_horizons(raw: Any) -> dict[str, list[str]]:
             raise CourseError(f"horizons.{scope}: unknown horizon {bad[0]!r}")
         out[scope] = [h for h in HORIZONS if h in value]  # canonical order, deduped
     return out
+
+
+def _check_proposals(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise CourseError("proposals must be an object")
+    out: dict[str, Any] = {}
+    rec = raw.get("recommendations", DEFAULT_PROPOSALS["recommendations"])
+    if not isinstance(rec, bool):
+        raise CourseError("proposals.recommendations must be true or false")
+    out["recommendations"] = rec
+    lo, hi = PER_WEEK_RANGE
+    for key in ("agent_per_week", "deck_per_week"):
+        value = raw.get(key, DEFAULT_PROPOSALS[key])
+        if isinstance(value, bool) or not isinstance(value, int) or not lo <= value <= hi:
+            raise CourseError(f"proposals.{key} must be a whole number from {lo} to {hi}")
+        out[key] = value
+    return out
+
+
+def _check_prefs(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise CourseError("prefs must be an object")
+    value = raw.get("auto_accept_agent_short", DEFAULT_PREFS["auto_accept_agent_short"])
+    if not isinstance(value, bool):
+        raise CourseError("auto_accept_agent_short must be true or false")
+    return {"auto_accept_agent_short": value}
+
+
+def norm_title(text: Any) -> str:
+    """A title as compared for duplicates: lower case, letters and digits only."""
+    return " ".join(re.sub(r"[^\w]+", " ", str(text or "").lower()).split())
 
 
 def _check_caps(raw: Any) -> dict[str, int]:
@@ -320,14 +361,16 @@ class CourseStore:
                     self._c().execute("SELECT key, value FROM course_settings").fetchall()}
         out: dict[str, Any] = {}
         for key, check, default in (("horizons", _check_horizons, DEFAULT_HORIZONS),
-                                    ("caps", _check_caps, DEFAULT_CAPS)):
+                                    ("caps", _check_caps, DEFAULT_CAPS),
+                                    ("proposals", _check_proposals, DEFAULT_PROPOSALS)):
             try:
                 out[key] = check(json.loads(rows[key])) if key in rows else check(default)
             except (CourseError, TypeError, ValueError):
                 out[key] = check(default)
         return out
 
-    def set_settings(self, *, horizons: Any = None, caps: Any = None) -> dict[str, Any]:
+    def set_settings(self, *, horizons: Any = None, caps: Any = None,
+                     proposals: Any = None) -> dict[str, Any]:
         """Save what is given (None = unchanged). Goals already at a horizon a
         scope no longer uses are kept; only new ones are refused."""
         updates: dict[str, Any] = {}
@@ -335,6 +378,9 @@ class CourseStore:
             updates["horizons"] = _check_horizons(horizons)
         if caps is not None:
             updates["caps"] = _check_caps(caps)
+        if proposals is not None:
+            updates["proposals"] = _check_proposals({**self.settings()["proposals"], **proposals}
+                                                    if isinstance(proposals, dict) else proposals)
         if updates:
             with self._lock:
                 conn = self._c()
@@ -346,6 +392,26 @@ class CourseStore:
                     )
                 conn.commit()
         return self.settings()
+
+    def prefs(self, user_id: str) -> dict[str, Any]:
+        """One user's Course preferences (the defaults when none were saved)."""
+        with self._lock:
+            row = self._c().execute("SELECT value FROM course_settings WHERE key = ?",
+                                    (f"prefs:{norm_user(user_id)}",)).fetchone()
+        try:
+            return _check_prefs(json.loads(row["value"])) if row else dict(DEFAULT_PREFS)
+        except (CourseError, TypeError, ValueError):
+            return dict(DEFAULT_PREFS)
+
+    def set_prefs(self, user_id: str, prefs: Any) -> dict[str, Any]:
+        merged = _check_prefs({**self.prefs(user_id), **prefs} if isinstance(prefs, dict) else prefs)
+        with self._lock:
+            conn = self._c()
+            conn.execute("INSERT INTO course_settings (key, value) VALUES (?, ?)"
+                         " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                         (f"prefs:{norm_user(user_id)}", json.dumps(merged)))
+            conn.commit()
+        return merged
 
     # ── reads ──────────────────────────────────────────────────────────
 
@@ -519,6 +585,7 @@ class CourseStore:
         proposed_by: str = "",
         rationale: Any = "",
         actor: str = "",
+        supersedes_id: str = "",
     ) -> dict[str, Any]:
         """A new goal. ``status`` is ``active`` (a person writing their own) or
         ``proposed`` (Phase 3: an agent or the deck suggesting one)."""
@@ -568,8 +635,8 @@ class CourseStore:
                 INSERT INTO course_goals
                     (id, scope, owner_id, agent_ref, horizon, parent_id, title, detail, success,
                      status, origin, proposed_by, rationale, review_every_days, review_at,
-                     due_at, created_at, updated_at, decided_at, decided_by)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     due_at, created_at, updated_at, decided_at, decided_by, supersedes_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (goal["id"], scope, owner_id, agent_ref, horizon, parent_id, clean["title"],
                  clean["detail"], clean["success"], status, origin, proposed_by,
@@ -577,7 +644,7 @@ class CourseStore:
                  _iso(now + timedelta(days=days)) if status == "active" else None,
                  due, _iso(now), _iso(now),
                  _iso(now) if status == "active" else None,
-                 actor if status == "active" else ""),
+                 actor if status == "active" else "", str(supersedes_id or "")),
             )
             self._event(conn, goal["id"], actor, "created" if status == "active" else "proposed",
                         {"horizon": horizon, "parent_id": parent_id})
@@ -656,6 +723,169 @@ class CourseStore:
                  new["due_at"], new["review_every_days"], review_at, _iso(_utcnow()), goal_id),
             )
             self._event(conn, goal_id, actor, "edited", {"fields": changed})
+            conn.commit()
+        return self.get(goal_id)  # type: ignore[return-value]
+
+    # ── proposals (Phase 3) ─────────────────────────────────────────────
+
+    def _proposal_rules(self, conn: sqlite3.Connection, *, scope: str, owner_id: str,
+                        agent_ref: str, title: str, origin: str, proposed_by: str,
+                        supersedes_id: str = "") -> None:
+        """Raise unless this suggestion may be made now: suggestions on, under the
+        proposer's weekly limit, room among the waiting ones, not a title already
+        waiting or on the course, not one declined in the last 90 days."""
+        cfg = self.settings()["proposals"]
+        if not cfg["recommendations"]:
+            raise CourseError("Goal suggestions are switched off on this deck")
+        now = _utcnow()
+        week = _iso(now - timedelta(days=7))
+        limit = cfg["agent_per_week" if origin == "agent" else "deck_per_week"]
+        made = int(conn.execute(
+            "SELECT COUNT(*) FROM course_goals WHERE origin = ? AND proposed_by = ? AND owner_id = ?"
+            " AND created_at >= ?", (origin, proposed_by, owner_id, week)).fetchone()[0])
+        if made >= limit:
+            raise CourseError(f"The weekly limit of {limit} suggestion{'s' if limit != 1 else ''} "
+                              "is reached; try again next week")
+        key = (scope, owner_id, agent_ref)
+        rows = [self._row(r) for r in conn.execute(
+            "SELECT * FROM course_goals WHERE scope = ? AND owner_id = ? AND agent_ref = ?", key)]
+        if sum(1 for r in rows if r["status"] == "proposed") >= WAITING_MAX:
+            raise CourseError(f"{WAITING_MAX} suggestions are already waiting here; "
+                              "they need an answer first")
+        want = norm_title(title)
+        cutoff = _iso(now - timedelta(days=DECLINE_MEMORY_DAYS))
+        for r in rows:
+            if norm_title(r["title"]) != want or r["id"] == supersedes_id:
+                continue
+            if r["status"] == "proposed":
+                raise CourseError("The same goal is already waiting for an answer")
+            if r["status"] in ("active", "paused") and not supersedes_id:
+                raise CourseError("That goal is already on the course")
+            if r["status"] == "declined" and (r["decided_at"] or "") >= cutoff:
+                raise CourseError("That goal was declined recently; it isn't suggested again "
+                                  f"within {DECLINE_MEMORY_DAYS} days")
+
+    def propose(self, *, scope: str, horizon: str, title: Any, owner_id: str, origin: str,
+                proposed_by: str, agent_ref: str = "", success: Any = "", detail: Any = "",
+                parent_id: Any = "", due_at: Any = None, rationale: Any = "") -> dict[str, Any]:
+        """A goal an agent (``origin="agent"``, ``proposed_by`` its agent_ref) or the
+        deck (``origin="deck"``) suggests: stored ``proposed``, waiting for the
+        scope's owner. Instance goals are an admin's alone."""
+        if origin not in PROPOSAL_ORIGINS:
+            raise CourseError(f"Unknown origin {origin!r}")
+        if scope not in ("user", "agent"):
+            raise CourseError("Only a person sets the deck's goals")
+        owner_id = norm_user(owner_id)
+        agent_ref = str(agent_ref or "").strip() if scope == "agent" else ""
+        with self._lock:
+            conn = self._c()
+            self._proposal_rules(conn, scope=scope, owner_id=owner_id, agent_ref=agent_ref,
+                                 title=title, origin=origin, proposed_by=proposed_by)
+            return self.create(scope=scope, horizon=horizon, title=title, owner_id=owner_id,
+                               agent_ref=agent_ref, detail=detail, success=success,
+                               parent_id=parent_id, due_at=due_at, status="proposed",
+                               origin=origin, proposed_by=proposed_by, rationale=rationale,
+                               actor=f"{origin}:{proposed_by}")
+
+    def propose_change(self, goal_id: str, changes: Any, *, origin: str, proposed_by: str,
+                       rationale: Any = "") -> dict[str, Any]:
+        """A changed version of a user or agent goal, waiting for its owner: a new
+        ``proposed`` row with ``supersedes_id``. Accepting it replaces the goal."""
+        if origin not in PROPOSAL_ORIGINS:
+            raise CourseError(f"Unknown origin {origin!r}")
+        if not isinstance(changes, dict) or not changes:
+            raise CourseError("Say what should change")
+        unknown = [k for k in changes if k not in CHANGEABLE]
+        if unknown:
+            raise CourseError(f"{unknown[0]} can't be changed")
+        with self._lock:
+            conn = self._c()
+            goal = self._row(conn.execute("SELECT * FROM course_goals WHERE id = ?",
+                                          (goal_id,)).fetchone())
+            if goal is None:
+                raise CourseNotFoundError(goal_id)
+            if goal["scope"] == "instance":
+                raise CourseError("Only an admin changes the deck's goals")
+            if goal["status"] not in ("active", "paused"):
+                raise CourseError(f"A {goal['status']} goal can't be changed")
+            if conn.execute("SELECT 1 FROM course_goals WHERE supersedes_id = ? AND status = 'proposed'",
+                            (goal_id,)).fetchone():
+                raise CourseError("A change to this goal is already waiting for an answer")
+            new = {k: goal[k] for k in CHANGEABLE}
+            new.update(changes)
+            if all(new[k] == goal[k] for k in CHANGEABLE):
+                raise CourseError("That changes nothing")
+            if new["horizon"] != goal["horizon"]:
+                for child in conn.execute(
+                        "SELECT horizon FROM course_goals WHERE parent_id = ?"
+                        " AND status NOT IN ('superseded','declined')", (goal_id,)).fetchall():
+                    if new["horizon"] in HORIZON_RANK and \
+                            HORIZON_RANK[new["horizon"]] > HORIZON_RANK[child["horizon"]]:
+                        raise CourseError("Goals that serve this one have a longer horizon")
+            self._proposal_rules(conn, scope=goal["scope"], owner_id=goal["owner_id"],
+                                 agent_ref=goal["agent_ref"], title=new["title"], origin=origin,
+                                 proposed_by=proposed_by, supersedes_id=goal_id)
+            if new["parent_id"] == goal_id:
+                raise CourseError("A goal can't serve itself, directly or through others")
+            return self.create(scope=goal["scope"], horizon=new["horizon"], title=new["title"],
+                               owner_id=goal["owner_id"], agent_ref=goal["agent_ref"],
+                               detail=new["detail"], success=new["success"],
+                               parent_id=new["parent_id"], due_at=new["due_at"],
+                               review_every_days=goal["review_every_days"], status="proposed",
+                               origin=origin, proposed_by=proposed_by, rationale=rationale,
+                               actor=f"{origin}:{proposed_by}", supersedes_id=goal_id)
+
+    def accept(self, goal_id: str, *, actor: str = "") -> dict[str, Any]:
+        """A proposal becomes an active goal. A change replaces the goal it
+        changes: that one is ``superseded``, and its children, evidence and
+        progress move to the new one."""
+        with self._lock:
+            conn = self._c()
+            goal = self._row(conn.execute("SELECT * FROM course_goals WHERE id = ?",
+                                          (goal_id,)).fetchone())
+            if goal is None:
+                raise CourseNotFoundError(goal_id)
+            if goal["status"] != "proposed":
+                raise CourseError(f"This goal is {goal['status']}, not a proposal")
+            if goal["horizon"] not in self.settings()["horizons"][goal["scope"]]:
+                raise CourseError(f"{HORIZON_LABELS[goal['horizon']]} goals aren't used at the "
+                                  f"{goal['scope']} level any more; change its horizon first")
+            old = None
+            if goal["supersedes_id"]:
+                old = self._row(conn.execute("SELECT * FROM course_goals WHERE id = ?",
+                                             (goal["supersedes_id"],)).fetchone())
+                if old is None or old["status"] not in ("active", "paused"):
+                    raise CourseError("The goal this would change is no longer active; decline "
+                                      "this and add it again if you still want it")
+            self._check_cap(conn, scope_key(goal), goal["horizon"],
+                            exclude_id=old["id"] if old else "")
+            now = _utcnow()
+            conn.execute(
+                "UPDATE course_goals SET status = 'active', review_at = ?, updated_at = ?,"
+                " decided_at = ?, decided_by = ?, progress = ?, progress_note = ? WHERE id = ?",
+                (_iso(now + timedelta(days=int(goal["review_every_days"]))), _iso(now), _iso(now),
+                 actor, old["progress"] if old else goal["progress"],
+                 old["progress_note"] if old else goal["progress_note"], goal_id))
+            self._event(conn, goal_id, actor, "accepted",
+                        {"supersedes_id": old["id"]} if old else {})
+            if old is not None:
+                conn.execute(
+                    "UPDATE course_goals SET status = 'superseded', updated_at = ?, decided_at = ?,"
+                    " decided_by = ? WHERE id = ?", (_iso(now), _iso(now), actor, old["id"]))
+                self._event(conn, old["id"], actor, "status",
+                            {"from": old["status"], "to": "superseded", "by": goal_id})
+                rank = HORIZON_RANK[goal["horizon"]]
+                for child in conn.execute(
+                        "SELECT id, horizon FROM course_goals WHERE parent_id = ?"
+                        " AND status NOT IN ('superseded','declined')", (old["id"],)).fetchall():
+                    if HORIZON_RANK[child["horizon"]] >= rank:
+                        conn.execute("UPDATE course_goals SET parent_id = ? WHERE id = ?",
+                                     (goal_id, child["id"]))
+                conn.execute("UPDATE OR IGNORE course_links SET goal_id = ? WHERE goal_id = ?",
+                             (goal_id, old["id"]))
+                if old["status"] == "paused":
+                    conn.execute("UPDATE course_goals SET status = 'paused' WHERE id = ?",
+                                 (goal_id,))
             conn.commit()
         return self.get(goal_id)  # type: ignore[return-value]
 

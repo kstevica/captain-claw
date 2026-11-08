@@ -23,6 +23,7 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
   const [saved, setSaved] = useState<CourseSettings | null>(null)
   const [draft, setDraft] = useState<CourseSettings | null>(null)
   const [range, setRange] = useState<[number, number]>([1, 20])
+  const [weekRange, setWeekRange] = useState<[number, number]>([0, 20])
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
@@ -33,8 +34,8 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
     getSettings()
       .then((s) => {
         if (cancelled) return
-        const v = { horizons: s.horizons, caps: s.caps }
-        setSaved(v); setDraft(v); setRange(s.cap_range)
+        const v = { horizons: s.horizons, caps: s.caps, proposals: s.proposals }
+        setSaved(v); setDraft(v); setRange(s.cap_range); setWeekRange(s.per_week_range ?? [0, 20])
       })
       .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)) })
       .finally(() => { if (!cancelled) setLoading(false) })
@@ -54,15 +55,23 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
     setNotice(null)
   }
 
+  const setProposals = (patch: Partial<CourseSettings['proposals']>) => {
+    if (!draft) return
+    setDraft({ ...draft, proposals: { ...draft.proposals, ...patch } })
+    setNotice(null)
+  }
+
   const dirty = !!saved && !!draft && !same(saved, draft)
   const badCap = !!draft && HORIZONS.some((h) => !(draft.caps[h] >= range[0] && draft.caps[h] <= range[1]))
+  const badWeek = !!draft && [draft.proposals.agent_per_week, draft.proposals.deck_per_week]
+    .some((n) => !(Number.isInteger(n) && n >= weekRange[0] && n <= weekRange[1]))
 
   const save = async () => {
     if (!draft) return
     setSaving(true); setError(null); setNotice(null)
     try {
       const s = await saveSettings(draft)
-      const v = { horizons: s.horizons, caps: s.caps }
+      const v = { horizons: s.horizons, caps: s.caps, proposals: s.proposals }
       setSaved(v); setDraft(v)
       setNotice('Saved. Goals already at a horizon you took away are kept; only new ones are refused.')
       onSaved?.()
@@ -78,7 +87,7 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
       <div className="flex items-start gap-2">
         <SlidersHorizontal className="mt-0.5 h-4 w-4 shrink-0 text-violet-400" />
         <div>
-          <h3 className="text-sm font-semibold text-zinc-200">Course: horizons and limits</h3>
+          <h3 className="text-sm font-semibold text-zinc-200">Course: horizons, limits and suggestions</h3>
           <p className="text-xs text-zinc-500 mt-0.5">
             Which horizons each level uses, and how many active goals a horizon may hold at each level.
             Clearing a row switches goals off at that level.
@@ -134,10 +143,38 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
               </tbody>
             </table>
           </div>
+          <div className="space-y-2 border-t border-zinc-800/70 pt-3">
+            <label className="flex items-start gap-2 text-xs text-zinc-300">
+              <input type="checkbox" checked={draft.proposals.recommendations}
+                onChange={(e) => setProposals({ recommendations: e.target.checked })} className="mt-0.5 h-4 w-4 accent-violet-600" />
+              <span>
+                Agents and Flight Deck may suggest goals
+                <span className="block text-[11px] text-zinc-500">Every suggestion waits for the person it’s for (unless they let their agents add their own short-term goals).</span>
+              </span>
+            </label>
+            {draft.proposals.recommendations && (
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pl-6 text-xs text-zinc-400">
+                <label className="flex items-center gap-1.5">
+                  Each agent, at most
+                  <input type="number" min={weekRange[0]} max={weekRange[1]} value={draft.proposals.agent_per_week}
+                    onChange={(e) => setProposals({ agent_per_week: Number(e.target.value) })}
+                    className="w-14 rounded-md border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-center text-zinc-200" />
+                  a week
+                </label>
+                <label className="flex items-center gap-1.5">
+                  Flight Deck, at most
+                  <input type="number" min={weekRange[0]} max={weekRange[1]} value={draft.proposals.deck_per_week}
+                    onChange={(e) => setProposals({ deck_per_week: Number(e.target.value) })}
+                    className="w-14 rounded-md border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-center text-zinc-200" />
+                  a week for each person
+                </label>
+              </div>
+            )}
+          </div>
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={save}
-              disabled={saving || !dirty || badCap}
+              disabled={saving || !dirty || badCap || badWeek}
               className="rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
             >
               {saving ? 'Saving…' : 'Save'}
@@ -152,6 +189,7 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
               </button>
             )}
             {badCap && <span className="text-[11px] text-red-500">Limits go from {range[0]} to {range[1]}.</span>}
+            {badWeek && <span className="text-[11px] text-red-500">Weekly suggestions go from {weekRange[0]} to {weekRange[1]}.</span>}
           </div>
         </>
       ) : null}

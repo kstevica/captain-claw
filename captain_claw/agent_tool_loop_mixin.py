@@ -142,7 +142,8 @@ class AgentToolLoopMixin:
             return "Checking on what I handed out" if action == "handed" else "Looking at the team"
         if name == "course":
             action = str(arguments.get("action", "")).strip().lower()
-            return {"link": "Linking work to a goal", "report": "Reporting progress on a goal"}.get(
+            return {"link": "Linking work to a goal", "report": "Reporting progress on a goal",
+                    "propose": "Suggesting a goal", "propose_change": "Suggesting a change to a goal"}.get(
                 action, "Looking at the course")
         if name == "line":
             action = str(arguments.get("action", "")).strip().lower()

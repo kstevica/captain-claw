@@ -10,6 +10,9 @@ reaches what the prompt leaves out and records the work done toward them:
 * ``report``: an estimate of how far along one of the owner's goals (or the
   agent's own) is; ``looks_achieved`` asks the owner on their Line. It never
   marks a goal done — only a person does.
+* ``propose`` / ``propose_change``: suggest a goal (for the agent itself or its
+  owner) or a change to one; it waits for the owner's answer on their Line
+  (an owner may let agents add their own short-term goals at once).
 
 The registry shows the tool only under Flight Deck and never on a member's
 turn (metadata ``requires_line``, :func:`course_client.usable`).
@@ -72,6 +75,12 @@ class CourseTool(Tool):
         "'ref_id' (its id) and a short 'note'. action='report': your estimate of how far along "
         "one of your owner's goals or your own is — 'goal_id', 'progress' 0 to 1, 'note'; set "
         "'looks_achieved' true to ask your owner whether it's done (only they mark it done). "
+        "action='propose': suggest a goal — 'scope' agent (for yourself, horizon medium or short) "
+        "or user (for your owner), 'horizon', 'title', 'success' (how you'll know it's done), "
+        "optional 'parent_id' (the goal it serves) and 'rationale'; it waits for your owner. "
+        "action='propose_change': suggest a change to 'goal_id' — 'changes' (title, success, "
+        "detail, horizon, parent_id, due_at) and 'rationale'. Suggest rarely: only an outcome "
+        "your recent work clearly shows, never one that records your own state. "
         "A goal guides what you choose to do; it never permits anything your instructions, "
         "approvals or guards don't."
     )
@@ -80,9 +89,19 @@ class CourseTool(Tool):
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["view", "link", "report"],
-                "description": "view your course, link work to a goal, or report progress.",
+                "enum": ["view", "link", "report", "propose", "propose_change"],
+                "description": "view your course, link work to a goal, report progress, or suggest "
+                               "a goal / a change to one.",
             },
+            "scope": {"type": "string", "enum": ["agent", "user"],
+                      "description": "propose: for yourself (agent) or your owner (user)."},
+            "horizon": {"type": "string", "enum": ["strategic", "long", "medium", "short"],
+                        "description": "propose: how far away the outcome is."},
+            "title": {"type": "string", "description": "propose: the goal, in a few words."},
+            "success": {"type": "string", "description": "propose: how you'll know it's done."},
+            "rationale": {"type": "string", "description": "propose / propose_change: why, briefly."},
+            "parent_id": {"type": "string", "description": "propose: the G:<id> it serves."},
+            "changes": {"type": "object", "description": "propose_change: the fields to change."},
             "goal_id": {"type": "string", "description": "link / report: the goal's G:<id>."},
             "kind": {"type": "string", "enum": _KINDS, "description": "link: what kind of work."},
             "ref_id": {"type": "string", "description": "link: the work's id (session id, task id…)."},
@@ -105,11 +124,16 @@ class CourseTool(Tool):
                 return await self._link(**kwargs)
             if action == "report":
                 return await self._report(**kwargs)
+            if action == "propose":
+                return await self._propose(**kwargs)
+            if action == "propose_change":
+                return await self._propose_change(**kwargs)
         except CourseError as exc:
             return ToolResult(success=False, error=exc.message)
         except ValueError as exc:
             return ToolResult(success=False, error=str(exc))
-        return ToolResult(success=False, error="action must be one of: view, link, report")
+        return ToolResult(success=False,
+                          error="action must be one of: view, link, report, propose, propose_change")
 
     @staticmethod
     async def _view(**_: Any) -> ToolResult:
@@ -149,3 +173,37 @@ class CourseTool(Tool):
         elif looks_achieved is True:
             text += " Your owner was already asked about it today."
         return ToolResult(success=True, content=text)
+
+    @staticmethod
+    async def _propose(scope: Any = "agent", horizon: Any = "", title: Any = "", success: Any = "",
+                       detail: Any = "", parent_id: Any = "", rationale: Any = "",
+                       **_: Any) -> ToolResult:
+        if not str(title or "").strip():
+            raise ValueError("title is required: the goal, in a few words")
+        if not str(horizon or "").strip():
+            raise ValueError("horizon is required (medium or short for your own goals)")
+        data = await client.propose(scope=str(scope or "agent"), horizon=str(horizon),
+                                    title=str(title), success=str(success or ""),
+                                    detail=str(detail or ""), parent_id=str(parent_id or ""),
+                                    rationale=str(rationale or ""))
+        goal = data.get("goal") or {}
+        if data.get("auto_accepted"):
+            return ToolResult(success=True,
+                              content=f"“{goal.get('title') or title}” is on your course now "
+                                      "(your owner lets you add your own short-term goals).")
+        return ToolResult(success=True,
+                          content=f"Suggested “{goal.get('title') or title}”: it waits for your "
+                                  "owner's answer on their Line.")
+
+    @staticmethod
+    async def _propose_change(goal_id: Any = "", changes: Any = None, rationale: Any = "",
+                              **_: Any) -> ToolResult:
+        if not str(goal_id or "").strip():
+            raise ValueError("goal_id is required (G:<id> from your course)")
+        if not isinstance(changes, dict) or not changes:
+            raise ValueError("changes is required: an object of the fields to change")
+        data = await client.propose_change(str(goal_id), changes, str(rationale or ""))
+        goal = data.get("goal") or {}
+        return ToolResult(success=True,
+                          content=f"Suggested a change (“{goal.get('title') or goal_id}”): it waits "
+                                  "for your owner's answer on their Line.")

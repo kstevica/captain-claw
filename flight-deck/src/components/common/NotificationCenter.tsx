@@ -329,7 +329,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
               && n.refId && onOpenSetup ? n.refId : ''
             const forge = n.refType === 'agent_forge' && n.refId && onOpenForge ? n.refId : ''
             const profile = n.refType === 'profile'
-            const course = n.refType === 'course_review'
+            const course = n.refType === 'course_review' || n.refType === 'course_goal'
             const tools = (n.refType === 'custom_tool' || n.refType === 'custom_tool_approval' || n.refType === 'custom_tool_proposal'
               || n.refType === 'person_ask') ? n.refType : ''
             const task = taskOf(n)

@@ -100,3 +100,18 @@ async def report(goal_id: str, progress: float, note: str = "",
                  looks_achieved: bool = False) -> dict[str, Any]:
     return await _post("report", {"goal_id": goal_id, "progress": progress, "note": note,
                                   "looks_achieved": looks_achieved})
+
+
+async def propose(*, horizon: str, title: str, success: str = "", scope: str = "agent",
+                  detail: str = "", parent_id: str = "", rationale: str = "") -> dict[str, Any]:
+    """Suggest a goal — for this agent (``scope="agent"``) or its owner
+    (``scope="user"``); it waits for the owner."""
+    return await _post("propose", {"scope": scope, "horizon": horizon, "title": title,
+                                   "success": success, "detail": detail, "parent_id": parent_id,
+                                   "rationale": rationale})
+
+
+async def propose_change(goal_id: str, changes: dict[str, Any], rationale: str = "") -> dict[str, Any]:
+    """Suggest a change to one of the owner's goals or this agent's own."""
+    return await _post("propose_change", {"goal_id": goal_id, "changes": changes,
+                                          "rationale": rationale})

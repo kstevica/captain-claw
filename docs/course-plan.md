@@ -1,9 +1,10 @@
 # Course: Implementation Plan
 
-> Status: Phases 1 and 2 built. Phase 1: store, routes, Course page, admin card, kiosk
-> dialog, prompt files, review sweep. Phase 2: the Arbiter, plans, the Taskboard, projects,
-> scheduled tasks, Swarm runs, Forge agents and the agent's `course` tool. Phases 3–4 not
-> started.
+> Status: Phases 1–3 built. Phase 1: store, routes, Course page, admin card, kiosk dialog,
+> prompt files, review sweep. Phase 2: the Arbiter, plans, the Taskboard, projects,
+> scheduled tasks, Swarm runs, Forge agents and the agent's `course` tool. Phase 3:
+> suggestions from agents (the tool, self-reflection) and from the deck (the heartbeat),
+> each waiting for a person. Phase 4 not started.
 > Decisions locked: the feature is called **Course** · each item is a **goal** · each goal
 > has a **horizon** (strategic · long · medium · short) · three scopes (instance · user ·
 > agent) · goals form a tree · proposals always wait for a person · goals guide priorities
@@ -306,17 +307,28 @@ agent (`fd_dispatch.dispatch_action`), and approve/reject trains action reliabil
 | `course_conflict` | deck | yes (Phase 4) |
 | `course_achieved` | result | no |
 
-**Hygiene** (server-side, so a chatty model can't get around it):
-- Each agent may propose at most `agent_proposals_per_week` (default 2); the deck at most
-  `deck_proposals_per_week` (default 2) per user.
-- A waiting proposal blocks another with the same normalised title in that scope.
-- A declined title can't be proposed again in the same scope for 90 days. That's the
-  same idea as the Arbiter's lookback dedup.
-- A proposal may target a goal a person set (`propose_change`), but the page always shows
-  it as a diff against the current goal.
-- Optional, off by default: `auto_accept_agent_short` lets an agent's own short-term
-  proposals become active straight away. The owner switches it on per user, like the
-  autonomy dials.
+**Hygiene** (server-side in `CourseStore._proposal_rules`, so a chatty model can't get
+around it; built in Phase 3):
+- The admin's switch: with suggestions off, every suggestion is refused.
+- Each agent may suggest at most `agent_per_week` (default 2) per week, across both
+  scopes; the deck at most `deck_per_week` (default 2) per user per week. Every
+  suggestion counts, whatever became of it.
+- At most 5 suggestions wait per scope (one user's, one agent's).
+- A title (compared lower case, letters and digits only) is refused when the same one is
+  already waiting, already on the course, or was declined in that scope in the last 90
+  days.
+- A suggestion may change a goal a person set (`propose_change`): a new `proposed` row
+  with `supersedes_id`, one waiting change per goal. The page shows what it changes, field
+  by field. Accepting it supersedes the old goal and moves its children (that still fit),
+  evidence and progress to the new one; a goal that was achieved or dropped meanwhile
+  can't be replaced.
+- A proposal becomes active only through `accept` (the status rules don't allow
+  `proposed → active` any other way).
+- Optional, off by default: `auto_accept_agent_short` lets an agent's own short-term goal
+  go straight onto its course; the Line says so (`course_auto_added`, nothing to answer).
+  Each user switches it on for themselves on the Course page.
+- Agents may suggest goals for their owner too (`scope = "user"`), not only for
+  themselves.
 
 ## Where Course plugs in
 
@@ -345,14 +357,18 @@ agent (`fd_dispatch.dispatch_action`), and approve/reject trains action reliabil
   due or went stale, posts `course_review` items, and rewrites the files of agents whose
   block changed.
 
-### Consciousness pulse (`flight_deck/consciousness.py`, Phase 3)
-- `_build_reflection_user_prompt` includes the compact course. `_parse_reflection`
-  accepts at most one optional `course` suggestion, which becomes a user-scope proposal
-  with `origin = deck`, subject to the weekly cap.
+### Consciousness pulse (`flight_deck/consciousness.py`, Phase 3, built)
+- The heartbeat's prompt lists the user's live goals; its JSON gains an optional
+  `course` object (`horizon`, `title`, `success`, `why`), "almost always null". One
+  becomes a user-scope proposal with `origin = deck` (`_suggest_goal`), under every rule
+  above. A heartbeat never fails over it.
 
-### Agent self-reflection (`captain_claw/reflections.py`, Phase 3)
-- `generate_reflection` already runs every 4 hours. Under FD with a Course block present, it
-  may return at most one goal proposal for the agent itself, posted through `course_client`.
+### Agent self-reflection (`captain_claw/reflections.py`, Phase 3, built)
+- No extra model call: under Flight Deck on the owner's turns (`course_client.usable`),
+  the reflection prompt gains a short Course addendum asking for at most one final line,
+  `GOAL_PROPOSAL: {…}` (a medium or short goal for the agent itself). The line is taken
+  off before the reflection is saved, so it never ends up in the agent's own prompt; the
+  suggestion goes to Flight Deck through `course_client.propose`.
 - The transcript it reads is already filtered by `member_privacy.learnable`, so a member's
   conversation never turns into a goal proposal for the owner.
 
@@ -450,25 +466,24 @@ What the page shows:
 
 Build with `npm run build`, which writes into `captain_claw/flight_deck/static/`.
 
-## Config: `CourseConfig` (`captain_claw/config.py`)
+## Settings (as built)
 
-A pydantic block next to `AutonomousWorkConfig`, read fresh each time through
-`get_config()`, with env overrides via `CLAW_COURSE__*`. Per-user overrides live in
-`user_settings` under `fd:course`, merged the way `autonomy.merge_config` does. The admin
-can switch recommendations off for the whole deck.
+Course's settings live in its own store (`course_settings` in `course.db`), not in
+`config.py`: the admin changes them from the UI at any time and they apply at once.
 
-| Field | Default | |
-|---|---|---|
-| `enabled` | true | Manual goals and the prompt block. No model calls. |
-| `recommendations` | true | Agents and the deck may propose. Proposals only ever wait for a person. |
-| `agent_proposals_per_week` | 2 | Per agent. |
-| `deck_proposals_per_week` | 2 | Per user. |
-| `auto_accept_agent_short` | false | Per user. |
-| `goal_driven_candidates` | false | Phase 4 Arbiter candidates. |
-| `progress_estimates` | false | Phase 4 weekly model pass. |
-| `caps` | 3 / 5 / 7 / 3 | Active goals per horizon per scope. |
-| `full_max` / `compact_max` | 3000 / 600 | Prompt block sizes. |
-| `review_grace_min_days` | 3 | |
+| Key | Who | Default | |
+|---|---|---|---|
+| `horizons` | admin | deck: strategic, long · user: all · agent: medium, short | Which horizons each level uses. |
+| `caps` | admin | 3 / 5 / 7 / 3 | Active goals per horizon per level. |
+| `proposals.recommendations` | admin | true | Agents and the deck may suggest goals. |
+| `proposals.agent_per_week` | admin | 2 | Per agent, per week (0–20). |
+| `proposals.deck_per_week` | admin | 2 | Per user, per week (0–20). |
+| `prefs:<user>.auto_accept_agent_short` | each user | false | Their agents may add their own short-term goals without asking. |
+
+Fixed in code for now: the prompt block sizes (3000 / 600), the review grace
+(`max(3 days, a quarter of the review period)`), 5 waiting suggestions per scope and the
+90-day decline memory. Phase 4's switches (goal-driven Arbiter candidates, weekly
+progress estimates) will join the admin's settings.
 
 ## Privacy and safety
 
@@ -505,10 +520,13 @@ can switch recommendations off for the whole deck.
      (evidence, history, progress, Plan a route), the Forge agents review step, and the
      `course` tool's `view`, `link` and `report`.
    - The Arbiter's "Candidate goals" string became "Candidates".
-3. **Recommendations.**
+3. **Recommendations.** (built)
    - `course` tool `propose` / `propose_change`, agent self-reflection proposals, pulse
-     proposals, the Line types and their resolution, caps, dedup, the 90-day decline
-     memory, and `auto_accept_agent_short`.
+     proposals, the `course_proposal` / `course_auto_added` Line types and their
+     resolution, weekly limits, the waiting cap, dedup, the 90-day decline memory,
+     `auto_accept_agent_short`, the "Waiting for you" strip (Accept, Edit and accept,
+     Decline, a change's differences), Accept / Decline on the Line, and the admin's
+     suggestion settings.
 4. **Progress and off course.**
    - Last moved, metrics (`manual`, `taskboard_done`, `link_count`), the weekly estimate,
      the off-course band, the conflict check, and goal-driven Arbiter candidates.
@@ -534,9 +552,12 @@ New `tests/test_course_*.py`:
 Decided: members of a shared agent see the deck-wide goals; the admin chooses the
 horizons per scope.
 
+Decided in Phase 3: agents may suggest goals for their owner (user scope) as well as for
+themselves.
+
 1. Should the deck ever propose instance goals to the admin? v1: no. It would have to read
    across users' private goals.
-2. Should an agent's `propose` at user scope be allowed in Phase 3, or only agent scope at
-   first?
-3. Should run workers (Basna, Vatra, Council teammates) get the compact block? v1: no. The
+2. Should run workers (Basna, Vatra, Council teammates) get the compact block? v1: no. The
    run's task already carries the `goal_id` of the action that started it.
+3. Should waiting suggestions expire? v1: no; at most 5 wait per scope, so old ones have
+   to be answered before new ones arrive.

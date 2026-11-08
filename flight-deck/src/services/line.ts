@@ -125,9 +125,9 @@ export async function markAllLineRead(): Promise<void> {
 }
 
 /** Items that need the user and are answered somewhere else, not by being
- *  read: a proposal (approved or rejected on the ledger) and a goal review
- *  (answered on the Course page). The server's line.ANSWERED_REFS, client side. */
-export const ANSWERED_ELSEWHERE = new Set(['autonomy_action', 'course_review'])
+ *  read: a proposal (approved or rejected on the ledger), a goal review and a
+ *  goal suggestion (answered on the Course page). The server's line.ANSWERED_REFS, client side. */
+export const ANSWERED_ELSEWHERE = new Set(['autonomy_action', 'course_review', 'course_goal'])
 export const answeredByReading = (needsYou: boolean | undefined, refType: string | undefined) =>
   !!needsYou && !ANSWERED_ELSEWHERE.has(refType || '')
 

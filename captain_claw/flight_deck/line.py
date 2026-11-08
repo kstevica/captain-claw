@@ -116,6 +116,9 @@ _TYPES: dict[str, tuple[str, bool]] = {
     "course_review": ("ask", True),
     # Course: an agent thinks a goal is done ("Looks achieved?").
     "course_looks_achieved": ("ask", True),
+    # Course: an agent or the deck suggests a goal; or one an agent added itself.
+    "course_proposal": ("proposal", True),
+    "course_auto_added": ("agent", False),
     "whatsapp_web": ("deck", True),
     "info": ("deck", False),
     "success": ("deck", False),
@@ -128,7 +131,7 @@ _NEEDS_YOU_REFS = frozenset({"agent_lessons", "purchase", "telegram_link"})
 # Generic types that are about an agent.
 _AGENT_REFS = frozenset({"agent_lessons", "agent_exam", "agent_setup", "agent_forge", "profile"})
 # Items answered somewhere else, not by being read.
-ANSWERED_REFS = frozenset({"autonomy_action", "person_ask", "course_review"})
+ANSWERED_REFS = frozenset({"autonomy_action", "person_ask", "course_review", "course_goal"})
 # Whose words an item's text is: the deck's own, an agent's, or someone
 # else's (an email, a WhatsApp chat) — what a reader may trust of it.
 _TRUST: dict[str, str] = {

@@ -5063,11 +5063,11 @@ class FlightDeckDB:
 
     # Reading an item that needs the user answers it, unless its answer is
     # given elsewhere (line.ANSWERED_REFS: a proposal, on the ledger; a
-    # question, in its dialog; a Course review, on the Course page).
+    # question, in its dialog; a Course review or proposal, on the Course page).
     _READ_SET = (
         "read_at = CASE WHEN read_at = '' THEN :now ELSE read_at END,"
         " resolved_at = CASE WHEN needs_you = 1 AND resolved_at = ''"
-        " AND ref_type NOT IN ('autonomy_action', 'person_ask', 'course_review')"
+        " AND ref_type NOT IN ('autonomy_action', 'person_ask', 'course_review', 'course_goal')"
         " THEN :now ELSE resolved_at END"
     )
 
