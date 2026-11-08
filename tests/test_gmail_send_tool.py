@@ -868,6 +868,22 @@ async def test_a_thread_draft_to_someone_else_does_not_block_a_reply(monkeypatch
 
 
 @pytest.mark.asyncio
+async def test_a_discarded_draft_in_trash_does_not_block_a_reply(monkeypatch):
+    _set_mode(monkeypatch, fd=False)
+    trashed = {"id": "m2", "threadId": "t1", "labelIds": ["DRAFT", "TRASH"], "internalDate": "2000",
+               "payload": {"headers": _hdrs(to="Team <team@ok.com>", subject="Re: Quarterly numbers")}}
+    gmail = _Gmail({
+        ("GET", "/messages/m1"): (200, {**ORIGINAL, "internalDate": "1000"}),
+        ("GET", "/threads/t1"): _thread(_ORIG_IN_THREAD, trashed),
+        ("GET", "/drafts"): (200, {"drafts": []}),
+        ("POST", "/drafts"): (200, {"id": "new", "message": {"id": "m-new"}}),
+    })
+    res = await _tool_with(gmail).execute("create_draft", reply_to_message_id="m1", body="Sounds good")
+    assert res.success, res.error
+    assert len(_posts(gmail)) == 1
+
+
+@pytest.mark.asyncio
 async def test_reply_already_sent_after_the_original_is_refused_but_an_older_one_is_not(monkeypatch):
     _set_mode(monkeypatch, fd=False)
 
