@@ -534,17 +534,30 @@ def checkable(detail: str) -> bool:
 _CLAUSE = re.compile(r"\s[—–]\s|;\s|\.{3}|…")   # "16% a year — double the 6½% long-run average"
 
 
-def check_details(details: list[str], corpus: dict[str, list[str]]) -> list[dict]:
+def _without_given(clause: str, asked: str) -> str:
+    """*clause* without the figures the question itself gives (*asked*, as
+    _checked writes it): a reply working with the question's own numbers
+    ("a fee of EUR 60,000", asked about €60,000) finds nothing in them."""
+    if not asked:
+        return clause
+    for f in _detail_parts(clause)[0]:
+        if _part_pattern(f, True).search(asked):
+            clause = re.sub(rf"(?<![\d.,]){re.escape(f)}(?!\d|[.,]\d)", " ", clause)
+    return clause
+
+
+def check_details(details: list[str], corpus: dict[str, list[str]], asked: str = "") -> list[dict]:
     """Each detail the grader found outside the question's passage, with
     where else it is: ``documents`` (anywhere in them), ``lessons`` (a fact
     or rule it was taught), ``looked_up`` (what its lookups returned) — or
     "" when nowhere: made up. One that joins facts (" — ", "; ", "…") is
     found when each of them is, wherever. One with nothing to check it by
     (the reply putting what it read its own way, or its own arithmetic) is
-    left out."""
+    left out — and so are the figures the question gives (*asked*): only
+    what the reply adds to them is checked."""
     out = []
     for d in details:
-        clauses = [c for c in _CLAUSE.split(d) if checkable(c)]
+        clauses = [c for c in (_without_given(c, asked) for c in _CLAUSE.split(d)) if checkable(c)]
         if not clauses:
             continue
         wheres = [next((where for where, texts in corpus.items() if found_in(c, texts)), "") for c in clauses]
@@ -883,7 +896,8 @@ async def _grade(job: ExamJob, reader: dict, srcs: list[Source]) -> None:
             g = grades.get(n)
             if g is None:
                 continue
-            q.update(settle(g, await asyncio.to_thread(check_details, g.pop("unsupported"), _corpus(srcs, lessons, q))))
+            q.update(settle(g, await asyncio.to_thread(check_details, g.pop("unsupported"), _corpus(srcs, lessons, q),
+                                                          _checked(q["question"]))))
             q["cause"] = cause(q)
         job.step += 1
         save(job)
