@@ -454,6 +454,24 @@ def test_a_figure_is_found_however_its_thousands_are_grouped():
     assert ex._detail_parts("EUR 1 850 and 2\u00a0000, not 2019 150")[0] == ["1 850", "2\u00a0000", "2019", "150"]
 
 
+def test_a_figure_the_question_gives_isnt_made_up():
+    # Seen on a Tender Writer: asked about a fee of €60,000, its right answer wrote "EUR 60,000" (a lesson's
+    # format) and was marked "Made things up", though the figure was the question's own.
+    corpus = {"documents": [ex._checked("Ask Maya before quoting a fee over €50,000.")], "lessons": [], "looked_up": []}
+    asked = ex._checked("The fee comes to €60,000 and the client asks when we can start. What do I do?")
+    said = 'write the amount as "EUR 60,000", not with the € sign'
+    assert ex.check_details([said], corpus) == [{"text": said, "found": ""}]
+    assert ex.check_details([said], corpus, asked) == []
+    # What the reply adds is still checked: a figure found nowhere is made up, one in its documents isn't.
+    more = "EUR 60,000 less a 7% discount"
+    assert ex.check_details([more], corpus, asked) == [{"text": more, "found": ""}]
+    over = "EUR 60,000 is over the EUR 50,000 threshold"
+    assert ex.check_details([over], corpus, asked) == [{"text": over, "found": "documents"}]
+    # A figure is the whole figure: the question's 60,000 stands for neither 600 nor 60, and 1,850 for 1850.
+    assert ex._without_given("600 and 60", asked).split() == ["600", "and", "60"]
+    assert ex._without_given("a rate of 1850", ex._checked("at EUR 1,850 a day")).split() == ["a", "rate", "of"]
+
+
 def test_made_up_stands_only_for_details_found_nowhere():
     grade = {"verdict": "partly", "made_up": True, "missing": [], "why": "Adds figures."}
     found = [{"text": "0.28 pp", "found": "lessons"}]

@@ -13,6 +13,9 @@ gives. The agent will be asked the questions as its users would ask them, withou
     procedure in this section decides what to do. End it with what they want from the agent
     ("What do you reply?", "What do you do?"). When the section has no rule or procedure to
     apply, write an `ask` instead.
+- **True to the documents.** A situation's own details (how many days, the fee it comes to, a
+  date) are made up for the case, but never a rate, a discount, a limit or a threshold the
+  documents set differently: a right reply would then have to correct the question.
 - **Plain and standalone.** Never mention "the document", "the section", "the handbook" or
   "according to", never quote the heading, and never give the answer away in the question.
 - **Specific.** Ask about what an agent would get wrong without the section — exact numbers,
