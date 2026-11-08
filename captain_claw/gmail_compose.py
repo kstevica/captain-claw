@@ -729,7 +729,9 @@ async def _thread_repeats(
 ) -> list[dict[str, str]]:
     """A reply's repeats: a DRAFT in the thread, or a SENT message newer than
     the email being answered (skipped when its date is unknown — the order
-    can't be told)."""
+    can't be told). A draft in Trash was discarded, so it isn't one: Drafts
+    doesn't list it and the subject search (``in:drafts``) skips it too. A sent
+    email in Trash still went, so it still counts."""
     try:
         thread = await _get_json(client, f"/threads/{thread_id}", {"format": "metadata"}, headers)
     except Exception as exc:
@@ -740,7 +742,8 @@ async def _thread_repeats(
     for message in thread.get("messages") or []:
         labels = set(message.get("labelIds") or [])
         if "DRAFT" in labels:
-            drafts.append(_candidate(message, "draft"))
+            if "TRASH" not in labels:
+                drafts.append(_candidate(message, "draft"))
         elif "SENT" in labels and after_ms and _as_int(message.get("internalDate")) > after_ms:
             sent.append(_candidate(message, "sent"))
     if drafts:
