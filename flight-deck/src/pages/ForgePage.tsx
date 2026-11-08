@@ -1058,7 +1058,7 @@ export function ForgePage() {
                   <p>{failed.length} of {agents.length} agent{agents.length !== 1 ? 's' : ''} failed to spawn.</p>
                   {limitHit && (
                     <p className="mt-1 text-[12px] text-red-700/80 dark:text-red-300/80">
-                      Your plan's concurrent-agent limit was reached. Remove some agents, stop idle ones on the Agent Desktop, or upgrade your plan, then spawn the rest.
+                      Your plan's concurrent-agent limit was reached. Remove some agents, stop idle ones on the Agent Desktop, or ask your admin for a higher limit, then spawn the rest.
                     </p>
                   )}
                 </div>

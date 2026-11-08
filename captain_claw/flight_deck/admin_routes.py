@@ -68,7 +68,12 @@ async def list_users(
     db = get_db()
     users = await db.list_users(limit=limit, offset=offset)
     total = await db.count_users()
-    return {"users": users, "total": total}
+    from captain_claw.flight_deck import crew_access
+
+    # Whether this deck offers Crew at all (FD_CREW, FD_CREW_TERMINAL): approving
+    # someone for it means nothing while it's off.
+    crew = {"offered": crew_access.offered(), "terminal": crew_access.terminal_offered()}
+    return {"users": users, "total": total, "crew": crew}
 
 
 @router.post("/users", status_code=201)
@@ -242,6 +247,13 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
         member_refs = await db.list_agent_share_refs(user_id)
     except Exception:
         member_refs = []
+    if not await db.get_user_by_id(user_id):
+        raise HTTPException(404, "User not found")
+    # Their agents go first, while their chat logs can still be found by owner:
+    # stopped, removed, and their folders deleted.
+    from captain_claw.flight_deck import server as fd_server
+
+    removed_agents = await fd_server.remove_agents_of(user_id)
     deleted = await db.delete_user(user_id)
     if not deleted:
         raise HTTPException(404, "User not found")
@@ -286,7 +298,7 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
         await context_packs.refresh_refs(db, sorted(set(pack_refs) | set(member_refs)))
     except Exception:
         pass
-    return {"ok": True}
+    return {"ok": True, "removed_agents": removed_agents}
 
 
 # ── Waitlist ──

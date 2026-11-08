@@ -132,7 +132,7 @@ export function CustomToolsPage({ phone = false, onClose }: { phone?: boolean; o
         />
 
         {status && !status.enabled && (
-          <Notice tone="amber">Custom tools are off on this deck. An admin turns them on under Settings.</Notice>
+          <Notice tone="amber">Custom tools are off on this deck. An admin turns them on in the Admin console, under Settings → Custom tools.</Notice>
         )}
         {error && <Notice tone="red">{error}</Notice>}
         {notice && <Notice tone="emerald">{notice}</Notice>}

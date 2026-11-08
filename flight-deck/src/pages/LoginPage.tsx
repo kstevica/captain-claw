@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { ArrowRight, AtSign, CheckCircle2, KeyRound, Loader2, Lock, Mail, User, UserCheck } from 'lucide-react'
 import { checkAuthStatus, joinWaitlist, loginUser, registerUser, useAuthStore } from '../stores/authStore'
 import { AuthCard, AuthError, AuthField, AuthShell } from '../components/auth/AuthShell'
@@ -8,7 +8,9 @@ type Mode = 'login' | 'register' | 'waitlist' | 'applied'
 export function LoginPage() {
   const signUp = useAuthStore((s) => s.signUp)
   const name = useAuthStore((s) => s.branding.name)
-  const [mode, setMode] = useState<Mode>('login')
+  // A deck with no account yet opens on creating the admin account.
+  const firstRun = signUp.firstRun === true
+  const [mode, setMode] = useState<Mode>(firstRun ? 'register' : 'login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [displayName, setDisplayName] = useState('')
@@ -20,7 +22,13 @@ export function LoginPage() {
 
   const cohort = signUp.cohort
   // What "the other tab" is: creating an account, applying, or nothing at all.
-  const signUpMode: Mode | null = signUp.mode === 'register' ? 'register' : signUp.mode === 'waitlist' ? 'waitlist' : null
+  // On a first run there's no one to sign in as yet: no tabs.
+  const signUpMode: Mode | null = firstRun ? null
+    : signUp.mode === 'register' ? 'register' : signUp.mode === 'waitlist' ? 'waitlist' : null
+
+  useEffect(() => {
+    if (firstRun) setMode('register')
+  }, [firstRun])
 
   const switchTo = (next: Mode) => {
     setMode(next)
@@ -93,17 +101,22 @@ export function LoginPage() {
   }
 
   const heading =
-    mode === 'login' ? 'Welcome back' : mode === 'register' ? 'Create your account' : 'Join the waitlist'
+    mode === 'login' ? 'Welcome back'
+      : mode === 'register' ? (firstRun ? 'Create the admin account' : 'Create your account')
+        : 'Join the waitlist'
   const subheading =
     mode === 'login'
       ? `Sign in to ${name}.`
       : mode === 'register'
-        ? `Set up your account on ${name}.`
+        ? (firstRun
+          ? `${name} is new. The first account is its administrator: you set up its models, people and connections.`
+          : `Set up your account on ${name}.`)
         : cohort
           ? <>Sign-up is by application. Apply for <span className="font-medium text-violet-200">{cohort}</span> — an administrator reviews each one.</>
           : 'Sign-up is by application — an administrator reviews each one.'
   const submitLabel =
-    mode === 'login' ? 'Sign in' : mode === 'register' ? 'Create account' : cohort ? `Apply for ${cohort}` : 'Apply'
+    mode === 'login' ? 'Sign in' : mode === 'register' ? (firstRun ? 'Create admin account' : 'Create account')
+      : cohort ? `Apply for ${cohort}` : 'Apply'
 
   return (
     <AuthShell>

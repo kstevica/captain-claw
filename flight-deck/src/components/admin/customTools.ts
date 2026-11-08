@@ -11,7 +11,7 @@ export const EVERYBODY_APPROVAL_TITLE = 'Approve tools shared with everybody'
 
 export const EVERYBODY_APPROVAL_HINT =
   'A tool someone offers to everybody waits for an admin before others can add it. Off: everyone is offered it at once. ' +
-  'Pending ones are under Custom tools → Approvals.'
+  'Pending ones wait on the Approvals tab of Custom tools (in the user view: Settings → Custom tools), and the bell tells you when one arrives.'
 
 export const SANDBOX_TITLE = 'Run tools only in the sandbox'
 

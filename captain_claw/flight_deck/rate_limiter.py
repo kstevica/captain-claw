@@ -183,7 +183,7 @@ def check_api_rate_limit(user: dict) -> None:
     if not _api_limiter.check(user["id"], rpm, 60.0):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Rate limit exceeded ({rpm} requests/minute). Upgrade your plan for higher limits.",
+            detail=f"Rate limit reached ({rpm} requests a minute). Wait a minute, or ask your admin for a higher limit.",
         )
 
 
@@ -196,7 +196,7 @@ def check_spawn_rate_limit(user: dict) -> None:
     if not _spawn_limiter.check(user["id"], sph, 3600.0):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Spawn rate limit exceeded ({sph} spawns/hour). Upgrade your plan for higher limits.",
+            detail=f"You've started {sph} new agents in the last hour, the most your plan allows. Wait a while, or ask your admin for a higher limit.",
         )
 
 
@@ -210,5 +210,5 @@ async def check_agent_count_limit(user: dict, current_count: int) -> None:
         plan = get_user_plan(user)
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Agent limit reached ({max_agents} agents on '{plan}' plan). Upgrade for more agents.",
+            detail=f"Agent limit reached: your '{plan}' plan allows {max_agents} agents. Remove one, or ask your admin for a higher limit.",
         )

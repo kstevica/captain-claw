@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Building2, IdCard, KeyRound, Loader2, MessageSquareText, RefreshCw, UserRound } from 'lucide-react'
 import { useAuthStore, updateProfile } from '../stores/authStore'
+import { openConsole, selectConsoleAdmin } from '../stores/consoleStore'
 import {
   getProfile,
   saveProfile,
@@ -75,6 +76,8 @@ export function ProfilePage({ kiosk = false, onDirtyChange, initialTab = 'person
 }) {
   const authEnabled = useAuthStore((s) => s.authEnabled)
   const isAdmin = useAuthStore((s) => s.user?.role === 'admin')
+  // Whoever can open the Admin console: an admin, or the desktop app's own user.
+  const consoleAdmin = useAuthStore(selectConsoleAdmin)
   // Context packs: what I share with agents' people (only on a deck that offers it).
   const contextPacks = useSharedAgentStore((s) => s.contextPacks)
   // Known only once the shared-agent list has loaded: before that a deck with
@@ -512,9 +515,13 @@ export function ProfilePage({ kiosk = false, onDirtyChange, initialTab = 'person
                     )}
                   </div>
                 )}
-                {isAdmin && kiosk && (
+                {consoleAdmin && kiosk && (
                   <p className="text-[11px] text-zinc-600">
-                    To change them, switch to the admin view: Settings → Switch to admin view → Profile → Deck-wide.
+                    To change them:{' '}
+                    <button type="button" onClick={() => openConsole('settings')} className="text-violet-500 hover:underline">
+                      Admin console → Settings
+                    </button>
+                    {' '}→ Deck-wide profile defaults.
                   </p>
                 )}
               </div>

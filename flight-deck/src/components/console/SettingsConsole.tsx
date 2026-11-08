@@ -108,13 +108,15 @@ export function SettingsConsole() {
       >
         <SettingRow
           title="Take waitlist applications"
-          hint={<>The sign-up page takes applications: name, email, a password and who recommended them. You approve them on{' '}
-            <button onClick={() => go('users', { usersTab: 'waitlist' })} className="text-violet-600 underline underline-offset-2 hover:no-underline dark:text-violet-400">Users → Waitlist</button>.
-            Off: the sign-in page says an administrator creates accounts.</>}
+          hint={signUpMode === 'register'
+            ? 'Not used while self-registration is open: people create their own accounts instead.'
+            : <>The sign-up page takes applications: name, email, a password and who recommended them. You approve them on{' '}
+              <button onClick={() => go('users', { usersTab: 'waitlist' })} className="text-violet-600 underline underline-offset-2 hover:no-underline dark:text-violet-400">Users → Waitlist</button>.
+              Off: the sign-in page says an administrator creates accounts.</>}
         >
           <Switch
-            on={config.waitlist_enabled}
-            disabled={busy === 'waitlist'}
+            on={config.waitlist_enabled && signUpMode !== 'register'}
+            disabled={busy === 'waitlist' || signUpMode === 'register'}
             label="Take waitlist applications"
             onToggle={() => save('waitlist', { waitlist_enabled: !config.waitlist_enabled })}
           />
@@ -195,7 +197,7 @@ export function SettingsConsole() {
       </Card>
 
       <Card icon={Wrench} title={CUSTOM_TOOLS_TITLE} hint={sandboxLine(toolStatus?.sandbox)} bodyClassName="divide-y divide-zinc-800/80 px-5 py-4">
-        <SettingRow title={CUSTOM_TOOLS_TITLE} hint={CUSTOM_TOOLS_HINT}>
+        <SettingRow title="On for this deck" hint={CUSTOM_TOOLS_HINT}>
           <Switch
             on={config.external_tools_enabled}
             disabled={busy === 'xtools'}

@@ -69,11 +69,14 @@ function firstAvailable(mail: MailOptions | null): Via {
   return PROVIDERS.find((p) => mail?.[p].available) ?? 'none'
 }
 
-export function WaitlistAdmin({ refreshTick, onPendingCount, onApproved, note }: {
+export function WaitlistAdmin({ refreshTick, onPendingCount, onApproved, note, kioskDefault = false, kioskNote = null }: {
   refreshTick: number
   onPendingCount: (n: number) => void
   onApproved: () => void
   note: string | null
+  // The deck's "New users start in kiosk mode": what the box below starts at.
+  kioskDefault?: boolean
+  kioskNote?: string | null
 }) {
   const [filter, setFilter] = useState<StatusFilter>('pending')
   const [entries, setEntries] = useState<WaitlistEntry[] | null>(null)
@@ -86,6 +89,8 @@ export function WaitlistAdmin({ refreshTick, onPendingCount, onApproved, note }:
   const [mail, setMail] = useState<MailOptions | null>(null)
   const [signInUrl, setSignInUrl] = useState('')
   const [via, setVia] = useState<Via>('none')
+  const [kiosk, setKiosk] = useState(kioskDefault)
+  useEffect(() => { setKiosk(kioskDefault) }, [kioskDefault])
   const [result, setResult] = useState<ApproveResult | null>(null)
 
   const load = useCallback(async () => {
@@ -124,7 +129,7 @@ export function WaitlistAdmin({ refreshTick, onPendingCount, onApproved, note }:
     setResult(null)
     act(e, async () => {
       const r = await call<ApproveResult>(`/fd/admin/waitlist/${e.id}/approve`, {
-        method: 'POST', body: JSON.stringify({ send_via: via }),
+        method: 'POST', body: JSON.stringify({ send_via: via, kiosk }),
       })
       setResult(r)
     }, onApproved)
@@ -196,7 +201,7 @@ export function WaitlistAdmin({ refreshTick, onPendingCount, onApproved, note }:
           <span>
             People who applied while registration is closed, with who recommended them. Approving creates
             their account with the password they chose, so they can sign in right away, and emails them
-            that they're in; the deck's kiosk default applies.
+            that they're in.
           </span>
         </p>
         <div className="flex flex-wrap items-center gap-2">
@@ -218,6 +223,11 @@ export function WaitlistAdmin({ refreshTick, onPendingCount, onApproved, note }:
             <option value="none">— don't email, I'll tell them</option>
           </select>
         </div>
+        <label className="flex items-center gap-2 text-xs text-zinc-400">
+          <input type="checkbox" checked={kiosk} onChange={(ev) => setKiosk(ev.target.checked)} className="accent-violet-500" />
+          Approve them into kiosk mode <span className="text-zinc-500">— simple chat only</span>
+        </label>
+        {kioskNote && <p className="text-[11px] text-zinc-500">{kioskNote}</p>}
         {mail && !canEmail && (
           <p className="text-[11px] text-zinc-500">
             To email approvals, connect your Google or Microsoft account with permission to send mail

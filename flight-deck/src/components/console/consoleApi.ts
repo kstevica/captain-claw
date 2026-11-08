@@ -133,6 +133,8 @@ export interface DeckUpdateJob {
 export interface DeckUpdateStatus {
   available: boolean
   why?: string
+  // How long everyone's countdown runs before the restart.
+  countdown_s?: number
   active?: boolean
   job: DeckUpdateJob
   mode?: DeckUpdateMode

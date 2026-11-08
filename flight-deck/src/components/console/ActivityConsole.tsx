@@ -347,7 +347,7 @@ function MailboxBar({ mailbox, loading, error, onRefresh, onConnect }: {
       <div className="min-w-[12rem] flex-1">
         <div className="text-zinc-300">{text}</div>
         <div className="mt-0.5 text-[11px] text-zinc-500">
-          Only the date and subject of the newest email each way, between you and each person — read when this page opens, never stored.
+          Only the date and subject of the newest email each way, between you and each person — read when this page opens, kept in memory for 10 minutes, never saved.
         </div>
       </div>
       {off ? (

@@ -150,16 +150,22 @@ export function AuditConsole() {
                 min={settings?.min_days ?? 7}
                 max={settings?.max_days ?? 3650}
                 value={days}
-                onChange={(e) => setDays(Math.max(1, Number(e.target.value) || 0))}
+                onChange={(e) => setDays(Number(e.target.value) || 0)}
                 aria-label="Days"
                 className="h-9 w-24 rounded-xl border border-zinc-700 bg-zinc-950 px-3 text-sm text-zinc-100 focus:border-violet-500/60 focus:outline-none"
               />
               <span className="text-sm text-zinc-500">days</span>
+              {settings && (days < (settings.min_days ?? 7) || days > (settings.max_days ?? 3650)) && (
+                <span className="text-xs text-amber-600 dark:text-amber-400">
+                  {settings.min_days ?? 7} to {settings.max_days ?? 3650} days
+                </span>
+              )}
               <Button
                 variant="primary"
                 icon={Save}
                 busy={saving}
-                disabled={!settings || days === settings.retention_days}
+                disabled={!settings || days === settings.retention_days
+                  || days < (settings.min_days ?? 7) || days > (settings.max_days ?? 3650)}
                 onClick={save}
                 className="ml-auto"
               >

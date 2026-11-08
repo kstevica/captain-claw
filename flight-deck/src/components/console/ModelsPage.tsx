@@ -112,10 +112,15 @@ export function ModelsPage() {
   const publish = async () => {
     if (!active) return
     const replacing = teamSet && teamSet.id !== active.id ? ` It replaces "${teamSet.name}".` : ''
+    // The set's extra keys (Brave, Tavily …) travel with it too.
+    const extra = (active.envVars || []).filter((v) => v.key?.trim()).map((v) => v.key.trim())
+    const extraLine = extra.length
+      ? ` Its extra keys for agents (${extra.join(', ')}) go to teammates' agents too.`
+      : ''
     if (!confirm(
       `Publish "${active.name}" to the team?${replacing}\n\n` +
       'Teammates who haven\'t set up models of their own will run on it. The API keys in this set become ' +
-      'the team\'s keys for those models — they are written into teammates\' agents.',
+      `the team's keys for those models — they are written into teammates' agents.${extraLine}`,
     )) return
     setPublishing(true); setPublishErr(''); setPublishNote(null)
     try {

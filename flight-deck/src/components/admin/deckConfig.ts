@@ -56,8 +56,8 @@ export function waitlistName(cfg: SystemConfig): string {
 }
 
 export function kioskModeNote(mode: KioskMode): string | null {
-  if (mode === 'all') return 'Kiosk mode is on for everyone (Admin → Settings), so this user is locked either way.'
-  if (mode === 'off') return 'Kiosk mode is off (Admin → Settings); this takes effect under "Selected users".'
+  if (mode === 'all') return 'Kiosk mode is on for everyone (Admin console → Settings → Kiosk mode), so this user is locked either way.'
+  if (mode === 'off') return 'Kiosk mode is off (Admin console → Settings → Kiosk mode); this takes effect under "Selected users".'
   return null
 }
 

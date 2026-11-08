@@ -26,7 +26,7 @@ from captain_claw.flight_deck.auth import get_current_user, get_db
 
 router = APIRouter(prefix="/fd/external-tools", tags=["external-tools"])
 
-OFF = "Custom tools are off on this deck. An admin turns them on under Admin → Settings."
+OFF = "Custom tools are off on this deck. An admin turns them on in the Admin console, under Settings → Custom tools."
 NEEDS_CREW = ("Making and publishing custom tools needs Crew (coding agents), which your account "
               "isn't approved for. An admin approves it on the Users page.")
 DELIVERY_PROJECT = "custom-tools"

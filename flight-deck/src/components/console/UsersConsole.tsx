@@ -78,6 +78,8 @@ export function UsersConsole({ onWaitlistCount }: { onWaitlistCount: (n: number)
       <div hidden={tab !== 'waitlist'}>
         <WaitlistAdmin
           refreshTick={refreshTick}
+          kioskDefault={config.kiosk_new_users}
+          kioskNote={kioskModeNote(config.kiosk_mode)}
           onPendingCount={onPending}
           onApproved={onApproved}
           note={
