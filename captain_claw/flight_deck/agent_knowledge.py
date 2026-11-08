@@ -292,7 +292,7 @@ async def add_from_agent(
             raise HTTPException(415, f"{name}: not a kind of document knowledge takes ({', '.join(pdocs.SUPPORTED)}). "
                                      "A picture or a scan: read its text, and add that as text.")
         name = (Path(name).stem if Path(name).suffix.lower() in pdocs.SUPPORTED else name) + suffix
-        body, why = await asyncio.to_thread(pdocs.extract_bytes, raw, suffix)
+        body, why = await asyncio.to_thread(pdocs.extract_bytes, raw, suffix, name)
         if not body.strip():
             scan = why == pdocs.NO_TEXT_SCAN
             raise HTTPException(422, {"reason": "scan" if scan else "unreadable",

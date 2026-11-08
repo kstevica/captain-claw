@@ -300,7 +300,7 @@ async def add_document(owner_id: str, name: str, raw: bytes) -> tuple[dict | Non
         return None, f"{name}: the file is empty."
     if len(raw) > pdocs.MAX_FILE_BYTES:
         return None, f"{name}: larger than 25 MB, left out."
-    text, err = await asyncio.to_thread(pdocs.extract_bytes, raw, suffix)
+    text, err = await asyncio.to_thread(pdocs.extract_bytes, raw, suffix, name)
     text = (text or "").strip()
     if not text:
         return None, _no_text(name, err)
