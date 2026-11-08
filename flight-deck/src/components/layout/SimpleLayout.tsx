@@ -25,6 +25,7 @@ import {
   X,
   Info,
   Compass,
+  Goal,
   AlarmClock,
   LibraryBig,
   ListChecks,
@@ -102,6 +103,8 @@ import { useByokStore } from '../../stores/byokStore'
 import { useQuotaStore } from '../../stores/quotaStore'
 import ConnectionsPage, { type TabId as ConnectionsTab } from '../../pages/ConnectionsPage'
 import { ProfilePage } from '../../pages/ProfilePage'
+import { CoursePage } from '../../pages/CoursePage'
+import { OPEN_COURSE_EVENT } from '../../services/course'
 import { OPEN_PROFILE_EVENT } from '../../utils/profileSources'
 import { NotificationBell } from '../common/NotificationCenter'
 import { LinePanel } from '../line/LinePanel'
@@ -321,6 +324,14 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     const open = () => setLineOpen(true)
     window.addEventListener(OPEN_LINE_EVENT, open)
     return () => window.removeEventListener(OPEN_LINE_EVENT, open)
+  }, [])
+  // Kiosk Course dialog — the goals the deck, the user and their agents work
+  // toward. A "Still on course?" item (the Line, the bell) opens it.
+  const [courseOpen, setCourseOpen] = useState(false)
+  useEffect(() => {
+    const open = () => { setLineOpen(false); setCourseOpen(true) }
+    window.addEventListener(OPEN_COURSE_EVENT, open)
+    return () => window.removeEventListener(OPEN_COURSE_EVENT, open)
   }, [])
   // Kiosk Settings dialog — theme, connections, profile, refresh, sign-out.
   const [settingsOpen, setSettingsOpen] = useState(false)
@@ -1045,6 +1056,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           onRefresh={() => { refresh(); setSettingsOpen(false) }}
           onConnections={() => { setSettingsOpen(false); openConnections() }}
           onProfile={() => { setSettingsOpen(false); setProfileOpen(true) }}
+          onCourse={() => { setSettingsOpen(false); setCourseOpen(true) }}
           onGuide={() => { setSettingsOpen(false); setGuideOpen(true) }}
           onTaskboard={() => { setSettingsOpen(false); openTaskboard() }}
           onScheduled={() => { setSettingsOpen(false); openScheduled() }}
@@ -1209,6 +1221,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       )}
       {locked && connectionsOpen && <KioskConnectionsDialog initialTab={connectionsTab} onClose={() => setConnectionsOpen(false)} />}
       {locked && profileOpen && <KioskProfileDialog onClose={() => setProfileOpen(false)} />}
+      {locked && courseOpen && (
+        <KioskDialog label="Course" widest onClose={() => setCourseOpen(false)}>
+          <CoursePage kiosk />
+        </KioskDialog>
+      )}
       {lineOpen && (
         <KioskWideDialog label="Line" phone={isMobile} widest onClose={() => setLineOpen(false)}>
           <LinePanel onClose={() => setLineOpen(false)} />
@@ -1325,7 +1342,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
 // the Getting started guide — and sign-out (how a shared kiosk hands the screen
 // to the next person).
 
-function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections, onProfile, onGuide, onTaskboard, onScheduled, onLibrary, onData, onFolders, onActivity, onByok, onBackups }: {
+function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections, onProfile, onCourse, onGuide, onTaskboard, onScheduled, onLibrary, onData, onFolders, onActivity, onByok, onBackups }: {
   /** The phone layout: two tiles to a row, not three. */
   phone: boolean
   /** The desktop app's admin in the users' kiosk: back to the Admin console. */
@@ -1334,6 +1351,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
   onRefresh: () => void
   onConnections: () => void
   onProfile: () => void
+  onCourse: () => void
   onGuide: () => void
   onTaskboard: () => void
   onScheduled: () => void
@@ -1392,6 +1410,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
       title: 'You',
       items: [
         { icon: IdCard, label: 'Profile', hint: 'You, your company, your preferences', onSelect: onProfile, tone: 'fuchsia' },
+        { icon: Goal, label: 'Course', hint: 'What you and your agents work toward', onSelect: onCourse, tone: 'violet' },
         { icon: Plug, label: 'Connections', hint: 'Google, Microsoft, MCP and Jev', onSelect: onConnections, tone: 'sky' },
         ...(quota?.byok_allowed || quota?.byok ? [{
           icon: KeyRound, label: 'Your own AI keys',

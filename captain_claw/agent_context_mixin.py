@@ -3806,6 +3806,18 @@ class AgentContextMixin:
                 base_prompt = insert_tenant_block(base_prompt, _member_block)
                 if _shared:
                     base_prompt = insert_tenant_block(base_prompt, _shared)
+                # Course: a member's turn gets the deck-wide goals only —
+                # never the owner's or this agent's own.
+                from captain_claw.tenant_context import load_course_deck
+
+                _course_deck = load_course_deck(use_compact_tenant_context(
+                    micro=self.instructions.use_micro,
+                    nano=self.instructions.use_nano,
+                )) if not (_is_being_body()
+                           or getattr(self, "_public_scoped", False)
+                           or getattr(self, "_tenant_hidden", False)) else ""
+                if _course_deck:
+                    base_prompt = insert_tenant_block(base_prompt, _course_deck)
             except Exception:
                 pass
         elif (not _is_being_body()
@@ -3823,6 +3835,16 @@ class AgentContextMixin:
                 ))
                 if _tenant_block:
                     base_prompt = insert_tenant_block(base_prompt, _tenant_block)
+                # Course: what this agent's work is for — the deck's goals,
+                # its owner's and its own (flight_deck/course_carrier.py).
+                from captain_claw.tenant_context import load_course_context
+
+                _course_block = load_course_context(use_compact_tenant_context(
+                    micro=self.instructions.use_micro,
+                    nano=self.instructions.use_nano,
+                ))
+                if _course_block:
+                    base_prompt = insert_tenant_block(base_prompt, _course_block)
                 if _shared:
                     base_prompt = insert_tenant_block(base_prompt, _shared)
                 # PR D: who this agent is shared with — owner instances only.

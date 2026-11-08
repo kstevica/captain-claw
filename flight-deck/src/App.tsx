@@ -50,6 +50,7 @@ import { FlowsPage } from './pages/FlowsPage'
 import { ObservatoryPage } from './pages/ObservatoryPage'
 import { AutonomousWorkPage } from './pages/AutonomousWorkPage'
 import { LinePage } from './pages/LinePage'
+import { CoursePage } from './pages/CoursePage'
 import { useLineStore } from './stores/lineStore'
 import { VFSPage } from './pages/VFSPage'
 import { DeepMemoryPage } from './pages/DeepMemoryPage'
@@ -394,6 +395,7 @@ function AppContent() {
       {view === 'observatory' && <ObservatoryPage />}
       {view === 'autonomous-work' && <AutonomousWorkPage />}
       {view === 'line' && <LinePage />}
+      {view === 'course' && <CoursePage />}
       {view === 'skills' && <SkillsPage />}
       {view === 'games' && <GamesPage />}
       {view === 'spawner' && <SpawnerPage />}

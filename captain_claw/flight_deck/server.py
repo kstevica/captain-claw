@@ -53,6 +53,7 @@ from captain_claw.flight_deck import proc_compat
 from captain_claw.flight_deck import origin_guard
 from captain_claw.flight_deck import agent_ws_quiet
 from captain_claw.flight_deck import tenant_profile
+from captain_claw.flight_deck import course_carrier
 from captain_claw.flight_deck import agent_sharing
 from captain_claw.flight_deck import archetypes as _archetypes
 from captain_claw.flight_deck import context_packs
@@ -1069,6 +1070,12 @@ async def lifespan(app: FastAPI):
     # Bring every agent's owner-profile files in line with the DB (an auth-mode
     # switch, edits made while FD was down) — in the background, best-effort.
     app.state.tenant_profile_reconcile = asyncio.create_task(tenant_profile.reconcile(_fd_db))
+    # The same for every agent's Course files, then the review sweep: goals
+    # that came due are asked about on the Line; stale ones leave the prompts.
+    app.state.course_reconcile = asyncio.create_task(course_carrier.reconcile(_fd_db))
+    app.state.course_review_stop = asyncio.Event()
+    app.state.course_review_task = asyncio.create_task(
+        course_carrier.review_loop(_fd_db, app.state.course_review_stop))
     # Shared-agent context packs: the same for the shared-context files (with
     # sharing off it removes leftovers), then — sharing on — a reconcile loop
     # for what FD only learns by polling (direct DB edits, removed agents).
@@ -1493,6 +1500,14 @@ async def lifespan(app: FastAPI):
                 await asyncio.wait_for(app.state.context_packs_task, timeout=5.0)
             except (TimeoutError, asyncio.CancelledError, Exception):
                 pass
+    # Stop the Course review sweep.
+    if hasattr(app.state, "course_review_stop"):
+        app.state.course_review_stop.set()
+        if hasattr(app.state, "course_review_task"):
+            try:
+                await asyncio.wait_for(app.state.course_review_task, timeout=5.0)
+            except (TimeoutError, asyncio.CancelledError, Exception):
+                pass
     # Stop the Captain Swarm supervisor: its runs go stale and are re-adopted
     # on the next boot, and a measurement it was in the middle of runs again.
     if hasattr(app.state, "captain_swarm_stop"):
@@ -1779,6 +1794,7 @@ from captain_claw.flight_deck.botport_routes import forget_share as botport_forg
 from captain_claw.flight_deck.chat_routes import router as chat_router
 from captain_claw.flight_deck.admin_routes import router as admin_router
 from captain_claw.flight_deck.profile_routes import router as profile_router
+from captain_claw.flight_deck.course_routes import router as course_router
 from captain_claw.flight_deck.council_routes import router as council_router
 from captain_claw.flight_deck.basna_routes import router as basna_router
 from captain_claw.flight_deck.vatra_routes import router as vatra_router
@@ -1904,6 +1920,7 @@ app.include_router(botport_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
 app.include_router(profile_router)
+app.include_router(course_router)
 app.include_router(council_router)
 app.include_router(basna_router)
 app.include_router(vatra_router)
@@ -3699,6 +3716,8 @@ async def spawn_agent(config: AgentConfig, request: Request, user: dict | None =
     _write_eco_flag_on_spawn(agent_dir)
     # …and know who they work for (the owner profile — see tenant_profile).
     await tenant_profile.write_on_spawn(agent_dir, owner_id, "docker")
+    # …and what their work is for (the deck's and the owner's goals — see course).
+    await course_carrier.write_on_spawn(agent_dir, owner_id, "docker")
     # A new container is a new agent: no other agent's shared context (packs).
     await context_packs.remove_files_locked(agent_dir, "docker")
 
@@ -4053,9 +4072,13 @@ async def _remove_replaced_container(existing) -> None:
 async def _forget_shared_agent(agent_ref: str, owner_id: str) -> None:
     """An agent was removed: drop its member grants, close its members' turn
     grants, drop their Google opt-ins for it and close their sockets (4404).
-    Best-effort — a removal never fails over it."""
+    Best-effort — a removal never fails over it. Its own Course goals go too
+    (nothing else can serve them; a recreated agent is a new agent_ref)."""
     if not agent_ref:
         return
+    from captain_claw.flight_deck import course as _course
+
+    await asyncio.to_thread(_course.forget_agent, agent_ref)
     try:
         if AUTH_ENABLED and owner_id:
             from captain_claw.flight_deck.auth import get_db
@@ -4434,6 +4457,7 @@ async def clone_container(container_id: str, req: CloneRequest, request: Request
     # The clone works for the source's owner: their profile, not whatever an
     # earlier agent of this slug left in the folder.
     await tenant_profile.write_on_spawn(new_agent_dir, str(labels.get(OWNER_LABEL, "") or ""), "docker")
+    await course_carrier.write_on_spawn(new_agent_dir, str(labels.get(OWNER_LABEL, "") or ""), "docker")
     # …and no shared context (packs) left by an earlier agent of this slug.
     await context_packs.remove_files_locked(new_agent_dir, "docker")
 
@@ -9782,6 +9806,8 @@ async def _spawn_process_locked(config: AgentConfig, request: Request, user: dic
     _write_eco_flag_on_spawn(agent_dir)
     # …and know who they work for (the owner profile — see tenant_profile).
     await tenant_profile.write_on_spawn(agent_dir, owner_id, "process")
+    # …and what their work is for (the deck's and the owner's goals — see course).
+    await course_carrier.write_on_spawn(agent_dir, owner_id, "process")
     # Never another agent's shared context (packs); a re-spawn of the same
     # agent gets its own back once the registry entry is saved (below).
     await context_packs.remove_files_locked(agent_dir, "process")
@@ -10382,6 +10408,7 @@ async def clone_process(slug: str, req: CloneRequest, request: Request, user: di
         await botport_forget_share("process", new_slug, str(replaced.get("owner") or ""))
     # Its owner's profile, not whatever an earlier agent of this slug left.
     await tenant_profile.write_on_spawn(new_agent_dir, str(entry.get("owner") or ""), "process")
+    await course_carrier.write_on_spawn(new_agent_dir, str(entry.get("owner") or ""), "process")
     # …and no shared context (packs): a clone is a new agent.
     await context_packs.remove_files_locked(new_agent_dir, "process")
 

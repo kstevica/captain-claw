@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { useAuthStore } from '../stores/authStore'
 import { DeckProfileDefaults } from '../components/profile/DeckProfileDefaults'
+import { DeckCourseSettings } from '../components/course/DeckCourseSettings'
 import { SharedTelegramBotAdmin } from '../components/admin/SharedTelegramBotAdmin'
 import { SharedCredentialsAdmin } from '../components/admin/SharedCredentialsAdmin'
 import { BrandingAdmin } from '../components/admin/BrandingAdmin'
@@ -747,6 +748,8 @@ export function AdminPage() {
             `loading`: it loads on its own, and a Refresh must not unmount it
             and drop a long unsaved draft. */}
         {tab === 'settings' && <DeckProfileDefaults />}
+        {/* Course: the horizons each level uses and the limits. */}
+        {tab === 'settings' && <DeckCourseSettings />}
 
         {/* Set up once, used by everyone: the team Telegram bot (with its
             access requests) and the shared Google / Microsoft / Jev / Soniox

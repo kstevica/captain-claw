@@ -1,10 +1,13 @@
 # Course: Implementation Plan
 
-> Status: plan. Not built yet.
+> Status: Phase 1 built (store, routes, Course page, admin card, kiosk dialog, prompt files,
+> review sweep). Phases 2–4 not started.
 > Decisions locked: the feature is called **Course** · each item is a **goal** · each goal
 > has a **horizon** (strategic · long · medium · short) · three scopes (instance · user ·
 > agent) · goals form a tree · proposals always wait for a person · goals guide priorities
-> and never grant permission.
+> and never grant permission · **the admin chooses which horizons each scope uses, and can
+> change it at any time** · **members of a shared agent see the deck-wide goals** (and
+> nothing of the owner's).
 
 ## Thesis
 
@@ -65,19 +68,31 @@ propose prompts both say so:
 
 ## Scopes, horizons and who does what
 
-| Scope | Horizons | Who sets it | Who proposes | Who decides | Who sees it |
+| Scope | Default horizons | Who sets it | Who proposes | Who decides | Who sees it |
 |---|---|---|---|---|---|
-| instance | strategic, long | admin | nobody in v1 | admin | every user, and every user's agents |
+| instance | strategic, long | admin | nobody in v1 | admin | every user; every agent, on owner **and member** turns |
 | user | all four | the user | the deck (pulse), the user's agents (course tool) | the user | the user, and their agents on owner turns |
 | agent | medium, short | the agent's owner | the agent itself (reflection, course tool) | the owner | the owner, and that agent on owner turns |
 
-On an auth-off deck the `local` user is both the admin and the only user. The Course page
-then shows the instance scope as "Deck" inside the admin console only, so one person
-doesn't manage two near-identical lists.
+**Horizons per scope are the admin's choice.** The table shows the defaults. The admin
+changes them in the deck-wide Course card; the change applies at once. An empty list
+switches a scope off: nobody can add goals there. When a horizon is taken away from a
+scope, goals already there are kept and still reach the agents (an admin setting never
+silently erases what people wrote). The page flags them, "this level no longer uses this
+horizon", and their owner can move them to another horizon, finish them or drop them. No
+new goal can be added at that horizon.
 
-**Caps** (active goals per scope, per horizon): strategic 3 · long 5 · medium 7 · short 3.
-Waiting proposals: at most 5 per scope. The caps keep the prompt block small and force a
-choice. They live in config (below).
+On an auth-off deck the `local` user is both the admin and the only user. The Course page
+shows both the deck band and the user's own band, and the deck band is editable there.
+
+**Caps** (active goals per scope, per horizon): strategic 3 · long 5 · medium 7 · short 3,
+also set by the admin. Waiting proposals: at most 5 per scope. The caps keep the prompt
+block small and force a choice.
+
+**Where the admin's settings live:** a `course_settings` table in `course.db` (key
+`horizons` = `{instance: [...], user: [...], agent: [...]}`, key `caps` =
+`{strategic, long, medium, short}`). Keeping them in the Course store keeps it
+self-contained and synchronous.
 
 ## Data: `course.db`
 
@@ -161,6 +176,8 @@ verbatim.
 - `course_context.md`: the full block, ≤3000 characters.
 - `course_context.compact.md`: ≤600 characters, for micro/nano templates and
   orchestrated workers (the same `use_compact_tenant_context` rule).
+- `course_deck.md` and `course_deck.compact.md`: the deck-wide goals only, for a shared
+  agent's member turns. The same for every agent on the deck, written with the others.
 
 **What one agent's block contains:** active, non-stale goals, as a tree from the top down:
 1. instance strategic and long;
@@ -197,11 +214,15 @@ are removed. That's the same `_atomic_write` / `_discard` discipline as tenant_p
 Reuse those helpers rather than copying them: move them into a small shared module, or
 import them.
 
-**Agent side.** Add `load_course_context(compact)` to `captain_claw/tenant_context.py`,
-the same mtime cache and size guard as `load_shared_context`. In
-`agent_context_mixin.py`, insert it **only in the owner branch** (the `elif` that loads
-`tenant_context.md`), right after the tenant block. It is therefore never on:
-- a shared agent's member turn (`_speaker_scoped`);
+**Agent side.** Add `load_course_context(compact)` and `load_course_deck(compact)` to
+`captain_claw/tenant_context.py`, the same mtime cache and size guard as
+`load_shared_context`. In `agent_context_mixin.py`:
+- the **owner branch** (the `elif` that loads `tenant_context.md`) inserts the full course
+  right after the tenant block;
+- the **member branch** (`_speaker_scoped`) inserts the deck-only block after the member
+  block. A member's turn therefore sees the deck's direction and nothing the owner wrote.
+
+Neither is ever on:
 - a public session (`_public_scoped`);
 - a BotPort dispatch (`_tenant_hidden`, `botport_client.py`);
 - a being's body (`_is_being_body`).
@@ -247,7 +268,10 @@ New router `captain_claw/flight_deck/course_routes.py`, mounted in `server.py`.
 - `PATCH /fd/course/goals/{id}` edits it (owner of the scope only).
 - `POST /fd/course/goals/{id}/accept|decline|pause|resume|achieve|drop|review`.
 - `POST /fd/course/goals/{id}/links`, `DELETE /fd/course/goals/{id}/links/{kind}/{ref_id}`.
-- `GET/PUT /fd/admin/course` manages instance goals (`require_admin`).
+- Instance goals are created and edited through the same goal routes with
+  `scope = "instance"`; only an admin may (`role == "admin"`, 403 otherwise).
+- `GET/PUT /fd/admin/course/settings`: the horizons per scope and the caps
+  (`require_admin`). A save changes no agent's files: existing goals stay where they are.
 
 Plain `get_current_user`, as on the profile routes: an admin's `X-FD-Act-As` does **not**
 reach another user's Course. Someone else's goal is a 404, as on the Taskboard. There is
@@ -312,11 +336,15 @@ agent (`fd_dispatch.dispatch_action`), and approve/reject trains action reliabil
   as a candidate. That lets the Arbiter propose work that comes from goals, still behind
   every existing dial.
 
-### Consciousness pulse (`flight_deck/consciousness.py`, Phases 1 and 3)
-- Phase 1: the review sweep runs inside the heartbeat loop. It's cheap and needs no model:
-  find due and newly stale goals, post `course_review` items, and rewrite the files of
-  agents whose block changed.
-- Phase 3: `_build_reflection_user_prompt` includes the compact course. `_parse_reflection`
+### The review sweep (`flight_deck/course_carrier.py`, Phase 1)
+- A small loop of its own, started at FD startup like `context_packs.reconcile_loop`, not
+  inside the consciousness heartbeat (which a user can switch off, and reviews must still
+  happen). It's cheap and needs no model: about every 30 minutes it finds goals that came
+  due or went stale, posts `course_review` items, and rewrites the files of agents whose
+  block changed.
+
+### Consciousness pulse (`flight_deck/consciousness.py`, Phase 3)
+- `_build_reflection_user_prompt` includes the compact course. `_parse_reflection`
   accepts at most one optional `course` suggestion, which becomes a user-scope proposal
   with `origin = deck`, subject to the weekly cap.
 
@@ -389,7 +417,8 @@ What the page shows:
 
 **Other places:**
 - **Admin:** a "Deck-wide course" card next to `DeckProfileDefaults` (in `AdminPage.tsx`
-  and `SettingsConsole.tsx`).
+  and `SettingsConsole.tsx`): which horizons each scope uses, the caps, and a link to the
+  deck band on the Course page where the deck's goals are edited.
 - **Kiosk:** `KioskCourseDialog` in `SimpleLayout.tsx`, beside `KioskProfileDialog`, with
   the user's goals and their agents' goals. Proposals reach kiosk users through the bell
   like everything else.
@@ -425,8 +454,8 @@ can switch recommendations off for the whole deck.
   dispatch decision is identical with and without a goal.
 - **User goals are private to the user.** No admin view and no act-as, the same rule as the
   Taskboard. Instance goals are visible to every user.
-- **Shared agents:** the owner's course never reaches a member's turn. Members see nothing
-  of it in v1.
+- **Shared agents:** a member's turn gets the deck-wide goals and nothing else. The
+  owner's user goals and the agent's own goals never reach it.
 - **BotPort, public sessions, being bodies:** no course block.
 - **Agent words are labelled.** Proposed text is shown to the owner as the agent's
   (`trust = "agent"`) and quoted in the prompt like profile text.
@@ -478,12 +507,12 @@ New `tests/test_course_*.py`:
 
 ## Open questions
 
-1. Should members of a shared agent see instance goals on their turns? v1: no course block
-   at all on member turns.
-2. Should the deck ever propose instance goals to the admin? v1: no. It would have to read
+Decided: members of a shared agent see the deck-wide goals; the admin chooses the
+horizons per scope.
+
+1. Should the deck ever propose instance goals to the admin? v1: no. It would have to read
    across users' private goals.
-3. Should the horizons per scope be fixed (as above) or chosen by the admin?
-4. Should an agent's `propose` at user scope be allowed in Phase 3, or only agent scope at
+2. Should an agent's `propose` at user scope be allowed in Phase 3, or only agent scope at
    first?
-5. Should run workers (Basna, Vatra, Council teammates) get the compact block? v1: no. The
+3. Should run workers (Basna, Vatra, Council teammates) get the compact block? v1: no. The
    run's task already carries the `goal_id` of the action that started it.

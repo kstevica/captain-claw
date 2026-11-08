@@ -15,6 +15,7 @@ import { useProcessStore } from '../../stores/processStore'
 import { useSharedAgentStore } from '../../stores/sharedAgentStore'
 import { useUIStore } from '../../stores/uiStore'
 import { OPEN_PROFILE_EVENT } from '../../utils/profileSources'
+import { OPEN_COURSE_EVENT } from '../../services/course'
 import { AgentSetupDialog } from '../layout/AgentSetupDialog'
 import { ForgeAgentsDialog } from '../forge/ForgeAgentsDialog'
 import { OnboardingDialog } from '../layout/OnboardingDialog'
@@ -239,6 +240,12 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
     else window.dispatchEvent(new CustomEvent(OPEN_PROFILE_EVENT))
   }
 
+  // A goal came due for review ("Still on course?"): Course, where it's answered.
+  const openCourse = () => {
+    onClose()
+    window.dispatchEvent(new CustomEvent(OPEN_COURSE_EVENT))
+  }
+
   // A custom tool's bell (offered, updated, approved; an admin's approval): the
   // Custom tools page, on the tool or the Approvals tab.
   const openTools = (refType: string, refId: string) => {
@@ -322,6 +329,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
               && n.refId && onOpenSetup ? n.refId : ''
             const forge = n.refType === 'agent_forge' && n.refId && onOpenForge ? n.refId : ''
             const profile = n.refType === 'profile'
+            const course = n.refType === 'course_review'
             const tools = (n.refType === 'custom_tool' || n.refType === 'custom_tool_approval' || n.refType === 'custom_tool_proposal'
               || n.refType === 'person_ask') ? n.refType : ''
             const task = taskOf(n)
@@ -332,11 +340,12 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
               key={n.id}
               notification={n}
               large={large}
-              action={setup || profile || forge || tools ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
+              action={setup || profile || forge || tools || course ? { kind: 'none' } : sharedNotificationAction(n.refType, n.refId, sharedAgents, layout)}
               hint={forge ? 'Click to open the plan.' : setup ? (exam ? 'Click to see the exam.' : lessons ? 'Click to approve it, or dismiss it.'
                 : n.type === 'error' ? 'Click to set it up again.' : 'Click to review it.')
                 : profile ? (n.type === 'error' ? 'Click to open your Profile and try again.' : 'Click to review it in your Profile.')
-                : tools ? (tools === 'person_ask' ? 'Answer it in the open question.' : 'Click to open Custom tools.') : ''}
+                : tools ? (tools === 'person_ask' ? 'Answer it in the open question.' : 'Click to open Custom tools.')
+                : course ? 'Click to review it on your Course.' : ''}
               proposal={n.refType === 'autonomy_action' && n.refId && waiting
                 ? (waiting.has(n.refId) ? 'waiting' : 'answered') : undefined}
               step={n.refType === 'autonomy_action' && n.refId && waiting?.get(n.refId)?.taskboard
@@ -345,7 +354,7 @@ function NotificationDropdown({ onClose, onEnlarge, onOpenSetup, onOpenForge, la
               onOpenTask={task ? () => { markRead(n.id); openTask(task) } : undefined}
               onRead={() => markRead(n.id)}
               onActivate={forge ? () => onOpenForge?.(forge) : setup ? () => onOpenSetup?.(setup, exam ? 'exam' : lessons ? 'lessons' : 'setup') : profile ? openProfile
-                : tools ? () => openTools(tools, n.refId || '') : activate}
+                : tools ? () => openTools(tools, n.refId || '') : course ? openCourse : activate}
               onRemove={() => remove(n.id)}
             />
             )

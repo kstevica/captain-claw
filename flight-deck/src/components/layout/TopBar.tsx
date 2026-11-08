@@ -9,6 +9,7 @@ import { openConsole, selectConsoleAdmin } from '../../stores/consoleStore'
 import { useEffect } from 'react'
 import { NotificationBell } from '../common/NotificationCenter'
 import { OPEN_LINE_EVENT } from '../../services/line'
+import { OPEN_COURSE_EVENT } from '../../services/course'
 
 interface TopBarProps {
   directorOpen?: boolean
@@ -49,6 +50,12 @@ export function TopBar({
     const open = () => setView('line')
     window.addEventListener(OPEN_LINE_EVENT, open)
     return () => window.removeEventListener(OPEN_LINE_EVENT, open)
+  }, [setView])
+  // …and to Course (a "Still on course?" item on the Line or in the bell).
+  useEffect(() => {
+    const open = () => setView('course')
+    window.addEventListener(OPEN_COURSE_EVENT, open)
+    return () => window.removeEventListener(OPEN_COURSE_EVENT, open)
   }, [setView])
 
   const refresh = () => {
