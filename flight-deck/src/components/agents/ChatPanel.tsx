@@ -92,7 +92,8 @@ import { AgentFilesPanel } from './AgentFilesPanel'
 import { AgentDatastorePanel } from './AgentDatastorePanel'
 import { QueuePanel, type QueueVariant } from './queue/QueuePanel'
 import { useQueueProgress, useQueueSignal } from './queue/queueHooks'
-import type { SignalTone } from './queue/queueModel'
+import type { AttachedFile, SignalTone } from './queue/queueModel'
+import { FileChips } from './queue/QueueHero'
 import { FOCUS } from './queue/QueueButton'
 import { usePersistedSize } from '../../hooks/usePersistedSize'
 import { touchKeyboard, useIsMobile } from '../../hooks/useMediaQuery'
@@ -2015,6 +2016,23 @@ function HeldBubble({ held, next, agentName, large, canInsert, onInsert, onCance
   )
 }
 
+// A message you sent with files carries them as ref lines for the agent
+// ("[Attached file: name → path]"). On screen they are chips with the name only:
+// the path is the server's (its folders, an upload id), never something to read.
+// Pictures keep their own rendering (processImagePaths); what was sent is unchanged.
+// The agent's own history writes the same ref without the name ("[Attached file: /path]").
+const SENT_FILE_REF = /^\s*\[Attached file: (?:(.+?) → )?(.+?)\]\s*$/
+function splitSentFiles(content: string): { text: string; files: AttachedFile[] } {
+  const files: AttachedFile[] = []
+  const kept: string[] = []
+  for (const line of (content || '').split('\n')) {
+    const m = line.match(SENT_FILE_REF)
+    if (m) files.push({ kind: 'file', name: m[1] || m[2].split(/[\\/]/).filter(Boolean).pop() || m[2], path: m[2], ref: line.trim() })
+    else kept.push(line)
+  }
+  return { text: files.length ? kept.join('\n').trim() : content, files }
+}
+
 // A message's small actions appear on hover. Where there is no hover (a phone, a tablet), they stay shown,
 // and get a finger-sized hit area.
 const TOUCH_SHOWN = '[@media(hover:none)]:opacity-100'
@@ -2181,12 +2199,16 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
   const saveLesson = () => setLessonFrom({ said: message.content || '', reply: replyBefore(message.id) })
 
   if (message.role === 'user') {
+    const sent = splitSentFiles(message.content || '')
     return (
       <div id={`fd-msg-${message.id}`} className="group mb-3 flex flex-col items-end gap-0.5">
         <div className={`max-w-[85%] rounded-br-sm bg-violet-600/20 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'}`}>
-          <div className={`fd-markdown ${bodyText} text-zinc-200`}>
-            <MarkdownMessage content={processImagePaths(message.content, agentConn?.host, agentConn?.port, agentConn?.auth)} />
-          </div>
+          {sent.text && (
+            <div className={`fd-markdown ${bodyText} text-zinc-200`}>
+              <MarkdownMessage content={processImagePaths(sent.text, agentConn?.host, agentConn?.port, agentConn?.auth)} />
+            </div>
+          )}
+          {sent.files.length > 0 && <FileChips files={sent.files} conn={agentConn} className={sent.text ? 'mt-2' : ''} />}
           <span className="mt-1 block text-right text-[10px] text-zinc-500">
             {message.via && <span className="mr-1.5 text-zinc-400">via {message.sourceLabel || viaLabel(message.via)}</span>}
             {formatTime(message.timestamp)}

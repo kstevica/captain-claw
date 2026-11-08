@@ -79,6 +79,13 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
   // A Forge agents plan that's ready for its next step, or stopped.
   const [forgeFor, setForgeFor] = useState('')
   const { isMobile: phone } = useIsMobile()
+  // Escape closes the dropdown, as it does every other menu and dialog.
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
   const openForge = (planId: string) => {
     setOpen(false)
     setBig(false)
