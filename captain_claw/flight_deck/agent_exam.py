@@ -280,6 +280,8 @@ def _clean(value: Any, limit: int) -> str:
 # An answer that points at its section instead of giving it ("the three areas named in the section").
 _POINTS_AT = re.compile(r"\b(?:in|from|by) the (?:section|passage|excerpt)\b|\bas (?:given|listed|named|stated|shown) "
                         r"(?:in|by)\b|\bthe exam expects\b", re.IGNORECASE)
+# The name of the language a question was written in, as the writer gives it ("English", "Brazilian Portuguese").
+_LANGUAGE = re.compile(r"[^\W\d_](?:[^\W\d_]|[ ()'’-]){0,39}")
 
 
 def parse_questions(content: str, batch: list[dict]) -> list[dict]:
@@ -309,12 +311,14 @@ def parse_questions(content: str, batch: list[dict]) -> list[dict]:
         if any(_POINTS_AT.search(x) for x in (*points, answer)):
             continue
         kind = str(item.get("kind") or "").strip().lower()
+        language = _clean(item.get("language"), 100)   # a name, whole (_LANGUAGE): never one cut short
         p = batch[n - 1]
         taken.add(n)
         out.append({**{k: p[k] for k in ("doc", "doc_title", "doc_name", "key", "title", "path", "read", "at")
                        if k in p},
                     "kind": kind if kind in KINDS else p["kind"],
-                    "question": question, "expected": answer, "points": points or [answer[:200]]})
+                    "question": question, "expected": answer, "points": points or [answer[:200]],
+                    **({"language": language} if _LANGUAGE.fullmatch(language) else {})})
     return out
 
 
@@ -329,7 +333,22 @@ def grading_prompt(batch: list[dict], text_of: dict[str, str | None]) -> str:
             f"## Item {n}\nQuestion: {q['question']}\n\nPassage ({where(q)}):\n{_excerpt(passage)}\n\n"
             f"Expected answer: {q['expected']}\nPoints:\n" + "\n".join(f"{i}. {p}" for i, p in enumerate(q["points"], 1))
             + f"\n\nReply:\n{_excerpt(q.get('answer') or '(no reply)', _ANSWER_CHARS)}")
-    return "\n\n".join(blocks)
+    return "\n\n".join([*blocks, why_language(batch)])
+
+
+def why_language(batch: list[dict]) -> str:
+    """The grading call's last line: the language each ``why`` is written
+    in — its question's, as the writer named it — said outright, since
+    "the question's language" alone lets a grader drift into another. A
+    question written before the writer named it (an earlier exam asked
+    again) is left to its own language."""
+    names = [str(q.get("language") or "").strip() for q in batch]
+    if not any(names):
+        return "Write each `why` in the language its question is written in."
+    if all(names) and len({n.casefold() for n in names}) == 1:
+        return f"Write every `why` in {names[0]}."
+    return "Write each `why` in its question's language: " + "; ".join(
+        f"item {n} in {name or 'the language its question is written in'}" for n, name in enumerate(names, 1)) + "."
 
 
 def _texts(value: Any, limit: int, most: int) -> list[str]:
@@ -382,7 +401,11 @@ def parse_grades(content: str, batch: list[dict]) -> dict[int, dict]:
 
 # ── Made up, or from elsewhere in its documents ───────────────────────
 
-_FIGURE = re.compile(r"\d+(?:[.,]\d+)*")
+# What groups a figure's thousands: 1,850 · 1.850 · 1 850 (a space, a no-break or a thin one) · 1'850.
+_GROUP_SEP = ",.\u00a0\u2009\u202f '’"
+# A figure: grouped by spaces or apostrophes (1 850, 1'850; the reply's tidied text has a plain space
+# where it had a no-break one), or digits with points and commas between them.
+_FIGURE = re.compile(r"(?<!\d)\d{1,3}(?:[\u00a0\u2009\u202f '’]\d{3})+(?!\d)(?:[.,]\d+)*|\d+(?:[.,]\d+)*")
 _WORD = re.compile(r"[^\W\d_][\w’'-]*")
 _YEARS = re.compile(r"\b(1[89]|20)(\d\d)(s?)\s*([–—-])\s*(\d\d)(s?)\b")   # 2005–07, 1980s–90s
 _COMMON = frozenset("""a an the and or but nor of in on at to for from by with as is are was were be been its it this
@@ -430,16 +453,33 @@ def _detail_parts(detail: str) -> tuple[list[str], list[str], list[str]]:
 
 
 _NUMBER_WORDS = "zero one two three four five six seven eight nine ten eleven twelve".split()
+_GROUPED = re.compile(rf"([1-9]\d{{0,2}})([{_GROUP_SEP}])(\d{{3}}(?:\2\d{{3}})*)(\.\d+)?")
+
+
+def _plain(figure: str) -> str:
+    """A figure without its thousands separators — 1,850, 1.850, 1 850 and
+    1'850 are 1850; 1,850.50 is 1850.50 (as _decimals writes 1.850,50 and
+    1 850,50 too). A decimal stays one: 1.5, 0.40, 300.0."""
+    m = _GROUPED.fullmatch(figure)
+    return m[1] + m[3].replace(m[2], "") + (m[4] or "") if m else figure
 
 
 def _part_pattern(part: str, figure: bool) -> re.Pattern:
-    """A figure as itself (300.0 as 300 too, and up to twelve as its word
-    too: "from six years to four"), or a name at the start of a word (Pepsi
-    in PepsiCo)."""
+    """A figure as itself, however a text groups its thousands (1850 as
+    1,850, 1.850, 1 850 or 1'850 too — one separator all through it), 300.0
+    as 300 too, and up to twelve as its word too ("from six years to four");
+    or a name at the start of a word (Pepsi in PepsiCo)."""
     if not figure:
         return re.compile(rf"(?<![^\W\d_]){re.escape(part)}")
-    whole = re.sub(r"\.0+$", "", part)
-    ways = [rf"(?<![\d.,]){re.escape(whole)}(?:\.0+)?(?!\d|[.,]\d)"]
+    whole = re.sub(r"\.0+$", "", _plain(part))
+    digits, point, decimals = whole.partition(".")
+    body = re.escape(whole)
+    if digits.isdigit() and len(digits) > 3 and digits[0] != "0":
+        head = len(digits) % 3 or 3
+        groups = [digits[i:i + 3] for i in range(head, len(digits), 3)]
+        body = (digits[:head] + f"(?P<sep>[{_GROUP_SEP}]?)" + groups[0] + "".join(f"(?P=sep){g}" for g in groups[1:])
+                + re.escape(point + decimals))
+    ways = [rf"(?<![\d.,]){body}(?:\.0+)?(?!\d|[.,]\d)"]
     if whole.isdigit() and int(whole) < len(_NUMBER_WORDS):
         ways.append(rf"\b{_NUMBER_WORDS[int(whole)]}\b")
     return re.compile("|".join(ways))
@@ -452,8 +492,14 @@ def found_in(detail: str, texts: list[str]) -> bool:
     of each other — an exhibit's title and its table are that far apart —
     and the exhibits and chapters it names anywhere in it (two exhibits it
     cites together can be pages apart). A detail with none of them has
-    nothing to find it by."""
+    nothing to find it by. Figures a space keeps apart are one figure (1 850)
+    or several ("rooms 101 102"): found either way."""
     figures, names, refs = _detail_parts(detail)
+    apart = [p for f in figures for p in f.split()]
+    return _found(figures, names, refs, texts) or (apart != figures and _found(apart, names, refs, texts))
+
+
+def _found(figures: list[str], names: list[str], refs: list[str], texts: list[str]) -> bool:
     patterns = [_part_pattern(f, True) for f in figures] + [_part_pattern(n, False) for n in names]
     places = [_part_pattern(r, True) for r in refs]
     if not patterns and not places:
@@ -1106,7 +1152,7 @@ async def start(slug: str, body: StartBody, user: dict = Depends(get_managed_use
         job.size, job.focus, job.docs = earlier.size, earlier.focus, list(earlier.docs or [])
         job.again = earlier.again or earlier.id
         keep = ("id", "kind", "question", "expected", "points", "doc", "doc_title", "doc_name", "title", "path", "key",
-                "read")
+                "read", "language")
         # Each with how it went last time, for "better" or "worse" now.
         job.questions = [{**{k: q[k] for k in keep if k in q}, **({"before": q["verdict"]} if q.get("verdict") else {})}
                          for q in earlier.questions]

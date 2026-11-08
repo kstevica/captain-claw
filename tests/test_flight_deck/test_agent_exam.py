@@ -141,8 +141,9 @@ async def test_the_pick_is_kept_with_the_exam_and_asked_again(monkeypatch):
     monkeypatch.setattr(ex.ap, "_quota_spent", no)
     monkeypatch.setattr(ex, "_reader", reader)
     monkeypatch.setattr(ex.ak, "_docs", docs)
+    saved: list[ex.ExamJob] = []
     monkeypatch.setattr(ex, "run_exam", run)
-    monkeypatch.setattr(ex, "save", lambda job: None)
+    monkeypatch.setattr(ex, "save", saved.append)
     monkeypatch.setattr(ex, "_RUNNING", {})
 
     async def start(**body) -> dict:
@@ -156,10 +157,12 @@ async def test_the_pick_is_kept_with_the_exam_and_asked_again(monkeypatch):
     with pytest.raises(HTTPException):
         await start(docs=["gone.md"])
     earlier = ex.ExamJob(id="e1", agent="helpdesk", size="deep", docs=["a.md"],
-                         questions=[{"id": "q1", "question": "Q?", "verdict": "right"}])
+                         questions=[{"id": "q1", "question": "Q?", "language": "English", "verdict": "right"}])
     monkeypatch.setattr(ex, "_exam", lambda slug, exam_id: earlier)
     again = await start(again="e1", docs=["c.md"])
     assert again["docs"] == ["a.md"] and again["size"] == "deep"      # as it was the first time
+    # Each question with the language it was written in, for the grader's why; not how it went.
+    assert saved[-1].questions == [{"id": "q1", "question": "Q?", "language": "English", "before": "right"}]
 
 
 def test_the_writers_questions_are_cleaned():
@@ -226,6 +229,39 @@ def test_the_grader_marks_each_point_and_the_verdict_is_worked_out():
                                                      "why": "Right, but adds a Heineken example."}]}), batch)[1]
     assert chatty["verdict"] == "right" and chatty["missing"] == []
     assert ex.settle(got[4], [])["verdict"] == "partly"         # a contradiction is a reason
+
+
+def test_the_writer_names_each_questions_language_and_the_grader_is_told_it():
+    # Seen on claude-sonnet-5-5: English questions on English documents, two of ten whys in Spanish
+    # and German. "The question's language" alone isn't enough: each grading call names it.
+    batch = [c | {"kind": "ask"} for c in ex.candidates(_src(read=set()))[:4]]
+    reply = json.dumps({"questions": [
+        {"section": 1, "language": "English", "question": "When did chapter one begin?", "answer": "Long ago."},
+        {"section": 2, "language": "Croatian", "question": "Kada je počelo drugo poglavlje?", "answer": "Davno."},
+        {"section": 3, "language": "{\"x\": 1}", "question": "When did chapter three begin?", "answer": "Long ago."},
+        {"section": 4, "language": "x" * 60, "question": "When did chapter four begin?", "answer": "Long ago."}]})
+    got = ex.parse_questions(reply, batch)
+    assert [q.get("language") for q in got] == ["English", "Croatian", None, None]   # a name, or nothing
+    assert ex.parse_questions(json.dumps({"questions": [
+        {"section": 1, "language": "Brazilian Portuguese", "question": "Quando começou?", "answer": "Há muito."}]}),
+        batch)[0]["language"] == "Brazilian Portuguese"
+
+    def items(*languages: str | None) -> list[dict]:
+        return [{"id": f"q{i}", "question": f"Question {i}?", "expected": "x", "points": ["x"], "doc": "handbook.md",
+                 "doc_title": "Handbook", "title": "Chapter 1 story", "answer": "y",
+                 **({"language": lang} if lang else {})} for i, lang in enumerate(languages, 1)]
+
+    prompt = ex.grading_prompt(items("English", "English", "english"), {})
+    assert prompt.endswith("\n\nWrite every `why` in English.")       # the last thing it reads before it writes
+    assert ex.grading_prompt(items("English", "Croatian", None), {}).endswith(
+        "Write each `why` in its question's language: item 1 in English; item 2 in Croatian; "
+        "item 3 in the language its question is written in.")
+    # Questions from before the writer named it (an earlier exam asked again): their own language.
+    assert ex.grading_prompt(items(None, None), {}).endswith(
+        "Write each `why` in the language its question is written in.")
+    system = ex._GRADE_PROMPT.read_text(encoding="utf-8")
+    assert "the end of the items names" in system and "Never in\n  another language" in system
+    assert '"language": "English"' in ex._QUESTIONS_PROMPT.read_text(encoding="utf-8")
 
 
 # ── Why it went wrong ─────────────────────────────────────────────────
@@ -383,6 +419,39 @@ def test_references_acronyms_and_arithmetic_are_read_for_what_they_are():
         assert ex.checkable(fact), fact
     assert ex.check_details(["0.06 × 4,314 = $258.8M", "Standard NPV −$57.2M"], corpus) == [
         {"text": "Standard NPV −$57.2M", "found": ""}]
+
+
+def test_a_figure_is_found_however_its_thousands_are_grouped():
+    # Seen on a Tender Writer: "EUR 1,850" in a right answer, the day-rate sheet extracted as a table
+    # with no separators, and the answer marked "Partly right · Made things up".
+    sheet = ["| partner | 1850 | sign-off and steering only |"]
+    assert ex.found_in("partner rate EUR 1,850 a day", sheet)
+    ways = ["1,850", "1850", "1.850", "1 850", "1\u00a0850", "1\u2009850", "1\u202f850", "1'850"]
+    for said in ways:
+        for written in ways:
+            assert ex.found_in(f"partner EUR {said} a day", [ex._checked(f"partner: {written} a day")]), (said, written)
+    corpus = {"documents": [ex._checked(sheet[0])], "lessons": [], "looked_up": []}
+    details = ex.check_details(["partner rate EUR 1,850 a day"], corpus)
+    assert details == [{"text": "partner rate EUR 1,850 a day", "found": "documents"}]
+    right = {"verdict": "right", "made_up": False, "missing": [], "contradicts": [], "why": "All there."}
+    assert ex.settle(right, details)["verdict"] == "right"
+    # Bigger figures, decimals after them, and a decimal comma after grouping points (1.850,5) or spaces.
+    assert ex.found_in("a fee of EUR 1,250,000", ["fee: 1.250.000"]) and ex.found_in("fee 1250000", ["fee 1 250 000"])
+    assert ex.found_in("fee 12,500", ["fee 12500"]) and ex.found_in("fee 1850.5", [ex._checked("fee 1.850,5")])
+    assert ex.found_in("fee 1,850.50", [ex._checked("fee 1 850,50")]) and ex.found_in("fee 1,850", ["fee 1,850.00"])
+    # Decimals stay decimals: 1.5 isn't 15, 0.40 isn't 40, and 300.0 is still 300.
+    assert not ex.found_in("rate 1.5", ["rate 15"]) and not ex.found_in("rate 15", ["rate 1.5"])
+    assert ex.found_in("rate 0.40", ["rate 0.40"]) and not ex.found_in("rate 0.40", ["rate 40"])
+    assert ex.found_in("rate 300.0", ["rate 300"]) and ex.found_in("rate 300", ["rate 300.0"])
+    # A figure is the whole figure, grouped one way all through.
+    for other in ["fee 1,850,000", "fee 18,500", "fee 1,850.5", "fee 11,850", "fee 1,8,50"]:
+        assert not ex.found_in("fee 1850", [other]), other
+    assert not ex.found_in("fee 1,850,000", ["fee 1,850.000"])
+    assert ex._plain("1,850") == ex._plain("1.850") == ex._plain("1 850") == "1850"
+    assert [ex._plain(f) for f in ("0.40", "1.5", "300.0", "27.4", "0,850")] == ["0.40", "1.5", "300.0", "27.4", "0,850"]
+    # Figures a space keeps apart can be several: each found on its own, as before.
+    assert ex.found_in("rooms 101 102", ["room 101 and, upstairs, room 102"])
+    assert ex._detail_parts("EUR 1 850 and 2\u00a0000, not 2019 150")[0] == ["1 850", "2\u00a0000", "2019", "150"]
 
 
 def test_made_up_stands_only_for_details_found_nowhere():

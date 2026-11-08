@@ -22,12 +22,13 @@ against the passage — not against what you know yourself.
   short from the reply (the figure or name with a few words of what it is about, e.g. "0.28
   points of TRS per point of growth"). Only what has a figure or a name in it: not an
   explanation, a summary or the reply's own wording of what it read; not a figure it works out
-  itself from the question's numbers (its arithmetic); not what it says the documents don't cover
-  or leave out. You see one passage of the agent's documents; these are checked against the rest
+  itself from the question's numbers or from today's date (its arithmetic: a sum, a deadline it
+  counts from today); not what it says the documents don't cover or leave out. You see one passage of the agent's documents; these are checked against the rest
   of them, so list every such detail. Hedged guesses ("probably", "usually") count only when it
   then acts on them as fact. Empty when there are none.
 - `why`: one short sentence for the agent's owner — what was right, or what was missing or
-  wrong — in the question's language.
+  wrong — in the question's language, which the end of the items names for each one. Never in
+  another language, whatever the passage, the reply or a name in them is written in.
 
 The verdict is worked out from these: every point covered and nothing contradicted is right, no
 point covered is wrong, anything between is partly right.

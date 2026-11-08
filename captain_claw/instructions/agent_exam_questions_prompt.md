@@ -22,7 +22,8 @@ gives. The agent will be asked the questions as its users would ask them, withou
 - **Not about now.** Don't ask what is current, latest or true today of something the section
   gives as of its writing — a person's role, a price, a year's figure: ask it without "current"
   or "now", and answer as the section gives it.
-- **Its own language.** Write the question and the answer in the section's language.
+- **Its own language.** Write the question and the answer in the section's language, and name
+  that language in `language`, in English ("English", "Croatian", "German").
 - A section with nothing to ask (a table of contents, a list of links, a title page): leave it out.
 
 ## The answer
@@ -37,6 +38,6 @@ gives. The agent will be asked the questions as its users would ask them, withou
 
 Return **only** one JSON object — no prose, no markdown fences:
 
-{"questions": [{"section": 1, "kind": "ask", "question": "...", "answer": "...", "points": ["..."]}]}
+{"questions": [{"section": 1, "kind": "ask", "language": "English", "question": "...", "answer": "...", "points": ["..."]}]}
 
 `section` is the section's number as given.

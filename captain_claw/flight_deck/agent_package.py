@@ -50,7 +50,7 @@ _FILE = "package.json"
 _SAFE_FILE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]*\.(?:md|txt)")     # what knowledge/ keeps as a document
 _SHARED_FILES = ("INDEX.md", "glossary.md")              # written from the record with the documents and glossary
 _QUESTION = ("id", "kind", "question", "expected", "points", "doc", "doc_title", "doc_name", "title", "path", "key",
-             "read")
+             "read", "language")
 
 
 def packages_dir() -> Path:
