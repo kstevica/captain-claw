@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Bot, Check, ChevronDown, Compass, Eye, Inbox, Loader2, Pencil, Plus, RefreshCw, UserRound, Users, X } from 'lucide-react'
+import { AlertTriangle, Bot, Check, ChevronDown, Compass, Eye, Inbox, Loader2, Pencil, Plus, RefreshCw, UserRound, Users, X } from 'lucide-react'
 import {
   agentsUpdatedLabel,
   changesOf,
   createGoal,
+  dismissConflict,
   draftOf,
   editGoal,
   emptyDraft,
   getCourse,
   getPreview,
   goalAction,
+  measureText,
+  progressOf,
   savePrefs,
   shortDate,
   DEFAULT_TEXT_CAPS,
@@ -94,6 +97,19 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
     }
   }
 
+  const dismiss = async (conflictId: string) => {
+    setBusy(conflictId); setNotice(null); setError(null)
+    try {
+      await dismissConflict(conflictId)
+      setNotice('Marked “not a conflict”. Flight Deck won’t flag that pair again.')
+      await load()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const save = async (d: GoalDraft) => {
     if (!editing) return
     setSaving(true); setFormError(null); setNotice(null)
@@ -145,6 +161,7 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
   }
 
   const proposals = useMemo(() => all.filter((g) => g.status === 'proposed'), [all])
+  const offCourse = useMemo(() => all.filter((g) => g.flags?.off_course), [all])
   const agentName = useMemo(() => new Map((data?.agents ?? []).map((a) => [a.ref, a.name])), [data])
   const [prefSaving, setPrefSaving] = useState(false)
   const setAutoAccept = async (on: boolean) => {
@@ -175,6 +192,7 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
         onEdit={(g) => { setFormError(null); setEditing({ mode: 'edit', goal: g }) }}
         onOpen={(g) => setOpened(g.id)}
         onAction={(g, a) => void act(g, a)}
+        onDismiss={(id) => void dismiss(id)}
         form={form(scope, agentRef)}
       />
     )
@@ -253,6 +271,25 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
               </Section>
             )}
 
+            {offCourse.length > 0 && (
+              <Section icon={AlertTriangle} title={`Off course (${offCourse.length})`}
+                hint="Goals nothing is moving. Give one of your agents a goal that serves it, plan a route to it, or pause it.">
+                <div className="space-y-1.5">
+                  {offCourse.map((g) => (
+                    <div key={g.id} className="rounded-md border border-amber-500/30 bg-amber-500/[0.05] px-3 py-2">
+                      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                        <button onClick={() => setOpened(g.id)} className="text-left text-sm text-zinc-100 hover:underline">{g.title}</button>
+                        <span className="text-[11px] text-zinc-500">
+                          {g.scope === 'agent' ? agentName.get(g.agent_ref) || 'An agent' : 'You'} · {HORIZON_LABELS[g.horizon]}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 text-xs text-amber-800 dark:text-amber-200">{g.off_course_reason}</p>
+                    </div>
+                  ))}
+                </div>
+              </Section>
+            )}
+
             <Section
               icon={Users}
               title="The deck"
@@ -325,7 +362,7 @@ function Section({ icon: Icon, title, hint, children }: {
   )
 }
 
-function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onOpen, onAction, form }: {
+function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onOpen, onAction, onDismiss, form }: {
   goals: Goal[]
   byId: Map<string, Goal>
   caps: Record<Horizon, number>
@@ -336,6 +373,7 @@ function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onOpen, o
   onEdit: (g: Goal) => void
   onOpen: (g: Goal) => void
   onAction: (g: Goal, a: GoalAction) => void
+  onDismiss: (conflictId: string) => void
   form: React.ReactNode
 }) {
   const open = goals.filter((g) => OPEN.includes(g.status))
@@ -356,7 +394,7 @@ function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onOpen, o
               {here.map((g) => (
                 <GoalCard key={g.id} goal={g} parent={byId.get(g.parent_id)} busy={busy === g.id}
                   readOnly={readOnly || !g.can_edit} onEdit={() => onEdit(g)} onOpen={() => onOpen(g)}
-                  onAction={(a) => onAction(g, a)} />
+                  onAction={(a) => onAction(g, a)} busyId={busy} onDismiss={onDismiss} />
               ))}
             </div>
           </div>
@@ -381,7 +419,7 @@ function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onOpen, o
             {finished.map((g) => (
               <GoalCard key={g.id} goal={g} parent={byId.get(g.parent_id)} busy={busy === g.id}
                 readOnly={readOnly || !g.can_edit} onEdit={() => onEdit(g)} onOpen={() => onOpen(g)}
-                onAction={(a) => onAction(g, a)} />
+                onAction={(a) => onAction(g, a)} busyId={busy} onDismiss={onDismiss} />
             ))}
           </div>
         </details>
@@ -397,7 +435,7 @@ const STATUS_CHIP: Partial<Record<Goal['status'], string>> = {
   dropped: 'bg-zinc-700/40 text-zinc-500',
 }
 
-function GoalCard({ goal: g, parent, busy, readOnly, onEdit, onOpen, onAction }: {
+function GoalCard({ goal: g, parent, busy, readOnly, onEdit, onOpen, onAction, busyId, onDismiss }: {
   goal: Goal
   parent?: Goal
   busy: boolean
@@ -405,8 +443,13 @@ function GoalCard({ goal: g, parent, busy, readOnly, onEdit, onOpen, onAction }:
   onEdit: () => void
   onOpen: () => void
   onAction: (a: GoalAction) => void
+  busyId: string | null
+  onDismiss: (conflictId: string) => void
 }) {
   const f = g.flags
+  const progress = OPEN.includes(g.status) ? progressOf(g) : null
+  const measured = OPEN.includes(g.status) ? measureText(g.measure) : ''
+  const clashes = g.conflicts ?? []
   const btn = 'rounded px-2 py-0.5 text-[11px] text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50'
   const actions: [GoalAction | 'edit', string][] = readOnly ? [] : (
     g.status === 'active' ? [['review', 'Still on course'], ['edit', 'Edit'], ['pause', 'Pause'], ['achieve', 'Done'], ['drop', 'Drop']]
@@ -436,19 +479,43 @@ function GoalCard({ goal: g, parent, busy, readOnly, onEdit, onOpen, onAction }:
             {parent && <span>Serves: {parent.title}</span>}
             {g.due_at && <span>Due {shortDate(g.due_at)}</span>}
             {g.status === 'active' && g.review_at && <span>Review by {shortDate(g.review_at)}</span>}
-            {g.progress != null && <span>{Math.round(g.progress * 100)}% along</span>}
+            {measured && <span>{measured}</span>}
+            {progress != null && !(g.measure?.progress != null) && <span title={g.progress_note || undefined}>About {Math.round(progress * 100)}% along</span>}
             {g.status === 'active' && <span>{g.last_moved ? `Last moved ${shortDate(g.last_moved)}` : 'No work linked yet'}</span>}
           </div>
-          {f && (f.stale || f.due || f.horizon_retired || f.serves_nothing || f.parent_gone) && (
+          {progress != null && (
+            <div className="mt-1.5 h-1 max-w-xs overflow-hidden rounded-full bg-zinc-800" role="progressbar"
+              aria-label="Progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(progress * 100)}>
+              <div className={`h-full rounded-full ${progress >= 1 ? 'bg-emerald-500' : 'bg-violet-500'}`} style={{ width: `${Math.round(progress * 100)}%` }} />
+            </div>
+          )}
+          {clashes.length > 0 && (
+            <div className="mt-1 space-y-1">
+              {clashes.map((cf) => (
+                <div key={cf.id} className="flex flex-wrap items-center gap-1.5 rounded bg-red-500/10 px-1.5 py-1 text-[11px] text-red-700 dark:text-red-300">
+                  <span className="min-w-0 flex-1">
+                    May pull against “{cf.other_title}”{cf.reason ? ` — ${cf.reason}` : ''}
+                  </span>
+                  <button onClick={() => onDismiss(cf.id)} disabled={busyId === cf.id}
+                    title="Flight Deck won't flag this pair again"
+                    className="shrink-0 rounded px-1.5 py-px text-[10px] text-zinc-500 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50">
+                    {busyId === cf.id ? 'Saving…' : 'Not a conflict'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          {f && (f.stale || f.due || f.horizon_retired || f.serves_nothing || f.parent_gone || f.off_course) && (
             <div className="mt-1 flex flex-wrap gap-1">
               {f.stale ? (
                 <Flag tone="red">Out of your agents’ prompts until someone says it’s still on course</Flag>
               ) : f.due ? (
                 <Flag tone="amber">Review due: it leaves your agents’ prompts {g.grace_days ?? 3} days after its review date</Flag>
               ) : null}
+              {f.off_course && <Flag tone="amber">Off course: {g.off_course_reason}</Flag>}
               {f.horizon_retired && <Flag tone="amber">This level no longer uses {HORIZON_LABELS[g.horizon].toLowerCase()} goals</Flag>}
               {f.parent_gone && <Flag tone="zinc">The goal it served is finished</Flag>}
-              {f.serves_nothing && !f.parent_gone && <Flag tone="zinc">Serves nothing above it</Flag>}
+              {f.serves_nothing && !f.parent_gone && !f.off_course && <Flag tone="zinc">Serves nothing above it</Flag>}
             </div>
           )}
         </div>

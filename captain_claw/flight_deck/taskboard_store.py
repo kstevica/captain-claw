@@ -830,6 +830,15 @@ class TaskboardStore:
         with self._lock:
             return self._owned(user_id, task_id)
 
+    def count_goal_done(self, user_id: str, goal_id: str, since: float = 0.0) -> int:
+        """Course (Phase 4): the user's tasks tied to ``goal_id`` and done since
+        ``since`` (epoch seconds) — a goal's ``taskboard_done`` metric."""
+        with self._lock:
+            return int(self._conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE user_id = ? AND goal_id = ? AND status = 'done'"
+                " AND merged_into = '' AND COALESCE(closed_at, 0) >= ?",
+                (user_id, goal_id, float(since))).fetchone()[0])
+
     def events(self, user_id: str, task_id: str, limit: int = 500) -> list[dict]:
         """The task's latest *limit* events (a scheduled task gathers a few
         every run), oldest first."""

@@ -1,10 +1,11 @@
 # Course: Implementation Plan
 
-> Status: Phases 1–3 built. Phase 1: store, routes, Course page, admin card, kiosk dialog,
+> Status: Phases 1–4 built. Phase 1: store, routes, Course page, admin card, kiosk dialog,
 > prompt files, review sweep. Phase 2: the Arbiter, plans, the Taskboard, projects,
 > scheduled tasks, Swarm runs, Forge agents and the agent's `course` tool. Phase 3:
 > suggestions from agents (the tool, self-reflection) and from the deck (the heartbeat),
-> each waiting for a person. Phase 4 not started.
+> each waiting for a person. Phase 4: metrics, the weekly estimate, the off-course band,
+> the conflict check and goal-driven Arbiter candidates.
 > Decisions locked: the feature is called **Course** · each item is a **goal** · each goal
 > has a **horizon** (strategic · long · medium · short) · three scopes (instance · user ·
 > agent) · goals form a tree · proposals always wait for a person · goals guide priorities
@@ -114,7 +115,7 @@ course_goals
   title              TEXT  ≤120
   detail             TEXT  ≤1000      what it means and why it matters
   success            TEXT  ≤500       how we'll know; required unless horizon=strategic
-  metric             TEXT  json       optional {kind, spec, target, unit} (Phase 4)
+  metric             TEXT  json       {} or {kind, target, unit} (+ value, value_at for manual)
   status             TEXT             proposed | active | paused | achieved | dropped |
                                       superseded | declined
   origin             TEXT             admin | user | agent | deck
@@ -124,7 +125,8 @@ course_goals
   review_every_days  INTEGER          default by horizon: short 7 · medium 30 · long 90 · strategic 365
   review_at          TEXT             next review (ISO)
   due_at             TEXT             optional deadline
-  progress           REAL             0..1 estimate, NULL = unknown (Phase 4)
+  progress           REAL             0..1 estimate, NULL = unknown
+  estimated_at       TEXT             when the weekly estimate last looked (Phase 4)
   progress_note      TEXT
   sort               INTEGER
   created_at, updated_at, decided_at TEXT
@@ -266,7 +268,8 @@ New router `captain_claw/flight_deck/course_routes.py`, mounted in `server.py`.
   - their user goals;
   - each of their agents' goals;
   - waiting proposals;
-  - flags (orphan, stale, due for review; off course in Phase 4).
+  - flags (orphan, stale, due for review, off course), each goal's measure and the
+    conflicts the caller is told about.
 - `POST /fd/course/goals` creates a goal (scope `user`, or `agent` for an agent the caller owns).
 - `PATCH /fd/course/goals/{id}` edits it (owner of the scope only).
 - `POST /fd/course/goals/{id}/accept|decline|pause|resume|achieve|drop|review`.
@@ -304,8 +307,8 @@ agent (`fd_dispatch.dispatch_action`), and approve/reject trains action reliabil
 | `course_proposal` | proposal | yes |
 | `course_review` | ask | yes |
 | `course_looks_achieved` | ask | yes |
-| `course_conflict` | deck | yes (Phase 4) |
-| `course_achieved` | result | no |
+| `course_conflict` | deck | yes (built in Phase 4) |
+| `course_achieved` | result | no (not built: a person marks a goal done, so nobody needs telling) |
 
 **Hygiene** (server-side in `CourseStore._proposal_rules`, so a chatty model can't get
 around it; built in Phase 3):
@@ -345,10 +348,12 @@ around it; built in Phase 3):
 - When an action ends `done`, link it to its goal automatically (`course_links` kind
   `autonomy_action`). `line.action_done` is the natural hook.
 - `goal_id` never changes `risk`, `should_auto_dispatch`, grants or caps.
-- Phase 4, off by default (`goal_driven_candidates`): `_gather_candidates` may add an
-  active short or medium goal with no evidence for a while ("No progress on G:… in 9 days")
-  as a candidate. That lets the Arbiter propose work that comes from goals, still behind
-  every existing dial.
+- Phase 4, off by default (`automation.goal_driven_candidates`, built): after
+  `_gather_candidates`, an active short goal nothing has moved for 3 days, or a medium
+  one for 7, becomes a candidate ("(course · G:… · no progress in 9 days) Move this goal
+  forward: …"), at most two per pass, longest-stalled first. A goal with an open action,
+  or one proposed in the last day, isn't fed again. That lets the Arbiter propose work
+  that comes from goals, still behind every existing dial.
 
 ### The review sweep (`flight_deck/course_carrier.py`, Phase 1)
 - A small loop of its own, started at FD startup like `context_packs.reconcile_loop`, not
@@ -416,25 +421,55 @@ around it; built in Phase 3):
   browser and has no server step after the agents exist. Its review step could create
   the goals through `POST /fd/course/goals` once each spawn returns its slug.
 
-## Progress and off course (Phase 4)
+## Progress and off course (Phase 4, built)
 
-- **Last moved:** the newest `course_links.at`. No model needed. Shown on every goal.
-- **Metrics in v1:**
-  - `manual`: a person enters the value;
-  - `taskboard_done`: tasks with this `goal_id` done since the goal became active;
-  - `link_count`.
+- **Last moved:** the newest `course_links.at` (the caller's own on a deck-wide goal). No
+  model needed. Shown on every active goal.
+- **Metrics** (`metric = {kind, target, unit}`, set in the goal form):
+  - `manual`: a person enters the value (`PUT /fd/course/goals/{id}/value`, logged as
+    `measured`); an edit of the target or unit keeps it, a change of kind starts empty;
+  - `taskboard_done`: the owner's tasks with this `goal_id`, done since the goal became
+    active (`TaskboardStore.count_goal_done`);
+  - `link_count`: the evidence linked to it.
+  - A deck-wide goal's work is everyone's and each user sees only their own, so it takes
+    only `manual` (the admin enters the number).
+  - With a target, the measure fills the progress bar (`measure.progress`); without one,
+    the bar is the estimate. When a measure reaches its target, the review sweep asks
+    `course_looks_achieved` once per target value (the admins for a deck-wide goal).
 - **Later metrics:** `datastore_query`, `swarm_score`.
-- **Weekly estimate:** one pass per active goal that has new evidence, on the user's
-  economy model through the pulse's author agent. It writes `progress` and
-  `progress_note`. It never sets `achieved`: at most it posts `course_looks_achieved`.
-- **Off course:** active user goals with no agent goal under them and no evidence within
-  their review period, plus agent goals that serve nothing above them. Shown as a band at
-  the top of the Course page.
-- **Conflicts:** when a goal is created or accepted, one LLM pass compares it with active
-  goals in its own and wider scopes. A likely conflict is flagged on both goals and posted
-  as `course_conflict` to the owner of the narrower goal. The deck flags conflicts; it
-  never settles them. For hard limits, instance outranks user, and user outranks agent.
-  An admin is never told about a user's goals.
+- **Weekly estimate** (`course_progress.estimate_round`, at the end of each pulse that
+  reflected): the user's own and their agents' active goals with evidence newer than
+  their last estimate, and no estimate in the last 7 days, at most 3 per pulse. One
+  model pass per goal writes `progress` and `progress_note` (actor `deck:estimate`). It
+  never sets `achieved`: at most it posts `course_looks_achieved`, never for a strategic
+  goal. A deck-wide goal is never estimated (no one user's work speaks for it). An
+  unreadable answer still counts as that week's try; when no agent answers, nothing is
+  marked and the next pulse tries again.
+- **Which model:** Flight Deck has no economy model of its own, so a Course pass thinks
+  through the user's running agents, the cheapest first (Library tier, else model name),
+  the others as fallbacks; the pulse's author is among them.
+- **Off course** (`course.off_course`, computed on every read): an active user goal that
+  no active agent goal serves (anywhere below it) and that nothing moved (on it or below
+  it) within its review period, judged once it has been active for that period or two
+  weeks, whichever is shorter; plus an active agent goal whose chain never reaches one
+  of the user's goals or the deck's. Shown as a band at the top of the Course page and as
+  a flag on the goal. Paused goals are never off course.
+- **Conflicts** (`course_conflicts`, in the background after the save): when a goal is
+  created, accepted (also an agent's auto-accepted short goal) or its title, success or
+  detail changes, one model pass compares it with the active goals in its own and wider
+  scopes (at most 30), through the deciding person's agents. It may name at most three,
+  and only goals it was shown. Each pair is stored once (`course_conflicts`, either order,
+  answered or not), the narrower goal as `goal_id`, and posted as `course_conflict` to
+  that goal's owner — the admins for two deck-wide goals; never across two people's
+  courses. The flag shows on both goals, but only to whoever was told: on a deck-wide
+  goal, each user sees only their own conflicts, and the deck goal's history never names
+  a user's goal. The deck flags conflicts; it never settles them. "Not a conflict"
+  (`POST /fd/course/conflicts/{id}/dismiss`) hides it for good; a goal that is done,
+  dropped or replaced takes its conflicts off the course and answers their Line items.
+  For hard limits, instance outranks user, and user outranks agent (the Line item says
+  so). An admin is never told about a user's goals.
+- **The admin's switches** (`automation`): weekly estimate (on), conflict check (on),
+  goal-driven candidates (off).
 
 ## The UI
 
@@ -450,7 +485,9 @@ What the page shows:
   - **Deck** (instance; read-only for non-admins);
   - **You** (user goals);
   - **Agents** (one group per agent);
-- each goal shows status, last moved, review due and (Phase 4) a progress bar;
+- an **off course** band under the proposals (Phase 4);
+- each goal shows status, last moved, review due, its measure and a progress bar, and the
+  conflicts the caller was told about, each with "Not a conflict";
 - the **goal drawer**: success, metric, links (evidence), History (`course_events`), and
   Plan a route (Phase 2).
 
@@ -479,11 +516,16 @@ Course's settings live in its own store (`course_settings` in `course.db`), not 
 | `proposals.agent_per_week` | admin | 2 | Per agent, per week (0–20). |
 | `proposals.deck_per_week` | admin | 2 | Per user, per week (0–20). |
 | `prefs:<user>.auto_accept_agent_short` | each user | false | Their agents may add their own short-term goals without asking. |
+| `automation.weekly_estimate` | admin | true | Estimate progress once a week from new evidence. |
+| `automation.conflict_check` | admin | true | Check a new, accepted or reworded goal for conflicts. |
+| `automation.goal_driven_candidates` | admin | false | Stalled short and medium goals become Arbiter candidates. |
 
 Fixed in code for now: the prompt block sizes (3000 / 600), the review grace
 (`max(3 days, a quarter of the review period)`), 5 waiting suggestions per scope and the
-90-day decline memory. Phase 4's switches (goal-driven Arbiter candidates, weekly
-progress estimates) will join the admin's settings.
+90-day decline memory, and in Phase 4 the estimate rhythm (7 days, 3 goals per pulse),
+the off-course window (the review period, judged after it or 14 days), the stall
+thresholds (short 3 days, medium 7) and the conflict check's limits (30 goals compared,
+3 flagged).
 
 ## Privacy and safety
 
@@ -527,7 +569,7 @@ progress estimates) will join the admin's settings.
      `auto_accept_agent_short`, the "Waiting for you" strip (Accept, Edit and accept,
      Decline, a change's differences), Accept / Decline on the Line, and the admin's
      suggestion settings.
-4. **Progress and off course.**
+4. **Progress and off course.** (built)
    - Last moved, metrics (`manual`, `taskboard_done`, `link_count`), the weekly estimate,
      the off-course band, the conflict check, and goal-driven Arbiter candidates.
 
@@ -546,6 +588,15 @@ New `tests/test_course_*.py`:
 - **Proposals:** weekly caps, waiting dedup, the 90-day decline block, Line item posted and
   resolved.
 - **Arbiter:** `goal_id` parsed and stored; dispatch decision unchanged by `goal_id`.
+- **Progress (Phase 4, `test_course_progress.py`):** metric validation and kinds, a manual
+  value kept across an edit, the measure, the Taskboard count, the admin's switches, which
+  goals are due an estimate, the estimate written as the deck and never marking a goal
+  done, a measure at its target asking once per target, off course, conflicts (once per
+  pair, told to the narrower goal's owner, hidden when a goal leaves), the check naming
+  only goals it was shown, stalled goals reaching the Arbiter only with the switch on.
+- **Routes (Phase 4):** a goal's value (owner only; admin for the deck's), off-course and
+  measure in the course view, conflicts shown only to whom they concern, "not a conflict"
+  answering the Line item, when the background check runs, the admin's switches.
 
 ## Open questions
 
@@ -561,3 +612,10 @@ themselves.
    run's task already carries the `goal_id` of the action that started it.
 3. Should waiting suggestions expire? v1: no; at most 5 wait per scope, so old ones have
    to be answered before new ones arrive.
+4. Should a new deck-wide goal be checked against every user's goals, telling each user
+   about their own conflicts? v1: no; a user goal is checked against the deck's when it is
+   added, accepted or reworded, so a deck goal added later isn't compared with older user
+   goals until one of them changes.
+5. Should the weekly estimate run without the consciousness heartbeat (a user who switched
+   it off)? v1: no; it thinks through the pulse's agents. The measure and "last moved"
+   need no model and work either way.

@@ -14,8 +14,12 @@
                                            review · accept · decline
 * ``POST /fd/course/goals/{id}/links``,
   ``DELETE /fd/course/goals/{id}/links/{kind}/{ref_id}``  the evidence
-* ``GET/PUT /fd/admin/course/settings``    the horizons each scope uses and the caps
-                                           (admin only)
+* ``PUT  /fd/course/goals/{id}/value``     the current value of a goal measured by a
+                                           number a person enters
+* ``POST /fd/course/conflicts/{id}/dismiss``  "not a conflict"
+* ``GET/PUT /fd/admin/course/settings``    the horizons each scope uses, the caps, the
+                                           suggestion rules and what Flight Deck does on
+                                           its own (admin only)
 
 Plain ``get_current_user``, as on the profile routes: an admin's ``X-FD-Act-As``
 does not reach another user's Course, and someone else's goal is a 404 — there is
@@ -24,7 +28,9 @@ changed only by an admin (403 otherwise).
 
 Every change rewrites the course files of the agents it reaches
 (``course_carrier.refresh_for_goal``) and says how many it updated. The rules
-themselves (horizons, caps, the tree) live in :mod:`course`.
+themselves (horizons, caps, the tree) live in :mod:`course`. A goal that is
+added, accepted or reworded is checked for conflicts in the background
+(:mod:`course_conflicts`).
 """
 
 from __future__ import annotations
@@ -38,6 +44,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 
 from captain_claw.flight_deck import course as c
 from captain_claw.flight_deck import course_carrier as carrier
+from captain_claw.flight_deck import course_conflicts as conflicts
 from captain_claw.flight_deck.admin_routes import require_admin
 from captain_claw.flight_deck.auth import get_current_user, get_db
 
@@ -89,15 +96,33 @@ def _flags(goal: dict[str, Any], settings: dict[str, Any], visible_ids: set[str]
 
 
 def _view(goal: dict[str, Any], *, can_edit: bool, flags: dict[str, bool],
-          moved: str | None = None, names: dict[str, str] | None = None) -> dict[str, Any]:
+          moved: str | None = None, names: dict[str, str] | None = None,
+          off: str = "", clashes: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     proposer = ""
     if goal.get("origin") == "deck":
         proposer = "Flight Deck"
     elif goal.get("origin") == "agent":
         proposer = (names or {}).get(str(goal.get("proposed_by") or ""), "") or "An agent"
-    return {**goal, "can_edit": can_edit, "flags": flags, "last_moved": moved,
-            "proposer": proposer,
+    return {**goal, "can_edit": can_edit, "flags": {**flags, "off_course": bool(off)},
+            "last_moved": moved, "proposer": proposer, "off_course_reason": off,
+            "conflicts": clashes or [],
+            "measure": c.measure(goal) if goal.get("status") in ("active", "paused") else None,
             "grace_days": c.grace_days(int(goal.get("review_every_days") or 30))}
+
+
+def _clashes(uid: str, admin: bool, visible: dict[str, dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Goal id → the open conflicts the caller is told about that it's part of,
+    each naming the other goal (only between goals the caller can see)."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    for cf in c.get_store().conflicts(uid, admin=admin):
+        a, b = visible.get(cf["goal_id"]), visible.get(cf["other_id"])
+        if a is None or b is None:
+            continue
+        for mine, other in ((a, b), (b, a)):
+            out.setdefault(mine["id"], []).append(
+                {"id": cf["id"], "other_id": other["id"], "other_title": other["title"],
+                 "other_scope": other["scope"], "reason": cf["reason"], "at": cf["at"]})
+    return out
 
 
 async def _visible_goal(goal_id: str, user: dict, *, edit: bool) -> dict[str, Any]:
@@ -142,11 +167,17 @@ async def get_course(user: dict = Depends(get_current_user)):
     moved = store.last_moved([g["id"] for g in mine + theirs])
     moved.update(store.last_moved([g["id"] for g in deck], owner_id=uid))
     now = datetime.now(UTC)
+    off = c.off_course(deck + mine + theirs, moved, now=now)
+    clashes = _clashes(uid, admin, {g["id"]: g for g in deck + mine + theirs})
+
+    def view(g: dict[str, Any], can_edit: bool) -> dict[str, Any]:
+        return _view(g, can_edit=can_edit, flags=_flags(g, settings, visible, now),
+                     moved=moved.get(g["id"]), names=names, off=off.get(g["id"], ""),
+                     clashes=clashes.get(g["id"]))
+
     by_agent: dict[str, list[dict[str, Any]]] = {r: [] for r in refs}
     for g in theirs:
-        by_agent.setdefault(g["agent_ref"], []).append(
-            _view(g, can_edit=True, flags=_flags(g, settings, visible, now),
-                  moved=moved.get(g["id"]), names=names))
+        by_agent.setdefault(g["agent_ref"], []).append(view(g, True))
     return {
         "settings": settings,
         "horizons": list(c.HORIZONS),
@@ -159,11 +190,10 @@ async def get_course(user: dict = Depends(get_current_user)):
         "recommendations": settings["proposals"]["recommendations"],
         "agents": [{"ref": a["ref"], "name": a["name"], "slug": a["slug"],
                     "runtime": a["runtime"]} for a in agents],
+        "metric_kinds": dict(c.METRIC_KIND_LABELS),
         "goals": {
-            "deck": [_view(g, can_edit=admin, flags=_flags(g, settings, visible, now),
-                           moved=moved.get(g["id"]), names=names) for g in deck],
-            "mine": [_view(g, can_edit=True, flags=_flags(g, settings, visible, now),
-                           moved=moved.get(g["id"]), names=names) for g in mine],
+            "deck": [view(g, admin) for g in deck],
+            "mine": [view(g, True) for g in mine],
             "agents": by_agent,
         },
     }
@@ -209,10 +239,11 @@ async def create_goal(body: Any = Body(...), user: dict = Depends(get_current_us
             owner_id=owner_id, agent_ref=agent_ref, detail=body.get("detail"),
             success=body.get("success"), parent_id=parent_id, due_at=body.get("due_at"),
             review_every_days=body.get("review_every_days"), origin=origin,
-            actor=_actor(user),
+            actor=_actor(user), metric=body.get("metric"),
         )
     except c.CourseError as exc:
         raise _bad(exc) from None
+    conflicts.check_soon(get_db(), goal, thinker=_uid(user))
     return {"goal": goal, "agents_updated": await _refresh(goal)}
 
 
@@ -231,8 +262,17 @@ async def get_goal(goal_id: str, user: dict = Depends(get_current_user)):
         # A link event names someone's work: the caller sees only their own.
         events = [e for e in events if e["event"] != "linked"
                   or str(e["detail"].get("owner_id") or "") == _uid(user)]
+    clashes = []
+    for cf in store.conflicts(_uid(user), admin=_is_admin(user)):
+        if goal_id not in (cf["goal_id"], cf["other_id"]):
+            continue
+        other = store.get(cf["other_id"] if cf["goal_id"] == goal_id else cf["goal_id"])
+        if other is not None:
+            clashes.append({"id": cf["id"], "other_id": other["id"], "other_title": other["title"],
+                            "other_scope": other["scope"], "reason": cf["reason"], "at": cf["at"]})
     return {"goal": goal, "links": store.links(goal_id, owner_id=_links_owner(goal, user)),
-            "events": events, "can_edit": goal["scope"] != "instance" or _is_admin(user)}
+            "events": events, "can_edit": goal["scope"] != "instance" or _is_admin(user),
+            "measure": c.measure(goal), "conflicts": clashes}
 
 
 @router.patch("/fd/course/goals/{goal_id}")
@@ -249,6 +289,8 @@ async def edit_goal(goal_id: str, body: Any = Body(...), user: dict = Depends(ge
         raise _bad(exc) from None
     except c.CourseNotFoundError:
         raise HTTPException(404, "Goal not found") from None
+    if any(updated.get(f) != goal.get(f) for f in ("title", "success", "detail")):
+        conflicts.check_soon(get_db(), updated, thinker=_uid(user))
     return {"goal": updated, "agents_updated": await _refresh(updated)}
 
 
@@ -403,7 +445,42 @@ async def goal_action(goal_id: str, action: str, user: dict = Depends(get_curren
         from captain_claw.flight_deck import course_proposals
 
         await course_proposals.resolve(get_db(), goal)
+    if action in ("achieve", "drop"):
+        await conflicts.resolve_for_goal(get_db(), goal)
+    if action == "accept":
+        if goal.get("supersedes_id"):
+            replaced = store.get(goal["supersedes_id"])
+            if replaced is not None:
+                await conflicts.resolve_for_goal(get_db(), replaced)
+        conflicts.check_soon(get_db(), updated, thinker=_uid(user))
     return {"goal": updated, "agents_updated": await _refresh(updated)}
+
+
+@router.put("/fd/course/goals/{goal_id}/value")
+async def set_value(goal_id: str, body: Any = Body(...), user: dict = Depends(get_current_user)):
+    """The current value of a goal measured by a number a person enters."""
+    await _visible_goal(goal_id, user, edit=True)
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Expected a JSON object")
+    try:
+        updated = c.get_store().set_metric_value(goal_id, body.get("value"), actor=_actor(user))
+    except c.CourseError as exc:
+        raise _bad(exc) from None
+    return {"goal": updated, "measure": c.measure(updated)}
+
+
+@router.post("/fd/course/conflicts/{conflict_id}/dismiss")
+async def dismiss_conflict(conflict_id: str, user: dict = Depends(get_current_user)):
+    """"Not a conflict": only someone it was told to; the pair isn't flagged again."""
+    store = c.get_store()
+    cf = store.get_conflict(conflict_id)
+    allowed = cf is not None and (
+        cf["owner_id"] == _uid(user) or (not cf["owner_id"] and _is_admin(user)))
+    if not allowed:
+        raise HTTPException(404, "Not found")
+    done = store.dismiss_conflict(conflict_id, actor=_actor(user))
+    await conflicts.resolve(get_db(), done)
+    return {"conflict": done}
 
 
 # ── The caller's own preferences ───────────────────────────────────────
@@ -430,7 +507,7 @@ async def get_settings(admin: dict = Depends(require_admin)):
     return {
         **c.get_store().settings(),
         "defaults": {"horizons": c.DEFAULT_HORIZONS, "caps": c.DEFAULT_CAPS,
-                     "proposals": c.DEFAULT_PROPOSALS},
+                     "proposals": c.DEFAULT_PROPOSALS, "automation": c.DEFAULT_AUTOMATION},
         "cap_range": list(c.CAP_RANGE),
         "per_week_range": list(c.PER_WEEK_RANGE),
         "scopes": list(c.SCOPES),
@@ -445,7 +522,8 @@ async def put_settings(body: Any = Body(...), admin: dict = Depends(require_admi
         raise HTTPException(400, "Expected a JSON object")
     try:
         saved = c.get_store().set_settings(horizons=body.get("horizons"), caps=body.get("caps"),
-                                           proposals=body.get("proposals"))
+                                           proposals=body.get("proposals"),
+                                           automation=body.get("automation"))
     except c.CourseError as exc:
         raise _bad(exc) from None
     # No agent's files change: goals at a horizon a scope no longer uses are
@@ -520,7 +598,7 @@ async def agent_view(request: Request) -> dict:
         "parent_id": g["parent_id"], "due_at": g["due_at"], "review_at": g["review_at"],
         "progress": g["progress"], "progress_note": g["progress_note"],
         "last_moved": moved.get(g["id"]), "stale": c.is_stale(g, now),
-        "own": g["scope"] == "agent",
+        "own": g["scope"] == "agent", "measure": c.measure(g),
     } for g in goals]}
 
 
@@ -558,17 +636,10 @@ async def agent_report(request: Request, body: dict = Body(default={})) -> dict:
         raise _bad(exc) from None
     asked = False
     if body.get("looks_achieved") is True:
-        from captain_claw.flight_deck import line
-
         note = " ".join(str(body.get("note") or "").split())[:400]
-        day = datetime.now(UTC).date().isoformat()
-        item = await line.post_once(
-            owner, "ask", f"Looks achieved? {' '.join(goal['title'].split())}"[:200],
-            f"{name} thinks this goal is done." + (f"\n\n{note}" if note else "")
-            + "\n\nMark it done, or keep it going, on the Course page.",
-            bell_type="course_looks_achieved", needs_you=True, source=name, trust="agent",
-            ref_type=carrier.REVIEW_REF, ref_id=f"{goal['id']}@achieved:{day}")
-        asked = bool(item)
+        asked = await c.ask_looks_achieved(
+            goal, source=name, trust="agent",
+            body=f"{name} thinks this goal is done." + (f"\n\n{note}" if note else ""))
     return {"goal": {"id": updated["id"], "title": updated["title"],
                      "progress": updated["progress"]}, "asked_owner": asked}
 

@@ -488,8 +488,9 @@ _last_stale: set[str] | None = None
 
 
 async def review_round(db, now: datetime | None = None) -> dict[str, int]:
-    """One sweep: ask about goals that came due; rewrite the agents whose block
-    changed because a goal went stale. Never raises."""
+    """One sweep: ask about goals that came due, and about goals whose measure
+    reached its target; rewrite the agents whose block changed because a goal
+    went stale. Never raises."""
     global _last_stale
     now = now or datetime.now(UTC)
     posted = refreshed = 0
@@ -505,6 +506,10 @@ async def review_round(db, now: datetime | None = None) -> dict[str, int]:
                     _review_body(goal, stale), bell_type="course_review", needs_you=True,
                     ref_type=REVIEW_REF, ref_id=review_ref(goal), source="Course")
                 posted += 1 if item else 0
+        # Phase 4: a measure that reached its target asks whether the goal is done.
+        from captain_claw.flight_deck import course_progress
+
+        await course_progress.target_round(db)
         stale_now = {g["id"] for g in due if c.is_stale(g, now)}
         if _last_stale is None:
             _last_stale = stale_now          # startup's reconcile wrote the files

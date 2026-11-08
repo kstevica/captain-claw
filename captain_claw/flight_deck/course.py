@@ -86,8 +86,27 @@ REVIEW_RANGE = (1, 730)
 GRACE_MIN_DAYS = 3
 
 TEXT_CAPS: dict[str, int] = {"title": 120, "detail": 1000, "success": 500, "rationale": 500,
-                             "progress_note": 500, "note": 300}
+                             "progress_note": 500, "note": 300, "unit": 30, "reason": 300}
 _REF_MAX = 200
+
+# Phase 4: progress and off course.
+# A goal's metric: how its progress is measured. A deck-wide goal's work is
+# everyone's, and each user sees only their own, so it takes only a value the
+# admin enters.
+METRIC_KINDS = ("manual", "taskboard_done", "link_count")
+METRIC_KIND_LABELS = {"manual": "A number you enter", "taskboard_done": "Tasks done for it",
+                      "link_count": "Pieces of work linked to it"}
+METRIC_MAX = 1_000_000_000
+# What Flight Deck does on its own (the admin's switches).
+DEFAULT_AUTOMATION: dict[str, bool] = {
+    "weekly_estimate": True,           # estimate progress once a week from new evidence
+    "conflict_check": True,            # check a new or accepted goal against the others
+    "goal_driven_candidates": False,   # stalled goals become Arbiter candidates
+}
+ESTIMATE_EVERY_DAYS = 7
+OFF_COURSE_MIN_DAYS = 14   # a goal is judged off course once active this long (or its review period)
+CONFLICT_STATUSES = ("open", "dismissed")
+_SCOPE_RANK = {"instance": 0, "user": 1, "agent": 2}   # wider first
 
 
 class CourseError(ValueError):
@@ -218,6 +237,60 @@ def _check_prefs(raw: Any) -> dict[str, Any]:
     return {"auto_accept_agent_short": value}
 
 
+def _check_automation(raw: Any) -> dict[str, bool]:
+    if not isinstance(raw, dict):
+        raise CourseError("automation must be an object")
+    out: dict[str, bool] = {}
+    for key, default in DEFAULT_AUTOMATION.items():
+        value = raw.get(key, default)
+        if not isinstance(value, bool):
+            raise CourseError(f"automation.{key} must be true or false")
+        out[key] = value
+    return out
+
+
+def _number(field: str, value: Any, *, minimum: float = 0.0) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CourseError(f"{field} must be a number")
+    value = float(value)
+    if value != value or not minimum <= value <= METRIC_MAX:   # NaN, or out of range
+        raise CourseError(f"{field} must be a number from {minimum:g} to {METRIC_MAX:,}")
+    return value
+
+
+def check_metric(raw: Any, scope: str, old: dict[str, Any] | None = None) -> dict[str, Any]:
+    """A goal's metric as stored: ``{}`` (none), or ``{kind, target, unit}``
+    plus, for ``manual``, the last ``value`` entered (kept across an edit of
+    the target or unit; a new kind starts empty)."""
+    if raw in (None, "") or (isinstance(raw, dict) and not raw.get("kind")):
+        return {}
+    if not isinstance(raw, dict):
+        raise CourseError("metric must be an object")
+    kind = raw.get("kind")
+    if kind not in METRIC_KINDS:
+        raise CourseError(f"metric.kind must be one of {', '.join(METRIC_KINDS)}")
+    if scope == "instance" and kind != "manual":
+        raise CourseError("A deck-wide goal's work is everyone's: measure it with a number "
+                          "the admin enters")
+    unknown = [k for k in raw if k not in ("kind", "target", "unit", "value", "value_at")]
+    if unknown:
+        raise CourseError(f"metric.{unknown[0]} is unknown")
+    target = raw.get("target")
+    out: dict[str, Any] = {
+        "kind": kind,
+        "target": None if target in (None, "") else _number("metric.target", target, minimum=0.0),
+        "unit": _text("unit", raw.get("unit")),
+    }
+    if out["target"] == 0:
+        raise CourseError("metric.target must be more than 0")
+    if kind == "manual":
+        old = old or {}
+        same = old.get("kind") == "manual"
+        out["value"] = old.get("value") if same else None
+        out["value_at"] = old.get("value_at") if same else None
+    return out
+
+
 def norm_title(text: Any) -> str:
     """A title as compared for duplicates: lower case, letters and digits only."""
     return " ".join(re.sub(r"[^\w]+", " ", str(text or "").lower()).split())
@@ -321,6 +394,21 @@ class CourseStore:
                     key    TEXT PRIMARY KEY,
                     value  TEXT NOT NULL
                 );
+
+                -- Phase 4: goals that likely pull against each other. The deck flags
+                -- them; a person settles them. goal_id is the narrower of the two.
+                CREATE TABLE IF NOT EXISTS course_conflicts (
+                    id          TEXT PRIMARY KEY,
+                    goal_id     TEXT NOT NULL REFERENCES course_goals(id) ON DELETE CASCADE,
+                    other_id    TEXT NOT NULL REFERENCES course_goals(id) ON DELETE CASCADE,
+                    owner_id    TEXT NOT NULL DEFAULT '',   -- who is told; '' = the deck's admins
+                    reason      TEXT NOT NULL DEFAULT '',
+                    status      TEXT NOT NULL DEFAULT 'open',
+                    at          TEXT NOT NULL,
+                    decided_at  TEXT,
+                    decided_by  TEXT NOT NULL DEFAULT ''
+                );
+                CREATE INDEX IF NOT EXISTS idx_course_conflicts ON course_conflicts(owner_id, status);
                 """
             )
             self._c().commit()
@@ -329,6 +417,11 @@ class CourseStore:
                 # Whose work a link is: a deck-wide goal shows each user only their own.
                 self._c().execute(
                     "ALTER TABLE course_links ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''")
+                self._c().commit()
+            have = {r["name"] for r in self._c().execute("PRAGMA table_info(course_goals)")}
+            if "estimated_at" not in have:
+                # When the weekly estimate last looked at the goal (Phase 4).
+                self._c().execute("ALTER TABLE course_goals ADD COLUMN estimated_at TEXT")
                 self._c().commit()
 
     # ── rows ───────────────────────────────────────────────────────────
@@ -362,7 +455,8 @@ class CourseStore:
         out: dict[str, Any] = {}
         for key, check, default in (("horizons", _check_horizons, DEFAULT_HORIZONS),
                                     ("caps", _check_caps, DEFAULT_CAPS),
-                                    ("proposals", _check_proposals, DEFAULT_PROPOSALS)):
+                                    ("proposals", _check_proposals, DEFAULT_PROPOSALS),
+                                    ("automation", _check_automation, DEFAULT_AUTOMATION)):
             try:
                 out[key] = check(json.loads(rows[key])) if key in rows else check(default)
             except (CourseError, TypeError, ValueError):
@@ -370,7 +464,7 @@ class CourseStore:
         return out
 
     def set_settings(self, *, horizons: Any = None, caps: Any = None,
-                     proposals: Any = None) -> dict[str, Any]:
+                     proposals: Any = None, automation: Any = None) -> dict[str, Any]:
         """Save what is given (None = unchanged). Goals already at a horizon a
         scope no longer uses are kept; only new ones are refused."""
         updates: dict[str, Any] = {}
@@ -381,6 +475,10 @@ class CourseStore:
         if proposals is not None:
             updates["proposals"] = _check_proposals({**self.settings()["proposals"], **proposals}
                                                     if isinstance(proposals, dict) else proposals)
+        if automation is not None:
+            updates["automation"] = _check_automation(
+                {**self.settings()["automation"], **automation}
+                if isinstance(automation, dict) else automation)
         if updates:
             with self._lock:
                 conn = self._c()
@@ -586,6 +684,7 @@ class CourseStore:
         rationale: Any = "",
         actor: str = "",
         supersedes_id: str = "",
+        metric: Any = None,
     ) -> dict[str, Any]:
         """A new goal. ``status`` is ``active`` (a person writing their own) or
         ``proposed`` (Phase 3: an agent or the deck suggesting one)."""
@@ -621,6 +720,7 @@ class CourseStore:
         parent_id = str(parent_id or "").strip()
         days = self._review_days(review_every_days, horizon)
         due = self._due_at(due_at)
+        measure = check_metric(metric, scope)
         now = _utcnow()
         goal = {"id": "goal_" + secrets.token_hex(8), "scope": scope, "owner_id": owner_id,
                 "agent_ref": agent_ref, "horizon": horizon}
@@ -635,8 +735,9 @@ class CourseStore:
                 INSERT INTO course_goals
                     (id, scope, owner_id, agent_ref, horizon, parent_id, title, detail, success,
                      status, origin, proposed_by, rationale, review_every_days, review_at,
-                     due_at, created_at, updated_at, decided_at, decided_by, supersedes_id)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     due_at, created_at, updated_at, decided_at, decided_by, supersedes_id,
+                     metric)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (goal["id"], scope, owner_id, agent_ref, horizon, parent_id, clean["title"],
                  clean["detail"], clean["success"], status, origin, proposed_by,
@@ -644,7 +745,8 @@ class CourseStore:
                  _iso(now + timedelta(days=days)) if status == "active" else None,
                  due, _iso(now), _iso(now),
                  _iso(now) if status == "active" else None,
-                 actor if status == "active" else "", str(supersedes_id or "")),
+                 actor if status == "active" else "", str(supersedes_id or ""),
+                 json.dumps(measure)),
             )
             self._event(conn, goal["id"], actor, "created" if status == "active" else "proposed",
                         {"horizon": horizon, "parent_id": parent_id})
@@ -652,7 +754,7 @@ class CourseStore:
         return self.get(goal["id"])  # type: ignore[return-value]
 
     _EDITABLE = ("title", "detail", "success", "horizon", "parent_id", "due_at",
-                 "review_every_days")
+                 "review_every_days", "metric")
 
     def update(self, goal_id: str, fields: dict[str, Any], *, actor: str = "") -> dict[str, Any]:
         """Edit a goal in place (a person editing their own). Only the keys
@@ -690,6 +792,8 @@ class CourseStore:
             if "review_every_days" in fields:
                 new["review_every_days"] = self._review_days(
                     fields["review_every_days"], new["horizon"])
+            if "metric" in fields:
+                new["metric"] = check_metric(fields["metric"], goal["scope"], goal["metric"])
             if new["horizon"] != "strategic" and not new["success"]:
                 raise CourseError("Say how you'll know it's done (success)")
             if new["parent_id"] and (new["parent_id"] != goal["parent_id"]
@@ -716,11 +820,12 @@ class CourseStore:
                 """
                 UPDATE course_goals SET title = ?, detail = ?, success = ?, horizon = ?,
                     parent_id = ?, due_at = ?, review_every_days = ?, review_at = ?,
-                    updated_at = ?
+                    metric = ?, updated_at = ?
                 WHERE id = ?
                 """,
                 (new["title"], new["detail"], new["success"], new["horizon"], new["parent_id"],
-                 new["due_at"], new["review_every_days"], review_at, _iso(_utcnow()), goal_id),
+                 new["due_at"], new["review_every_days"], review_at, json.dumps(new["metric"]),
+                 _iso(_utcnow()), goal_id),
             )
             self._event(conn, goal_id, actor, "edited", {"fields": changed})
             conn.commit()
@@ -862,10 +967,12 @@ class CourseStore:
             now = _utcnow()
             conn.execute(
                 "UPDATE course_goals SET status = 'active', review_at = ?, updated_at = ?,"
-                " decided_at = ?, decided_by = ?, progress = ?, progress_note = ? WHERE id = ?",
+                " decided_at = ?, decided_by = ?, progress = ?, progress_note = ?, metric = ?"
+                " WHERE id = ?",
                 (_iso(now + timedelta(days=int(goal["review_every_days"]))), _iso(now), _iso(now),
                  actor, old["progress"] if old else goal["progress"],
-                 old["progress_note"] if old else goal["progress_note"], goal_id))
+                 old["progress_note"] if old else goal["progress_note"],
+                 json.dumps(goal["metric"] or (old["metric"] if old else {})), goal_id))
             self._event(conn, goal_id, actor, "accepted",
                         {"supersedes_id": old["id"]} if old else {})
             if old is not None:
@@ -992,6 +1099,146 @@ class CourseStore:
             conn.commit()
         return self.get(goal_id)  # type: ignore[return-value]
 
+    def set_metric_value(self, goal_id: str, value: Any, *, actor: str = "") -> dict[str, Any]:
+        """A person enters the current value of a ``manual`` metric."""
+        number = _number("value", value)
+        with self._lock:
+            conn = self._c()
+            goal = self._row(conn.execute(
+                "SELECT * FROM course_goals WHERE id = ?", (goal_id,)).fetchone())
+            if goal is None:
+                raise CourseNotFoundError(goal_id)
+            if (goal["metric"] or {}).get("kind") != "manual":
+                raise CourseError("This goal isn't measured by a number you enter")
+            if goal["status"] not in ("active", "paused"):
+                raise CourseError(f"A {goal['status']} goal takes no new value")
+            metric = {**goal["metric"], "value": number, "value_at": _iso(_utcnow())}
+            conn.execute("UPDATE course_goals SET metric = ?, updated_at = ? WHERE id = ?",
+                         (json.dumps(metric), _iso(_utcnow()), goal_id))
+            self._event(conn, goal_id, actor, "measured", {"value": number})
+            conn.commit()
+        return self.get(goal_id)  # type: ignore[return-value]
+
+    def link_count(self, goal_id: str, *, owner_id: str | None = None) -> int:
+        sql, args = "SELECT COUNT(*) FROM course_links WHERE goal_id = ?", [goal_id]
+        if owner_id is not None:
+            sql += " AND owner_id = ?"
+            args.append(norm_user(owner_id))
+        with self._lock:
+            return int(self._c().execute(sql, args).fetchone()[0])
+
+    # ── the weekly estimate (Phase 4) ──────────────────────────────────
+
+    def to_estimate(self, owner_id: str, *, now: datetime | None = None,
+                    limit: int = 3) -> list[dict[str, Any]]:
+        """``owner_id``'s active goals (their own and their agents') with
+        evidence newer than their last estimate, and no estimate in the last
+        week — the oldest estimate first. A deck-wide goal is everyone's: no
+        one user's work estimates it."""
+        now = now or _utcnow()
+        week = _iso(now - timedelta(days=ESTIMATE_EVERY_DAYS))
+        with self._lock:
+            rows = self._c().execute(
+                """
+                SELECT g.* FROM course_goals g
+                WHERE g.scope IN ('user', 'agent') AND g.owner_id = ? AND g.status = 'active'
+                  AND (g.estimated_at IS NULL OR g.estimated_at <= ?)
+                  AND EXISTS (SELECT 1 FROM course_links l WHERE l.goal_id = g.id
+                              AND l.at > COALESCE(g.estimated_at, ''))
+                ORDER BY COALESCE(g.estimated_at, '') LIMIT ?
+                """, (norm_user(owner_id), week, max(1, int(limit)))).fetchall()
+        return [self._row(r) for r in rows]  # type: ignore[misc]
+
+    def mark_estimated(self, goal_id: str, *, now: datetime | None = None) -> None:
+        with self._lock:
+            conn = self._c()
+            conn.execute("UPDATE course_goals SET estimated_at = ? WHERE id = ?",
+                         (_iso(now or _utcnow()), goal_id))
+            conn.commit()
+
+    # ── conflicts (Phase 4) ────────────────────────────────────────────
+
+    def add_conflict(self, goal_id: str, other_id: str, reason: Any = "") -> dict[str, Any] | None:
+        """Flag two goals as likely pulling against each other. The narrower
+        goal's owner is told (the admins for two deck-wide goals); a pair
+        flagged before — answered or not — is never flagged again. None when
+        nothing new was flagged."""
+        reason = " ".join(str(reason or "").split())[:TEXT_CAPS["reason"]]
+        if not goal_id or not other_id or goal_id == other_id:
+            return None
+        with self._lock:
+            conn = self._c()
+            a = self._row(conn.execute("SELECT * FROM course_goals WHERE id = ?", (goal_id,)).fetchone())
+            b = self._row(conn.execute("SELECT * FROM course_goals WHERE id = ?", (other_id,)).fetchone())
+            if a is None or b is None:
+                return None
+            if any(g["status"] not in ("active", "paused") for g in (a, b)):
+                return None
+            if conn.execute(
+                    "SELECT 1 FROM course_conflicts WHERE (goal_id = ? AND other_id = ?)"
+                    " OR (goal_id = ? AND other_id = ?)", (a["id"], b["id"], b["id"], a["id"])).fetchone():
+                return None
+            if _SCOPE_RANK[b["scope"]] > _SCOPE_RANK[a["scope"]]:
+                a, b = b, a                       # goal_id is the narrower one
+            if a["scope"] != "instance" and b["scope"] != "instance" and a["owner_id"] != b["owner_id"]:
+                return None                       # never across two people's courses
+            row = {"id": "cf_" + secrets.token_hex(8), "goal_id": a["id"], "other_id": b["id"],
+                   "owner_id": "" if a["scope"] == "instance" else a["owner_id"],
+                   "reason": reason, "status": "open", "at": _iso(_utcnow())}
+            conn.execute(
+                "INSERT INTO course_conflicts (id, goal_id, other_id, owner_id, reason, status, at)"
+                " VALUES (:id, :goal_id, :other_id, :owner_id, :reason, :status, :at)", row)
+            self._event(conn, a["id"], "deck:conflict", "conflict",
+                        {"other_id": b["id"], "conflict_id": row["id"]})
+            if b["scope"] != "instance" or a["scope"] == "instance":
+                # A deck-wide goal's history is everyone's: it never names a user's goal.
+                self._event(conn, b["id"], "deck:conflict", "conflict",
+                            {"other_id": a["id"], "conflict_id": row["id"]})
+            conn.commit()
+        return {**row, "decided_at": None, "decided_by": ""}
+
+    def get_conflict(self, conflict_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._c().execute("SELECT * FROM course_conflicts WHERE id = ?",
+                                    (str(conflict_id or ""),)).fetchone()
+        return dict(row) if row else None
+
+    def conflicts(self, owner_id: str, *, admin: bool = False,
+                  status: str = "open") -> list[dict[str, Any]]:
+        """The conflicts ``owner_id`` is told about (an admin also those between
+        deck-wide goals), while both goals are still active or paused."""
+        sql = ("SELECT c.* FROM course_conflicts c"
+               " JOIN course_goals a ON a.id = c.goal_id JOIN course_goals b ON b.id = c.other_id"
+               " WHERE c.status = ? AND a.status IN ('active','paused')"
+               " AND b.status IN ('active','paused') AND (c.owner_id = ?")
+        args: list[Any] = [status, norm_user(owner_id)]
+        sql += " OR c.owner_id = '')" if admin else ")"
+        with self._lock:
+            return [dict(r) for r in self._c().execute(sql + " ORDER BY c.at DESC", args).fetchall()]
+
+    def conflicts_of(self, goal_id: str) -> list[dict[str, Any]]:
+        """Every open conflict a goal is part of, whoever was told."""
+        with self._lock:
+            return [dict(r) for r in self._c().execute(
+                "SELECT * FROM course_conflicts WHERE status = 'open' AND (goal_id = ? OR other_id = ?)",
+                (goal_id, goal_id)).fetchall()]
+
+    def dismiss_conflict(self, conflict_id: str, *, actor: str = "") -> dict[str, Any]:
+        """"Not a conflict": the pair is never flagged again."""
+        with self._lock:
+            conn = self._c()
+            row = conn.execute("SELECT * FROM course_conflicts WHERE id = ?",
+                               (conflict_id,)).fetchone()
+            if row is None:
+                raise CourseNotFoundError(conflict_id)
+            if row["status"] != "open":
+                return dict(row)
+            now = _iso(_utcnow())
+            conn.execute("UPDATE course_conflicts SET status = 'dismissed', decided_at = ?,"
+                         " decided_by = ? WHERE id = ?", (now, actor, conflict_id))
+            conn.commit()
+        return {**dict(row), "status": "dismissed", "decided_at": now, "decided_by": actor}
+
     def last_moved(self, goal_ids: list[str], *, owner_id: str | None = None) -> dict[str, str]:
         """The newest evidence time per goal (only ``owner_id``'s links when given)."""
         if not goal_ids:
@@ -1028,6 +1275,7 @@ class CourseStore:
         uid = norm_user(user_id)
         with self._lock:
             conn = self._c()
+            conn.execute("DELETE FROM course_conflicts WHERE owner_id = ?", (uid,))
             cur = conn.execute(
                 "DELETE FROM course_goals WHERE scope IN ('user', 'agent') AND owner_id = ?",
                 (uid,))
@@ -1178,3 +1426,138 @@ def goal_title(goal_id: str) -> str:
     except Exception:  # noqa: BLE001
         return ""
     return str(g["title"]) if g else ""
+
+
+
+# ── Progress and off course (Phase 4) ──────────────────────────────────
+
+
+def automation() -> dict[str, bool]:
+    """The admin's switches for what Flight Deck does on its own (the
+    defaults on any error)."""
+    try:
+        return get_store().settings()["automation"]
+    except Exception:  # noqa: BLE001
+        return dict(DEFAULT_AUTOMATION)
+
+
+def _tasks_done(goal: dict[str, Any]) -> int | None:
+    since = _parse_iso(goal.get("decided_at") or goal.get("created_at"))
+    try:
+        from captain_claw.flight_deck import taskboard_store
+
+        return taskboard_store.get_store().count_goal_done(
+            norm_user(goal.get("owner_id")), goal["id"], since.timestamp() if since else 0.0)
+    except Exception:  # noqa: BLE001 — no board: no count
+        return None
+
+
+def measure(goal: dict[str, Any]) -> dict[str, Any] | None:
+    """A goal's metric as it stands: ``{kind, label, value, target, unit,
+    progress}`` (``progress`` 0..1 when there is a target and a value), or None
+    when the goal has no metric. Counts are the goal owner's own work."""
+    m = goal.get("metric") or {}
+    kind = m.get("kind")
+    if kind not in METRIC_KINDS:
+        return None
+    value: float | int | None = None
+    if kind == "manual":
+        value = m.get("value")
+    elif goal.get("scope") != "instance":
+        if kind == "link_count":
+            try:
+                value = get_store().link_count(goal["id"])
+            except Exception:  # noqa: BLE001
+                value = None
+        elif kind == "taskboard_done":
+            value = _tasks_done(goal)
+    target = m.get("target")
+    progress = (min(1.0, max(0.0, float(value) / float(target)))
+                if value is not None and target else None)
+    return {"kind": kind, "label": METRIC_KIND_LABELS[kind], "value": value, "target": target,
+            "unit": m.get("unit") or "", "value_at": m.get("value_at"), "progress": progress}
+
+
+def off_course(goals: list[dict[str, Any]], moved: dict[str, str], *,
+               now: datetime | None = None) -> dict[str, str]:
+    """Which of one user's goals are off course, and why (goal id → reason).
+
+    ``goals`` is everything the user sees (the deck's, theirs, their agents');
+    ``moved`` their last-moved times. Off course:
+
+    * an active user goal no active agent goal serves (anywhere below it), with
+      no work on it or below it within its review period — judged once it has
+      been active for that period or two weeks, whichever is shorter;
+    * an active agent goal that serves none of the user's goals or the deck's.
+    """
+    now = now or _utcnow()
+    by_id = {g["id"]: g for g in goals}
+    children: dict[str, list[dict[str, Any]]] = {}
+    for g in goals:
+        if g.get("parent_id") and g["status"] in ("active", "paused"):
+            children.setdefault(g["parent_id"], []).append(g)
+
+    def below(gid: str) -> list[dict[str, Any]]:
+        out, todo, seen = [], list(children.get(gid, [])), {gid}
+        while todo:
+            g = todo.pop()
+            if g["id"] in seen:
+                continue
+            seen.add(g["id"])
+            out.append(g)
+            todo.extend(children.get(g["id"], []))
+        return out
+
+    reasons: dict[str, str] = {}
+    for g in goals:
+        if g["status"] != "active":
+            continue
+        if g["scope"] == "user":
+            days = int(g.get("review_every_days") or REVIEW_DAYS[g["horizon"]])
+            since = _parse_iso(g.get("decided_at") or g.get("created_at")) or now
+            if now - since < timedelta(days=min(days, OFF_COURSE_MIN_DAYS)):
+                continue
+            under = below(g["id"])
+            if any(x["scope"] == "agent" and x["status"] == "active" for x in under):
+                continue
+            times = [t for t in (_parse_iso(moved.get(x["id"])) for x in [g, *under]) if t]
+            if times and max(times) > now - timedelta(days=days):
+                continue
+            reasons[g["id"]] = (f"No agent goal serves it, and no work moved it in the last "
+                                f"{days} days")
+        elif g["scope"] == "agent":
+            cur, seen, reached = g, set(), False
+            while cur is not None and cur["id"] not in seen:
+                seen.add(cur["id"])
+                parent = by_id.get(cur.get("parent_id") or "")
+                if parent is not None and parent["status"] in ("active", "paused") \
+                        and parent["scope"] in ("user", "instance"):
+                    reached = True
+                    break
+                cur = parent if parent is not None and parent["status"] in ("active", "paused") else None
+            if not reached:
+                reasons[g["id"]] = "Serves none of your goals or the deck’s"
+    return reasons
+
+
+async def ask_looks_achieved(goal: dict[str, Any], *, source: str, trust: str, body: str,
+                             key: str | None = None, to: list[str] | None = None) -> bool:
+    """Ask whether a goal is achieved on the Line of ``to`` (default: the goal's
+    owner) — once per ``key`` (default: today, so at most once a day whoever
+    asks). It never marks the goal done. True when an item was posted. Never
+    raises."""
+    try:
+        from captain_claw.flight_deck import line
+
+        key = key or _utcnow().date().isoformat()
+        posted = False
+        for uid in to if to is not None else [norm_user(goal.get("owner_id"))]:
+            item = await line.post_once(
+                uid, "ask", f"Looks achieved? {' '.join(str(goal['title']).split())}"[:200],
+                body + "\n\nMark it done, or keep it going, on the Course page.",
+                bell_type="course_looks_achieved", needs_you=True, source=source, trust=trust,
+                ref_type="course_review", ref_id=f"{goal['id']}@achieved:{key}")
+            posted = posted or bool(item)
+        return posted
+    except Exception:  # noqa: BLE001 — a question never breaks its caller
+        return False

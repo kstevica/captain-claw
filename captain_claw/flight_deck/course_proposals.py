@@ -106,6 +106,9 @@ async def submit(*, owner_id: str, origin: str, proposed_by: str, proposer: str,
             await course_carrier.refresh_for_goal(get_db(), goal)
         except Exception:  # noqa: BLE001 — the files catch up on the next change
             pass
+        from captain_claw.flight_deck import course_conflicts
+
+        course_conflicts.check_soon(get_db(), goal, thinker=c.norm_user(goal["owner_id"]))
     else:
         await announce(goal, proposer=proposer, trust=trust)
     return {"goal": goal, "auto_accepted": auto}

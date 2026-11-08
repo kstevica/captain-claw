@@ -55,6 +55,10 @@ class TestActions:
                  "progress_note": "two signed", "last_moved": "2026-11-01T10:00:00+00:00",
                  "review_at": "2027-02-01T00:00:00+00:00", "due_at": "2027-03-01T00:00:00+00:00",
                  "stale": True},
+                {"id": "goal_m", "scope": "agent", "horizon": "short", "title": "Hire",
+                 "success": "two hires", "status": "active", "progress": None, "last_moved": None,
+                 "review_at": None, "due_at": None, "stale": False,
+                 "measure": {"kind": "manual", "value": 1.0, "target": 2.0, "unit": "hires"}},
             ]}
 
         async def link(goal_id, kind, ref_id, note=""):
@@ -78,6 +82,7 @@ class TestActions:
         assert "[G:goal_u · long-term · your owner's · out of your prompt until it's reviewed]" in out.content
         assert "progress 40% (two signed) · last moved 2026-11-01 · due 2027-03-01" in out.content
         assert "no work linked yet" in out.content
+        assert "measure 1 of 2 hires · no work linked yet" in out.content
         assert "never permission" in out.content
 
     async def test_link(self, calls):

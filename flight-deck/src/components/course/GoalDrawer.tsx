@@ -2,9 +2,13 @@ import { useCallback, useEffect, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { Loader2, Route, Trash2, X } from 'lucide-react'
 import {
+  dismissConflict,
   getGoal,
+  measureText,
   planRoute,
+  progressOf,
   removeLink,
+  setGoalValue,
   shortDate,
   HORIZON_LABELS,
   LINK_LABELS,
@@ -24,6 +28,8 @@ function eventText(e: GoalEvent): string {
     case 'reviewed': return 'Still on course'
     case 'linked': return `Work linked (${LINK_LABELS[d.kind as keyof typeof LINK_LABELS] ?? String(d.kind ?? '')})`
     case 'progress': return `Progress ${Math.round(Number(d.progress ?? 0) * 100)}%`
+    case 'measured': return `Value set to ${String(d.value ?? '')}`
+    case 'conflict': return 'Flagged: may pull against another goal'
     default: return e.event
   }
 }
@@ -32,6 +38,8 @@ function actorText(actor: string): string {
   if (!actor) return ''
   if (actor.startsWith('agent:')) return 'an agent'
   if (actor.startsWith('user:')) return 'a person'
+  if (actor === 'deck:estimate') return 'weekly estimate'
+  if (actor === 'deck:conflict') return 'Flight Deck'
   return actor   // autonomy · plan · taskboard
 }
 
@@ -77,6 +85,37 @@ export function GoalDrawer({ goalId, onClose, onChanged }: {
     }
   }
 
+  const [value, setValue] = useState('')
+  const saveValue = async () => {
+    const n = Number(value)
+    if (!value.trim() || !(n >= 0)) { setError('Enter a number (0 or more).'); return }
+    setBusy('value'); setError(null); setNotice(null)
+    try {
+      await setGoalValue(goalId, n)
+      setValue('')
+      await load()
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const notConflict = async (id: string) => {
+    setBusy(`cf:${id}`); setError(null); setNotice(null)
+    try {
+      await dismissConflict(id)
+      setNotice('Marked “not a conflict”. Flight Deck won’t flag that pair again.')
+      await load()
+      onChanged()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy('')
+    }
+  }
+
   const unlink = async (kind: GoalDetail['links'][number]['kind'], ref: string) => {
     setBusy(`${kind}:${ref}`); setError(null)
     try {
@@ -91,7 +130,9 @@ export function GoalDrawer({ goalId, onClose, onChanged }: {
   }
 
   const g = data?.goal
-  const progress = g?.progress ?? null
+  const measure = data?.measure ?? null
+  const progress = g ? progressOf({ measure, progress: g.progress }) : null
+  const live = !!g && (g.status === 'active' || g.status === 'paused')
   return createPortal(
     <div className="fixed inset-0 z-[60] flex justify-end bg-black/50" onClick={onClose}>
       <aside
@@ -131,15 +172,71 @@ export function GoalDrawer({ goalId, onClose, onChanged }: {
                 </p>
               </section>
 
-              {progress !== null && (
+              {(progress !== null || measure) && (
                 <section>
                   <div className="mb-1 flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-zinc-500">
-                    <span>Progress</span><span className="normal-case tracking-normal">{Math.round(progress * 100)}%</span>
+                    <span>Progress</span>
+                    {progress !== null && (
+                      <span className="normal-case tracking-normal">
+                        {measure?.progress != null ? '' : 'about '}{Math.round(progress * 100)}%
+                      </span>
+                    )}
                   </div>
-                  <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800">
-                    <div className="h-full rounded-full bg-violet-500" style={{ width: `${Math.round(progress * 100)}%` }} />
-                  </div>
-                  {g.progress_note && <p className="mt-1 text-xs text-zinc-500">{g.progress_note}</p>}
+                  {progress !== null && (
+                    <div className="h-1.5 overflow-hidden rounded-full bg-zinc-800">
+                      <div className={`h-full rounded-full ${progress >= 1 ? 'bg-emerald-500' : 'bg-violet-500'}`} style={{ width: `${Math.round(progress * 100)}%` }} />
+                    </div>
+                  )}
+                  {measure && (
+                    <p className="mt-1 text-xs text-zinc-400">
+                      <span className="text-zinc-500">{measure.label}:</span> {measureText(measure) || '—'}
+                      {measure.kind === 'manual' && measure.value_at && <span className="text-zinc-600"> · {shortDate(measure.value_at)}</span>}
+                    </p>
+                  )}
+                  {g.progress != null && (
+                    <p className="mt-1 text-xs text-zinc-500">
+                      {measure?.progress != null ? `Estimate: about ${Math.round(g.progress * 100)}%` : ''}
+                      {measure?.progress != null && g.progress_note ? ' — ' : ''}{g.progress_note}
+                    </p>
+                  )}
+                  {measure?.kind === 'manual' && data.can_edit && live && (
+                    <form className="mt-2 flex items-center gap-2" onSubmit={(e) => { e.preventDefault(); void saveValue() }}>
+                      <input
+                        inputMode="decimal"
+                        aria-label="Current value"
+                        placeholder="Current value"
+                        value={value}
+                        onChange={(e) => setValue(e.target.value)}
+                        className="w-32 rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1 text-xs text-zinc-200 focus:border-violet-500 focus:outline-none"
+                      />
+                      {measure.unit && <span className="text-xs text-zinc-500">{measure.unit}</span>}
+                      <button type="submit" disabled={!!busy || !value.trim()}
+                        className="rounded-md bg-violet-600 px-2.5 py-1 text-xs text-white hover:bg-violet-500 disabled:opacity-50">
+                        {busy === 'value' ? 'Saving…' : 'Update'}
+                      </button>
+                    </form>
+                  )}
+                </section>
+              )}
+
+              {data.conflicts.length > 0 && (
+                <section>
+                  <h3 className="mb-1.5 text-[11px] font-medium uppercase tracking-wider text-zinc-500">May pull against</h3>
+                  <ul className="space-y-1.5">
+                    {data.conflicts.map((cf) => (
+                      <li key={cf.id} className="rounded-md border border-red-500/30 bg-red-500/[0.05] px-2.5 py-1.5">
+                        <div className="text-xs text-zinc-200">{cf.other_title}</div>
+                        {cf.reason && <div className="text-[11px] text-zinc-400">{cf.reason}</div>}
+                        <div className="mt-1 flex items-center gap-2 text-[11px] text-zinc-500">
+                          <span className="flex-1">Flagged {shortDate(cf.at)}. Change or drop one of them, or:</span>
+                          <button onClick={() => void notConflict(cf.id)} disabled={!!busy}
+                            className="rounded px-1.5 py-0.5 text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200 disabled:opacity-50">
+                            {busy === `cf:${cf.id}` ? 'Saving…' : 'Not a conflict'}
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 </section>
               )}
 

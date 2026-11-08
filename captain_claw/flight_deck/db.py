@@ -5067,7 +5067,8 @@ class FlightDeckDB:
     _READ_SET = (
         "read_at = CASE WHEN read_at = '' THEN :now ELSE read_at END,"
         " resolved_at = CASE WHEN needs_you = 1 AND resolved_at = ''"
-        " AND ref_type NOT IN ('autonomy_action', 'person_ask', 'course_review', 'course_goal')"
+        " AND ref_type NOT IN ('autonomy_action', 'person_ask', 'course_review', 'course_goal',"
+        " 'course_conflict')"
         " THEN :now ELSE resolved_at END"
     )
 

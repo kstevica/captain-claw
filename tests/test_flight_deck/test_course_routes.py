@@ -159,7 +159,7 @@ class TestRead:
             r = await cl.get("/fd/course", headers=_hdr(BOB))
         flags = r.json()["goals"]["mine"][0]["flags"]
         assert flags == {"due": False, "stale": False, "horizon_retired": False,
-                         "serves_nothing": True, "parent_gone": False}
+                         "serves_nothing": True, "parent_gone": False, "off_course": False}
 
 
 # ── writing and the files ────────────────────────────────────────────
@@ -723,3 +723,139 @@ class TestProposals:
                 "scope": "agent", "horizon": "short", "title": "x"})
         assert bad_scope.status_code == 400 and other_parent.status_code == 404
         assert no_success.status_code == 400
+
+
+# ── Phase 4: progress, off course, conflicts ─────────────────────────
+
+
+@pytest.fixture
+def checks(monkeypatch):
+    """The background conflict check, recorded instead of run."""
+    from captain_claw.flight_deck import course_conflicts
+
+    seen: list[tuple[str, str, str]] = []
+    monkeypatch.setattr(course_conflicts, "check_soon",
+                        lambda db, goal, *, thinker: seen.append((goal["id"], goal["status"], thinker)))
+    return seen
+
+
+def _backdate(goal_id: str, days: int) -> None:
+    store = c.get_store()
+    at = (datetime.now(UTC) - timedelta(days=days)).isoformat()
+    with store._lock:
+        store._c().execute("UPDATE course_goals SET decided_at = ?, created_at = ? WHERE id = ?",
+                           (at, at, goal_id))
+        store._c().commit()
+
+
+class TestProgress:
+    async def test_a_measured_goal(self, deck, checks):
+        async with _client() as cl:
+            g = (await _post(cl, BOB, scope="user", horizon="long", title="Hire",
+                             metric={"kind": "manual", "target": 4, "unit": "hires"})).json()["goal"]
+            other = (await _post(cl, BOB, scope="user", horizon="long", title="Linked",
+                                 metric={"kind": "link_count"})).json()["goal"]
+            value = await cl.put(f"/fd/course/goals/{g['id']}/value", headers=_hdr(BOB), json={"value": 3})
+            not_manual = await cl.put(f"/fd/course/goals/{other['id']}/value", headers=_hdr(BOB),
+                                      json={"value": 3})
+            carols = await cl.put(f"/fd/course/goals/{g['id']}/value", headers=_hdr(CAROL),
+                                  json={"value": 4})
+            bad = await cl.put(f"/fd/course/goals/{g['id']}/value", headers=_hdr(BOB),
+                               json={"value": "lots"})
+            page = await cl.get("/fd/course", headers=_hdr(BOB))
+            detail = await cl.get(f"/fd/course/goals/{g['id']}", headers=_hdr(BOB))
+            deck_bad = await _post(cl, ADMIN, scope="instance", horizon="long", title="Deck",
+                                   metric={"kind": "taskboard_done"})
+            deck_goal = (await _post(cl, ADMIN, scope="instance", horizon="long", title="Deck",
+                                     metric={"kind": "manual", "target": 100})).json()["goal"]
+            not_admin = await cl.put(f"/fd/course/goals/{deck_goal['id']}/value", headers=_hdr(BOB),
+                                     json={"value": 1})
+        assert value.status_code == 200 and value.json()["measure"]["progress"] == 0.75
+        assert not_manual.status_code == 400 and carols.status_code == 404 and bad.status_code == 400
+        shown = {x["title"]: x for x in page.json()["goals"]["mine"]}
+        assert shown["Hire"]["measure"]["value"] == 3.0 and shown["Linked"]["measure"]["value"] == 0
+        assert page.json()["metric_kinds"]["manual"] == "A number you enter"
+        assert detail.json()["measure"]["target"] == 4.0
+        assert deck_bad.status_code == 400 and "deck-wide" in deck_bad.json()["detail"]
+        assert not_admin.status_code == 403
+
+    async def test_off_course(self, deck, checks):
+        async with _client() as cl:
+            idle = (await _post(cl, BOB, scope="user", horizon="long", title="Idle")).json()["goal"]
+            _backdate(idle["id"], 20)
+            orphan = (await _post(cl, BOB, scope="agent", agent_ref=_ref("bob-agent"),
+                                  horizon="short", title="Orphan")).json()["goal"]
+            page = await cl.get("/fd/course", headers=_hdr(BOB))
+        mine = page.json()["goals"]["mine"][0]
+        assert mine["flags"]["off_course"] is True
+        assert mine["off_course_reason"].startswith("No agent goal serves it")
+        agent = page.json()["goals"]["agents"][_ref("bob-agent")][0]
+        assert agent["id"] == orphan["id"] and agent["flags"]["off_course"] is True
+
+    async def test_conflicts_are_shown_only_to_whom_they_concern(self, deck, checks):
+        async with _client() as cl:
+            d = (await _post(cl, ADMIN, scope="instance", horizon="long", title="Cut costs")).json()["goal"]
+            g = (await _post(cl, BOB, scope="user", horizon="long", title="Hire five")).json()["goal"]
+            cf = c.get_store().add_conflict(g["id"], d["id"], "hiring costs money")
+            from captain_claw.flight_deck import course_conflicts
+
+            assert await course_conflicts.announce(deck, cf) == 1
+            bob = await cl.get("/fd/course", headers=_hdr(BOB))
+            carol = await cl.get("/fd/course", headers=_hdr(CAROL))
+            detail = await cl.get(f"/fd/course/goals/{d['id']}", headers=_hdr(BOB))
+            carol_detail = await cl.get(f"/fd/course/goals/{d['id']}", headers=_hdr(CAROL))
+            not_hers = await cl.post(f"/fd/course/conflicts/{cf['id']}/dismiss", headers=_hdr(CAROL))
+            not_admins = await cl.post(f"/fd/course/conflicts/{cf['id']}/dismiss", headers=_hdr(ADMIN))
+            waiting = await deck.list_line_items(BOB, needs_you=True)
+            dismissed = await cl.post(f"/fd/course/conflicts/{cf['id']}/dismiss", headers=_hdr(BOB))
+            after = await cl.get("/fd/course", headers=_hdr(BOB))
+        on_deck = bob.json()["goals"]["deck"][0]["conflicts"]
+        assert [(x["id"], x["other_title"], x["reason"]) for x in on_deck] == \
+            [(cf["id"], "Hire five", "hiring costs money")]
+        assert bob.json()["goals"]["mine"][0]["conflicts"][0]["other_title"] == "Cut costs"
+        assert carol.json()["goals"]["deck"][0]["conflicts"] == []
+        assert detail.json()["conflicts"][0]["other_id"] == g["id"]
+        assert carol_detail.json()["conflicts"] == []
+        assert not_hers.status_code == 404 and not_admins.status_code == 404
+        assert [(i["ref_type"], i["resolved_at"]) for i in waiting] == [("course_conflict", "")]
+        assert dismissed.status_code == 200 and dismissed.json()["conflict"]["status"] == "dismissed"
+        assert after.json()["goals"]["mine"][0]["conflicts"] == []
+        assert all(i["resolved_at"] for i in await deck.list_line_items(BOB, needs_you=True))
+
+    async def test_when_the_check_runs(self, deck, checks, monkeypatch):
+        from captain_claw.flight_deck import course_conflicts
+
+        resolved: list[str] = []
+
+        async def resolve_for_goal(db, goal):
+            resolved.append(goal["id"])
+            return 0
+
+        monkeypatch.setattr(course_conflicts, "resolve_for_goal", resolve_for_goal)
+        async with _client() as cl:
+            g = (await _post(cl, BOB, scope="user", horizon="long", title="Hire five")).json()["goal"]
+            await cl.patch(f"/fd/course/goals/{g['id']}", headers=_hdr(BOB), json={"due_at": "2027-01-01"})
+            await cl.patch(f"/fd/course/goals/{g['id']}", headers=_hdr(BOB), json={"title": "Hire six"})
+            p = c.get_store().propose_change(g["id"], {"title": "Hire seven"}, origin="deck",
+                                             proposed_by="deck")
+            await cl.post(f"/fd/course/goals/{p['id']}/accept", headers=_hdr(BOB))
+            await cl.post(f"/fd/course/goals/{p['id']}/drop", headers=_hdr(BOB))
+        # Added, reworded and accepted: checked; a new due date: not.
+        assert [x[0] for x in checks] == [g["id"], g["id"], p["id"]]
+        assert all(x[2] == BOB for x in checks)
+        # The replaced goal, then the dropped one, leave their conflicts.
+        assert resolved == [g["id"], p["id"]]
+
+    async def test_the_admins_automation_switches(self, deck):
+        async with _client() as cl:
+            put = await cl.put("/fd/admin/course/settings", headers=_hdr(ADMIN),
+                               json={"automation": {"goal_driven_candidates": True}})
+            got = await cl.get("/fd/admin/course/settings", headers=_hdr(ADMIN))
+            bad = await cl.put("/fd/admin/course/settings", headers=_hdr(ADMIN),
+                               json={"automation": {"weekly_estimate": "sometimes"}})
+            denied = await cl.put("/fd/admin/course/settings", headers=_hdr(BOB),
+                                  json={"automation": {"conflict_check": False}})
+        assert put.status_code == 200 and put.json()["automation"] == {
+            "weekly_estimate": True, "conflict_check": True, "goal_driven_candidates": True}
+        assert got.json()["defaults"]["automation"]["goal_driven_candidates"] is False
+        assert bad.status_code == 400 and denied.status_code == 403

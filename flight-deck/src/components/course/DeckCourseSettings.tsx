@@ -34,7 +34,7 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
     getSettings()
       .then((s) => {
         if (cancelled) return
-        const v = { horizons: s.horizons, caps: s.caps, proposals: s.proposals }
+        const v = { horizons: s.horizons, caps: s.caps, proposals: s.proposals, automation: s.automation }
         setSaved(v); setDraft(v); setRange(s.cap_range); setWeekRange(s.per_week_range ?? [0, 20])
       })
       .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : String(e)) })
@@ -61,6 +61,12 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
     setNotice(null)
   }
 
+  const setAutomation = (patch: Partial<CourseSettings['automation']>) => {
+    if (!draft) return
+    setDraft({ ...draft, automation: { ...draft.automation, ...patch } })
+    setNotice(null)
+  }
+
   const dirty = !!saved && !!draft && !same(saved, draft)
   const badCap = !!draft && HORIZONS.some((h) => !(draft.caps[h] >= range[0] && draft.caps[h] <= range[1]))
   const badWeek = !!draft && [draft.proposals.agent_per_week, draft.proposals.deck_per_week]
@@ -71,7 +77,7 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
     setSaving(true); setError(null); setNotice(null)
     try {
       const s = await saveSettings(draft)
-      const v = { horizons: s.horizons, caps: s.caps, proposals: s.proposals }
+      const v = { horizons: s.horizons, caps: s.caps, proposals: s.proposals, automation: s.automation }
       setSaved(v); setDraft(v)
       setNotice('Saved. Goals already at a horizon you took away are kept; only new ones are refused.')
       onSaved?.()
@@ -87,7 +93,7 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
       <div className="flex items-start gap-2">
         <SlidersHorizontal className="mt-0.5 h-4 w-4 shrink-0 text-violet-400" />
         <div>
-          <h3 className="text-sm font-semibold text-zinc-200">Course: horizons, limits and suggestions</h3>
+          <h3 className="text-sm font-semibold text-zinc-200">Course: horizons, limits, suggestions and checks</h3>
           <p className="text-xs text-zinc-500 mt-0.5">
             Which horizons each level uses, and how many active goals a horizon may hold at each level.
             Clearing a row switches goals off at that level.
@@ -170,6 +176,26 @@ export function DeckCourseSettings({ onSaved }: { onSaved?: () => void }) {
                 </label>
               </div>
             )}
+          </div>
+          <div className="space-y-2 border-t border-zinc-800/70 pt-3">
+            <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">What Flight Deck does on its own</div>
+            {([
+              ['weekly_estimate', 'Estimate progress once a week',
+                'For goals with new work linked to them, through each user’s cheapest running agent. It never marks a goal done; at most it asks.'],
+              ['conflict_check', 'Check new goals for conflicts',
+                'When a goal is added, accepted or reworded, it is compared with the goals above and beside it. A likely conflict is flagged to the owner of the narrower goal; nothing is changed.'],
+              ['goal_driven_candidates', 'Let stalled goals suggest work',
+                'A short- or medium-term goal nothing has moved for a while becomes a candidate for Autonomous Work. Every proposal still waits behind each user’s autonomy settings.'],
+            ] as const).map(([key, title, hint]) => (
+              <label key={key} className="flex items-start gap-2 text-xs text-zinc-300">
+                <input type="checkbox" checked={draft.automation[key]}
+                  onChange={(e) => setAutomation({ [key]: e.target.checked })} className="mt-0.5 h-4 w-4 accent-violet-600" />
+                <span>
+                  {title}
+                  <span className="block text-[11px] text-zinc-500">{hint}</span>
+                </span>
+              </label>
+            ))}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button

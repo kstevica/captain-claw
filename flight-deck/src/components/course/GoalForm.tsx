@@ -4,10 +4,12 @@ import {
   HORIZON_HINTS,
   HORIZON_LABELS,
   HORIZONS,
+  METRIC_LABELS,
   eligibleParents,
   type Goal,
   type GoalDraft,
   type Horizon,
+  type MetricKind,
   type Scope,
 } from '../../services/course'
 
@@ -38,7 +40,12 @@ export function GoalForm({
   const strategic = d.horizon === 'strategic'
   const len = (s: string) => Array.from(s).length
   const tooLong = len(d.title) > caps.title || len(d.success) > caps.success || len(d.detail) > caps.detail
+    || len(d.metric_unit) > 30
   const missing = !d.title.trim() || (!strategic && !d.success.trim())
+  const target = d.metric_target.trim()
+  const badTarget = !!d.metric_kind && !!target && !(Number(target) > 0)
+  // A deck-wide goal's work is everyone's: it's measured by a number the admin enters.
+  const kinds = (Object.keys(METRIC_LABELS) as MetricKind[]).filter((k) => scope !== 'instance' || k === 'manual')
 
   const setHorizon = (h: Horizon) => setD((cur) => ({
     ...cur,
@@ -60,7 +67,7 @@ export function GoalForm({
   return (
     <form
       className="space-y-3 rounded-lg border border-violet-500/30 bg-zinc-900/60 p-3"
-      onSubmit={(e) => { e.preventDefault(); if (!missing && !tooLong) onSave(d) }}
+      onSubmit={(e) => { e.preventDefault(); if (!missing && !tooLong && !badTarget) onSave(d) }}
     >
       <div>
         <div className={label}>Horizon</div>
@@ -122,6 +129,47 @@ export function GoalForm({
         />
       </label>
 
+      <div>
+        <div className={label}>How progress is measured (optional)</div>
+        <div className="grid gap-2 sm:grid-cols-3">
+          <select
+            className={input}
+            aria-label="Measure"
+            value={d.metric_kind}
+            onChange={(e) => setD({ ...d, metric_kind: e.target.value as MetricKind | '' })}
+          >
+            <option value="">Not measured (estimated from the work)</option>
+            {kinds.map((k) => <option key={k} value={k}>{METRIC_LABELS[k]}</option>)}
+          </select>
+          {d.metric_kind && (
+            <>
+              <input
+                className={input}
+                inputMode="decimal"
+                aria-label="Target"
+                placeholder="Target, e.g. 10"
+                value={d.metric_target}
+                onChange={(e) => setD({ ...d, metric_target: e.target.value })}
+              />
+              <input
+                className={input}
+                aria-label="Unit"
+                placeholder={d.metric_kind === 'manual' ? 'Unit, e.g. customers' : 'Unit (optional)'}
+                value={d.metric_unit}
+                onChange={(e) => setD({ ...d, metric_unit: e.target.value })}
+              />
+            </>
+          )}
+        </div>
+        <p className="mt-1 text-[11px] text-zinc-500">
+          {d.metric_kind === 'manual' ? 'You enter the current value on the goal; it fills the progress bar toward the target.'
+            : d.metric_kind === 'taskboard_done' ? 'Counts your Taskboard tasks tied to this goal and done since it went on your course.'
+              : d.metric_kind === 'link_count' ? 'Counts the work linked to this goal: tasks, plans, Autonomous Work, scheduled tasks.'
+                : 'Without a measure, progress is an estimate from the work linked to it.'}
+          {badTarget && <span className="text-red-500"> The target must be a number above 0.</span>}
+        </p>
+      </div>
+
       <div className="grid gap-3 sm:grid-cols-3">
         <label className="block sm:col-span-3">
           <span className={label}>Serves</span>
@@ -162,7 +210,7 @@ export function GoalForm({
       <div className="flex items-center gap-2">
         <button
           type="submit"
-          disabled={saving || missing || tooLong}
+          disabled={saving || missing || tooLong || badTarget}
           className="rounded-md bg-violet-600 px-3 py-1.5 text-xs text-white hover:bg-violet-500 disabled:opacity-50"
         >
           {saving ? 'Saving…' : submitLabel ?? (selfId ? 'Save goal' : 'Add goal')}

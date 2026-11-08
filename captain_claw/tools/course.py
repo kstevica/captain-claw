@@ -48,6 +48,11 @@ def _line(g: dict[str, Any]) -> str:
     if g.get("success"):
         out.append(f"  done when: {' '.join(str(g['success']).split())}")
     facts = []
+    m = g.get("measure") or {}
+    if m.get("value") is not None:
+        target = f" of {float(m['target']):g}" if m.get("target") else ""
+        unit = f" {' '.join(str(m.get('unit') or '').split())}" if m.get("unit") else ""
+        facts.append(f"measure {float(m['value']):g}{target}{unit}")
     if g.get("progress") is not None:
         facts.append(f"progress {round(float(g['progress']) * 100)}%"
                      + (f" ({' '.join(str(g.get('progress_note') or '').split())[:160]})"

@@ -10,7 +10,7 @@ import {
   addLineSummary, answeredByReading, askLine, fetchLine, fetchThread, handLineItem, LINE_PAGE, markAllLineRead,
   markThreadRead, type LineItem,
 } from '../../services/line'
-import { goalAction, OPEN_COURSE_EVENT } from '../../services/course'
+import { dismissConflict, goalAction, OPEN_COURSE_EVENT } from '../../services/course'
 import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
 import { useLineStore } from '../../stores/lineStore'
 import { useNotificationStore } from '../../stores/notificationStore'
@@ -775,7 +775,37 @@ function ProposalCard({ item, proposal, onAnswered }: { item: LineItem; proposal
 function CourseReviewCard({ item, onAnswered }: { item: LineItem; onAnswered: () => void }) {
   const [busy, setBusy] = useState('')
   const [err, setErr] = useState('')
-  if (!(item.needs_you && !item.resolved && (item.ref_type === 'course_review' || item.ref_type === 'course_goal'))) return null
+  if (!(item.needs_you && !item.resolved && (item.ref_type === 'course_review' || item.ref_type === 'course_goal'
+    || item.ref_type === 'course_conflict'))) return null
+  if (item.ref_type === 'course_conflict') {
+    const notConflict = async () => {
+      setBusy('dismiss'); setErr('')
+      try {
+        await dismissConflict(item.ref_id)
+        onAnswered()
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBusy('')
+      }
+    }
+    return (
+      <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3.5 py-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="flex-1 text-xs text-red-800 dark:text-red-200">Change or drop one of these goals, or mark it not a conflict.</span>
+          <button onClick={() => window.dispatchEvent(new CustomEvent(OPEN_COURSE_EVENT))} disabled={!!busy}
+            className="rounded-md bg-violet-600 px-3 py-1 text-xs text-white hover:bg-violet-500 disabled:opacity-50">
+            Open Course
+          </button>
+          <button onClick={() => void notConflict()} disabled={!!busy}
+            className="rounded-md border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50">
+            {busy === 'dismiss' ? 'Saving…' : 'Not a conflict'}
+          </button>
+        </div>
+        {err && <p className="mt-1.5 text-xs text-red-600 dark:text-red-300">{err}</p>}
+      </div>
+    )
+  }
   if (item.ref_type === 'course_goal') {
     const answer = async (a: 'accept' | 'decline') => {
       setBusy(a); setErr('')

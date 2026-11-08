@@ -37,6 +37,45 @@ export interface GoalFlags {
   horizon_retired: boolean
   serves_nothing: boolean
   parent_gone: boolean
+  /** No agent goal serves it and no work moved it lately, or (an agent's) it serves nothing of yours. */
+  off_course?: boolean
+}
+
+export type MetricKind = 'manual' | 'taskboard_done' | 'link_count'
+
+export const METRIC_LABELS: Record<MetricKind, string> = {
+  manual: 'A number you enter', taskboard_done: 'Tasks done for it', link_count: 'Pieces of work linked to it',
+}
+
+/** How a goal's progress is measured, as stored. */
+export interface Metric {
+  kind?: MetricKind
+  target?: number | null
+  unit?: string
+  value?: number | null
+  value_at?: string | null
+}
+
+/** A goal's metric as it stands now. */
+export interface Measure {
+  kind: MetricKind
+  label: string
+  value: number | null
+  target: number | null
+  unit: string
+  value_at?: string | null
+  /** 0..1 when there's a target and a value. */
+  progress: number | null
+}
+
+/** Two goals that likely pull against each other, seen from one of them. */
+export interface GoalConflict {
+  id: string
+  other_id: string
+  other_title: string
+  other_scope: Scope
+  reason: string
+  at: string
 }
 
 export interface Goal {
@@ -70,6 +109,11 @@ export interface Goal {
   grace_days?: number
   /** When work last moved it (the newest evidence; yours only on a deck goal). */
   last_moved?: string | null
+  metric?: Metric
+  measure?: Measure | null
+  /** Why it's off course ('' when it isn't). */
+  off_course_reason?: string
+  conflicts?: GoalConflict[]
 }
 
 export interface ProposalSettings {
@@ -78,10 +122,18 @@ export interface ProposalSettings {
   deck_per_week: number
 }
 
+/** What Flight Deck does on its own (the admin's switches). */
+export interface AutomationSettings {
+  weekly_estimate: boolean
+  conflict_check: boolean
+  goal_driven_candidates: boolean
+}
+
 export interface CourseSettings {
   horizons: Record<Scope, Horizon[]>
   caps: Record<Horizon, number>
   proposals: ProposalSettings
+  automation: AutomationSettings
 }
 
 export interface CoursePrefs {
@@ -108,6 +160,7 @@ export interface CourseResponse {
   /** Whether agents and the deck may suggest goals on this deck (the admin's switch). */
   recommendations: boolean
   agents: CourseAgent[]
+  metric_kinds?: Record<MetricKind, string>
   goals: { deck: Goal[]; mine: Goal[]; agents: Record<string, Goal[]> }
 }
 
@@ -149,6 +202,8 @@ export interface GoalDetail {
   links: GoalLink[]
   events: GoalEvent[]
   can_edit: boolean
+  measure: Measure | null
+  conflicts: GoalConflict[]
 }
 
 export interface CoursePreview {
@@ -164,6 +219,9 @@ export interface GoalDraft {
   parent_id: string
   due_at: string       // YYYY-MM-DD or ''
   review_every_days: number
+  metric_kind: MetricKind | ''
+  metric_target: string   // a number, or '' for none
+  metric_unit: string
 }
 
 export interface SettingsResponse extends CourseSettings {
@@ -239,6 +297,9 @@ function draftBody(d: GoalDraft) {
     parent_id: d.parent_id,
     due_at: d.due_at ? `${d.due_at}T00:00:00Z` : null,
     review_every_days: d.review_every_days,
+    metric: d.metric_kind
+      ? { kind: d.metric_kind, target: d.metric_target.trim() ? Number(d.metric_target) : null, unit: d.metric_unit.trim() }
+      : {},
   }
 }
 
@@ -272,6 +333,14 @@ export const planRoute = (goalId: string) =>
 
 export const savePrefs = (p: Partial<CoursePrefs>) => call<CoursePrefs>('/fd/course/prefs', json('PUT', p))
 
+/** The current value of a goal measured by a number you enter. */
+export const setGoalValue = (id: string, value: number) =>
+  call<{ goal: Goal; measure: Measure | null }>(`/fd/course/goals/${encodeURIComponent(id)}/value`, json('PUT', { value }))
+
+/** "Not a conflict": the pair isn't flagged again. */
+export const dismissConflict = (id: string) =>
+  call<{ conflict: { id: string; status: string } }>(`/fd/course/conflicts/${encodeURIComponent(id)}/dismiss`, { method: 'POST' })
+
 export const getSettings = () => call<SettingsResponse>('/fd/admin/course/settings')
 
 export const saveSettings = (s: Partial<CourseSettings>) =>
@@ -283,6 +352,7 @@ export function emptyDraft(horizon: Horizon, parentId = ''): GoalDraft {
   return {
     horizon, title: '', success: '', detail: '', parent_id: parentId, due_at: '',
     review_every_days: DEFAULT_REVIEW_DAYS[horizon],
+    metric_kind: '', metric_target: '', metric_unit: '',
   }
 }
 
@@ -295,7 +365,26 @@ export function draftOf(g: Goal): GoalDraft {
     parent_id: g.parent_id,
     due_at: g.due_at ? g.due_at.slice(0, 10) : '',
     review_every_days: g.review_every_days,
+    metric_kind: g.metric?.kind ?? '',
+    metric_target: g.metric?.target != null ? String(g.metric.target) : '',
+    metric_unit: g.metric?.unit ?? '',
   }
+}
+
+/** How far along a goal is, 0..1: its measure when it has a target, else the estimate. */
+export function progressOf(g: Pick<Goal, 'measure' | 'progress'>): number | null {
+  if (g.measure?.progress != null) return g.measure.progress
+  return g.progress ?? null
+}
+
+/** A measure in words: "3 of 10 customers", "4 tasks done". */
+export function measureText(m: Measure | null | undefined): string {
+  if (!m) return ''
+  const n = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1))
+  if (m.value == null) return m.kind === 'manual' ? 'No value entered yet' : ''
+  const unit = m.unit ? ` ${m.unit}` : m.kind === 'taskboard_done' ? ` task${m.value === 1 ? '' : 's'} done`
+    : m.kind === 'link_count' ? ` piece${m.value === 1 ? '' : 's'} of work` : ''
+  return m.target ? `${n(m.value)} of ${n(m.target)}${unit}` : `${n(m.value)}${unit}`
 }
 
 const RANK: Record<Horizon, number> = { strategic: 0, long: 1, medium: 2, short: 3 }

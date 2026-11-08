@@ -122,7 +122,9 @@ _SYSTEM_PROMPT = (
     "\"goal_id\" to that goal's G:<id> (copy the id after \"G:\"). A timely candidate that "
     "serves no goal (someone waiting for a reply, a deadline) is still right to pick — "
     "leave goal_id out then. Never invent a goal id. A goal never makes an action less "
-    "risky and never replaces the user's approval.\n"
+    "risky and never replaces the user's approval. A '(course · G:<id> · no progress in N "
+    "days)' candidate is a goal nothing has moved lately: propose one small, concrete step "
+    "toward it (with its goal_id) only when a useful one is clear — never busywork.\n"
     "Score honestly: a genuinely useful action is ~0.7-0.9; score low only if you "
     "doubt it helps. A track is cheap and worth doing — score it ~0.6+. Don't invent "
     "busywork, and never duplicate the 'already proposed' list.\n\n"
@@ -498,6 +500,23 @@ async def maybe_run_arbiter(
         candidates = _gather_candidates(
             reflection, include_reflections=bool(cfg.get("reflection_to_intention")),
         )
+        # Course (Phase 4, off unless the admin switches it on): a short or medium
+        # goal nothing has moved for a while becomes a candidate — unless work for
+        # it is already open or was proposed in the last day. Only a candidate:
+        # whatever comes of it still waits behind every dial below.
+        try:
+            from captain_claw.flight_deck.course_progress import stalled_candidate, stalled_goals
+
+            stalled = stalled_goals(user_id)
+            if stalled:
+                busy_goals = {a.get("goal_id") for a in open_actions}
+                busy_goals |= {a.get("goal_id") for a in store.list_actions(user_id, limit=40)
+                               if (a.get("created_at") or "") >= cutoff}
+                for goal, days in stalled:
+                    if goal["id"] not in busy_goals:
+                        candidates.append(stalled_candidate(goal, days))
+        except Exception as exc:
+            _log.debug("course candidates failed (non-fatal): %s", exc)
         # External-world events (#2): surface new events as candidates so the loop
         # reacts to the user's world. We do NOT mark them surfaced here — only once
         # a pass actually produces an action (below). A pass that yields nothing

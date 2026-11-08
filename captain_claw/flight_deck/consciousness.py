@@ -916,6 +916,15 @@ async def pulse(user_id: str, *, force: bool = False) -> dict[str, Any]:
     except Exception as exc:
         _log.debug("plan advance failed (non-fatal): %s", exc)
 
+    # Course (Phase 4): the weekly progress estimate of goals with new evidence,
+    # through the user's agents (cheapest first). Never fails the beat.
+    try:
+        from captain_claw.flight_deck import course_progress
+
+        await course_progress.estimate_round(uid, delta["agents"])
+    except Exception as exc:
+        _log.debug("course estimate failed (non-fatal): %s", exc)
+
     store.save_state(uid, cursor=delta["cursor"], pulse_inc=1,
                      thought_inc=len(entries), touched_thought=bool(entries))
 
