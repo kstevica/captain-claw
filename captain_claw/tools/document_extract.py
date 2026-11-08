@@ -1,9 +1,12 @@
 """Document extraction tools (PDF/DOCX/XLSX/PPTX) with Markdown output."""
 
 import asyncio
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 import posixpath
 import re
+import tempfile
 import xml.etree.ElementTree as ET
 import zipfile
 from typing import Any
@@ -32,6 +35,44 @@ def _truncate_markdown(markdown: str, max_chars: int) -> str:
     suffix = "\n\n... [truncated]"
     keep = max(0, max_chars - len(suffix))
     return markdown[:keep] + suffix
+
+
+# ── Reading bytes under their own name ───────────────────────────────
+#
+# Every extractor here starts its Markdown with ``# <file name>``, and the
+# model and the UI's section lists see that heading. Bytes that arrive without
+# a file of their own (an upload, a Drive download, an attachment) are written
+# under the name they came with, so the heading is "Refund policy.docx", not
+# a temp name like "tmph5n1x2i6.docx".
+
+_UNSAFE_IN_NAME = re.compile(r'[\x00-\x1f\x7f:*?"<>|]')
+_MAX_NAME_BYTES = 200
+
+
+def safe_file_name(name: str, suffix: str) -> str:
+    """*name* — a file's name as the person, the agent or the source gave it —
+    fit to be written in a folder of its own: just its last part, without
+    characters a file system refuses, not too long, ending in *suffix* (what
+    decides how it is read). "" when nothing of it is left."""
+    base = _UNSAFE_IN_NAME.sub("_", Path(str(name or "").replace("\\", "/")).name)
+    if base.lower().endswith(suffix.lower()):   # as it was written: "Policy.DOCX"
+        stem, suffix = base[: len(base) - len(suffix)], base[len(base) - len(suffix):]
+    else:
+        stem = base
+    budget = _MAX_NAME_BYTES - len(suffix.encode("utf-8"))
+    stem = stem.strip(" .").encode("utf-8")[:budget].decode("utf-8", errors="ignore").rstrip(" .")
+    return f"{stem}{suffix}" if stem else ""
+
+
+@contextmanager
+def named_copy(data: bytes, suffix: str, name: str = "") -> Iterator[Path]:
+    """*data* as a file in a temporary folder of its own, named after *name*
+    (see :func:`safe_file_name`) — or a temporary name when nothing of *name*
+    is usable. The folder and the file are removed on exit."""
+    with tempfile.TemporaryDirectory() as folder:
+        path = Path(folder) / (safe_file_name(name, suffix) or f"{Path(folder).name}{suffix}")
+        path.write_bytes(data)
+        yield path
 
 
 _DEFAULT_EXTRACT_CHARS = 120_000

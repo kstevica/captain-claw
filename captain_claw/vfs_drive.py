@@ -342,7 +342,8 @@ def bytes_to_text(data: bytes, ext: str, name: str) -> str | None:
     Text extensions decode directly; Office/PDF go through the same
     ``document_extract`` helpers the extract tools use. Anything else (images,
     archives, unknown binaries) returns ``None`` — the caller explains rather
-    than dumping bytes.
+    than dumping bytes. A document is converted under its own *name*, which
+    the Markdown starts with as a heading — not a temporary file's.
     """
     ext = ext.lower()
     if ext in TEXT_EXTS:
@@ -350,36 +351,31 @@ def bytes_to_text(data: bytes, ext: str, name: str) -> str | None:
     if ext not in _CONVERT_EXTS:
         return None
 
-    import tempfile
-
     from captain_claw.tools.document_extract import (
         _extract_docx_markdown,
         _extract_pdf_markdown,
         _extract_pptx_markdown,
         _extract_xlsx_markdown,
+        named_copy,
     )
 
-    with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as tmp:
-        tmp.write(data)
-        tmp_path = Path(tmp.name)
     try:
         # A corrupt or unexpected file must not crash the read/clone — a bad
         # download degrades to "can't convert" (→ stays a placeholder), never an
         # exception out of the tool.
-        if ext == ".pdf":
-            md, err = _extract_pdf_markdown(tmp_path, 200)
-            return md if md is not None else None
-        if ext == ".docx":
-            return _extract_docx_markdown(tmp_path)
-        if ext == ".xlsx":
-            return _extract_xlsx_markdown(tmp_path, 10_000)
-        if ext == ".pptx":
-            return _extract_pptx_markdown(tmp_path, 500)
+        with named_copy(data, ext, name) as tmp_path:
+            if ext == ".pdf":
+                md, err = _extract_pdf_markdown(tmp_path, 200)
+                return md if md is not None else None
+            if ext == ".docx":
+                return _extract_docx_markdown(tmp_path)
+            if ext == ".xlsx":
+                return _extract_xlsx_markdown(tmp_path, 10_000)
+            if ext == ".pptx":
+                return _extract_pptx_markdown(tmp_path, 500)
     except Exception as exc:
         log.debug("Drive content conversion failed", name=name, ext=ext, error=str(exc))
         return None
-    finally:
-        tmp_path.unlink(missing_ok=True)
     return None
 
 

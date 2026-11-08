@@ -17,7 +17,6 @@ import math
 import re
 import secrets
 import shutil
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -159,33 +158,12 @@ def html_markdown(html: str) -> str:
     return md
 
 
-_UNSAFE_IN_NAME = re.compile(r'[\x00-\x1f\x7f:*?"<>|]')
-_MAX_NAME_BYTES = 200
-
-
-def _upload_name(name: str, suffix: str) -> str:
-    """*name* — a file's name as the person or the agent gave it — fit to be
-    written in a folder of its own: just its last part, without characters a
-    file system refuses, not too long, ending in *suffix* (what decides how
-    it is read). "" when nothing of it is left."""
-    base = _UNSAFE_IN_NAME.sub("_", Path(str(name or "").replace("\\", "/")).name)
-    if base.lower().endswith(suffix.lower()):   # as it was written: "Policy.DOCX"
-        stem, suffix = base[: len(base) - len(suffix)], base[len(base) - len(suffix):]
-    else:
-        stem = base
-    budget = _MAX_NAME_BYTES - len(suffix.encode("utf-8"))
-    stem = stem.strip(" .").encode("utf-8")[:budget].decode("utf-8", errors="ignore").rstrip(" .")
-    return f"{stem}{suffix}" if stem else ""
-
-
 def extract_bytes(raw: bytes, suffix: str, name: str = "") -> tuple[str, str]:
     """``extract`` for an upload, read under its own file *name* when that is
     given — a Word file, a deck, a sheet or a PDF starts with its name as a
     heading, which the model and the section map see — else a temporary one."""
-    suffix = suffix or ".txt"
-    with tempfile.TemporaryDirectory() as folder:
-        path = Path(folder) / (_upload_name(name, suffix) or f"{Path(folder).name}{suffix}")
-        path.write_bytes(raw)
+    from captain_claw.tools import document_extract as dx
+    with dx.named_copy(raw, suffix or ".txt", name) as path:
         return extract(path)
 
 

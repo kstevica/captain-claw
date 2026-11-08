@@ -62,6 +62,7 @@ from captain_claw.flight_deck.data_library import datastore_file
 from captain_claw.flight_deck.db import FlightDeckDB
 from captain_claw.flight_deck.file_library import ModelReply
 from captain_claw.skills import _parse_frontmatter
+from captain_claw.tools import document_extract as dx
 
 BOB = "user-bob"
 CAROL = "user-carol"
@@ -337,7 +338,6 @@ def test_pages_are_counted_or_estimated():
 
 
 def test_a_library_file_is_read_in_full(monkeypatch, tmp_path):
-    from captain_claw.tools import document_extract as dx
     asked: list = []
 
     def fake_pdf(path, max_pages):
@@ -372,8 +372,8 @@ def test_an_upload_is_read_under_its_own_name():
     assert pdocs.extract_bytes(raw, ".docx", "../../etc/Re:fund?.docx")[0].startswith("# Re_fund_.docx\n")
     assert pdocs.extract_bytes(raw, ".docx", "C:\\Users\\bob\\Policy.DOCX")[0].startswith("# Policy.DOCX\n")
     assert pdocs.extract_bytes(raw, ".docx", "policy")[0].startswith("# policy.docx\n")
-    assert pdocs._upload_name("x" * 400 + ".docx", ".docx") == "x" * 195 + ".docx"
-    assert pdocs._upload_name("..", ".docx") == pdocs._upload_name(".docx", ".docx") == ""
+    assert dx.safe_file_name("x" * 400 + ".docx", ".docx") == "x" * 195 + ".docx"
+    assert dx.safe_file_name("..", ".docx") == dx.safe_file_name(".docx", ".docx") == ""
     # Without a name (or with nothing left of it) it is still read, under a temporary one.
     for name in ("", ".."):
         text, why = pdocs.extract_bytes(raw, ".docx", name)
