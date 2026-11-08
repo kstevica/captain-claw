@@ -271,8 +271,14 @@ def _proposal_bell(action: dict[str, Any], task_id: str = "") -> tuple[str, str,
     the link to its task (*task_id*) on the Taskboard when it is about one."""
     title = str(action.get("title") or "").strip()
     rationale = str(action.get("rationale") or "").strip()
+    serves = ""
+    if action.get("goal_id"):
+        from captain_claw.flight_deck.course import goal_title
+
+        goal = " ".join(goal_title(str(action["goal_id"])).split())
+        serves = f"\nServes: {goal}" if goal else ""
     return ("autonomy_proposal", "Waiting for your approval",
-            (title or "A new proposal") + (f"\n{rationale[:600]}" if rationale else "")
+            (title or "A new proposal") + (f"\n{rationale[:600]}" if rationale else "") + serves
             + (f"\n[Open in Taskboard]({taskboard_link(task_id)})" if task_id else ""))
 
 

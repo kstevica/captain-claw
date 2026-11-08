@@ -37,6 +37,8 @@ _TOOL_RISK: dict[str, str] = {
     "workspace_read": "read", "codemap": "read", "cv": "read", "screen_capture": "read",
     "telegram_inbox": "read", "self_check": "read", "activity": "read", "researchmap": "read", "watch_background": "read",
     "audio": "read", "line": "read",
+    # links work to a goal and estimates progress: the deck's own bookkeeping, nothing leaves
+    "course": "read",
     # asks the person the turn is for, in their Flight Deck: nothing changes, nothing leaves
     "ask_user": "read",
     # keep

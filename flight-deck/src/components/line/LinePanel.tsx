@@ -7,9 +7,10 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import {
-  addLineSummary, askLine, fetchLine, fetchThread, handLineItem, LINE_PAGE, markAllLineRead, markThreadRead,
-  type LineItem,
+  addLineSummary, answeredByReading, askLine, fetchLine, fetchThread, handLineItem, LINE_PAGE, markAllLineRead,
+  markThreadRead, type LineItem,
 } from '../../services/line'
+import { dismissConflict, goalAction, OPEN_COURSE_EVENT } from '../../services/course'
 import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '../../services/notifications'
 import { useLineStore } from '../../stores/lineStore'
 import { useNotificationStore } from '../../stores/notificationStore'
@@ -346,7 +347,7 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
   }
   const readAll = async () => {
     setItems((prev) => prev.map((i) => ({
-      ...i, read: true, resolved: i.resolved || (i.needs_you && i.ref_type !== 'autonomy_action'),
+      ...i, read: true, resolved: i.resolved || answeredByReading(i.needs_you, i.ref_type),
     })))
     await markAllLineRead()
     syncBell()
@@ -379,7 +380,7 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
     if (!threadId || !unreadKey) return
     const n = unreadKey.split(',').length
     setItems((prev) => prev.map((i) => ((i.thread_id || i.id) === threadId && !i.read ? {
-      ...i, read: true, resolved: i.resolved || (i.needs_you && i.ref_type !== 'autonomy_action'),
+      ...i, read: true, resolved: i.resolved || answeredByReading(i.needs_you, i.ref_type),
     } : i)))
     setCounts({ unread: Math.max(0, useLineStore.getState().unread - n), waiting: useLineStore.getState().waiting })
     void markThreadRead(threadId).then(syncBell)
@@ -691,6 +692,7 @@ function ThreadStart({ item, proposal, onAnswered }: { item: LineItem; proposal?
       </div>
       <h3 className="mt-4 text-base font-semibold leading-snug text-zinc-100">{heading}</h3>
       <ProposalCard item={item} proposal={proposal} onAnswered={onAnswered} />
+      <CourseReviewCard item={item} onAnswered={onAnswered} />
       {body && (
         <article className={`mt-3 ${PROSE}`}>
           <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={LINE_MD}>{keepBreaks(body)}</Markdown>
@@ -755,6 +757,7 @@ function ThreadEntry({ item, proposal, onAnswered }: { item: LineItem; proposal?
       </div>
       <h4 className="mt-2.5 text-sm font-semibold leading-snug text-zinc-100">{heading}</h4>
       <ProposalCard item={item} proposal={proposal} onAnswered={onAnswered} />
+      <CourseReviewCard item={item} onAnswered={onAnswered} />
       {rest && (
         <article className={`mt-1.5 ${PROSE}`}>
           <Markdown remarkPlugins={[remarkGfm]} urlTransform={untrustedUrlTransform} components={LINE_MD}>{keepBreaks(rest)}</Markdown>
@@ -781,6 +784,89 @@ function ProposalCard({ item, proposal, onAnswered }: { item: LineItem; proposal
             : 'Waiting for your answer — in the bell.'}
         </div>
       )}
+    </div>
+  )
+}
+
+/** A goal due for review: answered on Course (Still on course, edit, pause,
+ *  done or drop), not here. A goal suggestion: accepted or declined here, or
+ *  edited first on Course. */
+function CourseReviewCard({ item, onAnswered }: { item: LineItem; onAnswered: () => void }) {
+  const [busy, setBusy] = useState('')
+  const [err, setErr] = useState('')
+  if (!(item.needs_you && !item.resolved && (item.ref_type === 'course_review' || item.ref_type === 'course_goal'
+    || item.ref_type === 'course_conflict'))) return null
+  if (item.ref_type === 'course_conflict') {
+    const notConflict = async () => {
+      setBusy('dismiss'); setErr('')
+      try {
+        await dismissConflict(item.ref_id)
+        onAnswered()
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBusy('')
+      }
+    }
+    return (
+      <div className="mt-3 rounded-xl border border-red-500/30 bg-red-500/10 px-3.5 py-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="flex-1 text-xs text-red-800 dark:text-red-200">Change or drop one of these goals, or mark it not a conflict.</span>
+          <button onClick={() => window.dispatchEvent(new CustomEvent(OPEN_COURSE_EVENT))} disabled={!!busy}
+            className="rounded-md bg-violet-600 px-3 py-1 text-xs text-white hover:bg-violet-500 disabled:opacity-50">
+            Open Course
+          </button>
+          <button onClick={() => void notConflict()} disabled={!!busy}
+            className="rounded-md border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50">
+            {busy === 'dismiss' ? 'Saving…' : 'Not a conflict'}
+          </button>
+        </div>
+        {err && <p className="mt-1.5 text-xs text-red-600 dark:text-red-300">{err}</p>}
+      </div>
+    )
+  }
+  if (item.ref_type === 'course_goal') {
+    const answer = async (a: 'accept' | 'decline') => {
+      setBusy(a); setErr('')
+      try {
+        await goalAction(item.ref_id, a)
+        onAnswered()
+      } catch (e) {
+        setErr(e instanceof Error ? e.message : String(e))
+      } finally {
+        setBusy('')
+      }
+    }
+    return (
+      <div className="mt-3 rounded-xl border border-sky-500/30 bg-sky-500/10 px-3.5 py-3">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="flex-1 text-xs text-sky-800 dark:text-sky-200">Put this goal on the course?</span>
+          <button onClick={() => void answer('accept')} disabled={!!busy}
+            className="rounded-md bg-violet-600 px-3 py-1 text-xs text-white hover:bg-violet-500 disabled:opacity-50">
+            {busy === 'accept' ? 'Accepting…' : 'Accept'}
+          </button>
+          <button onClick={() => window.dispatchEvent(new CustomEvent(OPEN_COURSE_EVENT))} disabled={!!busy}
+            className="rounded-md border border-zinc-700 px-3 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50">
+            Edit on Course
+          </button>
+          <button onClick={() => void answer('decline')} disabled={!!busy}
+            className="rounded-md px-3 py-1 text-xs text-zinc-500 hover:bg-zinc-800 disabled:opacity-50">
+            {busy === 'decline' ? 'Declining…' : 'Decline'}
+          </button>
+        </div>
+        {err && <p className="mt-1.5 text-xs text-red-600 dark:text-red-300">{err}</p>}
+      </div>
+    )
+  }
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-3.5 py-3">
+      <span className="flex-1 text-xs text-amber-800 dark:text-amber-200">Is this goal still on course?</span>
+      <button
+        onClick={() => window.dispatchEvent(new CustomEvent(OPEN_COURSE_EVENT))}
+        className="rounded-md bg-amber-600 px-3 py-1 text-xs text-white hover:bg-amber-500"
+      >
+        Open Course
+      </button>
     </div>
   )
 }

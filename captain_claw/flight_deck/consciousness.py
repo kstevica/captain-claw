@@ -638,14 +638,19 @@ _SYSTEM_PROMPT = (
     "reasoning, no <think> blocks, no markdown fences. Keep each field short "
     "(a sentence or two) so the object always closes. Schema: "
     '{"thought": str, "dream": str|null, "mood": str (one word), '
-    '"salience": 1-10, "intentions": [str, ...]}. '
+    '"salience": 1-10, "intentions": [str, ...], "course": null|{"horizon": "long"|"medium"|"short", '
+    '"title": str, "success": str, "why": str}}. '
     "salience = how much this beat mattered. dream is null unless something "
-    "genuinely connects across threads."
+    "genuinely connects across threads. course is almost always null: only when "
+    "what you notice across the user's agents shows an outcome they are clearly "
+    "working toward that is NOT already on their Course (listed below), suggest it "
+    "as one goal — a few words, how they'll know it's done, and why. They decide; "
+    "never suggest one about your own inner life."
 )
 
 
 def _build_reflection_user_prompt(delta: dict[str, Any], recent_text: str,
-                                  intentions: list[dict[str, Any]]) -> str:
+                                  intentions: list[dict[str, Any]], course: str = "") -> str:
     parts: list[str] = []
     parts.append(
         f"Since the last heartbeat: {delta['new_messages']} new messages across "
@@ -658,6 +663,7 @@ def _build_reflection_user_prompt(delta: dict[str, Any], recent_text: str,
         parts.append("\nYour current standing intentions:")
         for i in intentions:
             parts.append(f"  - {i['content']}")
+    parts.append("\nThe user's Course (their goals):\n" + (course or "  (none yet)"))
     if recent_text:
         parts.append("\nWhat changed (recent exchanges):\n" + recent_text)
     else:
@@ -762,7 +768,11 @@ async def _reflect(
         ranked = pinned + rest
     recent_text = await _read_recent_text(delta.get("touched_sessions") or [])
     intentions = get_store().list_intentions(user_id)
-    user_prompt = _build_reflection_user_prompt(delta, recent_text, intentions)
+    from captain_claw.flight_deck import course as _course
+
+    user_prompt = _build_reflection_user_prompt(
+        delta, recent_text, intentions,
+        course=_course.prompt_lines(_course.live_goals(user_id), max_chars=1200))
 
     from captain_claw.games.remote_provider import RemoteLLMProvider
     from captain_claw.llm import Message
@@ -788,6 +798,31 @@ async def _reflect(
             continue
     if last_err:
         _log.warning("consciousness: no agent could reflect: %s", last_err)
+    return None
+
+
+async def _suggest_goal(uid: str, raw: Any) -> dict[str, Any] | None:
+    """The reflection's ``course`` suggestion as a proposal on the user's own
+    Course (Course's rules decide: suggestions on, the weekly limit, no
+    duplicates, the 90-day decline memory). Never raises."""
+    if not isinstance(raw, dict) or not str(raw.get("title") or "").strip():
+        return None
+    horizon = str(raw.get("horizon") or "")
+    if horizon not in ("long", "medium", "short"):
+        return None
+    from captain_claw.flight_deck import course, course_proposals
+
+    try:
+        out = await course_proposals.submit(
+            owner_id=uid, origin="deck", proposed_by="deck", proposer=course_proposals.DECK_NAME,
+            scope="user", horizon=horizon, title=" ".join(str(raw["title"]).split())[:120],
+            success=" ".join(str(raw.get("success") or "").split())[:500],
+            rationale=" ".join(str(raw.get("why") or "").split())[:500])
+        return out["goal"]
+    except course.CourseError as exc:
+        _log.debug("consciousness: goal suggestion not made: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — a heartbeat never breaks over Course
+        _log.debug("consciousness: goal suggestion failed: %s", exc)
     return None
 
 
@@ -849,6 +884,9 @@ async def pulse(user_id: str, *, force: bool = False) -> dict[str, Any]:
     if isinstance(intentions, list) and intentions:
         store.replace_intentions(uid, [str(i) for i in intentions])
 
+    # Course (Phase 3): a goal the deck suggests for the user — it waits for them.
+    await _suggest_goal(uid, reflection.get("course"))
+
     # Autonomous Work: let the Arbiter decide if anything is worth proposing.
     # Non-fatal — a heartbeat must never break because the loop is opted-in.
     arbiter_result: dict[str, Any] | None = None
@@ -877,6 +915,15 @@ async def pulse(user_id: str, *, force: bool = False) -> dict[str, Any]:
                 await advance_one(uid, _pl["id"], auto=True)
     except Exception as exc:
         _log.debug("plan advance failed (non-fatal): %s", exc)
+
+    # Course (Phase 4): the weekly progress estimate of goals with new evidence,
+    # through the user's agents (cheapest first). Never fails the beat.
+    try:
+        from captain_claw.flight_deck import course_progress
+
+        await course_progress.estimate_round(uid, delta["agents"])
+    except Exception as exc:
+        _log.debug("course estimate failed (non-fatal): %s", exc)
 
     store.save_state(uid, cursor=delta["cursor"], pulse_inc=1,
                      thought_inc=len(entries), touched_thought=bool(entries))

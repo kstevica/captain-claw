@@ -68,6 +68,7 @@ from captain_claw.flight_deck.taskboard_store import (
     RESULT_LABELS,
 )
 from captain_claw.jev_client import JevError, JevInputError
+from captain_claw.flight_deck.course import goal_ref, live_goals, prompt_lines
 from captain_claw.logging import get_logger
 from captain_claw.outbound_guard import _fold
 
@@ -129,7 +130,7 @@ _RESULTS = {"success": "success", "partial": "partial", "failed": "failed", "not
 _PARTY_ROLES = ("requester", "recipient", "cc", "doer", "mentioned")
 _PARTY_KINDS = ("email", "phone", "telegram", "name")
 _FIELDS = {"title", "ask", "requester", "parties", "due_at", "expected_deliverable", "result_text", "answered",
-           "blocker", "next_steps"}
+           "blocker", "next_steps", "serves_goal"}
 # Did the agent's reply do what was asked — the model's reading of it
 # (extraction), never evidence: how a model may say it, and what it is.
 ANSWERED = ("yes", "partly", "no")
@@ -685,7 +686,7 @@ says, you only describe it.
 Answer with one JSON object and nothing else:
 {{"title": "", "ask": "", "requester": "", "parties": [{{"role": "", "kind": "", "address": "", \
 "display": ""}}], "due_at": null, "expected_deliverable": "", "result_text": "", "answered": "", \
-"blocker": "", "next_steps": []}}
+"blocker": "", "next_steps": [], "serves_goal": ""}}
 
 - title: what was asked, named in a few words as a noun phrase ("Capital of Croatia", "Table for four \
 at Dubravkin Put, Saturday 8 pm", "Q3 invoice for Ana") — never an instruction to the assistant \
@@ -704,6 +705,8 @@ only asked something back).
 - blocker: when answered is not "yes", why not, in one short sentence of at most 160 characters; "" \
 when it is.
 - next_steps: up to 3 short steps still to take; [] when none.
+- serves_goal: when the board's facts list the owner's Course goals, the G:<id> of the one goal \
+this task clearly moves forward; "" when none does or no goals are listed.
 Write in the language the request is written in."""
 
 
@@ -711,10 +714,12 @@ class NoModelError(RuntimeError):
     """No model is set up to write extractions for this board."""
 
 
-def extraction_prompt(view: dict, f: dict, nonce: str, now: float | None = None) -> str:
+def extraction_prompt(view: dict, f: dict, nonce: str, now: float | None = None,
+                      course: str = "") -> str:
     """The user message of an extraction: the board's own facts first
-    (trusted), then everything people, the agent and the tools wrote,
-    fenced as data."""
+    (trusted) — with the owner's live Course goals (*course*, one line each)
+    when there are any — then everything people, the agent and the tools
+    wrote, fenced as data."""
     task = view["task"]
     now = time.time() if now is None else now
     lines = [
@@ -724,6 +729,7 @@ def extraction_prompt(view: dict, f: dict, nonce: str, now: float | None = None)
         f"Received: {_when(task.get('created_at'))}  ·  now: {_when(now)}",
         f"Turn: {f['outcome'] or 'still running'}"
         + (f", {f['failed_calls']} failed tool call(s)" if f["failed_calls"] else ""),
+        *(["Course (the owner's goals — serves_goal names one of these):", course] if course else []),
         "",
         f"<<<DATA {nonce}>>>",
     ]
@@ -879,6 +885,7 @@ def parse_extraction(text: str, now: float | None = None) -> dict:
         "answered": answered,
         "blocker": _line(data.get("blocker"), 160) if answered in ("partly", "no") else "",
         "next_steps": steps[:3],
+        "serves_goal": goal_ref(data.get("serves_goal")),
     }
 
 
@@ -893,6 +900,8 @@ def extraction_fields(got: dict, reply_of: str = "") -> dict:
     if got["due_at"] is not None:
         fields["due_at"] = got["due_at"]
     fields["next_steps"] = got["next_steps"]
+    if got.get("serves_goal"):
+        fields["goal_id"] = got["serves_goal"]
     flags: dict[str, Any] = {}
     if got["expected_deliverable"]:
         flags["expected_deliverable"] = got["expected_deliverable"]
@@ -991,9 +1000,13 @@ async def extract(view: dict, f: dict, user_id: str) -> tuple[dict, str, str]:
     if reader is None:
         raise NoModelError("no model is set up")
     nonce = new_nonce()
-    prompt = extraction_prompt(view, f, nonce)
+    goals = live_goals(user_id)
+    prompt = extraction_prompt(view, f, nonce, course=prompt_lines(goals, max_chars=1000))
     text, model = await complete(reader, _EXTRACT_SYSTEM.format(nonce=nonce), prompt, user_id)
-    return parse_extraction(text), model, _hash(prompt.replace(nonce, ""))
+    got = parse_extraction(text)
+    if got["serves_goal"] not in {g["id"] for g in goals}:
+        got["serves_goal"] = ""   # only a goal it was shown, never one it made up
+    return got, model, _hash(prompt.replace(nonce, ""))
 
 
 async def _quota_spent(user_id: str) -> bool:

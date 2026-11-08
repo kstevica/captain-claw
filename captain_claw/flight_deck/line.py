@@ -112,6 +112,15 @@ _TYPES: dict[str, tuple[str, bool]] = {
     "agent_forge_error": ("agent", True),
     "profile_research": ("agent", True),
     "profile_research_error": ("agent", True),
+    # Course: a goal came due for review ("Still on course?").
+    "course_review": ("ask", True),
+    # Course: an agent thinks a goal is done ("Looks achieved?").
+    "course_looks_achieved": ("ask", True),
+    # Course: an agent or the deck suggests a goal; or one an agent added itself.
+    "course_proposal": ("proposal", True),
+    "course_auto_added": ("agent", False),
+    # Course: two goals likely pull against each other (the deck only flags it).
+    "course_conflict": ("deck", True),
     "whatsapp_web": ("deck", True),
     "info": ("deck", False),
     "success": ("deck", False),
@@ -124,12 +133,14 @@ _NEEDS_YOU_REFS = frozenset({"agent_lessons", "purchase", "telegram_link"})
 # Generic types that are about an agent.
 _AGENT_REFS = frozenset({"agent_lessons", "agent_exam", "agent_setup", "agent_forge", "profile"})
 # Items answered somewhere else, not by being read.
-ANSWERED_REFS = frozenset({"autonomy_action", "person_ask"})
+ANSWERED_REFS = frozenset({"autonomy_action", "person_ask", "course_review", "course_goal",
+                           "course_conflict"})
 # Whose words an item's text is: the deck's own, an agent's, or someone
 # else's (an email, a WhatsApp chat) — what a reader may trust of it.
 _TRUST: dict[str, str] = {
     "autonomy_proposal": "agent",
     "autonomy_nudge": "agent",
+    "course_looks_achieved": "agent",
     "email_autoreply": "untrusted",
     "email_autoreply_held": "untrusted",
     "email_autoreply_issue": "untrusted",

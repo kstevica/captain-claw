@@ -580,6 +580,58 @@ async def _team_folder(uid: str, team: str, sid: str) -> str:
     return name
 
 
+async def _make_course_goals(uid: str, plan: dict, made: dict[str, dict]) -> dict:
+    """The team's goal on the person's Course, then one goal per agent made (its
+    mandate, serving the team's goal), within the horizons and limits the admin
+    set. What can't be added is said, never fatal. ``{team, agents, errors}``."""
+    from captain_claw.flight_deck import agent_sharing, course, course_carrier
+    from captain_claw.flight_deck.server import _load_process_registry
+
+    store = course.get_store()
+    allowed = store.settings()["horizons"]
+    out: dict[str, Any] = {"team": "", "title": plan.get("title") or "", "agents": {}, "errors": []}
+    horizon = plan.get("horizon") if plan.get("horizon") in allowed["user"] else (allowed["user"] or [""])[0]
+    actor = f"user:{course.norm_user(uid)}"
+    if not horizon:
+        out["errors"].append("Your admin has switched off your own goals on this deck.")
+        return out
+    try:
+        team = store.create(scope="user", owner_id=uid, horizon=horizon, title=plan["title"],
+                            success=plan.get("success") or "", actor=actor)
+        out["team"] = team["id"]
+    except course.CourseError as exc:
+        out["errors"].append(f"The team's goal: {exc}")
+        return out
+    if plan.get("agent_goals"):
+        rank = course.HORIZON_RANK
+        agent_h = next((h for h in ("medium", "short", "long", "strategic")
+                        if h in allowed["agent"] and rank[h] >= rank[horizon]), "")
+        registry = await asyncio.to_thread(_load_process_registry)
+        for draft_id, entry in made.items():
+            if not entry.get("ok") or not agent_h:
+                continue
+            ref = agent_sharing.process_ref(entry["slug"], registry.get(entry["slug"]) or {})
+            title = " ".join(str(entry.get("mandate") or "").split())
+            success = " ".join(str(entry.get("produces") or "").split()) \
+                or f"Its part of “{plan['title']}” is done"
+            if not ref or not title:
+                continue
+            try:
+                g = store.create(scope="agent", owner_id=uid, agent_ref=ref, horizon=agent_h,
+                                 title=course._clip_title(title), success=success[:course.TEXT_CAPS["success"]],
+                                 parent_id=team["id"], actor=actor)
+                out["agents"][draft_id] = g["id"]
+            except course.CourseError as exc:
+                out["errors"].append(f"{entry.get('name') or 'An agent'}: {exc}")
+        if made and not agent_h:
+            out["errors"].append("Your admin has switched off agent goals that fit under the team's goal.")
+    try:
+        await course_carrier.refresh_agents(get_db(), uid)
+    except Exception:  # noqa: BLE001 — the files catch up on the next change
+        pass
+    return out
+
+
 async def _run_create(sid: str, user: dict) -> None:
     """Make the approved agents, one at a time; one that fails doesn't stop the rest.
     Safe to run again: what was made stays made."""
@@ -639,6 +691,8 @@ async def _run_create(sid: str, user: dict) -> None:
         for entry in made.values():
             if entry.get("ok"):
                 _tell_later(uid, entry["slug"], str(entry.get("instructions") or ""))
+        if forge.get("course_plan") and not forge.get("course_made"):
+            await _save(sid, uid, course_made=await _make_course_goals(uid, forge["course_plan"], made))
         await _save(sid, uid, status=RECOMMENDING)
         await _run_recommend(sid, user)
     except asyncio.CancelledError:
@@ -769,6 +823,7 @@ def _view(sess: dict, uid: str) -> dict[str, Any]:
         "over_cap": int(forge.get("over_cap") or 0),
         "overview": forge.get("overview") or plan.get("overview") or "", "agents": agents,
         "questions": plan.get("questions") or [], "created": _created_view(forge.get("created") or []),
+        "course": forge.get("course_made") or None,
         "approved": [{"id": a["id"], "name": a["name"], "archetype": a["archetype"]} for a in forge.get("approved") or []],
         "recommendations": recs or None, "updated_at": sess.get("updated_at"), "created_at": sess.get("created_at"),
     }
@@ -870,9 +925,20 @@ class DraftAgent(BaseModel):
     hand_off_notes: str = ""
 
 
+class CourseChoice(BaseModel):
+    """Course (docs/course-plan.md): the team's goal, added to the person's own
+    Course once the agents exist — and, with ``agent_goals``, one goal per new
+    agent (its mandate) serving it."""
+    title: str
+    success: str = ""
+    horizon: str = "long"
+    agent_goals: bool = True
+
+
 class ApproveBody(BaseModel):
     agents: list[DraftAgent] = []
     overview: str = ""
+    course: CourseChoice | None = None
 
 
 @router.post("/plans/{plan_id}/approve")
@@ -907,7 +973,23 @@ async def approve(plan_id: str, body: ApproveBody, user: dict = Depends(get_curr
                              "mandate": a.mandate.strip(), "produces": a.produces.strip(),
                              "consumes_from": [c for c in a.consumes_from if c in kept and c != a.id],
                              "hand_off_notes": a.hand_off_notes.strip()})
-        await _save(plan_id, user["id"], status=CREATING, approved=approved, overview=body.overview.strip(), error="")
+        course_plan = None
+        if body.course is not None:
+            from captain_claw.flight_deck import course as _course
+
+            title = " ".join(body.course.title.split())
+            success = " ".join(body.course.success.split())
+            if not title:
+                raise HTTPException(400, "Say what the team's goal is, or leave it off your Course.")
+            if body.course.horizon not in _course.HORIZONS:
+                raise HTTPException(400, f"Unknown horizon '{body.course.horizon}'.")
+            if body.course.horizon != "strategic" and not success:
+                raise HTTPException(400, "Say how you'll know the team's goal is done.")
+            course_plan = {"title": title[:_course.TEXT_CAPS["title"]],
+                           "success": success[:_course.TEXT_CAPS["success"]],
+                           "horizon": body.course.horizon, "agent_goals": body.course.agent_goals}
+        await _save(plan_id, user["id"], status=CREATING, approved=approved, overview=body.overview.strip(),
+                    error="", course_plan=course_plan)
     else:
         await _save(plan_id, user["id"], status=CREATING, error="")
     _start(plan_id, _run_create(plan_id, user))

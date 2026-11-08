@@ -4,8 +4,10 @@ import {
   Keyboard, Layers, ListChecks, Loader2, Lock, Maximize2, MessageSquare, Minimize2, Pencil, RotateCcw, RotateCw, Search,
   Settings2, SlidersHorizontal,
   Split, Undo2, Users, Wrench, X,
+  Compass,
 } from 'lucide-react'
 import { useAuthStore } from '../../stores/authStore'
+import { useGoalTitles } from '../course/useGoalTitles'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { useTaskboardStore } from '../../stores/taskboardStore'
 import { useGmailAutoReplyStore } from '../../stores/gmailAutoReplyStore'
@@ -92,6 +94,7 @@ const SORTS: { id: TaskSort; label: string }[] = [
   { id: 'oldest', label: 'Oldest first' },
   { id: 'due', label: 'Due soonest' },
   { id: 'urgency', label: 'Most urgent' },
+  { id: 'course', label: 'Serves your course' },
 ]
 
 type Filters = Record<TaskFacetKey, string[]>
@@ -1225,6 +1228,22 @@ const DONE_ANSWERS: Answer[] = [
 const isMaybe = (t: TaskItem) => t.status === 'maybe'
 const isProbablyDone = (t: TaskItem) => t.status === 'open' && !!t.flags?.probably_done
 
+/** The Course goal a task serves, by its title (nothing when none or unknown). */
+function GoalChip({ goalId, large = false }: { goalId?: string; large?: boolean }) {
+  const titles = useGoalTitles()
+  const title = goalId ? titles.get(goalId) : ''
+  if (!title) return null
+  return (
+    <span
+      className={`ml-1.5 inline-flex max-w-[16rem] items-center gap-1 truncate rounded bg-violet-500/10 px-1 py-px font-medium text-violet-700 align-middle dark:text-violet-300 ${large ? 'text-xs' : 'text-[10px]'}`}
+      title={`Serves a goal on your Course: ${title}`}
+    >
+      <Compass className="h-3 w-3 shrink-0" aria-hidden />
+      <span className="truncate">{title}</span>
+    </span>
+  )
+}
+
 function TaskRow({ task, terms, me, active, ticked, onTick, onClick, onAnswered, onAct }: {
   task: TaskItem; terms: string[]; me: BoardUser; active: boolean; ticked: boolean; onTick: (range: boolean) => void
   onClick: () => void; onAnswered: () => Promise<void>
@@ -1270,6 +1289,7 @@ function TaskRow({ task, terms, me, active, ticked, onTick, onClick, onAnswered,
                   From history
                 </span>
               )}
+              <GoalChip goalId={task.goal_id} />
             </span>
             {task.ask && (
               <span className={`mt-1 text-xs leading-relaxed text-zinc-400 ${task.result_text ? 'line-clamp-1' : 'line-clamp-2'}`}>
@@ -1635,6 +1655,7 @@ function TaskDetailPane({
           )}
           {flags.low_confidence && <LowConfidenceHint />}
           {flags.historical && <HistoryChip />}
+          <GoalChip goalId={task.goal_id} large />
         </div>
         <WhyThisHere task={task} phone={phone} />
 

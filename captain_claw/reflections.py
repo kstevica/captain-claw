@@ -468,6 +468,70 @@ def _reflection_transcript(messages: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+# ── Course (Phase 3): a goal the agent suggests for itself ────────────
+
+_GOAL_LINE = re.compile(r"^[ \t]*GOAL_PROPOSAL:[ \t]*(\{.*\})[ \t]*$", re.MULTILINE)
+_GOAL_LINE_ANY = re.compile(r"^[ \t]*GOAL_PROPOSAL:.*$\n?", re.MULTILINE)
+
+
+def course_ask() -> str:
+    """The reflection prompt's Course addendum — only under Flight Deck on the
+    owner's own turns (``course_client.usable``); "" otherwise."""
+    try:
+        from captain_claw import course_client
+        from captain_claw.tenant_context import load_course_context
+
+        if not course_client.usable():
+            return ""
+        current = load_course_context(compact=True) or "You have no goals yet."
+    except Exception:
+        return ""
+    return (
+        "## Your course (optional)\n"
+        f"{current}\n\n"
+        "If — and only if — the work above clearly shows an outcome you should hold as a goal "
+        "of your own (medium-term or short-term, serving one of the goals above when one fits), "
+        "add ONE final line, exactly:\n"
+        'GOAL_PROPOSAL: {"horizon": "medium" or "short", "title": "a few words", '
+        '"success": "how you\'ll know it\'s done", "rationale": "why, in one sentence", '
+        '"parent_id": "G:<id> of the goal it serves, or empty"}\n'
+        "Your owner decides whether it goes on your course. Never suggest a goal about your own "
+        "state, mood or behaviour, nor one already on your course. Most of the time, write no "
+        "such line."
+    )
+
+
+def take_goal_proposal(text: str) -> tuple[str, dict[str, Any] | None]:
+    """``(the reflection without any GOAL_PROPOSAL line, the first proposal)``.
+    A proposal is kept only with a title and a medium or short horizon."""
+    found = None
+    m = _GOAL_LINE.search(text or "")
+    if m:
+        try:
+            data = json.loads(m.group(1))
+        except ValueError:
+            data = None
+        if isinstance(data, dict) and str(data.get("title") or "").strip() \
+                and data.get("horizon") in ("medium", "short"):
+            found = {"horizon": data["horizon"], "title": str(data["title"]).strip(),
+                     "success": str(data.get("success") or "").strip(),
+                     "rationale": str(data.get("rationale") or "").strip(),
+                     "parent_id": str(data.get("parent_id") or "").strip()}
+    return _GOAL_LINE_ANY.sub("", text or "").strip(), found
+
+
+async def _send_goal_proposal(proposal: dict[str, Any]) -> None:
+    """Hand the suggestion to Flight Deck; its rules (limits, duplicates, the
+    owner's answer) decide what happens. Never raises."""
+    try:
+        from captain_claw import course_client
+
+        await course_client.propose(scope="agent", **proposal)
+        log.info("Goal suggested from a self-reflection", title=proposal["title"][:80])
+    except Exception as exc:
+        log.info("Goal suggestion not made", error=str(getattr(exc, "message", exc))[:200])
+
+
 async def generate_reflection(agent: Agent) -> Reflection:
     """Generate a new self-reflection using the LLM.
 
@@ -552,6 +616,9 @@ async def generate_reflection(agent: Agent) -> Reflection:
         tasks_summary=tasks_text or "(No task history available.)",
         tool_record=tool_record_text or "(No tool-call record available.)",
     )
+    goal_ask = course_ask()
+    if goal_ask:
+        user_prompt = f"{user_prompt}\n\n{goal_ask}"
 
     messages = [
         Message(role="system", content=system_prompt),
@@ -573,7 +640,11 @@ async def generate_reflection(agent: Agent) -> Reflection:
     )
 
     latency_ms = int((_time.monotonic() - t0) * 1000)
-    summary = (response.content or "").strip()
+    # A goal suggestion is a line for Flight Deck, never part of the reflection
+    # the agent reads back in its prompt.
+    summary, goal_proposal = take_goal_proposal((response.content or "").strip())
+    if goal_proposal and goal_ask:
+        await _send_goal_proposal(goal_proposal)
     usage = response.usage or {}
 
     # 7. Build and save reflection.

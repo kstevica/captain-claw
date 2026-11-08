@@ -39,6 +39,7 @@ import {
   IdCard,
   Receipt,
   Waypoints,
+  Compass,
   Wrench,
 } from 'lucide-react'
 import { useCrewAllowed } from '../../stores/crewStore'
@@ -65,6 +66,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
     title: 'Workspace',
     items: [
       { id: 'line', icon: Waypoints, label: 'Line' },
+      { id: 'course', icon: Compass, label: 'Course' },
       { id: 'quick-chat', icon: MessagesSquare, label: 'Quick chat' },
       { id: 'desktop', icon: Monitor, label: 'Agent Desktop' },
       { id: 'payments', icon: Receipt, label: 'Payments', needsPayments: true },

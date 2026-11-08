@@ -98,6 +98,9 @@ _TABLES: dict[str, list[tuple[str, str]]] = {
         ("evidence", "TEXT NOT NULL DEFAULT 'none'"),
         ("result", "TEXT NOT NULL DEFAULT ''"),
         ("urgency", "INTEGER NOT NULL DEFAULT 0"),
+        # Course (docs/course-plan.md): the goal the task moves forward — the
+        # extraction's reading of it, checked against the owner's live goals.
+        ("goal_id", "TEXT NOT NULL DEFAULT ''"),
         ("due_at", "REAL"),
         ("snooze_until", "REAL"),
         ("created_at", "REAL NOT NULL DEFAULT 0"),
@@ -341,7 +344,19 @@ _SORTS = {
     "oldest": "t.created_at ASC, t.id",
     "due": "t.due_at IS NULL, t.due_at ASC, COALESCE(t.last_event_at, t.created_at) DESC",
     "urgency": "t.urgency DESC, COALESCE(t.last_event_at, t.created_at) DESC",
+    # Course: tasks that serve one of the owner's goals first, then the most urgent.
+    "course": "t.goal_id = '', t.urgency DESC, COALESCE(t.last_event_at, t.created_at) DESC",
 }
+
+
+def _goal_done(row: dict, goal_id: str) -> None:
+    """A task that served a Course goal closed as done: evidence for that goal."""
+    if not goal_id:
+        return
+    from captain_claw.flight_deck import course
+
+    course.link_quietly(goal_id, "task", str(row.get("id") or ""), note=str(row.get("title") or ""),
+                        actor="taskboard", owner_id=str(row.get("user_id") or ""))
 
 
 def _loads(raw: Any, default: Any) -> Any:
@@ -713,6 +728,8 @@ class TaskboardStore:
         sets["updated_at"] = time.time()
         self._conn.execute(
             f"UPDATE tasks SET {', '.join(f'{k} = ?' for k in sets)} WHERE id = ?", (*sets.values(), task_id))
+        if sets.get("status") == "done":
+            _goal_done(row, str(sets.get("goal_id", row.get("goal_id")) or ""))
         return True
 
     def _add_event(self, user_id: str, task_id: str, ev: dict, evidence_on: str = "") -> bool:
@@ -812,6 +829,15 @@ class TaskboardStore:
     def get_task(self, user_id: str, task_id: str) -> dict | None:
         with self._lock:
             return self._owned(user_id, task_id)
+
+    def count_goal_done(self, user_id: str, goal_id: str, since: float = 0.0) -> int:
+        """Course (Phase 4): the user's tasks tied to ``goal_id`` and done since
+        ``since`` (epoch seconds) — a goal's ``taskboard_done`` metric."""
+        with self._lock:
+            return int(self._conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE user_id = ? AND goal_id = ? AND status = 'done'"
+                " AND merged_into = '' AND COALESCE(closed_at, 0) >= ?",
+                (user_id, goal_id, float(since))).fetchone()[0])
 
     def events(self, user_id: str, task_id: str, limit: int = 500) -> list[dict]:
         """The task's latest *limit* events (a scheduled task gathers a few
@@ -1080,6 +1106,8 @@ class TaskboardStore:
                 new_locks = {**old_locks, **{k: now for k in locks}}
                 sets = {**fields, "user_locks": new_locks, "updated_at": now}
                 self._write(task_id, sets)
+                if fields.get("status") == "done" and row["status"] != "done":
+                    _goal_done(row, str(row.get("goal_id") or ""))
                 self._add_event(user_id, task_id, {
                     "source": "user", "source_ref": f"corr:{secrets.token_hex(8)}", "at": now,
                     "kind": "correction", "actor_kind": "me", "actor": actor, "summary": summary,

@@ -65,12 +65,19 @@ def _status_changed(user_id: str) -> None:
 
 
 def _action_done(row: dict[str, Any]) -> None:
-    """An action ended: its outcome goes on its user's Line (line.py)."""
+    """An action ended: its outcome goes on its user's Line (line.py), and one
+    that served a Course goal and didn't fail becomes evidence for it."""
     try:
         from captain_claw.flight_deck import line
         line.soon(line.action_done, dict(row))
     except Exception:  # noqa: BLE001 — the Line never breaks a write
         pass
+    if row.get("goal_id") and str(row.get("outcome") or "") != "fail":
+        from captain_claw.flight_deck import course
+
+        course.link_quietly(str(row["goal_id"]), "autonomy_action", str(row.get("id") or ""),
+                            note=str(row.get("title") or ""), actor="autonomy",
+                            owner_id=str(row.get("user_id") or ""))
 
 
 def _db_path() -> Path:
@@ -285,7 +292,20 @@ class AutonomyStore:
                 """
             )
             self._c().commit()
+            self._migrate()
             self._sweep_mail_trust()
+
+    def _migrate(self) -> None:
+        """Columns added after a deck's ledger was created."""
+        with self._lock:
+            conn = self._c()
+            have = {r["name"] for r in conn.execute("PRAGMA table_info(autonomous_actions)")}
+            if "goal_id" not in have:
+                # Course (docs/course-plan.md): the goal an action serves. It never
+                # changes risk, approval, auto-dispatch or caps.
+                conn.execute("ALTER TABLE autonomous_actions"
+                             " ADD COLUMN goal_id TEXT NOT NULL DEFAULT ''")
+                conn.commit()
 
     def _sweep_mail_trust(self) -> None:
         """Clear any learned trust for built-in email actions (``mail.*``).
@@ -419,6 +439,7 @@ class AutonomyStore:
         target: str = "",
         ref_id: str = "",
         payload: dict[str, Any] | None = None,
+        goal_id: str = "",
     ) -> dict[str, Any]:
         uid = _norm_user(user_id)
         aid = "act_" + secrets.token_hex(8)
@@ -429,12 +450,12 @@ class AutonomyStore:
                 """
                 INSERT INTO autonomous_actions
                     (id, user_id, source, kind, title, rationale, risk, domain,
-                     score, status, target, ref_id, payload, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     score, status, target, ref_id, payload, created_at, goal_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (aid, uid, source, kind, title, rationale, risk, domain,
                  float(score), status, target, ref_id,
-                 json.dumps(payload or {}), now),
+                 json.dumps(payload or {}), now, str(goal_id or "")[:40]),
             )
             conn.commit()
         _status_changed(uid)

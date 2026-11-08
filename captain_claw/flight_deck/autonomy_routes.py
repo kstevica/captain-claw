@@ -721,17 +721,34 @@ async def list_plans_route(request: Request, status_filter: str | None = None,
 
 @router.post("/plans")
 async def create_plan_route(request: Request, _user: dict | None = Depends(get_optional_user)):
-    """Decompose a goal into steps and create a plan. Body: {goal}."""
+    """Decompose a goal into steps and create a plan. Body: {goal} — or
+    {goal_id}: a route to one of the caller's Course goals ("Plan a route"),
+    planned from its title and how it will be known to be done."""
     uid = _user_id(request)
     body = await request.json()
     goal = str((body or {}).get("goal") or "").strip()
+    goal_id = str((body or {}).get("goal_id") or "").strip()
+    if goal_id:
+        from captain_claw.flight_deck import course
+
+        g = course.usable_goal(goal_id, uid, include_stale=True)
+        if g is None:
+            raise HTTPException(status_code=404, detail="Goal not found, or not active")
+        goal_id = g["id"]
+        if not goal:
+            goal = g["title"] + (f" — done when: {g['success']}" if g.get("success") else "")
     if not goal:
         raise HTTPException(status_code=400, detail="goal is required")
     from captain_claw.flight_deck.plans import decompose_goal, get_store as plans_store
     steps = await decompose_goal(uid, goal)
     if not steps:
         raise HTTPException(status_code=422, detail="Could not decompose the goal into steps")
-    plan = plans_store().create_plan(uid, goal, steps)
+    plan = plans_store().create_plan(uid, goal, steps, goal_id=goal_id)
+    if goal_id:
+        from captain_claw.flight_deck import course
+
+        course.link_quietly(goal_id, "plan", plan["id"], note=f"Route planned: {goal}",
+                            actor="plan", owner_id=uid)
     return {"ok": True, "plan": plan}
 
 

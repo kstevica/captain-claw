@@ -255,6 +255,10 @@ async def delete_user(user_id: str, admin: dict = Depends(require_admin)):
         taskboard.forget_user(user_id)
     except Exception:
         pass
+    # …and their Course: their goals and their agents' goals (course.db keeps no FK).
+    from captain_claw.flight_deck import course
+
+    course.forget_user(user_id)
     # …and their coding CLIs: the running ones stop, their folder goes.
     try:
         from captain_claw.flight_deck import crew_runner

@@ -23,6 +23,7 @@ import { SchedulePicker } from '../scheduler/SchedulePicker'
 import { useSchedulePreview } from '../scheduler/schedulePreview'
 import { AgentBadge, Chip, Eyebrow, ErrorNote, Fold } from './forgeParts'
 import { errorOf } from './forgeUtil'
+import { OPEN_COURSE_EVENT } from '../../services/course'
 
 // Step four: the team is up, and what's left is on one page, in the order you'd
 // do it. Each suggestion says why and how you'd use it, and reads as a sentence;
@@ -76,6 +77,7 @@ export function ForgeReady({ plan, archetypes, onChanged, onClose, onAnother }: 
             {agents.length === 1 ? `${agents[0].name} is ready to work` : `${agents.length} agents are ready to work`}
           </h2>
           {recs?.usage && <p className="mt-1 max-w-3xl whitespace-pre-wrap text-sm leading-relaxed text-zinc-400">{recs.usage}</p>}
+          {plan.course && <CourseAdded course={plan.course} />}
           <ul className="mt-4 grid gap-2 wide:grid-cols-2">
             {agents.map((a, i) => (
               <li key={a.id}>
@@ -651,6 +653,27 @@ function ConnectForm({ plan, app, agents, onChanged }: {
           <Button variant="primary" icon={Plug} busy={busy} disabled={!url.trim() || !key.trim() || chosen.size === 0} onClick={connect}>Connect</Button>
         </>
       )}
+    </div>
+  )
+}
+
+
+/** What the review step's "Add this team's goal to your Course" added. */
+function CourseAdded({ course }: { course: NonNullable<ForgePlan['course']> }) {
+  const n = Object.keys(course.agents).length
+  return (
+    <div className="mt-3 rounded-xl border border-violet-500/20 bg-violet-500/[0.06] px-3 py-2 text-xs">
+      {course.team ? (
+        <p className="text-zinc-300">
+          On your Course: <span className="font-medium text-zinc-100">{course.title}</span>
+          {n > 0 && <span className="text-zinc-400">, and a goal for {n === 1 ? 'one agent' : `${n} agents`} serving it</span>}.
+          {' '}
+          <button onClick={() => window.dispatchEvent(new CustomEvent(OPEN_COURSE_EVENT))} className="text-violet-600 hover:underline dark:text-violet-300">
+            Open Course
+          </button>
+        </p>
+      ) : null}
+      {course.errors.map((e) => <p key={e} className="mt-0.5 text-amber-700 dark:text-amber-300">{e}</p>)}
     </div>
   )
 }

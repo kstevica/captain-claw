@@ -119,6 +119,42 @@ def load_shared_members() -> str:
     return _read_cached(base / SHARED_MEMBERS_FILENAME)
 
 
+# Course (flight_deck/course_carrier.py): what the agent's work is for. The
+# owner's turns get the deck-wide goals, the owner's and the agent's own
+# (course_context*.md); a shared agent's member turns get the deck-wide goals
+# only (course_deck*.md). Flight Deck rewrites them when goals change and
+# deletes them when there is none.
+COURSE_FULL_FILENAME = "course_context.md"
+COURSE_COMPACT_FILENAME = "course_context.compact.md"
+COURSE_DECK_FULL_FILENAME = "course_deck.md"
+COURSE_DECK_COMPACT_FILENAME = "course_deck.compact.md"
+
+
+def _load_pair(full_name: str, compact_name: str, compact: bool) -> str:
+    """The compact file when *compact*, else the full one, falling back to the
+    other when the chosen one is missing or empty ("" when neither has text)."""
+    try:
+        base = Path.home() / ".captain-claw"
+    except RuntimeError:  # no resolvable home directory
+        return ""
+    order = (compact_name, full_name) if compact else (full_name, compact_name)
+    for name in order:
+        text = _read_cached(base / name)
+        if text:
+            return text
+    return ""
+
+
+def load_course_context(compact: bool) -> str:
+    """The owner's-turn Course block ("" when none)."""
+    return _load_pair(COURSE_FULL_FILENAME, COURSE_COMPACT_FILENAME, compact)
+
+
+def load_course_deck(compact: bool) -> str:
+    """The member's-turn Course block: the deck-wide goals only ("" when none)."""
+    return _load_pair(COURSE_DECK_FULL_FILENAME, COURSE_DECK_COMPACT_FILENAME, compact)
+
+
 def use_compact_tenant_context(*, micro: bool, nano: bool) -> bool:
     """Compact block for the micro/nano templates and for orchestrated
     workers (Council/Basna/Vatra teammates, bound via ``CLAW_VFS_PROJECT``)."""

@@ -45,6 +45,7 @@ from captain_claw.tools.microsoft_onedrive import MicrosoftOneDriveTool
 from captain_claw.tools.jev import JevTool
 from captain_claw.tools.telegram_inbox import TelegramInboxTool
 from captain_claw.tools.line import LineTool
+from captain_claw.tools.course import CourseTool
 from captain_claw.tools.whatsapp_web import WhatsAppWebTool
 from captain_claw.tools.personality import PersonalityTool
 from captain_claw.tools.todo import TodoTool
@@ -147,6 +148,7 @@ __all__ = [
     "AudioTool",
     "TelegramInboxTool",
     "LineTool",
+    "CourseTool",
     "WhatsAppWebTool",
     "TodoTool",
     "ContactsTool",

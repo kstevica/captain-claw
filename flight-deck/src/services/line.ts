@@ -124,5 +124,13 @@ export async function markAllLineRead(): Promise<void> {
   try { await fdFetch('/fd/line/read-all', { method: 'POST' }) } catch { /* ignore */ }
 }
 
+/** Items that need the user and are answered somewhere else, not by being
+ *  read: a proposal (approved or rejected on the ledger), a goal review, a
+ *  goal suggestion and a conflict between goals (answered on the Course page).
+ *  The server's line.ANSWERED_REFS, client side. */
+export const ANSWERED_ELSEWHERE = new Set(['autonomy_action', 'course_review', 'course_goal', 'course_conflict'])
+export const answeredByReading = (needsYou: boolean | undefined, refType: string | undefined) =>
+  !!needsYou && !ANSWERED_ELSEWHERE.has(refType || '')
+
 /** Opens the Line: the full view's page, or the kiosk's dialog. */
 export const OPEN_LINE_EVENT = 'fd:open-line'

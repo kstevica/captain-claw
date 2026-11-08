@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import {
   fetchNotifications, markNotificationRead, markAllNotificationsRead,
 } from '../services/notifications'
+import { answeredByReading as answeredOnRead } from '../services/line'
 
 export type NotificationType = 'info' | 'success' | 'warning' | 'error'
 
@@ -60,7 +61,7 @@ export interface Notification {
 }
 
 // Reading an item that needs the user answers it, unless it's answered elsewhere.
-const answeredByReading = (n: Notification) => !!n.needsYou && n.refType !== 'autonomy_action'
+const answeredByReading = (n: Notification) => answeredOnRead(n.needsYou, n.refType)
 
 interface NotificationStore {
   notifications: Notification[]
