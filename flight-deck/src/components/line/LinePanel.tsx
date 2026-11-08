@@ -14,7 +14,7 @@ import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '..
 import { useLineStore } from '../../stores/lineStore'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
-import NotificationsConnection from '../connections/NotificationsConnection'
+import NotificationsConnection, { NOTIFY_CHANGED } from '../connections/NotificationsConnection'
 import { FullscreenButton } from '../library/libraryParts'
 
 type Agent = { slug: string; name: string }
@@ -268,6 +268,13 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
   }, [query, setCounts])
   const loadRef = useRef(loadNewest)
   loadRef.current = loadNewest
+
+  // The agent for your Line, changed under Channels: the Daily summary card follows it now, not at the next poll.
+  useEffect(() => {
+    const reload = () => { void loadRef.current() }
+    window.addEventListener(NOTIFY_CHANGED, reload)
+    return () => window.removeEventListener(NOTIFY_CHANGED, reload)
+  }, [])
 
   useEffect(() => {
     setItems([]); setMore(false); setLoading(true)

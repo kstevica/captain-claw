@@ -181,7 +181,7 @@ export function ProposalCard({ slug, p, onSettled }: {
         {drafted && !editing && p.always && (
           <span className="inline-flex items-center gap-1 rounded-md bg-zinc-800 px-1.5 py-0.5 text-[11px] text-zinc-300"
             title="In its instructions: it keeps this in mind in every conversation">
-            <Pin className="h-3 w-3" />Every chat
+            <Pin className="h-3 w-3" />Always in mind
           </span>
         )}
         {!drafted && !editing && (
@@ -212,7 +212,7 @@ export function ProposalCard({ slug, p, onSettled }: {
           <label className={`flex items-start gap-2 text-xs ${kind === 'fact' ? 'text-zinc-600' : 'text-zinc-300'}`}>
             <input type="checkbox" checked={always} disabled={kind === 'fact'} onChange={(e) => setAlways(e.target.checked)}
               className="mt-0.5 accent-violet-600" />
-            <span><b className="font-medium">Every chat</b> — keep it in mind in every conversation (tone, language, length, format).
+            <span><b className="font-medium">Always in mind</b> — keep it in mind in every conversation (tone, language, length, format).
               Otherwise it comes up when a message is about it.</span>
           </label>
           {note && <p className="text-xs text-amber-600 dark:text-amber-400">{note}</p>}
