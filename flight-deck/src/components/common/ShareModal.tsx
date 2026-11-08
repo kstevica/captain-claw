@@ -47,6 +47,18 @@ export function ShareModal({ resourceType, resourceId, resourceName, allowEdit =
   }, [resourceType, resourceId])
 
   useEffect(() => { load() }, [load])
+  // Escape closes it, like the dialogs it opens from. Capture phase, and the key
+  // stops here: the folder or library under it must not close as well.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      e.stopImmediatePropagation()
+      e.preventDefault()
+      onClose()
+    }
+    window.addEventListener('keydown', onKey, true)
+    return () => window.removeEventListener('keydown', onKey, true)
+  }, [onClose])
 
   const sharedIds = new Set(shares.map((s) => s.grantee_id))
 
@@ -94,7 +106,7 @@ export function ShareModal({ resourceType, resourceId, resourceName, allowEdit =
             <div className="text-sm font-semibold text-zinc-100">Share</div>
             <div className="truncate text-xs text-zinc-500">{resourceName}</div>
           </div>
-          <button onClick={onClose} className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300">
+          <button onClick={onClose} aria-label="Close" title="Close" className="rounded p-1 text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300">
             <X className="h-4 w-4" />
           </button>
         </div>

@@ -15,7 +15,7 @@ import { fetchWaitingProposals, resolveProposal, type WaitingProposal } from '..
 import { useLineStore } from '../../stores/lineStore'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { untrustedUrlTransform } from '../../utils/untrustedContent'
-import NotificationsConnection from '../connections/NotificationsConnection'
+import NotificationsConnection, { NOTIFY_CHANGED } from '../connections/NotificationsConnection'
 import { FullscreenButton } from '../library/libraryParts'
 
 type Agent = { slug: string; name: string }
@@ -270,6 +270,13 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
   const loadRef = useRef(loadNewest)
   loadRef.current = loadNewest
 
+  // The agent for your Line, changed under Channels: the Daily summary card follows it now, not at the next poll.
+  useEffect(() => {
+    const reload = () => { void loadRef.current() }
+    window.addEventListener(NOTIFY_CHANGED, reload)
+    return () => window.removeEventListener(NOTIFY_CHANGED, reload)
+  }, [])
+
   useEffect(() => {
     setItems([]); setMore(false); setLoading(true)
     void loadNewest()
@@ -346,6 +353,18 @@ export function LinePanel({ onClose }: { onClose?: () => void; large?: boolean }
     syncBell()
   }
   const back = () => { setThreadId(null); setChannels(false) }
+  // Escape steps back the way the kiosk's other dialogs do: Channels first, then
+  // the open thread where it covers the list (a narrow Line), then the dialog.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape' || e.defaultPrevented) return
+      if (channels) { setChannels(false); return }
+      if (!wide && threadId) { setThreadId(null); return }
+      onClose?.()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [channels, threadId, wide, onClose])
   const answered = () => {
     loadProposals()
     void loadRef.current()

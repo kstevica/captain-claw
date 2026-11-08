@@ -80,6 +80,13 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
   // A Forge agents plan that's ready for its next step, or stopped.
   const [forgeFor, setForgeFor] = useState('')
   const { isMobile: phone } = useIsMobile()
+  // Escape closes the dropdown, as it does every other menu and dialog.
+  useEffect(() => {
+    if (!open) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open])
   const openForge = (planId: string) => {
     setOpen(false)
     setBig(false)
@@ -105,6 +112,7 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
             open ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
           }`}
           title="Notifications"
+          aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : 'Notifications'}
         >
           <Bell className="h-4 w-4" />
           {unreadCount > 0 && (

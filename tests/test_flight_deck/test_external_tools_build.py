@@ -132,3 +132,12 @@ async def test_the_tool_asks_for_what_a_build_needs(monkeypatch):
     monkeypatch.setattr(custom_tools_client, "member_call", lambda: True)
     refused = await tool.execute(action="improve", tool="csv-total", what="x", harness="claude")
     assert not refused.success and "owner" in refused.error
+
+
+def test_the_builder_is_told_the_limits_publishing_checks():
+    # Seen on a demo deck: the coding agent wrote a description of over 600 characters into
+    # tool.json, and publishing refused it ("'description' must be 1–600 characters").
+    brief = xr.build_brief("working-days", "Working days", "Count working days between two dates.")
+    assert "600" in brief and "80" in brief
+    readme = xt._starter("working-days", "Working days", "Counts working days.")["README.md"]
+    assert "1–600" in readme and "1–80" in readme
