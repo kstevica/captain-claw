@@ -28,7 +28,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from captain_claw.flight_deck import agent_preset_docs as pdocs
 from captain_claw.flight_deck import profile_sources as ps
@@ -281,7 +281,8 @@ async def fetch_page(client, url: str) -> tuple[str, str, str]:
         text = pdocs.html_markdown(html)
         title = text.split("\n", 1)[0].lstrip("# ").strip()[:120] if text.startswith("#") else ""
     elif "pdf" in ctype or urlsplit(url).path.lower().endswith(".pdf"):
-        text, _err = await asyncio.to_thread(pdocs.extract_bytes, raw, ".pdf")
+        pdf_name = unquote(urlsplit(url).path.rsplit("/", 1)[-1])   # its heading: "report.pdf", not a temp name
+        text, _err = await asyncio.to_thread(pdocs.extract_bytes, raw, ".pdf", pdf_name)
         title = ""
     elif ctype.startswith("text/") or "json" in ctype:
         text = raw.decode(r.encoding or "utf-8", errors="replace")

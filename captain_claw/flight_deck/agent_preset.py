@@ -349,7 +349,7 @@ async def stage_upload(root: Path, uf: UploadFile) -> tuple[dict | None, str]:
         return None, f"{name}: the file is empty."
     if len(raw) > pdocs.MAX_FILE_BYTES:
         return None, f"{name}: larger than 25 MB, left out."
-    text, err = await asyncio.to_thread(pdocs.extract_bytes, raw, Path(name).suffix)
+    text, err = await asyncio.to_thread(pdocs.extract_bytes, raw, Path(name).suffix, name)
     if not text.strip():
         return None, _no_text(name, err)
     return await asyncio.to_thread(pdocs.stage, root, name, text, "upload", "", raw), ""

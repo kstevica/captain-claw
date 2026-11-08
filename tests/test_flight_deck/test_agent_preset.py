@@ -351,6 +351,44 @@ def test_a_library_file_is_read_in_full(monkeypatch, tmp_path):
     assert pdocs.extract(tmp_path / "x.exe") == ("", "not a kind of document the setup reads")
 
 
+def _docx(*paragraphs: str) -> bytes:
+    """A minimal Word file with these paragraphs."""
+    import io
+    import zipfile
+    body = "".join(f"<w:p><w:r><w:t>{p}</w:t></w:r></w:p>" for p in paragraphs)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml",
+                   '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                   f"<w:body>{body}</w:body></w:document>")
+    return buf.getvalue()
+
+
+def test_an_upload_is_read_under_its_own_name():
+    raw = _docx("Refunds within 14 days.")
+    text, why = pdocs.extract_bytes(raw, ".docx", "Refund policy.docx")
+    assert why == "" and text.startswith("# Refund policy.docx\n") and "Refunds within 14 days." in text
+    # Only its last part, nothing a file system refuses, and the kind it is read as.
+    assert pdocs.extract_bytes(raw, ".docx", "../../etc/Re:fund?.docx")[0].startswith("# Re_fund_.docx\n")
+    assert pdocs.extract_bytes(raw, ".docx", "C:\\Users\\bob\\Policy.DOCX")[0].startswith("# Policy.DOCX\n")
+    assert pdocs.extract_bytes(raw, ".docx", "policy")[0].startswith("# policy.docx\n")
+    assert pdocs._upload_name("x" * 400 + ".docx", ".docx") == "x" * 195 + ".docx"
+    assert pdocs._upload_name("..", ".docx") == pdocs._upload_name(".docx", ".docx") == ""
+    # Without a name (or with nothing left of it) it is still read, under a temporary one.
+    for name in ("", ".."):
+        text, why = pdocs.extract_bytes(raw, ".docx", name)
+        assert why == "" and "Refunds within 14 days." in text and text.startswith("# tmp")
+
+
+async def test_a_word_upload_is_staged_under_its_own_name(deck, monkeypatch):
+    _model(monkeypatch, json.dumps(_REPLY))
+    out = await _stage(BOB, [("Refund policy.docx", _docx("Refunds within 14 days."))])
+    [doc] = out["docs"]
+    text = pdocs.load_staged(ap.owner_root(BOB), doc["id"])["text"]
+    assert doc["name"] == "Refund policy.docx" and text.startswith("# Refund policy.docx\n")
+    assert "tmp" not in text
+
+
 async def test_documents_are_staged_with_their_size_and_no_model(deck, monkeypatch):
     calls = _model(monkeypatch, json.dumps(_REPLY))
     big = _pdf_text(40).encode()
