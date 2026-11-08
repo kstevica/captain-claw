@@ -111,6 +111,7 @@ export function NotificationBell({ align = 'right' }: { align?: 'left' | 'right'
             open ? 'bg-zinc-800 text-zinc-200' : 'text-zinc-500 hover:bg-zinc-800 hover:text-zinc-300'
           }`}
           title="Notifications"
+          aria-label={unreadCount > 0 ? `Notifications, ${unreadCount} unread` : 'Notifications'}
         >
           <Bell className="h-4 w-4" />
           {unreadCount > 0 && (

@@ -182,7 +182,7 @@ function GroupView({ group, review, disabled, onToggle, onAll, onEdit }: {
                 checked={on}
                 disabled={disabled}
                 onChange={() => onToggle(key)}
-                aria-label={on ? 'Leave this out' : 'Keep this'}
+                aria-label="Keep this"
                 className="mt-1.5 h-4 w-4 shrink-0 accent-violet-600"
               />
               <div className="min-w-0 flex-1 space-y-1.5">
