@@ -255,10 +255,9 @@ def preview_file(name: str, blob: bytes) -> str:
     Reuses the extractors the document tools already own rather than growing a
     second understanding of what an .xlsx is. Anything unreadable degrades to
     a size note — the planner still gets the path, which is the part the tasks
-    actually need.
+    actually need. A document is read under its own *name*, which its preview
+    starts with as a heading — not a temporary file's.
     """
-    import tempfile
-
     suffix = pathlib.Path(name).suffix.lower()
     try:
         if suffix in (".txt", ".md", ".csv", ".tsv", ".json", ".yaml", ".yml", ".sql"):
@@ -268,10 +267,7 @@ def preview_file(name: str, blob: bytes) -> str:
         if suffix in (".xlsx", ".docx", ".pdf", ".pptx"):
             from captain_claw.tools import document_extract as de
 
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
-                tmp.write(blob)
-                tmp.flush()
-                target = pathlib.Path(tmp.name)
+            with de.named_copy(blob, suffix, name) as target:
                 if suffix == ".xlsx":
                     md = de._extract_xlsx_markdown(target, _PREVIEW_ROWS)
                 elif suffix == ".docx":

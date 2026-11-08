@@ -493,6 +493,20 @@ async def test_read_slides_exports_pptx_slide_by_slide(drive):
         assert f"## Slide {n}" in res.content and f"- {text}" in res.content
 
 
+async def test_read_is_headed_with_the_files_own_name(drive):
+    """The extracted text starts with the Drive name, not the temp copy's."""
+    drive.add(FID, "A/B results", SHEET_MIME)   # a "/" is part of a Drive name
+    drive.exports[(FID, XLSX)] = _xlsx({"Summary": [["Variant", "Rate"], ["B", "4%"]]})
+    res = await drive.tool.execute("read", file_id=FID)
+    assert res.success, res.error
+    assert "\n# A_B results.xlsx\n" in res.content and "# tmp" not in res.content
+
+    drive.add(FID, "Pitch.PPTX", PPTX, media=_pptx(["Problem"]))
+    res = await drive.tool.execute("read", file_id=FID)
+    assert res.success, res.error
+    assert "\n# Pitch.PPTX\n" in res.content and "# tmp" not in res.content
+
+
 async def test_read_extensionless_binary_extracts_by_type(drive, monkeypatch):
     """A PDF named "Contract" reaches pdf_extract as a .pdf, not a .bin."""
     seen: list[str] = []

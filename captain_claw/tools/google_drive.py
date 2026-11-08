@@ -13,7 +13,6 @@ import io
 import json
 import mimetypes
 import re
-import tempfile
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -29,6 +28,7 @@ from captain_claw.google_ids import (
     is_google_drive_url,
 )
 from captain_claw.logging import get_logger
+from captain_claw.tools.document_extract import named_copy
 from captain_claw.tools.registry import Tool, ToolResult
 
 if TYPE_CHECKING:
@@ -1335,14 +1335,12 @@ class GoogleDriveTool(Tool):
                 error=f"File '{name}' is too large (over 50 MB). Max 50 MB.",
             )
 
-        # Write to a temp file and run the appropriate extract tool. The
-        # suffix comes from the type: the extract tools refuse any other, and
-        # a Drive name often has none.
-        with tempfile.NamedTemporaryFile(suffix=_SUFFIX_BY_MIME[source_mime], delete=False) as tmp:
-            tmp.write(body)
-            tmp_path = tmp.name
-
-        try:
+        # Write to a temp folder under the file's own name — the extract tools
+        # start with it as a heading — and run the appropriate extract tool.
+        # The suffix comes from the type: the extract tools refuse any other,
+        # and a Drive name often has none. A "/" is part of a Drive name ("A/B
+        # results"), not a folder, so it stays in the heading as "_".
+        with named_copy(body, _SUFFIX_BY_MIME[source_mime], _safe_filename(name, "")) as tmp_path:
             extract_tool = self._get_extract_tool(tool_name)
             if extract_tool is None:
                 return ToolResult(
@@ -1357,7 +1355,7 @@ class GoogleDriveTool(Tool):
                 limits["max_chars"] = _MAX_READ_BYTES
             if tool_name == "xlsx_extract":
                 limits["max_rows"] = _SHEET_READ_MAX_ROWS
-            result = await extract_tool.execute(path=tmp_path, **limits)
+            result = await extract_tool.execute(path=str(tmp_path), **limits)
             if result.success:
                 kind = f"{mime} → exported as {export_mime}" if export_mime else mime
                 header = f"[Google Drive: {name}]\n[Type: {kind}]\n[Size: {self._format_size(len(body))}]\n"
@@ -1371,11 +1369,6 @@ class GoogleDriveTool(Tool):
                     content = content[:_MAX_READ_BYTES] + "\n\n... [content truncated]"
                 return ToolResult(success=True, content=header + "\n" + content)
             return result
-        finally:
-            try:
-                Path(tmp_path).unlink(missing_ok=True)
-            except Exception:
-                pass
 
     async def _download_as_text(
         self, token: str, file_id: str, name: str, mime: str,

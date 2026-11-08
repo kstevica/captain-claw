@@ -241,6 +241,31 @@ class TestBytesToText:
         # extractor (which emits a markdown doc), not decoded as raw text.
         assert out is not None and out.lstrip().startswith("#")
 
+    def test_a_document_is_headed_with_its_own_name(self):
+        """The Markdown starts with the file's name, never the temp copy's."""
+        import io
+        import zipfile
+
+        import openpyxl
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr(
+                "word/document.xml",
+                '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                "<w:body><w:p><w:r><w:t>Minutes of the board.</w:t></w:r></w:p></w:body></w:document>",
+            )
+        out = vfs_drive.bytes_to_text(buf.getvalue(), ".docx", "Board minutes.docx")
+        assert out.startswith("# Board minutes.docx\n") and "Minutes of the board." in out
+
+        # A Google Sheet's name has no extension; it reads as its .xlsx export.
+        wb = openpyxl.Workbook()
+        wb.active.append(["Item", "Cost"])
+        buf = io.BytesIO()
+        wb.save(buf)
+        out = vfs_drive.bytes_to_text(buf.getvalue(), ".xlsx", "Budget 2026")
+        assert out.startswith("# Budget 2026.xlsx\n") and "tmp" not in out
+
 
 class TestFindMount:
     async def test_finds_mount_and_rel(self, mount):

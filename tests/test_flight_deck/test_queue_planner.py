@@ -252,6 +252,21 @@ def test_a_broken_file_never_fails_the_plan():
     assert preview_file("truncated.xlsx", b"PK\x03\x04 not really a zip")
 
 
+def test_a_document_preview_is_headed_with_its_own_name():
+    """The planner sees "# Q3 targets.DOCX", not the temp copy's "# tmpab12cd.docx"."""
+    import io, zipfile
+    from captain_claw.flight_deck.queue_planner import preview_file
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("word/document.xml",
+                   '<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+                   "<w:body><w:p><w:r><w:t>Ship the importer.</w:t></w:r></w:p></w:body></w:document>")
+    out = preview_file("Q3 targets.DOCX", buf.getvalue())
+    assert out.startswith("# Q3 targets.DOCX\n") and "Ship the importer." in out
+    assert "tmp" not in out
+
+
 def test_prompt_tells_the_planner_a_path_must_reach_the_task():
     from captain_claw.flight_deck.queue_planner import _SYSTEM
 
