@@ -18,6 +18,7 @@ import type {
   TriageTemplate,
 } from '../../services/captainSwarm'
 import { useProcessStore } from '../../stores/processStore'
+import { ServesGoalPicker } from '../course/ServesGoalPicker'
 
 const ACTIVE = ['awaiting_go', 'baseline', 'running']
 const STATUS_TEXT: Record<string, string> = {
@@ -892,6 +893,9 @@ function RunView({ id, onChanged }: { id: string; onChanged: () => void }) {
           </div>
           <div className="mt-0.5 text-xs text-zinc-500">
             {STATUS_TEXT[run.status]}{run.stopped_reason ? `: ${run.stopped_reason}` : ''} · started by {run.started_by}
+          </div>
+          <div className="mt-1.5">
+            <ServesGoalPicker kind="swarm_run" refId={id} title={run.title} compact />
           </div>
         </div>
         <div className="flex gap-2">

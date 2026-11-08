@@ -1,7 +1,7 @@
 """The Arbiter — the decider that closes the autonomy loop (Topic 1 + Topic 4).
 
 It runs inside the consciousness heartbeat, right after a reflection. Given the
-candidate goals the system has surfaced to itself — the reflection's standing
+candidates the system has surfaced to itself — the reflection's standing
 intentions, its current thought, and the latest *agent* self-reflection bullets
 (Topic 4: reflections → proposed work) — it ranks them into one concrete next
 action and writes it to the action ledger.
@@ -30,6 +30,7 @@ from captain_claw.flight_deck.autonomy import (
     get_store,
     resolve_config,
 )
+from captain_claw.flight_deck.course import goal_ref, live_goals, prompt_lines
 
 _log = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ _RISKS = ("low", "normal", "high")
 _SYSTEM_PROMPT = (
     "You are the Arbiter: you turn the assistant's own reflections and standing "
     "intentions into its single next concrete action on the user's behalf.\n\n"
-    "From the candidate goals below, pick the ONE most useful thing to do now and "
+    "From the candidates below, pick the ONE most useful thing to do now and "
     "express it as a concrete action. Lean toward proposing one action whenever a "
     "candidate suggests something genuinely helpful — a check-in or nudge to the "
     "user, a small piece of research, a reminder, a recurring task. Return "
@@ -74,7 +75,9 @@ _SYSTEM_PROMPT = (
     'or re-snoozing a "follow-up due" candidate — copy the id after "FU:"), '
     '"event_ref": the EV:<id> of the surfaced event this action is about (copy the '
     'id after "EV:" from the candidate — set it on ANY action derived from an '
-    'event so the assistant can open the real item)}\n\n'
+    'event so the assistant can open the real item), '
+    '"goal_id": the G:<id> of the Course goal this action serves (only one listed '
+    'under "Course"; omit it when none fits)}\n\n'
     "Kind/risk mapping (use these exact kinds): a proactive message to the user is "
     'kind="nudge", risk="low". Running a task with the agent\'s tools is '
     'kind="run_prompt" (risk "normal", or "high" if it sends/changes external data). '
@@ -114,6 +117,12 @@ _SYSTEM_PROMPT = (
     'kind="nudge" reminding the user (set "follow_up_id" to its FU:<id>; make the '
     "reminder MORE insistent the older it is / the more times it has been surfaced), "
     'or re-snooze it with kind="track" + "follow_up_id" + a new "follow_up_days".\n'
+    "COURSE: when a 'Course' list is given, it is what the user's work is for. Prefer "
+    "the candidate that moves one of those goals forward and score it higher; set "
+    "\"goal_id\" to that goal's G:<id> (copy the id after \"G:\"). A timely candidate that "
+    "serves no goal (someone waiting for a reply, a deadline) is still right to pick — "
+    "leave goal_id out then. Never invent a goal id. A goal never makes an action less "
+    "risky and never replaces the user's approval.\n"
     "Score honestly: a genuinely useful action is ~0.7-0.9; score low only if you "
     "doubt it helps. A track is cheap and worth doing — score it ~0.6+. Don't invent "
     "busywork, and never duplicate the 'already proposed' list.\n\n"
@@ -238,6 +247,8 @@ def _parse_actions(text: str) -> list[dict[str, Any]]:
             # event_ref ties an action back to the surfaced event it acts on, so
             # dispatch can ground the agent with the real handle (see EV:<id>).
             "event_ref": str(raw.get("event_ref") or "").strip().removeprefix("EV:")[:48],
+            # The Course goal it serves (validated against the goals shown).
+            "goal_id": goal_ref(raw.get("goal_id")),
         })
     return out
 
@@ -676,10 +687,17 @@ async def maybe_run_arbiter(
                 + (" · needs the user's approval" if a["human_only"] else "")
                 for a in catalog
             )
+        # Course: what the user's work is for (the deck's goals and theirs),
+        # each with the id the ranker may set as "goal_id".
+        course_goals = live_goals(user_id)
+        course_hint = ""
+        if course_goals:
+            course_hint = ("\n\nCourse (what the user's work is for — the goal an action "
+                           "serves goes in goal_id):\n" + prompt_lines(course_goals))
         user_prompt = (
-            "Candidate goals the assistant has surfaced to itself:\n"
+            "Candidates the assistant has surfaced to itself:\n"
             + "\n".join(f"- {c}" for c in candidates)
-            + rel_hint + dup_hint + run_hint + cat_hint
+            + rel_hint + dup_hint + run_hint + cat_hint + course_hint
         )
 
         # Think through the same agent that authored the reflection.
@@ -812,11 +830,17 @@ async def maybe_run_arbiter(
         _tk = _thread_key(_chosen_ev) if _chosen_ev is not None else ""
         if _tk:
             _payload = {**(_payload or {}), "thread_key": _tk}
+        # Only a goal the ranker was shown: anything else is dropped, never trusted.
+        _goal = chosen.get("goal_id") or ""
+        if _goal and _goal not in {g["id"] for g in course_goals}:
+            emit("goal ignored: not one of the user's live goals", _goal, routine=True)
+            _goal = ""
         row = store.add_action(
             user_id,
             kind=chosen["kind"], title=chosen["title"], rationale=chosen["rationale"],
             source="reflection", risk=chosen["risk"], domain=chosen["domain"],
             score=chosen["score"], status="awaiting_approval", payload=_payload,
+            goal_id=_goal,
         )
 
         from captain_claw.flight_deck.fd_dispatch import dispatch_action, should_auto_dispatch

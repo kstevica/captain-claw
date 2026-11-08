@@ -56,9 +56,13 @@ export interface Goal {
   due_at: string | null
   created_at: string
   updated_at: string
+  progress?: number | null
+  progress_note?: string
   can_edit?: boolean
   flags?: GoalFlags
   grace_days?: number
+  /** When work last moved it (the newest evidence; yours only on a deck goal). */
+  last_moved?: string | null
 }
 
 export interface CourseSettings {
@@ -93,9 +97,34 @@ export interface GoalEvent {
   detail: Record<string, unknown>
 }
 
+export type LinkKind = 'plan' | 'project' | 'schedule' | 'swarm_run' | 'task' | 'autonomy_action' | 'session' | 'line_item'
+
+export const LINK_LABELS: Record<LinkKind, string> = {
+  plan: 'Plan', project: 'Project', schedule: 'Scheduled task', swarm_run: 'Swarm run', task: 'Task',
+  autonomy_action: 'Autonomous Work', session: 'Agent session', line_item: 'Line item',
+}
+
+export interface GoalLink {
+  kind: LinkKind
+  ref_id: string
+  note: string
+  at: string
+  added_by: string
+  owner_id: string
+}
+
+/** The goal an item serves, as the item's own page shows it. */
+export interface ServedGoal {
+  id: string
+  title: string
+  scope: Scope
+  horizon: Horizon
+  status: GoalStatus
+}
+
 export interface GoalDetail {
   goal: Goal
-  links: { kind: string; ref_id: string; note: string; at: string }[]
+  links: GoalLink[]
   events: GoalEvent[]
   can_edit: boolean
 }
@@ -143,6 +172,17 @@ const json = (method: string, body: unknown): RequestInit => ({ method, body: JS
 
 export const getCourse = () => call<CourseResponse>('/fd/course')
 
+// One read of the course shared by everything on the screen for a moment
+// (the "Serves a goal" pickers, the Taskboard's goal chips).
+let cached: { at: number; promise: Promise<CourseResponse> } | null = null
+export function courseOnce(): Promise<CourseResponse> {
+  if (!cached || Date.now() - cached.at > 20_000) {
+    cached = { at: Date.now(), promise: getCourse() }
+    cached.promise.catch(() => { cached = null })
+  }
+  return cached.promise
+}
+
 export const getPreview = (agentRef = '') =>
   call<CoursePreview>(`/fd/course/preview${agentRef ? `?agent_ref=${encodeURIComponent(agentRef)}` : ''}`)
 
@@ -171,6 +211,22 @@ export const editGoal = (id: string, d: GoalDraft) =>
 export const goalAction = (id: string, action: GoalAction) =>
   call<{ goal: Goal; agents_updated: number }>(
     `/fd/course/goals/${encodeURIComponent(id)}/${action}`, { method: 'POST' })
+
+export const removeLink = (goalId: string, kind: LinkKind, refId: string) =>
+  call<{ ok: boolean }>(`/fd/course/goals/${encodeURIComponent(goalId)}/links/${kind}/${encodeURIComponent(refId)}`,
+    { method: 'DELETE' })
+
+/** The goal one of the caller's items serves (null when none). */
+export const getServed = (kind: LinkKind, refId: string) =>
+  call<{ goal: ServedGoal | null }>(`/fd/course/served?kind=${kind}&ref_id=${encodeURIComponent(refId)}`)
+
+/** Set ('' clears) the one goal an item serves; `note` names the item. */
+export const setServed = (kind: LinkKind, refId: string, goalId: string, note: string) =>
+  call<{ goal: ServedGoal | null }>('/fd/course/served', json('PUT', { kind, ref_id: refId, goal_id: goalId, note }))
+
+/** "Plan a route": Autonomous Work plans the steps to a goal (a plan you advance). */
+export const planRoute = (goalId: string) =>
+  call<{ ok: boolean; plan: { id: string; goal: string } }>('/fd/autonomy/plans', json('POST', { goal_id: goalId }))
 
 export const getSettings = () => call<SettingsResponse>('/fd/admin/course/settings')
 

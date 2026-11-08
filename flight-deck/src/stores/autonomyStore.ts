@@ -104,6 +104,8 @@ export interface AutonomyAction {
   created_at: string
   dispatched_at: string | null
   completed_at: string | null
+  /** The Course goal it serves ('' when none). */
+  goal_id?: string
 }
 
 export interface ReliabilityRow {
@@ -150,6 +152,8 @@ export interface Plan {
   steps: PlanStep[]
   note: string
   created_at: string
+  /** The Course goal this plan is a route to ('' when none). */
+  goal_id?: string
 }
 
 export interface CatalogItem {

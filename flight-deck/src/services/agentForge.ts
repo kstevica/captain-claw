@@ -133,6 +133,23 @@ export interface ForgePlan {
   approved: { id: string; name: string; archetype: string }[]
   created: ForgeCreated[]
   recommendations: ForgeRecommendations | null
+  /** What was added to the person's Course after the team was made (null when they didn't ask). */
+  course?: ForgeCourseResult | null
+}
+
+/** The team's goal for the person's Course, chosen at the review step. */
+export interface ForgeCourseChoice {
+  title: string
+  success: string
+  horizon: 'strategic' | 'long' | 'medium' | 'short'
+  agent_goals: boolean
+}
+
+export interface ForgeCourseResult {
+  team: string
+  title: string
+  agents: Record<string, string>
+  errors: string[]
 }
 
 export interface ForgePlanRow {
@@ -204,7 +221,8 @@ export const forgeApi = {
   limits: () => api<ForgeLimits>('/fd/agent-forge/limits'),
   replan: (id: string, note: string, questions: ForgeQuestion[], agents: ForgeDraftAgent[] = [], maxAgents?: number) =>
     post<{ status: ForgeStatus }>(`${plans}/${id}/replan`, { note, questions, agents, max_agents: maxAgents }),
-  approve: (id: string, agents: ForgeDraftAgent[], overview: string) => post<{ status: ForgeStatus }>(`${plans}/${id}/approve`, { agents, overview }),
+  approve: (id: string, agents: ForgeDraftAgent[], overview: string, course?: ForgeCourseChoice | null) =>
+    post<{ status: ForgeStatus }>(`${plans}/${id}/approve`, { agents, overview, course: course ?? null }),
   recommend: (id: string) => post<{ status: ForgeStatus }>(`${plans}/${id}/recommend`),
   schedules: (id: string, items: ForgeSchedule[], tz: string) =>
     post<{ results: { id: string; ok: boolean; error?: string; job_id?: string }[] }>(`${plans}/${id}/schedules`, { items, tz }),

@@ -114,6 +114,8 @@ _TYPES: dict[str, tuple[str, bool]] = {
     "profile_research_error": ("agent", True),
     # Course: a goal came due for review ("Still on course?").
     "course_review": ("ask", True),
+    # Course: an agent thinks a goal is done ("Looks achieved?").
+    "course_looks_achieved": ("ask", True),
     "whatsapp_web": ("deck", True),
     "info": ("deck", False),
     "success": ("deck", False),
@@ -132,6 +134,7 @@ ANSWERED_REFS = frozenset({"autonomy_action", "person_ask", "course_review"})
 _TRUST: dict[str, str] = {
     "autonomy_proposal": "agent",
     "autonomy_nudge": "agent",
+    "course_looks_achieved": "agent",
     "email_autoreply": "untrusted",
     "email_autoreply_held": "untrusted",
     "email_autoreply_issue": "untrusted",

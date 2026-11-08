@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Cpu, Sliders, ListChecks, Loader2, AlertCircle, Check, ShieldCheck, Gauge, Play } from 'lucide-react'
 import { useAutonomyStore, type AutonomyConfig, type AutonomyAction, type CustomAction, type CustomSource } from '../stores/autonomyStore'
+import { GoalTag } from '../components/course/GoalTag'
 
 // Theming (see index.css): zinc is auto-remapped in light mode, so zinc classes
 // are written dark-first with NO dark: pairs. Non-zinc accents use explicit
@@ -335,6 +336,7 @@ function ActionCard({ action, onApprove, onReject, onUndo }: {
       </div>
       <div className="text-sm font-medium text-zinc-100">{action.title || '(untitled)'}</div>
       {action.rationale && <p className="mt-0.5 text-xs text-zinc-400">{action.rationale}</p>}
+      {action.goal_id && <div className="mt-1"><GoalTag goalId={action.goal_id} /></div>}
       {/* A Taskboard next step: what Approve sends, in the model's words. */}
       {action.source === 'taskboard' && !!(action.payload as { text?: unknown } | undefined)?.text && (
         <p className="mt-1.5 whitespace-pre-wrap break-words rounded-lg border border-zinc-800 px-2 py-1.5 text-xs text-zinc-300">
@@ -715,6 +717,7 @@ export function AutonomousWorkPage() {
                     <span className="font-medium text-zinc-100">{p.goal}</span>
                     <span className="ml-auto text-zinc-600">{relTime(p.created_at)}</span>
                   </div>
+                  {p.goal_id && <div className="mb-1"><GoalTag goalId={p.goal_id} prefix="Route to" /></div>}
                   <ol className="ml-4 list-decimal space-y-0.5 text-xs">
                     {p.steps.map((s) => (
                       <li key={s.idx} className={

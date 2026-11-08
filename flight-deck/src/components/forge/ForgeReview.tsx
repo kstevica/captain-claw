@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import {
   ArrowLeft, ArrowRight, Check, CornerUpLeft, MessageCircleQuestion, PackageCheck, Pencil, RefreshCw, Trash2, Users,
 } from 'lucide-react'
-import { forgeApi, type ForgeDraftAgent, type ForgePlan, type ForgeQuestion } from '../../services/agentForge'
+import { forgeApi, type ForgeCourseChoice, type ForgeDraftAgent, type ForgePlan, type ForgeQuestion } from '../../services/agentForge'
 import type { Archetype } from '../../services/tierConfig'
 import { Button, Card, Field, Pill, Sheet, inputCls } from '../console/parts'
 import { AgentBadge, Chip, Eyebrow, ErrorNote, TeamSize } from './forgeParts'
@@ -27,6 +27,12 @@ export function ForgeReview({ plan, archetypes, onChanged }: {
   const [open, setOpen] = useState('')
   const [busy, setBusy] = useState<'' | 'plan' | 'create'>('')
   const [err, setErr] = useState('')
+  // Course: the team's goal on the person's own Course, and one goal per new agent.
+  const [toCourse, setToCourse] = useState(false)
+  const [goal, setGoal] = useState<ForgeCourseChoice>(() => ({
+    title: plan.request.split(/\s+/).join(' ').slice(0, 120), success: '', horizon: 'long', agent_goals: true,
+  }))
+  const goalMissing = toCourse && (!goal.title.trim() || (goal.horizon !== 'strategic' && !goal.success.trim()))
 
   const nameOf = useMemo(() => new Map(agents.map((a) => [a.id, a.name])), [agents])
   const answered = (q: ForgeQuestion) => (q.selected || []).length > 0 || !!(q.other || '').trim()
@@ -60,7 +66,7 @@ export function ForgeReview({ plan, archetypes, onChanged }: {
     }
   }
   const replan = () => act('plan', () => forgeApi.replan(plan.id, note.trim(), questions, agents, cap))
-  const create = () => act('create', () => forgeApi.approve(plan.id, agents, overview))
+  const create = () => act('create', () => forgeApi.approve(plan.id, agents, overview, toCourse ? goal : null))
   const n = agents.length
 
   return (
@@ -143,6 +149,40 @@ export function ForgeReview({ plan, archetypes, onChanged }: {
               </ul>
             )}
           </section>
+
+          <section className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-4">
+            <label className="flex items-start gap-2.5">
+              <input type="checkbox" checked={toCourse} onChange={(e) => setToCourse(e.target.checked)} className="mt-0.5 h-4 w-4 accent-violet-600" />
+              <span>
+                <span className="block text-sm font-medium text-zinc-100">Add this team’s goal to your Course</span>
+                <span className="block text-xs text-zinc-500">
+                  Once the agents exist, the goal goes on your Course and each agent gets a goal of its own from what it’s for, serving it. Every agent working for you then knows what the team is for.
+                </span>
+              </span>
+            </label>
+            {toCourse && (
+              <div className="mt-3 grid gap-2 pl-6.5 wide:grid-cols-2">
+                <Field label="The team’s goal">
+                  <input value={goal.title} maxLength={120} onChange={(e) => setGoal({ ...goal, title: e.target.value })} className={inputCls} />
+                </Field>
+                <Field label={goal.horizon === 'strategic' ? 'How you’ll know (optional)' : 'How you’ll know it’s done'}>
+                  <input value={goal.success} maxLength={500} onChange={(e) => setGoal({ ...goal, success: e.target.value })}
+                    placeholder="e.g. Three EU customers on the new plan" className={inputCls} />
+                </Field>
+                <Field label="Horizon">
+                  <select value={goal.horizon} onChange={(e) => setGoal({ ...goal, horizon: e.target.value as ForgeCourseChoice['horizon'] })} className={inputCls}>
+                    <option value="strategic">Strategic (a direction)</option>
+                    <option value="long">Long-term (a quarter or more)</option>
+                    <option value="medium">Medium-term (weeks)</option>
+                  </select>
+                </Field>
+                <label className="flex items-center gap-2 self-end pb-2 text-xs text-zinc-400">
+                  <input type="checkbox" checked={goal.agent_goals} onChange={(e) => setGoal({ ...goal, agent_goals: e.target.checked })} className="h-4 w-4 accent-violet-600" />
+                  A goal for each agent too
+                </label>
+              </div>
+            )}
+          </section>
         </div>
       </div>
 
@@ -162,11 +202,11 @@ export function ForgeReview({ plan, archetypes, onChanged }: {
           <div className="flex gap-2">
             {wantsPlan ? (
               <>
-                <Button icon={Check} onClick={create} disabled={n === 0 || !!busy} busy={busy === 'create'} className="flex-1 wide:flex-none">Create as it is</Button>
+                <Button icon={Check} onClick={create} disabled={n === 0 || !!busy || goalMissing} busy={busy === 'create'} className="flex-1 wide:flex-none">Create as it is</Button>
                 <Button variant="primary" icon={RefreshCw} onClick={replan} disabled={!!busy} busy={busy === 'plan'} className="flex-1 wide:flex-none">Update the plan</Button>
               </>
             ) : (
-              <Button variant="primary" icon={Check} onClick={create} disabled={n === 0 || !!busy} busy={busy === 'create'} className="flex-1 wide:flex-none">
+              <Button variant="primary" icon={Check} onClick={create} disabled={n === 0 || !!busy || goalMissing} busy={busy === 'create'} className="flex-1 wide:flex-none">
                 Create {n} agent{n === 1 ? '' : 's'}
               </Button>
             )}

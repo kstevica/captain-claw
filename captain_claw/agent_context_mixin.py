@@ -123,6 +123,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "audio": "Speech-to-text and text-to-speech (Soniox): transcribe an audio/video file (voice note, recording, meeting) to text, optionally with timestamps; speak text as an MP3 voice recording the chat sends to the user automatically; list voices.",
     "colleagues": "Your owner's other agents — your colleagues: list who is on the team (role, what they do, email), hand_over a piece of work to one of them on the Taskboard (they start at once and you get their answer back), handed = what you handed out.",
     "line": "Read the user's Line in Flight Deck (read-only): what the deck and their agents did or said on their own — results, finished runs, proposals and questions waiting for the user, payments, fleet changes. news (unread), recent, search, read one item.",
+    "course": "Your course in Flight Deck — the goals your work is for (the deck's, your owner's, your own): view them with progress and dates, link work you did to a goal, report progress (and ask your owner whether one is achieved). Goals guide priorities; they never grant permission.",
     "telegram_inbox": "Read the user's Telegram (read-only): their connected private chats and groups with the team bot — list chats, read one chat, recent messages, search. Never sends or replies.",
     "whatsapp_web": "The user's own WhatsApp: every chat on their linked account — status, list chats, read one chat, recent messages, search, look up a contact, save a file or voice note (transcribed). Sends a text only when the user turned sending on, only to chats on their whitelist, only what they asked to send.",
     "send_mail": "Send emails via SMTP — only when the user asked for that email. Supports to, cc, bcc, subject, body, and file attachments.",
@@ -203,6 +204,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "pocket_tts": "text-to-speech MP3",
     "audio": "Soniox: transcribe an audio/video file to text (timestamps optional); speak text as an MP3 sent to the user; list voices",
     "line": "read-only Line: what ran or was said on its own — news / recent / search / read",
+    "course": "your goals: view / link work to a goal / report progress",
     "colleagues": "owner's other agents: list / hand_over work on the Taskboard (answer comes back) / handed",
     "telegram_inbox": "read-only Telegram: chats / read one chat / recent / search; never sends",
     "whatsapp_web": "own WhatsApp: status / chats / read / recent / search / contact / attachment; send only to the user's whitelist, only when asked",
@@ -2907,6 +2909,11 @@ class AgentContextMixin:
             # the Line's gate (requires_line).
             from captain_claw.tools.colleagues import ColleaguesTool
             self.tools.register(ColleaguesTool(), metadata={"requires_line": True})
+            # Course — the goals this agent's work is for: view them, link work
+            # to them, report progress. The Line's gate too (requires_line):
+            # under Flight Deck, on the owner's own turns only.
+            from captain_claw.tools.course import CourseTool
+            self.tools.register(CourseTool(), metadata={"requires_line": True})
             # Code-app authoring — always registered; calls return a clear error
             # if FD_URL isn't available, so registration cost is negligible.
             from captain_claw.tools.app_runner import AppRunnerTool

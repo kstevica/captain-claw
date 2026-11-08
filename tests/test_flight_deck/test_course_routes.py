@@ -293,10 +293,14 @@ class TestWrite:
         async with _client() as cl:
             g = (await _post(cl, BOB, scope="user", horizon="long", title="G")).json()["goal"]
             r = await cl.post(f"/fd/course/goals/{g['id']}/links", headers=_hdr(BOB),
-                              json={"kind": "task", "ref_id": "t-1", "note": "the launch task"})
+                              json={"kind": "project", "ref_id": "p-1", "note": "the launch project"})
             assert r.status_code == 200
-            d = await cl.delete(f"/fd/course/goals/{g['id']}/links/task/t-1", headers=_hdr(BOB))
-            again = await cl.delete(f"/fd/course/goals/{g['id']}/links/task/t-1",
+            # A Taskboard task that isn't Bob's (there is none): refused.
+            task = await cl.post(f"/fd/course/goals/{g['id']}/links", headers=_hdr(BOB),
+                                 json={"kind": "task", "ref_id": "t-1"})
+            assert task.status_code == 404
+            d = await cl.delete(f"/fd/course/goals/{g['id']}/links/project/p-1", headers=_hdr(BOB))
+            again = await cl.delete(f"/fd/course/goals/{g['id']}/links/project/p-1",
                                     headers=_hdr(BOB))
         assert d.status_code == 200 and again.status_code == 404
 
@@ -494,3 +498,124 @@ def test_course_review_is_answered_elsewhere():
 
 def test_now_is_utc():
     assert datetime.now(UTC).tzinfo is not None
+
+
+# ── Phase 2: evidence, "Serves a goal", the agent's side ─────────────
+
+
+class TestServed:
+    async def test_set_read_and_clear_the_goal_an_item_serves(self, deck):
+        async with _client() as cl:
+            g = (await _post(cl, BOB, scope="user", horizon="long", title="Ship EU")).json()["goal"]
+            g2 = (await _post(cl, BOB, scope="user", horizon="long", title="Other")).json()["goal"]
+            none = await cl.get("/fd/course/served", headers=_hdr(BOB),
+                                params={"kind": "project", "ref_id": "p1"})
+            put = await cl.put("/fd/course/served", headers=_hdr(BOB), json={
+                "kind": "project", "ref_id": "p1", "goal_id": g["id"], "note": "EU launch project"})
+            moved = await cl.put("/fd/course/served", headers=_hdr(BOB), json={
+                "kind": "project", "ref_id": "p1", "goal_id": g2["id"], "note": "EU launch project"})
+            got = await cl.get("/fd/course/served", headers=_hdr(BOB),
+                               params={"kind": "project", "ref_id": "p1"})
+            cleared = await cl.put("/fd/course/served", headers=_hdr(BOB), json={
+                "kind": "project", "ref_id": "p1", "goal_id": ""})
+        assert none.json() == {"goal": None}
+        assert put.json()["goal"]["id"] == g["id"] and moved.json()["goal"]["id"] == g2["id"]
+        assert got.json()["goal"]["title"] == "Other"
+        assert cleared.json() == {"goal": None}
+        assert c.get_store().links_for("project", "p1") == []
+
+    async def test_only_your_own_items_and_goals(self, deck):
+        async with _client() as cl:
+            carols = (await _post(cl, CAROL, scope="user", horizon="long", title="C")).json()["goal"]
+            mine = (await _post(cl, BOB, scope="user", horizon="long", title="B")).json()["goal"]
+            other_goal = await cl.put("/fd/course/served", headers=_hdr(BOB), json={
+                "kind": "project", "ref_id": "p1", "goal_id": carols["id"]})
+            not_mine = await cl.put("/fd/course/served", headers=_hdr(BOB), json={
+                "kind": "schedule", "ref_id": "job_nope", "goal_id": mine["id"]})
+            bad_kind = await cl.get("/fd/course/served", headers=_hdr(BOB),
+                                    params={"kind": "session", "ref_id": "s1"})
+        assert other_goal.status_code == 404 and not_mine.status_code == 404
+        assert bad_kind.status_code == 400
+
+    async def test_on_a_deck_goal_each_user_sees_only_their_own_work(self, deck):
+        async with _client() as cl:
+            g = (await _post(cl, ADMIN, scope="instance", horizon="long", title="Deck")).json()["goal"]
+            await cl.put("/fd/course/served", headers=_hdr(BOB), json={
+                "kind": "project", "ref_id": "p-bob", "goal_id": g["id"], "note": "Bob's secret project"})
+            await cl.put("/fd/course/served", headers=_hdr(CAROL), json={
+                "kind": "project", "ref_id": "p-carol", "goal_id": g["id"], "note": "Carol's project"})
+            bob = await cl.get(f"/fd/course/goals/{g['id']}", headers=_hdr(BOB))
+            carol = await cl.get(f"/fd/course/goals/{g['id']}", headers=_hdr(CAROL))
+            sneaky = await cl.delete(f"/fd/course/goals/{g['id']}/links/project/p-bob",
+                                     headers=_hdr(CAROL))
+            page = await cl.get("/fd/course", headers=_hdr(CAROL))
+        assert [lk["note"] for lk in bob.json()["links"]] == ["Bob's secret project"]
+        assert [lk["note"] for lk in carol.json()["links"]] == ["Carol's project"]
+        assert all(e["event"] != "linked" or e["detail"]["owner_id"] == CAROL
+                   for e in carol.json()["events"])
+        assert sneaky.status_code == 404
+        assert page.json()["goals"]["deck"][0]["last_moved"]
+
+
+def _agent(monkeypatch, token: str):
+    from captain_claw.flight_deck import google_oauth_routes
+
+    monkeypatch.setattr(google_oauth_routes, "_authorize_agent_call", lambda request: None)
+    owners = {e["web_auth"]: e["owner"] for e in _REGISTRY.values()}
+
+    async def owner_of(request, service=""):
+        return owners[request.headers.get("X-Agent-Auth", "")]
+
+    monkeypatch.setattr(google_oauth_routes, "_agent_owner", owner_of)
+    return {"X-Agent-Auth": token}
+
+
+class TestAgentSide:
+    async def test_view_link_report(self, deck, monkeypatch):
+        hdr = _agent(monkeypatch, "bob-tok")
+        async with _client() as cl:
+            await _post(cl, ADMIN, scope="instance", horizon="long", title="Deck")
+            mine = (await _post(cl, BOB, scope="user", horizon="long", title="Bob's")).json()["goal"]
+            own = (await _post(cl, BOB, scope="agent", agent_ref=_ref("bob-agent"), horizon="short",
+                               title="Agent's")).json()["goal"]
+            await _post(cl, BOB, scope="agent", agent_ref=_ref("bob-two"), horizon="short",
+                        title="The other agent's")
+            await _post(cl, CAROL, scope="user", horizon="long", title="Carol's")
+            view = await cl.post("/fd/course/agent/view", headers=hdr)
+            link = await cl.post("/fd/course/agent/link", headers=hdr, json={
+                "goal_id": f"G:{own['id']}", "kind": "session", "ref_id": "s-42", "note": "drafted it"})
+            report = await cl.post("/fd/course/agent/report", headers=hdr, json={
+                "goal_id": mine["id"], "progress": 0.5, "note": "half there", "looks_achieved": True})
+            again = await cl.post("/fd/course/agent/report", headers=hdr, json={
+                "goal_id": mine["id"], "progress": 0.9, "looks_achieved": True})
+        titles = {g["title"] for g in view.json()["goals"]}
+        assert titles == {"Deck", "Bob's", "Agent's"}
+        assert link.status_code == 200 and link.json()["goal"] == "Agent's"
+        assert c.get_store().links(own["id"])[0]["owner_id"] == BOB
+        assert report.status_code == 200 and report.json()["asked_owner"] is True
+        assert again.json()["asked_owner"] is False                     # once a day
+        assert c.get_store().get(mine["id"])["progress"] == 0.9
+        items = await deck.list_line_items(BOB, needs_you=True)
+        assert [i["title"] for i in items] == ["Looks achieved? Bob's"]
+        assert items[0]["type"] == "course_looks_achieved"
+
+    async def test_refusals(self, deck, monkeypatch):
+        hdr = _agent(monkeypatch, "bob-tok")
+        async with _client() as cl:
+            deckg = (await _post(cl, ADMIN, scope="instance", horizon="long", title="Deck")).json()["goal"]
+            carols = (await _post(cl, CAROL, scope="user", horizon="long", title="C")).json()["goal"]
+            mine = (await _post(cl, BOB, scope="user", horizon="long", title="B")).json()["goal"]
+            on_deck = await cl.post("/fd/course/agent/report", headers=hdr,
+                                    json={"goal_id": deckg["id"], "progress": 0.5})
+            on_carol = await cl.post("/fd/course/agent/link", headers=hdr, json={
+                "goal_id": carols["id"], "kind": "session", "ref_id": "s"})
+            bad_kind = await cl.post("/fd/course/agent/link", headers=hdr, json={
+                "goal_id": mine["id"], "kind": "line_item", "ref_id": "x"})
+            not_owned = await cl.post("/fd/course/agent/link", headers=hdr, json={
+                "goal_id": mine["id"], "kind": "plan", "ref_id": "plan_nope"})
+            bad_progress = await cl.post("/fd/course/agent/report", headers=hdr,
+                                         json={"goal_id": mine["id"], "progress": 2})
+            stranger = await cl.post("/fd/course/agent/view", headers={"X-Agent-Auth": "nope"})
+        assert on_deck.status_code == 400 and on_carol.status_code == 404
+        assert bad_kind.status_code == 400 and not_owned.status_code == 404
+        assert bad_progress.status_code == 400 and stranger.status_code == 403

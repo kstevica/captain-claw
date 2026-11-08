@@ -23,6 +23,7 @@ import {
 } from '../services/course'
 import { GoalForm } from '../components/course/GoalForm'
 import { DeckCourseSettings } from '../components/course/DeckCourseSettings'
+import { GoalDrawer } from '../components/course/GoalDrawer'
 
 // Course: what the work is for. Three bands — the deck's goals (set by an
 // admin), the user's own, and each of their agents' — every goal with a
@@ -52,6 +53,7 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
   const [saving, setSaving] = useState(false)
   const [formError, setFormError] = useState<string | null>(null)
   const [busy, setBusy] = useState<string | null>(null)
+  const [opened, setOpened] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -145,6 +147,7 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
         off={allowed.length === 0}
         onAdd={canAdd && !editing ? () => { setFormError(null); setEditing({ mode: 'new', scope, agentRef }) } : undefined}
         onEdit={(g) => { setFormError(null); setEditing({ mode: 'edit', goal: g }) }}
+        onOpen={(g) => setOpened(g.id)}
         onAction={(g, a) => void act(g, a)}
         form={form(scope, agentRef)}
       />
@@ -221,6 +224,7 @@ export function CoursePage({ kiosk = false }: { kiosk?: boolean }) {
             {data.is_admin && !kiosk && <DeckCourseSettings onSaved={() => void load()} />}
           </div>
         )}
+        {opened && <GoalDrawer goalId={opened} onClose={() => setOpened(null)} onChanged={() => void load()} />}
       </div>
     </div>
   )
@@ -243,7 +247,7 @@ function Section({ icon: Icon, title, hint, children }: {
   )
 }
 
-function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onAction, form }: {
+function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onOpen, onAction, form }: {
   goals: Goal[]
   byId: Map<string, Goal>
   caps: Record<Horizon, number>
@@ -252,6 +256,7 @@ function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onAction,
   off: boolean
   onAdd?: () => void
   onEdit: (g: Goal) => void
+  onOpen: (g: Goal) => void
   onAction: (g: Goal, a: GoalAction) => void
   form: React.ReactNode
 }) {
@@ -272,7 +277,8 @@ function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onAction,
             <div className="space-y-1.5">
               {here.map((g) => (
                 <GoalCard key={g.id} goal={g} parent={byId.get(g.parent_id)} busy={busy === g.id}
-                  readOnly={readOnly || !g.can_edit} onEdit={() => onEdit(g)} onAction={(a) => onAction(g, a)} />
+                  readOnly={readOnly || !g.can_edit} onEdit={() => onEdit(g)} onOpen={() => onOpen(g)}
+                  onAction={(a) => onAction(g, a)} />
               ))}
             </div>
           </div>
@@ -296,7 +302,8 @@ function Band({ goals, byId, caps, busy, readOnly, off, onAdd, onEdit, onAction,
           <div className="mt-1.5 space-y-1.5">
             {finished.map((g) => (
               <GoalCard key={g.id} goal={g} parent={byId.get(g.parent_id)} busy={busy === g.id}
-                readOnly={readOnly || !g.can_edit} onEdit={() => onEdit(g)} onAction={(a) => onAction(g, a)} />
+                readOnly={readOnly || !g.can_edit} onEdit={() => onEdit(g)} onOpen={() => onOpen(g)}
+                onAction={(a) => onAction(g, a)} />
             ))}
           </div>
         </details>
@@ -312,12 +319,13 @@ const STATUS_CHIP: Partial<Record<Goal['status'], string>> = {
   dropped: 'bg-zinc-700/40 text-zinc-500',
 }
 
-function GoalCard({ goal: g, parent, busy, readOnly, onEdit, onAction }: {
+function GoalCard({ goal: g, parent, busy, readOnly, onEdit, onOpen, onAction }: {
   goal: Goal
   parent?: Goal
   busy: boolean
   readOnly: boolean
   onEdit: () => void
+  onOpen: () => void
   onAction: (a: GoalAction) => void
 }) {
   const f = g.flags
@@ -333,7 +341,13 @@ function GoalCard({ goal: g, parent, busy, readOnly, onEdit, onAction }: {
       <div className="flex flex-wrap items-start gap-x-2 gap-y-1">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-1.5">
-            <span className={`text-sm ${g.status === 'dropped' ? 'text-zinc-500 line-through' : 'text-zinc-100'}`}>{g.title}</span>
+            <button
+              onClick={onOpen}
+              title="Open: the work that moved it, its history, Plan a route"
+              className={`text-left text-sm hover:underline ${g.status === 'dropped' ? 'text-zinc-500 line-through' : 'text-zinc-100'}`}
+            >
+              {g.title}
+            </button>
             {STATUS_CHIP[g.status] && (
               <span className={`rounded px-1.5 py-px text-[10px] font-medium capitalize ${STATUS_CHIP[g.status]}`}>{g.status}</span>
             )}
@@ -344,6 +358,8 @@ function GoalCard({ goal: g, parent, busy, readOnly, onEdit, onAction }: {
             {parent && <span>Serves: {parent.title}</span>}
             {g.due_at && <span>Due {shortDate(g.due_at)}</span>}
             {g.status === 'active' && g.review_at && <span>Review by {shortDate(g.review_at)}</span>}
+            {g.progress != null && <span>{Math.round(g.progress * 100)}% along</span>}
+            {g.status === 'active' && <span>{g.last_moved ? `Last moved ${shortDate(g.last_moved)}` : 'No work linked yet'}</span>}
           </div>
           {f && (f.stale || f.due || f.horizon_retired || f.serves_nothing || f.parent_gone) && (
             <div className="mt-1 flex flex-wrap gap-1">

@@ -85,8 +85,14 @@ class PlansStore:
                 """
             )
             self._c().commit()
+            have = {r["name"] for r in self._c().execute("PRAGMA table_info(plans)")}
+            if "goal_id" not in have:
+                # Course (docs/course-plan.md): the goal a plan is a route to.
+                self._c().execute("ALTER TABLE plans ADD COLUMN goal_id TEXT NOT NULL DEFAULT ''")
+                self._c().commit()
 
-    def create_plan(self, user_id: str, goal: str, steps: list[dict[str, Any]]) -> dict[str, Any]:
+    def create_plan(self, user_id: str, goal: str, steps: list[dict[str, Any]],
+                    *, goal_id: str = "") -> dict[str, Any]:
         uid = _norm_user(user_id)
         pid = "plan_" + secrets.token_hex(8)
         now = _utcnow_iso()
@@ -100,9 +106,9 @@ class PlansStore:
         with self._lock:
             conn = self._c()
             conn.execute(
-                "INSERT INTO plans (id, user_id, goal, status, steps, created_at, updated_at)"
-                " VALUES (?, ?, ?, 'active', ?, ?, ?)",
-                (pid, uid, goal, json.dumps(norm_steps), now, now),
+                "INSERT INTO plans (id, user_id, goal, status, steps, created_at, updated_at, goal_id)"
+                " VALUES (?, ?, ?, 'active', ?, ?, ?, ?)",
+                (pid, uid, goal, json.dumps(norm_steps), now, now, str(goal_id or "")[:40]),
             )
             conn.commit()
         return self.get_plan(pid) or {}
@@ -356,6 +362,13 @@ async def advance_one(user_id: str, plan_id: str, *, auto: bool = False) -> dict
     step["reverse"] = res.get("reverse")
     await _step_to_line(user_id, plan, step, bool(res.get("ok")))
     if res.get("ok"):
+        if plan.get("goal_id"):
+            # A step done on a route to a Course goal is evidence for it.
+            from captain_claw.flight_deck import course
+
+            course.link_quietly(str(plan["goal_id"]), "plan", plan_id,
+                                note=f"{step.get('title') or 'A step'}: {step['result']}",
+                                actor="plan", owner_id=str(plan.get("user_id") or ""))
         step["status"] = "done"
         remaining = any(s["status"] == "pending" for s in steps)
         store.save_plan(plan_id, steps=steps, status="active" if remaining else "done", note="")

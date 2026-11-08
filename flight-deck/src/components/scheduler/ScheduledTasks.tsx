@@ -56,6 +56,7 @@ import {
   type TaskDelivery,
   type TaskRun,
 } from '../../services/schedulerApi'
+import { ServesGoalPicker } from '../course/ServesGoalPicker'
 
 // ── Scheduled tasks ─────────────────────────────────────────────────
 //
@@ -683,6 +684,9 @@ function TaskDetail({ job, agentName, agentRunning, query, onEdit, onDeleted, on
           <p className="mt-0.5 text-xs text-zinc-500">
             {describeSchedule(job.schedule, job.next_run_at)}{job.tz ? ` · ${job.tz.replace(/_/g, ' ')}` : ''} · {agentName}
           </p>
+          <div className="mt-1.5">
+            <ServesGoalPicker kind="schedule" refId={job.id} title={job.name || 'Scheduled task'} compact />
+          </div>
         </div>
         <div className="flex items-center gap-1">
           <button

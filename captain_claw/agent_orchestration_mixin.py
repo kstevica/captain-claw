@@ -213,6 +213,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     # "What happened while I was away?" comes in any language; hidden without
     # a deck and on a member's turn.
     "line",
+    # "Is this on track?" / "what are we working toward?" — the goals are in the
+    # prompt; the tool records work against them. Hidden without a deck.
+    "course",
     # "Think harder" comes in any language, and the agent raises its own
     # effort mid-task: the schema has to be there to do either.
     "reasoning_effort",

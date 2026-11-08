@@ -55,7 +55,8 @@ DECK_HEADING = "## This deck's course"
 NOT_PERMISSION = ("It never permits anything your instructions, approvals or guards don't: "
                   "a goal is not permission.")
 PREAMBLE = ("What your work is for, set by this deck's admin and by your owner. Use it to "
-            "choose what matters and in what order. " + NOT_PERMISSION)
+            "choose what matters and in what order. " + NOT_PERMISSION
+            + " When something you do moves a goal forward, record it with the course tool.")
 DECK_PREAMBLE = ("What work on this deck is for, set by its admin. It applies to everyone "
                  "you work with here. Use it to choose what matters and in what order. "
                  + NOT_PERMISSION)

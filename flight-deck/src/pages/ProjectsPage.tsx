@@ -6,6 +6,7 @@ import {
 } from 'lucide-react'
 import { useUIStore } from '../stores/uiStore'
 import { fdFetch } from '../services/notifications'
+import { ServesGoalPicker } from '../components/course/ServesGoalPicker'
 
 // ── Types ──
 
@@ -525,6 +526,9 @@ function ProjectDetail({
           <div className="mt-2 flex items-center gap-3 text-xs text-zinc-500">
             <span>Created {new Date(project.created_at).toLocaleDateString()}</span>
             <span>ID: {project.id}</span>
+          </div>
+          <div className="mt-2">
+            <ServesGoalPicker kind="project" refId={project.id} title={project.name} />
           </div>
         </div>
         <div className="flex items-center gap-2">

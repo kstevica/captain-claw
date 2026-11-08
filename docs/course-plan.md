@@ -1,7 +1,9 @@
 # Course: Implementation Plan
 
-> Status: Phase 1 built (store, routes, Course page, admin card, kiosk dialog, prompt files,
-> review sweep). Phases 2–4 not started.
+> Status: Phases 1 and 2 built. Phase 1: store, routes, Course page, admin card, kiosk
+> dialog, prompt files, review sweep. Phase 2: the Arbiter, plans, the Taskboard, projects,
+> scheduled tasks, Swarm runs, Forge agents and the agent's `course` tool. Phases 3–4 not
+> started.
 > Decisions locked: the feature is called **Course** · each item is a **goal** · each goal
 > has a **horizon** (strategic · long · medium · short) · three scopes (instance · user ·
 > agent) · goals form a tree · proposals always wait for a person · goals guide priorities
@@ -229,7 +231,7 @@ Neither is ever on:
 
 A standalone agent (no Flight Deck) has no Course, like the Line.
 
-## The `course` tool (agent side)
+## The `course` tool (agent side, Phase 2, built)
 
 The same shape as the `line` tool:
 - `captain_claw/course_client.py` talks to `/fd/course/agent/*`;
@@ -354,28 +356,49 @@ agent (`fd_dispatch.dispatch_action`), and approve/reject trains action reliabil
 - The transcript it reads is already filtered by `member_privacy.learnable`, so a member's
   conversation never turns into a goal proposal for the owner.
 
-### Plans (`flight_deck/plans.py`, Phase 2)
-- Add a `goal_id` column to `plans`.
-- The goal drawer gets "Plan a route": it creates a plan whose `goal` is the goal's title
-  plus its success text, with `goal_id` set.
-- Plan step results link to the goal.
+### Plans (`flight_deck/plans.py`, Phase 2, built)
+- A `goal_id` column on `plans` (migrated in on open).
+- The goal drawer's "Plan a route" calls `POST /fd/autonomy/plans` with `{goal_id}`: the
+  plan's `goal` is the goal's title plus its success text. Only the caller's own or a
+  deck-wide active goal (past its review too); anything else is a 404.
+- A step that finishes links the goal, with the step's title and result as the note.
+- Autonomous Work shows "Route to: <goal>" on such a plan.
 
-### Taskboard (`flight_deck/taskboard_triage.py`, `taskboard_store.py`, Phase 2)
-- The triage prompt gets the compact goal list, and its answer gains `serves_goal`
-  (a `G:` id or none). Store it in a new `goal_id` column on tasks.
-- Add a sort `course`: tasks tied to a goal first, then by `urgency`. Show a goal chip on
-  the task.
-- A task closed as done links to its goal.
+### Taskboard (`flight_deck/taskboard_triage.py`, `taskboard_store.py`, Phase 2, built)
+- The goal is read by the **extraction** call (the agent's own model, one task at a time),
+  not by Jev. Extraction runs whether or not Jev is set up, and "what is this task about"
+  is the extraction's job. The owner's live goals go in the trusted part of the prompt,
+  above the fenced data; the answer gains `serves_goal`, kept only when it names one of the
+  goals the call was shown.
+- Stored in a new `goal_id` column on tasks (it reaches the UI with the other fields).
+- A sort `course` ("Serves your course"): tasks tied to a goal first, then by `urgency`.
+  A goal chip on the task row and in its detail.
+- A task closed as done links its goal, whether a source closed it or the person did.
 
-### Projects, schedules, Captain Swarm, Forge (Phase 2)
-- **Projects, schedules (FD scheduler jobs), Swarm runs:** linked through `course_links`;
-  no schema change in their own stores. The Course drawer offers "Link…", and each of
-  those pages offers "Serves a goal…".
+### Evidence belongs to someone (Phase 2, built)
+- Every link records whose work it is (`course_links.owner_id`). On a deck-wide goal each
+  user sees only their own links (in the drawer, in its history and in "last moved");
+  someone else's work is never shown to them, the admin included.
+
+### Projects, scheduled tasks, Captain Swarm runs (Phase 2, built)
+- Linked through `course_links` only; their own stores are unchanged.
+- Each one's page has a "Serves a goal" picker (`GET/PUT /fd/course/served`): one goal per
+  item per user, set or cleared. The item must be the caller's own (a scheduled task, a
+  Swarm run, a plan, a task, an action); projects belong to the whole deck.
 - **Captain Swarm:** a run's measured objective (`captain_swarm_objective.py`) can become a
   goal's metric in Phase 4 (`metric.kind = swarm_score`).
-- **Forge:** when a person forges a team from a goal (`agent_forge.py`), the review step
-  offers to create the user goal and one medium goal per forged agent. They're active,
-  because the person is confirming them right there, not proposals.
+
+### Forge (Phase 2, built for "Forge agents")
+- The "Forge agents" review step (`ForgeReview.tsx`, `agent_forge.py`) has an optional,
+  off-by-default "Add this team's goal to your Course": the goal, how you'll know it's done,
+  its horizon, and "a goal for each agent too". Once the agents exist, the user goal is
+  created, then one goal per agent made (its mandate as the title, what it produces as
+  the success), serving the team's goal. They're active, because the person confirmed
+  them right there. Horizons and limits the admin set are respected; what can't be added
+  is listed on the ready screen, never fatal.
+- **Agent Forge** (`ForgePage.tsx`, `POST /fd/forge`) is not wired yet: it spawns from the
+  browser and has no server step after the agents exist. Its review step could create
+  the goals through `POST /fd/course/goals` once each spawn returns its slug.
 
 ## Progress and off course (Phase 4)
 
@@ -475,12 +498,13 @@ can switch recommendations off for the whole deck.
      agent loader and prompt insertion, the review sweep with `course_review` Line items,
      `forget_user`, and agent removal.
    - What users get: people write their course, and every agent works with it.
-2. **Wiring.**
-   - `goal_id` on Arbiter proposals (prompt, column, auto-link), `plans.goal_id` and Plan a
-     route, Taskboard `serves_goal` and the `course` sort, links for projects, schedules
-     and Swarm runs, the Forge review step, and the `course` tool's `view`, `link` and
-     `report`.
-   - The Arbiter's "Candidate goals" string becomes "Candidates".
+2. **Wiring.** (built)
+   - `goal_id` on Arbiter proposals (prompt, column, auto-link, "Serves:" in the bell),
+     `plans.goal_id` and Plan a route, Taskboard `serves_goal` and the `course` sort, the
+     "Serves a goal" picker for projects, scheduled tasks and Swarm runs, the goal drawer
+     (evidence, history, progress, Plan a route), the Forge agents review step, and the
+     `course` tool's `view`, `link` and `report`.
+   - The Arbiter's "Candidate goals" string became "Candidates".
 3. **Recommendations.**
    - `course` tool `propose` / `propose_change`, agent self-reflection proposals, pulse
      proposals, the Line types and their resolution, caps, dedup, the 90-day decline

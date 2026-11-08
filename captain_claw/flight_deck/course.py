@@ -283,6 +283,12 @@ class CourseStore:
                 """
             )
             self._c().commit()
+            have = {r["name"] for r in self._c().execute("PRAGMA table_info(course_links)")}
+            if "owner_id" not in have:
+                # Whose work a link is: a deck-wide goal shows each user only their own.
+                self._c().execute(
+                    "ALTER TABLE course_links ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''")
+                self._c().commit()
 
     # ── rows ───────────────────────────────────────────────────────────
 
@@ -382,11 +388,21 @@ class CourseStore:
         with self._lock:
             return [self._row(r) for r in self._c().execute(sql, args).fetchall()]
 
-    def links(self, goal_id: str) -> list[dict[str, Any]]:
+    def links(self, goal_id: str, *, owner_id: str | None = None) -> list[dict[str, Any]]:
+        """A goal's evidence, newest first — only ``owner_id``'s when given."""
+        sql, args = "SELECT * FROM course_links WHERE goal_id = ?", [goal_id]
+        if owner_id is not None:
+            sql += " AND owner_id = ?"
+            args.append(norm_user(owner_id))
+        with self._lock:
+            return [dict(r) for r in self._c().execute(sql + " ORDER BY at DESC", args).fetchall()]
+
+    def links_for(self, kind: str, ref_id: str) -> list[dict[str, Any]]:
+        """The goals one item (a plan, a project, a scheduled task…) is linked to."""
         with self._lock:
             return [dict(r) for r in self._c().execute(
-                "SELECT * FROM course_links WHERE goal_id = ? ORDER BY at DESC", (goal_id,)
-            ).fetchall()]
+                "SELECT * FROM course_links WHERE kind = ? AND ref_id = ? ORDER BY at DESC",
+                (kind, str(ref_id or ""))).fetchall()]
 
     def events(self, goal_id: str, limit: int = 100) -> list[dict[str, Any]]:
         with self._lock:
@@ -696,7 +712,7 @@ class CourseStore:
         return self.get(goal_id)  # type: ignore[return-value]
 
     def add_link(self, goal_id: str, kind: str, ref_id: Any, *, note: Any = "",
-                 actor: str = "") -> dict[str, Any]:
+                 actor: str = "", owner_id: str = "") -> dict[str, Any]:
         if kind not in LINK_KINDS:
             raise CourseError(f"Unknown link kind {kind!r}")
         ref = str(ref_id or "").strip()
@@ -708,23 +724,69 @@ class CourseStore:
             if conn.execute("SELECT 1 FROM course_goals WHERE id = ?", (goal_id,)).fetchone() is None:
                 raise CourseNotFoundError(goal_id)
             now = _iso(_utcnow())
+            owner = norm_user(owner_id)
             conn.execute(
-                "INSERT INTO course_links (goal_id, kind, ref_id, note, added_by, at)"
-                " VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(goal_id, kind, ref_id)"
+                "INSERT INTO course_links (goal_id, kind, ref_id, note, added_by, at, owner_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(goal_id, kind, ref_id)"
                 " DO UPDATE SET note = excluded.note, at = excluded.at",
-                (goal_id, kind, ref, note, actor, now),
+                (goal_id, kind, ref, note, actor, now, owner),
             )
-            self._event(conn, goal_id, actor, "linked", {"kind": kind, "ref_id": ref})
+            self._event(conn, goal_id, actor, "linked",
+                        {"kind": kind, "ref_id": ref, "owner_id": owner})
             conn.commit()
         return {"goal_id": goal_id, "kind": kind, "ref_id": ref, "note": note,
-                "added_by": actor, "at": now}
+                "added_by": actor, "at": now, "owner_id": owner}
 
-    def remove_link(self, goal_id: str, kind: str, ref_id: str) -> bool:
+    def set_progress(self, goal_id: str, progress: Any, note: Any = "", *,
+                     actor: str = "") -> dict[str, Any]:
+        """An estimate of how far along a goal is (0..1), with a note. Never
+        sets ``achieved`` — only a person does."""
+        if isinstance(progress, bool) or not isinstance(progress, (int, float)):
+            raise CourseError("progress must be a number from 0 to 1")
+        value = float(progress)
+        if not 0.0 <= value <= 1.0:
+            raise CourseError("progress must be a number from 0 to 1")
+        note = _text("progress_note", note)
         with self._lock:
             conn = self._c()
-            cur = conn.execute(
-                "DELETE FROM course_links WHERE goal_id = ? AND kind = ? AND ref_id = ?",
-                (goal_id, kind, ref_id))
+            goal = self._row(conn.execute(
+                "SELECT * FROM course_goals WHERE id = ?", (goal_id,)).fetchone())
+            if goal is None:
+                raise CourseNotFoundError(goal_id)
+            if goal["status"] not in ("active", "paused"):
+                raise CourseError(f"A {goal['status']} goal takes no progress report")
+            conn.execute(
+                "UPDATE course_goals SET progress = ?, progress_note = ?, updated_at = ? WHERE id = ?",
+                (value, note, _iso(_utcnow()), goal_id))
+            self._event(conn, goal_id, actor, "progress", {"progress": value, "note": note})
+            conn.commit()
+        return self.get(goal_id)  # type: ignore[return-value]
+
+    def last_moved(self, goal_ids: list[str], *, owner_id: str | None = None) -> dict[str, str]:
+        """The newest evidence time per goal (only ``owner_id``'s links when given)."""
+        if not goal_ids:
+            return {}
+        sql = (f"SELECT goal_id, MAX(at) AS at FROM course_links"
+               f" WHERE goal_id IN ({','.join('?' * len(goal_ids))})")
+        args: list[Any] = list(goal_ids)
+        if owner_id is not None:
+            sql += " AND owner_id = ?"
+            args.append(norm_user(owner_id))
+        with self._lock:
+            return {r["goal_id"]: r["at"] for r in
+                    self._c().execute(sql + " GROUP BY goal_id", args).fetchall()}
+
+    def remove_link(self, goal_id: str, kind: str, ref_id: str, *,
+                    owner_id: str | None = None) -> bool:
+        """Remove a link (only ``owner_id``'s when given)."""
+        sql = "DELETE FROM course_links WHERE goal_id = ? AND kind = ? AND ref_id = ?"
+        args: list[Any] = [goal_id, kind, ref_id]
+        if owner_id is not None:
+            sql += " AND owner_id = ?"
+            args.append(norm_user(owner_id))
+        with self._lock:
+            conn = self._c()
+            cur = conn.execute(sql, args)
             conn.commit()
             return cur.rowcount > 0
 
@@ -783,3 +845,106 @@ def forget_agent(agent_ref: str) -> int:
         return get_store().forget_agent(agent_ref)
     except Exception:  # noqa: BLE001 — a removal never fails over Course
         return 0
+
+
+# ── For the rest of the deck (Phase 2: the Arbiter, the Taskboard, plans) ──
+
+_SHORT = {"strategic": "strategic", "long": "long-term", "medium": "medium-term",
+          "short": "short-term"}
+
+
+def live_goals(user_id: str, *, agent_ref: str = "", include_stale: bool = False,
+               now: datetime | None = None) -> list[dict[str, Any]]:
+    """The goals that steer work for ``user_id`` right now: the deck's and the
+    user's own (and, with ``agent_ref``, that agent's) — active and not stale
+    (stale ones too with ``include_stale``). Never raises ([] on any error)."""
+    try:
+        store = get_store()
+        uid = norm_user(user_id)
+        now = now or _utcnow()
+        goals = store.list_goals(scope="instance", statuses=("active",))
+        goals += store.list_goals(scope="user", owner_id=uid, statuses=("active",))
+        if agent_ref:
+            goals += store.list_goals(scope="agent", owner_id=uid, agent_refs=[agent_ref],
+                                      statuses=("active",))
+        return [g for g in goals if include_stale or not is_stale(g, now)]
+    except Exception:  # noqa: BLE001 — Course never breaks its callers
+        return []
+
+
+def prompt_lines(goals: list[dict[str, Any]], *, max_chars: int = 1500) -> str:
+    """The goals as one line each, ``- G:<id> (<horizon>): <title> — done when: <success>``,
+    for a deck-internal model prompt (the Arbiter, Taskboard triage). People's
+    text is flattened onto its line; lines past ``max_chars`` are left out."""
+    lines: list[str] = []
+    used = 0
+    for g in goals:
+        title = " ".join(str(g.get("title") or "").split())[:120]
+        line = f"- G:{g['id']} ({_SHORT.get(g.get('horizon', ''), g.get('horizon', ''))}): {title}"
+        success = " ".join(str(g.get("success") or "").split())[:160]
+        if success:
+            line += f" — done when: {success}"
+        if used + len(line) + 1 > max_chars:
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
+def goal_ref(value: Any) -> str:
+    """A model's ``goal_id`` / ``serves_goal`` answer as a bare goal id ("" for none)."""
+    text = str(value or "").strip().removeprefix("G:").strip()
+    if not text or text.lower() in ("none", "null", "-"):
+        return ""
+    return text[:40]
+
+
+def usable_goal(goal_id: str, user_id: str, *, agent_ref: str = "",
+                include_stale: bool = False) -> dict[str, Any] | None:
+    """``goal_id`` when it is one of ``user_id``'s live goals (see :func:`live_goals`),
+    else None — so a model can only ever point at a goal it was shown."""
+    gid = goal_ref(goal_id)
+    if not gid:
+        return None
+    for g in live_goals(user_id, agent_ref=agent_ref, include_stale=include_stale):
+        if g["id"] == gid:
+            return g
+    return None
+
+
+def link_quietly(goal_id: str, kind: str, ref_id: str, *, note: str = "",
+                 actor: str = "", owner_id: str = "") -> bool:
+    """Record evidence for a goal — ``owner_id``'s work; False (never an
+    exception) when the goal is gone or the link can't be written. The note is
+    clipped to its cap."""
+    gid = goal_ref(goal_id)
+    if not gid or not ref_id:
+        return False
+    try:
+        get_store().add_link(gid, kind, str(ref_id)[:_REF_MAX],
+                             note=" ".join(str(note or "").split())[:TEXT_CAPS["note"]],
+                             actor=actor, owner_id=owner_id)
+        return True
+    except (CourseError, CourseNotFoundError):
+        return False
+    except Exception:  # noqa: BLE001 — evidence never breaks the work it records
+        return False
+
+
+def _clip_title(text: str) -> str:
+    """A long text cut to a goal title's cap, at a word where it can."""
+    text = " ".join(str(text or "").split())
+    cap = TEXT_CAPS["title"]
+    if len(text) <= cap:
+        return text
+    cut = text[: cap - 1].rsplit(" ", 1)[0]
+    return (cut if len(cut) > cap // 2 else text[: cap - 1]).rstrip(" ,.;:") + "…"
+
+
+def goal_title(goal_id: str) -> str:
+    """A goal's title ("" when there is none)."""
+    try:
+        g = get_store().get(goal_ref(goal_id))
+    except Exception:  # noqa: BLE001
+        return ""
+    return str(g["title"]) if g else ""

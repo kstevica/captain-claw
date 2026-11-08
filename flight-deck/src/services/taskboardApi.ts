@@ -15,7 +15,7 @@ export type TaskStatus = 'open' | 'done' | 'failed' | 'dismissed' | 'not_task' |
 export type TaskOwesNext = 'me' | 'agent' | 'them' | 'nobody' | 'unclear'
 export type TaskEvidence = 'verified' | 'claimed' | 'none'
 export type TaskResult = 'success' | 'partial' | 'failed' | 'unknown' | ''
-export type TaskSort = 'recent' | 'oldest' | 'due' | 'urgency'
+export type TaskSort = 'recent' | 'oldest' | 'due' | 'urgency' | 'course'
 
 /** Someone a task is from, for, or done by — as the source named them. */
 export interface TaskParty {
@@ -151,6 +151,8 @@ export interface TaskItem {
   evidence: TaskEvidence
   result: TaskResult
   urgency: number
+  /** The Course goal it moves forward ('' when none): the extraction's reading. */
+  goal_id?: string
   /** Epoch seconds, like every time here. */
   due_at: number | null
   snooze_until: number | null
