@@ -1010,7 +1010,8 @@ async def agent_stop(body: FollowBody, runner: Runner = Depends(_agent_enabled))
 def build_brief(slug: str, title: str, what: str) -> str:
     return (f"Build the custom tool “{slug}” ({title}).\n\nWhat it should do:\n{what.strip()}\n\n"
             "The repository already holds a working starter (an echo tool): replace it with the real tool, and make "
-            "tool.json, the tests and the examples match what it now does.")
+            "tool.json, the tests and the examples match what it now does. In tool.json, keep the title to "
+            "80 characters and the description to 600 (a paragraph): publishing refuses a longer one.")
 
 
 def improve_brief(slug: str, what: str) -> str:

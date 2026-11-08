@@ -1485,7 +1485,9 @@ A Captain custom tool. Flight Deck runs `main.py` once per call: the input arriv
 as one JSON object on stdin, and the tool prints one JSON value on stdout.
 
 - `tool.json` describes it: input and output (JSON Schema), examples, secrets,
-  network, time and memory limits. Keep it true.
+  network, time and memory limits. Keep it true. Its `title` is 1–80 characters
+  and its `description` 1–600 (a paragraph, not the whole spec): publishing
+  refuses a longer one.
 - Every example runs when the tool is published; a version goes live only when
   the tests (`test` in tool.json) and every example pass. `expect` lists what the
   output must contain.
