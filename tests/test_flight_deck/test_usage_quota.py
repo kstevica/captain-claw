@@ -218,6 +218,9 @@ async def test_admin_sees_and_resets_today(fd_db):
         r = await c.delete(f"/fd/admin/users/{u['id']}/usage/today")
         assert r.status_code == 200
         assert (await c.delete("/fd/admin/users/nobody/usage/today")).status_code == 404
+    # Recent activity lists it, under the admin who did it.
+    logs = await fd_db.get_usage_logs(user_id=admin["id"], event_type="usage_reset_today")
+    assert len(logs) == 1 and json.loads(logs[0]["detail"])["user_id"] == u["id"]
     ok, _ = await usage_quota.admit_message(u["id"], "hi again")
     assert ok
     async with _client(_app(u)) as c:
@@ -342,6 +345,11 @@ async def test_admin_grant_routes(fd_db):
         assert (await c.put("/fd/admin/users/ghost/usage/resets",
                             json={"balance": 1})).status_code == 404
     assert await fd_db.get_usage_resets(a["id"]) == 1
+    # The grant to chosen people names them (the ghost wasn't given one); one to everyone doesn't need to.
+    grants = [json.loads(log["detail"]) for log in
+              await fd_db.get_usage_logs(user_id=admin["id"], event_type="usage_resets_granted")]
+    assert sorted(g.get("user_ids", "everyone") for g in grants if not g["all"]) == [[a["id"], b["id"]]]
+    assert all("user_ids" not in g for g in grants if g["all"])
     async with _client(_app(a)) as c:
         assert (await c.post("/fd/admin/usage/resets",
                              json={"count": 1, "all": True})).status_code == 403
