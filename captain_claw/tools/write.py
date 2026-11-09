@@ -38,6 +38,9 @@ _STATUS_CONFIRMATION_PATTERNS = re.compile(
 
 log = get_logger(__name__)
 
+# The refusal a `_keep_existing` write gets when its file is already there.
+KEEP_EXISTING_ERROR = "exists_kept"
+
 
 class WriteTool(Tool):
     """Write content to files."""
@@ -440,6 +443,20 @@ class WriteTool(Tool):
 
             if not is_vfs_path(path):  # a vfs file_path was resolved above
                 file_path = self.resolve_local_target(path, kwargs)
+
+            # The agent's own auto-save (a reply saved to the file the person
+            # named) passes `_keep_existing`: it may make a file, never replace
+            # one — that file is earlier work, not this reply's. Checked here,
+            # where the path resolves exactly as the write would land.
+            if kwargs.get("_keep_existing") and not append and file_path.exists():
+                return ToolResult(
+                    success=False,
+                    error=KEEP_EXISTING_ERROR,
+                    content=(
+                        f"Not written: {path} already exists, so it was left as it "
+                        "was (an auto-save never replaces an existing file)."
+                    ),
+                )
 
             # Ensure parent directory exists
             file_path.parent.mkdir(parents=True, exist_ok=True)

@@ -149,6 +149,11 @@ class AgentCompletionMixin:
                 turn_usage=turn_usage,
                 session_policy=session_tool_policy,
                 task_policy=self._active_task_tool_policy_payload(planning_pipeline),
+                # The file to save to comes from the person's message as sent:
+                # the effective input may carry the previous reply (merged in
+                # for a clarification follow-up), and a path that reply names
+                # was asked for in an earlier turn, not this one.
+                request_text=user_input,
             )
         if not str(final_response or "").strip():
             tool_output_fallback = self._collect_turn_tool_output(turn_start_idx)
