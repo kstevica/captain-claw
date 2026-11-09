@@ -139,10 +139,25 @@ async def test_what_it_asks_of_the_agent_shows_and_rings_when_it_grows(deck, age
     _commit(owner, "notes", {"tool.json": _manifest("notes", uses=more, examples=recorded)})
     assert (await xt.publish(owner, "notes", by=owner))["state"] == "passed"
     bells = [n for n in await deck.db.list_notifications(other) if n.get("ref_type") == "custom_tool"]
-    assert bells and "to use your agent's web_fetch (example.com)" in bells[0]["title"]
+    assert bells and bells[0]["title"].endswith("updated: it now asks to use your agent's web_fetch (example.com)")
     assert xr.declares_more({"uses": [], "runs": [], "network": False, "secrets": [], "timeout_s": 1, "memory_mb": 1},
                             {"uses": [], "runs": ["total"], "network": False, "secrets": [], "timeout_s": 1,
                              "memory_mb": 1}) == ["to run total"]
+
+
+def test_every_kind_of_extra_reads_after_it_now_asks():
+    old = {"uses": [], "runs": [], "asks": False, "network": False, "secrets": [], "timeout_s": 10, "memory_mb": 256}
+    new = {"uses": ["web_fetch (example.com)"], "runs": ["total"], "asks": True, "network": True,
+           "secrets": ["KEY", "TOKEN"], "timeout_s": 30, "memory_mb": 512}
+    more = xr.declares_more(old, new)
+    assert more == ["to use your agent's web_fetch (example.com)", "to run total", "to ask you questions while it runs",
+                    "to reach the internet", "to use the secrets KEY, TOKEN", "to run for up to 30 s",
+                    "to use up to 512 MB of memory"]
+    assert xr.declares_more(old, {**old, "secrets": ["KEY"]}) == ["to use the secret KEY"]
+    assert xr.asks_line(["to reach the internet"]) == "to reach the internet"
+    assert xr.asks_line(more[3:5]) == "to reach the internet and to use the secrets KEY, TOKEN"
+    assert xr.asks_line(more).startswith("to use your agent's web_fetch (example.com), to run total, ")
+    assert xr.asks_line(more).endswith(", to run for up to 30 s and to use up to 512 MB of memory")
 
 
 def test_the_spec_check_knows_a_tool_can_use_its_agent():

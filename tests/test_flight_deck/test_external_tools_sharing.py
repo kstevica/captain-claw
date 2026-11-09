@@ -189,7 +189,7 @@ async def test_a_new_version_that_asks_for_more_tells_who_added_it(team):
     _commit(a, "who", {"tool.json": _manifest("who", secrets=[{"name": "KEY", "why": ""}], network=True)})
     assert (await xt.publish(a, "who", by=a, secret_values={"KEY": "p"}))["state"] == "passed"
     [bell] = [n for n in await team.db.list_notifications(b) if "updated" in n["title"]]
-    assert "internet access" in bell["title"]
+    assert "it now asks to reach the internet" in bell["title"]
 
 
 async def test_deleting_a_tool_takes_its_offers_and_consents(team):

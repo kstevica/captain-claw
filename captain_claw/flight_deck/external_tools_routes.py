@@ -223,7 +223,8 @@ def _declares(owner: str, slug: str) -> dict[str, Any] | None:
 
 
 def declares_more(old: dict | None, new: dict | None) -> list[str]:
-    """What *new* asks for that *old* didn't, in words."""
+    """What *new* asks for that *old* didn't, in words. Each item starts with
+    "to", so the bell can read "it now asks to …" (see :func:`asks_line`)."""
     if not old or not new:
         return []
     out = []
@@ -236,15 +237,20 @@ def declares_more(old: dict | None, new: dict | None) -> list[str]:
     if new.get("asks") and not old.get("asks"):
         out.append("to ask you questions while it runs")
     if new["network"] and not old["network"]:
-        out.append("internet access")
+        out.append("to reach the internet")
     extra = [n for n in new["secrets"] if n not in old["secrets"]]
     if extra:
-        out.append("the secret" + ("s " if len(extra) > 1 else " ") + ", ".join(extra))
+        out.append("to use the secret" + ("s " if len(extra) > 1 else " ") + ", ".join(extra))
     if new["timeout_s"] > old["timeout_s"]:
-        out.append(f"up to {new['timeout_s']} s per run")
+        out.append(f"to run for up to {new['timeout_s']} s")
     if new["memory_mb"] > old["memory_mb"]:
-        out.append(f"up to {new['memory_mb']} MB of memory")
+        out.append(f"to use up to {new['memory_mb']} MB of memory")
     return out
+
+
+def asks_line(more: list[str]) -> str:
+    """The items of :func:`declares_more` as one phrase: "to a, to b and to c"."""
+    return more[0] if len(more) == 1 else ", ".join(more[:-1]) + " and " + more[-1]
 
 
 async def _person(uid: str) -> dict[str, str]:
@@ -1467,7 +1473,7 @@ async def after_publish(owner: str, slug: str, old_version: str | None, new_vers
     db = get_db()
     for uid in await db.users_with_setting(added_key(owner, slug)):
         try:
-            await db.add_notification(uid, "custom_tool", f"“{new['title']}” updated: it now asks for {', '.join(more)}",
+            await db.add_notification(uid, "custom_tool", f"“{new['title']}” updated: it now asks {asks_line(more)}",
                                       "Your agents use the new version. Remove it under Custom tools if you'd rather not.",
                                       ref_type="custom_tool", ref_id=share_id(owner, slug))
         except Exception:
