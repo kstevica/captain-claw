@@ -53,6 +53,7 @@ class Deck:
         self.reply = json.dumps(OUTLINE)
         self.cut = False
         self.prompts: list[str] = []
+        self.streamed: list[bool] = []
 
     async def get_system_setting(self, key):
         return self.settings.get(key)
@@ -71,9 +72,10 @@ class Deck:
 def deck(monkeypatch):
     d = Deck()
 
-    class Provider:
-        async def complete(self, messages, **kw):
+    class Provider:  # no plain complete(): every call here has to stream
+        async def complete_with_callback(self, messages, on_chunk=None, **kw):
             d.prompts.append(messages[-1].content)
+            d.streamed.append(on_chunk is not None)
             return type("R", (), {"content": d.reply, "finish_reason": "length" if d.cut else "stop"})()
 
     async def tiers(db, uid):
@@ -180,6 +182,16 @@ async def test_writing_places_the_rules_a_model_does_not_get_to_word(deck):
     assert limits.index(CRISIS_RULE) < limits.index(disclaimer_text("health")) < limits.index("Never advise")
     assert TEAM_SETTING not in deck.settings
     assert "`claims-drafter`" in deck.prompts[0]
+
+
+async def test_the_model_calls_stream_so_a_quiet_network_cannot_drop_them(deck):
+    # Unstreamed, nothing comes back until the model is done; a network that drops a
+    # connection silent for a minute then left the admin waiting the whole limit.
+    async with _client(deck) as c:
+        await c.post("/fd/archetypes/team/outline", data={"instructions": "A dental practice."})
+        deck.reply = WRITTEN
+        await c.post("/fd/archetypes/team/write", json={"role": "Explainer"})
+    assert deck.streamed == [True, True]
 
 
 @pytest.mark.parametrize("reply, cut", [("too short", False), (("No limits section. " * 80), False), (WRITTEN, True)])

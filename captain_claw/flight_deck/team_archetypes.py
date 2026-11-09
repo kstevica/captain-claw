@@ -117,6 +117,10 @@ def coerce_outline(raw: dict, registry: dict) -> dict:
     }
 
 
+def _ignore_chunk(_chunk: str) -> None:
+    """Asking for the chunks is what makes the call stream; the answer is used whole."""
+
+
 async def _complete(user: dict, system: str, prompt: str, *, temperature: float, default_max: int) -> tuple[str, bool]:
     """One model call on the admin's Reasoning tier, resolved here: no key crosses the browser."""
     from captain_claw.llm import Message
@@ -128,9 +132,13 @@ async def _complete(user: dict, system: str, prompt: str, *, temperature: float,
     try:
         provider, max_tokens = vr._provider_call(creds, temperature=temperature, default_max=default_max,
                                                  cap=vr._LEAD_OUTPUT_CAP, request_timeout=limit)
-        response = await asyncio.wait_for(provider.complete(messages=[
+        # Streamed. Unstreamed, the model sends nothing back until it is done, and some
+        # networks drop a connection that is silent for about a minute: a set of
+        # instructions takes longer than that, so the admin waited the whole limit
+        # for an answer that was never coming.
+        response = await asyncio.wait_for(provider.complete_with_callback(messages=[
             Message(role="system", content=system), Message(role="user", content=prompt),
-        ], temperature=temperature, max_tokens=max_tokens), limit)
+        ], temperature=temperature, max_tokens=max_tokens, on_chunk=_ignore_chunk), limit)
     except asyncio.TimeoutError as exc:
         raise HTTPException(504, "The model took too long. Try again.") from exc
     except HTTPException:
