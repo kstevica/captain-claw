@@ -23,6 +23,8 @@ import { BrandingAdmin } from '../components/admin/BrandingAdmin'
 import { Switch } from '../components/admin/Switch'
 import { IdleAgentsSetting, IDLE_AGENTS_HINT, IDLE_AGENTS_TITLE } from '../components/admin/IdleAgentsSetting'
 import { ByokSetting } from '../components/admin/ByokSetting'
+import { activityText } from '../components/console/activityText'
+import { fetchAllUsers } from '../components/console/consoleApi'
 import {
   CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE, SANDBOX_HINT, SANDBOX_TITLE,
 } from '../components/admin/customTools'
@@ -229,6 +231,8 @@ export function AdminPage() {
   const [keySaveFlash, setKeySaveFlash] = useState<string | null>(null)
   const [usageSummary, setUsageSummary] = useState<Record<string, number>>({})
   const [usageLogs, setUsageLogs] = useState<UsageLog[]>([])
+  // Names for Recent activity's rows, which store user ids.
+  const [userNames, setUserNames] = useState<Record<string, string>>({})
   const [costRollup, setCostRollup] = useState<CostRollup | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -253,11 +257,13 @@ export function AdminPage() {
 
   const loadUsage = useCallback(async () => {
     try {
-      const [summary, logs, costs] = await Promise.all([
+      const [summary, logs, costs, people] = await Promise.all([
         fetchUsageSummary(), fetchUsageLogs(), fetchCostRollup().catch(() => null),
+        fetchAllUsers().catch(() => ({ users: [] })),
       ])
       setUsageSummary(summary)
       setUsageLogs(logs)
+      setUserNames(Object.fromEntries(people.users.map((u) => [u.id, u.display_name || u.email])))
       setCostRollup(costs)
       setError('')
     } catch (e) {
@@ -434,25 +440,21 @@ export function AdminPage() {
             <div>
               <h3 className="text-sm font-medium text-zinc-300 mb-3">Recent Activity</h3>
               <div className="space-y-1">
-                {usageLogs.map((log) => (
-                  <div key={log.id} className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-zinc-800/50 text-sm">
-                    <span className="text-xs text-zinc-600 font-mono w-40 shrink-0">
-                      {new Date(log.created_at).toLocaleString()}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400 text-xs">
-                      {log.event_type}
-                    </span>
-                    <span className="text-zinc-500 text-xs truncate flex-1">
-                      {(() => {
-                        try {
-                          const d = JSON.parse(log.detail)
-                          return Object.entries(d).map(([k, v]) => `${k}: ${v}`).join(', ')
-                        } catch { return log.detail }
-                      })()}
-                    </span>
-                    <span className="text-xs text-zinc-600 font-mono shrink-0">{log.user_id.slice(0, 8)}</span>
-                  </div>
-                ))}
+                {usageLogs.map((log) => {
+                  const nameOf = (id: string) => userNames[id] || id.slice(0, 8)
+                  const row = activityText(log.event_type, log.detail, nameOf(log.user_id), nameOf)
+                  return (
+                    <div key={log.id} className="flex items-center gap-3 px-3 py-2 rounded-md hover:bg-zinc-800/50 text-sm">
+                      <span className="text-xs text-zinc-600 font-mono w-40 shrink-0">
+                        {new Date(log.created_at).toLocaleString()}
+                      </span>
+                      <span className="px-2 py-0.5 rounded-full bg-zinc-800 text-zinc-400 text-xs">
+                        {row.label}
+                      </span>
+                      <span className="text-zinc-500 text-xs truncate flex-1" title={row.text}>{row.text}</span>
+                    </div>
+                  )
+                })}
                 {usageLogs.length === 0 && (
                   <p className="text-center text-sm text-zinc-500 py-4">No activity logs yet</p>
                 )}

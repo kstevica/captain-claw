@@ -522,12 +522,14 @@ async def usage_today(_admin: dict = Depends(require_admin)) -> dict:
 
 
 @router.delete("/admin/users/{user_id}/usage/today")
-async def reset_usage_today(user_id: str, _admin: dict = Depends(require_admin)) -> dict:
+async def reset_usage_today(user_id: str, admin: dict = Depends(require_admin)) -> dict:
     """Give a user today's allowances back (admin only)."""
     db = get_db()
     if not await db.get_user_by_id(user_id):
         raise HTTPException(404, "User not found")
     await db.reset_daily_usage(user_id, today())
+    # Recent activity lists it, as it does a free reset someone spends.
+    await _log(db, str(admin.get("id") or ""), "usage_reset_today", {"user_id": user_id, "day": today()})
     return {"ok": True}
 
 
@@ -572,8 +574,10 @@ async def grant_resets(body: GrantResets, admin: dict = Depends(require_admin)) 
     before = await db.list_usage_resets()
     balances = await db.grant_usage_resets(None if body.all else ids, body.count, cap)
     given = sum(1 for uid, n in balances.items() if n > before.get(uid, 0))
-    await _log(db, str(admin.get("id") or ""), "usage_resets_granted", {
-        "count": body.count, "cap": cap, "all": body.all, "users": len(balances), "given": given})
+    detail = {"count": body.count, "cap": cap, "all": body.all, "users": len(balances), "given": given}
+    if not body.all and len(balances) <= 20:
+        detail["user_ids"] = [uid for uid in ids if uid in balances]  # so Recent activity can name them
+    await _log(db, str(admin.get("id") or ""), "usage_resets_granted", detail)
     return {"ok": True, "cap": cap, "users": len(balances), "given": given, "balances": balances}
 
 

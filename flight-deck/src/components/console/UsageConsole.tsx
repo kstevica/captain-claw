@@ -10,6 +10,7 @@ import {
 import { Page, PageHeader, Card, StatTile, Segmented, Button, Notice, Pill } from './parts'
 import { fmtNumber, timeAgo } from './format'
 import { ByokSetting } from '../admin/ByokSetting'
+import { activityText } from './activityText'
 
 // Usage & limits: what people used today against their plan, what the deck
 // spent, the plans' limits, and the latest activity. The Admin page's Usage
@@ -159,26 +160,23 @@ export function UsageConsole() {
 
       <ByokSetting />
 
-      <Card icon={Activity} title="Recent activity" hint="Sign-ins, new agents, resets and other events, newest first." bodyClassName="divide-y divide-zinc-800/70">
+      <Card icon={Activity} title="Recent activity" hint="Agents started, resets, own keys, deck-wide changes and what admins did for people, newest first." bodyClassName="divide-y divide-zinc-800/70">
         {logs.length === 0 && <p className="px-5 py-6 text-center text-sm text-zinc-500">No activity yet.</p>}
-        {logs.map((l) => (
-          <div key={l.id} className="flex items-center gap-3 px-5 py-2.5 text-sm">
-            <Pill>{l.event_type.replace(/_/g, ' ')}</Pill>
-            <span className="min-w-0 flex-1 truncate text-xs text-zinc-500">{name(l.user_id, byId.get(l.user_id))} · {describe(l.detail)}</span>
-            <span className="shrink-0 text-xs text-zinc-600" title={new Date(l.created_at).toLocaleString()}>{timeAgo(l.created_at)}</span>
-          </div>
-        ))}
+        {logs.map((l) => {
+          const row = activityText(l.event_type, l.detail, name(l.user_id, byId.get(l.user_id)), (id) => name(id, byId.get(id)))
+          return (
+            <div key={l.id} className="flex items-center gap-3 px-5 py-2.5 text-sm">
+              <Pill>{row.label}</Pill>
+              <span className="min-w-0 flex-1 truncate text-xs text-zinc-400" title={row.text}>{row.text}</span>
+              <span className="shrink-0 text-xs text-zinc-600" title={new Date(l.created_at).toLocaleString()}>{timeAgo(l.created_at)}</span>
+            </div>
+          )
+        })}
       </Card>
     </Page>
   )
 }
 
-function describe(detail: string): string {
-  try {
-    const d = JSON.parse(detail)
-    return Object.entries(d).map(([k, v]) => `${k.replace(/_/g, ' ')}: ${typeof v === 'object' ? JSON.stringify(v) : v}`).join(' · ')
-  } catch { return detail }
-}
 
 function SpendList({ title, rows, total }: { title: string; rows: { key: string; label: string; runs: number; usd: number }[]; total: number }) {
   return (
