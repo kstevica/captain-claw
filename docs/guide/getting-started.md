@@ -112,4 +112,4 @@ Full reference: [USAGE.md](../../USAGE.md#configuration-reference) (23 config se
 
 - [Flight Deck](flight-deck.md) — what to do once the dashboard is open
 - [BotPort and MCP](botport-and-mcp.md) — connect your decks to each other and to Claude
-- [Inside an agent](agents.md) — every supported model and the 72 built-in tools
+- [Inside an agent](agents.md) — every supported model and the 79 built-in tools

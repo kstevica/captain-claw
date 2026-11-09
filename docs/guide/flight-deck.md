@@ -12,7 +12,7 @@ A full management dashboard for running teams of AI agents. Spawn, monitor, conf
 flight-deck        # http://0.0.0.0:25080   (alias: captain-claw-fd; add --simple-chat for a kiosk)
 ```
 
-**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Crew](#crew) · [Forge agents](#forge-agents) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Onboarding](#onboarding) · [The Taskboard](#the-taskboard) · [Your own AI keys and Profile](#your-own-ai-keys-and-profile) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Updating the deck](#updating-the-deck) · [Idle agents sleep](#idle-agents-sleep)
+**On this page:** [Seven orchestration modes](#seven-orchestration-modes) · [Code](#code) · [Crew](#crew) · [Forge agents](#forge-agents) · [Archetypes](#archetypes) · [Captain Swarm](#captain-swarm) · [Plan and Deep mode](#plan-and-deep-mode) · [Orchestrator / DAG mode](#orchestrator--dag-mode) · [Flows and the Observatory](#flows-and-the-observatory) · [Running the fleet](#running-the-fleet) · [The kiosk and simple layout](#the-kiosk-and-simple-layout) · [Onboarding](#onboarding) · [The Taskboard](#the-taskboard) · [The Line](#the-line) · [Custom tools](#custom-tools) · [Agents as colleagues](#agents-as-colleagues) · [Agent files](#agent-files-export-import-and-backups) · [Course](#course) · [Your own AI keys and Profile](#your-own-ai-keys-and-profile) · [Activity and audit](#activity-and-audit) · [Running a deck for a team](#running-a-deck-for-a-team) · [Updating the deck](#updating-the-deck) · [Idle agents sleep](#idle-agents-sleep)
 
 ## Seven orchestration modes
 
@@ -171,7 +171,7 @@ The chat-first view your team's non-admins live in is a complete place to work:
 - a **[Taskboard](#the-taskboard)** of everything the agents were asked and sent, and what needs you (0.8.4);
 - one **timeline** per agent with named topics, and a **reasoning-effort** picker;
 - **agent groups**: folders in the agent list, with a name and a colour, that fold away and still show an agent at work or a new reply. Drag an agent onto a group, or use its **⋯ → Group**; a group's own **⋯** ticks its agents, renames, recolours and orders it. **Pin** one group to the top of the list, and as many agents as you like to the top of their group. Each person has their own, on all their devices;
-- a **⋯** menu per agent, a card of tiles since 0.8.4, for its model, its instructions, insights and skills, and its **[Onboarding](#onboarding)**, which also **shares it on the network** and shows its **Activity** and **Tasks**;
+- a **⋯** menu per agent, a card of tiles since 0.8.4, for its model, its instructions, insights and skills, and its **[Onboarding](#onboarding)**, which also **shares it on the network** and shows its **Activity** and **Tasks**; since 0.9.0 a wide card in four labelled rows, **At work**, **What it knows**, **Who it is** and **Its place**, with **Lessons to approve**, **Identity & email** and **Back up / export**;
 - a **Files** menu in the composer with the last five files the agent made in this chat, with **Open** and **Show in library** (0.8.4);
 - pictures the reply hands over, in the chat and the channel, and **compact cards** for automated results and the agent's rephrasing of your request (0.8.4);
 - **⌘/Ctrl+Enter** to queue a message on the lane's queue, switched to Auto (0.8.3); Enter still sends. **Insert now** (or `I`) hands a queued message to the running turn, which reads it on its next step (0.8.4). A message you send while the agent is busy waits under the transcript and goes when it's free, or **Send at next step** hands it to the running turn (0.8.11).
@@ -246,6 +246,57 @@ New in 0.8.6: one timeline per person for everything the deck and your agents di
 
 Design and known gaps: [docs/autonomous-line-plan.md](../autonomous-line-plan.md).
 
+## Custom tools
+
+New in 0.9.0, off by default: **Python tools of your own**, built by [Crew](#crew)'s coding agents and run by Flight Deck for your agents. An admin turns them on in **Admin console → Settings → Custom tools**; then **Custom tools** is under **Multi-Agent** in the full layout and in the kiosk's **Settings** menu, with the tabs **Mine**, **Shared with me**, **Everybody** and, for admins, **Approvals**.
+
+- **Making one** (people approved for Crew): **New tool** → **Name**, **Title** and **What it should do** → **Check it**. Your own model returns a fuller spec with a reason for each change and an **Already there?** warning when agents can do it already. Keep **Checked** or **Yours**, pick a coding agent, **Build it**. The worker writes the tool, its tests and its examples in the tool's own git repository; when you approve the merge, Flight Deck publishes it in the background, and it goes live only if the tests and every example pass. Otherwise the old version stays live, and the last three versions can be made live again under **Versions**.
+- **Agents use them** through the `custom_tools` tool (`list`, `describe`, `run`, and `build`, `improve`, `propose`). Flight Deck runs every call, never the agent: one process per call, JSON in and out, as the person whose turn it is, with that person's secrets (**Your secrets for it**) and files, and nothing else from the deck. Calls are limited to 60 seconds (300 at most) and 1 GB of memory by default, and land in the agent's tool-call register.
+- **Agents suggest tools.** After a long turn of repeated, mechanical work, the agent's own model may draft one; it waits in **Your agents suggest** at the top of **Mine**, and nothing is built until you click **Build it** (`tool_proposals` in `config.yaml`: 4 a day at most).
+- **Offer it**: to **People…** or to **Everybody on this deck** (which waits for an admin's approval unless turned off). An offer runs for nobody until they click **Add**, which is their consent to what the tool says it needs. Others can run it and give it their own secrets, but never change it or see its code, versions or logs; when a new version asks for more, everyone who added it gets a bell.
+- **A tool can ask** the agent that ran it to use its tools (declared in `tool.json` under `uses`, each with a reason; sending mail or messages only when the tool's owner runs it; never code, money or changes to the agent), run your other custom tools (3 levels deep at most), and ask the person running it a question in Flight Deck. **Try it** on the page has **Run as** for tools that call an agent.
+- **The sandbox.** On Linux 5.13 or later each run is held in a Landlock sandbox: it reads only its own version and the system folders, writes only to the call's folder, has no TCP unless `tool.json` says `"network": true`, and can't signal anything outside. **macOS, Windows and the stock Raspberry Pi 5 kernel have no Landlock**, so tools there run as Flight Deck's own user and can reach what it can; the admin card says which this host is. **Run tools only in the sandbox** stops every tool on a host without one. Installing a tool's own packages at publish time runs outside the sandbox.
+
+Needs `git` on the host (`uv` is optional). Tools live in `<FD data dir>/external_tools/`, so add it to backups. Design and what's still open: [docs/external-tools-plan.md](../external-tools-plan.md).
+
+**Questions in Flight Deck.** The same dialog serves the new `ask_user` tool: an agent asks the person its turn is for one question (text, one choice, several, yes/no) or a short form, in every Flight Deck tab they have open, and waits 10 minutes by default (up to an hour). The bell says *‹agent› asks you something*; **Send** or **Don't answer**, and either way the agent says what it assumed. Automatic turns (schedules, flows, other agents, Autonomous Work, the Taskboard, the API, agent links, exams) have nobody to ask, and turns from Telegram, WhatsApp, glasses, devices or public links ask in their reply instead. The dialog always says never to type a password or key there.
+
+## Agents as colleagues
+
+New in 0.9.0: an agent can hand a piece of work to another of your agents and carry on with the answer. The `colleagues` tool has `list` (who is on the team), `hand_over` and `handed` (what it handed out and how far each one is).
+
+- **A hand-over is its own Taskboard task**, under **Between your agents**, linked to the task the agent was on. The colleague's answer goes back to the agent that asked, in that task's session, and the work carries on; with no board task, it comes to its chat.
+- **Authority never grows**: the turn's mail permissions travel with the work, read by code, not by the model, and the right to send a Gmail reply never passes on.
+- **Limits**: no handing to itself or back along the chain, at most 4 agents in a chain, 60 hand-overs per owner a day, the owner's token allowance, and **Colleagues it may hand work to** in each agent's **⋯ → Identity & email**.
+- **Identity & email** also gives an agent a role, its own inbox and the names it answers to, so email meant for it becomes its task; see [Agents in your inbox](devices-and-channels.md#agents-in-your-inbox).
+
+Only on the owner's own turns under Flight Deck. Design: [docs/agent-colleagues-plan.md](../agent-colleagues-plan.md).
+
+## Agent files: export, import and backups
+
+New in 0.9.0: any process agent you own fits in one `.captain` file, to restore later, move to another deck or hand to someone else. In the kiosk: the agent's **⋯ → Back up / export** (in the *Its place* row) and **New agent → From a file**.
+
+- **What goes in**: **Template** (who it is and what it was taught, for a fresh copy someone else starts from), **Trained** (and what it learned since, without its conversations and files) or **Full backup** (everything: conversations and files too), with an **Includes** list to fine-tune. Before a Template or Trained file leaves, **What it learned — look it over**: insights that are usually about you or your clients (preferences, feedback, projects, deadlines, people) start unticked, and **People it knows** is a separate tick.
+- **Never in the file**: its `.env`, keys and tokens, connections, logs and your own profile. Connections travel by name only, and the import lists the ones to set up again with **Open Connections**. A **Full backup** can carry its keys with **Include its keys, sealed with a passphrase**; Flight Deck doesn't keep the passphrase.
+- **Bringing one in**: the dialog shows what the file holds, who made it and when, and whether it is **Signed by this deck**, by a deck you trust, or unsigned, before anything is made. Make **A new agent** on **Its own model** or **One of your models**, or pour it **Into** an existing agent: **Add to what it has** (what it knows stays; the file only adds what it hasn't got) or **Replace it** (memory, files, conversations and tasks; its model and keys stay). A backup is taken first, kept a week, with **Undo**. Scheduled tasks always arrive switched off.
+- **Packages and updates**: name a Template or Trained export under **Updates later** ("Bookkeeper for Acme") and each export becomes its next version. Bringing in a newer one offers **Update to version N**: the old version's items are swapped for the new ones, and what the agent learned since, or what was changed there, stays. A package's onboarding becomes the agent's base, which the person adds to but can't change.
+- **Scheduled backups**: kiosk **Settings → Agent backups** → **Back up my agents automatically**, every day or week from an hour you pick, keeping 1–60 per agent (7 by default), for all agents or chosen ones, with an optional copy into a folder of your files (those copies aren't pruned). **Backups kept** downloads, deletes or **Restore it**s any of them. Scheduled backups are full and never carry keys.
+- **Signed files**: every deck signs its bundles with its own key, and a file changed after signing is refused. **Agent backups** shows this deck's fingerprint to give to whoever imports your agents; admins list **Decks this one trusts** under **Admin console → Settings → Agent files** and can switch on **Only take files signed by this deck or a trusted one**.
+
+Files go up to 2 GB (`FD_AGENT_BUNDLE_MAX_MB`); Docker agents can't be exported yet, and the dialogs are in the kiosk only. Design: [docs/agent-export-plan.md](../agent-export-plan.md).
+
+## Course
+
+New in 0.9.0: the goals your agents' work is for. **Course** is under **Workspace** in the full layout's sidebar and under **Settings → You** in the kiosk.
+
+- **Three levels**: **The deck** (set by an admin, read by everyone), **You** and **Your agents** (one agent's own), each goal **Strategic**, **Long-term**, **Medium-term** or **Short-term**, with *Done when*, an optional metric and target, and a parent goal at its own level or a wider one, so they form a tree.
+- **Agents work with them in mind**: every agent working for you gets the live goals in its prompt (**What your agents receive** previews it) and uses them to decide what matters next. A goal is never permission to do anything.
+- **Suggestions wait for you**: agents (with the new `course` tool and their self-reflection) and Flight Deck can suggest a goal or a change; it waits on your Line (*Put this goal on the course?* → **Accept**, **Edit on Course**, **Decline**) and under **Waiting for you** on the page. **Let my agents add their own short-term goals without asking** is the one exception. Only a person marks a goal done.
+- **Wired into the deck**: tasks, plans, projects, scheduled tasks and Swarm runs can be marked **Serves a goal**; the Taskboard sorts by **Serves your course**; Autonomous Work ranks work that serves a goal higher (never with more rights); Forge's review offers **Add this team's goal to your Course**. Goals nothing has moved show under **Off course**, and a goal that misses its review leaves the agents' prompts until someone says it's still on course.
+- **Admins** set the horizons per level, caps, suggestion limits and the weekly progress estimate, conflict check and stalled-goal suggestions on **Admin console → Settings → Course: horizons, limits, suggestions and checks**.
+
+Design: [docs/course-plan.md](../course-plan.md).
+
 ## Your own AI keys and Profile
 
 **Your own AI keys** (0.8.4, Settings): add Anthropic, OpenAI, Google Gemini, OpenRouter or xAI keys, each checked with the provider and sealed at rest. While it's on, your tier set runs on them with **no daily limits**, and existing agents follow. An admin can turn it off for the deck.
@@ -269,8 +320,10 @@ New in 0.8.3: the **tool-call register** records every tool call every agent on 
 - **Multi-user Auth & teams** — JWT authentication, admin dashboard, rate limiting, and quotas; owner-scoped routes, per-user Google/Microsoft, team tier sets, shared agents, and a kiosk mode (0.8.0); invitations by email, a waitlist, password changes, branding and daily plan limits per user (0.8.1).
 - **Connections** — One tab per service: Google, Microsoft, ChatGPT, Antigravity, MCP Servers, WhatsApp, Telegram, Browser, Deep memory, Jev — each person connects their own accounts, and an agent only ever gets its owner's token. **Browser** (0.8.8) has the [Captain for Chrome](devices-and-channels.md#captain-for-chrome) extension and [Captain for Mac](devices-and-channels.md#captain-for-mac) to download, and lists the browsers and Macs connected to you. *Agent access for Claude (MCP)* issues the personal access tokens the HUD and the devices use too.
 - **MCP Connections** — Add Model Context Protocol servers (HTTP or stdio) once and every entitled agent in the fleet picks up their tools — no per-agent config. Phase 2 adds stdio transport for `npx`/`uvx`-shipped servers, per-agent allowlists, hot tool-list reload over SSE, and streaming tool calls.
+- **Activity** (0.9.0) — **Console → Activity** (`/console/activity`): who is using the deck, who has gone quiet, who never started, and whether you've written to them. A bar per day for what each person typed on any channel (their agents' own work shows faint and never counts), **Write** from your own Gmail or Outlook (*Message* or *Ask for feedback*), and **Mark as written** for a call, WhatsApp or a chat in person. With Gmail read access it shows your mail with each person too: dates and subjects only, kept 10 minutes in memory.
 - **Users page** (0.8.5) — last login with sorting, tokens used this month and all time, and **Ask for feedback**, an editable email from your own Gmail or Outlook.
 - **Branding** — the deck's name and logo on the sign-in page and, since 0.8.3, in the browser tab.
+- **Admin fixes** (0.9.0) — a deck without sign-in (the desktop app's) applies its console Settings (branding, deck name, Docker); **Make it a company archetype**; Plan limits shows only the limits the deck enforces, and limit messages say to ask the admin; **deleting a user stops and removes their agents, folders and chats**; an empty deck asks for **Create the admin account**; waitlist approvals can go **into kiosk mode**; **Recent activity** reads as sentences with people's names, and **Reset today** is recorded.
 - **Confinement** (0.8.4) — with sign-in on, agents stay in their own files, non-admins' agents don't run code or drive the host, hosted apps and host folders are admin-only, and team keys are masked for non-admins and go only to the team's endpoints. See the [checklist](../team-deployment.md#what-the-launch-hardening-changed-08x).
 
 The step-by-step checklist is [docs/team-deployment.md](../team-deployment.md).
@@ -296,3 +349,5 @@ New in 0.8.3, off by default. **Admin console → Settings → Agents → Put id
 - The kiosk shows *Asleep*, process cards an `asleep` badge, and the Processes page counts sleeping agents apart.
 - Never put to sleep: run workers, Iskra beings, agents with a Telegram, Slack or Discord bot of their own, an agent with a run in flight, and Docker agents.
 - `FD_AGENT_IDLE_STOP_S` (seconds) overrides the admin setting.
+
+**Scheduled tasks on an agent that's off** (0.9.0): a sleeping agent is woken as before, one that crashed is started and stays on, and one its owner switched off is started about five minutes before the run and switched off again after, when nothing else needs it. A choice you make meanwhile wins.

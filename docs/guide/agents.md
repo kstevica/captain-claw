@@ -18,9 +18,23 @@ Mix providers freely — each session independently selects its model.
 | LiteRT (on-device) | `.litertlm` Gemma models running locally via an isolated subprocess worker |
 | OpenRouter | 200+ models via meta-router |
 
-## 72 built-in tools
+## 79 built-in tools
 
 Shell, file I/O, web fetch/search, browser automation, PDF/DOCX/XLSX/PPTX extraction, image generation (DALL-E), OCR, vision, TTS, STT, email (SMTP/Mailgun/SendGrid), Google Workspace (Drive, Docs, Sheets, Slides, Gmail, Calendar), Microsoft 365 (Outlook mail, Calendar, OneDrive), Jev calibrated judgments (TypeSafe AI), Soniox speech in and out (`audio`), public file links, topic switching by asking (`sessions`), a read-only Telegram inbox, the StopWatch's background picture, bill payments (opt-in), WhatsApp file delivery, intentions (proactive future actions), desktop automation, screen capture with voice commands, persistent cross-session memory (todos, contacts, scripts, APIs, playbooks), datastore (SQLite tables with protection rules), deep memory (Typesense), Basna (read and start multi-agent ensemble runs), personality system, cron scheduling, BotPort fleet discovery, and Termux (Android).
+
+New in 0.9.0:
+
+| Tool | What it does |
+|---|---|
+| `custom_tools` | Lists, describes and runs the owner's [Custom tools](flight-deck.md#custom-tools) and the ones they added, and asks Crew to `build` or `improve` one, or `propose`s one for the owner to build. Flight Deck runs every call as the person, in a Landlock sandbox on Linux 5.13+ (none on macOS, Windows or the stock Raspberry Pi 5 kernel). Shown only while the deck has Custom tools on. |
+| `ask_user` | Asks the person the turn is for a question, or a short form of up to 10, in a Flight Deck dialog, and waits (10 minutes by default, up to 60). Automatic turns (schedules, flows, other agents, Autonomous Work, the Taskboard, the API, links, exams) have nobody to ask; turns from Telegram, WhatsApp, glasses, devices and public links are told to ask in the reply. |
+| `colleagues` | Hands a piece of work to another of the owner's agents and gets the answer back in the same task: `list`, `hand_over`, `handed`. See [Agents as colleagues](flight-deck.md#agents-as-colleagues). Owner's turns only. |
+| `imap_mail` | Reads, searches, drafts, files and (when the inbox allows it) sends from the owner's IMAP inboxes; never deletes. The password stays sealed in Flight Deck. Hidden until an inbox is connected. See [Agents in your inbox](devices-and-channels.md#agents-in-your-inbox). |
+| `external_memory` | The owner's Membase or Hindsight memory, shared by all of their agents, with the provider's own actions and rules (`remember`, `search`, Hindsight's `reflect`, `forget` only with `confirm=true`). Hidden until a memory is connected. See [Memory](memory.md). |
+| `course` | The goals the agent's work is for (the deck's, its owner's and its own): `view`, `link` work to a goal, `report` progress, `propose` a goal or a change, which waits for the owner on their Line. It never marks a goal done. Owner's turns only. |
+| `image_manipulation` | Resizes, crops, rotates, combines, overlays, watermarks, annotates, animates, splits and converts pictures (png, jpg, webp, gif, bmp, tiff, ico, avif, pdf) in-process, with about 45 operations and no model or network. Inputs are never changed. Always on. |
+
+That makes **79 built-in tools** per agent (78 in the desktop app, which has no Captain Swarm).
 
 New in 0.8.10:
 
