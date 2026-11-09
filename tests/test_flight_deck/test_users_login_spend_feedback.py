@@ -397,11 +397,19 @@ async def test_the_draft_asks_what_was_wanted_and_names_who_can_send_it(deck, mo
     assert body["mail"]["microsoft"]["available"] is False
 
 
-def test_a_draft_for_someone_with_no_name_still_reads_well():
+def test_the_draft_greets_by_first_name():
     subject, body = feedback_request_routes.compose_request(
-        instance_name="Captain", admin_name="Boss", user_name="")
-    assert subject == "How is Captain working for you?"
-    assert body.startswith("Hi,\n")
+        instance_name="Northwind Advisory", admin_name="Lena Park", user_name="Ahmed Karimi")
+    assert subject == "Ahmed, how is Northwind Advisory working for you?"
+    assert body.startswith("Hi Ahmed,\n")
+
+
+def test_a_draft_for_someone_with_no_name_still_reads_well():
+    for nameless in ("", "   "):
+        subject, body = feedback_request_routes.compose_request(
+            instance_name="Captain", admin_name="Boss", user_name=nameless)
+        assert subject == "How is Captain working for you?"
+        assert body.startswith("Hi,\n")
 
 
 async def test_sending_emails_the_user_and_marks_them_asked(deck, monkeypatch):

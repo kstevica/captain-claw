@@ -48,10 +48,12 @@ class SendFeedbackRequest(BaseModel):
 
 
 def compose_request(*, instance_name: str, admin_name: str, user_name: str) -> tuple[str, str]:
-    """(subject, plain text) of the draft the admin starts from."""
-    greeting = f"Hi {user_name}," if user_name else "Hi,"
+    """(subject, plain text) of the draft the admin starts from, to the person
+    by first name, as a plain message is (user_activity.compose_message)."""
+    first = user_name.split()[0] if user_name.split() else ""
+    greeting = f"Hi {first}," if first else "Hi,"
     # The name leads, so each email stands apart in the admin's mail list.
-    subject = (f"{user_name}, how is {instance_name} working for you?" if user_name
+    subject = (f"{first}, how is {instance_name} working for you?" if first
                else f"How is {instance_name} working for you?")
     return subject, "\n".join([
         greeting,
