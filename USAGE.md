@@ -1529,7 +1529,7 @@ HTML in, the page and a PNG of it out, for charts, diagrams and dashboards inste
 
 The PNG reaches the chat, Telegram, WhatsApp and the Files menu, and goes into a `.docx` or `.md` as `![caption](path)`. Script errors, failed loads, empty canvases and a blank picture come back for the agent to fix. The page never touches the host: it's served from an address that doesn't exist, every request goes through the public-only client, and WebSockets are closed.
 
-### image_manipulation — NEW
+### image_manipulation — NEW in 0.9.0
 
 Pictures changed in-process with Pillow: resized, cropped, joined, stamped, annotated and converted, instead of Pillow or ImageMagick scripts in the shell that often leave nothing. No model, no network. Always on.
 

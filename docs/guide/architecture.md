@@ -8,7 +8,7 @@ Where each part of Captain Claw lives in the code.
 |---|---|
 | Agent (14-mixin composition) | `captain_claw/agent.py` |
 | LLM providers | `captain_claw/llm/` |
-| 72 tools + registry | `captain_claw/tools/` |
+| 79 tools + registry | `captain_claw/tools/` |
 | Flight Deck (FastAPI + React) | `captain_claw/flight_deck/` |
 | Device bridge (StickS3 / StopWatch / PaperColor / Waveshare, `/device/ws`) + OTA store + backgrounds | `captain_claw/flight_deck/device_bridge.py`, `device_firmware.py`, `device_backgrounds.py` |
 | Device firmware (PlatformIO, every device) | `firmware/device/` |

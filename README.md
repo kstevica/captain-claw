@@ -4,7 +4,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENCE)
-[![Version](https://img.shields.io/badge/version-0.8.11-purple)](release-notes/RELEASE_NOTES_0.8.11.md)
+[![Version](https://img.shields.io/badge/version-0.9.0-purple)](release-notes/RELEASE_NOTES_0.9.0.md)
 [![Interface](https://img.shields.io/badge/interface-terminal%20%7C%20web%20UI%20%7C%20desktop-black)](docs/guide/getting-started.md)
 [![Models](https://img.shields.io/badge/models-OpenAI%20%7C%20Claude%20%7C%20Gemini%20%7C%20DeepSeek%20%7C%20Ollama%20%7C%20OpenRouter-orange)](docs/guide/agents.md#multi-model-support)
 
@@ -16,17 +16,17 @@
 
 **[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://cohort001.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)** · **[🧭 Guides](docs/guide/README.md)** · **[📝 What's new](docs/guide/whats-new.md)**
 
-**New in 0.8.11 — Hold:** a message written while the agent is busy waits and goes when it's free, a reply that came while your phone was locked arrives when you're back, and a clearer agent column in the kiosk. **[Release notes](release-notes/RELEASE_NOTES_0.8.11.md)** · **0.8.10 — Provisions:** pick a provider, paste its key, and every model tier is set; scans read by a local OCR engine with no model; a working turn no longer stops at 40 steps. **[Release notes](release-notes/RELEASE_NOTES_0.8.10.md)** · **0.8.8 — Spyglass:** Captain for Chrome sends the page you're on to one of your agents, Captain for Mac sends what's on your screen from any app (hold fn, or click), and a round of fixes from watching real users. **[Release notes](release-notes/RELEASE_NOTES_0.8.8.md)** · **0.8.9** makes agents work in the Windows desktop app, and a downloaded Mac app no longer "damaged": **[notes](release-notes/RELEASE_NOTES_0.8.9.md)** · Earlier: **[0.8.7](release-notes/RELEASE_NOTES_0.8.7.md)** · **[0.8.6 — Ship's Log](release-notes/RELEASE_NOTES_0.8.6.md)**
+**New in 0.9.0 — Shipyard:** tools of your own, built by Crew and run by Flight Deck in a sandbox; agents in one `.captain` file to back up, move or hand on; agents that hand each other work, answer email meant for them, read any IMAP inbox, learn from corrections you approve and know the goals their work is for. **[Release notes](release-notes/RELEASE_NOTES_0.9.0.md)** · **0.8.11 — Hold:** a message written while the agent is busy waits and goes when it's free. **[Release notes](release-notes/RELEASE_NOTES_0.8.11.md)** · **0.8.10 — Provisions:** pick a provider, paste its key, and every model tier is set; scans read by a local OCR engine with no model; a working turn no longer stops at 40 steps. **[Release notes](release-notes/RELEASE_NOTES_0.8.10.md)** · **0.8.8 — Spyglass:** Captain for Chrome sends the page you're on to one of your agents, Captain for Mac sends what's on your screen from any app (hold fn, or click), and a round of fixes from watching real users. **[Release notes](release-notes/RELEASE_NOTES_0.8.8.md)** · **0.8.9** makes agents work in the Windows desktop app, and a downloaded Mac app no longer "damaged": **[notes](release-notes/RELEASE_NOTES_0.8.9.md)** · Earlier: **[0.8.7](release-notes/RELEASE_NOTES_0.8.7.md)** · **[0.8.6 — Ship's Log](release-notes/RELEASE_NOTES_0.8.6.md)**
 
-<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>Captain for Chrome and for Mac</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>72 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>131 ready-made archetypes</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
+<p align="center"><strong>Flight Decks that work together</strong> &nbsp;·&nbsp; <strong>Captain for Chrome and for Mac</strong> &nbsp;·&nbsp; <strong>custom tools Crew builds for your agents</strong> &nbsp;·&nbsp; <strong>7 orchestration modes</strong> &nbsp;·&nbsp; <strong>79 built-in tools</strong> per agent &nbsp;·&nbsp; <strong>6 shared memory layers</strong> &nbsp;·&nbsp; <strong>131 ready-made archetypes</strong> &nbsp;·&nbsp; <strong>a full coding pipeline</strong> &nbsp;·&nbsp; <strong>Claude Code, Codex, OpenCode, Crush and Pi as your crew</strong> &nbsp;·&nbsp; <strong>a team-safe deck and kiosk</strong> &nbsp;·&nbsp; <strong>voice devices from M5Stack and Waveshare</strong> &nbsp;·&nbsp; <strong>living beings you raise</strong> &nbsp;·&nbsp; <strong>small models that do real work</strong></p>
 
 ## Why Captain Claw
 
 - **🛸 A fleet, not a chatbot.** Spawn specialists from 131 ready-made archetypes (31 generalists and 100 specialists, for your industry or your own life) plus the ones your admin generates for your company, describe a goal and let **Agent Forge** design the whole team, or say what you need in your own words and **Forge agents** plans a standing team with its schedules and its software.
-- **🎓 Agents you can train.** Give an agent your documents and it keeps them whole at no token cost, reads what you budget for, and learns rules and facts you review. Then exam it, and see exactly where it went wrong.
+- **🎓 Agents you can train.** Give an agent your documents and it keeps them whole at no token cost, reads what you budget for, and learns rules and facts you review. Then exam it, and see exactly where it went wrong It drafts lessons from your corrections for you to approve, works toward the goals you set on its **Course**, and fits in one file to back up, move to another deck or hand to a client.
 - **🧩 The right shape for every problem.** Seven orchestration modes, from blind ensembles merged by learned reliability to a collaborative blackboard, moderated councils, and a finisher that stops only when an independent judge says the work is done.
 - **🛰️ Decks that work together.** Flight Decks on a VPS, a laptop and a Raspberry Pi behind home NAT lend each other their agents over **BotPort**, and you watch every request cross a live map.
-- **💻 An engineering department.** Plan → your approval → build → three independent reviewers → fix, every phase a git commit in your own repo. Or hand the work to **Crew**: Claude Code, Codex, OpenCode, Crush and Pi in worktrees of their own, several at once, and nothing lands until a person says so.
+- **💻 An engineering department.** Plan → your approval → build → three independent reviewers → fix, every phase a git commit in your own repo. Or hand the work to **Crew**: Claude Code, Codex, OpenCode, Crush and Pi in worktrees of their own, several at once, and nothing lands until a person says so. Crew also builds **custom tools**, small Python programs Flight Deck runs for your agents, sandboxed on Linux.
 - **👥 Ready for a team.** A kiosk your non-admins live in, an admin console, invitations by email, per-user Google and Microsoft accounts, shared agents, daily plan limits or people's own AI keys, agents held to their own files, and a deck that updates itself from the console.
 - **🔌 Plugs into anything.** Give your CRM, shop or monitoring its own key and it talks to an agent over a WebSocket, HTTP or signed webhooks, or Flight Deck dials out to it. MCP works both ways: Claude drives your fleet, and your agents use any MCP server.
 - **📡 Wherever you are.** Web, WhatsApp (the Cloud API, or your own number), Telegram, a HUD for Meta Ray-Ban Display, push-to-talk devices from M5Stack and Waveshare, and Claude itself over MCP, all one conversation.
@@ -43,7 +43,26 @@ flight-deck          # the multi-agent dashboard: http://localhost:25080
 
 First run starts onboarding. For a single agent in the terminal or the browser, Docker, a deck for your team or a voice device, see **[Getting started](docs/guide/getting-started.md)**.
 
-## 🔭 New in 0.8.8 — spyglass
+## ⚓ New in 0.9.0 — shipyard
+
+**Custom tools.** Describe a tool in your own words, let your model check the spec, and Crew's coding agents write it, its tests and its examples. When you approve the merge, Flight Deck publishes it, and it goes live only if everything passes. Your agents call it with `custom_tools`; Flight Deck runs every call as the person, with their own secrets and files, held in a Landlock sandbox on Linux. Offer a tool to people or to the whole deck, and it runs for nobody until they **Add** it. A tool can use the agent's own tools, run your other tools and ask you a question, and agents suggest the tools they'd need.
+
+**Agents in one file.** **Back up / export** saves an agent as a `.captain` file: a **Template**, **Trained**, or a **Full backup** with its keys sealed by a passphrase. Bring it in as a new agent or into an existing one, with Undo. Name a package and each export becomes a version that updates your client's copy without touching what it learned there. Schedule backups, and sign every file with your deck's key.
+
+**Agents that work like colleagues.**
+
+- **Hand-overs**: an agent gives a piece of work to another of your agents and carries on with the answer, each step a Taskboard task.
+- **Their own address**: a role, an inbox, `you+researcher@gmail.com` and names they answer to, so mail meant for an agent becomes its task. Gmail replies go out only if you say so.
+- **Any mailbox**: **Email (IMAP)** connects up to 20 inboxes per person, with the password sealed in Flight Deck and sending off until you allow it.
+- **Lessons you approve**: a correction in chat becomes one drafted lesson in **Lessons to approve**.
+- **One memory**: Membase or Hindsight, shared by all of a person's agents, or one Hindsight server for the deck.
+- **A Course**: goals for the deck, for you and for each agent, in every agent's prompt; their suggestions wait for you.
+
+- **And:** `ask_user` asks you in a Flight Deck dialog, `image_manipulation` edits pictures with no scripts, **Console → Activity** shows who's using the deck and whether you've written to them, scheduled tasks start an agent that's off, and 79 built-in tools.
+
+**→ [Release notes](release-notes/RELEASE_NOTES_0.9.0.md)** · **[Custom tools](docs/guide/flight-deck.md#custom-tools)** · **[Agent files](docs/guide/flight-deck.md#agent-files-export-import-and-backups)** · **[Agents as colleagues](docs/guide/flight-deck.md#agents-as-colleagues)** · **[Course](docs/guide/flight-deck.md#course)**
+
+## 🔭 Spyglass `since 0.8.8`
 
 **Captain for Chrome** sends the page you're on to one of your agents. It reads the page **in your own browser**, signed in and as you see it, and fetches the files it links to with your session. That covers a portal, an intranet, a paywalled article or a dashboard drawn by JavaScript, where an agent's own web tools would hit a sign-in or a bot wall.
 
@@ -224,7 +243,7 @@ The fifth mode is **💻 Code** (above). The sixth is **Flight Deck** itself —
 | **[BotPort, MCP and agent links](docs/guide/botport-and-mcp.md)** | Flight Decks that work together, Flight Deck as an MCP server for Claude, MCP servers for your agents, connecting your own systems |
 | **[Devices and channels](docs/guide/devices-and-channels.md)** | StopWatch, PaperColor, StickS3 and Waveshare, the smart-glasses HUD, WhatsApp (and your own WhatsApp), Telegram, notifications, agents in your inbox |
 | **[Memory and cognition](docs/guide/memory.md)** | Six memory layers, the context engine, dreaming, the Brain Graph |
-| **[Inside an agent](docs/guide/agents.md)** | Every supported model, the 72 built-in tools, safety guards, the agent web UI |
+| **[Inside an agent](docs/guide/agents.md)** | Every supported model, the 79 built-in tools, safety guards, the agent web UI |
 | **[Architecture](docs/guide/architecture.md)** | Where each component lives in the code |
 | **[What's new](docs/guide/whats-new.md)** | Every release, newest first |
 

@@ -9,7 +9,7 @@
 | **[BotPort, MCP and agent links](botport-and-mcp.md)** | Flight Decks that work together, Flight Deck as an MCP server for Claude, MCP servers for your agents, connecting your own systems |
 | **[Devices and channels](devices-and-channels.md)** | StopWatch, PaperColor, StickS3 and Waveshare, the smart-glasses HUD, WhatsApp (and your own WhatsApp), Telegram, notifications, Captain for Chrome and Captain for Mac, agents in your inbox |
 | **[Memory and cognition](memory.md)** | Six memory layers, the context engine, dreaming, the Brain Graph |
-| **[Inside an agent](agents.md)** | Every supported model, the 72 built-in tools, safety guards, the agent web UI |
+| **[Inside an agent](agents.md)** | Every supported model, the 79 built-in tools, safety guards, the agent web UI |
 | **[Architecture](architecture.md)** | Where each component lives in the code |
 | **[What's new](whats-new.md)** | Every release, newest first |
 

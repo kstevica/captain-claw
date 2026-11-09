@@ -271,6 +271,34 @@ Connections panel).
   app's download is the deck's own build (`captain-for-mac/build.sh` on a Mac) or else the GitHub
   release (`FD_MAC_APP_URL`).
 
+## What 0.9.0 changes for a team deck
+
+- **Custom tools** are off until an admin turns them on (**Admin console → Settings → Custom tools**).
+  Only people approved for Crew can make them, and approving someone for Crew still trusts them with the
+  server. Each run is held in a Landlock sandbox on Linux 5.13+; on macOS, Windows and the stock
+  Raspberry Pi 5 kernel there is none, so tools run as Flight Deck's own user. **Run tools only in the
+  sandbox** refuses every run on such a host; `python3 tests/test_flight_deck/test_xtool_sandbox.py`
+  checks a kernel. A tool offered to **Everybody** waits for an admin under **Approvals** unless that
+  approval is turned off. The host needs `git`; tools live in `<FD data dir>/external_tools/`.
+- **Agents pick up email that names them** from their owner's Gmail, Outlook and IMAP inboxes, on by
+  default (`FD_AGENT_MAIL=off` stops it deck-wide), and those turns write drafts only. Sending a Gmail
+  reply is a per-agent choice that still passes each person's Google email-sending gate.
+- **Email (IMAP)** needs sign-in on: up to 20 inboxes per person, passwords sealed with the deck's data
+  key, sending off by default (`FD_IMAP_SEND=off` for the whole deck), every send audited and rung.
+  Hosts that resolve to private, link-local or cloud-metadata addresses are refused, except loopback for
+  Proton Bridge.
+- **External memory**: each person connects their own, or an admin connects one Hindsight server for
+  everyone (**Console → Connections → External memory → Shared memory server**), with a bank per person.
+  Non-admins can't point theirs at loopback, private or `.local` addresses.
+- **Agent files**: every person can export and import their own agents in the kiosk; keys never travel
+  unless sealed with a passphrase in a Full backup. Admins keep **Decks this one trusts** and can accept
+  only signed files under **Console → Settings → Agent files**. Back up `agent-bundles/`, `course.db`
+  and `<FD home>/bundle_signing_key` (losing the key changes the deck's fingerprint).
+- **Deleting a user** now stops and removes their agents, folders and chats. **Console → Activity** shows
+  who is using the deck and whether you've written to them.
+- **Course**: deck goals are set by admins and read by everyone, including members of shared agents.
+  Their horizons, caps and suggestion limits are on **Console → Settings → Course**.
+
 ## Known follow-ups (not blockers)
 
 - Flows and scheduler jobs are authenticated but **not yet per-user isolated**
