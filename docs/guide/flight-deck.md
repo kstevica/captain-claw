@@ -259,7 +259,7 @@ New in 0.9.0, off by default: **Python tools of your own**, built by [Crew](#cre
 
 Needs `git` on the host (`uv` is optional). Tools live in `<FD data dir>/external_tools/`, so add it to backups. Design and what's still open: [docs/external-tools-plan.md](../external-tools-plan.md).
 
-**Questions in Flight Deck.** The same dialog serves the new `ask_user` tool: an agent asks the person its turn is for one question (text, one choice, several, yes/no) or a short form, in every Flight Deck tab they have open, and waits 10 minutes by default (up to an hour). The bell says *‹agent› asks you something*; **Send** or **Don't answer**, and either way the agent says what it assumed. Turns started by a schedule have nobody to ask, and turns from Telegram, WhatsApp, glasses, devices or public links ask in their reply instead. The dialog always says never to type a password or key there.
+**Questions in Flight Deck.** The same dialog serves the new `ask_user` tool: an agent asks the person its turn is for one question (text, one choice, several, yes/no) or a short form, in every Flight Deck tab they have open, and waits 10 minutes by default (up to an hour). The bell says *‹agent› asks you something*; **Send** or **Don't answer**, and either way the agent says what it assumed. Automatic turns (schedules, flows, other agents, Autonomous Work, the Taskboard, the API, agent links, exams) have nobody to ask, and turns from Telegram, WhatsApp, glasses, devices or public links ask in their reply instead. The dialog always says never to type a password or key there.
 
 ## Agents as colleagues
 

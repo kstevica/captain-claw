@@ -52,9 +52,9 @@ Two new things are on by default (lesson proposals, and agents picking up email 
 - **`ask_user`: an agent asks you, in Flight Deck.** One question (text, one choice, several, yes/no) or a
   short form of up to 10, shown as a dialog in every Flight Deck tab of the person the turn is for, owner
   or member. The bell says *‹agent› asks you something*. The turn waits 10 minutes by default (up to an
-  hour); **Send** or **Don't answer**, and either way the agent says what it assumed. Turns started by a
-  schedule have nobody to ask, and turns from Telegram, WhatsApp, glasses, devices or public links ask in
-  their reply instead. Custom tools ask through the same dialog.
+  hour); **Send** or **Don't answer**, and either way the agent says what it assumed. Automatic turns
+  (schedules, flows, other agents, Autonomous Work, the Taskboard, the API, agent links, exams) have nobody
+  to ask, and turns from Telegram, WhatsApp, glasses, devices or public links ask in their reply instead. Custom tools ask through the same dialog.
 - **Agents in one file: export, import, packages and backups.** Any process agent you own fits in one
   `.captain` file. In the kiosk: the agent's **⋯ → Back up / export**, and **New agent → From a file**.
   - **What goes in**: **Template** (who it is and what it was taught), **Trained** (and what it learned

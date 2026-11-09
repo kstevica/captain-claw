@@ -25,6 +25,13 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Orchestrator Commands](#orchestrator-commands)
   - [Admin Commands](#admin-commands)
 - [Tools Reference](#tools-reference)
+  - [image_manipulation](#image_manipulation--new-in-090)
+  - [custom_tools](#custom_tools--new-in-090)
+  - [ask_user](#ask_user--new-in-090)
+  - [colleagues](#colleagues--new-in-090)
+  - [imap_mail](#imap_mail--new-in-090)
+  - [external_memory](#external_memory--new-in-090)
+  - [course](#course--new-in-090)
 - [Presentation Control (Decks)](#presentation-control-decks)
 - [File Editor (Flight Deck)](#file-editor-flight-deck)
 - [Director Panel (Flight Deck)](#director-panel-flight-deck)
@@ -58,6 +65,8 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [insights](#insights-1)
   - [nervous_system](#nervous_system)
   - [mcp_serve](#mcp_serve)
+  - [lesson_proposals](#lesson_proposals)
+  - [tool_proposals](#tool_proposals)
 - [Guard System](#guard-system)
 - [Skills System](#skills-system)
 - [Datastore](#datastore)
@@ -103,6 +112,14 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Crew](#crew-coding-agents-working-for-you--new-in-085)
   - [The Line](#the-line--new-in-086)
   - [Captain Swarm](#captain-swarm--new-in-086)
+  - [Custom tools](#custom-tools--new-in-090)
+  - [Questions and ask_user](#questions-and-ask_user--new-in-090)
+  - [Agent files: export, import and backups](#agent-files-export-import-and-backups--new-in-090)
+  - [Agents as colleagues and agent email](#agents-as-colleagues-and-agent-email--new-in-090)
+  - [Email (IMAP)](#email-imap--new-in-090)
+  - [Lessons to approve](#lessons-to-approve--new-in-090)
+  - [External memory](#external-memory--new-in-090)
+  - [Course](#course-the-goals-your-agents-work-for--new-in-090)
 - [Kiosk (Simple Layout)](#kiosk-simple-layout)
   - [Agent groups](#agent-groups--new-in-085)
   - [The agent menu](#the-agent-menu--new-in-081)
@@ -117,6 +134,7 @@ For a quick overview and installation guide, see [README.md](README.md).
   - [Desktop app mode](#desktop-app-mode--new-in-081)
 - [Deck Administration — NEW in 0.8.1](#deck-administration--new-in-081)
   - [Admin console](#admin-console)
+  - [Admin console → Activity](#admin-console--activity--new-in-090)
   - [Updating the deck](#updating-the-deck--new-in-085)
   - [Daily plan limits and free resets](#daily-plan-limits-and-free-resets)
 - [Remote Integrations](#remote-integrations)
@@ -1561,6 +1579,132 @@ Colour and filter operations take `region` `{x, y, width, height}` (or `box`) to
 
 On a sign-in Flight Deck, `path`, `paths` and `output_path` follow the agent's file rules, and a font given as a file must be one of its own files. When the agent's model sees images, it gets the results to check.
 
+### custom_tools — NEW in 0.9.0
+
+Runs the person's [custom tools](#custom-tools--new-in-090): small Python programs that Crew's coding agents wrote and Flight Deck keeps. The agent never runs a tool's code. Flight Deck runs each call as one process, JSON in and one JSON value out, as the person whose turn it is, with that person's own secrets and files. Shown only while the deck has Custom tools on (checked every turn). Refused in rehearsals. Kept in eco mode. A shared agent's member can `list`, `describe` and `run` their own tools, with their own secrets, and nothing else.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `list` (the tools usable now, and any secret still missing), `describe` (one tool's input fields, what it returns, an example, whether its secrets are set), `run`, `build`, `improve` or `propose` |
+| `tool` | string | all but list | The tool's name as `list` shows it (`<owner>/<name>` when two share a name), or a new short lowercase-dashed name for `build` and `propose` |
+| `input` | object | run | The tool's input fields, as `describe` lists them. A file field takes a `vfs:<folder>/<path>` |
+| `title` | string | no | build, propose: a short title |
+| `what` | string | build, improve, propose | What it should do, its input, what it returns and an example. For `improve`, what to change or the failure to fix |
+| `why` | string | no | propose: one sentence on why a tool beats doing it by hand |
+| `harness` | string | build, improve | The coding CLI, from `crew action=options` |
+| `model` | string | no | build, improve: the CLI's model, only if the user named one |
+
+`build` and `improve` start a Crew task and return at once. They need the owner's Crew approval; members can't use them. The agent is called back when the worker finishes. The tool goes live only after the person approves the merge and its tests and examples pass. `propose` puts a draft in **Your agents suggest** on the owner's Custom tools page; nothing is built until they click **Build it**. Files a run makes come back in `vfs:custom-tools/<tool>/<day>-<call>/`. A run that asks the person a question can wait up to an hour, so the call's outer limit is 66 minutes. A missing secret is set on the Custom tools page, never typed into a chat. Routes (the agent's own token): `/fd/external-tools/agent/status`, `/tools`, `/describe`, `/run`, `/follow`, `/stop`, `/build`, `/improve` and `/propose`.
+
+### ask_user — NEW in 0.9.0
+
+Asks the person the turn is for, as a dialog in every Flight Deck tab they have open, and waits for the answer. That person is the agent's owner, or on a shared agent the member whose turn it is. See [Questions and ask_user](#questions-and-ask_user--new-in-090). Shown only under Flight Deck. Allowed on member turns. Classed as a read. Kept in eco mode.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `question` | string | one of | One question in a short sentence (500 characters at most) |
+| `choices` | array | no | The options to pick from: 1–50, each up to 200 characters |
+| `multiple` | boolean | no | With `choices`: several may be picked |
+| `confirm` | boolean | no | A yes/no question |
+| `lines` | integer | no | Room for a free-text answer, 1–20 lines |
+| `help` | string | no | A line under the question: what it's for |
+| `questions` | array | one of | A short form instead: up to 10 objects, each with `id` (lowercase_with_underscores) and `question`, and optionally `choices`, `multiple`, `min`, `max`, `confirm`, `lines`, `help`, `optional` and `default` |
+| `wait_minutes` | number | no | How long to wait, 1–60 (default 10) |
+
+The agent gets the answers in words, and for a form as data too. Otherwise it gets "They chose not to answer" or "No answer within N minutes"; in both it is told to use its best judgement and say what it assumed. While it waits, the chat shows "Waiting for their answer in Flight Deck…". Stopping the turn closes the question. A turn with nobody there (a scheduled task, a flow, another agent, Autonomous Work, the Taskboard, the API, an agent link, an exam) can't ask. A turn from Telegram, WhatsApp, glasses, a device, a public link or another channel is told to ask in its reply. Never for passwords, codes or keys. Routes: `POST /fd/asks/agent`, `/fd/asks/agent/follow` and `/fd/asks/agent/cancel`.
+
+### colleagues — NEW in 0.9.0
+
+Hands a piece of work to another of the owner's agents and gets the answer back. See [Agents as colleagues and agent email](#agents-as-colleagues-and-agent-email--new-in-090). Shown only under Flight Deck, on the owner's own turns (the Line's gate). Never on a shared agent's member turns. Kept in eco mode.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `list` (this agent and its colleagues: name, role, what each does, email), `hand_over`, or `handed` (what it handed out lately and how far each one is) |
+| `to` | string | hand_over | The colleague's name or slug, from `list` |
+| `instructions` | string | hand_over | What they should do and deliver, complete on its own: they don't see the conversation. Under 4,000 characters |
+| `title` | string | no | hand_over: a short title for the task |
+
+A hand-over is a task on the owner's Taskboard. When the agent is working on a board task, the hand-over is part of it. The colleague starts at once, after what is already in its line. The answer comes back by itself (up to 8,000 characters): in that task's own session, else in the chat the agent was asked in. The agent shouldn't wait, poll or do the colleague's part. The tool sends this turn's mail authority, read by code, so the colleague never gets more. Limits: never to itself or back along the chain, at most 4 agents in a chain, 60 hand-overs per owner in 24 hours, the owner's token allowance, and the agent's **Colleagues it may hand work to**. Routes: `POST /fd/colleagues/agent/roster`, `/hand_over` and `/handed`.
+
+### imap_mail — NEW in 0.9.0
+
+Email in the owner's IMAP/SMTP inboxes, several at once. Flight Deck keeps the passwords and does the IMAP and SMTP work; the agent asks `POST /fd/imap/agent/<action>` and never sees a password. Shown only while the owner has an inbox this agent may use (**Which agents can use this inbox**). Never on a shared agent's member turns. Needs a deck with sign-in on, or the desktop app. See [Email (IMAP)](#email-imap--new-in-090).
+
+| Action | What it does |
+|---|---|
+| `list_accounts` | The inboxes, with their ids and which may send |
+| `list_messages` | Newest first; `folder` (default Inbox), `unread_only`, `include_body` |
+| `search` | `from:`, `to:`, `subject:`, `since:`, `before:`, `newer_than:7d`, `is:unread`, `is:flagged`, `has:attachment`, `-from:` and free text. `folder='all'` searches every folder |
+| `read_message`, `get_thread` | One email, with its attachments numbered; a whole conversation |
+| `list_folders`, `list_drafts` | The folders; the drafts (`query`: `to:<address>` or subject words) |
+| `get_attachment` | Saves one, or `all`, under `saved/downloads/<session>/mail-<hash>/` |
+| `create_draft`, `update_draft` | A draft, or a reply with `reply_to_message_id`. `update_draft` gives the draft a new Draft ID |
+| `send`, `send_draft` | Only when sending is on for that inbox |
+| `archive`, `move`, `mark_read`, `mark_unread`, `create_folder` | Filing, by `message_ids` or `thread_ids` (at most 100). Never to Trash, Junk, Drafts or Sent |
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | One of the above |
+| `account` | string | no | The inbox's id, email or label. `all` for list_messages, search, list_drafts and list_folders across every inbox. Needed for a write when there are several inboxes and no ID says which |
+| `folder` | string | no | list_messages, search: Inbox (default), Sent, Drafts, Archive, Junk or a folder from `list_folders`. move: the destination. create_folder: the new folder (`Clients/Acme`) |
+| `query` | string | search | The query; for `list_drafts`, `to:<address>` or subject words |
+| `message_id`, `thread_id`, `draft_id` | string | per action | The ID a list, search or read printed |
+| `message_ids`, `thread_ids` | array | organize | What to archive, move or mark |
+| `attachment` | string | get_attachment | A number from `read_message`, a name, or `all` |
+| `to`, `cc`, `bcc`, `subject`, `body`, `html_body` | string | writes | Comma-separated recipients; a reply defaults to `Re: <original>` |
+| `reply_to_message_id`, `reply_all` | string, boolean | no | Reply to that email, and to everyone on it |
+| `attachments`, `remove_attachments` | array | no | Files to attach (a printed path, `saved/…` or `vfs:<project>/<path>`; 20 files, 25 MB); attachments to drop from a draft |
+| `allow_repeat` | boolean | no | Only when the user asked for another copy of an email already drafted or sent |
+| `max_results` | number | no | Default 10, at most 50 |
+| `unread_only`, `include_body` | boolean | no | list_messages, search |
+
+Message, Draft and Thread IDs carry their inbox (`work:1700000000:4521:INBOX`), so an action on an ID needs no `account`. It never deletes mail: there is no `delete`, `trash`, `reply` or `forward` (a reply is `create_draft` or `send` with `reply_to_message_id`). Flight Deck adds the inbox's agentic signature to every draft and send. The agent writes only when asked, and mail writes in automated turns pass the mail-authority check first. A repeat (the same email already in Drafts, or in Sent within `FD_IMAP_REPEAT_CHECK_DAYS`, 14 days by default) is refused unless `allow_repeat` is set.
+
+### external_memory — NEW in 0.9.0
+
+The owner's external memory, shared by all of their agents: Membase or Hindsight, connected in **Connections → External memory**. Flight Deck holds the credentials and makes every call; the agent asks `/fd/external-memory/agent/run`. The tool has no fixed schema. Its actions, parameters and rules come from the connected provider, and only what the key allows is offered, so a read-only key has no `remember` or `forget`. Shown only while a memory is connected (the person's own, or the deck's shared Hindsight server). Never on a shared agent's member turns. See [External memory](#external-memory--new-in-090).
+
+| Action | Provider | What it does |
+|---|---|---|
+| `remember` | both | Save one fact (`content`; Membase `title`, Hindsight `context`) |
+| `search` | both | Look things up (`query`, `limit`; Membase `fast`, Hindsight `budget` low, mid or high) |
+| `list` | both | The newest facts (`limit`; Hindsight `query`) |
+| `documents` | both | What was handed in (`limit`; Membase `kind` file or note) |
+| `forget` | both | Remove one item for good (`id`). Only with `confirm=true`, after the person agreed; without it nothing changes |
+| `capabilities` | both | What the connection reaches and may do now, and the person's rules |
+| `reflect` | Hindsight | A reasoned answer over the whole bank (`question`, `budget`) |
+| `get`, `add_document`, `profile`, `add_profile_fact`, `search_media`, `ask` | Membase | One item by id; a long text or a public page by URL; standing facts about the person, and adding one; photos and videos; one written answer |
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | One of the actions the connected provider offers |
+| others | per action | per action | The provider's own parameters, as the tool's description lists them (`content`, `query`, `id`, `confirm`, `question`, `limit` …) |
+
+Insights, intentions and lessons (and reflections and intuitions, if the person ticks them) are copied in on their own; the tool is for what the agent decides to save or look up itself. The memory isn't recalled into the context by itself yet. Each search hit names the Memory it came from.
+
+### course — NEW in 0.9.0
+
+The goals the agent's work is for, from Flight Deck's [Course](#course-the-goals-your-agents-work-for--new-in-090): the deck's, its owner's and its own. The live goals are already in its prompt; the tool shows more and records progress. Shown only under Flight Deck, on the owner's own turns. Classed as a read. Kept in eco mode.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `action` | string | yes | `view` (every goal with status, progress, when work last moved it, due and review dates), `link`, `report`, `propose` or `propose_change` |
+| `goal_id` | string | link, report, propose_change | The goal's `G:<id>` |
+| `kind` | string | link | `session`, `schedule`, `project`, `task` or `plan` |
+| `ref_id` | string | link | The work's id (session id, task id …) |
+| `note` | string | no | link, report: one short sentence |
+| `progress` | number | report | 0 (not started) to 1 (done) |
+| `looks_achieved` | boolean | no | report: ask the owner on their Line whether the goal is achieved |
+| `scope` | string | propose | `agent` (for itself; horizon `medium` or `short`) or `user` (for its owner) |
+| `horizon` | string | propose | `strategic`, `long`, `medium` or `short` |
+| `title` | string | propose | The goal in a few words |
+| `success` | string | propose | How it will be known done |
+| `parent_id` | string | no | propose: the `G:<id>` it serves |
+| `changes` | object | propose_change | Any of `title`, `success`, `detail`, `horizon`, `parent_id`, `due_at` |
+| `rationale` | string | no | propose, propose_change: why, briefly |
+
+`report` covers the owner's goals and the agent's own, not the deck's. A proposal waits on the owner's Line, unless they let their agents add their own short-term goals without asking. The admin's weekly cap per agent applies (2 by default), at most 5 suggestions wait per level, and a declined title isn't suggested again for 90 days. It never marks a goal done; only a person does. A goal guides what the agent chooses to do and never permits anything. Routes: `POST /fd/course/agent/view`, `/link`, `/report`, `/propose` and `/propose_change`.
+
 ### crew — NEW in 0.8.5
 
 Run coding CLIs as your crew: Claude Code, Codex, OpenCode, Crush or Pi, each in its own git worktree on Flight Deck, several at once. The agent supervises and the CLI does the work. `dispatch` returns at once and the agent is called back when a task finishes or needs a decision, so it doesn't poll. How it all works is under [Crew](#crew-coding-agents-working-for-you--new-in-085).
@@ -2738,6 +2882,30 @@ Settings for Captain Claw's MCP server mode (`captain-claw-mcp`). See [MCP Serve
 mcp_serve:
   enabled: true                               # enable MCP server
   log_path: "~/.captain-claw/mcp_server.log"  # server log file path
+```
+
+### lesson_proposals
+
+**NEW in 0.9.0.** Lessons the agent drafts from its owner's corrections and standing rules, for the owner to approve in [Lessons to approve](#lessons-to-approve--new-in-090). Only under Flight Deck and only after the owner's own turns. A word check runs first, so only messages that read like a correction cost a model call, on the agent's own model. Nothing is taught without the owner's yes. **On by default.**
+
+```yaml
+lesson_proposals:
+  enabled: true              # false turns lesson proposals off for this agent
+  cooldown_seconds: 20       # at least this long between two drafts
+  max_per_day: 12            # drafts a day (UTC), whatever the owner does with them
+```
+
+### tool_proposals
+
+**NEW in 0.9.0.** [Custom tools](#custom-tools--new-in-090) the agent drafts when a job looks like code's, for the owner to build or dismiss under **Your agents suggest**. Only under Flight Deck, only when the deck has Custom tools on and the owner may build them (Crew), and only after the owner's own turns. Nothing is built without the owner's click.
+
+```yaml
+tool_proposals:
+  enabled: true              # false turns tool proposals off for this agent
+  cooldown_seconds: 600      # at least this long between two drafts
+  max_per_day: 4             # drafts a day (UTC)
+  min_tool_calls: 8          # a turn this long is worth asking about by itself;
+                             # 3 tool calls are enough when the owner's words sound like a repeated job
 ```
 
 ---
@@ -4851,6 +5019,8 @@ Since 0.8.0 the page has **one tab per connection** — Google, Microsoft, Teleg
 
 - **Telegram** — ask for the deck's team bot, picking one of your agents; after an admin approves, a one-time link binds your Telegram account. Then the **Inbox** switch, "Add <agent> to a group" and the agent's groups. See [Telegram: the Team Bot](#telegram-the-team-bot--new-in-081).
 - **Soniox** — your own Soniox key for speech-to-text and voices (checked with Soniox before it is saved; only a hint ever comes back). Without one you use the admin's team key, else the deck's `SONIOX_API_KEY`. Agents, devices and the WhatsApp bridge use their owner's key; the agent itself never holds it. See [`audio`](#audio).
+- **Email (IMAP)** (0.9.0) — up to 20 IMAP/SMTP inboxes of your own, with sending off until you turn it on. See [Email (IMAP)](#email-imap--new-in-090).
+- **External memory** (0.9.0) — one Membase or Hindsight memory all of your agents share. See [External memory](#external-memory--new-in-090).
 
 #### Google
 
@@ -5108,6 +5278,7 @@ Every process agent runs as the deck's OS user. On a deck with sign-in, Flight D
 - **Collaboration.** A notification bell for what needs you, and since 0.8.6 [the Line](#the-line--new-in-086) for shares, finished runs, sends and everything else that happened on its own, team spend by user and run kind in **Admin → Usage**, **Copy to my workspace** for a folder shared with you, and **Duplicate** on shared or built-in archetypes to fork an editable copy.
 - **Shared agents** (`FD_AGENT_SHARING=1`): one agent, several users — see [Shared agents](#shared-agents-a2-members-own-google-deep-memory-files) below.
 - **Agent options.** A gear on each agent opens a tabbed options dialog (General, Instructions, `config.yaml`, `.env`); name and description are stored by Flight Deck, so they survive a browser wipe. Instructions are stored per agent by Flight Deck, so two tabs can't erase each other's.
+- **For teams in 0.9.0.** Admins switch on [Custom tools](#custom-tools--new-in-090) and approve tools offered to everybody, list the decks whose [agent files](#agent-files-export-import-and-backups--new-in-090) they trust, can connect one Hindsight server for everyone's [external memory](#external-memory--new-in-090), set the deck's goals on [Course](#course-the-goals-your-agents-work-for--new-in-090), and see who uses the deck on [Activity](#admin-console--activity--new-in-090). A person's agents hand each other work as [colleagues](#agents-as-colleagues-and-agent-email--new-in-090).
 
 ### Forge agents: say what you need and get a team — NEW in 0.8.5
 
@@ -5277,6 +5448,256 @@ Captain Swarm keeps improving one measured number. Open it next to Bat in the fu
 **Caps are in tokens, never dollars**: type `80M`, `500k` or a number, with dollars shown as "about $x". Defaults per run and per attempt: Write or research 100M / 15M, Best result for a task 50M / 10M, Rules from your habits 60M, Any repository and Mrav 200M. A budget can stop a measurement midway; finished but unmeasured attempts are dropped when the budget runs out mid-wave.
 
 Settings: `FD_CAPTAIN_SWARM_DISABLED` (turns the supervisor off), `FD_CAPTAIN_SWARM_MAX_RUNS` (`1` run at once per person), `FD_CAPTAIN_SWARM_MAX_LANES` (`4`, attempts at once, 1–8), `FD_CAPTAIN_SWARM_PER_SITE` (`1`, 1–4), `FD_CAPTAIN_SWARM_MEASURE_PARALLEL` (`1`, 1–8), `FD_CAPTAIN_SWARM_BROWSER` (on; `0` keeps Captain's own checks to plain fetching). Runs live in `captain_swarm.db`. Known gaps: it has run on synthetic mail and throwaway decks; a real owner's baseline, a real **Carry it out** and a gain kept live on code are still to come, and address checks have a small DNS-rebinding window. Design: [docs/captain-swarm-plan.md](docs/captain-swarm-plan.md).
+
+### Custom tools — NEW in 0.9.0
+
+Python tools of your own, built by [Crew](#crew-coding-agents-working-for-you--new-in-085)'s coding agents and run by Flight Deck for your agents through the [`custom_tools`](#custom_tools--new-in-090) tool. Inside the code they're "external tools" (`/fd/external-tools/*`, settings `external_tools_*`).
+
+**Turning them on.** Off by default. **Admin console → Settings → Custom tools** has **On for this deck**, **Approve tools shared with everybody** (on by default; shown on a deck with accounts), **Run tools only in the sandbox** (off by default), and a line saying whether this host has the sandbox. The full layout's Admin → Settings tab has the same switches (the first one labelled **Custom tools**) without the host line. They are system settings with no environment variable: `external_tools_enabled`, `external_tools_everybody_approval`, `external_tools_require_sandbox`. The host needs `git`. `uv` is optional; without it publishing uses `venv` and `pip`.
+
+**The page.** **Multi-Agent → Custom tools** in the full layout, and **Settings → Custom tools** in the kiosk (a wide dialog), while the deck has them on. Tabs: **Mine**, **Shared with me**, **Everybody**, and **Approvals** for admins. A sheet for your own tool has:
+
+- **Try it**: a form built from the tool's input, or **Edit as JSON**, then **Run**.
+- **Your secrets for it**, with **Save secrets**.
+- **Publishing**: **Publish main**, and the last publish with its steps.
+- **Versions**, with **Make live**.
+- **Change it**: a Crew task.
+- **Offer it**: **People…** and **Everybody on this deck**.
+- **How it's used**: uses per day, kinds of failure, versions and how many people use it. Callers show only as a short hash; inputs and outputs are never shown.
+- **Delete tool**.
+
+Someone else's tool shows only Try it, your secrets and **Remove from my tools**.
+
+**New tool** (people approved for Crew) opens **New custom tool**, in two steps:
+
+1. **Describe it**: **Name**, **Title** and **What it should do** (up to 8,000 characters), then **Check it**.
+2. **Check it and build**: your own model (balanced tier, else reason, else fast) returns a fuller spec. It shows "Checked by ‹model›.", an **Already there?** warning when agents can do it already, and **What the check changed**, with a reason for each change. Keep **Checked** or **Yours** (both editable), pick a coding agent and **Build it**. If the check fails you can still build your own text. Nothing from the check is stored.
+
+**Publishing.** The worker writes the tool, its tests and its examples in the tool's own git repository. When you approve the merge, Flight Deck publishes in the background, as the owner. It copies the committed code without a checkout (so no git hooks run), checks `tool.json`, builds a venv, and runs the tests and every example. The version goes live only if all of them pass; otherwise the old version stays live. The 3 versions before the live one are kept for **Make live**. The owner gets a bell ("Custom tool ‹name› is live", or "…wasn't published" with the step that failed), and the agent that asked is told.
+
+**`tool.json`** holds `name`, `title` (1–80 characters), `description` (1–600), `entry`, `test`, `input` and `output` (JSON Schema), `examples` (1–10, each an `input` and the `expect` part the output must contain), `secrets` (up to 10, each with a `why`), `network`, `timeout_s` and `memory_mb`. An input field with `"format": "file"` takes a file.
+
+**Offering a tool.** **People…** opens the share dialog. **Everybody on this deck** waits in **Approvals** for an admin, unless that approval is off. Only a published tool can be offered. An offer runs for nobody until that person clicks **Add** (under **Shared with me** or **Everybody**), which records their consent to what the tool says it needs. They can run it and give it their own secrets. They never change it or see its repository, versions or logs. Taking an offer back ends their use on the next call. When a new version asks for more (the internet, a secret, more time or memory, more of the agent), everyone who added it gets a bell; they follow the new version. Deleting a tool removes its offers, everyone's consent and everyone's secrets for it.
+
+**What a tool can ask for.** It declares this in `tool.json`. Publishing checks it, and every request is checked again at run time.
+
+- **`uses`: the agent's tools.** Each entry names a tool with a `why`, e.g. `{"tool": "web_fetch", "hosts": ["api.example.com"], "why": "…"}` or `{"tool": "google_mail", "actions": ["search", "read"], "why": "…"}`. Read and write tools are allowed. Sending (mail, messages, calendar invitations and answers) works only when the tool's owner runs it. Never allowed: running code, money, tools Flight Deck can't classify, and tools that change the agent or set up later work (`cron`, `personality`, `playbooks`, `insights`, `facts`, `intentions`, `project_memory`, `reasoning_effort`, `apis`, `synthesize_flow`, `todo`, `topics`). Web fetching must name its `hosts`. Flight Deck relays each checked request to the agent that ran the tool, as the same person, and the agent checks it again. At most 50 requests per run, nested runs included.
+- **`uses` with `{"custom_tool": "<name>"}`: your other tools**, run with `captain.custom_tool(...)`. They must be the same person's, declared, with no cycle, at most 3 deep (the agent's run is the first level), and fit in the outer run's time. **Tools it runs** on the sheet shows each one's state. **Offer them too** offers them to the same people.
+- **`"asks": true`: questions** to the person running it, with `captain.ask(...)`, in the [questions dialog](#questions-and-ask_user--new-in-090). At most 5 per run. Each waits 10 minutes by default, an hour at most, and the run's clock stops meanwhile. A run with nobody there gets "no answer" at once.
+
+Cards show **Calls your agent: …**, **Runs …** and **Asks you questions**. **Try it** on a tool that calls an agent has **Run as**: one of your agents (an asleep one is woken; one that is off is refused). Its requests go to a session of their own, `custom-tools-try`, not your chat. An agent not restarted since the upgrade can't serve such a tool.
+
+**Agents suggest tools.** After an owner's turn with 8 or more tool calls, or 3 or more with words that sound like a repeated, mechanical job, the agent's own model may draft one tool. That happens only where the deck has Custom tools on and the owner may build, and never on members' turns, public chats, automations, exams or private turns. The draft waits in **Your agents suggest** at the top of **Mine**, with a coding-agent picker, **Build it** and **Dismiss**. At most 20 wait. The limits are [`tool_proposals`](#tool_proposals) in the agent's config.
+
+**Running a call.** One process per call: JSON on stdin, one JSON value on stdout. The environment is built from nothing: no Flight Deck variables, no agent secrets, only the runner's own secrets for that tool. Everything the tool started is killed when the call ends. Files go in as `vfs:` paths and come back in `vfs:custom-tools/<tool>/<day>-<call>/`. Every call lands in the agent's tool-call register.
+
+| Limit | Value |
+|---|---|
+| Time per call | 60 s by default, 300 s at most (`timeout_s`) |
+| Memory per call | 1,024 MB by default, 128–4,096 MB (`memory_mb`) |
+| Output | 1 MB of JSON, 50 files, 100 MB in all |
+| Input files | 200 MB per call |
+| Calls at once | 2 per person per tool, 8 on the deck |
+
+**The sandbox.** On Linux 5.13 or later, each run (and the test step of a publish) runs in a Landlock sandbox, with no root needed. It reads and runs only its own version folder, its Python, the system folders and its own `/proc/self`, and writes only to the call's folder. Landlock ABI 4 or later adds the network rule: no TCP unless `tool.json` says `"network": true`. UDP isn't covered, so DNS still works. ABI 6 or later adds the rule on signals and abstract sockets. Installing a tool's own packages at publish time runs outside the sandbox.
+
+**macOS, Windows and the stock Raspberry Pi 5 kernel have no Landlock.** Tools there run as Flight Deck's own OS user and can reach what it can. On macOS the memory cap is often refused. Windows applies no limits and refuses a tool that calls back into an agent. With **Run tools only in the sandbox** on, a host without one runs no tools (HTTP 503). `python3 tests/test_flight_deck/test_xtool_sandbox.py` says whether a Linux kernel has Landlock.
+
+**Storage.** `<FD data dir>/external_tools/<owner>/<slug>/` holds `repo/`, `versions/<v>/` (each with its venv), `live.json` and `publish.json`. Agents' drafts are in `external_tools/<owner>/.proposals.json`. Secrets are sealed in user settings under `xtool:`, and consent to added tools under `xtool-added:`. Back up `external_tools/`.
+
+**Routes.** The page: `GET`/`POST /fd/external-tools`, `GET`/`DELETE /fd/external-tools/{slug}`, and under `/{slug}`: `/publish`, `/live`, `/run`, `/secrets`, `/improve`, `/sharing`, `/everybody`, `/offer-dependencies`, `/usage`. Also `/fd/external-tools/status`, `/build`, `/review`, `/proposals`, `/shared`, `/catalog`, `/added`, `/approvals` and `/agents`. Agents use `/fd/external-tools/agent/*`. On the agent, Flight Deck calls `POST /api/custom-tools/callback` and `/api/custom-tools/host`.
+
+Known gaps: an agent choosing to call `custom_tools` or to propose a tool on its own wasn't tried with a real model. Design and what's still open: [docs/external-tools-plan.md](docs/external-tools-plan.md).
+
+### Questions and ask_user — NEW in 0.9.0
+
+One dialog for every question an agent (with [`ask_user`](#ask_user--new-in-090)) or a custom tool asks the person it works for. It opens in every Flight Deck tab of that person: the agent's owner, or on a shared agent the member whose turn it is. Answered in one tab, it closes in the others.
+
+- **The dialog** is titled "‹agent› asks" and says "‹agent› needs your answer to go on · ‹time left›". It always says "Never type a password or key here." The agent's name is the one you see (your own rename first). A question is free text (1–20 lines of room), one of a list, several of a list (with a minimum and maximum), or yes/no, with help, a default and "optional". A form holds up to 10 questions.
+- **Ways out**: **Send** or **Don't answer**. Escape and clicks outside do nothing. When time runs out, the dialog closes itself.
+- **The bell** says "‹agent› asks you something", as a Needs-you item on the Line. Reading the bell doesn't settle it; only answering does.
+- **Timing.** 10 minutes by default. `ask_user` takes 1–60 minutes; a tool may wait up to an hour. A person has at most 10 open questions. Stopping the turn closes its question.
+- **Which turns can ask.** Turns from the web chat, the Line and shared-agent members reach the dialog. Turns from Telegram, WhatsApp, glasses, devices, a public link or another channel are told to ask in their reply. Scheduled tasks, flows, other agents, Autonomous Work, the Taskboard, the API, agent links and exams have nobody to ask: the call answers at once, and a tool's `captain.ask` gets no answer.
+- **What the agent gets**: the answers in words (and as data for a form), "They chose not to answer…", or "No answer within N minutes…". In the last two it is told to use its best judgement and say what it assumed.
+
+Routes: `GET /fd/asks` and `POST /fd/asks/{id}` for the person; `POST /fd/asks/agent`, `/follow` and `/cancel` for agents, which follow a member's grant. They work whether Custom tools are on or not.
+
+### Agent files: export, import and backups — NEW in 0.9.0
+
+Any process agent you own fits in one `.captain` file: to restore later, move to another deck, or hand to someone else. The dialogs are in the kiosk only: the agent's **⋯ → Back up / export** (in the *Its place* row) and **New agent → From a file**. Docker agents can't be exported yet.
+
+**What goes in** (the export dialog):
+
+- **Template**: who it is and what it was taught, for a fresh copy someone else starts from.
+- **Trained**: that, and what it learned since, without its conversations and files.
+- **Full backup**: everything, conversations and files too.
+
+**Includes** fine-tunes it: Identity (always), Onboarding, What it learned, Data tables, Conversations, Files, Scheduled tasks. For a Template or Trained file with *What it learned* ticked, **What it learned — look it over** lists its insights by kind. Facts, how the work is done, decisions and references start ticked. Preferences, feedback, projects, deadlines and people start unticked. Single insights can be left out. **People it knows (N)** is a separate tick. Rows left out are vacuumed out of the file.
+
+**Never in the file**: the agent's `.env` and the keys and tokens in its `config.yaml`, `.fd-owner`, logs, your own profile (`tenant_context*.md`) and the semantic index (rebuilt after import). Credential tables and columns are emptied. Connections (Google, Microsoft, IMAP, Telegram, WhatsApp, Jev, external memory, MCP servers) travel by name only, and the import lists the ones to set up again, with **Open Connections**.
+
+**Sealed keys.** A Full backup can carry its keys: **Its keys → Include its keys, sealed with a passphrase** (8 characters or more, typed twice). That seals its `.env`, its model key and the credentials of APIs it learned into `secrets.enc` (scrypt and AES-256-GCM). Flight Deck doesn't keep the passphrase. On import, **Passphrase for its keys** brings them in; left empty, the agent comes in without them. A wrong passphrase is refused before anything is made.
+
+**Bringing one in.** **New agent from a file** → **Choose a .captain file**. Before anything is made, it shows what the file holds (counts, model, who made it and when) and how it is signed. **Where** picks:
+
+- **A new agent**, on **Its own model** (needs a key for it here) or **One of your models** (a tier). **Create agent** goes through the normal spawn, so plan limits and key checks apply.
+- **Into ‹agent›**, also from the export dialog's **Bring a file into it…**:
+  - **Add to what it has**: what it knows stays; the file only adds what it hasn't got. Insights are matched by key, then by text; intentions by title; playbooks, scripts and APIs by name. Files that exist stay. A new chat log goes into a lane of its own.
+  - **Replace it**: what the file carries replaces its own memory, files, conversations and tasks. Its model and keys stay.
+
+  The agent is stopped, backed up, changed, and restarted if it was running. The result lists what was added and what it already had, with **Download** and **Undo** for the backup, which is kept a week.
+
+Scheduled tasks always arrive switched off. Importing someone else's agent delivers its scheduled tasks only to its chat and drops the old phone numbers and addresses.
+
+**Packages and updates.** On a Template or Trained export, name a package under **Updates later** ("Bookkeeper for Acme"). Each export of it becomes its next version ("This will be version N"). The importing agent records what each version put in, in `.bundle-imports.json` in its folder, which is never exported. Bringing in a newer version shows "‹agent› — has version N" and offers **Update to version N**. The old version's items are swapped for the new ones. What the agent learned since, and what was changed there (an insight edited, a file rewritten, a task switched on, instructions rewritten), stays. When the package is someone else's, its onboarding becomes the agent's base layer, which the person adds to but can't change. Packages aren't offered on a Full backup.
+
+**Scheduled backups.** Kiosk **Settings → Agent backups**, or **Back up on a schedule…** in the export dialog:
+
+- **Back up my agents automatically** (off by default).
+- **How often**: Every day, or Every week on a weekday you pick. **From**: an hour, in the deck's time (03:00 by default).
+- **Keep per agent**: 1–60, 7 by default.
+- **Which agents**: **All of them**, or the ones you pick.
+- **Also copy to a folder in your files** (optional). Read-only links and Drive mounts are refused, and these copies aren't pruned.
+- **Save** and **Back up now**. **Backups kept** downloads, deletes or restores any of them (**Restore it** → **Yes, restore**: a reset, with its own week-long undo backup).
+
+Scheduled backups are always full, never carry keys, and the agent keeps running while one is taken. The deck checks every 5 minutes.
+
+**Signed files.** Each deck has an Ed25519 key, and every bundle carries `signature.json` over its manifest. A file changed after signing is refused. The import shows one of: "Signed by this deck", "Signed by ‹name›, a deck you trust", "Signed by “‹deck›” · ‹fingerprint› — not one of your trusted decks", or "Unsigned — you can't tell which deck made it". **Signed files** in Agent backups shows this deck's fingerprint to every user, to give to whoever imports your agents. Admins list **Decks this one trusts** (a name and a fingerprint) under **Admin console → Settings → Agent files**, and can switch on **Only take files signed by this deck or a trusted one**.
+
+**Checks on every file.** Paths that climb out, absolute paths, links, files the manifest doesn't list, a sha256 mismatch, a newer format version, and a file over `FD_AGENT_BUNDLE_MAX_MB` (default 2048) are refused. A bundled database is opened read-only with `trusted_schema=OFF` and copied by column name.
+
+**Storage.** `<FD data dir>/agent-bundles/`: `exports/`, `uploads/` and `tmp/` are swept after 24 hours, `safety/` (the backup taken before an import) after a week, and `backups/<agent>/` as each person set. The signing key is `<FD home>/bundle_signing_key` (mode 0600, made on first use). Losing it gives the deck a new fingerprint, so back it up with the data folder.
+
+Routes: `/fd/agent-bundle/*`, for the agent's owner. They honour `X-FD-Act-As`, but no admin screen opens these dialogs yet. Design: [docs/agent-export-plan.md](docs/agent-export-plan.md).
+
+### Agents as colleagues and agent email — NEW in 0.9.0
+
+**Hand-overs.** An agent hands a piece of work to another of its owner's agents with the [`colleagues`](#colleagues--new-in-090) tool, and carries on with the answer.
+
+- Each hand-over is its own Taskboard task, under **Between your agents**, linked to the task the agent was on. The colleague starts at once.
+- The answer goes back to the agent that asked, in that task's session, and the work carries on. With no board task, it comes to its chat.
+- Authority never grows. The turn's mail permissions travel with the work, read by code, not by the model. The right to send a Gmail reply never passes on.
+- Limits: no handing to itself or back along the chain; at most 4 agents in a chain; 60 hand-overs per owner a day; the owner's token allowance; and the agent's **Colleagues it may hand work to**.
+
+**Identity & email.** The agent's **⋯ → Identity & email** (in the kiosk's *Who it is* row), or **Its own inbox, aliases and names…** under the Email switch in the agent's settings:
+
+| Field | What it is |
+|---|---|
+| **Role** | Up to 60 characters ("Researcher"). Colleagues see it |
+| **What it does** | Up to 300 characters |
+| **Its own inbox** | An inbox from **Connections → Email (IMAP)** that becomes only this agent's |
+| **Addresses that land in your inbox** | Aliases such as `you+researcher@gmail.com`, comma-separated (up to 6) |
+| **Names it answers to** | Up to 6. Empty means its own name |
+| **Pick up email meant for ‹agent›** | On by default. Saved at once, no restart. Also under **Email** in the kiosk's Agent settings and in the classic Agent options → General |
+| **Replies in your Gmail** | Shown when Gmail is connected; see below |
+| **Colleagues it may hand work to** | **All of them** or **Only these** |
+
+**How email reaches an agent.** Every 60 seconds a watcher reads the owner's Gmail, Outlook and IMAP inboxes, for owners with an agent that picks up email (20 emails per source per pass). An email is an agent's when, strongest first:
+
+1. it came to the agent's own inbox;
+2. To, Cc or Delivered-To has one of its addresses;
+3. the subject names it as a word ("Researcher: Q3 numbers", "[Researcher] …");
+4. the body addresses it: a greeting ("Hi Rita,", "Dear Rita", "Bok Rita"), the name opening a line ("Rita, please…"), "@Rita", or "attn Rita".
+
+Names match as whole words, ignoring case and accents. Bulk, list, auto-reply and no-reply mail, and mail an agent sent, is skipped. The first look at each mailbox only sets a baseline, so older mail is never picked up, and an email never becomes a task twice. Each email becomes a task for the agent under **Email for an agent** on the Taskboard, and a turn in its line, one at a time.
+
+Those turns write drafts only (mail mode `draft`). Two exceptions: the agent's own IMAP inbox, where that inbox's sending setting decides, and Gmail replies, as **Replies in your Gmail** allows. `FD_AGENT_MAIL=off` stops the watcher for the whole deck. An agent with a common-word name may pick up unrelated mail: give it a specific name to answer to, or switch it off.
+
+**Replies in your Gmail.** Per agent:
+
+- **Drafts** (the default): it saves its reply as a draft, and you send it.
+- **Send to you**: sent when the email came from you (your deck address, your Gmail send-as addresses or a connected inbox). Anyone else gets a draft.
+- **Send to anyone**: sent to whoever wrote, when Gmail verified their address, so a forged From never counts.
+
+Only that one reply is allowed: a `google_mail send` to exactly that sender, for that message, with no cc or bcc. `send_draft` stays refused. The reply still goes through **Connections → Google → Email sending** (on/off, allowlist, daily limit). Outlook replies stay drafts.
+
+Routes: `GET /fd/colleagues` and `PUT /fd/colleagues/{slug}`; agents use `POST /fd/colleagues/agent/roster`, `/hand_over` and `/handed`. Design: [docs/agent-colleagues-plan.md](docs/agent-colleagues-plan.md).
+
+### Email (IMAP) — NEW in 0.9.0
+
+**Connections → Email (IMAP)** connects up to 20 IMAP/SMTP inboxes per person, beside Google and Microsoft: a company mail server, Fastmail, iCloud, Yahoo, Zoho, GMX, Gmail with an app password, or Proton Mail through Bridge. It's also in the kiosk's Connections and the admin console's Connections. Agents use the inboxes through [`imap_mail`](#imap_mail--new-in-090). It needs a deck with sign-in on (`FD_AUTH_ENABLED=true`) or the desktop app; elsewhere the tab says it isn't available.
+
+**Connecting.** **Connect an inbox** (then **Connect another inbox**). The **Connection** tab has:
+
+- **Email address**, **Name** (optional: "Work", "Support"), **Username**, **Password** (or an app password).
+- **Incoming mail (IMAP)** and **Outgoing mail (SMTP)**, each with **Server**, **Security** (SSL/TLS, STARTTLS, or None for this machine only) and **Port**.
+- **Receive only (no sending)**; **SMTP uses a different login**, with **SMTP username** and password.
+- **Sender name**, and **Put a copy of each sent email in Sent** (turn it off for providers that do it themselves).
+
+Typing the address fills in the servers. Built-in presets come first (Gmail, iCloud, Yahoo, AOL, Fastmail, Zoho, GMX, WEB.DE, mail.com, Yandex, Mail.ru, Proton Mail Bridge, Hrvatski Telekom, Iskon). Outlook.com and Microsoft 365 addresses are sent to the Microsoft tab, since Microsoft turned off password sign-in. Then comes Thunderbird's ISPDB (only the domain goes to `autoconfig.thunderbird.net`), then an `imap.` / `smtp.` guess. **Connect inbox** (or **Save**) tests the inbox first.
+
+**The test** checks IMAP and SMTP at the same time, on the typed port and the other standard one (SMTP 465 or 587 with STARTTLS, IMAP 993 or 143 with STARTTLS). A port that doesn't answer fails in about 8 seconds, with the likely cause. If only the other port works, the result offers **Use port 587 (STARTTLS)** (the words follow what it found), and saving switches to the working port by itself. Gmail's "Application-specific password required" reads as needing an app password, with where to make one.
+
+**Sending & access** tab:
+
+- **Let my agents send email from this inbox**: off by default. Until then agents only draft.
+- **Only to these recipients**: one address or `@domain` per line, up to 200. Empty means anyone.
+- **Daily limit**: sends per rolling 24 hours, 1–500 (50 by default).
+- **Agentic signature**: plain text Flight Deck adds to every draft and send from this inbox.
+- **Which agents can use this inbox**: empty means all of your agents.
+- **Recently sent by your agents**.
+
+Each inbox shows a pill: **Receive only**, **Drafts only**, **Sending on** or **Off on this deck**.
+
+**A send** passes one gate: `FD_IMAP_SEND=off` (no IMAP sending on this deck), the inbox's policy, the repeat check, the daily limit and a 10-minute duplicate check. The repeat check (drafts too) refuses the same email when it is already in Drafts, or in Sent within `FD_IMAP_REPEAT_CHECK_DAYS` (14 by default), unless the agent passes `allow_repeat`. Attachments total 25 MB at most. Each send is written to the `imap_sends` table and rings the owner's bell. A send the server took without confirming is recorded as `unknown`, counted, and never retried. An agent's own inbox (set in [Identity & email](#agents-as-colleagues-and-agent-email--new-in-090)) sends through the same gate.
+
+**Safety.**
+
+- The password is sealed with the deck's data key (this needs the `cryptography` package, a core dependency) and stored in the person's user settings, where `/fd/settings` can't read or write it.
+- The IMAP and SMTP work happens inside Flight Deck, with the standard library's `imaplib` and `smtplib`. Agents only call `/fd/imap/agent/<action>`, and the owner comes from the agent's token, never from its word.
+- TLS certificates are checked. Plain text, or TLS without a certificate check, is allowed only to a loopback host (Proton Mail Bridge). A host that resolves to a link-local or cloud-metadata address is refused.
+- Nothing is deleted, except a draft the tool replaces or sends, and nothing is moved to Trash, Junk, Drafts or Sent.
+- Shared-agent members get nothing.
+
+Routes: `GET`/`POST /fd/imap/accounts`, `PUT`/`DELETE /fd/imap/accounts/{id}`, `GET /fd/imap/suggest`, `POST /fd/imap/test`, `GET /fd/imap/sends`; agents use `GET /fd/imap/agent_status` and `POST /fd/imap/agent/{action}`. Tested live against GreenMail and Dovecot, not yet against a real provider.
+
+### Lessons to approve — NEW in 0.9.0
+
+When you correct an agent in chat, or state a standing rule ("too long", "always CC Marko", "ask me before booking"), the agent drafts one lesson and hands it to Flight Deck. Nothing is taught until you approve it.
+
+- **On the agent.** It runs only after the owner's own turns, never on members' turns, public chats, automations, exams or private turns. A cheap word check (English, Croatian and a few other languages) lets through only messages that read like a correction or a rule, so most turns cost nothing. For those, the agent's own model reads your message, the answer it follows and the lessons the agent already has, and drafts one lesson or none. Limits are [`lesson_proposals`](#lesson_proposals) in the agent's config: on by default, 20 seconds apart, 12 a day.
+- **Where you find them.** **Lessons to approve** opens from a graduation-cap badge beside the bell ("N lessons to approve"), from a lesson bell, or from the **Lessons to approve** card in each kiosk agent's ⋯ menu (*What it knows* row). The card's hint says "N lesson(s) wait for you — noticed in your chats", amber while any wait. It opens that agent's lessons, with **See every agent's · N more**. Onboarding → Lessons uses the same cards.
+- **Each card**: the lesson; its kind, **Rule**, **Ask first** or **Fact**; **Always in mind**; your words it came from, with **Show the conversation**; and **Approve**, **Edit**, **Dismiss**. **Approve all** (for all agents, or one) asks once to confirm. A shared-agent member's suggestion that isn't written as a lesson yet has **Write it as a lesson**.
+- **Just learned** lists recent approvals, each with **Undo**, which takes the lesson away and puts the proposal back.
+- A proposal the agent already has as a lesson, or one like a waiting or dismissed one, is dropped. Each agent rings at most one unread bell at a time.
+
+Routes: `POST /fd/lesson-proposals/agent` (the agent's own token), `GET /fd/lesson-proposals`, and `POST /fd/lesson-proposals/{slug}/{id}/approve`, `/dismiss` and `/undo`. Drafting was tested with stand-in models.
+
+### External memory — NEW in 0.9.0
+
+**Connections → External memory** ("One memory all of your agents share") links one memory service to all of a person's agents, through the [`external_memory`](#external_memory--new-in-090) tool. Flight Deck keeps the credentials sealed in user settings and makes every call; agents never see them. A deck with sign-in off keeps one connection.
+
+| Provider | Fields | Notes |
+|---|---|---|
+| **Membase** | **Membase developer key**; **Server address** (empty for membase.com; a local `membase --local serve` is `http://127.0.0.1:8787`) | The key's access decides the actions: Read & write lets agents save, Full access also lets them forget. One key is one person's memory, so it can't be shared deck-wide |
+| **Hindsight** (MIT) | **Server address** (your own server on port 8888, started with one `docker run`, or your Hindsight Cloud API address); **API key** (optional); **Bank** (optional; empty is one named after you) | Adds `reflect`. Mirrored items replace themselves when superseded. Hindsight Cloud has no published default address, so type it in |
+
+- **What agents can do.** Actions and rules come from the provider. The card shows what your agents can do and the rules they follow, recent items, and **Try it** (search or save). A read-only key can't `remember` or `forget`, and `forget` needs `confirm=true`.
+- **Copied in on its own.** What agents learn is mirrored: **Insights**, **Intentions** and **Lessons** by default, **Reflections** and **Intuitions** if you tick them. Items go through a durable outbox (`external_memory.db` in the data folder). It holds the queue on a refused key or a full quota, backs off on passing errors, and has **Send now**. Nothing is mirrored on a member's turn or in a public run, and nothing from before you connected is copied.
+- **Shared memory server** (admins, on a deck with accounts): **Console → Connections → External memory**, "One memory server, a bank per person". One Hindsight server for the whole deck. Everyone without a connection of their own gets their own bank (`captain-<user id>`). Their card says they're on the deck's memory, and **Connect my own** replaces it. Membase can't be shared this way.
+- **Addresses.** A non-admin's own connection can't point at this machine or its network (loopback, private, link-local or `.local` addresses), checked when saving and again at call time. The deck's connection, set by an admin, can.
+- It isn't recalled into the agent's context by itself yet. Agents use it through the tool.
+
+`FD_MEMBASE_BASE_URL` overrides Membase's API address (default `https://api.app.membase.com`). `FD_HINDSIGHT_BASE_URL` is the Hindsight address used when a connection gives none. Routes: `/fd/external-memory/providers`, `/status`, `/connection`, `/test`, `/mirror`, `/run`, `/outbox` and `/outbox/retry`; for admins `/fd/external-memory/deck`, `/deck-connection` and `/deck-test`; for agents `/fd/external-memory/agent/status`, `/run` and `/mirror`. Tested against self-hosted Hindsight 1.2.0; Membase and Hindsight Cloud only against stand-ins.
+
+### Course: the goals your agents work for — NEW in 0.9.0
+
+The goals your agents' work is for. **Workspace → Course** in the full layout's sidebar, and **Settings → You → Course** in the kiosk ("What you and your agents work toward").
+
+- **Three levels**, each with **Add goal**: **The deck** (set by an admin, read by everyone), **You**, and **Your agents** (one agent's own). A goal has a horizon, a title, *Done when*, optional detail, a due date, and optionally a metric with a target: "A number you enter", "Tasks done for it" or "Pieces of work linked to it" (a deck goal takes only a number the admin enters). A goal can serve a goal at its own level or a wider one, so goals form a tree.
+- **Horizons**: **Strategic**, **Long-term**, **Medium-term**, **Short-term**. By default the deck uses Strategic and Long-term, you use all four, and an agent uses Medium-term and Short-term. At most 3 / 5 / 7 / 3 active goals per horizon (Strategic / Long-term / Medium-term / Short-term) at each level. Review periods are 7 / 30 / 90 / 365 days (Short-term / Medium-term / Long-term / Strategic).
+- **In the prompt.** Every agent working for you gets the live goals in its prompt and uses them to decide what matters next. **What your agents receive** previews it ("When you talk to it" / "When a member of a shared agent talks to it"). A member of a shared agent gets only the deck's goals. A goal is never permission to do anything. A goal that misses its review leaves the prompts after a grace period, until someone says it's still on course.
+- **Suggestions wait for you.** Agents (with the [`course`](#course--new-in-090) tool and their self-reflection) and Flight Deck suggest goals or changes. Each waits on your Line ("Put this goal on the course?" → **Accept**, **Edit on Course**, **Decline**) and under **Waiting for you (N)** on the page, where the edit form has **Save and accept**. **Let my agents add their own short-term goals without asking** is the one exception. At most 5 suggestions wait per level, titles aren't duplicated, and a declined title isn't suggested again for 90 days. Only a person marks a goal done.
+- **Wired into the deck.** Taskboard tasks, plans, projects, scheduled tasks and Swarm runs can be marked **Serves a goal**. The Taskboard sorts by **Serves your course** and shows a goal chip. Autonomous Work's Arbiter ranks work that serves a goal higher; it never changes risk, auto-dispatch or grants. Forge's review offers **Add this team's goal to your Course**. A goal's drawer shows its evidence and history, and **Plan a route**.
+- **Off course.** Goals nothing has moved show under **Off course (N)**. The Line asks "Is this goal still on course?", with **Open Course**.
+- **Admins** use **Course: horizons, limits, suggestions and checks** under **Admin console → Settings** (and on the legacy Admin page's Settings tab):
+  - a level × horizon grid, and **Most active goals** per horizon (1–20);
+  - **Agents and Flight Deck may suggest goals** (on), with "Each agent, at most N a week" and "Flight Deck, at most N a week for each person" (2 each, 0–20);
+  - **Estimate progress once a week** (on; it goes through each person's cheapest running agent and never marks a goal done);
+  - **Check new goals for conflicts** (on);
+  - **Let stalled goals suggest work** (off).
+
+Deck goals are editable only by an admin, and an admin's act-as doesn't reach anyone else's goals. Goals live in `<FD data dir>/course.db`. Deleting a user or removing an agent deletes their goals. `FD_COURSE_REVIEW_TICK_S` (default 1800) sets how often, in seconds, the review sweep runs. Routes: `/fd/course`, `/fd/course/preview`, `/fd/course/goals/*`, `/fd/course/served`, `/fd/course/prefs` and `/fd/admin/course/settings`; agents use `POST /fd/course/agent/*`. Design: [docs/course-plan.md](docs/course-plan.md).
 
 ### The simple layout and kiosk mode — NEW in 0.8.0
 
@@ -6328,6 +6749,13 @@ Flight Deck uses environment variables:
 | `FD_CREW_WORKING_SECONDS` / `FD_CREW_MODEL_SILENCE_SECONDS` / `FD_CREW_ERROR_WAIT_SECONDS` / `FD_CREW_RETRY_WAIT_SECONDS` | `60` / `300` / `300` / `20` | **NEW in 0.8.5.** How often the still-working line refreshes; how long a model server through the deck can say nothing; how long a CLI gets to show it's past a failed call; the first wait between tries |
 | `FD_CREW_CLAUDE_BIN`, `FD_CREW_CODEX_BIN`, `FD_CREW_OPENCODE_BIN`, `FD_CREW_CRUSH_BIN`, `FD_CREW_PI_BIN` | found on `PATH` | **NEW in 0.8.5.** Where a CLI is, if Flight Deck can't find it |
 | `FD_UPDATE_REPO` / `FD_UPDATE_POLL_S` / `FD_UPDATE_COUNTDOWN_S` / `FD_UPDATE_BOOT_TIMEOUT_S` | worked out / `900` / `120` / `300` | **NEW in 0.8.5.** [Updating the deck](#updating-the-deck--new-in-085): the checkout; how often it looks; how long everyone gets before the restart; how long the new version gets to come up |
+| `FD_IMAP_SEND` | (unset) | **NEW in 0.9.0.** `off` stops all sending from [IMAP inboxes](#email-imap--new-in-090) on this deck; agents can still draft |
+| `FD_IMAP_REPEAT_CHECK_DAYS` | `14` | **NEW in 0.9.0.** An IMAP email already in Sent within this many days (or in Drafts) isn't drafted or sent again; `0` checks only Drafts |
+| `FD_AGENT_MAIL` | on | **NEW in 0.9.0.** `off` stops agents picking up email that names them ([agent email](#agents-as-colleagues-and-agent-email--new-in-090)) |
+| `FD_MEMBASE_BASE_URL` / `FD_HINDSIGHT_BASE_URL` | `https://api.app.membase.com` / (unset) | **NEW in 0.9.0.** [External memory](#external-memory--new-in-090): Membase's API address; the Hindsight address used when a connection gives none |
+| `FD_AGENT_BUNDLE_MAX_MB` | `2048` | **NEW in 0.9.0.** The largest [agent file](#agent-files-export-import-and-backups--new-in-090) Flight Deck takes, and the most it may unpack to |
+| `FD_COURSE_REVIEW_TICK_S` | `1800` | **NEW in 0.9.0.** How often, in seconds, [Course](#course-the-goals-your-agents-work-for--new-in-090)'s review sweep runs (5 at least) |
+| `FD_AGENT_IDLE_WAKE_LEAD_S` | `300` | How long before a scheduled run a sleeping agent is woken, or an agent its owner switched off is started (0.9.0) |
 
 A deck on more than one person's network: see [docs/team-deployment.md](docs/team-deployment.md) for the full checklist (`FD_AUTH_ENABLED`, `FD_JWT_SECRET`, `FD_LOCKDOWN`, `FD_AGENT_SHARED_SECRET`, `FD_GLASSES_BRIDGE_TOKEN`, …).
 
@@ -6402,6 +6830,8 @@ Each of the user's own agents has a **⋯** menu (on its row, and on the phone l
 
   Model and vision are read when the agent starts, so the dialog offers **Restart now**.
 - **Remove agent** — stops the agent and deletes it for good: its folder under `FD_DATA_DIR`, Flight Deck's chat log for every lane, and the scheduled tasks that run it (`DELETE /fd/processes/{slug}?purge=true`). The browser forgets its labels, queue and plans, so a later agent of the same name starts clean.
+
+**In rows (0.9.0).** On screens 1024 px and wider, the menu is a wide card in four labelled rows: **At work** (Info, Files & data, Activity, Tasks), **What it knows** (Instructions, insights & skills; Onboarding; [Lessons to approve](#lessons-to-approve--new-in-090)), **Who it is** (Identity & email, Settings, network sharing) and **Its place** (Group, Pin, **Back up / export**). **Remove agent** stays apart. From 768 px the headings sit above the cards; phones keep the sheet. A menu with 4 cards or fewer, a shared agent's menu and the ⋯ off the kiosk keep the plain card. **Identity & email** is in [Agents as colleagues and agent email](#agents-as-colleagues-and-agent-email--new-in-090); **Back up / export** is in [Agent files](#agent-files-export-import-and-backups--new-in-090).
 
 **Files and Data are no longer in the menu**: they repeated the **Library** and **Data** tiles, and the File library's "Everything it keeps" opens an agent's live files-and-data view. Agents the libraries don't index — one shared with you, a Docker agent — keep a **Files & data** entry, their only way to their files. Agents shared with you, and agents Flight Deck runs itself, have no Instructions, Settings or Remove.
 
@@ -6483,6 +6913,8 @@ Routes (owner-checked): `/fd/file-library/status`, `/fd/file-library/scan`, `/fd
 **Run history.** Every run is logged with its result and how each delivery went: an **All activity** feed with search, and a history per task. **Run now** runs a task in the background.
 
 Due tasks run concurrently, one at a time per agent, and wait up to 20 minutes for a reply. When the owner's daily token allowance is spent, tasks are skipped (a one-shot retries after the reset). `FD_SCHEDULER_QUIET_HOURS` (e.g. `22-08`) holds deliveries until the window ends. A non-admin's task can't drive another owner's agent, and an agent can't choose whom a task emails. Routes: `/scheduler/jobs`, `GET /scheduler/runs?q=`, `POST /scheduler/preview`, `GET /scheduler/delivery-options`, and `POST /scheduler/jobs/{id}/run?background=1`.
+
+**When the agent is off (0.9.0).** A task no longer fails with "agent not running". An agent that is asleep is woken, as before. One that crashed, or didn't come back after a restart, is started and stays on. One its owner switched off is started about five minutes before the run (`FD_AGENT_IDLE_WAKE_LEAD_S`, default 300 seconds), then switched off again after, when no other run holds or waits on it, no task is due soon, and it isn't mid-turn. If you switch it on or off meanwhile, your choice wins. The editor says "‹agent› is off. It is turned on a few minutes before each run and off again after." This covers Flight Deck's scheduled tasks, not an agent's own `cron`.
 
 ### Onboarding — NEW in 0.8.4
 
@@ -6578,10 +7010,25 @@ A layout of its own for admins, with no chat and no agent desktop — just setti
 - **Connections** — each service with its status. The deck-wide part (the Google and Microsoft OAuth clients, the team Telegram bot, the Jev and Soniox team keys, MCP servers shared with everyone) sits above the admin's own connection.
 - **Users** — Users · Invitations · Waitlist, as on the Users page.
 - **Usage & limits** — today per person against the plan, spend by person and run kind, the plan limits in one table, recent activity.
+- **Activity** (0.9.0) — who is using the deck, who has gone quiet, and whether you've written to them. See [Admin console → Activity](#admin-console--activity--new-in-090).
 - **Updates** — this deck's version, what's new on its branch, and the button that installs it. See [Updating the deck](#updating-the-deck--new-in-085).
-- **Settings** — branding, sign-up and the waitlist, kiosk mode, Docker, and the profile defaults.
+- **Settings** — branding, sign-up and the waitlist, kiosk mode, Docker, and the profile defaults. Since 0.9.0 also [Custom tools](#custom-tools--new-in-090), **Agent files** (trusted decks for [signed agent files](#agent-files-export-import-and-backups--new-in-090)) and [Course](#course-the-goals-your-agents-work-for--new-in-090)'s horizons and limits.
 
 **Admins start there.** Signing in from a form (sign in, sign up, an accepted invitation) takes an admin to the console's Overview; an admin who never picked a layout starts there, and a reload keeps the layout they chose last. Other ways in: `/console`, a button in the top bar and one in the simple layout. The full layout's Admin, Users, Library and Connections pages are still there. Non-admins never see the console.
+
+**Admin fixes (0.9.0).** A deck without sign-in (the desktop app's) now applies its console Settings: branding, **Name the deck**, **Docker containers**. Plan limits shows only the limits the deck enforces, and limit messages say to ask the admin. An empty deck greets the first person with **Create the admin account**. **Usage & limits → Recent activity** reads as sentences with people's names, and **Reset today** is recorded there.
+
+### Admin console → Activity — NEW in 0.9.0
+
+**Console → Activity** (`/console/activity`, "Who is active, who you wrote to") answers two questions for each person on the deck: are they using it, and have you written to them. Admins only, on a deck with accounts. Hidden in the desktop and Android apps.
+
+- **Counts** on top: **Active this week**, **Quiet**, **Never started**, **Not written to**. Clicking one filters the list. The window is **14 days**, **30 days** (the default) or **90 days**.
+- **Each row** has a bar per day. Violet is messages the person typed on any channel. Faint blue is days when only their agents worked, such as scheduled tasks; agents' work never counts as typing. Beside it: when they last typed and were last seen, when you last wrote and how, and the pills **Replied** and **Typed since**. **Details** shows "What they did" and "You and them".
+- **Write** emails them from your own Gmail or Outlook, as a **Message** or **Ask for feedback** (which greets them by first name).
+- **Mark as written** records contact made another way: WhatsApp, Phone call, In person, Email, Telegram or Other, with an optional note. Only these notes can be removed; sent emails stay on record.
+- **Your mail with them.** With Gmail read access (`gmail.readonly` or `gmail.modify`), it shows your mail with each person too: dates and subjects only, kept 10 minutes in memory and never stored. With only `gmail.compose` the page says so. Outlook is used only to send, never read.
+
+Routes: `GET /fd/admin/activity`, `GET /fd/admin/activity/mailbox`, `GET`/`POST /fd/admin/activity/{id}/message`, `POST /fd/admin/activity/{id}/contacts` and `DELETE /fd/admin/activity/contacts/{cid}`. Contacts are kept in the `user_contacts` table; earlier "feedback requested" rows are imported once at start.
 
 ### Updating the deck — NEW in 0.8.5
 
@@ -6622,6 +7069,7 @@ User management is its own **Users** page (admin only, in the sidebar and the ph
 - **Users** — search by name or email; filter by role, plan and status (kiosk, temporary password, active today, daily limit reached); sort by newest, oldest, name or today's use. **Add user** sits by the search box. Each user has **Set password**, the **Kiosk mode** mark, today's usage with **Reset today**, their free resets and their **Agents**.
 - **Invitations** — **Invite by email**: email, name, role, kiosk and an optional note, sent from the admin's own connected Gmail or Outlook (or no email: copy the link). The invitation carries a one-time link to `<deck>/invite#<token>` (only the token's hash is stored; it expires after 7 days). The invitee chooses their own password there and is signed in — no password travels by email. A failed email keeps the invitation and hands the admin the link; accepting rings the inviter's bell and settles a pending waitlist application. The tab lists Pending / Expired / Accepted / All with counts, searchable by email, name, inviter and note; **Resend** makes a new link. Gmail needs a send-capable scope (and honours `FD_GMAIL_SEND`); Outlook needs `Mail.Send`.
 - **On each row** (0.8.5) — **last login**, which you can sort by, and **tokens** used this month and all time: deck keys and own keys, with no prompt-cache reads, as the daily allowance counts them. A shared agent's member turns count against its owner. **Ask for feedback** opens an editable email, sent from your own connected Gmail or Outlook, with the user's name first in its subject. **Crew** (0.8.5) sets which CLIs they may use, how many at once, and the terminal: see [Crew](#crew-coding-agents-working-for-you--new-in-085).
+- **Deleting a user** (0.9.0) also stops and removes their process and Docker agents, with their folders and chats. The confirm says so, and it can't be undone.
 - **Waitlist** — while self-registration is closed, "No account?" on the sign-in page leads to a waitlist form: name, email, password, and the name and email of whoever recommended them. Applicants join under the deck's instance name (**Admin → Settings → Waitlist** can set a separate **Waitlist name**). An applicant who signs in before approval is told it's pending. **Approve** creates the account with the password the applicant chose; with the "when I approve someone, email them" picker set, **Approve & email** also tells them their account is ready, with the deck's sign-in link (from `FD_PUBLIC_URL`, else the admin's browser address), sent from the admin's own Gmail or Outlook. A warning shows when that link would point at localhost, and a failed email never undoes the approval (a banner gives a copyable sign-in address instead). The tab lists Waiting / Approved / Rejected / All with counts. Settings can turn the waitlist off. The form is rate-limited per network and capped at 1,000 pending applications.
 
 ### Passwords
@@ -7185,6 +7633,8 @@ tools:
 ```
 
 `allow_send` and `allowed_recipients` are ignored under Flight Deck, where the user's policy decides. `google_mail` is the only tool that sends Gmail (the old `gws` CLI wrapper, which could reach Gmail with the same token, is retired). The gate protects against model mistakes and prompt injection; it is not a security boundary against an agent that has a shell tool, which can reach the Google token itself.
+
+**Replies in your Gmail (0.9.0).** Email that reaches an agent through your Gmail (it names the agent, or came to one of its addresses) is answered with a draft by default. Per agent, **Replies in your Gmail** can be **Send to you** (sent when the email came from you) or **Send to anyone** (sent when Gmail verified the sender). Only that one reply goes: `send` to exactly that sender, for that message, with no cc or bcc, and `send_draft` stays refused. It still passes the policy above (on/off, allowed recipients, daily limit). See [Agents as colleagues and agent email](#agents-as-colleagues-and-agent-email--new-in-090).
 
 **Attaching files.** `create_draft`, `update_draft` and a composed `send` take `attachments` — local paths as the file tools print them (`saved/…`, `vfs:<project>/<path>`); `update_draft` also takes `remove_attachments`. `microsoft_mail` drafts take the same parameters.
 

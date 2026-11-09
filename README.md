@@ -45,7 +45,7 @@ First run starts onboarding. For a single agent in the terminal or the browser, 
 
 ## ⚓ New in 0.9.0 — shipyard
 
-**Custom tools.** Describe a tool in your own words, let your model check the spec, and Crew's coding agents write it, its tests and its examples. When you approve the merge, Flight Deck publishes it, and it goes live only if everything passes. Your agents call it with `custom_tools`; Flight Deck runs every call as the person, with their own secrets and files, held in a Landlock sandbox on Linux. Offer a tool to people or to the whole deck, and it runs for nobody until they **Add** it. A tool can use the agent's own tools, run your other tools and ask you a question, and agents suggest the tools they'd need.
+**Custom tools.** Describe a tool in your own words, let your model check the spec, and Crew's coding agents write it, its tests and its examples. When you approve the merge, Flight Deck publishes it, and it goes live only if everything passes. Your agents call it with `custom_tools`; Flight Deck runs every call as the person, with their own secrets and files, held in a Landlock sandbox on Linux 5.13+. Offer a tool to people or to the whole deck, and it runs for nobody until they **Add** it. A tool can use the agent's own tools, run your other tools and ask you a question, and agents suggest the tools they'd need.
 
 **Agents in one file.** **Back up / export** saves an agent as a `.captain` file: a **Template**, **Trained**, or a **Full backup** with its keys sealed by a passphrase. Bring it in as a new agent or into an existing one, with Undo. Name a package and each export becomes a version that updates your client's copy without touching what it learned there. Schedule backups, and sign every file with your deck's key.
 
