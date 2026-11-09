@@ -231,7 +231,9 @@ async def test_secrets_are_the_callers_and_required(data):
     assert state["state"] == "passed", state
     with pytest.raises(xt.ToolError) as exc:
         await xt.run_tool("u1", "sec", "u2", {})
-    assert exc.value.kind == "missing_secret" and "API_TOKEN" in exc.value.message
+    assert exc.value.kind == "missing_secret" and exc.value.message.startswith("API_TOKEN isn't set: Custom tools → ")
+    # It names the section the tool's sheet shows.
+    assert exc.value.message.endswith("→ Your secrets for it.")
     res = await xt.run_tool("u1", "sec", "u2", {}, secret_values={"API_TOKEN": "runner", "OTHER": "x"})
     assert res["output"] == {"t": "runner"}
 
@@ -241,6 +243,10 @@ async def test_a_publish_without_a_needed_secret_fails_on_the_example(data):
                 secrets=[{"name": "API_TOKEN", "why": ""}], publish=False)
     state = await xt.publish("u1", "sec2", by="u1")
     assert state["state"] == "failed" and "API_TOKEN isn't set" in state["steps"][-1]["detail"]
+    await _tool("u1", "sec3", "import json, os\nprint(json.dumps({'t': os.environ['API_TOKEN']}))\n",
+                secrets=[{"name": "API_TOKEN", "why": ""}, {"name": "OTHER", "why": ""}], publish=False)
+    state = await xt.publish("u1", "sec3", by="u1")
+    assert state["state"] == "failed" and "API_TOKEN, OTHER aren't set" in state["steps"][-1]["detail"]
 
 
 async def test_input_must_fit_the_schema(data):

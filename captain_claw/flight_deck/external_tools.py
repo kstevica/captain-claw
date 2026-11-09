@@ -1204,8 +1204,8 @@ async def _run_version(owner: str, slug: str, version: str, vdir: Path, manifest
         raise ToolError("bad_input", f"The input doesn't fit this tool ({where}): {problem.message}", status=422)
     missing = [s["name"] for s in manifest.secrets if not secret_values.get(s["name"])]
     if missing:
-        raise ToolError("missing_secret", f"{', '.join(missing)} isn't set: Custom tools → {manifest.title} → Secrets.",
-                        status=400)
+        raise ToolError("missing_secret", f"{', '.join(missing)} {'aren' if len(missing) > 1 else 'isn'}'t set: "
+                        f"Custom tools → {manifest.title} → Your secrets for it.", status=400)
     _check_owner(caller)
     require = await _sandbox_gate()
     _sweep_runs()
