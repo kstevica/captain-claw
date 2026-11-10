@@ -339,6 +339,7 @@ class BrowserSession:
             self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
             self._loaded_extensions = extensions
             log.info("Chromium launched with extensions", count=len(extensions))
+            await self.apply_seed()
         else:
             self._persistent = False
             self._loaded_extensions = []
@@ -407,9 +408,32 @@ class BrowserSession:
 
     # -- extensions -----------------------------------------------------------
 
-    def set_extensions(self, dirs: list[str]) -> None:
-        """The extensions this browser should have (loaded at its next start)."""
+    def set_extensions(self, dirs: list[str], seed: dict[str, Any] | None = None) -> None:
+        """The extensions this browser should have (loaded at its next start), and
+        what to put in one's storage then (Captain for Chrome's connection)."""
         self._extension_dirs = list(dirs)
+        self._seed = seed
+
+    async def apply_seed(self) -> bool:
+        """Put the seed into its extension's storage (its service worker), now."""
+        seed = getattr(self, "_seed", None)
+        if not seed or not getattr(self, "_persistent", False) or self._context is None:
+            return False
+        mark = f"chrome-extension://{seed['ext_id']}/"
+        worker = next((w for w in self._context.service_workers if w.url.startswith(mark)), None)
+        if worker is None:
+            try:
+                worker = await self._context.wait_for_event(
+                    "serviceworker", predicate=lambda w: w.url.startswith(mark), timeout=15000)
+            except Exception as e:
+                log.warning("The extension's worker didn't start; its connection waits", error=str(e))
+                return False
+        try:
+            await worker.evaluate("(s) => chrome.storage.local.set(s)", seed["storage"])
+        except Exception as e:
+            log.warning("Couldn't hand the extension its connection", error=str(e))
+            return False
+        return True
 
     @property
     def extensions_pending(self) -> bool:

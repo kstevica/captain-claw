@@ -136,7 +136,9 @@ function connect(conn) {
   wsConn = conn
   setStatus('connecting')
   sock.onopen = () => {
-    sock.send(JSON.stringify({ type: 'hello', token: conn.token, browser: browserLabel(), version: VERSION, stopped: [...stopped] }))
+    // An agent's own (headless) browser is named after the agent by Flight Deck.
+    sock.send(JSON.stringify({ type: 'hello', token: conn.token, browser: conn.agent ? `Headless · ${conn.agent}` : browserLabel(),
+                               version: VERSION, stopped: [...stopped] }))
     clearInterval(pingTimer)
     pingTimer = setInterval(() => send({ type: 'ping' }), PING_MS)
   }
@@ -886,7 +888,10 @@ async function listTabs(ctx) {
 
 const ACTIONS = {
   async status(ctx) {
-    const lines = [`Connected: the person's own Chrome (${browserLabel()}, Captain for Chrome ${VERSION}), signed in as them.`, await listTabs(ctx)]
+    const own = ctx.conn?.agent
+      ? `Connected: your own headless browser on the server (Captain for Chrome ${VERSION}) — not the person's Chrome; their sign-ins aren't here.`
+      : `Connected: the person's own Chrome (${browserLabel()}, Captain for Chrome ${VERSION}), signed in as them.`
+    const lines = [own, await listTabs(ctx)]
     return { content: lines.join('\n') }
   },
 

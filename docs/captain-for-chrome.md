@@ -131,6 +131,24 @@ to the extension's) — in an isolated world through a CDP session
 coordinate work there too. Only `tabs`, `tab_*`, `console`, `network_requests`
 and `resize` stay Chrome-only (and imply `target="chrome"`).
 
+### An agent's own Chrome
+
+`browser(action="extension_connect")` pairs Captain for Chrome in the agent's
+own headless browser (installing it from this Captain first). The agent asks
+Flight Deck (`POST /fd/browser-hands/agent/connect`, followed like `ask_user`);
+the person gets a yes/no dialog; on yes Flight Deck mints a token of its own
+kind (`cc_ab_…`, its hash in `<FD_DATA_DIR>/agent-browsers.json`) — not a
+personal access token: only the hands socket and that agent's act uploads take
+it, so `/fd/clip/me`, clips, MCP… refuse it. The agent keeps the connection in
+`.browser-extensions/captain-conn.json` and the session puts it (with "agents
+can use this browser" on) into the extension's storage at every start, since
+the headless profile is new each time. Routing (`usable_by`): the person's own
+Chrome first, then that agent's own browser; never another agent's. Results
+from it say "your own headless browser"; the extension's panel there shows a
+plain notice (no clips). Connections → Browser lists it ("Scout's own browser
+(on the server)") and Disconnect forgets it; removing Captain for Chrome lets
+go of it too.
+
 ## Security
 
 - The extension's origin reaches `/fd/clip/` only (origin guard + CORS);

@@ -54,7 +54,7 @@ HEADLESS_ONLY_ACTIONS = frozenset({
     "api_replay", "api_test", "switch_app", "list_sessions",
     "workflow_record_start", "workflow_record_stop", "workflow_save", "workflow_list",
     "workflow_show", "workflow_run", "workflow_delete",
-    "extension_install", "extension_list", "extension_remove", "extension_open",
+    "extension_install", "extension_list", "extension_remove", "extension_open", "extension_connect",
 })
 
 # The arguments the extension reads (everything else stays here).
@@ -183,6 +183,8 @@ class ChromeHands:
             error = str(data.get("error") or "The browser couldn't do that.")
             return ToolResult(success=False, error=error)
         content = str(data.get("content") or "").strip()
+        if data.get("own") and action in ("navigate", "tab_new", "tabs", "back", "forward"):
+            content = "(In your own headless browser on the server — not the person's Chrome.)\n" + content
         if action in ("page_text", "read_page", "find") and content:
             content = f"{WEB_CONTENT_NOTE}\n\n{content}"
         images: list[str] = []

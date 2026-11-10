@@ -20,6 +20,16 @@ Flight Deck keeps them in the person's **Web clips** folder
 (``vfs:web-clips/<day>-<site>-<agent>-browser/``), which every agent of
 theirs reads through ``vfs:``; the act's answer lists the paths.
 
+**An agent's own Chrome.** An agent can pair Captain for Chrome in its OWN
+headless browser (the browser tool's ``extension_connect``): it asks here
+(``/connect``), the person approves in Flight Deck, and the agent gets a token
+of a kind of its own (``cc_ab_…``, kept in ``agent-browsers.json``, never a
+personal access token) that only this socket and the act's file uploads take
+— for that agent's acts alone. An agent's ``target="chrome"`` acts go to the
+person's own Chrome first, and to its own browser only when theirs isn't
+connected; other agents never land there. Connections → Browser lists it and
+can disconnect it.
+
 Who may use it: only the person's own agents. The caller is resolved from
 Flight Deck's own records (``require_agent_caller``) and its owner is the
 person whose browser is used. A shared agent's member turns never reach the
@@ -39,13 +49,16 @@ import logging
 import secrets
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.security import HTTPAuthorizationCredentials
 from pydantic import BaseModel, Field
 
-from captain_claw.flight_deck.auth import get_db, hash_token
+from captain_claw.flight_deck import person_asks as asks
+from captain_claw.flight_deck.auth import get_db, get_mcp_user, hash_token
 from captain_claw.flight_deck.browser_clip import (
     CLIP_PROJECT,
     MAX_FILE_BYTES,
@@ -85,8 +98,14 @@ MAX_ACT_BYTES = 150 * 1024 * 1024
 NO_BROWSER = (
     "The person's Chrome isn't connected for agents. Ask them to open Captain for Chrome → "
     "Settings and turn on “Agents can use this browser” (the extension must be connected to "
-    "this Flight Deck). Until then use the headless browser (target=\"headless\") or web_fetch."
+    "this Flight Deck). Until then use the headless browser (target=\"headless\") or web_fetch — or "
+    "connect your own: browser(action=\"extension_connect\") pairs Captain for Chrome in your headless "
+    "browser (the person approves it), and target=\"chrome\" then runs there while theirs is away."
 )
+AGENT_TOKEN_PREFIX = "cc_ab_"
+AGENT_BROWSERS_FILE = "agent-browsers.json"
+CONNECT_WAIT_S = 600.0
+MINTED_KEEP_S = 600.0
 
 
 def _now() -> float:
@@ -105,6 +124,7 @@ class _Conn:
     last_seen: float = field(default_factory=_now)
     focused_at: float = 0.0     # the person was last at this browser (window focus)
     stopped: tuple[str, ...] = ()   # agents the person stopped in the panel
+    agent_slug: str = ""        # an agent's own (headless) browser: only that agent uses it
     closed: bool = False
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -113,7 +133,7 @@ class _Conn:
             await self.ws.send_text(json.dumps(msg, ensure_ascii=False))
 
     def view(self) -> dict:
-        return {"browser": self.browser, "version": self.version,
+        return {"browser": self.browser, "version": self.version, "own_of": self.agent_slug,
                 "connected_s": int(_now() - self.connected_at), "token_id": self.token_id}
 
 
@@ -145,6 +165,71 @@ def connections(user_id: str) -> list[_Conn]:
 
 def connected_token_ids(user_id: str) -> set[str]:
     return {c.token_id for c in connections(user_id)}
+
+
+def usable_by(user_id: str, slug: str) -> list[_Conn]:
+    """The browsers *slug* may use, in order: the person's own first, then
+    that agent's own headless one. Never another agent's."""
+    conns = connections(user_id)
+    return [c for c in conns if not c.agent_slug] + [c for c in conns if slug and c.agent_slug == slug]
+
+
+# ── Agents' own browsers (tokens of their own, not personal access tokens) ──
+
+
+def _agent_store_path() -> Path:
+    from captain_claw.flight_deck import server as srv
+
+    return Path(srv.DATA_DIR) / AGENT_BROWSERS_FILE
+
+
+def agent_browser_rows(user_id: str | None = None) -> list[dict]:
+    try:
+        rows = json.loads(_agent_store_path().read_text("utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = [r for r in rows if isinstance(r, dict) and r.get("id") and r.get("token_hash")] if isinstance(rows, list) else []
+    return [r for r in rows if user_id is None or str(r.get("user_id")) == str(user_id)]
+
+
+def _save_agent_rows(rows: list[dict]) -> None:
+    path = _agent_store_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(rows, indent=1), "utf-8")
+    tmp.replace(path)
+
+
+def _agent_row_for(raw: str) -> dict | None:
+    if not str(raw or "").startswith(AGENT_TOKEN_PREFIX):
+        return None
+    digest = hash_token(raw)
+    return next((r for r in agent_browser_rows() if r.get("token_hash") == digest), None)
+
+
+def mint_agent_browser(user_id: str, slug: str, name: str) -> tuple[str, dict]:
+    """A new token for *slug*'s own browser (an older one of that agent's goes)."""
+    raw = AGENT_TOKEN_PREFIX + secrets.token_urlsafe(32)
+    row = {"id": "ab_" + secrets.token_hex(8), "user_id": str(user_id), "slug": slug, "name": name,
+           "token_hash": hash_token(raw), "created_at": datetime.now(UTC).isoformat()}
+    keep = [r for r in agent_browser_rows() if not (str(r.get("user_id")) == str(user_id) and r.get("slug") == slug)]
+    _save_agent_rows(keep + [row])
+    for conn in [c for c in _CONNS.get(str(user_id), []) if c.agent_slug == slug]:
+        _unregister(conn)
+    return raw, row
+
+
+async def drop_agent_browser(user_id: str, row_id: str = "", slug: str = "") -> bool:
+    """Forget an agent's own browser (by its id, or the agent's): its socket closes."""
+    rows = agent_browser_rows()
+    gone = [r for r in rows if str(r.get("user_id")) == str(user_id)
+            and ((row_id and r.get("id") == row_id) or (slug and r.get("slug") == slug))]
+    if not gone:
+        return False
+    _save_agent_rows([r for r in rows if r not in gone])
+    for r in gone:
+        await drop_token(user_id, str(r["id"]))
+    return True
 
 
 def _register(conn: _Conn) -> None:
@@ -187,15 +272,23 @@ async def drop_token(user_id: str, token_id: str) -> None:
 
 
 async def _browser_token(raw: str) -> tuple[dict, dict] | None:
-    """``(user, token row)`` for a browser's own unrevoked token, else None."""
+    """``(user, token row)`` for a browser's own unrevoked token — the person's
+    Browser token, or an agent's own-browser token — else None."""
     from captain_claw.flight_deck import auth as fd_auth
 
     raw = str(raw or "").strip()
-    if not raw.startswith(fd_auth.PAT_PREFIX):
-        return None
     db = get_db()
-    row = await db.get_pat_by_hash(hash_token(raw))
-    if not row or token_kind(row.get("name")) != "browser":
+    if raw.startswith(AGENT_TOKEN_PREFIX):
+        row = _agent_row_for(raw)
+        if row is None:
+            return None
+        row = {**row, "agent_slug": str(row.get("slug") or ""),
+               "name": f"{row.get('name') or row.get('slug')}'s own browser"}
+    elif raw.startswith(fd_auth.PAT_PREFIX):
+        row = await db.get_pat_by_hash(hash_token(raw))
+        if not row or token_kind(row.get("name")) != "browser":
+            return None
+    else:
         return None
     uid = str(row.get("user_id") or "")
     user = await db.get_user_by_id(uid) if uid else None
@@ -208,6 +301,9 @@ async def _browser_token(raw: str) -> tuple[dict, dict] | None:
 
 async def _still_valid(conn: _Conn) -> bool:
     """The browser's token wasn't revoked since it connected."""
+    if conn.agent_slug:
+        return any(r.get("id") == conn.token_id and r.get("token_hash") == conn.token_hash
+                   for r in agent_browser_rows(conn.user_id))
     try:
         row = await get_db().get_pat_by_hash(conn.token_hash)
     except Exception:
@@ -271,8 +367,9 @@ async def hands_ws(ws: WebSocket) -> None:
     user, row = found
     conn = _Conn(ws=ws, user_id=str(user["id"]), token_id=str(row["id"]),
                  token_hash=str(row.get("token_hash") or ""),
-                 browser=one_line(first.get("browser") or row.get("name") or "Browser", 80),
-                 version=one_line(first.get("version"), 20))
+                 browser=one_line((row.get("name") if row.get("agent_slug") else first.get("browser"))
+                                  or row.get("name") or "Browser", 80),
+                 version=one_line(first.get("version"), 20), agent_slug=str(row.get("agent_slug") or ""))
     conn.stopped = _stopped_list(first.get("stopped"))
     _register(conn)
     log.info("Browser hands connected: user=%s browser=%s", conn.user_id, conn.browser)
@@ -326,12 +423,28 @@ class _FilesMeta(BaseModel):
     page_title: str = Field("", max_length=400)
 
 
+async def _files_caller(request: Request) -> tuple[str, str]:
+    """``(person, agent)`` posting an act's files: the person's browser (its
+    token, as the extension's other calls), or an agent's own browser — which
+    may post for that agent's acts only."""
+    raw = (request.headers.get("authorization") or "").partition(" ")[2].strip()
+    if raw.startswith(AGENT_TOKEN_PREFIX):
+        row = _agent_row_for(raw)
+        if row is None:
+            raise HTTPException(401, "This browser isn't connected to Flight Deck.")
+        return str(row["user_id"]), str(row.get("slug") or "")
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials=raw) if raw else None
+    user = await get_clip_user(request, await get_mcp_user(request, creds))
+    return str(user["id"]), ""
+
+
 @router.post("/files/{act_id}")
-async def hands_files(act_id: str, request: Request, user: dict = Depends(get_clip_user)) -> dict:
+async def hands_files(act_id: str, request: Request, caller: tuple[str, str] = Depends(_files_caller)) -> dict:
     """Files the browser fetched for an agent's act (``download``, ``save_page``):
     kept in the person's Web clips folder, listed in the act's answer."""
+    user_id, own_of = caller
     act = _ACTS.get(act_id)
-    if act is None or act.user_id != str(user["id"]) or act.future.done():
+    if act is None or act.user_id != user_id or act.future.done() or (own_of and act.slug != own_of):
         raise HTTPException(404, "That request is over.")
     form = await request.form(max_files=MAX_ACT_FILES + 1, max_fields=10)
     try:
@@ -385,8 +498,10 @@ class ActBody(BaseModel):
 @agent_router.get("/status")
 async def agent_status(request: Request) -> dict:
     owner, slug = _owner_of(request, "the person's browser")
-    conns = connections(owner)
+    conns = usable_by(owner, slug)
     return {"connected": bool(conns), "browsers": [c.view() for c in conns],
+            "own_connected": any(c.agent_slug == slug for c in conns),
+            "own_paired": any(r.get("slug") == slug for r in agent_browser_rows(owner)),
             "stopped": any(slug in c.stopped for c in conns[:1])}
 
 
@@ -401,7 +516,7 @@ async def agent_act(body: ActBody, request: Request) -> dict:
     if size > MAX_ARGS_BYTES:
         raise HTTPException(413, "The arguments are too large.")
     conn = None
-    for cand in connections(owner):
+    for cand in usable_by(owner, slug):
         if await _still_valid(cand):
             conn = cand
             break
@@ -441,6 +556,108 @@ async def agent_act(body: ActBody, request: Request) -> dict:
             result["files"] = list(act.files)
             result["folder"] = f"vfs:{CLIP_PROJECT}/{act.folder}/"
         result["browser"] = conn.browser
+        if conn.agent_slug:
+            result["own"] = True
         return result
     finally:
         _ACTS.pop(act.id, None)
+
+
+# ── An agent pairs its own browser (the person approves) ─────────────
+
+_MINTED: dict[str, tuple[float, str, dict]] = {}   # ask id → (when, agent, the answer with its token)
+
+
+class ConnectBody(BaseModel):
+    origin: str = Field("", max_length=60)
+    wait: float = Field(20, ge=0, le=30)
+    ask_id: str = Field("", pattern=r"^(xa_[0-9a-f]{16})?$")
+
+
+class ConnectFollow(BaseModel):
+    id: str = Field(..., max_length=40)
+    wait: float = Field(25, ge=0, le=30)
+
+
+def _connect_question(name: str) -> list[dict]:
+    return asks.check_questions([{
+        "id": "connect", "confirm": True,
+        "question": f"Let {name} connect Captain for Chrome in its own browser?",
+        "help": (f"It's {name}'s headless browser on the server, not your Chrome — your sign-ins aren't in it. "
+                 f"{name}'s browser actions for your Chrome go there only while your own Chrome isn't connected; "
+                 "no other agent uses it. Disconnect it any time in Connections → Browser."),
+    }])
+
+
+async def _connect_outcome(ask_id: str, done: dict, owner: str, slug: str, name: str) -> dict:
+    now = time.time()
+    for k in [k for k, (at, _s, _r) in _MINTED.items() if now - at > MINTED_KEEP_S]:
+        _MINTED.pop(k, None)
+    if done.get("ok") and (done.get("answers") or {}).get("connect") is True:
+        kept = _MINTED.get(ask_id)
+        if kept and kept[1] == slug:
+            return kept[2]   # asked again for the same yes: the same token, never a second one
+        raw, row = mint_agent_browser(owner, slug, name)
+        result = {"ok": True, "token": raw, "id": row["id"], "name": name}
+        _MINTED[ask_id] = (now, slug, result)
+        try:
+            await get_db().log_usage(owner, "agent_browser_connected", json.dumps({"agent": slug}))
+        except Exception:
+            pass
+        return result
+    if done.get("ok"):
+        return {"ok": False, "declined": True, "error": "The person said no. Don't connect it unless they ask you to."}
+    if done.get("declined"):
+        return {"ok": False, "declined": True, "error": "The person chose not to answer. Don't connect it unless they ask."}
+    return {"ok": False, "error": str(done.get("error") or "No answer from the person.")}
+
+
+@agent_router.post("/connect")
+async def agent_connect(body: ConnectBody, request: Request) -> dict:
+    """Ask the person to let this agent pair Captain for Chrome in its own
+    headless browser: the token for it once they say yes, or ``{"pending": id}``."""
+    owner, slug = _owner_of(request, "connecting a browser")
+    if not slug:
+        raise HTTPException(403, "Flight Deck can't tell which agent this is.")
+    if not asks.attended(body.origin):
+        return {"ok": False, "nobody": True,
+                "error": "Nobody is here to approve it: this turn started on its own. Ask the person in a chat."}
+    from captain_claw.flight_deck.agent_names import display_name
+
+    name = await display_name(slug, owner) or slug
+    try:
+        a = await asks.open_ask(owner, source="agent", title=name, agent_name=name,
+                                questions=_connect_question(name), wait_s=CONNECT_WAIT_S, ask_id=body.ask_id)
+    except asks.AskError as exc:
+        raise HTTPException(422, str(exc)) from None
+    done = await asks.wait_answer(a, body.wait)
+    if done is None:
+        return {"pending": a.id, "seconds_left": max(0, int(a.deadline - time.time()))}
+    return await _connect_outcome(a.id, done, owner, slug, name)
+
+
+@agent_router.post("/connect/follow")
+async def agent_connect_follow(body: ConnectFollow, request: Request) -> dict:
+    owner, slug = _owner_of(request, "connecting a browser")
+    try:
+        done = await asks.follow(body.id, owner, body.wait)
+    except KeyError:
+        raise HTTPException(404, "There's no such request (it ended a while ago).") from None
+    if done.get("pending"):
+        return done
+    from captain_claw.flight_deck.agent_names import display_name
+
+    return await _connect_outcome(body.id, done, owner, slug, await display_name(slug, owner) or slug)
+
+
+@agent_router.post("/connect/cancel")
+async def agent_connect_cancel(body: ConnectFollow, request: Request) -> dict:
+    owner, _slug = _owner_of(request, "connecting a browser")
+    return {"cancelled": await asks.cancel(body.id, owner)}
+
+
+@agent_router.post("/disconnect")
+async def agent_disconnect(request: Request) -> dict:
+    """The agent lets go of its own browser's connection (Captain removed)."""
+    owner, slug = _owner_of(request, "connecting a browser")
+    return {"ok": True, "dropped": await drop_agent_browser(owner, slug=slug)}

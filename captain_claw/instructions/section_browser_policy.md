@@ -14,6 +14,7 @@ The person's own Chrome (`target='chrome'`, through Captain for Chrome):
 Extensions in your headless browser:
 - `browser(action='extension_install', extension_id='<Chrome Web Store id or address>')` — or `path=` (a folder, .zip or .crx) or `url=` (a download). It tells you what the extension can do; on most decks the person approves it first — if they say no, don't try again.
 - "The extension" / "Captain for Chrome" / "the Captain extension" means Captain's own: `extension_id='captain'` installs it from this Captain (it isn't in the Web Store — don't search there).
+- "Connect it (to yourself)" means `browser(action='extension_connect')`: it pairs that Captain for Chrome with Flight Deck — the person approves in a dialog — and from then on `target='chrome'` runs in your own headless browser whenever their Chrome isn't connected (theirs always comes first). It's a server browser: their sign-ins aren't in it.
 - `extension_list`, `extension_remove`, `extension_open` (its popup or options page, then work it like a page). Installing or removing restarts a running browser, keeping cookies and the page.
 - Only for your own headless browser: the person installs extensions in their own Chrome themselves.
 
