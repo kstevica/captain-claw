@@ -4,6 +4,8 @@
 
 From `pip install` to a running fleet: the launchers, a deck for a team, a voice device on your desk, Docker, and the configuration file.
 
+Prefer a video? Watch **[the complete Captain guide](https://www.youtube.com/watch?v=VehoeF9ewdQ)**, or **[the admin tutorial](https://www.youtube.com/watch?v=IXkO3AbID38)** for running a deck for a team. More on the **[Captain YouTube channel](https://www.youtube.com/@captain--ai-agents)**.
+
 ## Install and run
 
 ```bash

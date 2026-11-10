@@ -5,6 +5,9 @@ behind a public URL or shared network), the defaults that are fine for a
 single-user machine are not enough. Set the environment variables below on the
 Flight Deck backend **before** the first teammate logs in.
 
+For a walk through the admin side on video, watch
+**[the Captain admin tutorial](https://www.youtube.com/watch?v=IXkO3AbID38)**.
+
 ## Required environment variables
 
 | Variable | Set to | Why it matters with a second user |

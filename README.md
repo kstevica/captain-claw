@@ -14,7 +14,7 @@
 
 > Most AI tools give you one agent in a chat box. Captain Claw **Flight Deck** is a multi-agent command center: spawn specialist teams, run **seven orchestration modes**, ship software with **Code** (plan → build → independent review), and compose deterministic **Flows**. Self-hosted, MIT licensed, and it works with every major LLM provider, or 100% local with Ollama. Since **0.8.2** your Flight Decks **work together**: a planner on your VPS asks a researcher on the Raspberry Pi at home, and you watch the request cross a live map. Your team works from a **kiosk**; you can just talk to a **watch**. Since **0.8.4** you can **teach an agent your work and test it**, and see every task on one **Taskboard**. Since **0.8.5** your agents run **Claude Code, Codex, OpenCode, Crush and Pi as their crew**, and you can **say what you need and get a whole team**, with its schedules and its software. Since **0.8.6** everything they do on their own is on **one Line**, **Captain Swarm** makes them measurably better at your real work, and **Captain** for your desktop is a 75 MB download that updates itself. Since **0.8.8** they see what you see: **Captain for Chrome** sends the page you're on, and **Captain for Mac** sends what's on your screen from any app.
 
-**[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://cohort001.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)** · **[🧭 Guides](docs/guide/README.md)** · **[📝 What's new](docs/guide/whats-new.md)**
+**[🌐 Website](https://captain-claw.com)** · **[🚀 Live Demo](https://cohort001.captain-claw.com/)** · **[📖 Docs](https://captain-claw.com/docs)** · **[▶️ YouTube](https://www.youtube.com/@captain--ai-agents)** · **[📦 PyPI](https://pypi.org/project/captain-claw/)** · **[🧭 Guides](docs/guide/README.md)** · **[📝 What's new](docs/guide/whats-new.md)**
 
 **New in 0.9.0 — Shipyard:** tools of your own, built by Crew and run by Flight Deck in a sandbox; agents in one `.captain` file to back up, move or hand on; agents that hand each other work, answer email meant for them, read any IMAP inbox, learn from corrections you approve and know the goals their work is for. **[Release notes](release-notes/RELEASE_NOTES_0.9.0.md)** · **0.8.11 — Hold:** a message written while the agent is busy waits and goes when it's free. **[Release notes](release-notes/RELEASE_NOTES_0.8.11.md)** · **0.8.10 — Provisions:** pick a provider, paste its key, and every model tier is set; scans read by a local OCR engine with no model; a working turn no longer stops at 40 steps. **[Release notes](release-notes/RELEASE_NOTES_0.8.10.md)** · **0.8.8 — Spyglass:** Captain for Chrome sends the page you're on to one of your agents, Captain for Mac sends what's on your screen from any app (hold fn, or click), and a round of fixes from watching real users. **[Release notes](release-notes/RELEASE_NOTES_0.8.8.md)** · **0.8.9** makes agents work in the Windows desktop app, and a downloaded Mac app no longer "damaged": **[notes](release-notes/RELEASE_NOTES_0.8.9.md)** · Earlier: **[0.8.7](release-notes/RELEASE_NOTES_0.8.7.md)** · **[0.8.6 — Ship's Log](release-notes/RELEASE_NOTES_0.8.6.md)**
 
@@ -227,6 +227,12 @@ The fifth mode is **💻 Code** (above). The sixth is **Flight Deck** itself —
 - **Every model** — OpenAI (API key or Sign in with ChatGPT), Anthropic, Google Gemini, DeepSeek, OpenRouter, Ollama and on-device LiteRT, mixed freely per agent. **→ [Inside an agent](docs/guide/agents.md)**
 
 ## See it in action
+
+Video guides on the **[Captain YouTube channel](https://www.youtube.com/@captain--ai-agents)**:
+
+| **The complete Captain guide** — AI agents that do real work | **The Captain admin tutorial** — run your team's own AI agent platform |
+|---|---|
+| [![AI Agents That Do Real Work: The Complete Captain Guide](https://img.youtube.com/vi/VehoeF9ewdQ/maxresdefault.jpg)](https://www.youtube.com/watch?v=VehoeF9ewdQ) | [![Run Your Team's Own AI Agent Platform: The Captain Admin Tutorial](https://img.youtube.com/vi/IXkO3AbID38/maxresdefault.jpg)](https://www.youtube.com/watch?v=IXkO3AbID38) |
 
 [![asciicast](https://asciinema.org/a/R1UPSHi4Y6UrOnpY.svg)](https://asciinema.org/a/R1UPSHi4Y6UrOnpY)
 
