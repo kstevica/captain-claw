@@ -1,21 +1,21 @@
-"""``/fd/external-memory/*`` — the user's external memory, for the dashboard
+"""``/fd/external-memory/*`` — the user's external memories, for the dashboard
 and for their agents.
 
 User routes (Connections → External memory)::
 
     GET    /providers         the providers this deck knows (and what each needs to connect)
-    GET    /status            this user's connection — never a credential
-    PUT    /connection        {provider, credentials: {...}} — checked with the provider, then saved
-    DELETE /connection        forget it (and whatever was still queued for it)
-    POST   /test              a live check; refreshes what the connection may do
-    PUT    /priority          {priority: first | alongside | on_demand} — how much agents lean on it
-    PUT    /mirror            {insight: bool, intention: bool, ...} — what is copied in on its own
-    POST   /run               {action, args} — the playground (search, remember, ...)
-    GET    /outbox            recent mirrored items and their state
-    POST   /outbox/retry      failed and held items go again now
+    GET    /status            this user's memories — never a credential
+    PUT    /connection        {provider, credentials: {...}, memory?, name?} — a new memory, or new
+                              credentials for one (memory = its id); checked with the provider, then saved
+    DELETE /connection        ?memory=<id> — remove one (and whatever was still queued for it)
+    PUT    /memories/{id}     {name?, priority?, mirror?, enabled?} — how this person uses one memory
+    POST   /test              {memory?} — a live check; refreshes what it may do
+    POST   /run               {action, args, memory?} — the playground (search, remember, ...)
+    GET    /outbox            ?memory= — recent mirrored items and their state
+    POST   /outbox/retry      {memory?} — failed and held items go again now
 
 Admin routes (the deck's connection — a scoped provider such as Hindsight, Qdrant or ArcadeDB, one
-scope per person; users without a connection of their own use it)::
+scope per person; one more memory in each person's list, which they can switch off)::
 
     GET    /deck              the deck's connection — never a credential
     PUT    /deck-connection   {provider, credentials} — checked, then saved
@@ -26,9 +26,9 @@ Agent routes — owner resolved from this deck's own records (``X-Agent-Auth``),
 the same gate as Jev; owner-only (not grant-aware, so the speaker-grant
 middleware refuses a shared-agent member's request)::
 
-    GET  /agent/status        {connected, provider, actions, rules, mirror, priority, recall_limit, ...}
-    POST /agent/run           {action, args}
-    POST /agent/recall        {query} → {priority, hits: [{text, id, when, kind}]} — before a reply; never fails
+    GET  /agent/status        {connected, memories, actions, rules, mirror, priority, recall_limit, ...}
+    POST /agent/run           {action, args, memory?} (args.memory works too)
+    POST /agent/recall        {query} → {groups: [{name, priority, hits}], hits} — before a reply; never fails
     POST /agent/mirror        {kind, source_id, content, title, tags, created_at, meta}
 
 The frontend reads a 401 as "the Flight Deck session expired", so a user route
@@ -111,7 +111,8 @@ async def em_connect(request: Request, _user: dict = Depends(get_current_user)) 
     try:
         out, warning = await svc.connect(
             _g._effective_owner(_user), provider, creds if isinstance(creds, dict) else {},
-            private_ok=private_ok,
+            private_ok=private_ok, memory_id=str(data.get("memory") or "").strip(),
+            name=str(data.get("name") or "").strip(),
         )
     except ProviderAuthError as exc:
         raise HTTPException(status_code=400, detail=f"{exc} Nothing was saved.") from None
@@ -123,37 +124,40 @@ async def em_connect(request: Request, _user: dict = Depends(get_current_user)) 
 
 
 @router.delete("/connection")
-async def em_disconnect(_user: dict = Depends(get_current_user)) -> dict[str, Any]:
-    return await svc.disconnect(_g._effective_owner(_user))
-
-
-@router.post("/test")
-async def em_test(_user: dict = Depends(get_current_user)) -> dict[str, Any]:
+async def em_disconnect(memory: str = "", _user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    owner = _g._effective_owner(_user)
+    if not memory:
+        own = [m for m in await svc.memories(owner, enabled_only=False) if m.source == "own"]
+        if len(own) != 1:
+            raise HTTPException(status_code=422, detail="Say which memory to remove (?memory=<id>).")
+        memory = own[0].id
     try:
-        return await svc.test(_g._effective_owner(_user))
-    except (svc.NotConnected, ProviderInputError, ProviderError) as exc:
+        return await svc.disconnect(owner, memory)
+    except (svc.NotConnected, ProviderInputError) as exc:
         raise http_error(exc) from None
 
 
-@router.put("/priority")
-async def em_priority(request: Request, _user: dict = Depends(get_current_user)) -> dict[str, Any]:
-    """Reading priority: how much this person's agents lean on the memory
-    (first | alongside | on_demand)."""
+@router.put("/memories/{memory_id}")
+async def em_memory_settings(memory_id: str, request: Request,
+                             _user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """How this person uses one memory: its name, reading priority (first |
+    alongside | on_demand), what is copied in on its own, on or off."""
     data = await _json_body(request)
-    owner = _g._effective_owner(_user)
+    if isinstance(data.get("kinds"), dict) and "mirror" not in data:
+        data["mirror"] = data["kinds"]
     try:
-        await svc.save_priority(owner, data.get("priority"))
-    except ProviderInputError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
-    return await svc.status_for_owner(owner)
+        return await svc.update_memory(_g._effective_owner(_user), memory_id, data)
+    except (svc.NotConnected, ProviderInputError) as exc:
+        raise http_error(exc) from None
 
 
-@router.put("/mirror")
-async def em_mirror(request: Request, _user: dict = Depends(get_current_user)) -> dict[str, Any]:
+@router.post("/test")
+async def em_test(request: Request, _user: dict = Depends(get_current_user)) -> dict[str, Any]:
     data = await _json_body(request)
-    kinds = data.get("kinds") if isinstance(data.get("kinds"), dict) else data
-    await svc.save_mirror(_g._effective_owner(_user), kinds)
-    return await svc.status_for_owner(_g._effective_owner(_user))
+    try:
+        return await svc.test(_g._effective_owner(_user), str(data.get("memory") or "").strip())
+    except (svc.NotConnected, ProviderInputError, ProviderError) as exc:
+        raise http_error(exc) from None
 
 
 @router.post("/run")
@@ -163,7 +167,7 @@ async def em_run(request: Request, _user: dict = Depends(get_current_user)) -> d
     try:
         result = await svc.run_for_owner(
             _g._effective_owner(_user), str(data.get("action") or ""), args if isinstance(args, dict) else {},
-            source="ui",
+            source="ui", memory=str(data.get("memory") or ""),
         )
     except (svc.NotConnected, ProviderInputError, ProviderError) as exc:
         raise http_error(exc) from None
@@ -171,19 +175,23 @@ async def em_run(request: Request, _user: dict = Depends(get_current_user)) -> d
 
 
 @router.get("/outbox")
-async def em_outbox(state: str = "", limit: int = 30, _user: dict = Depends(get_current_user)) -> dict[str, Any]:
+async def em_outbox(state: str = "", limit: int = 30, memory: str = "",
+                    _user: dict = Depends(get_current_user)) -> dict[str, Any]:
     owner = svc.owner_key(_g._effective_owner(_user))
     state = state if state in ("pending", "sent", "failed") else ""
     box = svc.outbox()
+    target = memory or None
     return {
-        "items": await box.recent(owner, max(1, min(int(limit or 30), 200)), state),
-        "counts": await box.counts(owner),
+        "items": await box.recent(owner, max(1, min(int(limit or 30), 200)), state, target=target),
+        "counts": await box.counts(owner, target=target),
     }
 
 
 @router.post("/outbox/retry")
-async def em_outbox_retry(_user: dict = Depends(get_current_user)) -> dict[str, Any]:
-    n = await svc.outbox().retry_owner(svc.owner_key(_g._effective_owner(_user)))
+async def em_outbox_retry(request: Request, _user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    data = await _json_body(request)
+    n = await svc.outbox().retry_owner(svc.owner_key(_g._effective_owner(_user)),
+                                       target=str(data.get("memory") or "") or None)
     svc.wake()
     return {"requeued": n}
 
@@ -272,7 +280,7 @@ async def em_agent_run(request: Request) -> dict[str, Any]:
     try:
         result = await svc.run_for_owner(
             owner, str(data.get("action") or ""), args if isinstance(args, dict) else {},
-            source="agent", agent=slug,
+            source="agent", agent=slug, memory=str(data.get("memory") or ""),
         )
     except (svc.NotConnected, ProviderInputError, ProviderError) as exc:
         raise http_error(exc) from None

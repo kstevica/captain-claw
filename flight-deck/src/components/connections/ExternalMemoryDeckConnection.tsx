@@ -5,9 +5,9 @@ import CredentialInputs from './CredentialInputs'
 
 // The deck's external memory (admins): one server that keeps people apart
 // itself — Hindsight gives each person a bank, Qdrant and ArcadeDB a space —
-// connected once for everyone. Users without a memory of their own use it,
-// each in their own; their
-// own connection wins. A memory whose key is one person's (Membase) can't be
+// connected once for everyone. It is one more memory in each person's list,
+// in their own bank or space, which they can switch off. A memory whose key
+// is one person's (Membase) can't be
 // shared this way, so only those that keep people apart are offered.
 
 type Busy = 'save' | 'test' | 'remove' | null
@@ -71,7 +71,7 @@ export default function ExternalMemoryDeckConnection() {
     if (busy) return
     if (!window.confirm(
       `Stop sharing ${deck?.label ?? 'this memory'} with everyone?\n\n` +
-      `People without a memory of their own lose theirs in Flight Deck (what is in their ${scope}s stays on the server). People who connected their own aren't affected.`,
+      `Everyone's agents stop using it (what is in their ${scope}s stays on the server). Their own memories aren't affected.`,
     )) return
     setBusy('remove'); setNotice(null)
     const done = await disconnectDeck()
@@ -104,10 +104,10 @@ export default function ExternalMemoryDeckConnection() {
 
       <div className="px-5 py-4 space-y-4">
         <p className="text-xs leading-relaxed text-zinc-400">
-          Connect one memory server for the whole deck. Everyone who hasn't connected a memory of their own uses
-          it, each in a {scope} of their own
+          Connect one memory server for the whole deck. It is one more memory in everyone's list, each in
+          a {scope} of their own
           {deck?.scope_example ? <> (<code className="text-zinc-300">{deck.scope_example}</code>)</> : null} — agents
-          never pick a {scope}, so nobody's agents can read anyone else's. A person's own connection wins over this one.
+          never pick a {scope}, so nobody's agents can read anyone else's. Each person can switch it off, and add memories of their own next to it.
           Only memories that keep people apart themselves can be shared like this.
         </p>
 

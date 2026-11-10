@@ -1,7 +1,8 @@
 """The agent's side of the external memory, which lives in Flight Deck.
 
-The person connects one external memory (Membase, …) in Flight Deck →
-Connections → External memory; every agent of theirs shares it. An agent never
+The person connects external memories (Membase, Hindsight, Qdrant, ArcadeDB —
+several at once) in Flight Deck → Connections → External memory; every agent
+of theirs shares them. An agent never
 holds the credentials: it asks ``/fd/external-memory/agent/*`` and Flight Deck
 answers with the owner's connection.
 
@@ -227,7 +228,8 @@ def remember_cue(said: str) -> bool:
 
 
 async def recall(query: str) -> dict[str, Any]:
-    """What the person's memory holds on *query*: ``{priority, label, hits}``.
+    """What the person's memories hold on *query*: ``{priority, label, groups,
+    hits}`` (``groups``: one per memory asked, with its reading priority).
     Never raises; ``hits`` is empty when nothing bears on it, the priority is
     ``on_demand``, the memory is slow or failing, or this isn't the owner's turn."""
     prio = priority()
@@ -250,7 +252,10 @@ async def recall(query: str) -> dict[str, Any]:
     if not isinstance(data, dict):
         return out
     hits = [h for h in data.get("hits") or [] if isinstance(h, dict) and str(h.get("text") or "").strip()]
-    out.update(hits=hits, label=str(data.get("label") or out["label"]),
+    # One group per memory asked (name, its reading priority, its hits) —
+    # where the agent puts each depends on that memory's priority.
+    groups = [g for g in data.get("groups") or [] if isinstance(g, dict)]
+    out.update(hits=hits, groups=groups, label=str(data.get("label") or out["label"]),
                priority=str(data.get("priority") or prio), error=str(data.get("error") or ""))
     return out
 

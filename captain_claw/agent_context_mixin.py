@@ -135,7 +135,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "microsoft_calendar": "Outlook Calendar — list_events, search_events, get_event, create_event, update_event, delete_event, respond_event, list_calendars; changes that email attendees need notify_attendees=true (only when the user asked).",
     "microsoft_mail": "Outlook mail — list_messages, search, read_message, get_thread, list_folders, get_attachment; create_draft / update_draft / list_drafts only when the user asked for that email (attachments=[file paths], ≤25 MB); never sends (drafts wait in Outlook); no repeat drafts. archive / move / create_folder / add_categories / remove_categories (thread_ids / message_ids from list_messages or search) only when the user asked to organize those emails — triaging never implies it, suggest instead; moving changes a message's ID — use the new one it prints.",
     "imap_mail": "Email in the user's IMAP/SMTP inboxes (several; account=<id> or all) — list_accounts, list_messages, search, read_message, get_thread, list_folders, list_drafts, get_attachment; create_draft / update_draft / send / send_draft only when the user asked (send only with sending on for that inbox); no repeats; archive / move / mark_read / mark_unread / create_folder only when asked; a moved email gets a new ID.",
-    "external_memory": "The person's external memory (e.g. Membase), shared by ALL of their agents: remember (save one lasting fact) / search (look up what any of their agents saved) + the provider's own actions; follow its rules (in the tool description; they also say what is copied in automatically).",
+    "external_memory": "The person's external memories (one or several: Membase, Hindsight, Qdrant, ArcadeDB), shared by ALL of their agents: remember (save one lasting fact; to all of them unless you name one with memory) / search (look up what any of their agents saved, in all of them) + the providers' own actions; follow their rules (in the tool description; they also say what is copied in automatically).",
     "jev": "Jev — calibrated judgments about text; use it WHENEVER you'd otherwise judge content yourself (never writes text): one call answers several typed questions about the same state (noul yes/no → p(yes); choice → option + probabilities; score → rubric level). Triage, routing, classification, relevance filtering, claim-vs-source checks, rubric rating, yes/no checks before acting. Literal, specific questions; not for math, counting, dates or writing.",
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
     "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
@@ -220,7 +220,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "microsoft_calendar": "Outlook Calendar: list/search/get/create/update/delete/respond events; notify_attendees=true only when asked",
     "microsoft_mail": "Outlook mail: list/search/read/thread, folders, attachments; drafts only when asked; never sends; no repeats; archive/move/create_folder/add_categories/remove_categories only when asked to organize (triage = suggest; a moved message gets a new ID)",
     "imap_mail": "IMAP/SMTP inboxes (several, account=<id>|all): list/search/read/thread, folders, attachments; drafts/sends only when asked (sends only with sending on); no repeats; archive/move/mark_read only when asked",
-    "external_memory": "shared memory of all the person's agents: remember / search (+ provider actions; follow its rules)",
+    "external_memory": "shared memories of all the person's agents: remember / search, all or one by memory (+ provider actions; follow their rules)",
     "jev": "use WHENEVER you'd judge content yourself: several yes/no (noul), choice or score questions about one state per call; triage/classify/filter/check claims; no math, no writing",
     "datastore": "persistent relational tables",
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
@@ -266,6 +266,7 @@ _NOTE_SHARES = {
     "cross_session_context": 0.2,
     "insights_context": 0.15,
     "external_memory_context": 0.2,
+    "external_memory_main": 0.25,
     "workspace_manifest": 0.15,
     "topic_recall": 0.15,
     "pinned_topic": 0.2,
@@ -1404,43 +1405,65 @@ class AgentContextMixin:
             log.debug("External memory recall for the turn unavailable", error=str(exc))
             self._external_memory_context_cache = {}
 
-    def _build_external_memory_context_note(self) -> str:
-        """The recalled items, worded for the reading priority. Items the
-        insights note already carries (mirrored there from this agent) are
-        left out: they would say the same thing twice."""
+    def _build_external_memory_context_notes(self) -> tuple[str, str]:
+        """``(main, alongside)``: what the person's memories recalled, as two
+        notes — from the ones they made their MAIN memory (reading priority
+        ``first``) and from the rest. An item another memory already gave, or
+        the insights note already carries (mirrored there from this agent),
+        is left out: it would say the same thing twice."""
         if getattr(self, "_suppress_memory_context", False):
-            return ""
+            return "", ""
         cache = getattr(self, "_external_memory_context_cache", None) or {}
-        hits = [h for h in cache.get("hits") or [] if isinstance(h, dict)]
-        if not hits:
-            return ""
+        groups = [g for g in cache.get("groups") or [] if isinstance(g, dict)]
+        if not groups and cache.get("hits"):  # one memory, from a Flight Deck before several
+            groups = [{"name": cache.get("label") or "", "label": cache.get("label") or "",
+                       "priority": cache.get("priority") or "alongside", "hits": cache.get("hits")}]
 
         def _norm(text: Any) -> str:
             return " ".join(re.findall(r"\w+", str(text or "").lower()))[:120]
 
-        known = {_norm(i.get("content")) for i in (getattr(self, "_insights_context_cache", None) or [])
-                 if isinstance(i, dict)}
-        known.discard("")
-        lines: list[str] = []
-        for h in hits:
-            key = _norm(h.get("text"))
-            if not key or any(key.startswith(k) or k.startswith(key) for k in known):
-                continue
-            when = str(h.get("when") or "")[:10]
-            text = " ".join(str(h.get("text") or "").split())
-            lines.append(f"- {text}" + (f" ({when})" if when else ""))
-        if not lines:
-            return ""
-        label = str(cache.get("label") or "external memory")
-        if cache.get("priority") == "first":
-            head = (f"From the person's MAIN memory ({label}, shared by all of their agents) — what it holds "
-                    "on this message:")
-            tail = ("Rely on this first; where it and your own notes disagree, go by it (the newer of two "
-                    "facts). Search it (external_memory) for more before saying you don't know.")
-        else:
-            head = f"From the person's external memory ({label}, shared by all of their agents), on this message:"
-            tail = "Use what bears on the message; search it (external_memory) for more."
-        return "\n".join([head, *lines, tail])
+        seen = {_norm(i.get("content")) for i in (getattr(self, "_insights_context_cache", None) or [])
+                if isinstance(i, dict)}
+        seen.discard("")
+        picked: dict[str, list[tuple[str, str]]] = {"first": [], "alongside": []}
+        for g in groups:
+            tier = "first" if g.get("priority") == "first" else "alongside"
+            for h in g.get("hits") or []:
+                if not isinstance(h, dict):
+                    continue
+                key = _norm(h.get("text"))
+                if not key or any(key.startswith(k) or k.startswith(key) for k in seen):
+                    continue
+                seen.add(key)
+                when = str(h.get("when") or "")[:10]
+                text = " ".join(str(h.get("text") or "").split())
+                source = str(g.get("name") or g.get("label") or "")
+                picked[tier].append((source, f"- {text}" + (f" ({when})" if when else "")))
+
+        def note(tier: str) -> str:
+            items = picked[tier]
+            if not items:
+                return ""
+            sources = list(dict.fromkeys(src for src, _ in items if src))
+            several = len(sources) > 1
+            lines = [f"{line} [{src}]" if several and src else line for src, line in items]
+            label = ", ".join(sources) or "external memory"
+            if tier == "first":
+                head = (f"From the person's MAIN memory ({label}, shared by all of their agents) — what it "
+                        "holds on this message:")
+                tail = ("Rely on this first; where it and your own notes disagree, go by it (the newer of two "
+                        "facts). Search it (external_memory) for more before saying you don't know.")
+            else:
+                head = (f"From the person's external memory ({label}, shared by all of their agents), on this "
+                        "message:")
+                tail = "Use what bears on the message; search it (external_memory) for more."
+            return "\n".join([head, *lines, tail])
+
+        return note("first"), note("alongside")
+
+    def _build_external_memory_context_note(self) -> str:
+        """Both recalled notes in one (main first) — for callers that want one."""
+        return "\n\n".join(n for n in self._build_external_memory_context_notes() if n)
 
     def _build_insights_context_note(self, query: str = "") -> str:
         """Build context note from relevant insights."""
@@ -4573,9 +4596,9 @@ class AgentContextMixin:
         # The owner's external memory: next to the insights, or — when it is
         # their main memory — last of all (kept longest when the prompt is
         # crowded, and nearest the message).
-        external_note = "" if skip_memory or not owner_notes else self._build_external_memory_context_note()
-        external_first = (getattr(self, "_external_memory_context_cache", None) or {}).get("priority") == "first"
-        if external_note and not external_first:
+        external_main, external_note = (
+            ("", "") if skip_memory or not owner_notes else self._build_external_memory_context_notes())
+        if external_note:
             notes.append(("external_memory_context", external_note))
         intentions_note = self._build_intentions_context_note() if owner_notes else ""
         if intentions_note:
@@ -4599,8 +4622,8 @@ class AgentContextMixin:
         # An earlier conversation thread matched to this message, and topics
         # pinned with the topics tool — last, so they are trimmed last.
         notes.extend(self._topic_context_notes(skip_memory=skip_memory, history_budget=history_budget))
-        if external_note and external_first:
-            notes.append(("external_memory_context", external_note))
+        if external_main:
+            notes.append(("external_memory_main", external_main))
 
         return notes
 

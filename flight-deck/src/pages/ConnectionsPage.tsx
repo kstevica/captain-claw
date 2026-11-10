@@ -101,7 +101,9 @@ function useTabDots(telegram: MyTelegram | null, systemsConnected: number, brows
     browser: browsers > 0 ? 'on' : undefined,
     jev: jev?.key_set ? (jev.verified === false ? 'pending' : 'on') : undefined,
     soniox: soniox?.key_set ? (soniox.verified === false ? 'pending' : 'on') : undefined,
-    memory: memory?.connected ? (memory.verified === false ? 'pending' : 'on') : undefined,
+    memory: memory?.connected
+      ? (memory.memories.some((m) => m.enabled && m.verified === false) ? 'pending' : 'on')
+      : undefined,
     telegram: telegram?.link && telegram.link.status !== 'rejected'
       ? (telegram.link.status === 'approved' && telegram.link.linked ? 'on' : 'pending')
       : undefined,

@@ -7,8 +7,11 @@ call only queues a row here and returns at once; the drainer
 so a slow or rate-limited service never holds up an agent, and nothing queued
 is lost to a restart.
 
-One row per ``(owner, kind, source_id)``: the same insight sent twice is
-queued once. States: ``pending`` (``next_at`` says when to try), ``sent``,
+One row per ``(owner, target, kind, source_id)``: ``target`` is the memory
+it goes to (a person can have several, each taking the kinds they chose), and
+the same insight sent twice is queued once per memory. Rows from before there
+were several memories have an empty target and the provider's name; the
+drainer sends them to that person's memory of that provider. States: ``pending`` (``next_at`` says when to try), ``sent``,
 ``failed`` (won't be retried until the user asks). Sent rows are kept a while
 for the "recently synced" list, then pruned.
 """
@@ -43,11 +46,33 @@ CREATE TABLE IF NOT EXISTS outbox (
     remote_id   TEXT NOT NULL DEFAULT '',
     created_at  REAL NOT NULL,
     sent_at     REAL,
-    UNIQUE (owner_id, kind, source_id)
+    target      TEXT NOT NULL DEFAULT '',
+    UNIQUE (owner_id, target, kind, source_id)
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_due ON outbox(state, next_at);
 CREATE INDEX IF NOT EXISTS idx_outbox_owner ON outbox(owner_id, state, id);
 """
+
+# A table from before ``target``: its UNIQUE (owner, kind, source_id) would
+# keep an item from being queued for a second memory, and SQLite can't change
+# a table's constraints, so it is rebuilt once with every row kept.
+_MIGRATE_TARGET = """
+ALTER TABLE outbox RENAME TO outbox_v1;
+""" + _DDL.replace("CREATE INDEX IF NOT EXISTS idx_outbox_due", "DROP INDEX IF EXISTS idx_outbox_due;\nCREATE INDEX IF NOT EXISTS idx_outbox_due").replace(
+    "CREATE INDEX IF NOT EXISTS idx_outbox_owner", "DROP INDEX IF EXISTS idx_outbox_owner;\nCREATE INDEX IF NOT EXISTS idx_outbox_owner") + """
+INSERT INTO outbox (id, owner_id, provider, kind, source_id, agent, title, payload, state, attempts, next_at,
+                    last_error, remote_id, created_at, sent_at, target)
+    SELECT id, owner_id, provider, kind, source_id, agent, title, payload, state, attempts, next_at,
+           last_error, remote_id, created_at, sent_at, '' FROM outbox_v1;
+DROP TABLE outbox_v1;
+"""
+
+
+def _scope(owner_id: str, target: str | None) -> tuple[str, tuple[Any, ...]]:
+    """The WHERE clause for one owner's rows, or one memory's of theirs."""
+    if target is None:
+        return "owner_id=?", (owner_id,)
+    return "owner_id=? AND target=?", (owner_id, target)
 
 
 class Outbox:
@@ -62,6 +87,11 @@ class Outbox:
             db = await aiosqlite.connect(str(self.path))
             db.row_factory = aiosqlite.Row
             await db.execute("PRAGMA journal_mode=WAL")
+            cur = await db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='outbox'")
+            if await cur.fetchone():
+                cols = {r[1] for r in await (await db.execute("PRAGMA table_info(outbox)")).fetchall()}
+                if "target" not in cols:
+                    await db.executescript("BEGIN;\n" + _MIGRATE_TARGET + "\nCOMMIT;")
             await db.executescript(_DDL)
             await db.commit()
             self._db = db
@@ -74,18 +104,18 @@ class Outbox:
 
     async def enqueue(
         self, owner_id: str, provider: str, kind: str, source_id: str, payload: dict[str, Any],
-        *, agent: str = "", title: str = "",
+        *, agent: str = "", title: str = "", target: str = "",
     ) -> bool:
-        """Queue one item; False when this (owner, kind, source_id) is queued
-        or sent already."""
+        """Queue one item for the memory *target*; False when this (owner,
+        target, kind, source_id) is queued or sent already."""
         async with self._lock:
             db = await self._conn()
             cur = await db.execute(
                 """INSERT OR IGNORE INTO outbox
-                   (owner_id, provider, kind, source_id, agent, title, payload, created_at, next_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+                   (owner_id, provider, kind, source_id, agent, title, payload, created_at, next_at, target)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)""",
                 (owner_id, provider, kind, source_id, agent[:200], title[:300],
-                 json.dumps(payload, ensure_ascii=False), time.time()),
+                 json.dumps(payload, ensure_ascii=False), time.time(), target),
             )
             await db.commit()
             return cur.rowcount > 0
@@ -133,80 +163,85 @@ class Outbox:
             )
             await db.commit()
 
-    async def defer_owner(self, owner_id: str, delay_s: float, error: str) -> int:
-        """Hold every pending row of *owner_id* (key refused, quota full):
-        no attempt is spent — they go once the cause is fixed."""
+    async def defer_owner(self, owner_id: str, delay_s: float, error: str, *, target: str | None = None) -> int:
+        """Hold every pending row of *owner_id* (key refused, quota full) —
+        only those for *target* when given: no attempt is spent, they go once
+        the cause is fixed."""
         async with self._lock:
             db = await self._conn()
+            where, args = _scope(owner_id, target)
             cur = await db.execute(
-                "UPDATE outbox SET next_at=?, last_error=? WHERE owner_id=? AND state='pending'",
-                (time.time() + delay_s, error[:500], owner_id),
+                f"UPDATE outbox SET next_at=?, last_error=? WHERE {where} AND state='pending'",
+                (time.time() + delay_s, error[:500], *args),
             )
             await db.commit()
             return cur.rowcount
 
-    async def retry_owner(self, owner_id: str) -> int:
-        """Failed and deferred rows of *owner_id* go again now."""
+    async def retry_owner(self, owner_id: str, *, target: str | None = None) -> int:
+        """Failed and deferred rows of *owner_id* (for *target*, when given)
+        go again now."""
         async with self._lock:
             db = await self._conn()
+            where, args = _scope(owner_id, target)
             cur = await db.execute(
                 "UPDATE outbox SET state='pending', next_at=0, attempts=CASE WHEN state='failed' THEN 0 "
-                "ELSE attempts END WHERE owner_id=? AND state IN ('failed', 'pending')",
-                (owner_id,),
+                f"ELSE attempts END WHERE {where} AND state IN ('failed', 'pending')",
+                args,
             )
             await db.commit()
             return cur.rowcount
 
-    async def drop_owner(self, owner_id: str, *, pending_only: bool = True) -> int:
-        """Forget *owner_id*'s queue (they disconnected): what hasn't gone
-        never will — and all of it with ``pending_only=False``."""
+    async def drop_owner(self, owner_id: str, *, pending_only: bool = True, target: str | None = None) -> int:
+        """Forget *owner_id*'s queue — for *target* only, when given (that
+        memory was removed): what hasn't gone never will — and all of it with
+        ``pending_only=False``."""
         async with self._lock:
             db = await self._conn()
+            where, args = _scope(owner_id, target)
             if pending_only:
                 cur = await db.execute(
-                    "DELETE FROM outbox WHERE owner_id=? AND state IN ('pending', 'failed')", (owner_id,),
+                    f"DELETE FROM outbox WHERE {where} AND state IN ('pending', 'failed')", args,
                 )
             else:
-                cur = await db.execute("DELETE FROM outbox WHERE owner_id=?", (owner_id,))
+                cur = await db.execute(f"DELETE FROM outbox WHERE {where}", args)
             await db.commit()
             return cur.rowcount
 
-    async def counts(self, owner_id: str) -> dict[str, Any]:
+    async def counts(self, owner_id: str, *, target: str | None = None) -> dict[str, Any]:
         db = await self._conn()
+        where, args = _scope(owner_id, target)
         cur = await db.execute(
-            "SELECT state, COUNT(*) AS n FROM outbox WHERE owner_id=? GROUP BY state", (owner_id,),
+            f"SELECT state, COUNT(*) AS n FROM outbox WHERE {where} GROUP BY state", args,
         )
         out: dict[str, Any] = {"pending": 0, "sent": 0, "failed": 0}
         for r in await cur.fetchall():
             out[str(r["state"])] = int(r["n"])
         cur = await db.execute(
-            "SELECT MAX(sent_at) AS t FROM outbox WHERE owner_id=? AND state='sent'", (owner_id,),
+            f"SELECT MAX(sent_at) AS t FROM outbox WHERE {where} AND state='sent'", args,
         )
         row = await cur.fetchone()
         out["last_sent_at"] = float(row["t"]) if row and row["t"] else None
         cur = await db.execute(
-            "SELECT last_error FROM outbox WHERE owner_id=? AND state IN ('pending','failed') "
+            f"SELECT last_error FROM outbox WHERE {where} AND state IN ('pending','failed') "
             "AND last_error != '' ORDER BY id DESC LIMIT 1",
-            (owner_id,),
+            args,
         )
         row = await cur.fetchone()
         out["last_error"] = str(row["last_error"]) if row else ""
         return out
 
-    async def recent(self, owner_id: str, limit: int = 30, state: str = "") -> list[dict[str, Any]]:
+    async def recent(self, owner_id: str, limit: int = 30, state: str = "",
+                     *, target: str | None = None) -> list[dict[str, Any]]:
         db = await self._conn()
+        where, args = _scope(owner_id, target)
         if state:
-            cur = await db.execute(
-                "SELECT id, kind, source_id, agent, title, state, attempts, last_error, remote_id, created_at, "
-                "sent_at FROM outbox WHERE owner_id=? AND state=? ORDER BY id DESC LIMIT ?",
-                (owner_id, state, limit),
-            )
-        else:
-            cur = await db.execute(
-                "SELECT id, kind, source_id, agent, title, state, attempts, last_error, remote_id, created_at, "
-                "sent_at FROM outbox WHERE owner_id=? ORDER BY id DESC LIMIT ?",
-                (owner_id, limit),
-            )
+            where += " AND state=?"
+            args = (*args, state)
+        cur = await db.execute(
+            "SELECT id, kind, source_id, agent, title, state, attempts, last_error, remote_id, created_at, "
+            f"sent_at, target FROM outbox WHERE {where} ORDER BY id DESC LIMIT ?",
+            (*args, limit),
+        )
         return [dict(r) for r in await cur.fetchall()]
 
     async def prune(self, now: float | None = None) -> int:
