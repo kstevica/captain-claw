@@ -727,7 +727,7 @@ function handsName(slug) {
 function handsStatusText() {
   const st = S.handsStatus?.state
   if (st === 'on') return ''
-  if (st === 'permission') return 'Chrome hasn\'t given Captain the permission yet.'
+  if (st === 'permission') return 'Reload Captain for Chrome in chrome://extensions to finish its update (it needs the debugger permission).'
   if (st === 'denied') return S.handsStatus.error || 'Flight Deck refused this browser — connect it again.'
   if (st === 'connecting') return S.handsStatus.error || 'Connecting to Flight Deck…'
   if (st === 'error') return S.handsStatus.error || 'Not connected.'
@@ -761,7 +761,7 @@ function viewHands() {
     <div class="card hands ${working.length ? 'active' : ''}">
       <div class="row">${icon('globe', 'sm')}<div class="grow"><b>${working.length ? 'An agent is using this browser' : 'Agents can use this browser'}</b>
         ${status ? `<div class="dim">${esc(status)}</div>` : ''}</div>
-        ${S.handsStatus?.state === 'permission' ? '<button class="btn" data-act="hands-allow" style="padding:3px 9px">Allow</button>' : ''}</div>
+        ${S.handsStatus?.state === 'permission' ? '<button class="btn" data-act="hands-extensions" style="padding:3px 9px">Open extensions</button>' : ''}</div>
       ${rows}${stoppedRows}${history}
     </div>`
 }
@@ -787,10 +787,10 @@ async function setHandsStopped(list) {
 }
 
 async function turnHandsOn(want) {
-  if (want) {
-    let ok = false
-    try { ok = await chrome.permissions.request({ permissions: ['debugger', 'tabGroups'] }) } catch { ok = false }
-    if (!ok) { toast('Chrome needs your OK for Captain to work in tabs for your agents.'); render(); return }
+  if (want && !(chrome.debugger && chrome.tabGroups)) {
+    toast('Reload Captain for Chrome in chrome://extensions first — this update needs it.')
+    render()
+    return
   }
   S.hands = { ...S.hands, on: want }
   await setStore({ hands: S.hands })
@@ -1465,7 +1465,7 @@ $view.addEventListener('click', (ev) => {
   else if (act === 'hands-show') handsShow(el.dataset.slug)
   else if (act === 'hands-stop') setHandsStopped([...S.handsStopped, el.dataset.slug]).then(() => toast(`${handsName(el.dataset.slug)} can't use this browser now`))
   else if (act === 'hands-let') setHandsStopped(S.handsStopped.filter((s) => s !== el.dataset.slug))
-  else if (act === 'hands-allow') turnHandsOn(true)
+  else if (act === 'hands-extensions') chrome.tabs.create({ url: 'chrome://extensions/?id=' + chrome.runtime.id })
   else if (act === 'clear-history') { S.history = []; setStore({ history: [] }); render() }
   else if (act === 'disconnect') {
     if (!confirm('Disconnect this browser from Flight Deck?')) return

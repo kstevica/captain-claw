@@ -73,9 +73,8 @@ label; the deck turns it into the lens's sentence in the turn.
 
 ## Agents in the person's browser (browser hands)
 
-With **Agents can use this browser** on (panel Settings; it asks Chrome for
-`debugger` and `tabGroups`), the extension lends the browser to the person's
-agents: their `browser` tool's `target="chrome"`.
+With **Agents can use this browser** on (panel Settings), the extension lends
+the browser to the person's agents: their `browser` tool's `target="chrome"`.
 
   agent `browser(…, target="chrome")` (`tools/browser_chrome.py`)
   → `POST /fd/browser-hands/agent/act {action, args}` (`flight_deck/browser_hands.py`;
@@ -83,6 +82,10 @@ agents: their `browser` tool's `target="chrome"`.
   → the extension's service worker over `/fd/clip/hands/ws` (`hands.js`)
   → `{"type": "result", ok, content, image?, data?}` back the same way.
 
+- **Permissions**: `debugger` and `tabGroups` are in the manifest's `permissions`:
+  Chrome refuses `debugger` as an optional permission (it drops it, and a worker
+  that touched `chrome.debugger` at load failed to register — 0.2.0). The switch
+  is the opt-in; nothing in the worker may assume either API exists at load.
 - **The socket**: the service worker opens it while the switch is on, says
   `hello` with the browser's own token (only a `Browser · …` token, still
   unrevoked, is accepted — checked again on every act), pings every 20 s

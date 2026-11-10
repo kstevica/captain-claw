@@ -100,8 +100,10 @@ works here (`target="chrome"`), signed in as you, while you watch:
 - **Bring an agent's tab to the front while it works** — off by default, so
   an agent working in the background doesn't take your tab away.
 
-Turning it on asks Chrome for two more permissions: **debugger** (real
-clicks, typing and screenshots in the agent's tabs) and **tab groups**.
+It uses two permissions the extension has from install: **debugger** (real
+clicks, typing and screenshots in the agent's tabs — Chrome doesn't let an
+extension ask for it later) and **tab groups**. Nothing uses them until you
+turn the switch on.
 
 ## What lands where
 
@@ -127,8 +129,10 @@ agent makes for a clip (notes, CSVs, a brief) goes there too.
 - **contextMenus, sidePanel, storage** — the right-click menu, the panel, your settings.
 - **Sites** are asked for one at a time (or all at once from settings): to read
   a page you didn't open Captain on, and to download a file from another site.
-- **debugger, tabGroups** (asked only when you turn on "Agents can use this
-  browser") — your agents work in tabs of their own, grouped under their name.
+- **debugger, tabGroups** — used only while "Agents can use this browser" is
+  on: your agents work in tabs of their own, grouped under their name, with
+  real clicks and typing. Chrome won't let an extension ask for the debugger
+  later, so it's asked for at install.
 - **alarms** — keeps the agents' connection to Flight Deck alive.
 
 The page's text is marked for the agent as web content: instructions written

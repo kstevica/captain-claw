@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import socket
 from pathlib import Path
 
@@ -323,3 +324,19 @@ def test_answers_are_bounded_and_keep_known_keys_only():
     assert set(out) == {"ok", "content", "image", "image_type", "data"}
     assert len(out["content"]) <= bh.MAX_CONTENT_CHARS and out["image_type"] == "image/jpeg"
     assert bh._clean_result({"ok": False}) == {"ok": False, "error": "The browser couldn't do that."}
+
+
+# ── the extension's side ──────────────────────────────────────────────
+
+EXTENSION = Path(__file__).resolve().parents[2] / "browser-extension" / "chrome"
+
+
+def test_the_extension_asks_for_the_debugger_the_way_chrome_allows():
+    m = json.loads((EXTENSION / "manifest.json").read_text())
+    assert {"debugger", "tabGroups", "alarms"} <= set(m["permissions"])
+    assert "debugger" not in m.get("optional_permissions", []), \
+        "Chrome drops debugger as optional, and the worker then failed to register"
+    # Nothing the worker runs when it loads may assume a permission's API is there.
+    for name in ("background.js", "hands.js"):
+        for n, line in enumerate((EXTENSION / name).read_text().splitlines(), 1):
+            assert not re.match(r"chrome\.(debugger|tabGroups|permissions)\.", line), f"{name}:{n}: {line}"
