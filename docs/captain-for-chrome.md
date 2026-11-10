@@ -119,6 +119,18 @@ the browser to the person's agents: their `browser` tool's `target="chrome"`.
   refs, screenshots/zoom, keys, drag, upload, console/network, downloads,
   new tabs, refusals, the panel's Stop) — harness not in the repo.
 
+### The same page actions in the agent's headless browser
+
+The agent's own headless browser (Playwright) runs the same two page scripts —
+copies shipped in `captain_claw/tools/browser_page_js/` (a test keeps them equal
+to the extension's) — in an isolated world through a CDP session
+(`tools/browser_page.py`). So `read_page`/`find` refs, `form_input`,
+`page_text`, `page_files`, `download` (with that browser's cookies, into
+`saved/downloads/<session>/<site>/`), `save_page`, `hover`, `drag`, `zoom`,
+`javascript`, `upload_file`, `back`/`forward`, and `click`/`type` with a ref or
+coordinate work there too. Only `tabs`, `tab_*`, `console`, `network_requests`
+and `resize` stay Chrome-only (and imply `target="chrome"`).
+
 ## Security
 
 - The extension's origin reaches `/fd/clip/` only (origin guard + CORS);

@@ -2,6 +2,7 @@ MANDATORY browser policy:
 - Use the `browser` tool ONLY when interacting with web applications that require JavaScript rendering, login sessions, or dynamic UI interaction (React, Angular, Vue apps).
 - For simple web content reading, ALWAYS prefer `web_fetch` — it's faster and lighter.
 - The browser session persists across calls — navigate, click, and type in sequence without re-launching.
+- In either browser, `read_page` (or `find`) gives refs like `ref_12`; `click` / `type` / `form_input` / `hover` with `ref` are the surest way to act. `page_text` reads the page as Markdown; `page_files` lists its files and `download` keeps them (headless: `saved/downloads/`); `save_page` keeps the whole page; `javascript` runs code in it.
 
 The person's own Chrome (`target='chrome'`, through Captain for Chrome):
 - Use it when a page needs the person's sign-in (a portal, an intranet, their accounts), when they ask you to use their browser, or when the headless browser hits a bot wall. It's their real browser: you work in tabs of your own tab group, they can watch and stop you.

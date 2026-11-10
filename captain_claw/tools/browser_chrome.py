@@ -36,15 +36,16 @@ log = get_logger(__name__)
 
 # Only the person's Chrome does these (they imply target="chrome").
 CHROME_ONLY_ACTIONS = frozenset({
-    "tabs", "tab_new", "tab_close", "tab_select", "back", "forward",
-    "read_page", "find", "form_input", "page_text", "page_files", "download", "save_page",
-    "hover", "double_click", "right_click", "triple_click", "drag", "scroll_to", "zoom",
-    "javascript", "console", "network_requests", "resize", "upload_file",
+    "tabs", "tab_new", "tab_close", "tab_select", "console", "network_requests", "resize",
 })
-# Both browsers do these.
+# Both browsers do these — the headless one runs the extension's page
+# scripts too (browser_page.py), so refs, page_text and the rest work there.
 SHARED_ACTIONS = frozenset({
     "open", "navigate", "screenshot", "click", "type", "press_key", "scroll", "wait",
     "status", "close", "observe", "act", "accessibility_tree", "find_element",
+    "read_page", "find", "form_input", "page_text", "page_files", "download", "save_page",
+    "back", "forward", "hover", "double_click", "right_click", "triple_click", "drag",
+    "scroll_to", "zoom", "javascript", "upload_file",
 })
 # The headless browser's own tools that make no sense in the person's Chrome.
 HEADLESS_ONLY_ACTIONS = frozenset({

@@ -327,6 +327,9 @@ async def test_live_extensions_load_open_and_go(tool_env, tmp_path):
             page = session._page
             await page.wait_for_function("document.documentElement.dataset.firstExt === 'on'", timeout=10000)
             assert "First Ext was here" in await session.get_content()
+            # The page actions work in this mode too (the extension's own scripts, isolated from its content script).
+            text = await tool.execute("page_text", **kw)
+            assert text.success and "Hello" in text.content and "First Ext was here" in text.content, text.error
             workers = [w.url for w in session._context.service_workers]
             for _ in range(50):
                 if workers:
