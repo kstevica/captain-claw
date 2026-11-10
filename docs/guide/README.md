@@ -2,6 +2,8 @@
 
 [← Back to the main README](../../README.md)
 
+Video guides: **[the complete Captain guide](https://www.youtube.com/watch?v=VehoeF9ewdQ)** · **[the admin tutorial](https://www.youtube.com/watch?v=IXkO3AbID38)** · **[all videos on YouTube](https://www.youtube.com/@captain--ai-agents)**
+
 | Guide | What's inside |
 |---|---|
 | **[Getting started](getting-started.md)** | Install and the launchers, a deck for a team, a voice device on your desk, Docker, configuration |
