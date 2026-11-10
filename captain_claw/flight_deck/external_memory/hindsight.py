@@ -37,7 +37,6 @@ and an insight that replaces another (same ``entity_key``) replaces it here too.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 from typing import Any
@@ -56,7 +55,11 @@ from captain_claw.flight_deck.external_memory.base import (
     ProviderAuthError,
     ProviderError,
     ProviderInputError,
+    RecallHit,
     clip,
+    mirror_body,
+    mirror_document_id,
+    note_document_id,
 )
 from captain_claw.logging import get_logger
 
@@ -97,11 +100,6 @@ def _day(value: Any) -> str:
     return str(value or "")[:10]
 
 
-def _doc_id(raw: str) -> str:
-    """A document id Hindsight takes in a URL path."""
-    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", raw).strip("-")[:200]
-
-
 def _when(item: dict[str, Any]) -> str:
     start = _day(item.get("occurred_start") or item.get("date"))
     said = _day(item.get("mentioned_at"))
@@ -125,6 +123,7 @@ class HindsightProvider(ExternalMemoryProvider):
     tenancy = "scoped"
     url_field = "base_url"
     scope_label = "bank"
+    scope_field = "bank"
     credential_fields = (
         CredentialField(
             name="base_url",
@@ -378,10 +377,9 @@ class HindsightProvider(ExternalMemoryProvider):
         if len(content) > MAX_CONTENT:
             raise ProviderInputError(f"That is {len(content):,} characters; save at most {MAX_CONTENT:,} at once.")
         # Keyed by the text: the same fact saved twice replaces itself.
-        digest = hashlib.sha1(" ".join(content.lower().split()).encode()).hexdigest()[:20]
         item: dict[str, Any] = {
             "content": content,
-            "document_id": f"captain-note-{digest}",
+            "document_id": note_document_id(content),
             "tags": ["captain", "note"],
             "metadata": {"source": "captain", "kind": "note"},
         }
@@ -498,27 +496,38 @@ class HindsightProvider(ExternalMemoryProvider):
         lines.append("Actions: " + ", ".join(a.name for a in self.actions()))
         return ActionResult("\n".join(lines), {"version": version, "stats": stats})
 
+    # ── automatic recall ────────────────────────────────────────────
+
+    async def recall(self, query: str, limit: int) -> list[RecallHit]:
+        """Hindsight's own recall at its cheapest budget, capped in tokens:
+        it ranks (meaning, words, entities, time, then a reranker) and keeps
+        only what fits, so what comes back is what it judged relevant."""
+        query = clip(query, MAX_QUERY_CHARS)
+        if not query:
+            return []
+        data = await self._request("POST", self._bank_path("/memories/recall"), json={
+            "query": query, "budget": "low", "max_tokens": 1500,
+        })
+        hits = []
+        for r in ((data or {}).get("results") or [])[:limit]:
+            if isinstance(r, dict) and r.get("text"):
+                hits.append(RecallHit(text=clip(r["text"], 600), id=str(r.get("document_id") or ""),
+                                      when=_day(r.get("occurred_start") or r.get("mentioned_at")),
+                                      kind=str(r.get("type") or "")))
+        return hits
+
     # ── mirroring ───────────────────────────────────────────────────
 
     @staticmethod
     def mirror_content(item: MemoryItem) -> str:
-        """Only what is about the person's world: the item and why it holds.
-        Who kept it, its category and tags go in metadata — measured on a real
-        server, provenance lines in the text came back as facts ("Bob Bot is a
-        Captain agent", "the insight is categorized as contact")."""
-        lines = [item.content.strip()]
-        for key in ("why", "how_to_apply", "body"):
-            value = str(item.meta.get(key) or "").strip()
-            if value:
-                lines.append(value)
-        return clip("\n".join(lines), MAX_CONTENT)
+        """Only what is about the person's world (:func:`base.mirror_body`)."""
+        return mirror_body(item, limit=MAX_CONTENT)
 
     async def mirror(self, item: MemoryItem) -> str:
         content = self.mirror_content(item)
         # What it IS, not which copy: an insight that replaces another (same
         # entity_key) replaces its document here too.
-        key = str(item.meta.get("entity_key") or "").strip() or item.source_id
-        doc = _doc_id(f"captain-{item.kind}-{key}")
+        doc = mirror_document_id(item)
         meta = {"source": "captain", "kind": item.kind, "source_id": item.source_id}
         for k in ("category", "agent"):
             v = item.meta.get(k) if k != "agent" else item.agent

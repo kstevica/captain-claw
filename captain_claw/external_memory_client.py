@@ -11,6 +11,12 @@ answers with the owner's connection.
   registry can decide synchronously whether to show ``external_memory`` and the
   tool can build its schema from the provider's own actions.
 * :func:`run` — one action through Flight Deck.
+* :func:`recall` — what the memory holds on the message about to be answered
+  (automatic recall, before every reply unless the person's reading priority
+  is ``on_demand``); never raises, never waits past what Flight Deck allows.
+* :func:`capture_every` / :func:`remember_cue` — how often facts are picked out
+  of the chat while a memory is connected (more often than Captain's own pace,
+  and right after "remember that…"), so the memory fills as the person talks.
 * :func:`mirror` — copy one item Captain keeps (an insight, an intention, a
   reflection, an intuition) into the memory. Fire-and-forget: it never waits,
   never raises, and does nothing when no memory is connected, that kind is
@@ -21,6 +27,7 @@ answers with the owner's connection.
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 import time
 from typing import Any
@@ -163,6 +170,89 @@ async def refresh(force: bool = False) -> bool:
         data = {}
     _set_manifest(data if isinstance(data, dict) else {})
     return bool(_MANIFEST.get("connected"))
+
+
+def _owner_turn() -> bool:
+    return under_flight_deck() and not _member_call() and not _multi_tenant_run()
+
+
+def priority() -> str:
+    """The person's reading priority: ``first`` | ``alongside`` |
+    ``on_demand`` — "" when no memory is connected (or not this turn's to use)."""
+    if not _owner_turn() or not is_connected_cached():
+        return ""
+    value = str(_MANIFEST.get("priority") or "alongside")
+    return value if value in ("first", "alongside", "on_demand") else "alongside"
+
+
+def capture_every() -> int:
+    """While a memory is connected: pick facts out of the chat every this many
+    of the person's messages (0 = Captain's own pace)."""
+    if not priority():
+        return 0
+    try:
+        return max(0, int(_MANIFEST.get("capture_every") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+# A message that hands over something to keep — the gate for picking facts
+# out of the chat right away rather than at the next interval. English and
+# Croatian (the owners' languages so far). Only a gate: the extraction model
+# decides what, if anything, is worth keeping.
+_REMEMBER_CUES = re.compile(
+    r"\b("
+    r"remember|don'?t forget|do not forget|keep in mind|note that|make a note|for the record|fyi|"
+    r"from now on|going forward|"
+    r"my (wife|husband|partner|son|daughter|kids?|children|mother|mom|mum|father|dad|brother|sister|"
+    r"boss|colleague|birthday|address|phone|number|email|name|company|team|doctor|dentist)|"
+    r"i (live|work|moved|prefer|like|love|hate|am allergic|have an?|was born|started|quit|joined)|"
+    r"we (moved|switched|decided|agreed|signed|hired|launched|closed)|"
+    r"zapamti|upamti|zabilježi|zabiljezi|ne zaboravi|imaj na umu|za zapisnik|od sada|ubuduće|ubuduce|"
+    r"moj[aeiu]? (žena|zena|supruga?|muž|muz|sin|kći|kćer|kcer|djeca|mama|majka|tata|otac|brat|sestra|"
+    r"šef|sef|kolega|kolegica|rođendan|rodjendan|adresa|broj|mail|ime|firma|tvrtka|doktor|zubar)|"
+    r"živim|zivim|radim u|radim kao|preselio|preselila|preferiram|volim|ne volim|alergičan|alergicna|"
+    r"odlučili smo|odlucili smo|dogovorili smo|potpisali smo|zaposlili smo"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def remember_cue(said: str) -> bool:
+    """Whether *said* reads like it hands over something worth keeping."""
+    text = " ".join(str(said or "").split())
+    if len(text) < 6 or len(text) > 4000 or text.startswith("/"):
+        return False
+    return bool(_REMEMBER_CUES.search(text.replace("’", "'")))
+
+
+async def recall(query: str) -> dict[str, Any]:
+    """What the person's memory holds on *query*: ``{priority, label, hits}``.
+    Never raises; ``hits`` is empty when nothing bears on it, the priority is
+    ``on_demand``, the memory is slow or failing, or this isn't the owner's turn."""
+    prio = priority()
+    out: dict[str, Any] = {"priority": prio, "label": str(_MANIFEST.get("label") or ""), "hits": []}
+    query = str(query or "").strip()
+    if not prio or prio == "on_demand" or not query:
+        return out
+    try:
+        wait = float(_MANIFEST.get("recall_timeout") or 4.0) + 2.0
+    except (TypeError, ValueError):
+        wait = 6.0
+    try:
+        async with httpx.AsyncClient(timeout=wait) as client:
+            resp = await client.post(f"{_fd_base()}/fd/external-memory/agent/recall",
+                                     json={"query": query[:4000]}, headers=_fd_headers())
+        data = resp.json() if resp.status_code == 200 else {}
+    except Exception as exc:
+        log.debug("external memory: recall failed: %s", type(exc).__name__)
+        return out
+    if not isinstance(data, dict):
+        return out
+    hits = [h for h in data.get("hits") or [] if isinstance(h, dict) and str(h.get("text") or "").strip()]
+    out.update(hits=hits, label=str(data.get("label") or out["label"]),
+               priority=str(data.get("priority") or prio), error=str(data.get("error") or ""))
+    return out
 
 
 # ── actions ─────────────────────────────────────────────────────────

@@ -8,12 +8,13 @@ User routes (Connections → External memory)::
     PUT    /connection        {provider, credentials: {...}} — checked with the provider, then saved
     DELETE /connection        forget it (and whatever was still queued for it)
     POST   /test              a live check; refreshes what the connection may do
+    PUT    /priority          {priority: first | alongside | on_demand} — how much agents lean on it
     PUT    /mirror            {insight: bool, intention: bool, ...} — what is copied in on its own
     POST   /run               {action, args} — the playground (search, remember, ...)
     GET    /outbox            recent mirrored items and their state
     POST   /outbox/retry      failed and held items go again now
 
-Admin routes (the deck's connection — a scoped provider such as Hindsight, one
+Admin routes (the deck's connection — a scoped provider such as Hindsight, Qdrant or ArcadeDB, one
 scope per person; users without a connection of their own use it)::
 
     GET    /deck              the deck's connection — never a credential
@@ -25,8 +26,9 @@ Agent routes — owner resolved from this deck's own records (``X-Agent-Auth``),
 the same gate as Jev; owner-only (not grant-aware, so the speaker-grant
 middleware refuses a shared-agent member's request)::
 
-    GET  /agent/status        {connected, provider, actions, rules, mirror, ...}
+    GET  /agent/status        {connected, provider, actions, rules, mirror, priority, recall_limit, ...}
     POST /agent/run           {action, args}
+    POST /agent/recall        {query} → {priority, hits: [{text, id, when, kind}]} — before a reply; never fails
     POST /agent/mirror        {kind, source_id, content, title, tags, created_at, meta}
 
 The frontend reads a 401 as "the Flight Deck session expired", so a user route
@@ -129,8 +131,21 @@ async def em_disconnect(_user: dict = Depends(get_current_user)) -> dict[str, An
 async def em_test(_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     try:
         return await svc.test(_g._effective_owner(_user))
-    except (svc.NotConnected, ProviderError) as exc:
+    except (svc.NotConnected, ProviderInputError, ProviderError) as exc:
         raise http_error(exc) from None
+
+
+@router.put("/priority")
+async def em_priority(request: Request, _user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Reading priority: how much this person's agents lean on the memory
+    (first | alongside | on_demand)."""
+    data = await _json_body(request)
+    owner = _g._effective_owner(_user)
+    try:
+        await svc.save_priority(owner, data.get("priority"))
+    except ProviderInputError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    return await svc.status_for_owner(owner)
 
 
 @router.put("/mirror")
@@ -207,7 +222,7 @@ async def em_deck_disconnect(_admin: dict = Depends(require_admin)) -> dict[str,
 async def em_deck_test(_admin: dict = Depends(require_admin)) -> dict[str, Any]:
     try:
         return await svc.deck_test()
-    except (svc.NotConnected, ProviderError) as exc:
+    except (svc.NotConnected, ProviderInputError, ProviderError) as exc:
         raise http_error(exc) from None
 
 
@@ -262,6 +277,15 @@ async def em_agent_run(request: Request) -> dict[str, Any]:
     except (svc.NotConnected, ProviderInputError, ProviderError) as exc:
         raise http_error(exc) from None
     return {"text": result.text, "data": result.data}
+
+
+@router.post("/agent/recall")
+async def em_agent_recall(request: Request) -> dict[str, Any]:
+    """What the owner's memory holds on the message the agent is about to
+    answer (automatic recall; empty when their reading priority is on_demand)."""
+    owner, slug, _name = await _agent_caller(request)
+    data = await _json_body(request)
+    return await svc.recall_for_owner(owner, str(data.get("query") or ""), agent=slug)
 
 
 @router.post("/agent/mirror")

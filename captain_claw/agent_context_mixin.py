@@ -265,6 +265,7 @@ _NOTE_SHARES = {
     "deep_memory_context": 0.2,
     "cross_session_context": 0.2,
     "insights_context": 0.15,
+    "external_memory_context": 0.2,
     "workspace_manifest": 0.15,
     "topic_recall": 0.15,
     "pinned_topic": 0.2,
@@ -1384,6 +1385,62 @@ class AgentContextMixin:
             return ""
         from captain_claw.tools.knowledge import pointer_note
         return pointer_note(getattr(self, "_knowledge_context_cache", None) or [])
+
+    async def _refresh_external_memory_context_cache(self, query: str | None = None) -> None:
+        """What the owner's external memory (Flight Deck) holds on this turn's
+        message — automatic recall, unless their reading priority is
+        ``on_demand``. Never on a shared-agent member's turn or a public
+        per-visitor run (the memory is the owner's); never fails the turn."""
+        self._external_memory_context_cache = {}
+        if not (query or "").strip() or getattr(self, "_speaker_scoped", False) is True:
+            return
+        try:
+            from captain_claw import external_memory_client as emc
+
+            if emc.priority() in ("", "on_demand"):
+                return
+            self._external_memory_context_cache = await emc.recall(str(query))
+        except Exception as exc:
+            log.debug("External memory recall for the turn unavailable", error=str(exc))
+            self._external_memory_context_cache = {}
+
+    def _build_external_memory_context_note(self) -> str:
+        """The recalled items, worded for the reading priority. Items the
+        insights note already carries (mirrored there from this agent) are
+        left out: they would say the same thing twice."""
+        if getattr(self, "_suppress_memory_context", False):
+            return ""
+        cache = getattr(self, "_external_memory_context_cache", None) or {}
+        hits = [h for h in cache.get("hits") or [] if isinstance(h, dict)]
+        if not hits:
+            return ""
+
+        def _norm(text: Any) -> str:
+            return " ".join(re.findall(r"\w+", str(text or "").lower()))[:120]
+
+        known = {_norm(i.get("content")) for i in (getattr(self, "_insights_context_cache", None) or [])
+                 if isinstance(i, dict)}
+        known.discard("")
+        lines: list[str] = []
+        for h in hits:
+            key = _norm(h.get("text"))
+            if not key or any(key.startswith(k) or k.startswith(key) for k in known):
+                continue
+            when = str(h.get("when") or "")[:10]
+            text = " ".join(str(h.get("text") or "").split())
+            lines.append(f"- {text}" + (f" ({when})" if when else ""))
+        if not lines:
+            return ""
+        label = str(cache.get("label") or "external memory")
+        if cache.get("priority") == "first":
+            head = (f"From the person's MAIN memory ({label}, shared by all of their agents) — what it holds "
+                    "on this message:")
+            tail = ("Rely on this first; where it and your own notes disagree, go by it (the newer of two "
+                    "facts). Search it (external_memory) for more before saying you don't know.")
+        else:
+            head = f"From the person's external memory ({label}, shared by all of their agents), on this message:"
+            tail = "Use what bears on the message; search it (external_memory) for more."
+        return "\n".join([head, *lines, tail])
 
     def _build_insights_context_note(self, query: str = "") -> str:
         """Build context note from relevant insights."""
@@ -4513,6 +4570,13 @@ class AgentContextMixin:
         insights_note = self._build_insights_context_note()
         if insights_note:
             notes.append(("insights_context", insights_note))
+        # The owner's external memory: next to the insights, or — when it is
+        # their main memory — last of all (kept longest when the prompt is
+        # crowded, and nearest the message).
+        external_note = "" if skip_memory or not owner_notes else self._build_external_memory_context_note()
+        external_first = (getattr(self, "_external_memory_context_cache", None) or {}).get("priority") == "first"
+        if external_note and not external_first:
+            notes.append(("external_memory_context", external_note))
         intentions_note = self._build_intentions_context_note() if owner_notes else ""
         if intentions_note:
             notes.append(("intentions_context", intentions_note))
@@ -4535,6 +4599,8 @@ class AgentContextMixin:
         # An earlier conversation thread matched to this message, and topics
         # pinned with the topics tool — last, so they are trimmed last.
         notes.extend(self._topic_context_notes(skip_memory=skip_memory, history_budget=history_budget))
+        if external_note and external_first:
+            notes.append(("external_memory_context", external_note))
 
         return notes
 

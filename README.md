@@ -55,7 +55,7 @@ First run starts onboarding. For a single agent in the terminal or the browser, 
 - **Their own address**: a role, an inbox, `you+researcher@gmail.com` and names they answer to, so mail meant for an agent becomes its task. Gmail replies go out only if you say so.
 - **Any mailbox**: **Email (IMAP)** connects up to 20 inboxes per person, with the password sealed in Flight Deck and sending off until you allow it.
 - **Lessons you approve**: a correction in chat becomes one drafted lesson in **Lessons to approve**.
-- **One memory**: Membase or Hindsight, shared by all of a person's agents, or one Hindsight server for the deck.
+- **One memory**: Membase, Hindsight, Qdrant or ArcadeDB, shared by all of a person's agents, or one Hindsight, Qdrant or ArcadeDB server for the deck.
 - **A Course**: goals for the deck, for you and for each agent, in every agent's prompt; their suggestions wait for you.
 
 - **And:** `ask_user` asks you in a Flight Deck dialog, `image_manipulation` edits pictures with no scripts, **Console → Activity** shows who's using the deck and whether you've written to them, scheduled tasks start an agent that's off, and 79 built-in tools.
