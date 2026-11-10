@@ -15,7 +15,6 @@
 import { browserLabel, loadConn } from './lib/api.js'
 
 const VERSION = chrome.runtime.getManifest().version
-const PERMS = { permissions: ['debugger', 'tabGroups'] }
 const PING_MS = 20000
 const IDLE_DETACH_MS = 3 * 60 * 1000
 const LOG_MAX = 80
@@ -87,8 +86,10 @@ export async function startHands() {
   ensureConnected()
 }
 
-async function permitted() {
-  try { return await chrome.permissions.contains(PERMS) } catch { return false }
+// Both are in the manifest's permissions (Chrome won't have debugger as an
+// optional one); an install that hasn't been reloaded since may lack them.
+function permitted() {
+  return !!(chrome.debugger?.attach && chrome.tabGroups?.update)
 }
 
 async function ensureConnected() {
@@ -98,7 +99,7 @@ async function ensureConnected() {
   prefs = { on: false, front: false, ...(got.hands || {}) }
   stopped = new Set(Array.isArray(got.handsStopped) ? got.handsStopped : [])
   if (!prefs.on) { disconnect('off'); return }
-  if (!(await permitted())) { disconnect('permission'); return }
+  if (!permitted()) { disconnect('permission'); return }
   const conn = await loadConn()
   if (!conn) { disconnect('off'); return }
   if (ws && wsConn && wsConn.url === conn.url && wsConn.token === conn.token &&
@@ -177,8 +178,8 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
   if (area === 'local' && changes.conn) ensureConnected()
 })
-chrome.permissions.onAdded.addListener(() => ensureConnected())
-chrome.permissions.onRemoved.addListener(() => ensureConnected())
+chrome.permissions?.onAdded.addListener(() => ensureConnected())
+chrome.permissions?.onRemoved.addListener(() => ensureConnected())
 chrome.windows.onFocusChanged.addListener((id) => { if (id !== chrome.windows.WINDOW_ID_NONE) send({ type: 'focus' }) })
 
 // ── one act ──
@@ -421,7 +422,7 @@ setInterval(() => {
   for (const [id, t] of attached) if (now - t.lastUse > IDLE_DETACH_MS) detach(id)
 }, 30000)
 
-chrome.debugger.onDetach.addListener((src, reason) => {
+chrome.debugger?.onDetach.addListener((src, reason) => {
   if (src.tabId === undefined) return
   const had = attached.delete(src.tabId)
   if (had && reason === 'canceled_by_user') {
@@ -447,7 +448,7 @@ function pushCapped(list, item) {
   if (list.length > BUFFER_MAX) list.splice(0, list.length - BUFFER_MAX)
 }
 
-chrome.debugger.onEvent.addListener((src, method, p) => {
+chrome.debugger?.onEvent.addListener((src, method, p) => {
   const t = attached.get(src.tabId)
   if (!t) return
   switch (method) {
