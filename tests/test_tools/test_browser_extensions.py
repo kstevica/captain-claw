@@ -267,6 +267,54 @@ async def test_extension_actions_belong_to_the_headless_browser(tool_env):
     assert not r.success and "No extension" in r.error
 
 
+
+def _deck_zip() -> bytes:
+    """Captain for Chrome as Flight Deck hands it out (/fd/clip/extension.zip)."""
+    src = bx.captain_checkout()
+    assert src is not None
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        for f in sorted(src.rglob("*")):
+            if f.is_file():
+                zf.write(f, f"captain-for-chrome/{f.relative_to(src).as_posix()}")
+    return buf.getvalue()
+
+
+async def test_captain_for_chrome_comes_from_this_captain(tool_env, monkeypatch):
+    from captain_claw import fd_client
+
+    fetched: list[str] = []
+    deck = {"base": "http://fd.test", "zip": _deck_zip()}
+
+    async def _download(url, max_bytes):
+        fetched.append(url)
+        if deck["zip"] is None:
+            raise bx.ExtensionError("The download answered 404.")
+        return deck["zip"]
+
+    monkeypatch.setattr(bx, "_download", _download)
+    monkeypatch.setattr(fd_client, "flight_deck_base", lambda: deck["base"])
+    tool, kw = BrowserTool(), tool_env.kw
+    version = json.loads((bx.captain_checkout() / "manifest.json").read_text())["version"]
+    r = await tool.execute("extension_install", extension_id="Captain for Chrome", **kw)
+    assert r.success, r.error
+    assert f"Installed Captain for Chrome {version} from this Captain" in r.content and "read_page" in r.content
+    assert fetched == ["http://fd.test/fd/clip/extension.zip"]
+    assert tool_env.asked == [], "Captain's own extension needs no approval"
+    store = bx.ExtensionStore.for_tool(kw)
+    [entry] = store.all()
+    assert entry.source == bx.CAPTAIN_SOURCE and (store.root / entry.id / "hands.js").exists()
+    # From the checkout when there's no deck, or the deck has no copy — the same extension, the same id.
+    deck["base"] = ""
+    assert (await tool.execute("extension_install", extension_id="captain", **kw)).success
+    deck["base"], deck["zip"] = "http://fd.test", None
+    assert (await tool.execute("extension_install", extension_id="captain", **kw)).success
+    assert len(fetched) == 2 and [e.id for e in store.all()] == [entry.id]
+    tool_env.cfg.extension_policy = "off"
+    r = await tool.execute("extension_install", extension_id="captain", **kw)
+    assert not r.success and "turned off" in r.error
+
+
 # ── live: a real headless Chromium ────────────────────────────────────
 
 
@@ -377,3 +425,38 @@ async def test_live_extensions_load_open_and_go(tool_env, tmp_path):
             assert not any(Path(p).exists() for p in profiles), "the temporary profiles go"
         browser_mod._BROWSER_SESSIONS.pop(kw["_session_id"], None)
         shutil.rmtree(tmp_path / "ws", ignore_errors=True)
+
+
+@pytest.mark.skipif(not _chromium_available(), reason="Playwright's Chromium isn't installed")
+async def test_live_captain_for_chrome_runs_in_the_headless_browser(tool_env, monkeypatch):
+    from captain_claw import fd_client
+
+    monkeypatch.setattr(fd_client, "flight_deck_base", lambda: "")   # from the checkout
+    tool, kw = BrowserTool(), tool_env.kw
+    session = None
+    try:
+        async def run():
+            nonlocal session
+            r = await tool.execute("extension_install", extension_id="captain", **kw)
+            assert r.success, r.error
+            ext_id = bx.ExtensionStore.for_tool(kw).get("captain for chrome").id
+            r = await tool.execute("extension_open", extension_id=ext_id, extension_page="sidepanel.html", **kw)
+            assert r.success and "Captain" in r.content, r.content or r.error
+            session = browser_mod._BROWSER_SESSIONS[kw["_session_id"]]
+            for _ in range(50):
+                urls = [w.url for w in session._context.service_workers]
+                if any(f"chrome-extension://{ext_id}/background.js" == u for u in urls):
+                    break
+                await asyncio.sleep(0.1)
+            else:
+                raise AssertionError(f"its worker never started: {urls}")
+            worker = next(w for w in session._context.service_workers if ext_id in w.url)
+            assert await worker.evaluate("typeof chrome.debugger + ' ' + typeof chrome.tabGroups") == "object object"
+            # The panel asks to connect: it isn't paired here.
+            await session._page.wait_for_selector("#deckUrl", timeout=10000)
+
+        await asyncio.wait_for(run(), 120)
+    finally:
+        if session is not None:
+            await session.close()
+        browser_mod._BROWSER_SESSIONS.pop(kw["_session_id"], None)
