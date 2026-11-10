@@ -290,9 +290,10 @@ Connections panel).
   key, sending off by default (`FD_IMAP_SEND=off` for the whole deck), every send audited and rung.
   Hosts that resolve to private, link-local or cloud-metadata addresses are refused, except loopback for
   Proton Bridge.
-- **External memory**: each person connects their own, or an admin connects one Hindsight server for
-  everyone (**Console → Connections → External memory → Shared memory server**), with a bank per person.
-  Non-admins can't point theirs at loopback, private or `.local` addresses.
+- **External memory**: each person connects their own, or an admin connects one Hindsight, Qdrant or
+  ArcadeDB server for everyone (**Console → Connections → External memory → Shared memory server**), with a
+  bank or space per person. Non-admins can't point theirs (or its embeddings address) at loopback, private
+  or `.local` addresses.
 - **Agent files**: every person can export and import their own agents in the kiosk; keys never travel
   unless sealed with a passphrase in a Full backup. Admins keep **Decks this one trusts** and can accept
   only signed files under **Console → Settings → Agent files**. Back up `agent-bundles/`, `course.db`

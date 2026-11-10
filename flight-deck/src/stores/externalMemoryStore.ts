@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { useAuthStore, refreshAccessToken, registerSignOutTeardown } from './authStore'
 
-// External memory (Membase, …) — one per user, shared by all of their agents,
+// External memory (Membase, Hindsight, Qdrant, ArcadeDB) — one per user, shared by all of their agents,
 // through /fd/external-memory/* (captain_claw/flight_deck/external_memory/).
 // Flight Deck keeps the credentials: they never come back here, only a hint.
 // On a deck with sign-in off the connection is the deck's.
@@ -13,6 +13,8 @@ export interface CredentialField {
   required: boolean
   placeholder: string
   help: string
+  // Folded under "More settings" (e.g. where vectors are made).
+  advanced?: boolean
 }
 
 export interface ProviderInfo {
@@ -26,6 +28,9 @@ export interface ProviderInfo {
   // "scoped": one server keeps people apart (an admin can connect it for the deck).
   tenancy: 'key' | 'scoped'
   scope_label: string
+  // The field where a person's own connection names its scope ("bank",
+  // "space"); the deck's connection never has it.
+  scope_field?: string
 }
 
 export interface ActionParam {
@@ -45,6 +50,9 @@ export interface ProviderAction {
 }
 
 export type MirrorKind = 'insight' | 'intention' | 'reflection' | 'lesson' | 'intuition'
+// first: the person's main memory; alongside: next to Captain's own memory;
+// on_demand: looked up only when an agent decides to search it.
+export type ReadingPriority = 'first' | 'alongside' | 'on_demand'
 
 export interface OutboxCounts {
   pending: number
@@ -59,6 +67,11 @@ export interface ExternalMemoryStatus {
   providers: ProviderInfo[]
   mirror: Record<MirrorKind, boolean>
   mirror_kinds: MirrorKind[]
+  // Reading priority: how much the person's agents lean on the memory.
+  priority?: ReadingPriority
+  priorities?: ReadingPriority[]
+  // Facts are picked out of chats every this many messages while connected.
+  capture_every?: number
   scope: 'user' | 'deck'
   auth_enabled: boolean
   provider?: string
@@ -78,7 +91,7 @@ export interface ExternalMemoryStatus {
   tenancy?: 'key' | 'scoped'
   scope_label?: string
   scope_id?: string
-  deck_connection?: { provider: string; label: string } | null
+  deck_connection?: { provider: string; label: string; scope_label?: string } | null
 }
 
 export interface ExternalMemoryDeckStatus {
@@ -119,6 +132,7 @@ interface ExternalMemoryStore {
   disconnect: () => Promise<boolean>
   test: () => Promise<{ ok: boolean; latency_ms?: number }>
   setMirror: (kinds: Partial<Record<MirrorKind, boolean>>) => Promise<boolean>
+  setPriority: (priority: ReadingPriority) => Promise<boolean>
   run: (action: string, args: Record<string, unknown>) => Promise<{ text: string } | { error: string }>
   outbox: (state?: string) => Promise<OutboxItem[]>
   retryOutbox: () => Promise<number | null>
@@ -240,6 +254,22 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set, get) => 
         status: await fetchJson<ExternalMemoryStatus>('/fd/external-memory/mirror', {
           method: 'PUT',
           body: JSON.stringify({ kinds }),
+        }),
+      })
+      return true
+    } catch (exc) {
+      set({ error: errText(exc) })
+      return false
+    }
+  },
+
+  setPriority: async (priority) => {
+    set({ error: null })
+    try {
+      set({
+        status: await fetchJson<ExternalMemoryStatus>('/fd/external-memory/priority', {
+          method: 'PUT',
+          body: JSON.stringify({ priority }),
         }),
       })
       return true

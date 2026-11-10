@@ -1639,6 +1639,10 @@ class AgentOrchestrationMixin:
             await self._refresh_datastore_context_cache()
         # Insights (the shared commons) follow what this turn is about; so do the owner's lessons.
         _turn_query = msg_origin.model_view_text({"content": user_input})
+        # The owner's external memory (Flight Deck) is asked at the same time:
+        # a network round trip, so it runs while the local lookups do.
+        _external_recall = asyncio.create_task(
+            self._refresh_external_memory_context_cache(query=_turn_query))
         await self._refresh_insights_context_cache(query=_turn_query)
         await self._refresh_lessons_context_cache(query=_turn_query)
         # The owner's documents are the owner's: a member's turn gets no pointers into them.
@@ -1646,6 +1650,7 @@ class AgentOrchestrationMixin:
             await self._refresh_knowledge_context_cache(query=_turn_query)
         else:
             self._knowledge_context_cache = []
+        await _external_recall
         if clarification_context_applied:
             self._emit_tool_output(
                 "task_contract",

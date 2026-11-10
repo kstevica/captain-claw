@@ -1,10 +1,12 @@
 import { useEffect, useId, useMemo, useState, type FormEvent } from 'react'
-import { Users, Loader2, Check, AlertCircle, Eye, EyeOff, Save, Trash2, Server, ExternalLink } from 'lucide-react'
+import { Users, Loader2, Check, AlertCircle, Save, Trash2, Server, ExternalLink } from 'lucide-react'
 import { useExternalMemoryStore } from '../../stores/externalMemoryStore'
+import CredentialInputs from './CredentialInputs'
 
 // The deck's external memory (admins): one server that keeps people apart
-// itself — Hindsight gives each person a bank — connected once for everyone.
-// Users without a memory of their own use it, each in their own bank; their
+// itself — Hindsight gives each person a bank, Qdrant and ArcadeDB a space —
+// connected once for everyone. Users without a memory of their own use it,
+// each in their own; their
 // own connection wins. A memory whose key is one person's (Membase) can't be
 // shared this way, so only those that keep people apart are offered.
 
@@ -22,7 +24,6 @@ export default function ExternalMemoryDeckConnection() {
   const { deck, deckError, refreshDeck, connectDeck, disconnectDeck, testDeck } = useExternalMemoryStore()
   const [providerName, setProviderName] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>({})
-  const [reveal, setReveal] = useState(false)
   const [busy, setBusy] = useState<Busy>(null)
   const [notice, setNotice] = useState<Notice | null>(null)
   const baseId = useId()
@@ -34,8 +35,10 @@ export default function ExternalMemoryDeckConnection() {
     const name = deck?.connected ? deck.provider : providerName || providers[0]?.name
     return providers.find((p) => p.name === name) ?? providers[0]
   }, [deck?.connected, deck?.provider, providerName, providers])
-  // Each person gets their own bank: the deck's connection never names one.
-  const fields = (chosen?.credential_fields ?? []).filter((f) => f.name !== 'bank')
+  // Each person gets their own bank / space: the deck's connection never names one.
+  const fields = (chosen?.credential_fields ?? []).filter((f) => !chosen?.scope_field || f.name !== chosen.scope_field)
+  const scope = (deck?.connected ? deck.scope_label : chosen?.scope_label) || 'space'
+
 
   if (deck && !deck.available) return null
 
@@ -53,7 +56,6 @@ export default function ExternalMemoryDeckConnection() {
     setBusy(null)
     if (!res.ok) return
     setDrafts({})
-    setReveal(false)
     setNotice(res.warning ? { tone: 'warn', text: res.warning } : { tone: 'ok', text: `Connected for everyone and checked with ${chosen.label}.` })
   }
 
@@ -69,7 +71,7 @@ export default function ExternalMemoryDeckConnection() {
     if (busy) return
     if (!window.confirm(
       `Stop sharing ${deck?.label ?? 'this memory'} with everyone?\n\n` +
-      "People without a memory of their own lose theirs in Flight Deck (what is in their banks stays on the server). People who connected their own aren't affected.",
+      `People without a memory of their own lose theirs in Flight Deck (what is in their ${scope}s stays on the server). People who connected their own aren't affected.`,
     )) return
     setBusy('remove'); setNotice(null)
     const done = await disconnectDeck()
@@ -96,16 +98,16 @@ export default function ExternalMemoryDeckConnection() {
               <span className={`${pill} bg-zinc-800 text-zinc-400 border-zinc-700`}>Not shared</span>
             )}
           </div>
-          <div className="text-xs text-zinc-500 mt-0.5">One memory server, a bank per person</div>
+          <div className="text-xs text-zinc-500 mt-0.5">One memory server, a {scope} per person</div>
         </div>
       </div>
 
       <div className="px-5 py-4 space-y-4">
         <p className="text-xs leading-relaxed text-zinc-400">
           Connect one memory server for the whole deck. Everyone who hasn't connected a memory of their own uses
-          it, each in a bank of their own
+          it, each in a {scope} of their own
           {deck?.scope_example ? <> (<code className="text-zinc-300">{deck.scope_example}</code>)</> : null} — agents
-          never pick a bank, so nobody's agents can read anyone else's. A person's own connection wins over this one.
+          never pick a {scope}, so nobody's agents can read anyone else's. A person's own connection wins over this one.
           Only memories that keep people apart themselves can be shared like this.
         </p>
 
@@ -140,44 +142,16 @@ export default function ExternalMemoryDeckConnection() {
               <span className="font-medium text-zinc-300">{chosen.label}</span>
               {chosen.description ? ` — ${chosen.description}` : ''}
             </div>
-            {fields.map((f) => {
-              const id = `${baseId}-${f.name}`
-              const hint = deck.connected ? deck.credential_hints?.[f.name] : undefined
-              return (
-                <div key={f.name} className="space-y-1">
-                  <label htmlFor={id} className="block text-xs font-medium text-zinc-400">
-                    {f.label}
-                    {!f.required && <span className="ml-1 text-zinc-600">(optional)</span>}
-                    {hint && f.secret && <span className="ml-2 text-[10px] text-emerald-600 dark:text-emerald-500">(saved)</span>}
-                  </label>
-                  <div className="relative">
-                    <input
-                      id={id}
-                      type={f.secret && !reveal ? 'password' : 'text'}
-                      value={drafts[f.name] || ''}
-                      onChange={(e) => setDrafts((d) => ({ ...d, [f.name]: e.target.value }))}
-                      placeholder={hint ? (f.secret ? `•••• saved (${hint}) — paste a new one to replace` : hint) : f.placeholder}
-                      autoComplete="off"
-                      spellCheck={false}
-                      disabled={busy === 'save'}
-                      className={`${input} font-mono ${f.secret ? 'pr-9' : ''}`}
-                    />
-                    {f.secret && (
-                      <button
-                        type="button"
-                        onClick={() => setReveal((v) => !v)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-zinc-500 hover:text-zinc-300"
-                        tabIndex={-1}
-                        aria-label={reveal ? 'Hide' : 'Show'}
-                      >
-                        {reveal ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                      </button>
-                    )}
-                  </div>
-                  {f.help && <div className="text-[11px] leading-snug text-zinc-500">{f.help}</div>}
-                </div>
-              )
-            })}
+            <CredentialInputs
+              key={`${chosen.name}-${deck.connected ? 'saved' : 'new'}`}
+              idPrefix={baseId}
+              fields={fields}
+              drafts={drafts}
+              onChange={(name, value) => setDrafts((d) => ({ ...d, [name]: value }))}
+              hints={deck.connected ? deck.credential_hints : undefined}
+              disabled={busy === 'save'}
+              inputClass={input}
+            />
             <div className="flex items-center gap-2 flex-wrap">
               <button
                 type="submit"

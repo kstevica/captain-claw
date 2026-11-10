@@ -52,6 +52,7 @@ from captain_claw.flight_deck.external_memory.base import (
     ProviderAuthError,
     ProviderError,
     ProviderInputError,
+    RecallHit,
     mirror_text,
 )
 from captain_claw.logging import get_logger
@@ -640,6 +641,24 @@ class MembaseProvider(ExternalMemoryProvider):
         for r in info.rules:
             lines.append(f"Rule: {r}")
         return ActionResult("\n".join(lines), {"info": info.to_dict()})
+
+    # ── automatic recall ────────────────────────────────────────────
+
+    async def recall(self, query: str, limit: int) -> list[RecallHit]:
+        """Membase's own search in its fast mode, most relevant first; nothing
+        when the key may not search."""
+        query = str(query or "").strip()[:2000]
+        if not query or not self._allows("search"):
+            return []
+        data = await self._request("POST", "/v1/search", json={"q": query, "limit": limit, "mode": "fast"})
+        hits = []
+        for it in _items(data)[:limit]:
+            if it.get("content"):
+                title = f"{it['title']}: " if it.get("title") else ""
+                hits.append(RecallHit(text=_clip(f"{title}{it['content']}", 600), id=str(it.get("id") or ""),
+                                      when=str(it.get("recorded_at") or it.get("created_at") or "")[:10],
+                                      kind=str(it.get("kind") or "")))
+        return hits
 
     # ── mirroring ───────────────────────────────────────────────────
 

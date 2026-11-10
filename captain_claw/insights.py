@@ -1410,6 +1410,14 @@ async def extract_insights(
 
 # ── Trigger ──────────────────────────────────────────────────────────
 
+def _message_text(message: dict[str, Any]) -> str:
+    """A chat message's words (plain text or content blocks)."""
+    content = message.get("content")
+    if isinstance(content, list):
+        return " ".join(str(b.get("text") or "") for b in content if isinstance(b, dict))
+    return str(content or "")
+
+
 async def maybe_extract_insights(
     agent: Agent,
     *,
@@ -1442,7 +1450,22 @@ async def maybe_extract_insights(
             last_user_count = getattr(agent, _ATTR_LAST_MSG_IDX, 0)
             interval = cfg.insights.extraction_interval_messages or _DEFAULT_INTERVAL_MESSAGES
             user_count = sum(1 for m in agent.session.messages if m.get("role") == "user")
-            if user_count - last_user_count < interval:
+            # With an external memory connected, facts are picked out more
+            # often — and right after a message that hands one over ("remember
+            # that…", "my daughter…") — so it fills as the person talks.
+            cue = False
+            try:
+                from captain_claw import external_memory_client
+
+                every = external_memory_client.capture_every()
+                if every:
+                    interval = min(interval, every)
+                    last_user = next((m for m in reversed(agent.session.messages) if m.get("role") == "user"), None)
+                    cue = bool(last_user) and external_memory_client.remember_cue(_message_text(last_user))
+            except Exception:
+                pass
+            new_messages = user_count - last_user_count
+            if new_messages < interval and not (cue and new_messages > 0):
                 setattr(agent, _ATTR_RUNNING, False)
                 return None
 

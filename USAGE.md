@@ -1662,17 +1662,19 @@ Message, Draft and Thread IDs carry their inbox (`work:1700000000:4521:INBOX`), 
 
 ### external_memory — NEW in 0.9.0
 
-The owner's external memory, shared by all of their agents: Membase or Hindsight, connected in **Connections → External memory**. Flight Deck holds the credentials and makes every call; the agent asks `/fd/external-memory/agent/run`. The tool has no fixed schema. Its actions, parameters and rules come from the connected provider, and only what the key allows is offered, so a read-only key has no `remember` or `forget`. Shown only while a memory is connected (the person's own, or the deck's shared Hindsight server). Never on a shared agent's member turns. See [External memory](#external-memory--new-in-090).
+The owner's external memory, shared by all of their agents: Membase, Hindsight, Qdrant or ArcadeDB, connected in **Connections → External memory**. Flight Deck holds the credentials and makes every call; the agent asks `/fd/external-memory/agent/run`. The tool has no fixed schema. Its actions, parameters and rules come from the connected provider, and only what the key allows is offered, so a read-only key has no `remember` or `forget`. Shown only while a memory is connected (the person's own, or the deck's shared server). Never on a shared agent's member turns. See [External memory](#external-memory--new-in-090).
 
 | Action | Provider | What it does |
 |---|---|---|
-| `remember` | both | Save one fact (`content`; Membase `title`, Hindsight `context`) |
-| `search` | both | Look things up (`query`, `limit`; Membase `fast`, Hindsight `budget` low, mid or high) |
-| `list` | both | The newest facts (`limit`; Hindsight `query`) |
-| `documents` | both | What was handed in (`limit`; Membase `kind` file or note) |
-| `forget` | both | Remove one item for good (`id`). Only with `confirm=true`, after the person agreed; without it nothing changes |
-| `capabilities` | both | What the connection reaches and may do now, and the person's rules |
+| `remember` | all | Save one fact (`content`; Membase `title`, Hindsight `context`, Qdrant and ArcadeDB `topics`: who and what it is about, comma-separated) |
+| `search` | all | Look things up (`query`, `limit`; Membase `fast`, Hindsight `budget` low, mid or high; Qdrant and ArcadeDB `topic` and `kind`) |
+| `list` | all | The newest facts (`limit`; Hindsight `query`, Qdrant and ArcadeDB `topic`) |
+| `documents` | Membase, Hindsight | What was handed in (`limit`; Membase `kind` file or note) |
+| `forget` | all | Remove one item for good (`id`). Only with `confirm=true`, after the person agreed; without it nothing changes |
+| `capabilities` | all | What the connection reaches and may do now, and the person's rules |
 | `reflect` | Hindsight | A reasoned answer over the whole bank (`question`, `budget`) |
+| `topics` | Qdrant, ArcadeDB | The topics the memory holds most about, with how many items each (`limit`) |
+| `related` | ArcadeDB | Everything about one topic and the topics that come up with it, from the graph (`topic`, `limit`) |
 | `get`, `add_document`, `profile`, `add_profile_fact`, `search_media`, `ask` | Membase | One item by id; a long text or a public page by URL; standing facts about the person, and adding one; photos and videos; one written answer |
 
 | Parameter | Type | Required | Description |
@@ -1680,7 +1682,7 @@ The owner's external memory, shared by all of their agents: Membase or Hindsight
 | `action` | string | yes | One of the actions the connected provider offers |
 | others | per action | per action | The provider's own parameters, as the tool's description lists them (`content`, `query`, `id`, `confirm`, `question`, `limit` …) |
 
-Insights, intentions and lessons (and reflections and intuitions, if the person ticks them) are copied in on their own; the tool is for what the agent decides to save or look up itself. The memory isn't recalled into the context by itself yet. Each search hit names the Memory it came from.
+Insights, intentions and lessons (and reflections and intuitions, if the person ticks them) are copied in on their own; the tool is for what the agent decides to save or look up itself. Before each reply the agent also gets what the memory holds on the message on its own (automatic recall, after 0.9.0), unless the person's **Reading priority** is *Only when needed*; the tool's rules follow that priority (at *First* the agent searches it before anything else and trusts it over its own notes). Each search hit names the Memory it came from.
 
 ### course — NEW in 0.9.0
 
@@ -5020,7 +5022,7 @@ Since 0.8.0 the page has **one tab per connection** — Google, Microsoft, Teleg
 - **Telegram** — ask for the deck's team bot, picking one of your agents; after an admin approves, a one-time link binds your Telegram account. Then the **Inbox** switch, "Add <agent> to a group" and the agent's groups. See [Telegram: the Team Bot](#telegram-the-team-bot--new-in-081).
 - **Soniox** — your own Soniox key for speech-to-text and voices (checked with Soniox before it is saved; only a hint ever comes back). Without one you use the admin's team key, else the deck's `SONIOX_API_KEY`. Agents, devices and the WhatsApp bridge use their owner's key; the agent itself never holds it. See [`audio`](#audio).
 - **Email (IMAP)** (0.9.0) — up to 20 IMAP/SMTP inboxes of your own, with sending off until you turn it on. See [Email (IMAP)](#email-imap--new-in-090).
-- **External memory** (0.9.0) — one Membase or Hindsight memory all of your agents share. See [External memory](#external-memory--new-in-090).
+- **External memory** (0.9.0) — one Membase, Hindsight, Qdrant or ArcadeDB memory all of your agents share. See [External memory](#external-memory--new-in-090).
 
 #### Google
 
@@ -5278,7 +5280,7 @@ Every process agent runs as the deck's OS user. On a deck with sign-in, Flight D
 - **Collaboration.** A notification bell for what needs you, and since 0.8.6 [the Line](#the-line--new-in-086) for shares, finished runs, sends and everything else that happened on its own, team spend by user and run kind in **Admin → Usage**, **Copy to my workspace** for a folder shared with you, and **Duplicate** on shared or built-in archetypes to fork an editable copy.
 - **Shared agents** (`FD_AGENT_SHARING=1`): one agent, several users — see [Shared agents](#shared-agents-a2-members-own-google-deep-memory-files) below.
 - **Agent options.** A gear on each agent opens a tabbed options dialog (General, Instructions, `config.yaml`, `.env`); name and description are stored by Flight Deck, so they survive a browser wipe. Instructions are stored per agent by Flight Deck, so two tabs can't erase each other's.
-- **For teams in 0.9.0.** Admins switch on [Custom tools](#custom-tools--new-in-090) and approve tools offered to everybody, list the decks whose [agent files](#agent-files-export-import-and-backups--new-in-090) they trust, can connect one Hindsight server for everyone's [external memory](#external-memory--new-in-090), set the deck's goals on [Course](#course-the-goals-your-agents-work-for--new-in-090), and see who uses the deck on [Activity](#admin-console--activity--new-in-090). A person's agents hand each other work as [colleagues](#agents-as-colleagues-and-agent-email--new-in-090).
+- **For teams in 0.9.0.** Admins switch on [Custom tools](#custom-tools--new-in-090) and approve tools offered to everybody, list the decks whose [agent files](#agent-files-export-import-and-backups--new-in-090) they trust, can connect one Hindsight, Qdrant or ArcadeDB server for everyone's [external memory](#external-memory--new-in-090), set the deck's goals on [Course](#course-the-goals-your-agents-work-for--new-in-090), and see who uses the deck on [Activity](#admin-console--activity--new-in-090). A person's agents hand each other work as [colleagues](#agents-as-colleagues-and-agent-email--new-in-090).
 
 ### Forge agents: say what you need and get a team — NEW in 0.8.5
 
@@ -5671,14 +5673,23 @@ Routes: `POST /fd/lesson-proposals/agent` (the agent's own token), `GET /fd/less
 |---|---|---|
 | **Membase** | **Membase developer key**; **Server address** (empty for membase.com; a local `membase --local serve` is `http://127.0.0.1:8787`) | The key's access decides the actions: Read & write lets agents save, Full access also lets them forget. One key is one person's memory, so it can't be shared deck-wide |
 | **Hindsight** (MIT) | **Server address** (your own server on port 8888, started with one `docker run`, or your Hindsight Cloud API address); **API key** (optional); **Bank** (optional; empty is one named after you) | Adds `reflect`. Mirrored items replace themselves when superseded. Hindsight Cloud has no published default address, so type it in |
+| **Qdrant** (Apache-2.0; after 0.9.0) | **Server address** (your own server on port 6333, or your Qdrant Cloud cluster URL); **API key** (optional); **Collection** (optional, `captain_memory`; made on first connect); **Space** (optional; empty is one named after you) | Keeps what is saved word for word and finds it by meaning and by words at once (BM25 on Qdrant 1.20+, meaning only before). Adds `topics`. One collection, a space per person (Qdrant's own tenant index); the collection's vector is named after the embedding model, so a connection with another model is refused, not mixed |
+| **ArcadeDB** (Apache-2.0; after 0.9.0) | **Server address** (port 2480); **User** (optional, `root`); **Password**; **Database** (optional, `captain_memory`; made on first connect if the user may); **Space** (optional) | Each item is a vertex, the people, projects and places it is about are topic vertices joined by edges. Search fuses the full-text index with exact similarity over the person's own vectors. Adds `topics` and `related` |
+
+Qdrant and ArcadeDB don't make vectors themselves, so Flight Deck does. Under **More settings**: **Embeddings address** (empty: a small model2vec model on Flight Deck, `minishlab/potion-base-8M`, no key and nothing leaves the deck; or any OpenAI-compatible `/embeddings` endpoint, e.g. Ollama's `http://127.0.0.1:11434/v1` or `https://api.openai.com/v1`), **Embeddings model** (the endpoint's model, or another model2vec model) and **Embeddings key**. Keep the model once the memory has things in it: vectors from two models can't be compared. A model that can't be loaded or reached is refused when connecting, before a collection or database is made.
 
 - **What agents can do.** Actions and rules come from the provider. The card shows what your agents can do and the rules they follow, recent items, and **Try it** (search or save). A read-only key can't `remember` or `forget`, and `forget` needs `confirm=true`.
 - **Copied in on its own.** What agents learn is mirrored: **Insights**, **Intentions** and **Lessons** by default, **Reflections** and **Intuitions** if you tick them. Items go through a durable outbox (`external_memory.db` in the data folder). It holds the queue on a refused key or a full quota, backs off on passing errors, and has **Send now**. Nothing is mirrored on a member's turn or in a public run, and nothing from before you connected is copied.
-- **Shared memory server** (admins, on a deck with accounts): **Console → Connections → External memory**, "One memory server, a bank per person". One Hindsight server for the whole deck. Everyone without a connection of their own gets their own bank (`captain-<user id>`). Their card says they're on the deck's memory, and **Connect my own** replaces it. Membase can't be shared this way.
-- **Addresses.** A non-admin's own connection can't point at this machine or its network (loopback, private, link-local or `.local` addresses), checked when saving and again at call time. The deck's connection, set by an admin, can.
-- It isn't recalled into the agent's context by itself yet. Agents use it through the tool.
+- **Shared memory server** (admins, on a deck with accounts): **Console → Connections → External memory**, "One memory server, a bank per person" (a space, for Qdrant and ArcadeDB). One Hindsight, Qdrant or ArcadeDB server for the whole deck. Everyone without a connection of their own gets their own bank or space (`captain-<user id>`), and every call Flight Deck makes is bound to it. Their card says they're on the deck's memory, and **Connect my own** replaces it. Membase can't be shared this way.
+- **Addresses.** A non-admin's own connection can't point at this machine or its network (loopback, private, link-local or `.local` addresses), checked when saving and again at call time — the server address and the embeddings address alike. The deck's connection, set by an admin, can.
+- **Reading priority** (after 0.9.0), per person on the card — how much their agents lean on the memory when they answer:
+  - **First — my main memory**: before every reply Flight Deck asks the memory what it holds on the message (up to 8 things, 6 s at most) and the agent gets it last of its background notes, so it is kept even when the conversation is long and sits nearest the message; the agent is told to search it before its own notes, files or the web and to go by it when the two disagree.
+  - **Alongside** (default): the same before every reply (up to 5 things, 4 s at most), placed next to the agent's insights.
+  - **Only when needed**: nothing is looked up on its own; agents search it when they decide to.
+  Only what bears on the message comes back, often nothing: Qdrant and ArcadeDB count an item when it shares the message's content words (stopwords don't count) or is at least as alike as the **Recall threshold** (More settings; 0.25 with the model on Flight Deck, 0.3 for others); Hindsight and Membase rank it themselves (Hindsight's cheapest recall, Membase's fast search). What the agent's insights note already says isn't repeated. A slow or failing memory never holds up or breaks the turn — the reply goes on without it. Never on a shared-agent member's turn or in a public per-visitor run. Each recall is a row in the usage log (`external_memory_call`, action `recall`).
+- **Saved often** (after 0.9.0): while a memory is connected, agents pick facts out of the chat every 5 of the person's messages instead of every 20, and right after a message that hands one over ("remember that…", "my daughter…", "zapamti…", "odlučili smo…"); the insights they keep are copied in as above.
 
-`FD_MEMBASE_BASE_URL` overrides Membase's API address (default `https://api.app.membase.com`). `FD_HINDSIGHT_BASE_URL` is the Hindsight address used when a connection gives none. Routes: `/fd/external-memory/providers`, `/status`, `/connection`, `/test`, `/mirror`, `/run`, `/outbox` and `/outbox/retry`; for admins `/fd/external-memory/deck`, `/deck-connection` and `/deck-test`; for agents `/fd/external-memory/agent/status`, `/run` and `/mirror`. Tested against self-hosted Hindsight 1.2.0; Membase and Hindsight Cloud only against stand-ins.
+`FD_MEMBASE_BASE_URL` overrides Membase's API address (default `https://api.app.membase.com`). `FD_HINDSIGHT_BASE_URL`, `FD_QDRANT_BASE_URL` and `FD_ARCADEDB_BASE_URL` are the addresses used when a connection gives none. Routes: `/fd/external-memory/providers`, `/status`, `/connection`, `/test`, `/priority`, `/mirror`, `/run`, `/outbox` and `/outbox/retry`; for admins `/fd/external-memory/deck`, `/deck-connection` and `/deck-test`; for agents `/fd/external-memory/agent/status`, `/run`, `/recall` and `/mirror`. Tested against self-hosted Hindsight 1.2.0, Qdrant 1.20.0 and ArcadeDB 26.11.1; Membase, Hindsight Cloud and Qdrant Cloud only against stand-ins.
 
 ### Course: the goals your agents work for — NEW in 0.9.0
 
@@ -6753,6 +6764,7 @@ Flight Deck uses environment variables:
 | `FD_IMAP_REPEAT_CHECK_DAYS` | `14` | **NEW in 0.9.0.** An IMAP email already in Sent within this many days (or in Drafts) isn't drafted or sent again; `0` checks only Drafts |
 | `FD_AGENT_MAIL` | on | **NEW in 0.9.0.** `off` stops agents picking up email that names them ([agent email](#agents-as-colleagues-and-agent-email--new-in-090)) |
 | `FD_MEMBASE_BASE_URL` / `FD_HINDSIGHT_BASE_URL` | `https://api.app.membase.com` / (unset) | **NEW in 0.9.0.** [External memory](#external-memory--new-in-090): Membase's API address; the Hindsight address used when a connection gives none |
+| `FD_QDRANT_BASE_URL` / `FD_ARCADEDB_BASE_URL` | (unset) | [External memory](#external-memory--new-in-090) (after 0.9.0): the Qdrant / ArcadeDB address used when a connection gives none |
 | `FD_AGENT_BUNDLE_MAX_MB` | `2048` | **NEW in 0.9.0.** The largest [agent file](#agent-files-export-import-and-backups--new-in-090) Flight Deck takes, and the most it may unpack to |
 | `FD_COURSE_REVIEW_TICK_S` | `1800` | **NEW in 0.9.0.** How often, in seconds, [Course](#course-the-goals-your-agents-work-for--new-in-090)'s review sweep runs (5 at least) |
 | `FD_AGENT_IDLE_WAKE_LEAD_S` | `300` | How long before a scheduled run a sleeping agent is woken, or an agent its owner switched off is started (0.9.0) |

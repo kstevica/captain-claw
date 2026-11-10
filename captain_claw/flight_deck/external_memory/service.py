@@ -10,7 +10,8 @@ The connection lives ONLY in Flight Deck, like Jev's key:
   returns it and refuses to write it. An auth-disabled deck keeps one
   connection for the deck in ``system_settings``.
 * The deck's connection: an admin may connect one *scoped* provider
-  (Hindsight: one server, a bank per person) for everyone —
+  (Hindsight: one server, a bank per person; Qdrant / ArcadeDB: one
+  collection / database, a space per person) for everyone —
   ``external_memory:deck_connection`` in ``system_settings``. A user with no
   connection of their own uses it, in a scope of their own
   (:func:`base.scope_id`); their own connection, once saved, wins. A *key*
@@ -30,6 +31,19 @@ Two ways things get in:
 * Mirroring (:func:`mirror_for_owner`): insights, intentions, reflections,
   intuitions (from the agents) and lessons (taught here) are queued in the
   outbox and written by :func:`drain_loop`, one at a time, retried with backoff.
+  While a memory is connected, agents pick facts out of their chats every
+  :data:`CAPTURE_EVERY` messages (Captain's own pace is 20), so insights — and
+  with them this memory — fill as the person talks.
+
+And one way out besides the tool: automatic recall (:func:`recall_for_owner`).
+Before a reply the agent sends the person's message; the provider returns
+only what bears on it, and the agent puts that in front of the model. How much
+the person's agents lean on the memory is their *reading priority*
+(``external_memory:priority``, :data:`PRIORITIES`): ``first`` — their main
+memory (more items, kept when the prompt is crowded, trusted over the agent's
+own notes); ``alongside`` (default) — next to Captain's own memory;
+``on_demand`` — nothing recalled on its own, the agent searches when it
+decides to.
 """
 
 from __future__ import annotations
@@ -66,6 +80,15 @@ log = get_logger(__name__)
 _K_CONN = "external_memory:connection"
 _K_MIRROR = "external_memory:mirror"
 _K_DECK = "external_memory:deck_connection"
+_K_PRIORITY = "external_memory:priority"
+
+PRIORITIES: tuple[str, ...] = ("first", "alongside", "on_demand")
+DEFAULT_PRIORITY = "alongside"
+# Automatic recall: (items at most, seconds Flight Deck gives the provider).
+RECALL: dict[str, tuple[int, float]] = {"first": (8, 6.0), "alongside": (5, 4.0)}
+# While a memory is connected, agents pick facts out of their chats every this
+# many of the person's messages (Captain's own pace is 20).
+CAPTURE_EVERY = 5
 
 NOT_CONNECTED = (
     "No external memory is connected — the person connects one in Flight Deck → Connections → "
@@ -241,7 +264,8 @@ async def resolve(owner: str) -> Resolved | None:
         cls = providers.provider_class(str(own["provider"]))
         scope = ""
         if cls is not None and cls.tenancy == "scoped":
-            scope = str(own["credentials"].get("bank") or "") or scope_id(owner_key(owner))
+            named = str(own["credentials"].get(cls.scope_field) or "") if cls.scope_field else ""
+            scope = named or scope_id(owner_key(owner))
         return Resolved(own, "own", scope)
     deck = await load_deck_connection()
     if deck:
@@ -271,6 +295,42 @@ async def save_mirror(owner: str, kinds: dict[str, Any]) -> dict[str, bool]:
             current[kind] = kinds[kind]
     await _write(owner, _K_MIRROR, json.dumps(current))
     return current
+
+
+async def load_priority(owner: str) -> str:
+    raw = (await _read(owner, _K_PRIORITY) or "").strip()
+    return raw if raw in PRIORITIES else DEFAULT_PRIORITY
+
+
+async def save_priority(owner: str, value: Any) -> str:
+    priority = str(value or "").strip().lower()
+    if priority not in PRIORITIES:
+        raise ProviderInputError(f"Reading priority is one of: {', '.join(PRIORITIES)}")
+    await _write(owner, _K_PRIORITY, priority)
+    return priority
+
+
+_PRIORITY_RULES = {
+    "first": (
+        "This is the person's MAIN memory. Before each reply what it holds on the message is put in front "
+        "of you; search it FIRST — before your own notes, files or the web — whenever the person asks about "
+        "themselves, people, their work, plans or past decisions. When it and your own notes disagree, go "
+        "by it (and by the newer of two facts)."
+    ),
+    "alongside": (
+        "Before each reply what it holds on the message is put in front of you, next to your own notes; "
+        "search it for more whenever the person asks about themselves, people, their work or past decisions."
+    ),
+    "on_demand": (
+        "Nothing from it is put in front of you on its own — search it whenever the person asks about "
+        "themselves, people, their work or past decisions."
+    ),
+}
+
+
+def priority_rule(priority: str) -> str:
+    """The rule telling an agent how much to lean on the memory."""
+    return _PRIORITY_RULES.get(priority, _PRIORITY_RULES[DEFAULT_PRIORITY])
 
 
 _KIND_PLURAL = {
@@ -306,10 +366,11 @@ async def provider_for(res: Resolved, **kwargs: Any) -> ExternalMemoryProvider:
     private addresses is checked again here (names can change what they
     point at)."""
     cls = providers.provider_class(res.provider_name)
-    if res.source == "own" and cls is not None and cls.url_field and not res.conn.get("private_ok"):
-        url = str(res.conn["credentials"].get(cls.url_field) or "")
-        if url and await _is_private(url):
-            raise ProviderError(PRIVATE_REFUSED, status=403, code="private_address")
+    if res.source == "own" and cls is not None and not res.conn.get("private_ok"):
+        for name in cls.address_fields():
+            url = str(res.conn["credentials"].get(name) or "")
+            if url and await _is_private(url):
+                raise ProviderError(PRIVATE_REFUSED, status=403, code="private_address")
     return providers.build(res.provider_name, res.conn["credentials"], res.conn.get("info"),
                            scope=res.scope, **kwargs)
 
@@ -340,18 +401,23 @@ async def _deck_offer() -> dict[str, Any] | None:
     if not deck:
         return None
     cls = providers.provider_class(str(deck["provider"]))
-    return {"provider": str(deck["provider"]), "label": cls.label if cls else str(deck["provider"])}
+    return {"provider": str(deck["provider"]), "label": cls.label if cls else str(deck["provider"]),
+            "scope_label": cls.scope_label if cls else ""}
 
 
 async def status_for_owner(owner: str) -> dict[str, Any]:
     """The connection as the dashboard shows it — never a credential."""
     res = await resolve(owner)
     mirror = await load_mirror(owner)
+    priority = await load_priority(owner)
     base: dict[str, Any] = {
         "connected": False,
         "providers": providers.catalog(),
         "mirror": mirror,
         "mirror_kinds": list(MIRROR_KINDS),
+        "priority": priority,
+        "priorities": list(PRIORITIES),
+        "capture_every": CAPTURE_EVERY,
         "scope": "deck" if _deck_scope() else "user",
         "auth_enabled": _fd_auth_enabled(),
         "deck_connection": await _deck_offer(),
@@ -377,7 +443,7 @@ async def status_for_owner(owner: str) -> dict[str, Any]:
         "scope_id": res.scope,
         "reaches": provider.reaches(),
         "actions": [a.to_dict() for a in provider.actions()],
-        "rules": [*provider.rules(), mirror_rule(mirror)],
+        "rules": [*provider.rules(), priority_rule(priority), mirror_rule(mirror)],
         "outbox": counts,
     }
 
@@ -437,14 +503,22 @@ async def manifest_for_owner(owner: str) -> dict[str, Any]:
         asyncio.create_task(_refresh_info(owner))
     provider = _plain_provider(res)
     mirror = await load_mirror(owner)
+    priority = await load_priority(owner)
     manifest = provider.manifest()
-    manifest["rules"] = [*manifest["rules"], mirror_rule(mirror)]
+    manifest["rules"] = [*manifest["rules"], priority_rule(priority), mirror_rule(mirror)]
+    limit, wait = RECALL.get(priority, (0, 0.0))
     return {
         "connected": True,
         **manifest,
         # The ones an AGENT sends (lessons are mirrored here, by Flight Deck).
         "mirror": [k for k in MIRROR_KINDS if mirror.get(k) and k != "lesson"],
         "refused": res.conn.get("verify_error") == "refused",
+        # Reading priority: whether the agent asks for recall before a reply,
+        # how long it waits, and where it puts what comes back.
+        "priority": priority,
+        "recall_limit": limit,
+        "recall_timeout": wait,
+        "capture_every": CAPTURE_EVERY,
     }
 
 
@@ -460,9 +534,11 @@ async def _checked_conn(provider_name: str, raw_credentials: dict[str, Any], *, 
     if cls is None:
         raise ProviderInputError(f"Unknown external memory '{provider_name}'")
     credentials = cls.clean_credentials(raw_credentials)
-    url = str(credentials.get(cls.url_field) or "") if cls.url_field else ""
-    if url and not private_ok and await asyncio.to_thread(private_address, url):
-        raise ProviderInputError(PRIVATE_REFUSED + " Nothing was saved.")
+    if not private_ok:
+        for name in cls.address_fields():
+            url = str(credentials.get(name) or "")
+            if url and await asyncio.to_thread(private_address, url):
+                raise ProviderInputError(PRIVATE_REFUSED + " Nothing was saved.")
     provider = providers.build(cls.name, credentials, scope=scope)
     now = _now()
     conn: dict[str, Any] = {
@@ -523,7 +599,8 @@ async def deck_connect(provider_name: str, raw_credentials: dict[str, Any]) -> t
         )
     conn, warning, _provider = await _checked_conn(provider_name, raw_credentials, private_ok=True,
                                                    scope=scope_id("check"))
-    conn["credentials"].pop("bank", None)  # every person gets their own
+    if cls.scope_field:
+        conn["credentials"].pop(cls.scope_field, None)  # every person gets their own
     await _store("", "deck", conn)
     wake()
     return await deck_status(), warning
@@ -613,6 +690,51 @@ async def run_for_owner(owner: str, action: str, args: dict[str, Any], *, source
     elif res.conn.get("verified") is not True:
         await _update(owner, res.source, verified=True, verify_error=None, verified_at=_now())
     return result
+
+
+# ── automatic recall ────────────────────────────────────────────────
+
+
+async def recall_for_owner(owner: str, query: str, *, agent: str = "") -> dict[str, Any]:
+    """What *owner*'s memory holds on *query*, for an agent about to reply:
+    ``{connected, priority, label, hits: [{text, id, when, kind}], error?}``.
+    Never raises — a slow or failing memory must not hold up or break the
+    turn: it comes back with no hits and the reason. Nothing is asked when the
+    person's reading priority is ``on_demand``."""
+    res = await resolve(owner)
+    if not res:
+        return {"connected": False, "hits": []}
+    priority = await load_priority(owner)
+    cls = providers.provider_class(res.provider_name)
+    out: dict[str, Any] = {"connected": True, "priority": priority, "provider": res.provider_name,
+                           "label": cls.label if cls else res.provider_name, "hits": []}
+    query = str(query or "").strip()[:4000]
+    if priority not in RECALL or not query:
+        return out
+    limit, wait = RECALL[priority]
+    t0 = time.monotonic()
+    ok, status = False, 0
+    try:
+        provider = await provider_for(res, max_retries=0)
+        hits = await asyncio.wait_for(provider.recall(query, limit), timeout=wait)
+        out["hits"] = [h.to_dict() for h in hits[:limit] if h.text.strip()]
+        ok, status = True, 200
+    except TimeoutError:
+        out["error"], status = "the memory didn't answer in time", 504
+    except ProviderAuthError as exc:
+        status = exc.status
+        out["error"] = "the memory refused the key"
+        await _update(owner, res.source, verified=False, verify_error="refused")
+    except (ProviderError, ProviderInputError) as exc:
+        status = getattr(exc, "status", 0) or 0
+        out["error"] = str(exc)[:200]
+    except Exception as exc:  # never the agent's problem
+        log.warning("external memory: recall failed", error=type(exc).__name__)
+        out["error"] = type(exc).__name__
+    finally:
+        await _log_call(owner, source="recall", agent=agent, provider=res.provider_name, action="recall",
+                        ok=ok, status=status, latency_ms=int((time.monotonic() - t0) * 1000))
+    return out
 
 
 # ── mirroring ───────────────────────────────────────────────────────

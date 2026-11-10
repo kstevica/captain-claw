@@ -32,15 +32,23 @@ Providers also differ in how they keep people apart (:attr:`tenancy`):
   whole deck; Flight Deck then gives each user a scope of their own
   (:attr:`ExternalMemoryProvider.scope`) and the provider puts it in every call.
   The agent never chooses it — no action takes a scope.
+
+Some services remember what they are given as it is (Qdrant, ArcadeDB — a
+database, not an extractor); for those, :func:`mirror_body` keeps the text
+about the person's world and the rest goes in fields beside it, and
+:func:`mirror_document_id` / :func:`note_document_id` key what is saved so that
+saving the same thing again replaces it instead of piling up.
 """
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import re
 import socket
 from abc import ABC, abstractmethod
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from typing import Any, ClassVar
 from urllib.parse import urlsplit
 
@@ -117,6 +125,8 @@ class CredentialField:
     required: bool = True
     placeholder: str = ""
     help: str = ""
+    # Shown folded under "More settings" — what most people leave as it is.
+    advanced: bool = False
 
 
 @dataclass(frozen=True)
@@ -218,6 +228,20 @@ class MemoryItem:
 
 
 @dataclass
+class RecallHit:
+    """One thing the memory holds that bears on a message — what automatic
+    recall puts in front of the agent."""
+
+    text: str
+    id: str = ""
+    when: str = ""   # the date it holds for (or was saved), YYYY-MM-DD
+    kind: str = ""   # insight, note, world, … — the provider's own word
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class ActionResult:
     """``text`` is what the agent reads; ``data`` the structured answer (the
     Flight Deck UI and tests use it)."""
@@ -243,8 +267,14 @@ class ExternalMemoryProvider(ABC):
     # The credential field holding the server's address, if the provider has
     # one (checked against private addresses for users who aren't admins).
     url_field: ClassVar[str] = ""
+    # Other credential fields holding an address Flight Deck calls (an
+    # embeddings endpoint…) — checked the same way.
+    extra_url_fields: ClassVar[tuple[str, ...]] = ()
     # What one person's scope is called in the UI ("bank").
     scope_label: ClassVar[str] = ""
+    # The credential field where a person's OWN connection may name its scope
+    # ("bank"); the deck's connection never keeps one (each person gets theirs).
+    scope_field: ClassVar[str] = ""
 
     def __init__(self, credentials: dict[str, str], info: ConnectionInfo | None = None,
                  *, scope: str = "") -> None:
@@ -265,7 +295,13 @@ class ExternalMemoryProvider(ABC):
             "credential_fields": [asdict(f) for f in cls.credential_fields],
             "tenancy": cls.tenancy,
             "scope_label": cls.scope_label,
+            "scope_field": cls.scope_field,
         }
+
+    @classmethod
+    def address_fields(cls) -> tuple[str, ...]:
+        """Every credential field holding an address Flight Deck will call."""
+        return tuple(f for f in (cls.url_field, *cls.extra_url_fields) if f)
 
     @classmethod
     def shareable(cls) -> bool:
@@ -343,6 +379,13 @@ class ExternalMemoryProvider(ABC):
         """Write one mirrored item; returns the service's id for it ("" when
         it gave none)."""
 
+    @abstractmethod
+    async def recall(self, query: str, limit: int) -> list[RecallHit]:
+        """What the memory holds that bears on *query*, most relevant first —
+        for automatic recall before a reply, so ONLY what is relevant (often
+        nothing), and fast (Flight Deck gives it a few seconds). Raises
+        :class:`ProviderError` like :meth:`run`."""
+
     # ── helpers for subclasses ──────────────────────────────────────
 
     def action(self, name: str) -> ProviderAction:
@@ -389,6 +432,89 @@ def mirror_text(item: MemoryItem, *, limit: int = 20_000) -> tuple[str, str]:
     when = f" on {item.created_at[:10]}" if item.created_at else ""
     lines.append(f"(Kept by {by}{when}.)")
     return clip(title, 200), clip("\n".join(lines), limit)
+
+
+def mirror_body(item: MemoryItem, *, limit: int = 50_000) -> str:
+    """Only what is about the person's world: the item and why it holds. Who
+    kept it, its category and tags belong in fields beside it — measured on
+    Hindsight, provenance lines in the text came back as facts ("Bob Bot is a
+    Captain agent"), and in a vector store they blur what the text means."""
+    lines = [item.content.strip()]
+    for key in ("why", "how_to_apply", "body"):
+        value = str(item.meta.get(key) or "").strip()
+        if value:
+            lines.append(value)
+    return clip("\n".join(lines), limit)
+
+
+def safe_document_id(raw: str) -> str:
+    """A document id any service takes, in a URL path or a field."""
+    return re.sub(r"[^A-Za-z0-9_.:-]+", "-", raw).strip("-")[:200]
+
+
+def mirror_document_id(item: MemoryItem) -> str:
+    """What a mirrored item IS, not which copy: an insight that replaces
+    another (same ``entity_key``) gets the same id, so it replaces it."""
+    key = str(item.meta.get("entity_key") or "").strip() or item.source_id
+    return safe_document_id(f"captain-{item.kind}-{key}")
+
+
+def note_document_id(content: str) -> str:
+    """A fact saved by hand, keyed by its text: saved twice, it replaces itself."""
+    digest = hashlib.sha1(" ".join(content.lower().split()).encode()).hexdigest()[:20]
+    return f"captain-note-{digest}"
+
+
+def clean_topics(*sources: Any, limit: int = 12) -> list[str]:
+    """Topics (people, projects, places…) from comma-separated text or lists:
+    lower-case, trimmed, no repeats, at most *limit*."""
+    out: list[str] = []
+    for src in sources:
+        parts = src if isinstance(src, (list, tuple)) else str(src or "").split(",")
+        for part in parts:
+            topic = " ".join(str(part or "").strip().lower().split())[:60].strip()
+            if topic and topic not in out:
+                out.append(topic)
+            if len(out) >= limit:
+                return out
+    return out
+
+
+def as_int(value: Any, default: int, lo: int, hi: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(lo, min(hi, n))
+
+
+def truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in ("1", "true", "yes", "y")
+
+
+def iso_utc(value: Any = "") -> str:
+    """A time as ``YYYY-MM-DDTHH:MM:SSZ`` (UTC) — sortable as text, and what
+    datetime indexes take; now when *value* is empty or unreadable."""
+    raw = str(value or "").strip()
+    if raw:
+        try:
+            dt = datetime.fromisoformat(raw[:-1] + "+00:00" if raw.endswith("Z") else raw)
+            dt = dt if dt.tzinfo else dt.replace(tzinfo=UTC)
+            return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            pass
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def rrf(*rankings: list[str], k: int = 60) -> list[tuple[str, float]]:
+    """Reciprocal rank fusion of ranked id lists, best first."""
+    scores: dict[str, float] = {}
+    for ranking in rankings:
+        for rank, key in enumerate(ranking):
+            scores[key] = scores.get(key, 0.0) + 1.0 / (k + rank + 1)
+    return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
 
 
 def scope_id(owner: str, prefix: str = "captain-") -> str:

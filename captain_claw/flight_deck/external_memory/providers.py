@@ -7,13 +7,17 @@ from __future__ import annotations
 
 from typing import Any
 
+from captain_claw.flight_deck.external_memory.arcadedb import ArcadeDBProvider
 from captain_claw.flight_deck.external_memory.base import ConnectionInfo, ExternalMemoryProvider
 from captain_claw.flight_deck.external_memory.hindsight import HindsightProvider
 from captain_claw.flight_deck.external_memory.membase import MembaseProvider
+from captain_claw.flight_deck.external_memory.qdrant import QdrantProvider
 
 PROVIDERS: dict[str, type[ExternalMemoryProvider]] = {
     MembaseProvider.name: MembaseProvider,
     HindsightProvider.name: HindsightProvider,
+    QdrantProvider.name: QdrantProvider,
+    ArcadeDBProvider.name: ArcadeDBProvider,
 }
 
 # Tests swap a provider's construction (to hand it a mock transport).
