@@ -677,14 +677,42 @@ async def agent_drop_upload(upload_id: str, request: Request) -> dict[str, bool]
     return {"ok": True}
 
 
-def _agents_model_source(source: dict[str, Any] | None, slug: str) -> dict[str, Any] | None:
-    """What an agent can run a worker on. "me" is the agent asking, by Flight Deck's record of it. A model
-    with a key typed in comes only from the page: a key doesn't go through a chat."""
-    if not source:
-        return None
-    if source.get("kind") == "typed":
+async def _agents_model_source(row: dict, grant: Grant, slug: str, fields: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+    """What an agent's worker runs on, and what to tell the agent about it.
+
+    Nothing named is the agent's own model on its own key: work it hands out runs as it would itself,
+    so it needn't ask anyone which model or login to use. "me" is the agent asking, by Flight Deck's
+    record of it. "cli", or a model of the CLI's own, is the CLI's own login. A model with a key typed
+    in comes only from the page: a key doesn't go through a chat.
+
+    Its own model can't always drive the CLI asked for (Claude Code talks only Anthropic's API). Then
+    the CLI's own login does it, if it has a real one, and the agent is told so; otherwise it's refused
+    with what would work."""
+    source = fields.get("model_source")
+    if source and source.get("kind") == "typed":
         raise HTTPException(403, "A model with its own key is entered by the user, on Crew's New task page.")
-    return {**source, "agent": slug} if source.get("agent") == "me" else source
+    if source and source.get("kind") == "cli":
+        return None, ""
+    if source:
+        return ({**source, "agent": slug} if source.get("agent") == "me" else source), ""
+    mine = {"kind": "agent", "agent": slug}
+    harness = str(fields.get("harness") or "").strip().lower()
+    if fields.get("model") or harness not in crew_harness.HARNESSES or harness not in grant.harnesses:
+        return (None if fields.get("model") else mine), ""  # a CLI it may not use is refused by dispatch
+    try:
+        await crew_model.choose(get_db(), row, grant, harness, mine)
+        return mine, ""
+    except HTTPException as exc:
+        if exc.status_code != 400:
+            raise
+        why = f"It can't run on your own model: {exc.detail}"
+    label = crew_harness.HARNESSES[harness].label
+    state = await crew_logins.login_state(get_db(), row, grant, harness)
+    if state["ok"] and not state.get("free"):
+        return None, f"{why} So it runs on {label}'s own login ({state['how']})."
+    free = (" OpenCode's free models are runs_on=cli with a model the user chose." if state.get("free") else "")
+    raise HTTPException(400, f"{why} {label} has no login of its own here either: the user can add one in Crew → Logins, "
+                             f"or name a deck tier or another agent's model in runs_on (see options).{free}")
 
 
 @router.post("/agent/dispatch")
@@ -695,14 +723,16 @@ async def agent_dispatch(body: AgentDispatchBody, request: Request) -> dict[str,
     if over_budget:
         raise HTTPException(429, over_budget)
     fields = body.model_dump()
+    source, model_note = await _agents_model_source(row, grant, slug, fields)
     fields.update(
-        agent_slug=slug, source_host=body.source_host or "localhost", model_source=_agents_model_source(fields.get("model_source"), slug),
+        agent_slug=slug, source_host=body.source_host or "localhost", model_source=source,
         origin={"platform": body.origin_platform, "user_id": body.origin_user_id, "chat_id": body.origin_chat_id},
     )
     task = await crew_runner.dispatch(row, grant, fields)
     await bat_nested.adopt("crew", task["id"], row["id"], slug=slug)
     key = crew_runner.project_of(task)[0]
-    return {**crew_runner.view(task, full=True), "unlanded": crew_runner.unlanded_in(row["id"], key, but=task["id"])}
+    return {**crew_runner.view(task, full=True), "unlanded": crew_runner.unlanded_in(row["id"], key, but=task["id"]),
+            **({"model_note": model_note} if model_note else {})}
 
 
 @router.post("/agent/clone")
