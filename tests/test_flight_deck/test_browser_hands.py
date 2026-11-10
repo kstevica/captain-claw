@@ -29,6 +29,7 @@ import websockets
 from fastapi import FastAPI, HTTPException
 
 from captain_claw.flight_deck import agent_identity, agent_names
+from captain_claw.flight_deck import person_asks as asks
 from captain_claw.flight_deck import auth as fd_auth
 from captain_claw.flight_deck import browser_clip as bc
 from captain_claw.flight_deck import browser_hands as bh
@@ -59,6 +60,10 @@ async def deck(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("FD_AUTH_ENABLED", "true")
     monkeypatch.setattr(bh, "_CONNS", {})
     monkeypatch.setattr(bh, "_ACTS", {})
+    monkeypatch.setattr(bh, "_MINTED", {})
+    monkeypatch.setattr(bh, "_agent_store_path", lambda: tmp_path / "agent-browsers.json")
+    from captain_claw.flight_deck import person_asks
+    person_asks.reset_for_tests()
 
     def _root(user_id, project=bc.CLIP_PROJECT):
         root = tmp_path / "vfs" / user_id / project
@@ -203,7 +208,7 @@ async def test_an_agents_act_runs_in_its_owners_browser_and_comes_back(deck):
                               "data": {"width": 1280, "height": 720}},
                "click": {"ok": False, "error": "ref_9 isn't on the page any more"}}
     status = (await c.get("/fd/browser-hands/agent/status", headers=_agent())).json()
-    assert status == {"connected": False, "browsers": [], "stopped": False}
+    assert status == {"connected": False, "browsers": [], "stopped": False, "own_connected": False, "own_paired": False}
     async with FakeBrowser(deck["ws"], await deck["pat"](), answer=lambda a: answers[a["action"]]) as fake:
         assert fake.welcome["type"] == "welcome" and fake.welcome["user"] == "Alice"
         status = (await c.get("/fd/browser-hands/agent/status", headers=_agent())).json()
@@ -340,3 +345,97 @@ def test_the_extension_asks_for_the_debugger_the_way_chrome_allows():
     for name in ("background.js", "hands.js"):
         for n, line in enumerate((EXTENSION / name).read_text().splitlines(), 1):
             assert not re.match(r"chrome\.(debugger|tabGroups|permissions)\.", line), f"{name}:{n}: {line}"
+
+
+# ── an agent's own browser ────────────────────────────────────────────
+
+
+async def _connect(c, *, slug="scout", origin="web", answer=True):
+    """The agent asks to connect its own browser; the person answers."""
+    r = (await c.post("/fd/browser-hands/agent/connect", headers=_agent(slug=slug),
+                      json={"origin": origin, "wait": 0})).json()
+    if "pending" not in r:
+        return r, None
+    [open_ask] = asks.open_for("alice")
+    if answer is None:
+        asks.answer(r["pending"], "alice", declined=True)
+    else:
+        asks.answer(r["pending"], "alice", answers={"connect": answer})
+    done = (await c.post("/fd/browser-hands/agent/connect/follow", headers=_agent(slug=slug),
+                         json={"id": r["pending"], "wait": 1})).json()
+    return done, open_ask
+
+
+async def test_an_agent_connects_its_own_browser_only_with_the_persons_ok(deck):
+    c = deck["client"]
+    nobody, _ = await _connect(c, origin="scheduled")
+    assert nobody["nobody"] and asks.open_for("alice") == []
+    said_no, ask = await _connect(c, answer=False)
+    assert said_no["declined"] and "said no" in said_no["error"] and bh.agent_browser_rows() == []
+    assert "Scout" in ask["questions"][0]["question"] and "not your Chrome" in ask["questions"][0]["help"]
+    skipped, _ = await _connect(c, answer=None)
+    assert skipped["declined"] and bh.agent_browser_rows() == []
+    got, _ = await _connect(c)
+    assert got["ok"] and got["token"].startswith(bh.AGENT_TOKEN_PREFIX) and got["name"] == "Scout"
+    [row] = bh.agent_browser_rows("alice")
+    assert row["slug"] == "scout" and got["token"] not in json.dumps(row), "only its hash is kept"
+    # The same yes asked about again gives the same token, never a second one.
+    again = (await c.post("/fd/browser-hands/agent/connect/follow", headers=_agent(),
+                          json={"id": list(bh._MINTED)[0], "wait": 0})).json()
+    assert again["token"] == got["token"] and len(bh.agent_browser_rows()) == 1
+    # It's no personal access token: the extension API, MCP and the rest refuse it.
+    me = await c.get("/fd/clip/me", headers={"Authorization": f"Bearer {got['token']}"})
+    assert me.status_code == 401
+    # Connections → Browser lists it, and Disconnect forgets it.
+    listed = (await c.get("/fd/browsers", headers=deck["jwt"])).json()["browsers"]
+    assert [(b["kind"], b["name"]) for b in listed] == [("agent", "Scout's own browser (on the server)")]
+    assert (await c.delete(f"/fd/browsers/{row['id']}", headers=deck["jwt"])).json() == {"ok": True}
+    assert bh.agent_browser_rows() == []
+
+
+async def test_an_agents_own_browser_serves_that_agent_after_the_persons_chrome(deck):
+    c = deck["client"]
+    got, _ = await _connect(c)
+    seen_own: list[str] = []
+
+    def own_answer(act):
+        seen_own.append(act["agent"]["slug"])
+        return {"ok": True, "content": "own did " + act["action"]}
+
+    async with FakeBrowser(deck["ws"], got["token"], answer=own_answer) as own:
+        assert own.welcome["type"] == "welcome"
+        [conn] = bh.connections("alice")
+        assert conn.agent_slug == "scout" and conn.browser == "Scout's own browser"
+        status = (await c.get("/fd/browser-hands/agent/status", headers=_agent())).json()
+        assert status["own_connected"] and status["own_paired"]
+        r = await _act(c, "navigate", {"url": "https://x.com"})
+        assert r["ok"] and r["own"] is True and r["content"] == "own did navigate"
+        # Another agent never lands there.
+        other = await _act(c, slug="ledger")
+        assert other["no_browser"] and seen_own == ["scout"]
+        assert not (await c.get("/fd/browser-hands/agent/status", headers=_agent(slug="ledger"))).json()["connected"]
+        # The person's own Chrome comes first, for every agent.
+        async with FakeBrowser(deck["ws"], await deck["pat"]()) as person:
+            r = await _act(c)
+            assert r["ok"] and "own" not in r and person.acts[-1]["agent"]["slug"] == "scout"
+            assert (await _act(c, slug="ledger"))["ok"]
+            # The agent's token posts files for that agent's own acts only.
+            ledger_act: dict = {}
+
+            async def hold(act):
+                ledger_act["id"] = act["id"]
+                await asyncio.sleep(0.3)
+                return {"ok": True, "content": "held"}
+
+            person.answer = hold
+            pending = asyncio.create_task(_act(c, slug="ledger"))
+            while "id" not in ledger_act:
+                await asyncio.sleep(0.02)
+            refused = await c.post(f"/fd/clip/hands/files/{ledger_act['id']}", headers={"Authorization": f"Bearer {got['token']}"},
+                                   files=[("file", ("x.txt", b"x"))])
+            assert refused.status_code == 404
+            await pending
+        # Revoked: the socket closes and the agent is told to connect again.
+        await c.delete(f"/fd/browsers/{bh.agent_browser_rows()[0]['id']}", headers=deck["jwt"])
+        await asyncio.sleep(0.1)
+        assert (await _act(c))["no_browser"]

@@ -315,6 +315,48 @@ async def test_captain_for_chrome_comes_from_this_captain(tool_env, monkeypatch)
     assert not r.success and "turned off" in r.error
 
 
+
+async def test_connecting_its_own_browser_needs_the_deck_and_the_persons_yes(tool_env, monkeypatch):
+    from captain_claw import fd_client
+
+    tool, kw = BrowserTool(), tool_env.kw
+    monkeypatch.setattr(fd_client, "flight_deck_base", lambda: "")
+    r = await tool.execute("extension_connect", **kw)
+    assert not r.success and "needs Flight Deck" in r.error
+    monkeypatch.setattr(fd_client, "flight_deck_base", lambda: "http://fd.test")
+
+    async def _download(url, max_bytes):
+        return _deck_zip()
+
+    monkeypatch.setattr(bx, "_download", _download)
+    asked: list[dict] = []
+
+    async def _no(kwargs):
+        asked.append(kwargs)
+        return {"ok": False, "declined": True, "error": "The person said no. Don't connect it unless they ask you to."}
+
+    monkeypatch.setattr(bx, "ask_to_connect", _no)
+    r = await tool.execute("extension_connect", **kw)
+    store = bx.ExtensionStore.for_tool(kw)
+    assert not r.success and "said no" in r.error and len(asked) == 1
+    assert store.captain() is not None, "Captain for Chrome is installed first"
+    assert store.captain_conn() is None and store.seed() is None
+    tool_env.cfg.extension_policy = "off"
+    assert "turned off" in (await tool.execute("extension_connect", **kw)).error
+    # A connection kept, then Captain removed: the connection goes, and the deck is told.
+    store.save_captain_conn({"url": "http://fd.test", "token": "cc_ab_x", "agent": "Scout"})
+    seed = store.seed()
+    assert seed["ext_id"] == store.captain().id and seed["storage"]["hands"] == {"on": True, "front": False}
+    let_go: list[bool] = []
+
+    async def _let_go():
+        let_go.append(True)
+
+    monkeypatch.setattr(bx, "let_go_of_own_browser", _let_go)
+    assert (await tool.execute("extension_remove", extension_id="captain for chrome", **kw)).success
+    assert store.captain_conn() is None and let_go == [True]
+
+
 # ── live: a real headless Chromium ────────────────────────────────────
 
 

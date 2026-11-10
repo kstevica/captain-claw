@@ -932,11 +932,23 @@ async def list_browsers(user: dict = Depends(get_current_user)):
         out.append({"id": r["id"], "kind": kind, "name": name or ("Mac" if kind == "desktop" else "Browser"),
                     "created_at": r.get("created_at"), "last_used_at": r.get("last_used_at"),
                     "agents_can_use": r["id"] in lent})
+    from captain_claw.flight_deck.agent_names import display_name
+    from captain_claw.flight_deck.browser_hands import agent_browser_rows
+
+    for r in agent_browser_rows(str(user["id"])):
+        name = await display_name(str(r.get("slug") or ""), str(user["id"])) or r.get("name") or r.get("slug")
+        out.append({"id": r["id"], "kind": "agent", "name": f"{name}'s own browser (on the server)",
+                    "created_at": r.get("created_at"), "last_used_at": None,
+                    "agents_can_use": r["id"] in lent, "agent": r.get("slug")})
     return {"browsers": out, "mac_app": mac_app_zip() is not None or bool(mac_app_url())}
 
 
 @owner_router.delete("/{token_id}")
 async def remove_browser(token_id: str, user: dict = Depends(get_current_user)):
+    from captain_claw.flight_deck.browser_hands import drop_agent_browser
+
+    if token_id.startswith("ab_") and await drop_agent_browser(str(user["id"]), row_id=token_id):
+        return {"ok": True}
     db = get_db()
     rows = await db.list_pats(str(user["id"]))
     if not any(r["id"] == token_id and token_kind(r.get("name")) for r in rows):

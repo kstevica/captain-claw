@@ -49,6 +49,7 @@ log = get_logger(__name__)
 
 STORE_DIRNAME = ".browser-extensions"
 INDEX_NAME = "index.json"
+CAPTAIN_CONN = "captain-conn.json"   # Captain for Chrome's connection in this agent's own browser
 MAX_FILES = 5000
 DEFAULT_PRODVERSION = "140.0.0.0"
 WEBSTORE_CRX_URL = ("https://clients2.google.com/service/update2/crx?response=redirect&prodversion={version}"
@@ -420,6 +421,40 @@ class ExtensionStore:
         self._save([e for e in self.all() if e.id != ext_id] + [entry])
         return entry
 
+    def captain(self) -> Installed | None:
+        """Captain for Chrome, when it's installed here."""
+        return next((e for e in self.all() if e.source == CAPTAIN_SOURCE), None)
+
+    def captain_conn(self) -> dict[str, Any] | None:
+        try:
+            conn = json.loads((self.root / CAPTAIN_CONN).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return conn if isinstance(conn, dict) and conn.get("url") and conn.get("token") else None
+
+    def save_captain_conn(self, conn: dict[str, Any]) -> None:
+        self.root.mkdir(parents=True, exist_ok=True)
+        path = self.root / CAPTAIN_CONN
+        path.write_text(json.dumps(conn), encoding="utf-8")
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+    def forget_captain_conn(self) -> bool:
+        path = self.root / CAPTAIN_CONN
+        existed = path.exists()
+        path.unlink(missing_ok=True)
+        return existed
+
+    def seed(self) -> dict[str, Any] | None:
+        """What to put in Captain for Chrome's storage when the browser starts:
+        its connection, and agents' use switched on."""
+        entry, conn = self.captain(), self.captain_conn()
+        if entry is None or conn is None:
+            return None
+        return {"ext_id": entry.id, "storage": {"conn": conn, "hands": {"on": True, "front": False}}}
+
     def remove(self, ext_id: str) -> Installed | None:
         e = self.get(ext_id)
         if e is None:
@@ -577,3 +612,88 @@ async def ask_person(s: dict[str, Any], ext_id: str, source: str, kwargs: dict[s
     if answer == "They answered: no":
         return False, "The person said no. Don't install it."
     return False, f"No go-ahead from the person ({answer[:200]}). Don't install it unless they say so."
+
+
+# ── pairing Captain for Chrome in this agent's own browser ───────────
+
+
+async def _deck(path: str, body: dict[str, Any] | None = None, *, method: str = "POST",
+                timeout: float = 45.0) -> tuple[int, dict[str, Any]]:
+    import httpx
+
+    from captain_claw.fd_client import flight_deck_base, flight_deck_headers
+
+    base = flight_deck_base()
+    if not base:
+        raise ExtensionError("Connecting needs Flight Deck, and this agent isn't running under one.")
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.request(method, f"{base}{path}", headers=flight_deck_headers(), json=body)
+    try:
+        data = resp.json()
+    except ValueError:
+        data = {"detail": resp.text[:300]}
+    return resp.status_code, data if isinstance(data, dict) else {}
+
+
+async def ask_to_connect(kwargs: dict[str, Any]) -> dict[str, Any]:
+    """Ask Flight Deck (and so the person) for this agent's own-browser token.
+    ``{"ok": True, "token", "name"}`` on their yes, else the reason."""
+    import secrets
+
+    agent = kwargs.get("_agent")
+    origin = getattr(agent, "_turn_source", None)
+    origin = str(origin[0]) if isinstance(origin, tuple) and origin else ""
+    ask_id = "xa_" + secrets.token_hex(8)
+    stream = kwargs.get("_stream_callback")
+    finished = False
+    try:
+        status, data = await _deck("/fd/browser-hands/agent/connect", {"origin": origin, "wait": 20, "ask_id": ask_id})
+        told = False
+        while status == 200 and data.get("pending"):
+            if not told and callable(stream):
+                told = True
+                try:
+                    stream("Waiting for their OK in Flight Deck…\n")
+                except Exception:
+                    pass
+            status, data = await _deck("/fd/browser-hands/agent/connect/follow", {"id": data["pending"], "wait": 25})
+        finished = True
+    except ExtensionError:
+        raise
+    except Exception as exc:
+        raise ExtensionError(f"Flight Deck didn't answer ({type(exc).__name__}).") from exc
+    finally:
+        if not finished:
+            try:
+                await _deck("/fd/browser-hands/agent/connect/cancel", {"id": ask_id, "wait": 0})
+            except Exception:
+                pass
+    if status == 404:
+        raise ExtensionError("This Flight Deck can't connect an agent's own browser yet — it needs an update.")
+    if status >= 400:
+        raise ExtensionError(str(data.get("detail") or f"Flight Deck answered {status}."))
+    return data
+
+
+async def own_browser_connected(wait: float = 20.0) -> bool:
+    """Flight Deck sees this agent's own browser (polled up to *wait* seconds)."""
+    import asyncio
+
+    deadline = time.time() + wait
+    while True:
+        try:
+            status, data = await _deck("/fd/browser-hands/agent/status", method="GET", timeout=10)
+            if status == 200 and data.get("own_connected"):
+                return True
+        except Exception:
+            pass
+        if time.time() >= deadline:
+            return False
+        await asyncio.sleep(0.5)
+
+
+async def let_go_of_own_browser() -> None:
+    try:
+        await _deck("/fd/browser-hands/agent/disconnect", {}, timeout=10)
+    except Exception:
+        pass

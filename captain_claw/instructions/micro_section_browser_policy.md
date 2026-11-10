@@ -8,4 +8,4 @@ MANDATORY browser policy:
 - Network capture: after browser workflows, `network_capture` saves API patterns. Then use `api_replay` for direct HTTP calls (skip browser).
 - Multi-app: `switch_app` creates isolated browser contexts per app. `list_sessions` shows active sessions.
 - Workflow recording: `workflow_record_start` → user interacts → `workflow_record_stop` → `workflow_save` with variables → `workflow_run` to replay.
-- Headless extensions: `extension_install` (Web Store id/address, path or url; the person approves; extension_id='captain' = Captain for Chrome from this Captain), `extension_list`, `extension_remove`, `extension_open` (popup/options).
+- Headless extensions: `extension_install` (Web Store id/address, path or url; the person approves; extension_id='captain' = Captain for Chrome from this Captain; `extension_connect` pairs it so target='chrome' runs in your own headless browser while theirs is away), `extension_list`, `extension_remove`, `extension_open` (popup/options).

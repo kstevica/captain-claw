@@ -141,8 +141,8 @@ function restoreScroll(before) {
 
 function render() {
   const connected = !!S.conn
-  $btnHistory.hidden = !connected || S.view === 'connect'
-  $btnSettings.hidden = !connected || S.view === 'connect'
+  $btnHistory.hidden = !connected || S.view === 'connect' || S.view === 'agent'
+  $btnSettings.hidden = !connected || S.view === 'connect' || S.view === 'agent'
   $deckName.textContent = connected ? (S.me?.deck?.name ? `${S.me.deck.name} · ${hostOf(S.conn.url)}` : hostOf(S.conn.url)) : 'Not connected'
   const before = listScroll()
   renderView()
@@ -150,9 +150,20 @@ function render() {
   if (S.view === 'run') followRun()
 }
 
+function viewAgentOwned() {
+  return `
+    <div class="card">
+      <div class="label">Connected</div>
+      <div><b>${esc(S.conn.agent_name || S.conn.agent)}</b>'s own browser</div>
+      <div class="dim">Flight Deck connected this browser for that agent's browser tool (${esc(hostOf(S.conn.url))}). It isn't a person's Chrome: sending pages from here is off.</div>
+    </div>
+    <div class="foot">Captain for Chrome ${esc(VERSION)}</div>`
+}
+
 function renderView() {
   keepFocus(() => {
-    if (S.view === 'connect') $view.innerHTML = viewConnect()
+    if (S.view === 'agent') $view.innerHTML = viewAgentOwned()
+    else if (S.view === 'connect') $view.innerHTML = viewConnect()
     else if (S.view === 'main') $view.innerHTML = viewHands() + viewMain()
     else if (S.view === 'run') $view.innerHTML = viewRun()
     else if (S.view === 'history') $view.innerHTML = viewHistory()
@@ -1622,6 +1633,12 @@ async function start() {
   S.conn = await loadConn()
   if (!S.conn) {
     S.view = 'connect'
+    render()
+    return
+  }
+  if (S.conn.agent) {
+    // An agent's own browser: its token is for the agent's browser tool only.
+    S.view = 'agent'
     render()
     return
   }
