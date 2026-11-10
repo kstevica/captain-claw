@@ -40,16 +40,19 @@ _WINDOWS = {"five_hour": "the 5-hour limit", "seven_day": "the weekly limit", "s
 
 
 def _model_source_of(value: Any) -> tuple[dict[str, str] | None, str]:
-    """What runs_on names, as Flight Deck takes it: (choice, why it can't be read)."""
+    """What runs_on names, as Flight Deck takes it: (choice, why it can't be read). Nothing named is
+    the agent's own model, which Flight Deck fills in from its record of who's asking."""
     text = str(value or "").strip().lower()
     if not text:
         return None, ""
     kind, _, name = text.partition(":")
     if text == "me":
         return {"kind": "agent", "agent": "me"}, ""
+    if text == "cli":
+        return {"kind": "cli"}, ""
     if kind in ("agent", "tier") and name.strip():
         return {"kind": kind, kind: name.strip()}, ""
-    return None, "runs_on is 'me', 'agent:<name>' or 'tier:<name>', as action=options lists them."
+    return None, "runs_on is 'me', 'cli', 'agent:<name>' or 'tier:<name>', as action=options lists them."
 
 
 def _choice_lines(choices: dict, you: str) -> list[str]:
@@ -59,8 +62,9 @@ def _choice_lines(choices: dict, you: str) -> list[str]:
     rows += [(f"tier:{t.get('id')}", f"{t.get('label')} tier", t) for t in choices.get("tiers") or []]
     if not rows:
         return []
-    lines = ["Models a worker can run on instead of its CLI's own (runs_on, when the user asks. The CLI needs no login, the key stays "
-             "on the deck, and tokens count toward the user's daily limit):"]
+    lines = ["Models a worker can run on (runs_on). Yours, 'me', is what it runs on when runs_on is left out, so don't ask the "
+             "user which model or login to use; name another only when they ask. On these the CLI needs no login, the key stays "
+             "on the deck, and tokens count toward the user's daily limit:"]
     for name, label, item in rows:
         clis = ", ".join(item.get("works_with") or [])
         lines.append(f"  {name}: {label}, {item.get('model')}, for {clis}" if clis else f"  {name}: {label}, can't be used: {item.get('why_not') or 'no CLI here can talk to it'}")
@@ -136,10 +140,11 @@ class CrewTool(Tool):
         "Giving a worker folders of the user's VFS: vfs_read and vfs_write on dispatch or prepare_env, or folders for a task under "
         "way. With vfs_read it gets its own copy; with vfs_write it works in the real folder, at once and with no undo, so give "
         "that only when the task has to change their files there. Google Drive and OneDrive folders can't be given. "
-        "Running a worker on another model: runs_on on dispatch or prepare_env, when the user asks for your model, another "
-        "agent's or a deck tier. Options lists them and which CLIs can use each. Its CLI then needs no login, the key stays "
-        "on the deck, and the tokens count toward the user's daily limit. A model with a key of its own is entered by the "
-        "user on Crew's New task page: never ask for a key in a chat. "
+        "Which model a worker runs on: yours, with your key, unless the user asks for another, so don't ask them which model "
+        "or login to use. runs_on on dispatch or prepare_env names another when they ask: 'cli' for the CLI's own login and "
+        "models, another agent's model, or a deck tier; options lists them and which CLIs can use each. On a model through the "
+        "deck the CLI needs no login, the key stays on the deck, and the tokens count toward the user's daily limit. A model "
+        "with a key of its own is entered by the user on Crew's New task page: never ask for a key in a chat. "
         "A task exists once a crew result here gives its id, and not before: never say one started, or that a repository "
         "is cloned, from anything else. If a call fails, tell the user what it said. "
         "Actions: options (the CLIs you may use, their logins, the model each last ran on and its usage limits, like "
@@ -199,13 +204,14 @@ class CrewTool(Tool):
             "folder": {"type": "string", "description": "dispatch, prepare_env, env: a folder in that project, only with project. Omit to use the project's name."},
             "repo_url": {"type": "string", "description": "dispatch, clone, prepare_env, env: a repository's https:// address, with no login in it. Crew clones it itself, in the background, and the worker starts inside it, so never ask a worker to clone. It makes its own project, named after the repository: send no project with it."},
             "repo_path": {"type": "string", "description": "dispatch, prepare_env, env: a git folder on this computer. Admins only."},
-            "model": {"type": "string", "description": "dispatch: a model for the CLI, only if the user asked for one; otherwise their default is used. For OpenCode, exactly a name from 'options': never make one up."},
+            "model": {"type": "string", "description": "dispatch: one of the CLI's own models, only if the user asked for one: the worker then runs on the CLI's own login, not on your model. For OpenCode, exactly a name from 'options': never make one up."},
             "runs_on": {
                 "type": "string",
                 "description": (
-                    "dispatch, prepare_env: run the worker on this instead of its CLI's own model, only if the user asked: "
-                    "'me' for your own model, 'agent:<name>' for another of the user's agents, 'tier:<name>' for a deck tier, "
-                    "exactly as 'options' lists them. Not with model."
+                    "dispatch, prepare_env: what the worker runs on. Leave it out for your own model and key, the default. "
+                    "Only if the user asked for something else: 'cli' for the CLI's own login and models (model then names one), "
+                    "'agent:<name>' for another of the user's agents, 'tier:<name>' for a deck tier, exactly as 'options' "
+                    "lists them. Only 'cli' goes with model."
                 ),
             },
             "effort": {"type": "string", "description": "dispatch: reasoning effort for the CLI, only if the user asked for one."},
@@ -274,15 +280,16 @@ class CrewTool(Tool):
         used = {u["id"]: u for u in (data.get("usage") or {}).get("harnesses", [])}
         for h in (data.get("me") or {}).get("harnesses", []):
             state = "not installed" if not h.get("installed") else (
-                f"ready, on {h['login']['how']}" if h["login"].get("ok") else "no login yet: it needs one in Crew → Logins, or runs_on")
+                f"installed; its own login, for runs_on=cli: {h['login']['how']}" if h["login"].get("ok")
+                else "installed; no login of its own, which only runs_on=cli needs (the user adds one in Crew → Logins)")
             lines.append(f"  {h['id']} ({h['label']}): {state}")
             if h.get("installed"):
                 lines.extend(_usage_lines(used.get(h["id"])))
                 if h.get("default_model"):
-                    lines.append(f"    Tasks use {h['default_model']} unless one names another (the user's choice).")
+                    lines.append(f"    On its own login it uses {h['default_model']} unless one names another (the user's choice).")
                 elif (h.get("login") or {}).get("free"):
-                    lines.append("    No model is chosen, so it needs one named. Its free models differ in what happens to "
-                                 "the code, so that's the user's choice: ask them, don't pick for them.")
+                    lines.append("    On its own login no model is chosen, so runs_on=cli needs one named. Its free models differ "
+                                 "in what happens to the code, so that's the user's choice: ask them, don't pick for them.")
                 if h.get("models"):
                     lines.append(f"    Of its own, it can use only these, by exactly these names: {', '.join(h['models'][:30])}")
         lines.extend(_choice_lines(data.get("model_choices") or {}, str(data.get("you") or "")))
@@ -408,11 +415,9 @@ class CrewTool(Tool):
         if not kwargs.get("deliver") and kwargs.get("kind") != "scout" and _OPENS_A_PR.search(brief):
             kwargs["deliver"] = "pr"
         folders, why = self._folders_of(kwargs)
-        source, why_not = _model_source_of(kwargs.get("runs_on"))
+        source, why_not = self._source_of(kwargs)
         if why or why_not:
             return ToolResult(success=False, error=why or why_not)
-        if source and kwargs.get("model"):
-            return ToolResult(success=False, error="Give model or runs_on, not both: runs_on already says which model.")
         held, refused = await self._attach(client, kwargs)
         if refused is not None:
             return refused
@@ -475,11 +480,9 @@ class CrewTool(Tool):
             return ToolResult(success=False, error="Provide `harness`: which CLI does it (see action='options').")
         origin_platform, origin_user_id, origin_chat_id = self._origin_of(kwargs.get("_agent"))
         folders, why = self._folders_of(kwargs)
-        source, why_not = _model_source_of(kwargs.get("runs_on"))
+        source, why_not = self._source_of(kwargs)
         if why or why_not:
             return ToolResult(success=False, error=why or why_not)
-        if source and kwargs.get("model"):
-            return ToolResult(success=False, error="Give model or runs_on, not both: runs_on already says which model.")
         held, refused = await self._attach(client, kwargs)
         if refused is not None:
             return refused
@@ -547,9 +550,21 @@ class CrewTool(Tool):
         return ToolResult(success=True, content="\n".join(lines))
 
     @staticmethod
+    def _source_of(kwargs: dict) -> tuple[dict[str, str] | None, str]:
+        """runs_on as Flight Deck takes it, or why not. A model of the CLI's own is its own login, as 'cli' is."""
+        source, why = _model_source_of(kwargs.get("runs_on"))
+        if source and source["kind"] != "cli" and kwargs.get("model"):
+            return None, "Give model or runs_on, not both: runs_on already says which model. A model of the CLI's own goes with runs_on=cli."
+        return source, why
+
+    @staticmethod
     def _runs_on_line(task: dict) -> str:
         label = (task.get("model_source") or {}).get("label")
-        return f" It runs on {label}: {task.get('model')}." if label else ""
+        if label:
+            return f" It runs on {label}: {task.get('model')}."
+        if task.get("model_note"):
+            return f" {task['model_note']}"
+        return f" It runs on {task.get('harness_label') or 'the CLI'}'s own login." if task.get("harness_label") else ""
 
     @staticmethod
     def _where_lines(results: dict) -> list[str]:

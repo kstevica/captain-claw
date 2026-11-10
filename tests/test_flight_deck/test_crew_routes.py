@@ -969,7 +969,7 @@ async def test_the_tool_says_a_free_model_is_the_users_choice():
     assert "the user's choice" in out and "opencode/deepseek-v4.1-flash-free" in out
     options.answers["options"]["me"]["harnesses"][0]["default_model"] = "opencode/deepseek-v4.1-flash-free"
     out = (await CrewTool()._do_options(options)).content
-    assert "Tasks use opencode/deepseek-v4.1-flash-free" in out and "ask them" not in out
+    assert "On its own login it uses opencode/deepseek-v4.1-flash-free" in out and "ask them" not in out
 
 
 async def test_the_tool_answers_which_model_and_how_much_of_the_limit():

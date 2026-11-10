@@ -1,4 +1,4 @@
-"""Crew's tool: an agent running a worker on its own model, another agent's or a deck tier."""
+"""Crew's tool: an agent running a worker on its own model (the default), its CLI's own login, another agent's or a deck tier."""
 
 # ruff: noqa: F811
 from __future__ import annotations
@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from captain_claw.flight_deck import crew_store, server
+from captain_claw.flight_deck import crew_logins, crew_store, server
 from captain_claw.tools.crew import CrewTool, _choice_lines, _model_source_of
 
 from .test_crew_routes import _approve, _client, as_agent, deck  # noqa: F401
@@ -57,6 +57,8 @@ async def ready(deck, as_agent, monkeypatch):
     (" ME ", {"kind": "agent", "agent": "me"}),
     ("agent:sokol", {"kind": "agent", "agent": "sokol"}),
     ("tier:Balanced", {"kind": "tier", "tier": "balanced"}),
+    ("cli", {"kind": "cli"}),
+    (" CLI", {"kind": "cli"}),
     ("", None),
     (None, None),
 ])
@@ -67,7 +69,7 @@ def test_what_runs_on_names(said, source):
 @pytest.mark.parametrize("said", ["balanced", "tier:", "agent: ", "typed:http://x", "gpt-5"])
 def test_what_it_cant_read_is_said_plainly(said):
     source, why = _model_source_of(said)
-    assert source is None and "'me', 'agent:<name>' or 'tier:<name>'" in why
+    assert source is None and "'me', 'cli', 'agent:<name>' or 'tier:<name>'" in why
 
 
 class _Asked:
@@ -93,10 +95,25 @@ async def test_it_isnt_sent_when_it_cant_be_read_or_contradicts_itself():
     assert not setup.success and client.asked == []
 
 
-async def test_nothing_named_changes_nothing():
+async def test_nothing_named_is_left_to_the_deck_to_fill_in():
+    """Its own model is the default, and Flight Deck knows who's asking: the tool sends nothing."""
     client = _Asked(dispatch=MADE)
     out = await CrewTool()._do_dispatch(client, harness="pi", brief="x")
-    assert out.success and "model_source" not in client.asked[0][1] and "It runs on" not in out.content
+    assert out.success and "model_source" not in client.asked[0][1]
+
+
+async def test_its_cli_own_login_is_named_and_can_have_a_model():
+    client = _Asked(dispatch=MADE)
+    out = await CrewTool()._do_dispatch(client, harness="opencode", brief="x", runs_on="cli", model="opencode/some-free")
+    assert out.success, out.error
+    assert client.asked[0][1]["model_source"] == {"kind": "cli"} and client.asked[0][1]["model"] == "opencode/some-free"
+    assert "It runs on OpenCode's own login." in out.content
+
+
+async def test_a_fallback_is_relayed():
+    client = _Asked(dispatch={**MADE, "model_note": "It can't run on your own model: no. So it runs on OpenCode's own login (x)."})
+    out = await CrewTool()._do_dispatch(client, harness="opencode", brief="x")
+    assert "It can't run on your own model: no. So it runs on OpenCode's own login (x)." in out.content
 
 
 def test_the_options_put_itself_first_and_say_what_cant_be_used():
@@ -123,7 +140,8 @@ async def test_options_list_them_with_no_key_in_sight(ready):
     assert "tier:vision: Vision tier, gemini-test, for opencode, crush, pi" in out.content
     assert "elsewhere" not in out.content, "only the person's own agents"
     assert TEAM_KEY not in out.content and "sk-of-" not in out.content
-    assert "no login yet: it needs one in Crew → Logins, or runs_on" in out.content
+    assert "no login of its own, which only runs_on=cli needs" in out.content
+    assert "Yours, 'me', is what it runs on when runs_on is left out" in out.content
 
 
 async def test_me_is_the_agent_asking_and_needs_no_login(ready):
@@ -174,9 +192,57 @@ async def test_status_says_what_it_runs_on(ready):
     assert "(Balanced tier)" in out.content and TEAM_KEY not in out.content
 
 
-async def test_no_login_and_no_model_says_it_has_both_ways_out(ready):
+async def test_nothing_named_runs_on_the_agents_own_model_and_key(ready):
+    """The agent doesn't have to ask which model or login: it's its own, as it would do the work itself."""
     out = await CrewTool()._do_dispatch(_Deck(), harness="claude", brief="SCENARIO:work", project="p")
+    assert out.success, out.error
+    assert "It runs on Helper's model: its-own-model." in out.content and "sk-of-" not in out.content
+    task = crew_store.get_store().list_for(ready.user["id"], limit=1)[0]
+    assert task["model_source"] == {"kind": "agent", "agent": "helper", "label": "Helper's model"} and task["model"] == "its-own-model"
+
+
+async def test_setting_a_project_up_runs_on_it_too(ready):
+    out = await CrewTool()._do_prepare_env(_Deck(), harness="claude", project="p")
+    assert out.success, out.error
+    assert "It runs on Helper's model: its-own-model." in out.content
+
+
+async def test_its_cli_own_login_when_asked(ready):
+    out = await CrewTool()._do_dispatch(_Deck(), harness="claude", brief="SCENARIO:work", project="p", runs_on="cli")
     assert not out.success and "Add your Claude Code login" in out.error and "an agent's model or a deck tier" in out.error
+
+
+async def test_a_model_of_the_clis_own_is_its_own_login(ready):
+    """An agent from before runs_on=cli names only the model: that was, and is, the CLI's own."""
+    out = await CrewTool()._do_dispatch(_Deck(), harness="claude", brief="SCENARIO:work", project="p", model="opus")
+    assert not out.success and "Add your Claude Code login" in out.error
+
+
+def _on_gemini(deck):
+    """The agent asking is on a model Claude Code can't talk to."""
+    home = deck.tmp / "fd-data" / "helper"
+    (home / "config.yaml").write_text(json.dumps({"model": {"provider": "gemini", "model": "gemini-own"}}))
+    (home / ".env").write_text("GEMINI_API_KEY=sk-of-helper\n")
+
+
+async def test_its_model_cant_drive_the_cli_and_theres_no_login_says_what_would(ready):
+    _on_gemini(ready)
+    out = await CrewTool()._do_dispatch(_Deck(), harness="claude", brief="SCENARIO:work", project="p")
+    assert not out.success
+    assert "It can't run on your own model: Claude Code can't talk to that model's server. OpenCode, Crush or Pi can." in out.error
+    assert "no login of its own here either" in out.error and "Crew → Logins" in out.error and "runs_on" in out.error
+    assert crew_store.get_store().list_for(ready.user["id"], limit=1) == []
+
+
+async def test_its_model_cant_drive_the_cli_so_its_own_login_does_and_it_says_so(ready):
+    _on_gemini(ready)
+    await crew_logins.save_login(ready.db, ready.user["id"], "claude", "sk-ant-oat-saved-login")
+    out = await CrewTool()._do_dispatch(_Deck(), harness="claude", brief="SCENARIO:work", project="p")
+    assert out.success, out.error
+    assert "It can't run on your own model" in out.content and "So it runs on Claude Code's own login (your saved login)." in out.content
+    assert "sk-ant-oat" not in out.content
+    task = crew_store.get_store().list_for(ready.user["id"], limit=1)[0]
+    assert not task.get("model_source")
 
 
 async def test_an_agent_cant_hand_a_key_through_the_route(ready):
@@ -195,5 +261,6 @@ async def test_the_person_can_still_enter_one_on_the_page(ready):
 
 def test_the_tool_says_how_and_when():
     text = CrewTool.description
-    assert "runs_on" in text and "when the user asks" in text and "never ask for a key in a chat" in text
+    assert "runs_on" in text and "yours, with your key, unless the user asks for another" in text
+    assert "don't ask them which model or login to use" in text and "never ask for a key in a chat" in text
     assert "runs_on" in CrewTool.parameters["properties"]
