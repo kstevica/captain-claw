@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import os
 import re
+import shutil
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -143,17 +145,25 @@ def _note_missing_libs(libs: list[str]) -> None:
 
 async def launch_chromium(browser_type: Any, *, headless: bool = True,
                           auto_install: bool = True, install_timeout: int = 300,
-                          **kwargs: Any) -> Any:
+                          persistent_dir: str | None = None, **kwargs: Any) -> Any:
     """``browser_type.launch(...)`` with the two host problems handled: a
     missing binary is installed once (into the shared cache) and retried; a
     host without Chromium's system libraries raises :class:`BrowserUnavailable`
     with a message the agent can act on — remembered for a while, so later
-    calls answer at once instead of failing slowly again."""
+    calls answer at once instead of failing slowly again. With
+    *persistent_dir*: ``launch_persistent_context`` there instead (a browser
+    that can load extensions) — the context, not a browser, comes back."""
     known = browser_unavailable_reason()
     if known:
         raise BrowserUnavailable(known, _libs_missing)
-    try:
+
+    async def _launch() -> Any:
+        if persistent_dir:
+            return await browser_type.launch_persistent_context(persistent_dir, headless=headless, **kwargs)
         return await browser_type.launch(headless=headless, **kwargs)
+
+    try:
+        return await _launch()
     except Exception as exc:
         libs = missing_system_libraries(exc)
         if libs:
@@ -176,7 +186,7 @@ async def launch_chromium(browser_type: Any, *, headless: bool = True,
             ) from exc
     log.info("Chromium installed — retrying launch")
     try:
-        return await browser_type.launch(headless=headless, **kwargs)
+        return await _launch()
     except Exception as exc:
         libs = missing_system_libraries(exc)
         if libs:
@@ -289,6 +299,15 @@ class BrowserSession:
         self._app_contexts: dict[str, dict[str, Any]] = {}  # app_name → {context, page, url}
         self._active_app: str = self._DEFAULT_APP
 
+        # Extensions (browser_extensions.py): the folders to load; with any, the
+        # browser runs from a profile of its own (a persistent context), one
+        # per app context, each in a temporary folder removed on close.
+        self._extension_dirs: list[str] = []
+        self._loaded_extensions: list[str] = []
+        self._persistent = False
+        self._profile_dirs: list[str] = []
+        self._headless: bool | None = None
+
     # -- lifecycle ------------------------------------------------------------
 
     async def start(self, headless: bool | None = None) -> None:
@@ -306,24 +325,27 @@ class BrowserSession:
             return  # already running
 
         effective_headless = headless if headless is not None else self._config.headless
+        self._headless = effective_headless
         log.info("Launching Playwright chromium", headless=effective_headless)
 
         self._playwright = await async_playwright().start()
         log.info("Playwright started")
-        self._browser = await self._launch_chromium(effective_headless)
-        log.info("Chromium browser launched")
-
-        context_kwargs: dict[str, Any] = {
-            "viewport": {
-                "width": self._config.viewport_width,
-                "height": self._config.viewport_height,
-            },
-        }
-        if self._config.user_agent:
-            context_kwargs["user_agent"] = self._config.user_agent
-
-        self._context = await self._browser.new_context(**context_kwargs)
-        self._page = await self._context.new_page()
+        extensions = list(getattr(self, "_extension_dirs", []) or [])
+        if extensions:
+            # Extensions load only into a browser with a profile of its own.
+            self._persistent = True
+            self._context = await self._launch_with_extensions(effective_headless, extensions)
+            self._browser = self._context.browser
+            self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
+            self._loaded_extensions = extensions
+            log.info("Chromium launched with extensions", count=len(extensions))
+        else:
+            self._persistent = False
+            self._loaded_extensions = []
+            self._browser = await self._launch_chromium(effective_headless)
+            log.info("Chromium browser launched")
+            self._context = await self._browser.new_context(**self._context_kwargs())
+            self._page = await self._context.new_page()
         self._started_at = time.time()
 
         # Attach network interceptor and auto-start if configured
@@ -346,6 +368,71 @@ class BrowserSession:
             auto_install=getattr(self._config, "auto_install_browser", True),
             install_timeout=getattr(self._config, "auto_install_timeout_seconds", 300),
         )
+
+    def _context_kwargs(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "viewport": {"width": self._config.viewport_width, "height": self._config.viewport_height},
+        }
+        if self._config.user_agent:
+            out["user_agent"] = self._config.user_agent
+        return out
+
+    async def _launch_with_extensions(self, headless: bool, extensions: list[str]) -> Any:
+        """A browser context with its own (temporary) profile and *extensions*
+        loaded — Chromium's new headless mode, which runs extensions."""
+        profile = tempfile.mkdtemp(prefix="captain-browser-")
+        self._profile_dirs.append(profile)
+        joined = ",".join(extensions)
+        return await launch_chromium(
+            self._playwright.chromium, headless=headless,
+            auto_install=getattr(self._config, "auto_install_browser", True),
+            install_timeout=getattr(self._config, "auto_install_timeout_seconds", 300),
+            persistent_dir=profile, channel="chromium",
+            args=[f"--disable-extensions-except={joined}", f"--load-extension={joined}"],
+            **self._context_kwargs(),
+        )
+
+    # -- extensions -----------------------------------------------------------
+
+    def set_extensions(self, dirs: list[str]) -> None:
+        """The extensions this browser should have (loaded at its next start)."""
+        self._extension_dirs = list(dirs)
+
+    @property
+    def extensions_pending(self) -> bool:
+        """The running browser has other extensions than it should."""
+        return self.is_alive and list(getattr(self, "_loaded_extensions", [])) != list(
+            getattr(self, "_extension_dirs", []))
+
+    @property
+    def loaded_extensions(self) -> list[str]:
+        return list(getattr(self, "_loaded_extensions", []))
+
+    async def restart(self) -> dict[str, Any]:
+        """Start again (with the extensions it should have now), keeping the
+        cookies and the page it was on. Other app sessions close."""
+        url = self.current_url
+        cookies: list[dict[str, Any]] = []
+        try:
+            cookies = await self.save_cookies()
+        except Exception:
+            cookies = []
+        headless = self._headless
+        await self.close()
+        self._app_contexts = {}
+        self._active_app = self._DEFAULT_APP
+        await self.start(headless=headless)
+        if cookies:
+            try:
+                await self.load_cookies(cookies)
+            except Exception as e:
+                log.warning("Cookies couldn't be restored", error=str(e))
+        if url and url.startswith(("http://", "https://")):
+            try:
+                await self.navigate(url)
+            except Exception as e:
+                log.warning("Page couldn't be reopened after restart", url=url, error=str(e))
+        return {"url": self.current_url, "cookies": len(cookies)}
 
     @property
     def network(self) -> NetworkInterceptor:
@@ -377,7 +464,18 @@ class BrowserSession:
                 errors.append(f"context close: {e}")
             self._context = None
 
-        if self._browser is not None:
+        if getattr(self, "_persistent", False):
+            # Each app context is a browser of its own here.
+            for entry in list(getattr(self, "_app_contexts", {}).values()):
+                ctx = entry.get("context")
+                if ctx is not None:
+                    try:
+                        await ctx.close()
+                    except Exception as e:
+                        errors.append(f"app context close: {e}")
+            self._app_contexts = {}
+            self._browser = None
+        elif self._browser is not None:
             try:
                 await self._browser.close()
             except Exception as e:
@@ -392,6 +490,11 @@ class BrowserSession:
             self._playwright = None
 
         self._started_at = 0.0
+        self._persistent = False
+        self._loaded_extensions = []
+        for profile in list(getattr(self, "_profile_dirs", [])):
+            shutil.rmtree(profile, ignore_errors=True)
+        self._profile_dirs = []
 
         if errors:
             log.warning("Browser close had errors", errors=errors)
@@ -403,6 +506,11 @@ class BrowserSession:
     @property
     def is_alive(self) -> bool:
         """Return True if the browser is running and responsive."""
+        if getattr(self, "_persistent", False):
+            try:
+                return self._context is not None and self._page is not None and not self._page.is_closed()
+            except Exception:
+                return False
         return (
             self._browser is not None
             and self._page is not None
@@ -637,17 +745,13 @@ class BrowserSession:
             log.info("App context already exists", app_name=app_name)
             return
 
-        context_kwargs: dict[str, Any] = {
-            "viewport": {
-                "width": self._config.viewport_width,
-                "height": self._config.viewport_height,
-            },
-        }
-        if self._config.user_agent:
-            context_kwargs["user_agent"] = self._config.user_agent
-
-        new_context = await self._browser.new_context(**context_kwargs)
-        new_page = await new_context.new_page()
+        if getattr(self, "_persistent", False):
+            # A browser with extensions makes no more contexts: another one, its own profile.
+            new_context = await self._launch_with_extensions(bool(self._headless), self._loaded_extensions)
+            new_page = new_context.pages[0] if new_context.pages else await new_context.new_page()
+        else:
+            new_context = await self._browser.new_context(**self._context_kwargs())
+            new_page = await new_context.new_page()
 
         self._app_contexts[app_name] = {
             "context": new_context,
@@ -752,4 +856,5 @@ class BrowserSession:
             "viewport": f"{self._config.viewport_width}x{self._config.viewport_height}",
             "active_app": self._active_app,
             "app_sessions": len(self._app_contexts),
+            "extensions": len(getattr(self, "_loaded_extensions", []) or []),
         }

@@ -1189,6 +1189,14 @@ class ToolRegistry:
         try:
             log.info("Executing tool", tool=name, args=_loggable_args(arguments))
             timeout_seconds = float(getattr(tool, "timeout_seconds", 30.0) or 30.0)
+            # A tool whose actions need very different time (one waits for the
+            # person's answer) says so per call.
+            timeout_for = getattr(tool, "timeout_for", None)
+            if callable(timeout_for):
+                try:
+                    timeout_seconds = float(timeout_for(arguments) or timeout_seconds)
+                except Exception:
+                    pass
             timeout_override = arguments.get("timeout")
             if timeout_override is not None:
                 try:

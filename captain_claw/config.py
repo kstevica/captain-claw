@@ -501,6 +501,13 @@ class BrowserToolConfig(BaseModel):
     cookie_persistence: bool = True  # save/restore cookies across sessions
     login_timeout_seconds: int = 30  # max wait for login form fill + submit
     login_verify_wait_seconds: float = 3.0  # wait after submit before checking login success
+    # Chrome extensions in the headless browser (tools/browser_extensions.py):
+    # "ask" — each install asks the person in Flight Deck first; "allow" —
+    # installs without asking; "off" — no extensions. Chrome Web Store ids
+    # listed in extensions_allowed install without asking (under "ask").
+    extension_policy: str = "ask"
+    extensions_allowed: list[str] = Field(default_factory=list)
+    extension_max_mb: int = 50
 
 
 class PinchTabConfig(BaseModel):
