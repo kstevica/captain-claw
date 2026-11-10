@@ -392,6 +392,19 @@ class BrowserSession:
             **self._context_kwargs(),
         )
 
+    async def use_page(self, page: Any) -> None:
+        """Work on *page* from now on (a tab the current one opened)."""
+        self._page = page
+        try:
+            await self._network.detach()
+        except Exception:
+            pass
+        if self._config.network_capture_enabled:
+            try:
+                await self._network.attach(page)
+            except Exception as e:
+                log.warning("Network capture couldn't follow the new tab", error=str(e))
+
     # -- extensions -----------------------------------------------------------
 
     def set_extensions(self, dirs: list[str]) -> None:

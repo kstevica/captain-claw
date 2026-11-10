@@ -48,10 +48,14 @@ async def test_which_browser_a_call_goes_to(deck, tmp_path, monkeypatch):
     # Default: headless.
     r = await tool.execute("navigate", url="https://example.com", **_kw(tmp_path))
     assert not r.success and "Playwright" in r.error and deck["calls"] == []
-    # A Chrome-only action means Chrome, and the session keeps it.
-    assert (await tool.execute("read_page", **_kw(tmp_path))).success
+    # The extension's page actions stay in the session's browser (headless here)…
+    r = await tool.execute("read_page", **_kw(tmp_path))
+    assert not r.success and "Playwright" in r.error and deck["calls"] == []
+    # …a Chrome-only action means Chrome, and the session keeps it.
+    assert (await tool.execute("tabs", **_kw(tmp_path))).success
     assert (await tool.execute("click", ref="ref_3", **_kw(tmp_path))).success
-    assert [c[0] for c in deck["calls"]] == ["read_page", "click"]
+    assert (await tool.execute("read_page", **_kw(tmp_path))).success
+    assert [c[0] for c in deck["calls"]] == ["tabs", "click", "read_page"]
     # A headless-only action goes headless without changing the session's browser.
     r = await tool.execute("network_capture", **_kw(tmp_path))
     assert not r.success and "Playwright" in r.error
@@ -64,7 +68,7 @@ async def test_which_browser_a_call_goes_to(deck, tmp_path, monkeypatch):
     assert not r.success and "Playwright" in r.error
     # Saying target picks it; a Chrome-only action can't be headless.
     assert (await tool.execute("navigate", url="https://x.com", target="chrome", **_kw(tmp_path))).success
-    r = await tool.execute("find", query="Sign in", target="headless", **_kw(tmp_path))
+    r = await tool.execute("console", target="headless", **_kw(tmp_path))
     assert not r.success and "person's own Chrome only" in r.error
     r = await tool.execute("status", target="firefox", **_kw(tmp_path))
     assert not r.success and "headless" in r.error
@@ -96,7 +100,7 @@ async def test_what_goes_to_the_deck(deck, tmp_path):
 async def test_upload_file_sends_the_file_itself(deck, tmp_path):
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "cv.pdf").write_bytes(b"%PDF cv")
-    r = await BrowserTool().execute("upload_file", ref="ref_4", path="docs/cv.pdf", **_kw(tmp_path))
+    r = await BrowserTool().execute("upload_file", target="chrome", ref="ref_4", path="docs/cv.pdf", **_kw(tmp_path))
     assert r.success
     action, args, _ = deck["calls"][-1]
     assert action == "upload_file" and "path" not in args
