@@ -286,8 +286,10 @@ class TestDeckConnection:
         c = _client()
         _deck(c)
         st = c.get("/fd/external-memory/status", headers=_bearer(BOB)).json()
-        assert st["connected"] and st["source"] == "deck" and st["scope_id"] == scope_id(BOB)
-        assert st["credential_hints"] == {}  # the admin's key isn't Bob's to see
+        (mem,) = st["memories"]
+        assert st["connected"] and mem["source"] == "deck" and mem["scope_id"] == scope_id(BOB)
+        assert mem["id"] == "deck" and mem["name"] == "Hindsight (shared)"
+        assert mem["credential_hints"] == {}  # the admin's key isn't Bob's to see
         c.post("/fd/external-memory/agent/run", headers={"X-Agent-Auth": "tok-bob"},
                json={"action": "remember", "args": {"content": "Bob's sister is Ana."}})
         c.post("/fd/external-memory/agent/run", headers={"X-Agent-Auth": "tok-carol"},
@@ -301,18 +303,23 @@ class TestDeckConnection:
         assert "reflect" in {a["name"] for a in m["actions"]}
         assert not any(p["name"] == "bank" for a in m["actions"] for p in a["params"])  # agents never pick one
 
-    async def test_a_users_own_connection_wins(self, db, hindsight):
+    async def test_a_users_own_memory_sits_next_to_the_decks(self, db, hindsight):
         c = _client()
         _deck(c)
         r = c.put("/fd/external-memory/connection", headers=_bearer(BOB),
                   json={"provider": "hindsight",
                         "credentials": {"base_url": HS, "api_key": HS_KEY, "bank": "bob-private"}})
         assert r.status_code == 200, r.text
-        st = r.json()
-        assert st["source"] == "own" and st["scope_id"] == "bob-private"
-        assert st["credential_hints"]["bank"] == "bob-private"
-        st = c.delete("/fd/external-memory/connection", headers=_bearer(BOB)).json()
-        assert st["source"] == "deck"  # back on the deck's
+        own, deck = r.json()["memories"]
+        assert own["source"] == "own" and own["scope_id"] == "bob-private" and own["name"] == "Hindsight"
+        assert own["credential_hints"]["bank"] == "bob-private"
+        assert deck["source"] == "deck" and deck["enabled"] is True  # still used, next to their own
+        st = c.delete(f"/fd/external-memory/connection?memory={own['id']}", headers=_bearer(BOB)).json()
+        assert [m["source"] for m in st["memories"]] == ["deck"]
+        r = c.delete("/fd/external-memory/connection?memory=deck", headers=_bearer(BOB))
+        assert r.status_code == 422  # the shared one is switched off, not removed
+        st = c.put("/fd/external-memory/memories/deck", headers=_bearer(BOB), json={"enabled": False}).json()
+        assert st["connected"] is False and st["memories"][0]["enabled"] is False
 
     async def test_mirrors_go_to_the_owners_bank(self, db, hindsight, agents, monkeypatch):
         monkeypatch.setattr(svc, "SEND_GAP_S", 0)

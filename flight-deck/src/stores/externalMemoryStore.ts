@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { useAuthStore, refreshAccessToken, registerSignOutTeardown } from './authStore'
 
-// External memory (Membase, Hindsight, Qdrant, ArcadeDB) — one per user, shared by all of their agents,
+// External memories (Membase, Hindsight, Qdrant, ArcadeDB) — several per user, shared by all of their agents,
 // through /fd/external-memory/* (captain_claw/flight_deck/external_memory/).
 // Flight Deck keeps the credentials: they never come back here, only a hint.
 // On a deck with sign-in off the connection is the deck's.
@@ -62,36 +62,54 @@ export interface OutboxCounts {
   last_error: string
 }
 
-export interface ExternalMemoryStatus {
-  connected: boolean
-  providers: ProviderInfo[]
+// One of the person's memories: their own, or the one an admin connected for
+// the deck (source "deck", id "deck"; scope_id is the person's own bank or
+// space on it). Each has its own reading priority and "copied in" choices.
+export interface MemoryView {
+  id: string
+  name: string
+  source: 'own' | 'deck'
+  enabled: boolean
+  priority: ReadingPriority
   mirror: Record<MirrorKind, boolean>
+  provider: string
+  label: string
+  credential_hints: Record<string, string>
+  verified: boolean | null
+  verify_error: 'refused' | 'unreachable' | null
+  verified_at: string | null
+  updated_at: string | null
+  tenancy: 'key' | 'scoped'
+  scope_label: string
+  scope_id: string
+  reaches: string[]
+  actions: ProviderAction[]
+  rules: string[]
+  outbox?: OutboxCounts
+}
+
+export interface ExternalMemoryStatus {
+  // Any memory switched on.
+  connected: boolean
+  memories: MemoryView[]
+  max_memories: number
+  providers: ProviderInfo[]
   mirror_kinds: MirrorKind[]
-  // Reading priority: how much the person's agents lean on the memory.
-  priority?: ReadingPriority
+  default_mirror: Record<MirrorKind, boolean>
   priorities?: ReadingPriority[]
   // Facts are picked out of chats every this many messages while connected.
   capture_every?: number
   scope: 'user' | 'deck'
   auth_enabled: boolean
-  provider?: string
-  label?: string
-  credential_hints?: Record<string, string>
-  verified?: boolean | null
-  verify_error?: 'refused' | 'unreachable' | null
-  verified_at?: string | null
-  updated_at?: string | null
-  reaches?: string[]
-  actions?: ProviderAction[]
-  rules?: string[]
   outbox?: OutboxCounts
-  // Whose connection this is: the person's own, or the one an admin set up
-  // for the deck (then scope_id is the person's own bank on it).
-  source?: 'own' | 'deck'
-  tenancy?: 'key' | 'scoped'
-  scope_label?: string
-  scope_id?: string
-  deck_connection?: { provider: string; label: string; scope_label?: string } | null
+  deck_connection?: { provider: string; label: string; scope_label?: string; name?: string } | null
+}
+
+export interface MemorySettings {
+  name?: string
+  priority?: ReadingPriority
+  mirror?: Partial<Record<MirrorKind, boolean>>
+  enabled?: boolean
 }
 
 export interface ExternalMemoryDeckStatus {
@@ -120,6 +138,7 @@ export interface OutboxItem {
   remote_id: string
   created_at: number
   sent_at: number | null
+  target?: string
 }
 
 interface ExternalMemoryStore {
@@ -128,14 +147,17 @@ interface ExternalMemoryStore {
   error: string | null
 
   refresh: () => Promise<void>
-  connect: (provider: string, credentials: Record<string, string>) => Promise<{ ok: boolean; warning?: string }>
-  disconnect: () => Promise<boolean>
-  test: () => Promise<{ ok: boolean; latency_ms?: number }>
-  setMirror: (kinds: Partial<Record<MirrorKind, boolean>>) => Promise<boolean>
-  setPriority: (priority: ReadingPriority) => Promise<boolean>
-  run: (action: string, args: Record<string, unknown>) => Promise<{ text: string } | { error: string }>
-  outbox: (state?: string) => Promise<OutboxItem[]>
-  retryOutbox: () => Promise<number | null>
+  // A new memory, or (memory = its id) new credentials for one of the person's own.
+  connect: (
+    provider: string, credentials: Record<string, string>, opts?: { memory?: string; name?: string },
+  ) => Promise<{ ok: boolean; warning?: string; memoryId?: string }>
+  disconnect: (memoryId: string) => Promise<boolean>
+  test: (memoryId: string) => Promise<{ ok: boolean; latency_ms?: number }>
+  updateMemory: (memoryId: string, settings: MemorySettings) => Promise<boolean>
+  // Without a memory: search looks in all of them, remember saves to all.
+  run: (action: string, args: Record<string, unknown>, memory?: string) => Promise<{ text: string } | { error: string }>
+  outbox: (memoryId?: string, state?: string) => Promise<OutboxItem[]>
+  retryOutbox: (memoryId?: string) => Promise<number | null>
 
   // Admin: the deck's connection (a scoped provider, a bank per person).
   deck: ExternalMemoryDeckStatus | null
@@ -202,26 +224,30 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set, get) => 
 
   // Flight Deck checks the credentials with the provider first: refused ones
   // aren't saved (error); ones it couldn't check are saved unverified (warning).
-  connect: async (provider, credentials) => {
+  connect: async (provider, credentials, opts = {}) => {
     set({ error: null })
     try {
-      const data = await fetchJson<WithWarning>('/fd/external-memory/connection', {
+      const data = await fetchJson<WithWarning & { memory_id?: string }>('/fd/external-memory/connection', {
         method: 'PUT',
-        body: JSON.stringify({ provider, credentials }),
+        body: JSON.stringify({ provider, credentials, ...(opts.memory ? { memory: opts.memory } : {}), ...(opts.name ? { name: opts.name } : {}) }),
       })
-      const { warning, ...status } = data
+      const { warning, memory_id, ...status } = data
       set({ status })
-      return { ok: true, ...(warning ? { warning } : {}) }
+      return { ok: true, memoryId: memory_id, ...(warning ? { warning } : {}) }
     } catch (exc) {
       set({ error: errText(exc) })
       return { ok: false }
     }
   },
 
-  disconnect: async () => {
+  disconnect: async (memoryId) => {
     set({ error: null })
     try {
-      set({ status: await fetchJson<ExternalMemoryStatus>('/fd/external-memory/connection', { method: 'DELETE' }) })
+      set({
+        status: await fetchJson<ExternalMemoryStatus>(
+          `/fd/external-memory/connection?memory=${encodeURIComponent(memoryId)}`, { method: 'DELETE' },
+        ),
+      })
       return true
     } catch (exc) {
       set({ error: errText(exc) })
@@ -229,11 +255,11 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set, get) => 
     }
   },
 
-  test: async () => {
+  test: async (memoryId) => {
     set({ error: null })
     try {
       const data = await fetchJson<ExternalMemoryStatus & { ok: boolean; latency_ms: number }>(
-        '/fd/external-memory/test', { method: 'POST', body: '{}' },
+        '/fd/external-memory/test', { method: 'POST', body: JSON.stringify({ memory: memoryId }) },
       )
       const { ok, latency_ms, ...status } = data
       set({ status })
@@ -247,13 +273,13 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set, get) => 
     }
   },
 
-  setMirror: async (kinds) => {
+  updateMemory: async (memoryId, settings) => {
     set({ error: null })
     try {
       set({
-        status: await fetchJson<ExternalMemoryStatus>('/fd/external-memory/mirror', {
+        status: await fetchJson<ExternalMemoryStatus>(`/fd/external-memory/memories/${encodeURIComponent(memoryId)}`, {
           method: 'PUT',
-          body: JSON.stringify({ kinds }),
+          body: JSON.stringify(settings),
         }),
       })
       return true
@@ -263,27 +289,11 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set, get) => 
     }
   },
 
-  setPriority: async (priority) => {
-    set({ error: null })
-    try {
-      set({
-        status: await fetchJson<ExternalMemoryStatus>('/fd/external-memory/priority', {
-          method: 'PUT',
-          body: JSON.stringify({ priority }),
-        }),
-      })
-      return true
-    } catch (exc) {
-      set({ error: errText(exc) })
-      return false
-    }
-  },
-
-  run: async (action, args) => {
+  run: async (action, args, memory) => {
     try {
       const data = await fetchJson<{ text: string }>('/fd/external-memory/run', {
         method: 'POST',
-        body: JSON.stringify({ action, args }),
+        body: JSON.stringify({ action, args, ...(memory ? { memory } : {}) }),
       })
       return { text: data.text }
     } catch (exc) {
@@ -291,10 +301,10 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set, get) => 
     }
   },
 
-  outbox: async (state = '') => {
+  outbox: async (memoryId = '', state = '') => {
     try {
       const data = await fetchJson<{ items: OutboxItem[] }>(
-        `/fd/external-memory/outbox?limit=30${state ? `&state=${encodeURIComponent(state)}` : ''}`,
+        `/fd/external-memory/outbox?limit=30${memoryId ? `&memory=${encodeURIComponent(memoryId)}` : ''}${state ? `&state=${encodeURIComponent(state)}` : ''}`,
       )
       return data.items || []
     } catch {
@@ -320,7 +330,7 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set, get) => 
       )
       const { warning, ...deck } = data
       set({ deck })
-      get().refresh()  // the admin's own view may now fall back to it
+      get().refresh()  // it is one more memory in the admin's own list now
       return { ok: true, ...(warning ? { warning } : {}) }
     } catch (exc) {
       set({ deckError: errText(exc) })
@@ -355,10 +365,12 @@ export const useExternalMemoryStore = create<ExternalMemoryStore>((set, get) => 
     }
   },
 
-  retryOutbox: async () => {
+  retryOutbox: async (memoryId) => {
     set({ error: null })
     try {
-      const data = await fetchJson<{ requeued: number }>('/fd/external-memory/outbox/retry', { method: 'POST', body: '{}' })
+      const data = await fetchJson<{ requeued: number }>('/fd/external-memory/outbox/retry', {
+        method: 'POST', body: JSON.stringify(memoryId ? { memory: memoryId } : {}),
+      })
       try {
         set({ status: await fetchJson<ExternalMemoryStatus>('/fd/external-memory/status') })
       } catch { /* keep the previous status */ }

@@ -77,6 +77,14 @@ def _serve(monkeypatch, status=200, body=None):
 
 
 class TestClient:
+    async def test_recall_keeps_each_memorys_group(self, monkeypatch):
+        _connected()
+        groups = [{"name": "Work", "priority": "first", "hits": HITS[:1]},
+                  {"name": "Notes", "priority": "alongside", "hits": HITS[1:]}]
+        _serve(monkeypatch, body={"priority": "first", "label": "Work, Notes", "groups": groups, "hits": HITS})
+        out = await emc.recall("atlas")
+        assert out["groups"] == groups and out["hits"] == HITS
+
     async def test_recall_asks_flight_deck_with_the_message(self, monkeypatch):
         _connected()
         seen = _serve(monkeypatch)
@@ -184,9 +192,9 @@ class TestNote:
         agent._insights_context_cache = [{"content": "Bob likes short answers.", "category": "preference"}]
         agent._external_memory_context_cache = {"priority": "first", "label": "Qdrant", "hits": HITS}
         kinds, notes = _kinds(agent)
-        assert kinds[-1] == "external_memory_context"
-        assert "MAIN memory" in notes["external_memory_context"]
-        assert "go by it" in notes["external_memory_context"]
+        assert kinds[-1] == "external_memory_main" and "external_memory_context" not in kinds
+        assert "MAIN memory" in notes["external_memory_main"]
+        assert "go by it" in notes["external_memory_main"]
 
     def test_first_survives_a_crowded_prompt(self):
         agent = _agent()
@@ -195,7 +203,7 @@ class TestNote:
         notes = [("filler", "word " * 400)] + notes
         size = agent._count_tokens(agent._wrap_internal_context(notes[-1:], "x")) + 5
         kept = agent._fit_context_notes(notes, size, "x")
-        assert [k for k, _ in kept] == ["external_memory_context"]
+        assert [k for k, _ in kept] == ["external_memory_main"]
 
     def test_what_the_insights_note_says_is_not_repeated(self):
         agent = _agent()
@@ -209,10 +217,10 @@ class TestNote:
     def test_no_note_when_memory_is_skipped_or_not_the_owners(self):
         agent = _agent()
         agent._external_memory_context_cache = {"priority": "first", "label": "Qdrant", "hits": HITS}
-        assert "external_memory_context" not in _kinds(agent, skip_memory=True)[0]
-        assert "external_memory_context" not in _kinds(agent, owner_notes=False)[0]
+        for kw in ({"skip_memory": True}, {"owner_notes": False}):
+            assert not {"external_memory_context", "external_memory_main"} & set(_kinds(agent, **kw)[0])
         agent._suppress_memory_context = True
-        assert "external_memory_context" not in _kinds(agent)[0]
+        assert not {"external_memory_context", "external_memory_main"} & set(_kinds(agent)[0])
 
     async def test_refresh(self, monkeypatch):
         agent = _agent()
@@ -229,6 +237,26 @@ class TestNote:
         _connected(priority="on_demand")
         await agent._refresh_external_memory_context_cache(query="atlas")
         assert agent._external_memory_context_cache == {} and len(seen) == 1
+
+    def test_several_memories_each_where_its_priority_puts_it(self):
+        agent = _agent()
+        agent._insights_context_cache = [{"content": "Bob likes short answers.", "category": "preference"}]
+        agent._external_memory_context_cache = {"priority": "first", "label": "Work, Notes", "groups": [
+            {"name": "Work", "label": "Qdrant", "priority": "first",
+             "hits": [{"text": "Project Atlas ships in March.", "when": "2026-11-09"}]},
+            {"name": "Notes", "label": "ArcadeDB", "priority": "alongside",
+             "hits": [{"text": "Project Atlas ships in March."},  # the same fact: said once
+                      {"text": "Ana leads Atlas."}]},
+            {"name": "Home", "label": "Hindsight", "priority": "first", "hits": [{"text": "Dentist on Friday."}]},
+        ]}
+        kinds, notes = _kinds(agent)
+        assert kinds.index("external_memory_context") == kinds.index("insights_context") + 1
+        assert kinds[-1] == "external_memory_main"
+        main = notes["external_memory_main"]
+        assert "MAIN memory (Work, Home" in main
+        assert "- Project Atlas ships in March. (2026-11-09) [Work]" in main and "Dentist on Friday. [Home]" in main
+        side = notes["external_memory_context"]
+        assert "(Notes, shared" in side and "- Ana leads Atlas." in side and "Atlas ships" not in side
 
     def test_it_reaches_the_model(self):
         agent = _agent()

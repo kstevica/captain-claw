@@ -730,9 +730,9 @@ class TestThroughFlightDeck:
         r = c.put("/fd/external-memory/connection", headers=_bearer(BOB),
                   json={"provider": name, "credentials": {**STORES[name], "space": "bob-private"}})
         assert r.status_code == 200, r.text
-        st = r.json()
-        assert st["source"] == "own" and st["scope_id"] == "bob-private"
-        assert st["credential_hints"]["space"] == "bob-private"
+        (mem,) = r.json()["memories"]
+        assert mem["source"] == "own" and mem["scope_id"] == "bob-private"
+        assert mem["credential_hints"]["space"] == "bob-private"
 
     async def test_a_private_embeddings_address_is_for_admins_only(self, db, servers, name):
         c = _client()
@@ -913,37 +913,44 @@ class TestRecallOthers:
 # ── reading priority, through Flight Deck ───────────────────────────
 
 
-def _connect_qdrant(c, uid=BOB):
+def _connect_qdrant(c, uid=BOB, **creds) -> str:
     r = c.put("/fd/external-memory/connection", headers=_bearer(uid),
-              json={"provider": "qdrant", "credentials": QD_CREDS})
+              json={"provider": "qdrant", "credentials": {**QD_CREDS, **creds}})
     assert r.status_code == 200, r.text
+    return r.json()["memory_id"]
+
+
+def _prio(c, mid, priority, uid=BOB):
+    return c.put(f"/fd/external-memory/memories/{mid}", headers=_bearer(uid), json={"priority": priority})
 
 
 class TestReadingPriority:
     async def test_alongside_by_default_and_set_per_person(self, db, servers):
         c = _client()
-        _connect_qdrant(c)
+        mid = _connect_qdrant(c)
         st = c.get("/fd/external-memory/status", headers=_bearer(BOB)).json()
-        assert st["priority"] == "alongside" and st["priorities"] == ["first", "alongside", "on_demand"]
+        assert st["memories"][0]["priority"] == "alongside"
+        assert st["priorities"] == ["first", "alongside", "on_demand"]
         assert st["capture_every"] == svc.CAPTURE_EVERY
-        r = c.put("/fd/external-memory/priority", headers=_bearer(BOB), json={"priority": "first"})
-        assert r.status_code == 200 and r.json()["priority"] == "first"
-        assert any("MAIN memory" in rule for rule in r.json()["rules"])
-        assert c.get("/fd/external-memory/status", headers=_bearer(CAROL)).json()["priority"] == "alongside"
-        r = c.put("/fd/external-memory/priority", headers=_bearer(BOB), json={"priority": "always"})
-        assert r.status_code == 422
+        r = _prio(c, mid, "first")
+        assert r.status_code == 200 and r.json()["memories"][0]["priority"] == "first"
+        assert any("MAIN memory" in rule for rule in r.json()["memories"][0]["rules"])
+        carol = _connect_qdrant(c, CAROL)
+        assert c.get("/fd/external-memory/status", headers=_bearer(CAROL)).json()["memories"][0]["priority"] == "alongside"
+        assert _prio(c, mid, "always").status_code == 422
+        assert _prio(c, carol, "first").status_code == 404  # not Bob's
 
     async def test_the_manifest_tells_the_agent(self, db, servers, agents):
         c = _client()
-        _connect_qdrant(c)
+        mid = _connect_qdrant(c)
         m = c.get("/fd/external-memory/agent/status", headers={"X-Agent-Auth": "tok-bob"}).json()
         assert (m["priority"], m["recall_limit"], m["capture_every"]) == ("alongside", 5, svc.CAPTURE_EVERY)
         assert any("put in front of you" in rule for rule in m["rules"])
-        c.put("/fd/external-memory/priority", headers=_bearer(BOB), json={"priority": "first"})
+        _prio(c, mid, "first")
         m = c.get("/fd/external-memory/agent/status", headers={"X-Agent-Auth": "tok-bob"}).json()
         assert (m["priority"], m["recall_limit"]) == ("first", 8)
         assert any("search it FIRST" in rule for rule in m["rules"])
-        c.put("/fd/external-memory/priority", headers=_bearer(BOB), json={"priority": "on_demand"})
+        _prio(c, mid, "on_demand")
         m = c.get("/fd/external-memory/agent/status", headers={"X-Agent-Auth": "tok-bob"}).json()
         assert (m["priority"], m["recall_limit"]) == ("on_demand", 0)
 
@@ -963,8 +970,8 @@ class TestReadingPriority:
 
     async def test_on_demand_asks_nothing(self, db, servers, agents):
         c = _client()
-        _connect_qdrant(c)
-        c.put("/fd/external-memory/priority", headers=_bearer(BOB), json={"priority": "on_demand"})
+        mid = _connect_qdrant(c)
+        _prio(c, mid, "on_demand")
         n = len(servers.qd.requests)
         body = c.post("/fd/external-memory/agent/recall", headers={"X-Agent-Auth": "tok-bob"},
                       json={"query": "atlas"}).json()
@@ -991,7 +998,7 @@ class TestReadingPriority:
         monkeypatch.setattr(QdrantProvider, "recall", broken)
         body = c.post("/fd/external-memory/agent/recall", headers={"X-Agent-Auth": "tok-bob"},
                       json={"query": "atlas"}).json()
-        assert body["hits"] == [] and body["error"] == "Qdrant: boom"
+        assert body["hits"] == [] and body["error"] == "Qdrant: Qdrant: boom"  # memory name: its error
 
     async def test_recall_is_logged(self, db, servers, agents):
         c = _client()

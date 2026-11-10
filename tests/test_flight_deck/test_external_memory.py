@@ -287,21 +287,24 @@ class TestConnection:
         body = r.json()
         assert body["connected"] is False and body["scope"] == "user"
         assert [p["name"] for p in body["providers"]] == ["membase", "hindsight", "qdrant", "arcadedb"]
-        assert body["mirror"] == {"insight": True, "intention": True, "lesson": True,
-                                  "reflection": False, "intuition": False}
+        assert body["memories"] == [] and body["max_memories"] == svc.MAX_MEMORIES
+        assert body["default_mirror"] == {"insight": True, "intention": True, "lesson": True,
+                                          "reflection": False, "intuition": False}
 
     async def test_connect_checks_seals_and_never_returns_the_key(self, db, membase):
         c = _client()
         r = _connect(c, BOB, f"  {KEY_BOB} ")
         assert r.status_code == 200, r.text
         body = r.json()
-        assert body["connected"] and body["verified"] is True and body["label"] == "Membase"
-        assert body["credential_hints"] == {"api_key": "mbk_…1111"}
-        assert "remember" in [a["name"] for a in body["actions"]]
-        assert body["reaches"] == ["Work", "Photos (media)"]
+        mem = body["memories"][0]
+        assert body["connected"] and mem["verified"] is True and mem["label"] == "Membase"
+        assert mem["name"] == "Membase" and mem["source"] == "own" and body["memory_id"] == mem["id"]
+        assert mem["credential_hints"] == {"api_key": "mbk_…1111"}
+        assert "remember" in [a["name"] for a in mem["actions"]]
+        assert mem["reaches"] == ["Work", "Photos (media)"]
         assert KEY_BOB not in r.text
-        raw = await db.get_setting(BOB, "external_memory:connection")
-        assert KEY_BOB not in raw and "sealed" in json.loads(raw)["credentials"]
+        raw = await db.get_setting(BOB, "external_memory:memories")
+        assert KEY_BOB not in raw and "sealed" in json.loads(raw)[0]["credentials"]
         conn = await svc.load_connection(BOB)
         assert conn["credentials"]["api_key"] == KEY_BOB
         assert await svc.load_connection(ALICE) is None
@@ -316,7 +319,8 @@ class TestConnection:
         membase.fail = "network"
         r = _connect(_client(), BOB, KEY_BOB)
         assert r.status_code == 200
-        assert r.json()["verified"] is False and r.json()["warning"].startswith("Saved, but couldn't check it")
+        assert r.json()["memories"][0]["verified"] is False
+        assert r.json()["warning"].startswith("Saved, but couldn't check it")
 
     async def test_bad_input_is_a_422_before_membase(self, db, membase):
         c = _client()
@@ -343,12 +347,16 @@ class TestConnection:
         assert r.json()["connected"] is False
         assert (await svc.outbox().counts(BOB))["pending"] == 0
 
-    async def test_mirror_settings(self, db):
+    async def test_mirror_settings(self, db, membase):
         c = _client()
-        r = c.put("/fd/external-memory/mirror", headers=_bearer(BOB),
-                  json={"kinds": {"reflection": True, "insight": False, "bogus": True}})
-        assert r.json()["mirror"]["reflection"] is True and r.json()["mirror"]["insight"] is False
-        assert "bogus" not in r.json()["mirror"]
+        mid = _connect(c, BOB, KEY_BOB).json()["memory_id"]
+        r = c.put(f"/fd/external-memory/memories/{mid}", headers=_bearer(BOB),
+                  json={"mirror": {"reflection": True, "insight": False, "bogus": True}})
+        mirror = r.json()["memories"][0]["mirror"]
+        assert mirror["reflection"] is True and mirror["insight"] is False and mirror["lesson"] is True
+        assert "bogus" not in mirror
+        assert c.put("/fd/external-memory/memories/m_nope", headers=_bearer(BOB),
+                     json={"priority": "first"}).status_code == 404
 
     async def test_playground_run(self, db, membase):
         c = _client()
@@ -417,21 +425,21 @@ class TestAgents:
         item = {"kind": "insight", "source_id": "ins-1", "content": "Bob's sister is Ana.",
                 "agent": "I am lying", "meta": {"category": "contact"}}
         r = c.post("/fd/external-memory/agent/mirror", headers={"X-Agent-Auth": "tok-bob"}, json=item)
-        assert r.json() == {"queued": True, "reason": ""}
+        assert r.json() == {"queued": True, "reason": "", "memories": ["Membase"]}
         r = c.post("/fd/external-memory/agent/mirror", headers={"X-Agent-Auth": "tok-bob"}, json=item)
-        assert r.json() == {"queued": False, "reason": "already_queued"}
+        assert r.json() == {"queued": False, "reason": "already_queued", "memories": []}
         rows = await svc.outbox().recent(BOB)
         assert len(rows) == 1 and rows[0]["agent"] == "Bob's Researcher"
         # A kind the person turned off isn't queued; lessons never come from agents.
         r = c.post("/fd/external-memory/agent/mirror", headers={"X-Agent-Auth": "tok-bob"},
                    json={**item, "kind": "intuition", "source_id": "t1"})
-        assert r.json() == {"queued": False, "reason": "kind_off"}
+        assert r.json() == {"queued": False, "reason": "kind_off", "memories": []}
         r = c.post("/fd/external-memory/agent/mirror", headers={"X-Agent-Auth": "tok-bob"},
                    json={**item, "kind": "lesson", "source_id": "l1"})
         assert r.status_code == 422
         # No connection: nothing queued.
         r = c.post("/fd/external-memory/agent/mirror", headers={"X-Agent-Auth": "tok-alice"}, json=item)
-        assert r.json() == {"queued": False, "reason": "not_connected"}
+        assert r.json() == {"queued": False, "reason": "not_connected", "memories": []}
 
 
 # ── the drainer ─────────────────────────────────────────────────────
@@ -514,6 +522,6 @@ async def test_auth_off_deck_keeps_one_connection(db, membase, agents, monkeypat
     c = _client()
     r = _connect(c, BOB, KEY_BOB)
     assert r.status_code == 200 and r.json()["scope"] == "deck"
-    assert await db.get_system_setting("external_memory:connection")
+    assert await db.get_system_setting("external_memory:memories")
     m = c.get("/fd/external-memory/agent/status", headers={"X-Agent-Auth": "tok-local"}).json()
     assert m["connected"] is True
