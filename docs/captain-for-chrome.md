@@ -71,6 +71,51 @@ never woken for this (`"asleep"`); one that can't say gets `"fallback"` and
 isn't asked again for ten minutes. A clip names the lens by id (`a-…`) and
 label; the deck turns it into the lens's sentence in the turn.
 
+## Agents in the person's browser (browser hands)
+
+With **Agents can use this browser** on (panel Settings; it asks Chrome for
+`debugger` and `tabGroups`), the extension lends the browser to the person's
+agents: their `browser` tool's `target="chrome"`.
+
+  agent `browser(…, target="chrome")` (`tools/browser_chrome.py`)
+  → `POST /fd/browser-hands/agent/act {action, args}` (`flight_deck/browser_hands.py`;
+    the caller resolved by `require_agent_caller`, its owner = whose browser)
+  → the extension's service worker over `/fd/clip/hands/ws` (`hands.js`)
+  → `{"type": "result", ok, content, image?, data?}` back the same way.
+
+- **The socket**: the service worker opens it while the switch is on, says
+  `hello` with the browser's own token (only a `Browser · …` token, still
+  unrevoked, is accepted — checked again on every act), pings every 20 s
+  (keeps an MV3 worker alive), reconnects with backoff, and an alarm every
+  30 s brings it back after Chrome stopped the worker. Several browsers: the
+  one the person was last at (window focus) gets the act.
+- **Tabs**: each agent has a tab group named after it, in the window the
+  person last used; it acts only on tabs in its group (`tab_id` of another
+  tab is refused); a tab a click opens joins the group and becomes current.
+  New tabs open in the background unless "Bring an agent's tab to the front".
+- **How it acts**: `chrome.debugger` (CDP 1.3) on the agent's tabs — real
+  mouse and key events (`Input.*`), screenshots scaled to CSS pixels (so a
+  coordinate in the picture is a coordinate to click), `Page.navigate`,
+  `Page.captureSnapshot` (mhtml), console and network buffers. The page
+  helpers (`hands-page.js`: refs, the tree, find, form_input, upload) and
+  `capture.js` (page_text, page_files) run in an isolated world the page
+  can't see; `javascript` runs in the page's own world. Idle tabs are
+  detached after 3 minutes (Chrome's "is debugging" bar goes away).
+- **Files** (`download`, `save_page`): fetched in the page (its cookies) or by
+  the worker, posted to `/fd/clip/hands/files/<act id>` and kept in
+  `vfs:web-clips/<day>-<site>-<agent>-browser/`; the act's answer lists them.
+- **Limits**: Flight Deck's own origin, non-web URLs (`chrome://`, `file://`,
+  `data:`…) are refused; the person can Stop an agent in the panel (kept in
+  `handsStopped`, also told to Flight Deck so it refuses at once); Cancel on
+  Chrome's debugging bar stops the agents that were working. Member turns of
+  a shared agent never reach the tool (speaker allowlist), and the routes
+  aren't grant-aware.
+- **Tests**: `tests/test_flight_deck/test_browser_hands.py` (the relay),
+  `tests/test_tools/test_browser_chrome.py` (the tool). A Chromium run with
+  the real extension against the full deck passed 48 checks (form filling,
+  refs, screenshots/zoom, keys, drag, upload, console/network, downloads,
+  new tabs, refusals, the panel's Stop) — harness not in the repo.
+
 ## Security
 
 - The extension's origin reaches `/fd/clip/` only (origin guard + CORS);
@@ -86,9 +131,9 @@ label; the deck turns it into the lens's sentence in the turn.
 
 ## Next steps worth building
 
-- **Browser hands** — an agent tool that asks the open side panel for more:
-  "open the next 5 results", "download the invoices from this portal",
-  confined to the clipped site and approved in the panel.
+- **Browser hands, next** — per-agent approval on first use, a per-site
+  allowlist, a recorded GIF of what the agent did, and "Share this tab with
+  <agent>" from the panel (today: drag it into the agent's group).
 - **Site recipes** — remembered per site: on the bank portal always Grab files
   into `finance/`; on LinkedIn Extract the profile; on a job board Make tasks.
 - **Watch with a diff** — Watch it keeps `page.md` versions and the agent

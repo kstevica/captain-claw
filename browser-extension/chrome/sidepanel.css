@@ -287,3 +287,16 @@ details.include[open] > summary .ic.chev { transform: rotate(180deg); }
 .spinner { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border-strong); border-top-color: var(--accent); animation: spin .8s linear infinite; flex: none; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner, .working .dot { animation: none; } }
+
+/* agents using this browser */
+.hands { display: flex; flex-direction: column; gap: 6px; padding: 9px 10px; }
+.hands.active { border-color: var(--accent); background: var(--accent-soft); }
+.hands > .row .ic { color: var(--accent-text); }
+.hands-agent { display: flex; align-items: center; gap: 8px; font-size: calc(12px * var(--fs)); min-width: 0; }
+.hands-agent .status-pill { flex: none; max-width: 45%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hands-agent .link-btn { flex: none; }
+.link-btn.danger { color: var(--err); }
+.hands-log summary { cursor: pointer; list-style: none; }
+.hands-log summary::-webkit-details-marker { display: none; }
+.hands-log .step { font-size: calc(11px * var(--fs)); color: var(--muted); }
+.hands-log .step.err { color: var(--err); }

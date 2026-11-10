@@ -2,6 +2,14 @@
 
 const CONN_KEY = 'conn'
 
+/** "Chrome on macOS", "Edge on Windows"… — how Flight Deck names this browser. */
+export function browserLabel() {
+  const ua = navigator.userAgentData
+  const brand = (ua?.brands || []).map((b) => b.brand).find((b) => !/not.?a.?brand|chromium/i.test(b)) || 'Chrome'
+  const platform = ua?.platform || (/Mac/.test(navigator.platform) ? 'macOS' : /Win/.test(navigator.platform) ? 'Windows' : 'Linux')
+  return `${brand.replace(/^Google /, '')} on ${platform}`
+}
+
 export class AuthError extends Error {}
 
 export async function loadConn() {
