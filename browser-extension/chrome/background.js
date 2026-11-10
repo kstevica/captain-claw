@@ -1,8 +1,11 @@
 // Captain for Chrome — the service worker.
 //
-// It only opens the side panel (toolbar button, Alt+Shift+C, right-click
-// menu) and tells it what a right-click pointed at. The panel does the rest:
-// reading the page, fetching its files, sending them to Flight Deck.
+// It opens the side panel (toolbar button, Alt+Shift+C, right-click menu)
+// and tells it what a right-click pointed at; the panel does the reading,
+// fetching and sending. With "Agents can use this browser" on, it also lends
+// the browser to the person's agents (hands.js).
+
+import { startHands } from './hands.js'
 
 const MENU = [
   { id: 'captain-page', title: 'Send this page to Captain', contexts: ['page'] },
@@ -31,3 +34,5 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.srcUrl) focus.src = info.srcUrl
   chrome.storage.session.set({ focus }).catch(() => {})
 })
+
+startHands()

@@ -7,7 +7,7 @@
 
 import { icon } from './lib/icons.js'
 import { renderMarkdown, escapeHtml as esc } from './lib/md.js'
-import { AuthError, api, clearConn, loadConn, normalizeDeckUrl, publicCall, saveConn, upload } from './lib/api.js'
+import { AuthError, api, browserLabel, clearConn, loadConn, normalizeDeckUrl, publicCall, saveConn, upload } from './lib/api.js'
 
 const VERSION = chrome.runtime.getManifest().version
 const HISTORY_MAX = 30
@@ -60,6 +60,11 @@ const S = {
   lenses: {},          // agent slug → {state, lenses, general, agent, at}
   lensMore: false,     // the general lenses shown beside the agent's own
   newTopic: false,     // a new topic being started
+  hands: { on: false, front: false },   // agents may use this browser (hands.js)
+  handsStatus: null,   // {state: on|connecting|permission|denied|off|error, error}
+  handsLog: [],        // what agents did here, newest last
+  handsStopped: [],    // agents the person stopped
+  handsSeen: 0,        // the newest act the panel has followed
 }
 
 // ── small helpers ──
@@ -80,13 +85,6 @@ function toast(text) {
   $toast.hidden = false
   clearTimeout(toast.t)
   toast.t = setTimeout(() => { $toast.hidden = true }, 2600)
-}
-
-function browserLabel() {
-  const ua = navigator.userAgentData
-  const brand = (ua?.brands || []).map((b) => b.brand).find((b) => !/not.?a.?brand|chromium/i.test(b)) || 'Chrome'
-  const platform = ua?.platform || (/Mac/.test(navigator.platform) ? 'macOS' : /Win/.test(navigator.platform) ? 'Windows' : 'Linux')
-  return `${brand.replace(/^Google /, '')} on ${platform}`
 }
 
 function actionDef(id = S.action) {
@@ -155,7 +153,7 @@ function render() {
 function renderView() {
   keepFocus(() => {
     if (S.view === 'connect') $view.innerHTML = viewConnect()
-    else if (S.view === 'main') $view.innerHTML = viewMain()
+    else if (S.view === 'main') $view.innerHTML = viewHands() + viewMain()
     else if (S.view === 'run') $view.innerHTML = viewRun()
     else if (S.view === 'history') $view.innerHTML = viewHistory()
     else if (S.view === 'settings') $view.innerHTML = viewSettings()
@@ -713,6 +711,112 @@ function selectedFiles() {
   return allFiles().filter((f) => S.checked.has(f.url))
 }
 
+// ── agents using this browser (hands.js) ──
+
+const HANDS_RECENT_MS = 2 * 60 * 1000
+
+function agoText(at) {
+  const s = Math.max(0, Math.round((Date.now() - at) / 1000))
+  return s < 10 ? 'now' : s < 60 ? `${s}s ago` : `${Math.round(s / 60)} min ago`
+}
+
+function handsName(slug) {
+  return agentDef(slug)?.name || [...S.handsLog].reverse().find((e) => e.slug === slug)?.name || slug
+}
+
+function handsStatusText() {
+  const st = S.handsStatus?.state
+  if (st === 'on') return ''
+  if (st === 'permission') return 'Chrome hasn\'t given Captain the permission yet.'
+  if (st === 'denied') return S.handsStatus.error || 'Flight Deck refused this browser — connect it again.'
+  if (st === 'connecting') return S.handsStatus.error || 'Connecting to Flight Deck…'
+  if (st === 'error') return S.handsStatus.error || 'Not connected.'
+  return 'Starting…'
+}
+
+function viewHands() {
+  if (!S.hands.on) return ''
+  const now = Date.now()
+  const latest = new Map()
+  for (const e of S.handsLog) if (now - e.at < HANDS_RECENT_MS) latest.set(e.slug, e)
+  const working = [...latest.values()].filter((e) => !S.handsStopped.includes(e.slug)).reverse()
+  const status = handsStatusText()
+  const rows = working.map((e) => `
+    <div class="hands-agent">
+      <span class="status-pill ${e.state === 'working' ? 'working' : e.state === 'failed' ? 'error' : 'done'}"><span class="dot"></span>${esc(e.name)}</span>
+      <div class="grow ellipsis" title="${esc(e.error || e.text)}">${esc(e.text)}${e.state === 'failed' ? ' — didn\'t work' : ''} <span class="dim">· ${esc(agoText(e.at))}</span></div>
+      <button class="link-btn" data-act="hands-show" data-slug="${esc(e.slug)}">Show</button>
+      <button class="link-btn danger" data-act="hands-stop" data-slug="${esc(e.slug)}">Stop</button>
+    </div>`).join('')
+  const stoppedRows = S.handsStopped.map((slug) => `
+    <div class="hands-agent"><div class="grow dim">${esc(handsName(slug))} is stopped — it can't use this browser.</div>
+      <button class="link-btn" data-act="hands-let" data-slug="${esc(slug)}">Let it again</button></div>`).join('')
+  const past = S.handsLog.slice(-15).reverse()
+  const history = past.length ? `
+    <details class="hands-log">
+      <summary class="dim">What agents did here</summary>
+      ${past.map((e) => `<div class="step ${e.state === 'failed' ? 'err' : ''}"><b>${esc(e.name)}</b>&nbsp;${esc(e.text)}${e.state === 'failed' ? ` — ${esc(e.error || 'failed')}` : ''} <span class="dim">· ${esc(agoText(e.at))}</span></div>`).join('')}
+    </details>` : ''
+  return `
+    <div class="card hands ${working.length ? 'active' : ''}">
+      <div class="row">${icon('globe', 'sm')}<div class="grow"><b>${working.length ? 'An agent is using this browser' : 'Agents can use this browser'}</b>
+        ${status ? `<div class="dim">${esc(status)}</div>` : ''}</div>
+        ${S.handsStatus?.state === 'permission' ? '<button class="btn" data-act="hands-allow" style="padding:3px 9px">Allow</button>' : ''}</div>
+      ${rows}${stoppedRows}${history}
+    </div>`
+}
+
+async function handsShow(slug) {
+  const got = await chrome.storage.session.get('handsGroups').catch(() => ({}))
+  const g = got.handsGroups?.[slug]
+  if (!g) { toast('Its tabs are gone.'); return }
+  let tabId = g.current
+  if (!tabId) {
+    const tabs = await chrome.tabs.query({ groupId: g.groupId }).catch(() => [])
+    tabId = tabs[0]?.id
+  }
+  if (!tabId) { toast('Its tabs are gone.'); return }
+  const tab = await chrome.tabs.update(tabId, { active: true }).catch(() => null)
+  if (tab) chrome.windows.update(tab.windowId, { focused: true }).catch(() => {})
+}
+
+async function setHandsStopped(list) {
+  S.handsStopped = [...new Set(list)]
+  await setStore({ handsStopped: S.handsStopped })
+  render()
+}
+
+async function turnHandsOn(want) {
+  if (want) {
+    let ok = false
+    try { ok = await chrome.permissions.request({ permissions: ['debugger', 'tabGroups'] }) } catch { ok = false }
+    if (!ok) { toast('Chrome needs your OK for Captain to work in tabs for your agents.'); render(); return }
+  }
+  S.hands = { ...S.hands, on: want }
+  await setStore({ hands: S.hands })
+  render()
+}
+
+// A new agent at work here becomes the panel's agent: talk to it, follow it.
+function followHands() {
+  const last = S.handsLog[S.handsLog.length - 1]
+  if (!last || last.at <= S.handsSeen) return
+  // Only the first step of a stretch of work: picking another agent meanwhile sticks.
+  const fresh = !S.handsLog.some((e) => e !== last && e.slug === last.slug && last.at - e.at < HANDS_RECENT_MS)
+  S.handsSeen = last.at
+  if (!fresh || last.slug === S.agent || S.sending || S.view === 'run' || !agentDef(last.slug)) return
+  S.agent = last.slug
+  S.lensMore = false
+  setStore({ agent: S.agent })
+  keepLensChoice()
+  loadLenses(S.agent)
+  toast(`${last.name} is using your browser`)
+}
+
+setInterval(() => {
+  if (S.view === 'main' && S.hands.on && S.handsLog.some((e) => Date.now() - e.at < HANDS_RECENT_MS + 20000)) render()
+}, 15000)
+
 // ── sending ──
 
 function onSend() {
@@ -1246,6 +1350,12 @@ function viewSettings() {
         </button>`).join('')}</div>
     </div>
     <div class="card">
+      <div class="label">Agents</div>
+      <label class="switch"><input type="checkbox" id="handsOn" ${S.hands.on ? 'checked' : ''}><div>Agents can use this browser<div class="dim">Your agents' browser tool works here, signed in as you — in tabs of their own, grouped under the agent's name. Chrome shows that Captain is debugging the browser while one works. Flight Deck's own pages stay off-limits.</div></div></label>
+      <label class="switch"><input type="checkbox" id="handsFront" ${S.hands.front ? 'checked' : ''} ${S.hands.on ? '' : 'disabled'}><div>Bring an agent's tab to the front while it works</div></label>
+      ${S.hands.on && handsStatusText() ? `<div class="dim" style="margin-top:4px">${esc(handsStatusText())}</div>` : ''}
+    </div>
+    <div class="card">
       <div class="label">Every time</div>
       <label class="switch"><input type="checkbox" id="prefAll" ${S.allSites ? 'checked' : ''}><div>Work on every site without asking<div class="dim">Reads pages and fetches their files anywhere; also lets screenshots work.</div></div></label>
       <label class="switch"><input type="checkbox" id="prefSnapshot" ${S.prefs.snapshot ? 'checked' : ''}><div>Always send the whole page (.mhtml)</div></label>
@@ -1352,6 +1462,10 @@ $view.addEventListener('click', (ev) => {
     navigator.clipboard.writeText(S.run.result).then(() => toast('Copied'), () => toast("Couldn't copy"))
   } else if (act === 'open-deck' && S.conn) chrome.tabs.create({ url: `${S.conn.url}/` })
   else if (act === 'follow-up') sendFollowUp()
+  else if (act === 'hands-show') handsShow(el.dataset.slug)
+  else if (act === 'hands-stop') setHandsStopped([...S.handsStopped, el.dataset.slug]).then(() => toast(`${handsName(el.dataset.slug)} can't use this browser now`))
+  else if (act === 'hands-let') setHandsStopped(S.handsStopped.filter((s) => s !== el.dataset.slug))
+  else if (act === 'hands-allow') turnHandsOn(true)
   else if (act === 'clear-history') { S.history = []; setStore({ history: [] }); render() }
   else if (act === 'disconnect') {
     if (!confirm('Disconnect this browser from Flight Deck?')) return
@@ -1380,6 +1494,11 @@ $view.addEventListener('change', (ev) => {
     S.prefs = { ...S.prefs, snapshot: document.getElementById('prefSnapshot').checked, screenshot: document.getElementById('prefShot').checked }
     setStore({ prefs: S.prefs })
     applyDefaults()
+  } else if (el.id === 'handsOn') {
+    turnHandsOn(el.checked)
+  } else if (el.id === 'handsFront') {
+    S.hands = { ...S.hands, front: el.checked }
+    setStore({ hands: S.hands })
   } else if (el.id === 'prefAll') {
     const want = el.checked
     const p = want ? chrome.permissions.request({ origins: ['<all_urls>'] }) : chrome.permissions.remove({ origins: ['<all_urls>'] })
@@ -1461,6 +1580,17 @@ async function takeFocus() {
 }
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === 'session' && changes.focus?.newValue) takeFocus()
+  if (area === 'session' && (changes.handsLog || changes.handsStatus)) {
+    if (changes.handsLog) S.handsLog = changes.handsLog.newValue || []
+    if (changes.handsStatus) S.handsStatus = changes.handsStatus.newValue || null
+    followHands()
+    if (S.view === 'main' || S.view === 'settings') render()
+  }
+  if (area === 'local' && (changes.hands || changes.handsStopped)) {
+    if (changes.hands) S.hands = { on: false, front: false, ...(changes.hands.newValue || {}) }
+    if (changes.handsStopped) S.handsStopped = changes.handsStopped.newValue || []
+    if (S.view === 'main' || S.view === 'settings') render()
+  }
   // A size picked in another window's panel applies here too.
   if (area === 'local' && changes.prefs?.newValue && changes.prefs.newValue.textSize !== S.prefs.textSize) {
     S.prefs = { ...S.prefs, textSize: changes.prefs.newValue.textSize }
@@ -1473,13 +1603,21 @@ chrome.storage.onChanged.addListener((changes, area) => {
 
 async function start() {
   try { S.windowId = (await chrome.windows.getCurrent()).id } catch { S.windowId = null }
-  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses'])
+  const stored = await getStore(['agent', 'prefs', 'history', 'lastDeck', 'me', 'lenses', 'hands', 'handsStopped'])
   S.agent = stored.agent || ''
   S.prefs = { snapshot: false, screenshot: false, textSize: 'small', watchEvery: 'daily', ...(stored.prefs || {}) }
   applyTextSize()
   S.history = Array.isArray(stored.history) ? stored.history : []
   S.deckInput = stored.lastDeck || ''
   S.lenses = stored.lenses && typeof stored.lenses === 'object' ? stored.lenses : {}
+  S.hands = { on: false, front: false, ...(stored.hands || {}) }
+  S.handsStopped = Array.isArray(stored.handsStopped) ? stored.handsStopped : []
+  try {
+    const sess = await chrome.storage.session.get(['handsLog', 'handsStatus'])
+    S.handsLog = Array.isArray(sess.handsLog) ? sess.handsLog : []
+    S.handsStatus = sess.handsStatus || null
+    S.handsSeen = S.handsLog.length ? S.handsLog[S.handsLog.length - 1].at : 0
+  } catch { /* no session storage */ }
   await refreshAllSites()
   S.conn = await loadConn()
   if (!S.conn) {

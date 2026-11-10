@@ -134,7 +134,8 @@ PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "whatsapp_send_file": (("path", "read"),),
     "vfs": (("path", "vfs"), ("to", "vfs")),
     "hosting": (("subdir", "rel"),),
-    "browser": (("url", "url"),),
+    # url/urls: where the browser goes (in the person's own Chrome too); path: a file upload_file sends.
+    "browser": (("url", "url"), ("urls", "url"), ("path", "read")),
 }
 
 # Schema properties that look like paths but aren't (the test that keeps
@@ -153,6 +154,8 @@ NON_PATH_PARAMS: dict[str, frozenset[str]] = {
     "web_fetch": frozenset({"url"}), "web_get": frozenset({"url"}),
     "web_fetch_batch": frozenset({"urls"}),           # httpx: web schemes only
     "direct_api": frozenset({"url"}), "apis": frozenset({"base_url"}),
+    # A filter on the console / network log it already has.
+    "browser": frozenset({"url_pattern", "pattern"}),
 }
 
 # Tool arguments that carry an OUTBOUND address (not a file path). For a
@@ -161,7 +164,7 @@ NON_PATH_PARAMS: dict[str, frozenset[str]] = {
 # neighbouring service instead of the public web. (admin agents, and decks
 # with sign-in off, keep the normal behaviour.)
 URL_PARAMS: dict[str, tuple[str, ...]] = {
-    "browser": ("url",),
+    "browser": ("url", "urls"),
     "direct_api": ("url",),
     "apis": ("base_url",),
     "web_fetch": ("url",),

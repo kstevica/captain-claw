@@ -919,7 +919,10 @@ async def pair_approve(body: PairDecision, user: dict = Depends(get_current_user
 async def list_browsers(user: dict = Depends(get_current_user)):
     """The person's connected browsers and Macs (their personal access tokens
     named so), and whether this deck has Captain for Mac to hand out."""
+    from captain_claw.flight_deck.browser_hands import connected_token_ids
+
     rows = await get_db().list_pats(str(user["id"]))
+    lent = connected_token_ids(str(user["id"]))   # open for the agents' browser tool now
     out = []
     for r in rows:
         kind = token_kind(r.get("name"))
@@ -927,7 +930,8 @@ async def list_browsers(user: dict = Depends(get_current_user)):
             continue
         name = str(r.get("name") or "")[len(TOKEN_PREFIXES[kind]):]
         out.append({"id": r["id"], "kind": kind, "name": name or ("Mac" if kind == "desktop" else "Browser"),
-                    "created_at": r.get("created_at"), "last_used_at": r.get("last_used_at")})
+                    "created_at": r.get("created_at"), "last_used_at": r.get("last_used_at"),
+                    "agents_can_use": r["id"] in lent})
     return {"browsers": out, "mac_app": mac_app_zip() is not None or bool(mac_app_url())}
 
 
@@ -938,6 +942,9 @@ async def remove_browser(token_id: str, user: dict = Depends(get_current_user)):
     if not any(r["id"] == token_id and token_kind(r.get("name")) for r in rows):
         raise HTTPException(404, "No such browser")
     await db.revoke_pat(token_id, str(user["id"]))
+    from captain_claw.flight_deck.browser_hands import drop_token
+
+    await drop_token(str(user["id"]), token_id)
     return {"ok": True}
 
 
@@ -971,6 +978,9 @@ async def disconnect_self(request: Request, user: dict = Depends(get_clip_user))
     row = await db.get_pat_by_hash(hash_token(raw))
     if row and token_kind(row.get("name")):
         await db.revoke_pat(row["id"], str(user["id"]))
+        from captain_claw.flight_deck.browser_hands import drop_token
+
+        await drop_token(str(user["id"]), str(row["id"]))
     return {"ok": True}
 
 

@@ -2,8 +2,8 @@
   "manifest_version": 3,
   "name": "Captain for Chrome",
   "short_name": "Captain",
-  "version": "0.1.0",
-  "description": "Send the page you're on to one of your Captain agents — summarize it, keep it with its files, pull out its data, or ask about it.",
+  "version": "0.2.0",
+  "description": "Send the page you're on to one of your Captain agents \u2014 and let your agents use this browser, signed in as you, in tabs of their own.",
   "icons": {
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
@@ -21,7 +21,8 @@
     "default_path": "sidepanel.html"
   },
   "background": {
-    "service_worker": "background.js"
+    "service_worker": "background.js",
+    "type": "module"
   },
   "permissions": [
     "sidePanel",
@@ -30,7 +31,12 @@
     "storage",
     "contextMenus",
     "pageCapture",
-    "tabs"
+    "tabs",
+    "alarms"
+  ],
+  "optional_permissions": [
+    "debugger",
+    "tabGroups"
   ],
   "optional_host_permissions": [
     "<all_urls>"

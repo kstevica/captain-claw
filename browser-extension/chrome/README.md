@@ -75,6 +75,34 @@ pinned at the bottom. Scroll up to read and it stops following; the bar's ⌄
 page as one `.mhtml`, a screenshot, the tables as CSV, and the files the page
 links to (documents are ticked for Handle it, Save and Grab files).
 
+## Let your agents use this browser
+
+Settings → **Agents can use this browser**. Your agents' `browser` tool then
+works here (`target="chrome"`), signed in as you, while you watch:
+
+- Each agent works in **tabs of its own**, in a tab group named after it. It
+  can't touch your other tabs — drag a tab into its group to share it.
+- It reads the page with refs it can point at (`read_page`, `find`), clicks,
+  types, fills forms, scrolls, drags, hovers, takes screenshots, reads the
+  console and network log, runs a script — and does what this panel does:
+  reads the page as Markdown, lists its files, downloads them **with your
+  session** into `vfs:web-clips/…`, saves the whole page as `.mhtml`.
+- Chrome shows "Captain for Chrome started debugging this browser" while an
+  agent works — that's how it clicks and types for real. Pressing **Cancel**
+  on that bar stops the agents that were working.
+- The panel shows which agent is at work and what it just did, with **Show**
+  (bring its tab to the front) and **Stop** (it can't use the browser until
+  you **Let it again**). The panel switches to the agent that starts working,
+  so you can talk to it right there.
+- Flight Deck's own pages, `chrome://` pages and anything that isn't a web
+  page are off-limits. Only your own agents can use it; a shared agent's
+  member chats never can.
+- **Bring an agent's tab to the front while it works** — off by default, so
+  an agent working in the background doesn't take your tab away.
+
+Turning it on asks Chrome for two more permissions: **debugger** (real
+clicks, typing and screenshots in the agent's tabs) and **tab groups**.
+
 ## What lands where
 
 ```
@@ -99,6 +127,9 @@ agent makes for a clip (notes, CSVs, a brief) goes there too.
 - **contextMenus, sidePanel, storage** — the right-click menu, the panel, your settings.
 - **Sites** are asked for one at a time (or all at once from settings): to read
   a page you didn't open Captain on, and to download a file from another site.
+- **debugger, tabGroups** (asked only when you turn on "Agents can use this
+  browser") — your agents work in tabs of their own, grouped under their name.
+- **alarms** — keeps the agents' connection to Flight Deck alive.
 
 The page's text is marked for the agent as web content: instructions written
 in a page are never treated as yours.
