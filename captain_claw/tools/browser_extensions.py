@@ -55,6 +55,14 @@ WEBSTORE_CRX_URL = ("https://clients2.google.com/service/update2/crx?response=re
                     "&acceptformat=crx2,crx3&x=id%3D{id}%26installsource%3Dondemand%26uc")
 _ID_RE = re.compile(r"(?<![a-z])([a-p]{32})(?![a-z])")
 
+# Captain for Chrome isn't in the Web Store: it comes from this Captain itself —
+# the zip Flight Deck hands out (/fd/clip/extension.zip), else a checkout's folder.
+CAPTAIN_NAMES = frozenset({"captain", "captain-for-chrome", "captain for chrome", "captain_for_chrome"})
+CAPTAIN_SOURCE = "Captain for Chrome (this Captain's own copy)"
+CAPTAIN_NOTE = ("In this browser it isn't paired with Flight Deck (its panel asks to connect), and you don't need it "
+                "to work pages: read_page, find, form_input, page_text, page_files and download already run its "
+                "page scripts here.")
+
 
 class ExtensionError(Exception):
     """An extension that can't be installed (said plainly to the agent)."""
@@ -91,6 +99,17 @@ def _new_public_key() -> bytes | None:
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     return key.public_key().public_bytes(serialization.Encoding.DER,
                                          serialization.PublicFormat.SubjectPublicKeyInfo)
+
+
+def is_captain(text: Any) -> bool:
+    """*text* names Captain for Chrome (installed from this Captain, not the Web Store)."""
+    return " ".join(str(text or "").strip().lower().split()) in CAPTAIN_NAMES
+
+
+def captain_checkout() -> Path | None:
+    """The extension's folder in this checkout, when the agent runs from one."""
+    folder = Path(__file__).resolve().parents[2] / "browser-extension" / "chrome"
+    return folder if (folder / "manifest.json").is_file() else None
 
 
 # ── CRX ───────────────────────────────────────────────────────────────
@@ -435,8 +454,29 @@ async def _download(url: str, max_bytes: int) -> bytes:
     return bytes(data)
 
 
+async def fetch_captain(*, store: ExtensionStore, max_bytes: int) -> tuple[Path, str, dict[str, Any], str]:
+    """Captain for Chrome from this Captain: the zip its Flight Deck hands out,
+    else the checkout's folder. Always under one source, so a reinstall keeps its id."""
+    from captain_claw.fd_client import flight_deck_base
+
+    base = flight_deck_base()
+    why = ""
+    if base:
+        try:
+            return await fetch(store=store, url=f"{base}/fd/clip/extension.zip", max_bytes=max_bytes,
+                               label=CAPTAIN_SOURCE)
+        except ExtensionError as exc:
+            why = str(exc)
+    folder = captain_checkout()
+    if folder is not None:
+        return await fetch(store=store, path=folder, max_bytes=max_bytes, label=CAPTAIN_SOURCE)
+    raise ExtensionError("This Captain has no copy of Captain for Chrome to install"
+                         + (f" (Flight Deck: {why})" if why else " (not running under Flight Deck)") + ".")
+
+
 async def fetch(*, store: ExtensionStore, path: Path | None = None, url: str = "", store_id: str = "",
-                max_bytes: int, prodversion: str = DEFAULT_PRODVERSION) -> tuple[Path, str, dict[str, Any], str]:
+                max_bytes: int, prodversion: str = DEFAULT_PRODVERSION,
+                label: str = "") -> tuple[Path, str, dict[str, Any], str]:
     """Get an extension into a staging folder: ``(folder, id, summary, source)``.
     Nothing is installed yet — :meth:`ExtensionStore.commit` does that."""
     staged = store.stage()
@@ -475,6 +515,7 @@ async def fetch(*, store: ExtensionStore, path: Path | None = None, url: str = "
         else:
             raise ExtensionError("Say what to install: path (a folder, .zip or .crx), url, or extension_id "
                                  "(a Chrome Web Store id or address).")
+        source = label or source
         manifest = read_manifest(staged)
         if key is None and not manifest.get("key"):
             key = store.key_of_source(source)   # an update of one installed from here keeps its id
