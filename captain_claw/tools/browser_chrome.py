@@ -53,6 +53,7 @@ HEADLESS_ONLY_ACTIONS = frozenset({
     "api_replay", "api_test", "switch_app", "list_sessions",
     "workflow_record_start", "workflow_record_stop", "workflow_save", "workflow_list",
     "workflow_show", "workflow_run", "workflow_delete",
+    "extension_install", "extension_list", "extension_remove", "extension_open",
 })
 
 # The arguments the extension reads (everything else stays here).
@@ -139,6 +140,10 @@ class ChromeHands:
         return out
 
     async def run(self, action: str) -> ToolResult:
+        if action.startswith("extension_"):
+            return ToolResult(success=False, error=(
+                "The person installs extensions in their own Chrome themselves (the Chrome Web Store or "
+                "chrome://extensions). The extension_* actions are for your headless browser (target=\"headless\")."))
         if action in HEADLESS_ONLY_ACTIONS:
             return ToolResult(success=False, error=(
                 f"'{action}' is the headless browser's (target=\"headless\"); in the person's Chrome they're "
