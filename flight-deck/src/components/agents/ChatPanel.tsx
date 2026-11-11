@@ -53,6 +53,9 @@ import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './Agen
 import { EffortMenu } from './EffortMenu'
 import { ChatFilesMenu } from './ChatFilesMenu'
 import { SaveLessonDialog, SuggestLessonDialog } from '../layout/LessonDraft'
+import { saidKey } from '../../services/agentLessons'
+import { useLessonMarks } from '../../stores/lessonMarksStore'
+import { useLessonInbox } from '../../stores/lessonInboxStore'
 import { isManagedAgent } from '../../utils/managedAgents'
 import { AttachmentChip } from './AttachmentChip'
 import { appendAttachmentRefs, useFileAttachments } from '../../hooks/useFileAttachments'
@@ -2197,6 +2200,14 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
   const sharedRef = message.role === 'user' && agentId?.startsWith('shared:') ? agentId.slice('shared:'.length) : ''
   const teachable = !!ownAgent || !!sharedRef
   const saveLesson = () => setLessonFrom({ said: message.content || '', reply: replyBefore(message.id) })
+  // A message that is a lesson already — taught, waiting in Lessons to approve, or dismissed there — isn't offered
+  // again (lessonMarksStore, by the message's key).
+  const lessonKey = useMemo(() => (teachable ? saidKey(message.content || '') : ''), [teachable, message.content])
+  const lessonMark = useLessonMarks((s) => (agentId && lessonKey ? s.marks[agentId]?.[lessonKey] : undefined))
+  const loadLessonMarks = useLessonMarks((s) => s.load)
+  useEffect(() => { if (lessonKey && agentId) loadLessonMarks(agentId) }, [lessonKey, agentId, loadLessonMarks])
+  const markLesson = (mark: 'taught' | 'waiting') => { if (agentId) useLessonMarks.getState().mark(agentId, lessonKey, mark) }
+  const offerLesson = teachable && !lessonMark && looksLikeLesson(message.content || '')
 
   if (message.role === 'user') {
     const sent = splitSentFiles(message.content || '')
@@ -2215,13 +2226,30 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
           </span>
         </div>
         <div className="flex items-center gap-1">
-          {teachable && looksLikeLesson(message.content || '') && (
+          {teachable && lessonMark === 'taught' && (
+            <span title={ownAgent ? 'It learned this as a lesson' : 'Its owner took this as a lesson'}
+              className="inline-flex items-center gap-1 px-1 text-[11px] text-zinc-500">
+              <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" /> {ownAgent ? 'Saved as a lesson' : 'Taken as a lesson'}
+            </span>
+          )}
+          {teachable && lessonMark === 'waiting' && (ownAgent ? (
+            <button onClick={() => useLessonInbox.getState().show(ownAgent.slug, { name: ownAgent.name })}
+              title="It noticed a lesson here — approve it, edit it or dismiss it"
+              className="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] text-zinc-500 hover:bg-violet-500/10 hover:text-violet-700 dark:hover:text-violet-300">
+              <GraduationCap className="h-3 w-3" /> In Lessons to approve
+            </button>
+          ) : (
+            <span className="inline-flex items-center gap-1 px-1 text-[11px] text-zinc-500">
+              <GraduationCap className="h-3 w-3" /> Suggested to its owner
+            </span>
+          ))}
+          {offerLesson && (
             <button onClick={saveLesson}
               className="inline-flex items-center gap-1 rounded-full border border-violet-500/30 px-2 py-0.5 text-[11px] text-violet-700 hover:bg-violet-500/10 dark:text-violet-300">
               <GraduationCap className="h-3 w-3" /> {ownAgent ? 'Save as a lesson?' : 'Suggest as a lesson?'}
             </button>
           )}
-          {teachable && !looksLikeLesson(message.content || '') && (
+          {teachable && !offerLesson && (!lessonMark || lessonMark === 'dismissed') && (
             <button onClick={saveLesson} title={ownAgent ? 'Save as a lesson' : 'Suggest as a lesson to its owner'}
               className={`rounded p-0.5 ${TOUCH_ROOM} text-zinc-600 opacity-0 transition-opacity hover:bg-zinc-700/50 hover:text-violet-400 group-hover:opacity-100 ${TOUCH_SHOWN}`}>
               <GraduationCap className="h-3 w-3" />
@@ -2231,12 +2259,13 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
         </div>
         {lessonFrom && ownAgent && (
           <SaveLessonDialog agent={{ slug: ownAgent.slug, name: ownAgent.name }} said={lessonFrom.said} reply={lessonFrom.reply}
-            onClose={() => setLessonFrom(null)} />
+            saidKey={lessonKey} onTaught={() => markLesson('taught')} onClose={() => setLessonFrom(null)} />
         )}
         {lessonFrom && sharedRef && (
           <SuggestLessonDialog agentRef={sharedRef} agentName={sourceName || 'This agent'}
             ownerName={useSharedAgentStore.getState().agents.find((a) => a.agent_ref === sharedRef)?.owner_name ?? ''}
-            said={lessonFrom.said} reply={lessonFrom.reply} onClose={() => setLessonFrom(null)} />
+            said={lessonFrom.said} reply={lessonFrom.reply} saidKey={lessonKey} onSent={() => markLesson('waiting')}
+            onClose={() => setLessonFrom(null)} />
         )}
       </div>
     )

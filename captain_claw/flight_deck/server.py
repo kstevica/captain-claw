@@ -2597,7 +2597,7 @@ def _build_config_yaml(c: AgentConfig) -> str:
             "enabled": without_retired_tools(c.tools),
             "shell": {"timeout": 120, "default_policy": "ask"},
             "browser": {"headless": True, "viewport_width": 1280, "viewport_height": 720},
-            "web_search": {"provider": "brave", "max_results": 5},
+            "web_search": {"provider": "brave", "max_results": 10},
             "require_confirmation": ["shell", "write", "edit"],
         },
         "session": {"storage": "sqlite", "path": "/data/sessions/sessions.db", "auto_save": True},
@@ -3290,7 +3290,7 @@ def _build_process_config_yaml(c: AgentConfig, agent_dir: Path) -> str:
             "enabled": without_retired_tools(c.tools),
             "shell": {"timeout": 120, "default_policy": "ask"},
             "browser": {"headless": True, "viewport_width": 1280, "viewport_height": 720},
-            "web_search": {"provider": "brave", "max_results": 5},
+            "web_search": {"provider": "brave", "max_results": 10},
             "require_confirmation": ["shell", "write", "edit"],
         },
         "session": {

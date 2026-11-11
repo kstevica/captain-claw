@@ -13,8 +13,10 @@ approve") and approves one as it is, edits it first, or dismisses it. An
 approved lesson is taught like one added by hand (``taught_by: noticed``,
 or ``member``) — it counts from the agent's next message — and stays listed
 under "Just learned" for a while, where Undo takes it away again and puts
-the proposal back. A proposal the agent has as a lesson already, or one
-like a waiting or dismissed one, is never kept.
+the proposal back. A proposal the agent has as a lesson already, one from a
+chat message its owner taught a lesson from already, or one like a waiting
+or dismissed one, is never kept; one waiting is settled when its owner
+teaches the same from the chat (agent_onboarding ``said_key``).
 
     POST /fd/lesson-proposals/agent                 an agent proposes one (its own X-Agent-Auth)
     GET  /fd/lesson-proposals                       every agent of the caller's: waiting, and just learned
@@ -68,10 +70,13 @@ def _same(a: str, b: str) -> bool:
     return ob._flat(a) == ob._flat(b) or retrieval.same_fact(a, b)
 
 
-def known(record: dict, items: list[dict], kind: str, text: str) -> str:
-    """Why a proposal isn't kept — the agent has that lesson (``known``), one
-    like it waits (``waiting``) or was dismissed (``dismissed``) — or ""."""
+def known(record: dict, items: list[dict], kind: str, text: str, said: str = "") -> str:
+    """Why a proposal isn't kept — the agent has that lesson, or one was
+    taught from the same chat message (*said*) already (``known``), one like
+    it waits (``waiting``) or was dismissed (``dismissed``) — or ""."""
     if ob._taken(record, kind, text) or any(_same(text, x["text"]) for x in agent_lessons.from_record(record)):
+        return "known"
+    if said and ob.said_key(said) in ob.stamped(record):
         return "known"
     for s in items:
         if s.get("origin") != "auto" or not s.get("text") or not _same(text, str(s["text"])):
@@ -137,7 +142,7 @@ async def propose(body: ProposeBody, request: Request) -> dict:
     record = await asyncio.to_thread(ap.earlier_setup, agent_dir, workspace)
     async with ob._SUGGESTION_LOCK:
         items = await asyncio.to_thread(ob._load_suggestions, agent_dir)
-        why = known(record, items, kind, text)
+        why = known(record, items, kind, text, body.said)
         if not why and sum(1 for s in items if s.get("origin") == "auto" and s.get("state") == "waiting") >= WAITING_MAX:
             why = "full"
         if why:
@@ -228,9 +233,12 @@ async def approve(slug: str, pid: str, body: ApproveBody, request: Request,
         raise HTTPException(400, "Write the lesson first.")
     always = bool(body.always if body.always is not None else s.get("always")) and kind != "fact"
     taught_by = "noticed" if s.get("origin") == "auto" else "member"
+    # The owner's chat message it was noticed in: the lesson keeps its key, so the chat doesn't offer it again.
+    key = ob.said_key(str(s.get("said") or "")) if s.get("origin") == "auto" else ""
     changed: dict = {}
     try:
-        changed = await ob.teach_one(slug, user, request, kind, text, always, taught_by)
+        changed = await ob.teach_one(slug, user, request, kind, text, always, taught_by, said_key=key,
+                                     proposal=True)
     except HTTPException as exc:
         if exc.status_code != 409:
             raise
