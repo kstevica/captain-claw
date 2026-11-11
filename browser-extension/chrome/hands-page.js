@@ -6,7 +6,9 @@
 // point at, finds things, fills fields and says where an element is, so the
 // worker can click it with real input events. It defines
 // globalThis.__captainHands once per document; refs last until the page
-// navigates.
+// navigates. In a frame from another site the worker sets
+// globalThis.__captainRefPrefix first ("f2_"), so its refs (ref_f2_5) never
+// collide with the page's.
 
 (() => {
   if (globalThis.__captainHands) return
@@ -30,7 +32,7 @@
   function refOf(el) {
     let id = ids.get(el)
     if (!id) {
-      id = `ref_${next++}`
+      id = `ref_${globalThis.__captainRefPrefix || ''}${next++}`
       ids.set(el, id)
       refs.set(id, new WeakRef(el))
     }
@@ -291,6 +293,18 @@
       const sized = r.width > 0 || r.height > 0 || (style && style.display === 'contents')
       const interactive = !hiddenHere && sized && (isInteractive(el, role) || looksClickable(el, style))
       if (onlyInteractive) {
+        if (role === 'iframe' && !hiddenHere && r.width >= 30 && r.height >= 20) {
+          let other = false
+          try { other = !el.contentDocument } catch { other = true }
+          if (other) {
+            const box = rectInTop(el)
+            const src = el.getAttribute('src') || ''
+            let host = ''
+            try { host = new URL(src, el.ownerDocument.baseURI).host } catch { host = '' }
+            push(`- iframe${nameOf(el, role) ? ' ' + q(nameOf(el, role)) : ''} from ${host || 'another site'} at (${Math.round(box.left)}, ${Math.round(box.top)}), ${Math.round(box.width)}×${Math.round(box.height)} — another site's frame: its fields are listed after the page when they can be read; else click in it by coordinate, then type`)
+            return
+          }
+        }
         if (interactive) {
           const name = nameOf(el, role)
           const off = inViewport(rectInTop(el)) ? '' : ' (off-screen)'
@@ -553,6 +567,103 @@
     return `Put ${q(name)} (${bytes.length.toLocaleString()} bytes) in ${describe(el)}.`
   }
 
+  const TYPED_KINDS = new Set(['text', 'search', 'email', 'url', 'tel', 'password', 'number', ''])
+
+  /** 'text' when typing sets it (text fields, textareas, contenteditable); else 'other'. */
+  function fieldKind({ ref } = {}) {
+    const el = byRef(ref)
+    if (el.tagName === 'TEXTAREA') return 'text'
+    if (el.tagName === 'INPUT') return TYPED_KINDS.has((el.getAttribute('type') || '').toLowerCase()) || TYPED_KINDS.has(el.type) ? 'text' : 'other'
+    if (el.isContentEditable) return 'text'
+    return 'other'
+  }
+
+  /** Focus a field and select what's in it, so what's typed next replaces it. */
+  function selectField({ ref } = {}) {
+    const el = byRef(ref)
+    el.focus()
+    if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+      try { el.select() } catch { /* a type without selection */ }
+      try { if (el.value && el.selectionStart === el.selectionEnd) el.ownerDocument.execCommand('selectAll') } catch { /* nothing to select */ }
+      return true
+    }
+    if (el.isContentEditable) {
+      const sel = el.ownerDocument.getSelection()
+      const range = el.ownerDocument.createRange()
+      range.selectNodeContents(el)
+      sel.removeAllRanges()
+      sel.addRange(range)
+      return true
+    }
+    return false
+  }
+
+  function fieldInfo(el) {
+    const role = roleOf(el)
+    const out = { what: describe(el), ref: refOf(el) }
+    if (el.tagName === 'INPUT' && (el.type === 'checkbox' || el.type === 'radio')) out.checked = el.checked
+    else if (el.tagName === 'INPUT' && el.type === 'password') out.length = (el.value || '').length
+    else if (el.tagName === 'SELECT') out.value = Array.from(el.selectedOptions || []).map((o) => oneLine(o.text)).join(', ')
+    else if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') out.value = clip(el.value || '', 300)
+    else if (el.isContentEditable) out.value = clip(oneLine(el.innerText), 300)
+    else return null
+    out.role = role
+    return out
+  }
+
+  /** What a field holds now (a password: only how long it is). */
+  function field({ ref } = {}) {
+    return fieldInfo(byRef(ref))
+  }
+
+  /** The field that has the keyboard here, or {frame: true} when a frame has it. */
+  function focused() {
+    let el = document.activeElement
+    while (el && el.shadowRoot && el.shadowRoot.activeElement) el = el.shadowRoot.activeElement
+    if (!el || el === document.body || el === document.documentElement) return null
+    if (el.tagName === 'IFRAME' || el.tagName === 'FRAME') {
+      try {
+        if (el.contentDocument) {
+          let inner = el.contentDocument.activeElement
+          while (inner && inner.shadowRoot && inner.shadowRoot.activeElement) inner = inner.shadowRoot.activeElement
+          return inner && inner !== el.contentDocument.body ? fieldInfo(inner) : null
+        }
+      } catch { /* another site's frame */ }
+      return { frame: true }
+    }
+    return fieldInfo(el)
+  }
+
+  function shown(el) {
+    const st = styleOf(el)
+    if (!st || st.display === 'none' || st.visibility === 'hidden') return false
+    const r = el.getBoundingClientRect()
+    return r.width > 0 && r.height > 0
+  }
+
+  /** What the page says is wrong now: fields marked invalid (and why), alerts, fields the browser rejects. */
+  function problems() {
+    const out = []
+    const seen = new Set()
+    const add = (t) => {
+      t = clip(oneLine(t), 180)
+      if (t && !seen.has(t)) { seen.add(t); out.push(t) }
+    }
+    for (const el of document.querySelectorAll('[aria-invalid="true"]')) {
+      if (!shown(el)) continue
+      const why = textOfIds(el, 'aria-errormessage') || textOfIds(el, 'aria-describedby') || el.validationMessage || 'marked invalid'
+      add(`${describe(el)}: ${why}`)
+    }
+    for (const el of document.querySelectorAll('[role="alert"], [aria-live="assertive"]')) {
+      const t = oneLine(el.innerText)
+      if (t && t.length <= 300 && shown(el)) add(t)
+    }
+    for (const el of document.querySelectorAll('input, select, textarea')) {
+      if (el.value && el.willValidate && el.validity && !el.validity.valid && shown(el)) add(`${describe(el)}: ${el.validationMessage}`)
+    }
+    return out.slice(0, 8)
+  }
+
   function info() {
     return {
       url: location.href,
@@ -567,5 +678,6 @@
     }
   }
 
-  globalThis.__captainHands = { tree, find, point, pointBy, scrollTo, formInput, upload, info }
+  globalThis.__captainHands = { tree, find, point, pointBy, scrollTo, formInput, upload, info,
+    fieldKind, selectField, field, focused, problems }
 })()

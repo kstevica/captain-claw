@@ -131,6 +131,34 @@ to the extension's) — in an isolated world through a CDP session
 coordinate work there too. Only `tabs`, `tab_*`, `console`, `network_requests`
 and `resize` stay Chrome-only (and imply `target="chrome"`).
 
+### Forms (2026-11-11, after a sign-up form on the staging deck stalled)
+
+What went wrong there: `type` sent each character's own code as its key code,
+so `.` went as Delete (46), `#` as End (35), `'` as → (39) — a dotted username
+arrived without its dots and a password lost its `#`; `type` appended to a
+field already filled ("Passwords do not match"); the username box was in a
+frame from another site that `read_page` never listed; the click on Submit said
+nothing about the error it caused; and Cancel on Chrome's debugging bar
+stopped the agent. Now:
+
+- **Keys** come from a US keyboard map (`US_KEYS`: code, key code, Shift);
+  anything not on it is inserted as text.
+- **`type` into a ref or point replaces** what's there (`append: true` adds);
+  **`form_input` on a text field** selects it and inserts the value as real
+  input (React/Vue see it); both answer with what the field now holds (a
+  password: only its length).
+- **Frames from other sites**: the worker auto-attaches to them
+  (`Target.setAutoAttach`, flat sessions, Chrome 125+), runs the page helpers
+  there with a ref prefix (`ref_f2_5`), and `read_page`/`find` list their
+  fields after the page; pointing adds the frame's offset. Without that, the
+  frame is still listed with its position (click by coordinate).
+- **After click / type / form_input / press_key**: new errors on the page —
+  `aria-invalid` fields with their message, alerts, fields the browser rejects —
+  come back as "On the page now: …".
+- **Cancel on the debugging bar** only hides it; Stop in the panel stops.
+- The prompt tells agents to finish forms the person asked for, use the values
+  they give, and stop only at a real CAPTCHA, code or payment.
+
 ### Back to the person's tab when the run is over
 
 Before each act the extension notes the active tab in every window; if the act

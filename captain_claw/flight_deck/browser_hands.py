@@ -535,8 +535,8 @@ async def agent_act(body: ActBody, request: Request) -> dict:
         return {"ok": False, "no_browser": True, "error": NO_BROWSER}
     if slug in conn.stopped:
         return {"ok": False, "stopped": True,
-                "error": "The person stopped you using their browser (Captain for Chrome). Don't try again "
-                         "unless they ask you to; carry on without it or ask them."}
+                "error": "The person stopped you using their browser (Stop in the Captain for Chrome panel). They "
+                         "let you go on with “Let it again” there: ask them to, and don't try again until they say so."}
     if sum(1 for a in _ACTS.values() if a.conn is conn) >= MAX_ACTS_PER_CONN:
         return {"ok": False, "error": "The browser is busy with other requests; try again in a moment."}
     from captain_claw.flight_deck.agent_names import display_name
