@@ -9,6 +9,7 @@ import { Page, PageHeader, Card, Button, Segmented, Notice, Field, Pill, inputCl
 import { CopyButton, DownloadButton, FileDrop, TokenText } from './anonParts'
 import { kindLabel, kindTone } from './anonFormat'
 import { VaultsPanel } from './VaultsPanel'
+import { GatePanel } from './GatePanel'
 
 // Anonymize: take names, numbers and addresses out of a text or a file. Each
 // becomes a token (⟦PERSON_1⟧); the real values stay in the person's vault,
@@ -78,12 +79,14 @@ export function AnonymizePage({ phone = false, onClose }: { phone?: boolean; onC
               { value: 'anonymize', label: 'Anonymize' },
               { value: 'restore', label: 'Put back' },
               { value: 'vaults', label: 'Vaults', count: vaults.length },
+              { value: 'gate', label: 'Privacy gate' },
             ]}
           />
         </div>
         {tab === 'anonymize' && <AnonymizeTab status={status} kinds={kinds} vaults={vaults} onDone={reloadVaults} phone={phone} />}
         {tab === 'restore' && <RestoreTab kinds={kinds} vaults={vaults} />}
         {tab === 'vaults' && <VaultsPanel vaults={vaults} reload={reloadVaults} onSheet={setSheetOpen} />}
+        {tab === 'gate' && <GatePanel />}
       </Page>
     </div>
   )

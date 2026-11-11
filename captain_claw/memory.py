@@ -232,6 +232,7 @@ class LayeredMemory:
         max_items: int = 3,
         max_snippet_chars: int = 360,
         layer: str = "l3",
+        exclude_sources: frozenset[str] | set[str] = frozenset(),
     ) -> tuple[str, str]:
         if self.semantic is None:
             return "", ""
@@ -243,6 +244,7 @@ class LayeredMemory:
             max_snippet_chars=max_snippet_chars,
             layer=layer,
             exclude_active_session=True,
+            exclude_sources=exclude_sources,
         )
 
     def promote(self, chunk_ids: list[str], layer: str = "l3"):

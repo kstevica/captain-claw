@@ -772,7 +772,23 @@ class AgentGuardMixin:
         if _pcac is not None:
             arguments = {**arguments, "_peer_consult_approval_callback": _pcac}
 
-        return await self.tools.execute(
+        # The person's privacy gate (Flight Deck decides): tokens in an
+        # outgoing message are put back just before it leaves, and results
+        # from covered sources are anonymized before the model sees them.
+        from captain_claw import anonymize_gate_client as _gate
+        from captain_claw.tools.registry import ToolResult as _ToolResult
+
+        gate = await _gate.decision(self)
+        restored = 0
+        if gate is not None and gate.egress(name):
+            try:
+                arguments, restored = await _gate.restore_args(gate, arguments)
+            except Exception as exc:  # noqa: BLE001 — nothing leaves with half its values
+                return _ToolResult(success=False, error=(
+                    f"Nothing was sent: the privacy gate couldn't put the real values back into it ({exc}). "
+                    "Try again in a moment; if it keeps failing, tell the person."))
+
+        result = await self.tools.execute(
             name=name,
             arguments=arguments,
             session_id=str(session_id_override or "").strip() or self._current_session_slug(),
@@ -784,3 +800,6 @@ class AgentGuardMixin:
             file_registry=getattr(self, "_file_registry", None),
             stream_callback=getattr(self, "_tool_stream_callback", None),
         )
+        if gate is not None and (restored or gate.covers(name, arguments)):
+            result = await _gate.gate_result(gate, name, result)
+        return result

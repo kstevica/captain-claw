@@ -2,7 +2,7 @@ import { create } from 'zustand'
 
 // The kiosk's Anonymize dialog: whether it is open, and the tab it opens on.
 
-export type AnonymizeTab = 'anonymize' | 'restore' | 'vaults'
+export type AnonymizeTab = 'anonymize' | 'restore' | 'vaults' | 'gate'
 
 interface AnonymizeState {
   open: boolean

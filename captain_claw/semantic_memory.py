@@ -1137,15 +1137,21 @@ class SemanticMemoryIndex:
         max_snippet_chars: int = 360,
         layer: str = "l3",
         exclude_active_session: bool = False,
+        exclude_sources: frozenset[str] | set[str] = frozenset(),
     ) -> tuple[str, str]:
         """Format top semantic hits as a prompt note + debug block.
 
         *layer* controls the snippet granularity:
         ``"l1"`` = one-liner, ``"l2"`` = summary, ``"l3"`` = full text (default).
+        *exclude_sources* leaves hits of those sources out (the privacy gate
+        keeps raw ``workspace`` files out of the prompt).
         """
         results = self.search(
-            query=query, max_results=max_items, exclude_active_session=exclude_active_session,
+            query=query, max_results=max_items * (3 if exclude_sources else 1),
+            exclude_active_session=exclude_active_session,
         )
+        if exclude_sources:
+            results = [r for r in results if r.source not in exclude_sources][:max_items]
         if not results:
             return "", "semantic_memory: no results"
         if self.cross_session_retrieval:

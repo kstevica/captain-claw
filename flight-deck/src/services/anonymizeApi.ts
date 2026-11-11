@@ -114,6 +114,21 @@ export interface TrustedModelInput {
   enabled: boolean
 }
 
+export interface GateSettings {
+  enabled: boolean
+  groups: string[]
+  folders: string[]
+  when: 'untrusted' | 'always'
+  lane: 'deterministic' | 'both'
+}
+
+export interface GateInfo {
+  gate: GateSettings
+  vault: string
+  groups: { id: string; label: string }[]
+  model_available: boolean
+}
+
 export interface TrustedTestCase {
   id: string
   lanes: string[]
@@ -141,6 +156,10 @@ export const anonymizeApi = {
   updateVault: (id: string, patch: { name?: string; expires_at?: number | null }) =>
     api<{ vault: Vault }>(`/fd/anonymize/vaults/${enc(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteVault: (id: string) => api<{ deleted: string }>(`/fd/anonymize/vaults/${enc(id)}`, { method: 'DELETE' }),
+  gate: () => api<GateInfo>('/fd/anonymize/gate'),
+  saveGate: (gate: GateSettings) =>
+    api<{ gate: GateSettings }>('/fd/anonymize/gate', { method: 'PUT', body: JSON.stringify(gate) }),
+  reveal: (content: string) => post<RestoreResult>('/fd/anonymize/reveal', { content }),
   trustedGet: () => api<{ model: TrustedModel | null; providers: string[] }>('/fd/anonymize/admin/trusted-model'),
   trustedPut: (body: TrustedModelInput) =>
     api<{ model: TrustedModel }>('/fd/anonymize/admin/trusted-model', { method: 'PUT', body: JSON.stringify(body) }),

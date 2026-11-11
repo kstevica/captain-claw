@@ -41,6 +41,7 @@ from captain_claw.anonymize import engine
 from captain_claw.anonymize import formats
 from captain_claw.anonymize import llm_lane
 from captain_claw.anonymize.detectors import KINDS
+from captain_claw.flight_deck import anonymize_gate as gate_settings
 from captain_claw.flight_deck import anonymize_trusted as trusted
 from captain_claw.flight_deck import anonymize_vault as av
 from captain_claw.flight_deck import fd_crypto
@@ -503,6 +504,17 @@ async def anonymize_agent_status(request: Request) -> dict[str, Any]:
     return await _status()
 
 
+@router.post("/agent/gate")
+async def anonymize_agent_gate(request: Request) -> dict[str, Any]:
+    """Does the person's privacy gate apply to this agent, on the model it
+    runs on now? (The agent says which model; the person's setting and the
+    deck's trust rules decide.)"""
+    person, _actor = await _agent_person(request)
+    data = await _body(request)
+    return await gate_settings.decide(person, str(data.get("provider") or "")[:100],
+                                      str(data.get("model") or "")[:200], str(data.get("base_url") or "")[:500])
+
+
 @router.get("/agent/vaults")
 async def anonymize_agent_vaults(request: Request) -> dict[str, Any]:
     person, _actor = await _agent_person(request)
@@ -675,3 +687,38 @@ def engine_cases() -> list[dict[str, Any]]:
     from pathlib import Path
 
     return json.loads((Path(engine.__file__).parent / "cases.json").read_text(encoding="utf-8"))["cases"]
+
+
+# ── the privacy gate (the person's setting) ─────────────────────────
+
+
+@router.get("/gate")
+async def anonymize_gate_get(user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    from captain_claw.anonymize import gate as G
+
+    settings = await gate_settings.load(user["id"])
+    return {"gate": settings.public(), "vault": G.GATE_VAULT,
+            "groups": [{"id": k, "label": G.GROUP_LABELS[k]} for k in G.GROUPS],
+            "model_available": bool(await trusted.usable(get_db()))}
+
+
+@router.put("/gate")
+async def anonymize_gate_put(request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    try:
+        settings = await gate_settings.save(user["id"], await _body(request))
+    except gate_settings.GateError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    log.info("Privacy gate set", user=user["id"], enabled=settings.enabled, groups=settings.groups, when=settings.when)
+    return {"gate": settings.public()}
+
+
+@router.post("/reveal")
+async def anonymize_reveal(request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Real values for the person reading a reply (the chat's "Show real
+    names"): the gate's vault unless another is named."""
+    from captain_claw.anonymize import gate as G
+
+    data = await _body(request)
+    data.setdefault("vault", G.GATE_VAULT)
+    data["format"] = "text"
+    return await restore_for(user["id"], data, actor="person (chat)")

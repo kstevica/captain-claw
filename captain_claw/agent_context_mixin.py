@@ -1413,7 +1413,7 @@ class AgentContextMixin:
         ``first``) and from the rest. An item another memory already gave, or
         the insights note already carries (mirrored there from this agent),
         is left out: it would say the same thing twice."""
-        if getattr(self, "_suppress_memory_context", False):
+        if getattr(self, "_suppress_memory_context", False) or self._gate_covers("memory"):
             return "", ""
         cache = getattr(self, "_external_memory_context_cache", None) or {}
         groups = [g for g in cache.get("groups") or [] if isinstance(g, dict)]
@@ -2164,6 +2164,18 @@ class AgentContextMixin:
         )
         return "\n".join(lines)
 
+    def _gate_covers(self, group: str) -> bool:
+        """Does the person's privacy gate apply to this agent now and cover
+        *group*? (The last answer Flight Deck gave; recall notes are built
+        without waiting on it.)"""
+        try:
+            from captain_claw import anonymize_gate_client
+
+            gate = anonymize_gate_client.cached_decision(self)
+        except Exception:  # noqa: BLE001
+            return False
+        return gate is not None and group in gate.groups
+
     def _build_semantic_memory_note(
         self,
         query: str | None,
@@ -2184,12 +2196,17 @@ class AgentContextMixin:
         memory = getattr(self, "memory", None)
         if memory is None:
             return "", ""
+        # While the person's privacy gate covers files, raw workspace files
+        # stay out of the automatic note (the agent reads them through its
+        # gated tools instead); session chunks are the gated conversation.
+        exclude = frozenset({"workspace"}) if self._gate_covers("files") else frozenset()
         try:
             return memory.build_semantic_note(
                 cleaned,
                 max_items=max_items,
                 max_snippet_chars=max_snippet_chars,
                 layer=layer,
+                exclude_sources=exclude,
             )
         except Exception as e:
             log.debug("Semantic memory note generation failed", error=str(e))
@@ -2403,7 +2420,7 @@ class AgentContextMixin:
         evidence, so the floor drops and more items are allowed through — the
         one case where a marginal hit still beats saying nothing.
         """
-        if getattr(self, "_suppress_memory_context", False):
+        if getattr(self, "_suppress_memory_context", False) or self._gate_covers("memory"):
             return "", ""
         cleaned = str(query or "").strip()
         if not cleaned:
@@ -4632,6 +4649,17 @@ class AgentContextMixin:
         if external_main:
             notes.append(("external_memory_main", external_main))
 
+        # The person's privacy gate: notes from a covered source stay out.
+        try:
+            from captain_claw import anonymize_gate_client
+            from captain_claw.anonymize.gate import NOTE_GROUPS
+
+            gate = anonymize_gate_client.cached_decision(self)
+        except Exception:  # noqa: BLE001
+            gate = None
+        if gate is not None:
+            blocked = {name for g in gate.groups for name in NOTE_GROUPS.get(g, ())}
+            notes = [n for n in notes if n[0] not in blocked]
         return notes
 
     def _topic_context_notes(self, *, skip_memory: bool = False,
