@@ -84,6 +84,51 @@ export interface TaskInput {
   enabled?: boolean
 }
 
+/** A job an agent scheduled for itself with its `cron` tool (it lives in the
+ *  agent's own file and runs in the chat it was set up from) — listed with
+ *  the tasks by `captain_claw/flight_deck/agent_cron_routes.py`. Times are
+ *  epoch seconds; the agent's schedule times are UTC. */
+export interface AgentCronJob {
+  id: string
+  agent_slug: string
+  /** The agent's name in Flight Deck's registry. */
+  agent_name: string
+  /** on: its process runs · asleep: woken before each run · off: its jobs wait until it's on. */
+  agent_state: 'on' | 'asleep' | 'off'
+  kind: string
+  task: string
+  /** "agent" when the agent wrote it; "" for one a person set up (/cron, the agent panel). */
+  author: string
+  /** The agent's own text: "daily 10:00", "every 3h", "weekly fri 17:00", "in 2 hours", "once at …". */
+  schedule: string
+  schedule_type: string
+  session_id: string
+  enabled: boolean
+  created_at: number | null
+  updated_at: number | null
+  last_run_at: number | null
+  next_run_at: number | null
+  last_status: string
+  last_error: string
+  running: boolean
+}
+
+export interface AgentCronRun {
+  /** 1 = its first run kept. */
+  n: number
+  started_at: number | null
+  finished_at: number | null
+  trigger: string
+  status: 'ok' | 'queued' | 'error' | 'cancelled' | 'running' | 'interrupted' | string
+  result: string
+  error: string
+}
+
+/** One agent job's key in lists and views. */
+export function agentJobKey(j: { agent_slug: string; id: string }): string {
+  return `${j.agent_slug}/${j.id}`
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const jwt = useAuthStore.getState().token
   const r = await fetch(path, {
@@ -140,6 +185,15 @@ export const schedulerApi = {
   preview: (schedule: string, tz: string) =>
     api<SchedulePreview>('/scheduler/preview', { method: 'POST', body: JSON.stringify({ schedule, tz }) }),
   deliveryOptions: () => api<DeliveryOptions>('/scheduler/delivery-options'),
+  // The agents' own schedules (their cron).
+  listAgentJobs: () => api<AgentCronJob[]>('/scheduler/agent-jobs'),
+  agentJobRuns: (slug: string, id: string) =>
+    api<AgentCronRun[]>(`/scheduler/agent-jobs/${encodeURIComponent(slug)}/${encodeURIComponent(id)}/runs`),
+  agentJobAction: (slug: string, id: string, action: 'pause' | 'resume' | 'run') =>
+    api<{ ok: boolean }>(
+      `/scheduler/agent-jobs/${encodeURIComponent(slug)}/${encodeURIComponent(id)}/${action}`, { method: 'POST' }),
+  deleteAgentJob: (slug: string, id: string) =>
+    api<{ ok: boolean }>(`/scheduler/agent-jobs/${encodeURIComponent(slug)}/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 }
 
 // ── Schedule strings ↔ a form a person fills in ──
@@ -234,6 +288,26 @@ export function describeSchedule(s: string, nextRunAt?: number | null): string {
     return Number.isNaN(at) ? 'Once' : `Once · ${fmtWhen(at / 1000)}`
   }
   return s
+}
+
+/** An agent's own schedule as a person reads it. Its clock times are UTC
+ *  (the agent's cron runs on UTC), so they say so. */
+export function describeAgentSchedule(j: Pick<AgentCronJob, 'schedule' | 'next_run_at'>): string {
+  const low = (j.schedule || '').trim().toLowerCase()
+  let m: RegExpMatchArray | null
+  if ((m = low.match(/^daily\s+(\d{1,2}:\d{2})$/))) return `Every day at ${padTime(m[1])} UTC`
+  if ((m = low.match(/^weekly\s+([a-z]+)\s+(\d{1,2}:\d{2})$/))) {
+    const d = DAY_KEYS.findIndex((k) => m![1].startsWith(k))
+    return `Every ${d >= 0 ? DAY_LONG[d] : m[1]} at ${padTime(m[2])} UTC`
+  }
+  if ((m = low.match(/^every\s+(\d+)\s*([mh])$/))) return describeSchedule(`every ${m[1]}${m[2]}`)
+  if (low.startsWith('once') || low.startsWith('in ')) return j.next_run_at ? `Once · ${fmtWhen(j.next_run_at)}` : 'Once'
+  return j.schedule || 'Unknown schedule'
+}
+
+/** An agent's one-off job that has run: the agent turned it off after its run. */
+export function isFinishedAgentOneShot(j: Pick<AgentCronJob, 'schedule_type' | 'enabled' | 'last_run_at'>): boolean {
+  return !j.enabled && j.schedule_type === 'once' && !!j.last_run_at
 }
 
 /** A one-shot that has run: finished, not paused. */
