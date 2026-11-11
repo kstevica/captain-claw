@@ -110,13 +110,35 @@ async function call<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 const base = (slug: string) => `/fd/agent-lessons/${encodeURIComponent(slug)}`
 
+/** Where a chat message stands as a lesson: one was taught from it, the agent noticed one in it that waits in
+ *  Lessons to approve (or, for a member, their suggestion waits for its owner), or that was dismissed. */
+export type LessonMark = 'taught' | 'waiting' | 'dismissed'
+
+// Python's str.split() whitespace, so both sides collapse the same characters.
+const SPACE = /[\t\n\v\f\r\x1c-\x1f \x85\xa0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+/
+
+/** A chat message's key — the lesson taught from it keeps it, so the chat doesn't offer it again. FNV-1a (32 bits) of
+ *  its words, whitespace collapsed, as UTF-8, then their length: Flight Deck works out the same (agent_onboarding
+ *  ``said_key``). "" for no words. */
+export function saidKey(text: string): string {
+  const data = new TextEncoder().encode(text.split(SPACE).filter(Boolean).join(' '))
+  if (!data.length) return ''
+  let h = 0x811c9dc5
+  for (const b of data) h = Math.imul(h ^ b, 0x01000193) >>> 0
+  return h.toString(16).padStart(8, '0') + data.length.toString(16)
+}
+
 /** Who taught a lesson by hand: the Lessons tab, a chat, a practice run, a member's suggestion. */
 export type TaughtBy = 'you' | 'chat' | 'practice' | 'member'
 
 export const agentLessonsApi = {
   list: (slug: string) => call<LessonsView>(base(slug)),
-  add: (slug: string, body: { kind: LessonKind; text: string; always: boolean; taught_by?: TaughtBy }) =>
-    call<LessonsChanged>(base(slug), { method: 'POST', body: JSON.stringify(body) }),
+  /** ``said_key``: the chat message it's taught from. Then one it has already isn't refused: that message is marked as
+   *  taught (``already``). */
+  add: (slug: string, body: { kind: LessonKind; text: string; always: boolean; taught_by?: TaughtBy; said_key?: string }) =>
+    call<LessonsChanged & { already?: boolean }>(base(slug), { method: 'POST', body: JSON.stringify(body) }),
+  /** The owner's chat messages not to offer as a lesson again, by saidKey. */
+  fromChat: (slug: string) => call<{ marks: Record<string, LessonMark> }>(`${base(slug)}/from-chat`),
   draft: (slug: string, body: { said: string; reply?: string; task?: string }) =>
     call<LessonDraft>(`${base(slug)}/draft`, { method: 'POST', body: JSON.stringify(body) }),
   change: (slug: string, id: string, patch: { text?: string; always?: boolean }) =>
@@ -128,9 +150,12 @@ export const agentLessonsApi = {
     call<{ suggestions: LessonSuggestion[] }>(`${base(slug)}/suggestions/${encodeURIComponent(id)}`,
       { method: 'POST', body: JSON.stringify({ state, lesson }) }),
   /** A member of someone's shared agent suggests a lesson to its owner. */
-  suggest: (agentRef: string, said: string, reply: string) =>
+  suggest: (agentRef: string, said: string, reply: string, saidKey = '') =>
     call<{ ok: boolean; already: boolean }>('/fd/agent-lessons/shared/suggest',
-      { method: 'POST', body: JSON.stringify({ agent_ref: agentRef, said, reply }) }),
+      { method: 'POST', body: JSON.stringify({ agent_ref: agentRef, said, reply, said_key: saidKey }) }),
+  /** A member's chat messages they suggested a lesson from, by saidKey. */
+  suggested: (agentRef: string) =>
+    call<{ marks: Record<string, LessonMark> }>(`/fd/agent-lessons/shared/suggested?agent_ref=${encodeURIComponent(agentRef)}`),
 }
 
 const proposals = '/fd/lesson-proposals'

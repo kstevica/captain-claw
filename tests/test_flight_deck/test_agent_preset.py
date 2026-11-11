@@ -2930,6 +2930,151 @@ async def test_only_the_decks_own_agents_propose_lessons(deck):
         assert r.status_code == 403
 
 
+
+# ── A chat message taught once isn't offered as a lesson again (said_key) ──
+
+
+def test_a_chat_messages_key_is_its_words_not_their_spacing():
+    from captain_claw.flight_deck import agent_onboarding as ob
+    # The same vectors as flight-deck saidKey (services/agentLessons.ts): both sides must agree.
+    assert ob.said_key("remember that we always need to find an email") == "97fd1d792d"
+    assert ob.said_key("  remember that\n we always   need to find an email ") == "97fd1d792d"
+    assert ob.said_key("Uvijek šalji ponude u PDF-u.") == "3d36d4d71d"
+    assert ob.said_key("Never 🙂 emoji") == "bfe338c710"
+    assert ob.said_key(" \n\t") == "" and ob.said_key("") == ""
+    assert ob.clean_key("97fd1d792d") == "97fd1d792d" and ob.clean_key("../x") == "" and ob.clean_key("abc") == ""
+
+
+async def test_a_lesson_saved_from_a_chat_message_is_not_offered_again(deck):
+    from captain_claw.flight_deck import agent_onboarding as ob
+    slug = await _spawn(BOB, "Helpdesk", 24421)
+    said = "Research their contact emails too — and remember that we always need to find an email."
+    key = ob.said_key(said)
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json() == {"marks": {}}
+
+    r = await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Always find a contact email.",
+                                           "taught_by": "chat", "said_key": key})
+    assert r.status_code == 200 and "already" not in r.json()
+    lesson = next(x for x in r.json()["lessons"] if x["text"] == "Always find a contact email.")
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json() == {"marks": {key: "taught"}}
+    # Only its owner reads them.
+    assert (await _ls(CAROL, "GET", f"{slug}/from-chat")).status_code == 404
+
+    # Saved again (the same lesson, drafted again): no 409 — the message is marked, and it isn't taught twice.
+    other = ob.said_key("we always need an email, remember")
+    r = await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Always find a contact email.",
+                                           "taught_by": "chat", "said_key": other})
+    assert r.status_code == 200 and r.json()["already"] is True
+    assert sum(1 for x in r.json()["lessons"] if x["text"] == "Always find a contact email.") == 1
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json()["marks"] == {key: "taught", other: "taught"}
+    # By hand on the Lessons tab (no message): the same lesson is still a 409; a key that isn't one is ignored.
+    assert (await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Always find a contact email."})).status_code == 409
+    r = await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Be brief.", "said_key": "../../x"})
+    assert r.status_code == 200
+    assert set((await _ls(BOB, "GET", f"{slug}/from-chat")).json()["marks"]) == {key, other}
+
+    # Reworded, it still came from those messages; taken away, the chat may offer it again.
+    r = await _ls(BOB, "PATCH", f"{slug}/{lesson['id']}", json={"text": "Always find a contact email for every lead."})
+    assert r.status_code == 200
+    assert set((await _ls(BOB, "GET", f"{slug}/from-chat")).json()["marks"]) == {key, other}
+    reworded = next(x for x in r.json()["lessons"] if x["text"].startswith("Always find"))
+    assert (await _ls(BOB, "DELETE", f"{slug}/{reworded['id']}")).status_code == 200
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json() == {"marks": {}}
+
+    # A fact keeps its message too.
+    fact = "Zone B shipping is 11.40 EUR, never 9."
+    r = await _ls(BOB, "POST", slug, json={"kind": "fact", "text": "Shipping to Zone B is 11.40 EUR.",
+                                           "said_key": ob.said_key(fact)})
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json()["marks"] == {ob.said_key(fact): "taught"}
+
+
+async def test_what_the_agent_noticed_in_a_message_counts_for_the_chat_too(deck, monkeypatch):
+    from captain_claw.flight_deck import agent_onboarding as ob
+    slug = await _spawn(BOB, "Helpdesk", 24422)
+    _as_agent(monkeypatch, slug)
+    key = ob.said_key(_NOTICED["said"])
+
+    # Noticed: it waits in Lessons to approve, and the chat says so rather than offer it.
+    pid = (await _lp("", "POST", "/agent", json=_NOTICED)).json()["id"]
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json() == {"marks": {key: "waiting"}}
+    # Approved: taught, and the lesson keeps the message.
+    r = await _lp(BOB, "POST", f"/{slug}/{pid}/approve", json={})
+    assert r.status_code == 200
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json() == {"marks": {key: "taught"}}
+    record = ap.read_record(server.DATA_DIR / slug)
+    assert any(key in (x.get("said_keys") or []) for x in record["rules"])
+    # The agent noticing a lesson in that message again isn't kept, however it words it.
+    again = await _lp("", "POST", "/agent", json={**_NOTICED, "text": "Answers: three paragraphs at most, short ones."})
+    assert again.json() == {"ok": True, "kept": False, "why": "known"}
+    # Undone: it waits again.
+    assert (await _lp(BOB, "POST", f"/{slug}/{pid}/undo")).status_code == 200
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json() == {"marks": {key: "waiting"}}
+    # Dismissed: not offered again either.
+    assert (await _lp(BOB, "POST", f"/{slug}/{pid}/dismiss")).status_code == 200
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json() == {"marks": {key: "dismissed"}}
+
+
+async def test_saving_a_message_from_the_chat_settles_what_waits_from_it(deck, monkeypatch):
+    from captain_claw.flight_deck import agent_onboarding as ob
+    slug = await _spawn(BOB, "Helpdesk", 24423)
+    _as_agent(monkeypatch, slug)
+    pid = (await _lp("", "POST", "/agent", json=_NOTICED)).json()["id"]
+    sign = (await _lp("", "POST", "/agent", json={"kind": "rule", "text": "Sign emails as Bob from the helpdesk.",
+                                                   "said": "sign as Bob from the helpdesk"})).json()["id"]
+    assert (await _lp(BOB, "GET")).json()["waiting"] == 2
+
+    # The owner saves the same message from the chat, worded their way: Lessons to approve asks no more.
+    r = await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "At most three short paragraphs per answer.",
+                                           "taught_by": "chat", "said_key": ob.said_key(_NOTICED["said"])})
+    assert r.status_code == 200
+    got = (await _lp(BOB, "GET")).json()
+    assert got["waiting"] == 1 and [p["id"] for p in got["agents"][0]["waiting"]] == [sign]
+    [learned] = got["agents"][0]["learned"]
+    assert learned["id"] == pid and learned["text"] == "At most three short paragraphs per answer."
+    # A lesson taught by hand that says what one waiting says settles it as well; nothing waits, the bell is answered.
+    assert (await _ls(BOB, "POST", slug, json={"kind": "rule", "text": "Sign emails as Bob from the helpdesk!"})).status_code == 200
+    assert (await _lp(BOB, "GET")).json()["waiting"] == 0
+    assert all(n["resolved"] for n in await deck.list_notifications_by_ref(BOB, "agent_lessons", [slug]))
+    # Undo on what was settled takes the lesson away, and it waits again.
+    r = await _lp(BOB, "POST", f"/{slug}/{pid}/undo")
+    assert r.status_code == 200 and all(not x["text"].startswith("At most") for x in r.json()["changed"]["lessons"])
+
+
+async def test_a_member_is_not_offered_to_suggest_the_same_message_twice(deck, monkeypatch):
+    from captain_claw.flight_deck import agent_onboarding as ob
+    from captain_claw.flight_deck import agent_sharing as sharing
+    slug = await _spawn(BOB, "Helpdesk", 24424)
+    ref = sharing.process_ref(slug, server._load_process_registry()[slug])
+    monkeypatch.setattr(sharing, "sharing_active", lambda: True)
+
+    async def member(db, agent_ref, owner, uid, max_age=0):
+        return agent_ref == ref and owner == BOB and uid == CAROL
+
+    monkeypatch.setattr(sharing, "member_check", member)
+    message = "No — shipping to Zone B is 11.40 EUR, not 9."
+    key = ob.said_key(message)
+
+    async def marks(uid: str) -> httpx.Response:
+        async with _client() as c:
+            return await c.get("/fd/agent-lessons/shared/suggested", params={"agent_ref": ref}, headers=_auth(uid))
+
+    assert (await marks(CAROL)).json() == {"marks": {}}
+    # Suggested in their own words: the message it came from is the one marked.
+    body = {"agent_ref": ref, "said": "Zone B shipping costs 11.40 EUR.", "reply": "9 EUR.", "said_key": key}
+    async with _client() as c:
+        assert (await c.post("/fd/agent-lessons/shared/suggest", headers=_auth(CAROL), json=body)).json()["already"] is False
+        again = {**body, "said": "Zone B: 11.40 EUR"}
+        assert (await c.post("/fd/agent-lessons/shared/suggest", headers=_auth(CAROL), json=again)).json()["already"] is True
+    assert (await marks(CAROL)).json() == {"marks": {key: "waiting"}}
+    assert (await marks(BOB)).status_code == 404            # its owner isn't a member
+
+    [waiting] = (await _ls(BOB, "GET", slug)).json()["suggestions"]
+    assert (await _ls(BOB, "POST", f"{slug}/suggestions/{waiting['id']}", json={"state": "declined"})).status_code == 200
+    assert (await marks(CAROL)).json() == {"marks": {key: "dismissed"}}
+    # The owner's own chat doesn't count a member's messages.
+    assert (await _ls(BOB, "GET", f"{slug}/from-chat")).json() == {"marks": {}}
+
+
 # ── Passing an onboarded agent on, with an archetype ──
 
 
