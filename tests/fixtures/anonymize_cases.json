@@ -1,0 +1,40 @@
+{
+  "_note": "Held to by every anonymization lane (docs/anonymization-plan.md). must_hide: none of these may appear in the output. must_keep: all of these must survive. lanes: which lanes must pass the case (the LLM lane adds cases the deterministic lane can't do).",
+  "cases": [
+    {
+      "id": "hr-letter",
+      "lanes": ["deterministic", "llm"],
+      "text": "Poštovani gospodine Horvat,\n\nšaljem ugovor za Ivana Horvata (OIB: 52601815906), rođen 12. 3. 1985., adresa: Ilica 12, 10000 Zagreb.\nKontakt: ivan.horvat@acme.hr, tel. +385 91 234 5678 ili 091 234 5678. IBAN HR1210010051863000160.\nTvrtka: Acme d.o.o. potpisuje. Ivan Horvat dolazi u utorak.\nVersion 1.2.3.4 is out. Sastanak 01.02.2023 u 08:30. Račun 00012345.\n\nLijep pozdrav,\nMarko Marić\n",
+      "must_hide": ["Horvat", "Ivan", "52601815906", "1985", "Ilica 12", "ivan.horvat@acme.hr", "234 5678", "HR1210010051863000160", "Acme", "Marko", "Marić"],
+      "must_keep": ["Poštovani", "ugovor", "1.2.3.4", "01.02.2023", "08:30", "00012345", "utorak", "Lijep pozdrav"]
+    },
+    {
+      "id": "en-mail",
+      "lanes": ["deterministic", "llm"],
+      "text": "Hi Sarah,\n\nPlease find attached the contract for John O'Brien (DOB: March 4, 1979). His SSN is 123-45-6789 and passport no. X1234567.\nCall him at +1 (415) 555-0132 or email john.obrien@example.com.\nHe lives at 221 Baker Street, London.\n\nBest regards,\nEmily Clarke\nBrightside Consulting Ltd\n",
+      "must_hide": ["Sarah", "O'Brien", "1979", "123-45-6789", "X1234567", "555-0132", "john.obrien@example.com", "221 Baker Street", "Emily", "Clarke", "Brightside"],
+      "must_keep": ["contract", "London", "Best regards"]
+    },
+    {
+      "id": "ids-and-numbers",
+      "lanes": ["deterministic", "llm"],
+      "text": "JMBG 1503985336097, OIB 83016613185, kartica 4111 1111 1111 1111 (CVV 123). IP 192.168.1.20, profil linkedin.com/in/ana-kovac-77 i github.com/anakovac. Auto ZG 1234-AB. Iznos 1.250,00 EUR, ponuda br. 2024-117.",
+      "must_hide": ["1503985336097", "83016613185", "4111 1111 1111 1111", "192.168.1.20", "ana-kovac-77", "anakovac", "ZG 1234-AB"],
+      "must_keep": ["1.250,00 EUR", "2024-117", "profil", "Auto"]
+    },
+    {
+      "id": "german-and-labels",
+      "lanes": ["deterministic", "llm"],
+      "text": "Name: Klaus Müller\nAdresse: Hauptstraße 5, 80331 München\nTelefon: 089 1234567\nE-Mail: k.mueller@beispiel.de\nFirma: Müller Bau GmbH\nIBAN: DE89 3704 0044 0532 0130 00",
+      "must_hide": ["Klaus", "Müller", "Hauptstraße 5", "1234567", "k.mueller@beispiel.de", "DE89 3704 0044 0532 0130 00"],
+      "must_keep": ["Name:", "Telefon:"]
+    },
+    {
+      "id": "bare-names",
+      "lanes": ["llm"],
+      "text": "We met Marko and Petra yesterday; the only female surgeon on Vis joined later.",
+      "must_hide": ["Marko", "Petra", "only female surgeon on Vis"],
+      "must_keep": ["We met", "yesterday"]
+    }
+  ]
+}

@@ -48,7 +48,7 @@ _TOOL_RISK: dict[str, str] = {
     "apis": "write", "typesense": "write", "insights": "write", "playbooks": "write",
     "personality": "write", "facts": "write", "intentions": "write", "project_memory": "write",
     "vfs": "write", "docx": "write", "xlsx": "write", "pptx": "write", "topics": "write", "image_gen": "write", "visualize": "write",
-    "image_manipulation": "write",
+    "image_manipulation": "write", "anonymize": "write",
     "synthesize_flow": "write", "pocket_tts": "write", "clipboard": "write",
     "reasoning_effort": "write",
     # run

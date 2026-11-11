@@ -123,6 +123,7 @@ PATH_RULES: dict[str, tuple[tuple[str, str], ...]] = {
     "linked_system": (("files", "read"),),
     "pocket_tts": (("output_path", "write"),),
     "public_link": (("path", "read"),),
+    "anonymize": (("path", "read"), ("output_path", "write")),
     "payments": (("source", "payments"),),
     "summarize_files": (("folder", "read"), ("pattern", "rel")),
     "twitter": (("image_path", "read"),),
@@ -152,6 +153,7 @@ NON_PATH_PARAMS: dict[str, frozenset[str]] = {
     "crew": frozenset({"folder", "repo_url", "repo_path", "vfs_read", "vfs_write"}),
     "app_runner": frozenset({"path"}),               # an HTTP route of the app
     "web_fetch": frozenset({"url"}), "web_get": frozenset({"url"}),
+    "anonymize": frozenset({"url"}),                 # a page it fetches (see URL_PARAMS)
     "web_fetch_batch": frozenset({"urls"}),           # httpx: web schemes only
     "direct_api": frozenset({"url"}), "apis": frozenset({"base_url"}),
     # A filter on the console / network log it already has.
@@ -170,6 +172,7 @@ URL_PARAMS: dict[str, tuple[str, ...]] = {
     "web_fetch": ("url",),
     "web_get": ("url",),
     "web_fetch_batch": ("urls",),
+    "anonymize": ("url",),
 }
 
 

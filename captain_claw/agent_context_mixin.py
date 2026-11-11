@@ -136,6 +136,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "microsoft_mail": "Outlook mail — list_messages, search, read_message, get_thread, list_folders, get_attachment; create_draft / update_draft / list_drafts only when the user asked for that email (attachments=[file paths], ≤25 MB); never sends (drafts wait in Outlook); no repeat drafts. archive / move / create_folder / add_categories / remove_categories (thread_ids / message_ids from list_messages or search) only when the user asked to organize those emails — triaging never implies it, suggest instead; moving changes a message's ID — use the new one it prints.",
     "imap_mail": "Email in the user's IMAP/SMTP inboxes (several; account=<id> or all) — list_accounts, list_messages, search, read_message, get_thread, list_folders, list_drafts, get_attachment; create_draft / update_draft / send / send_draft only when the user asked (send only with sending on for that inbox); no repeats; archive / move / mark_read / mark_unread / create_folder only when asked; a moved email gets a new ID.",
     "external_memory": "The person's external memories (one or several: Membase, Hindsight, Qdrant, ArcadeDB), shared by ALL of their agents: remember (save one lasting fact; to all of them unless you name one with memory) / search (look up what any of their agents saved, in all of them) + the providers' own actions; follow their rules (in the tool description; they also say what is copied in automatically).",
+    "anonymize": "Take private data (names, DOB, IBAN, cards, emails, phones, addresses, OIB/JMBG/ID numbers, companies) out of a file (path), page (url) or text: each becomes a token like ⟦PERSON_1⟧ that means nothing outside Captain; the real values stay in the person's encrypted vault in Flight Deck. Prefer path/url (read by the tool, never shown to you). restore writes the real values back into a file for the user — never read it back.",
     "jev": "Jev — calibrated judgments about text; use it WHENEVER you'd otherwise judge content yourself (never writes text): one call answers several typed questions about the same state (noul yes/no → p(yes); choice → option + probabilities; score → rubric level). Triage, routing, classification, relevance filtering, claim-vs-source checks, rubric rating, yes/no checks before acting. Literal, specific questions; not for math, counting, dates or writing.",
     "datastore": "Manage persistent relational data tables (create, query, insert, update, delete, import/export)",
     "basna": "Read your past Basna multi-agent sessions like a datastore — list/search sessions and pull the compiled truth, cross-agent analysis, per-agent outputs, and generated files (read-only).",
@@ -221,6 +222,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "microsoft_mail": "Outlook mail: list/search/read/thread, folders, attachments; drafts only when asked; never sends; no repeats; archive/move/create_folder/add_categories/remove_categories only when asked to organize (triage = suggest; a moved message gets a new ID)",
     "imap_mail": "IMAP/SMTP inboxes (several, account=<id>|all): list/search/read/thread, folders, attachments; drafts/sends only when asked (sends only with sending on); no repeats; archive/move/mark_read only when asked",
     "external_memory": "shared memories of all the person's agents: remember / search, all or one by memory (+ provider actions; follow their rules)",
+    "anonymize": "private data → tokens (⟦PERSON_1⟧), real values in the person's vault; path/url read by the tool; restore → file for the user, never read it back",
     "jev": "use WHENEVER you'd judge content yourself: several yes/no (noul), choice or score questions about one state per call; triage/classify/filter/check claims; no math, no writing",
     "datastore": "persistent relational tables",
     "basna": "read past Basna sessions (compiled truth, analysis, agent outputs, files)",
@@ -2956,6 +2958,11 @@ class AgentContextMixin:
             # when this agent wasn't spawned by a Flight Deck).
             from captain_claw.tools.public_link import PublicLinkTool
             self.tools.register(PublicLinkTool())
+            # Anonymization — private data out of a file / page / text into
+            # tokens; the vault lives in Flight Deck (clear error when this
+            # agent wasn't spawned by a Flight Deck).
+            from captain_claw.tools.anonymize import AnonymizeTool
+            self.tools.register(AnonymizeTool())
             # Linked systems — a message and files to a system the owner
             # linked to this agent (an agent link), sent on its own (clear
             # error when this agent wasn't spawned by a Flight Deck).
