@@ -86,8 +86,11 @@ class AnonymizeTool(Tool):
         "a restored file back (that sends the real values to your model) — give the user its path or share "
         "it. action='vaults' lists the person's vaults (names and counts only).\n"
         "Work with the tokens as they are: keep them exactly (⟦PERSON_1⟧) in anything you write, so restore "
-        "can put the values back. Names with nothing around them that marks them as names (a bare "
-        "'we met Marko') can be missed — check the result and pass misses in `extra`."
+        "can put the values back.\n"
+        "Lanes: code always looks (patterns, checksums, labels); when the deck has a TRUSTED model (local, or "
+        "one the admin vouches for) it also looks — it catches bare names ('we met Marko') and descriptions "
+        "that point to one person. Leave `lane` out to get both when available. If the result says the "
+        "trusted model didn't run, bare names can be missed: check the result and pass misses in `extra`."
     )
 
     parameters = {
@@ -128,6 +131,12 @@ class AnonymizeTool(Tool):
                     "required": ["text"],
                 },
                 "description": "anonymize: terms to always replace; kind like PERSON, ORG, PROJECT (default PERSON).",
+            },
+            "lane": {
+                "type": "string",
+                "enum": ["deterministic", "llm", "both"],
+                "description": "anonymize: who looks — deterministic (code only), llm (the trusted model only) or "
+                               "both. Leave out: both when the deck has a trusted model, else code only.",
             },
             "output_path": {
                 "type": "string",
@@ -263,7 +272,7 @@ class AnonymizeTool(Tool):
             "content": content, "format": fmt, "vault": vault, "mode": kwargs.get("mode") or "reversible",
             "source": source, "filename": stem,
         }
-        for key in ("keep", "extra"):
+        for key in ("keep", "extra", "lane"):
             if kwargs.get(key):
                 body[key] = kwargs[key]
         data, err = await self._post(base, headers, "/fd/anonymize/agent/run", body)
@@ -361,7 +370,18 @@ class AnonymizeTool(Tool):
         where = f"vault \"{vault['name']}\"" if vault else "one-way (no vault kept)"
         fixed = (data.get("verify") or {}).get("fixed") or 0
         check = "checked" + (f", {fixed} more caught on the second look" if fixed else "")
-        return f"Anonymized — {what}; {where}; {check}."
+        lanes = data.get("lanes") or {}
+        llm = lanes.get("llm")
+        if llm == "ok":
+            who = f"code + trusted model {lanes.get('llm_model', '')} ({lanes.get('llm_terms', 0)} more found by it)"
+        elif llm == "failed":
+            who = ("code only — the trusted model FAILED, so bare names and descriptions may be left: "
+                   "tell the user, check the result")
+        elif lanes.get("deterministic") == "off":
+            who = "trusted model only"
+        else:
+            who = "code only (no trusted model on this deck — bare names can be missed)"
+        return f"Anonymized — {what}; {where}; {who}; {check}."
 
     @staticmethod
     def _entity_lines(data: dict) -> list[str]:

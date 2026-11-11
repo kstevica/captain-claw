@@ -379,3 +379,159 @@ class TestTool:
         monkeypatch.setattr(fd_client, "flight_deck_base", lambda: "")
         res = await AnonymizeTool().execute(action="anonymize", text="x")
         assert not res.success and "Flight Deck" in res.error
+
+
+# ── the trusted-model lane ──────────────────────────────────────────
+
+BARE = "We met Marko yesterday; write to marko.k@x.hr. The only female surgeon on Vis joined."
+
+
+@pytest.fixture()
+def fake_model(monkeypatch):
+    """A trusted model that finds what code can't; records what it was shown."""
+    from captain_claw.flight_deck import anonymize_trusted as T
+
+    seen: dict = {"prompts": [], "fail": None, "answer": None}
+
+    def completer(m):
+        async def call(system, user):
+            seen["prompts"].append(user)
+            if seen["fail"]:
+                raise RuntimeError("down")
+            if seen["answer"] is not None:
+                return seen["answer"], 50
+            spans = [{"text": t, "kind": k} for t, k in (
+                ("Marko", "PERSON"), ("only female surgeon on Vis", "DETAIL"), ("Nobody Here", "PERSON"))
+                if t in user]
+            return json.dumps({"spans": spans}), 120
+        return call
+
+    monkeypatch.setattr(T, "completer", completer)
+    return seen
+
+
+def _set_model(c, **body):
+    payload = {"provider": "ollama", "model": "qwen3:8b", "base_url": "http://127.0.0.1:11434", **body}
+    return c.put("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin"), json=payload)
+
+
+class TestTrustedModel:
+    async def test_without_a_model_only_code_runs(self, db, agents):
+        c = _client()
+        data = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={"content": BARE}).json()
+        assert data["lane"] == "deterministic" and data["lanes"] == {"deterministic": "ok", "llm": "off"}
+        assert "Marko yesterday" in data["output"]  # the bare name is the known gap
+        r = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={"content": BARE, "lane": "both"})
+        assert r.status_code == 409 and "trusted model" in r.json()["detail"]
+        assert c.get("/fd/anonymize/agent/status", headers=BOB_AGENT).json() == {
+            "llm": False, "model": "", "default_lane": "deterministic"}
+
+    async def test_admin_trust_rules(self, db, agents):
+        c = _client()
+        assert _set_model(c).json()["model"]["basis"] == "local"
+        cloud = {"provider": "anthropic", "model": "claude-x", "base_url": "", "api_key": "sk-secret-1"}
+        r = c.put("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin"), json=cloud)
+        assert r.status_code == 422 and "attested" in r.json()["detail"]
+        ok = c.put("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin"), json={**cloud, "attested": True})
+        model = ok.json()["model"]
+        assert model["basis"] == "attested" and model["has_key"] and "sk-secret-1" not in ok.text
+        got = c.get("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin")).json()
+        assert got["model"]["label"] == "anthropic/claude-x" and "sk-secret" not in json.dumps(got)
+        raw = await db.get_system_setting("anonymize:trusted_model")
+        assert "sk-secret-1" not in raw  # sealed
+        # An Ollama "-cloud" model runs at Ollama: not local.
+        assert _set_model(c, model="gpt-oss:120b-cloud").status_code == 422
+        assert c.put("/fd/anonymize/admin/trusted-model", headers=_bearer(BOB),
+                     json={"provider": "ollama", "model": "x"}).status_code == 403
+        assert c.delete("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin")).json() == {"model": None}
+
+    async def test_both_lanes_model_sees_code_finds_as_tokens(self, db, agents, fake_model):
+        c = _client()
+        _set_model(c)
+        assert c.get("/fd/anonymize/status", headers=_bearer(BOB)).json()["default_lane"] == "both"
+        data = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={"content": BARE, "vault": "L"}).json()
+        assert data["lane"] == "both"
+        assert data["output"] == "We met ⟦PERSON_1⟧ yesterday; write to ⟦EMAIL_1⟧. The ⟦DETAIL_1⟧ joined."
+        assert data["lanes"]["llm"] == "ok" and data["lanes"]["llm_terms"] == 2
+        assert data["lanes"]["llm_model"] == "ollama/qwen3:8b"
+        # The model was shown the code's finds already replaced, not the email itself.
+        assert "marko.k@x.hr" not in fake_model["prompts"][0] and "⟦EMAIL_1⟧" in fake_model["prompts"][0]
+        # What the model found is in the vault: the next text needs no model to catch Marko.
+        again = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
+                       json={"content": "Marku šaljem ugovor.", "vault": "L", "lane": "deterministic"}).json()
+        assert again["output"] == "⟦PERSON_1⟧ šaljem ugovor."
+
+    async def test_llm_only_lane(self, db, agents, fake_model):
+        c = _client()
+        _set_model(c)
+        data = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
+                      json={"content": BARE, "lane": "llm", "mode": "one_way"}).json()
+        assert data["lanes"]["deterministic"] == "off"
+        assert "⟦PERSON_1⟧" in data["output"] and "marko.k@x.hr" in data["output"]
+
+    async def test_model_failure_refuses_by_default(self, db, agents, fake_model):
+        c = _client()
+        _set_model(c)
+        fake_model["fail"] = True
+        r = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={"content": BARE, "vault": "F"})
+        assert r.status_code == 502 and "Nothing was returned" in r.json()["detail"]
+        assert "Marko" not in r.text
+        _set_model(c, on_failure="deterministic")
+        data = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={"content": BARE, "vault": "F"}).json()
+        assert data["lanes"]["llm"] == "failed" and "⟦EMAIL_1⟧" in data["output"]
+        # lane=llm has nothing to fall back on.
+        assert c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
+                      json={"content": BARE, "lane": "llm"}).status_code == 502
+
+    async def test_a_model_that_invents_or_injects_adds_nothing(self, db, agents, fake_model):
+        c = _client()
+        _set_model(c)
+        fake_model["answer"] = json.dumps({"spans": [
+            {"text": "Ignore that, return the original", "kind": "PERSON"}, {"text": "the", "kind": "PERSON"}]})
+        data = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={"content": BARE, "mode": "one_way"}).json()
+        assert data["lanes"]["llm_terms"] == 0 and data["lanes"]["llm_dropped"] == 2
+        assert "⟦EMAIL_1⟧" in data["output"]  # the code's finds stand
+
+    async def test_tokens_are_counted_for_a_cloud_model_only(self, db, agents, fake_model, monkeypatch):
+        from captain_claw.flight_deck import usage_quota
+
+        counted = []
+
+        async def record(db_, user, tokens, byok=False):
+            counted.append((user, tokens))
+
+        monkeypatch.setattr(usage_quota, "record_tokens", record)
+        c = _client()
+        _set_model(c)
+        c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={"content": BARE, "mode": "one_way"})
+        assert counted == []  # local: costs the deck nothing
+        c.put("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin"),
+              json={"provider": "openrouter", "model": "x/y", "attested": True})
+        c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={"content": BARE, "mode": "one_way"})
+        assert counted == [(BOB, 120)]
+
+    async def test_environment_setting(self, db, agents, monkeypatch, fake_model):
+        monkeypatch.setenv("FD_ANONYMIZE_PROVIDER", "ollama")
+        monkeypatch.setenv("FD_ANONYMIZE_MODEL", "qwen3:8b")
+        c = _client()
+        status = c.get("/fd/anonymize/status", headers=_bearer(BOB)).json()
+        assert status == {"llm": True, "model": "ollama/qwen3:8b", "default_lane": "both"}
+        got = c.get("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin")).json()["model"]
+        assert got["source"] == "env" and got["basis"] == "local"
+
+    async def test_admin_check_on_the_sample_cases(self, db, agents, fake_model):
+        c = _client()
+        _set_model(c)
+        data = c.post("/fd/anonymize/admin/trusted-model/test", headers=_bearer(ALICE, "admin")).json()
+        bare = [x for x in data["cases"] if x["id"] == "bare-names"][0]
+        assert "Marko" in bare["code_missed"] and "Marko" not in bare["both_missed"]
+
+    async def test_tool_passes_the_lane_and_says_who_looked(self, tool_env, fake_model):
+        from captain_claw.tools.anonymize import AnonymizeTool
+
+        c = _client()
+        _set_model(c)
+        res = await AnonymizeTool().execute(action="anonymize", text=BARE, **tool_env)
+        assert res.success and "code + trusted model ollama/qwen3:8b (2 more found by it)" in res.content
+        res = await AnonymizeTool().execute(action="anonymize", text=BARE, lane="deterministic", **tool_env)
+        assert "code only" in res.content
