@@ -167,7 +167,7 @@ class TestVerify:
     def test_fails_closed_when_data_keeps_turning_up(self, monkeypatch):
         """A detector that finds one more thing every round: after the last
         round something is still there, so nothing is returned."""
-        def one_at_a_time(text, kinds=None):
+        def one_at_a_time(text, kinds=None, **kw):
             i = text.find("a")
             return [d.Span(i, i + 1, "PERSON", 2, "test")] if i >= 0 else []
 
@@ -248,3 +248,88 @@ def test_tool_is_registered_for_every_agent():
     assert deck_confine.PATH_RULES["anonymize"] == (("path", "read"), ("output_path", "write"))
     assert deck_confine.URL_PARAMS["anonymize"] == ("url",)
     assert tool_risk._TOOL_RISK["anonymize"] == "write"
+
+
+# ── P4: coarser values (one way) and the name-recognition hook ──────
+
+
+class TestGeneralize:
+    def _run(self, text, kinds=E.GENERALIZE_KINDS):
+        opts = E.Options(generalize=frozenset(kinds))
+        state = E.VaultState()
+        seg = [E.Segment(text)]
+        return E.generalize(seg, E.run(seg, state, opts), state, opts.generalize).outputs[0]
+
+    def test_dates_addresses_ages_amounts(self):
+        out = self._run("Klijent, rođen 12. 3. 1985., star 45 godina, adresa: Ilica 12, 10000 Zagreb. "
+                        "Plaća 4.237,50 EUR, bonus €1.250 i $87,500.00.")
+        assert "rođen 1985" in out and "40–49 godina" in out and "adresa: Zagreb" in out
+        assert "2.000–5.000 EUR" in out and "€1.000–2.000" in out and "$50,000–100,000" in out
+        for exact in ("12. 3. 1985", "45", "Ilica 12", "4.237,50", "1.250", "87,500"):
+            assert exact not in out, exact
+
+    def test_only_what_was_asked_and_tokens_otherwise(self):
+        out = self._run("Rođen 12. 3. 1985., plaća 4.237,50 EUR, adresa: Ilica 12", kinds=("DOB",))
+        assert "Rođen 1985" in out and "4.237,50 EUR" in out and "⟦ADDRESS_1⟧" in out
+        # An address with no city in it keeps its token.
+        assert "⟦ADDRESS_" in self._run("adresa: Ilica 12")
+
+    def test_amounts_and_ages_are_not_private_by_default(self):
+        out, _r, _s = _run("Plaća 4.237,50 EUR, star 45 godina.")
+        assert out == "Plaća 4.237,50 EUR, star 45 godina."
+
+    @pytest.mark.parametrize("raw,value", [("1.250,00", 1250.0), ("4,237.10", 4237.1), ("12 500", 12500.0),
+                                           ("250", 250.0), ("1.250", 1250.0), ("12.50", 12.5)])
+    def test_amount_formats(self, raw, value):
+        assert E._parse_amount(raw)[0] == value
+
+    def test_offices_get_the_coarse_value_where_it_stands(self):
+        text = "Plaća: 4.237,50 EUR"
+        opts = E.Options(generalize=frozenset({"AMOUNT"}))
+        state = E.VaultState()
+        res = E.generalize([E.Segment(text)], E.run([E.Segment(text)], state, opts), state, opts.generalize)
+        assert E.apply_edits(text, res.edits[0]) == res.outputs[0] == "Plaća: 2.000–5.000 EUR"
+
+
+class TestNamePack:
+    @pytest.fixture(autouse=True)
+    def _off_after(self):
+        yield
+        d.set_ner_backend(None)
+
+    def test_bare_names_found_and_followed(self):
+        def model(text):
+            out = []
+            for name in ("Marko", "Petra", "Zagreb"):
+                i = text.find(name)
+                if i >= 0:
+                    out.append((i, i + len(name), "LOC" if name == "Zagreb" else "PER", 0.97))
+            j = text.find("Ivan")
+            if j >= 0:
+                out.append((j, j + 4, "PER", 0.4))  # not sure enough
+            return out
+
+        d.set_ner_backend(model)
+        state = E.VaultState()
+        out, _r, _s = _run("We met Marko and Petra in Zagreb; Ivan came too.", state)
+        assert out == "We met ⟦PERSON_1⟧ and ⟦PERSON_2⟧ in Zagreb; Ivan came too."
+        later, _r, _s = _run("Marku i Petri šaljem ugovor.", state)  # the vault knows them now
+        assert "Marku" not in later and "Petri" not in later
+
+    def test_a_broken_model_finds_nothing(self):
+        def broken(text):
+            raise RuntimeError("model crashed")
+
+        d.set_ner_backend(broken)
+        out, _r, _s = _run("We met Marko; mail ana@x.hr")
+        assert out == "We met Marko; mail ⟦EMAIL_1⟧"
+
+
+@pytest.mark.parametrize("text,address", [
+    ("adresa: Ilica 12, 10000 Zagreb. Plaća je 4.000 EUR.", "Ilica 12, 10000 Zagreb"),
+    ("Adresa: Trg b. J. Jelačića 1, 10000 Zagreb. Sastanak u 9.", "Trg b. J. Jelačića 1, 10000 Zagreb"),
+    ("Address: 221 Baker Street, London; phone later", "221 Baker Street, London"),
+])
+def test_address_label_stops_at_the_sentence(text, address):
+    found = {text[s.start:s.end] for s in d.detect(text) if s.kind == "ADDRESS" and s.source == "address-label"}
+    assert found == {address}

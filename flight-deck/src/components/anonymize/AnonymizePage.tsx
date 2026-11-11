@@ -110,6 +110,7 @@ function AnonymizeTab({ status, kinds, vaults, onDone, phone }: {
   const [more, setMore] = useState(false)
   const [keep, setKeep] = useState('')
   const [extra, setExtra] = useState('')
+  const [coarser, setCoarser] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
   const [result, setResult] = useState<RunResult | null>(null)
@@ -127,6 +128,7 @@ function AnonymizeTab({ status, kinds, vaults, onDone, phone }: {
         lane: status?.llm ? lane : 'deterministic' as Lane,
         keep: lines(keep),
         extra: parseExtra(extra),
+        generalize: mode === 'one_way' && coarser,
       }
       if (source === 'text') {
         setResult(await anonymizeApi.run(text, opts))
@@ -167,6 +169,14 @@ function AnonymizeTab({ status, kinds, vaults, onDone, phone }: {
             <Segmented label="Keep the real values" value={mode} onChange={setMode}
               options={[{ value: 'reversible', label: 'In a vault' }, { value: 'one_way', label: 'Keep nothing' }]} />
           </Field>
+          {mode === 'one_way' && (
+            <Field label="Details" hint="An exact age, salary or birthday can point to one person even without a name.">
+              <label className="flex items-start gap-2.5 rounded-xl border border-zinc-800 px-3 py-2 text-sm text-zinc-200">
+                <input type="checkbox" checked={coarser} onChange={(e) => setCoarser(e.target.checked)} className="mt-0.5" />
+                <span>Make them coarser: date of birth → year, address → city, ages and amounts → ranges</span>
+              </label>
+            </Field>
+          )}
           {mode === 'reversible' && (
             <Field label="Vault" hint="One vault per case or client. A new name makes a new vault.">
               <input
@@ -185,7 +195,7 @@ function AnonymizeTab({ status, kinds, vaults, onDone, phone }: {
         </div>
 
         {status?.llm ? (
-          <Field label="Who looks" hint={`Code finds numbers, emails, labelled names and addresses. The trusted model (${status.model}) also finds names with nothing around them and descriptions that point to one person.`}>
+          <Field label="Who looks" hint={`Code finds numbers, emails, labelled names and addresses${status.name_model ? ', and a local name-recognition model finds names in plain sentences' : ''}. The trusted model (${status.model}) also finds names with nothing around them and descriptions that point to one person.`}>
             <Segmented label="Who looks" value={lane} onChange={setLane}
               options={[
                 { value: 'both', label: <span className="flex items-center gap-1.5"><Sparkles className="h-3.5 w-3.5" />Code + trusted model</span> },
@@ -195,8 +205,9 @@ function AnonymizeTab({ status, kinds, vaults, onDone, phone }: {
           </Field>
         ) : (
           <p className="text-xs leading-relaxed text-zinc-500">
-            Code looks for numbers, emails, labelled names, addresses and the names your vault already knows. This deck has no trusted
-            model, so a name with nothing around it ("we met Marko") can be missed — check the result, and add misses under More.
+            {status?.name_model
+              ? 'Code looks for numbers, emails, labelled names, addresses and the names your vault already knows, and a local name-recognition model finds names in plain sentences. Check the result, and add anything missed under More.'
+              : 'Code looks for numbers, emails, labelled names, addresses and the names your vault already knows. This deck has no trusted model, so a name with nothing around it ("we met Marko") can be missed — check the result, and add misses under More.'}
           </p>
         )}
 
@@ -269,7 +280,7 @@ function ResultView({ result, isFile }: { result: RunResult; isFile: boolean }) 
           ))}
         </div>
       )}
-      <Notice tone={lane.tone}>{lane.text}{result.verify.fixed ? ` A second look caught ${result.verify.fixed} more.` : ''}</Notice>
+      <Notice tone={lane.tone}>{lane.text}{result.verify.fixed ? ` A second look caught ${result.verify.fixed} more.` : ''}{result.generalized?.length ? ' Dates of birth, addresses, ages and amounts were made coarser where they were found.' : ''}</Notice>
       {result.warnings.map((w) => (
         <Notice key={w} tone="amber"><span className="inline-flex items-start gap-2"><AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />{w}</span></Notice>
       ))}

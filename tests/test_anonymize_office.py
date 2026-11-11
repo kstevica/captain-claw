@@ -219,7 +219,7 @@ def test_edits_map_back_across_rounds(monkeypatch):
     reported in the original text's positions."""
     real = d.detect
 
-    def one_q(text, kinds=None):
+    def one_q(text, kinds=None, **kw):
         i = text.find("Q")
         return [d.Span(i, i + 1, "PERSON", 2, "t")] if i >= 0 else []
 

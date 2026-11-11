@@ -108,6 +108,10 @@ class Options:
     # False: the deterministic lane doesn't run (lane "llm") — only the
     # caller's / the model's terms and what the vault already knows are found.
     deterministic: bool = True
+    # One-way runs only: kinds whose values are made coarser instead of
+    # tokenized (date of birth → year, address → city, age and amounts → a
+    # range). AGE and AMOUNT are then also looked for.
+    generalize: frozenset[str] = frozenset()
 
 
 @dataclass
@@ -606,7 +610,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         masks: list[list[tuple[int, int]]] = []
         for i, text in enumerate(texts):
             masked, token_ranges = _mask_tokens(text)
-            spans = d.detect(masked, options.kinds) if options.deterministic else []
+            spans = d.detect(masked, options.kinds, opt_in=options.generalize & set(d.OPT_IN_KINDS)) \
+                if options.deterministic else []
             if round_no == 1 and options.deterministic:
                 h = d.hint_span(masked, hints[i])
                 if h is not None and (options.kinds is None or h.kind in options.kinds):
@@ -681,7 +686,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         finder = _known_spans_finder(state, options)
         for text in texts:
             masked, token_ranges = _mask_tokens(text)
-            spans = (d.detect(masked, options.kinds) if options.deterministic else []) \
+            spans = (d.detect(masked, options.kinds, opt_in=options.generalize & set(d.OPT_IN_KINDS))
+                     if options.deterministic else []) \
                 + _extra_spans(masked, options.extra) + [sp for sp, _e in finder(masked)]
             for sp in _select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep)):
                 leftover[sp.kind] = leftover.get(sp.kind, 0) + 1
@@ -775,3 +781,97 @@ def restore_edits(text: str, state: VaultState) -> tuple[list[tuple[int, int, st
             continue
         out.append((m.start(), m.end(), e.original))
     return out, len(out), unknown
+
+
+# ── one way: coarser instead of tokens ──────────────────────────────
+
+GENERALIZE_KINDS = ("DOB", "ADDRESS", "AGE", "AMOUNT")
+_STEPS = (1, 2, 5)
+
+
+def _band(value: float) -> tuple[float, float] | None:
+    """The 1–2–5 band *value* falls in (1 250 → 1 000–2 000)."""
+    if value < 1:
+        return None
+    k = 1.0
+    while k * 10 <= value:
+        k *= 10
+    for i, step in enumerate(_STEPS):
+        lo = step * k
+        hi = (_STEPS[i + 1] * k) if i + 1 < len(_STEPS) else 10 * k
+        if lo <= value < hi:
+            return lo, hi
+    return 10 * k, 20 * k
+
+
+def _parse_amount(num: str) -> tuple[float, str] | None:
+    """(value, thousands separator to write back) for "1.250,00", "4,237.10",
+    "12 500", "250"."""
+    raw = num.replace("\u00a0", " ").strip()
+    if "." in raw and "," in raw:
+        dec = "," if raw.rfind(",") > raw.rfind(".") else "."
+    elif "," in raw:
+        dec = "," if re.search(r",\d{1,2}$", raw) else ""
+    elif "." in raw:
+        dec = "" if re.search(r"\.\d{3}(?:\.\d{3})*$", raw) else "."
+    else:
+        dec = ""
+    thousands = {",": ".", ".": ","}.get(dec, "." if "." in raw else ("," if "," in raw else " " if " " in raw else ""))
+    cleaned = raw
+    for sep in {".", ",", " "} - {dec}:
+        cleaned = cleaned.replace(sep, "")
+    if dec:
+        cleaned = cleaned.replace(dec, ".")
+    try:
+        return float(cleaned), thousands or ("." if dec == "," else ",")
+    except ValueError:
+        return None
+
+
+def _fmt(value: float, thousands: str) -> str:
+    return f"{int(value):,}".replace(",", thousands)
+
+
+def coarse(kind: str, text: str) -> str | None:
+    """A value made coarser, or None to keep the token."""
+    if kind == "DOB":
+        iso = d.parse_date(text)
+        if iso:
+            return iso[:4]
+        m = re.search(r"(?:19|20)\d{2}", text)
+        return m.group(0) if m else None
+    if kind == "ADDRESS":
+        m = re.search(rf"\b(?:[A-Z]{{1,2}}-)?\d{{4,5}}[ \t]+({NAME_WORD}(?:[ \t]+{NAME_WORD})?)", text)
+        return m.group(1) if m else None
+    if kind == "AGE":
+        m = re.search(r"\d{1,3}", text)
+        if not m:
+            return None
+        lo = int(m.group(0)) // 10 * 10
+        return text[:m.start()] + f"{lo}–{lo + 9}" + text[m.end():]
+    if kind == "AMOUNT":
+        m = re.search(r"\d[\d.,\u00a0 ]*\d|\d", text)
+        parsed = _parse_amount(m.group(0)) if m else None
+        band = _band(parsed[0]) if parsed else None
+        if not band:
+            return None
+        return text[:m.start()] + f"{_fmt(band[0], parsed[1])}–{_fmt(band[1], parsed[1])}" + text[m.end():]
+    return None
+
+
+def generalize(segments: list[Segment], result: RunResult, state: VaultState,
+               kinds: frozenset[str] | set[str]) -> RunResult:
+    """*result* with the tokens of *kinds* replaced by coarser values made from
+    each occurrence's own text (one-way runs: nothing is put back later)."""
+    import dataclasses
+
+    outputs, all_edits = [], []
+    for seg, edits in zip(segments, result.edits):
+        new_edits = []
+        for s, e, token in edits:
+            ent = state.by_token.get(token)
+            value = coarse(ent.kind, seg.text[s:e]) if ent is not None and ent.kind in kinds else None
+            new_edits.append((s, e, value if value is not None else token))
+        all_edits.append(new_edits)
+        outputs.append(apply_edits(seg.text, new_edits))
+    return dataclasses.replace(result, outputs=outputs, edits=all_edits)

@@ -30,6 +30,8 @@ export interface RunResult {
   verify: { ok: boolean; rounds: number; fixed: number }
   lane: Lane
   lanes: Lanes
+  generalized?: string[]
+  name_model?: string
   warnings: string[]
   output?: string          // a text run
   data?: string            // a file run: the file, base64
@@ -71,7 +73,7 @@ export interface VaultEntry {
 
 export interface VaultEvent { at: number; actor: string; action: string; detail: Record<string, unknown> }
 
-export interface AnonStatus { llm: boolean; model: string; default_lane: Lane }
+export interface AnonStatus { llm: boolean; model: string; default_lane: Lane; name_model?: string }
 
 export interface AnonKinds {
   kinds: { kind: string; label: string }[]
@@ -86,6 +88,17 @@ export interface RunOptions {
   lane?: Lane
   keep?: string[]
   extra?: { text: string; kind: string }[]
+  generalize?: boolean
+}
+
+export interface NamePack {
+  enabled: boolean
+  model: string
+  status: 'off' | 'not_installed' | 'not_downloaded' | 'not_loaded' | 'downloading' | 'loading' | 'ready' | 'error'
+  error: string
+  runtime: boolean
+  downloaded: boolean
+  models: { id: string; label: string }[]
 }
 
 export interface TrustedModel {
@@ -160,6 +173,10 @@ export const anonymizeApi = {
   saveGate: (gate: GateSettings) =>
     api<{ gate: GateSettings }>('/fd/anonymize/gate', { method: 'PUT', body: JSON.stringify(gate) }),
   reveal: (content: string) => post<RestoreResult>('/fd/anonymize/reveal', { content }),
+  nerGet: () => api<NamePack>('/fd/anonymize/admin/ner'),
+  nerPut: (enabled: boolean, model: string) =>
+    api<NamePack>('/fd/anonymize/admin/ner', { method: 'PUT', body: JSON.stringify({ enabled, model }) }),
+  nerDownload: () => post<NamePack>('/fd/anonymize/admin/ner/download', {}),
   trustedGet: () => api<{ model: TrustedModel | null; providers: string[] }>('/fd/anonymize/admin/trusted-model'),
   trustedPut: (body: TrustedModelInput) =>
     api<{ model: TrustedModel }>('/fd/anonymize/admin/trusted-model', { method: 'PUT', body: JSON.stringify(body) }),

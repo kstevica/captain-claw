@@ -42,6 +42,7 @@ from captain_claw.anonymize import formats
 from captain_claw.anonymize import llm_lane
 from captain_claw.anonymize.detectors import KINDS
 from captain_claw.flight_deck import anonymize_gate as gate_settings
+from captain_claw.flight_deck import anonymize_ner as ner
 from captain_claw.flight_deck import anonymize_trusted as trusted
 from captain_claw.flight_deck import anonymize_vault as av
 from captain_claw.flight_deck import fd_crypto
@@ -114,8 +115,22 @@ def _options(data: dict[str, Any]) -> engine.Options:
     cc = str(data.get("default_country_code") or "385").lstrip("+")
     if not re.fullmatch(r"\d{1,3}", cc):
         raise HTTPException(status_code=422, detail="default_country_code is 1–3 digits")
+    gen_in = data.get("generalize")
+    if gen_in is True:
+        generalize = frozenset(engine.GENERALIZE_KINDS)
+    elif isinstance(gen_in, list):
+        generalize = frozenset(str(k).upper() for k in gen_in)
+        if generalize - set(engine.GENERALIZE_KINDS):
+            raise HTTPException(status_code=422, detail=f"generalize takes: {', '.join(engine.GENERALIZE_KINDS)}")
+    elif gen_in in (None, False):
+        generalize = frozenset()
+    else:
+        raise HTTPException(status_code=422, detail="generalize is true or a list of kinds")
+    if generalize and str(data.get("mode") or "reversible") != "one_way":
+        raise HTTPException(status_code=422, detail=(
+            "generalize needs mode 'one_way': coarser values (a year, a city, a range) can't be put back"))
     return engine.Options(kinds=kinds, keep=tuple(_str_list(data.get("keep"), "keep")), extra=tuple(extra),
-                          default_cc=cc)
+                          default_cc=cc, generalize=generalize)
 
 
 def _content(data: dict[str, Any]) -> tuple[str, str]:
@@ -290,6 +305,8 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
 
         def work(state: engine.VaultState) -> tuple[engine.RunResult, str]:
             result = engine.run(doc.segments, state, options)
+            if options.generalize:
+                result = engine.generalize(doc.segments, result, state, options.generalize)
             name = engine.anonymize_filename(stem, state, options) if stem else ""
             return result, name
 
@@ -323,6 +340,8 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
         "verify": {"ok": True, "rounds": result.rounds, "fixed": result.fixed},
         "lane": lane,
         "lanes": lanes,
+        "generalized": sorted(options.generalize),
+        "name_model": ner._state["model"] if detectors_ner_on() else "",
         "warnings": list(doc.warnings),
         "already_exposed": source == "text",
         "_result": result,
@@ -530,10 +549,17 @@ async def anonymize_kinds(_user: dict = Depends(get_current_user)) -> dict[str, 
             "file_kinds": FILE_KINDS, "max_file_mb": MAX_FILE_BYTES // (1024 * 1024)}
 
 
+def detectors_ner_on() -> bool:
+    from captain_claw.anonymize import detectors
+
+    return detectors._ner_backend is not None
+
+
 async def _status() -> dict[str, Any]:
     model = await trusted.usable(get_db())
     return {"llm": bool(model), "model": model.label if model else "",
-            "default_lane": "both" if model else "deterministic"}
+            "default_lane": "both" if model else "deterministic",
+            "name_model": ner._state["model"] if detectors_ner_on() else ""}
 
 
 @router.get("/status")
@@ -722,3 +748,35 @@ async def anonymize_reveal(request: Request, user: dict = Depends(get_current_us
     data.setdefault("vault", G.GATE_VAULT)
     data["format"] = "text"
     return await restore_for(user["id"], data, actor="person (chat)")
+
+
+# ── admin: the name-recognition pack ────────────────────────────────
+
+
+@router.get("/admin/ner")
+async def anonymize_ner_get(_admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    return ner.status(await ner.load_config(get_db()))
+
+
+@router.put("/admin/ner")
+async def anonymize_ner_put(request: Request, _admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    data = await _body(request)
+    try:
+        config = await ner.save_config(get_db(), bool(data.get("enabled")), str(data.get("model") or ner.DEFAULT_MODEL))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    ner.apply(config)  # loads it if it is already downloaded; never downloads by itself
+    return ner.status(config)
+
+
+@router.post("/admin/ner/download")
+async def anonymize_ner_download(_admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    config = await ner.load_config(get_db())
+    if not config["enabled"]:
+        raise HTTPException(status_code=409, detail="Turn name recognition on first")
+    if not ner.runtime_available():
+        raise HTTPException(status_code=409, detail=(
+            "This deck has no transformers / torch, so it can't run the model "
+            "(pip install transformers torch, then restart Flight Deck)"))
+    ner.apply(config, download=True)
+    return ner.status(config)
