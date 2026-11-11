@@ -1851,6 +1851,7 @@ from captain_claw.flight_deck.face_routes import router as face_router
 from captain_claw.flight_deck.messenger_bridge import router as messenger_router
 from captain_claw.flight_deck.whatsapp_bridge import router as whatsapp_router
 from captain_claw.flight_deck.fd_scheduler import router as scheduler_router
+from captain_claw.flight_deck.agent_cron_routes import router as agent_cron_router
 from captain_claw.flight_deck.consciousness_routes import router as consciousness_router
 from captain_claw.flight_deck.autonomy_routes import router as autonomy_router
 from captain_claw.flight_deck.event_routes import router as event_router
@@ -2007,6 +2008,7 @@ app.include_router(face_router)
 app.include_router(messenger_router)
 app.include_router(whatsapp_router)
 app.include_router(scheduler_router)
+app.include_router(agent_cron_router)
 app.include_router(consciousness_router)
 app.include_router(autonomy_router)
 app.include_router(event_router)

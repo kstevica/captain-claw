@@ -393,8 +393,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const openScheduled = useScheduledStore((s) => s.openTasks)
   const closeScheduled = useScheduledStore((s) => s.close)
   const fetchScheduled = useScheduledStore((s) => s.fetchJobs)
-  const scheduledCount = useScheduledStore((s) => s.jobs.filter((j) => j.enabled === 1).length)
-  const scheduledRunning = useScheduledStore((s) => s.jobs.some((j) => j.running))
+  // Flight Deck's tasks and the jobs agents set up for themselves (their cron).
+  const scheduledCount = useScheduledStore((s) =>
+    s.jobs.filter((j) => j.enabled === 1).length + s.agentJobs.filter((j) => j.enabled).length)
+  const scheduledRunning = useScheduledStore((s) => s.jobs.some((j) => j.running) || s.agentJobs.some((j) => j.running))
   // File library: every file the agents made, summarised (agent column,
   // Settings, the phone header) — or one agent's (its "⋯", its phone chat).
   const libraryOpen = useFileLibraryStore((s) => s.open)

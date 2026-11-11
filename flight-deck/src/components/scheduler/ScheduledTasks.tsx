@@ -5,6 +5,7 @@ import {
   AlarmClock,
   AlertTriangle,
   ArrowLeft,
+  Bot,
   Check,
   CheckCircle2,
   ChevronDown,
@@ -37,18 +38,23 @@ import { SchedulePicker } from './SchedulePicker'
 import { useSchedulePreview } from './schedulePreview'
 import { isManagedAgent } from '../../utils/managedAgents'
 import {
+  agentJobKey,
   buildSchedule,
   defaultScheduleForm,
+  describeAgentSchedule,
   describeSchedule,
   explainStatus,
   fmtDuration,
   fmtRelative,
   fmtWhen,
+  isFinishedAgentOneShot,
   isFinishedOneShot,
   localTimeZone,
   parseSchedule,
   runTone,
   schedulerApi,
+  type AgentCronJob,
+  type AgentCronRun,
   type DeliveryOptions,
   type RunDelivery,
   type ScheduleForm,
@@ -66,10 +72,20 @@ import { ServesGoalPicker } from '../course/ServesGoalPicker'
 // email and/or your Telegram. Left: "All activity" (every run, newest first,
 // searchable) and the tasks; right: the selected task with its run history,
 // or the editor.
+//
+// Below the tasks: the jobs agents scheduled for themselves with their cron
+// tool, in chat ("Set up by agents"). Those live in the agent and run in the
+// chat they were set up from; here they can be seen, paused, run or deleted
+// (agent_cron_routes.py) — to change what one does, ask the agent.
 
 interface AgentChoice { slug: string; name: string; running: boolean }
 
-type View = { kind: 'all' } | { kind: 'task'; id: string } | { kind: 'edit'; id: string | null }
+type View =
+  | { kind: 'all' }
+  | { kind: 'task'; id: string }
+  | { kind: 'edit'; id: string | null }
+  /** An agent's own job, by agentJobKey. */
+  | { kind: 'agentjob'; key: string }
 
 const TEMPLATES: { title: string; prompt: string; form: Partial<ScheduleForm> }[] = [
   {
@@ -113,6 +129,7 @@ export function ScheduledTasks({
   onOpenTaskboard?: (jobId: string) => void
 }) {
   const jobs = useScheduledStore((s) => s.jobs)
+  const allAgentJobs = useScheduledStore((s) => s.agentJobs)
   const loaded = useScheduledStore((s) => s.loaded)
   const fetchJobs = useScheduledStore((s) => s.fetchJobs)
   const processes = useProcessStore((s) => s.processes)
@@ -123,7 +140,14 @@ export function ScheduledTasks({
     // Asleep is on: it wakes for its runs.
     .map((p) => ({ slug: p.slug, name: p.name || p.slug, running: p.status === 'running' || !!p.asleep }))
     .sort((a, b) => Number(b.running) - Number(a.running) || a.name.localeCompare(b.name)), [processes])
-  const agentName = useCallback((slug: string) => agents.find((a) => a.slug === slug)?.name || slug, [agents])
+  const agentName = useCallback((slug: string) => agents.find((a) => a.slug === slug)?.name
+    || processes.find((p) => p.slug === slug)?.name
+    || allAgentJobs.find((j) => j.agent_slug === slug)?.agent_name || slug, [agents, processes, allAgentJobs])
+  // Not the deck's own workers' and beings' machinery.
+  const agentJobs = useMemo(() => allAgentJobs.filter((j) => {
+    const p = processes.find((x) => x.slug === j.agent_slug)
+    return !p || !isManagedAgent(p.slug, p.description || '')
+  }), [allAgentJobs, processes])
 
   const [view, setView] = useState<View>(() =>
     newForAgent != null ? { kind: 'edit', id: null } : initialTaskId ? { kind: 'task', id: initialTaskId } : { kind: 'all' })
@@ -150,6 +174,7 @@ export function ScheduledTasks({
     (b.enabled - a.enabled) || ((a.next_run_at ?? Infinity) - (b.next_run_at ?? Infinity)) || a.name.localeCompare(b.name)),
   [jobs])
   const selected = view.kind === 'task' ? jobs.find((j) => j.id === view.id) ?? null : null
+  const selectedAgentJob = view.kind === 'agentjob' ? agentJobs.find((j) => agentJobKey(j) === view.key) ?? null : null
   const editing = view.kind === 'edit' ? (view.id ? jobs.find((j) => j.id === view.id) ?? null : null) : null
 
   const go = (v: View) => { setView(v); setPhoneDetail(true); if (v.kind !== 'edit') setTemplate(null) }
@@ -216,15 +241,36 @@ export function ScheduledTasks({
         </div>
         {!loaded && <div className="flex justify-center py-6 text-zinc-500"><Loader2 className="h-4 w-4 animate-spin" /></div>}
         {loaded && jobs.length === 0 && (
-          <p className="px-2.5 py-3 text-xs leading-relaxed text-zinc-500">No tasks yet. Start with “New task” or a suggestion on the right.</p>
+          <p className="px-2.5 py-3 text-xs leading-relaxed text-zinc-500">
+            {agentJobs.length ? 'None of your own yet — “New task” makes one.' : 'No tasks yet. Start with “New task” or a suggestion on the right.'}
+          </p>
         )}
         <ul className="flex flex-col gap-0.5">
           {sorted.map((j) => (
             <li key={j.id}>
-              <TaskRow job={j} agentName={agentName(j.agent_slug)} active={view.kind !== 'all' && (view.kind === 'task' || view.kind === 'edit') && view.id === j.id} onClick={() => go({ kind: 'task', id: j.id })} />
+              <TaskRow job={j} agentName={agentName(j.agent_slug)} active={(view.kind === 'task' || view.kind === 'edit') && view.id === j.id} onClick={() => go({ kind: 'task', id: j.id })} />
             </li>
           ))}
         </ul>
+        {agentJobs.length > 0 && (
+          <>
+            <div
+              className="px-2.5 pb-1 pt-4 text-[11px] font-medium uppercase tracking-wider text-zinc-500"
+              title="Jobs your agents scheduled for themselves in chat. They run inside the agent and report in that chat."
+            >
+              Set up by agents ({agentJobs.length})
+            </div>
+            <ul className="flex flex-col gap-0.5">
+              {agentJobs.map((j) => (
+                <li key={agentJobKey(j)}>
+                  <AgentJobRow job={j} agentName={agentName(j.agent_slug)}
+                    active={view.kind === 'agentjob' && view.key === agentJobKey(j)}
+                    onClick={() => go({ kind: 'agentjob', key: agentJobKey(j) })} />
+                </li>
+              ))}
+            </ul>
+          </>
+        )}
       </div>
     </div>
   )
@@ -271,7 +317,19 @@ export function ScheduledTasks({
         onOpenTaskboard={onOpenTaskboard}
       />
     )
-  } else if (loaded && jobs.length === 0 && !query) {
+  } else if (view.kind === 'agentjob' && selectedAgentJob) {
+    detail = (
+      <AgentJobDetail
+        key={agentJobKey(selectedAgentJob)}
+        job={selectedAgentJob}
+        agentName={agentName(selectedAgentJob.agent_slug)}
+        query={query}
+        onDeleted={async () => { await fetchJobs(); go({ kind: 'all' }) }}
+        onChanged={fetchJobs}
+        onOpenChat={onOpenChat}
+      />
+    )
+  } else if (loaded && jobs.length === 0 && agentJobs.length === 0 && !query) {
     detail = <EmptyState onStart={startNew} />
   } else {
     detail = <ActivityFeed query={query} jobs={jobs} onOpenTask={(id) => go({ kind: 'task', id })} onOpenTaskboard={onOpenTaskboard} />
@@ -474,10 +532,12 @@ function ActivityFeed({ query, jobs, onOpenTask, onOpenTaskboard }: {
   )
 }
 
-function RunList({ runs, loading, hasMore, onMore, showTask, onOpenTask, onOpenTaskboard, empty, query }: {
+function RunList({ runs, loading, hasMore, onMore, showTask, onOpenTask, onOpenTaskboard, empty, query, explain }: {
   runs: TaskRun[]; loading: boolean; hasMore: boolean; onMore: () => void
   showTask?: boolean; onOpenTask?: (id: string) => void; onOpenTaskboard?: (jobId: string) => void
   empty: string; query: string
+  /** A failed run's status in words (default: a scheduled task's). */
+  explain?: (status: string) => string
 }) {
   const [more, setMore] = useState(false)
   if (loading && runs.length === 0) {
@@ -492,7 +552,7 @@ function RunList({ runs, loading, hasMore, onMore, showTask, onOpenTask, onOpenT
   }
   return (
     <div className="flex flex-col gap-3">
-      {runs.map((r) => <RunCard key={r.id} run={r} showTask={showTask} onOpenTask={onOpenTask} onOpenTaskboard={onOpenTaskboard} query={query} />)}
+      {runs.map((r) => <RunCard key={r.id} run={r} showTask={showTask} onOpenTask={onOpenTask} onOpenTaskboard={onOpenTaskboard} query={query} explain={explain} />)}
       {hasMore && (
         <button
           onClick={async () => { setMore(true); try { await onMore() } finally { setMore(false) } }}
@@ -523,11 +583,12 @@ const VIA: Record<string, { label: string; Icon: typeof Mail }> = {
   channel: { label: 'Channel', Icon: MessageSquare },
 }
 
-function RunCard({ run, showTask, onOpenTask, onOpenTaskboard, query }: {
+function RunCard({ run, showTask, onOpenTask, onOpenTaskboard, query, explain = explainStatus }: {
   run: TaskRun; showTask?: boolean; onOpenTask?: (id: string) => void
   /** The Taskboard on the task this run is part of. */
   onOpenTaskboard?: (jobId: string) => void
   query: string
+  explain?: (status: string) => string
 }) {
   const tone = runTone(run.status)
   const pill = TONE_PILL[tone]
@@ -599,7 +660,7 @@ function RunCard({ run, showTask, onOpenTask, onOpenTaskboard, query }: {
         ) : null}
         {(tone === 'error' || tone === 'skipped' || tone === 'partial') && (
           <p className={`mt-2 rounded-lg px-3 py-2 text-xs ${tone === 'error' ? 'bg-red-500/10 text-red-700 dark:text-red-300' : 'bg-zinc-800/60 text-zinc-400'}`}>
-            {explainStatus(run.status)}
+            {explain(run.status)}
           </p>
         )}
       </div>
@@ -773,6 +834,235 @@ function Glance({ label, children }: { label: string; children: ReactNode }) {
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/40 px-3.5 py-2.5">
       <div className="text-[10px] font-medium uppercase tracking-wider text-zinc-500">{label}</div>
       <div className="mt-0.5 truncate text-sm text-zinc-200">{children}</div>
+    </div>
+  )
+}
+
+// ── An agent's own job (its cron) ──
+
+/** The first line of what it does, as a title. */
+function agentJobTitle(task: string): string {
+  const line = (task || '').trim().split('\n')[0].trim()
+  return line.length > 120 ? `${line.slice(0, 117)}…` : line || 'Scheduled job'
+}
+
+function AgentJobRow({ job, agentName, active, onClick }: {
+  job: AgentCronJob; agentName: string; active: boolean; onClick: () => void
+}) {
+  const done = isFinishedAgentOneShot(job)
+  const paused = !job.enabled && !done
+  return (
+    <button
+      onClick={onClick}
+      className={`flex w-full items-center gap-3 rounded-lg px-2.5 py-2.5 text-left transition-colors ${
+        active ? 'bg-zinc-800' : 'hover:bg-zinc-800/50'} ${paused ? 'opacity-60' : ''}`}
+    >
+      <AgentJobIcon job={job} />
+      <span className="min-w-0 flex-1">
+        <span className="flex items-center gap-1.5">
+          <span className="truncate text-sm font-medium text-zinc-100">{agentJobTitle(job.task)}</span>
+          {(paused || done) && (
+            <span className="shrink-0 rounded bg-zinc-800 px-1 py-0.5 text-[9px] font-medium uppercase tracking-wide text-zinc-400">{done ? 'Done' : 'Paused'}</span>
+          )}
+        </span>
+        <span className="block truncate text-[11px] text-zinc-500">
+          {describeAgentSchedule(job)} · {agentName}
+        </span>
+      </span>
+      <span className="shrink-0 text-[10px] text-zinc-500">
+        {job.running ? 'running'
+          : paused || done ? ''
+          : job.agent_state === 'off' ? 'agent off'
+          : job.next_run_at ? fmtRelative(job.next_run_at) : ''}
+      </span>
+    </button>
+  )
+}
+
+function AgentJobIcon({ job }: { job: AgentCronJob }) {
+  const base = 'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg'
+  if (job.running) {
+    return <span className={`${base} bg-amber-500/15 text-amber-600 dark:text-amber-400`}><Loader2 className="h-4 w-4 animate-spin" /></span>
+  }
+  if (isFinishedAgentOneShot(job) && job.last_status !== 'failed') {
+    return <span className={`${base} bg-emerald-500/10 text-emerald-600 dark:text-emerald-400`}><CheckCircle2 className="h-4 w-4" /></span>
+  }
+  if (!job.enabled) return <span className={`${base} bg-zinc-800 text-zinc-500`}><Pause className="h-4 w-4" /></span>
+  if (job.last_status === 'failed') return <span className={`${base} bg-red-500/10 text-red-600 dark:text-red-400`}><AlertTriangle className="h-4 w-4" /></span>
+  return <span className={`${base} bg-sky-500/10 text-sky-600 dark:text-sky-400`}><Bot className="h-4 w-4" /></span>
+}
+
+/** An agent job's run in the shape the run cards take. Its result went to
+ *  the agent's chat, so a finished run shows "Chat ✓". */
+function agentRunAsTaskRun(job: AgentCronJob, r: AgentCronRun): TaskRun {
+  const status = r.status === 'ok' ? 'ok'
+    : r.status === 'running' || r.status === 'queued' ? 'running'
+    : r.status === 'cancelled' ? 'skipped:cancelled'
+    : r.status === 'interrupted' ? 'error:interrupted'
+    : `error:${r.error || r.status}`
+  return {
+    id: r.n,
+    job_id: job.id,
+    job_name: '',
+    agent_slug: job.agent_slug,
+    trigger: r.trigger === 'manual' ? 'manual' : 'scheduled',
+    started_at: r.started_at ?? 0,
+    finished_at: r.finished_at,
+    status,
+    result: r.result,
+    deliveries: status === 'ok' ? [{ via: 'chat', ok: true, note: '' }] : [],
+    session_id: job.session_id,
+  }
+}
+
+function explainAgentRun(status: string): string {
+  if (status === 'error:interrupted') return "It didn't finish — the agent stopped during the run."
+  if (status === 'skipped:cancelled') return 'Cancelled before it finished.'
+  return `The run failed: ${status.replace(/^error:/, '')}`
+}
+
+function useAgentRuns(job: AgentCronJob) {
+  const [runs, setRuns] = useState<AgentCronRun[]>([])
+  const [loading, setLoading] = useState(true)
+  const { agent_slug: slug, id } = job
+  const load = useCallback(async () => {
+    try {
+      const rows = await schedulerApi.agentJobRuns(slug, id)
+      setRuns(Array.isArray(rows) ? rows : [])
+    } catch { /* keep what it showed */ } finally { setLoading(false) }
+  }, [slug, id])
+  useEffect(() => { load() }, [load])
+  const live = job.running || runs.some((r) => r.status === 'running' || r.status === 'queued')
+  useEffect(() => {
+    const t = setInterval(load, live ? 3000 : 15000)
+    return () => clearInterval(t)
+  }, [load, live])
+  return { runs, loading, reload: load }
+}
+
+function AgentJobDetail({ job, agentName, query, onDeleted, onChanged, onOpenChat }: {
+  job: AgentCronJob; agentName: string; query: string
+  onDeleted: () => void; onChanged: () => void
+  onOpenChat?: (agentSlug: string, sessionId: string) => void
+}) {
+  const notify = useNotificationStore((s) => s.add)
+  const [busy, setBusy] = useState<'' | 'run' | 'toggle' | 'delete'>('')
+  const [taskOpen, setTaskOpen] = useState(false)
+  const { runs, loading, reload } = useAgentRuns(job)
+  const done = isFinishedAgentOneShot(job)
+  const paused = !job.enabled && !done
+  const title = agentJobTitle(job.task)
+
+  const shown = useMemo(() => {
+    const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+    const rows = runs.map((r) => agentRunAsTaskRun(job, r))
+    return words.length ? rows.filter((r) => words.some((w) => r.result.toLowerCase().includes(w))) : rows
+  }, [runs, job, query])
+
+  const act = async (kind: 'run' | 'toggle', fn: () => Promise<unknown>, failTitle: string) => {
+    setBusy(kind)
+    try { await fn(); onChanged(); reload() } catch (e) {
+      notify('error', failTitle, e instanceof Error ? e.message : String(e))
+    } finally { setBusy('') }
+  }
+
+  const remove = () => {
+    if (!confirm(`Delete “${title}”? ${agentName} stops doing it.`)) return
+    setBusy('delete')
+    schedulerApi.deleteAgentJob(job.agent_slug, job.id).then(onDeleted).catch((e) => {
+      notify('error', 'Could not delete the job', e instanceof Error ? e.message : String(e))
+      setBusy('')
+    })
+  }
+
+  return (
+    <div className="h-full overflow-y-auto px-4 py-4 wide:px-6">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <h3 className="line-clamp-2 text-lg font-semibold leading-tight text-zinc-100">{title}</h3>
+          <p className="mt-0.5 text-xs text-zinc-500">{describeAgentSchedule(job)} · {agentName}</p>
+          <span className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-sky-500/10 px-1.5 py-0.5 text-[11px] font-medium text-sky-700 dark:text-sky-300">
+            <Bot className="h-3 w-3" />{job.author === 'agent' ? `${agentName} set this up in chat` : `In ${agentName}'s own schedule`}
+          </span>
+        </div>
+        <div className="flex items-center gap-1">
+          <button
+            onClick={() => act('run', () => schedulerApi.agentJobAction(job.agent_slug, job.id, 'run'), 'Could not run the job')}
+            disabled={!!busy || job.running}
+            className="flex items-center gap-1.5 rounded-lg border border-zinc-700 px-3 py-1.5 text-sm font-medium text-zinc-200 transition-colors hover:border-violet-500/50 hover:bg-zinc-800 disabled:opacity-50"
+            title={job.agent_state === 'on' ? 'Run it once now (the schedule stays as it is)' : `Run it once now — ${agentName} is turned on for the run`}
+          >
+            {busy === 'run' || job.running ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+            {job.running ? 'Running…' : 'Run now'}
+          </button>
+          <button onClick={remove} disabled={!!busy} className={`${iconBtn} hover:text-red-600 dark:hover:text-red-400`} title="Delete" aria-label="Delete">
+            {busy === 'delete' ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-2 wide:grid-cols-3">
+        <Glance label="Next run">
+          {done ? <span className="text-zinc-500">Done — it ran once</span>
+            : paused ? <span className="text-zinc-500">Paused</span>
+            : job.running ? <span className="text-amber-700 dark:text-amber-400">Running now</span>
+            : job.next_run_at ? <>{fmtWhen(job.next_run_at)} <span className="text-zinc-500">· {fmtRelative(job.next_run_at)}</span></>
+            : <span className="text-zinc-500">Not scheduled</span>}
+        </Glance>
+        <Glance label="Results go to">{agentName}'s chat</Glance>
+        <Glance label="Status">
+          {done ? <span className="text-zinc-500">Finished</span> : (
+            <label className="flex cursor-pointer items-center gap-2">
+              <Switch on={!paused} busy={busy === 'toggle'} onChange={(on) =>
+                act('toggle', () => schedulerApi.agentJobAction(job.agent_slug, job.id, on ? 'resume' : 'pause'),
+                  on ? 'Could not resume' : 'Could not pause')} />
+              <span>{paused ? 'Paused' : 'Active'}</span>
+            </label>
+          )}
+        </Glance>
+      </div>
+
+      {job.agent_state === 'off' && !paused && !done && (
+        <p className="mt-3 flex items-start gap-2 rounded-lg bg-zinc-800/60 px-3 py-2 text-xs text-zinc-400">
+          <Power className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          {agentName} is off, so this doesn't run until it is on again. “Run now” turns it on for one run.
+        </p>
+      )}
+      {job.last_status === 'failed' && job.last_error && (
+        <p className="mt-3 flex items-start gap-2 rounded-lg bg-red-500/10 px-3 py-2 text-xs text-red-700 dark:text-red-300">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          The last run failed: {job.last_error}
+        </p>
+      )}
+
+      <button onClick={() => setTaskOpen((v) => !v)} className="mt-4 block w-full rounded-xl border border-zinc-800 bg-zinc-900/40 px-4 py-3 text-left">
+        <span className="flex items-center justify-between text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+          What it does
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${taskOpen ? 'rotate-180' : ''}`} />
+        </span>
+        <span className={`mt-1 block whitespace-pre-wrap text-sm text-zinc-300 ${taskOpen ? '' : 'line-clamp-2'}`}>{job.task}</span>
+      </button>
+      <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+        {agentName} runs this itself, in the chat it was set up in. To change what it does or when, ask {agentName} there.
+      </p>
+
+      <div className="mb-3 mt-6 flex flex-wrap items-center gap-2">
+        <h4 className="text-sm font-semibold text-zinc-100">
+          {query ? <>Runs matching “{query}”</> : 'History'}
+        </h4>
+        {!loading && <span className="text-[11px] text-zinc-500">{runs.length} run{runs.length === 1 ? '' : 's'} kept</span>}
+        {onOpenChat && job.session_id && (
+          <button
+            onClick={() => onOpenChat(job.agent_slug, job.session_id)}
+            className="ml-auto flex items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-violet-600 hover:bg-violet-500/10 dark:text-violet-400"
+            title="Open the chat this job runs in"
+          >
+            <MessageSquare className="h-3.5 w-3.5" />Open the chat
+          </button>
+        )}
+      </div>
+      <RunList runs={shown} loading={loading} hasMore={false} onMore={() => {}} query={query} explain={explainAgentRun}
+        empty={query ? 'No run of this job matches.' : 'It hasn\'t run yet. Use “Run now” to try it.'} />
     </div>
   )
 }
