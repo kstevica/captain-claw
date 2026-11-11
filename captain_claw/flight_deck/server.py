@@ -1789,6 +1789,7 @@ _optional_agent_manager_dep = Depends(get_optional_managed_user) if AUTH_ENABLED
 
 from captain_claw.flight_deck.auth_routes import router as auth_router
 from captain_claw.flight_deck.settings_routes import router as settings_router
+from captain_claw.flight_deck.agent_avatar_routes import router as agent_avatar_router
 from captain_claw.flight_deck.botport_routes import router as botport_router
 from captain_claw.flight_deck.botport_routes import forget_share as botport_forget_share
 from captain_claw.flight_deck.chat_routes import router as chat_router
@@ -1918,6 +1919,7 @@ from captain_claw.terminal.relay import router as pty_router
 
 app.include_router(auth_router)
 app.include_router(settings_router)
+app.include_router(agent_avatar_router)
 app.include_router(botport_router)
 app.include_router(chat_router)
 app.include_router(admin_router)
