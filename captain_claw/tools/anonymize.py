@@ -127,6 +127,12 @@ class AnonymizeTool(Tool):
                 },
                 "description": "anonymize: terms to always replace; kind like PERSON, ORG, PROJECT (default PERSON).",
             },
+            "generalize": {
+                "type": "boolean",
+                "description": "anonymize with mode='one_way' only: make details coarser instead of tokens — date "
+                               "of birth → year, address → city, ages and money amounts → ranges (data shared for "
+                               "good, where an exact age or salary would point to one person).",
+            },
             "lane": {
                 "type": "string",
                 "enum": ["deterministic", "llm", "both"],
@@ -233,7 +239,7 @@ class AnonymizeTool(Tool):
             "content": content, "format": fmt, "vault": vault, "mode": kwargs.get("mode") or "reversible",
             "source": source, "filename": stem,
         }
-        for key in ("keep", "extra", "lane"):
+        for key in ("keep", "extra", "lane", "generalize"):
             if kwargs.get(key):
                 body[key] = kwargs[key]
         data, err = await self._post(base, headers, "/fd/anonymize/agent/run", body)
@@ -267,7 +273,7 @@ class AnonymizeTool(Tool):
     def _body_options(self, kwargs: dict) -> dict[str, Any]:
         body: dict[str, Any] = {"vault": str(kwargs.get("vault") or "").strip() or default_vault(kwargs),
                                 "mode": kwargs.get("mode") or "reversible"}
-        for key in ("keep", "extra", "lane"):
+        for key in ("keep", "extra", "lane", "generalize"):
             if kwargs.get(key):
                 body[key] = kwargs[key]
         return body

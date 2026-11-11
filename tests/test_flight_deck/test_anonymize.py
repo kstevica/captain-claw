@@ -425,7 +425,7 @@ class TestTrustedModel:
         r = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={"content": BARE, "lane": "both"})
         assert r.status_code == 409 and "trusted model" in r.json()["detail"]
         assert c.get("/fd/anonymize/agent/status", headers=BOB_AGENT).json() == {
-            "llm": False, "model": "", "default_lane": "deterministic"}
+            "llm": False, "model": "", "default_lane": "deterministic", "name_model": ""}
 
     async def test_admin_trust_rules(self, db, agents):
         c = _client()
@@ -516,7 +516,7 @@ class TestTrustedModel:
         monkeypatch.setenv("FD_ANONYMIZE_MODEL", "qwen3:8b")
         c = _client()
         status = c.get("/fd/anonymize/status", headers=_bearer(BOB)).json()
-        assert status == {"llm": True, "model": "ollama/qwen3:8b", "default_lane": "both"}
+        assert status == {"llm": True, "model": "ollama/qwen3:8b", "default_lane": "both", "name_model": ""}
         got = c.get("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin")).json()["model"]
         assert got["source"] == "env" and got["basis"] == "local"
 
@@ -869,3 +869,58 @@ async def test_background_notes_from_covered_sources_stay_out(gate_env):
     import inspect
 
     assert "NOTE_GROUPS" in inspect.getsource(AgentContextMixin._collect_background_context_notes)
+
+
+# ── P4: coarser values and the name-recognition pack ────────────────
+
+
+class TestP4Routes:
+    async def test_generalize_only_one_way(self, db, agents):
+        c = _client()
+        body = {"content": "Rođen 12. 3. 1985., plaća 4.237,50 EUR", "generalize": True}
+        assert c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json=body).status_code == 422
+        r = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT, json={**body, "mode": "one_way"}).json()
+        assert r["output"] == "Rođen 1985, plaća 2.000–5.000 EUR" and r["generalized"] == ["ADDRESS", "AGE", "AMOUNT", "DOB"]
+        bad = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
+                     json={**body, "mode": "one_way", "generalize": ["SALARY"]})
+        assert bad.status_code == 422
+
+    async def test_admin_name_pack(self, db, agents, monkeypatch):
+        import asyncio as _asyncio
+
+        from captain_claw.anonymize import detectors
+        from captain_claw.flight_deck import anonymize_ner
+
+        c = _client()
+        admin = _bearer(ALICE, "admin")
+        monkeypatch.setattr(anonymize_ner, "runtime_available", lambda: False)
+        got = c.get("/fd/anonymize/admin/ner", headers=admin).json()
+        assert got["status"] == "off" and {m["id"] for m in got["models"]} == set(anonymize_ner.MODELS)
+        assert c.put("/fd/anonymize/admin/ner", headers=admin,
+                     json={"enabled": True, "model": "someone/else"}).status_code == 422
+        on = c.put("/fd/anonymize/admin/ner", headers=admin, json={"enabled": True}).json()
+        assert on["status"] == "not_installed"
+        assert c.post("/fd/anonymize/admin/ner/download", headers=admin).status_code == 409
+        assert c.get("/fd/anonymize/admin/ner", headers=_bearer(BOB)).status_code == 403
+
+        # With the runtime and a (stand-in) model on disk it loads and runs.
+        monkeypatch.setattr(anonymize_ner, "runtime_available", lambda: True)
+        monkeypatch.setattr(anonymize_ner, "downloaded", lambda model: True)
+
+        def fake_pipe(text):
+            i = text.find("Marko")
+            return [{"start": i, "end": i + 5, "entity_group": "PER", "score": 0.99}] if i >= 0 else []
+
+        monkeypatch.setattr(anonymize_ner, "_load_pipeline", lambda model: fake_pipe)
+        anonymize_ner._state.update(status="off", model="", error="")
+        try:
+            await anonymize_ner._bring_up(anonymize_ner.DEFAULT_MODEL, download=False)
+            assert c.get("/fd/anonymize/admin/ner", headers=admin).json()["status"] == "ready"
+            r = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
+                       json={"content": "We met Marko yesterday.", "mode": "one_way"}).json()
+            assert r["output"] == "We met ⟦PERSON_1⟧ yesterday." and r["name_model"] == anonymize_ner.DEFAULT_MODEL
+            assert c.get("/fd/anonymize/status", headers=_bearer(BOB)).json()["name_model"]
+        finally:
+            detectors.set_ner_backend(None)
+            anonymize_ner._state.update(status="off", model="", error="")
+        await _asyncio.sleep(0)

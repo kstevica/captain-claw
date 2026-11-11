@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 
 # Upper / lower case letters, Latin with the diacritics of the languages
@@ -29,6 +30,11 @@ KINDS = (
     "PERSON", "ORG", "EMAIL", "PHONE", "ADDRESS", "DOB", "IBAN", "CARD", "CVV", "CARD_EXPIRY",
     "OIB", "JMBG", "ID_NUMBER", "SSN", "IP", "PROFILE_URL", "PLATE",
 )
+
+# Found only when asked for (``opt_in``): ages and money amounts aren't private
+# by themselves, but in a document shared for good they narrow a person down,
+# so one-way runs can turn them into ranges.
+OPT_IN_KINDS = ("AGE", "AMOUNT")
 
 # Kinds whose value is a number: compared digit by digit when checking output.
 DIGIT_KINDS = frozenset({"PHONE", "IBAN", "CARD", "OIB", "JMBG", "SSN"})
@@ -363,8 +369,19 @@ def _looks_like_date(text: str) -> bool:
     return bool(re.fullmatch(r"\(?\d{1,4}[./\-][ \t]?\d{1,2}[./\-][ \t]?\d{2,4}\.?\)?", text.strip()))
 
 
-def detect(text: str, kinds: frozenset[str] | set[str] | None = None) -> list[Span]:
-    """Every span the deterministic lane finds in *text* (they may overlap)."""
+_CURRENCY = r"(?:€|EUR|eura?|USD|\$|£|GBP|CHF|HRK|kn|kuna)"
+_NUMBER = r"\d{1,3}(?:[.,\u00a0 ]\d{3})*(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
+_AMOUNT_RE = re.compile(
+    rf"(?<![\w.,])(?:{_CURRENCY}[ \u00a0]?(?:{_NUMBER})|(?:{_NUMBER})[ \u00a0]?{_CURRENCY})(?![\w])", re.I)
+_AGE_RE = re.compile(
+    r"(?<![\w.,])(\d{1,3})[ \t]*(?:godin[aeu]?|god\.|years?[ \t]+old|yrs?\b|y/o)(?![\w])"
+    r"|(?i:\bage[ \t]*[:=]?|\bdob[ \t]*[:=]|\bstar[aoi][ \t]+)[ \t]*(\d{1,3})(?![\d.,])", re.I)
+
+
+def detect(text: str, kinds: frozenset[str] | set[str] | None = None,
+           opt_in: frozenset[str] | set[str] = frozenset()) -> list[Span]:
+    """Every span the deterministic lane finds in *text* (they may overlap).
+    *opt_in*: kinds of :data:`OPT_IN_KINDS` to find too."""
     text = str(text or "")
     out: list[Span] = []
 
@@ -462,7 +479,18 @@ def detect(text: str, kinds: frozenset[str] | set[str] | None = None) -> list[Sp
         if re.search(r"\d", text[s:e]) and e - s >= 4:
             add(s, e, "ID_NUMBER", 2, "id-label")
     for m in _ADDRESS_LABEL_RE.finditer(text):
-        s, e = _trim(text, m.start(1), m.end(1), " \t.,;:")
+        s, e = m.start(1), m.end(1)
+        # The rest of the line, up to the first sentence end after the house
+        # number ("Ilica 12, 10000 Zagreb. Plaća …" stops at "Zagreb";
+        # "Trg b. J. Jelačića 1" keeps its initials), or a ";" / " | ".
+        value = text[s:e]
+        cut = len(value)
+        for c in re.finditer(r"(?<=[\w)])\.\s+(?=[A-ZČĆŠŽĐ])|;|\s\|\s", value):
+            sentence_end = c.group(0).startswith(".")
+            if not sentence_end or re.search(r"\d", value[:c.start()]):
+                cut = c.start()
+                break
+        s, e = _trim(text, s, s + cut, " \t.,;:")
         if re.search(rf"[{UP}{LO}]", text[s:e]):
             add(s, e, "ADDRESS", 2, "address-label")
     for m in _PERSON_LABEL_RE.finditer(text):
@@ -499,6 +527,60 @@ def detect(text: str, kinds: frozenset[str] | set[str] | None = None) -> list[Sp
 
     if want("PERSON"):
         out.extend(_names_from_emails(text, out))
+    if "AMOUNT" in opt_in:
+        for m in _AMOUNT_RE.finditer(text):
+            s, e = _trim(text, m.start(), m.end(), " \t\u00a0")
+            out.append(Span(s, e, "AMOUNT", 1, "amount"))
+    if "AGE" in opt_in:
+        for m in _AGE_RE.finditer(text):
+            g = 1 if m.group(1) else 2
+            if 0 < int(m.group(g)) < 125:
+                out.append(Span(m.start(), m.end(), "AGE", 1, "age"))
+    if want("PERSON") and _ner_backend is not None:
+        out.extend(ner_spans(text))
+    return out
+
+
+# ── an optional local name-recognition model (the NER pack) ────────
+
+# Set by whoever runs the engine (Flight Deck) when an admin has turned the
+# pack on; None everywhere else, so the lane stays pure code by default.
+_ner_backend: "Callable[[str], list[tuple[int, int, str, float]]] | None" = None
+NER_MIN_SCORE = 0.80
+NER_MAX_CHARS = 200_000
+_NER_KINDS = {"PER": "PERSON", "PERSON": "PERSON", "B-PER": "PERSON", "I-PER": "PERSON", "ORG": "ORG"}
+
+
+def set_ner_backend(backend: "Callable[[str], list[tuple[int, int, str, float]]] | None") -> None:
+    """*backend(text)* → ``[(start, end, label, score)]`` (labels like PER /
+    ORG / LOC); None turns the pack off."""
+    global _ner_backend
+    _ner_backend = backend
+
+
+def ner_spans(text: str) -> list[Span]:
+    """People and companies the model finds (places and the rest are left: a
+    city on its own isn't private). Never raises: a broken model finds nothing."""
+    backend = _ner_backend
+    if backend is None or not text.strip() or len(text) > NER_MAX_CHARS:
+        return []
+    try:
+        found = backend(text)
+    except Exception:  # noqa: BLE001 — the lane keeps working without it
+        return []
+    out = []
+    for start, end, label, score in found:
+        kind = _NER_KINDS.get(str(label).upper())
+        if kind is None or float(score) < NER_MIN_SCORE or not (0 <= start < end <= len(text)):
+            continue
+        s, e = _trim(text, start, end, " \t\r\n,;:.!?\"'()[]")
+        if kind == "PERSON":
+            trimmed = trim_name(text, s, e)
+            if not trimmed:
+                continue
+            s, e = trimmed
+        if e - s >= 2:
+            out.append(Span(s, e, kind, 1, "ner"))
     return out
 
 

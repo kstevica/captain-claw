@@ -1180,6 +1180,13 @@ async def lifespan(app: FastAPI):
     _em_stop = asyncio.Event()
     app.state.external_memory_stop = _em_stop
     app.state.external_memory_task = asyncio.create_task(external_memory_service.drain_loop(_em_stop))
+    # Anonymization's name-recognition pack, if an admin turned it on (never downloads here).
+    try:
+        from captain_claw.flight_deck import anonymize_ner
+
+        await anonymize_ner.boot(_fd_db)
+    except Exception:
+        pass
     # ── Agent backups: each person's scheduled backups of their agents (agent_bundle.backups). ──
     from captain_claw.flight_deck.agent_bundle import backups as _agent_backups
     _backups_stop = asyncio.Event()

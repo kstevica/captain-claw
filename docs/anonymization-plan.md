@@ -7,8 +7,8 @@ tokens that mean nothing outside Captain. The real values are kept in an
 encrypted **vault** in Flight Deck, so the person (never the model) can put
 them back later.
 
-Status: **P0** PR #511 · **P1** PR #512 · **P2** PR #514 (each stacked on the one before) · **P3 built**
-(branch `feat/anonymize-p3`, stacked on P2); P4 next.
+Status: **P0** PR #511 · **P1** PR #512 · **P2** PR #514 · **P3** PR #515 (each stacked on the one before) ·
+**P4 built** (branch `feat/anonymize-p4`, stacked on P3) — the name-recognition model itself not yet measured.
 
 ## Principles
 
@@ -314,6 +314,43 @@ kept in their settings). Nothing changes for anyone who doesn't turn it on.
   shell, browser) are not gated; the gate's answer is cached for a minute, so
   turning it on reaches a running agent within a minute.
 
+## P4 — coarser values and the name-recognition pack
+
+**Coarser values (one way).** `generalize` (`true` or a list of `DOB`,
+`ADDRESS`, `AGE`, `AMOUNT`) with `mode: one_way` only — a coarse value can't
+be put back. The engine runs and verifies as usual; then
+`engine.generalize` swaps those tokens for values made from each
+occurrence's own text: date of birth → year, address → its city (the token
+stays when there is no postal code + city), age → decade band
+("40–49 godina"), money amount → a 1–2–5 band in the amount's own number
+format ("4.237,50 EUR" → "2.000–5.000 EUR", "$87,500.00" → "$50,000–100,000").
+Ages and amounts are found only when asked for (`detectors.OPT_IN_KINDS`):
+by themselves they aren't private. Office files get the coarse value where
+the token would have gone (it works on the edits). Page: "Keep nothing" →
+"Make them coarser"; tool: `generalize: true`.
+
+**Name-recognition pack** (`flight_deck/anonymize_ner.py`). A local
+token-classification model adds people and companies it finds (score ≥ 0.80;
+places and the rest ignored) to the deterministic lane on this deck, in
+~1,500-character chunks, one call at a time; a model that fails finds nothing
+and code carries on. Admin console → Settings → Name recognition: on/off, the
+model — only `Davlan/xlm-roberta-base-wikiann-ner` (176 languages, Croatian
+and English among them, ~1.1 GB) or `classla/bcms-bertic-ner`
+(Croatian / Bosnian / Serbian / Montenegrin, ~440 MB) — and "Download and
+start". Only `safetensors` weights are downloaded and loaded, from the local
+files, with no remote code. Needs `transformers` + `torch` where Flight Deck
+runs (not the slim desktop app or a Pi): the card says so. Started at deck
+start when it is on and downloaded; never downloads by itself.
+
+Not measured yet: neither model has been run on the shared cases here (the
+download was held back in this session). Once one is on, the trusted-model
+card's "Check on samples" shows what it adds: its "code alone" column then
+includes the name model.
+
+Also fixed in P4: an "Address:" label took the rest of its line — it now
+stops at the first sentence end after the house number ("Trg b. J. Jelačića 1"
+keeps its initials).
+
 ## Phases
 
 * **P0** — engine (detect → resolve → tokens → replace → verify → restore),
@@ -329,6 +366,4 @@ kept in their settings). Nothing changes for anyone who doesn't turn it on.
   admin card for the trusted model with its sample check. PDF redaction and
   OCR of pictures are not built.
 * **P3** (built) — the privacy gate, below.
-* **P4** — optional local NER pack (GLiNER / spaCy, a download — not in the
-  slim app or on the Pi by default); `one_way` generalization of
-  quasi-identifiers (DOB → year, address → city, amounts → ranges).
+* **P4** (built) — below.
