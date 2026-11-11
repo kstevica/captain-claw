@@ -354,6 +354,12 @@ _ECO_INTENT_PATTERNS: list[tuple[_re.Pattern[str], frozenset[str]]] = [
         r"\bshar(?:e|ed|es|ing|eable)\b|\bpublic\b|\bpublish\w*|\blinks?\b|\bpodijel\w*|\bpoveznic\w*"
         r"|\bjavn\w*\s+link", _re.I),
      frozenset({"public_link"})),
+    # Anonymization (EN / HR "anonimiz…", "osobni podaci", "zacrni").
+    (_re.compile(
+        r"\banonymi[sz]\w*|\bpseudonymi[sz]\w*|\bde-?identif\w*|\bredact\w*|\bpii\b|\bgdpr\b"
+        r"|\bpersonal\s+(?:data|information|details)|\bprivate\s+data|\banonimiz\w*|\bpseudonimiz\w*"
+        r"|\bosobn\w*\s+podat\w*|\bzacrn\w*|\bvault\b|⟦[A-Z_]+_\d+⟧", _re.I),
+     frozenset({"anonymize"})),
     # Linked systems: a message to a system the owner linked to this agent
     # (EN / HR "sustav").
     (_re.compile(r"\blinked\s+system|\bsystems?\b|\bcrm\b|\bwebhook\b|\bsustav\w*", _re.I),

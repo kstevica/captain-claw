@@ -1554,6 +1554,10 @@ async def lifespan(app: FastAPI):
         await external_memory_service.close()
     except Exception:
         pass
+    try:
+        await anonymize_vault.close()
+    except Exception:
+        pass
     if hasattr(app.state, "agent_backups_stop"):
         app.state.agent_backups_stop.set()
         try:
@@ -1814,6 +1818,8 @@ from captain_claw.flight_deck.imap_routes import router as imap_router
 from captain_claw.flight_deck.jev_routes import router as jev_router
 from captain_claw.flight_deck.external_memory.routes import router as external_memory_router
 from captain_claw.flight_deck.external_memory import service as external_memory_service
+from captain_claw.flight_deck.anonymize_routes import router as anonymize_router
+from captain_claw.flight_deck import anonymize_vault
 from captain_claw.flight_deck.soniox_routes import router as soniox_router
 from captain_claw.flight_deck.telegram_shared_routes import router as telegram_shared_router
 from captain_claw.flight_deck.telegram_inbox_routes import router as telegram_inbox_router
@@ -1957,6 +1963,7 @@ app.include_router(microsoft_oauth_router)
 app.include_router(imap_router)
 app.include_router(jev_router)
 app.include_router(external_memory_router)
+app.include_router(anonymize_router)
 app.include_router(soniox_router)
 app.include_router(telegram_shared_router)
 app.include_router(telegram_inbox_router)
@@ -2072,6 +2079,7 @@ app.include_router(payments_routes.public_router)
 # Tool-call register: every tool call the agents make (tool_audit_routes.py).
 tool_audit_routes.configure(data_dir=DATA_DIR)
 external_memory_service.configure(data_dir=DATA_DIR)
+anonymize_vault.configure(data_dir=DATA_DIR)
 app.include_router(tool_audit_routes.router)
 app.include_router(agent_sharing_router)
 app.include_router(context_pack_router)
