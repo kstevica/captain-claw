@@ -1718,6 +1718,16 @@ class DatastoreManager:
             await self._db.commit()
         return inserted
 
+    async def last_insert_id(self) -> int:
+        """The ``_id`` of the row this manager's connection inserted last (0
+        before any): the row a one-row :meth:`insert_rows` just added. Only
+        meaningful on a manager nobody else writes through meanwhile."""
+        await self._ensure_db()
+        assert self._db is not None
+        async with self._db.execute("SELECT last_insert_rowid()") as cur:
+            row = await cur.fetchone()
+        return int(row[0] or 0) if row else 0
+
     async def _unique_columns(self, internal: str) -> list[str]:
         """Columns of the table's UNIQUE index — the upsert conflict target, if any."""
         assert self._db is not None

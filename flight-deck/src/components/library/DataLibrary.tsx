@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import {
+  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
+  type KeyboardEvent as ReactKeyboardEvent, type MouseEvent as ReactMouseEvent, type ReactNode,
+} from 'react'
 import {
   AlertTriangle,
   ArrowLeft,
@@ -19,18 +22,21 @@ import {
   Link2,
   Loader2,
   MessageSquare,
+  Pencil,
+  Plus,
   RotateCw,
   Search,
   SlidersHorizontal,
   Sparkles,
   Table2,
   ToggleLeft,
+  Trash2,
   Type,
   X,
 } from 'lucide-react'
 import { useNotificationStore } from '../../stores/notificationStore'
 import { fmtRelative, fmtWhen } from '../../services/schedulerApi'
-import type { LibraryState } from '../../services/fileLibraryApi'
+import { apiStatus, type LibraryState } from '../../services/fileLibraryApi'
 import {
   dataLibraryApi,
   type ColumnKind,
@@ -51,7 +57,8 @@ import { FacetGroup, FullscreenButton, Highlight, ScanStatus, libraryIconBtn as 
 // the most common values) and writes a title, a summary, key facts and a
 // line on every column. Open a table to read it: the summary on top, then
 // the rows themselves — live, searchable, sortable, one record at a time if
-// you like — or each column's profile.
+// you like, and changed by hand (a cell, a new row, a deleted one) — or each
+// column's profile.
 
 const PAGE = 60
 const ROWS_PAGE = 50
@@ -710,6 +717,7 @@ function TableView({ item, terms, phone, onBack, onClose, onChanged, onRescan, o
       notes={t.column_notes}
       phone={phone}
       version={`${item.row_count}:${item.updated_at}:${nonce}`}
+      onTableChanged={onChanged}
     />
   )
   const columns = (
@@ -912,16 +920,32 @@ function SummaryPanel({ t, terms }: { t: DataTable; terms: string[] }) {
   )
 }
 
-// ── Data: the rows, live ──
+// ── Data: the rows, live — and changed by hand ──
+//
+// Double-click a cell to change it in place, or open a row and click a
+// value; "Add row" adds one, the row's bin deletes it. Every change goes
+// straight to the agent's datastore (the agent's own rules apply: a
+// protected row or cell stays as it is), and carries what you saw in the
+// cell — one the agent changed meanwhile is never overwritten: the page
+// reloads with what is there now.
 
-function DataGrid({ tableId, kinds, notes, phone, version }: {
+type Col = { name: string; type: string }
+/** Where the open record panel is: one row (by id, so an edit that moves it
+ *  keeps it open), a new row being typed in, or nothing. */
+type Panel = { kind: 'row'; id: number } | { kind: 'new' } | null
+type Editing = { id: number; col: string; where: 'grid' | 'panel' } | null
+
+function DataGrid({ tableId, kinds, notes, phone, version, onTableChanged }: {
   tableId: string
   kinds: Record<string, ColumnKind>
   notes: Record<string, string>
   phone: boolean
   /** Changes when the table does: the page reloads. */
   version: string
+  /** A hand edit changed the table: its fresh row count and last change. */
+  onTableChanged: (fresh: DataTable) => void
 }) {
+  const notify = useNotificationStore((s) => s.add)
   const [q, setQ] = useState('')
   const [dq, setDq] = useState('')
   const [sort, setSort] = useState<{ col: string; dir: 'asc' | 'desc' } | null>(null)
@@ -929,7 +953,12 @@ function DataGrid({ tableId, kinds, notes, phone, version }: {
   const [data, setData] = useState<RowsPage | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [openRow, setOpenRow] = useState<number | null>(null)
+  const [panel, setPanel] = useState<Panel>(null)
+  // The open row as last known: it stays open when an edit moves it off the page.
+  const [openCopy, setOpenCopy] = useState<DataRow | null>(null)
+  const [editing, setEditing] = useState<Editing>(null)
+  const [reload, setReload] = useState(0)
+  const keepPanel = useRef(false)
   const reqId = useRef(0)
 
   useEffect(() => {
@@ -941,23 +970,39 @@ function DataGrid({ tableId, kinds, notes, phone, version }: {
     const id = ++reqId.current
     setLoading(true)
     dataLibraryApi.rows(tableId, { limit: ROWS_PAGE, offset, q: dq, sort: sort?.col, dir: sort?.dir })
-      .then((res) => { if (id === reqId.current) { setData(res); setError('') } })
+      .then((res) => {
+        if (id !== reqId.current) return
+        // The last row of the last page was deleted: the page before.
+        if (!res.rows.length && offset > 0 && res.total > 0) {
+          setOffset(Math.max(0, Math.floor((res.total - 1) / ROWS_PAGE) * ROWS_PAGE))
+          return
+        }
+        setData(res)
+        setError('')
+      })
       .catch((e) => { if (id === reqId.current) setError(e instanceof Error ? e.message : String(e)) })
       .finally(() => { if (id === reqId.current) setLoading(false) })
-  }, [tableId, dq, sort, offset, version])
+  }, [tableId, dq, sort, offset, version, reload])
 
-  // A record open beside the grid closes on Escape before anything else does.
+  // Escape: an editor cancels itself; otherwise the open record (or the new
+  // row) closes before anything else does.
   useEffect(() => {
-    if (openRow === null) return
+    if (panel === null) return
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
+      if ((e.target as Element | null)?.closest?.('[data-cell-editor]')) return
       e.stopPropagation()
-      setOpenRow(null)
+      setPanel(null)
+      setEditing(null)
     }
     window.addEventListener('keydown', onKey, true)
     return () => window.removeEventListener('keydown', onKey, true)
-  }, [openRow])
-  useEffect(() => { setOpenRow(null) }, [dq, sort, offset])
+  }, [panel])
+  useEffect(() => {
+    if (keepPanel.current) { keepPanel.current = false; return }
+    setPanel(null)
+    setEditing(null)
+  }, [dq, sort, offset])
 
   const cols = data?.columns ?? []
   const rows = data?.rows ?? []
@@ -971,20 +1016,135 @@ function DataGrid({ tableId, kinds, notes, phone, version }: {
   const to = Math.min(offset + ROWS_PAGE, total)
   const pagerBtn = 'rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent'
 
-  const record = openRow !== null && rows[openRow] ? (
+  const openId = panel?.kind === 'row' ? panel.id : null
+  const openIndex = openId === null ? -1 : rows.findIndex((r) => r.__rowid === openId)
+  const openRow = openIndex >= 0 ? rows[openIndex] : openCopy && openCopy.__rowid === openId ? openCopy : null
+  const openRowAt = (i: number) => {
+    const r = rows[i]
+    if (!r) return
+    setPanel({ kind: 'row', id: r.__rowid })
+    setOpenCopy(r)
+    setEditing((cur) => (cur && cur.id === r.__rowid ? cur : null))
+  }
+
+  // A click opens the row a moment later, so a double-click changes the cell
+  // instead: opening the record narrows the grid, and the second click would
+  // land on another cell. On a phone a tap opens the row at once (its record
+  // is where a value is changed).
+  const clickTimer = useRef<number | null>(null)
+  useEffect(() => () => { if (clickTimer.current !== null) clearTimeout(clickTimer.current) }, [])
+  const rowClick = (e: ReactMouseEvent, i: number) => {
+    if (clickTimer.current !== null) { clearTimeout(clickTimer.current); clickTimer.current = null }
+    const r = rows[i]
+    const col = (e.target as Element | null)?.closest?.('td[data-col]')?.getAttribute('data-col')
+    if (phone || !r) { openRowAt(i); return }
+    if (e.detail >= 2) {
+      if (!col) { openRowAt(i); return }
+      window.getSelection()?.removeAllRanges()
+      // An open record follows to this row (it's open already: nothing moves).
+      if (panel?.kind === 'row') { setPanel({ kind: 'row', id: r.__rowid }); setOpenCopy(r) }
+      setEditing({ id: r.__rowid, col, where: 'grid' })
+      return
+    }
+    clickTimer.current = window.setTimeout(() => { clickTimer.current = null; openRowAt(i) }, 220)
+  }
+
+  const failed = (e: unknown) => e instanceof Error ? e.message : String(e)
+
+  /** Save one cell; '' when saved (or when the page reloads instead), else
+   *  why not, for the editor to show. */
+  const saveCell = async (row: DataRow, col: string, draft: string): Promise<string> => {
+    try {
+      const res = await dataLibraryApi.editRow(tableId, row.__rowid, { [col]: draft }, { [col]: row[col] ?? null })
+      const fresh = res.row
+      if (fresh) {
+        setData((d) => d && { ...d, rows: d.rows.map((r) => (r.__rowid === fresh.__rowid ? fresh : r)) })
+        setOpenCopy((c) => (c && c.__rowid === fresh.__rowid ? fresh : c))
+      }
+      onTableChanged(res.table)
+      return ''
+    } catch (e) {
+      const status = apiStatus(e)
+      const gone = status === 404
+      if (gone || (status === 409 && /changed since/i.test(failed(e)))) {
+        // Not this edit's to fix: the row as it is now.
+        notify('error', gone ? 'The row is gone' : 'The row changed meanwhile', failed(e))
+        setEditing(null)
+        if (gone && openId === row.__rowid) setPanel(null)
+        setReload((n) => n + 1)
+        return ''
+      }
+      return failed(e)
+    }
+  }
+
+  const addRow = async (values: Record<string, string>): Promise<string> => {
+    try {
+      const res = await dataLibraryApi.addRow(tableId, values)
+      onTableChanged(res.table)
+      if (res.row) {
+        setOpenCopy(res.row)
+        setPanel({ kind: 'row', id: res.row.__rowid })
+        // The rows read oldest first: the new one is on the last page.
+        if (!dq && !sort) {
+          const last = Math.max(0, Math.floor((res.table.row_count - 1) / ROWS_PAGE) * ROWS_PAGE)
+          if (last !== offset) { keepPanel.current = true; setOffset(last) }
+        }
+      } else {
+        setPanel(null)
+      }
+      setReload((n) => n + 1)
+      return ''
+    } catch (e) {
+      return failed(e)
+    }
+  }
+
+  const deleteRow = async (row: DataRow): Promise<string> => {
+    try {
+      const res = await dataLibraryApi.deleteRow(tableId, row.__rowid)
+      setPanel(null)
+      setEditing(null)
+      setOpenCopy(null)
+      setData((d) => d && { ...d, rows: d.rows.filter((r) => r.__rowid !== row.__rowid), total: Math.max(0, d.total - 1) })
+      onTableChanged(res.table)
+      return ''
+    } catch (e) {
+      if (apiStatus(e) !== 404) return failed(e)
+      notify('error', 'The row is gone', failed(e))
+      setPanel(null)
+      setReload((n) => n + 1)
+      return ''
+    }
+  }
+
+  const newRow = () => {
+    setEditing(null)
+    setPanel({ kind: 'new' })
+  }
+
+  const record = panel?.kind === 'new' ? (
+    <NewRowPanel columns={cols} kinds={kinds} notes={notes} phone={phone} onAdd={addRow} onClose={() => setPanel(null)} />
+  ) : openRow ? (
     <RecordPanel
-      row={rows[openRow]}
-      index={offset + openRow + 1}
+      key={openRow.__rowid}
+      row={openRow}
+      index={openIndex >= 0 ? offset + openIndex + 1 : null}
       columns={cols}
       kinds={kinds}
       notes={notes}
       terms={terms}
       phone={phone}
-      hasPrev={openRow > 0}
-      hasNext={openRow < rows.length - 1}
-      onPrev={() => setOpenRow((i) => (i !== null && i > 0 ? i - 1 : i))}
-      onNext={() => setOpenRow((i) => (i !== null && i < rows.length - 1 ? i + 1 : i))}
-      onClose={() => setOpenRow(null)}
+      hasPrev={openIndex > 0}
+      hasNext={openIndex >= 0 && openIndex < rows.length - 1}
+      onPrev={() => openRowAt(openIndex - 1)}
+      onNext={() => openRowAt(openIndex + 1)}
+      onClose={() => { setPanel(null); setEditing(null) }}
+      editingCol={editing?.where === 'panel' && editing.id === openRow.__rowid ? editing.col : null}
+      onEdit={(col) => setEditing({ id: openRow.__rowid, col, where: 'panel' })}
+      onSave={(col, draft) => saveCell(openRow, col, draft)}
+      onDoneEditing={() => setEditing(null)}
+      onDelete={() => deleteRow(openRow)}
     />
   ) : null
 
@@ -992,6 +1152,15 @@ function DataGrid({ tableId, kinds, notes, phone, version }: {
     <div className="relative flex h-full flex-col">
       <div className="flex shrink-0 items-center gap-2 border-b border-zinc-800 px-3 py-2">
         <div className="max-w-sm flex-1"><SearchBox value={q} onChange={setQ} placeholder="Search the rows…" small /></div>
+        <button
+          onClick={newRow}
+          disabled={!cols.length}
+          className="flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-800 px-2.5 py-1.5 text-xs text-zinc-300 transition-colors hover:bg-zinc-800/60 disabled:opacity-40"
+          title="Add a row by hand"
+          aria-label="Add row"
+        >
+          <Plus className="h-3.5 w-3.5" />{!phone && 'Add row'}
+        </button>
         <span className="ml-auto shrink-0 text-xs tabular-nums text-zinc-500">
           {loading && <Loader2 className="mr-1.5 inline h-3 w-3 animate-spin" />}
           {total ? `${fmtNum(from)}–${fmtNum(to)} of ${fmtNum(total)}${dq ? ' matching' : ''}` : dq ? 'No matching rows' : ''}
@@ -1012,8 +1181,13 @@ function DataGrid({ tableId, kinds, notes, phone, version }: {
           ) : !data && loading ? (
             <div className="flex h-full justify-center pt-12 text-zinc-500"><Loader2 className="h-5 w-5 animate-spin" /></div>
           ) : rows.length === 0 ? (
-            <div className="flex h-full items-center justify-center px-6 text-center text-sm text-zinc-500">
+            <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center text-sm text-zinc-500">
               {dq ? 'No row matches that search.' : 'This table has no rows yet.'}
+              {!dq && cols.length > 0 && (
+                <button onClick={newRow} className="flex items-center gap-1.5 rounded-lg border border-zinc-800 px-3 py-1.5 text-sm text-zinc-300 hover:bg-zinc-800/60">
+                  <Plus className="h-4 w-4" />Add the first row
+                </button>
+              )}
             </div>
           ) : (
             <table className="w-max min-w-full border-separate border-spacing-0 text-[13px]">
@@ -1046,21 +1220,42 @@ function DataGrid({ tableId, kinds, notes, phone, version }: {
                 {rows.map((r, i) => (
                   <tr
                     key={r.__rowid}
-                    onClick={() => setOpenRow(i)}
-                    className={`cursor-pointer transition-colors ${openRow === i ? 'bg-emerald-500/10' : 'hover:bg-zinc-900/70'}`}
+                    onClick={(e) => rowClick(e, i)}
+                    className={`cursor-pointer transition-colors ${openId === r.__rowid ? 'bg-emerald-500/10' : 'hover:bg-zinc-900/70'}`}
                   >
                     <td className="sticky left-0 border-b border-zinc-800/60 bg-zinc-950 px-3 py-1.5 text-right text-[11px] tabular-nums text-zinc-600">
                       {offset + i + 1}
                     </td>
                     {cols.map((c) => {
                       const numeric = typeof r[c.name] === 'number' && c.type !== 'boolean'
+                      const here = editing?.where === 'grid' && editing.id === r.__rowid && editing.col === c.name
+                      const cell = <Cell value={r[c.name]} kind={kinds[c.name]} type={c.type} terms={terms} />
                       return (
                         <td
                           key={c.name}
-                          className={`max-w-[320px] truncate border-b border-zinc-800/60 px-3 py-1.5 text-zinc-300 ${numeric ? 'text-right tabular-nums' : ''}`}
-                          title={r[c.name] == null ? undefined : String(r[c.name])}
+                          data-col={c.name}
+                          className={`relative max-w-[320px] border-b border-zinc-800/60 px-3 py-1.5 text-zinc-300 ${
+                            here ? 'whitespace-nowrap' : 'truncate'} ${numeric ? 'text-right tabular-nums' : ''}`}
+                          title={here ? undefined : `${r[c.name] == null ? '' : `${String(r[c.name])}\n`}Double-click to change`}
                         >
-                          <Cell value={r[c.name]} kind={kinds[c.name]} type={c.type} terms={terms} />
+                          {here ? (
+                            <>
+                              {/* The cell keeps its size under the editor. */}
+                              <span className="invisible block truncate">{cell}</span>
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="absolute left-0 top-0 z-30 w-[max(100%,300px)] whitespace-normal rounded-lg border border-zinc-700 bg-zinc-900 p-2 text-left shadow-xl"
+                              >
+                                <CellEditor
+                                  col={c}
+                                  value={r[c.name]}
+                                  compact
+                                  onSave={(draft) => saveCell(r, c.name, draft)}
+                                  onDone={() => setEditing(null)}
+                                />
+                              </div>
+                            </>
+                          ) : cell}
                         </td>
                       )
                     })}
@@ -1120,14 +1315,264 @@ function Cell({ value, kind, type, terms, full = false }: {
   return <span className={full ? 'whitespace-pre-wrap break-words' : ''}><Highlight text={s} terms={terms} /></span>
 }
 
+// ── Editing a value ──
+
+const DATE_ONLY_RE = /^\d{4}-\d{2}-\d{2}$/
+const editInput = 'w-full rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-sm text-zinc-100 placeholder:text-zinc-600 focus:border-emerald-500/70 focus:outline-none'
+
+/** A stored value as an editor holds it: plain text and numbers, yes / no. */
+function toDraft(v: unknown, type: string): string {
+  if (v === null || v === undefined) return ''
+  if (type === 'boolean') {
+    const s = String(v).trim().toLowerCase()
+    if (v === true || ['1', 'true', 'yes'].includes(s)) return 'yes'
+    if (v === false || ['0', 'false', 'no'].includes(s)) return 'no'
+  }
+  return String(v)
+}
+
+function editHint(type: string): string {
+  if (type === 'boolean') return 'Esc cancels'
+  if (type === 'json') return '⌘/Ctrl+Enter saves · Esc cancels'
+  if (['integer', 'real', 'date', 'datetime'].includes(type)) return 'Enter saves · Esc cancels'
+  return 'Enter saves · Shift+Enter new line · Esc cancels'
+}
+
+/** The input for one column's type. Enter saves (⌘/Ctrl+Enter in JSON,
+ *  where Enter is a new line); empty is no value. */
+function FieldInput({ col, value, onChange, onSubmit, onPick, autoFocus = false }: {
+  col: Col
+  value: string
+  onChange: (v: string) => void
+  onSubmit: () => void
+  /** Yes / No / Empty picked: save it at once (one cell), when given. */
+  onPick?: (v: string) => void
+  autoFocus?: boolean
+}) {
+  const area = useRef<HTMLTextAreaElement>(null)
+  // A text box grows with what it holds, up to a point.
+  useLayoutEffect(() => {
+    const el = area.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(260, el.scrollHeight + 2)}px`
+  }, [value])
+  const caretToEnd = (e: { currentTarget: HTMLInputElement | HTMLTextAreaElement }) => {
+    const el = e.currentTarget
+    if (el.type === 'date') return
+    const n = el.value.length
+    try { el.setSelectionRange(n, n) } catch { /* not a text input */ }
+  }
+  const enter = (e: ReactKeyboardEvent) => {
+    if (e.key !== 'Enter' || e.nativeEvent.isComposing) return
+    e.preventDefault()
+    onSubmit()
+  }
+  const label = humanize(col.name)
+
+  if (col.type === 'boolean') {
+    const opts: [string, string][] = [['yes', 'Yes'], ['no', 'No'], ['', 'Empty']]
+    const known = opts.some(([v]) => v === value)
+    return (
+      <div className="flex gap-1" role="radiogroup" aria-label={label}>
+        {opts.map(([v, text], i) => (
+          <button
+            key={text}
+            type="button"
+            role="radio"
+            aria-checked={value === v}
+            autoFocus={autoFocus && (value === v || (!known && i === 0))}
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => (onPick ? onPick(v) : onChange(v))}
+            className={`rounded-md border px-2.5 py-1 text-xs transition-colors ${value === v
+              ? 'border-emerald-500/60 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+              : 'border-zinc-700 text-zinc-400 hover:bg-zinc-800'}`}
+          >
+            {text}
+          </button>
+        ))}
+      </div>
+    )
+  }
+  if (col.type === 'integer' || col.type === 'real') {
+    return (
+      <input
+        type="text"
+        inputMode={col.type === 'integer' ? 'numeric' : 'decimal'}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={enter}
+        onFocus={caretToEnd}
+        autoFocus={autoFocus}
+        placeholder={col.type === 'integer' ? 'A whole number' : 'A number'}
+        aria-label={label}
+        className={`${editInput} tabular-nums`}
+      />
+    )
+  }
+  if (col.type === 'date' && (value === '' || DATE_ONLY_RE.test(value))) {
+    return (
+      <input
+        type="date"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={enter}
+        autoFocus={autoFocus}
+        aria-label={label}
+        className={`${editInput} dark:[color-scheme:dark]`}
+      />
+    )
+  }
+  if (col.type === 'date' || col.type === 'datetime') {
+    return (
+      <input
+        type="text"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={enter}
+        onFocus={caretToEnd}
+        autoFocus={autoFocus}
+        placeholder={col.type === 'date' ? '2026-11-11' : '2026-11-11T14:30'}
+        aria-label={label}
+        className={`${editInput} tabular-nums`}
+      />
+    )
+  }
+  const json = col.type === 'json'
+  return (
+    <textarea
+      ref={area}
+      rows={1}
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => {
+        if (e.key !== 'Enter' || e.nativeEvent.isComposing) return
+        if (json ? (e.metaKey || e.ctrlKey) : !e.shiftKey) {
+          e.preventDefault()
+          onSubmit()
+        }
+      }}
+      onFocus={caretToEnd}
+      autoFocus={autoFocus}
+      spellCheck={!json}
+      aria-label={label}
+      className={`${editInput} block resize-none leading-snug ${json ? 'font-mono text-xs' : ''}`}
+    />
+  )
+}
+
+/** One cell being changed: saves on Enter, on Save or when you click away
+ *  (only when it changed); Esc or Cancel leaves it as it was. A value that
+ *  doesn't fit stays open with the reason. */
+function CellEditor({ col, value, compact = false, onSave, onDone }: {
+  col: Col
+  value: unknown
+  compact?: boolean
+  /** Resolves to why it couldn't be saved, or '' when it's done. */
+  onSave: (draft: string) => Promise<string>
+  onDone: () => void
+}) {
+  const initial = toDraft(value, col.type)
+  const [draft, setDraft] = useState(initial)
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const busy = useRef(false)
+  const root = useRef<HTMLDivElement>(null)
+  // The editor, its buttons and a reason it couldn't save are in sight —
+  // in the grid it floats over the cell, which can sit at the edge.
+  useEffect(() => {
+    const el = compact ? root.current?.parentElement : root.current
+    el?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+  }, [compact, error])
+
+  const commit = async (v: string = draft) => {
+    if (busy.current) return
+    if (v === initial) { onDone(); return }
+    busy.current = true
+    setSaving(true)
+    setError('')
+    const why = await onSave(v)
+    busy.current = false
+    setSaving(false)
+    if (why) setError(why)
+    else onDone()
+  }
+
+  const small = 'rounded-md px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50'
+  return (
+    <div
+      ref={root}
+      data-cell-editor
+      onKeyDown={(e) => {
+        if (e.key !== 'Escape') return
+        e.stopPropagation()
+        onDone()
+      }}
+      onBlur={(e) => {
+        if (!e.currentTarget.contains(e.relatedTarget as Node | null)) void commit()
+      }}
+    >
+      <FieldInput
+        col={col}
+        value={draft}
+        onChange={(v) => { setDraft(v); setError('') }}
+        onSubmit={() => void commit()}
+        onPick={(v) => { setDraft(v); void commit(v) }}
+        autoFocus
+      />
+      {error && <p className="mt-1.5 text-[11px] leading-snug text-red-600 dark:text-red-400">{error}</p>}
+      <div className="mt-1.5 flex items-center gap-1.5">
+        {col.type !== 'boolean' && (
+          <button
+            type="button"
+            onMouseDown={(e) => e.preventDefault()}
+            onClick={() => void commit()}
+            disabled={saving}
+            className={`${small} flex items-center gap-1 bg-emerald-600 text-white hover:bg-emerald-500`}
+          >
+            {saving && <Loader2 className="h-3 w-3 animate-spin" />}Save
+          </button>
+        )}
+        <button
+          type="button"
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={onDone}
+          disabled={saving}
+          className={`${small} text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200`}
+        >
+          Cancel
+        </button>
+        {col.type === 'boolean' && saving && <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-500" />}
+        {!compact && <span className="ml-auto truncate text-[10px] text-zinc-500">{editHint(col.type)}</span>}
+      </div>
+    </div>
+  )
+}
+
 // ── One record ──
 
-function RecordPanel({ row, index, columns, kinds, notes, terms, phone, hasPrev, hasNext, onPrev, onNext, onClose }: {
-  row: DataRow; index: number; columns: { name: string; type: string }[]
+function RecordPanel({
+  row, index, columns, kinds, notes, terms, phone, hasPrev, hasNext, onPrev, onNext, onClose,
+  editingCol, onEdit, onSave, onDoneEditing, onDelete,
+}: {
+  row: DataRow
+  /** Its place in the table as shown; null when an edit moved it off this page. */
+  index: number | null
+  columns: Col[]
   kinds: Record<string, ColumnKind>; notes: Record<string, string>; terms: string[]; phone: boolean
   hasPrev: boolean; hasNext: boolean; onPrev: () => void; onNext: () => void; onClose: () => void
+  /** The column being changed here, if any. */
+  editingCol: string | null
+  onEdit: (col: string) => void
+  onSave: (col: string, draft: string) => Promise<string>
+  onDoneEditing: () => void
+  /** Resolves to why it couldn't be deleted, or '' when it's gone. */
+  onDelete: () => Promise<string>
 }) {
   const [copied, setCopied] = useState(false)
+  const [confirming, setConfirming] = useState(false)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
   const copy = async () => {
     const obj: Record<string, unknown> = {}
     for (const c of columns) obj[c.name] = row[c.name]
@@ -1137,34 +1582,189 @@ function RecordPanel({ row, index, columns, kinds, notes, terms, phone, hasPrev,
       setTimeout(() => setCopied(false), 1500)
     } catch { /* clipboard refused */ }
   }
+  const remove = async () => {
+    setDeleting(true)
+    setDeleteError('')
+    const why = await onDelete()
+    setDeleting(false)
+    if (why) setDeleteError(why)
+  }
   const small = 'rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100 disabled:opacity-30'
   return (
     <div className="flex h-full flex-col">
       <div className="flex items-center gap-1 border-b border-zinc-800 px-3 py-2">
-        <span className="flex-1 text-[11px] font-medium uppercase tracking-wider text-zinc-500">Row {fmtNum(index)}</span>
+        <span className="flex-1 text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+          {index === null ? 'Row' : `Row ${fmtNum(index)}`}
+        </span>
         <button onClick={onPrev} disabled={!hasPrev} className={small} title="Previous row" aria-label="Previous row"><ChevronUp className="h-4 w-4" /></button>
         <button onClick={onNext} disabled={!hasNext} className={small} title="Next row" aria-label="Next row"><ChevronDown className="h-4 w-4" /></button>
         <button onClick={copy} className={small} title="Copy the row as JSON" aria-label="Copy the row">
           {copied ? <Check className="h-4 w-4 text-emerald-500" /> : <Copy className="h-4 w-4" />}
         </button>
+        <button
+          onClick={() => { setConfirming(true); setDeleteError('') }}
+          className={`${small} hover:text-red-600 dark:hover:text-red-400`}
+          title="Delete this row"
+          aria-label="Delete this row"
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
         <button onClick={onClose} className={small} title="Close" aria-label="Close row"><X className={phone ? 'h-5 w-5' : 'h-4 w-4'} /></button>
       </div>
+      {confirming && (
+        <div className="border-b border-red-500/30 bg-red-500/5 px-3 py-2.5">
+          <div className="flex items-center gap-2">
+            <span className="flex-1 text-sm text-red-700 dark:text-red-300">Delete this row? It can't be undone.</span>
+            <button
+              onClick={remove}
+              disabled={deleting}
+              className="flex items-center gap-1 rounded-md bg-red-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-red-500 disabled:opacity-50"
+            >
+              {deleting && <Loader2 className="h-3 w-3 animate-spin" />}Delete
+            </button>
+            <button
+              onClick={() => setConfirming(false)}
+              disabled={deleting}
+              className="rounded-md px-2.5 py-1 text-xs text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200"
+            >
+              Cancel
+            </button>
+          </div>
+          {deleteError && <p className="mt-1.5 text-[11px] leading-snug text-red-600 dark:text-red-400">{deleteError}</p>}
+        </div>
+      )}
       <dl className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
-        {columns.map((c) => (
+        {columns.map((c) => {
+          const editing = editingCol === c.name
+          const label = humanize(c.name)
+          return (
+            <div key={c.name} className="group border-b border-zinc-800/60 py-2.5 last:border-0">
+              <dt className="text-[11px] text-zinc-500">
+                <span className="flex items-center gap-1.5">
+                  <KindIcon kind={kinds[c.name]} className="h-3 w-3" />
+                  <span className="font-medium text-zinc-400">{label}</span>
+                  {!editing && (
+                    <button
+                      onClick={() => onEdit(c.name)}
+                      className={`ml-auto rounded p-0.5 text-zinc-500 transition-opacity hover:bg-zinc-800 hover:text-zinc-200 focus:opacity-100 ${
+                        phone ? '' : 'opacity-0 group-hover:opacity-100'}`}
+                      title={`Change ${label}`}
+                      aria-label={`Change ${label}`}
+                    >
+                      <Pencil className="h-3 w-3" />
+                    </button>
+                  )}
+                </span>
+                {notes[c.name] && <span className="mt-0.5 line-clamp-2 block leading-snug">{notes[c.name]}</span>}
+              </dt>
+              <dd className="mt-1 break-words text-sm text-zinc-200">
+                {editing ? (
+                  <CellEditor col={c} value={row[c.name]} onSave={(draft) => onSave(c.name, draft)} onDone={onDoneEditing} />
+                ) : (
+                  <div
+                    onClick={() => {
+                      // Selecting text to copy it isn't asking to change it.
+                      if (window.getSelection()?.toString()) return
+                      onEdit(c.name)
+                    }}
+                    className="-mx-1 cursor-text rounded px-1 py-0.5 transition-colors hover:bg-zinc-800/50"
+                    title="Click to change"
+                  >
+                    <Cell value={row[c.name]} kind={kinds[c.name]} type={c.type} terms={terms} full />
+                  </div>
+                )}
+              </dd>
+            </div>
+          )
+        })}
+      </dl>
+      {!phone && (
+        <div className="border-t border-zinc-800 px-4 py-2 text-[10px] leading-snug text-zinc-500">
+          Click a value to change it — changes go straight to the agent's datastore.
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** A new row typed in by hand: every column, empty to start with. */
+function NewRowPanel({ columns, kinds, notes, phone, onAdd, onClose }: {
+  columns: Col[]
+  kinds: Record<string, ColumnKind>
+  notes: Record<string, string>
+  phone: boolean
+  /** Resolves to why it couldn't be added, or '' when it's in. */
+  onAdd: (values: Record<string, string>) => Promise<string>
+  onClose: () => void
+}) {
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+  const submit = async () => {
+    if (saving) return
+    setSaving(true)
+    setError('')
+    const why = await onAdd(Object.fromEntries(Object.entries(draft).filter(([, v]) => v !== '')))
+    setSaving(false)
+    if (why) setError(why)
+  }
+  return (
+    <div
+      data-cell-editor
+      className="flex h-full flex-col"
+      onKeyDown={(e) => {
+        if (e.key !== 'Escape') return
+        e.stopPropagation()
+        onClose()
+      }}
+    >
+      <div className="flex items-center gap-1 border-b border-zinc-800 px-3 py-2">
+        <span className="flex-1 text-[11px] font-medium uppercase tracking-wider text-zinc-500">New row</span>
+        <button
+          onClick={onClose}
+          className="rounded-md p-1.5 text-zinc-400 transition-colors hover:bg-zinc-800 hover:text-zinc-100"
+          title="Close"
+          aria-label="Close new row"
+        >
+          <X className={phone ? 'h-5 w-5' : 'h-4 w-4'} />
+        </button>
+      </div>
+      <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
+        {columns.map((c, i) => (
           <div key={c.name} className="border-b border-zinc-800/60 py-2.5 last:border-0">
-            <dt className="text-[11px] text-zinc-500">
-              <span className="flex items-center gap-1.5">
-                <KindIcon kind={kinds[c.name]} className="h-3 w-3" />
-                <span className="font-medium text-zinc-400">{humanize(c.name)}</span>
-              </span>
-              {notes[c.name] && <span className="mt-0.5 line-clamp-2 block leading-snug">{notes[c.name]}</span>}
-            </dt>
-            <dd className="mt-1 break-words text-sm text-zinc-200">
-              <Cell value={row[c.name]} kind={kinds[c.name]} type={c.type} terms={terms} full />
-            </dd>
+            <span className="flex items-center gap-1.5 text-[11px]">
+              <KindIcon kind={kinds[c.name]} className="h-3 w-3" />
+              <span className="font-medium text-zinc-400">{humanize(c.name)}</span>
+            </span>
+            {notes[c.name] && <span className="mt-0.5 line-clamp-2 block text-[11px] leading-snug text-zinc-500">{notes[c.name]}</span>}
+            <div className="mt-1.5">
+              <FieldInput
+                col={c}
+                value={draft[c.name] ?? ''}
+                onChange={(v) => setDraft((d) => ({ ...d, [c.name]: v }))}
+                onSubmit={() => void submit()}
+                autoFocus={i === 0}
+              />
+            </div>
           </div>
         ))}
-      </dl>
+      </div>
+      <div className="border-t border-zinc-800 px-4 py-3 pb-[max(0.75rem,env(safe-area-inset-bottom))]">
+        {error && <p className="mb-2 text-[11px] leading-snug text-red-600 dark:text-red-400">{error}</p>}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => void submit()}
+            disabled={saving}
+            className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-50"
+          >
+            {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}Add row
+          </button>
+          <button onClick={onClose} disabled={saving} className="rounded-lg px-3 py-1.5 text-sm text-zinc-400 hover:bg-zinc-800 hover:text-zinc-200">
+            Cancel
+          </button>
+          {!phone && <span className="ml-auto text-[10px] text-zinc-500">Empty fields stay empty</span>}
+        </div>
+      </div>
     </div>
   )
 }
