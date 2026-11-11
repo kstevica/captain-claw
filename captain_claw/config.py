@@ -1443,9 +1443,11 @@ class ScaleConfig(BaseModel):
     lightweight_progress_min_members: int = 3
 
     # Automatic task rephrasing — rewrites complex user prompts into
-    # structured, agent-friendly format before execution.  Especially
-    # beneficial for list-processing tasks with detailed formatting.
-    task_rephrase_enabled: bool = True
+    # structured, agent-friendly format before execution.  Built for the
+    # weaker models Captain started with; current ones follow the prompt as
+    # written, so it is off unless turned on.  Flight Deck's per-agent switch
+    # (~/.captain-claw/task_rephrase.txt, see task_rephrase.py) wins over this.
+    task_rephrase_enabled: bool = False
 
     # Minimum user input length (chars) to consider rephrasing.
     # Very short prompts (e.g. "summarize this") don't benefit.

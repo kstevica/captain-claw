@@ -14,6 +14,7 @@ import {
   Loader2,
   Mail,
   MoreHorizontal,
+  PenLine,
   RotateCw,
   SlidersHorizontal,
   Tags,
@@ -29,7 +30,10 @@ import { KioskInsightsPanel } from './KioskAgentInsights'
 import { MenuSheet, type MenuItem, type MenuSection } from './KioskMenuSheet'
 import { KioskSkillsPanel } from './KioskAgentSkills'
 import { TopicsPanel } from '../agents/TopicsPanel'
-import { getAgentConfig, getAgentMode, setAgentMode, setAgentModel, setAgentVision } from '../../services/docker'
+import { SwitchTrack } from '../common/SwitchTrack'
+import {
+  getAgentConfig, getAgentMode, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentTaskRephrase, setAgentVision,
+} from '../../services/docker'
 import { LLM_PROVIDERS } from '../../services/tierConfig'
 import { VISION_OPTIONS, parseModelFromYaml } from '../../services/agentModel'
 import { MODES } from '../../services/cognitiveModes'
@@ -47,7 +51,8 @@ import { useProcessStore } from '../../stores/processStore'
 // tasks (the Taskboard, filtered to it), open its files and data, give it
 // standing instructions and see what it remembers and
 // knows how to do (Instructions, insights & skills), change its model, how it
-// thinks and whether it sees images itself (Settings), or remove it for good,
+// thinks, whether it rewrites a request before starting and whether it sees
+// images itself (Settings), or remove it for good,
 // folder and all (Remove).
 
 /** What these dialogs need of an agent row. */
@@ -281,7 +286,7 @@ export function KioskAgentInfoDialog({ agent, phone, onClose }: { agent: KioskAg
   )
 }
 
-// ── Settings: model, vision, cognitive mode and reasoning effort ──
+// ── Settings: model, vision, cognitive mode, task rephrase and reasoning effort ──
 //
 // Two tabs: what it runs on and how it thinks, then its reasoning effort per
 // source (KioskReasoningSettings). Both stay mounted, so switching keeps a
@@ -319,6 +324,9 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const [mode, setMode] = useState('neutra')
   const [modeSaved, setModeSaved] = useState(false)
   const [vision, setVision] = useState('auto')
+  // Task rephrase (task_rephrase.py): null when the deck couldn't say.
+  const [rephrase, setRephrase] = useState<boolean | null>(null)
+  const [rephraseSaved, setRephraseSaved] = useState(false)
   // What its config holds, and the change being typed.
   const [model, setModel] = useState<ModelSetting>({ provider: '', model: '', baseUrl: '' })
   const [draft, setDraft] = useState({ provider: '', model: '', baseUrl: '' })
@@ -328,7 +336,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const [modelSaved, setModelSaved] = useState(false)
   // The reasoning levels are the model's: a saved change reads them afresh.
   const [modelRev, setModelRev] = useState(0)
-  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model'>('')
+  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model' | 'rephrase'>('')
   // Model and vision are read when the agent starts: changed since it last did.
   const [pendingRestart, setPendingRestart] = useState(false)
   const [restarted, setRestarted] = useState(false)
@@ -336,11 +344,15 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
 
   useEffect(() => {
     let live = true
-    Promise.all([getAgentMode(kind, key), getAgentConfig(kind, key)])
-      .then(([m, cfg]) => {
+    Promise.all([
+      getAgentMode(kind, key), getAgentConfig(kind, key),
+      getAgentTaskRephrase(kind, key).catch(() => null),
+    ])
+      .then(([m, cfg, tr]) => {
         if (!live) return
         const info = parseModelFromYaml(cfg.config_yaml || '')
         setMode(m.mode || 'neutra')
+        setRephrase(tr ? tr.enabled : null)
         setVision(info.vision)
         setModel({ provider: info.provider, model: info.model, baseUrl: info.base_url })
         setDraft({ provider: info.provider, model: info.model, baseUrl: info.base_url })
@@ -420,6 +432,23 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
     } catch (e) {
       setVision(was)
       setError(`Couldn't change vision: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving('')
+    }
+  }
+
+  // Read on every message — no restart.
+  const toggleRephrase = async () => {
+    if (rephrase === null || saving) return
+    const next = !rephrase
+    setRephrase(next); setSaving('rephrase'); setError(''); setRephraseSaved(false)
+    try {
+      await setAgentTaskRephrase(kind, key, next)
+      setRephraseSaved(true)
+      setTimeout(() => setRephraseSaved(false), 2000)
+    } catch (e) {
+      setRephrase(!next)
+      setError(`Couldn't change request rewriting: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSaving('')
     }
@@ -591,6 +620,25 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                 </div>
                 <p className="mt-2 text-[11px] leading-relaxed text-zinc-500">{current.description}</p>
               </section>
+              {rephrase !== null && (
+                <section>
+                  <SectionTitle icon={PenLine} title="Rewrite requests" saving={saving === 'rephrase'} saved={rephraseSaved} />
+                  <button
+                    type="button" role="switch" aria-checked={rephrase} onClick={toggleRephrase} disabled={!!saving}
+                    className="mt-1.5 flex w-full items-start gap-3 rounded-lg border border-zinc-800 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900 disabled:cursor-wait"
+                  >
+                    <span className="mt-0.5"><SwitchTrack on={rephrase} /></span>
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-zinc-200">Rewrite a long request before starting</span>
+                      <span className="block text-[11px] leading-relaxed text-zinc-500">
+                        An extra AI call tidies a long, mixed request (links, columns, file names) into a structured brief first.
+                        Older models needed it; current ones follow your words as written, so it's off unless you turn it on.
+                        Applies from its next message.
+                      </span>
+                    </span>
+                  </button>
+                </section>
+              )}
               {kind === 'process' && (
                 // The email meant for it (colleagues.py): saved at once, no restart.
                 <section>
