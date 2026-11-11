@@ -10,6 +10,8 @@
   the owner still on record, or to anyone when it holds no files;
 * ``GET /fd/agent-mode`` reads the mode as the agent resolves it, and ``PUT``
   writes Neutra too (an archetype's default mode would otherwise come back);
+* ``GET /fd/agent-task-rephrase`` is off by default (switch file, else config),
+  and ``PUT`` writes the switch and every config copy;
 * ``PUT /fd/agent-model`` with only ``vision`` leaves the model alone.
 """
 
@@ -303,6 +305,51 @@ async def test_mode_reads_the_file_then_the_config_default_then_neutra(deck):
         assert (await get()).json() == {"mode": "neutra"}
 
         assert (await c.get("/fd/agent-mode/process/bob-agent", headers=_hdr(CAROL))).status_code in (403, 404)
+
+
+# ── task rephrase ───────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_task_rephrase_is_off_by_default_and_reads_file_then_config(deck):
+    cc = server.DATA_DIR / "bob-agent" / "data" / "home-config-parent" / ".captain-claw"
+    async with _client() as c:
+        get = lambda: c.get("/fd/agent-task-rephrase/process/bob-agent", headers=_hdr(BOB))  # noqa: E731
+        assert (await get()).json() == {"enabled": False}
+
+        (cc / "config.yaml").write_text(yaml.dump({"scale": {"task_rephrase_enabled": True}}))
+        assert (await get()).json() == {"enabled": True}
+
+        (cc / "task_rephrase.txt").write_text("off\n")
+        assert (await get()).json() == {"enabled": False}
+
+        assert (await c.get("/fd/agent-task-rephrase/process/bob-agent", headers=_hdr(CAROL))).status_code in (403, 404)
+
+
+@pytest.mark.asyncio
+async def test_turning_task_rephrase_on_writes_the_switch_and_every_config_copy(deck):
+    agent_dir = server.DATA_DIR / "bob-agent"
+    cc = agent_dir / "data" / "home-config-parent" / ".captain-claw"
+    async with _client() as c:
+        r = await c.put("/fd/agent-task-rephrase/process/bob-agent", headers=_hdr(BOB), json={"enabled": True})
+        assert r.status_code == 200, r.text
+        assert r.json() == {"ok": True, "enabled": True}
+        assert (cc / "task_rephrase.txt").read_text() == "on"
+        for path in (agent_dir / "config.yaml", cc / "config.yaml"):
+            data = yaml.safe_load(path.read_text())
+            assert data["scale"] == {"task_rephrase_enabled": True}
+            assert data["model"]["model"] == "bob-agent-m"  # the rest of the config stays
+        assert (await c.get("/fd/agent-task-rephrase/process/bob-agent", headers=_hdr(BOB))).json() == {"enabled": True}
+
+        r = await c.put("/fd/agent-task-rephrase/process/bob-agent", headers=_hdr(BOB), json={"enabled": False})
+        assert r.status_code == 200
+        assert (cc / "task_rephrase.txt").read_text() == "off"
+        assert yaml.safe_load((cc / "config.yaml").read_text())["scale"] == {"task_rephrase_enabled": False}
+
+        # Not Carol's to change.
+        r = await c.put("/fd/agent-task-rephrase/process/bob-agent", headers=_hdr(CAROL), json={"enabled": True})
+        assert r.status_code in (403, 404)
+        assert (cc / "task_rephrase.txt").read_text() == "off"
 
 
 # ── vision only ─────────────────────────────────────────────────────────────

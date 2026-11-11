@@ -103,9 +103,15 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
       const body = await r.json()
       detail = typeof body?.detail === 'string' ? body.detail : ''
     } catch { /* not JSON */ }
-    throw new Error(detail || `${r.status} ${r.statusText}`)
+    // The HTTP status rides along, for a caller that tells refusals apart.
+    throw Object.assign(new Error(detail || `${r.status} ${r.statusText}`), { status: r.status })
   }
   return (await r.json()) as T
+}
+
+/** The HTTP status of an error `api` threw (0 when it never got one). */
+export function apiStatus(e: unknown): number {
+  return typeof (e as { status?: unknown })?.status === 'number' ? (e as { status: number }).status : 0
 }
 
 /** A file URL a viewer or link can open directly: the FD token rides along.

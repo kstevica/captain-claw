@@ -5337,6 +5337,81 @@ async def get_agent_mode(
     return {"mode": "neutra"}
 
 
+# ── Task rephrase: off unless the owner turns it on (task_rephrase.py) ──
+
+class AgentTaskRephraseUpdate(BaseModel):
+    enabled: bool
+
+
+def _read_agent_task_rephrase(agent_dir: Path, kind: str) -> bool:
+    """As the agent decides: its switch file, else its config, else the default (off)."""
+    from captain_claw import task_rephrase
+    from captain_claw.config import ScaleConfig
+
+    try:
+        switch = task_rephrase.parse(
+            (_agent_home_cc(agent_dir, kind) / task_rephrase.FILENAME).read_text(encoding="utf-8"))
+    except OSError:
+        switch = None
+    if switch is not None:
+        return switch
+    # The home config overlays the agent folder's, as at start-up.
+    for cfg in (_agent_home_cc(agent_dir, kind) / "config.yaml", agent_dir / "config.yaml"):
+        try:
+            data = yaml.safe_load(cfg.read_text()) or {}
+        except Exception:
+            continue
+        section = data.get("scale") if isinstance(data, dict) else None
+        if isinstance(section, dict) and isinstance(section.get("task_rephrase_enabled"), bool):
+            return section["task_rephrase_enabled"]
+    return ScaleConfig().task_rephrase_enabled
+
+
+@app.get("/fd/agent-task-rephrase/{kind}/{identifier}")
+async def get_agent_task_rephrase(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Whether the agent rewrites a complex request before working on it."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    return {"enabled": _read_agent_task_rephrase(agent_dir, kind)}
+
+
+@app.put("/fd/agent-task-rephrase/{kind}/{identifier}")
+async def update_agent_task_rephrase(
+    kind: str, identifier: str, body: AgentTaskRephraseUpdate, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Turn task rephrase on or off. The switch file applies from the agent's
+    next message; every config copy gets it too, so it holds after a restart
+    and travels with the agent's config."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    from captain_claw import task_rephrase
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    for cc_dir in _agent_reasoning_dirs(agent_dir, kind):
+        if cc_dir.is_dir():
+            (cc_dir / task_rephrase.FILENAME).write_text(task_rephrase.render(body.enabled), encoding="utf-8")
+    for cfg_path in _agent_config_paths(agent_dir):
+        if not cfg_path.is_file():
+            continue
+        try:
+            data = yaml.safe_load(cfg_path.read_text()) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        section = data.get("scale")
+        data["scale"] = {**(section if isinstance(section, dict) else {}), "task_rephrase_enabled": body.enabled}
+        cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+    return {"ok": True, "enabled": body.enabled}
+
+
 class AgentEcoModeUpdate(BaseModel):
     enabled: bool = False
 

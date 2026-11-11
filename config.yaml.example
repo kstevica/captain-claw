@@ -467,7 +467,7 @@ orchestrator:
 scale:
   scale_advisory_min_members: 7
   lightweight_progress_min_members: 3
-  task_rephrase_enabled: true
+  task_rephrase_enabled: false
   task_rephrase_min_chars: 120
   research_search_results: 10
   research_max_chars_per_fetch: 15000

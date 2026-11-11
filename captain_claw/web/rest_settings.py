@@ -1216,6 +1216,13 @@ async def put_settings(server: WebServer, request: web.Request) -> web.Response:
     # ── Reload in-memory config (merges local + home) ─────
     set_config(Config.load())
 
+    # Task rephrase changed here: the config decides again, not a switch
+    # Flight Deck wrote earlier (task_rephrase.py).
+    if "scale.task_rephrase_enabled" in changes:
+        from captain_claw import task_rephrase
+
+        task_rephrase.clear()
+
     # ── Hot-reload tools if the enabled list changed ──────
     if "tools.enabled" in changes and server.agent is not None:
         try:

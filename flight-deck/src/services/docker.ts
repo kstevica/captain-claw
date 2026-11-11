@@ -356,6 +356,17 @@ export const setAgentVision = (kind: 'process' | 'docker', id: string, vision: s
     body: JSON.stringify({ vision }),
   })
 
+/** Task rephrase: an extra call that rewrites a complex request before the
+ *  agent works on it. Off unless turned on. Applies from its next message. */
+export const getAgentTaskRephrase = (kind: 'process' | 'docker', id: string) =>
+  fdFetch<{ enabled: boolean }>(`/agent-task-rephrase/${kind}/${id}`)
+
+export const setAgentTaskRephrase = (kind: 'process' | 'docker', id: string, enabled: boolean) =>
+  fdFetch<{ ok: boolean; enabled: boolean }>(`/agent-task-rephrase/${kind}/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  })
+
 /** Reasoning effort for every source but the web chat (whose chat box has its
  *  own picker): a default and a level per source, "auto" = the model's own. */
 export interface AgentReasoningSettings { default?: string; channels: Record<string, string> }
