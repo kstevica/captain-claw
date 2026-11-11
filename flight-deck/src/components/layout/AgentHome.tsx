@@ -1,6 +1,7 @@
 import { useMemo, type ReactNode } from 'react'
 import { ArrowRight, Compass, Moon } from 'lucide-react'
 import { AgentPicture } from '../agents/AgentPicture'
+import { useAgentAvatarStore } from '../../stores/agentAvatarStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useGroupStore } from '../../stores/groupStore'
 import { groupTone, isFolder } from '../../utils/agentGroups'
@@ -82,6 +83,7 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
 }) {
   const user = useAuthStore((s) => s.user)
   const groups = useGroupStore((s) => s.groups)
+  const avatars = useAgentAvatarStore((s) => s.avatars)
 
   // Awake ones first, then asleep; each by name.
   const shown = useMemo(
@@ -129,6 +131,8 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
             const tone = PILL[st.tone]
             const group = groupOf.get(a.id)
             const gTone = group ? groupTone(group.color) : null
+            const avatar = avatars[a.id]
+            const fade = a.asleep ? 'opacity-75 saturate-[0.6]' : ''
             const about = a.description || (a.kind === 'shared' ? `Shared by ${a.ownerName || 'another user'}` : '')
             return (
               <li key={a.id} className="fd-rise" style={{ animationDelay: `${Math.min(i, 8) * 35}ms` }}>
@@ -143,9 +147,20 @@ export function AgentHome<A extends HomeAgent>({ agents, sessionInfo, booting, s
                     : 'cursor-default opacity-70'}`}
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <span className={`relative flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br ${hueOf(a.id)} text-base font-semibold text-white shadow-md shadow-black/10 ${a.asleep ? 'opacity-75 saturate-[0.6]' : ''}`}>
-                      <AgentPicture agentId={a.id} name={a.name} size="lg" />
-                    </span>
+                    {/* A picked icon or picture stands on its own; only initials get the coloured tile. */}
+                    {avatar && 'emoji' in avatar ? (
+                      <span aria-hidden className={`flex h-14 w-14 shrink-0 select-none items-center justify-center text-5xl leading-none drop-shadow-sm transition-transform duration-200 group-hover/card:scale-105 motion-reduce:transition-none ${fade}`}>
+                        {avatar.emoji}
+                      </span>
+                    ) : avatar ? (
+                      <span className={`relative flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl text-base font-semibold text-zinc-500 ${fade}`}>
+                        <AgentPicture agentId={a.id} name={a.name} size="lg" />
+                      </span>
+                    ) : (
+                      <span className={`relative flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-gradient-to-br ${hueOf(a.id)} text-base font-semibold text-white shadow-md shadow-black/10 ${fade}`}>
+                        <AgentPicture agentId={a.id} name={a.name} size="lg" />
+                      </span>
+                    )}
                     <span title={st.title} className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-2 py-1 text-[11px] font-medium ring-1 ring-inset ${tone.pill}`}>
                       {a.asleep && !info?.busy && !info?.unread && !starting
                         ? <Moon className="h-3 w-3" />
