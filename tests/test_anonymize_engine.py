@@ -10,9 +10,10 @@ import pytest
 
 from captain_claw.anonymize import detectors as d
 from captain_claw.anonymize import engine as E
+from captain_claw.anonymize import engine as engine_module
 from captain_claw.anonymize import formats
 
-CASES = json.loads((Path(__file__).parent / "fixtures" / "anonymize_cases.json").read_text(encoding="utf-8"))
+CASES = json.loads((Path(engine_module.__file__).parent / "cases.json").read_text(encoding="utf-8"))
 
 
 def _run(text, state=None, **opts):

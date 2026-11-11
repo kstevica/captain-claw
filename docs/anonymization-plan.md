@@ -7,7 +7,8 @@ tokens that mean nothing outside Captain. The real values are kept in an
 encrypted **vault** in Flight Deck, so the person (never the model) can put
 them back later.
 
-Status: **P0 built** (branch `feat/anonymize-p0`); P1 (trusted LLM lane) next.
+Status: **P0 built** (PR #511) · **P1 built** (branch `feat/anonymize-p1`, stacked on P0); P2 (pages and
+office formats) next.
 
 ## Principles
 
@@ -113,13 +114,46 @@ Known gap without a name-recognition model: a bare name in free text with no
 context ("we met Marko yesterday") — the result says so. An optional local NER
 pack closes most of it (P4).
 
-**Trusted LLM (P1).** The admin-trusted provider gets the text with the
-deterministic findings already marked and returns additional spans as JSON
-(`[{text, kind, occurrence}]`). Our code finds each quoted span in the text
-(exact match only; a quote that isn't in the text is dropped and counted),
-then the shared engine continues. Good at: bare names, coreference, quasi-
-identifiers ("the CEO of the only bakery in Vis"), gender for grammatical
-agreement (`⟦PERSON_3:f⟧`, optional).
+**Trusted LLM (P1).** The admin-trusted model gets the text with the
+deterministic finds already replaced by tokens (lane `both`; it runs on a
+snapshot, so the vault is untouched) or as it is (lane `llm`), in chunks of
+~6,000 characters, and answers `{"spans": [{"text", "kind"}]}`. Each text must
+be in the chunk character for character; anything else (invented, a token, a
+stop word, over 200 characters) is dropped and counted. What's left becomes
+terms the engine replaces everywhere (`Options.extra`), so the model can add
+what to hide but never change the text or un-hide what code found — a document
+that tries to instruct it can at worst make it find less. The terms join the
+vault, so later documents catch them with code alone (with case endings).
+Good at: bare names, descriptions that point to one person (kind `DETAIL`:
+"the only female surgeon on Vis"). Gender for agreement (`⟦PERSON_3:f⟧`) is
+left for later.
+
+* **Which model.** `anonymize_trusted.py`. An admin sets it
+  (`PUT /fd/anonymize/admin/trusted-model`), or the deck's environment does
+  (`FD_ANONYMIZE_PROVIDER`, `_MODEL`, `_BASE_URL`, `_API_KEY`, `_ATTESTED=1`,
+  `_ON_FAILURE`). Local is trusted as it is — `ollama` / `litert` at this
+  machine or a private address (not an Ollama `-cloud` model), or an
+  OpenAI-compatible server at a private address. Anything else needs
+  `attested: true`. The key is sealed. The model is called directly, with
+  errors logged by type only (a provider error can quote the request).
+* **Lane.** `lane` on every run: `deterministic`, `llm` or `both`; left out,
+  `both` when a trusted model is usable, else `deterministic`. Asking for the
+  model without one → 409.
+* **Failure.** One retry per chunk; then the lane has failed. Default
+  `on_failure: refuse` → 502, nothing returned. `deterministic` → the code's
+  result, marked `lanes.llm: "failed"` (lane `llm` always refuses: nothing to
+  fall back on).
+* **Cost.** Model tokens count against the person's daily allowance unless
+  the model is local.
+* **Checking it.** `POST /fd/anonymize/admin/trusted-model/test` runs the
+  built-in sample cases (`anonymize/cases.json`, the same cases the tests hold
+  every lane to) through code alone and code + model, and says what each left
+  behind. `tests/test_anonymize_llm_lane.py::test_shared_cases_live` runs them
+  against a real model (`CAPTAIN_LIVE_ANONYMIZE_MODEL=ollama/<model>` + `_BASE_URL`,
+  or `anthropic/claude-haiku-5-5` + `_API_KEY`). Measured 2026-11-11: local
+  `ollama/ornith:9b` 5/5 cases (13–51 s per case on a Mac), Claude Haiku 5.5
+  5/5 (1–4 s per case). Models that think by default count it against the
+  output cap, so the trusted call allows 16,000 tokens.
 
 ## Inputs and outputs
 
@@ -179,8 +213,9 @@ Entities never carry original values toward the model.
   as an outbound address with the private-network check, redirects included),
   risk class `write`.
 * Tests: `tests/test_anonymize_engine.py`, `tests/test_flight_deck/test_anonymize.py`
-  (routes and the tool end to end through the real routes), the shared fixture
-  `tests/fixtures/anonymize_cases.json`.
+  (routes and the tool end to end through the real routes), the shared cases
+  `captain_claw/anonymize/cases.json` (moved into the package in P1 so the
+  deck's admin check can use them).
 * Speed: ~3 s per MB of text; known values are found through word indexes, so
   a vault of thousands of people doesn't slow a run down.
 
@@ -204,11 +239,14 @@ Known limits of P0 (the deterministic lane):
 * **P0** — engine (detect → resolve → tokens → replace → verify → restore),
   deterministic lane, encrypted vault store, deck routes (agent + person), the
   agent tool, `one_way` mode, text/csv/json + markdown from office/pdf, tests.
-* **P1** — trusted LLM lane: admin trust flag on providers/endpoints (local
-  trusted by default), span-JSON prompt, `lane: deterministic | llm | both`,
-  fail-closed handling, recall measured against the shared fixture.
+* **P1** (built) — trusted LLM lane: trusted-model setting (admin API +
+  environment; local trusted by default, cloud only attested), span-JSON
+  prompt, `lane: deterministic | llm | both`, fail-closed handling, admin check
+  and live test on the shared cases. No page yet — the admin card for the
+  trusted model comes with P2's pages.
 * **P2** — formats kept (docx/xlsx/pptx writers, metadata strip, PDF
-  redaction), file-name and metadata leaks, kiosk page.
+  redaction), file-name and metadata leaks, kiosk page, admin console card for
+  the trusted model (with its sample-case check).
 * **P3** — privacy gate: per source (an inbox, a data table, a VFS folder)
   "always anonymize before an agent on an untrusted model sees it"; restore on
   the way out to the person (mail draft, delivered file).

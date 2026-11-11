@@ -30,17 +30,22 @@ validation handler, which logs and echoes the raw input — private data.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import re
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 
 from captain_claw.anonymize import engine
 from captain_claw.anonymize import formats
+from captain_claw.anonymize import llm_lane
 from captain_claw.anonymize.detectors import KINDS
+from captain_claw.flight_deck import anonymize_trusted as trusted
 from captain_claw.flight_deck import anonymize_vault as av
 from captain_claw.flight_deck import fd_crypto
-from captain_claw.flight_deck.auth import _LOCAL_USER, _fd_auth_enabled, get_current_user
+from captain_claw.flight_deck.admin_routes import require_admin
+from captain_claw.flight_deck.auth import _LOCAL_USER, _fd_auth_enabled, get_current_user, get_db
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -58,8 +63,9 @@ KIND_LABELS = {
     "IBAN": "Bank accounts (IBAN)", "CARD": "Payment card numbers", "CVV": "Card security codes",
     "CARD_EXPIRY": "Card expiry dates", "OIB": "OIB", "JMBG": "JMBG", "ID_NUMBER": "ID, passport, tax numbers",
     "SSN": "US social security numbers", "IP": "IP addresses", "PROFILE_URL": "Social profile links",
-    "PLATE": "Licence plates",
+    "PLATE": "Licence plates", "DETAIL": "Descriptions that point to one person (trusted model only)",
 }
+LANES = ("deterministic", "llm", "both")
 
 
 async def _body(request: Request) -> dict[str, Any]:
@@ -83,7 +89,7 @@ def _str_list(value: Any, what: str, max_len: int = 300) -> list[str]:
 
 def _options(data: dict[str, Any]) -> engine.Options:
     kinds_in = _str_list(data.get("kinds"), "kinds", 40)
-    unknown = [k for k in kinds_in if k.upper() not in KINDS]
+    unknown = [k for k in kinds_in if k.upper() not in llm_lane.LLM_KINDS]
     if unknown:
         raise HTTPException(status_code=422, detail=f"unknown kinds: {', '.join(unknown)} (known: {', '.join(KINDS)})")
     extra: list[tuple[str, str]] = []
@@ -151,17 +157,53 @@ async def run_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str,
     source = str(data.get("source") or "")
     store = av.store()
     vault_row: dict[str, Any] | None = None
-
-    def work(state: engine.VaultState) -> tuple[engine.RunResult, str]:
-        result = engine.run(prepared.segments, state, options)
-        name = engine.anonymize_filename(stem, state, options) if stem else ""
-        return result, name
+    model = await trusted.usable(get_db())
+    lane = str(data.get("lane") or "").strip().lower() or ("both" if model else "deterministic")
+    if lane not in LANES:
+        raise HTTPException(status_code=422, detail="lane is 'deterministic', 'llm' or 'both'")
+    if lane != "deterministic" and model is None:
+        raise HTTPException(status_code=409, detail=(
+            "No trusted model is set up for anonymization, so only the deterministic lane can run. "
+            "An admin sets one (a local model, or a cloud one they attest) — or pass lane='deterministic'."))
+    lanes: dict[str, Any] = {"deterministic": "off" if lane == "llm" else "ok",
+                             "llm": "off" if lane == "deterministic" else "ok"}
 
     try:
-        if mode == "one_way":
+        if mode == "reversible":
+            vault_row = await store.find_or_create(person, str(data.get("vault") or "default"), created_by=actor)
+        if lane != "deterministic":
+            assert model is not None
+            started = time.monotonic()
+            try:
+                found = await _llm_terms(prepared, options, lane, model,
+                                         await store.load_state(vault_row) if vault_row else engine.VaultState())
+            except llm_lane.LaneFailed as exc:
+                log.warning("Anonymization LLM lane failed", model=model.label, actor=actor, reason=str(exc))
+                if lane == "llm" or model.on_failure != "deterministic":
+                    raise HTTPException(status_code=502, detail=(
+                        f"The trusted model ({model.label}) failed: {exc}. Nothing was returned — retry, or "
+                        "pass lane='deterministic' to anonymize with code alone.")) from None
+                lanes["llm"] = "failed"
+                lanes["llm_error"] = str(exc)
+            else:
+                options = dataclasses.replace(options, extra=options.extra + tuple(found.terms),
+                                              deterministic=lane != "llm")
+                lanes.update({"llm_model": model.label, "llm_terms": len(found.terms),
+                              "llm_dropped": found.dropped, "llm_chunks": found.chunks,
+                              "llm_seconds": round(time.monotonic() - started, 1)})
+                if found.tokens and model.basis != "local":
+                    from captain_claw.flight_deck import usage_quota
+
+                    await usage_quota.record_tokens(get_db(), person, found.tokens)
+
+        def work(state: engine.VaultState) -> tuple[engine.RunResult, str]:
+            result = engine.run(prepared.segments, state, options)
+            name = engine.anonymize_filename(stem, state, options) if stem else ""
+            return result, name
+
+        if vault_row is None:
             result, out_name = await asyncio.to_thread(work, engine.VaultState())
         else:
-            vault_row = await store.find_or_create(person, str(data.get("vault") or "default"), created_by=actor)
             async with store.lock(vault_row["id"]):
                 state = await store.load_state(vault_row)
                 result, out_name = await asyncio.to_thread(work, state)
@@ -177,7 +219,8 @@ async def run_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str,
     if vault_row is not None:
         await store.log(person, vault_row["id"], actor, "anonymize", {
             "format": prepared.format, "source": source, "entities": counts,
-            "new": sum(1 for e in result.used if e.new), "fixed": result.fixed,
+            "new": sum(1 for e in result.used if e.new), "fixed": result.fixed, "lane": lane,
+            "llm": lanes.get("llm"), "llm_terms": lanes.get("llm_terms", 0),
         })
     return {
         "vault": {"id": vault_row["id"], "name": vault_row["name"]} if vault_row else None,
@@ -188,9 +231,24 @@ async def run_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str,
         "entities": [{"token": e.token, "kind": e.kind, "count": e.count, "new": e.new} for e in result.used],
         "summary": counts,
         "verify": {"ok": True, "rounds": result.rounds, "fixed": result.fixed},
-        "lanes": {"deterministic": "ok", "llm": "not available yet"},
+        "lane": lane,
+        "lanes": lanes,
         "already_exposed": source == "text",
     }
+
+
+async def _llm_terms(prepared: formats.Prepared, options: engine.Options, lane: str,
+                     model: trusted.TrustedModel, state: engine.VaultState) -> llm_lane.LaneResult:
+    """What the trusted model adds. It reads the text with the code's finds
+    already replaced (lane ``both``, on a snapshot — the vault is untouched)
+    or as it is (``llm``)."""
+    if lane == "both":
+        preview = await asyncio.to_thread(engine.run, prepared.segments, state.snapshot(), options)
+        texts = preview.outputs
+    else:
+        texts = [s.text for s in prepared.segments]
+    joined = "\n".join(t for t in texts if t.strip())
+    return await llm_lane.detect(joined, trusted.completer(model), kinds=options.kinds)
 
 
 async def restore_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str, Any]:
@@ -270,6 +328,12 @@ async def anonymize_agent_restore(request: Request) -> dict[str, Any]:
     return await restore_for(person, await _body(request), actor=actor)
 
 
+@router.get("/agent/status")
+async def anonymize_agent_status(request: Request) -> dict[str, Any]:
+    await _agent_person(request)
+    return await _status()
+
+
 @router.get("/agent/vaults")
 async def anonymize_agent_vaults(request: Request) -> dict[str, Any]:
     person, _actor = await _agent_person(request)
@@ -282,6 +346,17 @@ async def anonymize_agent_vaults(request: Request) -> dict[str, Any]:
 @router.get("/kinds")
 async def anonymize_kinds(_user: dict = Depends(get_current_user)) -> dict[str, Any]:
     return {"kinds": [{"kind": k, "label": KIND_LABELS.get(k, k)} for k in KINDS], "formats": list(formats.TEXT_FORMATS)}
+
+
+async def _status() -> dict[str, Any]:
+    model = await trusted.usable(get_db())
+    return {"llm": bool(model), "model": model.label if model else "",
+            "default_lane": "both" if model else "deterministic"}
+
+
+@router.get("/status")
+async def anonymize_status(_user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    return await _status()
 
 
 @router.post("/run")
@@ -353,3 +428,70 @@ async def anonymize_vault_delete(vault: str, user: dict = Depends(get_current_us
 async def anonymize_vault_events(vault: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row = await _own(user, vault)
     return {"events": await av.store().events(user["id"], row["id"])}
+
+
+# ── admin: the trusted model ────────────────────────────────────────
+
+
+@router.get("/admin/trusted-model")
+async def anonymize_trusted_get(_admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    m = await trusted.configured(get_db())
+    return {"model": m.public() if m else None, "providers": list(trusted.PROVIDERS)}
+
+
+@router.put("/admin/trusted-model")
+async def anonymize_trusted_put(request: Request, admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    try:
+        m = await trusted.save(get_db(), await _body(request), admin=str(admin.get("id") or ""))
+    except trusted.TrustError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except fd_crypto.CryptoUnavailable as exc:
+        raise _store_error(exc) from None
+    log.info("Anonymization trusted model set", model=m.label, basis=m.basis, admin=admin.get("id"))
+    return {"model": m.public()}
+
+
+@router.delete("/admin/trusted-model")
+async def anonymize_trusted_delete(_admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    await trusted.clear(get_db())
+    m = await trusted.configured(get_db())  # the environment's, if any
+    return {"model": m.public() if m else None}
+
+
+@router.post("/admin/trusted-model/test")
+async def anonymize_trusted_test(_admin: dict = Depends(require_admin)) -> dict[str, Any]:
+    """Run the built-in sample cases (synthetic people — the same ones the
+    tests hold every lane to) through the code alone and through code + the
+    trusted model, and say what each left behind."""
+    m = await trusted.configured(get_db())
+    if m is None:
+        raise HTTPException(status_code=404, detail="No trusted model is set")
+    if not m.usable:
+        raise HTTPException(status_code=409, detail="The trusted model is switched off or not trusted")
+    out = []
+    for case in engine_cases():
+        prepared = formats.prepare(case["text"], "text")
+        det, _r = await asyncio.to_thread(engine.anonymize_text, case["text"], engine.VaultState())
+        started = time.monotonic()
+        try:
+            found = await _llm_terms(prepared, engine.Options(), "both", m, engine.VaultState())
+            opts = engine.Options(extra=tuple(found.terms))
+            both, _r = await asyncio.to_thread(engine.anonymize_text, case["text"], engine.VaultState(), opts)
+            error = ""
+        except llm_lane.LaneFailed as exc:
+            both, error = "", str(exc)
+        out.append({
+            "id": case["id"], "lanes": case["lanes"], "seconds": round(time.monotonic() - started, 1),
+            "code_missed": [v for v in case["must_hide"] if v in det],
+            "both_missed": [v for v in case["must_hide"] if v in both] if not error else None,
+            "both_over_hid": [v for v in case["must_keep"] if v not in both] if not error else None,
+            "error": error,
+        })
+    return {"model": m.label, "cases": out}
+
+
+def engine_cases() -> list[dict[str, Any]]:
+    import json
+    from pathlib import Path
+
+    return json.loads((Path(engine.__file__).parent / "cases.json").read_text(encoding="utf-8"))["cases"]

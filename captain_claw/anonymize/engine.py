@@ -105,6 +105,9 @@ class Options:
     keep: tuple[str, ...] = ()
     extra: tuple[tuple[str, str], ...] = ()  # (text, kind)
     default_cc: str = "385"
+    # False: the deterministic lane doesn't run (lane "llm") — only the
+    # caller's / the model's terms and what the vault already knows are found.
+    deterministic: bool = True
 
 
 @dataclass
@@ -139,6 +142,11 @@ class VaultState:
         self.entities.append(e)
         self.by_key.setdefault((e.kind, e.key), e)
         self.by_token[e.token] = e
+
+    def snapshot(self) -> "VaultState":
+        """A copy to run on without changing this one (a preview pass)."""
+        copies = [Entity(e.token, e.kind, e.key, e.original, list(e.forms)) for e in self.entities]
+        return VaultState(copies, dict(self.counters))
 
     def add(self, kind: str, key: str, original: str) -> Entity:
         n = self.counters.get(kind, 0) + 1
@@ -546,8 +554,10 @@ def _extra_spans(text: str, extra: tuple[tuple[str, str], ...]) -> list[Span]:
         term = term.strip()
         if len(term) < 2:
             continue
-        for m in re.finditer(rf"(?<![\w])(?i:{re.escape(term)})(?![\w])", text):
-            out.append(Span(m.start(), m.end(), kind, 3, "extra"))
+        # Never a piece of an email, a domain or a dotted word ("marko" in
+        # marko.k@x.hr); priority 2 so a longer find (the whole email) wins.
+        for m in re.finditer(rf"(?<![\w@.\-])(?i:{re.escape(term)})(?![\w@\-]|\.\w)", text):
+            out.append(Span(m.start(), m.end(), kind, 2, "extra"))
     return out
 
 
@@ -574,8 +584,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         masks: list[list[tuple[int, int]]] = []
         for i, text in enumerate(texts):
             masked, token_ranges = _mask_tokens(text)
-            spans = d.detect(masked, options.kinds)
-            if round_no == 1:
+            spans = d.detect(masked, options.kinds) if options.deterministic else []
+            if round_no == 1 and options.deterministic:
                 h = d.hint_span(masked, hints[i])
                 if h is not None and (options.kinds is None or h.kind in options.kinds):
                     spans.append(h)
@@ -646,7 +656,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         finder = _known_spans_finder(state, options)
         for text in texts:
             masked, token_ranges = _mask_tokens(text)
-            spans = d.detect(masked, options.kinds) + [sp for sp, _e in finder(masked)]
+            spans = (d.detect(masked, options.kinds) if options.deterministic else []) \
+                + _extra_spans(masked, options.extra) + [sp for sp, _e in finder(masked)]
             for sp in _select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep)):
                 leftover[sp.kind] = leftover.get(sp.kind, 0) + 1
         if leftover:
