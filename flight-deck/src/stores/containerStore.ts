@@ -5,6 +5,7 @@ import { queueSave, registerHydrator } from '../services/settingsSync'
 import { useAuthStore } from './authStore'
 import { usePipelineStore } from './pipelineStore'
 import { useGroupStore } from './groupStore'
+import { useAgentAvatarStore } from './agentAvatarStore'
 
 const DESC_OVERRIDES_KEY = 'fd:container-descriptions'
 const NAME_OVERRIDES_KEY = 'fd:container-names'
@@ -190,6 +191,8 @@ export const useContainerStore = create<ContainerStore>((set, get) => ({
 
       // Migrate group memberships from old ID to new ID
       useGroupStore.getState().replaceAgent(oldId, newId)
+      // …and the picture it wears in the list
+      useAgentAvatarStore.getState().replaceAgent(oldId, newId)
 
       // Migrate agent card positions
       try {

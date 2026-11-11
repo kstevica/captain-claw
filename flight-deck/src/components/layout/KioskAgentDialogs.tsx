@@ -24,6 +24,7 @@ import {
 } from 'lucide-react'
 import { IntentionsPanel } from '../agents/IntentionsPanel'
 import { AgentMailSetting } from '../agents/AgentMailSetting'
+import { AgentPicture } from '../agents/AgentPicture'
 import { KioskInsightsPanel } from './KioskAgentInsights'
 import { MenuSheet, type MenuItem, type MenuSection } from './KioskMenuSheet'
 import { KioskSkillsPanel } from './KioskAgentSkills'
@@ -84,7 +85,9 @@ const AGENT_MENU_GROUPS: { key: AgentMenuGroup; title: string; caption: string }
 
 const initials = (name: string) => name.split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0]?.toUpperCase()).join('') || '?'
 
-export function AgentMenu({ agentName, items, subtitle = '', status, phone = false, shown = false }: {
+export function AgentMenu({ agentId, agentName, items, subtitle = '', status, phone = false, shown = false }: {
+  /** Its picture at the top, when it has one (else its initials). */
+  agentId?: string
   agentName: string
   items: AgentMenuItem[]
   /** Under its name: what it does, or its state. */
@@ -136,7 +139,7 @@ export function AgentMenu({ agentName, items, subtitle = '', status, phone = fal
       {open && (
         <MenuSheet
           label={agentName}
-          picture={initials(agentName)}
+          picture={agentId ? <AgentPicture agentId={agentId} name={agentName} size="lg" /> : initials(agentName)}
           status={status}
           title={agentName}
           subtitle={subtitle}

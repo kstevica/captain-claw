@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type
 import { createPortal } from 'react-dom'
 import { ArrowDown, ArrowUp, Check, ChevronRight, Folder, FolderMinus, FolderPlus, MoreHorizontal, Pin, Plus, Search, Trash2, X } from 'lucide-react'
 import { useGroupStore, type AgentGroup } from '../../stores/groupStore'
+import { AgentPicture } from '../agents/AgentPicture'
 import { GROUP_COLORS, OTHER_SECTION, agentSections, groupTone, isFolder, nextGroupColor, orderedFolders, type AgentSection } from '../../utils/agentGroups'
 
 // ── Agent groups in the agent column ──
@@ -50,12 +51,6 @@ export interface RowParts {
 }
 
 type Dragging = { kind: 'agent'; id: string; from: string } | { kind: 'group'; id: string }
-
-const agentInitials = (name: string) => {
-  const words = name.trim().split(/[\s_-]+/).filter(Boolean)
-  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase()
-  return name.trim().slice(0, 2).toUpperCase() || '?'
-}
 
 const headCount = (n: number) => `${n} agent${n === 1 ? '' : 's'}`
 
@@ -632,7 +627,7 @@ export function AgentGroupDialog<A extends GroupableAgent>({ groupId, agentIds, 
                   className={`flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40 ${on ? 'bg-zinc-800/60' : 'hover:bg-zinc-800/40'}`}
                 >
                   <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-zinc-800 text-[11px] font-semibold text-zinc-300">
-                    {agentInitials(a.name)}
+                    <AgentPicture agentId={a.id} name={a.name} size="md" dim={!live} />
                     <span className={`absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full ring-2 ring-zinc-900 ${live ? 'bg-emerald-600 dark:bg-emerald-400' : 'bg-zinc-600'}`} />
                   </span>
                   <span className="min-w-0 flex-1">

@@ -38,10 +38,13 @@ PROVIDER_KEYS_SETTING = "fd:provider-keys"
 # sending policies and signatures — written only through /fd/imap.
 # ``xtool:*`` is their values for custom tools' secrets (sealed), and
 # ``xtool-added:*`` the tools of others they added (their consent): both written
-# only through /fd/external-tools.
+# only through /fd/external-tools. ``agent-avatar:*`` is the pictures a user
+# gave their agents — written only through /fd/agent-avatars (which checks each
+# one) and never listed here, so these reads stay small.
 _SERVER_OWNED_PREFIXES = (
     "google_oauth:", "microsoft_oauth:", "fd:tenant-profile", "fd:shared-agent-",
     "jev:", "soniox:", "byok:", "crew:", "imap_mail:", "external_memory:", "xtool:", "xtool-added:",
+    "agent-avatar:",
 )
 
 

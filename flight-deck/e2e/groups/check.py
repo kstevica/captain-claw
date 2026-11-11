@@ -755,6 +755,8 @@ def no_sign_in(browser):
             return route.fulfill(json={"auth_enabled": False, "simple_chat_only": True})
         if "/fd/processes" in url:
             return route.fulfill(json=agents)
+        if "/fd/lesson-proposals" in url:  # an object: the kiosk "⋯" reads its .agents
+            return route.fulfill(json={"agents": []})
         if "/fd/settings" in url and route.request.method != "GET":
             puts.append(url)
             return route.fulfill(json={})

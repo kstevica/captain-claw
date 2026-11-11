@@ -30,6 +30,7 @@ import {
   LibraryBig,
   ListChecks,
   SlidersHorizontal,
+  Smile,
   Trash2,
   Archive,
   BookCheck,
@@ -114,6 +115,9 @@ import { BrandMark } from '../common/BrandMark'
 import { KioskInfoDialog, type InfoAgent } from './KioskInfoDialog'
 import { KioskOnboardingDialog, type OnboardingAction } from './KioskOnboardingDialog'
 import { KioskAgentIdentityDialog } from './KioskAgentIdentityDialog'
+import { KioskAgentPictureDialog } from './KioskAgentPicture'
+import { AgentPicture } from '../agents/AgentPicture'
+import { useAgentAvatarStore } from '../../stores/agentAvatarStore'
 import { MenuSheet, type MenuSection } from './KioskMenuSheet'
 import {
   AgentDialog, AgentMenu, KioskAgentInfoDialog, KioskAgentInstructionsDialog, KioskAgentSettingsDialog, KioskRemoveAgentDialog,
@@ -356,6 +360,10 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const [agentIdentityId, setAgentIdentityId] = useState<string | null>(null)
   // …and its files and data, read live from the agent (see agentMenuItems).
   const [filesDataId, setFilesDataId] = useState<string | null>(null)
+  // …and the picture its square shows instead of its initials.
+  const [agentPictureId, setAgentPictureId] = useState<string | null>(null)
+  const avatars = useAgentAvatarStore((s) => s.avatars)
+  const forgetAvatar = useAgentAvatarStore((s) => s.forgetAgent)
   // Agent groups: a group being made or edited, and the agent whose "⋯" → Group is open.
   const groups = useGroupStore((s) => s.groups)
   const forgetAgent = useGroupStore((s) => s.forgetAgent)
@@ -684,6 +692,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       const result = a.kind === 'docker' ? await removeContainer(a.startKey, true) : await removeProcess(a.startKey, true)
       clearAgentSlices(a.id)
       forgetAgent(a.id)
+      forgetAvatar(a.id)
       setAgentRemoveId(null)
       if (result.ok) useNotificationStore.getState().add('info', 'Agent removed', `${a.name} and its folder are gone.`)
       else useNotificationStore.getState().add('warning', 'Agent removed — not everything went', result.message)
@@ -740,6 +749,16 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       onSelect: () => toggleAgentPin(g.id, a.id),
     }]
   }
+  // Its picture in the list: an icon or one of the person's own, for any agent they see.
+  const pictureMenuItem = (a: SimpleAgent): AgentMenuItem => {
+    const pic = avatars[a.id]
+    return {
+      icon: Smile, label: 'Picture', tone: 'fuchsia', group: 'who',
+      hint: pic ? ('emoji' in pic ? `Shows ${pic.emoji} instead of its initials` : 'Shows your picture instead of its initials')
+        : 'An icon or a picture of yours, instead of its initials',
+      onSelect: () => setAgentPictureId(a.id),
+    }
+  }
   // A process agent of yours as a colleague: who it is to the team and its email.
   const identityMenuItems = (a: SimpleAgent): AgentMenuItem[] => (a.kind === 'process' && !a.managed ? [{
     icon: IdCard, label: 'Identity & email', tone: 'cyan', group: 'who',
@@ -752,6 +771,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
         ...(agentPanels(a.id, memberWorkspace, sharedAgents).region === 'member'
           ? [{ icon: FolderOpen, label: 'Files & data', hint: 'What everyone who uses it can open', tone: 'amber' as const, group: 'work' as const, onSelect: () => setFilesDataId(a.id) }]
           : []),
+        pictureMenuItem(a),
         groupMenuItem(a),
         ...pinMenuItems(a),
       ]
@@ -801,6 +821,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       items.push(
         ...identityMenuItems(a),
         { icon: SlidersHorizontal, label: 'Settings', hint: 'Model, how it thinks, vision', tone: 'zinc', group: 'who', onSelect: () => setAgentSettingsId(a.id) },
+        pictureMenuItem(a),
       )
       const net = networkShareAction(netAgents[shareKeyOf(a)], {
         canShare: netCanShare, admin: netAdmin, deckName: netDeck, displayName: a.name, setShared: netSetShared,
@@ -809,6 +830,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       })
       if (net.show) items.push({ icon: Globe, label: net.label, hint: net.hint, tone: 'cyan', group: 'who', onSelect: net.onClick, disabled: net.disabled })
     }
+    // A local agent, or one Flight Deck runs: its picture is all of "who it is" here.
+    if (!((a.kind === 'docker' || a.kind === 'process') && !a.managed)) items.push(pictureMenuItem(a))
     items.push(groupMenuItem(a), ...pinMenuItems(a))
     // The whole agent in one file — Flight Deck writes it from the agent's folder (process agents).
     if (a.kind === 'process' && !a.managed) {
@@ -824,7 +847,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
     return items
   }
   // Off the kiosk its "⋯" holds only the agent's group and pin (the gear has the rest).
-  const menuFor = locked ? agentMenuItems : (a: SimpleAgent) => [groupMenuItem(a), ...identityMenuItems(a), ...pinMenuItems(a)]
+  const menuFor = locked ? agentMenuItems : (a: SimpleAgent) => [groupMenuItem(a), ...identityMenuItems(a), pictureMenuItem(a), ...pinMenuItems(a)]
   const groupPickerAgent = groupPickerId ? agents.find((a) => a.id === groupPickerId) : undefined
   const agentInfo = agentInfoId ? agents.find((a) => a.id === agentInfoId) : undefined
   const agentInstructions = agentInstructionsId ? agents.find((a) => a.id === agentInstructionsId) : undefined
@@ -832,6 +855,7 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   const agentRemove = agentRemoveId ? agents.find((a) => a.id === agentRemoveId) : undefined
   const agentIdentity = agentIdentityId ? agents.find((a) => a.id === agentIdentityId) : undefined
   const filesData = filesDataId ? agents.find((a) => a.id === filesDataId) : undefined
+  const agentPicture = agentPictureId ? agents.find((a) => a.id === agentPictureId) : undefined
 
   const refresh = () => { fetchContainers(); fetchProcesses(); fetchShared(); probeAll() }
 
@@ -1215,6 +1239,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
           phone={isMobile}
           onClose={() => setGroupDialog(null)}
         />
+      )}
+      {agentPicture && (
+        <KioskAgentPictureDialog agentId={agentPicture.id} agentName={agentPicture.name} onClose={() => setAgentPictureId(null)} />
       )}
       {groupPickerAgent && (
         <AgentGroupPicker agentId={groupPickerAgent.id} agentName={groupPickerAgent.name} phone={isMobile} onClose={() => setGroupPickerId(null)} />
@@ -1800,7 +1827,7 @@ function AgentsColumn({
                 : 'bg-zinc-900 text-zinc-500 dark:text-zinc-400 hover:bg-zinc-800'
           }`}
         >
-          {switching.has(a.id) || isBooting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(a.name)}
+          {switching.has(a.id) || isBooting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <AgentPicture agentId={a.id} name={a.name} size="md" dim={!openable && !active} />}
           <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
           {info?.busy && (
             <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" />
@@ -2115,12 +2142,12 @@ function AgentsColumn({
                     : `${a.name} — ${isBooting ? 'Starting…' : stateLabel(a)}`}
                   className="flex min-w-0 flex-1 items-center gap-2.5 rounded-lg py-1.5 pl-1.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500/40"
                 >
-                  {/* Its picture: initials, its state on the corner, working or a new reply on top. */}
+                  {/* Its picture (its initials unless one was picked), its state on the corner, working or a new reply on top. */}
                   <span className={`relative flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[11px] font-semibold transition-colors ${
                     active ? 'bg-violet-600/20 text-violet-700 dark:text-violet-300'
                       : powered ? 'bg-zinc-700/50 text-zinc-200' : 'bg-zinc-800/70 text-zinc-500'}`}
                   >
-                    {working || isBooting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : initials(a.name)}
+                    {working || isBooting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <AgentPicture agentId={a.id} name={a.name} dim={!powered && !active} />}
                     <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
                     {busy && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 animate-pulse rounded-full bg-amber-500 ring-2 ring-zinc-900 dark:bg-amber-400" title="Working" />}
                     {unread && <span className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-sky-400 ring-2 ring-zinc-900" title="New reply" />}
@@ -2149,7 +2176,7 @@ function AgentsColumn({
                       <Settings className="h-3.5 w-3.5" />
                     </button>
                   )}
-                  {menu.length > 0 && <AgentMenu agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} shown />}
+                  {menu.length > 0 && <AgentMenu agentId={a.id} agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} shown />}
                   {shared && (
                     <button
                       onClick={() => onLeave(a)}
@@ -2695,7 +2722,7 @@ function PhoneLayout({
           >
             <FolderOpen className="h-5 w-5" />
           </button>
-          {a && menu.length > 0 && <AgentMenu agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} phone />}
+          {a && menu.length > 0 && <AgentMenu agentId={a.id} agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} phone />}
         </header>
         <main className="flex min-h-0 flex-1 flex-col overflow-hidden pb-[env(safe-area-inset-bottom)]">
           <ChatPanel variant="simple" />
@@ -2832,7 +2859,7 @@ function PhoneLayout({
                   className="flex min-w-0 flex-1 items-center gap-3 py-3.5 pl-3.5 text-left disabled:opacity-60"
                 >
                   <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-zinc-800 text-xs font-semibold text-zinc-300">
-                    {working || isBooting ? <Loader2 className="h-4 w-4 animate-spin" /> : initials(a.name)}
+                    {working || isBooting ? <Loader2 className="h-4 w-4 animate-spin" /> : <AgentPicture agentId={a.id} name={a.name} size="md" />}
                     <StateDot agent={a} className="absolute -bottom-0.5 -right-0.5 ring-2 ring-zinc-900" />
                   </span>
                   <span className="min-w-0 flex-1">
@@ -2866,7 +2893,7 @@ function PhoneLayout({
                     {working ? <Loader2 className="h-5 w-5 animate-spin" /> : <Power className="h-5 w-5" />}
                   </button>
                 )}
-                {menu.length > 0 && <AgentMenu agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} phone />}
+                {menu.length > 0 && <AgentMenu agentId={a.id} agentName={a.name} items={menu} subtitle={menuSubtitle(a)} status={<StateDot agent={a} />} phone />}
                 {shared && (
                   <button
                     onClick={() => onLeave(a)}
