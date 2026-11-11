@@ -43,7 +43,7 @@ async def test_web_search_formats_brave_results_and_uses_config_defaults(monkeyp
     old_cfg = get_config().model_copy(deep=True)
     cfg = old_cfg.model_copy(deep=True)
     cfg.tools.web_search.api_key = "cfg-key"
-    cfg.tools.web_search.max_results = 3
+    cfg.tools.web_search.max_results = 15
     cfg.tools.web_search.safesearch = "strict"
     set_config(cfg)
     monkeypatch.delenv("BRAVE_API_KEY", raising=False)
@@ -81,7 +81,7 @@ async def test_web_search_formats_brave_results_and_uses_config_defaults(monkeyp
 
         call = tool.client.calls[0]
         assert call["headers"]["X-Subscription-Token"] == "cfg-key"
-        assert call["params"]["count"] == 3
+        assert call["params"]["count"] == 15
         assert call["params"]["safesearch"] == "strict"
     finally:
         set_config(old_cfg)
@@ -103,9 +103,12 @@ async def test_web_search_uses_brave_api_key_from_env_when_config_missing(monkey
         assert result.success is True
         call = tool.client.calls[0]
         assert call["headers"]["X-Subscription-Token"] == "env-key"
-        # Brave max is 20, ensure clamped.
+        # Over 20 is paged in Brave's 20-result pages: offset 2 of 50 is
+        # results 100-149, i.e. Brave pages 5-7. The first came back empty,
+        # so no more pages were asked for.
         assert call["params"]["count"] == 20
-        assert call["params"]["offset"] == 2
+        assert call["params"]["offset"] == 5
+        assert len(tool.client.calls) == 1
     finally:
         set_config(old_cfg)
         monkeypatch.delenv("BRAVE_API_KEY", raising=False)
@@ -138,7 +141,7 @@ async def test_tavily_search_formats_results_and_uses_config_key(monkeypatch):
     cfg = old_cfg.model_copy(deep=True)
     cfg.tools.web_search.provider = "tavily"
     cfg.tools.web_search.tavily_api_key = "tvly-cfg-key"
-    cfg.tools.web_search.max_results = 3
+    cfg.tools.web_search.max_results = 12
     set_config(cfg)
     monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     try:
@@ -175,7 +178,7 @@ async def test_tavily_search_formats_results_and_uses_config_key(monkeypatch):
         assert call["method"] == "POST"
         assert call["url"] == "https://api.tavily.com/search"
         assert call["headers"]["Authorization"] == "Bearer tvly-cfg-key"
-        assert call["json"]["max_results"] == 3
+        assert call["json"]["max_results"] == 12
     finally:
         set_config(old_cfg)
 
@@ -310,8 +313,8 @@ async def test_youcom_search_uses_env_api_key_and_defaults(monkeypatch):
         assert result.success is True
         call = tool.client.calls[0]
         assert call["headers"]["X-API-Key"] == "ydc-env-key"
-        # count is clamped to the 20-result maximum
-        assert call["json"]["count"] == 20
+        # count goes up to the 50-result cap
+        assert call["json"]["count"] == 50
         # safesearch falls back to the config default ("moderate")
         assert call["json"]["safesearch"] == "moderate"
     finally:

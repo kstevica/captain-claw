@@ -299,9 +299,21 @@ class WebSearchToolConfig(BaseModel):
     youcom_api_key: str = ""
     keenable_api_key: str = ""
     base_url: str = "https://api.search.brave.com/res/v1/web/search"
-    max_results: int = 5
+    max_results: int = 10        # results when a call names no count (never below 10)
+    max_results_cap: int = 50    # most one call may ask for (Brave pages past its 20; Tavily stops at 20)
     timeout: int = 20
     safesearch: str = "moderate"
+    extra_snippets: bool = True  # Brave: up to 5 more excerpts per result, same request
+    # Enriched search — passages from the pages that match the query. The agent
+    # asks per call (enrich=true); `enrich: true` here makes it every search.
+    enrich: bool = False
+    enrich_pages: int = 5        # top results whose pages are read (Brave/Keenable)
+    enrich_chars: int = 2000     # page text kept per enriched result
+    enrich_timeout: int = 8      # seconds for one page read (when read here)
+    # Brave enrich goes through its LLM Context endpoint (same key, same price
+    # per request; many chunks per page, not just the 5 extra excerpts). Off,
+    # or on failure, the pages are read here instead.
+    brave_llm_context: bool = True
 
 
 class PocketTTSToolConfig(BaseModel):
