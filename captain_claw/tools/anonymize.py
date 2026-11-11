@@ -34,10 +34,6 @@ INLINE_MAX = 8000
 PREVIEW_CHARS = 3000
 MAX_FILE_BYTES = 25 * 1024 * 1024
 
-_TEXT_SUFFIXES = {".txt", ".text", ".log", ".xml", ".yaml", ".yml", ".ini", ".cfg", ".eml", ".rtf", ".srt", ".vtt"}
-_FORMAT_BY_SUFFIX = {".csv": "csv", ".tsv": "tsv", ".json": "json", ".jsonl": "jsonl", ".ndjson": "jsonl",
-                     ".md": "md", ".markdown": "md"}
-_EXTRACT_SUFFIXES = {".docx", ".xlsx", ".pptx", ".pdf", ".html", ".htm"}
 
 
 def _session_folder(kwargs: dict[str, Any]) -> str:
@@ -50,15 +46,6 @@ def default_vault(kwargs: dict[str, Any]) -> str:
     unless the agent names a case."""
     sid = str(kwargs.get("_session_id") or "").strip()
     return f"chat-{sid[:40]}" if sid else "default"
-
-
-def _decode(data: bytes) -> str:
-    for enc in ("utf-8-sig", "cp1250"):
-        try:
-            return data.decode(enc)
-        except UnicodeDecodeError:
-            continue
-    return data.decode("latin-1")
 
 
 class AnonymizeTool(Tool):
@@ -169,10 +156,10 @@ class AnonymizeTool(Tool):
 
     # ── sources ─────────────────────────────────────────────────────
 
-    def _read_file(self, value: str, kwargs: dict[str, Any]) -> tuple[str, str, Path] | str:
-        """(content, format, resolved path) — or why not."""
+    def _read_bytes(self, value: str, kwargs: dict[str, Any]) -> tuple[bytes, Path] | str:
+        """(the file's bytes, its resolved path) — or why not. Flight Deck
+        decides what it can read (text, csv, json, docx, xlsx, pptx, pdf, html)."""
         from captain_claw import mail_attachments
-        from captain_claw.tools import document_extract as dx
 
         resolved = mail_attachments.resolve_path(value, kwargs)
         if resolved is None:
@@ -182,37 +169,11 @@ class AnonymizeTool(Tool):
             return f"Not read: {why}. Anonymization is for personal data, not keys."
         try:
             size = resolved.stat().st_size
+            if size > MAX_FILE_BYTES:
+                return f"{resolved.name} is over {MAX_FILE_BYTES // (1024 * 1024)} MB — split it first."
+            return resolved.read_bytes(), resolved
         except OSError as exc:
             return f"Can't read {resolved.name}: {type(exc).__name__}"
-        if size > MAX_FILE_BYTES:
-            return f"{resolved.name} is over {MAX_FILE_BYTES // (1024 * 1024)} MB — split it first."
-        suffix = resolved.suffix.lower()
-        if suffix in _EXTRACT_SUFFIXES:
-            try:
-                if suffix == ".docx":
-                    content = dx._extract_docx_markdown(resolved)
-                elif suffix == ".xlsx":
-                    content = dx._extract_xlsx_markdown(resolved, 100000)
-                elif suffix == ".pptx":
-                    content = dx._extract_pptx_markdown(resolved, 2000)
-                elif suffix == ".pdf":
-                    content, err = dx._extract_pdf_markdown(resolved, 5000)
-                    if err or content is None:
-                        return f"Can't read {resolved.name}: {err or 'no text in it'}"
-                else:
-                    from captain_claw.tools.web_fetch import _extract_readable_text
-
-                    content = _extract_readable_text(_decode(resolved.read_bytes()))
-            except Exception as exc:  # noqa: BLE001 — a broken document is the user's to hear about
-                return f"Can't read {resolved.name}: {type(exc).__name__}"
-            return content, "md", resolved
-        data = resolved.read_bytes()
-        if b"\x00" in data[:4096]:
-            return f"{resolved.name} isn't a text or document file this tool can read."
-        fmt = _FORMAT_BY_SUFFIX.get(suffix, "text")
-        if suffix not in _FORMAT_BY_SUFFIX and suffix not in _TEXT_SUFFIXES and suffix:
-            fmt = "text"
-        return _decode(data), fmt, resolved
 
     @staticmethod
     async def _fetch(url: str) -> tuple[str, str] | str:
@@ -246,18 +207,10 @@ class AnonymizeTool(Tool):
         if len(given) != 1:
             return ToolResult(success=False, error="Give exactly one of `path`, `url` or `text`.")
         source = given[0]
-        stem, out_suffix = "", ".txt"
         if source == "path":
-            got = self._read_file(str(kwargs["path"]).strip(), kwargs)
-            if isinstance(got, str):
-                return ToolResult(success=False, error=got)
-            content, fmt, resolved = got
-            stem = resolved.stem
-            out_suffix = {"md": ".md", "csv": ".csv", "tsv": ".tsv", "json": ".json", "jsonl": ".jsonl"}.get(
-                fmt, resolved.suffix if resolved.suffix.lower() in _TEXT_SUFFIXES else ".txt")
-            if resolved.suffix.lower() == ".md":
-                out_suffix = ".md"
-        elif source == "url":
+            return await self._anonymize_file(base, headers, kwargs)
+        stem, out_suffix = "", ".txt"
+        if source == "url":
             got_url = await self._fetch(str(kwargs["url"]).strip())
             if isinstance(got_url, str):
                 return ToolResult(success=False, error=got_url)
@@ -303,6 +256,43 @@ class AnonymizeTool(Tool):
                       output[:PREVIEW_CHARS]]
         return ToolResult(success=True, content="\n".join(lines))
 
+    def _body_options(self, kwargs: dict) -> dict[str, Any]:
+        body: dict[str, Any] = {"vault": str(kwargs.get("vault") or "").strip() or default_vault(kwargs),
+                                "mode": kwargs.get("mode") or "reversible"}
+        for key in ("keep", "extra", "lane"):
+            if kwargs.get(key):
+                body[key] = kwargs[key]
+        return body
+
+    async def _anonymize_file(self, base: str, headers: dict, kwargs: dict) -> ToolResult:
+        """The file as it is goes to Flight Deck and comes back as the same
+        kind of file (Word, Excel, PowerPoint keep their formatting; PDF and
+        web pages come back as markdown)."""
+        import base64
+
+        got = self._read_bytes(str(kwargs["path"]).strip(), kwargs)
+        if isinstance(got, str):
+            return ToolResult(success=False, error=got)
+        blob, resolved = got
+        body = {**self._body_options(kwargs), "filename": resolved.name,
+                "data": base64.b64encode(blob).decode("ascii"), "source": "file"}
+        data, err = await self._post(base, headers, "/fd/anonymize/agent/file", body)
+        if err:
+            return ToolResult(success=False, error=f"Not anonymized: {err}")
+        target, werr = self._target(kwargs, "anonymized", str(data.get("filename") or "document.anonymized"))
+        if werr:
+            return ToolResult(success=False, error=werr)
+        self._write_bytes(target, base64.b64decode(data.get("data") or ""), kwargs)
+        preview = str(data.get("preview") or "")
+        lines = [self._headline(data), *self._entity_lines(data), f"Saved: {target}"]
+        lines += [f"Note: {w}" for w in data.get("warnings") or []]
+        if preview:
+            shown = preview[:INLINE_MAX] if len(preview) <= INLINE_MAX else preview[:PREVIEW_CHARS]
+            label = "--- its text, anonymized ---" if len(preview) <= INLINE_MAX else (
+                f"--- the first {PREVIEW_CHARS} characters of its text (the whole result is in the file) ---")
+            lines += ["", label, shown]
+        return ToolResult(success=True, content="\n".join(lines))
+
     async def _restore(self, base: str, headers: dict, kwargs: dict) -> ToolResult:
         from captain_claw import mail_authority
 
@@ -314,25 +304,31 @@ class AnonymizeTool(Tool):
         given = [k for k in ("path", "text") if str(kwargs.get(k) or "").strip()]
         if len(given) != 1:
             return ToolResult(success=False, error="Give exactly one of `path` (an anonymized file) or `text`.")
-        stem, suffix, fmt = "restored", ".txt", "text"
+        vault = str(kwargs.get("vault") or "").strip() or default_vault(kwargs)
         if given[0] == "path":
-            got = self._read_file(str(kwargs["path"]).strip(), kwargs)
+            import base64
+
+            got = self._read_bytes(str(kwargs["path"]).strip(), kwargs)
             if isinstance(got, str):
                 return ToolResult(success=False, error=got)
-            content, fmt, resolved = got
-            stem = re.sub(r"\.anonymized$", "", resolved.stem)
-            suffix = resolved.suffix or ".txt"
+            blob, resolved = got
+            data, err = await self._post(base, headers, "/fd/anonymize/agent/file/restore", {
+                "filename": resolved.name, "data": base64.b64encode(blob).decode("ascii"), "vault": vault})
+            if err:
+                return ToolResult(success=False, error=f"Not restored: {err}")
+            restored_bytes = base64.b64decode(data.get("data") or "")
+            name = str(data.get("filename") or "document.restored")
         else:
-            content = str(kwargs["text"])
-        vault = str(kwargs.get("vault") or "").strip() or default_vault(kwargs)
-        data, err = await self._post(base, headers, "/fd/anonymize/agent/restore",
-                                     {"content": content, "format": fmt, "vault": vault})
-        if err:
-            return ToolResult(success=False, error=f"Not restored: {err}")
-        target, werr = self._target(kwargs, "restored", f"{stem}.restored{suffix}")
+            data, err = await self._post(base, headers, "/fd/anonymize/agent/restore",
+                                         {"content": str(kwargs["text"]), "format": "text", "vault": vault})
+            if err:
+                return ToolResult(success=False, error=f"Not restored: {err}")
+            restored_bytes = str(data.get("output") or "").encode("utf-8")
+            name = "text.restored.txt"
+        target, werr = self._target(kwargs, "restored", name)
         if werr:
             return ToolResult(success=False, error=werr)
-        self._write(target, str(data.get("output") or ""), kwargs)
+        self._write_bytes(target, restored_bytes, kwargs)
         unknown = data.get("unknown") or []
         lines = [
             f"DONE — put back {data.get('restored', 0)} value(s) from vault \"{(data.get('vault') or {}).get('name', vault)}\". "
@@ -419,11 +415,14 @@ class AnonymizeTool(Tool):
             n += 1
         return target, ""
 
+    @classmethod
+    def _write(cls, target: Path, text: str, kwargs: dict) -> None:
+        cls._write_bytes(target, text.encode("utf-8"), kwargs)
+
     @staticmethod
-    def _write(target: Path, text: str, kwargs: dict) -> None:
+    def _write_bytes(target: Path, blob: bytes, kwargs: dict) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
-        with target.open("w", encoding="utf-8", newline="") as fh:
-            fh.write(text)
+        target.write_bytes(blob)
         registry = kwargs.get("_file_registry")
         if registry is not None:
             try:

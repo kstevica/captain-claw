@@ -122,6 +122,21 @@ class RunResult:
     used: list[Entity]
     fixed: int
     rounds: int
+    # Per segment, what was replaced, in the ORIGINAL text's positions:
+    # (start, end, token), sorted. A writer that keeps a document's own
+    # structure (Word runs, slide text) puts each token where it belongs.
+    edits: list[list[tuple[int, int, str]]] = field(default_factory=list)
+
+
+def _to_original(edits: list[tuple[int, int, str]], pos: int) -> int:
+    """A position in the current text (original + *edits*) as one in the
+    original. Never inside a token: spans that would touch one are blocked."""
+    shift = 0
+    for start, end, token in edits:
+        if pos <= start + shift:
+            break
+        shift += len(token) - (end - start)
+    return pos - shift
 
 
 class VaultState:
@@ -573,6 +588,13 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
     keep_folded = {fold(k) for k in options.keep if k.strip()}
     texts = [s.text for s in segments]
     hints = [s.hint for s in segments]
+    edits: list[list[tuple[int, int, str]]] = [[] for _ in segments]
+    # Names and companies the caller (or the trusted model) named are known
+    # from the start, so their other forms are found too ("Ana Kovač" also
+    # catches "Ane Kovač"). Stored only if they turn up.
+    for term, kind in options.extra:
+        if kind in ("PERSON", "ORG") and len(term.strip()) >= 2:
+            resolver.resolve(kind, term.strip())
     used: dict[str, Entity] = {}
     order: list[str] = []
     fixed = 0
@@ -631,8 +653,10 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
                 fixed += len(final)
             pieces = []
             pos = 0
+            new_edits = []
             for sp in final:
                 e = by_span[(sp.start, sp.end)]
+                new_edits.append((_to_original(edits[i], sp.start), _to_original(edits[i], sp.end), e.token))
                 surface = text[sp.start:sp.end]
                 if e.kind != "PERSON" or len(_name_words(surface)) > 1:
                     e.add_form(surface)
@@ -645,6 +669,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
                     order.append(e.token)
             pieces.append(text[pos:])
             new_texts.append("".join(pieces))
+            edits[i] = sorted(edits[i] + new_edits)
         texts = new_texts
         rounds = round_no
         if not changed:
@@ -663,7 +688,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         if leftover:
             raise VerifyFailed(leftover)
 
-    return RunResult(outputs=texts, used=[used[t] for t in order], fixed=fixed, rounds=rounds)
+    return RunResult(outputs=texts, used=[used[t] for t in order], fixed=fixed, rounds=rounds, edits=edits)
 
 
 def anonymize_text(text: str, state: VaultState, options: Options | None = None) -> tuple[str, RunResult]:
@@ -721,3 +746,32 @@ __all__ = [
     "anonymize_filename", "anonymize_text", "make_token", "name_stem", "normalize", "restore", "run",
     "summary",
 ]
+
+
+def apply_edits(text: str, edits: list[tuple[int, int, str]]) -> str:
+    """*text* with *edits* (original positions) applied — what :func:`run`
+    returned as the output."""
+    out = []
+    pos = 0
+    for start, end, token in sorted(edits):
+        out.append(text[pos:start])
+        out.append(token)
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def restore_edits(text: str, state: VaultState) -> tuple[list[tuple[int, int, str]], int, list[str]]:
+    """The edits that put a vault's values back into *text*: (edits, how many,
+    tokens the vault doesn't know)."""
+    out: list[tuple[int, int, str]] = []
+    unknown: list[str] = []
+    for m in TOKEN_RE.finditer(str(text or "")):
+        kind = m.group(1) or m.group(3)
+        e = state.by_token.get(make_token(kind, int(m.group(2) or m.group(4))))
+        if e is None:
+            if m.group(0) not in unknown:
+                unknown.append(m.group(0))
+            continue
+        out.append((m.start(), m.end(), e.original))
+    return out, len(out), unknown

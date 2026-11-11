@@ -535,3 +535,97 @@ class TestTrustedModel:
         assert res.success and "code + trusted model ollama/qwen3:8b (2 more found by it)" in res.content
         res = await AnonymizeTool().execute(action="anonymize", text=BARE, lane="deterministic", **tool_env)
         assert "code only" in res.content
+
+
+# ── whole files (P2) ────────────────────────────────────────────────
+
+
+def _docx_bytes() -> bytes:
+    import io
+
+    import docx
+
+    doc = docx.Document()
+    doc.core_properties.author = "Klaus Müller"
+    p = doc.add_paragraph("Name: ")
+    p.add_run("Klaus Müller").bold = True
+    doc.add_paragraph("IBAN: DE89370400440532013000, mail k.mueller@beispiel.de")
+    buf = io.BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
+
+
+def _b64(blob: bytes) -> str:
+    import base64
+
+    return base64.b64encode(blob).decode("ascii")
+
+
+class TestFiles:
+    async def test_docx_in_docx_out_and_back(self, db, agents):
+        import base64
+        import io
+
+        import docx
+
+        c = _client()
+        r = c.post("/fd/anonymize/file", headers=_bearer(BOB),
+                   json={"filename": "Klaus_Muller_contract.docx", "data": _b64(_docx_bytes()), "vault": "K"})
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["filename"] == "PERSON_1_contract.anonymized.docx" or data["filename"].endswith(".anonymized.docx")
+        assert data["content_type"].endswith("wordprocessingml.document")
+        out = base64.b64decode(data["data"])
+        doc = docx.Document(io.BytesIO(out))
+        assert doc.paragraphs[0].text == "Name: ⟦PERSON_1⟧" and doc.paragraphs[0].runs[1].bold
+        assert doc.core_properties.author == ""
+        assert "Müller" not in data["preview"] and "⟦IBAN_1⟧" in data["preview"]
+        back = c.post("/fd/anonymize/file/restore", headers=_bearer(BOB),
+                      json={"filename": data["filename"], "data": data["data"], "vault": "K"}).json()
+        assert back["filename"].endswith(".restored.docx") and back["restored"] == 3
+        restored = docx.Document(io.BytesIO(base64.b64decode(back["data"])))
+        assert restored.paragraphs[0].text == "Name: Klaus Müller"
+
+    async def test_agent_file_route_and_text_kinds(self, db, agents):
+        import base64
+
+        c = _client()
+        r = c.post("/fd/anonymize/agent/file", headers=BOB_AGENT,
+                   json={"filename": "people.csv", "data": _b64("ime,email\nIvan,ivan@x.hr\n".encode()),
+                         "mode": "one_way"})
+        assert r.status_code == 200
+        assert base64.b64decode(r.json()["data"]).decode() == "ime,email\n⟦PERSON_1⟧,⟦EMAIL_1⟧\n"
+        page = c.post("/fd/anonymize/agent/file", headers=BOB_AGENT,
+                      json={"filename": "p.html", "data": _b64(b"<p>Mail ana@x.hr</p>"), "mode": "one_way"}).json()
+        assert page["filename"].endswith(".md") and any("markdown" in w for w in page["warnings"])
+
+    async def test_bad_files(self, db, agents, monkeypatch):
+        c = _client()
+        bad = [({"filename": "x.exe", "data": _b64(b"MZ")}, 415),
+               ({"filename": "x.txt", "data": "not base64!"}, 422),
+               ({"filename": "x.docx", "data": _b64(b"not a zip")}, 422),
+               ({"data": _b64(b"x")}, 422)]
+        for body, status in bad:
+            assert c.post("/fd/anonymize/file", headers=_bearer(BOB), json=body).status_code == status, body
+        monkeypatch.setattr(anonymize_routes, "MAX_FILE_BYTES", 10)
+        assert c.post("/fd/anonymize/file", headers=_bearer(BOB),
+                      json={"filename": "x.txt", "data": _b64(b"x" * 100)}).status_code == 413
+
+    async def test_tool_sends_a_docx_and_gets_a_docx(self, tool_env):
+        import io
+
+        import docx
+
+        from captain_claw.tools.anonymize import AnonymizeTool
+
+        src = Path(tool_env["_runtime_base_path"]) / "contract.docx"
+        src.write_bytes(_docx_bytes())
+        res = await AnonymizeTool().execute(action="anonymize", path="contract.docx", **tool_env)
+        assert res.success, res.error
+        assert "Müller" not in res.content and "beispiel" not in res.content
+        saved = Path(res.content.split("Saved: ")[1].split("\n")[0])
+        assert saved.suffix == ".docx"
+        assert docx.Document(io.BytesIO(saved.read_bytes())).paragraphs[0].text == "Name: ⟦PERSON_1⟧"
+        back = await AnonymizeTool().execute(action="restore", path=str(saved), **tool_env)
+        restored = Path(back.content.split("for the user: ")[1].split("\n")[0])
+        assert docx.Document(io.BytesIO(restored.read_bytes())).paragraphs[0].text == "Name: Klaus Müller"
