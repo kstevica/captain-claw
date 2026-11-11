@@ -106,7 +106,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "web_fetch": "Fetch a URL and return clean readable TEXT (always text mode, never raw HTML). Saves the page's useful pictures for reports and lists them under \"[Images …]\"; an image URL is saved as a picture",
     "web_fetch_batch": "Fetch MULTIPLE URLs in PARALLEL (clean text each, plus each page's saved pictures). Use this — not repeated web_fetch — for several URLs, e.g. web_search results. Auto fast→deep per URL.",
     "web_get": "Fetch a URL and return raw HTML source (only for scraping/DOM inspection). The FIRST call on a URL returns readable text instead — call it twice on the same URL if you truly need the markup.",
-    "web_search": "Search the web for up-to-date sources",
+    "web_search": "Search the web for up-to-date sources (count up to 50 for breadth; enrich=true adds the top pages' passages that match the query)",
     "pdf_extract": "Extract a single .pdf file into markdown. ONLY for .pdf files. For multiple files in a folder use summarize_files instead.",
     "ocr_pdf": "Read a scanned / image-only PDF with a local OCR engine (no AI model, same text every time): pages with a good text layer are read as text, the rest OCR'd; text page by page with confidence, saved under saved/ocr/. Use it when pdf_extract finds pages without text. Never OCR with scripts.",
     "ocr_image": "Read the printed text in a picture (scan, photo of a document, receipt, screenshot) with a local OCR engine (no AI model, same text every time), with confidence; saved under saved/ocr/. image_ocr (a vision model) only for handwriting or when the user agrees to a model reading it.",
