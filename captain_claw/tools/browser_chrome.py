@@ -179,12 +179,21 @@ class ChromeHands:
         return self._shape(action, data)
 
     def _shape(self, action: str, data: dict[str, Any]) -> ToolResult:
+        from captain_claw.tools import web_blocked
+
         if not data.get("ok"):
             error = str(data.get("error") or "The browser couldn't do that.")
+            if data.get("no_browser"):
+                # A site blocks this session's server browsers: pointing back
+                # at them (the deck's usual advice) would only hit the wall again.
+                error = web_blocked.chrome_missing_note(self.kwargs) or error
             return ToolResult(success=False, error=error)
         content = str(data.get("content") or "").strip()
         if data.get("own") and action in ("navigate", "tab_new", "tabs", "back", "forward"):
             content = "(In your own headless browser on the server — not the person's Chrome.)\n" + content
+            content += web_blocked.own_browser_note(self.kwargs)
+        elif action in ("navigate", "tab_new") and self.kwargs.get("url"):
+            web_blocked.forget(self.kwargs, str(self.kwargs.get("url")))   # their Chrome got there
         if action in ("page_text", "read_page", "find") and content:
             content = f"{WEB_CONTENT_NOTE}\n\n{content}"
         images: list[str] = []
