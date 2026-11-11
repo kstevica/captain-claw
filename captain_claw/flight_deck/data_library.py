@@ -22,6 +22,7 @@ Flight Deck runs itself), and spend from the same daily token allowance.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import csv
 import hashlib
 import io
@@ -37,6 +38,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from captain_claw.flight_deck.auth import get_current_user
 from captain_claw.flight_deck.file_library import (
@@ -413,6 +415,16 @@ class DataStore:
             self._conn.execute(
                 f"UPDATE library_tables SET {cols} WHERE id = ? AND fingerprint = ?",
                 (*fields.values(), table_id, fingerprint))
+            self._conn.commit()
+
+    def touch(self, table_id: str, row_count: int, updated_at: str) -> None:
+        """A hand edit: the table's row count and last change as they are
+        now. The fingerprint stays, so the next scan profiles and summarises
+        the table again — as after any other change."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE library_tables SET row_count = ?, updated_at = ? WHERE id = ?",
+                (row_count, updated_at, table_id))
             self._conn.commit()
 
     def counts(self, slugs: list[str]) -> dict[str, int]:
@@ -837,6 +849,230 @@ async def data_rows(
             _read_rows, t, max(1, min(limit, _MAX_PAGE)), max(0, offset), q, sort, dir == "desc")
     except sqlite3.Error as e:
         raise HTTPException(503, f"The datastore can't be read right now: {e}")
+
+
+# ── Editing rows by hand ──────────────────────────────────────────────
+#
+# The owner changes a cell, adds a row or deletes one from the table view.
+# Every write goes through the agent's own DatastoreManager, opened for the
+# one call and closed again, so it obeys what the agent's writes obey —
+# protected tables, rows and cells, the row limit, a unique key — and stamps
+# the table's last change. A running agent writes to the same file: WAL and
+# the busy timeout let both. An edit carries the values the person saw; a
+# cell that changed since (the agent wrote it meanwhile) refuses the edit
+# instead of being overwritten.
+
+_MAX_EDIT_CHARS = 1_000_000
+_BOOL_TRUE = {"true", "yes", "y", "1", "on"}
+_BOOL_FALSE = {"false", "no", "n", "0", "off"}
+
+
+class RowValues(BaseModel):
+    values: dict[str, Any] = Field(default_factory=dict)
+    # What the person saw in the cells they changed: a cell that holds
+    # something else now refuses the edit (409).
+    expect: dict[str, Any] | None = None
+
+
+def _coerce(col: dict, v: Any) -> Any:
+    """A value typed by hand, as its column stores it. ValueError, in the
+    person's words, when it doesn't fit. Empty is no value."""
+    from datetime import date, datetime
+
+    label, typ = _humanize(col["name"]), col["type"]
+    if v is None or (isinstance(v, str) and not v.strip()):
+        return None
+    if isinstance(v, str) and len(v) > _MAX_EDIT_CHARS:
+        raise ValueError(f"{label} is too long — at most {_MAX_EDIT_CHARS:,} characters.")
+    s = v.strip() if isinstance(v, str) else v
+    if typ == "integer":
+        if isinstance(s, bool):
+            return int(s)
+        if isinstance(s, int):
+            return s
+        if isinstance(s, float) and s.is_integer():
+            return int(s)
+        try:
+            return int(str(s).replace(" ", "").replace("_", ""))
+        except ValueError:
+            raise ValueError(f"{label} takes a whole number.") from None
+    if typ == "real":
+        try:
+            f = float(s) if not isinstance(s, str) else float(s.replace(" ", ""))
+        except (TypeError, ValueError):
+            raise ValueError(f"{label} takes a number.") from None
+        if f != f or f in (float("inf"), float("-inf")):
+            raise ValueError(f"{label} takes a number.")
+        return f
+    if typ == "boolean":
+        if isinstance(s, bool):
+            return int(s)
+        word = str(s).strip().lower()
+        if word in _BOOL_TRUE:
+            return 1
+        if word in _BOOL_FALSE:
+            return 0
+        raise ValueError(f"{label} takes yes or no.")
+    if typ == "date":
+        try:
+            return date.fromisoformat(str(s)).isoformat()
+        except ValueError:
+            raise ValueError(f"{label} takes a date like 2026-11-11.") from None
+    if typ == "datetime":
+        try:
+            datetime.fromisoformat(str(s))
+        except ValueError:
+            raise ValueError(f"{label} takes a date and time like 2026-11-11T14:30.") from None
+        return str(s)
+    if typ == "json":
+        if not isinstance(v, str):
+            return json.dumps(v, ensure_ascii=False)
+        try:
+            json.loads(v)
+        except ValueError:
+            raise ValueError(f"{label} takes JSON — check the brackets and quotes.") from None
+        return v
+    return v if isinstance(v, str) else str(v)
+
+
+def _clean_values(raw: dict[str, Any], cols: list[dict]) -> dict[str, Any]:
+    by_name = {c["name"]: c for c in cols}
+    out: dict[str, Any] = {}
+    for name, v in raw.items():
+        col = by_name.get(name)
+        if col is None:
+            raise HTTPException(400, f"The table has no column {name!r}.")
+        try:
+            out[name] = _coerce(col, v)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    return out
+
+
+def _row_raw(t: dict, rowid: int) -> tuple[list[dict], dict | None]:
+    """The table's visible columns and one row as stored (blobs as bytes)."""
+    c, internal, cols = _open_table(t)
+    with closing(c):
+        select = ", ".join(["rowid AS __rowid"] + [_q(col["name"]) for col in cols])
+        r = c.execute(f"SELECT {select} FROM {_q(internal)} WHERE rowid = ?", (rowid,)).fetchone()
+        return cols, (dict(r) if r else None)
+
+
+def _after_write(t: dict, rowid: int | None) -> tuple[dict | None, int, str]:
+    """After a hand edit: the row as the view shows it, and the table's row
+    count and last change, read back from the file."""
+    c, internal, cols = _open_table(t)
+    with closing(c):
+        row = None
+        if rowid:
+            select = ", ".join(["rowid AS __rowid"] + [_q(col["name"]) for col in cols])
+            r = c.execute(f"SELECT {select} FROM {_q(internal)} WHERE rowid = ?", (rowid,)).fetchone()
+            row = {k: _plain(v) for k, v in dict(r).items()} if r else None
+        count = c.execute(f"SELECT COUNT(*) FROM {_q(internal)}").fetchone()[0]
+        meta = c.execute("SELECT updated_at FROM _ds_tables WHERE name = ?", (t["table_name"],)).fetchone()
+        return row, int(count or 0), str((meta[0] if meta else "") or "")
+
+
+@contextlib.asynccontextmanager
+async def _writer(t: dict):
+    """The agent's datastore, opened for one hand edit and closed after.
+    The datastore's own refusals come back as the person reads them."""
+    from captain_claw.datastore import DatastoreManager, ProtectedError
+
+    path = datastore_path(t["agent_slug"])
+    if path is None:
+        raise HTTPException(404, "the agent's datastore is gone")
+    mgr = DatastoreManager(db_path=path)
+    try:
+        yield mgr
+    except ProtectedError as e:
+        raise HTTPException(409, f"{e} — the agent protected it, so it can't be changed by hand.")
+    except sqlite3.IntegrityError:
+        raise HTTPException(409, "Another row already holds that value, and this table keeps it unique.")
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except sqlite3.Error as e:
+        raise HTTPException(503, f"The datastore can't be changed right now: {e}")
+    finally:
+        await mgr.close()
+
+
+async def _edited(t: dict, agents: dict[str, dict], rowid: int | None) -> dict:
+    """What every edit answers: the row now and the table with its fresh
+    row count and last change (kept in the library too)."""
+    try:
+        row, count, updated_at = await asyncio.to_thread(_after_write, t, rowid)
+    except sqlite3.Error:
+        return {"row": None, "table": _item(t, agents)}
+    store = get_store()
+    store.touch(t["id"], count, updated_at)
+    return {"row": row, "table": _item(store.get(t["id"]) or t, agents)}
+
+
+@router.post("/tables/{table_id}/rows")
+async def data_add_row(table_id: str, body: RowValues, user: dict = Depends(get_current_user)) -> dict:
+    """Add one row by hand; columns left out stay empty."""
+    t, agents = _owned(table_id, user)
+    try:
+        cols, _ = await asyncio.to_thread(_row_raw, t, 0)
+    except sqlite3.Error as e:
+        raise HTTPException(503, f"The datastore can't be read right now: {e}")
+    values = _clean_values(body.values, cols)
+    # Every column named, so a row of blanks is a row too.
+    row = {c["name"]: values.get(c["name"]) for c in cols}
+    async with _writer(t) as mgr:
+        if not await mgr.insert_rows(t["table_name"], [row]):
+            raise HTTPException(400, "The row couldn't be added — the table has no columns to fill.")
+        new_id = await mgr.last_insert_id()
+    return await _edited(t, agents, new_id)
+
+
+@router.patch("/tables/{table_id}/rows/{rowid}")
+async def data_edit_row(
+    table_id: str, rowid: int, body: RowValues, user: dict = Depends(get_current_user),
+) -> dict:
+    """Change cells of one row by hand. ``expect`` holds what the person saw
+    in them: one that holds something else now refuses the whole edit."""
+    t, agents = _owned(table_id, user)
+    try:
+        cols, before = await asyncio.to_thread(_row_raw, t, rowid)
+    except sqlite3.Error as e:
+        raise HTTPException(503, f"The datastore can't be read right now: {e}")
+    if before is None:
+        raise HTTPException(404, "This row is gone — it was deleted since you opened it.")
+    values = _clean_values(body.values, cols)
+    if not values:
+        raise HTTPException(400, "Nothing to change.")
+    for name in values:
+        if isinstance(before.get(name), bytes):
+            raise HTTPException(400, f"{_humanize(name)} holds a file — it can't be edited here.")
+    where: dict[str, Any] = {"_id": rowid}
+    for name, seen in (body.expect or {}).items():
+        if name in values:
+            where[name] = {"op": "IS NULL"} if seen is None else seen
+    async with _writer(t) as mgr:
+        changed = await mgr.update_rows(t["table_name"], values, where)
+    if not changed:
+        try:
+            _cols, now = await asyncio.to_thread(_row_raw, t, rowid)
+        except sqlite3.Error:
+            now = before
+        if now is None:
+            raise HTTPException(404, "This row is gone — it was deleted since you opened it.")
+        raise HTTPException(409, "This row changed since you opened it (the agent may have updated it) — "
+                                 "here is what it holds now. Make your change again if it still applies.")
+    return await _edited(t, agents, rowid)
+
+
+@router.delete("/tables/{table_id}/rows/{rowid}")
+async def data_delete_row(table_id: str, rowid: int, user: dict = Depends(get_current_user)) -> dict:
+    """Delete one row by hand."""
+    t, agents = _owned(table_id, user)
+    async with _writer(t) as mgr:
+        deleted = await mgr.delete_rows(t["table_name"], {"_id": rowid})
+    if not deleted:
+        raise HTTPException(404, "This row is already gone.")
+    return await _edited(t, agents, None)
 
 
 def _export_rows(c: sqlite3.Connection, internal: str, names: list[str], neutralize: bool = False):
