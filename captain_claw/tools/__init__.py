@@ -65,6 +65,7 @@ from captain_claw.tools.code_session import CodeSessionTool
 from captain_claw.tools.crew import CrewTool
 from captain_claw.tools.ask_user import AskUserTool
 from captain_claw.tools.custom_tools import CustomToolsTool
+from captain_claw.tools.anonymize import AnonymizeTool
 from captain_claw.tools.hosting import HostingTool
 from captain_claw.tools.public_link import PublicLinkTool
 from captain_claw.tools.linked_system import LinkedSystemTool
@@ -167,6 +168,7 @@ __all__ = [
     "CrewTool",
     "CustomToolsTool",
     "AskUserTool",
+    "AnonymizeTool",
     "HostingTool",
     "PublicLinkTool",
     "LinkedSystemTool",

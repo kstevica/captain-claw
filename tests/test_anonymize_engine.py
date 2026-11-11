@@ -316,6 +316,32 @@ class TestNamePack:
         later, _r, _s = _run("Marku i Petri šaljem ugovor.", state)  # the vault knows them now
         assert "Marku" not in later and "Petri" not in later
 
+    def test_the_model_reads_only_the_original_text(self):
+        seen = []
+
+        def model(text):
+            seen.append(text)
+            i = text.find("Marko")
+            return [(i, i + 5, "PER", 0.97)] if i >= 0 else []
+
+        d.set_ner_backend(model)
+        out, _r, _s = _run("⟦PERSON_7⟧ met Marko; Marko paid.")
+        assert out == "⟦PERSON_7⟧ met ⟦PERSON_1⟧; ⟦PERSON_1⟧ paid."
+        # Once, on the first round: never on the engine's own masked output
+        # (where it took the words around a token for names), and a token
+        # already in the text reaches it as spaces, not NULs.
+        assert seen == ["           met Marko; Marko paid."]
+
+    def test_company_hits_follow_the_kinds_asked(self):
+        def model(text):
+            i = text.find("Northwind")
+            return [(i, i + 9, "ORG", 0.97)] if i >= 0 else []
+
+        d.set_ner_backend(model)
+        assert [s.kind for s in d.detect("We signed with Northwind.")] == ["ORG"]
+        assert d.detect("We signed with Northwind.", kinds={"PERSON"}) == []
+        assert d.detect("We signed with Northwind.", ner=False) == []
+
     def test_a_broken_model_finds_nothing(self):
         def broken(text):
             raise RuntimeError("model crashed")

@@ -265,6 +265,8 @@ def test_every_path_like_schema_property_is_covered():
     assert hits["docx"] == {"path", "output_path", "to"}
     assert hits["xlsx"] == {"path", "output_path"}
     assert hits["pptx"] == {"path", "output_path"}
+    # The anonymize tool: its URL is checked as a public address, not a path.
+    assert hits["anonymize"] == {"path", "output_path"}
 
 
 async def test_an_allowlisted_tool_missing_from_the_map_is_refused(world, monkeypatch):

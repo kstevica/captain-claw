@@ -1,0 +1,1207 @@
+{
+ "_note": "Bare-name set for the name-recognition pack (docs/anonymization-plan.md, P4). people / orgs: must not survive (scored separately). keep: must survive (words, places, days, holidays that look like names). either: public names and brands, not scored. Matching is case-sensitive, whole words.",
+ "cases": [
+  {
+   "id": "hr-01",
+   "lang": "hr",
+   "text": "Jučer smo se našli s Markom i Petrom u kafiću.",
+   "people": [
+    "Markom",
+    "Petrom"
+   ],
+   "orgs": [],
+   "keep": [
+    "Jučer",
+    "kafiću"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-02",
+   "lang": "hr",
+   "text": "Ivana je poslala ponudu prije podne.",
+   "people": [
+    "Ivana"
+   ],
+   "orgs": [],
+   "keep": [
+    "ponudu",
+    "prije podne"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-03",
+   "lang": "hr",
+   "text": "Razgovarao sam s Anom Kovačević o projektu.",
+   "people": [
+    "Anom",
+    "Kovačević"
+   ],
+   "orgs": [],
+   "keep": [
+    "projektu"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-04",
+   "lang": "hr",
+   "text": "Dogovor s Tomislavom Babićem pada u petak.",
+   "people": [
+    "Tomislavom",
+    "Babićem"
+   ],
+   "orgs": [],
+   "keep": [
+    "Dogovor",
+    "petak"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-05",
+   "lang": "hr",
+   "text": "Hvala Luki na pomoći oko selidbe.",
+   "people": [
+    "Luki"
+   ],
+   "orgs": [],
+   "keep": [
+    "Hvala",
+    "selidbe"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-06",
+   "lang": "hr",
+   "text": "Kod Petre smo ostali do ponoći.",
+   "people": [
+    "Petre"
+   ],
+   "orgs": [],
+   "keep": [
+    "ponoći"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-07",
+   "lang": "hr",
+   "text": "Ugovor je potpisao Željko Šimunović, direktor nabave.",
+   "people": [
+    "Željko",
+    "Šimunović"
+   ],
+   "orgs": [],
+   "keep": [
+    "Ugovor",
+    "direktor nabave"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-08",
+   "lang": "hr",
+   "text": "Šaljem dokumente Goranu Vukoviću i Sanji.",
+   "people": [
+    "Goranu",
+    "Vukoviću",
+    "Sanji"
+   ],
+   "orgs": [],
+   "keep": [
+    "dokumente"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-09",
+   "lang": "hr",
+   "text": "Poruka za Matu: nazovi Antu prije sastanka.",
+   "people": [
+    "Matu",
+    "Antu"
+   ],
+   "orgs": [],
+   "keep": [
+    "Poruka",
+    "sastanka"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-10",
+   "lang": "hr",
+   "text": "Ante i Mate su braća, a Jure im je rođak.",
+   "people": [
+    "Ante",
+    "Mate",
+    "Jure"
+   ],
+   "orgs": [],
+   "keep": [
+    "braća",
+    "rođak"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-11",
+   "lang": "hr",
+   "text": "S Josipom Horvatom sam riješio račun.",
+   "people": [
+    "Josipom",
+    "Horvatom"
+   ],
+   "orgs": [],
+   "keep": [
+    "račun"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-12",
+   "lang": "hr",
+   "text": "Vidimo se kod Stipe u konobi.",
+   "people": [
+    "Stipe"
+   ],
+   "orgs": [],
+   "keep": [
+    "konobi"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-13",
+   "lang": "hr",
+   "text": "Dobio sam poruku od Nikoline oko rasporeda.",
+   "people": [
+    "Nikoline"
+   ],
+   "orgs": [],
+   "keep": [
+    "poruku",
+    "rasporeda"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-14",
+   "lang": "hr",
+   "text": "Ja i Hrvoje idemo na Sljeme.",
+   "people": [
+    "Hrvoje"
+   ],
+   "orgs": [],
+   "keep": [
+    "Sljeme"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-15",
+   "lang": "hr",
+   "text": "Sutra dolazi majstor Zvonko popraviti bojler.",
+   "people": [
+    "Zvonko"
+   ],
+   "orgs": [],
+   "keep": [
+    "majstor",
+    "bojler"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-16",
+   "lang": "hr",
+   "text": "Tea Božić i Lucija Marković rade u računovodstvu.",
+   "people": [
+    "Tea",
+    "Božić",
+    "Lucija",
+    "Marković"
+   ],
+   "orgs": [],
+   "keep": [
+    "računovodstvu"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-17",
+   "lang": "hr",
+   "text": "Pozdravi Ivanu i malu Emu.",
+   "people": [
+    "Ivanu",
+    "Emu"
+   ],
+   "orgs": [],
+   "keep": [
+    "Pozdravi"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-18",
+   "lang": "hr",
+   "text": "Novi direktor je Krešimir.",
+   "people": [
+    "Krešimir"
+   ],
+   "orgs": [],
+   "keep": [
+    "Novi direktor"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-19",
+   "lang": "hr",
+   "text": "Lovro je slomio ruku na Bundeku.",
+   "people": [
+    "Lovro"
+   ],
+   "orgs": [],
+   "keep": [
+    "Bundeku",
+    "ruku"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-20",
+   "lang": "hr",
+   "text": "Kristina Jurković Marić predaje izvještaj u ponedjeljak.",
+   "people": [
+    "Kristina",
+    "Jurković",
+    "Marić"
+   ],
+   "orgs": [],
+   "keep": [
+    "izvještaj",
+    "ponedjeljak"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-21",
+   "lang": "hr",
+   "text": "Sin Ivan i kći Lana žive u Osijeku.",
+   "people": [
+    "Ivan",
+    "Lana"
+   ],
+   "orgs": [],
+   "keep": [
+    "Osijeku"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-22",
+   "lang": "hr",
+   "text": "Dubravka je otišla u Dubravu po papire.",
+   "people": [
+    "Dubravka"
+   ],
+   "orgs": [],
+   "keep": [
+    "Dubravu",
+    "papire"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-23",
+   "lang": "hr",
+   "text": "Jadran Kovač je nazvao dvaput.",
+   "people": [
+    "Jadran",
+    "Kovač"
+   ],
+   "orgs": [],
+   "keep": [
+    "dvaput"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-24",
+   "lang": "hr",
+   "text": "Klijent John Smith stiže u ponedjeljak.",
+   "people": [
+    "John",
+    "Smith"
+   ],
+   "orgs": [],
+   "keep": [
+    "Klijent",
+    "ponedjeljak"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-25",
+   "lang": "hr",
+   "text": "Lisa Müller iz Beča poslala je nacrt.",
+   "people": [
+    "Lisa",
+    "Müller"
+   ],
+   "orgs": [],
+   "keep": [
+    "Beča",
+    "nacrt"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-26",
+   "lang": "hr",
+   "text": "Za Damira i Vedrana rezervirali smo stol.",
+   "people": [
+    "Damira",
+    "Vedrana"
+   ],
+   "orgs": [],
+   "keep": [
+    "stol"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-27",
+   "lang": "hr",
+   "text": "Nazvala je gospođa iz banke, ne znam joj ime, a onda i Mirjana.",
+   "people": [
+    "Mirjana"
+   ],
+   "orgs": [],
+   "keep": [
+    "gospođa",
+    "banke"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-28",
+   "lang": "hr",
+   "text": "Igor Barišić i njegova supruga Maja dolaze na večeru.",
+   "people": [
+    "Igor",
+    "Barišić",
+    "Maja"
+   ],
+   "orgs": [],
+   "keep": [
+    "supruga",
+    "večeru"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-30",
+   "lang": "hr",
+   "text": "Mirna je rekla da će doći, iako je more danas mirna površina.",
+   "people": [
+    "Mirna je"
+   ],
+   "orgs": [],
+   "keep": [
+    "mirna površina"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-31",
+   "lang": "hr",
+   "text": "Zora i Vjera dolaze sutra iz Splita.",
+   "people": [
+    "Zora",
+    "Vjera"
+   ],
+   "orgs": [],
+   "keep": [
+    "Splita",
+    "sutra"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-32",
+   "lang": "hr",
+   "text": "Nada Perić vodi računovodstvo.",
+   "people": [
+    "Nada",
+    "Perić"
+   ],
+   "orgs": [],
+   "keep": [
+    "računovodstvo"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-33",
+   "lang": "hr",
+   "text": "Ruža je zalila ruže u vrtu.",
+   "people": [
+    "Ruža"
+   ],
+   "orgs": [],
+   "keep": [
+    "ruže u vrtu"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-34",
+   "lang": "hr",
+   "text": "Vesna i Sunčica stižu vlakom.",
+   "people": [
+    "Vesna",
+    "Sunčica"
+   ],
+   "orgs": [],
+   "keep": [
+    "vlakom"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-40",
+   "lang": "hr",
+   "text": "Dražen Jurić iz Končara javlja da kasne s isporukom.",
+   "people": [
+    "Dražen",
+    "Jurić"
+   ],
+   "orgs": [
+    "Končara"
+   ],
+   "keep": [
+    "isporukom"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-41",
+   "lang": "hr",
+   "text": "Snježana Kos šalje ponudu u ime tvrtke Kos d.o.o.",
+   "people": [
+    "Snježana"
+   ],
+   "orgs": [
+    "Kos d.o.o."
+   ],
+   "keep": [
+    "ponudu"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-42",
+   "lang": "hr",
+   "text": "Naš klijent Mlinar d.d. kasni s plaćanjem.",
+   "people": [],
+   "orgs": [
+    "Mlinar d.d."
+   ],
+   "keep": [
+    "klijent",
+    "plaćanjem"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-43",
+   "lang": "hr",
+   "text": "Javio se Boris iz Medika Plus oko računa.",
+   "people": [
+    "Boris"
+   ],
+   "orgs": [
+    "Medika Plus"
+   ],
+   "keep": [
+    "računa"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-44",
+   "lang": "hr",
+   "text": "Ponudu smo poslali tvrtki Grafo-Print i obrtu Stolarija Babić.",
+   "people": [],
+   "orgs": [
+    "Grafo-Print",
+    "Stolarija Babić"
+   ],
+   "keep": [
+    "Ponudu"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-50",
+   "lang": "hr",
+   "text": "U zoru smo krenuli, s vjerom u bolje sutra.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "zoru",
+    "vjerom",
+    "bolje sutra"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-51",
+   "lang": "hr",
+   "text": "Nema nade da stignemo na vrijeme.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "nade",
+    "vrijeme"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-52",
+   "lang": "hr",
+   "text": "Prošetali smo Trgom bana Jelačića do katedrale.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Trgom bana Jelačića",
+    "katedrale"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-53",
+   "lang": "hr",
+   "text": "Na Martinje idemo u Samobor, a na Svetog Nikolu u Zagreb.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Martinje",
+    "Samobor",
+    "Svetog Nikolu",
+    "Zagreb"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-54",
+   "lang": "hr",
+   "text": "Letimo iz Zračne luke Franjo Tuđman u sedam sati.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Zračne luke Franjo Tuđman",
+    "sedam sati"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-55",
+   "lang": "hr",
+   "text": "Petrovo je u lipnju, a Ivanje odmah prije.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Petrovo",
+    "lipnju",
+    "Ivanje"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-56",
+   "lang": "hr",
+   "text": "Vozili smo se Ulicom grada Vukovara.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Ulicom grada Vukovara"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-57",
+   "lang": "hr",
+   "text": "Na Marjanu je bilo vjetrovito.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Marjanu",
+    "vjetrovito"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-58",
+   "lang": "hr",
+   "text": "Bura je puhala cijelu noć.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Bura",
+    "noć"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-59",
+   "lang": "hr",
+   "text": "U Zagrebu, Rijeci i Splitu pada kiša.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Zagrebu",
+    "Rijeci",
+    "Splitu",
+    "kiša"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-60",
+   "lang": "hr",
+   "text": "Vodimo se Zakonom o radu i Kolektivnim ugovorom.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Zakonom o radu",
+    "Kolektivnim ugovorom"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-61",
+   "lang": "hr",
+   "text": "Božić i Uskrs provodimo kod kuće.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Božić",
+    "Uskrs",
+    "kuće"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-62",
+   "lang": "hr",
+   "text": "Rijeka Sava teče kroz Zagreb.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Sava",
+    "Zagreb"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-63",
+   "lang": "hr",
+   "text": "Jadran je bio miran, a Neretva mutna.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Jadran je bio miran",
+    "Neretva"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-64",
+   "lang": "hr",
+   "text": "Sveti Duje je zaštitnik Splita.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Sveti Duje",
+    "Splita"
+   ],
+   "either": []
+  },
+  {
+   "id": "hr-65",
+   "lang": "hr",
+   "text": "Kupili smo Vegetu i Cedevitu u Konzumu.",
+   "people": [],
+   "orgs": [],
+   "keep": [],
+   "either": [
+    "Vegetu",
+    "Cedevitu",
+    "Konzumu"
+   ]
+  },
+  {
+   "id": "hr-66",
+   "lang": "hr",
+   "text": "Ministarstvo financija objavilo je novi pravilnik.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "novi pravilnik"
+   ],
+   "either": [
+    "Ministarstvo financija"
+   ]
+  },
+  {
+   "id": "hr-67",
+   "lang": "hr",
+   "text": "Čitali smo Krležu i Marulića za ispit.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "ispit"
+   ],
+   "either": [
+    "Krležu",
+    "Marulića"
+   ]
+  },
+  {
+   "id": "hr-68",
+   "lang": "hr",
+   "text": "Ponedjeljak i utorak su radni dani, srijeda nije.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Ponedjeljak",
+    "utorak",
+    "srijeda"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-01",
+   "lang": "en",
+   "text": "We met Marko and Petra yesterday.",
+   "people": [
+    "Marko",
+    "Petra"
+   ],
+   "orgs": [],
+   "keep": [
+    "We met",
+    "yesterday"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-02",
+   "lang": "en",
+   "text": "Sarah forwarded the invoice to Priya and Tom.",
+   "people": [
+    "Sarah",
+    "Priya",
+    "Tom"
+   ],
+   "orgs": [],
+   "keep": [
+    "invoice"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-03",
+   "lang": "en",
+   "text": "Can you ask Liam whether Noah signed?",
+   "people": [
+    "Liam",
+    "Noah"
+   ],
+   "orgs": [],
+   "keep": [
+    "Can you ask",
+    "signed"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-04",
+   "lang": "en",
+   "text": "Ask Sophie Turner-Hall about the lease.",
+   "people": [
+    "Sophie",
+    "Turner-Hall"
+   ],
+   "orgs": [],
+   "keep": [
+    "lease"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-05",
+   "lang": "en",
+   "text": "Kevin's laptop is broken again.",
+   "people": [
+    "Kevin"
+   ],
+   "orgs": [],
+   "keep": [
+    "laptop"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-06",
+   "lang": "en",
+   "text": "Maria Garcia López emailed twice this week.",
+   "people": [
+    "Maria",
+    "Garcia",
+    "López"
+   ],
+   "orgs": [],
+   "keep": [
+    "emailed twice"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-07",
+   "lang": "en",
+   "text": "Lunch with Aiko Tanaka and Wei Zhang is moved.",
+   "people": [
+    "Aiko",
+    "Tanaka",
+    "Wei",
+    "Zhang"
+   ],
+   "orgs": [],
+   "keep": [
+    "Lunch",
+    "moved"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-08",
+   "lang": "en",
+   "text": "Please cc Olumide and Fatima on the reply.",
+   "people": [
+    "Olumide",
+    "Fatima"
+   ],
+   "orgs": [],
+   "keep": [
+    "reply"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-09",
+   "lang": "en",
+   "text": "I spoke with Dr. Okafor this morning.",
+   "people": [
+    "Okafor"
+   ],
+   "orgs": [],
+   "keep": [
+    "this morning"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-10",
+   "lang": "en",
+   "text": "The Smiths are coming over and Mr Smith will drive.",
+   "people": [
+    "Smith will"
+   ],
+   "orgs": [],
+   "keep": [
+    "coming over"
+   ],
+   "either": [
+    "Smiths"
+   ]
+  },
+  {
+   "id": "en-11",
+   "lang": "en",
+   "text": "Our accountant, Brian O'Neill, filed the return late.",
+   "people": [
+    "Brian",
+    "O'Neill"
+   ],
+   "orgs": [],
+   "keep": [
+    "accountant",
+    "return"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-12",
+   "lang": "en",
+   "text": "Daniel and his wife Chloe moved to Leeds.",
+   "people": [
+    "Daniel",
+    "Chloe"
+   ],
+   "orgs": [],
+   "keep": [
+    "Leeds"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-20",
+   "lang": "en",
+   "text": "Tell Will the report is late; we will send it Monday.",
+   "people": [
+    "Will the"
+   ],
+   "orgs": [],
+   "keep": [
+    "we will send",
+    "Monday"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-21",
+   "lang": "en",
+   "text": "Mark the date: April 3. Mark Jensen will present.",
+   "people": [
+    "Jensen"
+   ],
+   "orgs": [],
+   "keep": [
+    "Mark the date",
+    "April 3"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-22",
+   "lang": "en",
+   "text": "Rose said the roses arrived.",
+   "people": [
+    "Rose said"
+   ],
+   "orgs": [],
+   "keep": [
+    "roses"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-23",
+   "lang": "en",
+   "text": "Grant approved the grant application.",
+   "people": [
+    "Grant approved"
+   ],
+   "orgs": [],
+   "keep": [
+    "grant application"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-24",
+   "lang": "en",
+   "text": "Hope you're well. Hope Daniels joins on Friday.",
+   "people": [
+    "Daniels"
+   ],
+   "orgs": [],
+   "keep": [
+    "Hope you're well",
+    "Friday"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-25",
+   "lang": "en",
+   "text": "Victoria Station was busy, so Victoria took a cab.",
+   "people": [
+    "Victoria took"
+   ],
+   "orgs": [],
+   "keep": [
+    "Victoria Station"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-26",
+   "lang": "en",
+   "text": "Bill sent the bill yesterday.",
+   "people": [
+    "Bill sent"
+   ],
+   "orgs": [],
+   "keep": [
+    "the bill"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-27",
+   "lang": "en",
+   "text": "Summer Lee starts in summer.",
+   "people": [
+    "Summer Lee"
+   ],
+   "orgs": [],
+   "keep": [
+    "in summer"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-30",
+   "lang": "en",
+   "text": "Our contact at Brightside Consulting is Emily.",
+   "people": [
+    "Emily"
+   ],
+   "orgs": [
+    "Brightside"
+   ],
+   "keep": [
+    "contact"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-31",
+   "lang": "en",
+   "text": "Payment from Hendricks & Sons Ltd arrived.",
+   "people": [],
+   "orgs": [
+    "Hendricks"
+   ],
+   "keep": [
+    "Payment",
+    "arrived"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-32",
+   "lang": "en",
+   "text": "We signed with Northwind Logistics last week.",
+   "people": [],
+   "orgs": [
+    "Northwind"
+   ],
+   "keep": [
+    "signed",
+    "last week"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-40",
+   "lang": "en",
+   "text": "We flew from Heathrow to Washington and stayed near Lincoln Center.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Heathrow",
+    "Washington",
+    "Lincoln Center"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-41",
+   "lang": "en",
+   "text": "Christmas, Easter and Thanksgiving are holidays.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Christmas",
+    "Easter",
+    "Thanksgiving"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-42",
+   "lang": "en",
+   "text": "Monday, Tuesday and May are busy months and days.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Monday",
+    "Tuesday",
+    "May"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-43",
+   "lang": "en",
+   "text": "Lake Victoria and Mount Kenya are on the list.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Lake Victoria",
+    "Mount Kenya"
+   ],
+   "either": []
+  },
+  {
+   "id": "en-44",
+   "lang": "en",
+   "text": "Amazon delivered the parcel from Berlin.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "Berlin",
+    "parcel"
+   ],
+   "either": [
+    "Amazon"
+   ]
+  },
+  {
+   "id": "en-45",
+   "lang": "en",
+   "text": "We use Microsoft Teams and Google Drive at work.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "at work"
+   ],
+   "either": [
+    "Microsoft",
+    "Google"
+   ]
+  },
+  {
+   "id": "en-46",
+   "lang": "en",
+   "text": "The Washington Post reported it first.",
+   "people": [],
+   "orgs": [],
+   "keep": [
+    "reported"
+   ],
+   "either": [
+    "Washington Post"
+   ]
+  }
+ ]
+}

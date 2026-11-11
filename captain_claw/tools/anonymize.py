@@ -36,6 +36,25 @@ MAX_FILE_BYTES = 25 * 1024 * 1024
 
 
 
+def _member_auth() -> tuple[dict[str, str], dict[str, str]]:
+    """(headers, params) a shared agent's member call adds — ``({}, {})``
+    for the owner. Raises when a member's turn has no grant."""
+    from captain_claw import speaker
+
+    return speaker.grant_headers(), speaker.grant_params()
+
+
+def _shown(path: Path) -> str:
+    """A path as the person knows it (``vfs:…`` inside their VFS)."""
+    try:
+        from captain_claw.vfs import to_display
+
+        shown = to_display(path)
+        return str(shown) if shown else str(path)
+    except Exception:  # noqa: BLE001
+        return str(path)
+
+
 def _session_folder(kwargs: dict[str, Any]) -> str:
     sid = re.sub(r"[^A-Za-z0-9_\-]+", "-", str(kwargs.get("_session_id") or "")).strip("-")
     return sid[:48] or "shared"
@@ -156,6 +175,13 @@ class AnonymizeTool(Tool):
             return ToolResult(success=False, error=(
                 "Anonymization runs in Flight Deck: this agent wasn't started by a Flight Deck, so it can't "
                 "anonymize anything. Don't paste the data elsewhere instead — tell the user."))
+        # A shared agent's member: every call carries the turn's grant, so
+        # Flight Deck files their data in THEIR vaults (never the owner's).
+        try:
+            _member_auth()
+        except Exception:  # noqa: BLE001 — SpeakerGrantMissing / identity lost
+            return ToolResult(success=False, error=(
+                "Anonymization is only available while answering this member's own message."))
         try:
             if action == "anonymize":
                 return await self._anonymize(base, headers, kwargs)
@@ -195,7 +221,22 @@ class AnonymizeTool(Tool):
 
         if not re.match(r"^https?://", url, re.I):
             return "url must start with http:// or https://"
-        from captain_claw import deck_confine
+        from captain_claw import deck_confine, speaker
+
+        if speaker.current() is not None:
+            # A member's fetch: public addresses only, checked at every hop,
+            # and a capped body — web_fetch's own member path.
+            from captain_claw.tools.web_fetch import _member_fetch
+
+            try:
+                text, status, _truncated = await _member_fetch(url)
+            except Exception as exc:  # noqa: BLE001 — refused address, network, HTTP error
+                return f"Couldn't fetch that page on a shared agent ({type(exc).__name__})."
+            if status >= 400:
+                return f"The page answered {status}."
+            if text.lstrip()[:1] == "<":
+                return _extract_readable_text(text, url), "md"
+            return text, "text"
 
         async with _make_http_client() as client:
             resp = await client.get(url)
@@ -262,7 +303,7 @@ class AnonymizeTool(Tool):
             lines.append("Note: this text came from your context, so your model had already seen the original. "
                          "Next time pass `path` or `url` and the tool reads it without you seeing it.")
         if saved:
-            lines.append(f"Saved: {saved}")
+            lines.append(f"Saved: {_shown(Path(saved))}")
         if len(output) <= INLINE_MAX:
             lines += ["", "--- anonymized ---", output]
         else:
@@ -298,7 +339,7 @@ class AnonymizeTool(Tool):
             return ToolResult(success=False, error=werr)
         self._write_bytes(target, base64.b64decode(data.get("data") or ""), kwargs)
         preview = str(data.get("preview") or "")
-        lines = [self._headline(data), *self._entity_lines(data), f"Saved: {target}"]
+        lines = [self._headline(data), *self._entity_lines(data), f"Saved: {_shown(target)}"]
         lines += [f"Note: {w}" for w in data.get("warnings") or []]
         if preview:
             shown = preview[:INLINE_MAX] if len(preview) <= INLINE_MAX else preview[:PREVIEW_CHARS]
@@ -346,7 +387,7 @@ class AnonymizeTool(Tool):
         unknown = data.get("unknown") or []
         lines = [
             f"DONE — put back {data.get('restored', 0)} value(s) from vault \"{(data.get('vault') or {}).get('name', vault)}\". "
-            f"The restored file is for the user: {target}",
+            f"The restored file is for the user: {_shown(target)}",
             "Its content is NOT shown to you, and don't read it back (that would send the real values to your "
             "model). Give the user the path, or share the file if they ask.",
         ]
@@ -356,8 +397,9 @@ class AnonymizeTool(Tool):
         return ToolResult(success=True, content="\n".join(lines))
 
     async def _vaults(self, base: str, headers: dict) -> ToolResult:
+        extra, params = _member_auth()
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.get(f"{base}/fd/anonymize/agent/vaults", headers=headers)
+            resp = await client.get(f"{base}/fd/anonymize/agent/vaults", headers={**headers, **extra}, params=params)
         if resp.status_code != 200:
             return ToolResult(success=False, error=self._detail(resp))
         vaults = (resp.json() or {}).get("vaults") or []
@@ -420,9 +462,25 @@ class AnonymizeTool(Tool):
                 root = kwargs.get("_runtime_base_path") or Path.cwd()
                 p = Path(root) / p
             return p, ""
-        saved = kwargs.get("_saved_base_path")
-        root = Path(saved) if saved else Path(kwargs.get("_runtime_base_path") or Path.cwd()) / "saved"
-        target = root / folder / _session_folder(kwargs) / name
+        from captain_claw import speaker
+
+        if speaker.current() is not None:
+            # A member's results go to THEIR own folder, not the agent's
+            # saved/ — a commons every member reads (a restored file holds
+            # real values).
+            from captain_claw.vfs import default_project, resolve_vfs_path
+
+            try:
+                resolved = resolve_vfs_path(f"vfs:{default_project()}/anonymize/{folder}/{name}")
+            except PermissionError:
+                resolved = None
+            if resolved is None:
+                return Path(), speaker.FILES_UNAVAILABLE_MESSAGE
+            target = Path(resolved)
+        else:
+            saved = kwargs.get("_saved_base_path")
+            root = Path(saved) if saved else Path(kwargs.get("_runtime_base_path") or Path.cwd()) / "saved"
+            target = root / folder / _session_folder(kwargs) / name
         n = 2
         while target.exists():
             target = target.with_name(f"{Path(name).stem}-{n}{Path(name).suffix}")
@@ -456,8 +514,9 @@ class AnonymizeTool(Tool):
         return f"Flight Deck answered {resp.status_code}"
 
     async def _post(self, base: str, headers: dict, path: str, body: dict) -> tuple[dict, str]:
+        extra, params = _member_auth()
         async with httpx.AsyncClient(timeout=self.timeout_seconds - 10) as client:
-            resp = await client.post(f"{base}{path}", json=body, headers=headers)
+            resp = await client.post(f"{base}{path}", json=body, headers={**headers, **extra}, params=params)
         if resp.status_code == 200:
             return resp.json(), ""
         if resp.status_code == 404 and path.endswith("/run"):

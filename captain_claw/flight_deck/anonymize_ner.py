@@ -3,8 +3,14 @@
 Code finds names by their context (a label, a greeting, a sign-off, a
 title); a bare name in a sentence ("we met Marko") needs a model. This pack
 runs a token-classification model on this machine — nothing leaves it — and
-adds the people and companies it finds (score ≥ 0.80; places and the rest are
-left) to every run, alongside the code.
+adds the people and companies it finds (score ≥ ``detectors.NER_MIN_SCORE``;
+places and the rest are left) to every run, alongside the code.
+
+Measured on ``anonymize/name_cases.json`` with ``scripts/measure_name_models.py``
+(2026-11-12, see docs/anonymization-plan.md): BERTić finds about nine in ten
+bare names (Croatian and English) and breaks almost nothing, so it is the
+default. The multilingual XLM-R model labels days, holidays and whole phrases
+as companies, so only its people are taken.
 
 It is optional and an admin's choice (Admin console → Settings →
 Anonymization): it needs ``transformers`` and ``torch`` installed (not in the
@@ -31,10 +37,15 @@ log = get_logger(__name__)
 
 SETTING_KEY = "anonymize:ner"
 MODELS: dict[str, str] = {
-    "Davlan/xlm-roberta-base-wikiann-ner": "Many languages (176, Croatian and English among them) · about 1.1 GB",
-    "classla/bcms-bertic-ner": "Croatian, Bosnian, Serbian, Montenegrin · about 440 MB",
+    "classla/bcms-bertic-ner": "Recommended · Croatian, Bosnian, Serbian, Montenegrin, and English names too · about 440 MB",
+    "Davlan/xlm-roberta-base-wikiann-ner": "Other languages · people only, finds fewer · about 1.1 GB",
 }
-DEFAULT_MODEL = "Davlan/xlm-roberta-base-wikiann-ner"
+DEFAULT_MODEL = "classla/bcms-bertic-ner"
+# Which of a model's labels are taken (its others are left).
+MODEL_LABELS: dict[str, frozenset[str]] = {
+    "classla/bcms-bertic-ner": frozenset({"PER", "ORG"}),
+    "Davlan/xlm-roberta-base-wikiann-ner": frozenset({"PER"}),
+}
 ALLOW_PATTERNS = ["*.json", "*.safetensors", "*.txt", "*.model", "tokenizer*", "sentencepiece*"]
 CHUNK_CHARS = 1500
 
@@ -107,7 +118,9 @@ def _chunks(text: str) -> list[tuple[int, str]]:
     return out
 
 
-def _make_backend(pipe: Any):
+def _make_backend(pipe: Any, model: str = DEFAULT_MODEL):
+    labels = MODEL_LABELS.get(model, frozenset({"PER"}))
+
     def backend(text: str) -> list[tuple[int, int, str, float]]:
         found: list[tuple[int, int, str, float]] = []
         with _lock:  # one model, many engine threads
@@ -119,6 +132,8 @@ def _make_backend(pipe: Any):
                     if start is None or end is None:
                         continue
                     label = re.sub(r"^[BI]-", "", str(ent.get("entity_group") or ent.get("entity") or ""))
+                    if label.upper() not in labels:
+                        continue
                     found.append((offset + int(start), offset + int(end), label, float(ent.get("score") or 0)))
         return found
     return backend
@@ -150,7 +165,7 @@ async def _bring_up(model: str, *, download: bool) -> None:
             raise RuntimeError("the model isn't downloaded")
         _state["status"] = "loading"
         pipe = await asyncio.to_thread(_load_pipeline, model)
-        detectors.set_ner_backend(_make_backend(pipe))
+        detectors.set_ner_backend(_make_backend(pipe, model))
         _state["status"] = "ready"
         log.info("Anonymization name-recognition pack ready", model=model)
     except Exception as exc:  # noqa: BLE001 — shown to the admin; code keeps working

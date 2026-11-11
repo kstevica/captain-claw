@@ -610,7 +610,11 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         masks: list[list[tuple[int, int]]] = []
         for i, text in enumerate(texts):
             masked, token_ranges = _mask_tokens(text)
-            spans = d.detect(masked, options.kinds, opt_in=options.generalize & set(d.OPT_IN_KINDS)) \
+            # The name model reads the original text only: on the engine's own
+            # masked output it mistakes the words around a token for names,
+            # and what it found in round 1 is known by then anyway.
+            spans = d.detect(masked, options.kinds, opt_in=options.generalize & set(d.OPT_IN_KINDS),
+                             ner=round_no == 1) \
                 if options.deterministic else []
             if round_no == 1 and options.deterministic:
                 h = d.hint_span(masked, hints[i])
@@ -686,7 +690,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
         finder = _known_spans_finder(state, options)
         for text in texts:
             masked, token_ranges = _mask_tokens(text)
-            spans = (d.detect(masked, options.kinds, opt_in=options.generalize & set(d.OPT_IN_KINDS))
+            spans = (d.detect(masked, options.kinds, opt_in=options.generalize & set(d.OPT_IN_KINDS), ner=False)
                      if options.deterministic else []) \
                 + _extra_spans(masked, options.extra) + [sp for sp, _e in finder(masked)]
             for sp in _select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep)):
