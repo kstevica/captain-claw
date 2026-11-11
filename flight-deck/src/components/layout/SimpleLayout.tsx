@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import {
   ChevronLeft,
   ChevronRight,
+  EyeOff,
   Wrench,
   LayoutDashboard,
   Search,
@@ -79,6 +80,8 @@ import { CrewBoard } from '../crew/CrewBoard'
 import { useCrewAllowed, useCrewStore } from '../../stores/crewStore'
 import { useCustomToolsOn, useCustomToolsStore } from '../../stores/customToolsStore'
 import { CustomToolsPage } from '../customTools/CustomToolsPage'
+import { useAnonymizeStore } from '../../stores/anonymizeStore'
+import { AnonymizePage } from '../anonymize/AnonymizePage'
 import { useCaptainSwarmStore, useCanSwarm } from '../../stores/captainSwarmStore'
 import { CaptainSwarmPage } from '../../pages/CaptainSwarmPage'
 import { SharedFolders } from '../vfs/SharedFolders'
@@ -429,6 +432,8 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   // Custom tools: the person's own programs and the ones offered to them.
   const toolsOpen = useCustomToolsStore((s) => s.open)
   const closeTools = useCustomToolsStore((s) => s.close)
+  const anonOpen = useAnonymizeStore((s) => s.open)
+  const closeAnon = useAnonymizeStore((s) => s.close)
   const refreshCustomTools = useCustomToolsStore((s) => s.refreshStatus)
   useEffect(() => { refreshCustomTools() }, [refreshCustomTools])
   // Captain Swarm: many attempts at one task, documents and research, each checked by Captain.
@@ -913,9 +918,9 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
   }
   // What a phone's Back closes before it leaves a chat (or Flight Deck).
   const phoneOverlayOpen = libraryOpen || dataOpen || foldersOpen || activityOpen || taskboardOpen || crewOpen || swarmOpen || toolsOpen
-    || !!filesData
+    || anonOpen || !!filesData
   const closePhoneOverlays = () => {
-    closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null)
+    closeLibrary(); closeData(); closeActivity(); closeTaskboard(); setFoldersOpen(false); setFilesDataId(null); closeAnon()
   }
   // Drive and OneDrive folders want the user's Google or Microsoft account:
   // Connections, on that tab.
@@ -1156,6 +1161,11 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       {toolsOpen && (
         <KioskWideDialog label="Custom tools" phone={isMobile} onClose={closeTools} roomy>
           <CustomToolsPage phone={isMobile} onClose={closeTools} />
+        </KioskWideDialog>
+      )}
+      {anonOpen && (
+        <KioskWideDialog label="Anonymize" phone={isMobile} onClose={closeAnon} widest>
+          <AnonymizePage phone={isMobile} onClose={closeAnon} />
         </KioskWideDialog>
       )}
       {swarmOpen && canSwarm && (
@@ -1416,6 +1426,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
   const openTools = useCustomToolsStore((s) => s.openTools)
   const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
   const canSwarm = useCanSwarm()
+  const openAnonymize = useAnonymizeStore((s) => s.openAnonymize)
 
   // Closed without choosing: the focus goes back to the Settings button.
   const [opener] = useState(() => document.activeElement as HTMLElement | null)
@@ -1445,6 +1456,7 @@ function KioskSettingsDialog({ phone, onAdmin, onClose, onRefresh, onConnections
         { icon: LibraryBig, label: 'File library', hint: 'Every file they made, easy to find', onSelect: onLibrary, tone: 'violet' },
         { icon: Database, label: 'Data library', hint: 'Every table they keep, easy to read', onSelect: onData, tone: 'cyan' },
         { icon: Folders, label: 'Shared folders', hint: 'The folders they work in together', onSelect: onFolders, tone: 'sky' },
+        { icon: EyeOff, label: 'Anonymize', hint: 'Names and numbers out of a file; the real ones kept for you', onSelect: () => { onClose(); openAnonymize() }, tone: 'fuchsia' },
       ],
     },
     {
@@ -1678,7 +1690,9 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
   const openCrew = useCrewStore((s) => s.openCrew)
   const openSwarm = useCaptainSwarmStore((s) => s.openSwarm)
   const canSwarm = useCanSwarm()
-  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders, crewAllowed, canSwarm].filter(Boolean).length
+  const openAnonymize = useAnonymizeStore((s) => s.openAnonymize)
+  // Anonymize is always there: one more tile.
+  const n = [onTaskboard, onScheduled, onLibrary, onData, onFolders, crewAllowed, canSwarm, true].filter(Boolean).length
   return (
     <div className={`grid gap-0.5 border-t border-zinc-800 p-2 pb-0 ${TILE_COLS[n] ?? 'grid-cols-1'}`}>
       {onTaskboard && (
@@ -1736,6 +1750,10 @@ function ToolTiles({ onTaskboard, taskboardCount, onScheduled, scheduledCount, s
           <span className="max-w-full truncate">Folders</span>
         </button>
       )}
+      <button onClick={() => openAnonymize()} className={toolTile} title="Anonymize — names and numbers out of a text or a file; the real ones kept for you">
+        <EyeOff className="h-[18px] w-[18px] text-fuchsia-600 dark:text-fuchsia-400" />
+        <span className="max-w-full truncate">Anonymize</span>
+      </button>
     </div>
   )
 }

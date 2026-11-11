@@ -7,8 +7,8 @@ tokens that mean nothing outside Captain. The real values are kept in an
 encrypted **vault** in Flight Deck, so the person (never the model) can put
 them back later.
 
-Status: **P0 built** (PR #511) · **P1 built** (branch `feat/anonymize-p1`, stacked on P0); P2 (pages and
-office formats) next.
+Status: **P0** PR #511 · **P1** PR #512 (stacked) · **P2 built** (branch `feat/anonymize-p2`, stacked on
+P1); P3 (privacy gate) next.
 
 ## Principles
 
@@ -164,9 +164,33 @@ left for later.
   drops author, comments and tracked changes); URLs (fetched inside the tool).
 * The output file name is tokenized too (`Ivan_Horvat_CV.pdf` →
   `⟦PERSON_1⟧_CV.anonymized.md`, spelled filesystem-safe).
-* P2: write docx / xlsx / pptx back in their own format, strip their metadata,
-  true PDF redaction, image OCR (with a warning that the picture itself is not
-  changed).
+* **P2 — office files in place** (`anonymize/office.py`). A `.docx`, `.xlsx` or
+  `.pptx` comes back as the same kind of file: the OOXML parts are edited inside
+  the zip (lxml, entities off, no network), so formatting, pictures and charts
+  stay byte for byte (re-saving with python-docx / openpyxl would drop charts
+  and images). The engine reports each replacement in the original text's
+  positions (`RunResult.edits`), and the token goes into the run where the span
+  starts — a name split across a bold and a plain run keeps the bold.
+  * Word: body, tables, headers, footers, footnotes, endnotes, comments, text
+    boxes, **tracked deletions** (`w:delText`), field codes (`HYPERLINK
+    "mailto:…"`), external link targets; every `author` / `initials` blanked.
+  * Excel: shared and inline strings, cached formula results, formulas, long
+    numbers (an OIB stored as a number becomes a text cell), comments,
+    threaded comments, sheet names (formulas follow the rename), text boxes,
+    chart labels; column headers work as hints, as in a CSV.
+  * PowerPoint: slides, notes, layouts, masters, comments, charts, links.
+  * Every kind: author and "last modified by" emptied; title, subject,
+    keywords, company … anonymized or emptied.
+  * Word and PowerPoint text is read **per part as one text** (paragraphs by a
+    newline, cells of one table row by a tab), so "Lijep pozdrav," reaches the
+    name on the next line and "Ime:" the name in the next cell; edits are split
+    back per paragraph.
+  * Pictures and embedded files are left as they are — the result says how
+    many. PDF and web pages still come back as markdown (true PDF redaction
+    would need PyMuPDF, which isn't a dependency).
+  * Routes `/fd/anonymize/file` and `/file/restore` (and `/agent/…`): the file
+    as base64 in, the same kind of file out, plus a text preview. The agent
+    tool sends a `path` file this way.
 
 Result (both lanes):
 
@@ -189,8 +213,17 @@ Entities never carry original values toward the model.
   records (owner, or the member on a member's turn); person routes (`/run`,
   `/restore`, `/vaults`, `/vaults/{id}` with originals, rename / expiry,
   delete, `/vaults/{id}/events`).
-* **Kiosk page** (P2) — paste or drop a file → anonymized copy; vault browser;
-  restore.
+* **Anonymize page** (P2) — in the kiosk (Settings → What they keep →
+  Anonymize) and the full layout (Files → Anonymize): paste text or drop a
+  file, choose the vault (or keep nothing) and who looks (code, code + trusted
+  model, model only); the result shows tokens as chips, the warnings, and a
+  download. "Put back" restores a text or a file from a vault. "Vaults" lists
+  them; one opens in a side sheet with its real values (only on request, and
+  logged), rename, an end date, delete, and its history.
+* **Admin console → Settings → Anonymization** (P2) — the trusted model:
+  provider, model, address, key (never shown again), the attestation for a
+  non-local model, refuse / code-only on failure, on/off, and "Check on
+  samples" (the built-in cases, code alone vs code + model).
 
 ## Leak surfaces to keep closed
 
@@ -228,8 +261,10 @@ Known limits of P0 (the deterministic lane):
   the LLM lane should resolve both.
 * Restore puts back the canonical (nominative) form, so an inflected sentence
   can come back grammatically off.
-* Office / PDF files come back as markdown.
-* Not yet: the kiosk page (P2), member turns of shared agents (the routes
+* PDF and web pages come back as markdown; pictures inside office files are
+  not changed (the result says how many there are).
+* In a spreadsheet, a first name and a surname in two cells get two tokens.
+* Not yet: member turns of shared agents (the routes
   already file a member's work in the member's vault; the tool isn't on the
   member allowlist yet), Iskra beings without fleet access (same as
   `public_link`).
@@ -244,9 +279,10 @@ Known limits of P0 (the deterministic lane):
   prompt, `lane: deterministic | llm | both`, fail-closed handling, admin check
   and live test on the shared cases. No page yet — the admin card for the
   trusted model comes with P2's pages.
-* **P2** — formats kept (docx/xlsx/pptx writers, metadata strip, PDF
-  redaction), file-name and metadata leaks, kiosk page, admin console card for
-  the trusted model (with its sample-case check).
+* **P2** (built) — office files in place with metadata cleaned, file routes,
+  the tool sending files whole, the Anonymize page (kiosk + full layout), the
+  admin card for the trusted model with its sample check. PDF redaction and
+  OCR of pictures are not built.
 * **P3** — privacy gate: per source (an inbox, a data table, a VFS folder)
   "always anonymize before an agent on an untrusted model sees it"; restore on
   the way out to the person (mail draft, delivered file).

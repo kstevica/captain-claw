@@ -145,19 +145,95 @@ def _store_error(exc: Exception) -> HTTPException:
 
 # ── the work, shared by both route sets ─────────────────────────────
 
+MAX_FILE_BYTES = 25 * 1024 * 1024
+_TEXT_EXT = {".txt": "text", ".text": "text", ".log": "text", ".md": "md", ".markdown": "md", ".csv": "csv",
+             ".tsv": "tsv", ".json": "json", ".jsonl": "jsonl", ".ndjson": "jsonl", ".xml": "text",
+             ".yaml": "text", ".yml": "text", ".eml": "text", ".ini": "text", ".srt": "text", ".vtt": "text"}
+FILE_KINDS = sorted({*_TEXT_EXT, ".html", ".htm", ".pdf", ".docx", ".xlsx", ".pptx"})
 
-async def run_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str, Any]:
-    content, fmt = _content(data)
-    options = _options(data)
-    mode = str(data.get("mode") or "reversible")
-    if mode not in ("reversible", "one_way"):
-        raise HTTPException(status_code=422, detail="mode is 'reversible' or 'one_way'")
+
+@dataclasses.dataclass
+class _Doc:
+    """What gets anonymized: its segments, and how to write it back from a
+    run's outputs and edits (text, or a file's bytes)."""
+    format: str
+    segments: list[engine.Segment]
+    rebuild: Any  # (outputs, edits) -> str | bytes
+    warnings: list[str] = dataclasses.field(default_factory=list)
+    out_ext: str = ""
+
+
+def _text_doc(content: str, fmt: str, *, out_ext: str = "", warnings: list[str] | None = None) -> _Doc:
     prepared = _prepare(content, fmt)
-    stem = str(data.get("filename") or "")[:255]
-    source = str(data.get("source") or "")
-    store = av.store()
-    vault_row: dict[str, Any] | None = None
-    model = await trusted.usable(get_db())
+    return _Doc(prepared.format, prepared.segments, lambda outs, _eds: prepared.rebuild(outs),
+                list(warnings or []), out_ext)
+
+
+def _file_input(data: dict[str, Any]) -> tuple[str, bytes]:
+    import base64
+    import binascii
+
+    filename = str(data.get("filename") or "").strip().replace("\\", "/").rsplit("/", 1)[-1][:255]
+    raw = data.get("data")
+    if not filename or not isinstance(raw, str):
+        raise HTTPException(status_code=422, detail="filename and data (the file, base64) are required")
+    if len(raw) > MAX_FILE_BYTES * 4 // 3 + 16:
+        raise HTTPException(status_code=413, detail=f"the file is over {MAX_FILE_BYTES // (1024 * 1024)} MB")
+    try:
+        blob = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=422, detail="data isn't valid base64") from None
+    return filename, blob
+
+
+async def _file_doc(filename: str, blob: bytes, *, scrub: bool) -> _Doc:
+    from pathlib import Path
+
+    from captain_claw.anonymize import office
+
+    ext = Path(filename).suffix.lower()
+    kind = office.kind_of(filename)
+    if kind:
+        try:
+            prep = await asyncio.to_thread(office.prepare, blob, kind, scrub=scrub)
+        except office.OfficeError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from None
+        if len(prep.segments) > MAX_SEGMENTS:
+            raise HTTPException(status_code=413, detail=f"over {MAX_SEGMENTS:,} pieces of text — split it")
+        return _Doc(kind, prep.segments, lambda _outs, eds: prep.rebuild(eds), prep.warnings, ext)
+    if ext == ".pdf":
+        text = await asyncio.to_thread(_pdf_text, blob)
+        return _text_doc(text, "md", out_ext=".md", warnings=[
+            "A PDF comes back as markdown text — its layout and pictures aren't kept (real PDF redaction isn't built)."])
+    if ext in (".html", ".htm"):
+        from captain_claw.tools.web_fetch import _extract_readable_text
+
+        return _text_doc(_extract_readable_text(formats.decode_text(blob)), "md", out_ext=".md",
+                         warnings=["A web page comes back as markdown text."])
+    if ext in _TEXT_EXT:
+        if b"\x00" in blob[:4096]:
+            raise HTTPException(status_code=422, detail=f"{filename} isn't a text file")
+        return _text_doc(formats.decode_text(blob), _TEXT_EXT[ext], out_ext=ext)
+    raise HTTPException(status_code=415, detail=(
+        f"Can't anonymize {ext or 'files without an extension'} — text, csv, json, docx, xlsx, pptx, pdf or html."))
+
+
+def _pdf_text(blob: bytes) -> str:
+    import tempfile
+    from pathlib import Path
+
+    from captain_claw.tools import document_extract as dx
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "document.pdf"
+        path.write_bytes(blob)
+        content, err = dx._extract_pdf_markdown(path, 5000)
+    if err or content is None:
+        raise HTTPException(status_code=422, detail=f"Can't read the PDF: {err or 'no text in it'}")
+    return content
+
+
+def _lane(data: dict[str, Any], model: trusted.TrustedModel | None) -> str:
     lane = str(data.get("lane") or "").strip().lower() or ("both" if model else "deterministic")
     if lane not in LANES:
         raise HTTPException(status_code=422, detail="lane is 'deterministic', 'llm' or 'both'")
@@ -165,9 +241,24 @@ async def run_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str,
         raise HTTPException(status_code=409, detail=(
             "No trusted model is set up for anonymization, so only the deterministic lane can run. "
             "An admin sets one (a local model, or a cloud one they attest) — or pass lane='deterministic'."))
+    return lane
+
+
+async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str, source: str,
+                     stem: str) -> dict[str, Any]:
+    """Run *doc* through the lanes and the engine into the person's vault (or
+    none, one_way). Returns the response fields every route shares, plus
+    ``_result`` (the RunResult) for the caller to write the output."""
+    options = _options(data)
+    mode = str(data.get("mode") or "reversible")
+    if mode not in ("reversible", "one_way"):
+        raise HTTPException(status_code=422, detail="mode is 'reversible' or 'one_way'")
+    store = av.store()
+    vault_row: dict[str, Any] | None = None
+    model = await trusted.usable(get_db())
+    lane = _lane(data, model)
     lanes: dict[str, Any] = {"deterministic": "off" if lane == "llm" else "ok",
                              "llm": "off" if lane == "deterministic" else "ok"}
-
     try:
         if mode == "reversible":
             vault_row = await store.find_or_create(person, str(data.get("vault") or "default"), created_by=actor)
@@ -175,7 +266,7 @@ async def run_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str,
             assert model is not None
             started = time.monotonic()
             try:
-                found = await _llm_terms(prepared, options, lane, model,
+                found = await _llm_terms(doc.segments, options, lane, model,
                                          await store.load_state(vault_row) if vault_row else engine.VaultState())
             except llm_lane.LaneFailed as exc:
                 log.warning("Anonymization LLM lane failed", model=model.label, actor=actor, reason=str(exc))
@@ -197,7 +288,7 @@ async def run_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str,
                     await usage_quota.record_tokens(get_db(), person, found.tokens)
 
         def work(state: engine.VaultState) -> tuple[engine.RunResult, str]:
-            result = engine.run(prepared.segments, state, options)
+            result = engine.run(doc.segments, state, options)
             name = engine.anonymize_filename(stem, state, options) if stem else ""
             return result, name
 
@@ -214,72 +305,138 @@ async def run_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str,
     except (av.VaultError, fd_crypto.CryptoUnavailable) as exc:
         raise _store_error(exc) from None
 
-    output = prepared.rebuild(result.outputs)
     counts = engine.summary(result.used)
     if vault_row is not None:
         await store.log(person, vault_row["id"], actor, "anonymize", {
-            "format": prepared.format, "source": source, "entities": counts,
+            "format": doc.format, "source": source, "entities": counts,
             "new": sum(1 for e in result.used if e.new), "fixed": result.fixed, "lane": lane,
             "llm": lanes.get("llm"), "llm_terms": lanes.get("llm_terms", 0),
         })
     return {
         "vault": {"id": vault_row["id"], "name": vault_row["name"]} if vault_row else None,
         "mode": mode,
-        "format": prepared.format,
-        "output": output,
+        "format": doc.format,
         "filename": out_name,
         "entities": [{"token": e.token, "kind": e.kind, "count": e.count, "new": e.new} for e in result.used],
         "summary": counts,
         "verify": {"ok": True, "rounds": result.rounds, "fixed": result.fixed},
         "lane": lane,
         "lanes": lanes,
+        "warnings": list(doc.warnings),
         "already_exposed": source == "text",
+        "_result": result,
     }
 
 
-async def _llm_terms(prepared: formats.Prepared, options: engine.Options, lane: str,
+async def run_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    content, fmt = _content(data)
+    doc = _text_doc(content, fmt)
+    out = await _anonymize(person, doc, data, actor=actor, source=str(data.get("source") or ""),
+                           stem=str(data.get("filename") or "")[:255])
+    result = out.pop("_result")
+    out["output"] = doc.rebuild(result.outputs, result.edits)
+    return out
+
+
+def _preview(texts: list[str], limit: int = 20000) -> str:
+    joined = "\n".join(t for t in texts if t.strip())
+    return joined[:limit]
+
+
+async def file_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    """A whole file in, the same kind of file out (pdf / html as markdown)."""
+    import base64
+    import mimetypes
+    from pathlib import Path
+
+    filename, blob = _file_input(data)
+    doc = await _file_doc(filename, blob, scrub=True)
+    out = await _anonymize(person, doc, data, actor=actor, source=str(data.get("source") or "file"),
+                           stem=Path(filename).stem)
+    result = out.pop("_result")
+    written = await asyncio.to_thread(doc.rebuild, result.outputs, result.edits)
+    blob_out = written if isinstance(written, bytes) else written.encode("utf-8")
+    name = f"{out['filename'] or 'document'}.anonymized{doc.out_ext or Path(filename).suffix.lower()}"
+    out.update({
+        "filename": name,
+        "data": base64.b64encode(blob_out).decode("ascii"),
+        "content_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
+        "size": len(blob_out),
+        "preview": _preview(result.outputs),
+    })
+    return out
+
+
+async def _llm_terms(segments: list[engine.Segment], options: engine.Options, lane: str,
                      model: trusted.TrustedModel, state: engine.VaultState) -> llm_lane.LaneResult:
     """What the trusted model adds. It reads the text with the code's finds
     already replaced (lane ``both``, on a snapshot — the vault is untouched)
     or as it is (``llm``)."""
     if lane == "both":
-        preview = await asyncio.to_thread(engine.run, prepared.segments, state.snapshot(), options)
+        preview = await asyncio.to_thread(engine.run, segments, state.snapshot(), options)
         texts = preview.outputs
     else:
-        texts = [s.text for s in prepared.segments]
+        texts = [s.text for s in segments]
     joined = "\n".join(t for t in texts if t.strip())
     return await llm_lane.detect(joined, trusted.completer(model), kinds=options.kinds)
 
 
-async def restore_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str, Any]:
-    content, fmt = _content(data)
+async def _vault_state(person: str, data: dict[str, Any]) -> tuple[dict[str, Any], engine.VaultState]:
     name = str(data.get("vault") or "").strip()
     if not name:
         raise HTTPException(status_code=422, detail="vault is required — the one the text was anonymized into")
     store = av.store()
     try:
         row = await store.get(person, name)
+        if row is None:
+            raise HTTPException(status_code=404, detail=f"No vault '{name}'")
+        return row, await store.load_state(row)
     except fd_crypto.CryptoUnavailable as exc:
         raise _store_error(exc) from None
-    if row is None:
-        raise HTTPException(status_code=404, detail=f"No vault '{name}'")
-    prepared = _prepare(content, fmt)
-    try:
-        state = await store.load_state(row)
-    except fd_crypto.CryptoUnavailable as exc:
-        raise _store_error(exc) from None
+
+
+async def _restore_doc(person: str, doc: _Doc, data: dict[str, Any], *, actor: str) -> tuple[Any, dict[str, Any]]:
+    row, state = await _vault_state(person, data)
     total = 0
     unknown: list[str] = []
-    outs = []
-    for seg in prepared.segments:
-        text, n, unk = engine.restore(seg.text, state)
-        outs.append(text)
+    outs: list[str] = []
+    all_edits: list[list[tuple[int, int, str]]] = []
+    for seg in doc.segments:
+        edits, n, unk = engine.restore_edits(seg.text, state)
+        outs.append(engine.apply_edits(seg.text, edits))
+        all_edits.append(edits)
         total += n
         unknown.extend(u for u in unk if u not in unknown)
+    written = await asyncio.to_thread(doc.rebuild, outs, all_edits)
+    store = av.store()
     await store.touch(row)
-    await store.log(person, row["id"], actor, "restore", {"restored": total, "unknown": len(unknown)})
-    return {"vault": {"id": row["id"], "name": row["name"]}, "output": prepared.rebuild(outs),
-            "restored": total, "unknown": unknown}
+    await store.log(person, row["id"], actor, "restore", {"restored": total, "unknown": len(unknown),
+                                                          "format": doc.format})
+    return written, {"vault": {"id": row["id"], "name": row["name"]}, "restored": total, "unknown": unknown}
+
+
+async def restore_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    content, fmt = _content(data)
+    written, out = await _restore_doc(person, _text_doc(content, fmt), data, actor=actor)
+    out["output"] = written
+    return out
+
+
+async def restore_file_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str, Any]:
+    import base64
+    import mimetypes
+    from pathlib import Path
+
+    filename, blob = _file_input(data)
+    doc = await _file_doc(filename, blob, scrub=False)
+    written, out = await _restore_doc(person, doc, data, actor=actor)
+    blob_out = written if isinstance(written, bytes) else written.encode("utf-8")
+    stem = re.sub(r"\.anonymized$", "", Path(filename).stem)
+    name = f"{stem}.restored{doc.out_ext or Path(filename).suffix.lower()}"
+    out.update({"filename": name, "data": base64.b64encode(blob_out).decode("ascii"),
+                "content_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
+                "size": len(blob_out)})
+    return out
 
 
 # ── agent routes ────────────────────────────────────────────────────
@@ -328,6 +485,18 @@ async def anonymize_agent_restore(request: Request) -> dict[str, Any]:
     return await restore_for(person, await _body(request), actor=actor)
 
 
+@router.post("/agent/file")
+async def anonymize_agent_file(request: Request) -> dict[str, Any]:
+    person, actor = await _agent_person(request)
+    return await file_for(person, await _body(request), actor=actor)
+
+
+@router.post("/agent/file/restore")
+async def anonymize_agent_file_restore(request: Request) -> dict[str, Any]:
+    person, actor = await _agent_person(request)
+    return await restore_file_for(person, await _body(request), actor=actor)
+
+
 @router.get("/agent/status")
 async def anonymize_agent_status(request: Request) -> dict[str, Any]:
     await _agent_person(request)
@@ -345,7 +514,8 @@ async def anonymize_agent_vaults(request: Request) -> dict[str, Any]:
 
 @router.get("/kinds")
 async def anonymize_kinds(_user: dict = Depends(get_current_user)) -> dict[str, Any]:
-    return {"kinds": [{"kind": k, "label": KIND_LABELS.get(k, k)} for k in KINDS], "formats": list(formats.TEXT_FORMATS)}
+    return {"kinds": [{"kind": k, "label": KIND_LABELS.get(k, k)} for k in KINDS], "formats": list(formats.TEXT_FORMATS),
+            "file_kinds": FILE_KINDS, "max_file_mb": MAX_FILE_BYTES // (1024 * 1024)}
 
 
 async def _status() -> dict[str, Any]:
@@ -362,6 +532,16 @@ async def anonymize_status(_user: dict = Depends(get_current_user)) -> dict[str,
 @router.post("/run")
 async def anonymize_run(request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     return await run_for(user["id"], await _body(request), actor="person")
+
+
+@router.post("/file")
+async def anonymize_file(request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    return await file_for(user["id"], await _body(request), actor="person")
+
+
+@router.post("/file/restore")
+async def anonymize_file_restore(request: Request, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    return await restore_file_for(user["id"], await _body(request), actor="person")
 
 
 @router.post("/restore")
@@ -474,7 +654,7 @@ async def anonymize_trusted_test(_admin: dict = Depends(require_admin)) -> dict[
         det, _r = await asyncio.to_thread(engine.anonymize_text, case["text"], engine.VaultState())
         started = time.monotonic()
         try:
-            found = await _llm_terms(prepared, engine.Options(), "both", m, engine.VaultState())
+            found = await _llm_terms(prepared.segments, engine.Options(), "both", m, engine.VaultState())
             opts = engine.Options(extra=tuple(found.terms))
             both, _r = await asyncio.to_thread(engine.anonymize_text, case["text"], engine.VaultState(), opts)
             error = ""

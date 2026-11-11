@@ -8,6 +8,7 @@ import { Switch } from '../admin/Switch'
 import { IdleAgentsSetting, IDLE_AGENTS_HINT, IDLE_AGENTS_TITLE } from '../admin/IdleAgentsSetting'
 import { DeckProfileDefaults } from '../profile/DeckProfileDefaults'
 import { DeckCourseSettings } from '../course/DeckCourseSettings'
+import { TrustedModelCard } from '../anonymize/TrustedModelCard'
 import {
   CUSTOM_TOOLS_HINT, CUSTOM_TOOLS_TITLE, EVERYBODY_APPROVAL_HINT, EVERYBODY_APPROVAL_TITLE, SANDBOX_HINT, SANDBOX_TITLE, sandboxLine,
 } from '../admin/customTools'
@@ -222,6 +223,8 @@ export function SettingsConsole() {
           />
         </SettingRow>
       </Card>
+
+      <TrustedModelCard />
 
       <Card icon={Archive} title="Agent files"
         hint="Agents exported from this deck are signed. Choose which other decks' files people here may import.">

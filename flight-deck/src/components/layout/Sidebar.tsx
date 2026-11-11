@@ -34,6 +34,7 @@ import {
   HardDrive,
   Code2,
   Globe,
+  EyeOff,
   Activity,
   Bug,
   IdCard,
@@ -90,6 +91,7 @@ const navSections: { title: string; items: NavItem[] }[] = [
       { id: 'vfs', icon: FolderTree, label: 'VFS' },
       { id: 'deep-memory', icon: Database, label: 'Deep Memory' },
       { id: 'hosting', icon: Globe, label: 'Hosting' },
+      { id: 'anonymize', icon: EyeOff, label: 'Anonymize' },
     ],
   },
   {

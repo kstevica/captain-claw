@@ -22,6 +22,17 @@ class FormatError(ValueError):
     pass
 
 
+def decode_text(data: bytes) -> str:
+    """Bytes of a text file as text: UTF-8 (with or without a BOM), else
+    Windows-1250 (Croatian files from older systems), else Latin-1."""
+    for enc in ("utf-8-sig", "cp1250"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("latin-1")
+
+
 @dataclass
 class Prepared:
     format: str
