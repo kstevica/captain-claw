@@ -43,7 +43,15 @@ def _session_folder(kwargs: dict[str, Any]) -> str:
 
 def default_vault(kwargs: dict[str, Any]) -> str:
     """One vault per conversation, so two conversations are never linked
-    unless the agent names a case."""
+    unless the agent names a case — or, while the person's privacy gate
+    applies, the gate's vault, so its tokens and these mean the same."""
+    from captain_claw import anonymize_gate_client
+
+    agent = kwargs.get("_agent")
+    if agent is not None and anonymize_gate_client.cached_active(agent):
+        from captain_claw.anonymize.gate import GATE_VAULT
+
+        return GATE_VAULT
     sid = str(kwargs.get("_session_id") or "").strip()
     return f"chat-{sid[:40]}" if sid else "default"
 

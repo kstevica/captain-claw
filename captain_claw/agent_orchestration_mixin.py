@@ -1635,6 +1635,14 @@ class AgentOrchestrationMixin:
         # slice an empty list.
         turn_start_idx = self._turn_start_after_compaction(turn_user_msg, turn_start_idx)
         self.last_turn_start_idx = turn_start_idx
+        # The person's privacy gate (Flight Deck; asked at most once a minute):
+        # known before this turn's notes are built, so none carries what it covers.
+        try:
+            from captain_claw import anonymize_gate_client
+
+            await anonymize_gate_client.decision(self)
+        except Exception:
+            pass
         # The owner's caches are never loaded for a shared-agent member.
         if getattr(self, "_speaker_scoped", False) is not True:
             await self._refresh_cron_context_cache()

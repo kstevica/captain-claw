@@ -4,6 +4,7 @@ agent tool end to end against the real routes."""
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -629,3 +630,242 @@ class TestFiles:
         back = await AnonymizeTool().execute(action="restore", path=str(saved), **tool_env)
         restored = Path(back.content.split("for the user: ")[1].split("\n")[0])
         assert docx.Document(io.BytesIO(restored.read_bytes())).paragraphs[0].text == "Name: Klaus Müller"
+
+
+# ── the privacy gate (P3) ───────────────────────────────────────────
+
+
+def _gate(c, **body):
+    return c.put("/fd/anonymize/gate", headers=_bearer(BOB),
+                 json={"enabled": True, "groups": ["mail"], "when": "untrusted", **body})
+
+
+def _decide(c, provider="anthropic", model="claude-x", base_url=""):
+    return c.post("/fd/anonymize/agent/gate", headers=BOB_AGENT,
+                  json={"provider": provider, "model": model, "base_url": base_url}).json()
+
+
+class TestGateDecision:
+    async def test_off_until_turned_on_and_settings_checked(self, db, agents):
+        c = _client()
+        got = c.get("/fd/anonymize/gate", headers=_bearer(BOB)).json()
+        assert got["gate"]["enabled"] is False and got["vault"] == "Privacy gate"
+        assert {g["id"] for g in got["groups"]} >= {"mail", "chats", "files"}
+        assert _decide(c) == {"active": False, "reason": "off"}
+        assert c.put("/fd/anonymize/gate", headers=_bearer(BOB), json={"groups": ["spam"]}).status_code == 422
+        assert c.put("/fd/anonymize/gate", headers=_bearer(BOB), json={"when": "sometimes"}).status_code == 422
+
+    async def test_who_it_applies_to(self, db, agents):
+        c = _client()
+        _gate(c, lane="both")
+        d = _decide(c)
+        assert d["active"] and d["groups"] == ["mail"] and d["vault"] == "Privacy gate"
+        assert d["lane"] == "deterministic"  # no trusted model on this deck: code only
+        assert _decide(c, "ollama", "qwen3:8b")["active"] is False  # local: trusted
+        assert _decide(c, "ollama", "gpt-oss:120b-cloud")["active"] is True  # runs at Ollama
+        c.put("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin"),
+              json={"provider": "anthropic", "model": "claude-x", "attested": True})
+        assert _decide(c)["active"] is False  # the admin's attested model
+        _gate(c, when="always")
+        assert _decide(c, "ollama", "qwen3:8b")["active"] is True
+        # Alice's own setting is hers: Bob's gate doesn't touch her agent.
+        alice = c.post("/fd/anonymize/agent/gate", headers=ALICE_AGENT, json={"provider": "anthropic", "model": "y"})
+        assert alice.json()["active"] is False
+
+    async def test_reveal_for_the_chat(self, db, agents):
+        c = _client()
+        c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
+               json={"content": "mail ana@x.hr", "vault": "Privacy gate", "source": "gate"})
+        r = c.post("/fd/anonymize/reveal", headers=_bearer(BOB), json={"content": "Reply to ⟦EMAIL_1⟧"})
+        assert r.json()["output"] == "Reply to ana@x.hr"
+        assert c.post("/fd/anonymize/reveal", headers=_bearer(ALICE), json={"content": "x"}).status_code == 404
+
+
+class _FakeTools:
+    def __init__(self, result_text: str) -> None:
+        self.calls: list[tuple[str, dict]] = []
+        self.result_text = result_text
+
+    async def execute(self, name, arguments, **kw):
+        from captain_claw.tools.registry import ToolResult
+
+        self.calls.append((name, {k: v for k, v in arguments.items() if not k.startswith("_")}))
+        return ToolResult(success=True, content=self.result_text)
+
+
+def _agent(provider: str, model: str, result_text: str):
+    import types
+
+    from captain_claw.agent_guard_mixin import AgentGuardMixin
+
+    class Agent(AgentGuardMixin):
+        async def _enforce_guard(self, **kw):
+            return True, ""
+
+        def _enforce_blast_radius(self, *a):
+            return True, ""
+
+        def _current_session_slug(self):
+            return "s-1"
+
+    a = Agent()
+    a.provider = types.SimpleNamespace(provider=provider, model=model, base_url="")
+    a.tools = _FakeTools(result_text)
+    return a
+
+
+@pytest.fixture()
+def gate_env(tool_env, monkeypatch):
+    from captain_claw import anonymize_gate_client
+    from captain_claw.google_oauth_manager import GoogleOAuthManager
+
+    monkeypatch.setattr(GoogleOAuthManager, "_flight_deck_base", staticmethod(lambda: "http://fd.test"))
+    monkeypatch.setattr(GoogleOAuthManager, "_flight_deck_headers", staticmethod(lambda as_speaker=True: dict(BOB_AGENT)))
+    anonymize_gate_client.reset_for_tests()
+    yield tool_env
+    anonymize_gate_client.reset_for_tests()
+
+
+class TestGateOnTheAgent:
+    MAIL = "From: Klaus Müller <k.mueller@beispiel.de>\nIBAN: DE89370400440532013000\nPlease call me."
+
+    async def _run(self, agent, name, args):
+        return await agent._execute_tool_with_guard(name, args, "test")
+
+    async def test_mail_results_are_tokens_before_the_model(self, gate_env):
+        _gate(_client())
+        agent = _agent("anthropic", "claude-x", self.MAIL)
+        res = await self._run(agent, "google_mail", {"action": "read_message", "id": "m1"})
+        assert "Müller" not in res.content and "DE89370400440532013000" not in res.content
+        assert "⟦IBAN_1⟧" in res.content and "[Privacy gate:" in res.content
+        # A source the person didn't pick passes as it is.
+        other = await self._run(agent, "web_fetch", {"url": "https://x.example"})
+        assert other.content == self.MAIL
+
+    async def test_outgoing_mail_gets_real_values_and_its_echo_is_gated(self, gate_env):
+        _gate(_client())
+        agent = _agent("anthropic", "claude-x", self.MAIL)
+        first = await self._run(agent, "google_mail", {"action": "read_message", "id": "m1"})
+        email_token = re.search(r"⟦EMAIL_\d+⟧", first.content).group(0)
+        agent.tools.result_text = "Draft created for k.mueller@beispiel.de"
+        res = await self._run(agent, "send_mail", {"to": email_token, "subject": "Re", "body": f"Dear {email_token}"})
+        sent = agent.tools.calls[-1][1]
+        assert sent["to"] == "k.mueller@beispiel.de" and sent["body"] == "Dear k.mueller@beispiel.de"
+        assert "k.mueller@beispiel.de" not in res.content and email_token in res.content
+
+    async def test_a_trusted_model_sees_the_real_thing(self, gate_env):
+        _gate(_client())
+        agent = _agent("ollama", "qwen3:8b", self.MAIL)
+        res = await self._run(agent, "google_mail", {"action": "read_message", "id": "m1"})
+        assert res.content == self.MAIL
+
+    async def test_fails_closed(self, gate_env, monkeypatch):
+        from captain_claw import anonymize_gate_client
+
+        _gate(_client())
+        agent = _agent("anthropic", "claude-x", self.MAIL)
+        await anonymize_gate_client.decision(agent)  # the gate is known to be on
+
+        async def down(path, body):
+            raise anonymize_gate_client.GateFailed("deck unreachable")
+
+        monkeypatch.setattr(anonymize_gate_client, "_post", down)
+        res = await self._run(agent, "google_mail", {"action": "read_message", "id": "m1"})
+        assert not res.success and "isn't shown" in res.error and "Müller" not in res.error
+        sent = await self._run(agent, "send_mail", {"to": "⟦EMAIL_1⟧", "body": "x"})
+        assert not sent.success and "Nothing was sent" in sent.error
+        assert all(name != "send_mail" for name, _a in agent.tools.calls)
+
+    async def test_folders_narrow_file_reads(self, gate_env):
+        _gate(_client(), groups=["files"], folders=["vfs:clients"])
+        agent = _agent("anthropic", "claude-x", self.MAIL)
+        inside = await self._run(agent, "read", {"path": "vfs:clients/acme/notes.txt"})
+        outside = await self._run(agent, "read", {"path": "vfs:public/readme.txt"})
+        assert "Müller" not in inside.content and outside.content == self.MAIL
+
+    async def test_the_anonymize_tool_uses_the_gate_vault_while_it_applies(self, gate_env):
+        from captain_claw import anonymize_gate_client
+        from captain_claw.tools.anonymize import default_vault
+
+        _gate(_client())
+        agent = _agent("anthropic", "claude-x", "")
+        assert default_vault({"_agent": agent, "_session_id": "s-1"}) == "chat-s-1"
+        await anonymize_gate_client.decision(agent)
+        assert default_vault({"_agent": agent, "_session_id": "s-1"}) == "Privacy gate"
+
+
+class TestGateAndRecall:
+    async def test_recall_keeps_raw_files_and_memories_out(self, gate_env):
+        import types
+
+        from captain_claw import anonymize_gate_client
+        from captain_claw.agent_context_mixin import AgentContextMixin
+        from captain_claw.agent_guard_mixin import AgentGuardMixin
+
+        class Agent(AgentGuardMixin, AgentContextMixin):
+            pass
+
+        agent = Agent()
+        agent.provider = types.SimpleNamespace(provider="anthropic", model="claude-x", base_url="")
+        seen: dict = {}
+
+        class Memory:
+            def build_semantic_note(self, query, **kw):
+                seen.update(kw)
+                return "note", ""
+
+        agent.memory = Memory()
+        AgentContextMixin._build_semantic_memory_note(agent, "who is the client")
+        assert seen["exclude_sources"] == frozenset()  # no gate: everything as before
+
+        _gate(_client(), groups=["files", "memory"])
+        await anonymize_gate_client.decision(agent)
+        AgentContextMixin._build_semantic_memory_note(agent, "who is the client")
+        assert seen["exclude_sources"] == frozenset({"workspace"})
+        assert AgentContextMixin._build_deep_memory_note(agent, "who is the client") == ("", "")
+        assert AgentContextMixin._build_external_memory_context_notes(agent) == ("", "")
+
+
+def test_semantic_note_leaves_excluded_sources_out():
+    import types
+
+    from captain_claw.semantic_memory import SemanticMemoryIndex
+
+    def hit(source, text):
+        return types.SimpleNamespace(source=source, snippet=text, text_l1=text, text_l2=text, path=f"{source}.txt",
+                                     start_line=1, updated_at="", score=1.0, reference=source,
+                                     text_score=1.0, vector_score=0.0)
+
+    fake = types.SimpleNamespace(
+        search=lambda **kw: [hit("workspace", "Tomislav Babić, OIB 52601815906"), hit("session", "⟦PERSON_1⟧ asked")],
+        cross_session_retrieval=False,
+        _pick_layer_text=lambda layer, text, text_l1, text_l2: text,
+    )
+    note, _debug = SemanticMemoryIndex.build_context_note(fake, "client", exclude_sources=frozenset({"workspace"}))
+    assert "Babić" not in note and "⟦PERSON_1⟧" in note
+
+
+async def test_background_notes_from_covered_sources_stay_out(gate_env):
+    import types
+
+    from captain_claw import anonymize_gate_client
+    from captain_claw.agent_context_mixin import AgentContextMixin
+
+    class Agent(AgentContextMixin):
+        pass
+
+    agent = Agent()
+    agent.provider = types.SimpleNamespace(provider="anthropic", model="claude-x", base_url="")
+    _gate(_client(), groups=["contacts", "files"])
+    await anonymize_gate_client.decision(agent)
+    notes = [("contacts_context", "Ivan Horvat +385…"), ("workspace_manifest", "Ivan_Horvat_CV.pdf"),
+             ("insights_context", "likes short replies"), ("datastore_context", "clients table")]
+    # The collector's own filter, on what it would have returned:
+    from captain_claw.anonymize.gate import NOTE_GROUPS
+
+    gate = anonymize_gate_client.cached_decision(agent)
+    blocked = {n for g in gate.groups for n in NOTE_GROUPS.get(g, ())}
+    assert [n for n, _t in notes if n not in blocked] == ["insights_context", "datastore_context"]
+    import inspect
+
+    assert "NOTE_GROUPS" in inspect.getsource(AgentContextMixin._collect_background_context_notes)

@@ -86,6 +86,7 @@ import { FlowSelectorModal } from './FlowSelectorModal'
 import { PlanCard } from './PlanCard'
 import { PaymentCard } from '../payments/PaymentCard'
 import { PurchaseCard } from '../payments/PurchaseCard'
+import { anonymizeApi } from '../../services/anonymizeApi'
 import { paymentIntentOf, purchaseIntentOf } from '../../services/payments'
 import TraceTimeline from '../observability/TraceTimeline'
 import { AgentFilesPanel } from './AgentFilesPanel'
@@ -2046,6 +2047,23 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
   const [lessonFrom, setLessonFrom] = useState<{ said: string; reply: string } | null>(null)
   const [copied, setCopied] = useState(false)
   const [showForward, setShowForward] = useState(false)
+  // A reply with privacy-gate tokens (⟦PERSON_1⟧) can be read with the real
+  // values, for this person only — the agent never sees them.
+  const [revealed, setRevealed] = useState<string | null>(null)
+  const [revealing, setRevealing] = useState(false)
+  const [revealError, setRevealError] = useState('')
+  const hasTokens = message.role === 'assistant' && /⟦[A-Z][A-Z0-9_]*?_\d{1,6}(?::[a-z]{1,3})?⟧/.test(message.content || '')
+  const toggleReveal = async () => {
+    if (revealed !== null) { setRevealed(null); return }
+    setRevealing(true); setRevealError('')
+    try {
+      setRevealed((await anonymizeApi.reveal(stripSuggestions(message.content))).output ?? null)
+    } catch (e) {
+      setRevealError(e instanceof Error ? e.message : "Couldn't find the real names")
+    } finally {
+      setRevealing(false)
+    }
+  }
 
   const containers = useContainerStore((s) => s.containers)
   const localAgents = useLocalAgentStore((s) => s.agents)
@@ -2379,12 +2397,22 @@ const MessageBubble = memo(function MessageBubble({ message, sourceName, agentId
     <div id={`fd-msg-${message.id}`} className="group mb-3 flex flex-col items-start gap-0.5">
       <div className={`max-w-[85%] rounded-bl-sm bg-zinc-800/60 ${large ? 'rounded-2xl px-4 py-3' : 'rounded-xl px-3.5 py-2.5'} ${message.replay ? 'opacity-60' : ''}`}>
         <div className={`fd-markdown ${bodyText} text-zinc-300`}>
-          <MarkdownMessage content={replyMarkdown(cleanContent, agentConn)} />
+          <MarkdownMessage content={replyMarkdown(revealed ?? cleanContent, agentConn)} />
         </div>
         <div className="mt-1 flex items-center gap-2 text-[10px] text-zinc-600">
           <span>{formatTime(message.timestamp)}</span>
           {message.model && <span className="font-mono">{message.model}</span>}
           {message.replay && <span className="text-zinc-700">(history)</span>}
+          {hasTokens && (
+            <button
+              type="button"
+              onClick={toggleReveal}
+              title={revealError || 'Show this reply with the real names from your privacy gate (only you see them)'}
+              className={`rounded px-1 font-medium hover:underline ${revealError ? 'text-red-600 dark:text-red-400' : 'text-violet-600 dark:text-violet-400'}`}
+            >
+              {revealing ? '…' : revealed !== null ? 'Tokens' : revealError ? 'No real names found' : 'Real names'}
+            </button>
+          )}
         </div>
       </div>
       {actionButtons('left')}

@@ -7,8 +7,8 @@ tokens that mean nothing outside Captain. The real values are kept in an
 encrypted **vault** in Flight Deck, so the person (never the model) can put
 them back later.
 
-Status: **P0** PR #511 · **P1** PR #512 (stacked) · **P2 built** (branch `feat/anonymize-p2`, stacked on
-P1); P3 (privacy gate) next.
+Status: **P0** PR #511 · **P1** PR #512 · **P2** PR #514 (each stacked on the one before) · **P3 built**
+(branch `feat/anonymize-p3`, stacked on P2); P4 next.
 
 ## Principles
 
@@ -269,6 +269,51 @@ Known limits of P0 (the deterministic lane):
   member allowlist yet), Iskra beings without fleet access (same as
   `public_link`).
 
+## P3 — the privacy gate
+
+Opt-in, per person (Anonymize page → Privacy gate; `GET/PUT /fd/anonymize/gate`,
+kept in their settings). Nothing changes for anyone who doesn't turn it on.
+
+* **What it covers** — sources the person ticks (`anonymize/gate.py`): mail
+  (Gmail, Outlook, IMAP tools), chats (Telegram inbox, WhatsApp), calendar,
+  contacts, files (read, grep, the extract tools, OCR, knowledge, Drive,
+  OneDrive — optionally only some local / VFS folders), data (datastore),
+  memory (external and deep memory).
+* **When** — `untrusted` (default): only for an agent whose current model
+  isn't trusted (not local, not the admin's trusted model); `always`: every
+  agent. Flight Deck decides (`POST /fd/anonymize/agent/gate` with the agent's
+  provider / model / address; a shared-agent member's turn uses the member's
+  setting).
+* **Results in** — `AgentGuardMixin._execute_tool_with_guard`, the one path
+  every tool call takes: a covered tool's result (content and error) is
+  anonymized into the person's **"Privacy gate"** vault before it is returned
+  — before the model, the session history, compaction, insights or anything
+  derived from them sees it — with a one-line note that the tokens are put
+  back on sending. If the deck can't check it, the result isn't shown (fail
+  closed). Who looks: code (default, fast) or code + trusted model.
+* **Messages out** — for mail and WhatsApp tools, tokens in the arguments
+  the agent wrote are put back just before the tool runs (the recipient reads
+  real names); the tool's own result is then anonymized again. If the values
+  can't be put back, nothing is sent.
+* **Recall** — background notes are built without waiting on the deck, so the
+  agent asks for the gate's answer at the start of each turn, and while the
+  gate covers a source its notes stay out: raw workspace files from the
+  semantic recall (session chunks stay: they are the gated conversation),
+  knowledge pointers and the workspace file list (files), contacts, data,
+  briefings (mail / calendar), deep and external memory (memory).
+* **Reading replies** — chat replies with tokens get a **Real names** toggle
+  (`POST /fd/anonymize/reveal`, the gate's vault, logged); while the gate
+  applies, the `anonymize` tool's default vault is the gate's too, so all
+  tokens in a chat mean the same.
+* **Verified live** with an agent on Claude Haiku 5.5 reading a notes file
+  with made-up people: its reply and its session store held only tokens,
+  "Real names" showed the reply properly, and in a fresh topic it could not
+  recall the client without its tools.
+* **Limits** — conversations from before the gate was turned on still hold
+  real values (start a new topic); tools outside the covered sources (web,
+  shell, browser) are not gated; the gate's answer is cached for a minute, so
+  turning it on reaches a running agent within a minute.
+
 ## Phases
 
 * **P0** — engine (detect → resolve → tokens → replace → verify → restore),
@@ -283,9 +328,7 @@ Known limits of P0 (the deterministic lane):
   the tool sending files whole, the Anonymize page (kiosk + full layout), the
   admin card for the trusted model with its sample check. PDF redaction and
   OCR of pictures are not built.
-* **P3** — privacy gate: per source (an inbox, a data table, a VFS folder)
-  "always anonymize before an agent on an untrusted model sees it"; restore on
-  the way out to the person (mail draft, delivered file).
+* **P3** (built) — the privacy gate, below.
 * **P4** — optional local NER pack (GLiNER / spaCy, a download — not in the
   slim app or on the Pi by default); `one_way` generalization of
   quasi-identifiers (DOB → year, address → city, amounts → ranges).
