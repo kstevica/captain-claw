@@ -499,7 +499,16 @@ class ActBody(BaseModel):
 async def agent_status(request: Request) -> dict:
     owner, slug = _owner_of(request, "the person's browser")
     conns = usable_by(owner, slug)
+    # Whether Captain for Chrome is set up in one of the person's browsers at
+    # all (a pairing's token, still unrevoked) — an agent a site blocks asks
+    # them to turn it on then, or recommends installing it when it isn't.
+    try:
+        rows = await get_db().list_pats(owner)
+    except Exception:
+        rows = []
     return {"connected": bool(conns), "browsers": [c.view() for c in conns],
+            "person_connected": any(not c.agent_slug for c in conns),
+            "extension_set_up": any(token_kind(r.get("name")) == "browser" for r in rows),
             "own_connected": any(c.agent_slug == slug for c in conns),
             "own_paired": any(r.get("slug") == slug for r in agent_browser_rows(owner)),
             "stopped": any(slug in c.stopped for c in conns[:1])}

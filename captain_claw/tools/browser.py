@@ -12,6 +12,7 @@ returns a clear error message with install instructions.
 
 from __future__ import annotations
 
+import asyncio
 import json as _json
 import re
 import time
@@ -686,14 +687,16 @@ class BrowserTool(Tool):
 
         url = str(kwargs.get("url", "")).strip()
         if url:
-            nav_info = await session.navigate(url)
+            nav_info, failed = await self._go(session, url, kwargs)
+            if failed is not None:
+                return failed
             return ToolResult(
                 success=True,
                 content=(
                     f"Browser launched and navigated to: {nav_info['url']}\n"
                     f"Page title: {nav_info['title']}\n"
                     f"HTTP status: {nav_info['status']}"
-                ),
+                ) + nav_info.get("wall_note", ""),
             )
 
         return ToolResult(
@@ -713,7 +716,9 @@ class BrowserTool(Tool):
             return ToolResult(success=False, error=self._gdrive_block_msg(url))
 
         session = self._get_session(self._session_key(kwargs))
-        nav_info = await session.navigate(url)
+        nav_info, failed = await self._go(session, url, kwargs)
+        if failed is not None:
+            return failed
 
         return ToolResult(
             success=nav_info["ok"] or nav_info["status"] == 0,
@@ -721,8 +726,69 @@ class BrowserTool(Tool):
                 f"Navigated to: {nav_info['url']}\n"
                 f"Page title: {nav_info['title']}\n"
                 f"HTTP status: {nav_info['status']}"
-            ),
+            ) + nav_info.get("wall_note", ""),
         )
+
+    async def _go(self, session: BrowserSession, url: str,
+                  kwargs: dict[str, Any]) -> tuple[dict[str, Any], ToolResult | None]:
+        """Navigate, and tell a site's bot wall from its page: a wall (or a
+        connection the site dropped) is noted for the session, and the answer
+        says what to try next — at last, asking the person for their Chrome
+        (web_blocked.py)."""
+        from captain_claw.tools import web_blocked
+
+        try:
+            nav_info = await session.navigate(url)
+        except Exception as e:
+            why = web_blocked.net_reason(str(e))
+            if not why:
+                raise
+            note = await web_blocked.note_failure(kwargs, url, web_blocked.BROWSER, why)
+            return {}, ToolResult(success=False, error=f"Browser navigate failed: {e}{note}")
+        why = await self._wall_reason(session, nav_info)
+        if why:
+            nav_info["wall_note"] = await web_blocked.note_failure(kwargs, url, web_blocked.BROWSER, why)
+        else:
+            web_blocked.forget(kwargs, url, web_blocked.BROWSER)
+        return nav_info, None
+
+    @staticmethod
+    async def _wall_reason(session: BrowserSession, nav_info: dict[str, Any]) -> str:
+        """Why the page just opened is a bot wall, or ``""``. A challenge that
+        clears itself (Cloudflare's JavaScript check) gets a few seconds."""
+        from captain_claw.tools import web_blocked
+
+        async def _look() -> tuple[str, str, str]:
+            try:
+                page = await session.ensure_page()
+                title = await page.title()
+                text = await page.evaluate(
+                    "() => ((document.body && document.body.innerText) || '').slice(0, 4000)")
+                html = ""
+                if len(str(text or "").strip()) < web_blocked.SHORT_PAGE_CHARS:
+                    html = await page.evaluate(
+                        "() => (document.documentElement ? document.documentElement.outerHTML : '').slice(0, 40000)")
+                return str(title or ""), str(text or ""), str(html or "")
+            except Exception:  # noqa: BLE001 — a page that can't be read isn't judged
+                return str(nav_info.get("title") or ""), "", ""
+
+        title, text, html = await _look()
+        status = int(nav_info.get("status") or 0)
+        why = web_blocked.block_reason(status=status, title=title, text=text, html=html)
+        if not why or not why.startswith("a bot check"):
+            return why
+        for _ in range(4):   # a self-clearing check moves on within seconds
+            await asyncio.sleep(2.0)
+            title, text, html = await _look()
+            if not web_blocked.block_reason(title=title, text=text, html=html):
+                nav_info["title"] = title
+                try:
+                    nav_info["url"] = (await session.ensure_page()).url
+                except Exception:  # noqa: BLE001
+                    pass
+                return ""
+        nav_info["title"] = title
+        return why
 
     async def _screenshot(self, **kwargs: Any) -> ToolResult:
         """Take a screenshot of the current page."""

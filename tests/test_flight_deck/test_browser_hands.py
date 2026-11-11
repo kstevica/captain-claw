@@ -208,11 +208,17 @@ async def test_an_agents_act_runs_in_its_owners_browser_and_comes_back(deck):
                               "data": {"width": 1280, "height": 720}},
                "click": {"ok": False, "error": "ref_9 isn't on the page any more"}}
     status = (await c.get("/fd/browser-hands/agent/status", headers=_agent())).json()
-    assert status == {"connected": False, "browsers": [], "stopped": False, "own_connected": False, "own_paired": False}
-    async with FakeBrowser(deck["ws"], await deck["pat"](), answer=lambda a: answers[a["action"]]) as fake:
+    assert status == {"connected": False, "browsers": [], "stopped": False, "own_connected": False, "own_paired": False,
+                      "person_connected": False, "extension_set_up": False}
+    pat = await deck["pat"]()
+    # Set up (paired) but not lent to agents yet: an agent a site blocks asks them to turn it on.
+    status = (await c.get("/fd/browser-hands/agent/status", headers=_agent())).json()
+    assert status["extension_set_up"] and not status["connected"] and not status["person_connected"]
+    async with FakeBrowser(deck["ws"], pat, answer=lambda a: answers[a["action"]]) as fake:
         assert fake.welcome["type"] == "welcome" and fake.welcome["user"] == "Alice"
         status = (await c.get("/fd/browser-hands/agent/status", headers=_agent())).json()
         assert status["connected"] and status["browsers"][0]["browser"] == "Chrome on macOS"
+        assert status["person_connected"] and status["extension_set_up"]
         got = await _act(c, "screenshot", {"tab_id": 7})
         assert got["ok"] and got["content"] == "Screenshot of tab 7" and got["image"] == pic
         assert got["data"] == {"width": 1280, "height": 720} and got["browser"] == "Chrome on macOS"
@@ -408,6 +414,8 @@ async def test_an_agents_own_browser_serves_that_agent_after_the_persons_chrome(
         assert conn.agent_slug == "scout" and conn.browser == "Scout's own browser"
         status = (await c.get("/fd/browser-hands/agent/status", headers=_agent())).json()
         assert status["own_connected"] and status["own_paired"]
+        # Its own server browser isn't the person's Chrome (nor a Captain for Chrome they set up).
+        assert status["connected"] and not status["person_connected"] and not status["extension_set_up"]
         r = await _act(c, "navigate", {"url": "https://x.com"})
         assert r["ok"] and r["own"] is True and r["content"] == "own did navigate"
         # Another agent never lands there.

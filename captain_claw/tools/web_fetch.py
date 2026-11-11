@@ -526,6 +526,31 @@ async def _deep_fetch(url: str, max_scrolls: int = 20, scroll_pause: float = 1.0
     return html
 
 
+async def _wall_note(kwargs: dict[str, Any], url: str, status: int | None, text: str, html: str) -> str:
+    """A fetch that came back with a bot wall (or nothing) instead of the page
+    is noted for the session; the note says what to try next — at last,
+    asking the person for their Chrome (web_blocked.py). ``""`` for a page."""
+    from captain_claw.tools import web_blocked
+
+    why = web_blocked.block_reason(status=status, text=text, html=html)
+    if why:
+        return await web_blocked.note_failure(kwargs, url, web_blocked.FETCH, why)
+    if not str(text or "").strip():
+        return await web_blocked.note_failure(kwargs, url, web_blocked.FETCH, "the page came back empty",
+                                              strong=False)
+    web_blocked.forget(kwargs, url, web_blocked.FETCH)
+    return ""
+
+
+async def _fetch_error_note(kwargs: dict[str, Any], url: str, exc: BaseException) -> str:
+    from captain_claw.tools import web_blocked
+
+    why, strong = web_blocked.fetch_error_reason(exc)
+    if not why:
+        return ""
+    return await web_blocked.note_failure(kwargs, url, web_blocked.FETCH, why, strong=strong)
+
+
 class WebFetchTool(Tool):
     """Fetch web page content as clean readable text (ALWAYS text mode)."""
 
@@ -682,6 +707,8 @@ class WebFetchTool(Tool):
                 mode = "text"
 
             content = _extract_readable_text(raw_html, base_url=url, images=images)
+            wall_note = await _wall_note(kwargs, url, None if mode == "deep" else status_code,
+                                         content, raw_html)
             block = await _page_images_block(
                 url, images or [], kwargs, limit=_images_per_page(),
                 budget_s=_IMAGE_BUDGET_S, member=member)
@@ -689,7 +716,7 @@ class WebFetchTool(Tool):
             if governed:
                 return ToolResult(success=True, content=browser_note + _with_block(_governed_page_output(
                     url, status_code, mode, len(raw_html), content[:_spill.SPILL_SOURCE_MAX],
-                    max_chars, _agent), block))
+                    max_chars, _agent), block) + wall_note)
 
             # R10: in a corpus run, save the FULL text and return a head + pointer.
             saved = None if member else _save_source_to_corpus(url, content)
@@ -698,7 +725,7 @@ class WebFetchTool(Tool):
                     success=True,
                     content=browser_note + _with_block(_corpus_output(
                         url, status_code, mode, len(raw_html), content, saved,
-                        head_chars=effective_max_chars), block),
+                        head_chars=effective_max_chars), block) + wall_note,
                 )
 
             if len(content) > effective_max_chars:
@@ -717,20 +744,20 @@ class WebFetchTool(Tool):
 
             return ToolResult(
                 success=True,
-                content=_with_block(output, block),
+                content=_with_block(output, block) + wall_note,
             )
 
         except httpx.HTTPError as e:
             log.error("HTTP fetch failed", url=url, error=str(e))
             return ToolResult(
                 success=False,
-                error=f"HTTP error: {e}",
+                error=f"HTTP error: {e}" + await _fetch_error_note(kwargs, url, e),
             )
         except Exception as e:
             log.error("Fetch failed", url=url, error=str(e))
             return ToolResult(
                 success=False,
-                error=str(e),
+                error=str(e) + await _fetch_error_note(kwargs, url, e),
             )
 
     async def _fetch_image(self, url: str, kwargs: dict[str, Any]) -> ToolResult:
@@ -861,6 +888,9 @@ class WebGetTool(Tool):
             output += content
             if not raw_allowed:
                 output += f"\n\n{_WEB_GET_TEXT_NOTE}"
+            output += await _wall_note(kwargs, url, response.status_code,
+                                       content if not raw_allowed else _extract_readable_text(raw_html),
+                                       raw_html)
 
             return ToolResult(
                 success=True,
@@ -871,13 +901,13 @@ class WebGetTool(Tool):
             log.error("HTTP fetch failed (raw)", url=url, error=str(e))
             return ToolResult(
                 success=False,
-                error=f"HTTP error: {e}",
+                error=f"HTTP error: {e}" + await _fetch_error_note(kwargs, url, e),
             )
         except Exception as e:
             log.error("Fetch failed (raw)", url=url, error=str(e))
             return ToolResult(
                 success=False,
-                error=str(e),
+                error=str(e) + await _fetch_error_note(kwargs, url, e),
             )
 
     async def close(self):
@@ -1088,10 +1118,38 @@ class WebFetchBatchTool(Tool):
         blocks = await self._image_blocks(targets, outcomes, saved_hits, kwargs,
                                           member=_speaker.principal_for(_agent) is not None)
         if governed:
-            return self._aggregate_governed(targets, outcomes, saved_hits, overflow,
-                                            deep_unavailable, max_chars, _agent, blocks)
-        return self._aggregate(targets, outcomes, per_url_cap, total_cap, overflow,
-                               deep_unavailable, blocks)
+            result = self._aggregate_governed(targets, outcomes, saved_hits, overflow,
+                                              deep_unavailable, max_chars, _agent, blocks)
+        else:
+            result = self._aggregate(targets, outcomes, per_url_cap, total_cap, overflow,
+                                     deep_unavailable, blocks)
+        notes = await self._wall_notes([u for u in targets if u not in blocked and u not in saved_hits],
+                                       outcomes, kwargs)
+        if notes:
+            if result.success:
+                result.content = (result.content or "") + notes
+            else:
+                result.error = (result.error or "") + notes
+        return result
+
+    @staticmethod
+    async def _wall_notes(urls: list[str], outcomes: dict, kwargs: dict[str, Any]) -> str:
+        """The bot walls this batch met — noted per site, the notes once each."""
+        from captain_claw.tools import web_blocked
+
+        notes: list[str] = []
+        for u in urls:
+            oc = outcomes[u]
+            if oc.ok:
+                note = await _wall_note(kwargs, u, oc.status if oc.mode == "fast" else None, oc.content, "")
+            else:
+                why = (web_blocked.block_reason(status=oc.status, text=oc.content)
+                       or web_blocked.net_reason(oc.error))
+                note = await web_blocked.note_failure(kwargs, u, web_blocked.FETCH, why,
+                                                      strong=why.startswith(("a bot check", "it ")))
+            if note and note not in notes:
+                notes.append(note)
+        return "".join(notes)
 
     async def _image_blocks(self, targets, outcomes, saved_hits, kwargs, *,
                             member: bool) -> dict[str, str]:
