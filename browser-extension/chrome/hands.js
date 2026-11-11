@@ -242,7 +242,7 @@ async function runAct(msg) {
   const before = await activeTabs()
   actsRunning++
   try {
-    if (stopped.has(agent.slug)) throw new Refusal("The person stopped you using their browser. Don't try again unless they ask you to.")
+    if (stopped.has(agent.slug)) throw new Refusal("The person stopped you using their browser (Stop in the Captain panel). They let you go on with “Let it again” there — ask them to, and don't try again until they say so.")
     const fn = ACTIONS[action]
     if (!fn) throw new Refusal(`“${action}” isn't something this browser does (Captain for Chrome ${VERSION}).`)
     const conn = wsConn || (await loadConn())
@@ -457,17 +457,28 @@ function cdp(tabId, method, params = {}) {
   return chrome.debugger.sendCommand({ tabId }, method, params)
 }
 
+// A command to one of the tab's frames from another site (its own debugger
+// session, Chrome 125+), or to the tab itself when *sid* is ''.
+function cdpS(tabId, sid, method, params = {}) {
+  return chrome.debugger.sendCommand(sid ? { tabId, sessionId: sid } : { tabId }, method, params)
+}
+
 async function attach(tabId) {
   const t = attached.get(tabId)
   if (t) { t.lastUse = Date.now(); return t }
   await chrome.debugger.attach({ tabId }, '1.3')
-  const state = { lastUse: Date.now(), since: Date.now(), world: null, console: [], net: new Map(), shotScale: 1, loads: [] }
+  const state = { lastUse: Date.now(), since: Date.now(), world: null, console: [], net: new Map(), shotScale: 1, loads: [],
+    frames: new Map(), frameIx: 0 }
   attached.set(tabId, state)
   await Promise.all([
     cdp(tabId, 'Page.enable'),
     cdp(tabId, 'Runtime.enable'),
     cdp(tabId, 'Log.enable').catch(() => {}),
     cdp(tabId, 'Network.enable', { maxPostDataSize: 0 }).catch(() => {}),
+    cdp(tabId, 'DOM.enable').catch(() => {}),
+    // Frames from other sites (a sign-up's username box, a card field) run in
+    // processes of their own: each gets a session, so its fields can be read too.
+    cdp(tabId, 'Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }).catch(() => {}),
   ])
   return state
 }
@@ -486,18 +497,11 @@ setInterval(() => {
   for (const [id, t] of attached) if (now - t.lastUse > IDLE_DETACH_MS) detach(id)
 }, 30000)
 
-chrome.debugger?.onDetach.addListener((src, reason) => {
-  if (src.tabId === undefined) return
-  const had = attached.delete(src.tabId)
-  if (had && reason === 'canceled_by_user') {
-    // The person pressed Cancel on Chrome's "is debugging this browser" bar:
-    // every agent that was working here stops until they let it again.
-    for (const [slug, g] of Object.entries(groups)) {
-      if (g.recentAt && Date.now() - g.recentAt < 10 * 60 * 1000) stopped.add(slug)
-    }
-    chrome.storage.local.set({ handsStopped: [...stopped] }).catch(() => {})
-    detachAll()
-  }
+chrome.debugger?.onDetach.addListener((src) => {
+  // Cancel on Chrome's "is debugging this browser" bar only hides it: the next
+  // act attaches again. Stopping an agent is the panel's Stop (people press
+  // Cancel to get rid of the bar, not to stop their agent).
+  if (src.tabId !== undefined) attached.delete(src.tabId)
 })
 
 function remoteText(a) {
@@ -515,7 +519,36 @@ function pushCapped(list, item) {
 chrome.debugger?.onEvent.addListener((src, method, p) => {
   const t = attached.get(src.tabId)
   if (!t) return
+  if (src.sessionId) {
+    // An event of a frame from another site.
+    const f = t.frames.get(src.sessionId)
+    if (!f) return
+    if ((method === 'Page.frameNavigated' && !p.frame?.parentId) || method === 'Runtime.executionContextsCleared' ||
+        (method === 'Runtime.executionContextDestroyed' && f.world === p.executionContextId)) f.world = null
+    if (method === 'Runtime.consoleAPICalled' || method === 'Runtime.exceptionThrown') {
+      const text = method === 'Runtime.exceptionThrown'
+        ? (p.exceptionDetails?.exception?.description || p.exceptionDetails?.text || 'Uncaught error')
+        : (p.args || []).map(remoteText).join(' ')
+      pushCapped(t.console, { at: Date.now(), level: method === 'Runtime.exceptionThrown' ? 'error' : p.type, text: clip(text, 2000), where: f.url })
+    }
+    return
+  }
   switch (method) {
+    case 'Target.attachedToTarget': {
+      const info = p.targetInfo || {}
+      if (info.type === 'iframe' && p.sessionId) {
+        t.frames.set(p.sessionId, { index: ++t.frameIx, targetId: info.targetId, url: info.url || '', world: null })
+        cdpS(src.tabId, p.sessionId, 'Page.enable').catch(() => {})
+        cdpS(src.tabId, p.sessionId, 'Runtime.enable').catch(() => {})
+      }
+      break
+    }
+    case 'Target.detachedFromTarget':
+      t.frames.delete(p.sessionId)
+      break
+    case 'Target.targetInfoChanged':
+      for (const f of t.frames.values()) if (f.targetId === p.targetInfo?.targetId) f.url = p.targetInfo.url || f.url
+      break
     case 'Runtime.consoleAPICalled': {
       const top = p.stackTrace?.callFrames?.[0]
       pushCapped(t.console, { at: Date.now(), level: p.type === 'warning' ? 'warn' : p.type, text: clip((p.args || []).map(remoteText).join(' '), 2000),
@@ -578,28 +611,35 @@ async function source(file) {
   return r.text()
 }
 
-async function world(tabId) {
-  const t = attached.get(tabId) || (await attach(tabId))
-  if (t.world) return t.world
-  const { frameTree } = await cdp(tabId, 'Page.getFrameTree')
-  const { executionContextId } = await cdp(tabId, 'Page.createIsolatedWorld', { frameId: frameTree.frame.id, worldName: 'captain-hands' })
-  t.world = executionContextId
-  return t.world
+function holderOf(tabId, sid) {
+  const t = attached.get(tabId)
+  const h = sid ? t?.frames.get(sid) : t
+  if (!h) throw new Refusal("That frame is gone (the page changed) — read the page again.")
+  return h
 }
 
-async function evaluate(tabId, expression, { main = false, timeout = 20000, repl = false } = {}) {
+async function world(tabId, sid = '') {
+  if (!attached.get(tabId)) await attach(tabId)
+  const h = holderOf(tabId, sid)
+  if (h.world) return h.world
+  const { frameTree } = await cdpS(tabId, sid, 'Page.getFrameTree')
+  const { executionContextId } = await cdpS(tabId, sid, 'Page.createIsolatedWorld', { frameId: frameTree.frame.id, worldName: 'captain-hands' })
+  h.world = executionContextId
+  return h.world
+}
+
+async function evaluate(tabId, expression, { main = false, timeout = 20000, repl = false, sid = '' } = {}) {
   const params = { expression, returnByValue: true, awaitPromise: true, userGesture: true }
   if (repl) params.replMode = true
-  if (!main) params.contextId = await world(tabId)
+  if (!main) params.contextId = await world(tabId, sid)
   let r
   try {
-    r = await withTimeout(cdp(tabId, 'Runtime.evaluate', params), timeout, 'The page took too long to answer.')
+    r = await withTimeout(cdpS(tabId, sid, 'Runtime.evaluate', params), timeout, 'The page took too long to answer.')
   } catch (e) {
     if (main || !/context/i.test(String(e.message || e))) throw e
-    const t = attached.get(tabId)
-    if (t) t.world = null
-    params.contextId = await world(tabId)
-    r = await withTimeout(cdp(tabId, 'Runtime.evaluate', params), timeout, 'The page took too long to answer.')
+    holderOf(tabId, sid).world = null
+    params.contextId = await world(tabId, sid)
+    r = await withTimeout(cdpS(tabId, sid, 'Runtime.evaluate', params), timeout, 'The page took too long to answer.')
   }
   if (r.exceptionDetails) {
     const d = r.exceptionDetails
@@ -608,10 +648,108 @@ async function evaluate(tabId, expression, { main = false, timeout = 20000, repl
   return r.result
 }
 
-async function helper(tabId, fn, arg = {}) {
+async function helper(tabId, fn, arg = {}, sid = '') {
   if (!helperSrc) helperSrc = await source('hands-page.js')
-  const res = await evaluate(tabId, `${helperSrc}\n;globalThis.__captainHands.${fn}(${JSON.stringify(arg)})`)
+  const prefix = sid ? `f${holderOf(tabId, sid).index}_` : ''
+  const res = await evaluate(tabId, `${helperSrc}\n;globalThis.__captainRefPrefix = ${JSON.stringify(prefix)};globalThis.__captainHands.${fn}(${JSON.stringify(arg)})`, { sid })
   return res.value
+}
+
+// The frame a ref lives in ('' = the page itself): ref_f2_5 is frame 2's.
+function sidOfRef(tabId, ref) {
+  const m = /^ref_f(\d+)_/.exec(String(ref || ''))
+  if (!m) return ''
+  const t = attached.get(tabId)
+  for (const [sid, f] of t?.frames || []) if (f.index === Number(m[1])) return sid
+  throw new Refusal(`${ref} was in a frame that's gone (the page changed) — read the page again.`)
+}
+
+async function refHelper(tabId, fn, arg) {
+  return helper(tabId, fn, arg, sidOfRef(tabId, arg.ref))
+}
+
+// Where a frame from another site sits in the page (its top-left inside the
+// border), scrolled into view first when asked.
+async function frameBox(tabId, sid, { reveal = false } = {}) {
+  const f = holderOf(tabId, sid)
+  const { backendNodeId } = await cdp(tabId, 'DOM.getFrameOwner', { frameId: f.targetId })
+  const { object } = await cdp(tabId, 'DOM.resolveNode', { backendNodeId, executionContextId: await world(tabId) })
+  const r = await cdp(tabId, 'Runtime.callFunctionOn', { objectId: object.objectId, returnByValue: true,
+    functionDeclaration: `function (reveal) {
+      let b = this.getBoundingClientRect()
+      if (reveal && (b.top < 0 || b.bottom > innerHeight)) { this.scrollIntoView({ block: 'center', behavior: 'instant' }); b = this.getBoundingClientRect() }
+      return { x: b.left + (this.clientLeft || 0), y: b.top + (this.clientTop || 0), w: b.width, h: b.height }
+    }`, arguments: [{ value: reveal }] })
+  cdp(tabId, 'Runtime.releaseObject', { objectId: object.objectId }).catch(() => {})
+  return r.result.value
+}
+
+function hostOfUrl(url) {
+  try { return new URL(url).host } catch { return 'another site' }
+}
+
+// The tab's frames from other sites worth reading: shown, not a pixel.
+async function liveFrames(tabId) {
+  const t = attached.get(tabId)
+  const out = []
+  for (const [sid, f] of [...(t?.frames || [])].sort((a, b) => a[1].index - b[1].index)) {
+    try {
+      const box = await frameBox(tabId, sid)
+      if (box.w >= 30 && box.h >= 20) out.push({ sid, f, box })
+    } catch { /* not in this page's tree (nested deeper) */ }
+    if (out.length >= 6) break
+  }
+  return out
+}
+
+// A helper run in the page and in each of its frames from other sites, joined.
+async function inAllFrames(tabId, fn, arg, heading) {
+  const parts = []
+  for (const { sid, f, box } of await liveFrames(tabId)) {
+    let text = ''
+    try { text = await helper(tabId, fn, arg, sid) } catch { continue }
+    if (typeof text !== 'string' || !text.includes('[ref_')) continue
+    const body = text.split('\n').filter((l) => !/^(Page:|Viewport )/.test(l)).join('\n')
+    parts.push(`\n${heading} ${hostOfUrl(f.url)} at (${Math.round(box.x)}, ${Math.round(box.y)}), ${Math.round(box.w)}×${Math.round(box.h)} — its refs work like the page's:\n${body}`)
+  }
+  return parts.join('\n')
+}
+
+// What the page and its frames say is wrong now.
+async function problemsAll(tabId) {
+  const out = []
+  try { out.push(...(await helper(tabId, 'problems'))) } catch { /* the page is changing */ }
+  for (const { sid } of await liveFrames(tabId).catch(() => [])) {
+    try { out.push(...(await helper(tabId, 'problems', {}, sid))) } catch { /* gone */ }
+  }
+  return out
+}
+
+function newProblems(before, after) {
+  const seen = new Set(before)
+  const fresh = after.filter((p) => !seen.has(p))
+  return fresh.length ? `On the page now: ${fresh.slice(0, 6).join(' · ')}` : ''
+}
+
+// The field that has the keyboard: in the page, or in one of its frames.
+async function focusedField(tabId) {
+  let f = null
+  try { f = await helper(tabId, 'focused') } catch { f = null }
+  if (f && !f.frame) return { ...f, sid: '' }
+  for (const { sid } of await liveFrames(tabId).catch(() => [])) {
+    try {
+      const inner = await helper(tabId, 'focused', {}, sid)
+      if (inner && !inner.frame) return { ...inner, sid }
+    } catch { /* gone */ }
+  }
+  return null
+}
+
+function fieldSays(info) {
+  if (!info) return ''
+  if (info.length !== undefined) return `${info.what} now holds ${info.length} character${info.length === 1 ? '' : 's'} (a password: not shown).`
+  if (info.checked !== undefined) return `${info.what} is ${info.checked ? 'checked' : 'unchecked'}.`
+  return `${info.what} now reads ${JSON.stringify(info.value ?? '')}.`
 }
 
 async function capturePage(tabId) {
@@ -730,6 +868,27 @@ for (let i = 1; i <= 12; i++) NAMED_KEYS[`f${i}`] = [`F${i}`, `F${i}`, 111 + i]
 
 const MAC_COMMANDS = { a: 'selectAll', c: 'copy', x: 'cut', v: 'paste', z: 'undo' }
 
+// Each printable character as a US keyboard types it: [code, key code, shift].
+// (A character's own code is not its key's: "." is 46, which is Delete.)
+const US_KEYS = (() => {
+  const m = {}
+  for (const c of 'abcdefghijklmnopqrstuvwxyz') {
+    const up = c.toUpperCase()
+    m[c] = [`Key${up}`, up.charCodeAt(0), false]
+    m[up] = [`Key${up}`, up.charCodeAt(0), true]
+  }
+  for (let d = 0; d <= 9; d++) m[String(d)] = [`Digit${d}`, 48 + d, false]
+  const digitShift = { '!': 1, '@': 2, '#': 3, $: 4, '%': 5, '^': 6, '&': 7, '*': 8, '(': 9, ')': 0 }
+  for (const [c, d] of Object.entries(digitShift)) m[c] = [`Digit${d}`, 48 + d, true]
+  const oem = [[' ', 'Space', 32], ['-', 'Minus', 189], ['=', 'Equal', 187], ['[', 'BracketLeft', 219], [']', 'BracketRight', 221],
+    ['\\', 'Backslash', 220], [';', 'Semicolon', 186], ["'", 'Quote', 222], [',', 'Comma', 188], ['.', 'Period', 190],
+    ['/', 'Slash', 191], ['`', 'Backquote', 192]]
+  for (const [c, code, kc] of oem) m[c] = [code, kc, false]
+  const oemShift = { _: '-', '+': '=', '{': '[', '}': ']', '|': '\\', ':': ';', '"': "'", '<': ',', '>': '.', '?': '/', '~': '`' }
+  for (const [c, base] of Object.entries(oemShift)) m[c] = [m[base][0], m[base][1], true]
+  return m
+})()
+
 function keySpec(name, mods) {
   const lower = name.toLowerCase()
   if (NAMED_KEYS[lower]) {
@@ -738,13 +897,8 @@ function keySpec(name, mods) {
   }
   if ([...name].length === 1) {
     const ch = name
-    const up = ch.toUpperCase()
-    let code = ''
-    let keyCode = up.charCodeAt(0)
-    if (/[a-z]/i.test(ch)) code = `Key${up}`
-    else if (/[0-9]/.test(ch)) code = `Digit${ch}`
-    else keyCode = 0
-    const shifted = mods & 8 && /[a-z]/.test(ch) ? up : ch
+    const shifted = mods & 8 && /[a-z]/.test(ch) ? ch.toUpperCase() : ch
+    const [code, keyCode] = US_KEYS[shifted] || US_KEYS[ch] || ['', 0]
     return { key: shifted, code, keyCode, text: mods & (2 | 4) ? '' : shifted }
   }
   throw new Refusal(`“${name}” isn't a key I know (try Enter, Tab, Escape, ArrowDown, a letter, or a combination like cmd+a).`)
@@ -775,9 +929,10 @@ async function typeText(tabId, text) {
   for (const ch of text) {
     if (ch === '\n') { await pressCombo(tabId, 'Enter'); continue }
     if (ch === '\t') { await pressCombo(tabId, 'Tab'); continue }
-    if (ch.length > 1 || ch.charCodeAt(0) > 0x7e) { await cdp(tabId, 'Input.insertText', { text: ch }); continue }
-    const spec = /[a-z0-9]/i.test(ch) ? keySpec(ch, 0) : { key: ch, code: '', keyCode: 0, text: ch }
-    const base = { key: ch, code: spec.code, windowsVirtualKeyCode: spec.keyCode || ch.toUpperCase().charCodeAt(0), nativeVirtualKeyCode: spec.keyCode }
+    const k = US_KEYS[ch]
+    if (!k) { await cdp(tabId, 'Input.insertText', { text: ch }); continue }   // not on a US keyboard: é, ü, emoji…
+    const [code, keyCode, shift] = k
+    const base = { key: ch, code, windowsVirtualKeyCode: keyCode, nativeVirtualKeyCode: keyCode, modifiers: shift ? 8 : 0 }
     await cdp(tabId, 'Input.dispatchKeyEvent', { ...base, type: 'keyDown', text: ch, unmodifiedText: ch })
     await cdp(tabId, 'Input.dispatchKeyEvent', { ...base, type: 'keyUp' })
   }
@@ -853,7 +1008,14 @@ async function pointFor(tab, args) {
     if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Refusal('coordinate is [x, y] from a screenshot.')
     return { x: x / scale, y: y / scale, what: `(${x}, ${y})` }
   }
-  if (args.ref) return helper(tab.id, 'point', { ref: args.ref })
+  if (args.ref) {
+    const sid = sidOfRef(tab.id, args.ref)
+    if (!sid) return helper(tab.id, 'point', { ref: args.ref })
+    await frameBox(tab.id, sid, { reveal: true })
+    const p = await helper(tab.id, 'point', { ref: args.ref }, sid)
+    const box = await frameBox(tab.id, sid)
+    return { ...p, x: p.x + box.x, y: p.y + box.y }
+  }
   if (args.selector || args.text || args.role) {
     return helper(tab.id, 'pointBy', { selector: args.selector || '', text: args.text || '', role: args.role || '', nth: args.nth ?? null })
   }
@@ -867,11 +1029,40 @@ function pointNotes(p) {
 
 async function clickLike(ctx, args, { button = 'left', count = 1, verb = 'Clicked' } = {}) {
   const tab = await useTab(ctx, args)
+  const pre = await problemsAll(tab.id)
   const p = await pointFor(tab, args)
   const before = await groupTabIds(ctx.agent)
   await mouseClick(tab.id, p.x, p.y, { button, count, mods: modsOf(args.modifiers) })
   const after = await settle(ctx, tab, tab.url, before)
-  return { content: [`${verb} ${p.what}${p.ref ? ` [${p.ref}]` : ''}.`, ...pointNotes(p), after].filter(Boolean).join('\n') }
+  const said = newProblems(pre, await problemsAll(tab.id))
+  return { content: [`${verb} ${p.what}${p.ref ? ` [${p.ref}]` : ''}.`, ...pointNotes(p), after, said].filter(Boolean).join('\n') }
+}
+
+// Typing into a field (a ref, a selector, a point) replaces what's in it unless
+// append is set; the answer says what the field holds afterwards.
+async function typeInto(ctx, tab, args, text) {
+  const pre = await problemsAll(tab.id)
+  let into = ''
+  if (args.ref || args.selector || Array.isArray(args.coordinate)) {
+    const p = await pointFor(tab, { ref: args.ref, selector: args.selector, coordinate: args.coordinate, nth: args.nth })
+    await mouseClick(tab.id, p.x, p.y)
+    into = ` into ${p.what}${p.ref ? ` [${p.ref}]` : ''}`
+  }
+  const field = await focusedField(tab.id)
+  if (field && into && !args.append) {
+    try { await helper(tab.id, 'selectField', { ref: field.ref }, field.sid) } catch { await pressCombo(tab.id, 'cmd+a') }
+  }
+  if (!field && into) into += ' (the click put no field in focus — check where the text went)'
+  const before = await groupTabIds(ctx.agent)
+  await typeText(tab.id, text)
+  const after = await settle(ctx, tab, tab.url, before)
+  let now = ''
+  if (field) {
+    try { now = fieldSays(await helper(tab.id, 'field', { ref: field.ref }, field.sid)) } catch { now = '' }
+  }
+  const said = newProblems(pre, await problemsAll(tab.id))
+  return [`Typed ${text.length} character${text.length === 1 ? '' : 's'}${into}${field && into && !args.append ? ', replacing what was there' : ''}.`, now, after, said]
+    .filter(Boolean).join('\n')
 }
 
 // ── files ──
@@ -1012,14 +1203,22 @@ const ACTIONS = {
 
   async read_page(ctx, args = ctx.args) {
     const tab = await useTab(ctx, args)
-    const text = await helper(tab.id, 'tree', { filter: args.filter === 'all' ? 'all' : 'interactive', refId: args.ref || args.ref_id || '',
-      maxChars: Math.min(Math.max(Number(args.max_chars) || 40000, 2000), 200000) })
-    return { content: text }
+    const filter = args.filter === 'all' ? 'all' : 'interactive'
+    const maxChars = Math.min(Math.max(Number(args.max_chars) || 40000, 2000), 200000)
+    const inside = args.ref || args.ref_id || ''
+    if (inside) return { content: await refHelper(tab.id, 'tree', { filter, refId: inside, maxChars, ref: inside }) }
+    const text = await helper(tab.id, 'tree', { filter, refId: '', maxChars })
+    const frames = await inAllFrames(tab.id, 'tree', { filter, refId: '', maxChars: Math.min(maxChars, 12000) }, 'Inside a frame from')
+    return { content: text + frames }
   },
 
   async find(ctx, args = ctx.args) {
     const tab = await useTab(ctx, args)
-    return { content: await helper(tab.id, 'find', { query: args.query || args.text || '' }) }
+    const query = args.query || args.text || ''
+    const here = await helper(tab.id, 'find', { query })
+    const frames = await inAllFrames(tab.id, 'find', { query }, 'In a frame from')
+    if (frames && /^Nothing on the page matches/.test(here)) return { content: `Nothing in the page itself matches ${JSON.stringify(query)}.${frames}` }
+    return { content: here + frames }
   },
 
   async page_text(ctx, args = ctx.args) {
@@ -1102,7 +1301,23 @@ const ACTIONS = {
   async form_input(ctx, args = ctx.args) {
     const tab = await useTab(ctx, args)
     if (!args.ref) throw new Refusal('form_input needs a ref (from read_page or find) and a value.')
-    return { content: await helper(tab.id, 'formInput', { ref: args.ref, value: args.value ?? args.text ?? '' }) }
+    const value = args.value ?? args.text ?? ''
+    const sid = sidOfRef(tab.id, args.ref)
+    const pre = await problemsAll(tab.id)
+    let said
+    if (await helper(tab.id, 'fieldKind', { ref: args.ref }, sid) === 'text') {
+      // A text field is set the way a person does it — select what's there, then
+      // the new text as real input — so React, Vue and the rest all see it.
+      await helper(tab.id, 'selectField', { ref: args.ref }, sid)
+      const text = String(value)
+      if (text) await cdp(tab.id, 'Input.insertText', { text })
+      else await pressCombo(tab.id, 'Backspace')
+      await sleep(80)
+      said = fieldSays(await helper(tab.id, 'field', { ref: args.ref }, sid))
+    } else {
+      said = await helper(tab.id, 'formInput', { ref: args.ref, value }, sid)
+    }
+    return { content: [said, newProblems(pre, await problemsAll(tab.id))].filter(Boolean).join('\n') }
   },
 
   click: (ctx) => clickLike(ctx, ctx.args),
@@ -1138,25 +1353,18 @@ const ACTIONS = {
     const text = String(args.text ?? '')
     if (!text) throw new Refusal('type needs the text to type.')
     const tab = await useTab(ctx, args)
-    let focused = ''
-    if (args.ref || args.selector || Array.isArray(args.coordinate)) {
-      const p = await pointFor(tab, { ref: args.ref, selector: args.selector, coordinate: args.coordinate, nth: args.nth })
-      await mouseClick(tab.id, p.x, p.y)
-      focused = ` into ${p.what}${p.ref ? ` [${p.ref}]` : ''}`
-    }
-    await typeText(tab.id, text)
-    const after = await settle(ctx, tab, tab.url)
-    return { content: [`Typed ${text.length} character${text.length === 1 ? '' : 's'}${focused}.`, after].filter(Boolean).join('\n') }
+    return { content: await typeInto(ctx, tab, args, text) }
   },
 
   async press_key(ctx, args = ctx.args) {
     const keys = String(args.key || args.text || '').trim()
     if (!keys) throw new Refusal('press_key needs key (Enter, Tab, Escape, cmd+a, … — several separated by spaces).')
     const tab = await useTab(ctx, args)
+    const pre = await problemsAll(tab.id)
     const before = await groupTabIds(ctx.agent)
     for (const combo of keys.split(/\s+/)) await pressCombo(tab.id, combo)
     const after = await settle(ctx, tab, tab.url, before)
-    return { content: [`Pressed ${keys}.`, after].filter(Boolean).join('\n') }
+    return { content: [`Pressed ${keys}.`, after, newProblems(pre, await problemsAll(tab.id))].filter(Boolean).join('\n') }
   },
 
   async scroll(ctx, args = ctx.args) {
@@ -1186,7 +1394,7 @@ const ACTIONS = {
 
   async scroll_to(ctx, args = ctx.args) {
     const tab = await useTab(ctx, args)
-    return { content: await helper(tab.id, 'scrollTo', { ref: args.ref }) }
+    return { content: await refHelper(tab.id, 'scrollTo', { ref: args.ref }) }
   },
 
   async screenshot(ctx, args = ctx.args) {
@@ -1265,7 +1473,7 @@ const ACTIONS = {
     const f = args.file || {}
     if (!args.ref || !f.data) throw new Refusal('upload_file needs ref (the file field) and the file.')
     const tab = await useTab(ctx, args)
-    return { content: await helper(tab.id, 'upload', { ref: args.ref, name: String(f.name || 'file'), type: String(f.type || 'application/octet-stream'), data: String(f.data) }) }
+    return { content: await refHelper(tab.id, 'upload', { ref: args.ref, name: String(f.name || 'file'), type: String(f.type || 'application/octet-stream'), data: String(f.data) }) }
   },
 
   async release(ctx) {

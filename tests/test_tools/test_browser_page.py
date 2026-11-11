@@ -124,10 +124,14 @@ async def test_live_the_extensions_page_actions_work_headless(tmp_path, monkeypa
         everything = await act("read_page", filter="all")
         assert "Welcome to the portal" in everything and "heading" in everything
         email = _ref(await act("find", query="email"), "Email")
-        assert "alice@x.co" in await act("form_input", ref=email, value="alice@x.co")
+        assert 'now reads "alice@x.co"' in await act("form_input", ref=email, value="alice@x.co")
+        assert 'now reads "alice@x.co"' in await act("form_input", ref=email, value="alice@x.co"), "replaced, not appended"
         assert "Quarterly" in await act("form_input", ref=_ref(tree, "combobox"), value="Quarterly")
         assert "checked" in await act("form_input", ref=_ref(tree, "I agree"), value="true")
-        await act("type", ref=_ref(tree, '"Note"'), text="Hi there")
+        typed = await act("type", ref=_ref(tree, '"Note"'), text="first.draft#1")
+        assert 'now reads "first.draft#1"' in typed, typed
+        again = await act("type", ref=_ref(tree, '"Note"'), text="Hi there")
+        assert "replacing what was there" in again and 'now reads "Hi there"' in again, again
         await act("click", ref=_ref(tree, "Request statement"))
         text = await act("page_text")
         assert "Requested for alice@x.co / q / agreed / Hi there" in text and "# Test Portal" in text

@@ -62,7 +62,7 @@ _PASS_ARGS = (
     "url", "ref", "coordinate", "start_coordinate", "region", "tab_id", "query", "value",
     "filter", "code", "pattern", "only_errors", "url_pattern", "width", "height", "text",
     "key", "selector", "role", "nth", "scroll_direction", "scroll_amount", "max_chars",
-    "offset", "urls", "all", "modifiers", "clear",
+    "offset", "urls", "all", "modifiers", "clear", "append",
 )
 _ALIASES = {"accessibility_tree": "read_page", "find_element": "find"}
 _LONG_ACTIONS = frozenset({"download", "save_page", "navigate", "tab_new", "page_text", "page_files"})

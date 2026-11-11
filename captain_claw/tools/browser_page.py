@@ -246,34 +246,78 @@ class HeadlessPage:
             return f"Now at: {await page.title()} — {page.url}"
         return ""
 
+    async def _problems(self) -> list[str]:
+        try:
+            got = await (await self.world()).helper("problems")
+        except Exception:
+            return []
+        return [str(x) for x in got or []]
+
+    @staticmethod
+    def _new_problems(before: list[str], after: list[str]) -> str:
+        fresh = [p for p in after if p not in set(before)]
+        return f"On the page now: {' · '.join(fresh[:6])}" if fresh else ""
+
+    @staticmethod
+    def _field_says(info: Any) -> str:
+        if not isinstance(info, dict):
+            return ""
+        if info.get("length") is not None:
+            n = int(info["length"])
+            return f"{info.get('what')} now holds {n} character{'s' if n != 1 else ''} (a password: not shown)."
+        if info.get("checked") is not None:
+            return f"{info.get('what')} is {'checked' if info['checked'] else 'unchecked'}."
+        return f"{info.get('what')} now reads {json.dumps(info.get('value') or '', ensure_ascii=False)}."
+
     async def click(self, *, button: str = "left", count: int = 1, verb: str = "Clicked") -> ToolResult:
         page = await self.page()
+        pre = await self._problems()
         p = await self.point()
         before, n = page.url, len(page.context.pages)
         await page.mouse.click(p["x"], p["y"], button=button, click_count=count)
         after = await self._settle(before, n)
         ref = f" [{p['ref']}]" if p.get("ref") else ""
         return ToolResult(success=True, content="\n".join(
-            [f"{verb} {p['what']}{ref}.", *self._notes(p), after, f"Current URL: {(await self.page()).url}"]).strip())
+            [f"{verb} {p['what']}{ref}.", *self._notes(p), after, self._new_problems(pre, await self._problems()),
+             f"Current URL: {(await self.page()).url}"]).strip())
 
     async def type(self) -> ToolResult:
+        """Typing into a field (a ref or a point) replaces what's in it unless
+        append is set; the answer says what the field holds afterwards."""
         text = str(self.kwargs.get("text") or "")
         if not text:
             return ToolResult(success=False, error="type needs the text to type.")
         page = await self.page()
-        focused = ""
+        pre = await self._problems()
+        into = ""
         if self.kwargs.get("ref") or isinstance(self.kwargs.get("coordinate"), (list, tuple)):
             p = await self.point(allow_text=False)
             await page.mouse.click(p["x"], p["y"])
-            focused = f" into {p['what']}" + (f" [{p['ref']}]" if p.get("ref") else "")
+            into = f" into {p['what']}" + (f" [{p['ref']}]" if p.get("ref") else "")
+        w = await self.world()
+        try:
+            field = await w.helper("focused")
+        except Exception:
+            field = None
+        field = field if isinstance(field, dict) and field.get("ref") else None
+        replaced = bool(field and into and not self.kwargs.get("append"))
+        if replaced:
+            await w.helper("selectField", {"ref": field["ref"]})
         before, n = page.url, len(page.context.pages)
         if len(text) > 300:
             await page.keyboard.insert_text(text)
         else:
             await page.keyboard.type(text)
         after = await self._settle(before, n)
-        return ToolResult(success=True, content="\n".join(
-            [f"Typed {len(text)} character{'s' if len(text) != 1 else ''}{focused}.", after]).strip())
+        now = ""
+        if field:
+            try:
+                now = self._field_says(await (await self.world()).helper("field", {"ref": field["ref"]}))
+            except Exception:
+                now = ""
+        return ToolResult(success=True, content="\n".join(filter(None, [
+            f"Typed {len(text)} character{'s' if len(text) != 1 else ''}{into}{', replacing what was there' if replaced else ''}.",
+            now, after, self._new_problems(pre, await self._problems())])))
 
     # -- the actions -----------------------------------------------------------
 
@@ -298,8 +342,21 @@ class HeadlessPage:
         if not k.get("ref"):
             return ToolResult(success=False, error="form_input needs a ref (from read_page or find) and a value.")
         value = k.get("value") if k.get("value") is not None else k.get("text", "")
-        said = await (await self.world()).helper("formInput", {"ref": str(k["ref"]), "value": value})
-        return ToolResult(success=True, content=str(said))
+        w = await self.world()
+        pre = await self._problems()
+        ref = str(k["ref"])
+        if await w.helper("fieldKind", {"ref": ref}) == "text":
+            # Set the way a person does it: select what's there, then real input.
+            await w.helper("selectField", {"ref": ref})
+            page = await self.page()
+            if str(value):
+                await page.keyboard.insert_text(str(value))
+            else:
+                await page.keyboard.press("Backspace")
+            said = self._field_says(await (await self.world()).helper("field", {"ref": ref}))
+        else:
+            said = str(await w.helper("formInput", {"ref": ref, "value": value}))
+        return ToolResult(success=True, content="\n".join(filter(None, [said, self._new_problems(pre, await self._problems())])))
 
     async def _page_text(self) -> ToolResult:
         page = await self.page()
