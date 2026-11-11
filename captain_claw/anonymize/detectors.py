@@ -379,9 +379,11 @@ _AGE_RE = re.compile(
 
 
 def detect(text: str, kinds: frozenset[str] | set[str] | None = None,
-           opt_in: frozenset[str] | set[str] = frozenset()) -> list[Span]:
+           opt_in: frozenset[str] | set[str] = frozenset(), *, ner: bool = True) -> list[Span]:
     """Every span the deterministic lane finds in *text* (they may overlap).
-    *opt_in*: kinds of :data:`OPT_IN_KINDS` to find too."""
+    *opt_in*: kinds of :data:`OPT_IN_KINDS` to find too. *ner*: ask the
+    name-recognition pack too, if one is on (the engine asks it only on the
+    original text, not on its own masked output)."""
     text = str(text or "")
     out: list[Span] = []
 
@@ -536,8 +538,8 @@ def detect(text: str, kinds: frozenset[str] | set[str] | None = None,
             g = 1 if m.group(1) else 2
             if 0 < int(m.group(g)) < 125:
                 out.append(Span(m.start(), m.end(), "AGE", 1, "age"))
-    if want("PERSON") and _ner_backend is not None:
-        out.extend(ner_spans(text))
+    if ner and _ner_backend is not None and (want("PERSON") or want("ORG")):
+        out.extend(sp for sp in ner_spans(text) if want(sp.kind))
     return out
 
 
@@ -546,7 +548,9 @@ def detect(text: str, kinds: frozenset[str] | set[str] | None = None,
 # Set by whoever runs the engine (Flight Deck) when an admin has turned the
 # pack on; None everywhere else, so the lane stays pure code by default.
 _ner_backend: "Callable[[str], list[tuple[int, int, str, float]]] | None" = None
-NER_MIN_SCORE = 0.80
+# Measured (scripts/measure_name_models.py): below 0.80 BERTić finds more
+# names and breaks nothing more; 0.70 keeps a margin.
+NER_MIN_SCORE = 0.70
 NER_MAX_CHARS = 200_000
 _NER_KINDS = {"PER": "PERSON", "PERSON": "PERSON", "B-PER": "PERSON", "I-PER": "PERSON", "ORG": "ORG"}
 
@@ -565,7 +569,9 @@ def ner_spans(text: str) -> list[Span]:
     if backend is None or not text.strip() or len(text) > NER_MAX_CHARS:
         return []
     try:
-        found = backend(text)
+        # Tokens already in the text are masked with NULs; a model reads
+        # spaces better (same length, so the offsets hold).
+        found = backend(text.replace("\x00", " "))
     except Exception:  # noqa: BLE001 — the lane keeps working without it
         return []
     out = []

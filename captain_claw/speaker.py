@@ -96,12 +96,18 @@ SPEAKER_CUSTOM_TOOLS = frozenset({"custom_tools"})
 # ask_user: a member's question goes to the MEMBER (Flight Deck reads the turn's grant).
 SPEAKER_ASK_TOOLS = frozenset({"ask_user"})
 _CUSTOM_TOOLS_ACTIONS = frozenset({"list", "describe", "run"})
+# anonymize: the member's text and files into THEIR vaults (the tool sends the
+# turn's grant; Flight Deck files everything under the member). Results go to
+# the member's own VFS folder, never the saved/ commons.
+SPEAKER_ANONYMIZE_TOOLS = frozenset({"anonymize"})
+_ANONYMIZE_ACTIONS = frozenset({"anonymize", "restore", "vaults"})
 # SPEAKER_TOOL_ALLOWLIST keeps its A1 meaning: the always-available chat tools.
 # The most a member can get (a verified member of a PROCESS agent); docker and
 # unknown runtimes stay at SPEAKER_TOOL_ALLOWLIST (part 0 §1).
 SPEAKER_TOOL_ALLOWLIST_MAX = (SPEAKER_TOOL_ALLOWLIST | SPEAKER_GOOGLE_TOOLS
                               | SPEAKER_DEEP_MEMORY_TOOLS | SPEAKER_FILE_TOOLS
-                              | SPEAKER_DATASTORE_TOOLS | SPEAKER_CUSTOM_TOOLS | SPEAKER_ASK_TOOLS)
+                              | SPEAKER_DATASTORE_TOOLS | SPEAKER_CUSTOM_TOOLS | SPEAKER_ASK_TOOLS
+                              | SPEAKER_ANONYMIZE_TOOLS)
 # = google_drive._SAVED_CATEGORIES and the write tool's saved/ categories.
 SAVED_CATEGORIES = frozenset({"downloads", "media", "output", "scripts", "showcase",
                               "skills", "summaries", "tmp", "tools"})
@@ -970,6 +976,16 @@ def apply_tool_rules(name: str, arguments: dict, agent: Any) -> tuple[dict, str 
             return args, NOT_ALLOWED_MESSAGE
         return args, None
 
+    if name == "anonymize":
+        if str(action or "").strip().lower() not in _ANONYMIZE_ACTIONS:
+            return args, NOT_ALLOWED_MESSAGE
+        if _non_empty(args.get("url")):
+            # The tool fetches the page itself: the same rule as web_fetch.
+            err = check_public_url(args.get("url"))
+            if err:
+                return args, err
+        return args, None
+
     return args, NOT_ALLOWED_MESSAGE
 
 
@@ -1042,6 +1058,8 @@ SPEAKER_PATH_MAP: dict[str, tuple[PathRule, ...]] = {
     "custom_tools": (),
     # ask_user: no paths at all; the question goes to the member through Flight Deck.
     "ask_user": (),
+    # anonymize: the file it reads, and where an explicit result goes.
+    "anonymize": (PathRule("/path", "read"), PathRule("/output_path", "write")),
 }
 
 # Schema properties that look like paths but aren't.
@@ -1051,6 +1069,7 @@ SPEAKER_NON_PATH_PARAMS: dict[str, frozenset[str]] = {
     "google_mail": frozenset({"to"}),                     # recipients (email addresses), not a path
     "playbooks": frozenset({"do_pattern", "dont_pattern"}),  # free-text playbook guidance
     "docx": frozenset({"to"}),                            # an edit's last paragraph number
+    "anonymize": frozenset({"url"}),                      # a web page it fetches (checked as public)
 }
 
 

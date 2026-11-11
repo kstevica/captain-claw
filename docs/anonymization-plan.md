@@ -7,8 +7,9 @@ tokens that mean nothing outside Captain. The real values are kept in an
 encrypted **vault** in Flight Deck, so the person (never the model) can put
 them back later.
 
-Status: **P0** PR #511 · **P1** PR #512 · **P2** PR #514 · **P3** PR #515 (each stacked on the one before) ·
-**P4 built** (branch `feat/anonymize-p4`, stacked on P3) — the name-recognition model itself not yet measured.
+Status: **P0** PR #511 · **P1** PR #512 · **P2** PR #514 · **P3** PR #515 · **P4** PR #516 (each stacked on the
+one before) · **members + name models measured** (branch `feat/anonymize-members`, stacked on P4; BERTić is
+the default name model). True PDF redaction is skipped (decided 2026-11-11).
 
 ## Principles
 
@@ -186,8 +187,9 @@ left for later.
     name on the next line and "Ime:" the name in the next cell; edits are split
     back per paragraph.
   * Pictures and embedded files are left as they are — the result says how
-    many. PDF and web pages still come back as markdown (true PDF redaction
-    would need PyMuPDF, which isn't a dependency).
+    many. PDF and web pages come back as markdown — true PDF redaction is
+    skipped (decided 2026-11-11; it would need PyMuPDF, which isn't a
+    dependency).
   * Routes `/fd/anonymize/file` and `/file/restore` (and `/agent/…`): the file
     as base64 in, the same kind of file out, plus a text preview. The agent
     tool sends a `path` file this way.
@@ -264,10 +266,8 @@ Known limits of P0 (the deterministic lane):
 * PDF and web pages come back as markdown; pictures inside office files are
   not changed (the result says how many there are).
 * In a spreadsheet, a first name and a surname in two cells get two tokens.
-* Not yet: member turns of shared agents (the routes
-  already file a member's work in the member's vault; the tool isn't on the
-  member allowlist yet), Iskra beings without fleet access (same as
-  `public_link`).
+* Not yet: Iskra beings without fleet access (same as `public_link`).
+  Member turns of shared agents came later (below).
 
 ## P3 — the privacy gate
 
@@ -330,26 +330,69 @@ the token would have gone (it works on the edits). Page: "Keep nothing" →
 "Make them coarser"; tool: `generalize: true`.
 
 **Name-recognition pack** (`flight_deck/anonymize_ner.py`). A local
-token-classification model adds people and companies it finds (score ≥ 0.80;
+token-classification model adds people and companies it finds (score ≥ 0.70;
 places and the rest ignored) to the deterministic lane on this deck, in
 ~1,500-character chunks, one call at a time; a model that fails finds nothing
-and code carries on. Admin console → Settings → Name recognition: on/off, the
-model — only `Davlan/xlm-roberta-base-wikiann-ner` (176 languages, Croatian
-and English among them, ~1.1 GB) or `classla/bcms-bertic-ner`
-(Croatian / Bosnian / Serbian / Montenegrin, ~440 MB) — and "Download and
-start". Only `safetensors` weights are downloaded and loaded, from the local
+and code carries on. It reads the original text only (the first round): on
+the engine's own masked output it took the words around a token for names.
+Admin console → Settings → Name recognition: on/off, the model — only
+`classla/bcms-bertic-ner` (default; Croatian / Bosnian / Serbian /
+Montenegrin, English names too, ~440 MB; people and companies) or
+`Davlan/xlm-roberta-base-wikiann-ner` (other languages, ~1.1 GB; people
+only) — and "Download and start". Only `safetensors` weights are downloaded and loaded, from the local
 files, with no remote code. Needs `transformers` + `torch` where Flight Deck
 runs (not the slim desktop app or a Pi): the card says so. Started at deck
 start when it is on and downloaded; never downloads by itself.
 
-Not measured yet: neither model has been run on the shared cases here (the
-download was held back in this session). Once one is on, the trusted-model
-card's "Check on samples" shows what it adds: its "code alone" column then
-includes the name model.
+**Measured 2026-11-12** (`scripts/measure_name_models.py` on
+`anonymize/name_cases.json`: 87 sentences, Croatian and English — bare and
+inflected names, names that are also words, small companies, and 144 traps:
+days, holidays, saints, streets and places named after people, ordinary
+words; plus the five shared cases). Mac, CPU, end to end through the engine:
+
+| | people (97) | companies (9) | traps kept (144) | memory | speed |
+|---|---|---|---|---|---|
+| code alone | 2% | 3 | 100% | — | — |
+| BERTić, cut-off 0.70 | **91%** (hr 95%, en 82%) | **9** | **142** | ~0.8 GB | ~17 ms/sentence, ~70 ms/KB, loads in ~3 s |
+| XLM-R, all labels, 0.70 | 88% (hr 84%, en 94%) | 8 | 124 | ~1.25 GB | similar |
+| XLM-R, people only, 0.70 | 78% | 3 | 141 | ~1.25 GB | similar |
+
+* BERTić is the default. Its false hits don't grow as the cut-off drops
+  (0.5–0.9 all keep 142/144), so 0.80 → 0.70 (0.5 finds one name more).
+* XLM-R labels days, holidays and whole phrases as companies at 0.9+
+  ("Monday", "Christmas", "U zoru smo krenuli"), so only its people are
+  taken; it stays for other languages.
+* What BERTić still misses: names that are also words at a sentence start
+  (Zora, Vjera, Ruža; Will, Grant, Bill), "Kevin's", "Summer Lee" (it calls
+  those MISC). What it breaks: "Sveti Duje" (a saint — public), and "Mark the
+  date" once "Mark Jensen" is known (the engine follows a known first name).
+* No shared case broke and no run failed verification with either model.
+* `tests/test_anonymize_names.py` runs the default model on the set where it
+  is downloaded (skipped elsewhere) and holds it to people ≥ 85%,
+  companies ≥ 80%, traps ≥ 97%.
+
+The trusted-model card's "Check on samples" includes the name model in its
+"code alone" column when one is on.
 
 Also fixed in P4: an "Address:" label took the rest of its line — it now
 stops at the first sentence end after the house number ("Trg b. J. Jelačića 1"
 keeps its initials).
+
+## Members of a shared agent
+
+A process member (A2) can use the tool on their own turn; a docker member
+stays at chat only (A1), as with every file tool.
+
+* `anonymize` is on the member's widest allowlist with the actions
+  `anonymize`, `restore` and `vaults` only. `path` is read and `output_path`
+  written under the member's own path rules, like `read` and `write`; `url`
+  must be a public address and is fetched the member's way (public only,
+  checked again when it connects).
+* The tool sends the member's grant to Flight Deck, so the work lands in the
+  **member's** vaults, never the owner's. Without the grant (a background step,
+  another person's message) it refuses: "Anonymization is only available while
+  answering this member's own message."
+* Results go to the member's own files: `vfs:<project>/anonymize/<folder>/<name>`.
 
 ## Phases
 
@@ -367,3 +410,5 @@ keeps its initials).
   OCR of pictures are not built.
 * **P3** (built) — the privacy gate, below.
 * **P4** (built) — below.
+* **Members** (built) — shared-agent members on their own turn, above.
+* **Skipped** — true PDF redaction (PDFs come back as markdown).

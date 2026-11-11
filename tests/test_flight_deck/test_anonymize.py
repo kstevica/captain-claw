@@ -924,3 +924,96 @@ class TestP4Routes:
             detectors.set_ner_backend(None)
             anonymize_ner._state.update(status="off", model="", error="")
         await _asyncio.sleep(0)
+
+
+# ── shared agents: a member uses the tool as themselves ─────────────
+
+
+class TestMemberTurns:
+    GRANT = "g" * 43
+
+    @pytest.fixture()
+    def member(self, tool_env, monkeypatch, tmp_path):
+        from captain_claw import speaker
+        from captain_claw.flight_deck import speaker_grants
+
+        seen: list[dict] = []
+
+        async def acting(request, google=False):
+            if request.headers.get(speaker.GRANT_HEADER) == self.GRANT and request.query_params.get("fd_member") == "1":
+                seen.append(dict(request.headers))
+                return speaker_grants.ActingMember(user_id=ALICE, owner=BOB, agent_ref="process:bob-bot:1",
+                                                   lane="A", turn="t1", slug="bob-bot", name="Bob's agent")
+            return None
+
+        monkeypatch.setattr(speaker_grants, "acting_member", acting)
+        monkeypatch.setenv("CLAW_VFS_ROOT", str(tmp_path / "vfs"))
+        p = speaker.Principal(ALICE, "Alice", "Bob", "A", "process:bob-bot:0123456789abcdef")
+        t1, t2 = speaker.bind(p), speaker.bind_grant(self.GRANT)
+        try:
+            yield {"env": tool_env, "seen": seen, "vfs": tmp_path / "vfs"}
+        finally:
+            speaker.reset_grant(t2)
+            speaker.reset(t1)
+
+    async def test_a_members_text_goes_to_their_vault(self, member):
+        from captain_claw.tools.anonymize import AnonymizeTool
+
+        res = await AnonymizeTool().execute(action="anonymize", text="mail ana@x.hr", vault="Mine",
+                                            **member["env"])
+        assert res.success and "⟦EMAIL_1⟧" in res.content and member["seen"]
+        c = _client()
+        assert [v["name"] for v in c.get("/fd/anonymize/vaults", headers=_bearer(ALICE)).json()["vaults"]] == ["Mine"]
+        assert c.get("/fd/anonymize/vaults", headers=_bearer(BOB)).json()["vaults"] == []  # never the owner's
+
+    async def test_a_members_files_land_in_their_own_folder(self, member):
+        from captain_claw.tools.anonymize import AnonymizeTool
+
+        src = Path(member["env"]["_saved_base_path"]) / "downloads" / "notes.txt"  # a member reads saved/ or VFS
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text(LETTER, encoding="utf-8")
+        res = await AnonymizeTool().execute(action="anonymize", path=str(src), **member["env"])
+        assert res.success, res.error
+        shown = res.content.split("Saved: ")[1].split("\n")[0]
+        assert shown.startswith("vfs:") and "/anonymize/anonymized/" in shown
+        assert list((member["vfs"] / ALICE).rglob("*.anonymized.txt"))
+        assert not list(Path(member["env"]["_saved_base_path"]).rglob("*.anonymized.txt"))  # not the commons
+
+    async def test_a_members_page_fetch_takes_the_public_only_path(self, member, monkeypatch):
+        from captain_claw.tools import web_fetch
+        from captain_claw.tools.anonymize import AnonymizeTool
+
+        asked = []
+
+        async def member_fetch(url):
+            asked.append(url)
+            raise PermissionError("private address")
+
+        monkeypatch.setattr(web_fetch, "_member_fetch", member_fetch)
+        res = await AnonymizeTool().execute(action="anonymize", url="http://intranet.example/hr", **member["env"])
+        assert asked == ["http://intranet.example/hr"]
+        assert not res.success and "shared agent" in res.error
+
+    async def test_no_grant_no_call(self, tool_env):
+        from captain_claw import speaker
+        from captain_claw.tools.anonymize import AnonymizeTool
+
+        p = speaker.Principal(ALICE, "Alice", "Bob", "A", "process:bob-bot:0123456789abcdef")
+        t = speaker.bind(p)
+        try:
+            res = await AnonymizeTool().execute(action="anonymize", text="mail ana@x.hr", **tool_env)
+        finally:
+            speaker.reset(t)
+        assert not res.success and "member's own message" in res.error
+
+
+def test_members_may_use_the_tool_under_rules():
+    from captain_claw import speaker
+
+    assert "anonymize" in speaker.SPEAKER_TOOL_ALLOWLIST_MAX
+    assert "anonymize" not in speaker.SPEAKER_TOOL_ALLOWLIST  # process agents only (their own vaults)
+    assert speaker.apply_tool_rules("anonymize", {"action": "vaults"}, None)[1] is None
+    assert speaker.apply_tool_rules("anonymize", {"action": "delete_everything"}, None)[1] == speaker.NOT_ALLOWED_MESSAGE
+    _args, err = speaker.apply_tool_rules("anonymize", {"action": "anonymize", "url": "file:///etc/passwd"}, None)
+    assert err
+    assert {r.pointer for r in speaker.SPEAKER_PATH_MAP["anonymize"]} == {"/path", "/output_path"}

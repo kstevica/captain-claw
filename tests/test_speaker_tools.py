@@ -145,6 +145,7 @@ def test_allowlist_is_exactly_the_contract():
         "google_mail", "google_drive", "google_calendar", "typesense", "read", "write",
         "edit", "glob", "grep", "vfs", "pdf_extract", "docx_extract", "xlsx_extract",
         "pptx_extract", "datastore", "docx", "xlsx", "pptx", "custom_tools", "ask_user",
+        "anonymize",
     }
 
 
