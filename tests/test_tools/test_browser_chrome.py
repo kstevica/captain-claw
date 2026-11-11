@@ -14,6 +14,8 @@ Pinned here:
 
 from __future__ import annotations
 
+import asyncio
+
 import base64
 from pathlib import Path
 
@@ -154,3 +156,40 @@ def test_the_schema_offers_every_chrome_action():
     assert props["target"]["enum"] == ["headless", "chrome"]
     for key in bc._PASS_ARGS:
         assert key in props, key
+
+
+
+async def test_the_end_of_a_run_that_used_chrome_tells_flight_deck_once(deck, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from captain_claw.agent import Agent
+
+    told: list[bool] = []
+
+    async def _tell():
+        told.append(True)
+
+    monkeypatch.setattr(bc, "_tell_turn_over", _tell)
+    agent = SimpleNamespace(_turn_depth=0)
+    # A turn that never used the person's Chrome says nothing.
+    agent._turn_depth = 1
+    Agent._turn_over_browser(agent)
+    await asyncio.sleep(0)
+    assert told == []
+    # One that did — through a turn nested in another — says it once, when the outer one ends.
+    agent._turn_depth = 2
+    await BrowserTool().execute("navigate", target="chrome", url="https://x.com", _agent=agent, **_kw(tmp_path))
+    assert agent._chrome_used_turn is True
+    Agent._turn_over_browser(agent)
+    await asyncio.sleep(0)
+    assert told == [] and agent._turn_depth == 1
+    Agent._turn_over_browser(agent)
+    await asyncio.sleep(0)
+    assert told == [True] and agent._chrome_used_turn is False
+    # The person's Chrome not connected: nothing to go back to.
+    deck["answers"]["navigate"] = {"ok": False, "no_browser": True, "error": "not connected"}
+    agent._turn_depth = 1
+    await BrowserTool().execute("navigate", target="chrome", url="https://x.com", _agent=agent, **_kw(tmp_path))
+    Agent._turn_over_browser(agent)
+    await asyncio.sleep(0)
+    assert told == [True]

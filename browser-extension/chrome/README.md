@@ -99,6 +99,9 @@ works here (`target="chrome"`), signed in as you, while you watch:
   member chats never can.
 - **Bring an agent's tab to the front while it works** — off by default, so
   an agent working in the background doesn't take your tab away.
+- **Back where you were** — when an agent's tab took the front (that switch,
+  or a link it clicked opening a new tab), the tab you were on comes back when
+  the agent's run is over. If you picked another tab meanwhile, it stays.
 
 It uses two permissions the extension has from install: **debugger** (real
 clicks, typing and screenshots in the agent's tabs — Chrome doesn't let an

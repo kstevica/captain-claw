@@ -664,6 +664,7 @@ class Agent(
         # The Taskboard's record of the turn (None when nested in one, or off).
         turn = turn_register.open_turn(self)
         outcome, reply = "error", ""
+        self._turn_depth = getattr(self, "_turn_depth", 0) + 1
         try:
             if self._mrav_enabled():
                 reply = await self._mrav_complete(user_input)
@@ -678,6 +679,15 @@ class Agent(
             member_privacy.exit_turn(self)
             self._flush_write_compactions()
             turn_register.close_turn(turn, outcome, reply, agent=self)
+            self._turn_over_browser()
+
+    def _turn_over_browser(self) -> None:
+        """The outermost turn is over: the person's Chrome may go back to their tab."""
+        self._turn_depth = max(0, getattr(self, "_turn_depth", 1) - 1)
+        if self._turn_depth == 0:
+            from captain_claw.tools.browser_chrome import turn_over
+
+            turn_over(self)
 
     async def stream(
         self,
@@ -709,6 +719,7 @@ class Agent(
         # sees between yields; close_turn ends it however the stream ends.
         turn = turn_register.open_turn(self)
         outcome, reply = "error", turn_register.ReplyHead()
+        self._turn_depth = getattr(self, "_turn_depth", 0) + 1
         try:
             if not self._mrav_enabled():
                 async for chunk in super().stream(user_input):
@@ -732,6 +743,7 @@ class Agent(
             member_privacy.exit_turn(self)
             self._flush_write_compactions()
             turn_register.close_turn(turn, outcome, reply.text, agent=self)
+            self._turn_over_browser()
 
     def _mrav_runtime_instance(self) -> Any:
         cached = getattr(self, "_mrav_runtime_cache", None)

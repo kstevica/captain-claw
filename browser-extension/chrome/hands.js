@@ -45,6 +45,10 @@ let log = []
 let loaded = null
 const attached = new Map()   // tabId → { lastUse, world, console: [], net: Map, shotScale, since }
 const cancelled = new Set()
+// Where to go back when an agent's run is over: window id → the tab the person
+// was on when one of that agent's tabs took the front ({ tabId, slug }).
+let returnTo = new Map()
+let actsRunning = 0
 const openedFrom = new Map() // tabId → [new tab ids opened from it]
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -56,10 +60,11 @@ async function loadState() {
   if (!loaded) {
     loaded = (async () => {
       const local = await chrome.storage.local.get(['hands', 'handsStopped']).catch(() => ({}))
-      const session = await chrome.storage.session.get(['handsGroups', 'handsLog']).catch(() => ({}))
+      const session = await chrome.storage.session.get(['handsGroups', 'handsLog', 'handsReturn']).catch(() => ({}))
       prefs = { on: false, front: false, ...(local.hands || {}) }
       stopped = new Set(Array.isArray(local.handsStopped) ? local.handsStopped : [])
       groups = session.handsGroups && typeof session.handsGroups === 'object' ? session.handsGroups : {}
+      returnTo = new Map(Array.isArray(session.handsReturn) ? session.handsReturn : [])
       log = Array.isArray(session.handsLog) ? session.handsLog : []
     })()
   }
@@ -149,6 +154,7 @@ function connect(conn) {
     else if (msg.type === 'denied') setStatus('denied', msg.error || '')
     else if (msg.type === 'act') runAct(msg)
     else if (msg.type === 'cancel') cancelled.add(String(msg.id || ''))
+    else if (msg.type === 'turn_over') turnOver(String(msg.agent?.slug || ''))
   }
   sock.onclose = (ev) => {
     if (ws !== sock) return
@@ -233,6 +239,8 @@ async function runAct(msg) {
   const quiet = action === 'status' || action === 'release'
   if (!quiet) { log.push(entry); if (log.length > LOG_MAX) log = log.slice(-LOG_MAX); saveLog() }
   let result
+  const before = await activeTabs()
+  actsRunning++
   try {
     if (stopped.has(agent.slug)) throw new Refusal("The person stopped you using their browser. Don't try again unless they ask you to.")
     const fn = ACTIONS[action]
@@ -247,9 +255,63 @@ async function runAct(msg) {
     entry.error = clip(result.error, 160)
   }
   cancelled.delete(id)
+  try { await noteFront(agent, before) } catch { /* a tab went away meanwhile */ }
+  actsRunning--
   if (!quiet) saveLog()
   send({ type: 'result', id, ...result })
 }
+
+// ── going back to the person's tab ──
+
+async function activeTabs() {
+  try {
+    const tabs = await chrome.tabs.query({ active: true })
+    return new Map(tabs.map((t) => [t.windowId, t]))
+  } catch { return new Map() }
+}
+
+function saveReturn() {
+  chrome.storage.session.set({ handsReturn: [...returnTo] }).catch(() => {})
+}
+
+// After an act: one of the agent's tabs took the front where the person was on
+// a tab of their own → remember that tab (once per run).
+async function noteFront(agent, before) {
+  const g = groups[agent.slug]
+  if (!g) return
+  const after = await activeTabs()
+  for (const [windowId, tab] of after) {
+    const was = before.get(windowId)
+    if (tab.groupId !== g.groupId || !was || was.id === tab.id || was.groupId === g.groupId) continue
+    if (returnTo.has(windowId)) continue
+    returnTo.set(windowId, { tabId: was.id, slug: agent.slug })
+    saveReturn()
+  }
+}
+
+// The agent's run is over: where its tab is still in front, the person's comes back.
+async function turnOver(slug) {
+  await loadState()
+  const g = await agentGroup({ slug, name: groups[slug]?.name || slug })
+  let changed = false
+  for (const [windowId, r] of [...returnTo]) {
+    if (r.slug !== slug) continue
+    returnTo.delete(windowId)
+    changed = true
+    const [cur] = await chrome.tabs.query({ active: true, windowId }).catch(() => [])
+    if (!cur || !g || cur.groupId !== g.groupId) continue   // they moved on: leave it
+    const back = await chrome.tabs.get(r.tabId).catch(() => null)
+    if (back && back.windowId === windowId) await chrome.tabs.update(back.id, { active: true }).catch(() => {})
+  }
+  if (changed) saveReturn()
+}
+
+// A tab the person picks themselves (no act running) is their choice: no going back.
+chrome.tabs.onActivated.addListener(({ windowId }) => {
+  if (actsRunning > 0 || !returnTo.has(windowId)) return
+  returnTo.delete(windowId)
+  saveReturn()
+})
 
 function cleanError(e) {
   let s = String(e?.message || e || 'Something went wrong.')
