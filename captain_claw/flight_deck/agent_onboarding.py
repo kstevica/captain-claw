@@ -26,14 +26,26 @@ the owner's models until they draft it.
                                             what a practice answer should have been), by the agent's model
     PATCH  /fd/agent-lessons/{slug}/{id}    reword it, or switch always
     DELETE /fd/agent-lessons/{slug}/{id}    take it away
+    GET    /fd/agent-lessons/{slug}/from-chat  which of the owner's chat messages are lessons already, wait in
+                                            Lessons to approve, or were dismissed there (by said_key)
     POST   /fd/agent-lessons/shared/suggest                   a member suggests one (agent_ref, said, reply)
+    GET    /fd/agent-lessons/shared/suggested?agent_ref=…     what the caller suggested, by said_key
     POST   /fd/agent-lessons/{slug}/suggestions/{id}          its owner took it, or declined it
+
+A chat offers "Save as a lesson?" under a message that reads like one. Once
+it is a lesson, it doesn't ask again: the lesson keeps the message's
+``said_key`` (``said_keys`` on its record item — a short hash of the words,
+not the words), and the chat reads them back (``from-chat``). A lesson the
+agent noticed in that message counts too, while it waits, once approved, or
+when it was dismissed. The key goes with the lesson when it's reworded, and
+with it when it's taken away, so the chat offers it again.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import re
 import secrets
 import time
 from pathlib import Path
@@ -78,6 +90,74 @@ def _place(slug: str, user: dict) -> tuple[str, Path, Path]:
 
 def _flat(text: str) -> str:
     return " ".join(str(text or "").split()).casefold()
+
+
+_SAID_KEY = re.compile(r"[0-9a-f]{9,16}")
+_SAID_KEYS_MAX = 20                                       # chat messages one lesson remembers coming from
+
+
+def said_key(text: str) -> str:
+    """A chat message's key: FNV-1a (32 bits) of its words, whitespace
+    collapsed, as UTF-8, then their length — the browser works out the same
+    (flight-deck services/agentLessons.ts ``saidKey``). "" for no words."""
+    data = " ".join(str(text or "").split()).encode("utf-8")
+    if not data:
+        return ""
+    h = 0x811C9DC5
+    for b in data:
+        h = ((h ^ b) * 0x01000193) & 0xFFFFFFFF
+    return f"{h:08x}{len(data):x}"
+
+
+def clean_key(key: str) -> str:
+    return key if _SAID_KEY.fullmatch(key or "") else ""
+
+
+def stamped(record: dict) -> set[str]:
+    """The keys of every chat message a lesson of the record was taught from."""
+    out: set[str] = set()
+    for group in (*_GROUP.values(), "lessons"):
+        for x in record.get(group) or []:
+            if isinstance(x, dict):
+                out.update(k for k in x.get("said_keys") or [] if isinstance(k, str))
+    return out
+
+
+def _stamp(record: dict, lesson_id: str, key: str) -> dict:
+    """*record* with *key* — the chat message it was taught from — on the lesson."""
+    at = find(record, lesson_id) if key else None
+    if at is None:
+        return record
+    group, i = at
+    items = list(record.get(group) or [])
+    item = dict(items[i])
+    item["said_keys"] = [key, *(k for k in item.get("said_keys") or [] if k != key)][:_SAID_KEYS_MAX]
+    items[i] = item
+    return {**record, group: items}
+
+
+_MARK_RANK = {"dismissed": 1, "waiting": 2, "taught": 3}
+
+
+def chat_marks(record: dict, items: list[dict], *, by: str = "") -> dict[str, str]:
+    """``{said_key: taught | waiting | dismissed}`` — the chat messages not
+    to offer as a lesson again: one a lesson was taught from, one the agent
+    noticed a lesson in (waiting, approved while its lesson lasts, or
+    dismissed). With *by*: that member's own suggestions instead."""
+    have = {x["id"] for x in agent_lessons.from_record(record)}
+    marks: dict[str, str] = {}
+    for s in items:
+        if (s.get("by") != by) if by else (s.get("origin") != "auto"):
+            continue
+        key = clean_key(str(s.get("said_key") or "")) or said_key(str(s.get("said") or ""))
+        state = s.get("state")
+        mark = ("waiting" if state == "waiting" else "dismissed" if state == "declined"
+                else "taught" if state == "taken" and (by or s.get("lesson") in have) else "")
+        if key and mark and _MARK_RANK[mark] > _MARK_RANK.get(marks.get(key, ""), 0):
+            marks[key] = mark
+    if not by:
+        marks.update(dict.fromkeys(stamped(record), "taught"))
+    return marks
 
 
 def view(record: dict, block: str, base_locked: bool = False) -> dict:
@@ -141,11 +221,22 @@ async def list_lessons(slug: str, request: Request, user: dict = Depends(get_man
             "suggestions": await asyncio.to_thread(_waiting, agent_dir)}
 
 
+@router.get("/{slug}/from-chat")
+async def from_chat(slug: str, user: dict = Depends(get_managed_user)) -> dict:
+    """The owner's chat messages not to offer as a lesson again, by
+    ``said_key``: taught, waiting in Lessons to approve, or dismissed there."""
+    _, agent_dir, workspace = _place(slug, user)
+    record = await asyncio.to_thread(ap.earlier_setup, agent_dir, workspace)
+    items = await asyncio.to_thread(_load_suggestions, agent_dir)
+    return {"marks": chat_marks(record, items)}
+
+
 class LessonBody(BaseModel):
     kind: str = Field("rule", max_length=20)
     text: str = Field(..., max_length=2000)
     always: bool = False
     taught_by: str = Field("you", max_length=20)
+    said_key: str = Field("", max_length=20)     # the chat message it's taught from (said_key)
 
 
 @router.post("/{slug}")
@@ -153,22 +244,36 @@ async def add_lesson(slug: str, body: LessonBody, request: Request, user: dict =
     """A lesson its owner gives by hand — on this page (``taught_by: you``),
     from a chat, after a practice answer, or from a member's suggestion. An
     admin giving it for its user gives the base."""
-    return await teach_one(slug, user, request, body.kind, body.text, body.always, body.taught_by)
+    return await teach_one(slug, user, request, body.kind, body.text, body.always, body.taught_by,
+                           said_key=body.said_key)
 
 
 async def teach_one(slug: str, user: dict, request: Request, kind: str, text: str, always: bool,
-                    taught_by: str) -> dict:
+                    taught_by: str, *, said_key: str = "", proposal: bool = False) -> dict:
     """Teach the caller's agent one lesson (409 when it has it already) —
-    by hand, or approved from Lessons to approve (lesson_proposals)."""
+    by hand, or approved from Lessons to approve (lesson_proposals:
+    *proposal*).
+
+    From a chat message (*said_key*), the lesson keeps that message's key,
+    so the chat doesn't offer it again; one it has already takes the key
+    (``already``) rather than a 409. What waits in Lessons to approve that
+    says what this lesson says is settled as taught — and, saved from the
+    chat, whatever the agent noticed in that same message."""
     owner_id, agent_dir, workspace = _place(slug, user)
     layer, locked = _teaching(request, user)
     if kind not in agent_lessons.KINDS:
         raise HTTPException(400, "A lesson is a rule, something to ask you first, or a fact.")
     taught_by = taught_by if taught_by in _TAUGHT_BY else "you"
     text = _clean(text)
+    key = clean_key(said_key)
+    lesson = agent_lessons.lesson_id(kind, text)
     record = await asyncio.to_thread(ap.earlier_setup, agent_dir, workspace)
     if _taken(record, kind, text):
-        raise HTTPException(409, "It has that lesson already.")
+        if not key:
+            raise HTTPException(409, "It has that lesson already.")
+        out = await _save(slug, owner_id, agent_dir, workspace, _stamp(record, lesson, key), locked)
+        await _settle_taught(owner_id, slug, agent_dir, kind, text, lesson, "" if proposal else key)
+        return {**out, "already": True}
     if kind in _GROUP:
         item = {"text": text, "always": always, "source": {"doc": "instructions", "section": ""},
                 "taught_by": taught_by, "added": time.time(), **({"layer": layer} if layer else {})}
@@ -176,9 +281,34 @@ async def teach_one(slug: str, user: dict, request: Request, kind: str, text: st
     else:
         record, _ = agent_lessons.taught(record, "fact", text, taught_by=taught_by, layer=layer)
     log.info("agent lessons: one added", agent=slug, kind=kind, layer=layer or "own", taught_by=taught_by)
-    out = await _save(slug, owner_id, agent_dir, workspace, record, locked)
+    out = await _save(slug, owner_id, agent_dir, workspace, _stamp(record, lesson, key), locked)
     await _mirror_lessons(owner_id, slug, [(kind, text)], taught_by)
+    await _settle_taught(owner_id, slug, agent_dir, kind, text, lesson, "" if proposal else key)
     return out
+
+
+async def _settle_taught(owner_id: str, slug: str, agent_dir: Path, kind: str, text: str, lesson: str,
+                         key: str) -> None:
+    """A lesson was taught: what the agent noticed in the chat message it
+    was saved from (*key*), or one saying the same, waits in Lessons to
+    approve no more — it's listed as just learned, as this lesson. Never
+    fails the teaching."""
+    from captain_claw.flight_deck import lesson_proposals as lp
+    try:
+        async with _SUGGESTION_LOCK:
+            items = await asyncio.to_thread(_load_suggestions, agent_dir)
+            hits = [s for s in items if s.get("origin") == "auto" and s.get("state") == "waiting" and (
+                (key and said_key(str(s.get("said") or "")) == key)
+                or (s.get("text") and lp._same(text, str(s["text"]))))]
+            for s in hits:
+                s.update(state="taken", kind=kind, text=text, lesson=lesson, settled=time.time())
+            if hits:
+                await asyncio.to_thread(_write_suggestions, agent_dir, items)
+        if hits:
+            log.info("agent lessons: lessons to approve settled by one taught", agent=slug, settled=len(hits))
+            await lp._settle_bell(owner_id, slug, agent_dir)
+    except Exception:
+        log.debug("agent lessons: settling lessons to approve failed", exc_info=True)
 
 
 async def _mirror_lessons(owner_id: str, slug: str, lessons: list[tuple[str, str]], taught_by: str) -> None:
@@ -377,6 +507,33 @@ class SuggestBody(BaseModel):
     agent_ref: str = Field(..., max_length=300)
     said: str = Field(..., max_length=4000)      # the member's words
     reply: str = Field("", max_length=8000)      # what the agent had answered them
+    said_key: str = Field("", max_length=20)     # the chat message they suggest it from (said_key)
+
+
+async def _shared_with(agent_ref: str, uid: str):
+    """The shared agent *agent_ref* — a process the caller is a member of
+    (404 otherwise)."""
+    from captain_claw.flight_deck import agent_sharing as sharing
+    from captain_claw.flight_deck.auth import get_db
+
+    rec = sharing.resolve_agent_record(agent_ref) if sharing.sharing_active() else None
+    if (rec is None or rec.runtime != "process" or rec.owner == uid
+            or not await sharing.member_check(get_db(), rec.ref, rec.owner, uid, max_age=0)):
+        raise HTTPException(404, "That agent isn't shared with you.")
+    return rec
+
+
+@router.get("/shared/suggested")
+async def suggested(agent_ref: str, user: dict = Depends(get_current_user)) -> dict:
+    """The caller's chat messages with a shared agent they suggested a
+    lesson from, by ``said_key`` — waiting for its owner, taught, or
+    dismissed — so their chat doesn't offer them again."""
+    from captain_claw.flight_deck import server as srv
+
+    uid = str(user.get("id") or "")
+    rec = await _shared_with(agent_ref, uid)
+    items = await asyncio.to_thread(_load_suggestions, srv.DATA_DIR / rec.slug)
+    return {"marks": chat_marks({}, items, by=uid)}
 
 
 @router.post("/shared/suggest")
@@ -385,31 +542,29 @@ async def suggest_lesson(body: SuggestBody, user: dict = Depends(get_current_use
     with it — their words, and the answer they correct — for its owner to
     take or decline (a bell tells them). Only its members; nothing is drafted
     until its owner looks."""
-    from captain_claw.flight_deck import agent_sharing as sharing
     from captain_claw.flight_deck import server as srv
     from captain_claw.flight_deck import tenant_profile
     from captain_claw.flight_deck.auth import get_db
 
     uid = str(user.get("id") or "")
     db = get_db()
-    rec = sharing.resolve_agent_record(body.agent_ref) if sharing.sharing_active() else None
-    if (rec is None or rec.runtime != "process" or rec.owner == uid
-            or not await sharing.member_check(db, rec.ref, rec.owner, uid, max_age=0)):
-        raise HTTPException(404, "That agent isn't shared with you.")
+    rec = await _shared_with(body.agent_ref, uid)
     said = " ".join(body.said.split())
     if not said:
         raise HTTPException(400, "Say what it should learn.")
+    key = clean_key(body.said_key)
     name = await tenant_profile.owner_name(db, uid) or "A member"
     agent_dir = srv.DATA_DIR / rec.slug
     async with _SUGGESTION_LOCK:
         items = await asyncio.to_thread(_load_suggestions, agent_dir)
         waiting = [s for s in items if s.get("state") == "waiting"]
-        if any(_flat(s.get("said") or "") == _flat(said) for s in waiting):
+        if any(_flat(s.get("said") or "") == _flat(said)
+               or (key and s.get("by") == uid and s.get("said_key") == key) for s in waiting):
             return {"ok": True, "already": True}
         if sum(1 for s in waiting if s.get("by") == uid) >= _SUGGESTIONS_WAITING:
             raise HTTPException(429, f"You have {_SUGGESTIONS_WAITING} suggestions waiting for its owner already.")
         item = {"id": secrets.token_hex(6), "said": said, "reply": body.reply.strip()[:6000], "by": uid,
-                "by_name": name, "created": time.time(), "state": "waiting"}
+                "by_name": name, "created": time.time(), "state": "waiting", **({"said_key": key} if key else {})}
         await asyncio.to_thread(_write_suggestions, agent_dir, [item, *items])
     try:
         await db.add_notification(rec.owner, "info", f"{name} suggested a lesson for {rec.name}"[:200], said[:300],

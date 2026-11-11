@@ -289,9 +289,18 @@ tools:
     youcom_api_key: ''
     keenable_api_key: ''
     base_url: https://api.search.brave.com/res/v1/web/search
-    max_results: 10
+    max_results: 10        # when a call names no count (never below 10)
+    max_results_cap: 50    # most one call may ask for (Tavily stops at 20)
     timeout: 20
     safesearch: moderate
+    extra_snippets: true   # Brave: up to 5 more excerpts per result, same request
+    # Enriched search: passages from the top pages that match the query.
+    # Agents ask for it per call (enrich=true); true here makes it every search.
+    enrich: false
+    enrich_pages: 5        # top results whose pages are read (Brave/Keenable)
+    enrich_chars: 2000     # page text kept per enriched result
+    enrich_timeout: 8      # seconds for one page read (when read here)
+    brave_llm_context: true  # Brave enrich via its LLM Context endpoint (same key)
   pocket_tts:
     max_chars: 4000
     default_voice: ''

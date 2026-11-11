@@ -23,7 +23,7 @@ const KINDS: { id: LessonKind; label: string; icon: typeof ScrollText; tone: str
 
 const message = (e: unknown) => (e instanceof Error ? e.message : String(e))
 
-export function LessonDraftForm({ slug, said, reply = '', task = '', taughtBy, onDone, onCancel }: {
+export function LessonDraftForm({ slug, said, reply = '', task = '', taughtBy, saidKey = '', onDone, onCancel }: {
   slug: string
   /** The owner's words. */
   said: string
@@ -31,8 +31,10 @@ export function LessonDraftForm({ slug, said, reply = '', task = '', taughtBy, o
   reply?: string
   task?: string
   taughtBy: Exclude<TaughtBy, 'you'>
-  /** Taught: the new lesson's id. */
-  onDone: (lessonId: string) => void
+  /** The chat message it's taught from (saidKey): the lesson keeps it, so the chat doesn't offer it again. */
+  saidKey?: string
+  /** Taught: the new lesson's id — or the one it had already (``already``, from a chat message). */
+  onDone: (lessonId: string, already: boolean) => void
   onCancel: () => void
 }) {
   const [drafting, setDrafting] = useState(true)
@@ -62,10 +64,12 @@ export function LessonDraftForm({ slug, said, reply = '', task = '', taughtBy, o
     setBusy(true)
     setErr('')
     try {
-      const res = await agentLessonsApi.add(slug, { kind, text, always: kind !== 'fact' && always, taught_by: taughtBy })
+      const res = await agentLessonsApi.add(slug, {
+        kind, text, always: kind !== 'fact' && always, taught_by: taughtBy, ...(saidKey ? { said_key: saidKey } : {}),
+      })
       syncInstructions(slug, res)
       const flat = text.trim().split(/\s+/).join(' ').toLowerCase()
-      onDone(res.lessons.find((x) => x.text.toLowerCase() === flat)?.id ?? '')
+      onDone(res.lessons.find((x) => x.text.toLowerCase() === flat)?.id ?? '', !!res.already)
     } catch (e) {
       setErr(message(e))
     } finally {
@@ -116,14 +120,17 @@ export function LessonDraftForm({ slug, said, reply = '', task = '', taughtBy, o
   )
 }
 
-/** "Save as a lesson" from a chat: the owner's message (and the answer it corrects) as a lesson. */
-export function SaveLessonDialog({ agent, said, reply, onClose }: {
+/** "Save as a lesson" from a chat: the owner's message (and the answer it corrects) as a lesson. The lesson keeps the
+ *  message's key (*saidKey*), so the chat doesn't offer that message again (*onTaught*). */
+export function SaveLessonDialog({ agent, said, reply, saidKey, onTaught, onClose }: {
   agent: { slug: string; name: string }
   said: string
   reply?: string
+  saidKey?: string
+  onTaught?: () => void
   onClose: () => void
 }) {
-  const [saved, setSaved] = useState(false)
+  const [saved, setSaved] = useState<'' | 'new' | 'already'>('')
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-0 sm:items-center sm:p-4" onClick={onClose}>
       <div role="dialog" aria-label="Save as a lesson" onClick={(e) => e.stopPropagation()}
@@ -144,12 +151,14 @@ export function SaveLessonDialog({ agent, said, reply, onClose }: {
         {saved ? (
           <div className="flex items-center justify-between gap-3">
             <p className="flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">
-              <Check className="h-4 w-4" /> Taught — it's in its lessons now.
+              <Check className="h-4 w-4 shrink-0" />
+              {saved === 'already' ? 'It has this lesson already — this message is marked as taught.' : "Taught — it's in its lessons now."}
             </p>
             <button onClick={onClose} className="rounded-lg border border-zinc-700 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800">Done</button>
           </div>
         ) : (
-          <LessonDraftForm slug={agent.slug} said={said} reply={reply} taughtBy="chat" onDone={() => setSaved(true)} onCancel={onClose} />
+          <LessonDraftForm slug={agent.slug} said={said} reply={reply} taughtBy="chat" saidKey={saidKey} onCancel={onClose}
+            onDone={(_, already) => { setSaved(already ? 'already' : 'new'); onTaught?.() }} />
         )}
       </div>
     </div>,
@@ -159,12 +168,15 @@ export function SaveLessonDialog({ agent, said, reply, onClose }: {
 
 /** "Suggest as a lesson", from a member's chat with someone's shared agent: their words (and the answer they
  *  correct) go to its owner, who takes it as a lesson or declines it. Nothing is drafted until they look. */
-export function SuggestLessonDialog({ agentRef, agentName, ownerName, said, reply, onClose }: {
+export function SuggestLessonDialog({ agentRef, agentName, ownerName, said, reply, saidKey = '', onSent, onClose }: {
   agentRef: string
   agentName: string
   ownerName: string
   said: string
   reply?: string
+  /** The chat message it's suggested from (saidKey): the chat doesn't offer it again (*onSent*). */
+  saidKey?: string
+  onSent?: () => void
   onClose: () => void
 }) {
   const [text, setText] = useState(said)
@@ -176,8 +188,9 @@ export function SuggestLessonDialog({ agentRef, agentName, ownerName, said, repl
     setBusy(true)
     setErr('')
     try {
-      await agentLessonsApi.suggest(agentRef, text, reply ?? '')
+      await agentLessonsApi.suggest(agentRef, text, reply ?? '', saidKey)
       setSent(true)
+      onSent?.()
     } catch (e) {
       setErr(message(e))
     } finally {
