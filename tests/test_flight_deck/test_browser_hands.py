@@ -447,3 +447,34 @@ async def test_an_agents_own_browser_serves_that_agent_after_the_persons_chrome(
         await c.delete(f"/fd/browsers/{bh.agent_browser_rows()[0]['id']}", headers=deck["jwt"])
         await asyncio.sleep(0.1)
         assert (await _act(c))["no_browser"]
+
+
+
+async def test_the_end_of_a_run_reaches_the_browsers_that_agent_uses(deck):
+    c = deck["client"]
+    got, _ = await _connect(c)            # Scout's own browser
+    heard: dict[str, list] = {"person": [], "own": []}
+
+    class Listening(FakeBrowser):
+        def __init__(self, *a, who, **kw):
+            super().__init__(*a, **kw)
+            self.who = who
+
+        async def _serve(self):
+            try:
+                async for raw in self.ws:
+                    msg = json.loads(raw)
+                    if msg.get("type") == "turn_over":
+                        heard[self.who].append(msg["agent"]["slug"])
+            except websockets.ConnectionClosed:
+                pass
+
+    async with Listening(deck["ws"], await deck["pat"](), who="person"), \
+            Listening(deck["ws"], got["token"], who="own"):
+        r = (await c.post("/fd/browser-hands/agent/turn-over", headers=_agent(), json={})).json()
+        assert r == {"ok": True, "browsers": 2}
+        # Another agent's run ending reaches the person's browser only, never Scout's own.
+        r = (await c.post("/fd/browser-hands/agent/turn-over", headers=_agent(slug="ledger"), json={})).json()
+        assert r == {"ok": True, "browsers": 1}
+        await asyncio.sleep(0.1)
+    assert heard == {"person": ["scout", "ledger"], "own": ["scout"]}

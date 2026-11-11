@@ -79,6 +79,45 @@ def _fd() -> tuple[str, dict[str, str]]:
     return flight_deck_base(), flight_deck_headers()
 
 
+_PENDING: set[asyncio.Task] = set()
+
+
+def note_used(kwargs: dict[str, Any]) -> None:
+    """This turn worked in the person's Chrome (its end tells Flight Deck)."""
+    agent = kwargs.get("_agent")
+    if agent is not None:
+        try:
+            agent._chrome_used_turn = True
+        except Exception:
+            pass
+
+
+async def _tell_turn_over() -> None:
+    base, headers = _fd()
+    if not base:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            await client.post(f"{base}/fd/browser-hands/agent/turn-over", headers=headers, json={})
+    except httpx.HTTPError:
+        pass
+
+
+def turn_over(agent: Any) -> None:
+    """The agent's run is over. If it worked in the person's Chrome, Flight Deck
+    tells that browser, which goes back to the tab the person was on (when an
+    agent's tab took the front and they haven't moved since). Never raises."""
+    try:
+        if not getattr(agent, "_chrome_used_turn", False):
+            return
+        agent._chrome_used_turn = False
+        task = asyncio.get_running_loop().create_task(_tell_turn_over())
+        _PENDING.add(task)
+        task.add_done_callback(_PENDING.discard)
+    except Exception:
+        pass
+
+
 async def call_deck(action: str, args: dict[str, Any], wait: float) -> dict[str, Any]:
     """One act in the person's browser: Flight Deck's answer, as a dict."""
     base, headers = _fd()
@@ -176,6 +215,8 @@ class ChromeHands:
             args.update(extra)
         wait = 55.0 if action in _LONG_ACTIONS else 40.0
         data = await call_deck(action, args, wait)
+        if not data.get("no_browser"):
+            note_used(self.kwargs)
         return self._shape(action, data)
 
     def _shape(self, action: str, data: dict[str, Any]) -> ToolResult:

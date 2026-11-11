@@ -131,6 +131,19 @@ to the extension's) — in an isolated world through a CDP session
 coordinate work there too. Only `tabs`, `tab_*`, `console`, `network_requests`
 and `resize` stay Chrome-only (and imply `target="chrome"`).
 
+### Back to the person's tab when the run is over
+
+Before each act the extension notes the active tab in every window; if the act
+leaves one of that agent's tabs in front where the person was on a tab of their
+own ("Bring an agent's tab to the front", a link opening a new tab, a screenshot
+of a tab that wouldn't draw behind), it remembers that tab (`handsReturn` in
+session storage). When the agent's outermost turn ends after it used the
+person's Chrome (`Agent._turn_over_browser` → `browser_chrome.turn_over`), the
+agent posts `/fd/browser-hands/agent/turn-over`; Flight Deck sends `turn_over`
+to the browsers that agent may use, and the extension brings the remembered tab
+back — only if the agent's tab is still in front. A tab the person picks
+themselves between acts forgets it: their choice stays.
+
 ### An agent's own Chrome
 
 `browser(action="extension_connect")` pairs Captain for Chrome in the agent's

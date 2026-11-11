@@ -621,6 +621,21 @@ async def _connect_outcome(ask_id: str, done: dict, owner: str, slug: str, name:
     return {"ok": False, "error": str(done.get("error") or "No answer from the person.")}
 
 
+@agent_router.post("/turn-over")
+async def agent_turn_over(request: Request) -> dict:
+    """The agent's run is over: the browsers it may use hear it, and go back to
+    the tab the person was on if one of its tabs took the front."""
+    owner, slug = _owner_of(request, "the person's browser")
+    told = 0
+    for conn in usable_by(owner, slug):
+        try:
+            await conn.send({"type": "turn_over", "agent": {"slug": slug}})
+            told += 1
+        except Exception:
+            pass
+    return {"ok": True, "browsers": told}
+
+
 @agent_router.post("/connect")
 async def agent_connect(body: ConnectBody, request: Request) -> dict:
     """Ask the person to let this agent pair Captain for Chrome in its own
