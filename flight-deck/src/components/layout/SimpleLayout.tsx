@@ -116,6 +116,7 @@ import { KioskInfoDialog, type InfoAgent } from './KioskInfoDialog'
 import { KioskOnboardingDialog, type OnboardingAction } from './KioskOnboardingDialog'
 import { KioskAgentIdentityDialog } from './KioskAgentIdentityDialog'
 import { KioskAgentPictureDialog } from './KioskAgentPicture'
+import { AgentHome } from './AgentHome'
 import { AgentPicture } from '../agents/AgentPicture'
 import { useAgentAvatarStore } from '../../stores/agentAvatarStore'
 import { MenuSheet, type MenuSection } from './KioskMenuSheet'
@@ -1343,7 +1344,18 @@ export function SimpleLayout({ locked = false, adminSwitch = false }: { locked?:
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden" style={{ minWidth: 320 }}>
         {hasActiveSession
           ? <ChatPanel variant="simple" />
-          : <EmptyChat hasAgents={agents.length > 0} onSpawn={goSpawn} locked={locked} onGuide={locked ? () => setGuideOpen(true) : undefined} />}
+          : (
+            <AgentHome
+              agents={agents}
+              sessionInfo={sessionInfo}
+              booting={booting}
+              switching={switching}
+              onOpen={handleOpen}
+              locked={locked}
+              onGuide={locked ? () => setGuideOpen(true) : undefined}
+              empty={<EmptyChat hasAgents={agents.length > 0} onSpawn={goSpawn} locked={locked} onGuide={locked ? () => setGuideOpen(true) : undefined} />}
+            />
+          )}
       </main>
 
       {/* The kiosk's files and data are the left column's Library and Data —
@@ -2340,13 +2352,13 @@ function EmptyChat({ hasAgents, onSpawn, locked = false, onGuide }: {
           <MessagesSquare className="h-6 w-6" />
         </div>
         <h2 className="mb-1.5 text-lg font-semibold text-zinc-100">
-          {hasAgents ? 'Pick an agent' : 'No agents available'}
+          {hasAgents ? 'None of your agents is on' : 'No agents available'}
         </h2>
         <p className="text-sm text-zinc-400">
           {hasAgents
             ? locked
-              ? 'Choose an agent on the left to start a conversation. What it saves for you lands in Library, Data and Folders, bottom left.'
-              : 'Choose an agent on the left to start a conversation. Its files and data show up on the right.'
+              ? 'Switch one on from the list on the left to start a conversation. What it saves for you lands in Library, Data and Folders, bottom left.'
+              : 'Switch one on from the list on the left to start a conversation. Its files and data show up on the right.'
             : locked
               ? 'Create an agent from an archetype to start chatting.'
               : 'Spawn your first agent to start chatting.'}

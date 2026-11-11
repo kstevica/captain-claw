@@ -73,6 +73,13 @@ export interface RowsPage {
   total: number
 }
 
+/** What a hand edit answers: the row as it is now (null after a delete) and
+ *  the table with its fresh row count and last change. */
+export interface RowEditResult {
+  row: DataRow | null
+  table: DataTable
+}
+
 export type DataSort = 'recent' | 'name' | 'rows' | 'agent'
 
 export interface DataQuery {
@@ -122,6 +129,20 @@ export const dataLibraryApi = {
     api<RowsPage>(`/fd/data-library/tables/${encodeURIComponent(id)}/rows?${qs(opts)}`),
   resummarize: (id: string) =>
     api<DataTable>(`/fd/data-library/tables/${encodeURIComponent(id)}/summarize`, { method: 'POST' }),
+  /** Add a row by hand; columns left out stay empty. Values are stored as
+   *  their column's type (or refused, 400, in plain words). */
+  addRow: (id: string, values: Record<string, unknown>) =>
+    api<RowEditResult>(`/fd/data-library/tables/${encodeURIComponent(id)}/rows`, {
+      method: 'POST', body: JSON.stringify({ values }),
+    }),
+  /** Change cells of a row. `expect` is what the person saw in them: a cell
+   *  that holds something else now refuses the edit (409). */
+  editRow: (id: string, rowid: number, values: Record<string, unknown>, expect?: Record<string, unknown>) =>
+    api<RowEditResult>(`/fd/data-library/tables/${encodeURIComponent(id)}/rows/${rowid}`, {
+      method: 'PATCH', body: JSON.stringify({ values, expect }),
+    }),
+  deleteRow: (id: string, rowid: number) =>
+    api<RowEditResult>(`/fd/data-library/tables/${encodeURIComponent(id)}/rows/${rowid}`, { method: 'DELETE' }),
   exportUrl,
   /** Save the table as a file. Fetched rather than linked, so a refusal (the
    *  datastore can't be read, the table is gone) throws with its reason

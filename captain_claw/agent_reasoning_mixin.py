@@ -1165,9 +1165,13 @@ class AgentReasoningMixin:
         if not text:
             return False
 
-        cfg = get_config().scale
-        if not cfg.task_rephrase_enabled:
+        # Off unless the agent's owner turned it on (task_rephrase.py):
+        # current models follow the prompt as written.
+        from captain_claw import task_rephrase
+
+        if not task_rephrase.enabled():
             return False
+        cfg = get_config().scale
 
         # Flight Deck workers (Basna/Vatra/Council/Code) get their task pre-framed
         # by the orchestrator, so a per-agent self-rephrase just re-does that job —
