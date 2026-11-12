@@ -630,6 +630,10 @@ the agent sees tokens — never restored.
     too, like a company's, so they come back in the case they were written in.
   Verified with Claude Haiku as the trusted model on a made-up interview: 3 of 3 runs all six mentions under one
   number, the shared surname apart, titles plain, everything put back exactly.
+* **A company in a file name.** A page's pictures were saved under names made from their alt text
+  ("saved/media/…/web-images/vrtlog-headquarters-in-zagreb-….jpg"), and a company's one-word name stayed in them:
+  a one-word company counted in links only. A file path or a file name (`…/…`, `name.ext`) now counts as a link —
+  the company's number, spelled as written, exactly put back.
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
   with lane "both"); map links keep a place's coordinates ("…/@45.8,15.9"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known
