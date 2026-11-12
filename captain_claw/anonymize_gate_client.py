@@ -30,6 +30,7 @@ when Flight Deck can't be reached, the last answer stands — never a silent
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import hashlib
 import json
@@ -280,8 +281,19 @@ async def restore_args(d: Decision, arguments: dict[str, Any]) -> tuple[dict[str
 _CLEAN: OrderedDict[str, str] = OrderedDict()
 
 
+# The person's message while it is being anonymized: the turn and its task
+# name ask for it at the same moment, and share one call.
+_PENDING: dict[str, asyncio.Future[str]] = {}
+
+
 def _sha(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+    """The cache key of *text* for whoever this turn is for — a member of a
+    shared agent has their own Chat vault, so their tokens are their own."""
+    from captain_claw import speaker
+
+    p = speaker.current()
+    who = p.speaker_id if p is not None else ""
+    return hashlib.sha256(f"{who}\0{text}".encode("utf-8", "surrogatepass")).hexdigest()
 
 
 def remember(anonymized: str, original: str | None = None) -> None:
@@ -297,9 +309,10 @@ def remember(anonymized: str, original: str | None = None) -> None:
 
 def known(text: str) -> str | None:
     """The anonymized form of *text*, when it has been seen (None otherwise)."""
-    hit = _CLEAN.get(_sha(text))
+    key = _sha(text)
+    hit = _CLEAN.get(key)
     if hit is not None:
-        _CLEAN.move_to_end(_sha(text))
+        _CLEAN.move_to_end(key)
     return hit
 
 
@@ -332,15 +345,34 @@ async def anonymize_texts(d: Decision, texts: list[str]) -> list[str]:
 
 
 async def anonymize_user_text(d: Decision, text: str) -> str:
-    """The person's message, before anything reads it (the whole chat)."""
+    """The person's message, before anything reads it (the whole chat).
+    Asked for twice at once (the turn and its task name), it's one call."""
     if not text.strip():
         return text
     hit = known(text)
     if hit is not None:
         return hit
+    key = _sha(text)
+    pending = _PENDING.get(key)
+    if pending is None:
+        pending = asyncio.ensure_future(_anonymize_new(d, text))
+        _PENDING[key] = pending
+        pending.add_done_callback(lambda f, k=key: _settled(k, f))
+    # Shielded: a caller that gives up (the task name has 5 seconds) doesn't
+    # cancel the call the other one is waiting for.
+    return await asyncio.shield(pending)
+
+
+async def _anonymize_new(d: Decision, text: str) -> str:
     (out,) = await anonymize_texts(d, [text])
     remember(out, text)
     return out
+
+
+def _settled(key: str, fut: asyncio.Future[str]) -> None:
+    _PENDING.pop(key, None)
+    if not fut.cancelled():
+        fut.exception()  # read here, so nobody left waiting is no warning
 
 
 async def anonymize_messages(agent: Any, d: Decision, messages: list[Any],
@@ -421,3 +453,4 @@ async def restore_text(d: Decision, text: str) -> str:
 def reset_for_tests() -> None:
     _CACHE.clear()
     _CLEAN.clear()
+    _PENDING.clear()
