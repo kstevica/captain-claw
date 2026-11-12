@@ -582,6 +582,10 @@ the agent sees tokens — never restored.
   privacy gate): its values and their history go, its name, key and token numbers stay — a new value never gets an
   old token, so text still holding old tokens shows them rather than somebody else's value. Agents hear of it with
   the gate's answer (`epoch`, within a minute) and forget the texts they anonymized before.
+* **A brand written as a domain.** Companies named by their web address ("Plaćanja.hr") showed in plain text as
+  their links' hosts (`http://placanja.hr`) right next to their tokens: a link spelling took "-", "_", "+" and
+  "%20" between a name's words, not a ".". Now it takes a "." too (a lone one — "Labs. Ana", a sentence's end, is
+  not one name); an email stays one token.
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
   with lane "both"); map links keep a place's coordinates ("…/@45.8,15.9"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known

@@ -466,3 +466,19 @@ def test_inside_a_link_a_token_puts_back_what_was_there():
     out = E.anonymize_text(text, state)[0]
     assert "Lana" not in out and "Vidi" not in out and "lana" not in out.lower().replace("⟦", "")
     assert E.restore(out, state)[0] == text  # never the full name put into "first="
+
+
+def test_a_brand_written_as_a_domain_is_found_in_its_links():
+    """"Plaćanja.hr" (a company named by its web address) in a link's host,
+    any case, accents or not; an email stays one; a sentence's end is no dot
+    between a name's words."""
+    state = E.VaultState()
+    opts = E.Options(one_word_names=False,
+                     extra=(("Plaćanja.hr", "ORG"), ("Vrtlog Labs", "ORG"), ("Ana Horvat", "PERSON")))
+    text = ("Plaćanja.hr (http://placanja.hr), www.placanja.hr/kontakt, PLACANJA.HR · "
+            "mail ana.horvat@vrtlog.example · https://in.example/ana.horvat")
+    out = E.anonymize_text(text, state, opts)[0]
+    assert "placanja" not in out.lower() and "horvat" not in out.lower() and out.count("⟦EMAIL_") == 1
+    assert E.restore(out, state)[0] == text
+    prose = "Vrtlog Labs. Ana Horvat said hi."
+    assert E.anonymize_text(prose, state, opts)[0].count("⟦") == 2
