@@ -55,9 +55,19 @@ DECIDE_TIMEOUT = 10.0
 CALL_TIMEOUT = float(os.environ.get("CLAW_ANONYMIZE_GATE_TIMEOUT") or 1800.0)
 NOTE = ("[Privacy gate: names, addresses and numbers in this result are tokens like ⟦PERSON_1⟧. Use them as "
         "they are; they are put back when you send mail or a message.]")
-CHAT_NOTE = ("[Privacy gate: names, addresses and numbers in the person's messages, in what your tools return and "
-             "in your memory notes are tokens like ⟦PERSON_1⟧. Use them exactly as they are (in replies, tool "
-             "calls, files); the real values are put back for the person and in what you send or write.]")
+# What the model must know about the tokens. A model that takes them for
+# redactions describes around them ("a Croatian company") instead of naming
+# them — and then nothing can be put back. So: they are names, not gaps.
+CHAT_NOTE = ("[About ⟦…⟧ tokens: names, companies, addresses and numbers in the person's messages, in what your "
+             "tools return and in your notes are written as tokens like ⟦PERSON_1⟧ or ⟦ORG_2⟧. They are not "
+             "redactions: before the person reads your reply, every token is replaced with the real value, and "
+             "tokens in tool calls and files you write are replaced too. So wherever you would name a person, "
+             "company, place or number, write its token exactly as given — \"⟦ORG_2⟧ signs as the Provider\", "
+             "not \"a Croatian company signs\". Never describe a tokenized thing instead of naming it, never leave "
+             "it out, and don't mention the tokens to the person.]")
+# Said again next to the tokens (a message or result that has them): the
+# model writes from what it just read, not from the end of a long prompt.
+CHAT_REMINDER = "[⟦…⟧ tokens are names the person sees as the real ones — name things by their token.]"
 BATCH_CHARS = 1_500_000  # under Flight Deck's 2M-character limit per call
 CACHE_MAX = 20_000
 
@@ -358,13 +368,31 @@ async def anonymize_messages(agent: Any, d: Decision, messages: list[Any],
     out = []
     for m in messages:
         text = getattr(m, "content", None)
-        if getattr(m, "role", "") == "system":
+        role = getattr(m, "role", "")
+        if role == "system":
             out.append(m)
             continue
         clean = known(text) if isinstance(text, str) and text.strip() else None
-        out.append(dataclasses.replace(m, content=clean) if clean is not None and clean != text else m)
+        new = clean if clean is not None else text
+        if role in ("user", "tool") and isinstance(new, str) and TOKEN_RE.search(new) \
+                and not new.endswith(CHAT_REMINDER):
+            new = f"{new}\n\n{CHAT_REMINDER}"  # the same every time: the prompt cache holds
+        out.append(dataclasses.replace(m, content=new) if new != text else m)
     _rewrite_history(agent)
     return out
+
+
+def with_chat_note(messages: list[Any]) -> list[Any]:
+    """*messages* with :data:`CHAT_NOTE` at the end of the system prompt (or
+    as one, when there is none)."""
+    from captain_claw.llm import Message
+
+    if messages and getattr(messages[0], "role", "") == "system":
+        first = messages[0]
+        if CHAT_NOTE in (first.content or ""):
+            return messages
+        return [dataclasses.replace(first, content=f"{first.content}\n\n{CHAT_NOTE}"), *messages[1:]]
+    return [Message(role="system", content=CHAT_NOTE), *messages]
 
 
 def _rewrite_history(agent: Any) -> None:

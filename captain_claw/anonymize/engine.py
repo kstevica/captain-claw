@@ -357,8 +357,11 @@ class _Resolver:
 # ── finding known entities again ────────────────────────────────────
 
 
-_TEXT_TOKEN_RE = re.compile(r"\w+|[^\w\s]")
-_GAP_RE = re.compile(r"[ \t]+")
+# Words stop at underscores: a saved file's name joins words with them
+# ("Acme_-_Supply_Agreement.docx", "Ivan_Horvat_CV.pdf"), and a
+# known name in it must be found like anywhere else.
+_TEXT_TOKEN_RE = re.compile(r"[^\W_]+|[^\w\s]|_")
+_GAP_RE = re.compile(r"[ \t]+|_")
 _LEGAL_AFTER_RE = re.compile(rf",?[ \t]+{d._LEGAL}(?![\w])")
 _DIGITS_RE = re.compile(r"[+(]?\d[\d \t()./\-]{4,40}\d")
 
@@ -449,7 +452,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
 
         if multi or surnames or singles:
             words = [(m.start(), m.end(), m.group(0)) for m in _NAME_TOKEN_RE.finditer(text)
-                     if not (m.start() > 0 and (text[m.start() - 1].isalnum() or text[m.start() - 1] in "_@."))]
+                     if not (m.start() > 0 and (text[m.start() - 1].isalnum() or text[m.start() - 1] in "@."))]
             keys = [_text_word_key(w) for _s, _e, w in words]
 
             def adjacent(i: int) -> bool:  # word i and i+1 stand next to each other
@@ -485,13 +488,13 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                 if not cands:
                     continue
                 pos = m.start()
-                if pos > 0 and (text[pos - 1].isalnum() or text[pos - 1] in "_@."):
+                if pos > 0 and (text[pos - 1].isalnum() or text[pos - 1] in "@."):
                     continue
                 for form_cf, length, e, upper_first in cands:
                     end = pos + length
                     if text[pos:end].casefold() != form_cf:
                         continue
-                    if end < len(text) and (text[end].isalnum() or text[end] in "_@"):
+                    if end < len(text) and (text[end].isalnum() or text[end] == "@"):
                         continue
                     if upper_first and not (text[pos].isupper() or text[pos].isdigit()):
                         continue
