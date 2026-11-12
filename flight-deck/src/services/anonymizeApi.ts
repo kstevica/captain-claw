@@ -69,6 +69,8 @@ export interface VaultEntry {
   kind: string
   original: string
   forms: string[]
+  /** Spellings that come back exactly, by their place: spellings[0] is ⟦KIND_N:2⟧. */
+  spellings?: string[]
   created_at: number | null
   updated_at: number | null
   /** Texts it went out in, and times it came back and was put back. */

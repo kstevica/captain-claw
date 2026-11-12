@@ -466,7 +466,9 @@ def bracket(text: str, known: set[str]) -> str:
 
     def sub(m: Any) -> str:
         token = make_token(m.group(1), int(m.group(2)))
-        return token if token in known else m.group(0)
+        if token not in known:
+            return m.group(0)
+        return f"{token[:-1]}:{m.group(3)}⟧" if m.group(3) else token  # a spelling keeps its place
 
     return BARE_TOKEN_RE.sub(sub, text)
 

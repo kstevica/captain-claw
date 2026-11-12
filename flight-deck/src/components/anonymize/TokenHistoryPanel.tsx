@@ -6,7 +6,7 @@ import { anonymizeApi, type TokenHistory, type TokenUse } from '../../services/a
 // to a model (in a new text) and came back and had to be put back. Contexts
 // are as they were sent — tokens; hover one to see its real value.
 
-const TOKEN_SPLIT = /(⟦[A-Z][A-Z0-9_]*?_\d{1,6}⟧)/
+const TOKEN_SPLIT = /(⟦[A-Z][A-Z0-9_]*?_\d{1,6}(?::[a-z0-9]{1,3})?⟧)/
 
 const FOUND_BY: Record<string, string> = {
   email: 'an email address', 'phone-intl': 'a phone number', 'phone-label': 'a phone label',
@@ -73,8 +73,8 @@ function Context({ text, token, values }: { text: string; token: string; values:
   return (
     <p className="mt-1 break-words rounded-lg bg-zinc-900/60 px-2 py-1 font-mono text-[11px] leading-relaxed text-zinc-300">
       {text.split(TOKEN_SPLIT).map((part, i) => TOKEN_SPLIT.test(part) ? (
-        <span key={i} title={values.get(part) || ''}
-          className={part === token ? 'rounded bg-violet-500/25 px-0.5 text-violet-200' : 'text-zinc-400 underline decoration-dotted'}>
+        <span key={i} title={values.get(part) || values.get(part.replace(/:[a-z0-9]{1,3}⟧$/, '⟧')) || ''}
+          className={part.replace(/:[a-z0-9]{1,3}⟧$/, '⟧') === token ? 'rounded bg-violet-500/25 px-0.5 text-violet-200' : 'text-zinc-400 underline decoration-dotted'}>
           {part}
         </span>
       ) : <span key={i}>{part}</span>)}
