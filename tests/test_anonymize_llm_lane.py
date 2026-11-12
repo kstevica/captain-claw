@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -133,7 +134,8 @@ class TestEngineWithTerms:
                                    E.Options(extra=(("Marko", "PERSON"),)))
         assert out == "We met ⟦PERSON_1⟧. ⟦PERSON_1⟧ said hi; mail ⟦EMAIL_1⟧"
         later, _r = E.anonymize_text("Markom smo zadovoljni.", state)  # known now, with its case ending
-        assert later == "⟦PERSON_1⟧ smo zadovoljni."
+        assert re.fullmatch(r"⟦PERSON_1(?::\d+)?⟧ smo zadovoljni\.", later)
+        assert E.restore(later, state)[0] == "Markom smo zadovoljni."
 
     def test_llm_only_turns_the_code_lane_off(self):
         out, _r = E.anonymize_text("We met Marko; mail ana@x.hr", E.VaultState(),

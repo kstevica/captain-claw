@@ -616,6 +616,20 @@ the agent sees tokens — never restored.
     stay plain text: "Overview ⟦ORG_7:2⟧".
   Verified with Claude Haiku as the trusted model on a made-up research page: 3 of 3 runs one number per company,
   headings plain, everything put back exactly.
+* **One person, one number — within one text.** The same person in one text sat under several tokens: "Marin
+  Vidović", "Mr. Vidović", "Vidović", "g. Vidović", "gospodin Marin" — four people to the model. Now, as a text is
+  anonymized:
+  * a title in front of a name stays plain text ("Mr.", "Dr.", "prof. dr. sc.", "gospodin", "gospođa", and in lower
+    case "g.", "gđa" — "G." may be an initial);
+  * a surname or first name alone, with any case ending ("gospodina Vidovića"), is the one full name in the same
+    text that has it: its number, spelled as written — ⟦PERSON_1:2⟧ restores "Vidović", ⟦PERSON_1:4⟧ "Vidovića";
+    an initial must agree ("G. Vidović" is not Marin Vidović);
+  * not when two in the text share it ("Lana Kordić and Davor Kordić … Kordić declined" — "Kordić" keeps its own),
+    never from another text or the vault (that guess put two other people's tokens on a new person's name);
+  * a person's other written forms (a case ending, an initial, a lone surname code took for them) are spellings
+    too, like a company's, so they come back in the case they were written in.
+  Verified with Claude Haiku as the trusted model on a made-up interview: 3 of 3 runs all six mentions under one
+  number, the shared surname apart, titles plain, everything put back exactly.
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
   with lane "both"); map links keep a place's coordinates ("…/@45.8,15.9"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known

@@ -123,7 +123,9 @@ class TestEntities:
         assert persons[0].original == "Ivan Horvat"  # restore gives the plain form
         # The vault finds him next time with no context at all.
         later, _r, _s = _run("Horvatom smo zadovoljni, I. Horvat potpisuje.", state)
-        assert later == "⟦PERSON_1⟧ smo zadovoljni, ⟦PERSON_1⟧ potpisuje."
+        # His number, each form spelled as written (it comes back in its own case).
+        assert re.fullmatch(r"⟦PERSON_1:\d+⟧ smo zadovoljni, ⟦PERSON_1:\d+⟧ potpisuje\.", later)
+        assert E.restore(later, state)[0] == "Horvatom smo zadovoljni, I. Horvat potpisuje."
 
     def test_two_people_sharing_a_surname(self):
         text = "Lijep pozdrav,\nIvan Horvat\n\nName: Ana Horvat\nHorvat je stigao."
@@ -444,7 +446,8 @@ def test_one_word_is_no_known_person_when_a_model_looks():
     nav = "Source: LinkedIn · Home · Solutions · an IT company · Thu 12 Nov · Ivan wrote"
     assert E.anonymize_text(nav, state, model)[0] == nav
     # A known full name the other way round is still that person.
-    assert E.anonymize_text("HORVAT ANA, član društva", state, model)[0] == f"{horvat}, član društva"
+    reversed_ = E.anonymize_text("HORVAT ANA, član društva", state, model)[0]
+    assert reversed_.startswith(horvat[:-1]) and E.restore(reversed_, state)[0] == "HORVAT ANA, član društva"
 
 
 def test_code_alone_takes_a_lone_name_but_never_guesses_next_to_another():
@@ -454,7 +457,8 @@ def test_code_alone_takes_a_lone_name_but_never_guesses_next_to_another():
     E.anonymize_text("Name: Ivan Babić", state)
     E.anonymize_text("Name: Ana Horvat", state)
     horvat = state.entities[1].token
-    assert E.anonymize_text("Poštovani g. Horvat,", state)[0] == f"Poštovani g. {horvat},"
+    out = E.anonymize_text("Poštovani g. Horvat,", state)[0]
+    assert re.fullmatch(r"Poštovani g\. " + re.escape(horvat[:-1]) + r"(?::\d+)?⟧,", out)
     assert "Ivan Horvat" in E.anonymize_text("član društva\nIvan Horvat", state)[0]
     nav = "Source: LinkedIn · Home · Solutions"
     assert E.anonymize_text(nav, state)[0] == nav
@@ -523,3 +527,27 @@ def test_one_company_one_number():
         f"Vrtlog d.o.o. · {org.spellings[1]} · VrtLog · VrtLog")  # an unknown place: the name
     unrelated = "Erste Novak d.o.o. signed."
     assert E.anonymize_text(unrelated, state, E.Options(one_word_names=False))[0] == "⟦ORG_2⟧ signed."
+
+
+def test_one_person_one_number_in_a_text():
+    """A surname or first name alone, with a title or a case ending, is the
+    one full name in the same text that has it: its number, spelled as
+    written; titles stay plain. Never when two share it, never across texts."""
+    state = E.VaultState()
+    model = E.Options(one_word_names=False, extra=(
+        ("Marin Vidović", "PERSON"), ("Vidović", "PERSON"), ("Mr. Vidović", "PERSON"), ("Marin", "PERSON"),
+        ("Vidovića", "PERSON"), ("G. Vidović", "PERSON")))
+    text = ("Mr. Vidović met us. Marin Vidović signed. Vidović called; g. Vidović agreed, gospodin Marin too. "
+            "Gospodina Vidovića nema. G. Vidović is his cousin.")
+    out = E.anonymize_text(text, state, model)[0]
+    assert "Mr. ⟦PERSON_1:" in out and "g. ⟦PERSON_1:" in out and "gospodin ⟦PERSON_1:" in out  # titles plain
+    assert out.count("⟦PERSON_1") == 6 and "G. Vidović" not in out  # "G. Vidović" is someone else
+    assert re.search(r"⟦PERSON_(\d+)⟧ is his cousin", out).group(1) != "1"
+    assert E.restore(out, state)[0] == text
+    two = "Lana Kordić and Davor Kordić joined; Kordić left."
+    out = E.anonymize_text(two, state, E.Options(one_word_names=False, extra=(
+        ("Lana Kordić", "PERSON"), ("Davor Kordić", "PERSON"), ("Kordić", "PERSON"))))[0]
+    assert len(set(re.findall(r"⟦PERSON_(\d+)", out))) == 3  # "Kordić" alone: two fit, no link
+    later = E.anonymize_text("Vidović wrote again.", state, E.Options(one_word_names=False,
+                                                                    extra=(("Vidović", "PERSON"),)))[0]
+    assert not later.startswith("⟦PERSON_1")  # another text: no link
