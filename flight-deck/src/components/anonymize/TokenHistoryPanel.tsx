@@ -15,7 +15,7 @@ const FOUND_BY: Record<string, string> = {
   ip: 'an IP address', 'profile-url': 'a profile link', 'person-label': 'a name label',
   'org-label': 'a company label', 'address-label': 'an address label', 'dob-label': 'a date of birth label',
   ner: 'the name model', hint: 'a column name', known: 'a value it already knew',
-  'known-digits': 'a number it already knew',
+  'known-digits': 'a number it already knew', 'name-run': 'a new full name (its first name or surname was known)',
 }
 
 const CHANNEL_OUT: Record<string, string> = {
