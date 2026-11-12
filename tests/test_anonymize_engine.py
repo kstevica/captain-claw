@@ -421,3 +421,37 @@ def test_a_context_never_cuts_a_token():
     assert "⟦PHONE_1⟧" not in found  # only what was asked for
     short = usage.snippet("⟦EMAIL_1⟧ hi", 0, 9, width=3)
     assert short == "⟦EMAIL_1⟧ hi"
+
+
+def test_a_new_full_name_is_not_two_known_people():
+    """A new person whose first name is one known person's and whose surname
+    is another's ("Ivan" Babić, Ana "Horvat") is a new person, "Ivan Horvat" —
+    not those two side by side (which put back as "Ivan Babić Ana Horvat")."""
+    state = E.VaultState()
+    E.anonymize_text("Name: Ivan Babić", state)
+    E.anonymize_text("Name: Ana Horvat", state)
+    babic, horvat = state.entities[0].token, state.entities[1].token
+    text = "član društva\nIvan Horvat\nčlan društva\nAna Horvat"
+    out = E.anonymize_text(text, state)[0]
+    new = out.split("\n")[1]
+    assert new not in (babic, horvat) and out.split("\n")[3] == horvat and out.count("⟦") == 2
+    assert E.restore(out, state)[0] == text
+    by = {e.token: e for e in state.entities}
+    assert by[new].original == "Ivan Horvat" and by[new].found_by == "name-run"
+    # The same person written surname first is that person; others in a row are one new person.
+    assert E.anonymize_text("HORVAT ANA, član društva", state)[0] == f"{horvat}, član društva"
+    for text in ("Ana Marija Horvat signed.", "M. Horvat called."):
+        out = E.anonymize_text(text, state)[0]
+        assert out.count("⟦") == 1 and E.restore(out, state)[0] == text
+    # Two known people side by side stay two.
+    assert E.anonymize_text("Ana Horvat Ivan Babić", state)[0] == f"{horvat} {babic}"
+
+
+def test_inside_a_link_a_token_puts_back_what_was_there():
+    state = E.VaultState()
+    E.anonymize_text("Name: Lana Vidić; mail lana.vidic@primjer.hr", state)
+    text = ("http://hr.linkedin.example/pub/dir/?first=Lana&last=Vidić&search=Search · "
+            "https://reg.example/osoba/lana-vidic · mailto:LANA.VIDIC@PRIMJER.HR")
+    out = E.anonymize_text(text, state)[0]
+    assert "Lana" not in out and "Vidi" not in out and "lana" not in out.lower().replace("⟦", "")
+    assert E.restore(out, state)[0] == text  # never the full name put into "first="

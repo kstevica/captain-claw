@@ -553,6 +553,16 @@ the agent sees tokens — never restored.
 * **A company's registry number.** "MB: 01234567" (matični broj) stayed while the OIB next to it was a token.
   The detectors now read the label "MB" (capitals; "512 MB" is a size) with 7–8 digits as an ID number, next to
   the "MBS" and "matični broj" labels they already knew.
+* **A new person's name split into two known people.** A court register listed two members, a known
+  person and a new one with the same surname ("Ivan Horvat" next to the known "Ana Horvat", while "Ivan"
+  was also the only first name of another known person, "Ivan Babić"). Code matched "Ivan" and "Horvat" one
+  word at a time — two tokens, two other people — so the reply read "Ivan Babić Ana Horvat". The trusted
+  model couldn't catch it: it reads the text after code has put its known values in. Putting back was right;
+  finding was wrong. Now a known first name or surname with name words right next to it is one name: the
+  same person written the other way round ("HORVAT ANA"), else a new person ("Ivan Horvat", "Ana Marija
+  Horvat", "M. Horvat"); two known full names side by side stay two. And inside a link every token puts back
+  exactly what was there ("?first=Ivan" never gets the full name it stood for), mailto: and tel: included.
+  Verified with Claude Haiku as the trusted model on a made-up register page: 3 of 3 runs right.
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
   with lane "both"); map links keep a place's coordinates ("…/@45.8,15.9"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known

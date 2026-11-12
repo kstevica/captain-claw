@@ -382,8 +382,10 @@ _GAP_RE = re.compile(r"[ \t]+|_")
 # there (a link still opens, a file is still found).
 _SLUG_WORD_RE = re.compile(r"%[0-9A-Fa-f]{2}|[^\W_]+")  # an escape ("%20") is a gap, not a word
 _SLUG_GAP_RE = re.compile(r"[_+\-]|%20|[ \t]+")
-_LINK_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"'\[\]{}|\\^`]+")
+_LINK_RE = re.compile(r"(?:https?://|www\.|mailto:|tel:)[^\s<>\"'\[\]{}|\\^`]+")
 SLUG_MIN_JOINED = 6
+# Name words in a row taken as one person's name, at most ("Ana Marija Horvat").
+MAX_NAME_RUN = 4
 _LEGAL_AFTER_RE = re.compile(rf",?[ \t]+{d._LEGAL}(?![\w])")
 _DIGITS_RE = re.compile(r"[+(]?\d[\d \t()./\-]{4,40}\d")
 
@@ -499,16 +501,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
             if surface == base.original:
                 emit(start, end, base, "known-slug")
                 return
-            key = "/" + surface
-
-            def make() -> Entity:
-                got = state.by_key.get((base.kind, key))
-                if got is None:
-                    got = state.add(base.kind, key, surface)
-                    got.found_by, got.derived_from = "known-slug", base.token
-                return got
-
-            emit(start, end, make, "known-slug")
+            emit(start, end, lambda: _spelling(state, base, surface), "known-slug")
 
         if multi or surnames or singles:
             words = [(m.start(), m.end(), m.group(0)) for m in _NAME_TOKEN_RE.finditer(text)
@@ -518,29 +511,85 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
             def adjacent(i: int) -> bool:  # word i and i+1 stand next to each other
                 return bool(_GAP_RE.fullmatch(text, words[i][1], words[i + 1][0]))
 
-            for i, (start, end, w) in enumerate(words):
+            # Known full names first: their words are theirs.
+            covered: set[int] = set()
+            for i, (start, _end, w) in enumerate(words):
                 if _is_initial(w):
                     continue
-                tk = keys[i]
-                for e, infos in multi.get(tk[0], ()):
+                for e, infos in multi.get(keys[i][0], ()):
                     n = len(infos)
                     if i + n <= len(words) and all(
                             not _is_initial(words[i + k][2]) and _word_matches(keys[i + k], infos[k])
                             for k in range(n)) and all(adjacent(i + k) for k in range(n - 1)):
                         emit(start, words[i + n - 1][1], e, "known")
+                        covered.update(range(i, i + n))
+
+            def namey(j: int) -> bool:  # a word that can be part of a name
+                w = words[j][2]
+                return j not in covered and not _is_initial(w) and len(w) >= 2 and fold(w) not in d._STOP
+
+            def lone(i: int, target: Target, own: list[_WordInfo]) -> None:
+                """A known first name or surname at word *i*. Alone, it is that
+                person. With name words right next to it, they are one name:
+                the same person written the other way round ("HORVAT ANA"), or
+                somebody else — "Ivan" of one known person (Ivan Babić) and
+                "Horvat" of another (Ana Horvat) make "Ivan Horvat", a new
+                person, not those two."""
+                a = b = i
+                while b + 1 < len(words) and b - a < MAX_NAME_RUN - 1 and adjacent(b) and namey(b + 1):
+                    b += 1
+                while a > 0 and b - a < MAX_NAME_RUN - 1 and adjacent(a - 1) and namey(a - 1):
+                    a -= 1
+                if a == b:
+                    emit(words[i][0], words[i][1], target, "known")
+                    return
+                e = known_by_words(a, b)
+                if e is not None:
+                    emit(words[a][0], words[b][1], e, "known")
+                elif all(any(_word_matches(keys[j], info) for info in own) for j in range(a, b + 1)):
+                    emit(words[a][0], words[b][1], target, "known")
+                else:
+                    new_person(words[a][0], words[b][1])
+
+            def known_by_words(a: int, b: int) -> Entity | None:
+                """The known person whose name is exactly words a..b in another
+                order ("HORVAT ANA"), if there is one."""
+                n = b - a + 1
+                for j in range(a, b + 1):
+                    for e, infos in multi.get(keys[j][0], ()):
+                        if len(infos) == n and all(any(_word_matches(keys[k], inf) for inf in infos)
+                                                   for k in range(a, b + 1)) \
+                                and all(any(_word_matches(keys[k], inf) for k in range(a, b + 1)) for inf in infos):
+                            return e
+                return None
+
+            def new_person(s: int, t: int) -> None:
+                surface = text[s:t]
+                key = normalize("PERSON", surface, options.default_cc)
+                emit(s, t, lambda: state.by_key.get(("PERSON", key)) or state.add("PERSON", key, surface),
+                     "name-run")
+
+            for i, (start, end, w) in enumerate(words):
+                if _is_initial(w) or i in covered:
+                    continue
+                tk = keys[i]
                 for info, target, first in surnames.get(tk[0], ()):
                     if not _word_matches(tk, info):
                         continue
-                    s0 = start
-                    if first is not None and i > 0 and adjacent(i - 1):
+                    if i > 0 and adjacent(i - 1):
                         pw = words[i - 1][2]
-                        if (_is_initial(pw) and d.strip_accents(pw[:1]).casefold() == first.initial) \
-                                or (not _is_initial(pw) and _word_matches(keys[i - 1], first)):
-                            s0 = words[i - 1][0]
-                    emit(s0, end, target, "known")
+                        if first is not None and (
+                                (_is_initial(pw) and d.strip_accents(pw[:1]).casefold() == first.initial)
+                                or (not _is_initial(pw) and _word_matches(keys[i - 1], first))):
+                            emit(words[i - 1][0], end, target, "known")
+                            continue
+                        if _is_initial(pw):  # "M. Horvat" is not Ana Horvat
+                            new_person(words[i - 1][0], end)
+                            continue
+                    lone(i, target, [info] if first is None else [info, first])
                 for info, e in singles.get(tk[0], ()):
                     if _word_matches(tk, info):
-                        emit(start, end, e, "known")
+                        lone(i, e, [_WordInfo.of(x) for x in _name_words(e.original) if not _is_initial(x)])
 
         if literal:
             for m in _TEXT_TOKEN_RE.finditer(text):
@@ -639,6 +688,17 @@ def _select(text: str, spans: list[Span], blocked: list[tuple[int, int]], keep_f
         ends.insert(i, sp.end)
         chosen.append(sp)
     return sorted(chosen, key=lambda s: s.start)
+
+
+def _spelling(state: VaultState, base: Entity, surface: str) -> Entity:
+    """*surface* as an entity of its own (key ``/surface``), so its token
+    restores exactly that spelling; noted as a spelling of *base*."""
+    key = "/" + surface
+    got = state.by_key.get((base.kind, key))
+    if got is None:
+        got = state.add(base.kind, key, surface)
+        got.found_by, got.derived_from = "known-slug", base.token
+    return got
 
 
 def _mask_tokens(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -748,6 +808,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             if not final:
                 new_texts.append(text)
                 continue
+            links = [(m.start(), m.end()) for m in _LINK_RE.finditer(masked)]
             changed = True
             if round_no > 1:
                 fixed += len(final)
@@ -756,6 +817,11 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             new_edits = []
             for sp in final:
                 e = by_span[(sp.start, sp.end)]
+                if links and text[sp.start:sp.end] != e.original \
+                        and any(a <= sp.start and sp.end <= b for a, b in links):
+                    # Inside a link a token puts back exactly what was there
+                    # ("?first=Ivan" stays "Ivan", not the full name it stood for).
+                    e = _spelling(state, e, text[sp.start:sp.end])
                 if e.new and not e.found_by:
                     e.found_by = sp.source
                 new_edits.append((_to_original(edits[i], sp.start), _to_original(edits[i], sp.end), e.token))
