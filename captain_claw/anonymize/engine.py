@@ -270,8 +270,16 @@ class _Person:
     stems: tuple[str, ...]
 
 
+def _slug_fold(word: str) -> str:
+    return d.strip_accents(word).casefold()
+
+
+def _slug_words(text: str) -> tuple[str, ...]:
+    return tuple(_slug_fold(w) for w in _SLUG_WORD_RE.findall(text) if not w.startswith("%"))
+
+
 def _person_view(e: Entity) -> _Person | None:
-    if e.kind != "PERSON" or e.key.startswith("~"):
+    if e.kind != "PERSON" or e.key.startswith(("~", "/")):  # "/…": a spelling in a link, not a name
         return None
     words = [w for w in _name_words(e.original) if not _is_initial(w)]
     if not words:
@@ -362,6 +370,14 @@ class _Resolver:
 # known name in it must be found like anywhere else.
 _TEXT_TOKEN_RE = re.compile(r"[^\W_]+|[^\w\s]|_")
 _GAP_RE = re.compile(r"[ \t]+|_")
+# Slugs: a known name as links and file names write it — "acme-supply",
+# "Acme+Supply", "acme%20supply", "acmesupply", "Acme_Supply_offer.pdf". Each
+# spelling is an entity of its own, so its token puts back exactly what was
+# there (a link still opens, a file is still found).
+_SLUG_WORD_RE = re.compile(r"%[0-9A-Fa-f]{2}|[^\W_]+")  # an escape ("%20") is a gap, not a word
+_SLUG_GAP_RE = re.compile(r"[_+\-]|%20|[ \t]+")
+_LINK_RE = re.compile(r"(?:https?://|www\.)[^\s<>\"'\[\]{}|\\^`]+")
+SLUG_MIN_JOINED = 6
 _LEGAL_AFTER_RE = re.compile(rf",?[ \t]+{d._LEGAL}(?![\w])")
 _DIGITS_RE = re.compile(r"[+(]?\d[\d \t()./\-]{4,40}\d")
 
@@ -443,12 +459,43 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
             if len(form) >= 4 and not (digits == re.sub(r"[\s.\-/]", "", form) and len(digits) < 6):
                 add_literal(form, e, False)
 
+    # Slug spellings of companies (and products) and of people's full names.
+    slug_multi: dict[str, list[tuple[tuple[str, ...], Entity]]] = {}
+    slug_joined: dict[str, list[Entity]] = {}
+    slug_single: dict[str, list[Entity]] = {}  # a one-word company, inside links only
+
+    def add_slug(words: tuple[str, ...], e: Entity, single: bool) -> None:
+        if len(words) >= 2:
+            slug_multi.setdefault(words[0], []).append((words, e))
+            joined = "".join(words)
+            if len(joined) >= SLUG_MIN_JOINED:
+                slug_joined.setdefault(joined, []).append(e)
+        elif single and words and len(words[0]) >= 3 and words[0] not in d._STOP:
+            slug_single.setdefault(words[0], []).append(e)
+
+    for e in state.entities:
+        if e.key.startswith("/") or (options.kinds is not None and e.kind not in options.kinds):
+            continue
+        if e.kind == "ORG":
+            add_slug(_slug_words(d.LEGAL_SUFFIX_RE.sub("", e.original)), e, True)
+        elif e.kind == "PERSON" and not e.key.startswith("~"):
+            add_slug(tuple(_slug_fold(w) for w in _name_words(e.original) if not _is_initial(w)), e, False)
+
     def find(text: str) -> list[tuple[Span, Entity]]:
         out: list[tuple[Span, Entity]] = []
 
         def emit(start: int, end: int, target: Target, source: str) -> None:
             e = target if isinstance(target, Entity) else target()
             out.append((Span(start, end, e.kind, 2, source), e))
+
+        def slug(start: int, end: int, base: Entity) -> None:
+            surface = text[start:end]
+            if surface == base.original:
+                emit(start, end, base, "known-slug")
+                return
+            key = "/" + surface
+            emit(start, end, lambda: state.by_key.get((base.kind, key)) or state.add(base.kind, key, surface),
+                 "known-slug")
 
         if multi or surnames or singles:
             words = [(m.start(), m.end(), m.group(0)) for m in _NAME_TOKEN_RE.finditer(text)
@@ -502,6 +549,27 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                         suffix = _LEGAL_AFTER_RE.match(text, end)
                         end = suffix.end() if suffix else end
                     emit(pos, end, e, "known")
+
+        if slug_multi or slug_joined or slug_single:
+            links = [(m.start(), m.end()) for m in _LINK_RE.finditer(text)] if slug_single else []
+            words = [(m.start(), m.end(), _slug_fold(m.group(0))) for m in _SLUG_WORD_RE.finditer(text)
+                     if not m.group(0).startswith("%")]
+            for i, (start, end, w) in enumerate(words):
+                if start > 0 and text[start - 1] == "@":
+                    continue  # an email's domain: the email is found whole
+                for ws, e in slug_multi.get(w, ()):
+                    n = len(ws)
+                    if i + n > len(words) or any(words[i + k][2] != ws[k] for k in range(1, n)):
+                        continue
+                    gaps = [text[words[i + k][1]:words[i + k + 1][0]] for k in range(n - 1)]
+                    if not all(_SLUG_GAP_RE.fullmatch(g) for g in gaps) or not any(g.strip() for g in gaps):
+                        continue  # written with spaces: found as the name itself
+                    slug(start, words[i + n - 1][1], e)
+                for e in slug_joined.get(w, ()):
+                    slug(start, end, e)
+                if any(a <= start and end <= b for a, b in links):
+                    for e in slug_single.get(w, ()):
+                        slug(start, end, e)
 
         if digit_keys:
             for m in _DIGITS_RE.finditer(text):
@@ -655,7 +723,12 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
                 if options.kinds is not None and e.kind not in options.kinds:
                     continue
                 spans.append(sp)
-                by_span.setdefault((sp.start, sp.end), e)
+                if sp.source == "known-slug":
+                    # The same words as a name found otherwise, but spelled as a link or a
+                    # file name writes them: the token must put back that spelling.
+                    by_span[(sp.start, sp.end)] = e
+                else:
+                    by_span.setdefault((sp.start, sp.end), e)
             final = _select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep))
             if not final:
                 new_texts.append(text)

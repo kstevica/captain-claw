@@ -300,6 +300,37 @@ def test_known_names_in_file_names_joined_by_underscores():
     assert E.anonymize_text("my_var_name = 1", state)[0] == "my_var_name = 1"
 
 
+def test_known_names_as_links_and_file_names_spell_them():
+    """A company's name in a link ("vrtlog-labs", "Vrtlog+Labs", "vrtloglabs")
+    or a file name is found too — each spelling its own token, so restoring
+    puts back exactly what was there and the link still opens."""
+    state = E.VaultState()
+    opts = E.Options(extra=(("Vrtlog Labs", "ORG"), ("Kvadrix", "ORG"), ("Lumora Desk", "ORG"),
+                            ("Ivana Perić", "PERSON")))
+    E.anonymize_text("Vrtlog Labs and Kvadrix make Lumora Desk; Ivana Perić runs it.", state, opts)
+    text = ("https://registar.example/tvrtka/vrtlog-labs-d-o-o/ · https://maps.example/place/Vrtlog+Labs/@45.8,15.9"
+            " · https://vrtloglabs.example/themes/vrtloglabs/a.css · https://s.example/?q=vrtlog%20labs"
+            " · https://x.example/kvadrix/lumora-desk/ · /team/ivana-peric · Vrtlog_Labs_offer.pdf"
+            " · Ivana_Peric_CV.pdf · info@vrtloglabs.example")
+    out = E.anonymize_text(text, state, opts)[0]
+    for raw in ("vrtlog", "Vrtlog", "kvadrix", "lumora", "ivana", "Ivana"):
+        assert raw not in out, (raw, out)
+    assert E.restore(out, state)[0] == text  # every link and file name exactly as it was
+    assert out.count("⟦EMAIL_") == 1  # the email stays one
+    # A spelling seen again is the same token; the name itself keeps its own.
+    again = E.anonymize_text("see https://registar.example/tvrtka/vrtlog-labs-d-o-o/ and Vrtlog Labs", state)[0]
+    assert again.split("tvrtka/")[1].split("-d-o-o")[0] in out and again.endswith("⟦ORG_1⟧")
+    # One word alone counts only inside a link; plain words stay.
+    assert E.anonymize_text("the lab tested a desk at the vrtlog", state)[0] == "the lab tested a desk at the vrtlog"
+
+
+def test_a_company_registry_number_by_its_label():
+    state = E.VaultState()
+    out = E.anonymize_text("OIB: 52601815906 MB: 01234567 Godina osnivanja: 2019. Disk 512 MB, MB 0123456.", state)[0]
+    assert "01234567" not in out and "0123456" not in out and "512 MB" in out
+    assert out.count("⟦ID_NUMBER_") == 2 and "2019" in out
+
+
 class TestNamePack:
     @pytest.fixture(autouse=True)
     def _off_after(self):

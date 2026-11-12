@@ -540,9 +540,22 @@ the agent sees tokens — never restored.
   capitals and made-up spellings too), and still leaves generic kinds of product and widely known brands
   (Excel, WhatsApp). A shared case with a made-up startup checks it: with Claude Haiku the old prompt left the
   product name in 3 of 3 runs, the new one hid it in 3 of 3, with the other cases unchanged.
+* **A company's name in links.** With products hidden, the screened company still showed through its
+  links: registry and search pages put its name in the path ("…/tvrtka/vrtlog-labs-d-o-o/", "…/place/Vrtlog+Labs/"),
+  its own site in theme folders ("/themes/vrtloglabs/") and product paths ("/programi/lumora-desk/") — and the
+  model fetched one. Code found a known multi-word name only as written, with spaces. Now the known-value finder
+  also finds a known company's, product's or person's full name spelled as links and file names write it —
+  joined by "-", "_", "+" or "%20", or run together ("vrtloglabs", six letters or more) — and a one-word company
+  inside a link. Each spelling is an entity of its own: restoring puts back exactly what was there, so a link
+  still opens and a file is still found (a slug that took the name's own token would come back as "Vrtlog Labs",
+  with a space). The model sees a different token for the slug than for the name. Verified with Claude Haiku as
+  the trusted model on a made-up company page: nothing raw left in 3 of 3 runs, every link restored exactly.
+* **A company's registry number.** "MB: 01234567" (matični broj) stayed while the OIB next to it was a token.
+  The detectors now read the label "MB" (capitals; "512 MB" is a size) with 7–8 digits as an ID number, next to
+  the "MBS" and "matični broj" labels they already knew.
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
-  with lane "both"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known
+  with lane "both"); map links keep a place's coordinates ("…/@45.8,15.9"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known
   to code; Flight Deck's own `/fd/llm/complete` (one-shot generations on the owner's tier) isn't gated.
 
 **Not covered yet** (tokens stay): WhatsApp, Messenger and devices (the channel bus can carry other allowed

@@ -258,6 +258,9 @@ _OIB_RE = re.compile(r"(?<!\d)\d{11}(?!\d)")
 _OIB_LABEL_RE = re.compile(r"(?i:\bOIB)[ \t]*[:\-–]?[ \t]*(\d{11})(?!\d)")
 _JMBG_RE = re.compile(r"(?<!\d)\d{13}(?!\d)")
 _JMBG_LABEL_RE = re.compile(r"(?i:\bJMBG)[ \t]*[:\-–]?[ \t]*(\d{13})(?!\d)")
+# A Croatian company's registry number, "MB: 01234567" (matični broj, 8
+# digits; older ones 7). Capitals only: "512 MB" is a size.
+_MB_LABEL_RE = re.compile(r"(?<![\w])MB[ \t]*[:\-–]?[ \t]*(\d{7,8})(?!\d)")
 _SSN_RE = re.compile(r"(?<![\d\-])(?!000|666|9\d\d)\d{3}-(?!00)\d{2}-(?!0000)\d{4}(?![\d\-])")
 
 _IPV4_RE = re.compile(r"(?<![\d.\w])(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(?![\d.]?\d)")
@@ -432,6 +435,8 @@ def detect(text: str, kinds: frozenset[str] | set[str] | None = None,
             add(m.start(), m.end(), "JMBG", 3, "jmbg")
     for m in _JMBG_LABEL_RE.finditer(text):
         add(m.start(1), m.end(1), "JMBG", 3, "jmbg-label")
+    for m in _MB_LABEL_RE.finditer(text):
+        add(m.start(1), m.end(1), "ID_NUMBER", 3, "mb-label")
 
     # structural
     for m in _EMAIL_RE.finditer(text):
