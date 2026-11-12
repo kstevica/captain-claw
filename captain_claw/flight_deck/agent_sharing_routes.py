@@ -606,7 +606,7 @@ async def _agent_to_client(conn: _MemberConn) -> None:
     from captain_claw.flight_deck import anonymize_chat
 
     # The member's privacy gate, whole chat: real values from THEIR vault.
-    restorer = anonymize_chat.ChatRestorer(conn.sub)
+    restorer = anonymize_chat.ChatRestorer(conn.sub, agent=conn.slug)
     try:
         async for msg in conn.upstream:
             agent_idle.touch(conn.slug)

@@ -40,6 +40,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from captain_claw.anonymize import engine
 from captain_claw.anonymize import formats
 from captain_claw.anonymize import llm_lane
+from captain_claw.anonymize import usage
 from captain_claw.anonymize.detectors import KINDS
 from captain_claw.flight_deck import anonymize_gate as gate_settings
 from captain_claw.flight_deck import anonymize_ner as ner
@@ -249,6 +250,39 @@ def _pdf_text(blob: bytes) -> str:
     return content
 
 
+# ── token history ───────────────────────────────────────────────────
+
+
+def _short(value: Any, limit: int = 120) -> str:
+    return re.sub(r"[\x00-\x1f]+", " ", str(value or "")).strip()[:limit]
+
+
+def _uses(entities: list[engine.Entity], texts: list[str], data: dict[str, Any],
+          trusted_label: str = "") -> list[av.TokenUse]:
+    """What a run did to its tokens: "added" for each new one (the finder
+    that matched it), "out" for each one in the text, with the context of its
+    first appearance in the output and the model it goes to (the agent's,
+    for the privacy gate)."""
+    contexts = usage.token_contexts(texts, {e.token for e in entities})
+    to_model = _short(data.get("to_model"))
+    out: list[av.TokenUse] = []
+    for e in entities:
+        count, context = contexts.get(e.token, (e.count, ""))
+        if e.new:
+            out.append(av.TokenUse(e.token, "added", 1, context, e.found_by, e.derived_from,
+                                   trusted_label if e.found_by == "extra" else ""))
+        out.append(av.TokenUse(e.token, "out", count or e.count or 1, context, model=to_model))
+    return out
+
+
+async def _record(row: dict[str, Any], uses: list[av.TokenUse], *, channel: str, actor: str,
+                  data: dict[str, Any]) -> None:
+    try:
+        await av.store().record_uses(row, uses, channel=channel, actor=actor, label=_short(data.get("purpose")))
+    except Exception as exc:  # noqa: BLE001 — the history never fails the work
+        log.warning("Token history not recorded", error=type(exc).__name__)
+
+
 def _lane(data: dict[str, Any], model: trusted.TrustedModel | None) -> str:
     lane = str(data.get("lane") or "").strip().lower() or ("both" if model else "deterministic")
     if lane not in LANES:
@@ -329,6 +363,9 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
 
     counts = engine.summary(result.used)
     if vault_row is not None:
+        await _record(vault_row, _uses(result.used, list(result.outputs), data,
+                                       str(lanes.get("llm_model") or "") if lanes.get("llm") == "ok" else ""),
+                      channel=source or "text", actor=actor, data=data)
         await store.log(person, vault_row["id"], actor, "anonymize", {
             "format": doc.format, "source": source, "entities": counts,
             "new": sum(1 for e in result.used if e.new), "fixed": result.fixed, "lane": lane,
@@ -408,9 +445,11 @@ async def anonymize_names(person: str, names: list[str], data: dict[str, Any], *
             state = await store.load_state(row)
             out = await asyncio.to_thread(work, state)
             await store.save_run(row, state)
-        return out
     except (av.VaultError, fd_crypto.CryptoUnavailable) as exc:
         raise _store_error(exc) from None
+    await _record(row, _uses([e for e in state.entities if e.count], out, data), channel="names", actor=actor,
+                  data=data)
+    return out
 
 
 async def file_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str, Any]:
@@ -472,6 +511,10 @@ async def _restore_doc(person: str, doc: _Doc, data: dict[str, Any], *, actor: s
         unknown.extend(u for u in unk if u not in unknown)
     written = await asyncio.to_thread(doc.rebuild, outs, all_edits)
     store = av.store()
+    to_model = _short(data.get("to_model"))
+    back = usage.token_contexts([seg.text for seg in doc.segments], set(state.by_token))
+    await _record(row, [av.TokenUse(t, "back", n, c, model=to_model) for t, (n, c) in back.items()],
+                  channel=_short(data.get("source"), 60) or "restore", actor=actor, data=data)
     await store.touch(row)
     await store.log(person, row["id"], actor, "restore", {"restored": total, "unknown": len(unknown),
                                                           "format": doc.format})
@@ -689,6 +732,24 @@ async def anonymize_vault_delete(vault: str, user: dict = Depends(get_current_us
 async def anonymize_vault_events(vault: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row = await _own(user, vault)
     return {"events": await av.store().events(user["id"], row["id"])}
+
+
+@router.get("/vaults/{vault}/tokens/{token}")
+async def anonymize_token_history(vault: str, token: str, limit: int = av.HISTORY_PAGE, before: int | None = None,
+                                  user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """One token's history: what added it, and when it went out and came back
+    (contexts as they were sent — tokens, no real values), newest first, a
+    page at a time (*before*: the oldest line's ``id`` of the page shown)."""
+    m = engine.TOKEN_RE.fullmatch(token.strip())
+    if m is None:
+        raise HTTPException(status_code=422, detail="token looks like ⟦PERSON_1⟧")
+    row = await _own(user, vault)
+    try:
+        return await av.store().token_history(row, engine.make_token(m.group(1) or m.group(3),
+                                                                     int(m.group(2) or m.group(4))),
+                                              limit=limit, before=before)
+    except fd_crypto.CryptoUnavailable as exc:
+        raise _store_error(exc) from None
 
 
 # ── admin: the trusted model ────────────────────────────────────────

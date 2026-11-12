@@ -69,9 +69,40 @@ export interface VaultEntry {
   forms: string[]
   created_at: number | null
   updated_at: number | null
+  /** Texts it went out in, and times it came back and was put back. */
+  sent?: number
+  restored?: number
+  last_sent_at?: number | null
+  last_restored_at?: number | null
 }
 
 export interface VaultEvent { at: number; actor: string; action: string; detail: Record<string, unknown> }
+
+/** One line of a token's history: what added it, or a time it went out to a
+ * model ("out") or came back and was put back ("back"). The context is cut
+ * from the tokenized text — tokens, no real values. */
+export interface TokenUse {
+  id: number
+  at: number
+  direction: 'added' | 'out' | 'back'
+  channel: string
+  actor: string
+  label: string
+  found_by: string
+  related: string
+  model: string
+  count: number
+  context: string
+}
+
+export interface TokenHistory {
+  token: string
+  added: TokenUse | null
+  stats: { sent: number; restored: number; last_sent_at: number | null; last_restored_at: number | null }
+  uses: TokenUse[]
+  /** An older page is there (load it with `before` = the last line's id). */
+  more: boolean
+}
 
 export interface AnonStatus { llm: boolean; model: string; default_lane: Lane; name_model?: string }
 
@@ -202,6 +233,8 @@ export const anonymizeApi = {
   vaults: () => api<{ vaults: Vault[] }>('/fd/anonymize/vaults'),
   vault: (id: string) => api<{ vault: Vault; entries: VaultEntry[] }>(`/fd/anonymize/vaults/${enc(id)}`),
   events: (id: string) => api<{ events: VaultEvent[] }>(`/fd/anonymize/vaults/${enc(id)}/events`),
+  tokenHistory: (id: string, token: string, before?: number) =>
+    api<TokenHistory>(`/fd/anonymize/vaults/${enc(id)}/tokens/${enc(token)}${before ? `?before=${before}` : ''}`),
   updateVault: (id: string, patch: { name?: string; expires_at?: number | null }) =>
     api<{ vault: Vault }>(`/fd/anonymize/vaults/${enc(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteVault: (id: string) => api<{ deleted: string }>(`/fd/anonymize/vaults/${enc(id)}`, { method: 'DELETE' }),

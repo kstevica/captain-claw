@@ -1572,7 +1572,7 @@ def _tg_restorer(agent: Agent):
 
     async def restore(text: str) -> str:
         try:
-            return await _gate.restore_text(gate, text)
+            return await _gate.restore_text(gate, text, "telegram")
         except Exception as exc:  # noqa: BLE001 — the tokens go out instead
             log.debug("Telegram: tokens not restored", error=type(exc).__name__)
             return text

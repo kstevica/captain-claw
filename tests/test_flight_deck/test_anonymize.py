@@ -1496,3 +1496,128 @@ def test_members_may_use_the_tool_under_rules():
     _args, err = speaker.apply_tool_rules("anonymize", {"action": "anonymize", "url": "file:///etc/passwd"}, None)
     assert err
     assert {r.pointer for r in speaker.SPEAKER_PATH_MAP["anonymize"]} == {"/path", "/output_path"}
+
+
+# ── a token's history ───────────────────────────────────────────────
+
+
+class TestTokenHistory:
+    """What put a token in the vault, and every time it went out to a model
+    and came back to be put back — with a short context, as tokens."""
+
+    @staticmethod
+    def _history(token, vault="Chat", uid=BOB):
+        from urllib.parse import quote
+
+        r = _client().get(f"/fd/anonymize/vaults/{quote(vault)}/tokens/{quote(token)}", headers=_bearer(uid))
+        return r
+
+    async def test_what_added_it_and_where_it_went(self, gate_env):
+        from captain_claw import anonymize_gate_client as gate
+
+        _gate(_client(), coverage="chat")
+        d = await gate.decision(_agent("anthropic", "claude-x", ""))
+        assert d.agent_model == "anthropic/claude-x"
+        (out,) = await gate.anonymize_texts(d, ["Please write to klaus.weber@beispiel.de about the offer"], "message")
+        token = re.search(r"⟦EMAIL_\d+⟧", out).group(0)
+        h = self._history(token).json()
+        added = h["added"]
+        assert added["found_by"] == "email" and added["channel"] == "gate-chat" and added["label"] == "message"
+        assert added["actor"] == "agent:bob-bot"
+        assert added["context"] == f"Please write to {token} about the offer"  # as it was sent: no real value
+        (use,) = h["uses"]
+        assert use["direction"] == "out" and use["model"] == "anthropic/claude-x" and use["count"] == 1
+        assert h["stats"]["sent"] == 1 and h["stats"]["restored"] == 0
+        # A tool result is noted with its tool; the same token again is a new use, not a new token.
+        await gate.gate_result(d, "web_fetch", _ToolResultLike(f"Contact: klaus.weber@beispiel.de (sales)"))
+        h = self._history(token).json()
+        assert [u["label"] for u in h["uses"]] == ["tool:web_fetch", "message"] and h["added"]["label"] == "message"
+
+    async def test_a_restore_says_why(self, gate_env):
+        from captain_claw import anonymize_gate_client as gate
+
+        _gate(_client(), coverage="chat")
+        d = await gate.decision(_agent("anthropic", "claude-x", ""))
+        (out,) = await gate.anonymize_texts(d, ["mail ana@x.hr"], "message")
+        token = re.search(r"⟦EMAIL_\d+⟧", out).group(0)
+        assert await gate.restore_text(d, f"I'll mail {token} today.", "telegram") == "I'll mail ana@x.hr today."
+        args, _n = await gate.restore_args(d, {"to": token, "body": f"Dear {token}"}, "tool:send_mail")
+        assert args == {"to": "ana@x.hr", "body": "Dear ana@x.hr"}
+        h = self._history(token).json()
+        back = [u for u in h["uses"] if u["direction"] == "back"]
+        assert [(u["label"], u["channel"]) for u in back] == [("tool:send_mail", "gate"), ("tool:send_mail", "gate"),
+                                                              ("telegram", "gate")]
+        assert back[-1]["context"] == f"I'll mail {token} today." and back[-1]["model"] == "anthropic/claude-x"
+        assert h["stats"]["restored"] == 3
+
+    async def test_the_chat_notes_each_text_once(self, gate_env):
+        import asyncio
+
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.flight_deck import anonymize_chat
+
+        anonymize_chat.reset_for_tests()
+        _gate(_client(), coverage="chat")
+        d = await gate.decision(_agent("anthropic", "claude-x", ""))
+        (out,) = await gate.anonymize_texts(d, ["mail ana@x.hr"], "message")
+        token = re.search(r"⟦EMAIL_\d+⟧", out).group(0)
+        r = anonymize_chat.ChatRestorer(BOB, agent="bob-bot")
+        frame = json.dumps({"type": "chat_message", "role": "assistant", "content": f"Done — I wrote to {token}."})
+        assert "ana@x.hr" in await r.frame(frame)
+        await r.frame(frame)  # the same text again
+        await r.frame(json.dumps({"type": "replay_batch", "messages": [{"content": f"wrote to {token}"}]}))
+        # Not what the model wrote: the prompt in a trace, the person's message, a tool's output.
+        await r.frame(json.dumps({"type": "monitor", "messages": [{"role": "user", "content": f"to {token}"}]}))
+        await r.frame(json.dumps({"type": "chat_message", "role": "user", "content": f"mail {token}"}))
+        await r.frame(json.dumps({"type": "tool_result", "content": f"sent to {token}"}))
+        await asyncio.gather(*list(anonymize_chat._TASKS))
+        back = [u for u in self._history(token).json()["uses"] if u["direction"] == "back"]
+        assert len(back) == 1
+        assert (back[0]["channel"], back[0]["label"], back[0]["actor"]) == ("chat", "chat_message", "agent:bob-bot")
+        assert back[0]["context"] == f"Done — I wrote to {token}."
+
+    async def test_a_spelling_points_at_its_name(self, db, agents):
+        out = (await anonymize_routes.run_for(BOB, {
+            "content": "Tvrtka: Acme Labs d.o.o. — see https://registar.example/tvrtka/acme-labs-d-o-o/",
+            "vault": "Deals", "lane": "deterministic"}, actor="person"))["output"]
+        name, slug = re.findall(r"⟦ORG_\d+⟧", out)[:2]
+        assert name != slug
+        added = self._history(slug, "Deals").json()["added"]
+        assert (added["found_by"], added["related"], added["channel"]) == ("known-slug", name, "text")
+        assert self._history(name, "Deals").json()["added"]["found_by"] == "org-label"
+
+    async def test_all_kept_a_page_at_a_time_and_gone_with_the_vault(self, gate_env):
+        from urllib.parse import quote
+
+        from captain_claw import anonymize_gate_client as gate
+
+        _gate(_client(), coverage="chat")
+        d = await gate.decision(_agent("anthropic", "claude-x", ""))
+        (out,) = await gate.anonymize_texts(d, ["mail ana@x.hr"], "message")
+        token = re.search(r"⟦EMAIL_\d+⟧", out).group(0)
+        for i in range(5):
+            await gate.restore_text(d, f"note {i}: {token}", "telegram")
+        h = self._history(token).json()
+        assert len(h["uses"]) == 6 and not h["more"]  # no limit per token: every line kept
+        assert h["uses"][0]["context"] == f"note 4: {token}"
+        assert h["stats"] == {**h["stats"], "sent": 1, "restored": 5} and h["added"] is not None
+        url = f"/fd/anonymize/vaults/Chat/tokens/{quote(token)}"
+        first = _client().get(f"{url}?limit=4", headers=_bearer(BOB)).json()
+        rest = _client().get(f"{url}?limit=4&before={first['uses'][-1]['id']}", headers=_bearer(BOB)).json()
+        assert first["more"] and not rest["more"]
+        assert [u["id"] for u in first["uses"] + rest["uses"]] == [u["id"] for u in h["uses"]]
+        raw = _client().get("/fd/anonymize/vaults/Chat", headers=_bearer(BOB)).json()["entries"]
+        assert next(e for e in raw if e["token"] == token)["restored"] == 5
+        assert self._history(token, uid=ALICE).status_code == 404  # only the vault's person
+        assert self._history("PERSON_1").status_code == 422
+        assert _client().delete("/fd/anonymize/vaults/Chat", headers=_bearer(BOB)).status_code == 200
+        store = anonymize_vault.store()
+        cur = await (await store._conn()).execute("SELECT COUNT(*) FROM token_uses")
+        assert (await cur.fetchone())[0] == 0
+
+
+class _ToolResultLike:
+    def __new__(cls, content):
+        from captain_claw.tools.registry import ToolResult
+
+        return ToolResult(success=True, content=content)

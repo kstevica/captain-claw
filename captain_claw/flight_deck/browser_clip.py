@@ -1225,7 +1225,8 @@ async def clip_anonymize_restore(body: dict[str, Any] = Body(...), user: dict = 
     if not isinstance(content, str) or not content.strip():
         raise HTTPException(422, "Paste the anonymized text first.")
     vault = str(body.get("vault") or "").strip() or anonymize_vault_for(body.get("url"))
-    return await anonymize_routes.restore_for(uid, {"content": content, "format": "md", "vault": vault},
+    return await anonymize_routes.restore_for(uid, {"content": content, "format": "md", "vault": vault,
+                                                    "source": "browser"},
                                               actor=f"browser:{uid}")
 
 

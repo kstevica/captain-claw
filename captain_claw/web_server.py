@@ -3207,7 +3207,7 @@ class WebServer:
         gate = await _gate.decision(self.agent) if self.agent is not None else None
         if gate is not None and gate.chat:
             try:
-                messages = await _gate.anonymize_messages(self.agent, gate, messages)
+                messages = await _gate.anonymize_messages(self.agent, gate, messages, purpose="borrowed")
             except Exception as exc:  # noqa: BLE001 — fail closed: nothing goes to the model
                 return web.json_response({"ok": False, "error": (
                     f"The privacy gate couldn't check this, so nothing was sent ({_gate.why(exc)}).")},
@@ -3234,8 +3234,8 @@ class WebServer:
             content = resp.content
             if gate is not None:
                 try:
-                    content = await _gate.restore_text(gate, content or "")
-                    thoughts = await _gate.restore_text(gate, thoughts) if thoughts else thoughts
+                    content = await _gate.restore_text(gate, content or "", "borrowed")
+                    thoughts = await _gate.restore_text(gate, thoughts, "borrowed") if thoughts else thoughts
                 except Exception as exc:  # noqa: BLE001 — tokens, never a failed answer
                     log.warning("Privacy gate: answer not restored", error=type(exc).__name__)
             return web.json_response({

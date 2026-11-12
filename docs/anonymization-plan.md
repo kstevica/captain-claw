@@ -568,6 +568,33 @@ wrote tokens in the call and `contact.txt` got the real values. No raw value any
 sessions, memory, insights or topics — only the tool-call audit (what actually ran) and the memory's index
 of the workspace file (recall goes through the gate).
 
+### Token history
+
+Every token keeps a history in its vault (`token_uses`, `token_stats` in `anonymize.db`):
+
+* **What added it** — once: when, from where (the chat, a tool result, a file, a folder, a Library file, a
+  web page in Chrome, folder names), why (the person's message, `tool:<name>`, a model call's label, a
+  Flight Deck feature), who (`agent:<slug>`, the person, Chrome), and which finder matched it: a code
+  pattern (`email`, `oib-label`, `mb-label` …), the name model, the trusted model (its label), the person's
+  own list, or a spelling of another token in a link or file name (`known-slug`, with that token).
+* **Every time it went out** — in a new text, to which model (the agent's own, "provider/model"), why, with
+  the context of its first appearance. Sending the same text again (a conversation's history, every turn)
+  is not a new use: the gate sends each text to Flight Deck once.
+* **Every time it came back and was put back** — the model's reply, narration, reasoning or question in the
+  person's chat (frame type), its tool call's arguments (`tool:<name>`), Telegram, a Flight Deck feature's
+  answer, the task's name, a text the person restored, Chrome. Frames the model didn't write — the prompt
+  echoed in a trace, a tool's output, the person's own message, a reconnect's replay — are restored but
+  not noted; the same text twice is noted once.
+
+A context is cut (80 characters each side, never through a token) from the tokenized text — what went out,
+or what the model wrote — never from the original, and is stored encrypted with the vault key anyway. Every
+send and restore is kept for 180 days (no limit per token — to be watched in real use: a much-used token
+gathers a line per new text), what added a token always stays, and deleting a vault deletes its history.
+The history is read a page (100 lines) at a time. The person sees it in Anonymize → Vaults
+→ a vault → *Show the real values*: each token shows ↑ sends and ↓ restores, and opens to its history;
+hovering a token in a context shows its real value. `GET /fd/anonymize/vaults/{vault}/tokens/{token}`
+returns it (the vault's person only).
+
 ## Phases
 
 * **P0** — engine (detect → resolve → tokens → replace → verify → restore),

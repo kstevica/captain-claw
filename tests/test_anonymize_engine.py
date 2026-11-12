@@ -399,3 +399,25 @@ class TestNamePack:
 def test_address_label_stops_at_the_sentence(text, address):
     found = {text[s.start:s.end] for s in d.detect(text) if s.kind == "ADDRESS" and s.source == "address-label"}
     assert found == {address}
+
+
+def test_new_entities_say_what_found_them():
+    state = E.VaultState()
+    opts = E.Options(extra=(("Vrtlog Labs", "ORG"),))
+    E.anonymize_text("Vrtlog Labs: ana@x.hr, see https://x.example/vrtlog-labs/", state, opts)
+    by = {e.original: e for e in state.entities if e.count}
+    assert by["ana@x.hr"].found_by == "email" and by["Vrtlog Labs"].found_by == "extra"
+    assert by["vrtlog-labs"].found_by == "known-slug" and by["vrtlog-labs"].derived_from == by["Vrtlog Labs"].token
+
+
+def test_a_context_never_cuts_a_token():
+    from captain_claw.anonymize import usage
+
+    text = "x" * 30 + " Meet ⟦PERSON_12⟧ and ⟦ORG_3⟧ at noon, then call ⟦PHONE_1⟧ before " + "y " * 80
+    found = usage.token_contexts([text, "again ⟦ORG_3⟧"], {"⟦ORG_3⟧", "⟦PERSON_12⟧"})
+    count, context = found["⟦ORG_3⟧"]
+    assert count == 2 and "⟦PERSON_12⟧" in context and "⟦PHONE_1⟧" in context
+    assert context.endswith("…") and "⟦PHONE_1⟧"[:-1] not in context.replace("⟦PHONE_1⟧", "")
+    assert "⟦PHONE_1⟧" not in found  # only what was asked for
+    short = usage.snippet("⟦EMAIL_1⟧ hi", 0, 9, width=3)
+    assert short == "⟦EMAIL_1⟧ hi"

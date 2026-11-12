@@ -477,7 +477,8 @@ class AgentGuardMixin:
             self._gate_status(_gate.working(gate, what))
 
         try:
-            out = await _gate.anonymize_messages(self, gate, messages, on_work=say)
+            out = await _gate.anonymize_messages(self, gate, messages, on_work=say,
+                                                 purpose=interaction_label or "model call")
         except Exception as exc:  # noqa: BLE001 — fail closed
             raise GuardBlockedError("privacy", (
                 f"The privacy gate couldn't check what goes to the model, so nothing was sent ({_gate.why(exc)}). "
@@ -823,7 +824,7 @@ class AgentGuardMixin:
             if self._has_tokens(arguments):
                 self._gate_status(_gate.restoring(name))
             try:
-                arguments, restored = await _gate.restore_args(gate, arguments)
+                arguments, restored = await _gate.restore_args(gate, arguments, f"tool:{name}")
             except Exception as exc:  # noqa: BLE001 — nothing leaves with half its values
                 return _ToolResult(success=False, error=(
                     f"Nothing was sent: the privacy gate couldn't put the real values back into it ({_gate.why(exc)}). "
