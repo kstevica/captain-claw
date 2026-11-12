@@ -525,13 +525,21 @@ the agent sees tokens — never restored.
   got the made-up test name and email back in their place.
 * **Names joined by underscores** (a saved file's name: "Acme_-_Supply_Agreement.docx",
   "Ivan_Horvat_CV.pdf") are found like anywhere else: the known-value finder treats `_` as a separator.
+* **Task naming went around the gate.** The chat names each task with its own small call to the agent's
+  model (litellm, outside the guarded path) — with the person's raw message, and for "continue" the three
+  messages before it. With the whole chat gated it now sends the message as the turn's model sees it (the
+  turn and the name share one anonymize call), earlier messages only when already anonymized, and the name
+  comes back with the real values; a message that can't be checked gets no name, never the raw text. On a
+  shared agent the name is made as the member (their gate, their vault), and the clean-text cache is kept
+  per person, so a text cleaned in the owner's vault is never reused for a member. Verified on the throwaway
+  deck: the naming call carried the tokenized message (91 characters, the raw one is 119).
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
-  needs the trusted model; Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known
+  needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
+  with lane "both"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known
   to code; Flight Deck's own `/fd/llm/complete` (one-shot generations on the owner's tier) isn't gated.
 
 **Not covered yet** (tokens stay): WhatsApp, Messenger and devices (the channel bus can carry other allowed
-people), cron deliveries, public pages, the Line and notifications; model calls an agent makes with
-another provider (e.g. task naming).
+people), cron deliveries, public pages, the Line and notifications.
 
 **Verified live** (throwaway deck, local `ornith:9b` agent, gate on "every agent", whole chat): the agent
 stored and its model read "Name: ⟦PERSON_1⟧, OIB ⟦OIB_1⟧, mail ⟦EMAIL_1⟧" and replied in tokens; the chat

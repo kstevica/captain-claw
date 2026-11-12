@@ -1016,6 +1016,138 @@ class TestWholeChat:
         resp = await server._llm_complete(Req({"messages": [{"role": "user", "content": "Ana Kovač, ana@x.hr"}]}))
         assert resp.status == 503 and len(seen) == 1  # nothing went to the model
 
+    @staticmethod
+    def _namer(monkeypatch, sent: list, reply=lambda text: "Write to the client"):
+        """litellm's call, as the task namer makes it (what it was sent kept).
+        A stand-in module: the real one can't load with httpx swapped out."""
+        import sys
+        import types
+
+        import captain_claw.llm  # noqa: F401 — loaded before the stand-in
+
+        async def acompletion(**kw):
+            sent.append(kw["messages"][-1]["content"])
+            msg = types.SimpleNamespace(content=reply(sent[-1]))
+            return types.SimpleNamespace(choices=[types.SimpleNamespace(message=msg)])
+
+        monkeypatch.setitem(sys.modules, "litellm", types.SimpleNamespace(acompletion=acompletion))
+
+    async def test_the_task_name_never_sees_the_persons_words(self, gate_env, monkeypatch):
+        """The task namer calls the agent's model itself (litellm): with the
+        whole chat gated it sends the message as the turn's model sees it, and
+        the name comes back with the real values."""
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.agent import Agent
+        from captain_claw.web import chat_handler
+
+        _gate(_client(), coverage="chat")
+        agent = _agent("anthropic", "claude-x", "")
+        sent: list = []
+        self._namer(monkeypatch, sent, lambda text: "Mail " + re.search(r"⟦EMAIL_\d+⟧", text).group(0))
+        calls: list = []
+        real_post = gate._post
+
+        async def counting(path, body):
+            calls.append(path)
+            return await real_post(path, body)
+
+        monkeypatch.setattr(gate, "_post", counting)
+        message = "Write to Klaus Weber at klaus.weber@beispiel.de about the offer"
+        naming = chat_handler._start_task_naming(agent, message, [])
+        text, refused = await Agent._gate_user_text(agent, message)  # the turn, at the same time
+        await naming
+        assert not refused and "Weber" not in text
+        assert len(sent) == 1 and "Weber" not in sent[0] and "beispiel" not in sent[0]
+        assert agent._current_task_name == "Mail klaus.weber@beispiel.de"
+        # The turn and the name asked at once: one call to anonymize the message.
+        assert [p for p in calls if p.endswith("/agent/run")] == ["/fd/anonymize/agent/run"]
+
+    async def test_continuations_are_named_from_anonymized_messages_only(self, gate_env, monkeypatch):
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.web import chat_handler
+
+        _gate(_client(), coverage="chat")
+        agent = _agent("anthropic", "claude-x", "")
+        sent: list = []
+        self._namer(monkeypatch, sent)
+        gate.remember("Find the offer from ⟦EMAIL_9⟧", "Find the offer from klaus.weber@beispiel.de")
+        earlier = ["Find the offer from klaus.weber@beispiel.de", "Never anonymized: ana@x.hr"]
+        await chat_handler._start_task_naming(agent, "continue", earlier)
+        assert "⟦EMAIL_9⟧" in sent[0] and "beispiel" not in sent[0] and "ana@x.hr" not in sent[0]
+
+    async def test_no_name_when_the_message_cant_be_anonymized(self, gate_env, monkeypatch):
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.web import chat_handler
+
+        _gate(_client(), coverage="chat")
+        agent = _agent("anthropic", "claude-x", "")
+        await gate.decision(agent)
+        sent: list = []
+        self._namer(monkeypatch, sent)
+
+        async def down(path, body):
+            raise gate.GateFailed("deck unreachable")
+
+        monkeypatch.setattr(gate, "_post", down)
+        await chat_handler._start_task_naming(agent, "Ana Kovač, ana@x.hr", [])
+        assert sent == [] and agent._current_task_name == ""
+
+    async def test_a_waiter_that_gives_up_doesnt_cancel_the_shared_call(self, gate_env, monkeypatch):
+        import asyncio
+
+        from captain_claw import anonymize_gate_client as gate
+
+        _gate(_client(), coverage="chat")
+        agent = _agent("anthropic", "claude-x", "")
+        d = await gate.decision(agent)
+        started, release = asyncio.Event(), asyncio.Event()
+        real_post = gate._post
+
+        async def slow(path, body):
+            started.set()
+            await release.wait()
+            return await real_post(path, body)
+
+        monkeypatch.setattr(gate, "_post", slow)
+        name_side = asyncio.ensure_future(gate.anonymize_user_text(d, "ana@x.hr is the client"))
+        await started.wait()
+        turn_side = asyncio.ensure_future(gate.anonymize_user_text(d, "ana@x.hr is the client"))
+        await asyncio.sleep(0)
+        name_side.cancel()  # the task name's 5 seconds ran out
+        release.set()
+        assert (await turn_side) == "⟦EMAIL_1⟧ is the client"
+        assert gate._PENDING == {}
+
+    async def test_a_members_tokens_are_their_own(self, gate_env, monkeypatch):
+        """One agent process, several people (a shared agent): a text the
+        owner's vault cleaned is never reused for a member, whose vault differs."""
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw import speaker
+        from captain_claw.web import chat_handler
+
+        gate.remember("Call ⟦PERSON_1⟧", "Call Klaus Weber")
+        p = speaker.Principal(ALICE, "Alice", "Bob", "A", "process:bob-bot:0123456789abcdef")
+        tok = speaker.bind(p)
+        try:
+            assert gate.known("Call Klaus Weber") is None
+        finally:
+            speaker.reset(tok)
+        assert gate.known("Call Klaus Weber") == "Call ⟦PERSON_1⟧"
+        # A member's task name asks the gate as the member, not as the owner.
+        seen: list = []
+
+        async def decision(agent):
+            seen.append((speaker.current(), speaker.current_grant()))
+            return None
+
+        monkeypatch.setattr(gate, "decision", decision)
+        self._namer(monkeypatch, [])
+        agent = _agent("anthropic", "claude-x", "")
+        agent._speaker_principal = p
+        await chat_handler._start_task_naming(agent, "hello", [], speaker_grant="g" * 43)
+        assert seen == [(p, "g" * 43)]
+        assert speaker.current() is None and speaker.current_grant() == ""  # the caller's context is untouched
+
     async def test_flight_deck_restores_for_the_person_only(self, gate_env):
         from captain_claw.flight_deck import anonymize_chat
 

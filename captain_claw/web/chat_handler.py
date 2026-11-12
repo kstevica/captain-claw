@@ -20,6 +20,8 @@ from captain_claw.ws_utils import fire_and_forget_send
 from captain_claw.next_steps import extract_next_steps, next_steps_to_dicts
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from captain_claw.web_server import WebServer
 
 log = get_logger(__name__)
@@ -55,11 +57,13 @@ async def _generate_task_name(
     api_key: str | None = None,
     base_url: str | None = None,
     extra_headers: dict | None = None,
+    restore: Callable[[str], Awaitable[str]] | None = None,
 ) -> str:
     """Fire a micro LLM call to name the task in ≤6 words.
 
     *recent_prompts* provides context for continuation messages.
-    Uses the cheapest/fastest model available via litellm.
+    Uses the cheapest/fastest model available via litellm. *restore* puts
+    the real values back into a name made from ⟦…⟧ tokens (the privacy gate).
     """
     try:
         # litellm has no provider mapping for ``litert/...`` model
@@ -147,6 +151,8 @@ async def _generate_task_name(
             kwargs.pop("temperature")
             resp = await acompletion(**kwargs)
         name = (resp.choices[0].message.content or "").strip().strip('"\'.')
+        if restore is not None and name:
+            name = (await restore(name)).strip()
         # Safety: truncate if the model got chatty
         if len(name) > 60:
             name = name[:60].rsplit(" ", 1)[0]
@@ -1232,11 +1238,44 @@ async def _rewind_session(agent: Any, rewind_to: str | None) -> None:
             log.warning("Failed to persist rewound session", error=str(e))
 
 
-def _start_task_naming(agent: Any, content: str, recent_prompts: list[str]) -> asyncio.Task:
+async def _naming_input(
+    agent: Any, content: str, recent_prompts: list[str],
+) -> tuple[str | None, list[str], Callable[[str], Awaitable[str]] | None]:
+    """(message, earlier messages, restore) the namer may send the model.
+
+    With the person's privacy gate covering the whole chat, the model never
+    sees their words: the namer gets the message as the turn's model does
+    (one shared call), earlier messages only as already anonymized, and the
+    name comes back with the real values. A message that can't be
+    anonymized gets no name (None) — never the raw text.
+    """
+    from captain_claw import anonymize_gate_client as _gate
+
+    gate = await _gate.decision(agent)
+    if gate is None or not gate.chat:
+        return content, recent_prompts, None
+    try:
+        clean = await _gate.anonymize_user_text(gate, content)
+    except Exception as e:  # noqa: BLE001 — the turn says why; the name just isn't there
+        log.info("Task naming: skipped (privacy gate)", error_type=type(e).__name__)
+        return None, [], None
+    earlier = [hit for p in recent_prompts if (hit := _gate.known(p)) is not None]
+
+    async def restore(name: str) -> str:
+        return await _gate.restore_text(gate, name)
+
+    return clean, earlier, restore
+
+
+def _start_task_naming(
+    agent: Any, content: str, recent_prompts: list[str], *, speaker_grant: str | None = None,
+) -> asyncio.Task:
     """Name the task with a micro LLM call, concurrently with the turn.
 
     *recent_prompts* is read when the naming call runs (after the caller
     has recorded *content* in it), so continuations get their context.
+    *speaker_grant* (a shared agent's member turn) makes the call the
+    member's: their privacy gate, their vault.
     """
     _naming_model = getattr(agent.provider, "model", "")
     _naming_provider = getattr(agent.provider, "provider", "")
@@ -1264,9 +1303,18 @@ def _start_task_naming(agent: Any, content: str, recent_prompts: list[str]) -> a
         if _is_fd_spawned_worker() or _naming_provider_class == "ChatGPTResponsesProvider":
             agent._current_task_name = ""
             return
+        if speaker_grant is not None:
+            # This task's own context: the member it names the message for.
+            from captain_claw import speaker as _speaker
+            _speaker.bind(getattr(agent, "_speaker_principal", None))
+            _speaker.bind_grant(speaker_grant)
+        agent._current_task_name = ""
+        text, earlier, restore = await _naming_input(agent, content, recent_prompts)
+        if text is None:
+            return
         name = await _generate_task_name(
-            content, recent_prompts, _naming_model, _naming_api_key,
-            _naming_base_url, _naming_extra_headers,
+            text, earlier, _naming_model, _naming_api_key,
+            _naming_base_url, _naming_extra_headers, restore,
         )
         agent._current_task_name = name
 
@@ -1346,7 +1394,7 @@ async def _handle_speaker_chat(
         if not isinstance(recent, list):
             recent = []
             agent._recent_prompts = recent  # type: ignore[attr-defined]
-        naming_task = _start_task_naming(agent, content, recent)
+        naming_task = _start_task_naming(agent, content, recent, speaker_grant=speaker_grant or "")
         _remember_prompt(recent, content)
 
         task = asyncio.create_task(_run_agent(
