@@ -115,6 +115,7 @@ _TOOL_PROMPT_DESCRIPTIONS: dict[str, str] = {
     "xlsx": "Excel workbooks: create from sheets and rows (=… is a formula; optional template), read cells with formulas and results, edit them (set/fill/clear/append_rows/insert and delete rows and columns/format/width/freeze/merge/sheets/names/tables/charts/notes; references follow, every affected formula is recalculated and each changed cell reported), check a model for errors, stale results, broken patterns and SUMs that stop short. NEVER make or change a workbook with a script, write or edit.",
     "pptx": "PowerPoint decks: create from layouts and placeholders (optional template), read slides with shape ids, edit them (set_text/replace/format/add, duplicate, move, delete slides/notes/pictures from any path or link/native tables and charts/place; each result says what doesn't fit), check for overflow, overlaps, empty placeholders and missing titles, render where LibreOffice is installed. NEVER make or change a deck with a script, write or edit.",
     "self_check": "Self-assessment and status: live tests of your models, Flight Deck, Google, Microsoft 365, Jev, Soniox, deep memory, MCP, mail, web search and inboxes, plus server details (host, load, memory, disk, process) and why any tool is hidden. Read-only.",
+    "model_switch": "Read or change the AI model you run on, among your provider's models (same key and endpoint): a smarter one for a hard task, a cheaper one for simple work. Works from EVERY channel: when the user asks to switch, use a smarter/cheaper model or go back to the default, call set from wherever they asked; never say only Flight Deck can change it. scope 'setting' = this conversation from now on; 'turn' = this turn only. On your own only when get says your owner allowed it (then scope 'turn', and say so).",
     "activity": "Your own tool calls as Flight Deck recorded them (read-only): list = what you did and how each call ended (overnight, in scheduled tasks, in this conversation) — check it before saying an action happened; summary = tools that keep failing, calls you repeat, what the guard blocked.",
     "reasoning_effort": "Read or change how hard you think (off…max, auto = model default). Works from EVERY channel — web chat, WhatsApp, Telegram, the app, glasses, devices: when the user asks to set, raise or lower it (or to think harder/less), call set from wherever they asked; never say only Flight Deck can change it. Applies at once and to later messages from that channel. On your own, for a task needing much more or less thinking, use scope 'turn' and say so.",
     "xlsx_extract": "Extract a single .xlsx file into markdown tables. ONLY for .xlsx files — never use on .pdf/.docx/.pptx. For multiple files in a folder use summarize_files instead.",
@@ -170,6 +171,7 @@ _TOOL_PROMPT_DESCRIPTIONS_NANO: dict[str, str] = {
     "pptx": "powerpoint decks",
     "self_check": "status",
     "reasoning_effort": "think harder/less (any channel)",
+    "model_switch": "switch to a smarter/cheaper model of your provider (any channel)",
     "activity": "your own tool calls",
     "xlsx_extract": "xlsx→md",
     "pptx_extract": "pptx→md",
@@ -200,6 +202,7 @@ _TOOL_PROMPT_DESCRIPTIONS_MICRO: dict[str, str] = {
     "self_check": "test your connections (models, Flight Deck, Google, Microsoft, mail, search, MCP…) + server status; read-only",
     "activity": "your own recorded tool calls: list (what you did, did it really happen) / summary (what keeps failing); read-only",
     "reasoning_effort": "get/set how hard you think (off…max, auto) from any channel — user asks → set, never 'only Flight Deck'; scope 'turn' = this turn only",
+    "model_switch": "get/set the model you run on among your provider's models (smarter/cheaper) from any channel — user asks → set; on your own only if get says allowed (scope 'turn')",
     "xlsx_extract": "single .xlsx → markdown (ONLY .xlsx, never .pdf; for multiple files use summarize_files)",
     "pptx_extract": "single .pptx → markdown (ONLY .pptx, never .pdf; for multiple files use summarize_files)",
     "pocket_tts": "text-to-speech MP3",
@@ -2590,6 +2593,7 @@ class AgentContextMixin:
         "pptx": ["pptx"],
         "self_check": ["self_check"],
         "reasoning_effort": ["reasoning_effort"],
+        "model_switch": ["model_switch"],
         "activity": ["activity"],
         "xlsx_extract": ["xlsx_extract"],
         "pptx_extract": ["pptx_extract"],
@@ -2757,6 +2761,9 @@ class AgentContextMixin:
             elif tool_name == "reasoning_effort":
                 from captain_claw.tools.reasoning_effort import ReasoningEffortTool
                 self.tools.register(ReasoningEffortTool())
+            elif tool_name == "model_switch":
+                from captain_claw.tools.model_switch import ModelSwitchTool
+                self.tools.register(ModelSwitchTool())
             elif tool_name == "activity":
                 from captain_claw.tools.activity import ActivityTool
                 self.tools.register(ActivityTool())
@@ -3435,6 +3442,11 @@ class AgentContextMixin:
         _source_line = self._turn_source_line()
         if _source_line:
             system_info_block = f"{system_info_block}\n{_source_line}" if system_info_block else _source_line
+        # The model it runs on, when it may switch: asked to now, or allowed to
+        # on its own.
+        _switch_line = self._model_switch_line()
+        if _switch_line:
+            system_info_block = f"{system_info_block}\n{_switch_line}" if system_info_block else _switch_line
         return system_info_block
 
     def _build_system_prompt(self) -> str:
@@ -4781,6 +4793,44 @@ class AgentContextMixin:
                 "tell the user it can only be changed in Flight Deck."
             )
         return line
+
+    def _model_switch_line(self) -> str:
+        """For the turn's note: when the user talks about the model, that the
+        agent can switch from here (models otherwise send them to Flight
+        Deck); when its owner lets it switch on its own, what it runs on and
+        what else it could. "" otherwise."""
+        from captain_claw import turn_source
+
+        try:
+            if not self.tools.has_tool("model_switch"):
+                return ""
+            src = getattr(self, "_turn_source", None)
+            source = src[0] if isinstance(src, tuple) and src else ""
+            if turn_source.channel_of(source) in {"public", "member", "link"} or self._model_switch_blocked():
+                return ""
+            options = self.model_switch_choices()
+        except Exception:
+            return ""
+        if len(options) < 2:
+            return ""
+        from captain_claw.llm import model_switch
+
+        running = self._running_model()
+        now = next((o for o in options if model_switch.is_model(running, o["model"])), None)
+        others = "; ".join(
+            f"{o['model']}" + (f" ({o['label'].lower()})" if o.get("label") else "")
+            for o in options if o is not now
+        )
+        head = f"You run on {now['model'] if now else running}; others on your provider: {others}."
+        if model_switch.talks_about_models(self._recent_user_text(), options):
+            return (f"{head} If the user asks you to switch models, call model_switch set (reason "
+                    "user_asked) — it works from this channel; never tell them it can only be changed "
+                    "in Flight Deck.")
+        if model_switch.self_switch_enabled():
+            return (f"{head} Your owner lets you switch on your own: for a task that clearly needs a "
+                    "smarter model, or simple work a cheaper one does as well, call model_switch set "
+                    "(reason own, scope turn) and tell the user.")
+        return ""
 
     def _recent_user_text(self) -> str:
         """This turn's message and the one before it ("what's your reasoning

@@ -15,6 +15,7 @@ import { useConsoleStore } from '../../stores/consoleStore'
 import { Switch } from '../admin/Switch'
 import { TEAM_KEY_PROVIDERS, fetchProviderKeys, saveProviderKey } from './consoleApi'
 import { QuickStartForm } from './QuickStartForm'
+import { SwitchModelsCard } from './SwitchModelsCard'
 import {
   Page, PageHeader, Card, Pill, Button, Sheet, Dialog, Field, ChipPicker, Notice, Segmented,
   inputCls, type Tone,
@@ -159,6 +160,24 @@ export function ModelsPage() {
 
   const editing = editingTier && tiers[editingTier] ? editingTier : null
 
+  // Endpoints the tier sets use that the catalog doesn't cover (a gateway, a
+  // local server, OpenRouter): where agents need an admin's model list to
+  // switch models.
+  const switchSuggestions = useMemo(() => {
+    const url = (u: string) => u.trim().replace(/\/+$/, '').toLowerCase()
+    const known = (catalog?.presets || []).map((p) => `${p.provider}|${url(p.base_url)}`)
+    const out = new Map<string, { provider: string; base_url: string }>()
+    for (const s of [...sets, ...teamSets]) {
+      for (const k of TIER_ORDER) {
+        const t = s.tiers[k]
+        if (!t?.provider || !t.model?.trim() || t.provider === 'browser' || t.provider === 'antigravity-cli') continue
+        const id = `${t.provider}|${url(t.base_url || '')}`
+        if (!known.includes(id) && !out.has(id)) out.set(id, { provider: t.provider, base_url: (t.base_url || '').trim() })
+      }
+    }
+    return [...out.values()]
+  }, [sets, teamSets, catalog])
+
   const foreignNotice = foreignTeamSet && (
     <Notice tone="zinc">
       <div className="flex flex-wrap items-center gap-3">
@@ -201,6 +220,7 @@ export function ModelsPage() {
           </section>
           {foreignNotice}
           <TeamKeysCard keys={keys} onSaved={setKeys} needsKey={teamNeedsKey} team={accounts} />
+          <SwitchModelsCard suggestions={switchSuggestions} />
         </>
       ) : (
         <>
@@ -295,6 +315,7 @@ export function ModelsPage() {
           </Card>
 
           <TeamKeysCard keys={keys} onSaved={setKeys} needsKey={teamNeedsKey} team={accounts} />
+          <SwitchModelsCard suggestions={switchSuggestions} />
         </>
       )}
 

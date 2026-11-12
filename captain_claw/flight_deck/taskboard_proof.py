@@ -74,7 +74,7 @@ _CHAT_TOOLS = ("whatsapp_web", "whatsapp_send_file")
 _DELEGATES = ("consult_peer", "botport", "flight_deck")
 # The agent's own housekeeping: no part of what it was asked to do out there.
 _HOUSEKEEPING = ("insights", "facts", "intentions", "personality", "project_memory", "topics", "playbooks",
-                 "reasoning_effort", "clipboard", "todo", "jev", "ask_human")
+                 "reasoning_effort", "model_switch", "clipboard", "todo", "jev", "ask_human")
 _CHECKED_KINDS = {"email": "The email", "draft": "The draft", "calendar": "The calendar change", "message": "The message"}
 _CALENDAR_LABELS = {"create_event": "Calendar event created", "update_event": "Calendar event updated",
                     "delete_event": "Calendar event deleted"}

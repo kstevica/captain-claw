@@ -52,6 +52,7 @@ EXAM_TOOLS: dict[str, frozenset[str] | None] = {
     "xlsx": frozenset({"read", "check"}),
     "pptx": frozenset({"read", "check"}),
     "reasoning_effort": frozenset({"get"}),
+    "model_switch": frozenset({"get"}),
 }
 
 REFUSED = ("{tool} isn't available in this conversation: it is an onboarding exam, where nothing is sent, saved "

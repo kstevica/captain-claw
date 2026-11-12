@@ -258,6 +258,18 @@ def _reasoning_profile_wire(agent: Any) -> dict | None:
     return profile.to_wire() if profile else None
 
 
+def _model_switch_wire(agent: Any) -> dict | None:
+    """The model picker for *agent* (llm/model_switch.py), or None."""
+    fn = getattr(agent, "model_switch_wire", None)
+    if not callable(fn):
+        return None
+    try:
+        return fn()
+    except Exception as exc:
+        log.warning("Model choices unavailable", error=str(exc))
+        return None
+
+
 class SpeakerCapacityError(Exception):
     """No room for another shared-agent speaker instance (global or per member)."""
 
@@ -1394,6 +1406,9 @@ class WebServer:
             # The chat box's reasoning-effort picker: the levels this model
             # offers and the one it runs at by default (None: no picker).
             "reasoning": _reasoning_profile_wire(agent),
+            # The chat box's model picker: the provider's other models this
+            # agent can switch to (None: nothing to switch to).
+            "model_switch": _model_switch_wire(agent),
         }
 
     # ── Cron runtime context ─────────────────────────────────────────

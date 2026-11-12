@@ -544,6 +544,12 @@ class AgentGuardMixin:
         except Exception:
             _error_occurred = True
             raise
+        else:
+            if _label not in _REASONING_EXEMPT_LABELS:
+                # The model that wrote this answer: a reply's label (a switch
+                # mid-turn, or one for the turn only, changes it).
+                self._last_call_model = (str(getattr(self.provider, "provider", "") or ""),
+                                         str(getattr(self.provider, "model", "") or ""))
         finally:
             _latency_ms = int((_time.monotonic() - _t0) * 1000)
             # Safety net: if a background job somehow ran while a busy status

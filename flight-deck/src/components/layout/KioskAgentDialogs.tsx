@@ -16,6 +16,7 @@ import {
   MoreHorizontal,
   PenLine,
   RotateCw,
+  Shuffle,
   SlidersHorizontal,
   Tags,
   Target,
@@ -32,7 +33,8 @@ import { KioskSkillsPanel } from './KioskAgentSkills'
 import { TopicsPanel } from '../agents/TopicsPanel'
 import { SwitchTrack } from '../common/SwitchTrack'
 import {
-  getAgentConfig, getAgentMode, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentTaskRephrase, setAgentVision,
+  getAgentConfig, getAgentMode, getAgentModelSwitch, getAgentTaskRephrase, setAgentMode, setAgentModel, setAgentModelSwitch,
+  setAgentTaskRephrase, setAgentVision,
 } from '../../services/docker'
 import { LLM_PROVIDERS } from '../../services/tierConfig'
 import { VISION_OPTIONS, parseModelFromYaml } from '../../services/agentModel'
@@ -327,6 +329,9 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   // Task rephrase (task_rephrase.py): null when the deck couldn't say.
   const [rephrase, setRephrase] = useState<boolean | null>(null)
   const [rephraseSaved, setRephraseSaved] = useState(false)
+  // Switching models on its own (llm/model_switch.py): null when the deck couldn't say.
+  const [selfSwitch, setSelfSwitch] = useState<boolean | null>(null)
+  const [selfSwitchSaved, setSelfSwitchSaved] = useState(false)
   // What its config holds, and the change being typed.
   const [model, setModel] = useState<ModelSetting>({ provider: '', model: '', baseUrl: '' })
   const [draft, setDraft] = useState({ provider: '', model: '', baseUrl: '' })
@@ -336,7 +341,7 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
   const [modelSaved, setModelSaved] = useState(false)
   // The reasoning levels are the model's: a saved change reads them afresh.
   const [modelRev, setModelRev] = useState(0)
-  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model' | 'rephrase'>('')
+  const [saving, setSaving] = useState<'' | 'mode' | 'vision' | 'model' | 'rephrase' | 'switch'>('')
   // Model and vision are read when the agent starts: changed since it last did.
   const [pendingRestart, setPendingRestart] = useState(false)
   const [restarted, setRestarted] = useState(false)
@@ -347,12 +352,14 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
     Promise.all([
       getAgentMode(kind, key), getAgentConfig(kind, key),
       getAgentTaskRephrase(kind, key).catch(() => null),
+      getAgentModelSwitch(kind, key).catch(() => null),
     ])
-      .then(([m, cfg, tr]) => {
+      .then(([m, cfg, tr, ms]) => {
         if (!live) return
         const info = parseModelFromYaml(cfg.config_yaml || '')
         setMode(m.mode || 'neutra')
         setRephrase(tr ? tr.enabled : null)
+        setSelfSwitch(ms ? ms.enabled : null)
         setVision(info.vision)
         setModel({ provider: info.provider, model: info.model, baseUrl: info.base_url })
         setDraft({ provider: info.provider, model: info.model, baseUrl: info.base_url })
@@ -449,6 +456,23 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
     } catch (e) {
       setRephrase(!next)
       setError(`Couldn't change request rewriting: ${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving('')
+    }
+  }
+
+  // Read on every message — no restart.
+  const toggleSelfSwitch = async () => {
+    if (selfSwitch === null || saving) return
+    const next = !selfSwitch
+    setSelfSwitch(next); setSaving('switch'); setError(''); setSelfSwitchSaved(false)
+    try {
+      await setAgentModelSwitch(kind, key, next)
+      setSelfSwitchSaved(true)
+      setTimeout(() => setSelfSwitchSaved(false), 2000)
+    } catch (e) {
+      setSelfSwitch(!next)
+      setError(`Couldn't change model switching: ${e instanceof Error ? e.message : String(e)}`)
     } finally {
       setSaving('')
     }
@@ -634,6 +658,25 @@ export function KioskAgentSettingsDialog({ agent, restarting, onRestart, onClose
                         An extra AI call tidies a long, mixed request (links, columns, file names) into a structured brief first.
                         Older models needed it; current ones follow your words as written, so it's off unless you turn it on.
                         Applies from its next message.
+                      </span>
+                    </span>
+                  </button>
+                </section>
+              )}
+              {selfSwitch !== null && (
+                <section>
+                  <SectionTitle icon={Shuffle} title="Switch models" saving={saving === 'switch'} saved={selfSwitchSaved} />
+                  <button
+                    type="button" role="switch" aria-checked={selfSwitch} onClick={toggleSelfSwitch} disabled={!!saving}
+                    className="mt-1.5 flex w-full items-start gap-3 rounded-lg border border-zinc-800 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900 disabled:cursor-wait"
+                  >
+                    <span className="mt-0.5"><SwitchTrack on={selfSwitch} /></span>
+                    <span className="min-w-0">
+                      <span className="block text-xs font-medium text-zinc-200">Pick a smarter or cheaper model on its own</span>
+                      <span className="block text-[11px] leading-relaxed text-zinc-500">
+                        For one task at a time it may move to another model of the same provider and key — a smarter one for
+                        hard work, a cheaper one for simple work — and tells you when it does. Off, it switches only when you
+                        ask or pick a model in the chat box. Applies from its next message.
                       </span>
                     </span>
                   </button>

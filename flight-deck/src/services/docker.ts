@@ -367,6 +367,18 @@ export const setAgentTaskRephrase = (kind: 'process' | 'docker', id: string, ena
     body: JSON.stringify({ enabled }),
   })
 
+/** Model switching on its own: whether the agent may pick another model of
+ *  its provider for a task by itself (a cheaper or a smarter one), not only
+ *  when asked. Off unless turned on. Applies from its next message. */
+export const getAgentModelSwitch = (kind: 'process' | 'docker', id: string) =>
+  fdFetch<{ enabled: boolean }>(`/agent-model-switch/${kind}/${id}`)
+
+export const setAgentModelSwitch = (kind: 'process' | 'docker', id: string, enabled: boolean) =>
+  fdFetch<{ ok: boolean; enabled: boolean }>(`/agent-model-switch/${kind}/${id}`, {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  })
+
 /** Reasoning effort for every source but the web chat (whose chat box has its
  *  own picker): a default and a level per source, "auto" = the model's own. */
 export interface AgentReasoningSettings { default?: string; channels: Record<string, string> }
