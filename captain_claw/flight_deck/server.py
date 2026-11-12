@@ -1826,6 +1826,7 @@ from captain_claw.flight_deck.jev_routes import router as jev_router
 from captain_claw.flight_deck.external_memory.routes import router as external_memory_router
 from captain_claw.flight_deck.external_memory import service as external_memory_service
 from captain_claw.flight_deck.anonymize_routes import router as anonymize_router
+from captain_claw.flight_deck.anonymize_targets import router as anonymize_targets_router
 from captain_claw.flight_deck import anonymize_vault
 from captain_claw.flight_deck.soniox_routes import router as soniox_router
 from captain_claw.flight_deck.telegram_shared_routes import router as telegram_shared_router
@@ -1971,6 +1972,7 @@ app.include_router(imap_router)
 app.include_router(jev_router)
 app.include_router(external_memory_router)
 app.include_router(anonymize_router)
+app.include_router(anonymize_targets_router)
 app.include_router(soniox_router)
 app.include_router(telegram_shared_router)
 app.include_router(telegram_inbox_router)

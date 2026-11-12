@@ -25,9 +25,12 @@ import {
   Settings2,
   Share2,
   SlidersHorizontal,
+  ShieldCheck,
   Sparkles,
   X,
 } from 'lucide-react'
+import { AnonymizeHereDialog } from '../anonymize/AnonymizeHereDialog'
+import { anonymizable } from '../anonymize/anonFormat'
 import { useChatStore } from '../../stores/chatStore'
 import { useNotificationStore } from '../../stores/notificationStore'
 import type { LibraryFocus } from '../../stores/fileLibraryStore'
@@ -275,6 +278,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
   const [editing, setEditing] = useState<{ item: LibraryItem; agent: AgentEndpoint } | null>(null)
   const [linking, setLinking] = useState<{ item: LibraryItem; agent: AgentEndpoint } | null>(null)
   const [sharing, setSharing] = useState<LibraryItem | null>(null)
+  const [anonymizing, setAnonymizing] = useState<LibraryItem | null>(null)
   const [filtersOpen, setFiltersOpen] = useState(false)
   const reqId = useRef(0)
   const shown = useRef(PAGE)
@@ -395,7 +399,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
   // Escape: a viewer, dialog or sheet closes itself; then the open file
   // (phone), then the library.
   const overlayRef = useRef(false)
-  overlayRef.current = !!(viewing || editing || linking || sharing)
+  overlayRef.current = !!(viewing || editing || linking || sharing || anonymizing)
   const selectedRef = useRef(selected)
   selectedRef.current = selected
   const filtersRef = useRef(filtersOpen)
@@ -527,6 +531,7 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
       onShare={() => setSharing(selected)}
       onPublicLink={(a) => setLinking({ item: selected, agent: a })}
       onResummarize={() => resummarize(selected)}
+      onAnonymize={() => setAnonymizing(selected)}
       onTag={(t) => setQuery(t)}
       onAgent={() => setAgent(selected.agent_slug)}
       onOpenAgent={onOpenAgent && selected.agent_running ? () => onOpenAgent(selected.agent_slug) : undefined}
@@ -559,6 +564,13 @@ export function FileLibrary({ phone = false, initialAgent, initialFile, onClose,
 
   const dialogs = (
     <>
+      {anonymizing && (
+        <AnonymizeHereDialog
+          target={{ kind: 'library', id: anonymizing.id, name: anonymizing.filename, agent: anonymizing.agent_name }}
+          onClose={() => setAnonymizing(null)}
+          onDone={() => load(true)}
+        />
+      )}
       {linking && (
         <PublicLinkDialog
           agent={linking.agent}
@@ -840,14 +852,14 @@ function ResultRow({ item, creator, terms, active, onClick }: {
 // ── One file ──
 
 function FileDetail({
-  item, creator, terms, phone, viewerOpen, onClose, onOpen, onEdit, onDownload, onShare, onPublicLink, onResummarize, onTag, onAgent, onOpenAgent,
+  item, creator, terms, phone, viewerOpen, onClose, onOpen, onEdit, onDownload, onShare, onPublicLink, onResummarize, onAnonymize, onTag, onAgent, onOpenAgent,
 }: {
   item: LibraryItem; creator: Creator | null | undefined; terms: string[]; phone: boolean
   /** A file is open in the viewer over the library (its preview pauses). */
   viewerOpen: boolean
   onClose: () => void; onOpen: () => void; onEdit: (agent: AgentEndpoint) => void
   onDownload: () => void; onShare: () => void; onPublicLink: (agent: AgentEndpoint) => void
-  onResummarize: () => Promise<void>; onTag: (t: string) => void; onAgent: () => void
+  onResummarize: () => Promise<void>; onAnonymize: () => void; onTag: (t: string) => void; onAgent: () => void
   onOpenAgent?: () => void
 }) {
   const notify = useNotificationStore((s) => s.add)
@@ -1021,6 +1033,11 @@ function FileDetail({
         {onOpenAgent && (
           <button onClick={onOpenAgent} className={btn} title={`Chat with ${item.agent_name}`}>
             <MessageSquare className="h-4 w-4" />Agent chat
+          </button>
+        )}
+        {anonymizable(item.filename) && (
+          <button onClick={onAnonymize} className={btn} title="An anonymized copy beside it, in the agent's files">
+            <ShieldCheck className="h-4 w-4" />Anonymize
           </button>
         )}
         <button onClick={redo} disabled={busy || item.status === 'pending'} className={btn} title="Read the file again and write a fresh summary">

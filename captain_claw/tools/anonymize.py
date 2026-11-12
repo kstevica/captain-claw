@@ -33,6 +33,8 @@ log = structlog.get_logger(__name__)
 INLINE_MAX = 8000
 PREVIEW_CHARS = 3000
 MAX_FILE_BYTES = 25 * 1024 * 1024
+FOLDER_WAIT_SECONDS = 200  # under the tool timeout; a folder job keeps going on Flight Deck after this
+FOLDER_POLL_SECONDS = 2.0
 
 
 
@@ -119,7 +121,8 @@ class AnonymizeTool(Tool):
             "path": {
                 "type": "string",
                 "description": "A file: a path as you know it (workspace, saved/…, vfs:<project>/…). Read "
-                               "by the tool, never shown to you.",
+                               "by the tool, never shown to you. Or a VFS folder (vfs:<project>/<folder>/): every "
+                               "file in it gets an anonymized copy in a new folder beside it.",
             },
             "url": {"type": "string", "description": "anonymize: a web page to fetch and anonymize."},
             "text": {"type": "string", "description": "Inline text (you have already seen it — prefer path/url)."},
@@ -311,6 +314,67 @@ class AnonymizeTool(Tool):
                       output[:PREVIEW_CHARS]]
         return ToolResult(success=True, content="\n".join(lines))
 
+    @staticmethod
+    def _vfs_folder(value: str) -> tuple[str, str] | None:
+        """(project, path) when *value* names a VFS folder, else None."""
+        from captain_claw.vfs import is_vfs_path, resolve_vfs_path, split_scheme
+
+        if not is_vfs_path(value):
+            return None
+        try:
+            if not resolve_vfs_path(value).is_dir():
+                return None
+        except (PermissionError, ValueError, OSError):
+            return None
+        project, rel = split_scheme(value)
+        return project, rel.strip("/")
+
+    async def _anonymize_folder(self, base: str, headers: dict, kwargs: dict, project: str,
+                                path: str) -> ToolResult:
+        """Every file in a VFS folder, on Flight Deck (a job): the copies go in a
+        new folder beside it (or the person's Anonymized folder when it's
+        read-only), names in their paths tokenized too. Waits for the job."""
+        import asyncio
+
+        body = {**self._body_options(kwargs), "project": project, "path": path}
+        job, err = await self._post(base, headers, "/fd/anonymize/agent/vfs/folder", body)
+        if err:
+            return ToolResult(success=False, error=f"Not anonymized: {err}")
+        extra, params = _member_auth()
+        deadline = time.monotonic() + FOLDER_WAIT_SECONDS
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            while job.get("running") and time.monotonic() < deadline:
+                await asyncio.sleep(FOLDER_POLL_SECONDS)
+                resp = await client.get(f"{base}/fd/anonymize/agent/vfs/job", headers={**headers, **extra},
+                                        params=params)
+                if resp.status_code == 200:
+                    job = resp.json() or job
+        where = f"vfs:{project}/{path}".rstrip("/")
+        if job.get("running"):
+            return ToolResult(success=True, content=(
+                f"Still anonymizing {where} on Flight Deck ({job.get('done', 0)} of {job.get('total', 0)} files so "
+                "far). It carries on by itself; the copies appear in a new folder beside it when it's done."))
+        dest = job.get("dest") or {}
+        lines = [f"Anonymized {job.get('done', 0)} of {job.get('total', 0)} files in {where}."]
+        if dest.get("project"):
+            place = "/".join(p for p in (dest["project"], dest.get("path") or "") if p)
+            lines.append(f"Copies: vfs:{place}/" + ("" if job.get("beside") else
+                                                    " (in the person's own Anonymized folder — the source is read-only)"))
+        kinds = ", ".join(f"{n} {k}" for k, n in sorted((job.get("entities") or {}).items()))
+        if kinds:
+            lines.append(f"Replaced: {kinds}.")
+        if job.get("vault"):
+            lines.append(f"Vault: {job['vault']}")
+        if job.get("failed_count"):
+            names = ", ".join(f["path"] for f in (job.get("failed") or [])[:5])
+            lines.append(f"Couldn't anonymize {job['failed_count']} (no copy made): {names}")
+        if job.get("skipped_count"):
+            names = ", ".join(f["path"] for f in (job.get("skipped") or [])[:5])
+            lines.append(f"Left out {job['skipped_count']} (pictures, archives, other kinds): {names}")
+        if job.get("message"):
+            lines.append(str(job["message"]))
+        return ToolResult(success=bool(job.get("done")) or not job.get("total"), content="\n".join(lines))
+
     def _body_options(self, kwargs: dict) -> dict[str, Any]:
         body: dict[str, Any] = {"vault": str(kwargs.get("vault") or "").strip() or default_vault(kwargs),
                                 "mode": kwargs.get("mode") or "reversible"}
@@ -325,6 +389,9 @@ class AnonymizeTool(Tool):
         web pages come back as markdown)."""
         import base64
 
+        folder = self._vfs_folder(str(kwargs["path"]).strip())
+        if folder is not None:
+            return await self._anonymize_folder(base, headers, kwargs, *folder)
         got = self._read_bytes(str(kwargs["path"]).strip(), kwargs)
         if isinstance(got, str):
             return ToolResult(success=False, error=got)
