@@ -35,6 +35,13 @@
       "text": "We met Marko and Petra yesterday; the only female surgeon on Vis joined later.",
       "must_hide": ["Marko", "Petra", "only female surgeon on Vis"],
       "must_keep": ["We met", "yesterday"]
+    },
+    {
+      "id": "startup-product",
+      "lanes": ["llm"],
+      "text": "Meet Lumora — inventory software for small shops in Zagreb. Lumora counts stock from a phone photo, syncs with Excel and sends alerts on WhatsApp. Built by Vrtlog Labs. Try LUMORA Pro free for 14 days.",
+      "must_hide": ["Lumora", "LUMORA", "Vrtlog Labs"],
+      "must_keep": ["inventory software", "Zagreb", "Excel", "WhatsApp", "14 days"]
     }
   ]
 }
