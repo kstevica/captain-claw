@@ -318,9 +318,7 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
             assert model is not None
             started = time.monotonic()
             try:
-                found = await _llm_terms(doc.segments, options, lane, model,
-                                         await store.load_state(vault_row) if vault_row
-                                         else (one_way_state or engine.VaultState()))
+                found = await _llm_terms(doc.segments, options, model)
             except llm_lane.LaneFailed as exc:
                 log.warning("Anonymization LLM lane failed", model=model.label, actor=actor, reason=str(exc))
                 if lane == "llm" or model.on_failure != "deterministic":
@@ -330,8 +328,9 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
                 lanes["llm"] = "failed"
                 lanes["llm_error"] = str(exc)
             else:
+                # With the trusted model looking, code doesn't take one word for a known person.
                 options = dataclasses.replace(options, extra=options.extra + tuple(found.terms),
-                                              deterministic=lane != "llm")
+                                              deterministic=lane != "llm", one_word_names=False)
                 lanes.update({"llm_model": model.label, "llm_terms": len(found.terms),
                               "llm_dropped": found.dropped, "llm_chunks": found.chunks,
                               "llm_seconds": round(time.monotonic() - started, 1)})
@@ -469,16 +468,12 @@ async def file_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str
     return out
 
 
-async def _llm_terms(segments: list[engine.Segment], options: engine.Options, lane: str,
-                     model: trusted.TrustedModel, state: engine.VaultState) -> llm_lane.LaneResult:
-    """What the trusted model adds. It reads the text with the code's finds
-    already replaced (lane ``both``, on a snapshot — the vault is untouched)
-    or as it is (``llm``)."""
-    if lane == "both":
-        preview = await asyncio.to_thread(engine.run, segments, state.snapshot(), options)
-        texts = preview.outputs
-    else:
-        texts = [s.text for s in segments]
+async def _llm_terms(segments: list[engine.Segment], options: engine.Options,
+                     model: trusted.TrustedModel) -> llm_lane.LaneResult:
+    """What the trusted model finds. It reads the text as it is, in both lanes:
+    shown code's output instead, it couldn't see a name code had guessed wrong
+    ("Ivan Horvat" as two other people's tokens) — and names are its call."""
+    texts = [s.text for s in segments]
     joined = "\n".join(t for t in texts if t.strip())
     return await llm_lane.detect(joined, trusted.completer(model), kinds=options.kinds)
 
@@ -728,6 +723,18 @@ async def anonymize_vault_delete(vault: str, user: dict = Depends(get_current_us
     return {"deleted": row["id"]}
 
 
+@router.post("/vaults/{vault}/reset")
+async def anonymize_vault_reset(vault: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+    """Empty the vault (values and their history), keep it and its token
+    numbers — the Chat vault starts over without old tokens ever meaning
+    something new."""
+    row = await _own(user, vault)
+    reset = await av.store().reset(user["id"], row["id"], actor="person")
+    if reset is None:
+        raise HTTPException(status_code=404, detail="No such vault")
+    return {"vault": av._public(reset)}
+
+
 @router.get("/vaults/{vault}/events")
 async def anonymize_vault_events(vault: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
     row = await _own(user, vault)
@@ -796,8 +803,8 @@ async def anonymize_trusted_test(_admin: dict = Depends(require_admin)) -> dict[
         det, _r = await asyncio.to_thread(engine.anonymize_text, case["text"], engine.VaultState())
         started = time.monotonic()
         try:
-            found = await _llm_terms(prepared.segments, engine.Options(), "both", m, engine.VaultState())
-            opts = engine.Options(extra=tuple(found.terms))
+            found = await _llm_terms(prepared.segments, engine.Options(), m)
+            opts = engine.Options(extra=tuple(found.terms), one_word_names=False)
             both, _r = await asyncio.to_thread(engine.anonymize_text, case["text"], engine.VaultState(), opts)
             error = ""
         except llm_lane.LaneFailed as exc:

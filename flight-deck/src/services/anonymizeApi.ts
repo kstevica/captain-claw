@@ -60,6 +60,8 @@ export interface Vault {
   updated_at: number
   last_used_at: number
   expires_at: number | null
+  /** When it was last emptied (Reset), if ever. */
+  reset_at?: number | null
 }
 
 export interface VaultEntry {
@@ -238,6 +240,8 @@ export const anonymizeApi = {
   updateVault: (id: string, patch: { name?: string; expires_at?: number | null }) =>
     api<{ vault: Vault }>(`/fd/anonymize/vaults/${enc(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
   deleteVault: (id: string) => api<{ deleted: string }>(`/fd/anonymize/vaults/${enc(id)}`, { method: 'DELETE' }),
+  /** Empty a vault (values and their history); its name, key and token numbers stay. */
+  resetVault: (id: string) => api<{ vault: Vault }>(`/fd/anonymize/vaults/${enc(id)}/reset`, { method: 'POST' }),
   gate: () => api<GateInfo>('/fd/anonymize/gate'),
   saveGate: (gate: GateSettings) =>
     api<{ gate: GateSettings }>('/fd/anonymize/gate', { method: 'PUT', body: JSON.stringify(gate) }),

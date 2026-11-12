@@ -87,6 +87,7 @@ class Decision:
     chat: bool = False  # the whole chat, not chosen sources
     model: str = ""  # the trusted model that looks too (lane "both"), for the status line
     agent_model: str = ""  # the agent's own model ("provider/model"): where texts go, for the tokens' history
+    epoch: float = 0.0  # when the gate vault was last reset: a change means forget what was anonymized before
 
     def covers(self, name: str, arguments: dict[str, Any]) -> bool:
         if self.active and self.chat:
@@ -184,12 +185,32 @@ async def decision(agent: Any) -> Decision | None:
             d = Decision(bool(data.get("active")), frozenset(data.get("groups") or ()),
                          list(data.get("folders") or []), str(data.get("vault") or G.GATE_VAULT),
                          str(data.get("lane") or "deterministic"), bool(data.get("chat")),
-                         str(data.get("model") or ""), "/".join(x for x in (provider, model) if x))
+                         str(data.get("model") or ""), "/".join(x for x in (provider, model) if x),
+                         float(data.get("epoch") or 0.0))
+            _forget_if_reset(d.epoch)
     except Exception as exc:  # noqa: BLE001 — keep the last answer
         log.debug("Privacy gate: decision unavailable", error=type(exc).__name__)
         return hit[1] if hit and hit[1].active else None
     _CACHE[key] = (time.monotonic(), d)
     return d if d.active else None
+
+
+_EPOCHS: dict[str, float] = {}
+
+
+def _forget_if_reset(epoch: float) -> None:
+    """The person's gate vault was reset since the last look: texts already
+    anonymized hold tokens it no longer has — anonymize them afresh."""
+    from captain_claw import speaker
+
+    p = speaker.current()
+    who = p.speaker_id if p is not None else ""
+    seen = _EPOCHS.get(who)
+    _EPOCHS[who] = epoch
+    if seen is not None and epoch != seen:
+        _CLEAN.clear()
+        _PENDING.clear()
+        log.info("Privacy gate: vault was reset, anonymized texts forgotten")
 
 
 def cached_decision(agent: Any) -> Decision | None:
@@ -466,3 +487,4 @@ def reset_for_tests() -> None:
     _CACHE.clear()
     _CLEAN.clear()
     _PENDING.clear()
+    _EPOCHS.clear()

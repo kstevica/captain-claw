@@ -114,7 +114,19 @@ async def decide(person: str, provider: str, model: str, base_url: str) -> dict[
     chat = settings.coverage == "chat"
     return {"active": True, "chat": chat, "groups": [] if chat else settings.groups,
             "folders": [] if chat else settings.folders, "vault": G.GATE_VAULT, "lane": lane,
-            "model": model.label if model else "", "reason": settings.when}
+            "model": model.label if model else "", "reason": settings.when, "epoch": await _vault_epoch(person)}
+
+
+async def _vault_epoch(person: str) -> float:
+    """When the person's gate vault was last reset (0: never) — an agent that
+    sees it change forgets the texts it anonymized before."""
+    from captain_claw.flight_deck import anonymize_vault as av
+
+    try:
+        row = await av.store().get(person, G.GATE_VAULT)
+    except Exception:  # noqa: BLE001 — no store, no vault: nothing to forget
+        return 0.0
+    return float((row or {}).get("reset_at") or 0.0)
 
 
 async def chat_restores(person: str) -> bool:

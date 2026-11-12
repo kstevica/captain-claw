@@ -1,8 +1,8 @@
 import { Fragment, useEffect, useMemo, useState } from 'react'
-import { Vault as VaultIcon, Search, Trash2, Save, History, Eye, EyeOff, ChevronDown, ChevronRight } from 'lucide-react'
+import { Vault as VaultIcon, Search, Trash2, Save, History, Eye, EyeOff, ChevronDown, ChevronRight, RotateCcw } from 'lucide-react'
 import { anonymizeApi, type Vault, type VaultEntry, type VaultEvent } from '../../services/anonymizeApi'
 import { Card, Button, Dialog, EmptyState, Field, Notice, Segmented, Sheet, inputCls } from '../console/parts'
-import { kindLabel, kindTone, when } from './anonFormat'
+import { RESET_TEXT, kindLabel, kindTone, when } from './anonFormat'
 import { TokenHistoryPanel } from './TokenHistoryPanel'
 
 // The person's vaults: one per case. Opening one shows the real values behind
@@ -19,7 +19,7 @@ type ExpiryChoice = (typeof EXPIRY)[number]['value'] | 'keep'
 
 const ACTIONS: Record<string, string> = {
   create: 'Created', anonymize: 'Anonymized into it', restore: 'Values put back', view: 'Opened',
-  update: 'Changed', delete: 'Deleted', expired: 'Expired',
+  update: 'Changed', delete: 'Deleted', expired: 'Expired', reset: 'Reset (emptied)',
 }
 
 export function VaultsPanel({ vaults, reload, onSheet }: {
@@ -83,6 +83,7 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
   const [busy, setBusy] = useState('')
   const [error, setError] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmReset, setConfirmReset] = useState(false)
 
   const reveal = async () => {
     setBusy('view'); setError('')
@@ -135,6 +136,19 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
 
   const values = useMemo(() => new Map((entries || []).map((e) => [e.token, e.original])), [entries])
 
+  const reset = async () => {
+    setBusy('reset'); setError('')
+    try {
+      await anonymizeApi.resetVault(vault.id)
+      await onChanged()
+      onClose()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't reset")
+      setBusy('')
+      setConfirmReset(false)
+    }
+  }
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!entries) return []
@@ -151,7 +165,8 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
       onClose={onClose}
       wide
       footer={<>
-        <Button variant="danger" icon={Trash2} onClick={() => setConfirmDelete(true)} className="mr-auto">Delete</Button>
+        <Button variant="danger" icon={Trash2} onClick={() => setConfirmDelete(true)}>Delete</Button>
+        <Button icon={RotateCcw} onClick={() => setConfirmReset(true)} className="mr-auto">Reset</Button>
         <Button onClick={onClose}>Close</Button>
         <Button variant="primary" icon={Save} busy={busy === 'save'} onClick={save}>Save</Button>
       </>}
@@ -242,6 +257,14 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
         </div>
       </div>
 
+      {confirmReset && (
+        <Dialog title={`Reset "${vault.name}"?`} icon={RotateCcw} onClose={() => setConfirmReset(false)} footer={<>
+          <Button onClick={() => setConfirmReset(false)}>Keep it</Button>
+          <Button variant="danger" icon={RotateCcw} busy={busy === 'reset'} onClick={reset}>Reset</Button>
+        </>}>
+          <p className="text-sm leading-relaxed text-zinc-300">{RESET_TEXT}</p>
+        </Dialog>
+      )}
       {confirmDelete && (
         <Dialog title={`Delete "${vault.name}"?`} icon={Trash2} onClose={() => setConfirmDelete(false)} footer={<>
           <Button onClick={() => setConfirmDelete(false)}>Keep it</Button>

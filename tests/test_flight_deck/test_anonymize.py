@@ -446,7 +446,7 @@ class TestTrustedModel:
                      json={"provider": "ollama", "model": "x"}).status_code == 403
         assert c.delete("/fd/anonymize/admin/trusted-model", headers=_bearer(ALICE, "admin")).json() == {"model": None}
 
-    async def test_both_lanes_model_sees_code_finds_as_tokens(self, db, agents, fake_model):
+    async def test_both_lanes_model_reads_the_raw_text(self, db, agents, fake_model):
         c = _client()
         _set_model(c)
         assert c.get("/fd/anonymize/status", headers=_bearer(BOB)).json()["default_lane"] == "both"
@@ -455,8 +455,8 @@ class TestTrustedModel:
         assert data["output"] == "We met ⟦PERSON_1⟧ yesterday; write to ⟦EMAIL_1⟧. The ⟦DETAIL_1⟧ joined."
         assert data["lanes"]["llm"] == "ok" and data["lanes"]["llm_terms"] == 2
         assert data["lanes"]["llm_model"] == "ollama/qwen3:8b"
-        # The model was shown the code's finds already replaced, not the email itself.
-        assert "marko.k@x.hr" not in fake_model["prompts"][0] and "⟦EMAIL_1⟧" in fake_model["prompts"][0]
+        # The model reads the text as it is: code's guesses never hide a name from it.
+        assert "marko.k@x.hr" in fake_model["prompts"][0] and "⟦" not in fake_model["prompts"][0]
         # What the model found is in the vault: the next text needs no model to catch Marko.
         again = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
                        json={"content": "Marku šaljem ugovor.", "vault": "L", "lane": "deterministic"}).json()
@@ -1621,3 +1621,33 @@ class _ToolResultLike:
         from captain_claw.tools.registry import ToolResult
 
         return ToolResult(success=True, content=content)
+
+
+class TestVaultReset:
+    async def test_reset_empties_it_and_never_reuses_a_token(self, gate_env):
+        from captain_claw import anonymize_gate_client as gate
+
+        _gate(_client(), coverage="chat")
+        d = await gate.decision(_agent("anthropic", "claude-x", ""))
+        assert d.epoch == 0.0
+        (out,) = await gate.anonymize_texts(d, ["mail ana@x.hr and ivo@x.hr"], "message")
+        old = re.findall(r"⟦EMAIL_\d+⟧", out)
+        c = _client()
+        assert c.post("/fd/anonymize/vaults/Chat/reset", headers=_bearer(ALICE)).status_code == 404  # not hers
+        r = c.post("/fd/anonymize/vaults/Chat/reset", headers=_bearer(BOB)).json()["vault"]
+        assert r["entity_count"] == 0 and r["reset_at"]
+        detail = c.get("/fd/anonymize/vaults/Chat", headers=_bearer(BOB)).json()
+        assert detail["entries"] == []
+        assert [e["action"] for e in c.get("/fd/anonymize/vaults/Chat/events", headers=_bearer(BOB)).json()["events"]][:2] \
+            == ["view", "reset"]
+        store = anonymize_vault.store()
+        cur = await (await store._conn()).execute("SELECT COUNT(*) FROM token_uses")
+        assert (await cur.fetchone())[0] == 0
+        # Old tokens can't be put back any more; a new value never gets one of them.
+        assert await gate.restore_text(d, f"wrote to {old[0]}") == f"wrote to {old[0]}"
+        gate._CACHE.clear()  # the next look (within a minute) sees the reset …
+        gate.remember("cached ⟦EMAIL_1⟧", "cached ana@x.hr")
+        d = await gate.decision(_agent("anthropic", "claude-x", ""))
+        assert d.epoch == r["reset_at"] and gate.known("cached ana@x.hr") is None  # … and forgets what it anonymized
+        (again,) = await gate.anonymize_texts(d, ["mail ana@x.hr"], "message")
+        assert re.search(r"⟦EMAIL_\d+⟧", again).group(0) not in old
