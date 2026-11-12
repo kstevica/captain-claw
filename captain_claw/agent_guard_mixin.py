@@ -472,8 +472,9 @@ class AgentGuardMixin:
             # like its model calls: the agent already said it is idle.
             if str(interaction_label or "").strip() in _BACKGROUND_MAINTENANCE_LABELS:
                 return
-            what = "your message" if n == 1 and messages and messages[-1].role == "user" else (
-                f"{n} new {'text' if n == 1 else 'texts'} before the model reads them")
+            # The person's own message was anonymized as it came in
+            # (Agent._gate_user_text); what's new here is notes, results, history.
+            what = f"{n} new {'text' if n == 1 else 'texts'} before the model reads them"
             self._gate_status(_gate.working(gate, what))
 
         try:
