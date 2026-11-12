@@ -494,8 +494,11 @@ the agent sees tokens — never restored.
   which was 120–180 s); the `anonymize` tool 30 minutes. A failure names what happened ("it took longer
   than 30 minutes", "Flight Deck couldn't be reached") instead of an empty "()".
 * The answer limit: **32,000** tokens (`FD_ANONYMIZE_MODEL_MAX_TOKENS`, was 16,000). The trusted model's
-  **thinking is off** by default on Ollama (`FD_ANONYMIZE_MODEL_THINK`: `off` default, `low`/`medium`/`high`,
-  `on`, or `model` for the model's own) — a local model that thought without end ran to the limit twice on
+  **thinking is off** by default on every provider (`FD_ANONYMIZE_MODEL_THINK`: `off` default,
+  `low`/`medium`/`high`, `on`, or `model` for the model's own) — through the reasoning-effort plans
+  (`llm/reasoning.py`: `chat_template_kwargs.enable_thinking` for a Qwen on a local OpenAI-compatible
+  server, `thinking` for Claude, `reasoning_effort` for OpenAI) and as Ollama's own `think` for a model
+  they don't know — a local model that thought without end ran to the limit twice on
   a ~1,000-token chunk (16,000, then 32,000 tokens). An answer cut at the limit (`finish_reason` "length")
   is asked again without thinking (when thinking was on), then in halves, twice at most, then the lane
   fails saying so.
