@@ -1103,6 +1103,30 @@ class TestWholeChat:
             await trusted.completer(m)("system", "user")
         assert thinks == [True, False]
 
+    async def test_thinking_off_reaches_an_openai_compatible_server(self, monkeypatch):
+        """A Qwen on a local OpenAI-compatible server (llama.cpp, vLLM): "off" is
+        chat_template_kwargs.enable_thinking=false in the request it gets."""
+        import types
+
+        from captain_claw import llm
+        from captain_claw.flight_deck import anonymize_trusted as trusted
+
+        sent = []
+
+        async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
+            sent.append(self._request_kwargs(messages, temperature=temperature, max_tokens=max_tokens))
+            return types.SimpleNamespace(content='{"spans": []}', usage={}, finish_reason="stop")
+
+        monkeypatch.setattr(llm.LiteLLMProvider, "complete", complete)
+        monkeypatch.delenv("FD_ANONYMIZE_MODEL_THINK", raising=False)
+        m = trusted.TrustedModel(provider="openai", model="qwen3.8-flash-next-iq3_s",
+                                 base_url="http://192.168.1.50:8080/v1", api_key="x")
+        await trusted.completer(m)("system", "user")
+        assert sent[-1]["extra_body"]["chat_template_kwargs"] == {"enable_thinking": False}
+        monkeypatch.setenv("FD_ANONYMIZE_MODEL_THINK", "model")  # the model's own: nothing sent
+        await trusted.completer(m)("system", "user")
+        assert not (sent[-1].get("extra_body") or {}).get("chat_template_kwargs")
+
     async def test_without_thinking_the_retry_can_finish(self, monkeypatch):
         import types
 

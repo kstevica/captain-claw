@@ -50,11 +50,14 @@ CALL_TIMEOUT = float(os.environ.get("FD_ANONYMIZE_MODEL_TIMEOUT") or 600.0)
 # answer cut at the limit is asked again in smaller pieces (llm_lane.AnswerCut).
 # FD_ANONYMIZE_MODEL_MAX_TOKENS changes it.
 MAX_TOKENS = int(os.environ.get("FD_ANONYMIZE_MODEL_MAX_TOKENS") or 32000)
-# Thinking on the trusted model's calls (Ollama): off by default — finding
-# names in a text needs none of it, and a local model that thought without
-# end ran to the answer limit twice on a 1,000-token chunk (16k, then 32k
-# tokens). FD_ANONYMIZE_MODEL_THINK: "off" (default), "low"/"medium"/"high",
-# "on", or "model" (the model's own).
+# Thinking on the trusted model's calls: off by default — finding names in a
+# text needs none of it, and a local model that thought without end ran to
+# the answer limit twice on a ~1,000-token chunk (16k, then 32k tokens).
+# FD_ANONYMIZE_MODEL_THINK: "off" (default), "low"/"medium"/"high", "on", or
+# "model" (the model's own). It goes through the reasoning-effort plans
+# (llm/reasoning.py) — ``chat_template_kwargs.enable_thinking`` for a Qwen on
+# a local OpenAI-compatible server, ``thinking`` for Claude, ``reasoning_effort``
+# for OpenAI — and as Ollama's own ``think`` for a model those don't know.
 _THINK = {"off": False, "false": False, "0": False, "no": False, "on": True, "true": True, "1": True,
           "yes": True, "low": "low", "medium": "medium", "high": "high", "model": None}
 
@@ -231,6 +234,9 @@ def completer(m: TrustedModel):
     from captain_claw.llm import Message, create_provider
 
     async def ask(system: str, user: str, think: bool | str | None) -> Any:
+        from captain_claw.llm import reasoning
+
+        level = "off" if think is False else ("on" if think is True else think)  # None: the model's own
         try:
             provider = create_provider(
                 provider=m.provider, model=m.model, api_key=m.api_key or None, base_url=m.base_url or None,
@@ -239,10 +245,12 @@ def completer(m: TrustedModel):
             # 180 s) would cut a long answer short of the cap below.
             provider.request_timeout = CALL_TIMEOUT
             provider.log_content = False  # its answer is the private data it found
-            return await asyncio.wait_for(
-                provider.complete(messages=[Message(role="system", content=system), Message(role="user", content=user)],
-                                  temperature=0.0, max_tokens=MAX_TOKENS),
-                CALL_TIMEOUT)
+            with reasoning.call_effort(level):  # the provider shapes it for this model and server
+                return await asyncio.wait_for(
+                    provider.complete(messages=[Message(role="system", content=system),
+                                                Message(role="user", content=user)],
+                                      temperature=0.0, max_tokens=MAX_TOKENS),
+                    CALL_TIMEOUT)
         except Exception as exc:  # noqa: BLE001 — the error may quote the document: type only
             log.warning("Anonymization trusted model call failed", model=m.label, error=type(exc).__name__)
             raise RuntimeError(type(exc).__name__) from None
@@ -255,7 +263,7 @@ def completer(m: TrustedModel):
 
         think = model_think()
         resp = await ask(system, user, think)
-        if cut(resp) and think is not False and m.provider == "ollama":
+        if cut(resp) and think is not False:
             # What runs on is thinking: the same piece, without it.
             log.info("Anonymization trusted model hit its answer limit; asking again without thinking",
                      model=m.label, limit=MAX_TOKENS)
