@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "about": "Quick start tier sets: a person picks a provider, pastes its API key, and gets a set named after the provider with that provider's CURRENT models on every tier. Served by captain_claw/flight_deck/tier_presets.py (GET /fd/tier-presets); the console's New tier set and the Library's setup wizard read it. A model release is an edit here, no frontend build. Keep model_prices.json in step when a model changes.",
+    "about": "Quick start tier sets: a person picks a provider, pastes its API key, and gets a set named after the provider with that provider's CURRENT models on every tier. Served by captain_claw/flight_deck/tier_presets.py (GET /fd/tier-presets); the console's New tier set and the Library's setup wizard read it. A model release is an edit here, no frontend build. Keep model_prices.json in step when a model changes. Model switching reads it too (captain_claw/llm/model_switch.py): an agent on one of these endpoints can switch among the provider's models listed here — the reason tier's model is offered as the smartest, the fast tier's as the cheapest.",
     "checked": "2026-11-05",
     "key_prefixes": "How a pasted key names its provider: the form picks that provider, or says the key looks like another one. Leave it out when a provider's keys look like everyone else's (DeepSeek's plain sk-).",
     "recheck": "Monthly, and after any provider launch. Look at each provider's own model list (sources below), swap retired or superseded ids, keep input_ctx under the provider's long-prompt price step, and update 'checked'.",

@@ -35,7 +35,7 @@ OWNER_ONLY = frozenset({"send"})
 # Tools that change the agent itself or set up later work.
 NEVER = frozenset({
     "cron", "personality", "playbooks", "insights", "facts", "intentions", "project_memory",
-    "reasoning_effort", "apis", "synthesize_flow", "todo", "topics",
+    "reasoning_effort", "model_switch", "apis", "synthesize_flow", "todo", "topics",
     # A tool reaches other custom tools with a custom_tool entry, never through this one.
     "custom_tools",
 })

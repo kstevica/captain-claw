@@ -8,6 +8,7 @@ import { ACT_AS_HEADER } from '../../services/docker'
 import { ModelSelector } from '../common/ModelSelector'
 import { CognitiveModeSelector } from '../common/CognitiveModeSelector'
 import { AgentMailSetting } from './AgentMailSetting'
+import { ModelSwitchSetting } from './ModelSwitchSetting'
 
 interface AgentConfigEditorProps {
   /** 'local' agents live on a remote host — only their label/description are
@@ -342,6 +343,12 @@ export function AgentConfigEditor({
                   <Field label="Cognitive mode" hint="How the agent thinks — its reasoning strategy. Applies immediately.">
                     <CognitiveModeSelector value={cog} saved={cogSaved} onChange={applyCognitive} />
                   </Field>
+
+                  {(kind === 'docker' || kind === 'process') && (
+                    <Field label="Switch models" hint="Saved at once — applies from its next message.">
+                      <ModelSwitchSetting kind={kind} identifier={identifier} />
+                    </Field>
+                  )}
                 </>
               )}
             </div>

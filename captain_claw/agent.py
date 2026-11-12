@@ -597,6 +597,23 @@ class Agent(
         self._turn_source = (source, turn_source.label_for(source, label) if source else "")
         # A level the agent set for one turn only (reasoning_effort tool) ends with it.
         self._turn_effort_override = None
+        # …and so does a model switched to for one turn only (model_switch), if
+        # the last turn didn't put it back; the admin's model list is fetched
+        # again when it is old (llm/model_switch.py).
+        if not getattr(self, "_turn_depth", 0):
+            restore = getattr(self, "_restore_turn_model", None)
+            if callable(restore):
+                restore()
+        home = getattr(self, "_switch_home", None)
+        if callable(home):
+            try:
+                from captain_claw.llm import model_switch
+
+                provider, _model, base_url = home()
+                if provider:
+                    model_switch.maybe_refresh(provider, base_url)
+            except Exception:
+                pass
 
     def _absorb_surface_block(self, user_input: str, surface: str | None = None) -> tuple[str, bool]:
         """Take a chat surface's rules block (prepended by Flight Deck to a
@@ -704,12 +721,19 @@ class Agent(
                           "Try again in a moment.")
 
     def _turn_over_browser(self) -> None:
-        """The outermost turn is over: the person's Chrome may go back to their tab."""
+        """The outermost turn is over: the person's Chrome may go back to their
+        tab, and a model switched to for that turn only goes back."""
         self._turn_depth = max(0, getattr(self, "_turn_depth", 1) - 1)
         if self._turn_depth == 0:
             from captain_claw.tools.browser_chrome import turn_over
 
             turn_over(self)
+            try:
+                self._restore_turn_model()
+            except Exception as exc:
+                from captain_claw.logging import get_logger
+
+                get_logger(__name__).warning("Couldn't switch back to the turn's model", error=str(exc))
 
     async def stream(
         self,

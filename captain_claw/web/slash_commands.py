@@ -250,6 +250,11 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
         elif cmd in ("/new",):
             name = args.strip() or None
             outgoing = getattr(server.agent, "session", None)
+            # A model switched to with the chat box's picker (or model_switch)
+            # goes on in the new conversation, as it does across /clear.
+            _carried = (outgoing.metadata or {}).get("model_selection") if outgoing is not None else None
+            if not (isinstance(_carried, dict) and _carried.get("switch")):
+                _carried = None
             # Freeze the outgoing session into history before switching, so the
             # conversation stays verbatim-searchable (same as before compaction).
             server.agent.archive_current_session_to_history()
@@ -262,6 +267,9 @@ async def handle_command(server: WebServer, ws: web.WebSocketResponse, raw: str)
 
                 await server._send(ws, speaker_error("not_allowed", str(e)))
                 return
+            if _carried and session is not outgoing:
+                session.metadata["model_selection"] = dict(_carried)
+                await server.agent.session_manager.save_session(session)
             server.agent.refresh_session_runtime_flags()
             # Lane / member views never move the owner's "last active" pointer.
             if not _is_view(server):

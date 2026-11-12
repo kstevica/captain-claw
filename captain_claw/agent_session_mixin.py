@@ -1289,7 +1289,8 @@ class AgentSessionMixin:
         if selection:
             model_id = str(selection.get("id", "")).strip()
             try:
-                self._apply_model_option(selection, source="session", model_id=model_id)
+                self._apply_model_option(selection, source="session", model_id=model_id,
+                                         make_global=not getattr(self, "_provider_override", False))
                 return
             except Exception as e:
                 log.warning(

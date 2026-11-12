@@ -51,6 +51,7 @@ import {
 import { createPortal } from 'react-dom'
 import { ChatGreeting, SkillInputDialog, SkillsDialog, SkillsMenu } from './AgentSkills'
 import { EffortMenu } from './EffortMenu'
+import { ModelMenu } from './ModelMenu'
 import { ChatFilesMenu } from './ChatFilesMenu'
 import { SaveLessonDialog, SuggestLessonDialog } from '../layout/LessonDraft'
 import { saidKey } from '../../services/agentLessons'
@@ -113,6 +114,7 @@ import { useQuotaStore } from '../../stores/quotaStore'
 import { PlanUsageBar } from '../common/PlanUsage'
 import type { ChatMessage, TokenUsage } from '../../services/agentChat'
 import type { ReasoningProfile } from '../../utils/reasoningEffort'
+import type { ModelSwitchInfo } from '../../utils/modelSwitch'
 
 // Plugin arrays hoisted to module scope so they keep a stable identity across
 // renders (react-markdown otherwise sees "new" plugins every render).
@@ -749,7 +751,7 @@ function ChatContent({
   onQueue,
   onCancel,
 }: {
-  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null; closed?: { code: number; reason: string } | null; unreachable?: string | null; asleep?: boolean; waking?: boolean; hasOlder?: boolean; hasNewer?: boolean; holdScrollUntil?: number; reasoning?: ReasoningProfile | null; held?: HeldMessage[]; stopping?: boolean }
+  session: { containerId: string; containerName: string; messages: ChatMessage[]; connected: boolean; busy: boolean; statusText: string; nextStepOptions?: NextStepOption[]; liveTurnUsage?: TokenUsage | null; closed?: { code: number; reason: string } | null; unreachable?: string | null; asleep?: boolean; waking?: boolean; hasOlder?: boolean; hasNewer?: boolean; holdScrollUntil?: number; reasoning?: ReasoningProfile | null; modelSwitch?: ModelSwitchInfo | null; held?: HeldMessage[]; stopping?: boolean }
   /** This lane's store key — for anything that reads or writes session state.
    *  The agent id lives on `session.containerId`. */
   sessionKey: string
@@ -1192,6 +1194,14 @@ function ChatContent({
                 onMore={() => setSkillsDialog(true)}
                 compact={isMobile}
               />
+              {!shared && session.modelSwitch && (
+                <ModelMenu
+                  containerId={session.containerId}
+                  info={session.modelSwitch}
+                  disabled={!session.connected || closed}
+                  compact={isMobile}
+                />
+              )}
               {!shared && session.reasoning && (
                 <EffortMenu
                   agentId={session.containerId}

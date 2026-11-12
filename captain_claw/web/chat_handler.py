@@ -1892,12 +1892,18 @@ async def _run_agent(
             import time as _wa_time
 
             _wa_started_at = _wa_time.time()
+            agent._last_call_model = None
             response = await agent.complete(content)
             # Read right away, before any other await: a concurrent turn on
             # this Agent object could reset it (contract part 0c NB7). The
             # output level also covers a reply that carry-over flagged (it
             # restated member text from context without reading it again).
             _private_level = _member_privacy.output_level(agent)
+            # The model that wrote the reply, when the agent switched during
+            # the turn (model_switch) — the label above is the turn's start.
+            _reply_model = getattr(agent, "_last_call_model", None)
+            if isinstance(_reply_model, tuple) and _reply_model[1]:
+                model_label = f"{_reply_model[0]}:{_reply_model[1]}"
 
             log.info(
                 "Agent complete() returned",

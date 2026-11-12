@@ -117,6 +117,16 @@ async def ws_handler(server: WebServer, request: web.Request) -> web.WebSocketRe
         session_info = server._session_info(_welcome_agent)
         if _welcome_agent is not None:
             _turn_on = turn_in_flight(server, ws, _welcome_agent)
+            # The admin's model list for the picker, fetched again when old
+            # (the next session_info carries it).
+            try:
+                from captain_claw.llm import model_switch as _model_switch
+
+                _home = _welcome_agent._switch_home()
+                if _home[0]:
+                    _model_switch.maybe_refresh(_home[0], _home[2])
+            except Exception:
+                pass
         _sess_meta = {}
         if _welcome_agent and _welcome_agent.session:
             _sess_meta = _welcome_agent.session.metadata or {}
@@ -813,6 +823,29 @@ async def handle_ws_message(
                     "command": "/session model",
                     "content": msg,
                 })
+
+    elif msg_type == "switch_model":
+        # The chat box's model picker: another model of the agent's provider
+        # (same key, same endpoint) for this conversation from now on —
+        # llm/model_switch.py. Members and public visitors can't.
+        # A refusal comes back as its own frame: a command_result would end a
+        # turn that is running in the chat.
+        if getattr(ws, "_public_session_id", None):
+            await server._send(ws, {"type": "model_switch",
+                                    "error": "Model selection is not available in public mode."})
+        else:
+            _sw_agent = await server.resolve_agent(ws)
+            _sw_view = server.lane_view(ws, _sw_agent)
+            selector = str(data.get("model", "")).strip()
+            if not selector or _sw_agent is None:
+                ok, msg = False, "Pick a model."
+            else:
+                ok, msg, _choice = await _sw_agent.switch_model(selector, scope="setting")
+            # The picker shows what the agent runs on, switched or not.
+            if _sw_agent is not None and getattr(_sw_agent, "session", None) is not None:
+                _sw_view._broadcast({"type": "session_info", **_sw_view._session_info(_sw_agent)})
+            if not ok:
+                await server._send(ws, {"type": "model_switch", "error": msg})
 
     elif msg_type == "set_byok":
         # BYOK: public user supplies their own LLM provider/model/API key.

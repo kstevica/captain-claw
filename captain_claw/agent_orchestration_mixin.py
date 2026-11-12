@@ -219,6 +219,9 @@ _ECO_CORE_TOOLS: frozenset[str] = frozenset({
     # "Think harder" comes in any language, and the agent raises its own
     # effort mid-task: the schema has to be there to do either.
     "reasoning_effort",
+    # "Use Opus for this" / "switch to something cheaper" too, and the agent
+    # may pick a smarter or cheaper model of its provider on its own.
+    "model_switch",
     # "Have Codex fix the login test" comes in any language too. Hidden by the
     # registry unless an admin approved the owner for Crew.
     "crew",

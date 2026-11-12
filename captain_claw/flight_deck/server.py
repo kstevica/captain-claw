@@ -1921,6 +1921,7 @@ from captain_claw.flight_deck.costs_routes import router as costs_router
 from captain_claw.flight_deck.usage_quota import router as usage_quota_router
 from captain_claw.flight_deck.byok import router as byok_router
 from captain_claw.flight_deck.tier_presets import router as tier_presets_router
+from captain_claw.flight_deck.model_switch_routes import router as model_switch_router
 from captain_claw.flight_deck.llm_routes import router as llm_router
 from captain_claw.flight_deck.being_routes import router as being_router
 from captain_claw.flight_deck.being_public_routes import router as being_public_router
@@ -2103,6 +2104,7 @@ app.include_router(usage_quota_router)
 app.include_router(usage_spend.router)
 app.include_router(byok_router)
 app.include_router(tier_presets_router)
+app.include_router(model_switch_router)
 app.include_router(llm_router)
 app.include_router(being_router)
 app.include_router(being_public_router)
@@ -5428,6 +5430,54 @@ async def update_agent_task_rephrase(
         section = data.get("scale")
         data["scale"] = {**(section if isinstance(section, dict) else {}), "task_rephrase_enabled": body.enabled}
         cfg_path.write_text(yaml.dump(data, default_flow_style=False, sort_keys=False, allow_unicode=True))
+    return {"ok": True, "enabled": body.enabled}
+
+
+class AgentModelSwitchUpdate(BaseModel):
+    enabled: bool = False
+
+
+def _read_agent_model_switch(agent_dir: Path, kind: str) -> bool:
+    from captain_claw.llm import model_switch
+
+    try:
+        text = (_agent_home_cc(agent_dir, kind) / model_switch.SWITCH_FILENAME).read_text(encoding="utf-8")
+    except OSError:
+        return False
+    return bool(model_switch.parse_switch(text))
+
+
+@app.get("/fd/agent-model-switch/{kind}/{identifier}")
+async def get_agent_model_switch(
+    kind: str, identifier: str, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Whether the agent may switch to another of its provider's models on its
+    own (to save cost, or to think better) — not only when asked."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    return {"enabled": _read_agent_model_switch(agent_dir, kind)}
+
+
+@app.put("/fd/agent-model-switch/{kind}/{identifier}")
+async def update_agent_model_switch(
+    kind: str, identifier: str, body: AgentModelSwitchUpdate, request: Request,
+    user: dict | None = _agent_manager_dep,
+):
+    """Let the agent switch models on its own, or not. The switch file applies
+    from its next message — no restart."""
+    if kind not in ("docker", "process"):
+        raise HTTPException(400, "kind must be 'docker' or 'process'")
+    from captain_claw.llm import model_switch
+
+    user_id = getattr(request.state, "user_id", "")
+    agent_dir = _resolve_agent_dir(identifier, kind, user_id)
+    for cc_dir in _agent_reasoning_dirs(agent_dir, kind):
+        if cc_dir.is_dir():
+            (cc_dir / model_switch.SWITCH_FILENAME).write_text(
+                model_switch.render_switch(body.enabled), encoding="utf-8")
     return {"ok": True, "enabled": body.enabled}
 
 

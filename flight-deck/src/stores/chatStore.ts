@@ -13,6 +13,7 @@ import { asNote, injectedAs, markLegacyNarration, notificationOrigin } from '../
 import { scrubUserText } from '../utils/cardScrub'
 import { SHARED_PREFIX, sharedContainerId, sharedSliceId } from '../utils/sharedAgent'
 import { clampLevel, parsePick, parseProfile, type ReasoningProfile } from '../utils/reasoningEffort'
+import { parseModelSwitch, type ModelSwitchInfo } from '../utils/modelSwitch'
 import { effortFor, useReasoningStore } from './reasoningStore'
 
 // ── Chat persistence helpers ──
@@ -1813,6 +1814,9 @@ interface ChatSession {
   /** The reasoning-effort levels the agent's model offers (from its session
    *  info); null when it has none to choose from, or for a shared agent. */
   reasoning: ReasoningProfile | null
+  /** The other models of its provider the agent can switch to (from its
+   *  session info); null when there are none, or for a shared agent. */
+  modelSwitch: ModelSwitchInfo | null
   activePersonality: string
   // Token generation speed tracking
   _busyStartedAt: number // timestamp (ms) when agent became busy
@@ -1964,6 +1968,9 @@ interface ChatStore {
   addLocalNote: (containerId: string, content: string) => void
   cancelTask: (containerId: string) => void
   setModel: (containerId: string, selector: string) => void
+  /** The chat box's model picker: another model of the agent's provider for
+   *  this conversation ("default" goes back to the configured one). */
+  switchModel: (containerId: string, model: string) => void
   setPersonality: (containerId: string, personalityId: string) => void
   respondToApproval: (containerId: string, requestId: string, approved: boolean) => void
   // Plan-mode actions
@@ -2095,6 +2102,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       personalities: [],
       activeModel: '',
       reasoning: null,
+      modelSwitch: null,
       activePersonality: '',
       _busyStartedAt: 0,
       lastTokPerSec: 0,
@@ -2279,8 +2287,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ws.on('session_info', (data) => {
       const id = String(data.id ?? '')
       if (!id) return
-      // A model change arrives here too: the picker follows the new model.
+      // A model change arrives here too: the pickers follow the new model.
       if (!shared && 'reasoning' in data) updateSession(key, { reasoning: parseProfile(data.reasoning) })
+      if (!shared && 'model_switch' in data) updateSession(key, { modelSwitch: parseModelSwitch(data.model_switch) })
       // A transcript with no divider at all on the session the lane already
       // knows it is on is the agent's replay (no sign-in, or an unreadable
       // log): that session, not a return to an earlier one. Marking it added
@@ -2302,6 +2311,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     ws.on('reasoning_effort', (data) => {
       const pick = parsePick(data.level)
       if (!shared && pick) useReasoningStore.getState().setEffort(containerId, pick)
+    })
+
+    // The agent switched models (its model_switch tool) — the pickers follow;
+    // or it turned down a pick made in the chat box, which says why.
+    ws.on('model_switch', (data) => {
+      if (shared) return
+      // (The session_info sent with a refusal puts the picker back.)
+      if (data.error) {
+        useChatStore.getState().addLocalNote(key, String(data.error))
+        return
+      }
+      const patch: Partial<ChatSession> = {}
+      if ('model_switch' in data) patch.modelSwitch = parseModelSwitch(data.model_switch)
+      if ('reasoning' in data) patch.reasoning = parseProfile(data.reasoning)
+      updateSession(key, patch)
     })
 
     // The agent named a session it was asked to leave (a short title from
@@ -2337,7 +2361,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const models = (data.models as AgentModelInfo[] || [])
       const personalities = (data.personalities as AgentPersonalityInfo[] || [])
       const reasoning = parseProfile(sessionInfo?.reasoning)
-      const patch: Partial<ChatSession> = { models, personalities, agentSessionId, reasoning }
+      const modelSwitch = parseModelSwitch(sessionInfo?.model_switch)
+      const patch: Partial<ChatSession> = { models, personalities, agentSessionId, reasoning, modelSwitch }
       if (name) patch.statusText = `Session: ${name}`
       updateSession(key, patch)
       turnOnAtWelcome(key, data)
@@ -3412,6 +3437,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       session.ws.sendJSON({ type: 'set_model', selector })
       updateSession(containerId, { activeModel: selector })
     }
+  },
+
+  switchModel: (containerId, model) => {
+    const session = get().sessions.get(containerId)
+    if (!session || session.shared || !session.modelSwitch || !model) return
+    session.ws.sendJSON({ type: 'switch_model', model })
+    // Shown at once; the agent's session_info (or its refusal) settles it.
+    const target = model === 'default' ? session.modelSwitch.default : model
+    updateSession(containerId, { modelSwitch: { ...session.modelSwitch, current: target, turnOnly: false } })
   },
 
   setPersonality: (containerId, personalityId) => {

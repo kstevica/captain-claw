@@ -38,6 +38,27 @@ export async function saveProviderKey(provider: string, key: string): Promise<Re
   return data.keys || {}
 }
 
+// ── Models agents can switch to, per custom endpoint (fd:model-switch-endpoints) ──
+
+export interface SwitchEndpoint {
+  provider: string
+  /** "" = the provider's own endpoint. */
+  base_url: string
+  models: { model: string; note: string }[]
+}
+
+export async function fetchSwitchEndpoints(): Promise<SwitchEndpoint[]> {
+  return (await call<{ endpoints?: SwitchEndpoint[] }>('/fd/model-switch/endpoints')).endpoints || []
+}
+
+/** Replaces the whole list; returns it as stored (tidied). */
+export async function saveSwitchEndpoints(endpoints: SwitchEndpoint[]): Promise<SwitchEndpoint[]> {
+  const data = await call<{ endpoints?: SwitchEndpoint[] }>('/fd/model-switch/endpoints', {
+    method: 'PUT', body: JSON.stringify({ endpoints }),
+  })
+  return data.endpoints || []
+}
+
 // ── People ──
 
 export interface AdminUser {

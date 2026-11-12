@@ -6,7 +6,8 @@ from typing import Any
 import os
 
 from captain_claw.config import Config, get_config
-from captain_claw.llm import create_provider, set_provider
+from captain_claw.flight_deck.endpoints import same_endpoint
+from captain_claw.llm import create_provider, model_switch, set_provider
 
 
 class AgentModelMixin:
@@ -235,8 +236,12 @@ class AgentModelMixin:
         option: dict[str, Any],
         source: str,
         model_id: str = "",
+        make_global: bool = True,
     ) -> None:
-        """Instantiate provider for chosen model and switch runtime."""
+        """Instantiate provider for chosen model and switch runtime.
+
+        *make_global* also makes it the process's provider (``set_provider``),
+        which helpers outside an agent use — not for a lane's own agent."""
         provider = str(option.get("provider", "")).strip()
         model = str(option.get("model", "")).strip()
         base_url_raw = str(option.get("base_url", "") or "").strip()
@@ -317,7 +322,8 @@ class AgentModelMixin:
             tokens_per_minute=resolved_tpm,
             extra_headers=extra_headers,
         )
-        set_provider(self.provider)
+        if make_global:
+            set_provider(self.provider)
         self._refresh_runtime_model_details(source=source, model_id=model_id)
 
     def _session_model_selection(self) -> dict[str, Any] | None:
@@ -331,6 +337,13 @@ class AgentModelMixin:
         model = str(raw.get("model", "")).strip()
         if not provider or not model:
             return None
+        if raw.get("switch"):
+            # A model switched to on the configured endpoint: once the agent
+            # runs somewhere else (its model changed in Flight Deck), it no
+            # longer applies.
+            home_provider, _home_model, home_base = self._switch_home()
+            if not same_endpoint(provider, raw.get("base_url"), home_provider, home_base):
+                return None
         return {
             "id": str(raw.get("id", "")).strip(),
             "provider": provider,
@@ -348,6 +361,10 @@ class AgentModelMixin:
         """Apply config default model unless agent is using external provider override."""
         cfg = get_config()
         if self._provider_override and self.provider is not None:
+            # A lane's agent back on its own model after a switch.
+            home = getattr(self, "_switch_home_provider", None)
+            if home is not None and self.provider is not home:
+                self.provider = home
             self._refresh_runtime_model_details(source="override")
             return
         self._apply_model_option(
@@ -407,6 +424,175 @@ class AgentModelMixin:
         if persist:
             await self.session_manager.save_session(self.session)
         return True, f"Session model set to {details.get('provider')}/{details.get('model')}"
+
+    # ------------------------------------------------------------------
+    # Model switching — another model of the configured provider, at the
+    # same endpoint with the same key (llm/model_switch.py). Tier sets are
+    # not involved.
+    # ------------------------------------------------------------------
+
+    def _switch_home(self) -> tuple[str, str, str]:
+        """(provider, model, base_url) the agent is configured to run on."""
+        cfg = get_config()
+        return (str(cfg.model.provider or "").strip(), str(cfg.model.model or "").strip(),
+                str(cfg.model.base_url or "").strip())
+
+    def model_switch_choices(self) -> list[dict[str, Any]]:
+        """The models this agent can switch to (its configured one included)."""
+        provider, model, base_url = self._switch_home()
+        if not provider or not model:
+            return []
+        allowed = []
+        for item in get_config().model.allowed:
+            allowed.append((
+                str(getattr(item, "provider", "") or ""), str(getattr(item, "model", "") or ""),
+                str(getattr(item, "base_url", "") or ""), str(getattr(item, "description", "") or ""),
+            ))
+        return model_switch.choices(provider, model, base_url, allowed=allowed)
+
+    def _model_switch_blocked(self) -> str:
+        """Why this agent can't switch models ("" when it can)."""
+        from captain_claw.speaker import is_speaker_agent
+
+        if is_speaker_agent(self):
+            return "A shared agent's member can't change the owner's model."
+        if getattr(self, "_byok_active", False):
+            return "This conversation runs on a key the visitor brought — its model is theirs."
+        provider = getattr(self, "provider", None)
+        name = str(getattr(provider, "provider", "") or "")
+        if name in {"browser"}:
+            return "This agent runs on the browser's own model."
+        return ""
+
+    def _running_model(self) -> str:
+        return str(getattr(getattr(self, "provider", None), "model", "") or "").strip()
+
+    def model_switch_wire(self) -> dict[str, Any] | None:
+        """What the chat box's model picker shows: the model it runs on now,
+        the configured one, and the choices — None when there's nothing to
+        switch to (one model, or a conversation that may not switch)."""
+        if self._model_switch_blocked():
+            return None
+        options = self.model_switch_choices()
+        if len(options) < 2:
+            return None
+        running = self._running_model()
+        _provider, home_model, _base = self._switch_home()
+        current = next((o["model"] for o in options if model_switch.is_model(running, o["model"])), running)
+        return {
+            "current": current,
+            "default": home_model,
+            "turn_only": getattr(self, "_turn_model_restore", None) is not None,
+            "self_switch": model_switch.self_switch_enabled(),
+            "choices": [
+                {k: o[k] for k in ("model", "name", "label", "note", "price", "default")}
+                for o in options
+            ],
+        }
+
+    def _activate_choice(self, choice: dict[str, Any]) -> None:
+        """Run on *choice* from now on (its provider and key are the configured ones)."""
+        provider, home_model, base_url = self._switch_home()
+        cfg = get_config()
+        make_global = not getattr(self, "_provider_override", False)
+        running = self._running_model()
+        if choice.get("default"):
+            home = getattr(self, "_switch_home_provider", None)
+            if home is not None and model_switch.is_model(str(getattr(home, "model", "") or ""), home_model):
+                self.provider = home
+                if make_global:
+                    set_provider(home)
+                self._refresh_runtime_model_details(source="config", model_id="default")
+                return
+            self._apply_model_option(
+                {"provider": provider, "model": home_model, "base_url": base_url,
+                 "temperature": cfg.model.temperature, "max_tokens": cfg.model.max_tokens},
+                source="config", model_id="default", make_global=make_global,
+            )
+            return
+        # The provider it started on, to come back to without building a new
+        # one (a lane's shares the main agent's connection and rate limiter).
+        if getattr(self, "_switch_home_provider", None) is None and model_switch.is_model(running, home_model):
+            self._switch_home_provider = self.provider
+        option: dict[str, Any] = {"provider": provider, "model": choice["model"], "base_url": base_url}
+        # The catalog's limits only ever lower the configured ones: a cheaper
+        # model priced higher above a prompt size keeps under it.
+        if 0 < int(choice.get("max_context") or 0) < int(cfg.context.max_tokens):
+            option["max_context"] = int(choice["max_context"])
+        if 0 < int(choice.get("max_output") or 0) < int(cfg.model.max_tokens):
+            option["max_output_tokens"] = int(choice["max_output"])
+        self._apply_model_option(option, source="switch", model_id=f"switch:{choice['model']}",
+                                 make_global=make_global)
+
+    async def switch_model(self, selector: str, *, scope: str = "setting") -> tuple[bool, str, dict[str, Any] | None]:
+        """Switch to the choice *selector* names. ``setting``: for this
+        conversation from now on (kept in its session, so a restart, /clear
+        and /new keep it); ``turn``: for the rest of this turn only.
+        Returns (ok, message, the choice)."""
+        blocked = self._model_switch_blocked()
+        if blocked:
+            return False, blocked, None
+        options = self.model_switch_choices()
+        if len(options) < 2:
+            return False, "There is no other model to switch to on this agent's provider.", None
+        choice, could_be = model_switch.resolve(options, selector)
+        if choice is None:
+            names = ", ".join(o["model"] for o in (could_be or options))
+            what = f"{selector!r} could be: {names}" if could_be else f"No model {selector!r} here — the choices are: {names}"
+            return False, what + ".", None
+        mode = "turn" if str(scope or "").strip().lower() == "turn" else "setting"
+        if mode == "turn":
+            if getattr(self, "_turn_model_restore", None) is None:
+                self._turn_model_restore = (self.provider, dict(getattr(self, "_runtime_model_details", None) or {}))
+        else:
+            self._turn_model_restore = None
+        try:
+            self._activate_choice(choice)
+        except Exception as exc:
+            return False, f"Couldn't start {choice['model']}: {exc}", None
+        if mode == "setting" and self.session is not None:
+            provider, _home_model, base_url = self._switch_home()
+            if choice.get("default"):
+                self.session.metadata.pop("model_selection", None)
+            else:
+                details = self.get_runtime_model_details()
+                self.session.metadata["model_selection"] = {
+                    "id": f"switch:{choice['model']}",
+                    "provider": provider,
+                    "model": choice["model"],
+                    "base_url": base_url,
+                    "temperature": details.get("temperature"),
+                    "max_tokens": details.get("max_tokens"),
+                    "max_context": int(choice.get("max_context") or 0)
+                    if 0 < int(choice.get("max_context") or 0) < int(get_config().context.max_tokens) else 0,
+                    "max_output_tokens": int(choice.get("max_output") or 0)
+                    if 0 < int(choice.get("max_output") or 0) < int(get_config().model.max_tokens) else 0,
+                    "switch": True,
+                    "updated_at": datetime.now(UTC).isoformat(),
+                }
+            try:
+                await self.session_manager.save_session(self.session)
+            except Exception as exc:
+                return True, f"Switched to {choice['name']}, but it couldn't be kept for later: {exc}", choice
+        where = "for the rest of this turn" if mode == "turn" else "for this conversation from now on"
+        return True, f"Switched to {choice['name']} ({choice['model']}) {where}.", choice
+
+    def _restore_turn_model(self) -> bool:
+        """Back to the model the turn started on, after a switch for the turn
+        only (``switch_model(scope="turn")``). True when it switched back."""
+        saved = getattr(self, "_turn_model_restore", None)
+        if saved is None:
+            return False
+        self._turn_model_restore = None
+        provider, details = saved
+        self.provider = provider
+        if not getattr(self, "_provider_override", False):
+            set_provider(provider)
+        if isinstance(details, dict) and details:
+            self._runtime_model_details = dict(details)
+        else:
+            self._refresh_runtime_model_details(source="config")
+        return True
 
     # ------------------------------------------------------------------
     # BYOK (Bring Your Own Key) — per-agent provider from user credentials
