@@ -33,6 +33,7 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import json
+import os
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -48,7 +49,10 @@ log = get_logger(__name__)
 
 TTL = 60.0
 DECIDE_TIMEOUT = 10.0
-CALL_TIMEOUT = 180.0
+# One check on Flight Deck — with a trusted model that looks too, every chunk
+# of what goes to the model (the system prompt alone is several): it can take
+# minutes on a local model. CLAW_ANONYMIZE_GATE_TIMEOUT (seconds) changes it.
+CALL_TIMEOUT = float(os.environ.get("CLAW_ANONYMIZE_GATE_TIMEOUT") or 1800.0)
 NOTE = ("[Privacy gate: names, addresses and numbers in this result are tokens like ⟦PERSON_1⟧. Use them as "
         "they are; they are put back when you send mail or a message.]")
 CHAT_NOTE = ("[Privacy gate: names, addresses and numbers are tokens like ⟦PERSON_1⟧ — in the person's messages "
@@ -70,6 +74,7 @@ class Decision:
     vault: str = G.GATE_VAULT
     lane: str = "deterministic"
     chat: bool = False  # the whole chat, not chosen sources
+    model: str = ""  # the trusted model that looks too (lane "both"), for the status line
 
     def covers(self, name: str, arguments: dict[str, Any]) -> bool:
         if self.active and self.chat:
@@ -88,6 +93,26 @@ class Decision:
         if self.active and self.chat:
             return name not in G.KEEP_TOKEN_ARGS
         return self.active and name in G.EGRESS_TOOLS
+
+
+def why(exc: BaseException) -> str:
+    """What went wrong, in a few words (a timeout's own text is empty)."""
+    if isinstance(exc, httpx.TimeoutException):
+        return f"it took longer than {CALL_TIMEOUT / 60:g} minutes"
+    if isinstance(exc, httpx.ConnectError):
+        return "Flight Deck couldn't be reached"
+    return str(exc) or type(exc).__name__
+
+
+def working(d: Decision, what: str) -> str:
+    """The live status while the gate looks at *what* — so a slow trusted
+    model doesn't read as the agent thinking."""
+    who = f"the trusted model ({d.model})" if d.lane == "both" and d.model else "code"
+    return f"🛡️ Anonymizing {what} — {who} is looking for private data…"
+
+
+def restoring(name: str) -> str:
+    return f"🛡️ Putting the real values back into {name}…"
 
 
 def fd_facing(label: str) -> bool:
@@ -146,7 +171,8 @@ async def decision(agent: Any) -> Decision | None:
             data = resp.json()
             d = Decision(bool(data.get("active")), frozenset(data.get("groups") or ()),
                          list(data.get("folders") or []), str(data.get("vault") or G.GATE_VAULT),
-                         str(data.get("lane") or "deterministic"), bool(data.get("chat")))
+                         str(data.get("lane") or "deterministic"), bool(data.get("chat")),
+                         str(data.get("model") or ""))
     except Exception as exc:  # noqa: BLE001 — keep the last answer
         log.debug("Privacy gate: decision unavailable", error=type(exc).__name__)
         return hit[1] if hit and hit[1].active else None
@@ -203,7 +229,7 @@ async def gate_result(d: Decision, name: str, result: Any) -> Any:
     except Exception as exc:  # noqa: BLE001 — fail closed
         log.warning("Privacy gate: result withheld", tool=name, error=type(exc).__name__)
         return ToolResult(success=False, error=(
-            f"The privacy gate couldn't check what {name} returned, so it isn't shown ({exc}). "
+            f"The privacy gate couldn't check what {name} returned, so it isn't shown ({why(exc)}). "
             "Try again in a moment; if it keeps failing, tell the person."))
     if content and TOKEN_RE.search(content) and not d.chat:  # the whole chat: said once, in the prompt
         content = f"{content}\n\n{NOTE}"
@@ -307,16 +333,20 @@ async def anonymize_user_text(d: Decision, text: str) -> str:
     return out
 
 
-async def anonymize_messages(agent: Any, d: Decision, messages: list[Any]) -> list[Any]:
+async def anonymize_messages(agent: Any, d: Decision, messages: list[Any],
+                             on_work: Any = None) -> list[Any]:
     """*messages* (llm ``Message``) as the model may see them: every text not
     seen yet goes to Flight Deck (in one call); the session's history is
-    rewritten to the tokens too, so it keeps them. Pictures pass as they are."""
+    rewritten to the tokens too, so it keeps them. Pictures pass as they are.
+    *on_work(n)*: called before Flight Deck is asked, with how many texts."""
     todo: dict[str, str] = {}
     for m in messages:
         text = getattr(m, "content", None)
         if isinstance(text, str) and text.strip() and known(text) is None:
             todo.setdefault(_sha(text), text)
     if todo:
+        if on_work is not None:
+            on_work(len(todo))
         originals = list(todo.values())
         for original, anonymized in zip(originals, await anonymize_texts(d, originals), strict=True):
             remember(anonymized, original)

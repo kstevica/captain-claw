@@ -711,14 +711,16 @@ class Agent(
         gate = await _gate.decision(self)
         if gate is None or not gate.chat or not text.strip():
             return text, ""
+        if _gate.known(text) is None:
+            self._gate_status(_gate.working(gate, "your message"))
         try:
             return await _gate.anonymize_user_text(gate, text), ""
         except Exception as exc:  # noqa: BLE001
             from captain_claw.logging import get_logger
 
             get_logger(__name__).warning("Privacy gate: message not anonymized", error=type(exc).__name__)
-            return text, ("The privacy gate couldn't check your message, so it wasn't sent to the model. "
-                          "Try again in a moment.")
+            return text, (f"The privacy gate couldn't check your message, so it wasn't sent to the model "
+                          f"({_gate.why(exc)}). Try again in a moment.")
 
     def _turn_over_browser(self) -> None:
         """The outermost turn is over: the person's Chrome may go back to their

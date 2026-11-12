@@ -41,10 +41,24 @@ SETTING_KEY = "anonymize:trusted_model"
 PROVIDERS = ("ollama", "litert", "openai", "anthropic", "gemini", "xai", "openrouter")
 LOCAL_PROVIDERS = ("ollama", "litert")
 ON_FAILURE = ("refuse", "deterministic")
-CALL_TIMEOUT = 240.0
+# One call to the trusted model (one chunk of ~6,000 characters). A local
+# model that thinks can write 10k+ tokens for a chunk: minutes, not seconds.
+# FD_ANONYMIZE_MODEL_TIMEOUT (seconds) changes it.
+CALL_TIMEOUT = float(os.environ.get("FD_ANONYMIZE_MODEL_TIMEOUT") or 600.0)
 # Room for the answer and for thinking: models that think by default
-# (Claude Haiku 5.5) count it against max_tokens.
-MAX_TOKENS = 16000
+# (Claude Haiku 5.5, local thinking models) count it against max_tokens. An
+# answer cut at the limit is asked again in smaller pieces (llm_lane.AnswerCut).
+# FD_ANONYMIZE_MODEL_MAX_TOKENS changes it.
+MAX_TOKENS = int(os.environ.get("FD_ANONYMIZE_MODEL_MAX_TOKENS") or 32000)
+# Thinking on the trusted model's calls (Ollama): "off", "low"/"medium"/"high"
+# or "on"; unset leaves the model's own. Finding names needs little of it,
+# and a model that thinks without end only reaches the answer limit.
+_THINK = {"off": False, "false": False, "0": False, "no": False, "on": True, "true": True, "1": True,
+          "yes": True, "low": "low", "medium": "medium", "high": "high"}
+
+
+def model_think() -> bool | str | None:
+    return _THINK.get(os.environ.get("FD_ANONYMIZE_MODEL_THINK", "").strip().lower())
 
 
 class TrustError(ValueError):
@@ -214,10 +228,16 @@ def completer(m: TrustedModel):
     from captain_claw.llm import Message, create_provider
 
     async def call(system: str, user: str) -> tuple[str, int]:
+        from captain_claw.anonymize.llm_lane import AnswerCut
+
         try:
             provider = create_provider(
                 provider=m.provider, model=m.model, api_key=m.api_key or None, base_url=m.base_url or None,
-                temperature=0.0, max_tokens=MAX_TOKENS)
+                temperature=0.0, max_tokens=MAX_TOKENS, think=model_think())
+            # The provider's own per-request timeout (Ollama 120 s, LiteLLM
+            # 180 s) would cut a long answer short of the cap below.
+            provider.request_timeout = CALL_TIMEOUT
+            provider.log_content = False  # its answer is the private data it found
             resp = await asyncio.wait_for(
                 provider.complete(messages=[Message(role="system", content=system), Message(role="user", content=user)],
                                   temperature=0.0, max_tokens=MAX_TOKENS),
@@ -225,6 +245,9 @@ def completer(m: TrustedModel):
         except Exception as exc:  # noqa: BLE001 — the error may quote the document: type only
             log.warning("Anonymization trusted model call failed", model=m.label, error=type(exc).__name__)
             raise RuntimeError(type(exc).__name__) from None
+        if str(getattr(resp, "finish_reason", "") or "").lower() in ("length", "max_tokens"):
+            log.info("Anonymization trusted model hit its answer limit", model=m.label, limit=MAX_TOKENS)
+            raise AnswerCut(MAX_TOKENS)
         return str(getattr(resp, "content", "") or ""), _tokens(getattr(resp, "usage", None))
 
     return call

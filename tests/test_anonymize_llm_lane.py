@@ -89,6 +89,36 @@ class TestDetect:
             await L.detect("x" * (L.MAX_CHARS + 1), bad_json)
 
 
+class TestAnswerLimit:
+    """A model that writes (or thinks) until its answer limit: the piece is
+    asked again in halves; one that never stops fails the lane clearly."""
+
+    TEXT = ("We met Marko at the harbour and talked for a long while. " * 20 + "\n\n"
+            + "Later Petra came by and stayed for dinner with everyone. " * 20)
+
+    async def test_a_cut_answer_is_asked_again_in_halves(self):
+        asked = []
+
+        async def model(system, user):
+            piece = user.split("<<<DOCUMENT\n", 1)[-1]
+            asked.append(len(piece))
+            if len(asked) == 1:
+                raise L.AnswerCut(16000)  # the whole piece: it ran to the limit
+            return _answer(*[(n, "PERSON") for n in ("Marko", "Petra") if n in piece]), 3
+
+        result = await L.detect(self.TEXT, model)
+        assert sorted(result.terms) == [("Marko", "PERSON"), ("Petra", "PERSON")]
+        assert len(asked) == 3 and asked[1] < asked[0] and asked[2] < asked[0]
+
+    async def test_a_model_that_never_stops_fails_clearly(self):
+        async def model(system, user):
+            raise L.AnswerCut(16000)
+
+        with pytest.raises(L.LaneFailed) as exc:
+            await L.detect(self.TEXT, model)
+        assert "answer limit" in str(exc.value) and "16,000" in str(exc.value)
+
+
 class TestEngineWithTerms:
     def test_terms_replace_every_occurrence_and_join_the_vault(self):
         state = E.VaultState()

@@ -192,6 +192,14 @@ class LLMProvider(ABC):
     # a caller that bounds a long single call itself — e.g. the Vatra Lead's team
     # plan, which may take up to 30 minutes on a slow model.
     request_timeout: float | None = None
+    # Whether log lines may quote what the model wrote. Off for calls whose
+    # answers are private data (the anonymization trusted model): its answer
+    # IS the names it found.
+    log_content: bool = True
+
+    def _content_preview(self, text: Any, n: int) -> str:
+        """A log preview of model output — empty when this provider mustn't quote it."""
+        return str(text or "")[:n].replace("\n", " ") if self.log_content else ""
 
     @abstractmethod
     async def complete(
@@ -2557,7 +2565,7 @@ class ChatGPTResponsesProvider(LLMProvider):
                     raw_lines=len(collected_lines),
                     events=len(events),
                     completed_seen=completed is not None,
-                    preview="\n".join(preview_lines)[:2000],
+                    preview="\n".join(preview_lines)[:2000] if self.log_content else "",
                 )
                 # Look for a Codex error event the parser may have missed.
                 err_detail = ""
@@ -3392,7 +3400,7 @@ class OllamaProvider(LLMProvider):
                 log.info(
                     "Ollama final content",
                     content_len=len(content),
-                    preview=content[:200].replace("\n", " "),
+                    preview=self._content_preview(content, 200),
                 )
 
                 tool_calls: list[ToolCall] = []
@@ -3439,7 +3447,7 @@ class OllamaProvider(LLMProvider):
                     else:
                         log.warning(
                             "Ollama forced tool call did not parse",
-                            preview=content[:160].replace("\n", " "),
+                            preview=self._content_preview(content, 160),
                         )
 
                 usage = {
@@ -3941,7 +3949,7 @@ class LiteLLMProvider(LLMProvider):
             provider=self.provider,
             model=self.model,
             content_len=len(final_content),
-            content_preview=final_content[:300],
+            content_preview=self._content_preview(final_content, 300),
             raw_content_len=len(joined_content),
             reasoning_len=len(joined_reasoning),
             tool_calls=len(collected_tool_calls),
@@ -4103,7 +4111,7 @@ class LiteLLMProvider(LLMProvider):
                 provider=self.provider,
                 model=self.model,
                 content_len=len(content or ""),
-                content_preview=str(content or "")[:300],
+                content_preview=self._content_preview(content, 300),
                 raw_content_len=len(str(raw_content) if raw_content else ""),
                 reasoning_len=len(str(reasoning_content)) if reasoning_content else 0,
             )
