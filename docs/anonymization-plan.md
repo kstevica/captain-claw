@@ -533,6 +533,13 @@ the agent sees tokens — never restored.
   shared agent the name is made as the member (their gate, their vault), and the clean-text cache is kept
   per person, so a text cleaned in the owner's vault is never reused for a member. Verified on the throwaway
   deck: the naming call carried the tokenized message (91 characters, the raw one is 119).
+* **A private company's product went through.** A deal screener fetched a startup's site: its address became
+  a token, but the product name on its pages stayed — the trusted model was told not to mark product names
+  (written for personal privacy), and the screener's model then searched, wrote and replied with it. The
+  trusted model now marks a private company's own products, apps, services and brands as ORG (one word, odd
+  capitals and made-up spellings too), and still leaves generic kinds of product and widely known brands
+  (Excel, WhatsApp). A shared case with a made-up startup checks it: with Claude Haiku the old prompt left the
+  product name in 3 of 3 runs, the new one hid it in 3 of 3, with the other cases unchanged.
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
   with lane "both"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known
