@@ -300,3 +300,12 @@ details.include[open] > summary .ic.chev { transform: rotate(180deg); }
 .hands-log summary::-webkit-details-marker { display: none; }
 .hands-log .step { font-size: calc(11px * var(--fs)); color: var(--muted); }
 .hands-log .step.err { color: var(--err); }
+
+/* Anonymize: the result as it is copied, its tokens as chips. */
+.anon-out { white-space: pre-wrap; word-wrap: break-word; font-size: calc(12.5px * var(--fs)); line-height: 1.55; max-height: 55vh; overflow: auto; }
+.tok { background: var(--accent-soft); color: var(--accent-text); border-radius: 4px; padding: 0 3px; font: calc(11.5px * var(--fs)) ui-monospace, SFMono-Regular, Menlo, monospace; }
+details.anon-back > summary { list-style: none; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+details.anon-back > summary::-webkit-details-marker { display: none; }
+details.anon-back > summary .ic { transition: transform .15s; }
+details.anon-back[open] > summary .ic.chev { transform: rotate(180deg); }
+

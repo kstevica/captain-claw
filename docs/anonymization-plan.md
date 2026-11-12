@@ -9,7 +9,8 @@ them back later.
 
 Status: P0–P4, members and the name models are **merged** (PRs #511 #512 #514 #515 #516 #517, main
 17c73e94). **P5** — files where they are (VFS file, VFS folder, Library file) — built on branch
-`feat/anonymize-vfs`. Next: **P6** the Chrome extension, **P7** the whole chat. True PDF redaction is skipped
+`feat/anonymize-vfs` (PR #518). **P6** — the Chrome extension — built on `feat/anonymize-chrome`. Next:
+**P7** the whole chat. True PDF redaction is skipped
 (decided 2026-11-11).
 
 ## Principles
@@ -425,13 +426,22 @@ folder — the copy goes to their own **Anonymized** folder under the source fol
   coarser, words to leave, and a folder's progress (it keeps going when closed). The full layout's VFS
   browser doesn't have it yet.
 
-## P6 — the Chrome extension (planned)
+## P6 — the Chrome extension
 
-An "Anonymize" action in Captain for Chrome: the page or the selection, vault named after the page's host
-(`www.example.com`, `www.` kept). The extension can only call `/fd/clip/*` (origin guard + its paired PAT),
-so a thin `POST /fd/clip/anonymize` (+ `/restore`) with `get_clip_user` calls `run_for` / `restore_for`.
-Panel: a button beside Send and a right-click item; the result shown with Copy (and optionally saved to
-`vfs:web-clips/`).
+Captain for Chrome 0.3.0: **Anonymize this page** (or **the selection**, when one is picked) under the Send
+button, and **Anonymize with Captain** on the right-click menu (page or selection). No agent is involved.
+
+* The vault is named after the page's host as the browser shows it (`www.example.com`, `www.` kept): the
+  same person gets the same token on every page of the site.
+* The extension can only reach `/fd/clip/*` (origin guard) with its paired token, so Flight Deck has
+  `POST /fd/clip/anonymize` and `/fd/clip/anonymize/restore` (`get_clip_user`) standing in for
+  `run_for` / `restore_for`. The page goes as the markdown the panel already read (`capture.js`).
+* The panel shows what was found, the result with its tokens as chips, **Copy**, **Save in Flight Deck**
+  (Web clips, `<day>-<site>-<tokenized title>-anonymized/` — the folder is named from the tokenized title,
+  since a page title often carries the name), and **Put the real names back** for text that has tokens in
+  it (an answer someone got for the anonymized text).
+* Verified end to end: headless Chromium with the unpacked extension against a throwaway deck — page,
+  save, put back, selection, right-click.
 
 ## P7 — the whole chat (planned)
 
@@ -469,4 +479,5 @@ agent (Telegram strangers, groups, public pages) sees tokens — never restored.
 * **P4** (built) — below.
 * **Members** (built) — shared-agent members on their own turn, above.
 * **P5** (built) — files where they are, above.
+* **P6** (built) — the Chrome extension, above.
 * **Skipped** — true PDF redaction (PDFs come back as markdown).

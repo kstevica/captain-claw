@@ -1169,6 +1169,66 @@ def _schedule_watch(user_id: str, agent: dict, meta: dict, folder: str, title: s
 NEW_TOPIC_WAIT_S = 20.0
 
 
+# ── Anonymize (the page or the selection) ───────────────────────────
+#
+# The extension may only call /fd/clip/* (origin guard) with its paired
+# token, so these thin routes stand in for /fd/anonymize/run and /restore.
+# The vault is named after the page's host as the browser shows it
+# ("www.example.com"): one vault per site, the same person the same token
+# on every page of it.
+
+def anonymize_vault_for(url: Any) -> str:
+    """The vault a page's host names (``www.`` kept); ``web`` without one."""
+    host = (urlsplit(str(url or "")).hostname or "").strip(".").lower()
+    return host[:80] or "web"
+
+
+def _anon_options(body: dict[str, Any]) -> dict[str, Any]:
+    return {k: body[k] for k in ("mode", "keep", "extra", "lane", "generalize") if body.get(k) not in (None, "")}
+
+
+@router.post("/anonymize")
+async def clip_anonymize(body: dict[str, Any] = Body(...), user: dict = Depends(get_clip_user)):
+    """Anonymize the page's (or the selection's) markdown into the vault its
+    host names. ``save``: also keep the result in the clip folder."""
+    from captain_claw.flight_deck import anonymize_routes
+
+    uid = str(user["id"])
+    content = body.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(422, "There's no text on this page to anonymize.")
+    url = str(body.get("url") or "")
+    vault = str(body.get("vault") or "").strip() or anonymize_vault_for(url)
+    data = {"content": content, "format": "md", "vault": vault, "source": "browser",
+            "filename": str(body.get("title") or "page")[:200], **_anon_options(body)}
+    out = await anonymize_routes.run_for(uid, data, actor=f"browser:{uid}")
+    saved = None
+    if body.get("save"):
+        root = _clip_root(uid)
+        # The folder is named from the TOKENIZED title: a page title often
+        # carries the very name the copy is meant to hide.
+        now = datetime.now(UTC)
+        folder = _new_folder(root, clip_folder_name(out.get("filename") or "page", url, now) + "-anonymized")
+        name = f"{out.get('filename') or 'page'}.anonymized.md"
+        _write(root, folder, name, str(out.get("output") or "").encode("utf-8"), uid)
+        saved = {"folder": folder, "path": f"{folder}/{name}", "vfs": f"vfs:{CLIP_PROJECT}/{folder}/{name}"}
+    return {**out, "saved": saved}
+
+
+@router.post("/anonymize/restore")
+async def clip_anonymize_restore(body: dict[str, Any] = Body(...), user: dict = Depends(get_clip_user)):
+    """Put the real values back into text anonymized from a page of this site."""
+    from captain_claw.flight_deck import anonymize_routes
+
+    uid = str(user["id"])
+    content = body.get("content")
+    if not isinstance(content, str) or not content.strip():
+        raise HTTPException(422, "Paste the anonymized text first.")
+    vault = str(body.get("vault") or "").strip() or anonymize_vault_for(body.get("url"))
+    return await anonymize_routes.restore_for(uid, {"content": content, "format": "md", "vault": vault},
+                                              actor=f"browser:{uid}")
+
+
 @router.post("/agents/{slug}/new-topic")
 async def clip_new_topic(slug: str, user: dict = Depends(get_clip_user)):
     """A new topic with this agent: its chat starts a fresh session, as /new
