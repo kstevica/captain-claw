@@ -12,6 +12,7 @@ const MENU = [
   { id: 'captain-selection', title: 'Send selection to Captain', contexts: ['selection'] },
   { id: 'captain-link', title: 'Send link to Captain', contexts: ['link'] },
   { id: 'captain-image', title: 'Send image to Captain', contexts: ['image'] },
+  { id: 'captain-anonymize', title: 'Anonymize with Captain', contexts: ['page', 'selection'] },
 ]
 
 function setUp() {
