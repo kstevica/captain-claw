@@ -1677,3 +1677,48 @@ class TestBareTokens:
         args, n = await gate.restore_args(d, {"to": bare, "body": "Dear ORG_404 team"}, "tool:send_mail")
         assert args == {"to": "ana@x.hr", "body": "Dear ORG_404 team"} and n == 1  # an unknown one stays
         assert "brackets included" in gate.CHAT_NOTE and "⟦ ⟧ included" in gate.CHAT_REMINDER
+
+
+class TestBracketsOnTheAnswer:
+    def test_bare_tokens_the_model_was_shown_get_their_brackets(self):
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.llm import LLMResponse, Message, ToolCall
+
+        known = gate.tokens_in([Message(role="system", content="setup"),
+                                Message(role="user", content="Compare ⟦ORG_663⟧ and ⟦ORG_664⟧; mail ⟦EMAIL_2⟧.")])
+        assert known == {"⟦ORG_663⟧", "⟦ORG_664⟧", "⟦EMAIL_2⟧"}
+        r = LLMResponse(content="ORG_663 is owned by ⟦ORG_799⟧. ORG_664 spun out; not ORG_9, not HTTP_200.",
+                        reasoning_content="check ORG_664 first",
+                        tool_calls=[ToolCall(id="1", name="web_search",
+                                             arguments={"query": "ORG_663 owner", "opts": {"also": ["EMAIL_2"]}})])
+        assert gate.bracket_response(r, known) == 5
+        assert r.content == "⟦ORG_663⟧ is owned by ⟦ORG_799⟧. ⟦ORG_664⟧ spun out; not ORG_9, not HTTP_200."
+        assert r.reasoning_content == "check ⟦ORG_664⟧ first"
+        assert r.tool_calls[0].arguments == {"query": "⟦ORG_663⟧ owner", "opts": {"also": ["⟦EMAIL_2⟧"]}}
+        assert gate.bracket_response(LLMResponse(content="ORG_663"), set()) == 0  # no gate, nothing shown: as it is
+        assert "progress notes too" in gate.CHAT_REMINDER
+
+    async def test_the_agent_fixes_its_answer_before_anything_reads_it(self, gate_env, monkeypatch):
+        import types
+
+        from captain_claw.llm import LLMResponse, Message
+
+        _gate(_client(), coverage="chat")
+        agent = _agent("anthropic", "claude-x", "")
+
+        class Provider:
+            provider, model, base_url = "anthropic", "claude-x", ""
+
+            async def complete_with_callback(self, messages, tools=None, max_tokens=None, on_chunk=None):
+                token = re.search(r"⟦(EMAIL_\d+)⟧", messages[-1].content).group(1)
+                return LLMResponse(content=f"Writing to {token} now.", model="m")
+
+        agent.provider = Provider()
+        agent.session = types.SimpleNamespace(messages=[])
+        for name in ("_emit_llm_trace", "_record_usage_to_db", "_set_runtime_status", "_accumulate_usage",
+                     "_log_llm_call"):
+            monkeypatch.setattr(agent, name, lambda *a, **k: None, raising=False)
+        monkeypatch.setattr(agent, "_turn_reasoning_effort", lambda: None, raising=False)
+        r = await agent._complete_with_guards([Message(role="user", content="mail ana@x.hr please")], None,
+                                              interaction_label="turn_1")
+        assert re.fullmatch(r"Writing to ⟦EMAIL_\d+⟧ now\.", r.content)

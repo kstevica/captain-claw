@@ -497,6 +497,9 @@ class AgentGuardMixin:
         # The privacy gate's whole chat: what the model (and the input guard's
         # own model) reads is anonymized first.
         messages = await self._gate_outgoing(messages, interaction_label)
+        from captain_claw import anonymize_gate_client as _gate_out
+
+        _sent_tokens = _gate_out.tokens_in(messages)  # the tokens the model is shown, for its answer
         guard_payload = self._serialize_messages_for_guard(messages)
         allowed_input, input_error = await self._enforce_guard(
             guard_type="input",
@@ -588,6 +591,10 @@ class AgentGuardMixin:
             # was showing, make sure we land back in the idle state.
             if _is_background:
                 self._set_runtime_status("ready")
+
+        # Brackets back on the tokens the model wrote bare ("ORG_2"), before
+        # anything reads its answer — the reply, the narration, the history.
+        _gate_out.bracket_response(response, _sent_tokens)
 
         if turn_usage is not None:
             self._accumulate_usage(turn_usage, response.usage or {})

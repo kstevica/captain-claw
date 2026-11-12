@@ -43,7 +43,7 @@ from typing import Any
 import httpx
 
 from captain_claw.anonymize import gate as G
-from captain_claw.anonymize.engine import TOKEN_RE, has_tokens
+from captain_claw.anonymize.engine import BARE_TOKEN_RE, TOKEN_RE, has_tokens, make_token
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -68,7 +68,8 @@ CHAT_NOTE = ("[About ⟦…⟧ tokens: names, companies, addresses and numbers i
              "instead of naming it, never leave it out, and don't mention the tokens to the person.]")
 # Said again next to the tokens (a message or result that has them): the
 # model writes from what it just read, not from the end of a long prompt.
-CHAT_REMINDER = "[⟦…⟧ tokens are names the person sees as the real ones — name things by their token, ⟦ ⟧ included.]"
+CHAT_REMINDER = ("[⟦…⟧ tokens are names the person sees as the real ones — name things by their token, ⟦ ⟧ "
+                 "included, in short progress notes too: ⟦ORG_2⟧, never ORG_2.]")
 BATCH_CHARS = 1_500_000  # under Flight Deck's 2M-character limit per call
 CACHE_MAX = 20_000
 
@@ -444,6 +445,63 @@ async def anonymize_messages(agent: Any, d: Decision, messages: list[Any],
         out.append(dataclasses.replace(m, content=new) if new != text else m)
     _rewrite_history(agent)
     return out
+
+
+def tokens_in(messages: list[Any]) -> set[str]:
+    """Every token in what goes to the model (its messages' text)."""
+    out: set[str] = set()
+    for m in messages:
+        text = getattr(m, "content", None)
+        if isinstance(text, str) and "⟦" in text:
+            out.update(make_token(t.group(1) or t.group(3), int(t.group(2) or t.group(4)))
+                       for t in TOKEN_RE.finditer(text))
+    return out
+
+
+def bracket(text: str, known: set[str]) -> str:
+    """*text* with ⟦ ⟧ put back around tokens the model wrote bare ("ORG_2")
+    — only those it was shown (*known*); anything else stays as written."""
+    if not known or not text:
+        return text
+
+    def sub(m: Any) -> str:
+        token = make_token(m.group(1), int(m.group(2)))
+        return token if token in known else m.group(0)
+
+    return BARE_TOKEN_RE.sub(sub, text)
+
+
+def bracket_response(response: Any, known: set[str]) -> int:
+    """The model's answer — its text, reasoning and tool calls' arguments —
+    with brackets back on the tokens it wrote bare. A model copies its own
+    earlier messages: one that kept "ORG_2" in its history goes on writing
+    it, so the history must have the brackets. Returns how many were fixed."""
+    if not known:
+        return 0
+    fixed = 0
+
+    def fix(value: Any) -> Any:
+        nonlocal fixed
+        if isinstance(value, str):
+            new = bracket(value, known)
+            if new != value:
+                fixed += len(BARE_TOKEN_RE.findall(value)) - len(BARE_TOKEN_RE.findall(new))
+            return new
+        if isinstance(value, list):
+            return [fix(v) for v in value]
+        if isinstance(value, dict):
+            return {k: fix(v) for k, v in value.items()}
+        return value
+
+    for attr in ("content", "reasoning_content"):
+        if isinstance(getattr(response, attr, None), str):
+            setattr(response, attr, fix(getattr(response, attr)))
+    for call in getattr(response, "tool_calls", None) or []:
+        if isinstance(getattr(call, "arguments", None), dict):
+            call.arguments = fix(call.arguments)
+    if fixed:
+        log.info("Privacy gate: brackets put back", tokens=fixed)
+    return fixed
 
 
 def with_chat_note(messages: list[Any]) -> list[Any]:

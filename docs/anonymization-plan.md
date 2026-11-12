@@ -593,6 +593,12 @@ the agent sees tokens — never restored.
   (`HTTP_200`, `MY_ORG_1`, `ORG_1_count`) stays as written — in the person's chat, Telegram, a tool call's
   arguments and every other restore, and its history counts it. The note and the reminder now say "brackets
   included".
+* **Brackets back on the model's answer.** Told to write tokens "brackets included", the model still wrote the
+  run's two main companies bare in its progress notes ("ORG_663 is now owned by a ⟦ORG_799⟧ …") — and a model copies
+  its own earlier messages, so once a bare token is in its history it keeps writing it. Now every answer is fixed as it
+  arrives, before anything reads it (the reply, the narration, the history, a tool call): a bare token the model was
+  shown in that call gets its brackets back; anything else stays as written. The reminder next to the tokens names
+  "short progress notes" too.
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
   with lane "both"); map links keep a place's coordinates ("…/@45.8,15.9"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known

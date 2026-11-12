@@ -3973,6 +3973,10 @@ class AgentOrchestrationMixin:
                 )
             except Exception:
                 pass
+            from captain_claw import anonymize_gate_client as _gate_out
+
+            # Brackets back on tokens the model wrote bare, before the history keeps them.
+            full_content = _gate_out.bracket(full_content, _gate_out.tokens_in(messages))
             self._add_session_message("assistant", full_content)
             await self.session_manager.save_session(self.session)
             memory = getattr(self, "memory", None)
