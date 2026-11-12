@@ -383,11 +383,12 @@ class _Resolver:
 _TEXT_TOKEN_RE = re.compile(r"[^\W_]+|[^\w\s]|_")
 _GAP_RE = re.compile(r"[ \t]+|_")
 # Slugs: a known name as links and file names write it — "acme-supply",
-# "Acme+Supply", "acme%20supply", "acmesupply", "Acme_Supply_offer.pdf". Each
+# "Acme+Supply", "acme%20supply", "acmesupply", "Acme_Supply_offer.pdf", and a
+# brand written as a domain, "Plaćanja.hr" → "placanja.hr" in a link's host. Each
 # spelling is an entity of its own, so its token puts back exactly what was
 # there (a link still opens, a file is still found).
 _SLUG_WORD_RE = re.compile(r"%[0-9A-Fa-f]{2}|[^\W_]+")  # an escape ("%20") is a gap, not a word
-_SLUG_GAP_RE = re.compile(r"[_+\-]|%20|[ \t]+")
+_SLUG_GAP_RE = re.compile(r"[_+.\-]|%20|[ \t]+")
 _LINK_RE = re.compile(r"(?:https?://|www\.|mailto:|tel:)[^\s<>\"'\[\]{}|\\^`]+")
 SLUG_MIN_JOINED = 6
 # Name words in a row read as one name, at most ("Ana Marija Horvat").
