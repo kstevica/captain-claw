@@ -599,6 +599,23 @@ the agent sees tokens — never restored.
   arrives, before anything reads it (the reply, the narration, the history, a tool call): a bare token the model was
   shown in that call gets its brackets back; anything else stays as written. The reminder next to the tokens names
   "short progress notes" too.
+* **One company, one number.** A company researched in one run sat in the vault under five tokens: its name,
+  a page heading stuck to it ("Overview Vrtlog d.o.o."), two link spellings ("vrtlog", "Vrtlog") and its registry
+  name ("Vrtlog društvo s ograničenom odgovornošću za računalne i srodne aktivnosti") — the model saw five companies.
+  Now, as the text is anonymized:
+  * a spelling that must come back as it was keeps the company's number with its own place — ⟦ORG_7:2⟧, ⟦ORG_7:3⟧
+    (the token's `:` slot, reserved for gender, now holds a number): in a link or a file name, and a company's
+    other written form (its legal form, its registry name); restoring puts that exact spelling back, bare
+    `ORG_7:2` too, and the bracket repair keeps the place. Spellings are kept with the value (`spellings`, up to
+    40); old spelling entities (`/…` keys) are no longer matched. In ordinary text the name's own token restores
+    the name, as before;
+  * a legal form written out ("društvo s ograničenom odgovornošću", "dioničko društvo", "jednostavno društvo s
+    ograničenom odgovornošću" …) and, after it, a registry's "za …" activity are the company's legal part, so the
+    registry name is the same company;
+  * one or two words stuck in front of a known company — by code's company pattern or in the trusted model's term —
+    stay plain text: "Overview ⟦ORG_7:2⟧".
+  Verified with Claude Haiku as the trusted model on a made-up research page: 3 of 3 runs one number per company,
+  headings plain, everything put back exactly.
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
   with lane "both"); map links keep a place's coordinates ("…/@45.8,15.9"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known

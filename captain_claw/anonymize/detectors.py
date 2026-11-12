@@ -311,11 +311,18 @@ _DISPLAY_NAME_RE = re.compile(
     rf"[\"']?({name_seq(1, 4)})[\"']?[ \t]*<[^<>@\s]+@[^<>\s]+>")
 
 _ORG_WORD = rf"(?:{NAME_WORD}|[{UP}0-9][{UP}{LO}0-9&\-]*)"
-_LEGAL = (r"(?:(?i:j\.d\.o\.o\.|d\.o\.o\.?|d\.d\.|k\.d\.|j\.t\.d\.)|GmbH(?:[ \t]*&[ \t]*Co\.?[ \t]*KG)?|AG|KG"
+# Croatian legal forms written out, as registries name a company ("… društvo s
+# ograničenom odgovornošću za računalne i srodne aktivnosti").
+_LEGAL_LONG = (r"(?i:jednostavno[ \t]+društvo[ \t]+s[ \t]+ograničenom[ \t]+odgovornošću"
+               r"|društvo[ \t]+s[ \t]+ograničenom[ \t]+odgovornošću|dioničko[ \t]+društvo|komanditno[ \t]+društvo"
+               r"|javno[ \t]+trgovačko[ \t]+društvo)")
+_LEGAL = (r"(?:(?i:j\.d\.o\.o\.|d\.o\.o\.?|d\.d\.|k\.d\.|j\.t\.d\.)|" + _LEGAL_LONG + r"|GmbH(?:[ \t]*&[ \t]*Co\.?[ \t]*KG)?|AG|KG"
           r"|Ltd\.?|Limited|LLC|L\.L\.C\.|LLP|Inc\.?|Corp\.?|Corporation|S\.A\.|S\.p\.A\.|S\.r\.l\.|SRL|S\.L\."
           r"|B\.V\.|BV|N\.V\.|Oy|AB|ApS|A/S|plc|PLC|Kft\.?|s\.r\.o\.|Sp\.[ \t]*z[ \t]*o\.o\.|SAS|SARL"
           r"|Pty[ \t]+Ltd\.?|(?i:obrt))")
-LEGAL_SUFFIX_RE = re.compile(rf",?[ \t]+{_LEGAL}$")
+# A name's legal part, to its end — with what a registry adds after a legal
+# form written out ("… odgovornošću za računalne i srodne aktivnosti").
+LEGAL_SUFFIX_RE = re.compile(rf",?[ \t]+(?:{_LEGAL_LONG}(?:[ \t]+za[ \t]+[^\n,;()]{{1,100}})?|{_LEGAL})$")
 _ORG_RE = re.compile(
     rf"(?<![\w])((?:{_ORG_WORD}[ \t]+(?:&[ \t]+)?){{0,4}}{_ORG_WORD}),?[ \t]+{_LEGAL}(?![\w])")
 _ORG_LABEL_RE = re.compile(

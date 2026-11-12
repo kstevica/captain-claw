@@ -1580,11 +1580,10 @@ class TestTokenHistory:
         out = (await anonymize_routes.run_for(BOB, {
             "content": "Tvrtka: Acme Labs d.o.o. — see https://registar.example/tvrtka/acme-labs-d-o-o/",
             "vault": "Deals", "lane": "deterministic"}, actor="person"))["output"]
-        name, slug = re.findall(r"⟦ORG_\d+⟧", out)[:2]
-        assert name != slug
-        added = self._history(slug, "Deals").json()["added"]
-        assert (added["found_by"], added["related"], added["channel"]) == ("known-slug", name, "text")
-        assert self._history(name, "Deals").json()["added"]["found_by"] == "org-label"
+        name, slug = re.findall(r"⟦ORG_\d+(?::\d+)?⟧", out)[:2]
+        assert slug == f"{name[:-1]}:2⟧"  # one company, one number: the link's spelling has its place
+        h = self._history(name, "Deals").json()
+        assert h["added"]["found_by"] == "org-label" and h["uses"][0]["count"] == 2  # both went out under it
 
     async def test_all_kept_a_page_at_a_time_and_gone_with_the_vault(self, gate_env):
         from urllib.parse import quote
@@ -1722,3 +1721,21 @@ class TestBracketsOnTheAnswer:
         r = await agent._complete_with_guards([Message(role="user", content="mail ana@x.hr please")], None,
                                               interaction_label="turn_1")
         assert re.fullmatch(r"Writing to ⟦EMAIL_\d+⟧ now\.", r.content)
+
+
+class TestOneNumberPerCompany:
+    async def test_spellings_are_kept_in_the_vault(self, db, agents):
+        out = (await anonymize_routes.run_for(BOB, {
+            "content": "Tvrtka: Vrtlog d.o.o. — https://x.example/vrtlog/ · Vrtlog d.o.o. again",
+            "vault": "Deals", "lane": "deterministic"}, actor="person"))["output"]
+        assert re.findall(r"⟦ORG_\d+(?::\d+)?⟧", out) == ["⟦ORG_1⟧", "⟦ORG_1:2⟧", "⟦ORG_1⟧"]
+        back = await anonymize_routes.restore_for(BOB, {"content": "see ⟦ORG_1:2⟧ and ORG_1:2", "vault": "Deals"},
+                                                  actor="person")
+        assert back["output"] == "see vrtlog and vrtlog"  # loaded back from the vault, exactly
+        entries = _client().get("/fd/anonymize/vaults/Deals", headers=_bearer(BOB)).json()["entries"]
+        assert entries[0]["spellings"] == ["vrtlog"]
+
+    def test_bracket_repair_keeps_a_spelling_place(self):
+        from captain_claw import anonymize_gate_client as gate
+
+        assert gate.bracket("ORG_7:2 and ORG_7", {"⟦ORG_7⟧"}) == "⟦ORG_7:2⟧ and ⟦ORG_7⟧"

@@ -134,7 +134,11 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
     }
   }
 
-  const values = useMemo(() => new Map((entries || []).map((e) => [e.token, e.original])), [entries])
+  // Token → what it puts back; a spelling's place too (⟦ORG_7:2⟧ → that spelling).
+  const values = useMemo(() => new Map((entries || []).flatMap((e) => [
+    [e.token, e.original] as [string, string],
+    ...(e.spellings || []).map((sp, k) => [`${e.token.slice(0, -1)}:${k + 2}⟧`, sp] as [string, string]),
+  ])), [entries])
 
   const reset = async () => {
     setBusy('reset'); setError('')
@@ -154,7 +158,8 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
     if (!entries) return []
     if (!q) return entries
     return entries.filter((e) => e.token.toLowerCase().includes(q) || e.original.toLowerCase().includes(q)
-      || kindLabel(e.kind).includes(q) || e.forms.some((f) => f.toLowerCase().includes(q)))
+      || kindLabel(e.kind).includes(q) || e.forms.some((f) => f.toLowerCase().includes(q))
+      || (e.spellings || []).some((f) => f.toLowerCase().includes(q)))
   }, [entries, query])
 
   return (
@@ -209,6 +214,13 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
                           <td className="px-3 py-2 text-zinc-200">
                             <div className="break-words">{e.original}</div>
                             {e.forms.length > 0 && <div className="mt-0.5 text-xs text-zinc-500">also: {e.forms.slice(0, 6).join(' · ')}</div>}
+                            {(e.spellings || []).length > 0 && (
+                              <div className="mt-0.5 text-xs text-zinc-500" title="Written like this, these come back exactly — a link, a legal name">
+                                spelled: {(e.spellings || []).slice(0, 8).map((sp, k) => (
+                                  <span key={k} className="mr-2"><span className="font-mono text-zinc-600">:{k + 2}</span> {sp}</span>
+                                ))}
+                              </div>
+                            )}
                           </td>
                           <td className="whitespace-nowrap px-3 py-2 text-right">
                             <button type="button" onClick={() => setOpenToken(openToken === e.token ? '' : e.token)}

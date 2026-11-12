@@ -311,7 +311,8 @@ class VaultStore:
             except Exception:
                 continue  # an entry this key can't open is skipped, never guessed
             entities.append(Entity(r["token"], r["kind"], str(data.get("key") or ""),
-                                   str(data.get("original") or ""), list(data.get("forms") or [])))
+                                   str(data.get("original") or ""), list(data.get("forms") or []),
+                                   spellings=[str(x) for x in data.get("spellings") or []]))
         return VaultState(entities, json.loads(row["counters"] or "{}"))
 
     async def save_run(self, row: dict[str, Any], state: VaultState) -> int:
@@ -326,7 +327,8 @@ class VaultStore:
             raise VaultError(f"a vault holds at most {MAX_ENTRIES_PER_VAULT} values — use another vault")
         for e in to_write:
             payload = f.encrypt(json.dumps(
-                {"key": e.key, "original": e.original, "forms": e.forms}, ensure_ascii=False).encode("utf-8")
+                {"key": e.key, "original": e.original, "forms": e.forms, "spellings": e.spellings},
+                ensure_ascii=False).encode("utf-8")
             ).decode("ascii")
             await db.execute(
                 """INSERT INTO entries (vault_id, token, kind, payload, created_at, updated_at)
@@ -358,6 +360,7 @@ class VaultStore:
         for e in state.entities:
             created, updated = times.get(e.token, (None, None))
             out.append({"token": e.token, "kind": e.kind, "original": e.original, "forms": e.forms,
+                        "spellings": e.spellings,
                         "created_at": created, "updated_at": updated,
                         **stats.get(e.token, {"sent": 0, "restored": 0, "last_sent_at": None,
                                               "last_restored_at": None})})

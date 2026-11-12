@@ -296,7 +296,8 @@ def test_known_names_in_file_names_joined_by_underscores():
     E.anonymize_text("Tvrtka: Acme d.o.o. Name: Ivan Horvat, ivan_horvat@acme.hr", state)
     out = E.anonymize_text("# Acme_-_Agreement_final.docx · Ivan_Horvat_CV.pdf · ivan_horvat@acme.hr", state)[0]
     assert "Acme_" not in out and "Horvat" not in out
-    assert out.startswith("# ⟦ORG_1⟧_-_Agreement_final.docx") and "⟦EMAIL_1⟧" in out  # the email stays one
+    # "Acme" is the company's own name in a file name: its number, spelled as written (⟦ORG_1:2⟧).
+    assert out.startswith("# ⟦ORG_1:2⟧_-_Agreement_final.docx") and "⟦EMAIL_1⟧" in out  # the email stays one
     assert E.anonymize_text("my_var_name = 1", state)[0] == "my_var_name = 1"
 
 
@@ -407,7 +408,8 @@ def test_new_entities_say_what_found_them():
     E.anonymize_text("Vrtlog Labs: ana@x.hr, see https://x.example/vrtlog-labs/", state, opts)
     by = {e.original: e for e in state.entities if e.count}
     assert by["ana@x.hr"].found_by == "email" and by["Vrtlog Labs"].found_by == "extra"
-    assert by["vrtlog-labs"].found_by == "known-slug" and by["vrtlog-labs"].derived_from == by["Vrtlog Labs"].token
+    # A link's spelling is no entity of its own: the company's, with its place.
+    assert "vrtlog-labs" not in by and by["Vrtlog Labs"].spellings == ["vrtlog-labs"]
 
 
 def test_a_context_never_cuts_a_token():
@@ -497,3 +499,27 @@ def test_a_token_written_without_its_brackets_is_put_back():
     edits, n, _u = E.restore_edits(text, state)
     assert E.apply_edits(text, edits) == out and n == 3
     assert E.has_tokens("The ORG_5 page") and not E.has_tokens("HTTP_200 and plain words")
+
+
+def test_one_company_one_number():
+    """A company's other spellings — its legal form, its registry name, a
+    link's lower case — keep its number with their own place (⟦ORG_1:2⟧) and
+    come back exactly; words stuck in front (a page's heading) stay plain."""
+    state = E.VaultState()
+    opts = E.Options(one_word_names=False, extra=(
+        ("VrtLog", "ORG"),
+        ("Vrtlog društvo s ograničenom odgovornošću za računalne i srodne aktivnosti", "ORG"),
+        ("About Vrtlog d.o.o.", "ORG")))
+    text = ("VrtLog makes apps. Overview Vrtlog d.o.o. – profile. Registry: Vrtlog društvo s ograničenom "
+            "odgovornošću za računalne i srodne aktivnosti. About Vrtlog d.o.o. — "
+            "https://x.example/vrtlog/ · https://x.example/Vrtlog/a")
+    out = E.anonymize_text(text, state, opts)[0]
+    assert set(re.findall(r"⟦ORG_(\d+)", out)) == {"1"}  # one company, one number
+    assert "Overview ⟦ORG_1:2⟧" in out and "About ⟦ORG_1:2⟧" in out  # heading words stay plain
+    assert E.restore(out, state)[0] == text
+    org = state.by_token["⟦ORG_1⟧"]
+    assert org.original == "VrtLog" and org.spellings[0] == "Vrtlog d.o.o."
+    assert E.restore("ORG_1:2 · ⟦ORG_1:3⟧ · ⟦ORG_1⟧ · ⟦ORG_1:99⟧", state)[0] == (
+        f"Vrtlog d.o.o. · {org.spellings[1]} · VrtLog · VrtLog")  # an unknown place: the name
+    unrelated = "Erste Novak d.o.o. signed."
+    assert E.anonymize_text(unrelated, state, E.Options(one_word_names=False))[0] == "⟦ORG_2⟧ signed."

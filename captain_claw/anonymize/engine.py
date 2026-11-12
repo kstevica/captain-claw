@@ -26,7 +26,7 @@ from __future__ import annotations
 import bisect
 import re
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from captain_claw.anonymize import detectors as d
@@ -41,9 +41,12 @@ from captain_claw.anonymize.detectors import (
 )
 
 TOKEN_RE = re.compile(
-    r"⟦([A-Z][A-Z0-9_]*?)_(\d{1,6})(?::[a-z]{1,3})?⟧|\[\[([A-Z][A-Z0-9_]*?)_(\d{1,6})\]\]")
+    r"⟦([A-Z][A-Z0-9_]*?)_(\d{1,6})(?::[a-z0-9]{1,3})?⟧|\[\[([A-Z][A-Z0-9_]*?)_(\d{1,6})\]\]")
 MAX_ROUNDS = 3
 MAX_FORMS = 24
+# Exact spellings kept per entity (a link's "vrtlog", a legal form), each
+# with its own place in the token: ⟦ORG_7:2⟧, ⟦ORG_7:3⟧ …
+MAX_SPELLINGS = 40
 _MASK = "\x00"
 
 
@@ -54,7 +57,14 @@ def make_token(kind: str, n: int) -> str:
 # A token a model wrote without its brackets ("The ORG_531 pages …"): put back
 # too, but only when the vault has it — "HTTP_200" or an unknown number stays.
 BARE_TOKEN_RE = re.compile(
-    r"(?<![\w⟦\[])(" + "|".join(sorted({*d.KINDS, "DETAIL"}, key=len, reverse=True)) + r")_(\d{1,6})(?![\w⟧\]])")
+    r"(?<![\w⟦\[])(" + "|".join(sorted({*d.KINDS, "DETAIL"}, key=len, reverse=True))
+    + r")_(\d{1,6})(?::(\d{1,3}))?(?![\w⟧\]])")
+
+
+def token_place(token_text: str) -> str:
+    """The spelling's place in a token as written ("⟦ORG_7:2⟧" → "2"; "" for none)."""
+    i = token_text.find(":")
+    return token_text[i + 1:].rstrip("⟧]") if i != -1 else ""
 
 
 def has_tokens(text: str) -> bool:
@@ -88,6 +98,28 @@ class Entity:
     # for a slug, the token of the name it spells.
     found_by: str = ""
     derived_from: str = ""
+    # Spellings that must come back exactly (stored with the value): one
+    # company, one number — "vrtlog" in a link is ⟦ORG_7:2⟧, not a token
+    # of its own, and restores as "vrtlog", not the name.
+    spellings: list[str] = field(default_factory=list)
+
+    def spelling_token(self, surface: str) -> str:
+        """The token that restores exactly *surface*: this entity's own when
+        it is the value, else ⟦KIND_N:i⟧ with *surface* kept as a spelling."""
+        if surface == self.original:
+            return self.token
+        if surface not in self.spellings:
+            if len(self.spellings) >= MAX_SPELLINGS:
+                return self.token
+            self.spellings.append(surface)
+            self.changed = True
+        return f"{self.token[:-1]}:{self.spellings.index(surface) + 2}⟧"
+
+    def value(self, place: str = "") -> str:
+        """What a token puts back: the spelling at *place* ("2", "3" …), else the value."""
+        if place.isdigit() and 2 <= int(place) < len(self.spellings) + 2:
+            return self.spellings[int(place) - 2]
+        return self.original
 
     def add_form(self, form: str) -> None:
         form = re.sub(r"\s+", " ", form).strip()
@@ -186,7 +218,8 @@ class VaultState:
 
     def snapshot(self) -> "VaultState":
         """A copy to run on without changing this one (a preview pass)."""
-        copies = [Entity(e.token, e.kind, e.key, e.original, list(e.forms)) for e in self.entities]
+        copies = [Entity(e.token, e.kind, e.key, e.original, list(e.forms), spellings=list(e.spellings))
+                  for e in self.entities]
         return VaultState(copies, dict(self.counters))
 
     def add(self, kind: str, key: str, original: str) -> Entity:
@@ -477,6 +510,8 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
     for e in state.entities:
         if e.kind == "PERSON" or (options.kinds is not None and e.kind not in options.kinds):
             continue
+        if e.key.startswith("/"):
+            continue  # a spelling kept as an entity of its own (before spellings had places)
         if e.kind in DIGIT_KINDS:
             digit_keys.setdefault(e.key, e)
         if e.kind == "ORG":
@@ -521,11 +556,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
             out.append((Span(start, end, e.kind, 2, source), e))
 
         def slug(start: int, end: int, base: Entity) -> None:
-            surface = text[start:end]
-            if surface == base.original:
-                emit(start, end, base, "known-slug")
-                return
-            emit(start, end, lambda: _spelling(state, base, surface), "known-slug")
+            emit(start, end, base, "known-slug")  # the spelling gets its place when it is written
 
         if multi or surnames or singles:
             words = [(m.start(), m.end(), m.group(0)) for m in _NAME_TOKEN_RE.finditer(text)
@@ -706,15 +737,38 @@ def _select(text: str, spans: list[Span], blocked: list[tuple[int, int]], keep_f
     return sorted(chosen, key=lambda s: s.start)
 
 
-def _spelling(state: VaultState, base: Entity, surface: str) -> Entity:
-    """*surface* as an entity of its own (key ``/surface``), so its token
-    restores exactly that spelling; noted as a spelling of *base*."""
-    key = "/" + surface
-    got = state.by_key.get((base.kind, key))
-    if got is None:
-        got = state.add(base.kind, key, surface)
-        got.found_by, got.derived_from = "known-slug", base.token
-    return got
+def _org_core(text: str) -> str:
+    return fold(d.LEGAL_SUFFIX_RE.sub("", text).strip())
+
+
+def _org_cores(state: VaultState, extra: tuple[tuple[str, str], ...]) -> set[str]:
+    """The companies known now: the vault's and the ones named for this run."""
+    cores = {_org_core(e.original) for e in state.entities if e.kind == "ORG" and not e.key.startswith("/")}
+    cores |= {_org_core(t) for t, k in extra if k == "ORG"}
+    return {c for c in cores if len(c) >= 4 and c not in d._STOP}
+
+
+def _trim_org_text(value: str, cores: set[str]) -> str:
+    """*value* without one or two words stuck in front of a known company
+    ("Overview Acme d.o.o." → "Acme d.o.o."); as it is otherwise."""
+    if not cores or _org_core(value) in cores:
+        return value
+    words = list(re.finditer(r"\S+", value))
+    for k in (1, 2):
+        if len(words) <= k:
+            break
+        rest = value[words[k].start():]
+        if _org_core(rest) in cores:
+            return rest
+    return value
+
+
+def _trim_org_span(text: str, sp: Span, cores: set[str]) -> Span:
+    value = text[sp.start:sp.end]
+    trimmed = _trim_org_text(value, cores)
+    if trimmed == value:
+        return sp
+    return Span(sp.end - len(trimmed), sp.end, sp.kind, sp.priority, sp.source)
 
 
 def _mask_tokens(text: str) -> tuple[str, list[tuple[int, int]]]:
@@ -753,6 +807,11 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
     texts = [s.text for s in segments]
     hints = [s.hint for s in segments]
     edits: list[list[tuple[int, int, str]]] = [[] for _ in segments]
+    # A company named with words stuck in front ("Overview Acme d.o.o." from a
+    # page's heading) is the known company; the words stay plain text.
+    cores = _org_cores(state, options.extra)
+    options = replace(options, extra=tuple(
+        (_trim_org_text(t, cores - {_org_core(t)}), k) if k == "ORG" else (t, k) for t, k in options.extra))
     # Names and companies the caller (or the trusted model) named are known
     # from the start, so their other forms are found too ("Ana Kovač" also
     # catches "Ane Kovač"). Stored only if they turn up.
@@ -783,6 +842,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
                 if h is not None and (options.kinds is None or h.kind in options.kinds):
                     spans.append(h)
             spans.extend(_extra_spans(masked, options.extra))
+            spans = [_trim_org_span(masked, sp, cores) if sp.kind == "ORG" else sp for sp in spans]
             masks.append(token_ranges)
             found.append(_select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep)))
 
@@ -810,6 +870,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             for sp in found[i]:
                 spans.append(sp)
                 by_span[(sp.start, sp.end)] = pending[(i, sp.start, sp.end)]
+            slug_at: set[tuple[int, int]] = set()
             for sp, e in known:
                 if options.kinds is not None and e.kind not in options.kinds:
                     continue
@@ -818,6 +879,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
                     # The same words as a name found otherwise, but spelled as a link or a
                     # file name writes them: the token must put back that spelling.
                     by_span[(sp.start, sp.end)] = e
+                    slug_at.add((sp.start, sp.end))
                 else:
                     by_span.setdefault((sp.start, sp.end), e)
             final = _select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep))
@@ -833,19 +895,23 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             new_edits = []
             for sp in final:
                 e = by_span[(sp.start, sp.end)]
-                if links and text[sp.start:sp.end] != e.original \
-                        and any(a <= sp.start and sp.end <= b for a, b in links):
-                    # Inside a link a token puts back exactly what was there
-                    # ("?first=Ivan" stays "Ivan", not the full name it stood for).
-                    e = _spelling(state, e, text[sp.start:sp.end])
+                surface = text[sp.start:sp.end]
+                # A spelling that must come back as it was keeps the entity's
+                # number with its own place (⟦ORG_7:2⟧): in a link or a file
+                # name ("?first=Ivan" never gets the full name), and a
+                # company's other form ("Acme d.o.o.", its registry name).
+                exact = surface != e.original and (
+                    (sp.start, sp.end) in slug_at
+                    or any(a <= sp.start and sp.end <= b for a, b in links)
+                    or (e.kind == "ORG" and fold(surface) != fold(e.original)))
+                token = e.spelling_token(surface) if exact else e.token
                 if e.new and not e.found_by:
                     e.found_by = sp.source
-                new_edits.append((_to_original(edits[i], sp.start), _to_original(edits[i], sp.end), e.token))
-                surface = text[sp.start:sp.end]
-                if e.kind != "PERSON" or len(_name_words(surface)) > 1:
+                new_edits.append((_to_original(edits[i], sp.start), _to_original(edits[i], sp.end), token))
+                if not exact and (e.kind != "PERSON" or len(_name_words(surface)) > 1):
                     e.add_form(surface)
                 pieces.append(text[pos:sp.start])
-                pieces.append(e.token)
+                pieces.append(token)
                 pos = sp.end
                 e.count += 1
                 if e.token not in used:
@@ -900,7 +966,7 @@ def restore(text: str, state: VaultState) -> tuple[str, int, list[str]]:
                 unknown.append(m.group(0))
             return m.group(0)
         count += 1
-        return e.original
+        return e.value(token_place(m.group(0)))
 
     def bare(m: re.Match[str]) -> str:
         nonlocal count
@@ -908,7 +974,7 @@ def restore(text: str, state: VaultState) -> tuple[str, int, list[str]]:
         if e is None:
             return m.group(0)
         count += 1
-        return e.original
+        return e.value(m.group(3) or "")
 
     return BARE_TOKEN_RE.sub(bare, TOKEN_RE.sub(sub, str(text or ""))), count, unknown
 
@@ -966,11 +1032,11 @@ def restore_edits(text: str, state: VaultState) -> tuple[list[tuple[int, int, st
             if m.group(0) not in unknown:
                 unknown.append(m.group(0))
             continue
-        out.append((m.start(), m.end(), e.original))
+        out.append((m.start(), m.end(), e.value(token_place(m.group(0)))))
     for m in BARE_TOKEN_RE.finditer(str(text or "")):
         e = state.by_token.get(make_token(m.group(1), int(m.group(2))))
         if e is not None:
-            out.append((m.start(), m.end(), e.original))
+            out.append((m.start(), m.end(), e.value(m.group(3) or "")))
     out.sort()
     return out, len(out), unknown
 
