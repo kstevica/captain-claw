@@ -551,3 +551,16 @@ def test_one_person_one_number_in_a_text():
     later = E.anonymize_text("Vidović wrote again.", state, E.Options(one_word_names=False,
                                                                     extra=(("Vidović", "PERSON"),)))[0]
     assert not later.startswith("⟦PERSON_1")  # another text: no link
+
+
+def test_a_company_in_a_file_path_or_name():
+    """A file path or a file name counts as a link: a known company's one-word
+    name in it — a saved picture named after its alt text — is found and
+    comes back exactly."""
+    state = E.VaultState()
+    opts = E.Options(one_word_names=False, extra=(("Vrtlog", "ORG"),))
+    text = ("1. saved/media/c4d4/web-images/vrtlog-headquarters-in-zagreb-052249fa.jpg — 509×339\n"
+            "Logo: VRTLOG_logo.png, photo vrtlog.jpg; Vrtlog is in Zagreb.")
+    out = E.anonymize_text(text, state, opts)[0]
+    assert "vrtlog" not in out.lower()
+    assert set(re.findall(r"⟦ORG_(\d+)", out)) == {"1"} and E.restore(out, state)[0] == text

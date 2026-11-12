@@ -435,6 +435,15 @@ _GAP_RE = re.compile(r"[ \t]+|_")
 _SLUG_WORD_RE = re.compile(r"%[0-9A-Fa-f]{2}|[^\W_]+")  # an escape ("%20") is a gap, not a word
 _SLUG_GAP_RE = re.compile(r"[_+.\-]|%20|[ \t]+")
 _LINK_RE = re.compile(r"(?:https?://|www\.|mailto:|tel:)[^\s<>\"'\[\]{}|\\^`]+")
+# A file path or a file name counts as a link: "saved/media/…/acme-headquarters.jpg",
+# "ACME_logo.png" — a name in it must come back exactly, and one word is enough.
+_PATH_RE = re.compile(r"(?<![\w/.~%+-])(?:[\w.~%+-]+/)+[\w.~%+-]+"
+                      r"|(?<![\w/.~%+-])[\w~%+-]+(?:[._-][\w~%+-]+)*\.[A-Za-z][A-Za-z0-9]{1,4}(?![\w.])")
+
+
+def _link_ranges(text: str) -> list[tuple[int, int]]:
+    """Where links, file paths and file names are in *text*."""
+    return [(m.start(), m.end()) for rx in (_LINK_RE, _PATH_RE) for m in rx.finditer(text)]
 SLUG_MIN_JOINED = 6
 # Name words in a row read as one name, at most ("Ana Marija Horvat").
 MAX_NAME_RUN = 4
@@ -660,7 +669,7 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                     emit(pos, end, e, "known")
 
         if slug_multi or slug_joined or slug_single:
-            links = [(m.start(), m.end()) for m in _LINK_RE.finditer(text)] if slug_single else []
+            links = _link_ranges(text) if slug_single else []
             words = [(m.start(), m.end(), _slug_fold(m.group(0))) for m in _SLUG_WORD_RE.finditer(text)
                      if not m.group(0).startswith("%")]
             for i, (start, end, w) in enumerate(words):
@@ -946,7 +955,7 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             if not final:
                 new_texts.append(text)
                 continue
-            links = [(m.start(), m.end()) for m in _LINK_RE.finditer(masked)]
+            links = _link_ranges(masked)
             changed = True
             if round_no > 1:
                 fixed += len(final)
