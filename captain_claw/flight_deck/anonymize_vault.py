@@ -22,9 +22,9 @@ from where: the chat, a tool result, a file), every time it went out in a new
 text (where to, which model) and every time it came back and was put back
 (the chat, a tool's arguments, Telegram …), each with a short context cut from
 the tokenized text — encrypted with the vault key like the values. Sending the
-same text again (a conversation's history, every turn) is not a new use. The
-newest ``USES_PER_TOKEN`` sends and restores per token are kept, for
-``USES_MAX_AGE`` at most; the counters (``token_stats``) keep counting.
+same text again (a conversation's history, every turn) is not a new use. Every
+send and restore is kept for ``USES_MAX_AGE`` (no limit per token); what added a
+token always stays, and the counters (``token_stats``) keep counting.
 
 Without the ``cryptography`` package nothing is stored: reversible runs fail
 (:class:`fd_crypto.CryptoUnavailable`) and only ``one_way`` works.
@@ -122,8 +122,8 @@ CREATE TABLE IF NOT EXISTS token_stats (
 );
 """
 
-USES_PER_TOKEN = 200          # sends and restores kept per token (its "added" always stays)
-USES_MAX_AGE = 180 * 86400.0  # older sends and restores are dropped
+USES_MAX_AGE = 180 * 86400.0  # older sends and restores are dropped (what added a token always stays)
+HISTORY_PAGE = 100            # sends and restores per page of a token's history
 _PRUNE_EVERY = 3600.0
 DIRECTIONS = ("added", "out", "back")
 
@@ -457,11 +457,6 @@ class VaultStore:
                        last_sent_at = COALESCE(excluded.last_sent_at, last_sent_at),
                        last_restored_at = COALESCE(excluded.last_restored_at, last_restored_at)""",
                 (vid, u.token, int(out), int(not out), now if out else None, None if out else now))
-            await db.execute(
-                """DELETE FROM token_uses WHERE vault_id=? AND token=? AND direction!='added' AND id <= (
-                       SELECT id FROM token_uses WHERE vault_id=? AND token=? AND direction!='added'
-                       ORDER BY id DESC LIMIT 1 OFFSET ?)""",
-                (vid, u.token, vid, u.token, USES_PER_TOKEN))
         if now - self._pruned.get(vid, 0.0) > _PRUNE_EVERY:
             self._pruned[vid] = now
             await db.execute("DELETE FROM token_uses WHERE vault_id=? AND direction!='added' AND at < ?",
@@ -484,27 +479,34 @@ class VaultStore:
                 context = f.decrypt(r["context"].encode("ascii")).decode("utf-8")
             except Exception:  # noqa: BLE001 — a line this key can't open shows no context
                 context = ""
-        return {"at": r["at"], "direction": r["direction"], "channel": r["channel"], "actor": r["actor"],
+        return {"id": r["id"], "at": r["at"], "direction": r["direction"], "channel": r["channel"],
+                "actor": r["actor"],
                 "label": r["label"], "found_by": r["found_by"], "related": r["related"], "model": r["model"],
                 "count": r["count"], "context": context}
 
-    async def token_history(self, row: dict[str, Any], token: str, limit: int = USES_PER_TOKEN) -> dict[str, Any]:
-        """A token's history: what added it, its counters, and its newest
-        sends and restores (contexts decrypted — tokens, no real values)."""
+    async def token_history(self, row: dict[str, Any], token: str, limit: int = HISTORY_PAGE,
+                            before: int | None = None) -> dict[str, Any]:
+        """A token's history: what added it, its counters, and a page of its
+        sends and restores, newest first — older than line *before*, when
+        given (contexts decrypted — tokens, no real values). ``more``: an
+        older page is there."""
         f = self._fernet(row)
         db = await self._conn()
         cur = await db.execute(
             "SELECT * FROM token_uses WHERE vault_id=? AND token=? AND direction='added' ORDER BY id LIMIT 1",
             (row["id"], token))
         added = await cur.fetchone()
+        limit = max(1, min(int(limit), 1000))
         cur = await db.execute(
-            "SELECT * FROM token_uses WHERE vault_id=? AND token=? AND direction!='added' ORDER BY id DESC LIMIT ?",
-            (row["id"], token, max(1, min(limit, USES_PER_TOKEN))))
-        uses = [self._use_view(f, r) for r in await cur.fetchall()]
+            """SELECT * FROM token_uses WHERE vault_id=? AND token=? AND direction!='added' AND id < ?
+               ORDER BY id DESC LIMIT ?""",
+            (row["id"], token, before if before is not None else 2**62, limit + 1))
+        rows = await cur.fetchall()
+        uses = [self._use_view(f, r) for r in rows[:limit]]
         stats = (await self.token_stats(row)).get(token, {"sent": 0, "restored": 0, "last_sent_at": None,
                                                           "last_restored_at": None})
         return {"token": token, "added": self._use_view(f, added) if added else None, "stats": stats,
-                "uses": uses}
+                "uses": uses, "more": len(rows) > limit}
 
 
 def _token_number(token: str) -> int:

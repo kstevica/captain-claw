@@ -104,6 +104,20 @@ export function TokenHistoryPanel({ vaultId, token, values }: { vaultId: string;
   const [h, setH] = useState<TokenHistory | null>(null)
   const [error, setError] = useState('')
   const [all, setAll] = useState(false)
+  const [loading, setLoading] = useState(false)
+
+  const older = async () => {
+    if (!h || !h.uses.length) return
+    setLoading(true)
+    try {
+      const page = await anonymizeApi.tokenHistory(vaultId, token, h.uses[h.uses.length - 1].id)
+      setH({ ...h, uses: [...h.uses, ...page.uses], more: page.more })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Couldn't load more")
+    } finally {
+      setLoading(false)
+    }
+  }
 
   useEffect(() => {
     let live = true
@@ -129,7 +143,12 @@ export function TokenHistoryPanel({ vaultId, token, values }: { vaultId: string;
       </ul>
       {h.uses.length > uses.length && (
         <button type="button" onClick={() => setAll(true)} className="text-xs font-medium text-violet-600 hover:underline dark:text-violet-400">
-          Show all {h.uses.length}
+          Show {h.uses.length - uses.length} more
+        </button>
+      )}
+      {h.uses.length === uses.length && h.more && (
+        <button type="button" onClick={older} disabled={loading} className="text-xs font-medium text-violet-600 hover:underline disabled:opacity-60 dark:text-violet-400">
+          {loading ? 'Loading…' : 'Load older'}
         </button>
       )}
       {!h.uses.length && h.added && <p className="text-xs text-zinc-500">Not sent or put back since.</p>}

@@ -735,16 +735,19 @@ async def anonymize_vault_events(vault: str, user: dict = Depends(get_current_us
 
 
 @router.get("/vaults/{vault}/tokens/{token}")
-async def anonymize_token_history(vault: str, token: str, user: dict = Depends(get_current_user)) -> dict[str, Any]:
+async def anonymize_token_history(vault: str, token: str, limit: int = av.HISTORY_PAGE, before: int | None = None,
+                                  user: dict = Depends(get_current_user)) -> dict[str, Any]:
     """One token's history: what added it, and when it went out and came back
-    (contexts as they were sent — tokens, no real values)."""
+    (contexts as they were sent — tokens, no real values), newest first, a
+    page at a time (*before*: the oldest line's ``id`` of the page shown)."""
     m = engine.TOKEN_RE.fullmatch(token.strip())
     if m is None:
         raise HTTPException(status_code=422, detail="token looks like ⟦PERSON_1⟧")
     row = await _own(user, vault)
     try:
         return await av.store().token_history(row, engine.make_token(m.group(1) or m.group(3),
-                                                                     int(m.group(2) or m.group(4))))
+                                                                     int(m.group(2) or m.group(4))),
+                                              limit=limit, before=before)
     except fd_crypto.CryptoUnavailable as exc:
         raise _store_error(exc) from None
 

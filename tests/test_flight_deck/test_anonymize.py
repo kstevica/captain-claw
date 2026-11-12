@@ -1586,10 +1586,11 @@ class TestTokenHistory:
         assert (added["found_by"], added["related"], added["channel"]) == ("known-slug", name, "text")
         assert self._history(name, "Deals").json()["added"]["found_by"] == "org-label"
 
-    async def test_kept_newest_counted_all_and_gone_with_the_vault(self, gate_env, monkeypatch):
+    async def test_all_kept_a_page_at_a_time_and_gone_with_the_vault(self, gate_env):
+        from urllib.parse import quote
+
         from captain_claw import anonymize_gate_client as gate
 
-        monkeypatch.setattr(anonymize_vault, "USES_PER_TOKEN", 3)
         _gate(_client(), coverage="chat")
         d = await gate.decision(_agent("anthropic", "claude-x", ""))
         (out,) = await gate.anonymize_texts(d, ["mail ana@x.hr"], "message")
@@ -1597,8 +1598,14 @@ class TestTokenHistory:
         for i in range(5):
             await gate.restore_text(d, f"note {i}: {token}", "telegram")
         h = self._history(token).json()
-        assert len(h["uses"]) == 3 and h["uses"][0]["context"] == f"note 4: {token}"
+        assert len(h["uses"]) == 6 and not h["more"]  # no limit per token: every line kept
+        assert h["uses"][0]["context"] == f"note 4: {token}"
         assert h["stats"] == {**h["stats"], "sent": 1, "restored": 5} and h["added"] is not None
+        url = f"/fd/anonymize/vaults/Chat/tokens/{quote(token)}"
+        first = _client().get(f"{url}?limit=4", headers=_bearer(BOB)).json()
+        rest = _client().get(f"{url}?limit=4&before={first['uses'][-1]['id']}", headers=_bearer(BOB)).json()
+        assert first["more"] and not rest["more"]
+        assert [u["id"] for u in first["uses"] + rest["uses"]] == [u["id"] for u in h["uses"]]
         raw = _client().get("/fd/anonymize/vaults/Chat", headers=_bearer(BOB)).json()["entries"]
         assert next(e for e in raw if e["token"] == token)["restored"] == 5
         assert self._history(token, uid=ALICE).status_code == 404  # only the vault's person

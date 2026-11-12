@@ -587,9 +587,10 @@ Every token keeps a history in its vault (`token_uses`, `token_stats` in `anonym
   not noted; the same text twice is noted once.
 
 A context is cut (80 characters each side, never through a token) from the tokenized text — what went out,
-or what the model wrote — never from the original, and is stored encrypted with the vault key anyway. The
-newest 200 sends and restores per token are kept, for 180 days at most; the counters keep counting, and
-what added it always stays. Deleting a vault deletes its history. The person sees it in Anonymize → Vaults
+or what the model wrote — never from the original, and is stored encrypted with the vault key anyway. Every
+send and restore is kept for 180 days (no limit per token — to be watched in real use: a much-used token
+gathers a line per new text), what added a token always stays, and deleting a vault deletes its history.
+The history is read a page (100 lines) at a time. The person sees it in Anonymize → Vaults
 → a vault → *Show the real values*: each token shows ↑ sends and ↓ restores, and opens to its history;
 hovering a token in a context shows its real value. `GET /fd/anonymize/vaults/{vault}/tokens/{token}`
 returns it (the vault's person only).
