@@ -6014,7 +6014,8 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
         _restore_for = speaker_id if speaker_id and (not _agent_owner or _agent_owner == speaker_id) else ""
     else:
         _restore_for = str(_LOCAL_USER["id"])
-    restorer = anonymize_chat.ChatRestorer(_restore_for)
+    restorer = anonymize_chat.ChatRestorer(
+        _restore_for, agent=agent[len("proc-"):] if agent.startswith("proc-") else "")
 
     await ws.accept()
     # Auto-resolve auth token if the caller didn't provide one — only for the

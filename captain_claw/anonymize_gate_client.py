@@ -86,6 +86,7 @@ class Decision:
     lane: str = "deterministic"
     chat: bool = False  # the whole chat, not chosen sources
     model: str = ""  # the trusted model that looks too (lane "both"), for the status line
+    agent_model: str = ""  # the agent's own model ("provider/model"): where texts go, for the tokens' history
 
     def covers(self, name: str, arguments: dict[str, Any]) -> bool:
         if self.active and self.chat:
@@ -183,7 +184,7 @@ async def decision(agent: Any) -> Decision | None:
             d = Decision(bool(data.get("active")), frozenset(data.get("groups") or ()),
                          list(data.get("folders") or []), str(data.get("vault") or G.GATE_VAULT),
                          str(data.get("lane") or "deterministic"), bool(data.get("chat")),
-                         str(data.get("model") or ""))
+                         str(data.get("model") or ""), "/".join(x for x in (provider, model) if x))
     except Exception as exc:  # noqa: BLE001 — keep the last answer
         log.debug("Privacy gate: decision unavailable", error=type(exc).__name__)
         return hit[1] if hit and hit[1].active else None
@@ -223,9 +224,16 @@ async def _post(path: str, body: dict[str, Any]) -> dict[str, Any]:
     return resp.json()
 
 
-async def anonymize(d: Decision, text: str) -> str:
+def _why(d: Decision, purpose: str) -> dict[str, str]:
+    """What the tokens' history notes about a call: why it was made, and the
+    model the text goes to (or, a restore, came from)."""
+    return {"purpose": purpose[:120], "to_model": d.agent_model}
+
+
+async def anonymize(d: Decision, text: str, purpose: str = "") -> str:
     data = await _post("/fd/anonymize/agent/run", {
-        "content": text, "format": "text", "vault": d.vault, "lane": d.lane, "mode": "reversible", "source": "gate"})
+        "content": text, "format": "text", "vault": d.vault, "lane": d.lane, "mode": "reversible", "source": "gate",
+        **_why(d, purpose)})
     return str(data.get("output") or "")
 
 
@@ -235,8 +243,9 @@ async def gate_result(d: Decision, name: str, result: Any) -> Any:
     from captain_claw.tools.registry import ToolResult
 
     try:
-        content = await anonymize(d, result.content) if (result.content or "").strip() else result.content
-        error = await anonymize(d, result.error) if (result.error or "").strip() else result.error
+        purpose = f"tool:{name}"
+        content = await anonymize(d, result.content, purpose) if (result.content or "").strip() else result.content
+        error = await anonymize(d, result.error, purpose) if (result.error or "").strip() else result.error
     except Exception as exc:  # noqa: BLE001 — fail closed
         log.warning("Privacy gate: result withheld", tool=name, error=type(exc).__name__)
         return ToolResult(success=False, error=(
@@ -248,7 +257,7 @@ async def gate_result(d: Decision, name: str, result: Any) -> Any:
     return result.model_copy(update={"content": content, "error": error})
 
 
-async def restore_args(d: Decision, arguments: dict[str, Any]) -> tuple[dict[str, Any], int]:
+async def restore_args(d: Decision, arguments: dict[str, Any], purpose: str = "") -> tuple[dict[str, Any], int]:
     """*arguments* with tokens put back in every string the agent wrote (not
     the runtime's own ``_…`` entries); and how many strings changed."""
     changed = 0
@@ -258,7 +267,8 @@ async def restore_args(d: Decision, arguments: dict[str, Any]) -> tuple[dict[str
         if isinstance(value, str):
             if not TOKEN_RE.search(value):
                 return value
-            data = await _post("/fd/anonymize/agent/restore", {"content": value, "format": "text", "vault": d.vault})
+            data = await _post("/fd/anonymize/agent/restore", {"content": value, "format": "text", "vault": d.vault,
+                                                                "source": "gate", **_why(d, purpose)})
             out = str(data.get("output") or value)
             if out != value:
                 changed += 1
@@ -316,7 +326,7 @@ def known(text: str) -> str | None:
     return hit
 
 
-async def anonymize_texts(d: Decision, texts: list[str]) -> list[str]:
+async def anonymize_texts(d: Decision, texts: list[str], purpose: str = "") -> list[str]:
     """Several texts in one call (a JSON list): one engine run, same tokens."""
     out: list[str] = []
     batch: list[str] = []
@@ -328,7 +338,7 @@ async def anonymize_texts(d: Decision, texts: list[str]) -> list[str]:
             return
         data = await _post("/fd/anonymize/agent/run", {
             "content": json.dumps(batch, ensure_ascii=False), "format": "json", "vault": d.vault,
-            "lane": d.lane, "mode": "reversible", "source": "gate-chat"})
+            "lane": d.lane, "mode": "reversible", "source": "gate-chat", **_why(d, purpose)})
         got = json.loads(str(data.get("output") or "[]"))
         if not isinstance(got, list) or len(got) != len(batch):
             raise GateFailed("Flight Deck returned a different number of texts")
@@ -364,7 +374,7 @@ async def anonymize_user_text(d: Decision, text: str) -> str:
 
 
 async def _anonymize_new(d: Decision, text: str) -> str:
-    (out,) = await anonymize_texts(d, [text])
+    (out,) = await anonymize_texts(d, [text], "message")
     remember(out, text)
     return out
 
@@ -376,7 +386,7 @@ def _settled(key: str, fut: asyncio.Future[str]) -> None:
 
 
 async def anonymize_messages(agent: Any, d: Decision, messages: list[Any],
-                             on_work: Any = None) -> list[Any]:
+                             on_work: Any = None, purpose: str = "") -> list[Any]:
     """*messages* (llm ``Message``) as the model may see them: every text not
     seen yet goes to Flight Deck (in one call); the session's history is
     rewritten to the tokens too, so it keeps them. Pictures pass as they are.
@@ -395,7 +405,8 @@ async def anonymize_messages(agent: Any, d: Decision, messages: list[Any],
         if on_work is not None:
             on_work(len(todo))
         originals = list(todo.values())
-        for original, anonymized in zip(originals, await anonymize_texts(d, originals), strict=True):
+        for original, anonymized in zip(originals, await anonymize_texts(d, originals, purpose or "model call"),
+                                        strict=True):
             remember(anonymized, original)
     out = []
     for m in messages:
@@ -442,11 +453,12 @@ def _rewrite_history(agent: Any) -> None:
                 msg["content"] = clean
 
 
-async def restore_text(d: Decision, text: str) -> str:
+async def restore_text(d: Decision, text: str, purpose: str = "") -> str:
     """*text* with the real values back (for the person: their Telegram chat)."""
     if not TOKEN_RE.search(text or ""):
         return text
-    data = await _post("/fd/anonymize/agent/restore", {"content": text, "format": "text", "vault": d.vault})
+    data = await _post("/fd/anonymize/agent/restore", {"content": text, "format": "text", "vault": d.vault,
+                                                        "source": "gate", **_why(d, purpose)})
     return str(data.get("output") or text)
 
 

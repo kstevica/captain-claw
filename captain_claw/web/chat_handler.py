@@ -1262,7 +1262,7 @@ async def _naming_input(
     earlier = [hit for p in recent_prompts if (hit := _gate.known(p)) is not None]
 
     async def restore(name: str) -> str:
-        return await _gate.restore_text(gate, name)
+        return await _gate.restore_text(gate, name, "task-name")
 
     return clean, earlier, restore
 

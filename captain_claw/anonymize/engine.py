@@ -70,6 +70,12 @@ class Entity:
     new: bool = False
     changed: bool = False
     count: int = 0
+    # Where a new entity came from (a run's bookkeeping, not stored with the
+    # value): the finder that first matched it ("email", "oib-label", "ner",
+    # "extra" — the trusted model or the caller's list — "known-slug"), and
+    # for a slug, the token of the name it spells.
+    found_by: str = ""
+    derived_from: str = ""
 
     def add_form(self, form: str) -> None:
         form = re.sub(r"\s+", " ", form).strip()
@@ -494,8 +500,15 @@ def _known_spans_finder(state: VaultState, options: Options) -> Callable[[str], 
                 emit(start, end, base, "known-slug")
                 return
             key = "/" + surface
-            emit(start, end, lambda: state.by_key.get((base.kind, key)) or state.add(base.kind, key, surface),
-                 "known-slug")
+
+            def make() -> Entity:
+                got = state.by_key.get((base.kind, key))
+                if got is None:
+                    got = state.add(base.kind, key, surface)
+                    got.found_by, got.derived_from = "known-slug", base.token
+                return got
+
+            emit(start, end, make, "known-slug")
 
         if multi or surnames or singles:
             words = [(m.start(), m.end(), m.group(0)) for m in _NAME_TOKEN_RE.finditer(text)
@@ -669,7 +682,9 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
     # catches "Ane Kovač"). Stored only if they turn up.
     for term, kind in options.extra:
         if kind in ("PERSON", "ORG") and len(term.strip()) >= 2:
-            resolver.resolve(kind, term.strip())
+            e = resolver.resolve(kind, term.strip())
+            if e.new and not e.found_by:
+                e.found_by = "extra"
     used: dict[str, Entity] = {}
     order: list[str] = []
     fixed = 0
@@ -741,6 +756,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             new_edits = []
             for sp in final:
                 e = by_span[(sp.start, sp.end)]
+                if e.new and not e.found_by:
+                    e.found_by = sp.source
                 new_edits.append((_to_original(edits[i], sp.start), _to_original(edits[i], sp.end), e.token))
                 surface = text[sp.start:sp.end]
                 if e.kind != "PERSON" or len(_name_words(surface)) > 1:

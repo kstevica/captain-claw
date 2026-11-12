@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react'
-import { Vault as VaultIcon, Search, Trash2, Save, History, Eye, EyeOff } from 'lucide-react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
+import { Vault as VaultIcon, Search, Trash2, Save, History, Eye, EyeOff, ChevronDown, ChevronRight } from 'lucide-react'
 import { anonymizeApi, type Vault, type VaultEntry, type VaultEvent } from '../../services/anonymizeApi'
 import { Card, Button, Dialog, EmptyState, Field, Notice, Segmented, Sheet, inputCls } from '../console/parts'
 import { kindLabel, kindTone, when } from './anonFormat'
+import { TokenHistoryPanel } from './TokenHistoryPanel'
 
 // The person's vaults: one per case. Opening one shows the real values behind
 // its tokens (for this person only — every view is logged), and lets them
@@ -72,6 +73,7 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
   const [events, setEvents] = useState<VaultEvent[] | null>(null)
   const [query, setQuery] = useState('')
   const [shown, setShown] = useState(false)
+  const [openToken, setOpenToken] = useState('')
   const [name, setName] = useState(vault.name)
   const [expiry, setExpiry] = useState<ExpiryChoice>(vault.expires_at ? 'keep' : 'never')
   const expiryOptions = [
@@ -131,6 +133,8 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
     }
   }
 
+  const values = useMemo(() => new Map((entries || []).map((e) => [e.token, e.original])), [entries])
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
     if (!entries) return []
@@ -182,15 +186,33 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
                 <table className="w-full text-sm">
                   <tbody className="divide-y divide-zinc-800/80">
                     {filtered.map((e) => (
-                      <tr key={e.token} className="align-top">
-                        <td className="whitespace-nowrap px-3 py-2">
-                          <span className={`rounded px-1 font-mono text-xs ${kindTone(e.kind)}`}>{e.token}</span>
-                        </td>
-                        <td className="px-3 py-2 text-zinc-200">
-                          <div className="break-words">{e.original}</div>
-                          {e.forms.length > 0 && <div className="mt-0.5 text-xs text-zinc-500">also: {e.forms.slice(0, 6).join(' · ')}</div>}
-                        </td>
-                      </tr>
+                      <Fragment key={e.token}>
+                        <tr className="align-top">
+                          <td className="whitespace-nowrap px-3 py-2">
+                            <span className={`rounded px-1 font-mono text-xs ${kindTone(e.kind)}`}>{e.token}</span>
+                          </td>
+                          <td className="px-3 py-2 text-zinc-200">
+                            <div className="break-words">{e.original}</div>
+                            {e.forms.length > 0 && <div className="mt-0.5 text-xs text-zinc-500">also: {e.forms.slice(0, 6).join(' · ')}</div>}
+                          </td>
+                          <td className="whitespace-nowrap px-3 py-2 text-right">
+                            <button type="button" onClick={() => setOpenToken(openToken === e.token ? '' : e.token)}
+                              title="What added it, and every time it went out to a model and came back"
+                              className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200">
+                              <span className="text-amber-400">↑{e.sent || 0}</span>
+                              <span className="text-sky-400">↓{e.restored || 0}</span>
+                              {openToken === e.token ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
+                            </button>
+                          </td>
+                        </tr>
+                        {openToken === e.token && (
+                          <tr>
+                            <td colSpan={3} className="bg-zinc-950/40 px-3 pb-3 pt-1">
+                              <TokenHistoryPanel vaultId={vault.id} token={e.token} values={values} />
+                            </td>
+                          </tr>
+                        )}
+                      </Fragment>
                     ))}
                   </tbody>
                 </table>
