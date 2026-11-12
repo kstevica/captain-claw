@@ -856,7 +856,7 @@ class AgentGuardMixin:
 
     @staticmethod
     def _has_tokens(arguments: dict[str, Any]) -> bool:
-        from captain_claw.anonymize.engine import TOKEN_RE
+        from captain_claw.anonymize.engine import has_tokens
 
-        return any(not k.startswith("_") and TOKEN_RE.search(json.dumps(v, ensure_ascii=False))
+        return any(not k.startswith("_") and has_tokens(json.dumps(v, ensure_ascii=False))
                    for k, v in arguments.items())

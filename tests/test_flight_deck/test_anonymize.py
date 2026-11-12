@@ -1651,3 +1651,29 @@ class TestVaultReset:
         assert d.epoch == r["reset_at"] and gate.known("cached ana@x.hr") is None  # … and forgets what it anonymized
         (again,) = await gate.anonymize_texts(d, ["mail ana@x.hr"], "message")
         assert re.search(r"⟦EMAIL_\d+⟧", again).group(0) not in old
+
+
+class TestBareTokens:
+    async def test_the_chat_and_the_agent_put_back_a_token_without_brackets(self, gate_env):
+        import asyncio
+
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.flight_deck import anonymize_chat
+
+        anonymize_chat.reset_for_tests()
+        _gate(_client(), coverage="chat")
+        d = await gate.decision(_agent("anthropic", "claude-x", ""))
+        (out,) = await gate.anonymize_texts(d, ["mail ana@x.hr"], "message")
+        bare = re.search(r"⟦(EMAIL_\d+)⟧", out).group(1)
+        r = anonymize_chat.ChatRestorer(BOB, agent="bob-bot")
+        frame = json.dumps({"type": "narration", "content": f"Writing to {bare} now."})
+        assert json.loads(await r.frame(frame))["content"] == "Writing to ana@x.hr now."
+        await asyncio.gather(*list(anonymize_chat._TASKS))
+        from urllib.parse import quote
+
+        h = _client().get(f"/fd/anonymize/vaults/Chat/tokens/{quote('⟦' + bare + '⟧')}", headers=_bearer(BOB)).json()
+        assert [u["label"] for u in h["uses"] if u["direction"] == "back"] == ["narration"]
+        assert await gate.restore_text(d, f"Sent to {bare}.", "telegram") == "Sent to ana@x.hr."
+        args, n = await gate.restore_args(d, {"to": bare, "body": "Dear ORG_404 team"}, "tool:send_mail")
+        assert args == {"to": "ana@x.hr", "body": "Dear ORG_404 team"} and n == 1  # an unknown one stays
+        assert "brackets included" in gate.CHAT_NOTE and "⟦ ⟧ included" in gate.CHAT_REMINDER

@@ -43,7 +43,7 @@ from typing import Any
 import httpx
 
 from captain_claw.anonymize import gate as G
-from captain_claw.anonymize.engine import TOKEN_RE
+from captain_claw.anonymize.engine import TOKEN_RE, has_tokens
 from captain_claw.logging import get_logger
 
 log = get_logger(__name__)
@@ -63,12 +63,12 @@ CHAT_NOTE = ("[About ⟦…⟧ tokens: names, companies, addresses and numbers i
              "tools return and in your notes are written as tokens like ⟦PERSON_1⟧ or ⟦ORG_2⟧. They are not "
              "redactions: before the person reads your reply, every token is replaced with the real value, and "
              "tokens in tool calls and files you write are replaced too. So wherever you would name a person, "
-             "company, place or number, write its token exactly as given — \"⟦ORG_2⟧ signs as the Provider\", "
-             "not \"a Croatian company signs\". Never describe a tokenized thing instead of naming it, never leave "
-             "it out, and don't mention the tokens to the person.]")
+             "company, place or number, write its token exactly as given, brackets included — \"⟦ORG_2⟧ signs as "
+             "the Provider\", not \"ORG_2 signs\" or \"a Croatian company signs\". Never describe a tokenized thing "
+             "instead of naming it, never leave it out, and don't mention the tokens to the person.]")
 # Said again next to the tokens (a message or result that has them): the
 # model writes from what it just read, not from the end of a long prompt.
-CHAT_REMINDER = "[⟦…⟧ tokens are names the person sees as the real ones — name things by their token.]"
+CHAT_REMINDER = "[⟦…⟧ tokens are names the person sees as the real ones — name things by their token, ⟦ ⟧ included.]"
 BATCH_CHARS = 1_500_000  # under Flight Deck's 2M-character limit per call
 CACHE_MAX = 20_000
 
@@ -286,7 +286,7 @@ async def restore_args(d: Decision, arguments: dict[str, Any], purpose: str = ""
     async def fix(value: Any) -> Any:
         nonlocal changed
         if isinstance(value, str):
-            if not TOKEN_RE.search(value):
+            if not has_tokens(value):
                 return value
             data = await _post("/fd/anonymize/agent/restore", {"content": value, "format": "text", "vault": d.vault,
                                                                 "source": "gate", **_why(d, purpose)})
@@ -476,7 +476,7 @@ def _rewrite_history(agent: Any) -> None:
 
 async def restore_text(d: Decision, text: str, purpose: str = "") -> str:
     """*text* with the real values back (for the person: their Telegram chat)."""
-    if not TOKEN_RE.search(text or ""):
+    if not has_tokens(text or ""):
         return text
     data = await _post("/fd/anonymize/agent/restore", {"content": text, "format": "text", "vault": d.vault,
                                                         "source": "gate", **_why(d, purpose)})

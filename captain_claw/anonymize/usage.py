@@ -11,7 +11,7 @@ import re
 from collections.abc import Iterable, Iterator
 from typing import Any
 
-from captain_claw.anonymize.engine import TOKEN_RE, make_token
+from captain_claw.anonymize.engine import BARE_TOKEN_RE, TOKEN_RE, make_token
 
 CONTEXT_CHARS = 80   # on each side of the token
 MAX_CONTEXT = 300
@@ -38,17 +38,27 @@ def snippet(text: str, start: int, end: int, width: int = CONTEXT_CHARS) -> str:
 
 def token_contexts(texts: Iterable[str], wanted: set[str] | None = None) -> dict[str, tuple[int, str]]:
     """Every token in *texts* (only those in *wanted*, when given): how many
-    times it appears, and the context of its first appearance."""
+    times it appears, and the context of its first appearance. With *wanted*
+    (a vault's tokens), one a model wrote without its brackets counts too."""
     found: dict[str, tuple[int, str]] = {}
+
+    def note(token: str, text: str, start: int, end: int) -> None:
+        count, context = found.get(token, (0, ""))
+        found[token] = (count + 1, context or snippet(text, start, end))
+
     for text in texts:
-        if not text or ("⟦" not in text and "[[" not in text):
+        if not text:
             continue
-        for m in TOKEN_RE.finditer(text):
-            token = make_token(m.group(1) or m.group(3), int(m.group(2) or m.group(4)))
-            if wanted is not None and token not in wanted:
-                continue
-            count, context = found.get(token, (0, ""))
-            found[token] = (count + 1, context or snippet(text, m.start(), m.end()))
+        if "⟦" in text or "[[" in text:
+            for m in TOKEN_RE.finditer(text):
+                token = make_token(m.group(1) or m.group(3), int(m.group(2) or m.group(4)))
+                if wanted is None or token in wanted:
+                    note(token, text, m.start(), m.end())
+        if wanted is not None:
+            for m in BARE_TOKEN_RE.finditer(text):
+                token = make_token(m.group(1), int(m.group(2)))
+                if token in wanted:
+                    note(token, text, m.start(), m.end())
     return found
 
 

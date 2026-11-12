@@ -51,7 +51,7 @@ _TASKS: set[asyncio.Task[Any]] = set()
 def may_have_tokens(text: str) -> bool:
     """A token's bracket, as it is or as JSON escapes it (the agent's frames
     are ``json.dumps``-ed with non-ASCII escaped: ``\\u27e6``)."""
-    return "⟦" in text or "\\u27e6" in text or "\\u27E6" in text
+    return "⟦" in text or "\\u27e6" in text or "\\u27E6" in text or bool(engine.BARE_TOKEN_RE.search(text))
 
 
 async def vault_state(person: str) -> engine.VaultState | None:
@@ -74,7 +74,7 @@ async def vault_state(person: str) -> engine.VaultState | None:
 def restore_value(value: Any, state: engine.VaultState) -> Any:
     """Every string in *value* (a frame's JSON) with its tokens put back."""
     if isinstance(value, str):
-        return engine.restore(value, state)[0] if "⟦" in value else value
+        return engine.restore(value, state)[0] if engine.has_tokens(value) else value
     if isinstance(value, list):
         return [restore_value(v, state) for v in value]
     if isinstance(value, dict):
@@ -85,7 +85,7 @@ def restore_value(value: Any, state: engine.VaultState) -> Any:
 async def restore_text(person: str, text: str) -> str:
     """*text* with the person's Chat vault's tokens put back (as it is when
     there's nothing to do or anything fails)."""
-    if "⟦" not in text:
+    if not engine.has_tokens(text):
         return text
     try:
         state = await vault_state(person)

@@ -586,6 +586,13 @@ the agent sees tokens — never restored.
   their links' hosts (`http://placanja.hr`) right next to their tokens: a link spelling took "-", "_", "+" and
   "%20" between a name's words, not a ".". Now it takes a "." too (a lone one — "Labs. Ana", a sentence's end, is
   not one name); an email stays one token.
+* **A token written without its brackets.** A narration line read "The ORG_531 pages are detailed. The ORG_530
+  sources mostly describe a company the results label ⟦ORG_541⟧ …": the model had dropped the brackets of two
+  tokens in a sentence that kept the third, so the person saw "ORG_531". Restoring now puts back a token written
+  bare too — only one the vault has (`ORG_531` when ⟦ORG_531⟧ is in it); an unknown number or a look-alike
+  (`HTTP_200`, `MY_ORG_1`, `ORG_1_count`) stays as written — in the person's chat, Telegram, a tool call's
+  arguments and every other restore, and its history counts it. The note and the reminder now say "brackets
+  included".
 * Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
   needs the trusted model, and even that can miss one (a startup's name in a short meeting title went through
   with lane "both"); map links keep a place's coordinates ("…/@45.8,15.9"); Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known
