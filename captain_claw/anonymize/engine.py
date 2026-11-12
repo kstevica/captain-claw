@@ -51,6 +51,18 @@ def make_token(kind: str, n: int) -> str:
     return f"⟦{kind}_{n}⟧"
 
 
+# A token a model wrote without its brackets ("The ORG_531 pages …"): put back
+# too, but only when the vault has it — "HTTP_200" or an unknown number stays.
+BARE_TOKEN_RE = re.compile(
+    r"(?<![\w⟦\[])(" + "|".join(sorted({*d.KINDS, "DETAIL"}, key=len, reverse=True)) + r")_(\d{1,6})(?![\w⟧\]])")
+
+
+def has_tokens(text: str) -> bool:
+    """Tokens in *text*, with their brackets or without."""
+    text = str(text or "")
+    return bool(TOKEN_RE.search(text) or BARE_TOKEN_RE.search(text))
+
+
 class VerifyFailed(RuntimeError):
     """Private data was still found in the output after the last round."""
 
@@ -890,7 +902,15 @@ def restore(text: str, state: VaultState) -> tuple[str, int, list[str]]:
         count += 1
         return e.original
 
-    return TOKEN_RE.sub(sub, str(text or "")), count, unknown
+    def bare(m: re.Match[str]) -> str:
+        nonlocal count
+        e = state.by_token.get(make_token(m.group(1), int(m.group(2))))
+        if e is None:
+            return m.group(0)
+        count += 1
+        return e.original
+
+    return BARE_TOKEN_RE.sub(bare, TOKEN_RE.sub(sub, str(text or ""))), count, unknown
 
 
 # ── file names ──────────────────────────────────────────────────────
@@ -915,8 +935,8 @@ def summary(used: list[Entity]) -> dict[str, int]:
 
 
 __all__ = [
-    "Entity", "Options", "RunResult", "Segment", "TOKEN_RE", "VaultState", "VerifyFailed",
-    "anonymize_filename", "anonymize_text", "make_token", "name_stem", "normalize", "restore", "run",
+    "BARE_TOKEN_RE", "Entity", "Options", "RunResult", "Segment", "TOKEN_RE", "VaultState", "VerifyFailed",
+    "anonymize_filename", "anonymize_text", "has_tokens", "make_token", "name_stem", "normalize", "restore", "run",
     "summary",
 ]
 
@@ -947,6 +967,11 @@ def restore_edits(text: str, state: VaultState) -> tuple[list[tuple[int, int, st
                 unknown.append(m.group(0))
             continue
         out.append((m.start(), m.end(), e.original))
+    for m in BARE_TOKEN_RE.finditer(str(text or "")):
+        e = state.by_token.get(make_token(m.group(1), int(m.group(2))))
+        if e is not None:
+            out.append((m.start(), m.end(), e.original))
+    out.sort()
     return out, len(out), unknown
 
 

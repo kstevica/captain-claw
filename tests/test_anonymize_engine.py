@@ -482,3 +482,18 @@ def test_a_brand_written_as_a_domain_is_found_in_its_links():
     assert E.restore(out, state)[0] == text
     prose = "Vrtlog Labs. Ana Horvat said hi."
     assert E.anonymize_text(prose, state, opts)[0].count("⟦") == 2
+
+
+def test_a_token_written_without_its_brackets_is_put_back():
+    """Models sometimes drop the brackets ("The ORG_1 pages …"): put back when
+    the vault has it; an unknown number or a look-alike stays as written."""
+    state = E.VaultState()
+    E.anonymize_text("Tvrtka: Vrtlog Labs d.o.o.; mail ana@x.hr", state)
+    text = "The ORG_1 pages; (ORG_1), **EMAIL_1**. Not EMAIL_9, HTTP_200, MY_ORG_1, ORG_1_count."
+    out, n, unknown = E.restore(text, state)
+    assert out == ("The Vrtlog Labs d.o.o. pages; (Vrtlog Labs d.o.o.), **ana@x.hr**. "
+                   "Not EMAIL_9, HTTP_200, MY_ORG_1, ORG_1_count.")
+    assert n == 3 and unknown == []
+    edits, n, _u = E.restore_edits(text, state)
+    assert E.apply_edits(text, edits) == out and n == 3
+    assert E.has_tokens("The ORG_5 page") and not E.has_tokens("HTTP_200 and plain words")
