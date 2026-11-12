@@ -931,10 +931,12 @@ class TestWholeChat:
                     *(Message(role=m["role"], content=m["content"]) for m in agent.session.messages),
                     Message(role="user", content="And this picture", images=[picture])]
         out = await agent._gate_outgoing(messages)
-        text = "\n".join(m.content for m in out)
-        for raw in ("Horvat", "acme.hr", "Weber", "beispiel", "DE89370400440532013000"):
+        text = "\n".join(m.content for m in out[1:])
+        for raw in ("Weber", "beispiel", "DE89370400440532013000"):
             assert raw not in text
-        assert out[0].content.endswith(gate.CHAT_NOTE) and out[-1].images == [picture]  # pictures pass
+        # The system prompt is the agent's own setup: as it is, with the gate's note.
+        assert out[0].content == f"{messages[0].content}\n\n{gate.CHAT_NOTE}"
+        assert out[-1].images == [picture]  # pictures pass
         # The history keeps the tokens …
         assert "Weber" not in agent.session.messages[0]["content"] and "⟦" in agent.session.messages[1]["content"]
         # … and the same texts are never sent again (they read the same: the prompt cache holds).
@@ -996,8 +998,9 @@ class TestWholeChat:
         fetched = await self._run(agent, "web_fetch", {"url": "https://x.example"})
         email = re.search(r"⟦EMAIL_\d+⟧", fetched.content).group(0)
         await self._run(agent, "send_mail", {"to": email, "body": "hi"})
-        await agent._gate_outgoing([Message(role="system", content="Owner: Ivan Horvat, ivan.horvat@acme.hr")])
-        await agent._gate_outgoing([Message(role="system", content="Owner: Ivan Horvat, ivan.horvat@acme.hr")])
+        note = Message(role="user", content="[Memory] Owner: Ivan Horvat, ivan.horvat@acme.hr")
+        await agent._gate_outgoing([Message(role="system", content="You are Captain."), note])
+        await agent._gate_outgoing([Message(role="system", content="You are Captain."), note])
         assert said[0] == "🛡️ Anonymizing your message — code is looking for private data…"
         assert "🛡️ Anonymizing what web_fetch returned — code is looking for private data…" in said
         assert "🛡️ Putting the real values back into send_mail…" in said
@@ -1006,7 +1009,7 @@ class TestWholeChat:
             "🛡️ Anonymizing 1 new text before the model reads them — code is looking for private data…"]  # once
         # Housekeeping after the turn stays quiet (the agent said it is idle).
         before = len(said)
-        await agent._gate_outgoing([Message(role="system", content="Reflection on Ana Kovač, ana@x.hr")], "reflection")
+        await agent._gate_outgoing([Message(role="user", content="Reflection on Ana Kovač, ana@x.hr")], "reflection")
         assert len(said) == before
 
     def test_the_status_names_the_trusted_model(self):
@@ -1052,10 +1055,14 @@ class TestWholeChat:
                                  attested=False, on_failure="refuse", enabled=True, source="settings")
         assert await trusted.completer(m)("system", "user") == ("[]", 3)
         assert made == [trusted.CALL_TIMEOUT] and trusted.CALL_TIMEOUT >= 600
-        assert kwargs["max_tokens"] == trusted.MAX_TOKENS >= 32000 and kwargs["think"] is None  # the model's own
-        monkeypatch.setenv("FD_ANONYMIZE_MODEL_THINK", "off")
+        assert kwargs["max_tokens"] == trusted.MAX_TOKENS >= 32000
+        assert kwargs["think"] is False  # off by default: finding names needs no thinking
+        monkeypatch.setenv("FD_ANONYMIZE_MODEL_THINK", "model")
         await trusted.completer(m)("system", "user")
-        assert kwargs["think"] is False
+        assert kwargs["think"] is None  # the model's own
+        monkeypatch.setenv("FD_ANONYMIZE_MODEL_THINK", "low")
+        await trusted.completer(m)("system", "user")
+        assert kwargs["think"] == "low"
 
     def test_a_provider_can_keep_model_output_out_of_its_logs(self):
         from captain_claw.llm import OllamaProvider
@@ -1078,10 +1085,45 @@ class TestWholeChat:
             async def complete(self, **kw):
                 return types.SimpleNamespace(content='{"spans": [{"text": "Mar', usage={}, finish_reason="length")
 
-        monkeypatch.setattr(llm, "create_provider", lambda **kw: Provider())
+        thinks = []
+
+        def make(**kw):
+            thinks.append(kw["think"])
+            return Provider()
+
+        monkeypatch.setattr(llm, "create_provider", make)
         m = trusted.TrustedModel(provider="ollama", model="ornith:9b")
         with pytest.raises(AnswerCut):
             await trusted.completer(m)("system", "user")
+        assert thinks == [False]  # thinking already off: no second try here
+        # With thinking on, a cut answer is asked again without it.
+        monkeypatch.setenv("FD_ANONYMIZE_MODEL_THINK", "on")
+        thinks.clear()
+        with pytest.raises(AnswerCut):
+            await trusted.completer(m)("system", "user")
+        assert thinks == [True, False]
+
+    async def test_without_thinking_the_retry_can_finish(self, monkeypatch):
+        import types
+
+        from captain_claw import llm
+        from captain_claw.flight_deck import anonymize_trusted as trusted
+
+        class Provider:
+            request_timeout = None
+
+            def __init__(self, think):
+                self.think = think
+
+            async def complete(self, **kw):
+                if self.think:  # thinks until the limit
+                    return types.SimpleNamespace(content="", usage={}, finish_reason="length")
+                return types.SimpleNamespace(content='{"spans": []}', usage={"total_tokens": 9}, finish_reason="stop")
+
+        monkeypatch.setattr(llm, "create_provider", lambda **kw: Provider(kw["think"]))
+        monkeypatch.setenv("FD_ANONYMIZE_MODEL_THINK", "on")
+        m = trusted.TrustedModel(provider="ollama", model="ornith:9b")
+        assert await trusted.completer(m)("system", "user") == ('{"spans": []}', 9)
 
     async def test_telegram_restores_for_the_owners_chat(self, gate_env):
         from captain_claw import anonymize_gate_client as gate

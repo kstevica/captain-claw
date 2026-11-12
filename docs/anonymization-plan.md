@@ -457,8 +457,11 @@ the agent sees tokens — never restored.
 * Every tool's result (`_execute_tool_with_guard`: `covers()` is true for every tool) — except calls whose
   result goes to Flight Deck (`autonomous-action`, `flow_step`, `custom_tool:*`).
 * Everything else just before each model call (`_gate_outgoing` at the start of `_complete_with_guards`,
-  before the input guard's own model call; also the salvage and the no-tools streaming calls): the system
-  prompt, the turn's notes, cron notes and mirrored results, compaction summaries, `/btw` — in **one**
+  before the input guard's own model call; also the salvage and the no-tools streaming calls): the turn's
+  memory and recall notes (a user-role message), cron notes and mirrored results, compaction summaries,
+  `/btw` — **not the system prompt** (decided 2026-11-12: it is the agent's own setup, and reading it
+  through a local trusted model on every change cost minutes per turn; what it says about the owner — the
+  profile, the members — reaches the model as written) — in **one**
   Flight Deck call (the texts as a JSON list). Each text is anonymized once and remembered (sha256 → result),
   so the same text always reads the same to the model (its prompt cache holds), and the session's history is
   rewritten to the tokens (nothing raw is left to derive notes or summaries from). The system prompt says
@@ -490,10 +493,12 @@ the agent sees tokens — never restored.
   **10 minutes** (`FD_ANONYMIZE_MODEL_TIMEOUT`, was 240 s, now also the provider's own request timeout,
   which was 120–180 s); the `anonymize` tool 30 minutes. A failure names what happened ("it took longer
   than 30 minutes", "Flight Deck couldn't be reached") instead of an empty "()".
-* The answer limit: **32,000** tokens (`FD_ANONYMIZE_MODEL_MAX_TOKENS`, was 16,000). An answer cut at the
-  limit (`finish_reason` "length" — a thinking model that ran on: 16,000 tokens for a 1,743-token chunk) is
-  asked again in halves, twice at most, then the lane fails saying so. `FD_ANONYMIZE_MODEL_THINK`
-  (`off`/`low`/`medium`/`high`/`on`) sets the trusted model's thinking on Ollama; unset keeps the model's own.
+* The answer limit: **32,000** tokens (`FD_ANONYMIZE_MODEL_MAX_TOKENS`, was 16,000). The trusted model's
+  **thinking is off** by default on Ollama (`FD_ANONYMIZE_MODEL_THINK`: `off` default, `low`/`medium`/`high`,
+  `on`, or `model` for the model's own) — a local model that thought without end ran to the limit twice on
+  a ~1,000-token chunk (16,000, then 32,000 tokens). An answer cut at the limit (`finish_reason` "length")
+  is asked again without thinking (when thinking was on), then in halves, twice at most, then the lane
+  fails saying so.
 * The trusted model's answers are the private data it found: its provider no longer quotes model output in
   log lines (`LLMProvider.log_content = False`; the Ollama provider logged a 200-character preview at INFO).
 

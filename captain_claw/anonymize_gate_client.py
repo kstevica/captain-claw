@@ -55,9 +55,9 @@ DECIDE_TIMEOUT = 10.0
 CALL_TIMEOUT = float(os.environ.get("CLAW_ANONYMIZE_GATE_TIMEOUT") or 1800.0)
 NOTE = ("[Privacy gate: names, addresses and numbers in this result are tokens like ⟦PERSON_1⟧. Use them as "
         "they are; they are put back when you send mail or a message.]")
-CHAT_NOTE = ("[Privacy gate: names, addresses and numbers are tokens like ⟦PERSON_1⟧ — in the person's messages "
-             "too. Use them exactly as they are (in replies, tool calls, files); the real values are put back "
-             "for the person and in what you send or write.]")
+CHAT_NOTE = ("[Privacy gate: names, addresses and numbers in the person's messages, in what your tools return and "
+             "in your memory notes are tokens like ⟦PERSON_1⟧. Use them exactly as they are (in replies, tool "
+             "calls, files); the real values are put back for the person and in what you send or write.]")
 BATCH_CHARS = 1_500_000  # under Flight Deck's 2M-character limit per call
 CACHE_MAX = 20_000
 
@@ -338,11 +338,16 @@ async def anonymize_messages(agent: Any, d: Decision, messages: list[Any],
     """*messages* (llm ``Message``) as the model may see them: every text not
     seen yet goes to Flight Deck (in one call); the session's history is
     rewritten to the tokens too, so it keeps them. Pictures pass as they are.
+    The system prompt (role "system") is left as it is: it is the agent's own
+    setup, not what the person or their memory brought in — and reading it
+    through a trusted model on every change cost minutes per turn (decided
+    2026-11-12). The memory notes ride in a user message, so they are covered.
     *on_work(n)*: called before Flight Deck is asked, with how many texts."""
     todo: dict[str, str] = {}
     for m in messages:
         text = getattr(m, "content", None)
-        if isinstance(text, str) and text.strip() and known(text) is None:
+        if (getattr(m, "role", "") != "system" and isinstance(text, str) and text.strip()
+                and known(text) is None):
             todo.setdefault(_sha(text), text)
     if todo:
         if on_work is not None:
@@ -353,6 +358,9 @@ async def anonymize_messages(agent: Any, d: Decision, messages: list[Any],
     out = []
     for m in messages:
         text = getattr(m, "content", None)
+        if getattr(m, "role", "") == "system":
+            out.append(m)
+            continue
         clean = known(text) if isinstance(text, str) and text.strip() else None
         out.append(dataclasses.replace(m, content=clean) if clean is not None and clean != text else m)
     _rewrite_history(agent)
