@@ -649,7 +649,7 @@ class TestGateDecision:
     async def test_off_until_turned_on_and_settings_checked(self, db, agents):
         c = _client()
         got = c.get("/fd/anonymize/gate", headers=_bearer(BOB)).json()
-        assert got["gate"]["enabled"] is False and got["vault"] == "Privacy gate"
+        assert got["gate"]["enabled"] is False and got["vault"] == "Chat"
         assert {g["id"] for g in got["groups"]} >= {"mail", "chats", "files"}
         assert _decide(c) == {"active": False, "reason": "off"}
         assert c.put("/fd/anonymize/gate", headers=_bearer(BOB), json={"groups": ["spam"]}).status_code == 422
@@ -659,7 +659,7 @@ class TestGateDecision:
         c = _client()
         _gate(c, lane="both")
         d = _decide(c)
-        assert d["active"] and d["groups"] == ["mail"] and d["vault"] == "Privacy gate"
+        assert d["active"] and d["groups"] == ["mail"] and d["vault"] == "Chat"
         assert d["lane"] == "deterministic"  # no trusted model on this deck: code only
         assert _decide(c, "ollama", "qwen3:8b")["active"] is False  # local: trusted
         assert _decide(c, "ollama", "gpt-oss:120b-cloud")["active"] is True  # runs at Ollama
@@ -675,7 +675,7 @@ class TestGateDecision:
     async def test_reveal_for_the_chat(self, db, agents):
         c = _client()
         c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
-               json={"content": "mail ana@x.hr", "vault": "Privacy gate", "source": "gate"})
+               json={"content": "mail ana@x.hr", "vault": "Chat", "source": "gate"})
         r = c.post("/fd/anonymize/reveal", headers=_bearer(BOB), json={"content": "Reply to ⟦EMAIL_1⟧"})
         assert r.json()["output"] == "Reply to ana@x.hr"
         assert c.post("/fd/anonymize/reveal", headers=_bearer(ALICE), json={"content": "x"}).status_code == 404
@@ -791,7 +791,7 @@ class TestGateOnTheAgent:
         agent = _agent("anthropic", "claude-x", "")
         assert default_vault({"_agent": agent, "_session_id": "s-1"}) == "chat-s-1"
         await anonymize_gate_client.decision(agent)
-        assert default_vault({"_agent": agent, "_session_id": "s-1"}) == "Privacy gate"
+        assert default_vault({"_agent": agent, "_session_id": "s-1"}) == "Chat"
 
 
 class TestGateAndRecall:
@@ -869,6 +869,137 @@ async def test_background_notes_from_covered_sources_stay_out(gate_env):
     import inspect
 
     assert "NOTE_GROUPS" in inspect.getsource(AgentContextMixin._collect_background_context_notes)
+
+
+# ── P7: the whole chat ──────────────────────────────────────────────
+
+
+class TestWholeChat:
+    MAIL = TestGateOnTheAgent.MAIL
+
+    async def _run(self, agent, name, args, label="test"):
+        return await agent._execute_tool_with_guard(name, args, label)
+
+    async def test_setting_and_decision(self, db, agents):
+        c = _client()
+        assert c.put("/fd/anonymize/gate", headers=_bearer(BOB), json={"coverage": "all"}).status_code == 422
+        _gate(c, coverage="chat")
+        assert c.get("/fd/anonymize/gate", headers=_bearer(BOB)).json()["gate"]["coverage"] == "chat"
+        d = _decide(c)
+        assert d["active"] and d["chat"] is True and d["groups"] == [] and d["vault"] == "Chat"
+        _gate(c)  # chosen sources again
+        assert _decide(c)["chat"] is False
+
+    async def test_every_tool_is_gated_and_gets_the_real_values(self, gate_env):
+        _gate(_client(), coverage="chat")
+        agent = _agent("anthropic", "claude-x", self.MAIL)
+        res = await self._run(agent, "web_fetch", {"url": "https://x.example"})  # not a "source": gated anyway
+        assert "Müller" not in res.content and "⟦IBAN_1⟧" in res.content
+        assert "[Privacy gate:" not in res.content  # said once, in the system prompt
+        email = re.search(r"⟦EMAIL_\d+⟧", res.content).group(0)
+        agent.tools.result_text = "written"
+        await self._run(agent, "write", {"path": "notes.txt", "content": f"Mail {email}"})
+        assert agent.tools.calls[-1][1]["content"] == "Mail k.mueller@beispiel.de"  # files get real values
+        await self._run(agent, "anonymize", {"action": "restore", "text": f"Mail {email}"})
+        assert agent.tools.calls[-1][1]["text"] == f"Mail {email}"  # tokens are what it works with
+        agent.tools.result_text = self.MAIL
+        fd = await self._run(agent, "web_fetch", {"url": "https://x.example"}, label="autonomous-action")
+        assert fd.content == self.MAIL  # its result goes to Flight Deck, not to the model
+
+    async def test_what_reaches_the_model(self, gate_env, monkeypatch):
+        import types
+
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.llm import Message
+
+        _gate(_client(), coverage="chat")
+        agent = _agent("anthropic", "claude-x", "")
+        agent.session = types.SimpleNamespace(messages=[
+            {"role": "user", "content": "Write to Klaus Weber at klaus.weber@beispiel.de"},
+            {"role": "tool", "content": "cron note: IBAN DE89370400440532013000"},
+        ])
+        calls = []
+        real_post = gate._post
+
+        async def counting(path, body):
+            calls.append(path)
+            return await real_post(path, body)
+
+        monkeypatch.setattr(gate, "_post", counting)
+        picture = object()
+        messages = [Message(role="system", content="You help the owner, Ivan Horvat (ivan.horvat@acme.hr)."),
+                    *(Message(role=m["role"], content=m["content"]) for m in agent.session.messages),
+                    Message(role="user", content="And this picture", images=[picture])]
+        out = await agent._gate_outgoing(messages)
+        text = "\n".join(m.content for m in out)
+        for raw in ("Horvat", "acme.hr", "Weber", "beispiel", "DE89370400440532013000"):
+            assert raw not in text
+        assert out[0].content.endswith(gate.CHAT_NOTE) and out[-1].images == [picture]  # pictures pass
+        # The history keeps the tokens …
+        assert "Weber" not in agent.session.messages[0]["content"] and "⟦" in agent.session.messages[1]["content"]
+        # … and the same texts are never sent again (they read the same: the prompt cache holds).
+        runs = [p for p in calls if p.endswith("/agent/run")]
+        again = await agent._gate_outgoing(messages)
+        assert [p for p in calls if p.endswith("/agent/run")] == runs
+        assert [m.content for m in again] == [m.content for m in out]
+
+    async def test_the_persons_message_first_and_fail_closed(self, gate_env, monkeypatch):
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.agent import Agent
+        from captain_claw.exceptions import GuardBlockedError
+        from captain_claw.llm import Message
+
+        _gate(_client(), coverage="chat")
+        agent = _agent("anthropic", "claude-x", "")
+        text, refused = await Agent._gate_user_text(agent, "Pozovi Klausa Webera, OIB 52601815906")
+        assert not refused and "52601815906" not in text and "⟦OIB_1⟧" in text
+
+        async def down(path, body):
+            raise gate.GateFailed("deck unreachable")
+
+        monkeypatch.setattr(gate, "_post", down)
+        text, refused = await Agent._gate_user_text(agent, "Ana Kovač, ana@x.hr")
+        assert refused.startswith("The privacy gate couldn't check your message")
+        with pytest.raises(GuardBlockedError):
+            await agent._gate_outgoing([Message(role="user", content="new text, ana@x.hr")])
+
+    async def test_flight_deck_restores_for_the_person_only(self, gate_env):
+        from captain_claw.flight_deck import anonymize_chat
+
+        anonymize_chat.reset_for_tests()
+        c = _client()
+        c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
+               json={"content": "Klaus Weber, klaus.weber@beispiel.de", "vault": "Chat", "source": "gate"})
+        frame = json.dumps({"type": "chat_message", "role": "assistant", "content": "Wrote to ⟦PERSON_1⟧ (⟦EMAIL_1⟧)."})
+        bob = anonymize_chat.ChatRestorer(BOB)
+        assert await bob.frame(frame) == frame  # the gate doesn't cover the whole chat: tokens
+        _gate(c, coverage="chat")
+        bob = anonymize_chat.ChatRestorer(BOB)
+        assert json.loads(await bob.frame(frame))["content"] == "Wrote to Klaus Weber (klaus.weber@beispiel.de)."
+        replay = json.dumps({"type": "replay_batch", "messages": [{"role": "assistant", "content": "Hi ⟦PERSON_1⟧"}]})
+        assert json.loads(await bob.frame(replay))["messages"][0]["content"] == "Hi Klaus Weber"
+        assert "\\u27e6" in frame  # the agent's frames escape non-ASCII: still found
+        stream = json.dumps({"type": "response_stream", "text": "⟦PERS"})
+        assert await bob.frame(stream) == stream  # deltas pass (a token may be split)
+        assert await anonymize_chat.ChatRestorer(ALICE).frame(frame) == frame  # someone else: tokens
+        assert await anonymize_chat.ChatRestorer("").frame(frame) == frame
+
+    async def test_telegram_restores_for_the_owners_chat(self, gate_env):
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.web import telegram
+
+        c = _client()
+        agent = _agent("anthropic", "claude-x", "")
+        _gate(c)  # chosen sources: no restoring
+        await gate.decision(agent)
+        assert telegram._tg_restorer(agent) is None
+        gate.reset_for_tests()
+        _gate(c, coverage="chat")
+        await gate.decision(agent)
+        c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
+               json={"content": "Klaus Müller", "vault": "Chat", "source": "gate", "extra": [{"text": "Klaus Müller"}]})
+        restore = telegram._tg_restorer(agent)
+        assert await restore("Hi ⟦PERSON_1⟧") == "Hi Klaus Müller"
 
 
 # ── P4: coarser values and the name-recognition pack ────────────────

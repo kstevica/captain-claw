@@ -3,6 +3,7 @@
 import asyncio
 import json
 import re
+from dataclasses import replace
 from typing import Any
 
 from captain_claw.config import get_config
@@ -456,6 +457,26 @@ class AgentGuardMixin:
         except Exception:
             return None
 
+    async def _gate_outgoing(self, messages: list[Message]) -> list[Message]:
+        """*messages* as the model may read them: unchanged unless the person's
+        privacy gate covers the whole chat — then anonymized (each text once,
+        the history keeping the tokens) and the system prompt told so. A
+        failed check sends nothing."""
+        from captain_claw import anonymize_gate_client as _gate
+
+        gate = await _gate.decision(self)
+        if gate is None or not gate.chat:
+            return messages
+        try:
+            out = await _gate.anonymize_messages(self, gate, messages)
+        except Exception as exc:  # noqa: BLE001 — fail closed
+            raise GuardBlockedError("privacy", (
+                f"The privacy gate couldn't check what goes to the model, so nothing was sent ({exc}). "
+                "Try again in a moment; if it keeps failing, tell the person.")) from None
+        if out and out[0].role == "system" and _gate.CHAT_NOTE not in (out[0].content or ""):
+            out = [replace(out[0], content=f"{out[0].content}\n\n{_gate.CHAT_NOTE}"), *out[1:]]
+        return out
+
     async def _complete_with_guards(
         self,
         messages: list[Message],
@@ -465,6 +486,9 @@ class AgentGuardMixin:
         max_tokens: int | None = None,
     ):
         """Run guarded LLM completion (input + output guards)."""
+        # The privacy gate's whole chat: what the model (and the input guard's
+        # own model) reads is anonymized first.
+        messages = await self._gate_outgoing(messages)
         guard_payload = self._serialize_messages_for_guard(messages)
         allowed_input, input_error = await self._enforce_guard(
             guard_type="input",
@@ -779,6 +803,8 @@ class AgentGuardMixin:
         from captain_claw.tools.registry import ToolResult as _ToolResult
 
         gate = await _gate.decision(self)
+        if gate is not None and _gate.fd_facing(interaction_label):
+            gate = None  # its result goes to Flight Deck, not to the model
         restored = 0
         if gate is not None and gate.egress(name):
             try:

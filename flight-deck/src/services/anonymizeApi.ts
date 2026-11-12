@@ -133,6 +133,8 @@ export interface GateSettings {
   folders: string[]
   when: 'untrusted' | 'always'
   lane: 'deterministic' | 'both'
+  /** 'chat': everything that reaches the model, not only the sources picked. */
+  coverage: 'sources' | 'chat'
 }
 
 export interface GateInfo {

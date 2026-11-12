@@ -1,12 +1,18 @@
 """The privacy gate: what it covers (shared by Flight Deck and the agent).
 
-A person picks sources — their mail, chats, calendar, contacts, files, data,
-memory — and, when the gate applies (only for an agent whose model isn't
-trusted, or always), what those sources give an agent is anonymized before
-the agent's model sees it: tool results go through the engine into the
-person's "Privacy gate" vault. On the way out, tokens in a message the agent
-sends (mail, WhatsApp) are put back just before it leaves, so the recipient
-reads real names while the model never does.
+A person picks what it covers, and it applies only for an agent whose model
+isn't trusted (or always):
+
+* **Chosen sources** — their mail, chats, calendar, contacts, files, data,
+  memory: what those give an agent is anonymized before the agent's model
+  sees it (tool results go through the engine into the person's "Chat" vault).
+  Tokens in a message the agent sends (mail, WhatsApp) are put back just
+  before it leaves, so the recipient reads real names while the model never does.
+* **The whole chat** — everything that reaches the model: the person's
+  messages, every tool result, the notes and the system prompt. The person's
+  own chat shows the real values again (Flight Deck restores them on the way
+  to them), and files the agent writes get them too; anyone else talking to
+  the agent sees tokens.
 
 This module only says which tools belong to which source and which tools send
 things out; Flight Deck keeps the setting and decides
@@ -16,7 +22,8 @@ things out; Flight Deck keeps the setting and decides
 
 from __future__ import annotations
 
-GATE_VAULT = "Privacy gate"
+GATE_VAULT = "Chat"
+COVERAGE = ("sources", "chat")
 
 # Source → the tools whose results come from it.
 GROUPS: dict[str, frozenset[str]] = {
@@ -63,6 +70,14 @@ EGRESS_TOOLS = frozenset({
 
 # Arguments of the files group that name what is read (for the folder filter).
 PATH_ARGS = ("path", "file_path", "paths", "folder", "file", "local_path")
+
+# Tool calls whose results go to Flight Deck, not to the model (an autonomous
+# action, a flow step, a custom tool's call back): never gated, never restored.
+FD_FACING_LABELS = ("autonomous-action", "flow_step")
+FD_FACING_PREFIXES = ("custom_tool:",)
+# In the whole chat, every tool's arguments get the real values back — but
+# not these: tokens are what they work with.
+KEEP_TOKEN_ARGS = frozenset({"anonymize"})
 
 WHEN = ("untrusted", "always")
 LANES = ("deterministic", "both")
