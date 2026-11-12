@@ -40,6 +40,14 @@ selection, a link or a picture. Pick an agent and what it should do:
 | Remember | The facts kept in the agent's memory |
 | Ask | Your own question |
 
+**Anonymize this page** (or the selection — also on the right-click menu as
+"Anonymize with Captain") needs no agent: Flight Deck takes the names,
+numbers, emails and addresses out and gives back tokens like ⟦PERSON_1⟧. The
+real values stay in Flight Deck, in a vault named after the site
+(`www.example.com`), so the same person gets the same token on every page of
+it. Copy the result, keep it in Web clips, or paste an answer that has tokens
+in it and put the real names back.
+
 **Read it as** gives any action a lens. The agent you picked suggests its
 own, from who it is (its personality and description): a VC analyst offers
 "Partner memo" or "Founder red flags", a lawyer "Opposing counsel". They're

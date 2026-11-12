@@ -261,10 +261,12 @@ def _lane(data: dict[str, Any], model: trusted.TrustedModel | None) -> str:
 
 
 async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str, source: str,
-                     stem: str) -> dict[str, Any]:
+                     stem: str, one_way_state: engine.VaultState | None = None) -> dict[str, Any]:
     """Run *doc* through the lanes and the engine into the person's vault (or
     none, one_way). Returns the response fields every route shares, plus
-    ``_result`` (the RunResult) for the caller to write the output."""
+    ``_result`` (the RunResult) for the caller to write the output.
+    *one_way_state*: for one_way, an in-memory state several runs share (one
+    job over a folder), so a person keeps one token across its files."""
     options = _options(data)
     mode = str(data.get("mode") or "reversible")
     if mode not in ("reversible", "one_way"):
@@ -283,7 +285,8 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
             started = time.monotonic()
             try:
                 found = await _llm_terms(doc.segments, options, lane, model,
-                                         await store.load_state(vault_row) if vault_row else engine.VaultState())
+                                         await store.load_state(vault_row) if vault_row
+                                         else (one_way_state or engine.VaultState()))
             except llm_lane.LaneFailed as exc:
                 log.warning("Anonymization LLM lane failed", model=model.label, actor=actor, reason=str(exc))
                 if lane == "llm" or model.on_failure != "deterministic":
@@ -311,7 +314,8 @@ async def _anonymize(person: str, doc: _Doc, data: dict[str, Any], *, actor: str
             return result, name
 
         if vault_row is None:
-            result, out_name = await asyncio.to_thread(work, engine.VaultState())
+            result, out_name = await asyncio.to_thread(work, one_way_state if one_way_state is not None
+                                                       else engine.VaultState())
         else:
             async with store.lock(vault_row["id"]):
                 state = await store.load_state(vault_row)
@@ -363,26 +367,65 @@ def _preview(texts: list[str], limit: int = 20000) -> str:
     return joined[:limit]
 
 
+async def anonymize_blob(person: str, filename: str, blob: bytes, data: dict[str, Any], *, actor: str,
+                         source: str, one_way_state: engine.VaultState | None = None) -> tuple[bytes, dict[str, Any]]:
+    """A file's bytes in, the anonymized file's bytes out (pdf / html as
+    markdown), plus the response fields; ``filename`` is the new file's name
+    (its own name tokenized, then ``.anonymized``)."""
+    from pathlib import Path
+
+    if len(blob) > MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail=f"the file is over {MAX_FILE_BYTES // (1024 * 1024)} MB")
+    doc = await _file_doc(filename, blob, scrub=True)
+    out = await _anonymize(person, doc, data, actor=actor, source=source, stem=Path(filename).stem,
+                           one_way_state=one_way_state)
+    result = out.pop("_result")
+    written = await asyncio.to_thread(doc.rebuild, result.outputs, result.edits)
+    blob_out = written if isinstance(written, bytes) else written.encode("utf-8")
+    out["filename"] = f"{out['filename'] or 'document'}.anonymized{doc.out_ext or Path(filename).suffix.lower()}"
+    out["preview"] = _preview(result.outputs)
+    return blob_out, out
+
+
+async def anonymize_names(person: str, names: list[str], data: dict[str, Any], *, actor: str,
+                          one_way_state: engine.VaultState | None = None) -> list[str]:
+    """Folder names tokenized like file names, into the same vault (for
+    one_way, *one_way_state* or nothing), so a copied folder tree doesn't
+    carry names in its paths. Call it after the files ran: what they taught
+    the vault is what finds a bare name ("Ivan Horvat/")."""
+    options = _options(data)
+    store = av.store()
+
+    def work(state: engine.VaultState) -> list[str]:
+        return [engine.anonymize_filename(n, state, options) or n for n in names]
+
+    try:
+        if str(data.get("mode") or "reversible") == "one_way":
+            return await asyncio.to_thread(work, one_way_state if one_way_state is not None
+                                           else engine.VaultState())
+        row = await store.find_or_create(person, str(data.get("vault") or "default"), created_by=actor)
+        async with store.lock(row["id"]):
+            state = await store.load_state(row)
+            out = await asyncio.to_thread(work, state)
+            await store.save_run(row, state)
+        return out
+    except (av.VaultError, fd_crypto.CryptoUnavailable) as exc:
+        raise _store_error(exc) from None
+
+
 async def file_for(person: str, data: dict[str, Any], *, actor: str) -> dict[str, Any]:
     """A whole file in, the same kind of file out (pdf / html as markdown)."""
     import base64
     import mimetypes
-    from pathlib import Path
 
     filename, blob = _file_input(data)
-    doc = await _file_doc(filename, blob, scrub=True)
-    out = await _anonymize(person, doc, data, actor=actor, source=str(data.get("source") or "file"),
-                           stem=Path(filename).stem)
-    result = out.pop("_result")
-    written = await asyncio.to_thread(doc.rebuild, result.outputs, result.edits)
-    blob_out = written if isinstance(written, bytes) else written.encode("utf-8")
-    name = f"{out['filename'] or 'document'}.anonymized{doc.out_ext or Path(filename).suffix.lower()}"
+    blob_out, out = await anonymize_blob(person, filename, blob, data, actor=actor,
+                                         source=str(data.get("source") or "file"))
+    name = out["filename"]
     out.update({
-        "filename": name,
         "data": base64.b64encode(blob_out).decode("ascii"),
         "content_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
         "size": len(blob_out),
-        "preview": _preview(result.outputs),
     })
     return out
 

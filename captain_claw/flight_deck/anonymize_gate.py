@@ -34,6 +34,7 @@ class GateSettings:
     folders: list[str] = field(default_factory=list)
     when: str = "untrusted"
     lane: str = "deterministic"
+    coverage: str = "sources"  # or "chat": everything that reaches the model
 
     def public(self) -> dict[str, Any]:
         return asdict(self)
@@ -55,7 +56,10 @@ def _clean(data: dict[str, Any]) -> GateSettings:
         raise GateError("when is 'untrusted' or 'always'")
     if lane not in G.LANES:
         raise GateError("lane is 'deterministic' or 'both'")
-    return GateSettings(bool(data.get("enabled")), list(dict.fromkeys(groups)), folders, when, lane)
+    coverage = str(data.get("coverage") or "sources")
+    if coverage not in G.COVERAGE:
+        raise GateError("coverage is 'sources' or 'chat'")
+    return GateSettings(bool(data.get("enabled")), list(dict.fromkeys(groups)), folders, when, lane, coverage)
 
 
 async def load(person: str) -> GateSettings:
@@ -106,5 +110,14 @@ async def decide(person: str, provider: str, model: str, base_url: str) -> dict[
     lane = settings.lane
     if lane == "both" and await trusted.usable(get_db()) is None:
         lane = "deterministic"
-    return {"active": True, "groups": settings.groups, "folders": settings.folders,
-            "vault": G.GATE_VAULT, "lane": lane, "reason": settings.when}
+    chat = settings.coverage == "chat"
+    return {"active": True, "chat": chat, "groups": [] if chat else settings.groups,
+            "folders": [] if chat else settings.folders, "vault": G.GATE_VAULT, "lane": lane,
+            "reason": settings.when}
+
+
+async def chat_restores(person: str) -> bool:
+    """Whether the person's own chat shows real values (the gate covers the
+    whole chat). Flight Deck restores what their agents send them."""
+    settings = await load(person)
+    return settings.enabled and settings.coverage == "chat"

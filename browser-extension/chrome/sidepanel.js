@@ -4,6 +4,9 @@
 // person's own browser session, and sends it all to Flight Deck
 // (/fd/clip/send), which saves it in the Web clips shared folder and hands
 // it to the chosen agent. Then it follows the agent's progress and answer.
+// "Anonymize" sends the page or the selection to Flight Deck instead
+// (/fd/clip/anonymize): names, numbers and addresses come back as tokens,
+// the real values stay in a vault named after the site.
 
 import { icon } from './lib/icons.js'
 import { renderMarkdown, escapeHtml as esc } from './lib/md.js'
@@ -65,6 +68,7 @@ const S = {
   handsLog: [],        // what agents did here, newest last
   handsStopped: [],    // agents the person stopped
   handsSeen: 0,        // the newest act the panel has followed
+  anon: null,          // the page or selection anonymized (/fd/clip/anonymize)
 }
 
 // ── small helpers ──
@@ -166,6 +170,7 @@ function renderView() {
     else if (S.view === 'connect') $view.innerHTML = viewConnect()
     else if (S.view === 'main') $view.innerHTML = viewHands() + viewMain()
     else if (S.view === 'run') $view.innerHTML = viewRun()
+    else if (S.view === 'anon') $view.innerHTML = viewAnon()
     else if (S.view === 'history') $view.innerHTML = viewHistory()
     else if (S.view === 'settings') $view.innerHTML = viewSettings()
     else $view.innerHTML = '<div class="row dim"><div class="spinner"></div> Loading…</div>'
@@ -715,7 +720,146 @@ function viewMain() {
     ${S.sendError ? `<div class="notice err">${esc(S.sendError)}</div>` : ''}
     ${sending}
     <button class="btn primary block" data-act="send" ${canSend ? '' : 'disabled'}>${icon('send', 'sm')} ${ag ? `Send to ${esc(ag.name)}` : 'Pick an agent'}</button>
+    <button class="btn block" data-act="anonymize" ${t && scan && !S.scanning && !S.needsPermission ? '' : 'disabled'}
+      title="Names, numbers and addresses out — the real ones kept in Flight Deck, in your vault “${esc(vaultOf(t?.url))}”">
+      ${icon('shield', 'sm')} ${anonSource() === 'selection' ? 'Anonymize the selection' : 'Anonymize this page'}</button>
     <div class="foot">${icon('folder', 'sm')} Saved in Shared folders → ${esc(S.me.folder || 'web-clips')}</div>`
+}
+
+// ── anonymize (the page or the selection) ──
+
+// The vault: the site as the browser names it ("www.example.com", www kept).
+const vaultOf = (url) => { try { return new URL(url).hostname.toLowerCase() } catch { return 'web' } }
+
+function anonSource() {
+  const sel = S.scan?.selection
+  return sel?.text && (S.focus?.kind === 'selection' || S.include.selection) ? 'selection' : 'page'
+}
+
+function anonContent(source) {
+  if (source === 'selection') return S.scan?.selection?.markdown || S.scan?.selection?.text || ''
+  return S.scan?.markdown || ''
+}
+
+// Text with every token as a chip (the text stays exactly as it is copied).
+const TOKEN_RE = /⟦[A-Z][A-Z0-9_]*?_\d{1,6}(?::[a-z]{1,3})?⟧/g
+function tokenHtml(text) {
+  let out = ''
+  let last = 0
+  for (const m of String(text || '').matchAll(TOKEN_RE)) {
+    out += esc(text.slice(last, m.index)) + `<span class="tok">${esc(m[0])}</span>`
+    last = m.index + m[0].length
+  }
+  return out + esc(String(text || '').slice(last))
+}
+
+const KIND_NAMES = { PERSON: 'person', ORG: 'company', EMAIL: 'email', PHONE: 'phone', ADDRESS: 'address', DOB: 'date of birth',
+  IBAN: 'IBAN', CARD: 'card', OIB: 'OIB', JMBG: 'JMBG', SSN: 'SSN', PASSPORT: 'passport', IP: 'IP', URL: 'link', PLATE: 'plate' }
+const kindName = (k) => KIND_NAMES[k] || k.toLowerCase()
+
+async function anonymize({ content, source, save = false } = {}) {
+  const t = S.tab
+  if (!t || !S.conn) return
+  const src = source || anonSource()
+  const text = content ?? anonContent(src)
+  if (!text.trim()) { toast("There's no text to anonymize here."); return }
+  const title = (S.scan?.meta?.url === t.url && S.scan.meta.title) || t.title || ''
+  S.anon = { state: 'working', source: src, content: text, title, url: t.url,
+    vault: vaultOf(t.url), output: '', summary: {}, warnings: [], saved: null, saving: false, back: '', restored: null, restoring: false }
+  S.view = 'anon'
+  render()
+  try {
+    const r = await api(S.conn, '/fd/clip/anonymize', { method: 'POST', body: JSON.stringify({ content: text, url: t.url, title: S.anon.title, save }) })
+    Object.assign(S.anon, { state: 'done', output: r.output || '', summary: r.summary || {}, vault: r.vault?.name || S.anon.vault,
+      warnings: r.warnings || [], saved: r.saved || null, lane: r.lane, lanes: r.lanes || {} })
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    Object.assign(S.anon, { state: 'error', error: e.message })
+  }
+  render()
+}
+
+// Keep the result in Flight Deck (Web clips): the same vault gives the same tokens.
+async function anonSave() {
+  const a = S.anon
+  if (!a || a.saving || a.saved) return
+  a.saving = true
+  render()
+  try {
+    const r = await api(S.conn, '/fd/clip/anonymize', { method: 'POST', body: JSON.stringify({ content: a.content, url: a.url, title: a.title, save: true }) })
+    Object.assign(a, { output: r.output || a.output, saved: r.saved || null })
+    toast('Saved in Web clips')
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    toast(e.message)
+  }
+  a.saving = false
+  render()
+}
+
+async function anonRestore() {
+  const a = S.anon
+  if (!a || a.restoring || !a.back.trim()) return
+  a.restoring = true
+  render()
+  try {
+    const r = await api(S.conn, '/fd/clip/anonymize/restore', { method: 'POST', body: JSON.stringify({ content: a.back, vault: a.vault }) })
+    a.restored = { output: r.output || '', count: r.restored || 0, unknown: r.unknown || [] }
+  } catch (e) {
+    if (e instanceof AuthError) return disconnected(e.message)
+    toast(e.message)
+  }
+  a.restoring = false
+  render()
+}
+
+function viewAnon() {
+  const a = S.anon
+  if (!a) return ''
+  const kinds = Object.entries(a.summary || {}).filter(([, n]) => n > 0)
+  const found = kinds.length
+    ? `<div class="facts">${kinds.map(([k, n]) => `<span class="fact">${esc(kindName(k))} · ${n}</span>`).join('')}</div>`
+    : '<div class="dim">Nothing private was found.</div>'
+  const who = a.lanes?.llm === 'failed' ? 'The trusted model failed, so code alone looked — check for missed names.'
+    : a.lane === 'deterministic' ? 'Code looked (patterns, labels, names the vault knows) — a name with nothing around it can be missed.'
+      : 'Code and the trusted model looked.'
+  let body
+  if (a.state === 'working') body = '<div class="card row"><div class="spinner"></div><div class="grow">Taking names, numbers and addresses out…</div></div>'
+  else if (a.state === 'error') body = `<div class="notice err">${esc(a.error)}</div>`
+  else {
+    const r = a.restored
+    body = `
+      <div class="card"><div class="label">Found</div>${found}<div class="hint" style="margin-top:6px">${esc(who)}</div></div>
+      ${(a.warnings || []).map((w) => `<div class="notice">${esc(w)}</div>`).join('')}
+      <div class="card"><div class="anon-out" id="anonOut">${tokenHtml(a.output)}</div></div>
+      <div class="row">
+        <button class="btn grow" data-act="anon-copy">${icon('copy', 'sm')} Copy</button>
+        <button class="btn grow" data-act="anon-save" ${a.saved || a.saving ? 'disabled' : ''}>${a.saving ? '<div class="spinner" style="width:12px;height:12px"></div>' : icon(a.saved ? 'check' : 'folder', 'sm')} ${a.saved ? 'Saved' : 'Save in Flight Deck'}</button>
+      </div>
+      ${a.saved ? `<div class="dim ellipsis" title="${esc(a.saved.vfs)}">${icon('folder', 'sm')} ${esc(a.saved.vfs)}</div>` : ''}
+      <div class="dim">The real values stay in Flight Deck, in your vault <b>${esc(a.vault)}</b> — the same person gets the same token on every page of this site.</div>
+      <details class="card anon-back" ${a.back || r ? 'open' : ''}>
+        <summary><span class="grow"><b>Put the real names back</b></span>${icon('chevron', 'sm chev')}</summary>
+        <div style="margin-top:6px">
+          <textarea id="anonBack" rows="4" placeholder="Paste text with tokens like ⟦PERSON_1⟧ — an answer you got for the anonymized text">${esc(a.back)}</textarea>
+          <button class="btn block" data-act="anon-restore" style="margin-top:6px" ${a.restoring || !a.back.trim() ? 'disabled' : ''}>${a.restoring ? '<div class="spinner" style="width:12px;height:12px"></div>' : icon('refresh', 'sm')} Put them back</button>
+          ${r ? `
+            <div class="anon-out" style="margin-top:8px">${esc(r.output)}</div>
+            <div class="row" style="margin-top:6px"><span class="dim grow">${plural(r.count, 'value')} put back${r.unknown.length ? ` · not in this vault: ${esc(r.unknown.slice(0, 6).join(', '))}` : ''}</span>
+              <button class="btn" data-act="anon-copy-back">${icon('copy', 'sm')} Copy</button></div>` : ''}
+        </div>
+      </details>`
+  }
+  return `
+    <div class="row">
+      <button class="icon-btn" data-act="back" title="Back to the page">${icon('back')}</button>
+      <div class="grow">
+        <div style="font-weight:600" class="ellipsis">Anonymized: ${esc(a.title || hostOf(a.url))}</div>
+        <div class="dim ellipsis">${a.source === 'selection' ? 'The selection' : 'The page'} · vault ${esc(a.vault)}</div>
+      </div>
+    </div>
+    ${body}
+    <div class="foot">Captain for Chrome ${esc(VERSION)}</div>`
 }
 
 function selectedFiles() {
@@ -1447,6 +1591,14 @@ $view.addEventListener('click', (ev) => {
   else if (act === 'grant') {
     chrome.permissions.request({ origins: [`${S.needsPermission}/*`] }).then((ok) => { if (ok) scan() }).catch(() => {})
   } else if (act === 'send') onSend()
+  else if (act === 'anonymize') anonymize()
+  else if (act === 'anon-save') anonSave()
+  else if (act === 'anon-restore') anonRestore()
+  else if (act === 'anon-copy' && S.anon?.output) {
+    navigator.clipboard.writeText(S.anon.output).then(() => toast('Copied'), () => toast("Couldn't copy"))
+  } else if (act === 'anon-copy-back' && S.anon?.restored) {
+    navigator.clipboard.writeText(S.anon.restored.output).then(() => toast('Copied'), () => toast("Couldn't copy"))
+  }
   else if (act === 'files-docs' || act === 'files-all' || act === 'files-none') {
     const files = allFiles()
     S.checked = new Set(act === 'files-none' ? [] : files.filter((f) => act === 'files-all' || DOC_KINDS.has(f.kind)).map((f) => f.url))
@@ -1522,6 +1674,11 @@ $view.addEventListener('input', (ev) => {
   if (el.id === 'note') S.note = el.value
   else if (el.id === 'lensText') S.perspectiveText = el.value
   else if (el.id === 'followUp') S.followUp = el.value
+  else if (el.id === 'anonBack' && S.anon) {
+    const was = !!S.anon.back.trim()
+    S.anon.back = el.value
+    if (was !== !!el.value.trim()) render()   // the button turns on/off
+  }
   else if (el.id === 'deckUrl') S.deckInput = el.value
   else if (el.id === 'fileSearch') { S.fileQuery = el.value; render() }
 })
@@ -1564,6 +1721,20 @@ async function takeFocus() {
   await chrome.storage.session.remove('focus').catch(() => {})
   const tab = await currentTab()
   if (!tab || tab.id !== f.tabId) return
+  if (f.kind === 'anonymize') {
+    // Right-click "Anonymize with Captain": the selection as it is, or the
+    // page once it's read.
+    if (S.conn && S.view !== 'run') {
+      if (f.selection) {
+        S.tab = tab
+        return anonymize({ content: f.selection, source: 'selection' })
+      }
+      if (!S.scan || S.scanning || S.tab?.id !== tab.id) await scan()
+      if (S.scan) return anonymize({ source: 'page' })
+    }
+    render()
+    return
+  }
   if (f.kind === 'selection' && f.selection) {
     S.focus = { kind: 'selection', tabId: f.tabId, label: `Selected: “${f.selection.slice(0, 140)}${f.selection.length > 140 ? '…' : ''}”` }
     S.include.selection = true

@@ -924,3 +924,42 @@ async def test_the_mac_app_comes_from_the_deck_or_else_from_github(deck, tmp_pat
     assert (await c.get("/fd/browsers", headers=jwt)).json()["mac_app"] is False
     monkeypatch.setenv("FD_MAC_APP_URL", "javascript:alert(1)")
     assert (await c.get("/fd/clip/mac-app.zip")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_the_extension_anonymizes_a_page_into_its_sites_vault(deck, tmp_path, monkeypatch):
+    from captain_claw.flight_deck import anonymize_vault, fd_crypto
+
+    monkeypatch.setenv("CAPTAIN_CLAW_FD_HOME", str(tmp_path / "fd-home"))
+    fd_crypto.reset_for_tests()
+    store = anonymize_vault.VaultStore(tmp_path / "anonymize.db")
+    anonymize_vault.set_store(store)
+    try:
+        c, jwt = deck["client"], deck["jwt"]
+        pat = {"Authorization": f"Bearer {await _pair(c, jwt)}"}
+        ext = Headers({"origin": "chrome-extension://abcdefghijklmnop", "host": "deck.example.com"})
+        assert origin_guard.extension_route("/fd/clip/anonymize", ext)  # reachable from the extension
+        page = "# Ivan Horvat — profil\n\nName: Ivan Horvat\nmail ivan.horvat@acme.hr\n"
+        r = await c.post("/fd/clip/anonymize", headers=pat, json={
+            "content": page, "url": "https://www.example.com/team/ivan", "title": "Ivan Horvat — profil", "save": True})
+        assert r.status_code == 200, r.text
+        data = r.json()
+        assert data["vault"]["name"] == "www.example.com"  # the host names the vault, www kept
+        assert "Horvat" not in data["output"] and "Name: ⟦PERSON_1⟧" in data["output"]
+        saved = deck["clips"] / data["saved"]["path"]
+        assert saved.read_text(encoding="utf-8") == data["output"]
+        assert "horvat" not in data["saved"]["folder"].lower()  # named from the tokenized title
+        # Another page of the same site: the same person, the same token.
+        again = (await c.post("/fd/clip/anonymize", headers=pat, json={
+            "content": "Ivan Horvat wrote again.", "url": "https://www.example.com/news"})).json()
+        assert again["output"] == "⟦PERSON_1⟧ wrote again." and again["saved"] is None
+        back = (await c.post("/fd/clip/anonymize/restore", headers=pat, json={
+            "content": data["output"], "url": "https://www.example.com/"})).json()
+        assert "Name: Ivan Horvat" in back["output"] and back["restored"] >= 2
+        # Without the paired token: nothing.
+        assert (await c.post("/fd/clip/anonymize", json={"content": page})).status_code == 401
+        assert (await c.post("/fd/clip/anonymize", headers=pat, json={"content": "  "})).status_code == 422
+    finally:
+        anonymize_vault.set_store(None)
+        await store.close()
+        fd_crypto.reset_for_tests()

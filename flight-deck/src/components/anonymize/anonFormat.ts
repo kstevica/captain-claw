@@ -26,3 +26,13 @@ export function when(ts: number | null | undefined): string {
   const d = new Date(ts * 1000)
   return d.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' })
 }
+
+// The kinds anonymization reads (anonymize_routes.FILE_KINDS).
+const ANON_EXTS = new Set(['.txt', '.text', '.log', '.md', '.markdown', '.csv', '.tsv', '.json', '.jsonl', '.ndjson',
+  '.xml', '.yaml', '.yml', '.eml', '.ini', '.srt', '.vtt', '.html', '.htm', '.pdf', '.docx', '.xlsx', '.pptx'])
+
+/** Whether anonymization can read a file of this name. */
+export function anonymizable(name: string): boolean {
+  const dot = name.lastIndexOf('.')
+  return dot > 0 && ANON_EXTS.has(name.slice(dot).toLowerCase())
+}

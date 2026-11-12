@@ -13,6 +13,16 @@ this module applies it, from the agent's one tool-call path
   arguments are put back just before it runs, so the recipient reads real
   names, and its own result (which may echo them) is anonymized again.
 
+With the gate covering **the whole chat**, every tool's result is anonymized
+(and every tool's arguments get the real values back, so files the agent
+writes and searches it runs use them), the person's message is anonymized as
+it comes in (``Agent.complete``), and whatever else reaches the model — the
+system prompt, the turn's notes, anything put in the history directly — goes
+through :func:`anonymize_messages` just before each model call
+(``AgentGuardMixin._complete_with_guards``). Each text is anonymized once and
+the result cached, so the same text always reads the same to the model (its
+prompt cache holds), and the history keeps the tokens.
+
 The decision is asked once a minute per model (and per shared-agent member);
 when Flight Deck can't be reached, the last answer stands — never a silent
 "off" for a person who turned the gate on.
@@ -20,7 +30,11 @@ when Flight Deck can't be reached, the last answer stands — never a silent
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
+import json
 import time
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -37,6 +51,11 @@ DECIDE_TIMEOUT = 10.0
 CALL_TIMEOUT = 180.0
 NOTE = ("[Privacy gate: names, addresses and numbers in this result are tokens like ⟦PERSON_1⟧. Use them as "
         "they are; they are put back when you send mail or a message.]")
+CHAT_NOTE = ("[Privacy gate: names, addresses and numbers are tokens like ⟦PERSON_1⟧ — in the person's messages "
+             "too. Use them exactly as they are (in replies, tool calls, files); the real values are put back "
+             "for the person and in what you send or write.]")
+BATCH_CHARS = 1_500_000  # under Flight Deck's 2M-character limit per call
+CACHE_MAX = 20_000
 
 
 class GateFailed(RuntimeError):
@@ -50,8 +69,11 @@ class Decision:
     folders: list[str] = field(default_factory=list)
     vault: str = G.GATE_VAULT
     lane: str = "deterministic"
+    chat: bool = False  # the whole chat, not chosen sources
 
     def covers(self, name: str, arguments: dict[str, Any]) -> bool:
+        if self.active and self.chat:
+            return True
         if not self.active or not G.gated(name, self.groups):
             return False
         # Folders narrow local and VFS file reads only; Drive and OneDrive have
@@ -62,7 +84,16 @@ class Decision:
         return True
 
     def egress(self, name: str) -> bool:
+        """Put the real values back into this tool's arguments before it runs?"""
+        if self.active and self.chat:
+            return name not in G.KEEP_TOKEN_ARGS
         return self.active and name in G.EGRESS_TOOLS
+
+
+def fd_facing(label: str) -> bool:
+    """A tool call whose result goes to Flight Deck, not to the model."""
+    label = str(label or "")
+    return label in G.FD_FACING_LABELS or label.startswith(G.FD_FACING_PREFIXES)
 
 
 _CACHE: dict[tuple[str, ...], tuple[float, Decision]] = {}
@@ -115,7 +146,7 @@ async def decision(agent: Any) -> Decision | None:
             data = resp.json()
             d = Decision(bool(data.get("active")), frozenset(data.get("groups") or ()),
                          list(data.get("folders") or []), str(data.get("vault") or G.GATE_VAULT),
-                         str(data.get("lane") or "deterministic"))
+                         str(data.get("lane") or "deterministic"), bool(data.get("chat")))
     except Exception as exc:  # noqa: BLE001 — keep the last answer
         log.debug("Privacy gate: decision unavailable", error=type(exc).__name__)
         return hit[1] if hit and hit[1].active else None
@@ -174,8 +205,9 @@ async def gate_result(d: Decision, name: str, result: Any) -> Any:
         return ToolResult(success=False, error=(
             f"The privacy gate couldn't check what {name} returned, so it isn't shown ({exc}). "
             "Try again in a moment; if it keeps failing, tell the person."))
-    if content and TOKEN_RE.search(content):
+    if content and TOKEN_RE.search(content) and not d.chat:  # the whole chat: said once, in the prompt
         content = f"{content}\n\n{NOTE}"
+    remember(content or "")
     return result.model_copy(update={"content": content, "error": error})
 
 
@@ -204,5 +236,122 @@ async def restore_args(d: Decision, arguments: dict[str, Any]) -> tuple[dict[str
     return fixed, changed
 
 
+# ── the whole chat: what reaches the model ──────────────────────────
+
+# sha256(text) → its anonymized text, for texts already anonymized (both the
+# original's hash and the result's), so each is sent to Flight Deck once and
+# always reads the same.
+_CLEAN: OrderedDict[str, str] = OrderedDict()
+
+
+def _sha(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def remember(anonymized: str, original: str | None = None) -> None:
+    """*anonymized* is clean (and is what *original* becomes)."""
+    if not anonymized:
+        return
+    _CLEAN[_sha(anonymized)] = anonymized
+    if original is not None:
+        _CLEAN[_sha(original)] = anonymized
+    while len(_CLEAN) > CACHE_MAX:
+        _CLEAN.popitem(last=False)
+
+
+def known(text: str) -> str | None:
+    """The anonymized form of *text*, when it has been seen (None otherwise)."""
+    hit = _CLEAN.get(_sha(text))
+    if hit is not None:
+        _CLEAN.move_to_end(_sha(text))
+    return hit
+
+
+async def anonymize_texts(d: Decision, texts: list[str]) -> list[str]:
+    """Several texts in one call (a JSON list): one engine run, same tokens."""
+    out: list[str] = []
+    batch: list[str] = []
+    size = 0
+
+    async def flush() -> None:
+        nonlocal batch, size
+        if not batch:
+            return
+        data = await _post("/fd/anonymize/agent/run", {
+            "content": json.dumps(batch, ensure_ascii=False), "format": "json", "vault": d.vault,
+            "lane": d.lane, "mode": "reversible", "source": "gate-chat"})
+        got = json.loads(str(data.get("output") or "[]"))
+        if not isinstance(got, list) or len(got) != len(batch):
+            raise GateFailed("Flight Deck returned a different number of texts")
+        out.extend(str(x) for x in got)
+        batch, size = [], 0
+
+    for text in texts:
+        if batch and size + len(text) > BATCH_CHARS:
+            await flush()
+        batch.append(text)
+        size += len(text)
+    await flush()
+    return out
+
+
+async def anonymize_user_text(d: Decision, text: str) -> str:
+    """The person's message, before anything reads it (the whole chat)."""
+    if not text.strip():
+        return text
+    hit = known(text)
+    if hit is not None:
+        return hit
+    (out,) = await anonymize_texts(d, [text])
+    remember(out, text)
+    return out
+
+
+async def anonymize_messages(agent: Any, d: Decision, messages: list[Any]) -> list[Any]:
+    """*messages* (llm ``Message``) as the model may see them: every text not
+    seen yet goes to Flight Deck (in one call); the session's history is
+    rewritten to the tokens too, so it keeps them. Pictures pass as they are."""
+    todo: dict[str, str] = {}
+    for m in messages:
+        text = getattr(m, "content", None)
+        if isinstance(text, str) and text.strip() and known(text) is None:
+            todo.setdefault(_sha(text), text)
+    if todo:
+        originals = list(todo.values())
+        for original, anonymized in zip(originals, await anonymize_texts(d, originals), strict=True):
+            remember(anonymized, original)
+    out = []
+    for m in messages:
+        text = getattr(m, "content", None)
+        clean = known(text) if isinstance(text, str) and text.strip() else None
+        out.append(dataclasses.replace(m, content=clean) if clean is not None and clean != text else m)
+    _rewrite_history(agent)
+    return out
+
+
+def _rewrite_history(agent: Any) -> None:
+    """The session's messages that were anonymized on the way out keep the
+    tokens (the next call reads the same, and nothing raw is left to derive
+    notes or summaries from)."""
+    session = getattr(agent, "session", None)
+    for msg in getattr(session, "messages", None) or []:
+        if not isinstance(msg, dict):
+            continue
+        text = msg.get("content")
+        if isinstance(text, str) and text.strip():
+            clean = known(text)
+            if clean is not None and clean != text:
+                msg["content"] = clean
+
+
+async def restore_text(d: Decision, text: str) -> str:
+    """*text* with the real values back (for the person: their Telegram chat)."""
+    if not TOKEN_RE.search(text or ""):
+        return text
+    data = await _post("/fd/anonymize/agent/restore", {"content": text, "format": "text", "vault": d.vault})
+    return str(data.get("output") or text)
+
+
 def reset_for_tests() -> None:
     _CACHE.clear()
+    _CLEAN.clear()

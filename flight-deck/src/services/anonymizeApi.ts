@@ -133,6 +133,8 @@ export interface GateSettings {
   folders: string[]
   when: 'untrusted' | 'always'
   lane: 'deterministic' | 'both'
+  /** 'chat': everything that reaches the model, not only the sources picked. */
+  coverage: 'sources' | 'chat'
 }
 
 export interface GateInfo {
@@ -140,6 +142,40 @@ export interface GateInfo {
   vault: string
   groups: { id: string; label: string }[]
   model_available: boolean
+}
+
+/** Where an anonymized copy was written (a VFS place). */
+export interface VfsPlace { project: string; path: string; owner: string }
+
+export interface HereResult extends RunResult {
+  written: VfsPlace
+  beside: boolean
+  size: number
+}
+
+export interface LibraryResult extends RunResult {
+  written: { agent_slug: string; rel_path: string; filename: string }
+  size: number
+}
+
+export interface FolderJob {
+  id: string
+  running: boolean
+  phase: 'anonymizing' | 'placing' | 'done'
+  cancelled: boolean
+  source: VfsPlace
+  dest: Partial<VfsPlace>  // empty until the copies are placed
+  vault: string
+  beside: boolean
+  total: number
+  done: number
+  current: string
+  skipped: { path: string; reason: string }[]
+  failed: { path: string; error: string }[]
+  skipped_count: number
+  failed_count: number
+  entities: Record<string, number>
+  message: string
 }
 
 export interface TrustedTestCase {
@@ -177,6 +213,13 @@ export const anonymizeApi = {
   nerPut: (enabled: boolean, model: string) =>
     api<NamePack>('/fd/anonymize/admin/ner', { method: 'PUT', body: JSON.stringify({ enabled, model }) }),
   nerDownload: () => post<NamePack>('/fd/anonymize/admin/ner/download', {}),
+  vfsFile: (project: string, path: string, owner: string, opts: RunOptions) =>
+    post<HereResult>('/fd/anonymize/vfs/file', { project, path, owner, ...opts }),
+  vfsFolder: (project: string, path: string, owner: string, opts: RunOptions) =>
+    post<FolderJob>('/fd/anonymize/vfs/folder', { project, path, owner, ...opts }),
+  vfsJob: () => api<FolderJob | { running: false }>('/fd/anonymize/vfs/job'),
+  vfsJobCancel: () => post<FolderJob>('/fd/anonymize/vfs/job/cancel', {}),
+  libraryFile: (id: string, opts: RunOptions) => post<LibraryResult>(`/fd/anonymize/library/${enc(id)}`, opts),
   trustedGet: () => api<{ model: TrustedModel | null; providers: string[] }>('/fd/anonymize/admin/trusted-model'),
   trustedPut: (body: TrustedModelInput) =>
     api<{ model: TrustedModel }>('/fd/anonymize/admin/trusted-model', { method: 'PUT', body: JSON.stringify(body) }),

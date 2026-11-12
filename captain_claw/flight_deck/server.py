@@ -1826,6 +1826,7 @@ from captain_claw.flight_deck.jev_routes import router as jev_router
 from captain_claw.flight_deck.external_memory.routes import router as external_memory_router
 from captain_claw.flight_deck.external_memory import service as external_memory_service
 from captain_claw.flight_deck.anonymize_routes import router as anonymize_router
+from captain_claw.flight_deck.anonymize_targets import router as anonymize_targets_router
 from captain_claw.flight_deck import anonymize_vault
 from captain_claw.flight_deck.soniox_routes import router as soniox_router
 from captain_claw.flight_deck.telegram_shared_routes import router as telegram_shared_router
@@ -1972,6 +1973,7 @@ app.include_router(imap_router)
 app.include_router(jev_router)
 app.include_router(external_memory_router)
 app.include_router(anonymize_router)
+app.include_router(anonymize_targets_router)
 app.include_router(soniox_router)
 app.include_router(telegram_shared_router)
 app.include_router(telegram_inbox_router)
@@ -6002,6 +6004,18 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
                 return
         speaker_id = str(payload.get("sub") or "")
 
+    # The privacy gate's whole chat: real values back in what the agent sends
+    # its OWN person (never an admin looking at someone else's agent).
+    from captain_claw.flight_deck import anonymize_chat
+    from captain_claw.flight_deck.auth import _LOCAL_USER
+
+    if AUTH_ENABLED:
+        _agent_owner = str(entry.get("owner") or "") if entry else _resolve_agent_owner(port)
+        _restore_for = speaker_id if speaker_id and (not _agent_owner or _agent_owner == speaker_id) else ""
+    else:
+        _restore_for = str(_LOCAL_USER["id"])
+    restorer = anonymize_chat.ChatRestorer(_restore_for)
+
     await ws.accept()
     # Auto-resolve auth token if the caller didn't provide one — only for the
     # agent's own address (a process agent's is loopback), never a host the
@@ -6192,7 +6206,7 @@ async def agent_ws_proxy(ws: WebSocket, host: str, port: int, token: str = "", l
             try:
                 async for msg in agent_ws:
                     agent_idle.touch(slug)
-                    await ws.send_text(msg if isinstance(msg, str) else msg.decode())
+                    await ws.send_text(await restorer.frame(msg if isinstance(msg, str) else msg.decode()))
             except Exception as exc:
                 log.info("agent-ws: the chat link to the agent broke — closing the chat socket",
                          agent=who, error=f"{type(exc).__name__}: {exc}"[:200])
