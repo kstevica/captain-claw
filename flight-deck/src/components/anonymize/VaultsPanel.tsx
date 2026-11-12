@@ -217,7 +217,7 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
                             {(e.spellings || []).length > 0 && (
                               <div className="mt-0.5 text-xs text-zinc-500" title="Written like this, these come back exactly — a link, a legal name">
                                 spelled: {(e.spellings || []).slice(0, 8).map((sp, k) => (
-                                  <span key={k} className="mr-2"><span className="font-mono text-zinc-600">:{k + 2}</span> {sp}</span>
+                                  <span key={k} className="mr-2"><span className="font-mono text-zinc-500">:{k + 2}</span> {sp}</span>
                                 ))}
                               </div>
                             )}
@@ -226,8 +226,8 @@ function VaultSheet({ vault, onClose, onChanged }: { vault: Vault; onClose: () =
                             <button type="button" onClick={() => setOpenToken(openToken === e.token ? '' : e.token)}
                               title="What added it, and every time it went out to a model and came back"
                               className="inline-flex items-center gap-1 text-xs text-zinc-400 hover:text-zinc-200">
-                              <span className="text-amber-400">↑{e.sent || 0}</span>
-                              <span className="text-sky-400">↓{e.restored || 0}</span>
+                              <span className="text-amber-600 dark:text-amber-400">↑{e.sent || 0}</span>
+                              <span className="text-sky-600 dark:text-sky-400">↓{e.restored || 0}</span>
                               {openToken === e.token ? <ChevronDown className="h-3.5 w-3.5" /> : <ChevronRight className="h-3.5 w-3.5" />}
                             </button>
                           </td>
