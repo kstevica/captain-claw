@@ -39,6 +39,7 @@ import {
   RotateCw,
   Search,
   Share2,
+  ShieldCheck,
   Sparkles,
   TextCursorInput,
   Trash2,
@@ -58,6 +59,8 @@ import { FileActionSheet } from '../agents/FileActionSheet'
 import { DatastoreBrowser } from '../agents/DatastoreBrowser'
 import { ShareModal } from '../common/ShareModal'
 import { AgentMenu, type AgentMenuItem } from '../layout/KioskAgentDialogs'
+import { AnonymizeHereDialog, type AnonTarget } from '../anonymize/AnonymizeHereDialog'
+import { anonymizable } from '../anonymize/anonFormat'
 import { FullscreenButton, Highlight, libraryIconBtn } from '../library/libraryParts'
 import { FilePreview } from '../library/FilePreview'
 import { isUntrustedFile } from '../../utils/untrustedContent'
@@ -115,6 +118,7 @@ type Dialog =
   | { kind: 'drive' }
   | { kind: 'onedrive' }
   | { kind: 'link' }
+  | { kind: 'anonymize'; target: AnonTarget }
 
 const refKey = (r: FolderRef) => `${r.owner}\0${r.project}`
 const itemKey = (i: FileItem) => `${refKey(i.ref)}\0${i.path}`
@@ -642,6 +646,17 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
         onSelect: () => driveAction(p, 'clone'),
       })
     }
+    {
+      const sub = inside && open && sameRef(open.ref, refOf(p)) ? open.path : ''
+      items.push({
+        icon: ShieldCheck, label: sub ? 'Anonymize this folder' : 'Anonymize the whole folder',
+        hint: 'An anonymized copy beside it — the folder isn\'t changed',
+        onSelect: () => setDialog({ kind: 'anonymize', target: {
+          kind: 'vfs-folder', project: p.name, path: sub, owner: refOf(p).owner,
+          name: sub ? sub.split('/').pop() || sub : titleOf(p),
+        } }),
+      })
+    }
     // A mount's hidden entries are only its bookkeeping (manifest, cache).
     if (inside && hiddenCount && !isMount(p)) {
       items.push({ icon: showHidden ? EyeOff : Eye, label: showHidden ? 'Hide hidden files' : `Show hidden files (${hiddenCount})`, onSelect: () => setShowHidden((v) => !v) })
@@ -1133,23 +1148,26 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
                         <li key={e.path} className="group relative">
                           <button
                             onClick={() => goPath(e.path)}
-                            className={`flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2.5 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900/80 ${canWrite ? 'pr-11' : ''}`}
+                            className="flex w-full items-center gap-3 rounded-xl border border-zinc-800 bg-zinc-900/40 px-3 py-2.5 pr-11 text-left transition-colors hover:border-zinc-700 hover:bg-zinc-900/80"
                           >
                             <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-sky-500/10"><Folder className="h-4 w-4 text-sky-600 dark:text-sky-400" /></span>
                             <span className="min-w-0 flex-1">
                               <span className="block truncate text-sm font-medium text-zinc-100">{e.name}</span>
                               <span className="mt-0.5 block text-[11px] text-zinc-500">Folder{e.mtime ? ` · ${ago(e.mtime)}` : ''}</span>
                             </span>
-                            {!canWrite && <ChevronRight className="h-4 w-4 shrink-0 text-zinc-600" />}
                           </button>
-                          {canWrite && (
-                            <div className="absolute right-2.5 top-1/2 -translate-y-1/2">
-                              <AgentMenu agentName={e.name} items={[
+                          <div className="absolute right-2.5 top-1/2 -translate-y-1/2">
+                            <AgentMenu agentName={e.name} items={[
+                              { icon: ShieldCheck, label: 'Anonymize', hint: 'An anonymized copy beside it',
+                                onSelect: () => setDialog({ kind: 'anonymize', target: {
+                                  kind: 'vfs-folder', project: open.ref.project, path: e.path, owner: open.ref.owner, name: e.name,
+                                } }) },
+                              ...(canWrite ? [
                                 { icon: TextCursorInput, label: 'Rename', onSelect: () => renameItem(open.ref, e.path, e.name, true) },
                                 { icon: Trash2, label: 'Delete', danger: true, onSelect: () => deleteItem(open.ref, e.path, e.name, true) },
-                              ]} />
-                            </div>
-                          )}
+                              ] : []),
+                            ]} />
+                          </div>
                         </li>
                       ) : fileRow(entryItem(e)!, { showFolder: false, showDir: false })))}
                     </ul>
@@ -1190,6 +1208,9 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
       onShare={() => setSharingFile(selected)}
       onCopyAddress={(a) => copyAddress(a)}
       onSaveToDrive={() => saveToDrive(selected)}
+      onAnonymize={anonymizable(selected.name) ? () => setDialog({ kind: 'anonymize', target: {
+        kind: 'vfs-file', project: selected.ref.project, path: selected.path, owner: selected.ref.owner, name: selected.name,
+      } }) : undefined}
       onRename={() => renameItem(selected.ref, selected.path, selected.name, false)}
       onDelete={() => deleteItem(selected.ref, selected.path, selected.name, false)}
       onShowInFolder={() => openAt(selected.ref, parentOf(selected.path), selected)}
@@ -1227,6 +1248,9 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
   const dialogs = (
     <>
       {dialog?.kind === 'name' && <NameDialog {...dialog} onClose={() => setDialog(null)} />}
+      {dialog?.kind === 'anonymize' && (
+        <AnonymizeHereDialog target={dialog.target} onClose={() => setDialog(null)} onDone={afterChange} />
+      )}
       {dialog?.kind === 'confirm' && <ConfirmDialog {...dialog} onClose={() => setDialog(null)} />}
       {dialog?.kind === 'share' && (
         <ShareModal
@@ -1323,7 +1347,7 @@ export function SharedFolders({ phone = false, canLink = false, onClose, onConne
 
 function FileDetail({
   item, folder, phone, terms, writable: canWrite, viewerOpen, inFolder,
-  onClose, onOpen, onEdit, onDownload, onShare, onCopyAddress, onSaveToDrive, onRename, onDelete, onShowInFolder,
+  onClose, onOpen, onEdit, onDownload, onShare, onCopyAddress, onSaveToDrive, onAnonymize, onRename, onDelete, onShowInFolder,
 }: {
   item: FileItem
   folder: VFSProject | undefined
@@ -1335,7 +1359,7 @@ function FileDetail({
   /** The open folder is the one the file is in. */
   inFolder: boolean
   onClose: () => void; onOpen: () => void; onEdit: () => void; onDownload: () => void; onShare: () => void
-  onCopyAddress: (address: string) => void; onSaveToDrive: () => void; onRename: () => void; onDelete: () => void
+  onCopyAddress: (address: string) => void; onSaveToDrive: () => void; onAnonymize?: () => void; onRename: () => void; onDelete: () => void
   onShowInFolder: () => void
 }) {
   const file = toAgentFile(item, folder)
@@ -1428,6 +1452,7 @@ function FileDetail({
         {canEdit && <button onClick={onEdit} className={btn}><Pencil className="h-4 w-4" />Edit</button>}
         {phone && canShareFiles && <button onClick={onShare} className={btn}><Share2 className="h-4 w-4" />Share</button>}
         {folder?.kind !== 'gdrive' && <button onClick={onSaveToDrive} className={btn} title="A copy into your Google Drive (My Drive)"><CloudUpload className="h-4 w-4" />To Drive</button>}
+        {onAnonymize && <button onClick={onAnonymize} className={btn} title="An anonymized copy beside it"><ShieldCheck className="h-4 w-4" />Anonymize</button>}
         {canWrite && <button onClick={onRename} className={btn}><TextCursorInput className="h-4 w-4" />Rename</button>}
         {canWrite && (
           <button onClick={onDelete} className={`${btn} hover:border-red-500/40 hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-400`}>

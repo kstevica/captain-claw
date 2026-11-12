@@ -7,9 +7,10 @@ tokens that mean nothing outside Captain. The real values are kept in an
 encrypted **vault** in Flight Deck, so the person (never the model) can put
 them back later.
 
-Status: **P0** PR #511 · **P1** PR #512 · **P2** PR #514 · **P3** PR #515 · **P4** PR #516 (each stacked on the
-one before) · **members + name models measured** (branch `feat/anonymize-members`, stacked on P4; BERTić is
-the default name model). True PDF redaction is skipped (decided 2026-11-11).
+Status: P0–P4, members and the name models are **merged** (PRs #511 #512 #514 #515 #516 #517, main
+17c73e94). **P5** — files where they are (VFS file, VFS folder, Library file) — built on branch
+`feat/anonymize-vfs`. Next: **P6** the Chrome extension, **P7** the whole chat. True PDF redaction is skipped
+(decided 2026-11-11).
 
 ## Principles
 
@@ -394,6 +395,62 @@ stays at chat only (A1), as with every file tool.
   answering this member's own message."
 * Results go to the member's own files: `vfs:<project>/anonymize/<folder>/<name>`.
 
+## P5 — files where they are (VFS file, VFS folder, Library file)
+
+`flight_deck/anonymize_targets.py`. The copy goes **next to the original** (decided 2026-11-12):
+`Contract.anonymized.docx` beside the file, `Clients_anonymized/` beside the folder (a whole folder becomes
+a new folder of the person's own: `Clients_anonymized`, then `-2` …). Never over an earlier copy. When the
+person can't write there — a Drive or OneDrive mount, a read-only link, a view-only share, an `@alias`
+folder — the copy goes to their own **Anonymized** folder under the source folder's name.
+
+* Names in the copied paths are tokenized too, into the same vault (`Ivan Horvat/` → `PERSON_1/`). They
+  are named **after** the files ran (`anonymize_routes.anonymize_names`): code alone can't tell a bare
+  "Ivan Horvat" is a name; the files taught the vault.
+* A folder is a background job, one per person: phase 1 anonymizes every file into a scratch folder
+  outside the VFS, phase 2 names the folders and places the copies (so no raw name is ever written into
+  the copy). Stop places what was finished. Up to 2,000 files; pictures, archives and other kinds,
+  files over 25 MB, and earlier anonymized copies are left out and listed; a file that fails is listed
+  and gets no copy.
+* `one_way` keeps one in-memory state for the whole job (`one_way_state`), so a person keeps one token
+  across the copied folder and folder names can still be found.
+* The default vault is the folder's name (a Library file: its agent's name).
+* Routes: `POST /fd/anonymize/vfs/file`, `POST /vfs/folder`, `GET /vfs/job`, `POST /vfs/job/cancel`,
+  `POST /library/{file_id}` (the copy beside it in the agent's workspace, listed in the Library at once);
+  for agents `POST /agent/vfs/folder`, `GET /agent/vfs/job` (the agent's person: owner or member).
+* The agent tool: `path: vfs:<folder>/<sub>/` runs the folder job and waits up to 200 s (the tool's
+  limit); a longer job carries on and the tool says so.
+* UI: Shared folders → a file's panel "Anonymize"; a folder's "…" menu "Anonymize the whole folder" /
+  "Anonymize this folder"; every subfolder row's "…" "Anonymize" (also in read-only folders). File
+  library → a file's panel "Anonymize". One dialog (`AnonymizeHereDialog`): vault or keep nothing,
+  coarser, words to leave, and a folder's progress (it keeps going when closed). The full layout's VFS
+  browser doesn't have it yet.
+
+## P6 — the Chrome extension (planned)
+
+An "Anonymize" action in Captain for Chrome: the page or the selection, vault named after the page's host
+(`www.example.com`, `www.` kept). The extension can only call `/fd/clip/*` (origin guard + its paired PAT),
+so a thin `POST /fd/clip/anonymize` (+ `/restore`) with `get_clip_user` calls `run_for` / `restore_for`.
+Panel: a button beside Send and a right-click item; the result shown with Copy (and optionally saved to
+`vfs:web-clips/`).
+
+## P7 — the whole chat (planned)
+
+Decided 2026-11-12: a **coverage mode of the privacy gate** ("What it covers: chosen sources / the whole
+chat"), one vault **"Chat"** for both (replacing "Privacy gate"), keeping "untrusted model / every agent"
+and "code / code + trusted model". **Pictures pass through** as they are. **Anyone else** talking to the
+agent (Telegram strangers, groups, public pages) sees tokens — never restored.
+
+* In: the person's message at `Agent.complete` (before rephrase, guards, storage), every tool result
+  (all tools; their arguments restored), a sweep before each model call for anything appended directly
+  (cron notes, mirrored results, compaction summary, `/btw`), and the turn's notes and system prompt
+  anonymized once per turn. Stored history holds tokens, anonymized once, so the cache prefix holds.
+* Out: Flight Deck restores narration, replies, tool output shown, next steps, replay — in the relays
+  that know the socket's person (own agents, members, the channel bus; a hold-back buffer for streamed
+  deltas). Agent-side: Telegram, other platforms, cron delivery; files the agent writes get real values
+  (write/edit/docx/xlsx/pptx arguments restored).
+* Risks to handle: tokens from another vault (owner vs member, peers) restored against the wrong one;
+  recall queries in tokens; restore must never fail the person (tokens shown instead).
+
 ## Phases
 
 * **P0** — engine (detect → resolve → tokens → replace → verify → restore),
@@ -411,4 +468,5 @@ stays at chat only (A1), as with every file tool.
 * **P3** (built) — the privacy gate, below.
 * **P4** (built) — below.
 * **Members** (built) — shared-agent members on their own turn, above.
+* **P5** (built) — files where they are, above.
 * **Skipped** — true PDF redaction (PDFs come back as markdown).
