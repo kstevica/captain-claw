@@ -737,6 +737,64 @@ def _select(text: str, spans: list[Span], blocked: list[tuple[int, int]], keep_f
     return sorted(chosen, key=lambda s: s.start)
 
 
+# A title before a name stays plain text: "Mr. ⟦PERSON_1⟧", "gospodin ⟦PERSON_1:2⟧".
+# Croatian short forms only in lower case ("G." may be an initial).
+_TITLE_RE = re.compile(
+    r"(?:(?i:prof\.?[ \t]*dr\.?[ \t]*sc\.?|dr\.?[ \t]*sc\.?|mr\.?[ \t]*sc\.?|mrs\.?|mr\.?|ms\.?|miss|dr\.?|prof\.?"
+    r"|sir|herr|frau|gospodin(?:a|u|om|e)?|gospođ(?:a|e|i|u|om)|gospođic(?:a|e|i|u|om))"
+    r"|g\.|gđa\.?|gđica\.?|gosp\.)[ \t]+")
+
+
+def _strip_title(value: str) -> str:
+    """*value* without the titles in front of a name (never all of it)."""
+    rest = value
+    while True:
+        m = _TITLE_RE.match(rest)
+        if m is None or not rest[m.end():].strip():
+            return rest
+        rest = rest[m.end():]
+
+
+def _trim_title_span(text: str, sp: Span) -> Span:
+    value = text[sp.start:sp.end]
+    rest = _strip_title(value)
+    return sp if rest == value else Span(sp.end - len(rest), sp.end, sp.kind, sp.priority, sp.source)
+
+
+def _full_name(e: Entity) -> bool:
+    return e.kind == "PERSON" and not e.key.startswith(("~", "/")) \
+        and sum(1 for w in _name_words(e.original) if not _is_initial(w)) >= 2
+
+
+def _full_names_in(text: str, chosen: list[Entity], state: VaultState) -> list[Entity]:
+    """The people named in full in *text*: about to be replaced, or tokens already."""
+    here = {e.token: e for e in chosen if _full_name(e)}
+    for m in TOKEN_RE.finditer(text):
+        e = state.by_token.get(make_token(m.group(1) or m.group(3), int(m.group(2) or m.group(4))))
+        if e is not None and _full_name(e):
+            here[e.token] = e
+    return list(here.values())
+
+
+def _the_one_here(surface: str, here: list[Entity]) -> Entity | None:
+    """The one person of *here* a one-word mention can be ("Vidovića" →
+    Marin Vidović), or None — two who share the word, or none."""
+    words = [w for w in _name_words(surface) if not _is_initial(w)]
+    initials = [d.strip_accents(w[:1]).casefold() for w in _name_words(surface) if _is_initial(w)]
+    if len(words) != 1 or len(stem_key(words[0])) < 3:
+        return None
+    key = _text_word_key(words[0])
+
+    def fits(e: Entity) -> bool:
+        names = [w for w in _name_words(e.original) if not _is_initial(w)]
+        if initials and d.strip_accents(names[0][:1]).casefold() != initials[0]:
+            return False  # "G. Vidović" is not Marin Vidović
+        return any(_word_matches(key, _WordInfo.of(w)) for w in names)
+
+    found = [e for e in here if fits(e)]
+    return found[0] if len(found) == 1 else None
+
+
 def _org_core(text: str) -> str:
     return fold(d.LEGAL_SUFFIX_RE.sub("", text).strip())
 
@@ -811,7 +869,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
     # page's heading) is the known company; the words stay plain text.
     cores = _org_cores(state, options.extra)
     options = replace(options, extra=tuple(
-        (_trim_org_text(t, cores - {_org_core(t)}), k) if k == "ORG" else (t, k) for t, k in options.extra))
+        (_trim_org_text(t, cores - {_org_core(t)}), k) if k == "ORG"
+        else (_strip_title(t), k) if k == "PERSON" else (t, k) for t, k in options.extra))
     # Names and companies the caller (or the trusted model) named are known
     # from the start, so their other forms are found too ("Ana Kovač" also
     # catches "Ane Kovač"). Stored only if they turn up.
@@ -842,7 +901,8 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
                 if h is not None and (options.kinds is None or h.kind in options.kinds):
                     spans.append(h)
             spans.extend(_extra_spans(masked, options.extra))
-            spans = [_trim_org_span(masked, sp, cores) if sp.kind == "ORG" else sp for sp in spans]
+            spans = [_trim_org_span(masked, sp, cores) if sp.kind == "ORG"
+                     else _trim_title_span(masked, sp) if sp.kind == "PERSON" else sp for sp in spans]
             masks.append(token_ranges)
             found.append(_select(masked, spans, token_ranges, keep_folded, _keep_ranges(masked, options.keep)))
 
@@ -893,17 +953,27 @@ def run(segments: list[Segment], state: VaultState, options: Options | None = No
             pieces = []
             pos = 0
             new_edits = []
+            here = _full_names_in(text, [by_span[(sp.start, sp.end)] for sp in final], state)
             for sp in final:
                 e = by_span[(sp.start, sp.end)]
                 surface = text[sp.start:sp.end]
+                # One person, one number: a surname or first name alone is the
+                # one full name in this same text that has it ("Vidović" with
+                # "Marin Vidović") — its number, spelled as written. Never when
+                # two people here share it, never from another text.
+                who = _the_one_here(surface, here) if e.kind == "PERSON" and here and not _full_name(e) else None
+                if who is not None:
+                    e = who
                 # A spelling that must come back as it was keeps the entity's
                 # number with its own place (⟦ORG_7:2⟧): in a link or a file
-                # name ("?first=Ivan" never gets the full name), and a
-                # company's other form ("Acme d.o.o.", its registry name).
+                # name ("?first=Ivan" never gets the full name), a company's
+                # other form ("Acme d.o.o.", its registry name), a person's
+                # other form ("M. Vidović", "Marina Vidovića", "Vidović").
                 exact = surface != e.original and (
-                    (sp.start, sp.end) in slug_at
+                    who is not None
+                    or (sp.start, sp.end) in slug_at
                     or any(a <= sp.start and sp.end <= b for a, b in links)
-                    or (e.kind == "ORG" and fold(surface) != fold(e.original)))
+                    or (e.kind in ("ORG", "PERSON") and fold(surface) != fold(e.original)))
                 token = e.spelling_token(surface) if exact else e.token
                 if e.new and not e.found_by:
                     e.found_by = sp.source

@@ -460,7 +460,7 @@ class TestTrustedModel:
         # What the model found is in the vault: the next text needs no model to catch Marko.
         again = c.post("/fd/anonymize/agent/run", headers=BOB_AGENT,
                        json={"content": "Marku šaljem ugovor.", "vault": "L", "lane": "deterministic"}).json()
-        assert again["output"] == "⟦PERSON_1⟧ šaljem ugovor."
+        assert re.fullmatch(r"⟦PERSON_1(?::\d+)?⟧ šaljem ugovor\.", again["output"])
 
     async def test_llm_only_lane(self, db, agents, fake_model):
         c = _client()

@@ -154,7 +154,9 @@ class TestVfsFolder:
         dest = root / "Clients_anonymized"
         names = sorted(p.relative_to(dest).as_posix() for p in dest.rglob("*") if p.is_file())
         assert names == ["PERSON_1/ugovor.anonymized.txt", "notes.anonymized.md"]
-        assert (dest / "notes.anonymized.md").read_text() == "Sastanak s ⟦PERSON_1⟧ u utorak."
+        # His number, the declined form spelled as written ("Ivanom Horvatom" comes back as it was).
+        assert (dest / "notes.anonymized.md").read_text() in ("Sastanak s ⟦PERSON_1⟧ u utorak.",
+                                                              "Sastanak s ⟦PERSON_1:2⟧ u utorak.")
         assert job["entities"]["PERSON"] >= 2
         # A second run goes to a new folder.
         async with _client() as c:
