@@ -74,7 +74,7 @@ function Context({ text, token, values }: { text: string; token: string; values:
     <p className="mt-1 break-words rounded-lg bg-zinc-900/60 px-2 py-1 font-mono text-[11px] leading-relaxed text-zinc-300">
       {text.split(TOKEN_SPLIT).map((part, i) => TOKEN_SPLIT.test(part) ? (
         <span key={i} title={values.get(part) || values.get(part.replace(/:[a-z0-9]{1,3}⟧$/, '⟧')) || ''}
-          className={part.replace(/:[a-z0-9]{1,3}⟧$/, '⟧') === token ? 'rounded bg-violet-500/25 px-0.5 text-violet-200' : 'text-zinc-400 underline decoration-dotted'}>
+          className={part.replace(/:[a-z0-9]{1,3}⟧$/, '⟧') === token ? 'rounded bg-violet-500/15 px-0.5 font-semibold text-violet-700 dark:bg-violet-500/25 dark:text-violet-200' : 'text-zinc-400 underline decoration-dotted'}>
           {part}
         </span>
       ) : <span key={i}>{part}</span>)}
@@ -84,7 +84,8 @@ function Context({ text, token, values }: { text: string; token: string; values:
 
 function Line({ u, token, values }: { u: TokenUse; token: string; values: Map<string, string> }) {
   const Icon = u.direction === 'added' ? Sparkles : u.direction === 'out' ? ArrowUpRight : ArrowDownLeft
-  const tone = u.direction === 'added' ? 'text-emerald-400' : u.direction === 'out' ? 'text-amber-400' : 'text-sky-400'
+  const tone = u.direction === 'added' ? 'text-emerald-600 dark:text-emerald-400'
+    : u.direction === 'out' ? 'text-amber-600 dark:text-amber-400' : 'text-sky-600 dark:text-sky-400'
   return (
     <li className="flex gap-2">
       <Icon className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${tone}`} />
