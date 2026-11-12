@@ -1259,7 +1259,10 @@ async def _tg_process_with_typing(
                 # Narration goes out live, one message per blurb; the agent
                 # then answers with just its last response instead of folding
                 # every blurb into one long message.
-                narration = _TgNarration(server, chat_id) if _stream_narration() else None
+                # The privacy gate's whole chat: the owner's own chat reads
+                # the real values; anyone else's keeps the tokens.
+                restore = _tg_restorer(user_agent) if owner else None
+                narration = _TgNarration(server, chat_id, restore) if _stream_narration() else None
                 # The main agent's own hook (the web chat's) comes back after.
                 prev_narration = getattr(user_agent, "narration_callback", None)
                 user_agent.narration_callback = narration
@@ -1289,7 +1292,8 @@ async def _tg_process_with_typing(
                         await narration.drain()  # the answer always lands last
                 log.info("Telegram agent.complete() done", user_id=user_id, response_len=len(response or ""))
 
-                await _tg_send(server, chat_id, response, reply_to_message_id=reply_to_message_id)
+                await _tg_send(server, chat_id, await restore(response) if restore and response else response,
+                               reply_to_message_id=reply_to_message_id)
                 # The whole account — narration and answer, as the reply read
                 # before narration went live: the web mirror shows it, and a
                 # document a blurb named still goes out.
@@ -1436,9 +1440,10 @@ class _TgNarration:
 
     Sends are chained so blurbs arrive in order; ``drain`` waits for them."""
 
-    def __init__(self, server: WebServer, chat_id: int) -> None:
+    def __init__(self, server: WebServer, chat_id: int, restore: Any = None) -> None:
         self._server = server
         self._chat_id = chat_id
+        self._restore = restore  # the owner's chat, whole-chat gate: real values back
         self._tail: asyncio.Task[None] | None = None
         self.texts: list[str] = []
 
@@ -1452,6 +1457,8 @@ class _TgNarration:
     async def _send(self, text: str, prev: asyncio.Task[None] | None) -> None:
         if prev is not None:
             await asyncio.wait({prev})  # done, however it ended
+        if self._restore is not None:
+            text = await self._restore(text)
         await _tg_send(self._server, self._chat_id, text)
         # A message clears "typing…" until the next heartbeat; put it back.
         bridge = self._server._telegram_bridge
@@ -1552,6 +1559,25 @@ def _tg_is_approved(server: WebServer, user_id_key: str) -> bool:
     if info is None:
         return False
     return getattr(server, "_telegram_relay", False) or info.get("via") != "shared_bot"
+
+
+def _tg_restorer(agent: Agent):
+    """An async text → text that puts the real values back when the person's
+    privacy gate covers the whole chat (else None); tokens stay on any failure."""
+    from captain_claw import anonymize_gate_client as _gate
+
+    gate = _gate.cached_decision(agent)
+    if gate is None or not gate.chat:
+        return None
+
+    async def restore(text: str) -> str:
+        try:
+            return await _gate.restore_text(gate, text)
+        except Exception as exc:  # noqa: BLE001 — the tokens go out instead
+            log.debug("Telegram: tokens not restored", error=type(exc).__name__)
+            return text
+
+    return restore
 
 
 def _tg_is_owner(server: WebServer, user_id_key: str, chat_type: str = "private") -> bool:

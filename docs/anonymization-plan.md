@@ -9,8 +9,8 @@ them back later.
 
 Status: P0–P4, members and the name models are **merged** (PRs #511 #512 #514 #515 #516 #517, main
 17c73e94). **P5** — files where they are (VFS file, VFS folder, Library file) — built on branch
-`feat/anonymize-vfs` (PR #518). **P6** — the Chrome extension — built on `feat/anonymize-chrome`. Next:
-**P7** the whole chat. True PDF redaction is skipped
+`feat/anonymize-vfs` (PR #518). **P6** — the Chrome extension — PR #519. **P7** — the whole chat — built on
+`feat/anonymize-chat`. True PDF redaction is skipped
 (decided 2026-11-11).
 
 ## Principles
@@ -443,23 +443,51 @@ button, and **Anonymize with Captain** on the right-click menu (page or selectio
 * Verified end to end: headless Chromium with the unpacked extension against a throwaway deck — page,
   save, put back, selection, right-click.
 
-## P7 — the whole chat (planned)
+## P7 — the whole chat
 
-Decided 2026-11-12: a **coverage mode of the privacy gate** ("What it covers: chosen sources / the whole
-chat"), one vault **"Chat"** for both (replacing "Privacy gate"), keeping "untrusted model / every agent"
-and "code / code + trusted model". **Pictures pass through** as they are. **Anyone else** talking to the
-agent (Telegram strangers, groups, public pages) sees tokens — never restored.
+Decided 2026-11-12: a **coverage mode of the privacy gate** — "What it covers: sources I pick / the whole
+chat" — with one vault, **"Chat"**, for both (it replaces "Privacy gate"), keeping "untrusted model / every
+agent" and "code / code + trusted model". **Pictures pass through** as they are. **Anyone else** talking to
+the agent sees tokens — never restored.
 
-* In: the person's message at `Agent.complete` (before rephrase, guards, storage), every tool result
-  (all tools; their arguments restored), a sweep before each model call for anything appended directly
-  (cron notes, mirrored results, compaction summary, `/btw`), and the turn's notes and system prompt
-  anonymized once per turn. Stored history holds tokens, anonymized once, so the cache prefix holds.
-* Out: Flight Deck restores narration, replies, tool output shown, next steps, replay — in the relays
-  that know the socket's person (own agents, members, the channel bus; a hold-back buffer for streamed
-  deltas). Agent-side: Telegram, other platforms, cron delivery; files the agent writes get real values
-  (write/edit/docx/xlsx/pptx arguments restored).
-* Risks to handle: tokens from another vault (owner vs member, peers) restored against the wrong one;
-  recall queries in tokens; restore must never fail the person (tokens shown instead).
+**In** (the agent; `anonymize_gate_client.py`):
+
+* The person's message at `Agent.complete` / `Agent.stream`, before anything reads it — the rephrase, the
+  guards, the history, the model (`Agent._gate_user_text`; refused, not sent, when it can't be checked).
+* Every tool's result (`_execute_tool_with_guard`: `covers()` is true for every tool) — except calls whose
+  result goes to Flight Deck (`autonomous-action`, `flow_step`, `custom_tool:*`).
+* Everything else just before each model call (`_gate_outgoing` at the start of `_complete_with_guards`,
+  before the input guard's own model call; also the salvage and the no-tools streaming calls): the system
+  prompt, the turn's notes, cron notes and mirrored results, compaction summaries, `/btw` — in **one**
+  Flight Deck call (the texts as a JSON list). Each text is anonymized once and remembered (sha256 → result),
+  so the same text always reads the same to the model (its prompt cache holds), and the session's history is
+  rewritten to the tokens (nothing raw is left to derive notes or summaries from). The system prompt says
+  once that tokens are on purpose (`CHAT_NOTE`); results no longer carry the per-result note. A failed check
+  sends nothing (`GuardBlockedError("privacy")`, shown as the turn's reply).
+
+**Out**:
+
+* Every tool's arguments get the real values back before it runs (files the agent writes, searches it runs,
+  mail it sends) — except `anonymize`, whose job is tokens. The result is anonymized again.
+* Flight Deck restores the frames it relays to the person (`flight_deck/anonymize_chat.py`, `ChatRestorer`):
+  the owner's socket to their own agent (`agent_ws_proxy`; never an admin looking at someone else's agent)
+  and a member's socket to a shared agent (the member's vault). Every string in a frame is restored, except
+  streamed deltas (`response_stream`: a token can be split; the chat doesn't draw them). The vault is
+  cached until it changes. The agent's frames escape non-ASCII, so the check looks for `\u27e6` as well.
+  Restoring never fails the person: tokens are shown instead.
+* Telegram: the owner's own private chat (reply and live narration) — `_tg_restorer`; other users and
+  groups keep the tokens.
+
+**Not covered yet** (tokens stay): WhatsApp, Messenger and devices (the channel bus can carry other allowed
+people), cron deliveries, public pages, the Line and notifications; model calls an agent makes with
+another provider (e.g. task naming).
+
+**Verified live** (throwaway deck, local `ornith:9b` agent, gate on "every agent", whole chat): the agent
+stored and its model read "Name: ⟦PERSON_1⟧, OIB ⟦OIB_1⟧, mail ⟦EMAIL_1⟧" and replied in tokens; the chat
+showed "Your name is Ivan Horvat and your email is ivan.horvat@acme.hr". Asked to write a file, the model
+wrote tokens in the call and `contact.txt` got the real values. No raw value anywhere in the agent's
+sessions, memory, insights or topics — only the tool-call audit (what actually ran) and the memory's index
+of the workspace file (recall goes through the gate).
 
 ## Phases
 
@@ -480,4 +508,5 @@ agent (Telegram strangers, groups, public pages) sees tokens — never restored.
 * **Members** (built) — shared-agent members on their own turn, above.
 * **P5** (built) — files where they are, above.
 * **P6** (built) — the Chrome extension, above.
+* **P7** (built) — the whole chat, above.
 * **Skipped** — true PDF redaction (PDFs come back as markdown).

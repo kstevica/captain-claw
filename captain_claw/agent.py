@@ -646,6 +646,9 @@ class Agent(
         user_input = scrub_user_text(str(user_input or ""))   # no card data, ever
         user_input, _had_surface = self._absorb_surface_block(
             str(user_input or ""), surface=channel or self._hinted_channel())
+        user_input, refused = await self._gate_user_text(user_input)
+        if refused:
+            return refused
         self._turn_user_text = user_input
         self._set_turn_origin(
             self._turn_user_text, turn_origin,
@@ -681,6 +684,25 @@ class Agent(
             turn_register.close_turn(turn, outcome, reply, agent=self)
             self._turn_over_browser()
 
+    async def _gate_user_text(self, text: str) -> tuple[str, str]:
+        """(the message as the turn may use it, a refusal): with the person's
+        privacy gate covering the whole chat, the message is anonymized before
+        anything reads it — the rephrase, the guards, the history, the model.
+        When that can't be done the turn doesn't run (fail closed)."""
+        from captain_claw import anonymize_gate_client as _gate
+
+        gate = await _gate.decision(self)
+        if gate is None or not gate.chat or not text.strip():
+            return text, ""
+        try:
+            return await _gate.anonymize_user_text(gate, text), ""
+        except Exception as exc:  # noqa: BLE001
+            from captain_claw.logging import get_logger
+
+            get_logger(__name__).warning("Privacy gate: message not anonymized", error=type(exc).__name__)
+            return text, ("The privacy gate couldn't check your message, so it wasn't sent to the model. "
+                          "Try again in a moment.")
+
     def _turn_over_browser(self) -> None:
         """The outermost turn is over: the person's Chrome may go back to their tab."""
         self._turn_depth = max(0, getattr(self, "_turn_depth", 1) - 1)
@@ -704,6 +726,10 @@ class Agent(
         user_input = scrub_user_text(str(user_input or ""))   # no card data, ever
         user_input, _had_surface = self._absorb_surface_block(
             str(user_input or ""), surface=channel or self._hinted_channel())
+        user_input, refused = await self._gate_user_text(user_input)
+        if refused:
+            yield refused
+            return
         self._turn_user_text = user_input
         self._set_turn_origin(
             self._turn_user_text, turn_origin,

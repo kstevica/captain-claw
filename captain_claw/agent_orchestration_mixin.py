@@ -1495,6 +1495,7 @@ class AgentOrchestrationMixin:
                     query=effective_user_input,
                 )
                 salvage_messages.append(Message(role="user", content=prompt))
+                salvage_messages = await self._gate_outgoing(salvage_messages)
                 salvage_resp = await self.provider.complete(
                     messages=salvage_messages,
                     tools=None,
@@ -3939,6 +3940,7 @@ class AgentOrchestrationMixin:
             planning_pipeline=planning_pipeline,
         )
         self._note_tool_schema_tokens(tool_defs)
+        messages = await self._gate_outgoing(messages)
 
         # Stream the response
         full_content = ""
