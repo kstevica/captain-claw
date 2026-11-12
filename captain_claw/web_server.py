@@ -3198,6 +3198,23 @@ class WebServer:
         messages = [Message(role=m["role"], content=m["content"]) for m in raw_messages]
         temperature = body.get("temperature")
         max_tokens = body.get("max_tokens")
+        # The privacy gate's whole chat covers Flight Deck's borrowed calls too
+        # (consciousness, the arbiter, plans, WhatsApp auto-replies…): what they
+        # send is anonymized like the agent's own, and the answer gets the real
+        # values back before Flight Deck shows or sends it.
+        from captain_claw import anonymize_gate_client as _gate
+
+        gate = await _gate.decision(self.agent) if self.agent is not None else None
+        if gate is not None and gate.chat:
+            try:
+                messages = await _gate.anonymize_messages(self.agent, gate, messages)
+            except Exception as exc:  # noqa: BLE001 — fail closed: nothing goes to the model
+                return web.json_response({"ok": False, "error": (
+                    f"The privacy gate couldn't check this, so nothing was sent ({_gate.why(exc)}).")},
+                    status=503)
+            messages = _gate.with_chat_note(messages)
+        else:
+            gate = None
         try:
             # A long single call (Flight Deck's setup reads ~100k tokens at once)
             # outlasts the provider's own timeout; the copy keeps it to this call.
@@ -3214,9 +3231,16 @@ class WebServer:
                     max_tokens=max_tokens,
                 )
             thoughts = resp.reasoning_content or ""
+            content = resp.content
+            if gate is not None:
+                try:
+                    content = await _gate.restore_text(gate, content or "")
+                    thoughts = await _gate.restore_text(gate, thoughts) if thoughts else thoughts
+                except Exception as exc:  # noqa: BLE001 — tokens, never a failed answer
+                    log.warning("Privacy gate: answer not restored", error=type(exc).__name__)
             return web.json_response({
                 "ok": True,
-                "content": resp.content,
+                "content": content,
                 "model": resp.model,
                 "usage": resp.usage,
                 "finish_reason": resp.finish_reason,

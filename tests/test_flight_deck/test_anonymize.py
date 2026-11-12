@@ -936,6 +936,9 @@ class TestWholeChat:
             assert raw not in text
         # The system prompt is the agent's own setup: as it is, with the gate's note.
         assert out[0].content == f"{messages[0].content}\n\n{gate.CHAT_NOTE}"
+        # Where tokens are, the model is reminded what they are (not redactions).
+        assert out[1].content.endswith(gate.CHAT_REMINDER) and out[2].content.endswith(gate.CHAT_REMINDER)
+        assert "not redactions" in gate.CHAT_NOTE
         assert out[-1].images == [picture]  # pictures pass
         # The history keeps the tokens …
         assert "Weber" not in agent.session.messages[0]["content"] and "⟦" in agent.session.messages[1]["content"]
@@ -964,6 +967,54 @@ class TestWholeChat:
         assert refused.startswith("The privacy gate couldn't check your message")
         with pytest.raises(GuardBlockedError):
             await agent._gate_outgoing([Message(role="user", content="new text, ana@x.hr")])
+
+    async def test_flight_decks_borrowed_calls_go_through_the_gate(self, gate_env, monkeypatch):
+        """Consciousness, the arbiter, WhatsApp auto-replies… borrow the agent's
+        model through /api/llm/complete: anonymized on the way in, the answer
+        restored on the way out."""
+        import types
+
+        from captain_claw import anonymize_gate_client as gate
+        from captain_claw.llm import LLMResponse
+        from captain_claw.web_server import WebServer
+
+        _gate(_client(), coverage="chat")
+        seen: list = []
+
+        class Provider:
+            provider, model, base_url = "anthropic", "claude-x", ""
+
+            async def complete(self, messages, tools=None, temperature=None, max_tokens=None):
+                seen.append(messages)
+                tokens = re.findall(r"⟦[A-Z_]+_\d+⟧", messages[-1].content)
+                return LLMResponse(content=f"Unread note from {tokens[0]} ({tokens[1]}).", model="m")
+
+        class Req:
+            def __init__(self, body):
+                self._body = body
+
+            async def json(self):
+                return self._body
+
+        server = WebServer.__new__(WebServer)
+        server.agent = types.SimpleNamespace(provider=Provider(), session=None)
+        monkeypatch.setattr(WebServer, "_scoped_provider", lambda self: self.agent.provider, raising=False)
+        body = {"messages": [{"role": "system", "content": "You write one-line notes."},
+                             {"role": "user", "content": "Klaus Weber (klaus.weber@beispiel.de) sent a note."}]}
+        resp = await server._llm_complete(Req(body))
+        data = json.loads(resp.text)
+        sent = seen[-1]
+        assert "Weber" not in sent[-1].content and sent[-1].content.endswith(gate.CHAT_REMINDER)
+        assert sent[0].content.endswith(gate.CHAT_NOTE)
+        assert data["ok"] and data["content"] == "Unread note from Klaus Weber (klaus.weber@beispiel.de)."
+
+        async def down(path, payload):
+            raise gate.GateFailed("deck unreachable")
+
+        monkeypatch.setattr(gate, "_post", down)
+        gate._CLEAN.clear()
+        resp = await server._llm_complete(Req({"messages": [{"role": "user", "content": "Ana Kovač, ana@x.hr"}]}))
+        assert resp.status == 503 and len(seen) == 1  # nothing went to the model
 
     async def test_flight_deck_restores_for_the_person_only(self, gate_env):
         from captain_claw.flight_deck import anonymize_chat

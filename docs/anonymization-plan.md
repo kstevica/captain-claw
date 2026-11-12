@@ -505,6 +505,30 @@ the agent sees tokens — never restored.
 * The trusted model's answers are the private data it found: its provider no longer quotes model output in
   log lines (`LLMProvider.log_content = False`; the Ollama provider logged a 200-character preview at INFO).
 
+**Checked on the staging deck (glasses), 2026-11-12**, and fixed:
+
+* **The model must name things by their tokens.** Claude Haiku summarized a tokenized agreement as "a
+  Croatian company", "a Luxembourg fund" — no tokens, so nothing to put back. A model that takes ⟦…⟧ for
+  redactions writes around them. The note now says plainly they are not redactions and every token is
+  replaced before the person reads the reply ("write its token — '⟦ORG_2⟧ signs as the Provider', not 'a
+  Croatian company signs'"), and a one-line reminder (`CHAT_REMINDER`) follows every user message and
+  tool result that has tokens — where the model reads them, not only at the end of a long system prompt
+  (the same text every time: the prompt cache holds). Verified with Haiku on a throwaway deck: the summary
+  named the parties by token ("between ⟦ORG_1⟧ (the Participant) and ⟦ORG_2⟧ (the Provider)") and the
+  chat showed the real names.
+* **Flight Deck's borrowed calls were not gated.** Consciousness, the arbiter, plans, course progress,
+  dispatch, games, WhatsApp reactions and auto-replies borrow the agent's model through its
+  `/api/llm/complete`, which called the provider directly — glasses' log showed Haiku writing real
+  names of the owner's contacts from them. The endpoint now anonymizes what they send (not their system prompt),
+  adds the note, restores the answer before Flight Deck shows or sends it, and refuses (503) when the check
+  can't run. Verified with Haiku: the model wrote "Unread note from ⟦PERSON_6⟧ (⟦EMAIL_5⟧)…", Flight Deck
+  got the made-up test name and email back in their place.
+* **Names joined by underscores** (a saved file's name: "Acme_-_Supply_Agreement.docx",
+  "Ivan_Horvat_CV.pdf") are found like anywhere else: the known-value finder treats `_` as a separator.
+* Still open: a bare company name the vault doesn't know yet ("Acme - Supply Agreement…" in the first message)
+  needs the trusted model; Luxembourg forms (SCSp, S.à r.l.) and registry numbers (B plus six digits) aren't known
+  to code; Flight Deck's own `/fd/llm/complete` (one-shot generations on the owner's tier) isn't gated.
+
 **Not covered yet** (tokens stay): WhatsApp, Messenger and devices (the channel bus can carry other allowed
 people), cron deliveries, public pages, the Line and notifications; model calls an agent makes with
 another provider (e.g. task naming).

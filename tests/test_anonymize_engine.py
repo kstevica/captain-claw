@@ -291,6 +291,15 @@ class TestGeneralize:
         assert E.apply_edits(text, res.edits[0]) == res.outputs[0] == "Plaća: 2.000–5.000 EUR"
 
 
+def test_known_names_in_file_names_joined_by_underscores():
+    state = E.VaultState()
+    E.anonymize_text("Tvrtka: Acme d.o.o. Name: Ivan Horvat, ivan_horvat@acme.hr", state)
+    out = E.anonymize_text("# Acme_-_Agreement_final.docx · Ivan_Horvat_CV.pdf · ivan_horvat@acme.hr", state)[0]
+    assert "Acme_" not in out and "Horvat" not in out
+    assert out.startswith("# ⟦ORG_1⟧_-_Agreement_final.docx") and "⟦EMAIL_1⟧" in out  # the email stays one
+    assert E.anonymize_text("my_var_name = 1", state)[0] == "my_var_name = 1"
+
+
 class TestNamePack:
     @pytest.fixture(autouse=True)
     def _off_after(self):

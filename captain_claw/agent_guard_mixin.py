@@ -3,7 +3,6 @@
 import asyncio
 import json
 import re
-from dataclasses import replace
 from typing import Any
 
 from captain_claw.config import get_config
@@ -483,9 +482,7 @@ class AgentGuardMixin:
             raise GuardBlockedError("privacy", (
                 f"The privacy gate couldn't check what goes to the model, so nothing was sent ({_gate.why(exc)}). "
                 "Try again in a moment; if it keeps failing, tell the person.")) from None
-        if out and out[0].role == "system" and _gate.CHAT_NOTE not in (out[0].content or ""):
-            out = [replace(out[0], content=f"{out[0].content}\n\n{_gate.CHAT_NOTE}"), *out[1:]]
-        return out
+        return _gate.with_chat_note(out)
 
     async def _complete_with_guards(
         self,
